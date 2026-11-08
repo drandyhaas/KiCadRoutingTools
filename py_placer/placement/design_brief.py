@@ -157,7 +157,8 @@ _PRODUCT_KEYS = {'form_factor', 'primary_axis', 'held_by', 'user_top_side'}
 _INTERFACE_KEYS = {'ref', 'role', 'user_facing', 'edge', 'along_edge',
                    'along_edge_tolerance_mm', 'overhang_mm', 'mount_mode',
                    'cable_entry', 'cable_envelope_mm', 'requirement', 'why',
-                   'note', 'context', 'mating_face', 'mating_face_source'}
+                   'note', 'context', 'mating_face', 'mating_face_source',
+                   'opens'}
 #: #959 (#1000): the space a cable needs, declared. `depth` is how far an
 #: in-plane plug reaches in from the edge; `clear` is the margin around a
 #: perpendicular one. There are NO defaults: measured on five as-built boards
@@ -708,6 +709,7 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
                 f"{where}.mating_face_source: {src!r} -- a non-empty string "
                 f"naming what a declared mating_face was read off (a drawing "
                 f"and its page, or the 3D model), beside a known mating_face")
+        _enum(c.get('opens'), fp.OPENS + (UNKNOWN,), f"{where}.opens")
         _enum(c.get('mount_mode'), _MOUNT_MODES, f"{where}.mount_mode")
         _enum(c.get('cable_entry'), _CABLE_ENTRY, f"{where}.cable_entry")
         env = c.get('cable_envelope_mm')
@@ -1144,6 +1146,13 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
                 entry['mating_face_source'] = c['mating_face_source']
         elif face == UNKNOWN:
             unknown.append(f"interfaces[{ref}].mating_face")
+        # #1769: which way it opens at the edge, inward for a socket whose
+        # card lies over the board
+        if _known(c.get('opens')):
+            entry['opens'] = c['opens']
+            declared.append(f"interfaces[{ref}].opens")
+        elif c.get('opens') == UNKNOWN:
+            unknown.append(f"interfaces[{ref}].opens")
 
         if _known(c.get('user_facing')) and c.get('user_facing') is True:
             # An edge class is what the placement ENGINES read (via
@@ -1494,6 +1503,8 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
                   for s in list(c.get('standoffs') or ()) + list(c.get('holes') or ()))
            for c in fragment.get('covers') or ()):
         need_reader = max(need_reader, fp.BEHIND_READER)
+    if any('opens' in c for c in fragment.get('edge_connectors') or ()):
+        need_reader = max(need_reader, fp.OPENS_READER)
     if need_reader:
         fragment['min_reader'] = need_reader
 
@@ -2247,7 +2258,7 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
             bmap.pop(f"edge_connectors[{c['ref']}].edge", None)
         for key in ('edge', 'overhang_mm', 'center_on_edge',
                     'along_edge_band', 'max_setback_mm', 'side',
-                    'mating_face', 'mating_face_source'):
+                    'mating_face', 'mating_face_source', 'opens'):
             if key in c:
                 own = cb.get(key) or (cb.get('overhang_mm.min')
                                       if key == 'overhang_mm' else None)
@@ -2348,7 +2359,7 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
             continue
         for key in ('edge', 'center_on_edge', 'along_edge_band',
                     'overhang_mm', 'max_setback_mm', 'side', 'mating_face',
-                    'mating_face_source'):
+                    'mating_face_source', 'opens'):
             if key in c and cur.get(key) != c[key]:
                 out.append((
                     _drift_clause_id('interfaces', ref, key,
@@ -2816,6 +2827,7 @@ def _clause_state(rec, intent_doc, rules_run, abstained, cons=None,
             'user_facing': entry.get('class') == 'edge_receptacle',
             'along_edge': ('center_on_edge' in entry
                            or 'along_edge_band' in entry),
+            'opens': 'opens' in entry,
         }.get(key)
         if carried is False:
             return ('uncovered', f"the intent's {ref} entry does not carry "

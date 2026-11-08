@@ -243,7 +243,11 @@ EDGE_BAND_SANITY_MM = 5.0
 #: points at, not on the summed reading. It changes the band's verdict; an
 #: older build refuses the key by name, and the emit stamps `min_reader` 24
 #: on a document carrying it.
-READER_VERSION = 24
+#: 25 (#1769): `edge_connectors[].opens` -- a part whose opening faces INTO
+#: the board (an M.2 or SO-DIMM socket, its card over the board), so the seat
+#: and the facing conjunct put its BACK at the edge. It changes the facing
+#: verdict and the seat's turns; an older build refuses the key by name.
+READER_VERSION = 25
 #: The reader version that first reads `templates[]`.
 TEMPLATES_READER = 13
 #: The reader version that first reads a template row's `kind` and
@@ -273,6 +277,8 @@ BEHIND_READER = 23
 #: The reader version that first reads `edge_connectors[].overhang_face`
 #: (#1714).
 OVERHANG_FACE_READER = 24
+#: The reader version that first reads `edge_connectors[].opens` (#1769).
+OPENS_READER = 25
 #: #1475. The keep-outs a block's `fence_mm` compiles to are named
 #: `fence:<block>:<N|S|W|E>`; an intent may not name its own keep-out so.
 FENCE_KEEPOUT_PREFIX = 'fence:'
@@ -453,7 +459,7 @@ _EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
                         'class', 'source', 'suspect', 'suspect_reason',
                         'overhang_capped', 'observed_overhang_mm', 'context',
                         'center_on_edge', 'along_edge_band', 'side',
-                        'mating_face', 'mating_face_source',
+                        'mating_face', 'mating_face_source', 'opens',
                         'overhang_face'} | _FREE_TEXT_KEYS
 #: `edge_connectors[].overhang_face` (#1714): the side of the footprint, in its
 #: OWN unrotated frame, along which a row's `overhang_mm` was read as a
@@ -470,6 +476,13 @@ _EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
 #: 3D model); without it a face nothing independent confirms is graded
 #: `unverified` and said at WARN.
 MATING_FACES = ('+x', '-x', '+y', '-y')
+#: `edge_connectors[].opens` (#1769): which way the mating face opens at the
+#: edge -- `outward` (the default) or `inward`, into the board, its back to
+#: the edge (an M.2 or SO-DIMM socket whose card lies over the board).
+#: `mating.edge_side` turns that into the side the seat and the facing
+#: conjunct put at the edge. The mating face stays the side the OPENING is
+#: on, read or declared.
+OPENS = ('outward', 'inward')
 #: #959 (#1000): mount modes where a connector stands OFF a face, so its mating
 #: face points away from the board and reaching the edge is not what makes it
 #: usable. The edge-receptacle seat does not apply to one: measured on the
@@ -2127,6 +2140,11 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                 f"{c['mating_face']!r}, expected one of "
                 f"{', '.join(MATING_FACES)} (the side, in the footprint's own "
                 f"frame, its mating face opens on)")
+        if c.get('opens') is not None and c['opens'] not in OPENS:
+            raise IntentError(
+                f"edge_connectors[{i}] ({c['ref']}): opens {c['opens']!r}, "
+                f"expected one of {', '.join(OPENS)} (inward: its opening faces "
+                f"into the board and its back goes to the edge)")
         if c.get('overhang_face') is not None \
                 and c['overhang_face'] not in MATING_FACES:
             raise IntentError(
@@ -4736,7 +4754,7 @@ def model_short_owed(intent, pcb_data, pcb_file, heights) -> List[str]:
 
 
 def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
-                           geometry=None, declared=None) -> Optional[Dict[str, object]]:
+                           geometry=None, declared=None, opens=None) -> Optional[Dict[str, object]]:
     """#1662: the overhang that keeps `ref`'s body at board depth off the board,
     read in the part's own frame, so a pile's staging pose does not matter and
     no edge is asserted (#1103): an edge only chooses a direction, and the
@@ -4757,8 +4775,10 @@ def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
     (no turn is the seat's to choose then), and `by_face` the floor for each
     of the four. None when no body of it could ever gate, or none was read, or
     a floor is 0 in every direction asked. `declared` is an entry's
-    `mating_face`, read as the seat reads it (`mating.face_with_declaration`)."""
-    from .mating import face_with_declaration, mating_face_local
+    `mating_face`, read as the seat reads it (`mating.face_with_declaration`),
+    and `opens` its `opens`: `face` is the side the seat puts at the edge
+    (`mating.edge_side`, #1769)."""
+    from .mating import edge_side, face_with_declaration, mating_face_local
     fp = (pcb_data.footprints or {}).get(ref)
     if bodies is None:
         from .body import board_bodies
@@ -4766,7 +4786,8 @@ def body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies=None,
     read = _body_floor_reads(heights, pcb_data, pcb_file, ref, bodies, geometry)
     if fp is None or read is None:
         return None
-    face = face_with_declaration(mating_face_local(fp, bodies.get(ref)), declared)[0]
+    face = edge_side(face_with_declaration(mating_face_local(fp, bodies.get(ref)),
+                                           declared)[0], opens)
     if face:
         got, reach = read[face]
         return ({'face': face, 'min': got, 'by_face': {face: got}, 'reach': reach}
@@ -4846,7 +4867,7 @@ def body_floor_owed(intent, pcb_data, pcb_file, heights) -> List[str]:
                 or not _body_floor_applies(pcb_data, ref):
             continue
         got = body_clearing_overhang(heights, pcb_data, pcb_file, ref, bodies, geometry,
-                                     declared=c.get('mating_face'))
+                                     declared=c.get('mating_face'), opens=c.get('opens'))
         if got is None:
             continue
         name = pcb_data.footprints[ref].footprint_name
@@ -4882,24 +4903,18 @@ def _pads_short_of_floor(geometry, rules, pcb_data, ref, base, floor, reach, fac
     """The pads (`connector_geometry.pad_boxes`, the seat's own) of `ref` the
     seat would hold further in than `floor` allows, with `face` to a straight
     edge and overhanging by `floor` on a shape reaching `reach` along that
-    face: `(pad number, mm it would stand inside the edge, the clearance
-    binding it, the rule setting that clearance or '')` each."""
-    from .connector_geometry import pad_boxes
-    from .edge_seat import COPPER_SLACK_MM
-    fp = pcb_data.footprints[ref]
-    short = []
-    for index, lx, ly, hx, hy, tilt in pad_boxes(geometry, ref):
+    face: the `edge_seat.PadRead` of each, read by the seat's own per-pad
+    reading (`edge_seat.pad_edge_reads`, #1773)."""
+    from .edge_seat import COPPER_SLACK_MM, pad_edge_reads
+
+    def inside(lx, ly, hx, hy, tilt):
         a = math.radians(tilt)
         ca, sa = abs(math.cos(a)), abs(math.sin(a))
         ex, ey = hx * ca + hy * sa, hx * sa + hy * ca
-        inside = reach - floor - {'+x': lx + ex, '-x': ex - lx,
-                                  '+y': ly + ey, '-y': ey - ly}[face]
-        clearance, rule = base, ''
-        if rules is not None:
-            _lo, clearance, rule = rules.for_pad(fp.pads[index], base)
-        if inside < clearance + COPPER_SLACK_MM - legality.EPS:
-            short.append((str(fp.pads[index].pad_number), inside, clearance, rule))
-    return short
+        return reach - floor - {'+x': lx + ex, '-x': ex - lx,
+                                '+y': ly + ey, '-y': ey - ly}[face]
+    return [r for r in pad_edge_reads(geometry, rules, pcb_data, ref, base, inside)
+            if r.inside < r.clearance + COPPER_SLACK_MM - legality.EPS]
 
 
 def pad_floor_owed(intent, pcb_data, pcb_file, heights, edge_clearance=None) -> List[str]:
@@ -4921,8 +4936,9 @@ def pad_floor_owed(intent, pcb_data, pcb_file, heights, edge_clearance=None) -> 
     from design_rules import PadEdgeRules
     from .body import board_bodies
     from .connector_geometry import ConnectorGeometry, pad_boxes
-    from .edge_seat import COPPER_SLACK_MM, PAD_FLOOR_WAY_OUT, edge_floor_source
-    from .mating import face_with_declaration, mating_face_local
+    from .edge_seat import (COPPER_SLACK_MM, PAD_FLOOR_WAY_OUT, PAD_ON_OUTLINE,
+                            binding_pads, pad_rule_source, pad_stands, pads_named)
+    from .mating import edge_side, face_with_declaration, mating_face_local
     locked = set(extract_locked_refs_safe(pcb_file))
     posed = {str(f.get('ref')) for f in (intent.fixed_poses or ())}
     rows = {str(c.get('ref')): c for c in (intent.edge_connectors or ())}
@@ -4944,8 +4960,8 @@ def pad_floor_owed(intent, pcb_data, pcb_file, heights, edge_clearance=None) -> 
         if read is None:
             continue
         fp = pcb_data.footprints[ref]
-        face = face_with_declaration(mating_face_local(fp, bodies.get(ref)),
-                                     c.get('mating_face'))[0]
+        face = edge_side(face_with_declaration(mating_face_local(fp, bodies.get(ref)),
+                                               c.get('mating_face'))[0], c.get('opens'))
         sides = [face] if face else sorted(read)
         asked = {f: _pads_short_of_floor(geometry, rules, pcb_data, ref, base,
                                          read[f][0], read[f][1], f) for f in sides}
@@ -4953,27 +4969,21 @@ def pad_floor_owed(intent, pcb_data, pcb_file, heights, edge_clearance=None) -> 
         if not all(read[f][0] > legality.EPS and asked[f] for f in sides):
             continue
         # a part the plan may turn: the side nearest to seating
-        side = face or max(sides, key=lambda f: min(p[1] - p[2] for p in asked[f]))
-        short = sorted(asked[side], key=lambda p: p[1] - p[2])
-        worst = short[0]
-        every = len(short) == len(pad_boxes(geometry, ref))
-        numbers = sorted({p[0] for p in short})
-        some = 'its pads' if every else 'pad' + ('s ' if len(numbers) > 1 else ' ') + ', '.join(numbers)
+        side = face or max(sides, key=lambda f: min(p.inside - p.clearance for p in asked[f]))
+        short = asked[side]
+        worst = binding_pads(short)[0]
+        some = pads_named(short, len(pad_boxes(geometry, ref)))
         how = (f"with its mating face ({side}) to the edge" if face else
                f"no mating face reads in the board's plane and no side of it can seat: "
                f"with its {side} side to the edge, the nearest to seating")
-        where = (f"would stand {worst[1]:.3f}mm from the edge" if worst[1] >= 0.0
-                 else f"would leave the board by {-worst[1]:.3f}mm")
-        source = (f"the .kicad_dru rule {worst[3]!r}" if worst[3]
-                  else edge_floor_source(pcb_file, base))
         lead = (f"{ref} ({fp.footprint_name}): {how}, the overhang of "
-                f"{read[side][0]:.3f}mm its body needs means {some} {where}, and the "
-                f"clearance binding them is {worst[2]:.2f}mm, from {source}. So it "
-                f"gets no seat, and place_simple places it as any other part. ")
-        if min(p[1] for p in short) <= COPPER_SLACK_MM:
-            out.append(lead + "No edge_clearance rule frees a pad on or past the "
-                              "outline: if the board is cut away under that body, "
-                              "write a `why`; otherwise this footprint cannot seat "
+                f"{read[side][0]:.3f}mm its body needs means "
+                f"{pad_stands(some, worst.inside)}, and the clearance binding them is "
+                f"{worst.clearance:.2f}mm, from {pad_rule_source(pcb_file, base, worst.rule)}. "
+                f"So it gets no seat, and place_simple places it as any other part. ")
+        if min(p.inside for p in short) <= COPPER_SLACK_MM:
+            out.append(lead + PAD_ON_OUTLINE + ": if the board is cut away under that "
+                              "body, write a `why`; otherwise this footprint cannot seat "
                               "on an edge")
             continue
         out.append(lead + f"{PAD_FLOOR_WAY_OUT}: `(rule edge_launch (condition "
@@ -4993,7 +5003,8 @@ def edge_facing_policy(entry: Dict, fp) -> str:
 
     In order: a declared `mating_face` is graded, whatever the mount -- the
     edge seat turns the part by it, so the grade checks the same face (a
-    vertical header's names the side its cable leaves); a vertical
+    vertical header's names the side its cable leaves) -- and so is a row
+    declaring `opens` inward (#1769), for the same reason; a vertical
     `mount_mode` is exempt (it mates off a face, not the edge --
     `VERTICAL_MOUNTS`), and so are card-edge fingers
     (`part_class.is_card_fingers`: they ARE the edge, with no opening to
@@ -5010,7 +5021,9 @@ def edge_facing_policy(entry: Dict, fp) -> str:
     SW1: courtyard north, fab south)."""
     ctxd = entry.get('context') or {}
     mm = ctxd.get('mount_mode')
-    if entry.get('mating_face'):
+    if entry.get('mating_face') or entry.get('opens') == 'inward':
+        # #1769: a declared `opens` says which side meets the edge, as a
+        # declared face does, and the seat turns by it
         return 'graded'
     if mm in VERTICAL_MOUNTS:
         return 'exempt: a %s mates off a face, not the edge' % mm
@@ -5033,7 +5046,9 @@ def edge_facing_policy(entry: Dict, fp) -> str:
 def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
                 ) -> Dict:
     """Which board edge a declared edge part's mating face points at, and
-    whether `rule_edge_connector` fails it (#1155).
+    whether `rule_edge_connector` fails it (#1155). For an entry that `opens`
+    inward (#1769), `facing` is the edge its BACK points at (`edge_face`, the
+    side opposite its opening, `local_face`), which is what is graded.
 
     `geom` is the part's `body.BodyGeometry` (None reads as no body);
     `rotation` defaults to the footprint's own, and is what a seat trying a
@@ -5063,8 +5078,8 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
     pass unless the entry declares the face. A footprint's own "PCB Edge" marker
     (#1245) confirms a face (strong) or vetoes it (an abstention) where it
     draws one, through `mating_face_local`."""
-    from .mating import (LocalFace, face_evidence, face_with_declaration,
-                         facing_edge, mating_face_local)
+    from .mating import (OPENS_INWARD, LocalFace, edge_side, face_evidence,
+                         face_with_declaration, facing_edge, mating_face_local)
     policy = edge_facing_policy(entry, fp)
     lf = (mating_face_local(fp, geom) if geom is not None
           else LocalFace(None, 0.0, '', 'no body geometry'))
@@ -5087,12 +5102,21 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
         if mk is not None and mk.face and mk.face != face:
             # Only on an abstaining body: a weak face the marker contradicts
             # abstains, one it confirms is strong and outranks the
-            # declaration (`mating_face_local`).
+            # declaration (`mating_face_local`). #1770: a marker whose line
+            # the text's stored angle chose is said as that, and a recorded
+            # source silences it (`_mating_face_warning`).
             disagreement = (f"its declared mating_face {face} is against its "
                             f"PCB-edge marker, which puts the board edge on "
-                            f"its {mk.face} side")
+                            f"its {mk.face} side"
+                            + (" as its text's stored angle reads it (the text "
+                               "sits between lines along both axes)"
+                               if mk.by_angle else ''))
     rot = (fp.rotation or 0.0) if rotation is None else rotation
-    facing = facing_edge(lf.face, rot)
+    # #1769: the side graded at the edge -- the opening's, or its back for a
+    # part that opens into the board
+    opens = OPENS_INWARD if entry.get('opens') == OPENS_INWARD else None
+    side = edge_side(lf.face, opens)
+    facing = facing_edge(side, rot)
     edge = entry.get('edge')
     reason = lf.reason or ('' if facing or not lf.face else
                            'the pose is more than 30 degrees off a quarter '
@@ -5105,7 +5129,9 @@ def edge_facing(entry: Dict, fp, geom, rotation: Optional[float] = None
                           and facing != edge),
             'declared_face': declared, 'declared_source': recorded,
             'body_face': body.face,
-            'body_strong': bool(body.strong), 'disagreement': disagreement}
+            'body_strong': bool(body.strong), 'disagreement': disagreement,
+            'marker_by_angle': bool(body.marker is not None and body.marker.by_angle),
+            'opens': opens, 'edge_face': side}
 
 
 #: The axis a part slides along when it moves ALONG the named edge: x for a
@@ -6554,9 +6580,29 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             'declared_source': _ef['declared_source'],
             'body_face': _ef['body_face'],
             'body_strong': _ef['body_strong'],
-            'disagreement': _ef['disagreement']}
+            'disagreement': _ef['disagreement'],
+            'opens': _ef['opens'], 'edge_face': _ef['edge_face']}
         yield from _mating_face_warning(c, ref, _ef)
-        if _ef['fails']:
+        if _ef['fails'] and _ef['opens']:
+            yield Violation(
+                rule='edge_connector',
+                severity=(ctx.sev('edge_connector') if _ef['strong']
+                          else WARN),
+                ref=ref,
+                message=(f"{ref} opens into the board ({_ef['local_face']}, "
+                         f"{_ef['basis']}), so its back ({_ef['edge_face']}) goes "
+                         f"to its declared {edge} edge, but at this pose it points "
+                         f"{_ef['facing']}"
+                         + ('' if _ef['strong'] else
+                            ' (a weak face, under 2 mm: a WARN)')),
+                measured={'facing': _ef['facing'],
+                          'facing_basis': _ef['basis'],
+                          'facing_offset_mm': _ef['offset_mm'],
+                          'facing_strong': _ef['strong'],
+                          'local_face': _ef['local_face'],
+                          'edge_face': _ef['edge_face'], 'opens': _ef['opens']},
+                expected={'facing': edge})
+        elif _ef['fails']:
             yield Violation(
                 rule='edge_connector',
                 severity=(ctx.sev('edge_connector') if _ef['strong']
@@ -6732,10 +6778,14 @@ def _mating_face_warning(c, ref, _ef) -> Iterator[Violation]:
     declaration that records what it was read off (`mating_face_source`,
     #1652) silences the WARN over a weak reading. Never over a strong one, nor
     against the PCB-edge marker: those are evidence, a recorded source is the
-    author's word. Reads the footprint's own frame, so no pose decides it."""
+    author's word -- except a marker whose line only its text's stored angle
+    chose (#1770), which is no more evidence than the source. Reads the footprint's own frame, so no pose decides it."""
     from .mating import EVIDENCE_SOURCED, EVIDENCE_UNVERIFIED
     said = _ef['disagreement']
-    if said and _ef['evidence'] == EVIDENCE_SOURCED and _ef['body_face']:
+    if said and _ef['evidence'] == EVIDENCE_SOURCED and (
+            _ef['body_face'] or _ef.get('marker_by_angle')):
+        # #1770: nor against a marker whose line only its text's stored
+        # angle chose: that reading is no more evidence than the source
         said = ''
     if _ef['evidence'] == EVIDENCE_UNVERIFIED and c.get('edge'):
         # #1652: a declared face nothing independent confirms, whichever
@@ -6787,7 +6837,8 @@ def _staged_evidence(c, ref, _ef) -> Dict[str, object]:
                 'declared_source': _ef['declared_source'],
                 'body_face': _ef['body_face'],
                 'body_strong': _ef['body_strong'],
-                'disagreement': _ef['disagreement']}}
+                'disagreement': _ef['disagreement'],
+                'opens': _ef['opens'], 'edge_face': _ef['edge_face']}}
 
 
 def _setback_tail(e) -> str:
@@ -6822,12 +6873,16 @@ def _facing_tail(f) -> str:
                 f"the entry declares a mating_face)")
     if f['disposition'] == 'abstained':
         return f"; facing abstained ({f.get('reason') or 'no face'})"
+    inward = f.get('opens') == 'inward' and f.get('local_face')
     if f['disposition'] == 'staging':
-        return (f"; mating face {f['local_face']} [{f['basis']}, "
-                f"{f['evidence']}]")
+        return (f"; mating face {f['local_face']}"
+                + (f", opening into the board (its back {f.get('edge_face')} to "
+                   f"the edge)" if inward else '')
+                + f" [{f['basis']}, {f['evidence']}]")
     if f['disposition'] == 'no_edge':
-        return (f"; facing {f['facing']} (no edge declared: not graded)"
-                if f.get('facing') else '')
+        return ((f"; back to {f['facing']}, opens into the board"
+                 if inward else f"; facing {f['facing']}")
+                + " (no edge declared: not graded)" if f.get('facing') else '')
     said = ''
     if f.get('disagreement') and f.get('declared_face') and f.get('body_face'):
         # #1586: which of the two faces the clause graded, and over which
@@ -6838,7 +6893,10 @@ def _facing_tail(f) -> str:
     # #1652: the second word is what the face rests on (`mating.
     # face_evidence`), not the severity: a declared face fails at ERROR and
     # reads `unverified` unless its marker confirms it.
-    return (f"; facing {f['facing']} [{f['basis']}, "
+    # #1769: a part that opens into the board is graded on its back
+    head = (f"; back to {f['facing']} ({f.get('edge_face')}), opens into the "
+            f"board ({f['local_face']})" if inward else f"; facing {f['facing']}")
+    return (f"{head} [{f['basis']}, "
             f"{f['evidence']}] "
             f"{f['disposition'].upper() if f['disposition'] == 'fail' else 'pass'}"
             + said)
@@ -13127,6 +13185,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
         doc['min_reader'] = max(int(doc.get('min_reader') or 0), 12)
     if any('overhang_face' in c for c in doc.get('edge_connectors') or ()):
         doc['min_reader'] = max(int(doc.get('min_reader') or 0), OVERHANG_FACE_READER)
+    if any('opens' in c for c in doc.get('edge_connectors') or ()):
+        doc['min_reader'] = max(int(doc.get('min_reader') or 0), OPENS_READER)
     return doc
 
 

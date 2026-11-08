@@ -520,6 +520,14 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   seat lays the header with its long side along the edge and the cable runs
   off the board. Without it, a 2x05 header lay across its edge on most
   seeds, its cable along the edge.
+- **A socket that opens into the board.** An M.2 or SO-DIMM socket at an
+  edge has its back on the edge and its card lying over the board. Leave
+  `mating_face` as the side its OPENING is on (the body's reading, or
+  declared as above) and write `"opens": "inward"` on its row: the seat
+  puts its back at the edge and the facing clause reads `back to <edge>
+  (<side>), opens into the board (<face>)`. Declaring its back as
+  `mating_face` instead seats it the same way but grades the back as its
+  opening (#1769).
 - **The pin rows of a plug-in module** (a DIP or breadboard module, rows
   that go into a socket): the socket sets their spacing, so declare each row
   in `fixed_poses[]` (`basis: derived_default`), not on its edge: parallel,
@@ -584,6 +592,13 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   band, and the way out is the same, or a larger `max_setback_mm` where the
   drawing allows (#1713). It offers `overhang_mm.max` only where the band's
   maximum is what holds the body back.
+  Its figures can be copied into the band as printed: a reach it falls short
+  of is rounded down, a least reading rounded up, and the pads are placed to
+  0.001 mm, beside the seat's own 0.005 mm copper slack (#1772).
+  It names the pads that stop the seat, each at its own clearance and the
+  rule that sets it, and where they would stand at the minimum; when that is
+  on or past the outline it says no rule can free them, as the roster does
+  (#1773).
 - **Where the part's own model ends.** Where a 3D model resolves,
   check_floorplan's line says `model end -2.07mm` beside the overhang (from
   the edge's line, negative short of it) and warns when the courtyard reads

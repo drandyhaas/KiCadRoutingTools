@@ -186,7 +186,10 @@ KEY_SETS = {
         'mating_face_source',
         # #1714: the side a pile's floor row's band was read along, written
         # by `emit_intent`, so an edge-less row is graded as that distance.
-        'overhang_face'} | FREE,
+        'overhang_face',
+        # #1769: which way its opening faces at the edge (`inward`: its back
+        # goes to the edge, a socket whose card lies over the board).
+        'opens'} | FREE,
     '_OVERHANG_KEYS': {'min', 'max'},
     '_CENTER_ON_EDGE_KEYS': {'tolerance_mm'},
     '_ALONG_EDGE_BAND_KEYS': {'from', 'to'},
@@ -353,7 +356,7 @@ def test_an_intent_using_every_known_key_loads():
             {'ref': 'J2', 'edge': 'west',
              'along_edge_band': {'from': 0.10, 'to': 0.35},
              'mating_face': '-x', 'mating_face_source': 'the 3D model',
-             'overhang_face': '-x'}],
+             'overhang_face': '-x', 'opens': 'outward'}],
         'decaps': {'max_distance_mm': 2.5, 'exempt': ['C99'],
                    'search_radius_mm': 6.0, 'max_pin_distance_mm': 1.5,
                    'pin_functions': ['VCC', 'VDD'], 'same_side': False,
