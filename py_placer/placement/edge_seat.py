@@ -86,6 +86,7 @@ the parts that walled it.
 """
 from __future__ import annotations
 
+import math
 from collections import namedtuple
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
@@ -623,8 +624,8 @@ def _body_unclear_text(probe, entry, edge, axis, pose) -> str:
         read = probe.band(ref, edge, at(far))
         hi = (entry.get('overhang_mm') or {}).get('max')
         if hi is not None and read > float(hi) + EPS:
-            held = (f": clearing it here takes an overhang reading {read:.2f}mm, past "
-                    f"its overhang_mm.max {float(hi):.2f}mm, so raise that if its "
+            held = (f": clearing it here takes an overhang reading {_at_least(read)}mm, past "
+                    f"its overhang_mm.max {_said(float(hi))}mm, so raise that if its "
                     f"drawing allows")
         elif not probe.copper_clear(ref, at(far)):
             held = (f": its pad copper's edge clearance stops it, "
@@ -739,7 +740,7 @@ def _courtyard_seat_text(probe, ref, edge, pose, entry=None) -> str:
         flush[1 - axis] += (-1.0 if edge in ('north', 'west') else 1.0) * inside
         flush = tuple(flush)
         hi = (entry.get('overhang_mm') or {}).get('max')
-        held = (f"its declared overhang_mm.max {float(hi):.2f}mm"
+        held = (f"its declared overhang_mm.max {_said(float(hi))}mm"
                 if hi is not None and probe.band(ref, edge, flush)
                 > float(hi) - BAND_SLACK_MM + EPS
                 else "its pad copper's edge clearance"
@@ -841,16 +842,45 @@ PAD_FLOOR_WAY_OUT = ("Lowering the band will not help a part whose body needs it
                      "(check_assembly gates a body at board depth): " + PAD_FLOOR_RULE)
 
 
+def _at_most(mm) -> str:
+    """#1772: a reach the seat falls short of, to 2 dp rounded DOWN, so the
+    figure copied into a band minimum is one the seat can meet (the band
+    test is exact, #987)."""
+    return f"{math.floor(mm * 100.0 + 1e-6) / 100.0:.2f}"
+
+
+def _at_least(mm) -> str:
+    """#1772: a least reading, to 2 dp rounded UP (`pose_ops`' `--radius`
+    idiom), so the figure copied into a maximum or a limit admits it."""
+    return f"{math.ceil(mm * 100.0 - 1e-6) / 100.0:.2f}"
+
+
+def _said(mm) -> str:
+    """A number the author declared, as declared: 2 dp, or every digit when
+    2 dp would round it (a minimum of 11.525 must not print as 11.53)."""
+    two = f"{mm:.2f}"
+    return two if abs(float(two) - mm) <= 1e-9 else f"{mm:.6g}"
+
+
 def _pad_floor_text(probe, ref, e, low, held) -> str:
     """#1663: the band minimum `low` failed at a seat its pad copper's edge
     clearance chose, reading `held`: the pad floor, its value and where it
-    comes from, and what to do instead of what the band's message invites."""
+    comes from, and what to do instead of what the band's message invites.
+    #1772: where the seat holds the pads (`e`, the floor plus its copper
+    slack) beside where the minimum would put them, to 0.001 mm, and the
+    slack named when it is all the shortfall there is."""
     floor = e - COPPER_SLACK_MM
-    left = e - (low - held)
-    reach = (f"its pads would stand {left:.2f}mm from the edge"
-             if left >= 0.0 else f"its pads would leave the board by {-left:.2f}mm")
-    return (f": its pad copper's edge clearance stops it there, {floor:.2f}mm from "
-            f"{probe.copper_source(ref)}, and at that minimum {reach}. {PAD_FLOOR_WAY_OUT}")
+    short = low - held
+    left = e - short
+    reach = (f"its pads would stand {left:.3f}mm from the edge"
+             if left >= 0.0 else f"its pads would leave the board by {-left:.3f}mm")
+    slack = (f" ({short:.3f}mm short of it: within the seat's own {COPPER_SLACK_MM:g}mm "
+             f"copper slack, which keeps a written pose from reading as copper exactly "
+             f"at its clearance)" if short < 0.01 else '')
+    return (f": its pad copper's edge clearance stops it there: the seat holds its pads "
+            f"{e:.3f}mm inside the edge, {_said(floor)}mm from {probe.copper_source(ref)} "
+            f"plus its {COPPER_SLACK_MM:g}mm copper slack, and at that minimum {reach}"
+            f"{slack}. {PAD_FLOOR_WAY_OUT}")
 
 
 def _setback_held_text(probe, entry, edge, e, reads) -> str:
@@ -865,8 +895,8 @@ def _setback_held_text(probe, entry, edge, e, reads) -> str:
     limit = edge_setback_rule(entry)[0]
     ref = entry['ref']
     short, basis, pose = min(reads, key=lambda r: r[0])
-    head = (f"with its {basis} at least {short:.2f}mm from the nearest edge, past its "
-            f"setback limit {limit:.2f}mm")
+    head = (f"with its {basis} at least {_at_least(short)}mm from the nearest edge, past its "
+            f"setback limit {_said(limit)}mm")
     axis = 0 if edge in ('north', 'south') else 1
     reach = list(pose)
     reach[1 - axis] += (-1.0 if edge in ('north', 'west') else 1.0) * (short - limit)
@@ -874,7 +904,7 @@ def _setback_held_text(probe, entry, edge, e, reads) -> str:
     hi = (entry.get('overhang_mm') or {}).get('max')
     held = []
     if hi is not None and probe.band(ref, edge, reach) > float(hi) - BAND_SLACK_MM + EPS:
-        held.append(f"its declared overhang_mm.max {float(hi):.2f}mm holds it there "
+        held.append(f"its declared overhang_mm.max {_said(float(hi))}mm holds it there "
                     f"(raise overhang_mm.max if its drawing allows, or declare a larger "
                     f"max_setback_mm)")
     if not probe.copper_clear(ref, reach):
@@ -912,8 +942,9 @@ def _unseated_reason(probe, entry, edge, axis, target, e, floors, spans, tally,
         cr = part.rect(0.0, 0.0, rot)
         basis = probe.band_read(ref, edge, (part.x, part.y, rot))[1]
         part.ensure_rotation(part.rot)
-        why = (f"its overhang reads at least {floors[rot]:.2f}mm wherever it stands ({basis}), "
-               f"never the {target:.2f}mm at the low end of its band that the seat puts it at")
+        why = (f"its overhang reads at least {_at_least(floors[rot])}mm wherever it stands "
+               f"({basis}), never the {_said(target)}mm at the low end of its band that the "
+               f"seat puts it at")
         if cr[axis + 2] - cr[axis] > edge_len + EPS:
             why += (f": its courtyard is {cr[axis + 2] - cr[axis]:.2f}mm along a "
                     f"{edge_len:.2f}mm edge")
@@ -933,13 +964,13 @@ def _unseated_reason(probe, entry, edge, axis, target, e, floors, spans, tally,
                 said.append(f"{n} with pad copper inside the board's "
                             f"{e - COPPER_SLACK_MM:.2f}mm edge clearance")
             elif kind == 'band_min':
-                said.append(f"{n} reading an overhang of at most {max(reads):.2f}mm, under "
-                            f"the declared minimum {float(lim.get('min', 0.0)):.2f}mm"
+                said.append(f"{n} reading an overhang of at most {_at_most(max(reads))}mm, "
+                            f"under the declared minimum {_said(float(lim.get('min', 0.0)))}mm"
                             + (_pad_floor_text(probe, ref, e, float(lim.get('min', 0.0)),
                                                max(held.values())) if held else ''))
             elif kind == 'band_max':
-                said.append(f"{n} reading an overhang of at least {min(reads):.2f}mm, past "
-                            f"the declared maximum {float(lim['max']):.2f}mm")
+                said.append(f"{n} reading an overhang of at least {_at_least(min(reads))}mm, "
+                            f"past the declared maximum {_said(float(lim['max']))}mm")
             elif kind == 'edge':
                 said.append(f"{n} reading nearest the {'/'.join(sorted(set(reads)))} edge")
             elif kind == 'setback':

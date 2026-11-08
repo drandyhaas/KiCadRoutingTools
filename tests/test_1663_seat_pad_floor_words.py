@@ -109,7 +109,7 @@ def main():
         check('...its value and where it comes from',
               "0.40mm from the board's min_copper_edge_clearance" in text, text)
         check('...what the minimum would take', 'its pads would leave the board' not in text
-              and 'at that minimum its pads would stand 0.10mm from the edge' in text, text)
+              and 'at that minimum its pads would stand 0.100mm from the edge' in text, text)
         check('...that lowering the band will not help, and the way out',
               'Lowering the band will not help a part whose body needs it' in text
               and "the vendor's drawing" in text and '.kicad_dru edge_clearance rule' in text, text)

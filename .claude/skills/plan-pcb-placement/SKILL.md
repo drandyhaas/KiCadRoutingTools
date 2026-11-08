@@ -584,6 +584,9 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   band, and the way out is the same, or a larger `max_setback_mm` where the
   drawing allows (#1713). It offers `overhang_mm.max` only where the band's
   maximum is what holds the body back.
+  Its figures can be copied into the band as printed: a reach it falls short
+  of is rounded down, a least reading rounded up, and the pads are placed to
+  0.001 mm, beside the seat's own 0.005 mm copper slack (#1772).
 - **Where the part's own model ends.** Where a 3D model resolves,
   check_floorplan's line says `model end -2.07mm` beside the overhang (from
   the edge's line, negative short of it) and warns when the courtyard reads
