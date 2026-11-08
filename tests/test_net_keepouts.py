@@ -235,12 +235,12 @@ def test_corridor_rule_is_honoured():
 
 
 def test_other_steps_still_report_it_not_honoured():
-    """A step that does not stamp keep-outs (planes, fanout) derives none and
+    """A step that does not stamp keep-outs (fanout) derives none and
     keeps reporting the rule NOT honoured -- saying who does read it."""
     _, rules, log = _install(CORRIDOR, routing=False)
     assert rules.net_keepouts == [], rules.net_keepouts
     (name, why), = rules.unsupported()
-    assert name == "corridor" and "route.py and route_diff.py read it" in why, why
+    assert name == "corridor" and "repair_planes.py read it" in why, why
     assert "NOT honoured" in log and "honoured as" not in log, log
 
 
@@ -595,6 +595,70 @@ def test_shipped_board_audit_reports_input_copper():
     assert res[3].get("net_keepouts") == want, res[3].get("net_keepouts")
 
 
+SW_BOX = box(14, 5, 26, 25)
+SW_RULE = _rule("sw", "A.intersectsArea('sw') && A.NetName != 'SIG'")
+
+
+def _split_pour(zone_x1, name):
+    """A GND pour on F.Cu from x=1 to `zone_x1`, GND pads at (6,15) and
+    (34,15), a SIG track down x=20 and rule area 'sw' that only SIG may
+    cross, between them; SW_RULE beside it. Returns the board path."""
+    from synth import RoutingBoard
+    from kicad_writer import generate_rule_area_sexpr
+    b = RoutingBoard(w=40, h=30)
+    b.pad('G1', 6, 15, 'GND'); b.pad('G2', 34, 15, 'GND')
+    b.pad('S1', 20, 1, 'SIG'); b.pad('S2', 20, 29, 'SIG')
+    b.seg(20, 1, 20, 29, 'SIG')
+    b.items.append(f'  (zone (net {b.net("GND")}) (net_name "GND") (layer "F.Cu") (uuid "z")'
+                   ' (hatch edge 0.5) (connect_pads (clearance 0.2)) (min_thickness 0.2)'
+                   ' (filled_areas_thickness no) (fill yes (thermal_gap 0.3)'
+                   ' (thermal_bridge_width 0.3)) (polygon (pts (xy 1 1)'
+                   f' (xy {zone_x1} 1) (xy {zone_x1} 29) (xy 1 29))))')
+    b.items.append(generate_rule_area_sexpr(['F.Cu', 'B.Cu'], SW_BOX, 'sw', not_allowed=()))
+    path = os.path.join(tempfile.mkdtemp(prefix="nko_"), f"{name}.kicad_pcb")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(b.text())
+    with open(path[:-len(".kicad_pcb")] + ".kicad_dru", "w", encoding="utf-8") as f:
+        f.write(SW_RULE)
+    return path
+
+
+def _gnd_in_sw(board):
+    pcb = _quiet(parse_kicad_pcb, board)
+    return nk.audit(pcb, pcb.segments, pcb.vias, [_region(SW_BOX, {"GND"}, name="sw")])
+
+
+def test_plane_repair_copper_stays_out():
+    """The plane step's copper keeps GND out of 'sw': repair_planes' region
+    join across the pour SIG splits, and the KiCad oracle's weld from the
+    pour to a pad beyond the region. Both ran straight through it: their
+    maps never carried the region."""
+    out = os.path.join(tempfile.mkdtemp(prefix="nko_out_"), "o.kicad_pcb")
+    r = subprocess.run([sys.executable, "-X", "utf8", "py_router/repair_planes.py",
+                        _split_pour(39, "split"), out, "--nets", "GND",
+                        "--escalation", "off"],
+                       cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=ENV, timeout=900)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert _connected(out, ["GND"]) and _gnd_in_sw(out) == [], _gnd_in_sw(out)
+    assert "rule 'sw': honoured" in r.stdout, r.stdout[-3000:]
+    assert _kicad_items_not_allowed(out, SW_RULE) in (None, 0)
+
+    from kicad_oracle import find_kicad_cli, oracle_reconnect
+    cli = find_kicad_cli(warn=False)
+    if not cli:
+        raise Skip("the oracle leg needs kicad-cli")
+    board = _split_pour(13, "half")
+    subprocess.run([cli, "pcb", "drc", "--refill-zones", "--save-board",
+                    "--output", board + ".drc.json", board], capture_output=True, timeout=600)
+    cfg = GridRouteConfig(track_width=0.3, clearance=0.2, via_size=0.6, via_drill=0.3,
+                          layers=["F.Cu", "B.Cu"])
+    res = _quiet(oracle_reconnect, board, ["GND"], cfg, track_via_clearance=0.8,
+                 hole_to_hole_clearance=0.25)
+    assert res["links_routed"] == 1, res
+    assert _gnd_in_sw(board) == [], _gnd_in_sw(board)
+
+
 TESTS = [
     test_rule_area_names_are_parsed,
     test_corridor_rule_is_honoured,
@@ -614,6 +678,7 @@ TESTS = [
     test_route_diff_member_copper_stays_out,
     test_gui_shaped_call_and_forwarded_regions,
     test_shipped_board_audit_reports_input_copper,
+    test_plane_repair_copper_stays_out,
 ]
 
 

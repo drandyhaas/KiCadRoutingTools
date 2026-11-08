@@ -1169,7 +1169,15 @@ def repair_planes(
     # and tap/join copper would route blind to the board's layer rules. Same
     # reasoning as the reconciliation sub-run's forwarded map.
     from kicad_dru import install_layer_clearances, install_track_clearances
-    install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    install_layer_clearances(config, layer_clearances, input_file, pcb_data,
+                             net_keepouts=True)
+    # Net-filtered keep-outs bind repair copper too: the base map blocks them
+    # (build_base_obstacles) and the pad taps check them. An in-run finalize
+    # takes the parent's list, for the same reason as the layer map above.
+    from net_keepouts import attach as _nk_attach
+    _nk_parent = (route_knobs or {}).get('net_keepouts')
+    _nk_attach(pcb_data, _nk_parent if _nk_parent is not None
+               else getattr(getattr(config, 'rules', None), 'net_keepouts', None))
     # #1135: and the track-to-track rules, as route.py installs them -- a
     # region join or a pad tap is a track like any other, and a board's
     # `A.Type == 'track' && B.Type == 'track'` rule binds it too (raise-only

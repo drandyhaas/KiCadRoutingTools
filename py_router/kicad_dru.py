@@ -1776,7 +1776,8 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
     target layers outside the routed subset -- via keep-outs still need them)
     and pinned up to the fab tier's clearance floor. Prints what is honored.
     ``net_keepouts``: the caller stamps net-filtered keep-outs (route.py /
-    route_diff.py), so the design rules derive them (net_keepouts.py)."""
+    route_diff.py / repair_planes.py), so the design rules derive them
+    (net_keepouts.py)."""
     if layer_clearances is not None:
         config.layer_clearances = dict(layer_clearances)
         _install_rules_quietly(config, input_file, pcb_data, net_keepouts)

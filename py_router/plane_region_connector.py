@@ -3740,6 +3740,12 @@ def build_base_obstacles(
     # keep-out rule areas (#25), on the plane routing layers.
     add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
     add_rule_area_keepout_obstacles(obstacles, pcb_data, config, layers=routing_layers)
+    # and the .kicad_dru's net-filtered keep-outs (net_keepouts) that bind
+    # the nets this map is built for
+    from dataclasses import replace
+    from net_keepouts import block as block_net_keepouts
+    block_net_keepouts(obstacles, pcb_data, exclude_net_ids,
+                       replace(config, layers=list(routing_layers), track_width=track_width))
 
     # #1279: the excluded nets' own copper is free to this map, so a protected
     # Kelvin sense branch of one of them is stamped back in as foreign copper

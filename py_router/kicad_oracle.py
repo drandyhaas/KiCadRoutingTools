@@ -2173,11 +2173,27 @@ def oracle_reconnect(board_file: str, net_names, config,
                        or board_has_scoped_clearance_rules(_track_src))
     except Exception:                                       # noqa: BLE001
         _track_live = False
+    _net_keepouts = None
 
     def _install_net_maps(pcb):
         """Install the by-name maps on the board just parsed, by ITS ids."""
+        nonlocal _net_keepouts
         if _ncl_by_name:
             config.net_clearances = rekey_by_name(_ncl_by_name, pcb.nets)
+        from net_keepouts import attach, derive_area_keepouts, derive_layer_bans
+        if _net_keepouts is None:
+            # the rules source's net-filtered keep-outs name nets and
+            # polygons, so one derivation serves every parse
+            try:
+                from design_rules import DesignRules
+                rules = DesignRules.from_project(pcb, _track_src)
+                _net_keepouts = (derive_area_keepouts(rules, pcb)
+                                 + derive_layer_bans(rules, pcb))
+            except Exception as _ke:                        # noqa: BLE001
+                print(f"  KiCad-oracle recheck: net-filtered keep-outs not "
+                      f"derived ({_ke})")
+                _net_keepouts = []
+        attach(pcb, _net_keepouts)
         # #1133: the weld's power-layer discipline and width ladder read
         # these by net id, so they follow the parse too
         for _f, _m in _w_by_name.items():

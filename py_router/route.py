@@ -9397,9 +9397,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Net-filtered keep-outs: the bound-net copper the SHIPPED board has
     # inside a region. stamp() keeps the router's own searches out, but the
-    # plane finalize's taps and joins and the post-route passes lay copper
-    # without it, and the input may already have some: KiCad grades every
-    # piece as items_not_allowed, so it is said here, not found there.
+    # post-route passes lay copper without it, and the input may already
+    # have some: KiCad grades every piece as items_not_allowed, so it is said
+    # here, not found there.
     _nk_shipped = None
     if final_reconcile and not _ckpt_stop and getattr(pcb_data, '_net_keepouts', None):
         try:
