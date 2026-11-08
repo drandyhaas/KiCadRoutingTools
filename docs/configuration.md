@@ -294,9 +294,14 @@ kept out of 'corridor' (tracks, vias)`. A rule the tool cannot model completely
 outside every named area (`!A.intersectsArea(...)`), one that combines areas
 other than as a union (`a && b`), or one naming no area the board has -- stays
 `NOT honoured` and is listed in `design_rules.unsupported_rules`; nothing of it
-is applied. The run ends with an audit of the board it ships: bound-net copper
-inside a region (from a path that does not stamp the region, such as the plane
-finalize's taps and joins, or already in the input) is printed and reported as
+is applied. The plane step honours the same rules, standalone (`repair_planes.py`)
+and as route.py's in-run finalize: its region joins and the KiCad oracle's welds
+route with the plane net's regions blocked, a width upgrade or sub-grid via nudge
+that would reach into one is refused (`check_drc.copper_keepout_gate`, which
+also judges plain rule areas), and its pad taps refuse a site or trace inside
+one. The run ends with an audit of the board it ships: bound-net
+copper inside a region (from a path that does not stamp the region, such as a
+post-route pass, or already in the input) is printed and reported as
 `net_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (`[]` =
 clean; absent when the board has no such rule).
 

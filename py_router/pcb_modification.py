@@ -7599,6 +7599,17 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     scoped = [v for v in pcb_data.vias
               if id(v) in own_ids
               and (scope_net_ids is None or v.net_id in scope_net_ids)]
+    # #1782: a move must not carry the via into a keep-out -- a board rule
+    # area forbidding vias, or a net-filtered keep-out binding its net
+    from check_drc import copper_keepout_gate
+    _ko_refuses = copper_keepout_gate(pcb_data)
+
+    def _ko_at(v, x, y):
+        return bool(_ko_refuses(vias=[Via(
+            x=x, y=y, size=v.size, drill=v.drill,
+            layers=list(v.layers or ['F.Cu', 'B.Cu']), net_id=v.net_id,
+            via_type=getattr(v, 'via_type', 'through') or 'through')]))
+
     for v in scoped:
         if not (copper_flagged(v) or hole_flagged(v) or npth_copper_flagged(v)
                 or edge_flagged(v)):
@@ -7627,6 +7638,9 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         net_zones = zones_by_net.get(v.net_id, [])
         before = check_net_connectivity(v.net_id, net_segs, net_vias, net_pads,
                                         net_zones, pcb_data=pcb_data)
+        # a via already inside one (input-era geometry) may still move; it
+        # just may not move INTO one
+        _ko_free = _ko_refuses is not None and not _ko_at(v, v.x, v.y)
 
         for ang in (0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0):
             a = math.radians(ang)
@@ -7640,6 +7654,8 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                 continue
             nx, ny = round(v.x + dx * dist, 4), round(v.y + dy * dist, 4)
             if worst_gap(nx, ny, v, near)[0] < -1e-6:
+                continue
+            if _ko_free and _ko_at(v, nx, ny):
                 continue
 
             # apply, verify connectivity, revert on regression
