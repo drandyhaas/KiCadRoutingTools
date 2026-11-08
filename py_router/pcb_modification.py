@@ -2884,6 +2884,11 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
     tails = []
     added_s = []                 # weld connectors (#1372)
     tol = 1e-3
+    # #1784: a weld's connector lies in copper already there, so no clearance
+    # shrinks; but that copper was a VIA, and a rule area may forbid tracks
+    # and allow vias. The connector asks the one keep-out gate (#1760).
+    from check_drc import copper_keepout_gate
+    _ko_refuses = copper_keepout_gate(board)
 
     def weld_pair(v, a, b):
         """Two segments whose ends met inside a dangling via's barrel (#1372):
@@ -2928,6 +2933,8 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
         new.uuid = ''
         new.start_x_str = new.start_y_str = ''
         new.end_x_str = new.end_y_str = ''
+        if _ko_refuses and _ko_refuses(segments=[new]):
+            return None
         return new
 
     def grade(nid, segs, vias, pads, zones):
