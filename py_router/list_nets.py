@@ -1227,6 +1227,16 @@ def _fmt_outer_profile(pcb_data, net_name):
     return f"  ({', '.join(parts)})" if parts else ""
 
 
+def power_net_order(item):
+    """Sort key for a (net name, pad count) of `find_power_nets` (#1755):
+    pad count descending, then a canonical ground (a plain `GND` / `VSS`
+    leaf) ahead of AGND, PGND and the rest, then the name -- so a tie does
+    not fall to the order the board file lists its nets in."""
+    name, pads = item[0], item[1]
+    leaf = name.upper().rsplit('/', 1)[-1]
+    return (-pads, leaf not in ('GND', 'VSS'), name)
+
+
 def find_power_nets(pcb_data):
     """Find power and ground nets by name patterns and connection count.
 
@@ -1262,9 +1272,9 @@ def find_power_nets(pcb_data):
             vcc_nets.append((net.name, pad_count))
             matched.add(net.name)
 
-    # Sort by pad count descending
-    gnd_nets.sort(key=lambda x: -x[1])
-    vcc_nets.sort(key=lambda x: -x[1])
+    # Pad count descending; ties by name, never by board file order (#1755)
+    gnd_nets.sort(key=power_net_order)
+    vcc_nets.sort(key=power_net_order)
 
     # High pad-count nets the patterns missed: anything rivaling the known
     # POWER rails is probably a power net with an unconventional name (e.g.
@@ -1277,7 +1287,7 @@ def find_power_nets(pcb_data):
          if net.name and net.name not in matched
          and not net.name.lower().startswith('unconnected')
          and len(net.pads) >= threshold),
-        key=lambda x: -x[1])[:8]
+        key=power_net_order)[:8]
 
     return gnd_nets, vcc_nets, candidates
 
