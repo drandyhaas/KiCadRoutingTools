@@ -917,7 +917,7 @@ Key functions in `net_queries.py`:
 Key functions in `py_tools/analyze_power_paths.py` (used by `/analyze-power-nets` skill):
 - `analyze_pcb(filepath)` - Load PCB and extract components for analysis
 - `get_components_needing_analysis(components)` - Get components requiring AI classification
-- `classify_component(components, ref, role, current_rating_ma, notes, supply_nets)` - Set component classification (`supply_nets` names the rails of a part whose pads carry no pintype and whose nets are not rail-named)
+- `classify_component(components, ref, role, current_rating_ma, notes, supply_nets, input_nets)` - Set component classification (`supply_nets` names the rails of a part whose pads carry no pintype and whose nets are not rail-named, a source's outputs; `input_nets` names a source's inputs and replaces what its pins say)
 - `trace_power_paths(pcb, components)` - Trace each load upstream (regulators entered output to input only) to the source feeding it
 - `get_power_net_recommendations(pcb, components, paths)` - Get recommended track widths (a sink's rating is charged once per net; a source's rating is a limit, never a load)
 

@@ -748,7 +748,10 @@ flags. Extend its table when a future flag goes.
   retries too (default prunes to the file-dependency chain). A command its tool
   refused writes nothing and is not kept in the manifest (#1640: the recorder
   takes back a command that wrote nothing); an older manifest's refused command
-  is skipped when the tool's own parser refuses it.
+  is skipped when the tool's own parser refuses it. A file the command names
+  (`--intent`, `--fab-overrides`) is judged where the replay RUNS it -- in
+  `--workdir`, or with `--remap` applied, after the side files are seeded --
+  never in the recorded folder (#1776).
 
 - **Whole set, graded (full chain):** `python3 tests/stress/ab_replay_grade.py
   --set ~/Documents/kicad_stress_test/runs_set1 --out <wavedir> --label new
