@@ -429,7 +429,11 @@ ships`), and copper inside the clearance of one (`NOT CLEAR ...`, at the floor
 the writeback stores, so a pair a net class raises above it is `check_drc`'s to
 name), in `--json-out` and the GUI's `results_data` as `pad_contacts` and
 `pad_grazes` (`[{pad, pad_net, net, kind, at, overlap_mm, short, ...}]`), and in
-`JSON_SUMMARY_MIN` (the pads). This part only reports. `check_complete.py` names
+`JSON_SUMMARY_MIN` (the pads). A row whose net a route step will not rip carries
+`net_protected`, the NET's reason (`locked`, a `sense:` group, a `.kicad_pro`
+protection; per net, as the rip decides it, #1766), the console line ends
+`[net X: reason]`, and the audit prints the remedy: no flag lifts `locked` or
+`sense:` copper. This part only reports. `check_complete.py` names
 the shorts among its reasons.
 
 ##### History congestion (#590), the only field that measures TIME
