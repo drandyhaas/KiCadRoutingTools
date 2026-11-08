@@ -101,6 +101,14 @@ power_net_evidence`): a ground or rail name, power pins on two or more parts, or
 A surface stub of a net `--power-nets` names is not listed; a via-drop stub is, while its named width is wider
 than drawn. Disclosure only: the copper is unchanged.
 
+**The via a run sizes itself (#1775):** with no `--via-size`/`--via-drill` the via-drop's via starts at
+0.45/0.25, raised to the board's `.kicad_dru` via rules (#1676) and, under `--escalation board` only, to its
+Board Setup `min_through_hole_diameter`, `min_via_diameter` and `min_via_annular_width` round the drill (a
+0.13 ring makes it 0.51/0.25). Under the default `fab` it keeps its size; with `--no-fix-drc-settings` a via
+laid below a Board Setup minimum is named in a `WARNING` line and in `JSON_SUMMARY`'s `board_setup_vias`
+(`rule`, `min`, `vias`, `below`, `smallest_ring` / `smallest`). bga_fanout.py does the same with its 0.5/0.3.
+The GUI fanout tab starts from the Default-class via instead and goes through the same raise and grade.
+
 ## Options
 
 | Option | Description | Default |

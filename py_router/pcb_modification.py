@@ -700,6 +700,9 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 return True
         return False
 
+    from check_drc import copper_keepout_gate
+    _ko_refuses = copper_keepout_gate(pcb_data)
+
     def clears(nid, x1, y1, x2, y2, layer, w):
         d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer,
                                       base_clearance=clr),
@@ -714,8 +717,15 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
         # was structurally blind to the one hole a same-net bridge is most
         # likely to cross.
         hd = min(hd, _own_net_npth_hole_dist(pcb_data, nid, x1, y1, x2, y2))
-        return (d >= clr + w / 2.0 - 1e-4 and
-                hd >= npth_clr + w / 2.0 - 1e-4)
+        if not (d >= clr + w / 2.0 - 1e-4 and
+                hd >= npth_clr + w / 2.0 - 1e-4):
+            return False
+        # #1760: a bridge must not enter a keep-out the route kept out of (a
+        # tracks-not-allowed rule area, a net-filtered keep-out). The joint
+        # it would firm is already electrical, so a refused bridge is skipped.
+        return not (_ko_refuses and _ko_refuses(
+            [Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2, width=w,
+                     layer=layer, net_id=nid)]))
 
     new_conns = []
     for (net_id, layer), ends in dangles.items():
@@ -1485,6 +1495,12 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
                 if point_in_polygon(px, py, z.polygon) or \
                         point_to_polygon_edge_distance(px, py, z.polygon) < _req(z.net_id) + half:
                     return False
+    # #1760: nor a keep-out the route kept out of (rule area, net-filtered).
+    from check_drc import copper_keepout_gate
+    refuses = copper_keepout_gate(pcb_data)
+    if refuses and refuses([Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
+                                    width=width, layer=layer, net_id=net_id)]):
+        return False
     return True
 
 

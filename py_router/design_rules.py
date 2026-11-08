@@ -494,6 +494,13 @@ _VIA_SIZE_FLAGS = {'via_diameter': ('via_diameter', 'VIA-SIZE'),
                    'hole_size': ('drill_out_of_range', 'VIA-DRILL-SIZE')}
 
 
+def _via_attr(v, key):
+    """A via's `size` / `drill` / `net_id`, from a Via or the dict a fanout
+    engine returns, 0 when absent."""
+    val = v.get(key) if isinstance(v, dict) else getattr(v, key, 0)
+    return val or 0
+
+
 # --------------------------------------------------------------------------
 # Condition expressions
 # --------------------------------------------------------------------------
@@ -2177,25 +2184,33 @@ class DesignRules:
             s = _via_holding_ring(s, d, ring)
         return s, d
 
-    def via_size_grade(self, vias) -> List[dict]:
+    def via_size_grade(self, vias, board_floors=None) -> List[dict]:
         """#1676: `annular_grade` for the two other kinds a rule sizes a via by:
         one row per `via_diameter` / `hole_size` rule that sets the minimum of
         at least one of ``vias``: ``{rule, kind, min, vias, below, smallest}``,
-        ``min`` KiCad's value and ``smallest`` the smallest size it bound."""
+        ``min`` KiCad's value and ``smallest`` the smallest size it bound.
+        ``board_floors`` as for `annular_grade` (#1775): a via no rule binds is
+        graded against its `via_diameter` / `via_drill` under the rule name
+        `Board Setup <key>`, the row marked ``board_setup``."""
         rows: Dict[Tuple[str, str], dict] = {}
+        bf = board_floors or {}
         for v in vias or ():
-            size, drill = getattr(v, 'size', 0) or 0, getattr(v, 'drill', 0) or 0
+            size, drill = _via_attr(v, 'size'), _via_attr(v, 'drill')
             if not size or not drill:
                 continue
-            item = self.item_for_net(int(getattr(v, 'net_id', 0) or 0), 'via')
+            item = self.item_for_net(int(_via_attr(v, 'net_id')), 'via')
             for kind, have in (('via_diameter', size), ('hole_size', drill)):
                 c = self.resolve(kind, item, None, None)
                 need = c.kicad_min if c.fab_bound else c.min
-                if c.min_rule is None or need is None:
+                rule, setup = c.min_rule, False
+                if rule is None:
+                    need = bf.get('via_diameter' if kind == 'via_diameter' else 'via_drill')
+                    rule, setup = f"Board Setup {BOARD_MIN_KEYS[kind]}", True
+                if not need:
                     continue
-                row = rows.setdefault((c.min_rule, kind), {
-                    'rule': c.min_rule, 'kind': kind, 'min': need, 'vias': 0, 'below': 0,
-                    'smallest': have})
+                row = rows.setdefault((rule, kind), {
+                    'rule': rule, 'kind': kind, 'min': need, 'vias': 0, 'below': 0,
+                    'smallest': have, **({'board_setup': True} if setup else {})})
                 row['vias'] += 1
                 row['smallest'] = min(row['smallest'], have)
                 if have < need - 1e-6:
@@ -2204,7 +2219,7 @@ class DesignRules:
             row['smallest'] = round(row['smallest'], 4)
         return [rows[k] for k in sorted(rows)]
 
-    def annular_grade(self, vias) -> List[dict]:
+    def annular_grade(self, vias, board_floors=None) -> List[dict]:
         """#1649: the vias of one step graded against each `annular_width`
         rule (`ROUTER_UNHONOURED_KINDS`) -- the
         answer the "NOT honoured" line, printed before the step, cannot give.
@@ -2213,23 +2228,36 @@ class DesignRules:
         (before this tool's fab-profile raise, as check_drc grades it) and
         ``below`` the vias whose ring, (size - drill) / 2, falls short of it.
         A via the rule does not bind (another rule, a class, the board
-        minimum set its ring) is not counted. [] when no such rule binds."""
+        minimum set its ring) is not counted. [] when no such rule binds.
+
+        ``board_floors`` (#1775), a FLOOR_KEYS dict of the Board Setup
+        minimums the run ships graded against (`board_setup_via_floors`):
+        a via no rule binds is graded against its `annular` instead, under
+        the rule name `Board Setup min_via_annular_width`, the row marked
+        ``board_setup``. None (the default) grades rules only."""
         rows: Dict[str, dict] = {}
+        board_ring = (board_floors or {}).get('annular')
         for v in vias or ():
-            size, drill = getattr(v, 'size', 0) or 0, getattr(v, 'drill', 0) or 0
+            size, drill = _via_attr(v, 'size'), _via_attr(v, 'drill')
             if not size or not drill:
                 continue
             c = self.resolve('annular_width',
-                             self.item_for_net(int(getattr(v, 'net_id', 0) or 0), 'via'),
+                             self.item_for_net(int(_via_attr(v, 'net_id')), 'via'),
                              None, None)
-            if c.min_rule is None:          # a class or the board minimum set it
-                continue
-            need = c.kicad_min if c.fab_bound else c.min
+            rule, setup = c.min_rule, False
+            if rule is None:                # a class or the board minimum set it
+                if not board_ring:
+                    continue
+                rule, setup = f"Board Setup {BOARD_MIN_KEYS['annular_width']}", True
+                need = board_ring
+            else:
+                need = c.kicad_min if c.fab_bound else c.min
             if need is None:
                 continue
             ring = (size - drill) / 2.0
-            row = rows.setdefault(c.min_rule, {'rule': c.min_rule, 'min': need, 'vias': 0,
-                                               'below': 0, 'smallest_ring': ring})
+            row = rows.setdefault(rule, {'rule': rule, 'min': need, 'vias': 0,
+                                         'below': 0, 'smallest_ring': ring,
+                                         **({'board_setup': True} if setup else {})})
             row['vias'] += 1
             row['smallest_ring'] = min(row['smallest_ring'], ring)
             if ring < need - 1e-6:
@@ -2335,12 +2363,20 @@ def relaxing_rules(rules, board_min) -> List[dict]:
     return out
 
 
+def _grade_rule_label(row) -> str:
+    """What a via-grade row names: a `.kicad_dru` rule, or (#1775) the
+    Board Setup minimum a via no rule binds is graded against."""
+    if row.get('board_setup'):
+        return row['rule']
+    return f".kicad_dru rule '{row['rule']}'"
+
+
 def annular_grade_lines(rows) -> List[str]:
     """One end-of-step line per `DesignRules.annular_grade` row (#1649):
     whether this step's vias on the nets the rule binds meet its ring."""
     out = []
     for r in rows:
-        head = (f".kicad_dru rule '{r['rule']}' (annular_width min {r['min']:g} mm): "
+        head = (f"{_grade_rule_label(r)} (annular_width min {r['min']:g} mm): "
                 f"this step's {r['vias']} via(s) it binds")
         if r['below']:
             out.append(f"{head}: {r['below']} BELOW it (smallest ring "
@@ -2352,22 +2388,103 @@ def annular_grade_lines(rows) -> List[str]:
 
 
 def run_via_for_rules(board_path: Optional[str], pcb_data, via_size: float,
-                      via_drill: float) -> Tuple[float, float]:
+                      via_drill: float, board_setup: bool = True) -> Tuple[float, float]:
     """#1676: the (size, drill) a step that was given no explicit via starts
     from: its own, raised to the `.kicad_dru` rules that bind a via of no
-    particular net. Without a rule file it is what it was, unread."""
+    particular net, then (``board_setup``, #1775) to the Board Setup via
+    minimums under ``--escalation board`` (`via_for_board_setup`, which reads
+    the run's escalation policy, so it must run after the policy is set).
+    Without a rule file the rule step is skipped, unread."""
     path = board_path or getattr(pcb_data, 'source_path', '') or ''
-    if not path or not os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
-        return via_size, via_drill
-    try:
-        out = DesignRules.from_project(pcb_data, path).via_meeting_rules(via_size, via_drill)
-    except (OSError, ValueError) as e:
-        print(f"  (via rules not read: {e})")
-        return via_size, via_drill
-    if out != (via_size, via_drill):
-        print(f"Via {via_size:g}/{via_drill:g} raised to {out[0]:g}/{out[1]:g} to meet the "
-              f"board's .kicad_dru via rules (#1676).")
+    out = (via_size, via_drill)
+    if path and os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
+        try:
+            out = DesignRules.from_project(pcb_data, path).via_meeting_rules(via_size,
+                                                                             via_drill)
+        except (OSError, ValueError) as e:
+            print(f"  (via rules not read: {e})")
+            out = (via_size, via_drill)
+        if out != (via_size, via_drill):
+            print(f"Via {via_size:g}/{via_drill:g} raised to {out[0]:g}/{out[1]:g} to meet "
+                  f"the board's .kicad_dru via rules (#1676).")
+    if board_setup:
+        out = via_for_board_setup(*out)
     return out
+
+
+#: FLOOR_KEYS of the Board Setup via minimums (`min_via_diameter`,
+#: `min_through_hole_diameter`, `min_via_annular_width`).
+BOARD_SETUP_VIA_KEYS = ('via_diameter', 'via_drill', 'annular')
+
+
+def board_setup_via_floors() -> Dict[str, float]:
+    """#1775: the Board Setup via minimums of this run, as its escalation
+    policy resolved them (`fab_tiers.set_policy_from_args` on the CLI,
+    `set_fab_tier_from_config` in the GUI); {} when the board declares none."""
+    from fab_tiers import get_escalation_policy
+    floors = get_escalation_policy()[1]
+    return {k: floors[k] for k in BOARD_SETUP_VIA_KEYS if floors.get(k)}
+
+
+def via_for_board_setup(via_size: float, via_drill: float) -> Tuple[float, float]:
+    """#1775: a via a step sizes itself, raised to the board's Board Setup
+    minimums ONLY under ``--escalation board``: the drill to
+    `min_through_hole_diameter`, the diameter to `min_via_diameter` and to
+    the drill plus `min_via_annular_width` each side (`_via_holding_ring`, as
+    #1579 raises a descent rung). Raise-only. Any other policy keeps the via;
+    a shortfall is then disclosed after the step (`disclose_board_setup_vias`)."""
+    from fab_tiers import get_escalation_policy, _via_holding_ring
+    if get_escalation_policy()[0] != 'board':
+        return via_size, via_drill
+    f = board_setup_via_floors()
+    if not f:
+        return via_size, via_drill
+    d = max(via_drill, f.get('via_drill', 0.0))
+    s = max(via_size, f.get('via_diameter', 0.0))
+    if f.get('annular'):
+        s = _via_holding_ring(s, d, f['annular'])
+    if (s, d) != (via_size, via_drill):
+        print(f"Via {via_size:g}/{via_drill:g} raised to {s:g}/{d:g} to meet the board's "
+              f"Board Setup via minimums (--escalation board, #1775).")
+    return s, d
+
+
+def board_setup_via_grade(pcb_data, vias, board_path: Optional[str] = None,
+                          rules=None) -> List[dict]:
+    """#1775: the rows of `annular_grade` / `via_size_grade` that grade
+    ``vias`` (Via objects or a fanout's via dicts) against the Board Setup
+    via minimums no `.kicad_dru` rule replaces, and only those with a via
+    below. [] when the run's project writeback will lower those minimums to
+    the copper (`fab_tiers.project_writeback`; it says so itself, FAB FLOOR
+    RELAXED), when the board declares none, or when no via falls short.
+    ``rules`` is the step's DesignRules when it has one (built from the
+    board's project otherwise)."""
+    from fab_tiers import project_writeback
+    floors = board_setup_via_floors()
+    if not vias or not floors or project_writeback():
+        return []
+    if rules is None:
+        try:
+            rules = DesignRules.from_project(pcb_data, board_path)
+        except (OSError, ValueError):
+            rules = DesignRules()
+    rows = rules.annular_grade(vias, floors) + rules.via_size_grade(vias, floors)
+    return [r for r in rows if r.get('board_setup') and r['below']]
+
+
+def disclose_board_setup_vias(pcb_data, vias, board_path: Optional[str] = None,
+                              rules=None) -> List[dict]:
+    """`board_setup_via_grade`, printed one line per row: the end-of-step
+    disclosure of vias laid below the board's own Board Setup minimum, which
+    a self-sized via is under any policy but ``board`` (#1775). Returns the
+    rows (the JSON_SUMMARY ``board_setup_vias`` key)."""
+    rows = board_setup_via_grade(pcb_data, vias, board_path, rules)
+    ring = [r for r in rows if 'smallest_ring' in r]
+    size = [r for r in rows if 'smallest_ring' not in r]
+    for line in annular_grade_lines(ring) + via_size_grade_lines(size):
+        print(f"  WARNING: {line}; the project writeback is off, so the minimum "
+              f"ships as declared (--escalation board sizes a self-sized via to it)")
+    return rows
 
 
 def install_board_via_rule_floors(pcb_data, board_path: Optional[str] = None) -> None:
@@ -2389,7 +2506,7 @@ def via_size_grade_lines(rows) -> List[str]:
     out = []
     for r in rows:
         kicad, ours = _VIA_SIZE_FLAGS[r['kind']]
-        head = (f".kicad_dru rule '{r['rule']}' ({r['kind']} min {r['min']:g} mm): "
+        head = (f"{_grade_rule_label(r)} ({r['kind']} min {r['min']:g} mm): "
                 f"this step's {r['vias']} via(s) it binds")
         if r['below']:
             out.append(f"{head}: {r['below']} BELOW it (smallest {r['smallest']:g} mm); "
@@ -2459,7 +2576,8 @@ def edge_rule_grade_lines(rows) -> List[str]:
 def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = None) -> dict:
     """The rule grades of one routing step's own copper, printed per rule and
     returned as `JSON_SUMMARY.design_rules` keys: `annular_rules` (#1649),
-    `via_rules` (#1676) and `edge_rules` (#1678). A rule broken by a descent is
+    `via_rules` (#1676), `edge_rules` (#1678) and `board_setup_vias` (#1775,
+    the vias below a Board Setup minimum the writeback will not lower). A rule broken by a descent is
     named here whatever the policy that allowed the descent. A disclosure only:
     it changes no copper. Both routing engines call it, so both fronts get it."""
     vias = [v for r in results for v in (r.get('new_vias') or [])]
@@ -2476,6 +2594,9 @@ def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = No
         out['edge_rules'] = eg
     for line in annular_grade_lines(ag) + via_size_grade_lines(vg) + edge_rule_grade_lines(eg):
         print(f"  {line}")
+    bs = disclose_board_setup_vias(pcb_data, vias, board_path or rules.source or None, rules)
+    if bs:
+        out['board_setup_vias'] = bs
     return out
 
 

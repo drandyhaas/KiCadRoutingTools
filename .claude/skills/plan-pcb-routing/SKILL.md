@@ -642,9 +642,14 @@ manifest routes.
     `route_diff.py`, `route_planes.py`, `bga_fanout.py`, `qfn_fanout.py`, and
     `repair_planes.py` if it runs). A descent then stops at the board's own
     `rules.min_*` (an unset key falls back to the fab tier floor, an unset
-    `min_clearance` to the Default class), a via never rings below
-    `min_via_annular_width` (#1579), and a non-Default net never descends below
-    its own class. `--escalation off` instead when no size may move at all: a
+    `min_clearance` to the Default class), a descended via never rings below
+    `min_via_annular_width` (#1579), a via the step sizes itself (no
+    `--via-size` / `--via-drill`) starts at `min_via_diameter`,
+    `min_through_hole_diameter` and that ring (#1775), and a non-Default net
+    never descends below its own class. Under the default `fab` that
+    self-sized via keeps its built-in size, and with `--no-fix-drc-settings`
+    the step names each one below a Board Setup minimum (a WARNING line and
+    `board_setup_vias` in JSON_SUMMARY). `--escalation off` instead when no size may move at all: a
     net that cannot complete at the requested geometry fails and is reported
     (only a wide power/impedance net may neck, for at most 2 mm at a pad entry).
   - `--no-fix-drc-settings` on every one of those steps AND on

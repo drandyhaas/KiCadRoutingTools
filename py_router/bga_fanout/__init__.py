@@ -4910,6 +4910,12 @@ LAST_FILTER_MISSES: List[Dict] = []
 # (escape_budget's dict, {} when none). JSON_SUMMARY `escape_budget` reads it.
 LAST_ESCAPE_BUDGET: Dict = {}
 
+# #1775: the vias the last generate_bga_fanout call laid below the board's own
+# Board Setup via minimums with the project writeback off
+# (`design_rules.board_setup_via_grade` rows); EMPTY when every via meets them.
+# JSON_SUMMARY `board_setup_vias` and the fanout tab read it.
+LAST_BOARD_SETUP_VIAS: List[Dict] = []
+
 
 def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
                           net_filter: Optional[List[str]] = None,
@@ -5424,6 +5430,7 @@ def generate_bga_fanout(footprint: Footprint,
     # pattern that spells a board net verbatim is made literal, so a bus
     # member 'D[3]' fans out itself rather than 'D3' in every pass below.
     LAST_ESCAPE_BUDGET.clear()
+    LAST_BOARD_SETUP_VIAS.clear()   # #1775
     LAST_FILTER_MISSES.clear()
     LAST_FILTER_MISSES.extend(net_filter_misses(footprint, pcb_data, net_filter))
     for _line in filter_miss_lines(LAST_FILTER_MISSES):
@@ -5650,6 +5657,9 @@ def generate_bga_fanout(footprint: Footprint,
     _st962, _rec962 = via_protection_stamps(vias_to_add, [], pcb_data)
     apply_stamps_in_memory(_st962)
     print_via_protection_record(_rec962, "BGA fanout")
+    # #1775: the vias laid below the board's Board Setup via minimums
+    from design_rules import disclose_board_setup_vias
+    LAST_BOARD_SETUP_VIAS[:] = disclose_board_setup_vias(pcb_data, vias_to_add)
     # What both fronts report (the CLI's failed / unescaped_nets, the GUI
     # tab's failed list) is the nets still unescaped, not every route the
     # passes gave up: those per-route lists drove the retries above and stay
@@ -5812,9 +5822,13 @@ def main():
     if not _vs_explicit:
         from design_rules import run_via_for_rules
         args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,
-                                                          args.via_drill)
+                                                          args.via_drill, board_setup=False)
     set_default_fab_tier(*fab_tier_from_args(args))
     __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
+    if not _vs_explicit:
+        # #1775: and, under --escalation board, at its Board Setup minimums
+        from design_rules import via_for_board_setup
+        args.via_size, args.via_drill = via_for_board_setup(args.via_size, args.via_drill)
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
         track_width=getattr(args, 'track_width', None),
@@ -6082,6 +6096,9 @@ def main():
         'failed': len(unescaped),
         'unescaped_nets': unescaped,
         'skipped_nc': len(single_pad_net_ids(footprint, pcb_data)),
+        # #1775: the vias laid below the board's own Board Setup via
+        # minimums, with the project writeback off. Disclosure only.
+        'board_setup_vias': list(LAST_BOARD_SETUP_VIAS),
         # #1641: each --nets pattern that selected no ball, with its reason
         'unmatched': list(LAST_FILTER_MISSES),
         'clearance': args.clearance,

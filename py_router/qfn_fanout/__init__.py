@@ -88,6 +88,13 @@ LAST_FILTER_MISSES: List[Dict] = []
 # the fanout tab's completion message read it.
 LAST_SKIPPED_INTERIOR: List[str] = []
 
+# #1775: the vias the last run laid below the board's own Board Setup via
+# minimums with the project writeback off (`design_rules.board_setup_via_grade`
+# rows; printed by the engine). Refreshed by every generate_qfn_fanout call;
+# EMPTY when every via meets them. The CLI's JSON_SUMMARY `board_setup_vias`
+# and the fanout tab's completion message read it.
+LAST_BOARD_SETUP_VIAS: List[Dict] = []
+
 
 def skipped_interior_line(pads: List[str]) -> str:
     """The one line naming LAST_SKIPPED_INTERIOR's pads (#1717), for the
@@ -1902,6 +1909,7 @@ def generate_qfn_fanout(footprint: Footprint,
     LAST_FILTER_MISSES.clear()      # #1641
     LAST_SKIPPED_INTERIOR.clear()   # #1717
     LAST_POWER_STUBS_AT_WIDTH.clear()   # #1743
+    LAST_BOARD_SETUP_VIAS.clear()   # #1775
     _RULES_SAID.clear()             # #1565: said once per call
     # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
     # returns early on several paths that never reach `_underpad_via_escape`
@@ -2155,6 +2163,9 @@ def generate_qfn_fanout(footprint: Footprint,
                       f"{best_cl:g} mm escapes {len(rescued)} of them "
                       f"({len(best[2])} still dropped)")
             res = best
+        # #1775: every via this fanout lays comes through here
+        from design_rules import disclose_board_setup_vias
+        LAST_BOARD_SETUP_VIAS.extend(disclose_board_setup_vias(pcb_data, res[1]))
         return res
 
     if escape_method == "underpad":
@@ -2920,8 +2931,12 @@ def main():
     if not _vs_explicit:
         from design_rules import run_via_for_rules
         args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,
-                                                          args.via_drill)
+                                                          args.via_drill, board_setup=False)
     __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
+    if not _vs_explicit:
+        # #1775: and, under --escalation board, at its Board Setup minimums
+        from design_rules import via_for_board_setup
+        args.via_size, args.via_drill = via_for_board_setup(args.via_size, args.via_drill)
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
         track_width=getattr(args, 'track_width', None),
@@ -3184,6 +3199,10 @@ def main():
         # #1743: the escape stubs drawn at --width on a net that reads as
         # power or ground (pad, net, width, escape, why). Disclosure only.
         'power_stubs_at_width': list(LAST_POWER_STUBS_AT_WIDTH),
+        # #1775: the vias laid below the board's own Board Setup via
+        # minimums, with the project writeback off (rule, kind, min, vias,
+        # below, smallest). Disclosure only.
+        'board_setup_vias': list(LAST_BOARD_SETUP_VIAS),
         'clearance': args.clearance,
         'track_width': args.width,
         'escape_method': args.escape_method,

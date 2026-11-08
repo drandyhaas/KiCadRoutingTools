@@ -198,6 +198,10 @@ _BOARD_FLOORS = {}
 # writeback off): the board minimum KiCad grades such a clearance at, which
 # the Default class does not bind. None = no such raise this run.
 _BOARD_RULE_CLEARANCE = None
+# #1775: whether this run's DRC-floor writeback will run (--no-fix-drc-settings
+# / the GUI's "Fix DRC settings" box unticked = False): a via below a Board
+# Setup minimum the writeback will not lower ships graded against it.
+_WRITEBACK = True
 
 #: The key :func:`floor_board_clearance_at_class` carries that floor under in
 #: the floors dict it returns; :func:`set_escalation_policy` reads it off.
@@ -222,13 +226,15 @@ def get_default_fab_tier():
     return (_DEFAULT_TIER, dict(_DEFAULT_OVERRIDES))
 
 
-def set_escalation_policy(policy, board_floors=None):
+def set_escalation_policy(policy, board_floors=None, writeback=True):
     """Set the process-wide escalation policy and the board's declared floors
     (a FLOOR_KEYS dict, e.g. from ``design_rules.board_floor_dict``). Resets
     the per-run ledger: this marks the start of a run. A
     :data:`RULE_CLEARANCE_KEY` entry is the floor of rule- and class-set
-    clearances (:func:`rule_fab_floors`, #1630)."""
-    global _ESCALATION, _BOARD_FLOORS, _BOARD_RULE_CLEARANCE
+    clearances (:func:`rule_fab_floors`, #1630). ``writeback`` is whether the
+    run's DRC-floor writeback will run (:func:`project_writeback`, #1775)."""
+    global _ESCALATION, _BOARD_FLOORS, _BOARD_RULE_CLEARANCE, _WRITEBACK
+    _WRITEBACK = bool(writeback)
     policy = policy or DEFAULT_ESCALATION
     if policy not in ESCALATION_POLICIES:
         raise ValueError(f"unknown escalation policy {policy!r} "
@@ -248,6 +254,12 @@ def get_escalation_policy():
     if _BOARD_RULE_CLEARANCE is not None:
         floors[RULE_CLEARANCE_KEY] = _BOARD_RULE_CLEARANCE
     return (_ESCALATION, floors)
+
+
+def project_writeback():
+    """True when this run's DRC-floor writeback will run (the default), False
+    under ``--no-fix-drc-settings`` or the GUI's box unticked (#1775)."""
+    return _WRITEBACK
 
 
 def may_narrow():
@@ -1583,7 +1595,8 @@ def set_fab_tier_from_config(config):
             writeback=bool(config.get('fix_drc_settings', True)))
     else:
         floors = drop_stale_board_floors(declared, requested)
-    set_escalation_policy(policy, floors)
+    set_escalation_policy(policy, floors,
+                          writeback=bool(config.get('fix_drc_settings', True)))
 
 
 def fab_tier_from_args(args):
@@ -1694,7 +1707,7 @@ def set_policy_from_args(args, pcb_path=None):
         graded_floors=(graded_board_floors(rules, announce=True)
                        if pcb_path and policy == 'board' and not writeback
                        else None))
-    set_escalation_policy(policy, floors)
+    set_escalation_policy(policy, floors, writeback=writeback)
     return floors
 
 
