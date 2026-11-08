@@ -4,7 +4,8 @@ whole route run again from its recorded work dir: whole_route.chain at one round
 it (STEP_SETTINGS, the run's rules at its sizes, FANOUT_JOINT, the bus's ROUTE_LAYERS), in process as --inproc runs
 it. With `--fanout-from` the round's FANOUT is the recorded round's (its fo.kicad_pcb with siblings, fo.plan.json and
 fo.log copied in where fanout_from_plan.py would write them), so the rest of the round -- solve, loop, lay -- runs on
-the very same ends.
+the very same ends; with `--solve-from` its first SOLVE is the recorded round's too (solve.json and its log), so the
+loop runs on the very same plan.
 
 What it is for: a change to the solve, the loop or the lay judged on the ends a recorded run laid, the fanout's own
 spread taken out; and a round in a fraction of its time where the fanout is the slow part. WORK is the bus's work
@@ -28,26 +29,31 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('work', help="the bus's work dir (route_bus's BUS.bus: frame.kicad_pcb)")
     ap.add_argument('out_dir')
-    ap.add_argument('--sizes', required=True, metavar='CLR,TRK,FTRK,VIA,DRILL',
-                    help="the run's --clearance-ceiling, --track-width, --fanout-track-width, --via-size, --via-drill")
+    ap.add_argument('--sizes', required=True, metavar='CLR,TRK,FTRK,VIA,DRILL[,H2H[,EDGE]]',
+                    help="the run's --clearance-ceiling, --track-width, --fanout-track-width, --via-size, --via-drill, and "
+                         "its --hole-to-hole-clearance and --board-edge-clearance where it gave them (else the board's)")
     ap.add_argument('--k', type=int, required=True, help="the bus's width (route_bus's K)")
     ap.add_argument('--dest', default=None, help='the destination part(s) (default: DEST, else U1)')
     ap.add_argument('--layers', default=None, help="the bus's routing layers (default F.Cu,B.Cu and the inner ones)")
     ap.add_argument('--fanout-from', default=None, metavar='ROUND_DIR', help="a recorded round whose fanout to take")
+    ap.add_argument('--solve-from', default=None, metavar='ROUND_DIR',
+                    help="a recorded round whose first solve to take (with --fanout-from that round's fanout's)")
     ap.add_argument('--set', action='append', default=[], metavar='K=V', help='a setting for the round')
     a = ap.parse_args()
     work, out = os.path.abspath(a.work), os.path.abspath(a.out_dir)
     fo_from = os.path.abspath(a.fanout_from) if a.fanout_from else None
+    so_from = os.path.abspath(a.solve_from) if a.solve_from else None
     os.chdir(HERE)
     import route_bus as rb
     import rules as _rules
     import whole_route as wr
     from kicad_parser import parse_kicad_pcb
     frame = os.path.join(work, 'frame.kicad_pcb')
-    clr, trk, ftrk, vs, vd = (float(x) for x in a.sizes.split(','))
+    clr, trk, ftrk, vs, vd, h2h, edge = (list(float(x) for x in a.sizes.split(',')) + [None, None])[:7]
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         rr = rb.resolve_rules(frame, clearance_ceiling=clr, track_width=trk, fanout_track_width=ftrk, via_size=vs,
-                              via_drill=vd, log=lambda *x: None)
+                              via_drill=vd, hole_to_hole_clearance=h2h,
+                              board_edge_clearance=edge, log=lambda *x: None)
         cu = parse_kicad_pcb(frame).board_info.copper_layers
     layers = a.layers or ','.join(['F.Cu', 'B.Cu'] + [L for L in cu if L not in ('F.Cu', 'B.Cu')])
     settings = {'ROUTE_LAYERS': layers, **rb.STEP_SETTINGS, _rules.SETTING: _rules.as_setting(rr)}
@@ -72,6 +78,26 @@ def main():
                 return 0, ''
             return run0(argv, env, *x, **k)
         wr.run = run_
+    if so_from:
+        run1 = wr.run
+        taken = []
+
+        def run_s(argv, env, *x, **k):
+            # (the round's FIRST solve -- its solve.json beside its solve.log, never a loop's re-solve -- taken from the
+            # recorded round)
+            lp_ = k.get('log_path') or ''
+            if (argv and argv[0] == 'whole_solve.py' and not taken and os.path.basename(argv[1]) == 'solve.json'
+                    and os.path.basename(lp_) == 'solve.log'):
+                taken.append(argv[1])
+                for f_ in ('solve.json', 'solve.crowded.json'):
+                    if os.path.isfile(os.path.join(so_from, f_)):
+                        shutil.copy2(os.path.join(so_from, f_), os.path.join(os.path.dirname(argv[1]), f_))
+                if os.path.isfile(os.path.join(so_from, 'solve.log')):
+                    shutil.copy2(os.path.join(so_from, 'solve.log'), lp_)
+                print(f'replay_round: the first solve taken from {so_from}', flush=True)
+                return 0, ''
+            return run1(argv, env, *x, **k)
+        wr.run = run_s
     with rb.step_policy(rr, settings):
         rc, grade = wr.chain(a.k, os.path.join(out, 'run'), 1, base=frame, dest=a.dest or os.environ.get('DEST') or 'U1',
                              F=0, settings=settings)

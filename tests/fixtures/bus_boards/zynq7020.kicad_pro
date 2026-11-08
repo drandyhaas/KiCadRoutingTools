@@ -1,0 +1,2780 @@
+{
+  "board": {
+    "3dviewports": [],
+    "design_settings": {
+      "defaults": {
+        "apply_defaults_to_fp_barcodes": false,
+        "apply_defaults_to_fp_dimensions": false,
+        "apply_defaults_to_fp_fields": false,
+        "apply_defaults_to_fp_shapes": false,
+        "apply_defaults_to_fp_text": false,
+        "board_outline_line_width": 0.1,
+        "copper_line_width": 0.2,
+        "copper_text_italic": false,
+        "copper_text_size_h": 1.5,
+        "copper_text_size_v": 1.5,
+        "copper_text_thickness": 0.3,
+        "copper_text_upright": false,
+        "courtyard_line_width": 0.05,
+        "dimension_precision": 4,
+        "dimension_units": 3,
+        "dimensions": {
+          "arrow_length": 1270000,
+          "extension_offset": 500000,
+          "keep_text_aligned": true,
+          "suppress_zeroes": false,
+          "text_position": 0,
+          "units_format": 1
+        },
+        "fab_line_width": 0.1,
+        "fab_text_italic": false,
+        "fab_text_size_h": 1.0,
+        "fab_text_size_v": 1.0,
+        "fab_text_thickness": 0.15,
+        "fab_text_upright": false,
+        "other_line_width": 0.15,
+        "other_text_italic": false,
+        "other_text_size_h": 1.0,
+        "other_text_size_v": 1.0,
+        "other_text_thickness": 0.15,
+        "other_text_upright": false,
+        "pads": {
+          "drill": 0.0,
+          "height": 1.8,
+          "width": 1.0
+        },
+        "silk_line_width": 0.15,
+        "silk_text_italic": false,
+        "silk_text_size_h": 1.0,
+        "silk_text_size_v": 1.0,
+        "silk_text_thickness": 0.15,
+        "silk_text_upright": false,
+        "zones": {
+          "min_clearance": 0.127
+        }
+      },
+      "diff_pair_dimensions": [
+        {
+          "gap": 0.0,
+          "via_gap": 0.0,
+          "width": 0.0
+        },
+        {
+          "gap": 0.2,
+          "via_gap": 0.5,
+          "width": 0.1
+        },
+        {
+          "gap": 0.25,
+          "via_gap": 0.5,
+          "width": 0.1
+        },
+        {
+          "gap": 0.25,
+          "via_gap": 0.5,
+          "width": 0.104
+        },
+        {
+          "gap": 0.3,
+          "via_gap": 0.5,
+          "width": 0.11
+        },
+        {
+          "gap": 0.2,
+          "via_gap": 0.5,
+          "width": 0.12
+        }
+      ],
+      "drc_exclusions": [],
+      "meta": {
+        "version": 2
+      },
+      "rule_severities": {
+        "annular_width": "error",
+        "clearance": "error",
+        "connection_width": "warning",
+        "copper_edge_clearance": "error",
+        "copper_sliver": "warning",
+        "courtyards_overlap": "error",
+        "creepage": "error",
+        "diff_pair_gap_out_of_range": "error",
+        "diff_pair_uncoupled_length_too_long": "error",
+        "drill_out_of_range": "error",
+        "duplicate_footprints": "warning",
+        "extra_footprint": "warning",
+        "footprint": "error",
+        "footprint_filters_mismatch": "ignore",
+        "footprint_symbol_field_mismatch": "warning",
+        "footprint_symbol_mismatch": "warning",
+        "footprint_type_mismatch": "ignore",
+        "hole_clearance": "error",
+        "hole_near_hole": "error",
+        "hole_to_hole": "error",
+        "holes_co_located": "warning",
+        "invalid_outline": "error",
+        "isolated_copper": "warning",
+        "item_on_disabled_layer": "error",
+        "items_not_allowed": "error",
+        "length_out_of_range": "error",
+        "lib_footprint_issues": "warning",
+        "lib_footprint_mismatch": "warning",
+        "malformed_courtyard": "error",
+        "microvia_drill_out_of_range": "error",
+        "mirrored_text_on_front_layer": "warning",
+        "missing_courtyard": "ignore",
+        "missing_footprint": "warning",
+        "missing_tuning_profile": "warning",
+        "net_conflict": "warning",
+        "nonmirrored_text_on_back_layer": "warning",
+        "npth_inside_courtyard": "ignore",
+        "padstack": "warning",
+        "pth_inside_courtyard": "ignore",
+        "shorting_items": "error",
+        "silk_edge_clearance": "warning",
+        "silk_over_copper": "warning",
+        "silk_overlap": "warning",
+        "skew_out_of_range": "error",
+        "solder_mask_bridge": "error",
+        "starved_thermal": "error",
+        "text_height": "warning",
+        "text_on_edge_cuts": "error",
+        "text_thickness": "warning",
+        "through_hole_pad_without_hole": "error",
+        "too_many_vias": "error",
+        "track_angle": "error",
+        "track_dangling": "warning",
+        "track_not_centered_on_via": "ignore",
+        "track_on_post_machined_layer": "error",
+        "track_segment_length": "error",
+        "track_width": "error",
+        "tracks_crossing": "error",
+        "tuning_profile_track_geometries": "ignore",
+        "unconnected_items": "error",
+        "unresolved_variable": "error",
+        "via_dangling": "warning",
+        "zones_intersect": "error"
+      },
+      "rules": {
+        "max_error": 0.005,
+        "min_clearance": 0.09,
+        "min_connection": 0.0,
+        "min_copper_edge_clearance": 0.3,
+        "min_groove_width": 0.0,
+        "min_hole_clearance": 0.09,
+        "min_hole_to_hole": 0.2,
+        "min_microvia_diameter": 0.2,
+        "min_microvia_drill": 0.1,
+        "min_resolved_spokes": 2,
+        "min_silk_clearance": 0.0,
+        "min_text_height": 0.8,
+        "min_text_thickness": 0.08,
+        "min_through_hole_diameter": 0.2,
+        "min_track_width": 0.09,
+        "min_via_annular_width": 0.05,
+        "min_via_diameter": 0.3,
+        "solder_mask_clearance": 0.0,
+        "solder_mask_min_width": 0.0,
+        "solder_mask_to_copper_clearance": 0.0,
+        "use_height_for_length_calcs": false,
+        "min_via_drill": 0.2
+      },
+      "teardrop_options": [
+        {
+          "td_onpthpad": true,
+          "td_onroundshapesonly": false,
+          "td_onsmdpad": true,
+          "td_ontrackend": false,
+          "td_onvia": true
+        }
+      ],
+      "teardrop_parameters": [
+        {
+          "td_allow_use_two_tracks": true,
+          "td_curve_segcount": 0,
+          "td_height_ratio": 1.0,
+          "td_length_ratio": 0.5,
+          "td_maxheight": 2.0,
+          "td_maxlen": 1.0,
+          "td_on_pad_in_zone": false,
+          "td_target_name": "td_round_shape",
+          "td_width_to_size_filter_ratio": 0.9
+        },
+        {
+          "td_allow_use_two_tracks": true,
+          "td_curve_segcount": 0,
+          "td_height_ratio": 1.0,
+          "td_length_ratio": 0.5,
+          "td_maxheight": 2.0,
+          "td_maxlen": 1.0,
+          "td_on_pad_in_zone": false,
+          "td_target_name": "td_rect_shape",
+          "td_width_to_size_filter_ratio": 0.9
+        },
+        {
+          "td_allow_use_two_tracks": true,
+          "td_curve_segcount": 0,
+          "td_height_ratio": 1.0,
+          "td_length_ratio": 0.5,
+          "td_maxheight": 2.0,
+          "td_maxlen": 1.0,
+          "td_on_pad_in_zone": false,
+          "td_target_name": "td_track_end",
+          "td_width_to_size_filter_ratio": 0.9
+        }
+      ],
+      "track_widths": [
+        0.0,
+        0.1,
+        0.11,
+        0.135,
+        0.15,
+        0.2,
+        0.25,
+        0.3,
+        0.5
+      ],
+      "tuning_pattern_settings": {
+        "diff_pair_defaults": {
+          "corner_radius_percentage": 50,
+          "corner_style": 0,
+          "max_amplitude": 1.2,
+          "min_amplitude": 0.1,
+          "single_sided": true,
+          "spacing": 0.6
+        },
+        "diff_pair_skew_defaults": {
+          "corner_radius_percentage": 100,
+          "corner_style": 1,
+          "max_amplitude": 1.0,
+          "min_amplitude": 0.05,
+          "single_sided": false,
+          "spacing": 0.3
+        },
+        "single_track_defaults": {
+          "corner_radius_percentage": 50,
+          "corner_style": 0,
+          "max_amplitude": 1.0,
+          "min_amplitude": 0.1,
+          "single_sided": true,
+          "spacing": 0.4
+        }
+      },
+      "via_dimensions": [
+        {
+          "diameter": 0.0,
+          "drill": 0.0
+        },
+        {
+          "diameter": 0.3,
+          "drill": 0.2
+        },
+        {
+          "diameter": 0.35,
+          "drill": 0.2
+        },
+        {
+          "diameter": 0.4,
+          "drill": 0.25
+        },
+        {
+          "diameter": 0.4,
+          "drill": 0.3
+        },
+        {
+          "diameter": 0.45,
+          "drill": 0.3
+        },
+        {
+          "diameter": 0.55,
+          "drill": 0.4
+        }
+      ],
+      "zones_allow_external_fillets": true
+    },
+    "ipc2581": {
+      "bom_rev": "",
+      "dist": "",
+      "distpn": "",
+      "internal_id": "",
+      "mfg": "",
+      "mpn": "",
+      "sch_revision": ""
+    },
+    "layer_pairs": [],
+    "layer_presets": [],
+    "viewports": []
+  },
+  "boards": [],
+  "component_class_settings": {
+    "assignments": [],
+    "meta": {
+      "version": 0
+    },
+    "sheet_component_classes": {
+      "enabled": false
+    }
+  },
+  "cvpcb": {
+    "equivalence_files": []
+  },
+  "erc": {
+    "erc_exclusions": [],
+    "meta": {
+      "version": 0
+    },
+    "pin_map": [
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        2
+      ],
+      [
+        0,
+        2,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        2,
+        2,
+        2,
+        2
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        1,
+        2
+      ],
+      [
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        2,
+        1,
+        1,
+        2
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        2
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2
+      ],
+      [
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2
+      ],
+      [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        2
+      ],
+      [
+        0,
+        2,
+        1,
+        2,
+        0,
+        0,
+        1,
+        0,
+        2,
+        2,
+        2,
+        2
+      ],
+      [
+        0,
+        2,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        2,
+        0,
+        0,
+        2
+      ],
+      [
+        0,
+        2,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0,
+        2,
+        0,
+        0,
+        2
+      ],
+      [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    ],
+    "rule_severities": {
+      "bus_definition_conflict": "error",
+      "bus_entry_needed": "error",
+      "bus_to_bus_conflict": "error",
+      "bus_to_net_conflict": "error",
+      "conflicting_netclasses": "error",
+      "different_unit_footprint": "error",
+      "different_unit_net": "error",
+      "duplicate_reference": "error",
+      "duplicate_sheet_names": "error",
+      "endpoint_off_grid": "warning",
+      "extra_units": "error",
+      "footprint_filter": "ignore",
+      "footprint_link_issues": "warning",
+      "four_way_junction": "ignore",
+      "global_label_dangling": "warning",
+      "hier_label_mismatch": "error",
+      "label_dangling": "error",
+      "label_multiple_wires": "warning",
+      "lib_symbol_issues": "warning",
+      "lib_symbol_mismatch": "warning",
+      "missing_bidi_pin": "warning",
+      "missing_input_pin": "warning",
+      "missing_power_pin": "error",
+      "missing_unit": "warning",
+      "multiple_net_names": "warning",
+      "net_not_bus_member": "warning",
+      "no_connect_connected": "warning",
+      "no_connect_dangling": "warning",
+      "pin_not_connected": "error",
+      "pin_not_driven": "error",
+      "pin_to_pin": "error",
+      "power_pin_not_driven": "error",
+      "same_local_global_label": "warning",
+      "similar_label_and_power": "warning",
+      "similar_labels": "warning",
+      "similar_power": "warning",
+      "simulation_model_issue": "ignore",
+      "single_global_label": "ignore",
+      "unannotated": "error",
+      "unconnected_wire_endpoint": "warning",
+      "unit_value_mismatch": "error",
+      "unresolved_variable": "error",
+      "wire_dangling": "error"
+    }
+  },
+  "libraries": {
+    "pinned_footprint_libs": [],
+    "pinned_symbol_libs": []
+  },
+  "meta": {
+    "filename": "zynq7020_som.kicad_pro",
+    "version": 3
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "Default",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 2147483647,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "+1V0",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 0,
+        "schematic_color": "rgb(228, 169, 0)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 20
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "+1V35",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 1,
+        "schematic_color": "rgb(204, 102, 0)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 20
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "+1V8",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 2,
+        "schematic_color": "rgb(112, 49, 255)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 20
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "+3V3",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 3,
+        "schematic_color": "rgb(102, 251, 183)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 20
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "3V3_LDO",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 4,
+        "schematic_color": "rgb(90, 175, 178)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 20
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "DDR_ADDR",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 5,
+        "schematic_color": "rgb(194, 72, 200)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 8
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "DDR_BL0",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 6,
+        "schematic_color": "rgb(0, 169, 169)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 8
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "DDR_BL1",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 7,
+        "schematic_color": "rgb(255, 153, 0)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.35,
+        "via_drill": 0.2,
+        "wire_width": 8
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "ETH_MDI",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 8,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "ETH_RX",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 9,
+        "schematic_color": "rgb(126, 78, 203)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "ETH_TX",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 10,
+        "schematic_color": "rgb(208, 82, 206)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "GND",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 11,
+        "schematic_color": "rgb(58, 74, 131)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 12
+      },
+      {
+        "bus_width": 20,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.2,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "PWR",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 12,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.3,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 20
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "QSPI",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 13,
+        "schematic_color": "rgb(255, 10, 17)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "SDIO",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 14,
+        "schematic_color": "rgb(16, 104, 0)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "STM32_PM",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 15,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.15,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1146,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "USB",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 16,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.1146,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "USB_ULPI",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 17,
+        "schematic_color": "rgb(96, 171, 96)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "VIN",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 18,
+        "schematic_color": "rgb(255, 75, 158)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 20
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.104,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "Zynq_PL_DP",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 19,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.104,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.12,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "Zynq_PL_SingleEnded",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 20,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.09,
+        "diff_pair_gap": 0.2,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "eMMC",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 21,
+        "schematic_color": "rgb(55, 62, 255)",
+        "track_width": 0.12,
+        "tuning_profile": "",
+        "via_diameter": 0.3,
+        "via_drill": 0.2,
+        "wire_width": 6
+      }
+    ],
+    "meta": {
+      "version": 5
+    },
+    "net_colors": {
+      "+1V0": "rgb(228, 255, 44)",
+      "+1V35": "rgb(204, 102, 0)",
+      "+1V8": "rgb(112, 49, 255)",
+      "+3V3": "rgb(255, 172, 121)",
+      "+3V3_SC": "rgb(65, 134, 180)",
+      "+VCCO_13": "rgb(131, 255, 172)",
+      "+VCCO_33": "rgb(138, 48, 166)",
+      "+VCCO_34": "rgb(0, 101, 255)",
+      "+VCCO_35": "rgb(36, 255, 0)",
+      "/Ethernet PHY/1V0_ETH": "rgb(143, 115, 0)",
+      "/Ethernet PHY/1V8A_ETH": "rgb(134, 91, 255)",
+      "/Ethernet PHY/3V3A_ETH": "rgb(95, 0, 11)",
+      "/Zynq Power/VCCPLL": "rgb(87, 11, 120)",
+      "GND": "rgb(58, 74, 131)",
+      "Net-(U2G-PS_MIO7_500)": "rgb(228, 255, 44)",
+      "VIN": "rgb(255, 75, 158)",
+      "ZYNQ_PL_DONE": "rgb(255, 172, 121)",
+      "ZYNQ_PL_INITB": "rgb(112, 49, 255)"
+    },
+    "netclass_assignments": null,
+    "netclass_patterns": [
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A8"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A9"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A10"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A11"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A12"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A13"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A14"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A15"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ0"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ1"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ2"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ3"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ4"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ5"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ6"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ7"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQS0_N"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DQS0_P"
+      },
+      {
+        "netclass": "DDR_BL0",
+        "pattern": "/Zynq_B502_DDR/DDR_DM0"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A0"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A1"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A2"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A3"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A4"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A5"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A6"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A7"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ0"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ8"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ9"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ10"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ11"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ12"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ13"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ14"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQ15"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQS1_N"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DQS1_P"
+      },
+      {
+        "netclass": "DDR_BL1",
+        "pattern": "/Zynq_B502_DDR/DDR_DM1"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/DZynq_B502_DDR/DDR_CK_N"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_CK_P"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/~{DDR_CS}"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/~{DDR_RAS}"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/~{DDR_CAS}"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/~{DDR_WE}"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_BA0"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_BA1"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_BA2"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_ODT"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/~{DDR_RST}"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_CK_E"
+      },
+      {
+        "netclass": "+1V35",
+        "pattern": "+1V35"
+      },
+      {
+        "netclass": "GND",
+        "pattern": "GND"
+      },
+      {
+        "netclass": "+1V0",
+        "pattern": "+1V0"
+      },
+      {
+        "netclass": "+1V8",
+        "pattern": "+1V8"
+      },
+      {
+        "netclass": "+3V3",
+        "pattern": "+3V3"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_~{CAS}_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_CK_E_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_~{CS}_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_~{RAS}_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_~{WE}_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A0_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A1_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A2_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A3_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A4_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A5_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A6_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A7_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A8_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A9_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A10_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A11_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A12_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A13_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_A14_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_BA0_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_BA1_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_BA2_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_ODT_T"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_~{WE}"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_~{RAS}"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_~{CS}"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_~{CAS}"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_~{RST}"
+      },
+      {
+        "netclass": "ETH_TX",
+        "pattern": "ETH_PHY_TXC"
+      },
+      {
+        "netclass": "ETH_TX",
+        "pattern": "ETH_PHY_TXD0"
+      },
+      {
+        "netclass": "ETH_TX",
+        "pattern": "ETH_PHY_TXD1"
+      },
+      {
+        "netclass": "ETH_TX",
+        "pattern": "ETH_PHY_TXD2"
+      },
+      {
+        "netclass": "ETH_RX",
+        "pattern": "ETH_PHY_RXT3"
+      },
+      {
+        "netclass": "ETH_TX",
+        "pattern": "ETH_PHY_TXCTL"
+      },
+      {
+        "netclass": "ETH_RX",
+        "pattern": "ETH_PHY_RXC"
+      },
+      {
+        "netclass": "ETH_RX",
+        "pattern": "ETH_PHY_RXD0"
+      },
+      {
+        "netclass": "ETH_RX",
+        "pattern": "ETH_PHY_RXD1"
+      },
+      {
+        "netclass": "ETH_RX",
+        "pattern": "ETH_PHY_RXD2"
+      },
+      {
+        "netclass": "ETH_RX",
+        "pattern": "ETH_PHY_RXD3"
+      },
+      {
+        "netclass": "ETH_RX",
+        "pattern": "ETH_PHY_RXCTL"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_DATA4"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_DIR"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_STP"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_DATA0"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_DATA1"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_DATA2"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_DATA3"
+      },
+      {
+        "netclass": "Default",
+        "pattern": ""
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_CLKOUT"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_DATA5"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_DATA6"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_DATA7"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "USB_ULPI_NXT"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "ETH_PHY_INT"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "ETH_PHY_MDIO"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "ETH_PHY_MDC"
+      },
+      {
+        "netclass": "eMMC",
+        "pattern": "eMMC_CLK"
+      },
+      {
+        "netclass": "eMMC",
+        "pattern": "eMMC_CMD"
+      },
+      {
+        "netclass": "eMMC",
+        "pattern": "eMMC_D0"
+      },
+      {
+        "netclass": "eMMC",
+        "pattern": "eMMC_D1"
+      },
+      {
+        "netclass": "eMMC",
+        "pattern": "eMMC_D2"
+      },
+      {
+        "netclass": "eMMC",
+        "pattern": "eMMC_D3"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "eMMC_~{RST}"
+      },
+      {
+        "netclass": "QSPI",
+        "pattern": "QSPI_~{CS}"
+      },
+      {
+        "netclass": "QSPI",
+        "pattern": "QSPI_CLK"
+      },
+      {
+        "netclass": "ETH_TX",
+        "pattern": "ETH_PHY_TXD3"
+      },
+      {
+        "netclass": "SDIO",
+        "pattern": "SDIO_CK"
+      },
+      {
+        "netclass": "SDIO",
+        "pattern": "SDIO_CLK"
+      },
+      {
+        "netclass": "SDIO",
+        "pattern": "SDIO_CMD"
+      },
+      {
+        "netclass": "SDIO",
+        "pattern": "SDIO_D0"
+      },
+      {
+        "netclass": "SDIO",
+        "pattern": "SDIO_D1"
+      },
+      {
+        "netclass": "SDIO",
+        "pattern": "SDIO_D2"
+      },
+      {
+        "netclass": "SDIO",
+        "pattern": "SDIO_D3"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/Ethernet PHY/1V0_ETH"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/Ethernet PHY/3V3A_ETH"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "VCCPLL"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "/USB HS PHY/REFCLK"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "/USB HS PHY/CLK_24MHz"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "/USB HS PHY/USB_REFCLK"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "SENSE_1V35"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "+VCCO_35"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "+VCCO_34"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "+VCCO_33"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "+VCCO_13"
+      },
+      {
+        "netclass": "USB_ULPI",
+        "pattern": "/USB HS PHY/USB_ULPI_CLKOUT_T"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "/Zynq B500-B501/STM32_SCL_T"
+      },
+      {
+        "netclass": "3V3_LDO",
+        "pattern": "+3V3_SC"
+      },
+      {
+        "netclass": "QSPI",
+        "pattern": "slash"
+      },
+      {
+        "netclass": "DDR_ADDR",
+        "pattern": "/Zynq_B502_DDR/DDR_CK_N"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L24N_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L15P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L18P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L21P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L6N_VREF_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L22P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L6P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_25_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L18N_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L24P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L19P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L2N_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L3P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L2P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L19P_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L5N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L16_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L16_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L17_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L17_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L20P_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L20N_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L1N_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L3N_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L5P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L1P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L15P_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_25_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L19N_VREF_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L15N_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L1_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L23_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L1_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L22_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L24_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L6_VREF_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L5_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L12_MRCC_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L12_MRCC_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L7_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L5_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L4_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L1_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L24_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L7_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L20_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L2_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L1_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L5_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L5_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_0_35"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L4_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L6_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L6_VREF_N_35"
+      },
+      {
+        "netclass": "Default",
+        "pattern": "ZYNQ_TDI"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L1_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L4_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L3P_PUDC_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L20_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L18_N_34"
+      },
+      {
+        "netclass": "USB",
+        "pattern": "STM32_USB_D_P"
+      },
+      {
+        "netclass": "USB",
+        "pattern": "STM32_USB_D_N"
+      },
+      {
+        "netclass": "USB",
+        "pattern": "USB_D+"
+      },
+      {
+        "netclass": "USB",
+        "pattern": "USB_D-"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/Zynq Power/VCCPLL"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L6_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L16_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L24_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L2_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L2_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L3_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L3_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L15_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L19_VREF_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L15_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L20_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L4_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L20_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L24_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L21_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L18_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L18_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L14_N_SRCC_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L14_P_SRCC_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L11_SRCC_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L11_SRCC_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L24_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L9_DQS_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L9_DQS_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L8_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L8_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L7_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L7_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L23_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L23_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L24_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L24_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L18_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L18_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L17_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L17_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L12_MRCC_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L12_MRCC_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L10_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L10_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L12_MRCC_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L12_MRCC_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L10_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L10_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L22_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L22_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L21_DQS_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L14_SRCC_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L14_SRCC_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L21_DQS_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L11_SRCC_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L11_SRCC_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L3_DQS_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L3_DQS_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L2_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L2_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L17_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L17_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L16_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L16_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L15_DQS_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L15_DQS_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L10_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L10_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L9_DQS_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L9_DQS_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L8_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L8_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L24_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L23_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L23_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L17_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L17_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L16_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L16_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L18_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L18_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L15_DQS_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L15_DQS_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L13_MRCC_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L13_MRCC_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L10_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L10_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L5_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L5_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L4_N_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L14_SRCC_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L14_SRCC_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L13_MRCC_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L4_P_33"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L13_MRCC_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L11_SRCC_N_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L11_SRCC_P_34"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L19_N_VREF_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L19_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L22_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L22_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L20_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L20_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L21_DQS_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L21_DQS_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L14_SRCC_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L14_SRCC_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L12_MRCC_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L12_MRCC_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L11_SRCC_N_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L11_SRCC_P_35"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L4_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L23_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L23_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L13_MRCC_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_DP",
+        "pattern": "IO_L13_MRCC_N_13"
+      },
+      {
+        "netclass": "ETH_MDI",
+        "pattern": "ETH_PHY_MDI3_N"
+      },
+      {
+        "netclass": "ETH_MDI",
+        "pattern": "ETH_PHY_MDI3_P"
+      },
+      {
+        "netclass": "ETH_MDI",
+        "pattern": "ETH_PHY_MDI2_N"
+      },
+      {
+        "netclass": "ETH_MDI",
+        "pattern": "ETH_PHY_MDI2_P"
+      },
+      {
+        "netclass": "ETH_MDI",
+        "pattern": "ETH_PHY_MDI1_N"
+      },
+      {
+        "netclass": "ETH_MDI",
+        "pattern": "ETH_PHY_MDI1_P"
+      },
+      {
+        "netclass": "ETH_MDI",
+        "pattern": "ETH_PHY_MDI0_N"
+      },
+      {
+        "netclass": "ETH_MDI",
+        "pattern": "ETH_PHY_MDI0_P"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L22_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L6_N_VREF_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L6_P_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L5_N_13"
+      },
+      {
+        "netclass": "Zynq_PL_SingleEnded",
+        "pattern": "IO_L15_P_13"
+      },
+      {
+        "netclass": "STM32_PM",
+        "pattern": "SENSE_1V0"
+      },
+      {
+        "netclass": "STM32_PM",
+        "pattern": "3V3_PG"
+      },
+      {
+        "netclass": "STM32_PM",
+        "pattern": "SENSE_3V3"
+      },
+      {
+        "netclass": "STM32_PM",
+        "pattern": "1V35_PG"
+      },
+      {
+        "netclass": "STM32_PM",
+        "pattern": "1V8_PG"
+      },
+      {
+        "netclass": "STM32_PM",
+        "pattern": "1V0_PG"
+      },
+      {
+        "netclass": "STM32_PM",
+        "pattern": "1V0_EN"
+      },
+      {
+        "netclass": "STM32_PM",
+        "pattern": "1V35_EN"
+      },
+      {
+        "netclass": "STM32_PM",
+        "pattern": "3V3_EN"
+      },
+      {
+        "netclass": "VIN",
+        "pattern": "VIN"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/System Controller/STM32_VDDA"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/Ethernet PHY/1V8A_ETH"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/Ethernet PHY/ETH_REG_OUT"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/Zynq Power/VCCADC"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/Ethernet PHY/25MHz_1V8"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/USB HS PHY/13MHz_1V8"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "/Zynq B500-B501/33MHz_3V3"
+      }
+    ]
+  },
+  "pcbnew": {
+    "last_paths": {
+      "gencad": "",
+      "idf": "",
+      "netlist": "",
+      "plot": "",
+      "pos_files": "assembly/",
+      "specctra_dsn": "",
+      "step": "Zynq_SoM.step",
+      "svg": "svg/",
+      "vrml": "Zynq_SoM.wrl"
+    },
+    "page_layout_descr_file": "test_drawing_sheet.kicad_wks"
+  },
+  "schematic": {
+    "annotate_start_num": 0,
+    "bom_export_filename": "",
+    "bom_fmt_presets": [],
+    "bom_fmt_settings": {
+      "field_delimiter": ",",
+      "keep_line_breaks": false,
+      "keep_tabs": false,
+      "name": "CSV",
+      "ref_delimiter": ",",
+      "ref_range_delimiter": "",
+      "string_delimiter": "\""
+    },
+    "bom_presets": [],
+    "bom_settings": {
+      "exclude_dnp": false,
+      "fields_ordered": [
+        {
+          "group_by": false,
+          "label": "Reference",
+          "name": "Reference",
+          "show": true
+        },
+        {
+          "group_by": true,
+          "label": "Value",
+          "name": "Value",
+          "show": true
+        },
+        {
+          "group_by": false,
+          "label": "Datasheet",
+          "name": "Datasheet",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Footprint",
+          "name": "Footprint",
+          "show": true
+        },
+        {
+          "group_by": false,
+          "label": "Qty",
+          "name": "${QUANTITY}",
+          "show": true
+        },
+        {
+          "group_by": true,
+          "label": "DNP",
+          "name": "${DNP}",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "#",
+          "name": "${ITEM_NUMBER}",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Availability",
+          "name": "Availability",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Check_prices",
+          "name": "Check_prices",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MANUFACTURER",
+          "name": "MANUFACTURER",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MAXIMUM_PACKAGE_HEIGHT",
+          "name": "MAXIMUM_PACKAGE_HEIGHT",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MF",
+          "name": "MF",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MP",
+          "name": "MP",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "PARTREV",
+          "name": "PARTREV",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Package",
+          "name": "Package",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Price",
+          "name": "Price",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Purchase-URL",
+          "name": "Purchase-URL",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Rating",
+          "name": "Rating",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "STANDARD",
+          "name": "STANDARD",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "SnapEDA_Link",
+          "name": "SnapEDA_Link",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Type",
+          "name": "Type",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Description",
+          "name": "Description",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Tolerance",
+          "name": "Tolerance",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Part",
+          "name": "Part",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "LCSC Part",
+          "name": "LCSC Part",
+          "show": true
+        },
+        {
+          "group_by": false,
+          "label": "Sim.Pins",
+          "name": "Sim.Pins",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Sim.Type",
+          "name": "Sim.Type",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Sim.Device",
+          "name": "Sim.Device",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Digikey",
+          "name": "Digikey",
+          "show": true
+        }
+      ],
+      "filter_string": "",
+      "group_symbols": true,
+      "include_excluded_from_bom": false,
+      "name": "",
+      "sort_asc": true,
+      "sort_field": "Reference"
+    },
+    "bus_aliases": {},
+    "connection_grid_size": 50.0,
+    "drawing": {
+      "dashed_lines_dash_length_ratio": 12.0,
+      "dashed_lines_gap_length_ratio": 3.0,
+      "default_line_thickness": 6.0,
+      "default_text_size": 50.0,
+      "field_names": [],
+      "intersheets_ref_own_page": false,
+      "intersheets_ref_prefix": "",
+      "intersheets_ref_short": false,
+      "intersheets_ref_show": false,
+      "intersheets_ref_suffix": "",
+      "junction_size_choice": 3,
+      "label_size_ratio": 0.375,
+      "operating_point_overlay_i_precision": 3,
+      "operating_point_overlay_i_range": "~A",
+      "operating_point_overlay_v_precision": 3,
+      "operating_point_overlay_v_range": "~V",
+      "overbar_offset_ratio": 1.23,
+      "pin_symbol_size": 25.0,
+      "text_offset_ratio": 0.15
+    },
+    "legacy_lib_dir": "",
+    "legacy_lib_list": [],
+    "meta": {
+      "version": 1
+    },
+    "net_format_name": "",
+    "page_layout_descr_file": "test_drawing_sheet.kicad_wks",
+    "plot_directory": "./",
+    "space_save_all_events": true,
+    "spice_current_sheet_as_root": false,
+    "spice_external_command": "spice \"%I\"",
+    "spice_model_current_sheet_as_root": true,
+    "spice_save_all_currents": false,
+    "spice_save_all_dissipations": false,
+    "spice_save_all_voltages": false,
+    "subpart_first_id": 65,
+    "subpart_id_separator": 0,
+    "top_level_sheets": [
+      {
+        "filename": "zynq_som2.kicad_sch",
+        "name": "zynq_som2",
+        "uuid": "00000000-0000-0000-0000-000000000000"
+      }
+    ]
+  },
+  "sheets": [
+    [
+      "9d6eea33-5ef7-40fb-8bed-868692275d9e",
+      "Root"
+    ],
+    [
+      "5fa4f0b4-9a16-4cbc-a6af-bce4837d28e8",
+      "System Controller"
+    ],
+    [
+      "c35e0d60-90f2-4710-a61e-612b72b7a94d",
+      "Power architecture"
+    ],
+    [
+      "dc79e2a6-41ec-48f6-a601-6a2f85843b12",
+      "Power"
+    ],
+    [
+      "2f9c4d8f-1139-4e12-89c5-7d0f4349a1bb",
+      "Zynq Power"
+    ],
+    [
+      "d180ed10-b028-4f1a-94fb-3a88ff44e0c4",
+      "Zynq Config"
+    ],
+    [
+      "93c79f28-72de-433b-a782-24f51a89bc53",
+      "Zynq B500-B501"
+    ],
+    [
+      "cb5d1bd2-e8a0-4a0f-b9b9-6c546fa0d670",
+      "eMMC"
+    ],
+    [
+      "0ff5dea4-ec5e-466f-a3d6-b6f054342afb",
+      "Ethernet PHY"
+    ],
+    [
+      "0f4d91d0-4f44-4d16-9e5a-24b4625e7f6d",
+      "USB HS PHY"
+    ],
+    [
+      "4c2c8cd8-7dee-4130-9eab-32aadc123ced",
+      "Zynq_B502_DDR"
+    ],
+    [
+      "65143b88-83ea-4717-b10d-b194d207d577",
+      "Zynq B33 B34 B35"
+    ],
+    [
+      "57881974-86d7-4cd2-9a18-2a6d0da4e93e",
+      "Zynq PL (B13)"
+    ],
+    [
+      "1e02c74d-00c6-446b-a80c-bd25841d36b7",
+      "Sensors"
+    ],
+    [
+      "6a258c6d-70b9-41f1-81f9-b3243effcf9c",
+      "Connectors"
+    ],
+    [
+      "bd15ab55-1c82-4318-b7bd-15bd8898eec1",
+      "Revisions changes"
+    ]
+  ],
+  "text_variables": {
+    "BOARD_NAME": "Zynq System on Module",
+    "DESIGNER": "G. Incerti",
+    "STATUS": "RELEASED",
+    "VARIANT": "No Variant"
+  },
+  "tuning_profiles": {
+    "meta": {
+      "version": 0
+    },
+    "tuning_profiles_impedance_geometric": []
+  },
+  "kicad_routing_tools": {
+    "repo_rules": {
+      "min_via_drill": 0.2
+    },
+    "fab_floor_origin": {
+      "min_hole_clearance": 0.2,
+      "min_through_hole_diameter": 0.2,
+      "min_track_width": 0.09,
+      "min_via_annular_width": 0.05,
+      "min_via_diameter": 0.3
+    },
+    "records_rev": 1
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "about": "tests/stress/bus_boards.py: each case is a board's pre-bus input (its planes poured, no bus copper) and the route_bus.py arguments its recorded run took -- every bus of the board in one call, routed in turn or negotiated as the step decides. The check: every bus net connected on the board the step hands on.",
+  "cases": {
+    "kintex": {
+      "board": "kintex.kicad_pcb.gz",
+      "args": ["--bus", "U1:U2:whole-array:F.Cu,B.Cu,In1.Cu,In2.Cu,In3.Cu,In4.Cu,In5.Cu,In6.Cu",
+               "--clearance-ceiling", "0.1016", "--track-width", "0.1524", "--fanout-track-width", "0.1524",
+               "--via-size", "0.45", "--via-drill", "0.2"]
+    },
+    "h616": {
+      "board": "h616.kicad_pcb.gz",
+      "args": ["--bus", "U1:U2:whole-array:F.Cu,B.Cu,In1.Cu,In2.Cu",
+               "--clearance-ceiling", "0.1", "--track-width", "0.1", "--fanout-track-width", "0.0975",
+               "--via-size", "0.35", "--via-drill", "0.15"]
+    },
+    "zynq": {
+      "board": "zynq.kicad_pcb.gz",
+      "args": ["--bus", "U1:U2:whole-array:F.Cu,B.Cu,In1.Cu,In2.Cu", "--bus", "U1:U5:escape:F.Cu,B.Cu,In1.Cu,In2.Cu",
+               "--bus", "U1:U4+U3:plain:F.Cu,B.Cu,In1.Cu,In2.Cu",
+               "--clearance-ceiling", "0.09", "--track-width", "0.15", "--fanout-track-width", "0.12",
+               "--via-size", "0.45", "--via-drill", "0.3"]
+    },
+    "sdi": {
+      "board": "sdi.kicad_pcb.gz",
+      "args": ["--bus", "U11:U12:whole-array:F.Cu,B.Cu,In1.Cu,In2.Cu,In3.Cu,In4.Cu,In5.Cu,In6.Cu",
+               "--bus", "U11:U15:escape:F.Cu,B.Cu,In1.Cu,In2.Cu,In3.Cu,In4.Cu,In5.Cu,In6.Cu",
+               "--bus", "U11:J4:plain:F.Cu,B.Cu,In1.Cu,In2.Cu,In3.Cu,In4.Cu,In5.Cu,In6.Cu",
+               "--bus", "U11:J6:plain:F.Cu,B.Cu,In1.Cu,In2.Cu,In3.Cu,In4.Cu,In5.Cu,In6.Cu",
+               "--clearance-ceiling", "0.1", "--track-width", "0.15", "--fanout-track-width", "0.12",
+               "--via-size", "0.45", "--via-drill", "0.2"]
+    },
+    "zynq7020": {
+      "board": "zynq7020.kicad_pcb.gz",
+      "args": ["--bus", "U2:U1:whole-array:F.Cu,B.Cu,In1.Cu,In2.Cu,In3.Cu,In4.Cu,In5.Cu,In6.Cu",
+               "--bus", "U2:J1+U3+U5:plain:F.Cu,B.Cu,In1.Cu,In2.Cu,In3.Cu,In4.Cu,In5.Cu,In6.Cu",
+               "--clearance-ceiling", "0.09", "--track-width", "0.09", "--fanout-track-width", "0.09",
+               "--via-size", "0.3", "--via-drill", "0.15"]
+    },
+    "orangecrab": {
+      "board": "orangecrab.kicad_pcb.gz",
+      "args": ["--bus", "U3:U4:plain:F.Cu,B.Cu,In1.Cu,In2.Cu,In3.Cu,In4.Cu",
+               "--clearance-ceiling", "0.0889", "--track-width", "0.0762", "--fanout-track-width", "0.0762",
+               "--via-size", "0.25", "--via-drill", "0.15"]
+    }
+  }
+}

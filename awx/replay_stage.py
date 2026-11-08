@@ -27,7 +27,8 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 
 def round_env(work, round_dir, sizes, dest=None, layers=None, sets=()):
     """the environment a bus's round gives its loop's stages (as route_bus._route and whole_route.chain build it),
-    over this process's: `sizes` the run's (clearance ceiling, track, fanout track, via, drill), `layers` its routing
+    over this process's: `sizes` the run's (clearance ceiling, track, fanout track, via, drill, and the hole-to-hole and
+    edge clearances where it gave them), `layers` its routing
     layers (default F.Cu, B.Cu and the frame's inner layers in stack order -- the order the run's cut files index),
     `sets` K=V given last"""
     import route_bus as rb
@@ -36,10 +37,11 @@ def round_env(work, round_dir, sizes, dest=None, layers=None, sets=()):
     from kicad_parser import parse_kicad_pcb
     work, round_dir = os.path.abspath(work), os.path.abspath(round_dir)
     frame = os.path.join(work, 'frame.kicad_pcb')
-    clr, trk, ftrk, vs, vd = (float(x) for x in sizes.split(','))
+    clr, trk, ftrk, vs, vd, h2h, edge = (list(float(x) for x in sizes.split(',')) + [None, None])[:7]
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         rr = rb.resolve_rules(frame, clearance_ceiling=clr, track_width=trk, fanout_track_width=ftrk, via_size=vs,
-                              via_drill=vd, log=lambda *a: None)
+                              via_drill=vd, hole_to_hole_clearance=h2h,
+                              board_edge_clearance=edge, log=lambda *a: None)
         cu = parse_kicad_pcb(frame).board_info.copper_layers
     env = dict(os.environ)
     env.update(rb.STEP_SETTINGS)
@@ -63,8 +65,9 @@ def add_round_args(ap):
     """the arguments every replay of a round takes"""
     ap.add_argument('work', help="the bus's work dir (route_bus's BUS.bus: frame.kicad_pcb)")
     ap.add_argument('round_dir', help='a whole_route round in it: run/rN (fo.kicad_pcb, nets.lines)')
-    ap.add_argument('--sizes', required=True, metavar='CLR,TRK,FTRK,VIA,DRILL',
-                    help="the run's --clearance-ceiling, --track-width, --fanout-track-width, --via-size, --via-drill")
+    ap.add_argument('--sizes', required=True, metavar='CLR,TRK,FTRK,VIA,DRILL[,H2H[,EDGE]]',
+                    help="the run's --clearance-ceiling, --track-width, --fanout-track-width, --via-size, --via-drill, and "
+                         "its --hole-to-hole-clearance and --board-edge-clearance where it gave them (else the board's)")
     ap.add_argument('--dest', default=None, help='the destination part(s) (default: DEST, else U1)')
     ap.add_argument('--layers', default=None, help="the bus's routing layers (default F.Cu,B.Cu and the inner ones)")
     ap.add_argument('--set', action='append', default=[], metavar='K=V', help='a setting for the stage(s)')

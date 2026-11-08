@@ -1,0 +1,20 @@
+(version 1)
+(rule ADDR_LEN
+    (condition "A.NetClass == 'DDR_ADDR'")
+    (constraint skew (max 3.175mm)))
+
+(rule 0_BYTE_LANE_LEN
+    (condition "A.NetClass == 'DDR_DATA_0'")
+    (constraint skew (max 3.175mm)))
+
+(rule 1_BYTE_LANE_LEN
+    (condition "A.NetClass == 'DDR_DATA_1'")
+    (constraint skew (max 3.175mm)))
+
+(rule 2_BYTE_LANE_LEN
+    (condition "A.NetClass == 'DDR_DATA_2'")
+    (constraint skew (max 3.175mm)))
+
+(rule 3_BYTE_LANE_LEN
+    (condition "A.NetClass == 'DDR_DATA_3'")
+    (constraint skew (max 3.175mm)))

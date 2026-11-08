@@ -2265,15 +2265,18 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             # failed: what it named recorded (the last resort leaves those lanes out), and the next seed's round -- or,
             # a feedback round left, that round: the split pairs and the lanes between their tips, ends not to be
             # chosen together again, freed incrementally, while the refusal names something new
+            # (the findings read off the SET-ASIDE sidecar, fo.refused.plan.json: whole_feedback reads the board beside
+            # its sidecar -- the plan frame's mirror axis, the nets' names -- and fo.kicad_pcb is no longer there)
             refused = os.path.join(d, 'fo.refused.json')
-            if os.path.isfile(refused) and os.path.isfile(os.path.join(d, 'fo.plan.json')):
+            side_r = os.path.join(d, 'fo.refused.plan.json')
+            if os.path.isfile(refused) and os.path.isfile(side_r):
                 for ln in grep(os.path.join(d, 'fo.log'), r'^REFUSED'):
                     say('  ' + ln[:220])
-                say(stripped(run(['whole_feedback.py', '--refused', os.path.join(d, 'fo.plan.json'), FB, refused],
+                say(stripped(run(['whole_feedback.py', '--refused', side_r, FB, refused],
                                  {**env, 'FB_ROUND': str(r)}, err=sys.stderr)[1]))
                 if fed_left and r < R:
-                    fbl = stripped(run(['whole_feedback.py', '--refused', os.path.join(d, 'fo.plan.json'), FBD,
-                                        refused], {**env, 'FB_ROUND': str(r)}, err=sys.stderr)[1])
+                    fbl = stripped(run(['whole_feedback.py', '--refused', side_r, FBD, refused],
+                                       {**env, 'FB_ROUND': str(r)}, err=sys.stderr)[1])
                     if re.search(r'whole_feedback: [1-9]', fbl):
                         say("=== the fanout refused its board -- a feedback round frees the ends it named")
                         base = advance(d, base)

@@ -714,6 +714,24 @@ python3 tests/stress/placement_survey.py run --sets 1-30 --jobs 6 --out rows.jso
 python3 tests/stress/placement_survey.py report rows.jsonl
 ```
 
+## The bus boards check (`bus_boards.py`, not run by default)
+
+`python3 tests/stress/bus_boards.py [--cases A,B] [--out DIR] [-j N] [--set K=V]`
+routes every bus of each board in `tests/fixtures/bus_boards` (pre-bus inputs, planes
+poured, gzipped with their `.kicad_pro`/`.kicad_dru`; `manifest.json` holds each
+board's `route_bus.py` arguments -- all its buses in one call, so the step routes them
+in turn or negotiates as it decides) with `--rounds 1`, and grades every bus net on the
+board the step hands on: the net's pads on the bus's own parts one piece of copper
+(`check_connected.check_net_connectivity`, zones credited) -- read off the board, not
+the step's own count; a net's pads elsewhere (a termination, a test point) are left to
+the chain's later steps. Exit 0 when no bus net is open on any board; the table and
+`OUT/report.json` name the open nets, each bus's grade and walled balls, and the time.
+It is an hour or more of routing, so `tests/run_all.py` does not collect it (it lives
+under `tests/stress/`); run it before committing a change to the bus step (`awx/`),
+and `--set K=V` runs an arm of a change behind a setting. A negotiated board starts a
+routing process per bus: keep `-j` so the processes at once stay within the machine's
+routing budget.
+
 ## Replaying & A/B (no LLM)
 
 Each board's `runs_set*/<board>/redo_commands.sh` records every board-mutating
