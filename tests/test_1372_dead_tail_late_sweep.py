@@ -22,8 +22,13 @@ Rows, on `sweep_dangling_via_branches` and then through route.py:
 and the via-in-pad unblock shape (#535): a via that is the only thing joining
 two F.Cu track ends 0.07 mm apart (their caps overlap, so the net grades
 connected). The sweep's gate refused to remove it because dropping the via
-graded the two ends as new dangling ends; it now removes the via and moves
-one end onto the other (a weld), so the net stays joined and the via is gone.
+graded the two ends as new dangling ends; it now removes the via and joins
+the two ends with a connector track inside the via's disc (a weld), so the
+net stays joined and the via is gone. The weld first moved one end onto the
+other, which re-aimed the whole track: a power board's I2C_B_SCL diagonal
+came to 0.130 mm of a foreign via under a 0.2 mm clearance (row 10). The
+connector is a TRACK where a via was, so a rule area forbidding tracks but
+allowing vias refuses it, and the via stays (row 11).
 
     python3 tests/test_1372_dead_tail_late_sweep.py
 """
@@ -120,34 +125,89 @@ def main():
     st = {}
     rs, rv = sweep_dangling_via_branches(b, {1}, stats=st)
     added = st.get('added') or []
-    check('8. the via is removed and one end is welded onto the other',
-          rv == [via] and len(added) == 1 and len(b.vias) == 0
+    check('8. the via is removed and a connector joins the two ends',
+          rv == [via] and not rs and len(added) == 1 and len(b.vias) == 0
           and st.get('welds') == 1, f'{len(rv)} via(s), {len(added)} weld(s), {st}')
     if added:
         w = added[0]
-        pts = {(round(q.start_x, 3), round(q.start_y, 3), round(q.end_x, 3), round(q.end_y, 3))
-               for q in b.segments}
-        joined = any(abs(x.end_x - y.start_x) < 1e-6 and abs(x.end_y - y.start_y) < 1e-6
-                     for x in b.segments for y in b.segments if x is not y)
-        check('8. the two ends now coincide and the net is still two tracks',
-              len(b.segments) == 2 and joined and w in b.segments, str(pts))
+        check('8. the connector runs from one end to the other and the tracks stay put',
+              len(b.segments) == 3 and w in b.segments
+              and (w.start_x, w.start_y, w.end_x, w.end_y) == (19.965, 10, 20.035, 10)
+              and (a.end_x, c.start_x) == (19.965, 20.035),
+              str([(q.start_x, q.start_y, q.end_x, q.end_y) for q in b.segments]))
     a, c = seg(10, 10, 19.965, 10, locked=True), seg(20.035, 10, 30, 10)
     b = board([a, c], PADS)
     b.vias = [Via(x=20.0, y=10.0, size=0.6, drill=0.3, layers=['F.Cu', 'B.Cu'], net_id=1)]
     st = {}
     rs, rv = sweep_dangling_via_branches(b, {1}, stats=st)
-    check('8. the unlocked track moves when the other is locked',
-          len(rv) == 1 and st.get('welds') == 1 and a in b.segments, str(st))
+    check('8. with one track locked the connector copies the other',
+          len(rv) == 1 and st.get('welds') == 1 and a in b.segments
+          and not st['added'][0].locked, str(st))
     a, c = seg(10, 10, 19.965, 10, locked=True), seg(20.035, 10, 30, 10, locked=True)
     b = board([a, c], PADS)
     b.vias = [Via(x=20.0, y=10.0, size=0.6, drill=0.3, layers=['F.Cu', 'B.Cu'], net_id=1)]
     rs, rv = sweep_dangling_via_branches(b, {1})
     check('8. with both tracks locked nothing is welded or removed', not rv and not rs)
+    a, c = seg(20, 5, 20, 9.72), seg(20.28, 10, 30, 10)     # ends on the rim, a quarter apart
+    b = board([a, c], [pad('A', 20, 5), pad('B', 30, 10)])
+    b.vias = [Via(x=20.0, y=10.0, size=0.6, drill=0.3, layers=['F.Cu', 'B.Cu'], net_id=1)]
+    rs, rv = sweep_dangling_via_branches(b, {1})
+    check('8. a connector that would leave the via\'s disc is not laid; the via stays',
+          not rv and not rs and len(b.segments) == 2)
     a, c = seg(10, 10, 18.0, 10), seg(22.0, 10, 30, 10)        # ends 4 mm apart
     b = board([a, c], PADS)
     b.vias = [Via(x=20.0, y=10.0, size=0.6, drill=0.3, layers=['F.Cu', 'B.Cu'], net_id=1)]
     rs, rv = sweep_dangling_via_branches(b, {1})
     check('8. ends that did not meet inside the barrel are not welded', not rv)
+
+    # 10. The weld adds no copper nearer foreign copper.
+    from check_drc import point_to_segment_distance
+    foreign = Via(x=108.35, y=96.3, size=0.7, drill=0.3, layers=['F.Cu', 'B.Cu'], net_id=2)
+
+    def gap(segs):
+        return min(point_to_segment_distance(foreign.x, foreign.y, q.start_x, q.start_y,
+                                             q.end_x, q.end_y) - q.width / 2 - foreign.size / 2
+                   for q in segs if q.net_id == 1)
+    b = board([seg(108.1, 97.5, 110.3, 95.3), seg(110.2, 95.0, 110.2, 93.0)],
+              [pad('A', 108.1, 97.5), pad('B', 110.2, 93.0)])
+    b.vias = [Via(x=110.2, y=95.0, size=0.7, drill=0.3, layers=['F.Cu', 'B.Cu'], net_id=1),
+              foreign]
+    before = gap(b.segments)
+    st = {}
+    rs, rv = sweep_dangling_via_branches(b, {1}, stats=st)
+    check('10. the via is welded out and the foreign gap is what it was',
+          len(rv) == 1 and st.get('welds') == 1 and gap(b.segments) >= before - 1e-9
+          and before >= 0.2, f'{before:.4f} -> {gap(b.segments):.4f} mm')
+
+    # 11. A rule area that forbids tracks but allows vias covers part of the
+    # via's disc the connector would cross, and neither track reaches it: the
+    # connector would be a track inside it, so the weld is refused (#1760's
+    # gate) and the via stays.
+    def ko_board(x0):
+        b = board([seg(108.1, 97.5, 110.3, 95.3), seg(110.2, 95.0, 110.2, 93.0)],
+                  [pad('A', 108.1, 97.5), pad('B', 110.2, 93.0)])
+        b.vias = [Via(x=110.2, y=95.0, size=0.7, drill=0.3, layers=['F.Cu', 'B.Cu'],
+                      net_id=1)]
+        b.board_info.keepouts = [{
+            'name': 'no-tracks', 'layers': ['F.Cu'], 'tracks_allowed': False,
+            'vias_allowed': True,
+            'polygon': [(x0, 95.05), (x0 + 0.27, 95.05), (x0 + 0.27, 95.2), (x0, 95.2)]}]
+        return b
+    from check_drc import keepout_census
+    b = ko_board(110.33)
+    pre = keepout_census(b, ['F.Cu', 'B.Cu'])
+    st = {}
+    rs, rv = sweep_dangling_via_branches(b, {1}, stats=st)
+    check('11. a connector that would enter a no-tracks rule area is not laid; '
+          'the via stays',
+          not pre and not rv and not st.get('welds') and len(b.vias) == 1
+          and not keepout_census(b, ['F.Cu', 'B.Cu']),
+          f'precondition rows {len(pre)}, {len(rv)} via(s) removed, {st}')
+    b = ko_board(111.33)
+    st = {}
+    rs, rv = sweep_dangling_via_branches(b, {1}, stats=st)
+    check('11. control: the same area 1 mm away leaves the weld alone',
+          len(rv) == 1 and st.get('welds') == 1, str(st))
 
     # 7. route.py on a board file.
     bd = RoutingBoard(w=40, h=30)

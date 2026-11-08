@@ -1594,6 +1594,10 @@ def _late_dangling_via_sweep1166(pcb_data, output_file, return_results,
         elif output_file and os.path.isfile(output_file):
             from kicad_parser import parse_kicad_pcb as _pk1166
             board = _pk1166(output_file)
+            # the run's net-filtered keep-outs, which the weld's keep-out
+            # gate reads (#1784); the GUI's copy of pcb_data carries them
+            if getattr(pcb_data, '_net_keepouts', None):
+                board._net_keepouts = list(pcb_data._net_keepouts)
         else:
             return 0, 0
         name_of = {nid: n.name for nid, n in board.nets.items()}
@@ -1616,7 +1620,7 @@ def _late_dangling_via_sweep1166(pcb_data, output_file, return_results,
             return 0, 0
         gone = {id(x) for x in removed + dropped}
         # #1372: a via that was the only thing joining two track ends is
-        # removed with one end moved onto the other; the moved copy is new copper.
+        # removed with a connector track joining the ends; it is new copper.
         welded = list(_stats.get('added') or [])
         if return_results:
             for r in rd.get('results') or []:
