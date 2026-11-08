@@ -1017,13 +1017,21 @@ sometimes has pads that aren't a coupled connection — e.g. a P and an N test p
 several mm apart, or a logical pair daisy-chained through spread-out parts. If the
 coupled chain can't be routed, `route_diff.py` peels those far-apart pads off the
 chain (routing the genuinely-coupled terminals as a pair) and lists the affected
-nets under `single_ended_followup_nets` in its `JSON_SUMMARY` (and a "route them
-single-ended next" block on stdout). Those pads are **not** dropped — the **Signal
-Routing** step (`route.py --nets "*"`) connects them P→P / N→N along with
-every other unrouted net, since they remain unrouted after the diff-pair step. So:
-**do not exclude the diff-pair nets from the signal-routing step's net selection** —
-that step is what finishes the peeled pads. If you scope the signal step to specific
-nets instead of `"*"`, add any `single_ended_followup_nets` to it explicitly.
+nets under `single_ended_followup_nets` in its `JSON_SUMMARY`. That field holds
+**every** net the step left single-ended, so read why in
+`single_ended_followup_reasons` ({net: reason}, #1764) before acting on it:
+`peeled-terminals` (these peeled pads) and `electrically-short` are left
+single-ended **by design**; any other reason (`coupled-route-failed`,
+`no-escape-path`, ...) is a pair whose coupled route FAILED, which the pair gate
+below sends back to `route_diff`, never to `route.py` (that de-pairs it, #1399).
+The log's "left single-ended by this pair step" block, printed after the step's
+own single-ended fallback, groups the nets the same way and says which are still
+open. The by-design pads are **not** dropped — the **Signal Routing** step
+(`route.py --nets "*"`) connects them P→P / N→N along with every other unrouted
+net, since they remain unrouted after the diff-pair step. So: **do not exclude
+the diff-pair nets from the signal-routing step's net selection** — that step is
+what finishes the peeled pads. If you scope the signal step to specific nets
+instead of `"*"`, add the by-design `single_ended_followup_nets` to it explicitly.
 
 ### Check for DDR/High-Speed Memory Signals
 
@@ -3978,9 +3986,12 @@ board), and every `route_diff.py` step runs before it. So run the chain
 A pair is ready for the all-nets step when it is in `routed_diff_pairs`, or
 in `single_ended_diff_pairs` with `failure_reason` `electrically-short` (too
 short for coupling to buy anything). A `member_incomplete_pairs` entry is expected
-only when the pair's members are in `single_ended_followup_nets` (a `partial`
-pair's peeled far terminals, or an `electrically-short` pair's members): the
-all-nets step closes them, and `check_connected` after it says whether it did.
+only when the pair's members are in `single_ended_followup_nets` **by design**,
+i.e. `single_ended_followup_reasons` gives them `peeled-terminals` (a `partial`
+pair's peeled far terminals) or `electrically-short`: the all-nets step closes
+them, and `check_connected` after it says whether it did. The same field also
+holds the members of a pair whose coupled route failed (any other reason): that
+pair is not ready, whatever the field says.
 
 On a matching step, a ready pair's `intra_pair_matching` status says what to do
 next; none of these stops the chain (`/diagnose-routing-failures`, "route_diff
@@ -3996,7 +4007,8 @@ runs", defines them and each `reason`):
   tolerance and nothing grades it, so compare it with `tolerance_mm` yourself
   and report it if it is over.
 - `unmatched` with `reason` `not-measured`, on a pair whose members are in
-  `single_ended_followup_nets` (a peeled pair): nothing yet. It has no length
+  `single_ended_followup_nets` with reason `peeled-terminals` (a peeled
+  pair): nothing yet. It has no length
   until the all-nets step joins its far terminals, and `check_drc` grades it
   after that step at its recorded tolerance.
 - Any other `unmatched`, and a peeled pair `check_drc` then finds out of range:

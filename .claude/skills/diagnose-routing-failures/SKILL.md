@@ -141,9 +141,12 @@ And across the buckets:
 
 - `member_incomplete_pairs`: every pair with a member pad still open at the end
   of the step. Expected only when the pair's members are in
-  `single_ended_followup_nets`, left for the next `route.py` by design (a
-  `partial` pair's peeled far terminals, or an `electrically-short` pair's
-  members); open copper for any other.
+  `single_ended_followup_nets` BY DESIGN, which `single_ended_followup_reasons`
+  ({net: reason}, #1764) says: `peeled-terminals` (a `partial` pair's peeled
+  far terminals) or `electrically-short`. Those the next `route.py` closes.
+  The same field also lists the members of a pair whose coupled route FAILED
+  (any other reason, e.g. `coupled-route-failed`): open copper, retried with
+  `route_diff` below, never `route.py`. Open copper for any other pair too.
 - `polarity_swap_denied_pairs`: a P/N mismatch the run was not allowed to
   resolve by a swap (#279); `polarity_swapped_pairs` lists the swaps it made.
 - `casualty_reconcile`: nets this step ripped whose reroute failed
@@ -169,7 +172,8 @@ And across the buckets:
     `meanders-would-worsen`, `meanders-ran-out` (the bumps that fit fall short),
     `copper-skew-over-tolerance` (the matcher reached the tolerance and the
     copper that ships does not), `not-measured` (a member's pads are not joined
-    by track copper). On a peeled pair (members in `single_ended_followup_nets`)
+    by track copper). On a peeled pair (`single_ended_followup_reasons`
+    `peeled-terminals`)
     `not-measured` is expected: `check_drc` grades it after the all-nets step.
     Past that, an `unmatched` pair is a shipped blocker and nothing more: it
     has no retry here, so report it. A pair the post-route cleanup moved out of
@@ -294,8 +298,11 @@ python3 -X utf8 py_router/route_diff.py board_diff.kicad_pcb board_diff_retry.ki
 needed when they already carry copper (routed single-ended, or a `partial` /
 `uncoupled` pair). A pair that should be coupled is retried with `route_diff.py`,
 never `route.py`, which routes single-ended and would de-pair it (#1399); the
-members in `single_ended_followup_nets` are the exception, closed by the next
-`route.py` by design. Read the retry's `pair_reports` the same way before the
+members listed by design in `single_ended_followup_reasons`
+(`peeled-terminals`, `electrically-short`) are the exception, closed by the next
+`route.py`. A member there with any other reason belongs to a pair whose coupled
+route failed: it is retried here, and the step's log block says so with a
+`route_diff.py ... --force-reroute` line. Read the retry's `pair_reports` the same way before the
 next step.
 
 If the retry log prints `IMPROVEMENT GATE: ... -- REJECTED` (#600, on by default), the retry broke more than it connected (or raised the disconnected-pad count), so route.py wrote a copy of the INPUT board to the output path (the verdict is also on the `JSON_IMPROVEMENT_GATE:` line). More rip authority cannot help: change the approach (thinner track, finer grid, other layers) or report the nets as open. When the gate says its verdict rests on zone nets outside `--nets`, add those nets to `--nets` and retry.
