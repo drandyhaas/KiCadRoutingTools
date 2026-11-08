@@ -507,11 +507,28 @@ def board_tokens(argv):
     return [vals[i] for i in idx[:-1]], vals[idx[-1]]
 
 
-def refused_commands(cmds, manifest=None):
+def run_site(cwd, argv, remaps=(), workdir=None):
+    """(cwd, argv) as the replay RUNS a recorded command: `--remap` applied to
+    its argv and its cwd, and every command in `--workdir` when one is given
+    (the run loop's own reading, #1776)."""
+    argv = apply_remaps(argv, remaps) if remaps else list(argv)
+    if workdir:
+        return workdir, argv
+    return (apply_remaps([cwd], remaps)[0] if cwd and remaps else cwd), argv
+
+
+def refused_commands(cmds, manifest=None, remaps=(), workdir=None):
     """{index: why} for every command its tool would refuse before doing
     anything (cli_argv_check): at argparse, or in a post-parse check its main
     makes on the arguments or on a file they name, resolved against the
-    command's recorded cwd (else the manifest's folder).
+    command's cwd (else the manifest's folder).
+
+    That cwd is where the replay will RUN the command (#1776): with `remaps`
+    applied to its argv and cwd, in `workdir` when given -- so a replay judges
+    a named file (an `--intent`, a `--fab-overrides`) after seeding it there,
+    not in the recorded folder, which may be gone, or back and empty after an
+    in-place replay re-created it. Without either (a converter reading the
+    manifest, an in-place replay) that is the recorded cwd.
 
     A refused command ran nothing and wrote no board. Since #1640 the
     recorder takes such a command back out of the manifest; this reads the
@@ -525,7 +542,8 @@ def refused_commands(cmds, manifest=None):
     for i, (_cwd, argv) in enumerate(cmds):
         if is_check_cmd(argv) or '--help' in argv or '-h' in argv:
             continue
-        why = rejection(argv, cwd=_cwd or here)
+        cwd, argv = run_site(_cwd, argv, remaps, workdir)
+        why = rejection(argv, cwd=cwd or here)
         if why:
             out[i] = why
     return out
@@ -635,7 +653,7 @@ def compute_prune_keep(cmds, refused=None, final_board=None):
                   "dropped": dropped, "chain_holes": holes}
 
 
-def compute_contamination(cmds):
+def compute_contamination(cmds, written=None):
     """Which outputs of a replay carry STALE original-run copper (issue #315
     post-mortem: zynq's step5d read `final_board.kicad_pcb`, a file the worker
     cp'd mid-run that no manifest command regenerates, so a --verbatim replay
@@ -650,7 +668,13 @@ def compute_contamination(cmds):
 
     "Produces" means an EARLIER command wrote it: a command reading its own
     output path, or a board only a later command writes, reads a hole
-    (#1708) -- its tool refuses a missing input, or reads a stale file."""
+    (#1708) -- its tool refuses a missing input, or reads a stale file.
+
+    `written` (indices into `cmds`) names the commands whose boards the replay
+    WRITES, when that is fewer than `cmds` (a pruned replay, #1776): the holes
+    and the taint are still read off the whole chain, since a pruned step
+    still decides which board is a hole, but only a written board is named as
+    tainted or as the one to grade."""
     produced_before = set()
 
     holes = set()
@@ -659,10 +683,11 @@ def compute_contamination(cmds):
     last_clean_out = None
     seen_output = False
     seed_ok = set()
-    for _cwd, argv in cmds:
+    for k, (_cwd, argv) in enumerate(cmds):
         if is_check_cmd(argv):
             continue
         ins, out = board_io(argv)
+        named = written is None or k in written
         # An unproduced input is a legit external seed when it is first read
         # before ANY output exists (the source board, a hand-copied `*_input`
         # seed). An unproduced input first read mid-chain is original-run
@@ -683,25 +708,41 @@ def compute_contamination(cmds):
             produced_before.add(out)
             if tainted:
                 tainted_boards.add(out)
-                tainted_outputs.append(out)
+                if named:
+                    tainted_outputs.append(out)
             else:
                 tainted_boards.discard(out)  # a clean rewrite launders the name
-                last_clean_out = out
+                if named:
+                    last_clean_out = out
     return sorted(holes), tainted_outputs, last_clean_out
 
 
-def warn_contamination(cmds):
-    """Print the replay-contamination warning (both pruned and verbatim modes).
+def warn_contamination(cmds, refused_writers=None, written=None):
+    """Print the replay-contamination warning (both pruned and verbatim modes)
+    over `cmds`, the recorded chain less its refused commands. `written`
+    (indices into `cmds`) are the commands this replay RUNS, so the board it
+    says to grade is one the replay writes (#1776). `refused_writers` ({board
+    basename: (1-based index, why)}) names the holes a refused command would
+    have filled: the replay made those, not the agent.
     Returns True if any contamination was found."""
-    holes, tainted, last_clean = compute_contamination(cmds)
+    holes, tainted, last_clean = compute_contamination(cmds, written)
     if not holes:
         return False
+    refused_writers = refused_writers or {}
+    copied = [h for h in holes if h not in refused_writers]
     print("\n" + "!" * 70)
     print("WARNING: REPLAY CONTAMINATION -- these input board(s) are produced by")
-    print("NO recorded command (the agent cp/mv'd them mid-run), so the replay")
-    print("seeds them from the ORIGINAL run dir with the ORIGINAL code's copper:")
+    print("no command this replay runs, so the replay seeds them from the")
+    print("ORIGINAL run dir with the ORIGINAL code's copper:")
     for h in holes:
-        print(f"    {h}")
+        if h in refused_writers:
+            i, why = refused_writers[h]
+            print(f"    {h}  (its writer [{i}] is refused here: {why})")
+        else:
+            print(f"    {h}")
+    if copied:
+        which = "them" if len(copied) == len(holes) else ", ".join(copied)
+        print(f"No recorded command writes {which}: the agent cp/mv'd them mid-run.")
     if tainted:
         print("Every output downstream of them is part original-run copper -- do NOT")
         print("grade these to judge current code:")
@@ -709,6 +750,8 @@ def warn_contamination(cmds):
             print(f"    {t}")
     if last_clean:
         print(f"Last output with fully current-code ancestry (grade THIS): {last_clean}")
+    else:
+        print("No board this replay writes has fully current-code ancestry.")
     print("!" * 70 + "\n")
     return True
 
@@ -895,6 +938,7 @@ def main():
         old, new = r.split(":", 1)
         remaps.append((old, new))
         os.makedirs(new, exist_ok=True)
+    dest_dirs = [args.workdir] if args.workdir else [n for _o, n in remaps]
 
     if args.workdir:
         os.makedirs(args.workdir, exist_ok=True)
@@ -916,13 +960,26 @@ def main():
     if remaps:
         print("Remaps: " + ", ".join(f"{o} -> {n}" for o, n in remaps))
 
+    # Side files first: a command is judged where it will run (#1776), and a
+    # file it names (an --intent) is there only once seeded.
+    for d in dest_dirs:
+        side = seed_side_files(args.manifest, cmds, d)
+        if side:
+            print(f"Seeded side-file(s) into {d}: {', '.join(side)}")
+
     # A command its tool refuses ran nothing in the original run either: it
     # is never replayed, in either mode, and binds no board (#1640). The
     # recorder no longer writes one; an older manifest may still carry it.
-    refused = refused_commands(cmds, args.manifest)
+    refused = refused_commands(cmds, args.manifest, remaps=remaps,
+                               workdir=args.workdir)
     for i, why in sorted(refused.items()):
         print(f"    refused [{i+1}]: {why} -- not replayed")
     live = [c for i, c in enumerate(cmds) if i not in refused]
+    refused_writers = {}
+    for i, why in sorted(refused.items()):
+        _ins, out = board_io(cmds[i][1])
+        if out:
+            refused_writers[out] = (i + 1, why)
 
     prune_keep = None
     if not args.verbatim:
@@ -949,7 +1006,9 @@ def main():
                       "(a single-point zone kiss grades as disconnected). "
                       "Re-record the chain to end on route.py with the "
                       "plane nets in --nets.")
-        warn_contamination(live)
+        _live_idx = [i for i in range(len(cmds)) if i not in refused]
+        warn_contamination(live, refused_writers,
+                           written={k for k, i in enumerate(_live_idx) if i in prune_keep})
         for i in dropped:
             _ins, out = board_io(cmds[i][1])
             tool = next((os.path.basename(a) for a in cmds[i][1] if a.endswith(".py")), "?")
@@ -958,19 +1017,15 @@ def main():
         # Verbatim replays inherit hole files just the same -- the zynq #315
         # "still broken" verdict came from grading a verbatim replay's tail
         # that descended from a recorded artifact. Warn here too.
-        warn_contamination(live)
+        warn_contamination(live, refused_writers)
 
     # Seed input-only relative boards (e.g. <board>_input.kicad_pcb) into the dest
     # so the first command finds them -- without this the chain breaks (issue: a
     # relative seed file the original run dir had but no recorded command produces).
-    dest_dirs = [args.workdir] if args.workdir else [n for _o, n in remaps]
     for d in dest_dirs:
         seeded = seed_input_boards(args.manifest, live, d)
         if seeded:
             print(f"Seeded input board(s) into {d}: {', '.join(seeded)}")
-        side = seed_side_files(args.manifest, cmds, d)
-        if side:
-            print(f"Seeded side-file(s) into {d}: {', '.join(side)}")
 
     failures = 0
     timings = []   # per-command (index, seconds, returncode, argv) for later comparison
