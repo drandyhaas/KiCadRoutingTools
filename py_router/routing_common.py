@@ -702,7 +702,8 @@ def filter_already_routed(
             # ...but ROUTING only helps when there is live copper to join
             # (#659). Dead copper -- a cluster tied to no pad and no pour --
             # cannot improve connectivity no matter what the router welds to
-            # it, and the late orphan sweep deletes it at the end of the run.
+            # it, and the late orphan sweep deletes it at the end of the run
+            # (unless it holds locked or sense-held copper, which is kept).
             # Measured on spartan6_4layer, three such nets cost 448s, 2.0M A*
             # iterations on one link and 28 neighbours pulled in by the rip
             # escalation, fixed NONE of them, and bred three more debris nets.
@@ -715,19 +716,21 @@ def filter_already_routed(
             # authoritative graph which copper is dead, drop it, and re-count:
             # only if the REMAINDER is whole is there nothing left to route.
             #
-            # A net whose copper is ALL KiCad-locked is not a route either
-            # (#1261). Its pads grade connected; the strict fragments are the
+            # A net whose copper is ALL KiCad-locked or sense-held is not a
+            # route either (#1261, #1781). Its pads grade connected; the strict
+            # fragments are the
             # designer's pinned copper, which no pass may move or remove, so
             # "routing to join them" can only lay new copper beside it, and
             # puts a net the user pinned in front of every rip ladder and
             # stub-switch rung of the run.
             if n > 1 and _all_copper_locked(net_segments, net_vias):
                 print(f"  {net_name}: pads grade connected and every segment "
-                      f"and via is KiCad-locked -- its {n} strict fragment(s) "
+                      f"and via is KiCad-locked or sense-held -- its {n} "
+                      f"strict fragment(s) "
                       f"are pinned copper, not a route to finish (#1261)")
                 n = 1
             if n > 1:
-                from check_connected import net_dead_copper
+                from check_connected import net_dead_copper, dead_copper_fate
                 _dead_s, _dead_v = net_dead_copper(
                     pcb_data, net_id, net_segments, net_vias, net_pads,
                     net_zones)
@@ -746,7 +749,8 @@ def filter_already_routed(
                               f"extra fragment is DEAD copper "
                               f"({len(_dead_s)} segment(s), {len(_dead_v)} "
                               f"via(s) tied to no pad or pour) -- not a route "
-                              f"(#659); the late orphan sweep removes it")
+                              f"(#659); "
+                              f"{dead_copper_fate(_dead_s, _dead_v)}")
                         n = _n2
             if n > 1:
                 print(f"  {net_name}: pads grade connected, but its copper "
@@ -788,10 +792,13 @@ def filter_already_routed(
 
 def _all_copper_locked(segments, vias) -> bool:
     """True when a net has copper and every track and via of it is
-    KiCad-locked (graphics are not the net's track copper)."""
+    immutable: KiCad-locked, or held by a `sense:` group (#1279), which no
+    pass may move or remove either (is_immutable_copper; graphics are not
+    the net's track copper)."""
+    from kicad_parser import is_immutable_copper
     items = [s for s in segments if not getattr(s, 'graphic', False)]
     items += list(vias)
-    return bool(items) and all(getattr(x, 'locked', False) for x in items)
+    return bool(items) and all(is_immutable_copper(x) for x in items)
 
 
 def _max_fragments_within_one_outline(pcb_data, anchors):

@@ -30,7 +30,7 @@ import tempfile
 import time
 from typing import Dict, List, Optional, Tuple
 
-from kicad_parser import Segment as _Seg, Via as _Via
+from kicad_parser import Segment as _Seg, Via as _Via, is_immutable_copper
 
 KICAD_CLI_CANDIDATES = [
     shutil.which('kicad-cli'),
@@ -1172,7 +1172,8 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
     verdict and protected as input copper by every cleanup, so KiCad
     demands a link to it forever -- deleting the dead fragment IS the
     resolution (no cluster, no ratsnest demand). Graphics-art components
-    are never touched."""
+    are never touched, nor is a cluster holding locked or sense-held copper
+    (#1261): a locked lone via is a port a later step joins."""
     import math
     from check_connected import check_net_connectivity
     from geometry_utils import UnionFind
@@ -1249,6 +1250,8 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
         cvias = [v for j, v in enumerate(vias)
                  if via_reprs.get(j) is not None
                  and uf.find(via_reprs[j]) == root]
+        if any(is_immutable_copper(x) for x in csegs + cvias):
+            continue
         if csegs or cvias:
             return csegs, cvias
     return None
