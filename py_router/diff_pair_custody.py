@@ -808,7 +808,8 @@ def record_casualty(state, net_id: int, saved_result: dict,
 
 
 def run_casualty_reconcile(state, progress_callback=None,
-                           cancel_check=None) -> Dict:
+                           cancel_check=None, input_ids=None,
+                           register_partial=False) -> Dict:
     """Casualties-only end-of-run reconciliation (final_reconcile=
     'casualties-only', depth 1 - no recursive rip authority).
 
@@ -823,6 +824,20 @@ def run_casualty_reconcile(state, progress_callback=None,
          already committed as obstacles - one plain attempt, no rip-up;
       D. last resort: piece-level partial restore of the non-colliding copper
          (parity with route.py's #134 last resort) - a partial net beats zero.
+
+    input_ids is the set of id()s of the copper the calling run was handed
+    (its original segments and vias). D's write-list entry is built from it
+    (rip_up_reroute.restore_write_entry), as route.py's #134 last resort's
+    is: a restored INPUT piece rides no write-list (#1311). None appends the
+    whole restore, as before. register_partial=True also makes D's restore
+    the net's result in state.routed_results (route.py, #1758): route.py's
+    #87 write-list filter and its dead-end sweep's protect set
+    (_unfinished_net_ids) read only routed_results, so without it the
+    restored pieces were dropped and trimmed. route_diff leaves it off: it
+    has no #87 filter, and to it a routed_results entry means "routed this
+    run" -- its cleanup scope (diff_cleanup_scope) would then sweep the
+    restore, and the single-ended member fallback, the intra-pair matcher
+    and #521 protection would read it as a routed pair.
 
     progress_callback(i, n, label) fires per casualty in the restore and
     reroute loops (#527: this phase used to run with the PREVIOUS phase's
@@ -1022,7 +1037,26 @@ def run_casualty_reconcile(state, progress_callback=None,
             refresh_net_obstacles(state.working_obstacles,
                                   state.net_obstacles_cache, pcb_data, config,
                                   sorted(set(ripped_ids or []) | {net_id}))
-            state.results.append(pruned)
+            # #1758: on route.py (register_partial) the restore is the net's
+            # AUTHORITATIVE result, as the route.py #134 sibling's is (#508
+            # finding 8 / #1427): route.py's
+            # #87 filter keeps only results routed_results names, and its
+            # dead-end sweep protects only nets whose routed_results entry is
+            # stamped partial_restore_134 (_unfinished_net_ids) -- so a
+            # restore appended to results alone was dropped from the
+            # write-list and its pieces trimmed as dead ends, and the net
+            # shipped none of the copper this line says it restored. Only the
+            # nets whose copper the restore carries, and only where no
+            # result exists (A's entry condition: the casualty has none).
+            from rip_up_reroute import restore_write_entry
+            _wentry = (pruned if input_ids is None
+                       else restore_write_entry(pruned, input_ids))
+            if _wentry is not None:
+                state.results.append(_wentry)
+            if register_partial:
+                for _rid in sorted({o.net_id for o in keep_segs + keep_vias}):
+                    if _rid not in state.routed_results:
+                        state.routed_results[_rid] = pruned
             # Same registration the route.py sibling owes (see there): a net in
             # neither routed_net_ids nor remaining_net_ids is never stamped as
             # foreign copper by `build_single_ended_obstacles`, so this restore
