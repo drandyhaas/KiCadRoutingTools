@@ -820,7 +820,7 @@ def _foreign_hole_capsules(pcb_data):
 
       * no copper at all -- np_thru_hole mechanical / mounting holes, or a pad
         declaring no copper layer; and
-      * #441 RING-UNCOVERED PLATED pads, whose copper ring is SMALLER than their
+      * #441 RING-UNCOVERED PLATED pads, whose copper is NO WIDER than their
         drill (vfo_ctrl's U4 "MH": 0.001mm of copper over a 2.5mm drill). These
         have copper, so `_pad_has_no_copper` is False and the copper distance
         functions "see" them -- as a ~1um speck that keeps nothing off the real
@@ -863,7 +863,7 @@ def _foreign_hole_capsules(pcb_data):
                 # map, the grader and the movers agree on what an exposed drill
                 # is.
                 if not (_pad_has_no_copper(pad)
-                        or max(pad.size_x, pad.size_y) < pad.drill):
+                        or max(pad.size_x, pad.size_y) <= pad.drill):
                     continue
                 (p1x, p1y), (p2x, p2y), hr = pad_drill_capsule(pad)
                 nid.append(pad_net)
@@ -7310,7 +7310,7 @@ def _neck_exact_pads(pcb_data, layer):
 def _neck_exact_standoffs(pcb_data):
     """What _neck_zone_exact_fits does NOT measure, as bounding boxes
     ``(layer or None, x0, y0, x1, y1)`` (None = every layer): drill holes no
-    copper ring covers (NPTH, slots, a plated ring smaller than its drill --
+    copper ring covers (NPTH, slots, a plated ring no wider than its drill --
     the hole keep-outs of add_drill_hole_obstacles), keep-out rule areas,
     drawn keep-outs, and filled copper graphics (#1181 interiors). Fixed for
     a board, so cached on it."""
@@ -7331,7 +7331,7 @@ def _neck_exact_standoffs(pcb_data):
         for p in plist:
             if (p.drill or 0) <= 0:
                 continue
-            if _pad_has_copper(p) and max(p.size_x, p.size_y) >= p.drill:
+            if _pad_has_copper(p) and max(p.size_x, p.size_y) > p.drill:
                 continue
             (ax, ay), (bx, by), r = pad_drill_capsule(p)
             boxes.append((None, min(ax, bx) - r, min(ay, by) - r,

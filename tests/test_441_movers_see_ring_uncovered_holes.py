@@ -1,6 +1,6 @@
 """A ring-uncovered plated drill is a HOLE to the copper-movers too (#441).
 
-A pad whose copper ring is SMALLER than its drill leaves the hole exposed: a
+A pad whose copper is NO WIDER than its drill leaves the hole exposed: a
 track crossing it is cut by the drill, net-independently, exactly like an NPTH
 mounting hole. #441 taught that to two of the three consumers --
 `add_drill_hole_obstacles` stamps it (so the ROUTER keeps clear) and
@@ -81,6 +81,17 @@ def t_a_ring_uncovered_plated_hole_is_seen():
           f'hole)' if d < 1e8 else 'still 1e9 -- the movers remain blind')
 
 
+def t_copper_equal_to_its_drill_is_a_hole():
+    """#1753: copper no wider than its drill leaves no ring either. A 0.6mm pad
+    over a 0.6mm drill (an unnamed locating peg) is exposed exactly like the
+    0.001mm speck above; the strict `<` let it through as ordinary copper."""
+    from single_ended_routing import _foreign_hole_capsules
+    nid = _foreign_hole_capsules(_board(0.6, 0.6))[0]
+    check('t_copper_equal_to_its_drill_is_a_hole',
+          nid.size == 1,
+          f'{nid.size} capsule(s) for a 0.6mm pad over a 0.6mm drill (must be 1)')
+
+
 def t_a_properly_ringed_pad_is_not_a_hole():
     """The control. A pad whose copper SPANS its drill is ordinary copper --
     counting it here would make every through-hole pad a keep-out and strand
@@ -112,19 +123,29 @@ def t_the_three_consumers_use_one_rule():
     """
     import re
     root = os.path.join(os.path.dirname(__file__), '..', 'py_router')
-    want = re.compile(r'max\(pad\.size_x,\s*pad\.size_y\)\s*<\s*pad\.drill')
-    for fname, who in (('obstacle_map.py', 'the router\'s map'),
-                       ('check_drc.py', 'the grader'),
-                       ('single_ended_routing.py', 'the copper-movers')):
+    # #1753: copper EQUAL to its drill leaves no ring either, so a site reads
+    # `<= drill` (or its complement `> drill`), never `< drill` / `>= drill`.
+    # obstacle_map has two sites (the signal map and the plane via maps'
+    # via_floor_npth_holes, #1514); single_ended_routing has two (the movers
+    # and the neck's exact standoffs).
+    want = re.compile(r'max\((\w+)\.size_x,\s*\1\.size_y\)\s*(?:<=|>)\s*\1\.drill')
+    off = re.compile(r'max\((\w+)\.size_x,\s*\1\.size_y\)\s*(?:<|>=)\s*\1\.drill')
+    for fname, who, sites in (('obstacle_map.py', 'the router\'s maps', 2),
+                              ('check_drc.py', 'the grader', 1),
+                              ('single_ended_routing.py', 'the copper-movers', 2)):
         with open(os.path.join(root, fname)) as f:
             src = f.read()
+        found = len(want.findall(src))
+        left = len(off.findall(src))
         check(f't_{fname.split(".")[0]}_uses_the_ring_uncovered_test',
-              bool(want.search(src)),
-              f'{who} branches on copper-smaller-than-drill')
+              found == sites and left == 0,
+              f'{who}: {found} of {sites} site(s) treat copper equal to its '
+              f'drill as a hole; {left} still treat it as a ring')
 
 
 def main():
     t_a_ring_uncovered_plated_hole_is_seen()
+    t_copper_equal_to_its_drill_is_a_hole()
     t_a_properly_ringed_pad_is_not_a_hole()
     t_the_no_copper_population_still_qualifies()
     t_the_three_consumers_use_one_rule()

@@ -2574,7 +2574,7 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                     (_c1, _c2, _r) = pad_drill_capsule(pad)
                     if abs(_c2[0] - _c1[0]) > 1e-9 or abs(_c2[1] - _c1[1]) > 1e-9:
                         npth_slot_holes.extend(circles)
-                elif (max(pad.size_x, pad.size_y) < pad.drill
+                elif (max(pad.size_x, pad.size_y) <= pad.drill
                       and net_id not in nets_to_route_set):
                     # #441: a PLATED pad whose copper ring does NOT span its drill
                     # (a near-zero annular mounting hole -- vfo_ctrl's U4 "MH":
@@ -2756,7 +2756,7 @@ def via_floor_npth_holes(pcb_data: PCBData, routed_net_ids) -> list:
                 continue
             if not _pad_has_copper(_pad):
                 holes.extend(pad_drill_circles(_pad))
-            elif (max(_pad.size_x, _pad.size_y) < _pad.drill
+            elif (max(_pad.size_x, _pad.size_y) <= _pad.drill
                   and _nid not in routed_net_ids):
                 holes.extend(pad_drill_circles(_pad))
     return holes

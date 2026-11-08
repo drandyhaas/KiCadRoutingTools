@@ -6770,7 +6770,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                               f"{pad.component_ref}.{pad.pad_number}",
                               npth_track_clearance(lc, clearance, hole_clearance),
                               None))
-            elif max(pad.size_x, pad.size_y) < pad.drill:
+            elif max(pad.size_x, pad.size_y) <= pad.drill:
                 # #441: a PLATED pad whose copper ring does NOT span its drill
                 # (vfo_ctrl's U4 "MH": 0.001mm copper over a 2.5mm drill) leaves
                 # the hole exposed -- a track that crosses it is cut by the drill,
