@@ -474,6 +474,26 @@ def _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin) -> bool:
     return True
 
 
+def _keepout_gate(pcb_data):
+    """check_drc.copper_keepout_gate for the amplitude searches (#1761):
+    None when the board forbids copper nowhere."""
+    if pcb_data is None or getattr(pcb_data, 'board_info', None) is None:
+        return None
+    from check_drc import copper_keepout_gate
+    return copper_keepout_gate(pcb_data)
+
+
+def _bump_in_keepout(refuses, bump_segs, width, layer, net_ids) -> bool:
+    """True when a bump's copper (its centreline segments at `width`, on
+    `layer`) enters a keep-out forbidding it to any of `net_ids` (#1761)."""
+    for nid in net_ids:
+        if refuses([Segment(start_x=bx1, start_y=by1, end_x=bx2, end_y=by2,
+                            width=width, layer=layer, net_id=nid)
+                    for bx1, by1, bx2, by2 in bump_segs]):
+            return True
+    return False
+
+
 # Spatial-query slack for foreign copper wider than the config defaults (#370
 # B1): the per-object checks below grow the keep-out by (width - track_width)/2
 # (or (via.size - via_size)/2), so the cell queries must reach at least that much
@@ -715,6 +735,10 @@ def get_safe_amplitude_at_point(
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     edge_margin = edge_clearance + net_half
     edge_geom = _board_edge_geom(pcb_data)
+    # #1761: nor may a bump enter a keep-out the route kept out of (a
+    # tracks-not-allowed rule area, a net-filtered keep-out), at the arms'
+    # copper (centreline + half the net's width), as check_drc grades it.
+    _ko_refuses = _keepout_gate(pcb_data)
 
     # Binary search for safe amplitude
     # Start with max_amplitude and reduce if there are conflicts
@@ -743,6 +767,9 @@ def get_safe_amplitude_at_point(
         # interior cutout (real Edge.Cuts geometry; bbox fallback, #370 B1).
         if not _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin):
             continue  # try a smaller amplitude that stays inside the outline
+        if _ko_refuses and _bump_in_keepout(_ko_refuses, bump_segs, net_w, layer,
+                                            (net_id,)):
+            continue  # try a smaller amplitude that stays out of the area
 
         # Use spatial index if available, otherwise fall back to full iteration
         if clearance_index is not None:
@@ -3427,6 +3454,10 @@ def get_safe_amplitude_for_diff_pair(
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     edge_margin = edge_clearance + diff_pair_extra + net_half
     edge_geom = _board_edge_geom(pcb_data)
+    # #1761: the P/N copper must stay out of a keep-out too; the bump is a
+    # centreline, so it is judged at the pair's outer copper (2 x (offset +
+    # half width)) as each member's net.
+    _ko_refuses = _keepout_gate(pcb_data)
 
     # Combine all segments and vias
     all_segments = list(pcb_data.segments)
@@ -3456,6 +3487,10 @@ def get_safe_amplitude_for_diff_pair(
         # over an interior cutout (real Edge.Cuts geometry; bbox fallback, #370 B1).
         if not _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin):
             continue  # try a smaller amplitude that stays inside the outline
+        if _ko_refuses and _bump_in_keepout(
+                _ko_refuses, bump_segs, 2.0 * (diff_pair_extra + net_half),
+                layer_name, (p_net_id, n_net_id)):
+            continue  # try a smaller amplitude that stays out of the area
 
         # Check each bump segment
         for bx1, by1, bx2, by2 in bump_segs:

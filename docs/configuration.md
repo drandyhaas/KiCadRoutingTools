@@ -655,6 +655,12 @@ Notes:
   routing (`route_diff.py --keepout`), and across plane via-stitching and plane repair. KiCad
   native keep-out rule areas (`(zone … (keepout …))`) are honoured automatically everywhere too,
   with no flag. (Guide corridors, by contrast, steer single-ended/multipoint routing only.)
+  That includes the copper laid after the search: the soft-joint and stub-gap bridges and the
+  length-matching meander bumps refuse to enter a forbidding rule area or a net-filtered
+  keep-out (`check_drc.copper_keepout_gate`, the copper grown by half its width, #1760/#1761),
+  and route.py / route_diff.py report what the routed board still has inside a forbidding rule
+  area as `rule_area_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (rows of
+  area, net, tracks, vias; `[]` = clean; absent when the board has no such area).
 - It's a non-copper User layer, so the polygon never affects manufacturing — it only steers the
   router.
 - **Don't draw a zone over a pad you need to route.** Cells inside the polygon are blocked
