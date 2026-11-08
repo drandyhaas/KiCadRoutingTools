@@ -33,7 +33,10 @@ image has no KiCad). Rows:
     zone's own clearance when it is wider than the pair clearance;
   * the pad taps, which place on maps of their own: the #535 off-pad escape
     via of the #189 via-in-pad unblock moves to a site clear of a barrier
-    rather than land in it.
+    rather than land in it, and still does with the via search's site filter
+    off (the tap's own refusal of copper that enters);
+  * the barrier keep-out geometry those checks read (pour_guard), and the
+    net rescue's #666 fanout-rescue escape asking it before it ships.
 
     python3 tests/test_1260_pour_guard.py
 """
@@ -345,11 +348,80 @@ def test_tap(tmp):
     via, gap = escape([])
     check("control: with no barrier the escape via lands next to the island",
           via is not None and gap < 0.2, f"{gap:.3f} mm")
-    via, gap = escape([{'net': 'ZONE_NET', 'layer': 'F.Cu', 'polygons': [poly],
-                        'clearance': None}])
+    barrier = [{'net': 'ZONE_NET', 'layer': 'F.Cu', 'polygons': [poly],
+                'clearance': None}]
+    via, gap = escape(barrier)
     check("with the barrier the escape via and its stub keep the clearance "
           "from the island", via is not None and gap >= 0.2 - 1e-6,
           f"via {via and (via.x, via.y)}, {gap:.3f} mm")
+    # the two halves each on their own: the via search's site filter, and
+    # tap_pad_with_escalation's refusal of a rung whose copper still enters
+    # (the via -> pad trace, a via the edge clamp moved), which must hold
+    # even when the search offers it a site inside
+    import pour_guard
+    real = pour_guard.barrier_via_site_filter
+    pour_guard.barrier_via_site_filter = lambda *a, **k: None
+    try:
+        via, gap = escape(barrier)
+    finally:
+        pour_guard.barrier_via_site_filter = real
+    check("with no site filter, the tap still refuses a rung whose copper "
+          "enters the barrier", via is None or gap >= 0.2 - 1e-6,
+          f"via {via and (via.x, via.y)}, {gap:.3f} mm")
+
+
+def test_barrier_geometry():
+    from types import SimpleNamespace
+    import pour_guard
+    from kicad_parser import Segment, Via
+    from routing_config import GridRouteConfig
+    poly = [(10, 10), (20, 10), (20, 20), (10, 20)]
+    pcb = SimpleNamespace(nets={1: SimpleNamespace(name='ZONE_NET'),
+                                2: SimpleNamespace(name='SIG')})
+    cfg = GridRouteConfig(track_width=0.2, clearance=0.2, via_size=0.6,
+                          via_drill=0.3, layers=['F.Cu', 'B.Cu'])
+    check("no barrier: no site filter", pour_guard.barrier_via_site_filter(
+        cfg, pcb, 0.6) is None)
+    cfg.pour_barriers = [{'net': 'ZONE_NET', 'layer': 'F.Cu', 'polygons': [poly],
+                          'clearance': 0.5}]
+    ok = pour_guard.barrier_via_site_filter(cfg, pcb, 0.6)
+    # keep-out of a 0.6 via: the zone's 0.5 (over the pair's 0.2) + 0.3
+    check("a via site inside the island is refused", not ok(15, 15))
+    check("...and one whose keep-out reaches it (0.7 off, needs 0.8)", not ok(9.3, 15))
+    check("...and one clear of it is accepted (0.9 off)", ok(9.1, 15))
+
+    def seg(x1, y1, x2, y2, layer='F.Cu', w=0.2):
+        return Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2, width=w,
+                       layer=layer, net_id=2)
+
+    def via(x, y):
+        return Via(x=x, y=y, size=0.6, drill=0.3, layers=['F.Cu', 'B.Cu'], net_id=2)
+
+    check("a trace on the island's layer that enters names the pour",
+          pour_guard.barrier_entered(cfg, pcb, [seg(5, 15, 15, 15)], []) == 'ZONE_NET')
+    check("...a trace within the zone clearance of it too (0.55 off, needs 0.6)",
+          pour_guard.barrier_entered(cfg, pcb, [seg(5, 15, 9.45, 15)], []) == 'ZONE_NET')
+    check("...not one beyond it (0.65 off)",
+          pour_guard.barrier_entered(cfg, pcb, [seg(5, 15, 9.35, 15)], []) is None)
+    check("...nor one on another layer", pour_guard.barrier_entered(
+        cfg, pcb, [seg(5, 15, 15, 15, layer='B.Cu')], []) is None)
+    check("a through via over the island cuts it from any layer",
+          pour_guard.barrier_entered(cfg, pcb, [], [via(15, 15)]) == 'ZONE_NET')
+
+
+def test_rescue_escape_wiring():
+    """The net rescue's #666 fanout-rescue escape (generate_bga_fanout, maps
+    of its own) runs when the dogbone tap is refused, so it asks the same
+    question before its copper reaches the board."""
+    import ast
+    src = open(os.path.join(ROOT, 'py_router', 'net_rescue.py'), encoding='utf-8').read()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == 'rescue_failed_nets')
+    body = ast.get_source_segment(src, fn)
+    ask = body.find('barrier_entered(config, pcb_data, _gsegs, _gvias)')
+    ship = body.find('pcb_data.vias.extend(_gvias)')
+    check("the fanout-rescue escape asks barrier_entered", ask >= 0)
+    check("...before its copper is added to the board", 0 <= ask < ship, f"{ask} vs {ship}")
 
 
 def main():
@@ -368,6 +440,10 @@ def main():
             test_stamp(tmp)
             print("in process: pad taps")
             test_tap(tmp)
+            print("in process: barrier keep-out geometry")
+            test_barrier_geometry()
+            print("source: the net rescue's fanout escape")
+            test_rescue_escape_wiring()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
