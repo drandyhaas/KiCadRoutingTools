@@ -4043,6 +4043,15 @@ runs", defines them and each `reason`):
   no recipe for it, so carry it into the report rather than re-routing for it.
   The step has already matched it again on the copper its cleanup left (the
   record's `rematch`), so `reason` and `delta_mm` say what is left.
+- The exception (#1762): a pair in `single_ended_diff_pairs` that `check_drc`
+  finds out of range already ships as two single-ended members, so re-routing
+  it costs no coupling. One scoped `route.py --nets P N --force-reroute
+  --length-match-group P N --length-match-tolerance <tol>` strips both,
+  re-routes them and meanders the short one. Without `--force-reroute` a
+  connected pair is skipped (its `member_status` reads
+  `unmatched_board_copper`). A member the replan routes only partway keeps its
+  new, incomplete copper (only one that gets no copper is restored), so run
+  `check_connected` after it.
 
 **Do not proceed to the all-nets step with any other pair failure**: a pair in
 `failed_diff_pairs`, in `single_ended_diff_pairs` for any other `failure_reason`

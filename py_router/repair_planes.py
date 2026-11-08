@@ -1061,6 +1061,9 @@ def repair_planes(
     if getattr(pcb_data, '_input_copper', None) is None:
         from rip_up_reroute import mark_input_copper
         mark_input_copper(pcb_data)
+        # #1763: a standalone repair is its own invocation (failure hints)
+        from routing_diagnostics import note_invocation_input
+        note_invocation_input(pcb_data)
 
     # Resolve net IDs
     net_ids = []

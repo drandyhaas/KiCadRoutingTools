@@ -359,6 +359,7 @@ def _empty_results_data() -> dict:
         'pad_pairs_open': [],
         'keep_away': [],
         'length_match_groups': [],
+        'skew_moved_by_cleanup': [],
     }
 
 
@@ -2594,6 +2595,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     stash_hands_off(pcb_data, negated_net_names(
         net_name_patterns if net_name_patterns is not None else net_names,
         [n.name for n in pcb_data.nets.values()]))
+    if final_reconcile:
+        # #1763: which nets the INVOCATION was handed copper on, for the
+        # failure hints of the sub-runs that re-read the outer pass's board.
+        from routing_diagnostics import note_invocation_input
+        note_invocation_input(pcb_data)
     if final_reconcile or not _pcb_in_memory:
         # #980: the copper this run was handed. A nested in-memory sub-run
         # keeps its parent's mark, as it keeps the parent's ledgers.
@@ -3452,6 +3458,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"--rip-existing-nets only rips nets that block another "
                   f"route; pass --force-reroute to rip and re-route them "
                   f"from scratch (#515).")
+    # #1762: a --length-match-group member dropped here never routes, so the
+    # matcher can only grade it as board copper -- it cannot meander it. Say
+    # so here, with the flag that does put it back in the route set.
+    if length_match_groups and _already_routed and not force_reroute:
+        from net_queries import matches_net_filter as _mnf1762
+        from length_matching import force_reroute_hint as _frh1762
+        _conn1762 = [n for n, _reason in _already_routed
+                     if not _reason.startswith('Only')]
+        for _g1762 in length_match_groups:
+            if not _g1762 or (len(_g1762) == 1 and _g1762[0].lower() == 'auto'):
+                continue
+            _hit1762 = [n for n in _conn1762 if _mnf1762(n, _g1762)]
+            if _hit1762:
+                print(f"NOTE: {len(_hit1762)} --length-match-group member(s) "
+                      f"are already fully connected and will NOT be re-routed "
+                      f"({', '.join(_hit1762[:6])}"
+                      f"{', ...' if len(_hit1762) > 6 else ''}): the group "
+                      f"grades them as existing board copper and cannot "
+                      f"meander them -- {_frh1762(_hit1762)} (#1762)")
     # #1112: with pours in this step's scope, "nothing to route" is the FILL
     # MODEL's verdict, and the plane finalize at the end of the run is the pass
     # that checks it against KiCad's exact fill (its oracle leg is ungated on
@@ -4686,7 +4711,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # when nothing safe can be re-instated. Engine-side, so the GUI inherits.
     from diff_pair_custody import run_casualty_reconcile
     casualty_summary = None if _ckpt_stop else run_casualty_reconcile(
-        state, progress_callback=progress_callback, cancel_check=cancel_check)
+        state, progress_callback=progress_callback, cancel_check=cancel_check,
+        input_ids=original_segment_ids | original_via_ids,
+        register_partial=True)
 
     # Issues #331/#371: last-chance scoped fine-parameter rescue for nets the
     # whole pipeline (main loop, rip-up ladder, reroute loop, Phase 3, #134
@@ -5130,6 +5157,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _protect_unfinished = _unfinished_net_ids(
         routed_results, single_ended_nets,
         getattr(state, 'terminal_restores', None))
+    # #1759: the cleanup's graze passes change copper LENGTH, and a group a
+    # skew rule grades (a pair an earlier route_diff step matched and
+    # recorded, a .kicad_dru skew rule) gets no re-match here -- so measure
+    # every graded group in scope before and after it, and disclose the ones
+    # it moved out of their tolerance.
+    _skew_path1759 = input_file or getattr(pcb_data, 'source_path', '') or ''
+    _skew_before1759 = {}
+    if not (_ckpt_stop and not _ckpt_cleanup):
+        try:
+            from check_drc import skew_group_snapshot as _sgs1759
+            _skew_before1759 = _sgs1759(pcb_data, _skew_path1759,
+                                        sweep_scope_ids)
+        except Exception as _e1759:
+            print(f"  (#1759 skew snapshot failed: {_e1759})")
     _cleanup = None if (_ckpt_stop and not _ckpt_cleanup) else run_post_route_cleanup(
         results, pcb_data, sweep_scope_ids, config,
         protect_net_ids=_protect_unfinished,
@@ -5166,6 +5207,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # and the reconciliation route around this copper, and collapsing it
         # first steered their rip/reroute (cparti_fpga 6 open nets -> 15).
         strict_collapse=False)
+    skew_moved_by_cleanup = []
+    if _skew_before1759:
+        try:
+            from check_drc import skew_moved_out_of_range as _smo1759
+            _ids1759 = {m for (_r, _ms) in _skew_before1759 for m in _ms}
+            skew_moved_by_cleanup = _smo1759(
+                _skew_before1759,
+                _sgs1759(pcb_data, _skew_path1759, _ids1759))
+        except Exception as _e1759:
+            print(f"  (#1759 skew comparison failed: {_e1759})")
+    for _sm in skew_moved_by_cleanup:
+        _lim = ' / '.join(f"{_k[:3]} {_sm[_k]:g}" for _k in ('min_mm', 'max_mm')
+                          if _sm[_k] is not None)
+        print(f"  {RED}WARNING{RESET}: the post-route cleanup moved "
+              f"{' / '.join(_sm['nets'])} out of its skew rule "
+              f"'{_sm['rule']}' ({_lim} mm): skew {_sm['skew_before_mm']:.4f} "
+              f"-> {_sm['skew_after_mm']:.4f} mm"
+              + ("" if _sm['was_within'] else " (already out, now further)")
+              + " -- route.py does not re-match it (#1759)")
     # The cleanup pipeline MOVES and STRIPS copper -- nudge_grazing_octolinear /
     # _microshift / _vias re-bend and shift it, the prunes, sweeps and the #536
     # smoother delete and replace it -- all by mutating pcb_data directly. None
@@ -6382,6 +6442,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'ripped_open_uncounted are additionally not in either scoped term: '
             'if they are also outside the multipoint pad deficit, the run\'s '
             'open-net verdict is understated by that many.')
+    # #1759: the skew-graded groups this step's cleanup moved out of their
+    # tolerance (a protected pair is otherwise listed only under
+    # protected_skipped, which reads as "left alone").
+    if skew_moved_by_cleanup:
+        summary['skew_moved_by_cleanup'] = skew_moved_by_cleanup
     try:
         from protected_nets import PROTECTED_SKIPPED
         if PROTECTED_SKIPPED:
@@ -6932,6 +6997,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # or None, so it stays in JSON_SUMMARY['length_match_auto'] only:
             # every key here is a list (`_empty_results_data`).
             'length_match_groups': summary.get('length_match_groups', []),
+            # #1759: same data as JSON_SUMMARY['skew_moved_by_cleanup'].
+            'skew_moved_by_cleanup': summary.get('skew_moved_by_cleanup', []),
         }
         # #666 sequence point 1, GUI front: the CLI applies the main pass's
         # moves to the file it is about to write, mirrors them and re-welds
@@ -8241,10 +8308,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # dropped later by the sub-run's own filter_rippable_names.
                 # (Shared by the initial #103 escalation and the #572
                 # lap-authority harvest below.)
+                # #1757: the nets this step's --nets NEGATES are read from
+                # the run's hands-off set (#1621, stashed from the RAW
+                # patterns -- `net_names` is already expanded, so a '!'
+                # read off it found nothing and the excluded net was
+                # ripped here). An operator --rip-existing-nets naming it
+                # still rides _rk's own list, unfiltered.
+                from protected_nets import hands_off_names as _ho103
+                _off103 = _ho103(pcb_data)
+                _names = [n for n in (_names or []) if n not in _off103]
                 if not (_names and net_names):
                     return list(_names or [])
-                from net_queries import (matches_net_filter as _mnf,
-                                         split_net_patterns as _snp)
+                from net_queries import matches_net_filter as _mnf
                 # PROTECTED names are dropped here UNCONDITIONALLY: the
                 # #521 override door ("an exact name overrides") exists for
                 # DELIBERATE operator naming, and #103 hints are machine-
@@ -8255,9 +8330,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # anywhere.
                 from protected_nets import protection_map as _pm103
                 _prot103 = _pm103(pcb_data, input_file)
-                _all_names103 = {n.name for n in pcb_data.nets.values()}
-                _, _neg103 = _snp(net_names, _all_names103)
-                from net_queries import net_pattern_matches as _npm103
                 _zone_ids103 = {z.net_id
                                 for z in (getattr(pcb_data, 'zones', None)
                                           or [])}
@@ -8268,8 +8340,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if _mnf(_bn, net_names):
                         _keep103.append(_bn)          # in scope: as before
                         continue
-                    if any(_npm103(_bn, _p) for _p in _neg103):
-                        continue                       # negated BY PLAN
                     _bid = next((i for i, nn in pcb_data.nets.items()
                                  if nn.name == _bn), None)
                     if _bid is None or _bid in _zone_ids103:

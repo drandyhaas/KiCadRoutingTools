@@ -757,7 +757,8 @@ def run_reroute_loop(
                         print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                         from routing_diagnostics import static_boxin_hint, condense_hint
                         hint, _boxin = static_boxin_hint(
-                            result, config, pcb_data, return_verdict=True)
+                            result, config, pcb_data, return_verdict=True,
+                            net_id=ripped_net_id)
                         hint = condense_hint(hint)
                         if hint:
                             print(f"  {hint}")
