@@ -149,16 +149,19 @@ def rot_key(rot) -> float:
 
 
 def _turns(state, pcb, geometry, entry, edge) -> Tuple[List[float], str, str]:
-    """The turns `entry`'s part may take on `edge`, its mating face, and
-    what the declared face and the body's reading disagree on ('' when
-    nothing): the turns that point the face at the edge -- the entry's
-    declared `mating_face` where the body reads none or a weak one, else the
-    face its body reads (`mating.face_with_declaration`, #1586) -- or every
+    """The turns `entry`'s part may take on `edge`, the side of it that goes
+    to the edge, and what the declared face and the body's reading disagree
+    on ('' when nothing): the turns that point that side at the edge -- its
+    mating face, the entry's declared `mating_face` where the body reads none
+    or a weak one, else the face its body reads
+    (`mating.face_with_declaration`, #1586), or for an entry that `opens`
+    inward the side opposite it (`mating.edge_side`, #1769) -- or every
     quarter turn when it has none in the plane (its own turn first)."""
-    from .mating import face_with_declaration, facing_edge, mating_face_local
+    from .mating import edge_side, face_with_declaration, facing_edge, mating_face_local
     ref = str(entry['ref'])
     lf = mating_face_local(pcb.footprints[ref], geometry.get(ref))
     face, _source, said = face_with_declaration(lf, entry.get('mating_face'))
+    face = edge_side(face, entry.get('opens'))
     if face:
         return [r for r in ROTS if facing_edge(face, r) == edge], face, said
     own = rot_key(state.parts[ref].rot)
@@ -1325,7 +1328,9 @@ def seats(state, pcb, pcb_file, intent, movable, crowded=None
         was[ref] = (part.x, part.y, part.rot)
         _sit(part, seat)
         said[ref] = (f"edge connector {ref} on the {edge} edge"
-                     + (f", facing it ({face})" if face else
+                     + ((f", its back to it ({face}), opening into the board"
+                         if c.get('opens') == 'inward' else f", facing it ({face})")
+                        if face else
                         f", no mating face: {len(lines)} turn(s) seat there")
                      + (f" ({disagree})" if disagree else '')
                      + _deeper_text(edge, {r: d for r, d in deeper.items() if r in lines})

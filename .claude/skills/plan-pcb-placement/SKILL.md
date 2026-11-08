@@ -520,6 +520,14 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   seat lays the header with its long side along the edge and the cable runs
   off the board. Without it, a 2x05 header lay across its edge on most
   seeds, its cable along the edge.
+- **A socket that opens into the board.** An M.2 or SO-DIMM socket at an
+  edge has its back on the edge and its card lying over the board. Leave
+  `mating_face` as the side its OPENING is on (the body's reading, or
+  declared as above) and write `"opens": "inward"` on its row: the seat
+  puts its back at the edge and the facing clause reads `back to <edge>
+  (<side>), opens into the board (<face>)`. Declaring its back as
+  `mating_face` instead seats it the same way but grades the back as its
+  opening (#1769).
 - **The pin rows of a plug-in module** (a DIP or breadboard module, rows
   that go into a socket): the socket sets their spacing, so declare each row
   in `fixed_poses[]` (`basis: derived_default`), not on its edge: parallel,

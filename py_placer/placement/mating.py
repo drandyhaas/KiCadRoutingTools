@@ -239,6 +239,26 @@ def mating_face_local(fp, geom) -> LocalFace:
                      votes, marker=mk)
 
 
+#: #1769: `edge_connectors[].opens`, which way a seated edge part's opening
+#: faces: `outward` (the default: out of its edge) or `inward` (into the
+#: board, its back to the edge -- an M.2 or SO-DIMM socket whose card lies
+#: over the board).
+OPENS = ('outward', 'inward')
+OPENS_INWARD = 'inward'
+_OPPOSITE_FACE = {'+x': '-x', '-x': '+x', '+y': '-y', '-y': '+y'}
+
+
+def edge_side(face: Optional[str], opens=None) -> Optional[str]:
+    """#1769: the side of a part, in its own frame, an edge seat turns to its
+    edge and the facing conjunct grades there: the side its opening `face` is
+    on, or for a part declared to open INTO the board (`opens` 'inward') the
+    side opposite it. The opening's face stays what the body reads (or the
+    entry declares): only which side meets the edge changes."""
+    if face in _OPPOSITE_FACE and opens == OPENS_INWARD:
+        return _OPPOSITE_FACE[face]
+    return face
+
+
 def face_with_declaration(lf: LocalFace, declared) -> Tuple[Optional[str], str, str]:
     """`(face, source, disagreement)`: the face a seat turns by and the grade
     grades, given the body's reading `lf` and an intent's declared
