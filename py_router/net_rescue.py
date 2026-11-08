@@ -1254,6 +1254,37 @@ def escape_keepout_refusal(pcb_data, segments, vias):
     return gate(segments, vias) if gate else ''
 
 
+def rescue_candidates(pcb_data, routed_results, single_ended_nets):
+    """The nets rescue_failed_nets attempts, as (name, id, kind) rows: kind
+    'failed' for a net with no result (the rescue's copper becomes it), and
+    'partial' for a result the net has not finished (the rescue's copper is
+    folded into it)."""
+    candidates = []
+    for net_name, net_id in sorted(set(single_ended_nets)):
+        if net_id not in pcb_data.nets:
+            continue
+        if len(pcb_data.pads_by_net.get(net_id, [])) < 2:
+            continue
+        result = routed_results.get(net_id)
+        if result is None:
+            candidates.append((net_name, net_id, 'failed'))
+        elif (result.get('failed_pads_info')
+              or result.get('partial_restore_134')):
+            # A partial restore (route.py's #134 last resort, the casualty
+            # reconcile's branch D) is the net's result but carries no
+            # failed_pads_info: it is the pre-rip route's surviving pieces,
+            # "PARTIAL for a later pass" -- and this is that pass. Read
+            # only the pad debt and the net is neither failed nor partial,
+            # so the rescue skipped it (#1758 follow-up: once branch D made
+            # its restore the net's result, ottercast_audio's BT_UART_CTS,
+            # which the rescue used to recover as a failed net, shipped in
+            # two pieces). The same reading as route.py's
+            # _unfinished_net_ids; the rescue's _net_component_info still
+            # skips a net the checker grades connected.
+            candidates.append((net_name, net_id, 'partial'))
+    return candidates
+
+
 def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                        progress_callback=None, cancel_check=None):
     """Scoped fine-parameter rescue for every still-failed/partial net.
@@ -1285,17 +1316,8 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
     config = state.config
     routed_results = state.routed_results
 
-    candidates = []
-    for net_name, net_id in sorted(set(single_ended_nets)):
-        if net_id not in pcb_data.nets:
-            continue
-        if len(pcb_data.pads_by_net.get(net_id, [])) < 2:
-            continue
-        result = routed_results.get(net_id)
-        if result is None:
-            candidates.append((net_name, net_id, 'failed'))
-        elif result.get('failed_pads_info'):
-            candidates.append((net_name, net_id, 'partial'))
+    candidates = rescue_candidates(pcb_data, routed_results,
+                                   single_ended_nets)
     if not candidates:
         return None
 
