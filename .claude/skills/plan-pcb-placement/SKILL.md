@@ -1511,8 +1511,9 @@ Routing Completes): run them once, here, not again inside the routing.
     the default `--grid-step 0.1` against `0.05` (`0.025` at ≤0.4 mm pitch),
     sizes unchanged, keeping the better-graded result. A finer grid never
     widens a gap, but 0.1 can miss one that exists (a 0.4 mm-pitch QFN: 0.05 routed
-    9 of 11 nets boxed in at 0.1, #1765); below 0.05 it has not helped where it
-    was measured. Only what stays boxed in after that is placement. First, if that part is a fine-pitch
+    9 of 11 nets boxed in at 0.1, #1765); below 0.05 the gain shrinks (0.025
+    routed one more net there, and none on run 20's board). Only what stays
+    boxed in after that is placement. First, if that part is a fine-pitch
     perimeter part and the chain fanned nothing out for it, route that arm
     (plan-pcb-routing Step 3, rule 3): it costs one route, and re-placing
     costs a whole pass.

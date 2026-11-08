@@ -3889,8 +3889,9 @@ you.
   routed 9 of the 11 nets boxed in at 0.1 (#1765). The sign varies: on the
   same nets at other sizes 0.05 did worse, which is why it is an A/B and not a
   default. Only what is still boxed in on the better arm is a placement
-  question. The "not a lever" claim holds below 0.05 only, as far as it was
-  measured (run 20, one board): `0.05 -> 0.025 -> 0.0125`, about 40 minutes,
+  question. Below 0.05 the gain shrinks, which is why the finer arm is 0.025
+  only at ≤0.4 mm pitch: on that QFN-56, 0.025 routed one more net than 0.05,
+  and on run 20's board `0.05 -> 0.025 -> 0.0125`, about 40 minutes,
   left `unrouted` at exactly BUSY / Net-(U4-XTAL_P) / SCK at every
   resolution. Note also that "ripup budget" is not a lever here at all — "no
   rippable blockers found" means the blockers are not rippable copper.
