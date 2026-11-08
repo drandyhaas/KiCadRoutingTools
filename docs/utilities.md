@@ -294,6 +294,8 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
 python3 -X utf8 py_placer/place_simple.py board.kicad_pcb 's{seed}.kicad_pcb' \
     --groups groups.json --intent intent.json --seeds 0-3 [--clustered-seeds 2-3] \
     [--jobs 4] --json 's{seed}.json'
+# keep the board's poses, move only the parts that are not legal (#1756)
+python3 -X utf8 py_placer/place_simple.py board.kicad_pcb fixed.kicad_pcb     --groups groups.json --intent intent.json --legalise-only [--json report.json]
 # where each group would go, non-binding (#1481): one anchored seed, nothing written
 python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
     --groups groups.json --intent intent.json --preview [--seed 0] [--draft-zones draft.json]
@@ -309,6 +311,33 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
   changed. (The anchored start's own solve, unannealed, is no preview: on a
   pile with nothing fixed it puts every group on the board's centre.)
 
+- **Legalise only** (`--legalise-only`, #1756). No scatter and no anneal:
+  the board's poses are kept and only the parts that are not legal where
+  they stand move. Legal means **KiCad's standard**, read with the
+  checkers' own functions, not place_simple's spacing: pad or drawn copper
+  past the outline (check_assembly, check_drc), pad / hole clearance at
+  check_drc's clearance model, a body inside another or a frame pin under a
+  courtyard, the board's rule-area keep-outs and the intent's keep-outs and
+  zones, and courtyard overlap as `check_assembly --baseline <the input>`
+  grades it (the project's courtyards_overlap severity honoured): a
+  courtyard pair the board already had is left alone, and a part closer to
+  a neighbour than place_simple's spacing is not moved -- that spacing is
+  only preferred for a pose a part moves to, within 0.5 mm of the nearest.
+  The illegal parts move one at a time -- the move that makes the most others
+  legal first, then the shortest step at the part's own turn -- each to its
+  nearest legal pose (6 mm reach; an edge-seated part slides along its
+  edge), with the anneal's repair, shoves only, for a part no such pose
+  frees -- legal parts held as walls first, then shoved only to another
+  legal pose. A part that was legal never ends illegal, no intent decap
+  limit or claim ends further past its limit, no part ends more than 6 mm
+  from where the board put it, and an edge-seated part is never
+  shoved off its edge; a part those rules leave no legal pose is left where
+  it is and named (exit 4). A legal board comes back with every pose as it was. Use it to fix a
+  mostly-good placement (a human layout, a seed after hand edits) without
+  re-placing it. It places one board, so `--seeds`, `{seed}` without
+  `--seed`, the start lists and counts, `--moves` and `--preview` are
+  refused; the log names each part moved and how far, and the report's
+  `mode`, `start` (`board`) and `legalised` keys say what it did.
 - **Inputs.** `--groups` is the groups file (`py_tools/check_groups.py`
   checks it): each group a set of parts kept together, with optional `near`,
   `apart` and `edge` hints and a `side`. `--intent` is the emitted intent
@@ -1693,7 +1722,11 @@ python3 py_tools/edge_closeup.py placed.kicad_pcb J7 J3:north --out-dir edges [-
 Each part is read on the outline edge its pads are nearest unless
 `REF:north|south|east|west` names it, and rendered from the side standing
 outside that edge (`back` for north, `front` south, `left` west, `right`
-east). The scale defaults to 40 px/mm. kicad-cli's scale at zoom 1 is
+east). Name the edge the part is declared to face (its intent row, or
+check_floorplan's `facing` clause): a part read on its nearest edge whose
+next-nearest edge is within 1 mm as near (a corner part, or one as long as
+the board's side) may face the other one, and its line then ends `corner:
+also N mm from <edge>` (`corner` in the JSON rows, #1771). The scale defaults to 40 px/mm. kicad-cli's scale at zoom 1 is
 measured per side (two renders a 1 cm pivot apart), not assumed, and the
 zoom follows from it. One line per part names the image, the edge, the scale
 and whether the part's 3D model is declared and resolves; a part without one

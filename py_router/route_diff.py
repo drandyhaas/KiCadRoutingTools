@@ -773,6 +773,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     from rip_up_reroute import reset_run_ledgers, mark_input_copper
     reset_run_ledgers(pcb_data)
     mark_input_copper(pcb_data)  # #980
+    # #1763: and which nets it was handed copper on, for the failure hints
+    from routing_diagnostics import note_invocation_input
+    note_invocation_input(pcb_data)
     # #962: the input's vias as values, for the ship-time Type VII stamp
     from fab_notes import via_snapshot as _via_snapshot962
     _input_vias962 = _via_snapshot962(pcb_data.vias, pcb_data)  # #1171: + sites
@@ -2195,24 +2198,6 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         total_time += rb_t
         total_iterations += rb_i
 
-    # Report nets whose far-apart (uncoupled) terminal pads were peeled off the
-    # coupled chain (issue #121). Those pads are not a coupled differential
-    # connection (e.g. spread-out test points), so they are left for a separate
-    # single-ended pass (route.py); the plan-pcb-routing workflow sequences that
-    # after this step. Surfaced here and in JSON_SUMMARY so the follow-up knows
-    # which nets still need P->P / N->N routing.
-    single_ended_followup = sorted(state.diff_pair_single_ended_nets.values())
-    if single_ended_followup:
-        print("\n" + "=" * 60)
-        print(f"{len(single_ended_followup)} net(s) have far-apart terminal pads "
-              f"peeled from the coupled chain - route them single-ended next:")
-        for nm in single_ended_followup:
-            print(f"  {nm}")
-        print("  e.g.  route.py <this_output> <out2> --nets " +
-              " ".join(f"'{n}'" for n in single_ended_followup[:3]) +
-              (" ..." if len(single_ended_followup) > 3 else ""))
-        print("=" * 60)
-
     # Run reroute loop for nets that were ripped during diff pair routing
     rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
         state, route_index_start=route_index,
@@ -2245,7 +2230,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                                    build_pair_reports, deferred_reasons_text,
                                    run_single_ended_member_fallback)
     casualty_summary = run_casualty_reconcile(
-        state, progress_callback=progress_callback, cancel_check=cancel_check)
+        state, progress_callback=progress_callback, cancel_check=cancel_check,
+        input_ids=original_segment_ids | original_via_ids)
     _recovered = (len(casualty_summary['restored'])
                   + len(casualty_summary['rerouted']))
     if _recovered:
@@ -2270,6 +2256,25 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     from diff_pair_loop import couple_fallback_pairs_narrowed
     successful += couple_fallback_pairs_narrowed(state, diff_pair_ids_to_route,
                                                  se_fallback_summary)
+
+    # Report the nets left single-ended (state.diff_pair_single_ended_nets),
+    # grouped by WHY (#1764): a pair's far terminals peeled off its coupled
+    # chain (issue #121) or an electrically short pair is left for the
+    # all-nets route.py by design; a pair whose coupled route FAILED should be
+    # coupled, and route.py would de-pair it (#1399), so it is pointed at a
+    # route_diff --force-reroute retry instead. Printed after the step's own
+    # single-ended fallback and narrowed coupling, so it says what they did
+    # rather than promising a command whose outcome is not known yet.
+    from diff_pair_custody import (single_ended_followup_reasons,
+                                   single_ended_followup_lines,
+                                   _member_connected)
+    _followup_reasons = single_ended_followup_reasons(
+        state, diff_pair_ids_to_route)
+    _followup_open = {nm for nid, nm in state.diff_pair_single_ended_nets.items()
+                      if not _member_connected(pcb_data, nid)}
+    for _line in single_ended_followup_lines(_followup_reasons,
+                                             _followup_open, se_fallback_summary):
+        print(_line)
 
     # Apply length matching if configured
     _length_match_report = {}
@@ -2698,6 +2703,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
         'polarity_swap_denied_pairs': sorted(state.polarity_swap_denied_pairs),
         'single_ended_followup_nets': sorted(state.diff_pair_single_ended_nets.values()),
+        # #1764: {net: why} for the same nets -- 'peeled-terminals' and
+        # 'electrically-short' are left for the all-nets route.py by design
+        # (diff_pair_custody.FOLLOWUP_BY_DESIGN); any other value is the code
+        # of a coupled route that FAILED, retried with route_diff, not route.py.
+        'single_ended_followup_reasons': single_ended_followup_reasons(
+            state, diff_pair_ids_to_route),
         'skipped_bad_fanout': sorted(skipped_bad_fanout),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in summarize_target_swaps(target_swaps)],
         'layer_swaps': total_layer_swaps,
@@ -2765,6 +2776,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         summary['net_keepouts'] = _nk_found
         print(f"{RED}{_nk_format(_nk_found, 'the routed board')}{RESET}"
               if _nk_found else _nk_format(_nk_found, 'the routed board'))
+    # #1760/#1761: likewise the copper inside a board keep-out RULE AREA that
+    # forbids it (absent on a board with none; route.py reports the same key).
+    from check_drc import rule_area_audit, format_rule_area_audit
+    _ra_found = rule_area_audit(pcb_data, pcb_data.segments, pcb_data.vias)
+    if _ra_found is not None:
+        summary['rule_area_keepouts'] = _ra_found
+        print(f"{RED}{format_rule_area_audit(_ra_found, 'the routed board')}{RESET}"
+              if _ra_found else format_rule_area_audit(_ra_found, 'the routed board'))
     try:                       # #653: env knobs into the machine-readable
         import env_knobs as _ek653   # summary, so a harness can detect a
         summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
@@ -2872,6 +2891,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # Net-filtered keep-outs: JSON_SUMMARY['net_keepouts'] (None
             # without a keep-out, [] when the copper is clean).
             'net_keepouts': summary.get('net_keepouts'),
+            # #1760/#1761: JSON_SUMMARY['rule_area_keepouts'] (None without
+            # a forbidding rule area, [] when the copper is clean).
+            'rule_area_keepouts': summary.get('rule_area_keepouts'),
             # successful/failed only count pairs that were coupled-routed or
             # outright failed -- pairs deferred to the single-ended pass
             # (electrically short, or coupled route failed), and pairs

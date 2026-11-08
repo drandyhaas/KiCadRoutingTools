@@ -148,7 +148,7 @@ side, source, suspect, suspect_reason, why
 | `defaults` | `zone_tolerance_mm` |
 | `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `rotation`, `rotation_candidates`, `fence_mm` (a band that wide round `zone` no part may use, members included; see "`fence_mm`" below; needs `min_reader` 16), `why` (or `note` / `reason`), `context`. `rigid` is refused by name: its only reader, the retired quench engine, is gone, and `place_simple` moves each group of the groups file together |
 | `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `max_height_mm` (a part whose height is KNOWN and no more than this may stand in it; see "`covers[]` and `heights[]`" below; needs `min_reader` 15), `why` (or `note` / `reason`), `context` |
-| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `center_on_edge`, `along_edge_band`, `side` (`F`/`B`, the connector's face, graded as the advisory `edge_connector_side`; needs `min_reader` 6), `mating_face` (`+x`/`-x`/`+y`/`-y`, see "Which way it opens" below), `mating_face_source` (free text: what that face was read off), `class`, `why` (or `note` / `reason`), `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm`, `overhang_face` (`+x`/`-x`/`+y`/`-y`: the side a pile's floor row's band was read along, see "On a pile" below; needs `min_reader` 24) |
+| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `center_on_edge`, `along_edge_band`, `side` (`F`/`B`, the connector's face, graded as the advisory `edge_connector_side`; needs `min_reader` 6), `mating_face` (`+x`/`-x`/`+y`/`-y`, see "Which way it opens" below), `mating_face_source` (free text: what that face was read off), `opens` (`"outward"`, the default, or `"inward"`: the opening faces into the board and its back goes to the edge, see "A part that opens into the board" below; needs `min_reader` 25), `class`, `why` (or `note` / `reason`), `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm`, `overhang_face` (`+x`/`-x`/`+y`/`-y`: the side a pile's floor row's band was read along, see "On a pile" below; needs `min_reader` 24) |
 | `edge_connectors[].overhang_mm` | `min`, `max` |
 | `edge_connectors[].center_on_edge` | `tolerance_mm` (required — see below) |
 | `edge_connectors[].along_edge_band` | `from`, `to` |
@@ -337,6 +337,7 @@ Each `min_reader` level and the keys it covers:
 | 22 | `covers[].holes[]` |
 | 23 | `covers[].start_mm`, a `covers[].holes[]` or `covers[].standoffs[]` `length_mm` below 0 |
 | 24 | `edge_connectors[].overhang_face` |
+| 25 | `edge_connectors[].opens` |
 
 The emitter and the design-brief compiler stamp the level their output needs.
 
@@ -590,10 +591,17 @@ points west, not out of the east edge
   pads) -- not the text's position, which sits at an end of the line. The
   text's stored angle, which any tool or hand can turn, breaks only a tie
   between the nearest lines along the two axes, a text sitting where the
-  edge line meets the body's side (#1715). A marker that agrees with the body's face makes it STRONG
+  edge line meets the body's side (#1715). The axes are compared on the
+  text's gap off each line's run where it sits within 1.5 mm past the line's
+  end, so a text on the edge line's extension reads that line, not a body
+  line across it (#1770). A marker that agrees with the body's face makes it STRONG
   (`basis` gains `+marker`, so esp_prog's USB1 and orangecrab's J3, at 1.05
   and 0.63 mm, fail at ERROR when turned away); one that contradicts it makes
-  the face abstain, never fail; with no marker, the body's reading stands. It
+  the face abstain, never fail -- unless only the text's angle chose its
+  line, which may confirm any face but vetoes only a weak one, never a
+  strong reading, and against which a recorded `mating_face_source` silences
+  the WARN (#1770); with no marker,
+  the body's reading stands. It
   never names a face the body does not. Calibrated on KiCad 10's 154 marked
   stock footprints, it agrees with all 73 strong body faces, at every
   quarter turn.
@@ -667,6 +675,21 @@ STRONG reading overruling the declaration, nor a PCB-edge marker against it:
 those are evidence, a source is the author's word, which nothing here checks.
 It is refused without a `mating_face`, or empty. A design brief's
 `interfaces[]` carries it the same way.
+
+**A part that opens into the board: `opens`.** An M.2 or SO-DIMM socket at
+an edge, its card lying over the board, has its back on the edge and its
+opening facing the board's interior. `"opens": "inward"` on its row says so
+(#1769). The face is still the side its opening is on -- the body's reading
+(KiCad 10's SODIMM-260 socket reads `+x` strong, the side its module lies
+on) or a declared `mating_face` -- and stays evidence as before; the seat
+points the OPPOSITE side at the declared edge, and the facing clause grades
+that side and says so: `back to north (-y), opens into the board (+y)
+[fab, strong] pass`. Declaring the part's back as `mating_face` instead
+would seat it the same way and grade the back as its opening, so declare
+the opening and `opens`. `"outward"` is the default, the meaning every row
+without the key has. A row with `opens` is graded whatever its class, as a
+declared `mating_face` is. A design brief's `interfaces[]` carries it the
+same way.
 
 **A face belongs to one drawing's frame.** `+y` is a side of the footprint
 as drawn, and a copy of the same part -- a vendor's or importer's drawing,

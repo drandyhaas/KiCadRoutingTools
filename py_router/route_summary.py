@@ -39,7 +39,7 @@ __all__ = ['merge_summaries', 'merge_route_summaries', 'summary_min',
            'named_nets', 'regrade_record', 'GATE_RE',
            'apply_improvement_gate', 'SHIPPED_RULES_RE',
            'sink_summary', 'restamp_shipped_rules',
-           'apply_shipped_rules']
+           'apply_shipped_rules', 'SHIPPED_AUDIT_RE']
 
 SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
 # #962: `fab_notes`' ship-time via_in_pad record, printed after the summaries
@@ -54,6 +54,11 @@ GATE_RE = re.compile(r'JSON_IMPROVEMENT_GATE: (\{.*\})')
 # every JSON_SUMMARY of that run when they differ from what a printed summary
 # carried (see restamp_shipped_rules).
 SHIPPED_RULES_RE = re.compile(r'JSON_SHIPPED_RULES: (\{.*\})')
+# The outermost run's audits of the board it SHIPS (#1760: rule_area_keepouts),
+# measured after every JSON_SUMMARY of that run, as {summary key: value}.
+# route.py sets the same keys on the merged `--json-out` document, so a reader
+# of the log alone (merge_route_summaries) must apply them too.
+SHIPPED_AUDIT_RE = re.compile(r'JSON_SHIPPED_AUDIT: (\{.*\})')
 
 
 def apply_improvement_gate(merged: Optional[Dict], gate: Optional[Dict]):
@@ -706,6 +711,10 @@ def merge_route_summaries(log: str) -> Optional[Dict]:
     sr = list(SHIPPED_RULES_RE.finditer(log))
     if sr and sr[-1].start() > log.rfind(raw[-1]):
         apply_shipped_rules(merged, json.loads(sr[-1].group(1)))
+    # The shipped-board audits route.py sets on --json-out (#1760).
+    sa = list(SHIPPED_AUDIT_RE.finditer(log))
+    if merged is not None and sa and sa[-1].start() > log.rfind(raw[-1]):
+        merged.update(json.loads(sa[-1].group(1)))
     # #962: the ship-time Type VII record runs after every JSON_SUMMARY line,
     # so it is printed on its own line; route.py sets the same record on the
     # merged `--json-out` document. The last one is the shipped board's.

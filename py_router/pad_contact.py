@@ -203,15 +203,51 @@ def rip_pad_contacts(pcb, scope_ids: Set[int], input_file=None,
     return parted
 
 
+def net_protection(pcb, input_file=None) -> Dict[str, str]:
+    """#1766: {net name: why a route step will not rip that net's copper}.
+
+    Protection is PER NET (protection_map marks a whole net 'locked' when any
+    of its copper is), so this is what decides whether a step that names the
+    net in --nets can take its contact off the pad -- not whether the one
+    shorting item is itself locked. What this run's pad-contact rip refused
+    (PROTECTED_SKIPPED['pad contact']) wins over the board's own map."""
+    from protected_nets import PROTECTED_SKIPPED, protection_map
+    try:
+        prot = dict(protection_map(pcb, input_file) or {})
+    except Exception:                                           # noqa: BLE001
+        prot = {}
+    prot.update(PROTECTED_SKIPPED.get('pad contact') or {})
+    return prot
+
+
+def protection_remedy(reason: str) -> str:
+    """#1766: what lifts a protection reason, in the words protected_nets'
+    own refusal line uses. Locked and `sense:`-held copper have NO flag."""
+    from protected_nets import is_sense_reason
+    if reason == 'locked':
+        return ("KiCad-locked copper: no flag lifts it; unlock it in the "
+                "board, or report the short as the board's own copper")
+    if is_sense_reason(reason):
+        return (f"held by the `{reason}` group (#1279): no flag lifts it; "
+                f"ungroup or rename the group in the board, or report the "
+                f"short as the board's own copper")
+    return (f"protected ({reason}): name the net exactly (no glob) in "
+            f"--nets to lift it")
+
+
 def format_rows(rows: List[dict], limit: int = 8) -> List[str]:
     """One console line per contact, capped with an explicit remainder."""
     def line(r):
         where = f"{r['kind']} at ({r['at'][0]:.2f}, {r['at'][1]:.2f})"
+        prot = (f" [net {r['net']}: {r['net_protected']}]"
+                if r.get('net_protected') else '')
         if r.get('short', True):
             return (f"{r['pad']} ({r['pad_net']}) on a {r['net']} {where}, "
-                    f"overlap {r['overlap_mm'] - r.get('clearance_mm', 0.0):.3f} mm")
+                    f"overlap {r['overlap_mm'] - r.get('clearance_mm', 0.0):.3f} mm"
+                    f"{prot}")
         return (f"{r['pad']} ({r['pad_net']}) {r['overlap_mm']:.3f} mm inside "
-                f"the {r['clearance_mm']:g} mm clearance of a {r['net']} {where}")
+                f"the {r['clearance_mm']:g} mm clearance of a {r['net']} {where}"
+                f"{prot}")
     out = [line(r) for r in rows[:limit]]
     if len(rows) > limit:
         out.append(f"... and {len(rows) - limit} more")
@@ -219,9 +255,14 @@ def format_rows(rows: List[dict], limit: int = 8) -> List[str]:
 
 
 def shipped_report(pcb, segments=None, vias=None, clearance=0.0) -> List[dict]:
-    """`pad_contacts` as JSON-ready rows."""
+    """`pad_contacts` as JSON-ready rows. A row whose copper's NET a route
+    step will not rip carries `net_protected`, the reason (`locked`, a
+    `sense:` group, or a .kicad_pro protection), #1766."""
+    rows = pad_contacts(pcb, segments, vias, clearance)
+    prot = net_protection(pcb) if rows else {}
     return [{k: v for k, v in r.items() if k not in ('net_id', 'item')}
-            for r in pad_contacts(pcb, segments, vias, clearance)]
+            | ({'net_protected': prot[r['net']]} if r['net'] in prot else {})
+            for r in rows]
 
 
 def audit_shipped(pcb, segments=None, vias=None, clearance=0.0):
@@ -246,4 +287,13 @@ def audit_shipped(pcb, segments=None, vias=None, clearance=0.0):
             print(f"\n{RED}  {head.format(n=len(found))}{RESET}")
             for line in format_rows(found):
                 print(f"  {RED}{line}{RESET}")
+    # #1766: one remedy per protection reason, so the next step is chosen
+    # before a route step is spent naming a net no flag can release.
+    whys = sorted({r['net_protected'] for r in shorts + grazes
+                   if r.get('net_protected')})
+    for why in whys:
+        nets = sorted({r['net'] for r in shorts + grazes
+                       if r.get('net_protected') == why})
+        print(f"  {', '.join(nets[:4])}{' ...' if len(nets) > 4 else ''}: "
+              f"{protection_remedy(why)}")
     return shorts, grazes

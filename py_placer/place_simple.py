@@ -78,6 +78,47 @@ the same way.
    pads but a limit is WARNED, being priced over legs the grade does not read
    (`claim_arity`).
 
+LEGALISE ONLY (`--legalise-only`, #1756): no scatter and no anneal. The
+board's own poses are kept, and only the parts that are not legal to KICAD'S
+STANDARD where they stand move (`simple_anneal.legalise`). The standard is
+the authoritative checkers', each part of it their own function: pad or
+drawn copper past the outline (check_assembly's gate, check_drc's census),
+pad / hole / graphic-copper clearance at check_drc's clearance model
+(`LegalityContext.pair_shortfall`), a body inside another or a frame pin
+under a courtyard (check_assembly), the board's rule-area keep-outs and the
+intent's keep-outs and zones (the floorplan grade's errors), and courtyard
+overlap as `check_assembly --baseline <the input>` grades it
+(`legality.CourtyardCensus`, under the project's own courtyards_overlap
+severity): a pair the board already had is not fixed, a pair a move would
+create is refused. Closer than place_simple's own courtyard spacing is NOT
+illegal; that spacing is only preferred for a pose a part moves to, when
+one keeping it is within 0.5 mm of the nearest. The illegal parts move one at
+a time, the move that makes the most of the others legal first (the part
+that overlaps several, not each of those it overlaps), each to its nearest
+pose meeting the standard -- an edge-seated part slid along its edge, any
+other walked out to 6 mm at its own turn, then at its others -- and a part
+no such pose frees mended by the anneal's repair, shoves only, first with
+every legal part held as a wall, then letting it shove a legal part only to
+another legal pose. Three rules bind every move:
+a part that was legal never ends illegal, no intent decap limit or claim
+`max_mm` ends further past its limit (a floorplan ERROR no route clears),
+and no part ends more than 6 mm (`simple_anneal.LEGALISE_REACH`) from where
+the board put it; an edge-seated
+part is never shoved, only slid along its edge. A part those rules leave no
+legal pose is left where it is and named (exit 4), never flung across the
+board or mended by breaking a neighbour. A legal part not shoved is not
+written at all, so a legal board comes back with every pose as it was. Locks, declared
+poses and faces, and the #1300 courtyard fallback apply as in an anneal; no
+part is flipped to a face of our choosing. It places ONE board: `--seeds`,
+an OUT carrying {seed} with no `--seed`, the start lists and counts,
+`--moves` and `--preview` are refused, and `--seed` is only the repair's
+random stream. The log names each part moved and how far, and the report
+says `mode` (`legalise-only`, else `anneal`), `start` (`board`) and
+`legalised` (moved, count, max_mm, illegal_before, illegal_after, repaired,
+broken); its `illegal` and `illegal_why` are by KiCad's standard. For a
+mostly-good placement -- a human layout, a seed after hand edits -- that
+wants fixing, not re-placing.
+
 Before any seed, the intent's plan is checked once (`floorplan.plan_check`,
 what `check_floorplan --plan-only` runs; in the parent of a `--seeds` run):
 its WARNs are printed once, and an ERROR -- a plan no arrangement can
@@ -372,9 +413,16 @@ def build(pcb, board, doc, base, args, intent=None, blocks=None, fixed=(),
     model.edge_seats, model.edge_unseated, model.edge_oversubscribed = {}, {}, []
     if intent is not None:
         from placement import edge_seat
+        stood = ({r: (p.x, p.y, p.rot) for r, p in state.parts.items()}
+                 if getattr(args, 'legalise_only', False) else None)
         model.edge_seats, snotes, model.edge_unseated = edge_seat.seats(
             state, pcb, board, intent, set(movable), crowded=model.edge_oversubscribed)
         notes += snotes
+        # #1756: --legalise-only keeps the board's poses; a seated part is
+        # slid onto its edge only when it is not legal where it stands
+        for r in sorted(model.edge_seats) if stood else ():
+            state.parts[r].ensure_rotation(stood[r][2])
+            state.apply_move(r, *stood[r])
     # the intent's decap limits, where it grades them at error: priced as the
     # grade measures them (the tether gate's terms), per mm past each limit
     if intent is not None and args.decap_limit_weight > 0:
@@ -962,6 +1010,51 @@ def _name_judged(a, seeds, summaries):
         print(f"  WARNING: {crowding_text(rec)}")
 
 
+def legalise_refusal(a):
+    """Why `--legalise-only` (#1756) cannot run with the rest of `a`, or
+    None. It places ONE board from the poses it has, so whatever chooses
+    among seeds or starts, or sets an anneal's length, has nothing to act
+    on."""
+    if a.preview:
+        return "keeps the board's poses; --preview draws an annealed seed"
+    if a.seeds:
+        return ("places one board, the same one for every seed but the repair's "
+                "stream: name one --seed, not --seeds")
+    if a.seed is None and '{seed}' in a.out:
+        return "places one board: OUT carries {seed} with no --seed named"
+    for flag, v in (('--clustered-seeds', a.clustered_seeds),
+                    ('--anchored-seeds', a.anchored_seeds), ('--scattered', a.scattered),
+                    ('--clustered', a.clustered), ('--anchored', a.anchored)):
+        if v is not None:
+            return f"starts from the board's own poses, so {flag} (a start) does not apply"
+    if a.moves:
+        return "runs no anneal, so --moves does not apply"
+    return None
+
+
+def legalised_summary(rec):
+    """The report's `legalised` key (#1756): None outside --legalise-only."""
+    if rec is None:
+        return None
+    mm = [m['mm'] for m in rec['moved'].values()]
+    return {'moved': rec['moved'], 'count': len(mm),
+            'max_mm': round(max(mm), 4) if mm else 0.0,
+            'illegal_before': rec['illegal_before'],
+            'illegal_after': rec.get('illegal_after', []), 'repaired': rec['repaired'],
+            'broken': rec.get('broken', []),
+            'seconds': rec['seconds']}
+
+
+def legalised_text(rec):
+    """'2 of 5 illegal part(s) moved, at most 0.75 mm' and the like."""
+    sm = legalised_summary(rec)
+    if not sm['count'] and not sm['illegal_before']:
+        return "every part already legal, nothing moved"
+    return (f"{len(sm['illegal_before'])} part(s) illegal as the board has them, "
+            f"{sm['count']} moved, at most {sm['max_mm']:.3f} mm"
+            + (f" ({len(sm['repaired'])} by the repair)" if sm['repaired'] else ""))
+
+
 def build_parser():
     """The command line, also the one place the weights' defaults live."""
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
@@ -1079,6 +1172,19 @@ def build_parser():
                     help='with --preview: also write those boxes as draft blocks[] '
                          'to JSON, for the author to edit, check with check_floorplan '
                          '--plan-only and paste into the intent; never applied')
+    ap.add_argument('--legalise-only', action='store_true',
+                    help="keep the board's own poses and make legal only the parts that "
+                         "are not, by KiCad's standard -- the checkers' (check_assembly, "
+                         "check_drc's pad clearance, the intent's keep-outs and zones), "
+                         "not place_simple's own spacing (#1756): no scatter and no "
+                         "anneal, each illegal part "
+                         "moved to its nearest legal pose (an edge-seated part slid along "
+                         "its edge), and one no such pose frees mended by the anneal's "
+                         "repair; a legal part stays exactly where it is. For a mostly-good "
+                         "placement (a human layout, a seed after hand edits) that wants "
+                         "fixing, not re-annealing. ONE board: --seeds, {seed} without "
+                         "--seed, the start lists and counts, --moves and --preview do "
+                         "not apply; --seed is the repair's random stream")
     ap.add_argument('--plan-checked', action='store_true',
                     help='skip the plan check made before any seed: the plan was '
                          'checked already (a --seeds run checks it once and passes '
@@ -1185,6 +1291,12 @@ def main(argv=None):
     if a.draft_zones and not a.preview:
         print("place_simple: --draft-zones is a --preview output", file=sys.stderr)
         return 2
+    if a.legalise_only:
+        why = legalise_refusal(a)
+        if why:
+            print(f"place_simple: --legalise-only {why}. Nothing was written.",
+                  file=sys.stderr)
+            return 2
     if a.preview:
         if (a.seeds or '{seed}' in a.out or a.scattered is not None
                 or a.clustered is not None or a.anchored is not None):
@@ -1457,7 +1569,35 @@ def main(argv=None):
     def runs(st, mdl, label='front'):
         """The restarts on one state: `(kept, k)`, the run that left the
         fewest parts illegal -- (illegal refs, poses, res), the earlier on a
-        tie -- and the last run's index."""
+        tie -- and the last run's index. With --legalise-only, the one
+        legalising pass instead (#1756): the board's own poses, only the
+        parts that are not legal moved, its record in `res['legalised']`."""
+        if a.legalise_only:
+            # KiCad's standard (#1756): the checkers' own functions, and the
+            # courtyard as check_assembly --baseline <this board> grades it
+            # -- against the board the run started from, a part a declared
+            # pose or a cover's seat moved counted as moved
+            from placement.legality import CourtyardCensus
+
+            def courtyards(board_pcb, board_file):
+                return CourtyardCensus(
+                    board_pcb, board_file, intent_waivers=intent.waiver_pairs(),
+                    courtyard_waivers=intent.fixed_pose_courtyard_waivers(),
+                    declared_heights=intent.height_declarations())
+            pcb0 = parse_kicad_pcb(a.board)
+            f0, f1 = pcb0.footprints, st.pcb_data.footprints
+            premoved = {r for r, f in f1.items() if r in f0 and (
+                (f0[r].x, f0[r].y, f0[r].rotation % 360.0, f0[r].layer)
+                != (f.x, f.y, f.rotation % 360.0, f.layer))}
+            rec = simple_anneal.legalise(
+                mdl, movable, seed=a.seed, seats=mdl.edge_seats,
+                census=courtyards(st.pcb_data, src),
+                baseline=courtyards(pcb0, a.board).grade(), premoved=premoved)
+            passes.append({'pass': label, 'run': 1, 'moves': 0, 'seconds': rec['seconds']})
+            return (list(rec['illegal_after']),
+                    {r: (st.parts[r].x, st.parts[r].y, st.parts[r].rot) for r in movable},
+                    {'moves': 0, 'reseated': rec['reseated'], 'repaired': bool(rec['repaired']),
+                     'stats': {}, 'legalised': rec}), -1
         kept, k = None, -1
         for k in range(RESTARTS + 1):
             # a restart's own stream, distinct from every other seed's first run
@@ -1483,13 +1623,25 @@ def main(argv=None):
     if not movable:
         print("place_simple: nothing to place; the board is written as it is")
         k, kept = -1, ([], {}, {'moves': 0, 'reseated': [], 'stats': {}})
+        if a.legalise_only:
+            kept[2]['legalised'] = {'moved': {}, 'reseated': [], 'repaired': [],
+                                    'illegal_before': [], 'illegal_after': [], 'why': {},
+                                    'broken': [], 'seconds': 0.0}
     else:
         est = set(state.courtyard_estimates)
         worst = (RESTARTS + 1) * (1 + (2 if est else 0)
                                   + (faces.FACE_ROUNDS if flip_ok else 0))
-        print(f"place_simple: {moves} moves per anneal, {RESTARTS + 1} anneal(s) per pass "
-              f"until one is legal; up to {worst} anneal(s) in all (the #1300 courtyard "
-              f"fallback{' and the face pass' if flip_ok else ''} included)")
+        if a.legalise_only:
+            # #1756: the board's own poses, only the parts that are not legal moved
+            print(f"place_simple: legalise only: {len(movable)} movable part(s) kept where "
+                  f"they stand unless illegal; no scatter, no anneal")
+            if flip_ok:
+                print(f"  NOTE: legalise only keeps every part on its face: "
+                      f"{', '.join(sorted(flip_ok))} flippable but not flipped")
+        else:
+            print(f"place_simple: {moves} moves per anneal, {RESTARTS + 1} anneal(s) per "
+                  f"pass until one is legal; up to {worst} anneal(s) in all (the #1300 "
+                  f"courtyard fallback{' and the face pass' if flip_ok else ''} included)")
         kept, k = runs(state, model)
         # #1300: an ESTIMATED courtyard is ours, not the board's. When the
         # runs leave a part no legal pose on the estimates, the part itself
@@ -1537,7 +1689,7 @@ def main(argv=None):
                 mdl.claims_broken(), cost)
     if movable:
         kept = settle(state, model, kept)
-    if flip_ok and movable:
+    if flip_ok and movable and not a.legalise_only:
         before = outcome(state, model, kept)
         flipped = {}        # every flip the kept runs carry
         for _round in range(faces.FACE_ROUNDS):
@@ -1572,6 +1724,7 @@ def main(argv=None):
             before = after
     settled(pcb, state, model, movable)
     _ill, poses, res = kept
+    legalised = res.get('legalised')        # --legalise-only's record (#1756)
     for r, pose in poses.items():
         state.parts[r].ensure_rotation(pose[2])
         state.apply_move(r, *pose)
@@ -1601,27 +1754,42 @@ def main(argv=None):
                       'tolerance_mm': model.tmpl_tolerance.get(anc)})
     # a refused declared pose is the intent's, the same in every seed: it is
     # reported apart (`refused`), not counted against the seed (#1297)
-    illegal = [r for r in movable if not ok(r)]
+    # --legalise-only grades by KiCad's standard (#1756), its own record
+    illegal = (list(legalised['illegal_after']) if legalised is not None
+               else [r for r in movable if not ok(r)])
     # closer than the board clearance only where no run found it a legal pose
     # (TIGHT_CLEARANCE_MM): legal, and named with the gap it stands at
     from placement.simple import rect_gap
     tight = {}
-    for r in [r for r in illegal if r not in too_big and tight_ok(r)]:
+    for r in [r for r in illegal if r not in too_big and legalised is None and tight_ok(r)]:
         P = state.parts[r]
         gap, near = min(((rect_gap(P.rect(), q.rect()), o) for o, q in state.parts.items()
                          if o != r and P.sides & q.sides), default=(None, None))
         tight[r] = {'gap_mm': None if gap is None else round(gap, 4), 'neighbour': near}
     illegal = [r for r in illegal if r not in tight]
     # #1540: why each is illegal, by the first check it fails
-    illegal_why = {r: illegal_reason(state, model, r) for r in illegal}
-    print(f"place_simple: annealed {res['moves']} moves in {t2 - t1:.1f} s "
-          f"({len(passes)} anneal(s), {sum(p['moves'] for p in passes)} moves in all"
-          + (f", {', '.join(f'{n} {lab}' for lab, n in _pass_counts(passes))}"
-             if len(passes) > 1 else '') + f"); {_line(final)}")
-    if res.get('repaired'):
-        print("  NOTE: the last run never came clean; its overlaps were shoved apart where it stood")
-    if res['reseated']:
-        print(f"  NOTE: moved to the nearest legal pose after the anneal: {', '.join(res['reseated'])}")
+    illegal_why = ({r: legalised['why'][r] for r in illegal} if legalised is not None
+                   else {r: illegal_reason(state, model, r) for r in illegal})
+    if legalised is not None:
+        print(f"place_simple: legalise only, {legalised_text(legalised)} in "
+              f"{t2 - t1:.1f} s; {_line(final)}")
+        for r, m in sorted(legalised['moved'].items()):
+            print(f"  moved {r} {m['mm']:.3f} mm: ({m['from'][0]:g}, {m['from'][1]:g}, "
+                  f"{m['from'][2]:g}) -> ({m['to'][0]:g}, {m['to'][1]:g}, {m['to'][2]:g})"
+                  + (" (repair)" if r in legalised['repaired'] else ""))
+        for r in legalised.get('broken') or ():
+            print(f"  WARNING: {r} was legal before legalising and is not now")
+    else:
+        print(f"place_simple: annealed {res['moves']} moves in {t2 - t1:.1f} s "
+              f"({len(passes)} anneal(s), {sum(p['moves'] for p in passes)} moves in all"
+              + (f", {', '.join(f'{n} {lab}' for lab, n in _pass_counts(passes))}"
+                 if len(passes) > 1 else '') + f"); {_line(final)}")
+        if res.get('repaired'):
+            print("  NOTE: the last run never came clean; its overlaps were shoved apart "
+                  "where it stood")
+        if res['reseated']:
+            print(f"  NOTE: moved to the nearest legal pose after the anneal: "
+                  f"{', '.join(res['reseated'])}")
     for r, t in sorted(tight.items()):
         print(f"  NOTE: {r} has no legal pose at the board clearance "
               f"({state.clearance:g} mm); seated {t['gap_mm']:g} mm from {t['neighbour']}, "
@@ -1706,6 +1874,9 @@ def main(argv=None):
     from placement.edge_seat import written_pose
     placements = []
     for r in movable:
+        if legalised is not None and r not in legalised['moved'] and not (
+                mended and any(m['ref'] == r for m in mended['moved'])):
+            continue        # #1756: a part legalise kept is written as the board has it
         p = state.parts[r]
         x, y = (written_pose(model.edge_seats[r], p.x, p.y, p.rot)
                 if r in model.edge_seats else (round(p.x, 4), round(p.y, 4)))
@@ -1731,8 +1902,10 @@ def main(argv=None):
     final.pop('per_group', None)
     final.pop('per_hint', None)
     report = {'final': final, 'moves': res['moves'], 'seed': a.seed,
-              'start': ('anchored' if anchored else 'clustered' if clustered
-                        else 'scattered'), 'runs': k + 1,
+              'mode': 'legalise-only' if legalised is not None else 'anneal',
+              'legalised': legalised_summary(legalised),
+              'start': ('board' if legalised is not None else 'anchored' if anchored
+                        else 'clustered' if clustered else 'scattered'), 'runs': k + 1,
               'declared': sorted(f['reference'] for f in flips),
               'reseated': res['reseated'], 'repaired': bool(res.get('repaired')),
               'illegal': illegal, 'illegal_why': illegal_why,
@@ -1751,7 +1924,8 @@ def main(argv=None):
     if a.json:
         json.dump(report, open(a.json, 'w', encoding='utf-8'), indent=1)
     print('JSON_SUMMARY: ' + json.dumps({k: report[k] for k in
-                                          ('final', 'moves', 'seed', 'start', 'reseated', 'illegal',
+                                          ('final', 'moves', 'seed', 'mode', 'legalised', 'start',
+                                           'reseated', 'illegal',
                                            'illegal_why', 'tight',
                                            'refused', 'oversubscribed', 'claim_arity', 'floorplan',
                                            'assembly', 'bga_field', 'template_off', 'decap_residual', 'claims_left', 'hints_saturated', 'estimate_fallback',

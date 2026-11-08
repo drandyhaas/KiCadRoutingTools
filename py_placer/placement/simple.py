@@ -2485,11 +2485,15 @@ def target(model, ref, placed):
     return t
 
 
-def nearest_legal(state, ref, tx, ty, rot, exclude, reach=12.0, step=0.25):
+def nearest_legal(state, ref, tx, ty, rot, exclude, reach=12.0, step=0.25, accept=None):
     """The legal pose nearest (tx, ty) at `rot`, walking square rings out to
-    `reach` mm, or None."""
+    `reach` mm, or None. `accept(x, y, rot)`, when given, must also hold
+    there (place_simple's `--legalise-only` passes the intent's claims)."""
     _rot_ok(state, ref, rot)
-    if legal(state, ref, tx, ty, rot, exclude):
+
+    def fits(x, y):
+        return legal(state, ref, x, y, rot, exclude) and (accept is None or accept(x, y, rot))
+    if fits(tx, ty):
         return (tx, ty, rot)
     k = 1
     while k * step <= reach:
@@ -2497,7 +2501,7 @@ def nearest_legal(state, ref, tx, ty, rot, exclude, reach=12.0, step=0.25):
         for i in range(-k, k + 1):
             for x, y in ((tx + i * step, ty - k * step), (tx + i * step, ty + k * step),
                          (tx - k * step, ty + i * step), (tx + k * step, ty + i * step)):
-                if legal(state, ref, x, y, rot, exclude):
+                if fits(x, y):
                     d = (x - tx) ** 2 + (y - ty) ** 2
                     if best is None or d < best[0]:
                         best = (d, x, y)

@@ -474,6 +474,26 @@ def _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin) -> bool:
     return True
 
 
+def _keepout_gate(pcb_data):
+    """check_drc.copper_keepout_gate for the amplitude searches (#1761):
+    None when the board forbids copper nowhere."""
+    if pcb_data is None or getattr(pcb_data, 'board_info', None) is None:
+        return None
+    from check_drc import copper_keepout_gate
+    return copper_keepout_gate(pcb_data)
+
+
+def _bump_in_keepout(refuses, bump_segs, width, layer, net_ids) -> bool:
+    """True when a bump's copper (its centreline segments at `width`, on
+    `layer`) enters a keep-out forbidding it to any of `net_ids` (#1761)."""
+    for nid in net_ids:
+        if refuses([Segment(start_x=bx1, start_y=by1, end_x=bx2, end_y=by2,
+                            width=width, layer=layer, net_id=nid)
+                    for bx1, by1, bx2, by2 in bump_segs]):
+            return True
+    return False
+
+
 # Spatial-query slack for foreign copper wider than the config defaults (#370
 # B1): the per-object checks below grow the keep-out by (width - track_width)/2
 # (or (via.size - via_size)/2), so the cell queries must reach at least that much
@@ -715,6 +735,10 @@ def get_safe_amplitude_at_point(
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     edge_margin = edge_clearance + net_half
     edge_geom = _board_edge_geom(pcb_data)
+    # #1761: nor may a bump enter a keep-out the route kept out of (a
+    # tracks-not-allowed rule area, a net-filtered keep-out), at the arms'
+    # copper (centreline + half the net's width), as check_drc grades it.
+    _ko_refuses = _keepout_gate(pcb_data)
 
     # Binary search for safe amplitude
     # Start with max_amplitude and reduce if there are conflicts
@@ -743,6 +767,9 @@ def get_safe_amplitude_at_point(
         # interior cutout (real Edge.Cuts geometry; bbox fallback, #370 B1).
         if not _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin):
             continue  # try a smaller amplitude that stays inside the outline
+        if _ko_refuses and _bump_in_keepout(_ko_refuses, bump_segs, net_w, layer,
+                                            (net_id,)):
+            continue  # try a smaller amplitude that stays out of the area
 
         # Use spatial index if available, otherwise fall back to full iteration
         if clearance_index is not None:
@@ -2102,7 +2129,7 @@ def apply_length_matching_to_group(
                   f"help; use --diff-pair-intra-match for P/N skew, or give the pair "
                   f"room to route coupled.")
         else:
-            print(f"  Length matching group: no nets routed this run, skipping")
+            _board_copper_group_status(group_results, net_names, config, pcb_data)
         return net_results
     if board_seeded:
         _tr = sorted(n for n, r in board_seeded.items() if r.get('routed_this_run'))
@@ -2148,18 +2175,8 @@ def apply_length_matching_to_group(
     _lo, _hi = (window[0], window[1]) if window is not None else (None, None)
 
     def _record(name, length, state, shortfall=0.0):
-        rec = {'length_mm': round(length, 3), 'target_mm': round(target_length, 3),
-               'status': state}
-        if shortfall:
-            rec['shortfall_mm'] = round(shortfall, 3)
-        if _lo is not None or _hi is not None:
-            rec['window_mm'] = [_lo, _hi]
-            if (_lo is not None and length < _lo - 1e-6) or \
-                    (_hi is not None and length > _hi + 1e-6):
-                rec['in_window'] = False
-            else:
-                rec['in_window'] = True
-        member_status[name] = rec
+        member_status[name] = _member_record(length, target_length, state,
+                                             _lo, _hi, shortfall)
     if any(die.values()):
         print(f"  Pad-to-die included (#1248): "
               + _pad_to_die_note(die, group_results, pcb_data, 'mm'))
@@ -2216,7 +2233,8 @@ def apply_length_matching_to_group(
                 else:
                     print(f"    WARNING: {net_name} is {delta:.2f}mm SHORT of the group target "
                           f"but its copper was written in an earlier step -- the group is NOT "
-                          f"fully matched (route the whole group in one step to meander it)")
+                          f"fully matched (route the whole group in one step to meander it: "
+                          f"{force_reroute_hint(net_names)})")
             continue
 
         if delta <= config.length_match_tolerance:
@@ -2271,6 +2289,24 @@ def apply_length_matching_to_group(
             group_clearance_index.add_segments(new_segments, index_margin)
 
     # Per-member verdicts for the summary (run_length_matching reads them).
+    _store_member_status(config, member_status)
+    return net_results
+
+
+def _member_record(length, target, state, lo=None, hi=None, shortfall=0.0):
+    """One member's verdict for `length_match_groups[].member_status`."""
+    rec = {'length_mm': round(length, 3), 'target_mm': round(target, 3),
+           'status': state}
+    if shortfall:
+        rec['shortfall_mm'] = round(shortfall, 3)
+    if lo is not None or hi is not None:
+        rec['window_mm'] = [lo, hi]
+        rec['in_window'] = not ((lo is not None and length < lo - 1e-6)
+                                or (hi is not None and length > hi + 1e-6))
+    return rec
+
+
+def _store_member_status(config, member_status):
     try:
         statuses = getattr(config, '_length_match_status', None)
         if statuses is None:
@@ -2279,7 +2315,56 @@ def apply_length_matching_to_group(
         statuses.update(member_status)
     except AttributeError:
         pass
-    return net_results
+
+
+def force_reroute_hint(net_names):
+    """The command that re-routes and matches a group of connected members
+    (#1762): --force-reroute strips them before the route, so they re-enter
+    the run and the group meanders them."""
+    names = ' '.join(f"'{n}'" for n in net_names)
+    return (f"re-run with --force-reroute and --length-match-group {names} "
+            f"(both members in --nets) to strip, re-route and match them")
+
+
+def _board_copper_group_status(group_results, net_names, config, pcb_data):
+    """#1762: every member of the group is existing board copper (connected
+    before this run, so filter_already_routed kept it out of the route set).
+    Nothing here can meander it, but its verdict is still recorded -- the
+    target as the meander path would compute it (pad-to-die, the .kicad_dru
+    window), each member `matched` / `unmatched_board_copper` /
+    `over_target` -- and the skip line names the re-route that does match
+    it. Recording only: the group is NOT noted protected (#521), because an
+    unmatched group frozen against rips would refuse the very glob
+    --force-reroute that fixes it."""
+    tol = config.length_match_tolerance
+    die = {n: member_pad_to_die(r, n, pcb_data) for n, r in group_results.items()}
+    target = max(r['route_length'] + die[n] for n, r in group_results.items())
+    window = dru_length_window(list(group_results), pcb_data)
+    if window is not None:
+        target, _wnote = clamp_target_to_window(target, window, tol)
+    lo, hi = (window[0], window[1]) if window is not None else (None, None)
+    status, off = {}, []
+    for name, r in group_results.items():
+        length = r['route_length'] + die[name]
+        delta = target - length
+        if abs(delta) <= tol:
+            state = 'matched'
+        else:
+            state = 'unmatched_board_copper' if delta > 0 else 'over_target'
+            off.append(f"{name} {length:.2f}mm")
+        status[name] = _member_record(length, target, state, lo, hi,
+                                      max(delta, 0.0) if state != 'matched' else 0.0)
+    _store_member_status(config, status)
+    if off:
+        print(f"  Length matching group: no member was routed this run (all "
+              f"{len(group_results)} are existing board copper, which this pass "
+              f"cannot meander); {len(off)} out of the {tol:g}mm tolerance of the "
+              f"target {target:.2f}mm: {', '.join(off)} -- NOT matched; "
+              f"{force_reroute_hint(net_names)} (#1762)")
+    else:
+        print(f"  Length matching group: no member was routed this run; all "
+              f"{len(group_results)} (existing board copper) are within "
+              f"{tol:g}mm of the target {target:.2f}mm")
 
 
 def get_route_primary_layer(segments: List[Segment]) -> str:
@@ -3427,6 +3512,10 @@ def get_safe_amplitude_for_diff_pair(
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     edge_margin = edge_clearance + diff_pair_extra + net_half
     edge_geom = _board_edge_geom(pcb_data)
+    # #1761: the P/N copper must stay out of a keep-out too; the bump is a
+    # centreline, so it is judged at the pair's outer copper (2 x (offset +
+    # half width)) as each member's net.
+    _ko_refuses = _keepout_gate(pcb_data)
 
     # Combine all segments and vias
     all_segments = list(pcb_data.segments)
@@ -3456,6 +3545,10 @@ def get_safe_amplitude_for_diff_pair(
         # over an interior cutout (real Edge.Cuts geometry; bbox fallback, #370 B1).
         if not _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin):
             continue  # try a smaller amplitude that stays inside the outline
+        if _ko_refuses and _bump_in_keepout(
+                _ko_refuses, bump_segs, 2.0 * (diff_pair_extra + net_half),
+                layer_name, (p_net_id, n_net_id)):
+            continue  # try a smaller amplitude that stays out of the area
 
         # Check each bump segment
         for bx1, by1, bx2, by2 in bump_segs:

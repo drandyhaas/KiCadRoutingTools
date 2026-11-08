@@ -119,10 +119,10 @@ def main():
                   'past its setback limit 0.50mm' in why, why)
             check("...and that its pad copper's edge clearance holds it, with the floor and "
                   "its source",
-                  "its pad copper's edge clearance holds it there, 0.40mm from "
+                  "its pad copper's edge clearance holds it there: pad MP, 0.40mm from "
                   "the edge clearance given to this run" in why, why)
             check('...and where its pads would stand at the limit (0.405 - 0.055)',
-                  'at its setback limit its pads would stand 0.35mm from the edge' in why, why)
+                  'at its setback limit pad MP would stand 0.350mm from the edge' in why, why)
             check("...and the way out: the vendor's drawing, a .kicad_dru rule, a larger "
                   "max_setback_mm",
                   "check the vendor's drawing" in why and '.kicad_dru edge_clearance rule' in why

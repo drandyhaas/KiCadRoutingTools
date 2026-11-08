@@ -353,6 +353,11 @@ RESCUE_MAX_ITERATIONS = 1_000_000  # per-rung A* backstop. Deliberately generous
                                    # ~4x the coarse iteration count), so this only
                                    # guards degenerate --max-iterations values.
 
+# Final reconciliation's finer-grid rung (#1763, finer_grid_rung.py): one more
+# whole-board lap at half the run's grid for nets still boxed in, skipped when
+# that map would exceed this many cells summed over the routing layers.
+FINER_GRID_RUNG_MAX_CELLS = 40_000_000
+
 
 # GUI-specific ranges (min, max, increment, digits)
 # These define the SpinCtrl ranges for the GUI

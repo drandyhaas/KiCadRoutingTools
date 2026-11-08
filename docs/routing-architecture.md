@@ -50,6 +50,7 @@ KiCadRoutingTools/
 │   ├── target_swap.py             # Target assignment optimization
 │   ├── length_matching.py         # Trombone meander length matching
 │   ├── net_rescue.py              # Last-chance rescue + terminal geometry escalation
+│   ├── finer_grid_rung.py         # Reconciliation's half-grid lap for boxed-in nets (#1763)
 │   │
 │   ├── plane_pad_tap.py           # Plane pad taps (finalize / repair)
 │   ├── plane_region_connector.py  # Joins between disconnected plane regions
@@ -113,6 +114,7 @@ The other `py_router/` modules are documented in the README's [Module Overview](
 | `length_matching.py` | Adds trombone meanders to match route lengths within groups |
 | `history_congestion.py` | PathFinder-style history cost: cells repeatedly contested get dearer (#590) |
 | `net_rescue.py` | Scoped retry of still-failed nets at a finer grid / narrower floor, then a whole-net retry with width and via stepping down to the fab floor |
+| `finer_grid_rung.py` | The final reconciliation's last lap: nets still boxed in at the run's grid re-routed at half of it, with rip authority over their blockers, under a whole-board cell budget (#1763) |
 
 #### Planes, Post-Route and Output
 
@@ -173,6 +175,11 @@ happens on both fronts.
 11. **Final reconciliation.** Up to three laps that re-run `batch_route` on
     the nets still incomplete, against the finished board. A net a lap rips
     and leaves open is a target of the next lap (#1554).
+    After the laps, the nets still open on the static box-in verdict get
+    one more lap at HALF the run's grid, with rip authority over the
+    blockers the last lap named for them (guard-filtered as #103's are),
+    unless that whole-board map would exceed
+    `FINER_GRID_RUNG_MAX_CELLS` (`finer_grid_rung.py`, #1763).
 12. **Late passes on the board it ships:** the audit of every ball a fanout
     promised to serve by fill contact (#678), soft-joint bridges, the strict
     redundant-copper collapse (#1063), the dead-end sweep of the nets step

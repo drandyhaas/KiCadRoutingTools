@@ -49,6 +49,10 @@ Key fields:
   {grid_step, clearance, track_width, via_diameter}}`. Static obstacles
   (neighbouring pads + clearance), not congestion: the lever is a finer grid
   or smaller clearance/track, unless `geometry` is already at the floor.
+  When the net's pads sit off the run grid the entry also carries
+  `pads_off_grid`, `pads`, `on_grid_step` and `on_grid_axes` (#1763): re-route
+  those nets scoped (`--nets`) at `--grid-step <on_grid_step>`, which puts
+  their pads on grid on those axes; a rip at the run's grid does not move them.
 - `fanout_dropped`: per failed net with a ball its fanout never escaped —
   `{net, pad, component, plane_like, pads}` (#652). The fix is upstream of
   this step: re-run the fanout for that net, or, when `plane_like`, the plane.
@@ -141,9 +145,12 @@ And across the buckets:
 
 - `member_incomplete_pairs`: every pair with a member pad still open at the end
   of the step. Expected only when the pair's members are in
-  `single_ended_followup_nets`, left for the next `route.py` by design (a
-  `partial` pair's peeled far terminals, or an `electrically-short` pair's
-  members); open copper for any other.
+  `single_ended_followup_nets` BY DESIGN, which `single_ended_followup_reasons`
+  ({net: reason}, #1764) says: `peeled-terminals` (a `partial` pair's peeled
+  far terminals) or `electrically-short`. Those the next `route.py` closes.
+  The same field also lists the members of a pair whose coupled route FAILED
+  (any other reason, e.g. `coupled-route-failed`): open copper, retried with
+  `route_diff` below, never `route.py`. Open copper for any other pair too.
 - `polarity_swap_denied_pairs`: a P/N mismatch the run was not allowed to
   resolve by a swap (#279); `polarity_swapped_pairs` lists the swaps it made.
 - `casualty_reconcile`: nets this step ripped whose reroute failed
@@ -169,7 +176,8 @@ And across the buckets:
     `meanders-would-worsen`, `meanders-ran-out` (the bumps that fit fall short),
     `copper-skew-over-tolerance` (the matcher reached the tolerance and the
     copper that ships does not), `not-measured` (a member's pads are not joined
-    by track copper). On a peeled pair (members in `single_ended_followup_nets`)
+    by track copper). On a peeled pair (`single_ended_followup_reasons`
+    `peeled-terminals`)
     `not-measured` is expected: `check_drc` grades it after the all-nets step.
     Past that, an `unmatched` pair is a shipped blocker and nothing more: it
     has no retry here, so report it. A pair the post-route cleanup moved out of
@@ -215,13 +223,13 @@ Work through the failure modes most-targeted-first. Do not jump straight to glob
 
 | Evidence | Failure mode | Fix |
 |----------|--------------|-----|
-| `pad_contacts` / `pad_grazes` name a pad (JSON_SUMMARY_MIN pads, `--json-out` rows; the console prints "SHORTED on the board this run ships" / "NOT CLEAR ...") | Copper still on, or inside the clearance of, another net's pad. A route step rips such copper of a net in its `--nets`, so a short here is on a net outside the step, locked or protected: name that net in `--nets` (exactly, if protected), or re-fan holding the part. A graze is usually a part the clearance step could not clear (its `Unresolved` line) |
+| `pad_contacts` / `pad_grazes` name a pad (JSON_SUMMARY_MIN pads, `--json-out` rows; the console prints "SHORTED on the board this run ships" / "NOT CLEAR ...") | Copper still on, or inside the clearance of, another net's pad. A route step rips such copper of a net in its `--nets`, so a short here is on a net outside the step or a protected one; read the row's `net_protected` (the NET's reason, also on the console line as `[net X: reason]`) before choosing. No `net_protected`: name that net in `--nets`, or re-fan holding the part. A `.kicad_pro` protection (a matched group, a routed pair): name the net exactly in `--nets`. `locked` (any of the net's copper is KiCad-locked) or a `sense:` group: no flag lifts it, so a route step would only ship the short again: unlock or ungroup it in the board, or report the short as the user's copper. A graze is usually a part the clearance step could not clear (its `Unresolved` line) |
 | `unroutable_as_designed` names the net (JSON_SUMMARY rows, JSON_SUMMARY_MIN names; the console prints "Unroutable as designed") | A pad is already shorted to another net as drawn: another net's pad on it, or another part's copper (stacked or swapped net-tie footprints) | Stop retrying: no routing reaches that pad without the short, and KiCad grades it `shorting_items` before any routing. Report the pad and the foreign copper named in the row; the fix is the board's (re-pose the part), not a router flag |
 | "no rippable blockers found" near a BGA/PGA | Blocked by the BGA exclusion zone or pre-existing copper | `--no-bga-zone <ref>` for that component |
 | Stuck positions cluster in one corridor; blockers are routed nets that themselves had few alternatives | Corridor congestion | Suggest the user **draw a guide corridor**: a polyline on `User.1` through a less congested region, then re-route the failed nets with `--guide-corridor`. Describe in words where the corridor should go (e.g. "south of J3, between the mounting hole and C14"). **Do not draw the geometry yourself** — guide drawing is the user's decision |
 | Failed nets have source and target stubs on conflicting layers; rip-up histories show repeated mutual ripping | Same-layer crossing conflicts | `--mps-layer-swap`, or revisit `--layer-costs` |
 | "Re-route FAILED: no path found" for ripped nets | Search space exhausted | NOT a budget problem: the router self-budgets (#529, default on — auto-extends to 1e7 iterations while progressing), so do not suggest raising `--max-iterations`. A "dynamic iterations (#529): search extended to N" line followed by failure means genuine progress ran out — escalate capacity: `--max-ripup`, clearance/track toward fab floor, or layers. (`KICAD_DYNAMIC_ITERATIONS=0` restores legacy static caps for A/B only) |
-| Many multipoint pads failed on the same fine-pitch component; `boxed_in` entries for them | Grid too coarse for the pad geometry | `--grid-step 0.05`, and check `--track-width`/`--clearance` against the pad pitch |
+| Many multipoint pads failed on the same fine-pitch component; `boxed_in` entries for them | Grid too coarse for the pad geometry | `--grid-step 0.05` (0.025 at ≤0.4 mm pitch), and check `--track-width`/`--clearance` against the pad pitch. This holds at the board's floor too: it is the one grid A/B (0.1 against the finer grid, sizes unchanged, keep the better-graded result) `/plan-pcb-routing` asks for before a box-in is called a placement question |
 | `fanout_dropped` names the net's ball | The fanout never escaped that ball — no rip or retry can reach it | Re-run the fanout for that net: `bga_fanout.py`, or for a QFN/QFP pad `qfn_fanout.py --escape-method underpad` (a stub run with `--nets` via-drops the interior pads its filter selects; one it could not place is in its summary's `skipped_interior`, so retry it with a smaller via or `--allow-via-in-pad`), with a smaller `--via-size` if the via did not fit; when `plane_like`, re-create the plane instead. A power or ground pad whose escape stub the fanout drew at `--width` is named in its summary's `power_stubs_at_width` (#1743): a narrow stub is a width question, not an open |
 | `sealed_by_snpc` names the pad | This run's own `--same-net-pad-clearance` closed the last via site | Retry with `--same-net-pad-clearance 0`, or widen the channel in placement |
 | Failures cluster on one part's pads or escape face; `py_tools/check_reachability.py <board> --pad REF.PAD` says CAGED (its verdict grades the placement, with the board's routed copper set aside); or `boxed_in[].geometry` is already at the board/fab floor | Placement-shaped: geometry, not the router | First, if the part is a fine-pitch perimeter part (QFN/QFP, or a 2-row SMD connector or socket, at <=0.65 mm) and the chain fanned nothing out for it, route that arm (`plan-pcb-routing` Step 3, rule 3): it costs one route, and re-placing costs a whole pass. Otherwise stop retrying: no router flag fixes it. Hand the board back to `/plan-pcb-placement full` (or `place`) to re-place, then re-route |
@@ -294,8 +302,11 @@ python3 -X utf8 py_router/route_diff.py board_diff.kicad_pcb board_diff_retry.ki
 needed when they already carry copper (routed single-ended, or a `partial` /
 `uncoupled` pair). A pair that should be coupled is retried with `route_diff.py`,
 never `route.py`, which routes single-ended and would de-pair it (#1399); the
-members in `single_ended_followup_nets` are the exception, closed by the next
-`route.py` by design. Read the retry's `pair_reports` the same way before the
+members listed by design in `single_ended_followup_reasons`
+(`peeled-terminals`, `electrically-short`) are the exception, closed by the next
+`route.py`. A member there with any other reason belongs to a pair whose coupled
+route failed: it is retried here, and the step's log block says so with a
+`route_diff.py ... --force-reroute` line. Read the retry's `pair_reports` the same way before the
 next step.
 
 If the retry log prints `IMPROVEMENT GATE: ... -- REJECTED` (#600, on by default), the retry broke more than it connected (or raised the disconnected-pad count), so route.py wrote a copy of the INPUT board to the output path (the verdict is also on the `JSON_IMPROVEMENT_GATE:` line). More rip authority cannot help: change the approach (thinner track, finer grid, other layers) or report the nets as open. When the gate says its verdict rests on zone nets outside `--nets`, add those nets to `--nets` and retry.

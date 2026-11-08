@@ -18,7 +18,12 @@ where the grade then failed it. On #1603's fixture, whose J3 needs 11.83 mm
   4. a `.kicad_dru` `edge_clearance` rule binding its pads seats it, at the
      band; a rule too large to reach it is named as the source;
   5. a band not held by the pad floor keeps its plain words;
-  6. the skill names this direction and the rule.
+  6. the skill names this direction and the rule;
+  7. (#1773) a pad-number rule that frees only the pad that stops the seat:
+     the words name THAT pad, its own clearance and rule, where it would stand
+     at the minimum, and #1694's way out when that is past the outline, at
+     every site the seat words a pad floor, read through the one per-pad
+     reading `pad_floor_owed` uses.
 
     python3 tests/test_1663_seat_pad_floor_words.py
 """
@@ -94,6 +99,118 @@ def seat(path, band=BAND):
     return got, unseated, st, pcb
 
 
+def launch_board(tmp):
+    """#1773's J1, an edge-launch part on a 40 x 30 board: pad 1 (the launch)
+    ends 4.0 mm east of its origin, its two pads "2" (posts) 1.25 mm, its
+    F.Fab body 4.5 mm. The project floor is 0.4 mm; a rule frees pad 1 alone."""
+    d = os.path.join(tmp, 'launch')
+    os.makedirs(d)
+
+    def rect(x0, y0, x1, y1, layer):
+        return (f'    (fp_rect (start {x0} {y0}) (end {x1} {y1}) (stroke (width 0.05) '
+                f'(type default)) (layer "{layer}"))\n')
+
+    def pad(n, x, y, w, h):
+        return (f'    (pad "{n}" smd rect (at {x} {y}) (size {w} {h}) '
+                f'(layers "F.Cu" "F.Mask"))\n')
+    fp = ('  (footprint "t:EdgeLaunch" (layer "F.Cu") (at 20 15)\n'
+          '    (property "Reference" "J1" (at 0 -5) (layer "F.SilkS"))\n'
+          + rect(-1.5, -3, 4.5, 3, 'F.Fab') + rect(-2, -3.5, 5, 3.5, 'F.CrtYd')
+          + pad('1', 3, 0, 2, 1) + pad('2', 0.5, -2.2, 1.5, 1) + pad('2', 0.5, 2.2, 1.5, 1)
+          + '  )\n')
+    cuts = ''.join(f'  (gr_line (start {a} {b}) (end {c} {e}) (stroke (width 0.05) '
+                   f'(type default)) (layer "Edge.Cuts"))\n'
+                   for a, b, c, e in ((0, 0, 40, 0), (40, 0, 40, 30), (40, 30, 0, 30), (0, 30, 0, 0)))
+    path = os.path.join(d, 'b.kicad_pcb')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('(kicad_pcb (version 20241229) (generator "t1773")\n  (net 0 "")\n'
+                + cuts + fp + ')\n')
+    with open(os.path.join(d, 'b.kicad_pro'), 'w', encoding='utf-8') as f:
+        json.dump({'board': {'design_settings': {'rules': {'min_copper_edge_clearance': 0.4}}}}, f)
+    with open(os.path.join(d, 'b.kicad_dru'), 'w', encoding='utf-8') as f:
+        f.write("(version 1)\n(rule \"launch_pin\"\n  (condition \"A.Type == 'Pad' && "
+                "A.Pad_Number == '1' && A.memberOfFootprint('J1')\")\n"
+                "  (constraint edge_clearance (min 0mm)))\n")
+    run_utils.evidence(path, 'the #1773 board')
+    return path
+
+
+def launch_seat(path, low):
+    """edge_seat.seats on the #1773 board, J1 declared on its east edge
+    with its band at `low`..2.0: (seated, unseated, state, pcb, entry)."""
+    from kicad_parser import parse_kicad_pcb
+    from placement import edge_seat, floorplan
+    pcb = quiet(parse_kicad_pcb, path)
+    row = {'ref': 'J1', 'edge': 'east', 'mating_face': '+x', 'class': 'edge_receptacle',
+           'overhang_mm': {'min': low, 'max': 2.0}}
+    it = floorplan.intent_from_dict({'schema': floorplan.SCHEMA_VERSION, 'kind': floorplan.KIND,
+                                     'units': 'mm', 'edge_connectors': [row]}, source_path='t')
+    st = quiet(edge_seat.seat_state, pcb, path, it, {}, *floorplan.resolved_floors(path))
+    got, _notes, why = quiet(edge_seat.seats, st, pcb, path, it, {'J1'})
+    return got, why, st, pcb, row
+
+
+def binding_pad(tmp):
+    """7. (#1773)."""
+    from design_rules import PadEdgeRules
+    from placement import edge_seat, floorplan
+    from placement.body import board_bodies
+    from placement.connector_geometry import ConnectorGeometry
+    print('a rule that frees only the pad that stops it (#1773):')
+    path = launch_board(tmp)
+    got, why, st, pcb, row = launch_seat(path, 0.495)
+    check('min 0.495 seats it, pad 1 at its 0 mm rule', 'J1' in got, str(why))
+    probe = edge_seat._Probe(st, pcb, path, board_bodies(pcb, path),
+                             floorplan.outline_state(pcb, path))
+    probe.faces['J1'] = '+x'
+    if 'J1' in got:
+        x = next(iter(got['J1'].lines.values())).coord
+        b = probe.binding('J1', (x, 15.0, 0.0))
+        check('...the pad that binds there is pad 1, at its rule',
+              b.names == 'pad 1' and abs(b.clearance) < 1e-9 and 'launch_pin' in b.source
+              and abs(b.inside - 0.005) < 1e-4, f'{b}')
+    _g, why, _st, _pcb, _row = launch_seat(path, 0.8)
+    text = why.get('J1', '')
+    check('min 0.8: no seat, the reason names pad 1, its clearance and its rule',
+          "the seat holds pad 1 0.005mm inside the edge, 0.00mm from the .kicad_dru rule "
+          "'launch_pin'" in text, text)
+    check('...where pad 1 would stand at that minimum',
+          'at that minimum pad 1 would leave the board by 0.300mm' in text, text)
+    check("...#1694's way out, not a rule for pads already at 0 mm",
+          edge_seat.PAD_ON_OUTLINE in text and 'edge_clearance rule for those pads' not in text,
+          text)
+    check("...and not the posts' board floor", "0.40mm from the board's" not in text
+          and 'would stand 0.10' not in text, text)
+
+    print('...the other sites read the same pads:')
+    pose = (x, 15.0, 0.0) if 'J1' in got else (34.5, 15.0, 0.0)
+    out = (pose[0] + 0.2, pose[1], pose[2])     # pad 1 0.195 mm past its 0.005
+    words = edge_seat._unseated_reason(probe, row, 'east', 1, 0.8, {}, {},
+                                       {'copper': [3, [out]]})
+    check('the copper tally names pad 1 and its rule',
+          "3 with pad copper inside its edge clearance: pad 1, 0.00mm from the .kicad_dru "
+          "rule 'launch_pin'" in words, words)
+    words = edge_seat._unseated_reason(probe, row, 'east', 1, 0.8, {}, {0.0: 50.0}, {})
+    check('a span too long names the largest clearance, of the posts, as what both ends '
+          'are held to', "inside it by 0.40mm, the edge clearance of pad 2 (the board's "
+          "min_copper_edge_clearance)" in words, words)
+    entry = dict(row, max_setback_mm=0.1)
+    words = edge_seat._setback_held_text(probe, entry, 'east', [(0.6, 'body:F.Fab', pose)])
+    check('the setback clause names pad 1, and where it would stand at the limit',
+          "holds it there: pad 1, 0.00mm from the .kicad_dru rule 'launch_pin'" in words
+          and 'at its setback limit pad 1 would leave the board by 0.495mm' in words
+          and edge_seat.PAD_ON_OUTLINE in words, words)
+
+    print("...through the reading #1694's roster uses:")
+    reads = {r.index: r[1:] for r in probe.pad_reads('J1', pose)}
+    geometry = ConnectorGeometry(pcb, path)
+    rules = PadEdgeRules(pcb, path)
+    owed = floorplan._pads_short_of_floor(geometry, rules, pcb, 'J1', 0.4, 0.8, 4.5, '+x')
+    check('the roster and the seat give each pad the same number, clearance and rule',
+          owed and all(reads[r.index][0] == r.number and reads[r.index][2:] == r[3:]
+                       for r in owed), f'{reads} vs {owed}')
+
+
 def main():
     run_utils.evidence(FIXTURE, 'the #1603 fixture')
     run_utils.evidence(SKILL, 'the skill')
@@ -109,7 +226,7 @@ def main():
         check('...its value and where it comes from',
               "0.40mm from the board's min_copper_edge_clearance" in text, text)
         check('...what the minimum would take', 'its pads would leave the board' not in text
-              and 'at that minimum its pads would stand 0.10mm from the edge' in text, text)
+              and 'at that minimum its pads would stand 0.100mm from the edge' in text, text)
         check('...that lowering the band will not help, and the way out',
               'Lowering the band will not help a part whose body needs it' in text
               and "the vendor's drawing" in text and '.kicad_dru edge_clearance rule' in text, text)
@@ -148,10 +265,12 @@ def main():
 
         print('a band nothing holds:')
         part_probe = probe
-        words = edge_seat._unseated_reason(part_probe, entry, 'east', 1, 11.83, 0.205, {}, {},
+        words = edge_seat._unseated_reason(part_probe, entry, 'east', 1, 11.83, {}, {},
                                            {'band_min': [3, [11.7]]})
         check('keeps its plain words', 'under the declared minimum 11.83mm' in words
               and 'Lowering' not in words, words)
+
+        binding_pad(tmp)
 
         print('the skill:')
         with open(SKILL, encoding='utf-8') as f:
