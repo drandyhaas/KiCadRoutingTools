@@ -588,9 +588,12 @@ def kicad_dangling_end(s, others, net_vias, net_pads, net_zones,
     Reported only when both ends touch same-net TRACK copper, and no via,
     pad or zone touches either end. A track touching just one end counts
     for that end; it does not exempt a joint whose other contacts all count
-    for the same end. Where a via, pad or zone is involved KiCad's verdict turns on
-    zone-fill and anchor details this model does not reproduce, so it says
-    nothing rather than guess. Never size-filtered: KiCad warns at any length.
+    for the same end. Where a via, pad or zone is involved KiCad's verdict
+    turns on zone-fill and anchor details this model does not reproduce, so
+    it says nothing rather than guess. Never size-filtered: KiCad warns at
+    any length. The touch test is a superset of KiCad's connectivity graph,
+    and an extra toucher only adds a count, so the model can miss a joint
+    but never invents one.
 
     ``others`` is the same-net track copper to judge against (``s`` itself is
     skipped by identity): every segment of the net, or any subset that still
@@ -652,8 +655,9 @@ def _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
             'kicad-dangling', name, s.layer, free[0], free[1],
             f"segment ({s.start_x:.3f}, {s.start_y:.3f})-({s.end_x:.3f}, "
             f"{s.end_y:.3f}) w{s.width:.3f}: both ends lie on other {name} "
-            f"track(s), but those contacts count for only one end -- KiCad's DRC reports "
-            f"track_dangling at ({free[0]:.3f}, {free[1]:.3f})",
+            f"track(s), but those contacts count for only one end -- "
+            f"KiCad's DRC reports track_dangling at "
+            f"({free[0]:.3f}, {free[1]:.3f})",
             size=None))
 
 
