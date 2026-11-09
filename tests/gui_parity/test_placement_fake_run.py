@@ -165,6 +165,7 @@ def main():
         tick) outside a running loop on MSW - headless_plan.py runs
         PlanExecutor inside a real MainLoop for the same reason. Returns
         False on timeout."""
+        from headless_plan import exit_main_loop
         state = {'timed_out': False, 'grace': None}
         timer = wx.Timer(frame)
 
@@ -177,14 +178,14 @@ def main():
                 else:
                     state['grace'] -= 1
                 if state['grace'] <= 0:
-                    app.ExitMainLoop()
+                    exit_main_loop(app)
 
         frame.Bind(wx.EVT_TIMER, _on_poll, timer)
         timer.Start(100)
 
         def _on_timeout():
             state['timed_out'] = True
-            app.ExitMainLoop()
+            exit_main_loop(app)
 
         watchdog = wx.CallLater(int(timeout_s * 1000), _on_timeout)
         app.MainLoop()
