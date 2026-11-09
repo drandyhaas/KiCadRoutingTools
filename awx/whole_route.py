@@ -57,6 +57,11 @@ import tempfile
 import time
 import traceback
 
+if getattr(sys, 'frozen', False):
+    from krt_standalone.process import run as run_process
+else:
+    run_process = subprocess.run
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import awx_settings  # noqa: E402
@@ -163,12 +168,12 @@ def run(argv, env, log_path=None, err=None, to=None, own_process=False):
             return rc, cap.read()
     if log_path is not None:
         with open(log_path, 'w') as f:
-            return subprocess.run([PY] + argv, cwd=HERE, env=env, stdout=f, stderr=subprocess.STDOUT).returncode, ''
+            return run_process([PY] + argv, cwd=HERE, env=env, stdout=f, stderr=subprocess.STDOUT).returncode, ''
     if to is INHERIT:
-        return subprocess.run([PY] + argv, cwd=HERE, env=env).returncode, ''
+        return run_process([PY] + argv, cwd=HERE, env=env).returncode, ''
     if to is not None:
-        return subprocess.run([PY] + argv, cwd=HERE, env=env, stdout=to, stderr=to).returncode, ''
-    p = subprocess.run([PY] + argv, cwd=HERE, env=env, stdout=subprocess.PIPE, stderr=err or subprocess.DEVNULL,
+        return run_process([PY] + argv, cwd=HERE, env=env, stdout=to, stderr=to).returncode, ''
+    p = run_process([PY] + argv, cwd=HERE, env=env, stdout=subprocess.PIPE, stderr=err or subprocess.DEVNULL,
                        text=True)
     return p.returncode, p.stdout
 
