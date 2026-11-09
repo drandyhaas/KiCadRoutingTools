@@ -1,6 +1,7 @@
 """#1655: a refused AI plan reports its outcome through the real wx tab.
 
-Run with KiCad's bundled Python. No agent CLI runs and no board is modified.
+Needs KiCad's bundled Python (wx); plain python3 relaunches into it, and the
+gate exits 2 when there is none. No agent CLI runs and no board is modified.
 CLI discovery and the notification dialog are stubbed; backend stream parsing,
 plan validation, installation, completion and wx controls are real.
 """
@@ -14,7 +15,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
 
-import wx
+sys.path.insert(0, str(ROOT / 'py_router'))
+from headless_plan import have_kicad_python, reexec_into_kicad  # noqa: E402
+if not have_kicad_python():
+    reexec_into_kicad(__file__)
+    print('ERROR: no python with pcbnew + wx found; this gate does not self-skip.')
+    sys.exit(2)
+
+import wx  # noqa: E402
 from kicad_routing_plugin.ai_backend import BACKENDS
 from kicad_routing_plugin.ai_gui import AITab
 

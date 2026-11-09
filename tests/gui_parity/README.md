@@ -22,6 +22,11 @@ chain's CLI steps run file-to-file.
 ## Running the gates
 
     python3 tests/gui_parity/<gate>.py
+    python3 tests/gui_parity/run_gui_parity.py      # every gate, one at a time
+
+`run_gui_parity.py` prints each gate's verdict by its exit code (0 PASS, 77 a
+declared SKIP listed apart, anything else FAIL; a gate past `--timeout` is
+killed with its process group and FAILS) and exits 1 on any failure.
 
 Plain `python3` is right: a gate that needs pcbnew or wx re-execs itself into
 KiCad's bundled python (`KICAD_PYTHON` names one explicitly), and the dialog is

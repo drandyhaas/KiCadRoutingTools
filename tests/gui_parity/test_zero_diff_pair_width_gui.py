@@ -50,6 +50,10 @@ def main():
         import kipy  # noqa: F401
         import wx
     except ImportError as exc:
+        # relaunch under KiCad's python (it has wx and kipy), as the sibling
+        # gates do; exit 2 only when there is none (no self-skip)
+        from headless_plan import reexec_into_kicad
+        reexec_into_kicad(__file__)
         print(f'ERROR: KiCad Python with wx + kipy is required: {exc}')
         return 2
     from copy_board import copy_board
