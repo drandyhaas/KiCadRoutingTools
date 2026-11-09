@@ -3605,7 +3605,16 @@ def create_plane(
     # #498: per-layer .kicad_dru clearance rules -- tap tracks/vias, region
     # joins and blocker reroutes must obey them like every other routed copper.
     from kicad_dru import install_layer_clearances, install_track_clearances
-    install_layer_clearances(config, None, input_file, pcb_data)
+    install_layer_clearances(config, None, input_file, pcb_data,
+                             net_keepouts=True)
+    # Net-filtered keep-outs bind plane copper too, as repair_planes attaches
+    # them: the soft-joint bridges and GND return vias ask the keep-out gate
+    # (check_drc.copper_keepout_gate), which reads pcb_data's list. Attached
+    # (or cleared) here, so a step sees its OWN board's rules: the CLI parses
+    # fresh and saw none, the GUI's long-lived PCBData kept an earlier run's.
+    from net_keepouts import attach as _nk_attach
+    _nk_attach(pcb_data, getattr(getattr(config, 'rules', None),
+                                 'net_keepouts', None))
     # #1135: and the track-to-track rules (#735), as batch_route installs
     # them: a tap track or a blocker reroute is a track, and a board's
     # `A.Type == 'track' && B.Type == 'track'` rule binds it too. Raise-only
@@ -4782,7 +4791,14 @@ Examples:
         # sibling rules file fix_project_for_output only copies after this
         # block -- so discovering it via pcb_data.source_path found nothing on
         # a fresh output path, and return vias ignored every layer rule.
-        install_layer_clearances(gnd_config, None, args.input_file, pcb_data)
+        install_layer_clearances(gnd_config, None, args.input_file, pcb_data,
+                                 net_keepouts=True)
+        # And its net-filtered keep-outs, which the return-via gate reads off
+        # pcb_data: create_plane attached them to ITS board, and this block
+        # parsed the output afresh (the Planes tab's one PCBData has them).
+        from net_keepouts import attach as _nk_attach
+        _nk_attach(pcb_data, getattr(getattr(gnd_config, 'rules', None),
+                                     'net_keepouts', None))
         # #1602: and the track/scoped channels (#1135/#1491), as create_plane
         # installs them: a class/type-scoped rule binds a return via too.
         from kicad_dru import install_track_clearances
