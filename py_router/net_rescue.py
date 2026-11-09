@@ -1255,11 +1255,13 @@ def escape_keepout_refusal(pcb_data, segments, vias):
 
 
 def rescue_candidates(pcb_data, routed_results, single_ended_nets):
-    """The nets rescue_failed_nets attempts, as (name, id, kind) rows: kind
-    'failed' for a net with no result (the rescue's copper becomes it), and
-    'partial' for a result the net has not finished (the rescue's copper is
-    folded into it)."""
+    """The nets rescue_failed_nets attempts, in the order it attempts them,
+    as (name, id, kind) rows: kind 'failed' for a net with no result (the
+    rescue's copper becomes it), and 'partial' for a result the net has not
+    finished (the rescue's copper is folded into it). A casualty's partial
+    restore comes after every other candidate."""
     candidates = []
+    restores = []
     for net_name, net_id in sorted(set(single_ended_nets)):
         if net_id not in pcb_data.nets:
             continue
@@ -1268,21 +1270,35 @@ def rescue_candidates(pcb_data, routed_results, single_ended_nets):
         result = routed_results.get(net_id)
         if result is None:
             candidates.append((net_name, net_id, 'failed'))
-        elif (result.get('failed_pads_info')
-              or result.get('partial_restore_134')):
-            # A partial restore (route.py's #134 last resort, the casualty
-            # reconcile's branch D) is the net's result but carries no
-            # failed_pads_info: it is the pre-rip route's surviving pieces,
-            # "PARTIAL for a later pass" -- and this is that pass. Read
-            # only the pad debt and the net is neither failed nor partial,
-            # so the rescue skipped it (#1758 follow-up: once branch D made
-            # its restore the net's result, ottercast_audio's BT_UART_CTS,
-            # which the rescue used to recover as a failed net, shipped in
-            # two pieces). The same reading as route.py's
-            # _unfinished_net_ids; the rescue's _net_component_info still
-            # skips a net the checker grades connected.
+        elif result.get('failed_pads_info'):
             candidates.append((net_name, net_id, 'partial'))
-    return candidates
+        elif result.get('casualty_restore'):
+            # The casualty reconcile's partial restore (branch D) is the
+            # net's result but carries no failed_pads_info: it is the pre-rip
+            # route's surviving pieces, "PARTIAL for a later pass". Read only
+            # the pad debt and the net is neither failed nor partial, so the
+            # rescue skipped it (#1758 follow-up: before #1758 registered
+            # that restore as the net's result, the rescue took the net as
+            # failed and recovered ottercast_audio's BT_UART_CTS; after it,
+            # the net shipped in two pieces). The rescue's
+            # _net_component_info still skips a net the checker grades
+            # connected.
+            #
+            # Only branch D's restore. The #134 last resort's (route.py) has
+            # been the net's result since #508 finding 8 and was never a
+            # candidate; taking it too put 22 more nets ahead of the final
+            # reconciliation on cparti_fpga's route step, which then shipped
+            # 4 nets open against 1.
+            #
+            # LAST, after every net the rescue took before it read restores:
+            # the rescue's copper is additive and each net's windows see the
+            # copper of the nets before it, so a restore taken in name order
+            # took the corridor of a net after it. Measured on ottercast's
+            # route step: UART1_RX's rescue left WL_SDIO_D1, which the rescue
+            # had fully reconnected, improved but open. Last, the nets the
+            # rescue took before see the board they saw then.
+            restores.append((net_name, net_id, 'partial'))
+    return candidates + restores
 
 
 def rescue_failed_nets(state, single_ended_nets, net_clearances=None,

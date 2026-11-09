@@ -1139,6 +1139,9 @@ def run_casualty_reconcile(state, progress_callback=None,
             pruned['new_segments'] = keep_segs
             pruned['new_vias'] = keep_vias
             pruned['partial_restore_134'] = True
+            # Which restore this is: net_rescue.rescue_candidates takes a
+            # casualty put back here, and not the #134 last resort's.
+            pruned['casualty_restore'] = True
             add_route_to_pcb_data(pcb_data, pruned,
                                   debug_lines=config.debug_lines)
             from obstacle_cache import refresh_net_obstacles  # #806
