@@ -1602,6 +1602,15 @@ class PlanExecutor:
                     # all; this covers plans converted before that.
                     _keys = tuple(k for k in _FLOOR_KEYS
                                   if k != 'board_edge_clearance')
+                elif step.get('action') == 'route_planes':
+                    # #338/#1698: a plane step's --board-edge-clearance is the
+                    # pour's INSET, not a copper floor. route_planes' main
+                    # records the project's own rule (read_project_edge_
+                    # clearance), and the Planes tab's writeback passes none;
+                    # harvested here it became the rule every later chain
+                    # step and KiCad grade at.
+                    _keys = tuple(k for k in _FLOOR_KEYS
+                                  if k != 'board_edge_clearance')
                 for k in _keys:
                     if p.get(k) is not None:
                         _take(k, p[k])
