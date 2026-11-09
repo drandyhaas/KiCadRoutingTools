@@ -1,6 +1,7 @@
 """Native geometry and text/live-parser coverage on copies of esp_prog (#967).
 
-Run with KiCad Python. Missing pcbnew exits 77, never an unmeasured pass.
+Plain python3 relaunches into KiCad's python; with no KiCad python at all it
+exits 77, never an unmeasured pass.
 """
 import copy
 import hashlib
@@ -9,13 +10,16 @@ from pathlib import Path
 import sys
 import tempfile
 
+ROOT = Path(__file__).resolve().parents[2]
 try:
     import pcbnew
 except ImportError:
+    sys.path.insert(0, str(ROOT / 'py_router'))
+    from headless_plan import reexec_into_kicad
+    reexec_into_kicad(__file__)
     print('SKIP: native pad coverage requires KiCad pcbnew')
     raise SystemExit(77)
 
-ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT/'py_router'), str(ROOT/'py_placer')]
 from copy_board import copy_board
 from kicad_parser import parse_kicad_pcb, build_pcb_data_from_board
