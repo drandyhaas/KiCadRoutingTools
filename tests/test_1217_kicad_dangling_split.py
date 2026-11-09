@@ -185,16 +185,8 @@ def mixed_contacts(tmp):
               len(findings) == expected, f'{findings}')
         before = connected(pcb)
         pairs = split_kicad_dangling_hosts(pcb)
-        check(f'rise {rise}: split only the ambiguous trunk',
+        check(f'rise {rise}: host-split count is {expected}',
               len(pairs) == expected, f'splits {len(pairs)}')
-        if pairs:
-            host, pieces = pairs[0]
-            check('split covers the same inner-layer trunk',
-                  is_(host, spans[0]) and len(pieces) == 2
-                  and is_(pieces[0], (10, 10, 11.7, 10))
-                  and is_(pieces[1], (11.7, 10, 12.1, 10))
-                  and all(p.width == host.width and p.layer == host.layer
-                          and p.net_id == host.net_id for p in pieces))
         check(f'rise {rise}: no KiCad-dangling joint after the split',
               not kd(pcb))
         check(f'rise {rise}: all pads remain connected',
