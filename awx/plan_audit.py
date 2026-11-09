@@ -697,9 +697,16 @@ def check_dives(ctx, corridors, show_all=False):
                     # against 0.331, and a whole round spent moving it))
                     voff = (math.hypot(x - round(x / g) * g, y - round(y / g) * g)
                             if _pt_on_grid(s[0], s[1], g) or s in exact_b[nm] else 0.0)
+                    # (...a pair's LEGS by a track's ring, from a via a router places among them. A crossover's barrel
+                    # no router places: the pair step lays it where it is drawn once it clears the copper and the
+                    # reserved lines by the clearance (connect._legs_clear), so the clearance is its bar from a leg --
+                    # held to the ring, a laid crossover 0.447 off the next pair's leg, its copper 0.147 from it at a
+                    # 0.1 rule, failed the last two rounds of an all-pair bus, which then laid that same plan clean)
+                    leg_bar = ((lambda p, q: VR + TW / 2 + CL) if s in exact_b[nm] else
+                               (lambda p, q: ring_one + voff + g2 * (0 if _on_grid(p, q, g) else 1)))
                     ln = min([(dseg(x, y, p, q), ring[om] + voff + g2 * (0 if _on_grid(p, q, g) else 1), om, L)
                               for om in M if om != nm for (p, q, L) in ring_lines[om]]
-                             + [(dseg(x, y, p, q), ring_one + voff + g2 * (0 if _on_grid(p, q, g) else 1), om, L)
+                             + [(dseg(x, y, p, q), leg_bar(p, q), om, L)
                                 for om in leg_lines if om != nm for (p, q, L) in leg_lines[om]],
                              key=lambda r: r[0] - r[1], default=(9, 0, '', ''))
                     if short(ln[0], ln[1]):

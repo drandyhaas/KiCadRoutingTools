@@ -237,7 +237,6 @@ def lay_field(board, out, ref, buses, reserve, clearance, work, log=print, avoid
     each bus's routed nets (short names) and their solo teeth (solo_teeth). `avoid` {net: [(x, y), ..]}: teeth the
     buses' rounds found crowded -- such a net prefers no tooth, and an exit near one is paid (joint_escape.C_AVOID).
     Under the run's rules and step policy (route_bus.step_policy). Returns the plan's report"""
-    import escape_moves as em
     import joint_escape as je
     import route_bus as rb
     import whole_route as wr
@@ -384,7 +383,7 @@ def merge(out, boards, log=print, field=None):
     from coherent_nets import net_keys
     from kicad_parser import parse_kicad_pcb
     from protected_nets import read_protected_nets, pro_path_for_board
-    (base_b, base_s), rest = boards[0], boards[1:]
+    base_b, rest = boards[0][0], boards[1:]
     with contextlib.redirect_stdout(io.StringIO()):
         pb = parse_kicad_pcb(base_b)
     txt = open(base_b, encoding='utf-8').read()
@@ -608,17 +607,16 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     shutil.rmtree(jd, ignore_errors=True)
     os.makedirs(jd)
     log(f'  every bus on the shared field, negotiated (meeting in {os.path.relpath(jd, os.path.dirname(out))})')
-    # (a whole-array bus lays its own escapes at the shared array again each round, as in its solo run, round the plain
-    # buses' reserved there: kept as the shared field laid them -- surface stubs, no via at the face -- its rounds could
-    # choose no layer at that end, and a memory bus had three lanes with no room for their crossings every round,
-    # against one open laid again, as in its solo run)
+    # (a whole-array bus keeps the escapes the shared field laid it there too, as a plain bus does: the field planned
+    # them with every other bus's. Fanned again round the others' escapes, a memory bus's comb sent an address ball out
+    # by the face another bus's lanes leave by, among their exits, and split a strobe pair across two layers)
     # (an ESCAPE bus is plain on the shared field: the shared field escaped its balls toward its destination with every
     # other bus's, as its own escape fanout does in its solo run, and it keeps them there as a plain bus keeps its own;
     # its solo run, which its solo teeth came of, was an escape bus's. Turned away, an escape bus off an array with
     # three other buses was routed sequentially with them, and the two routed after it found their faces taken by its
     # lanes)
     jobs = [_bus_job(work, 'neg', (b[0], b[1], 'plain' if b[2] == 'escape' else b[2], b[3]), field,
-                     {**_env0(), 'SOURCE_SHARED': '0' if b[2] == 'whole-array' else src,
+                     {**_env0(), 'SOURCE_SHARED': src,
                       'JOINT_DIR': jd, 'JOINT_PEERS': ','.join(dests)},
                      k, rounds, inproc, feedback_rounds, sizes)
             for b in buses]
@@ -640,6 +638,16 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
         with contextlib.redirect_stdout(io.StringIO()):
             copy_board(board, out)
         log('route_bus: no bus off the array wrote a board -- OUT is the board as it came')
+    # (the merged board graded as a bus step's own board is: every bus net connected on its bus's parts, no DRC the step
+    # made, no ball walled in -- each bus graded its own board alone, and the buses' lanes stand together here)
+    grade_ = None
+    if have:
+        import route_bus as rb
+        nets_ = []
+        for b, x in zip(buses, boards):
+            j_ = json.load(open(x[1])) if x else {}
+            nets_.append((b[0], b[1].split('+'), list(j_.get('routed') or []) + list(j_.get('refused') or {})))
+        grade_ = rb.board_grade(board, out, nets_, work, log=log, tag='merged')
     runs = []
     for b, x in zip(buses, boards):
         j = json.load(open(x[1])) if x else {}
@@ -652,8 +660,8 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
         json.dump(dict(board=board, out=out, negotiated=True, src=src, field=field,
                        field_plan={k_: v_ for k_, v_ in (field_plan or {}).items()
                                    if isinstance(v_, (int, float, str))},
-                       buses=runs, conflicts=n_conf, given_back=given, secs=int(time.time() - t0), exit=code), f,
-                  indent=1)
+                       buses=runs, conflicts=n_conf, given_back=given, grade=grade_, secs=int(time.time() - t0),
+                       exit=code), f, indent=1)
     log(f'route_bus: negotiated, {sum(r["routed"] for r in runs)} nets routed by {len(runs)} buses, '
         f'{"no" if n_conf == 0 else n_conf if n_conf is not None else "ungraded"} cross-bus conflict(s), '
         f'{int(time.time() - t0)} s -- {os.path.basename(out)}')

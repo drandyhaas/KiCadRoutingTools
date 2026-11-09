@@ -822,6 +822,10 @@ def loop(solve, out, rounds, env, log):
                 free_ |= round_lanes(O(f'lc{i}.json'), O('plan.found'))
             if not free_:
                 free_ = round_lanes(O(f'c{i}.json'), O(f'p{i}.audit'))
+            if os.path.isfile(O(f'dc{i}.json')):
+                # (...and every pair the snap could not lay, its dive cut with it (smooth_passes): held, its cut was a
+                # held lane's and dropped, and the repair solved another lane again to the same plan, three rounds)
+                free_ |= {x['lane'] for x in (json.load(open(O(f'dc{i}.json'))).get('vcuts') or [])}
             if env.get('VBAN_WALLS') and os.path.isfile(env['VBAN_WALLS']):
                 # (...and every lane an end of which the relayer kept off the solve's layer, for walling a ball in)
                 free_ |= {r_[0] for r_ in json.load(open(env['VBAN_WALLS']))}
@@ -1937,7 +1941,7 @@ def joint_sync(env, r, solve, say):
         except (OSError, ValueError):
             lanes = None
     lanes = with_end_runs(lanes, genv, q_, cx_, cy_)
-    say(f'  coupled solve: this bus\'s own plan laid out for the couplings: '
+    say('  coupled solve: this bus\'s own plan laid out for the couplings: '
         + (f'{len(lanes["pieces"])} pieces' if lanes else 'NOT (its taut paths instead)'))
     req = {'bus': bus, 'env': {k_: v_ for k_, v_ in env.items() if isinstance(v_, str)}, 'solve': os.path.abspath(solve),
            'turn': [int(q_), cx_, cy_], 'lanes': lanes}

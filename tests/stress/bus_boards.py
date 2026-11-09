@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """bus_boards.py -- the BUS BOARDS check: each board of tests/fixtures/bus_boards routed by the bus step from its pre-bus
 input (route_bus.py, the board's recorded arguments: every bus of the board in one call -- routed in turn, or
-negotiated where the buses off one array need it, as the step decides), and every bus net CONNECTED on the board the
-step hands on (check_connected, read off that board -- not the step's own count).
+negotiated where the buses off one array need it, as the step decides), and graded on the board the step hands on,
+against its input (route_bus.board_grade, read off that board -- not the step's own count): every bus net CONNECTED,
+no DRC violation the step made, and no ball of the buses' arrays WALLED in.
 
   python3 tests/stress/bus_boards.py [--cases A,B] [--out DIR] [-j N] [--rounds R] [--set K=V ...]
 
 Not collected by tests/run_all.py: a run is an hour or more of routing (the boards run -j at a time, each a full
-route_bus call). Exit 0 when every board's bus nets are all connected, 1 when any is open or a run failed; the table
-names each board's open nets, its buses (mode, vias, copper, walled balls) and its time, and OUT/report.json holds it.
+route_bus call). Exit 0 when every board is clean -- no bus net open, no DRC, no ball walled -- 1 otherwise or when a
+run failed; the table names each board's open nets, DRC and walled balls, its buses (mode, vias, copper) and its time,
+and OUT/report.json holds it.
 
   --set K=V   a setting for every run (e.g. ENDS_JOINT_ALL=1): an A/B arm of a change behind a setting
   --rounds R  route_bus --rounds (default 1: a bus closes in its first round)
@@ -75,61 +77,39 @@ def bus_summaries(d):
 
 
 def grade(d):
-    """{buses: [...], nets, open: [names], why}: every bus net of the run in `d` checked on its output board -- its
-    pads on the bus's own parts (the source, the destination's every part) one piece of copper (check_connected's
-    test, zones credited). A bus net's pads elsewhere (a termination's, a test point's) are the chain's later steps'"""
-    return grade_board(os.path.join(d, 'bus.kicad_pcb'), bus_summaries(d))
+    """{buses: [...], nets, open: [names], drc, walled: [balls], ok, why}: the run in `d` graded on its output board
+    against its input (route_bus.board_grade): every bus net's pads on the bus's own parts (the source, the
+    destination's every part) one piece of copper -- a net's pads elsewhere (a termination's, a test point's) are the
+    chain's later steps' --, no DRC violation the step made, and no ball of the buses' arrays walled in"""
+    return grade_board(os.path.join(d, 'bus.kicad_pcb'), bus_summaries(d), os.path.join(d, 'input.kicad_pcb'),
+                       os.path.join(d, 'grade'))
 
 
-def grade_board(out_, summaries):
-    """grade's test on the board `out_` for the buses `summaries` [(a bus's summary path, its entry)]"""
+def grade_board(out_, summaries, input_, work):
+    """grade's test on the board `out_`, routed from `input_`, for the buses `summaries` [(a bus's summary path, its
+    entry)]; the checkers' files in `work`"""
     sys.path.insert(0, os.path.join(ROOT, 'py_router'))
     sys.path.insert(0, os.path.join(ROOT, 'awx'))
-    import collections
-    import check_connected as cc
-    from coherent_nets import by_key
-    from kicad_parser import parse_kicad_pcb
+    import route_bus as rb
     if not os.path.isfile(out_):
-        return dict(buses=[], nets=0, open=[], why='no output board')
-    buses, asked = [], []
+        return dict(buses=[], nets=0, open=[], drc=None, walled=[], ok=False, why='no output board')
+    buses, nets_ = [], []
     for path, entry in summaries:
         if not path or not os.path.isfile(path):
             buses.append(dict(bus=f"{entry.get('src')}->{entry.get('dest')}", why='no summary'))
             continue
         s = json.load(open(path, encoding='utf-8'))
         nets = list(s.get('routed') or []) + list(s.get('refused') or {})
-        refs = {s.get('src')} | set(str(s.get('dest') or '').split('+'))
-        asked += [(k, refs) for k in nets]
+        nets_.append((s.get('src'), str(s.get('dest') or '').split('+'), nets))
         g = s.get('grade') or entry.get('grade') or ''
         buses.append(dict(bus=f"{s.get('src')}->{s.get('dest')}", mode=entry.get('mode'), nets=len(nets),
-                          exit=s.get('exit'), walled=len((s.get('walled') or {}).get('walled') or []),
-                          grade=g.split(' | ')[0]))
-    if not asked:
-        return dict(buses=buses, nets=0, open=[], why='no bus nets in the summaries')
+                          exit=s.get('exit'), grade=g.split(' | ')[0]))
+    if not nets_:
+        return dict(buses=buses, nets=0, open=[], drc=None, walled=[], ok=False, why='no bus nets in the summaries')
     with contextlib.redirect_stdout(io.StringIO()):
-        pcb = parse_kicad_pcb(out_)
-    bk = by_key(pcb)
-    segs, vias, zones = (collections.defaultdict(list) for _ in range(3))
-    for s_ in pcb.segments:
-        segs[s_.net_id].append(s_)
-    for v_ in pcb.vias:
-        vias[v_.net_id].append(v_)
-    for z_ in pcb.zones or ():
-        zones[z_.net_id].append(z_)
-    bad = []
-    for k, refs in asked:
-        if k not in bk:
-            bad.append(k)
-            continue
-        nid, net = bk[k]
-        pads = [p for p in net.pads if p.component_ref in refs]
-        if len(pads) < 2:
-            continue                                    # (nothing of the bus's to join)
-        with contextlib.redirect_stdout(io.StringIO()):
-            r = cc.check_net_connectivity(nid, segs[nid], vias[nid], pads, zones[nid], pcb_data=pcb)
-        if not r.get('connected'):
-            bad.append(net.name)
-    return dict(buses=buses, nets=len(asked), open=sorted(set(bad)), why='')
+        g = rb.board_grade(input_, out_, nets_, work, log=lambda *a_: None, tag='grade')
+    return dict(buses=buses, nets=g['nets'], open=g['open'], drc=g['drc']['n'], walled=g['walled']['walled'],
+                ok=g['ok'], why='' if g['drc']['n'] is not None else 'the DRC gave nothing to read')
 
 
 def main():
@@ -161,20 +141,22 @@ def main():
             rows[c] = dict(exit=rc, secs=secs, **g)
             print(f'  {c}: route_bus exit {rc}, {secs} s -- {g["nets"]} bus net(s), {len(g["open"])} open'
                   + (f' ({", ".join(g["open"][:8])}{" ..." if len(g["open"]) > 8 else ""})' if g['open'] else '')
+                  + f', drc {g["drc"]}, {len(g["walled"])} walled' + (f' ({", ".join(g["walled"][:8])})'
+                                                                      if g['walled'] else '')
                   + (f' [{g["why"]}]' if g['why'] else ''), flush=True)
-    print('\nboard      bus nets  open  secs  buses')
+    print('\nboard      bus nets  open  drc  walled  secs  buses')
     ok = True
     for c in cases:
         r = rows[c]
-        fail = bool(r['open']) or bool(r['why']) or r['exit'] not in (0, 1)
+        fail = not r['ok'] or bool(r['why']) or r['exit'] not in (0, 1)
         ok &= not fail
-        print(f'{c:10s} {r["nets"]:8d} {len(r["open"]):5d} {r["secs"]:5d}  '
+        print(f'{c:10s} {r["nets"]:8d} {len(r["open"]):5d} {str(r["drc"]):>4s} {len(r["walled"]):7d} {r["secs"]:5d}  '
               + '; '.join(f'{b["bus"]} {b.get("mode") or ""} {b.get("grade", b.get("why", ""))[4:] if b.get("grade") else b.get("why", "")}'
-                          f'{" walled=" + str(b["walled"]) if b.get("walled") else ""}' for b in r['buses'])
+                          for b in r['buses'])
               + ('  FAIL' if fail else ''))
     with open(os.path.join(out, 'report.json'), 'w', encoding='utf-8') as f:
         json.dump(dict(sets=sets, rounds=a.rounds, cases=rows), f, indent=1)
-    print(f'\nbus_boards: {"every bus net connected on every board" if ok else "OPEN bus nets or failed runs"} '
+    print(f'\nbus_boards: {"every board clean: no bus net open, no DRC, no ball walled" if ok else "OPEN bus nets, DRC, walled balls or failed runs"} '
           f'-- {os.path.join(out, "report.json")}')
     sys.exit(0 if ok else 1)
 

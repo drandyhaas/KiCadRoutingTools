@@ -1196,6 +1196,10 @@ def _route(n, strict=True, wide=False, neck=False):
                         fi_, fj_, _fd, fk_, _fs = far_[1]
                         stuck = (f'; the farthest any start got: {far_[0]:.2f} of {total:.2f} mm along it, at '
                                  f'({(fi_ + i0) * g:.2f}, {(fj_ + j0) * g:.2f}) on {lays[fk_]}')
+                        # (...and kept, as a single's search keeps it: the pair's dive cut is its change nearest
+                        # there. Unkept, the cut was the change nearest the lane's START -- a pair stuck 2 mm short
+                        # of its berth had its first dive, mid-route, cut three rounds running, and stayed stuck)
+                        STUCK_AT['last'] = ((fi_ + i0) * g, (fj_ + j0) * g)
                         if W.get('stages'):
                             debug_map(n, W, ((fi_ + i0) * g, (fj_ + j0) * g), [lays[fk_]])
                     break

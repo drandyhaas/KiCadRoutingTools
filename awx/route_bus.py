@@ -359,15 +359,6 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
             left = None
         return step_out, step_json, left
 
-    def open_nets(summaries):
-        """the nets the steps whose summaries these are handed back, all told (one with no summary: None)"""
-        n_ = 0
-        for p_ in summaries:
-            try:
-                n_ += len(json.load(open(p_)).get('refused') or {})
-            except (OSError, ValueError, TypeError):
-                return None
-        return n_
     for bus in resolved:
         s, d = bus[0], bus[1]
         if s in negotiated:
@@ -427,17 +418,33 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
             code, _g = negotiated_buses.route_negotiated(cur, step_out, grp, k, rounds, inproc, log, step_json,
                                                          feedback_rounds, solo=solo, **sizes)
             got = json.load(open(step_json)).get('buses') if os.path.isfile(step_json) else None
-            # (the better of the two by the nets each leaves open, all told)
-            neg_open = open_nets([r_['summary'] for r_ in got]) if got else None
-            seq_open = open_nets([j_ for _o, j_, _l in seq])
+            # (the better of the two by each one's board, graded as a step's own: its bus nets open, its DRC and its
+            # balls walled in, all told -- board_grade; the negotiation's merged board graded by negotiated_buses)
+            nets_of = collections.defaultdict(set)
+            for js_ in [j_ for _o, j_, _l in seq] + [r_.get('summary') for r_ in got or []]:
+                try:
+                    s_ = json.load(open(js_))
+                except (OSError, ValueError, TypeError):
+                    continue
+                nets_of[(s_.get('src'), str(s_.get('dest')))] |= set(s_.get('routed') or []) | set(s_.get('refused') or {})
+            gnets_ = [(g_[0], g_[1].split('+'), sorted(nets_of[(g_[0], g_[1])])) for g_ in grp]
+            seq_g = board_grade(cur0, seq_state[0], gnets_, os.path.join(work, f'{name}.in_turn'), log=log,
+                                tag='in_turn') if os.path.isfile(seq_state[0]) else None
+            neg_g = json.load(open(step_json)).get('grade') if os.path.isfile(step_json) else None
+            told = lambda g_: None if not g_ or g_['drc']['n'] is None else \
+                len(g_['open']) + g_['drc']['n'] + len(g_['walled']['walled'])  # noqa: E731
+            say_ = lambda g_: 'no grade' if not g_ else \
+                f'{len(g_["open"])} open, drc {g_["drc"]["n"]}, {len(g_["walled"]["walled"])} walled'  # noqa: E731
+            neg_open, seq_open = told(neg_g), told(seq_g)
             if neg_open is None or (seq_open is not None and seq_open < neg_open):
-                log(f'route_bus: the negotiation left {neg_open if neg_open is not None else "no count of its"} net(s) '
-                    f'open, the buses in turn {seq_open} -- the buses in turn kept')
+                log(f'route_bus: the negotiation left {say_(neg_g)} on the board, the buses in turn {say_(seq_g)} -- '
+                    f'the buses in turn kept')
                 cur, rs_, cs_, is_, through = seq_state
                 del inputs[i0:]
                 runs.extend(rs_), codes.extend(cs_), inputs.extend(is_)
                 continue
-            log(f'route_bus: the negotiation left {neg_open} net(s) open, the buses in turn {seq_open} -- negotiated')
+            log(f'route_bus: the negotiation left {say_(neg_g)} on the board, the buses in turn {say_(seq_g)} -- '
+                f'negotiated')
             codes.append(code)
             for r_ in got or [dict(src=s, dest=g_[1], mode=g_[2], exit=None, grade=None, summary=None) for g_ in grp]:
                 ex_ = 1 if r_['exit'] is None else r_['exit']
@@ -864,7 +871,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             joint_left = {n for _r, n in added}
             with open(os.path.join(work, 'joint.json'), 'w', encoding='utf-8') as f:
                 json.dump(spec, f, indent=1)
-            log(f'  whole-array fanout: the bus nets the run leaves out planned as the arrays\' others: '
+            log('  whole-array fanout: the bus nets the run leaves out planned as the arrays\' others: '
                 + ', '.join(f'{r_}:{short(n)}' for r_, n in added))
 
     # 3. the flow frame
@@ -1199,6 +1206,76 @@ def walled_grade(board, routed, refs, names, log=print):
         log(f'  WALLED IN by the step, reached from nowhere at {rung[0]}/{rung[1]}/{rung[2]} (the fab ladder\'s finest): '
             + ', '.join(f'{k} ({nets_.get(k)})' for k in walled) + ' -- each net ships open past the locked lanes')
     return out
+
+
+def board_grade(board, routed, buses, work, log=print, tag='board'):
+    """A bus step's output `routed` graded against the board it came in with, `board`, for the three things a step
+    answers for on the BOARD -- `buses` [(source, [destination parts], [its nets, full names])]: every bus net's pads on
+    its own bus's parts one piece of copper there (check_connected's test, zones credited; a net's pads elsewhere -- a
+    termination's, a test point's -- are the chain's later steps': `open`, full names), no DRC violation the step made
+    (check_drc at the project's floor, margin 0.1: the bus nets' own and the board's past those it came with -- `drc`),
+    and no ball of the buses' arrays walled in (walled_grade -- `walled`). A step's own grade reads its own board
+    alone; buses routed together (negotiated_buses' merge, the bus boards check) are graded here on the board they hand
+    on. {open, nets, drc: {bus, board, input, n}, walled, ok}; its files in `work`, prefixed `tag`"""
+    import awx_settings
+    import whole_route as wr
+    import check_connected as _cc
+    from coherent_nets import net_keys, net_patterns
+    from kicad_parser import parse_kicad_pcb
+    os.makedirs(work, exist_ok=True)
+    checker = lambda name: os.path.join(HERE, '..', 'py_router', name)  # noqa: E731
+    with contextlib.redirect_stdout(io.StringIO()):
+        pcb = parse_kicad_pcb(routed)
+    keys = net_keys(pcb)
+    # (a net by its full name or the whole route's -- a step's summary names them so: by_key)
+    by_name = {n.name: (i, n) for i, n in pcb.nets.items() if n.name}
+    by_name.update({keys.get(n.name, n.name): (i, n) for i, n in pcb.nets.items() if n.name})
+    full = lambda n: by_name[n][1].name if n in by_name else n  # noqa: E731
+    buses = [(s, list(ds), [full(n) for n in ns]) for s, ds, ns in buses]
+    names = sorted({n for _s, _d, ns in buses for n in ns})
+    refs = sorted({r for s, ds, _n in buses for r in [s] + list(ds)})
+    segs, vias, zones = (collections.defaultdict(list) for _ in range(3))
+    for s_ in pcb.segments:
+        segs[s_.net_id].append(s_)
+    for v_ in pcb.vias:
+        vias[v_.net_id].append(v_)
+    for z_ in pcb.zones or ():
+        zones[z_.net_id].append(z_)
+    open_ = set()
+    for s, ds, ns in buses:
+        parts = {s} | set(ds)
+        for n in ns:
+            if n not in by_name:
+                open_.add(n)
+                continue
+            nid, net = by_name[n]
+            pads = [p for p in net.pads if p.component_ref in parts]
+            if len(pads) < 2:
+                continue                                    # (nothing of the bus's to join)
+            with contextlib.redirect_stdout(io.StringIO()):
+                r_ = _cc.check_net_connectivity(nid, segs[nid], vias[nid], pads, zones[nid], pcb_data=pcb)
+            if not r_.get('connected'):
+                open_.add(n)
+    open_ = sorted(open_)
+    pats = net_patterns(names, keys)
+
+    def drc(path, sub, *more):
+        jp = os.path.join(work, f'{tag}_drc_{sub}.json')
+        if os.path.exists(jp):
+            os.remove(jp)
+        wr.run([checker('check_drc.py'), path, '--clearance-margin', '0.1', '--max-print', '0', '--json', jp, *more],
+               awx_settings.environ(), log_path=jp[:-len('.json')] + '.log', own_process=True)
+        return wr.drc_count(jp)[0]
+    d_bus, d_out, d_in = drc(routed, 'bus', '--nets', *pats), drc(routed, 'board'), drc(board, 'input')
+    n_drc = None if None in (d_bus, d_out, d_in) else d_bus + max(0, d_out - d_in)
+    walled = walled_grade(board, routed, refs, names, log)
+    ok = not open_ and n_drc == 0 and not walled['walled']
+    log(f'  on the board: {len(open_)} bus net(s) open of {len(names)}'
+        + (f' ({", ".join(keys.get(n, n) for n in open_[:8])})' if open_ else '')
+        + f', drc {n_drc} (bus {d_bus}, board {d_out} vs {d_in} in), walled {len(walled["walled"])}'
+        + (' -- clean' if ok else ''))
+    return dict(open=open_, nets=len(names), drc=dict(bus=d_bus, board=d_out, input=d_in, n=n_drc), walled=walled,
+                ok=ok)
 
 
 def _cage_rung(pcb):

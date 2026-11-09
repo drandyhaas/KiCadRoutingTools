@@ -745,7 +745,7 @@ def joint_berths(st, board, choice, log=print):
     desc = lambda m_: f'{m_.kind}/{m_.direction}/{m_.layer}@({m_.exit_pt[0]:.2f},{m_.exit_pt[1]:.2f})'
     moved = [nm for nm in choice if nm not in out or sr.move_sig(out[nm]) != sr.move_sig(choice[nm])]
     if moved:
-        log(f'  berths the whole-array plan moved: ' + '; '.join(
+        log('  berths the whole-array plan moved: ' + '; '.join(
             f'{sn(nm)} {desc(choice[nm])} -> {desc(out[nm]) if nm in out else "none"}' for nm in moved))
     return out
 
@@ -1294,6 +1294,11 @@ def plan(base, names, work):
                 joint_ = bool(res_r.get('joint'))
                 if not joint_:
                     ban_moves(banned, moves, misses, names)
+                else:
+                    # ...but an asked tooth that plan left as it stood (unplanned, its copper restored: source_realize)
+                    # is no tooth it can lay -- banned, as a refusal is. Left free, it was asked again, the same board
+                    # laid and rejected, pass after pass
+                    ban_moves(banned, moves, [nm for nm in misses if nm in set(res_r.get('restored') or ())], names)
                 how_ = "the whole-array plan's" if joint_ else 'banned'
                 line = (f'  round {r}: source residue move(s) realized: {sorted(moves)}'
                         + (f'; not laid as asked ({how_}): {misses}' if misses else '')

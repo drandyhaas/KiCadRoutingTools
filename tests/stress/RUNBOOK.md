@@ -720,12 +720,15 @@ python3 tests/stress/placement_survey.py report rows.jsonl
 routes every bus of each board in `tests/fixtures/bus_boards` (pre-bus inputs, planes
 poured, gzipped with their `.kicad_pro`/`.kicad_dru`; `manifest.json` holds each
 board's `route_bus.py` arguments -- all its buses in one call, so the step routes them
-in turn or negotiates as it decides) with `--rounds 1`, and grades every bus net on the
-board the step hands on: the net's pads on the bus's own parts one piece of copper
-(`check_connected.check_net_connectivity`, zones credited) -- read off the board, not
-the step's own count; a net's pads elsewhere (a termination, a test point) are left to
-the chain's later steps. Exit 0 when no bus net is open on any board; the table and
-`OUT/report.json` name the open nets, each bus's grade and walled balls, and the time.
+in turn or negotiates as it decides) with `--rounds 1`, and grades the board the step
+hands on against its input (`awx/route_bus.board_grade`, read off the board, not the
+step's own count) for three things: every bus net's pads on the bus's own parts one
+piece of copper (`check_connected.check_net_connectivity`, zones credited; a net's pads
+elsewhere -- a termination, a test point -- are left to the chain's later steps), no DRC
+violation the step made (the bus nets' own and the board's past those it came with),
+and no ball of the buses' arrays walled in. Exit 0 when every board is clean on all
+three; the table and `OUT/report.json` name the open nets, the DRC count, the walled
+balls, each bus's grade, and the time.
 It is an hour or more of routing, so `tests/run_all.py` does not collect it (it lives
 under `tests/stress/`); run it before committing a change to the bus step (`awx/`),
 and `--set K=V` runs an arm of a change behind a setting. A negotiated board starts a

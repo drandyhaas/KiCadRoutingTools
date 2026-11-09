@@ -15,8 +15,9 @@ route_bus gave it there -- an escape bus on an array an earlier bus went through
 into STEPS_DIR with steps.json; each step's recorded work dir (BUS.bus/SRC-DEST.bus) named for `replay`.
 
 `run`: every step routed by route_bus (in process, --rounds R, the case's sizes) on its own board, -j at a time, each
-graded as bus_boards grades a board: every bus net's pads on the bus's parts one piece of copper on the step's output.
-Exit 0 when no step leaves a bus net open. Use it for a change to the fanout, the ends or anything the whole step runs.
+graded as bus_boards grades a board, on the step's output against its board: every bus net's pads on the bus's parts
+one piece of copper, no DRC violation the step made, no ball walled in. Exit 0 when every step is clean so. Use it for
+a change to the fanout, the ends or anything the whole step runs.
 
 `replay`: every step's recorded ROUND again (awx/replay_round.py: its fanout as recorded -- and with --keep-solve its
 first solve -- the rest by this tree), its round-1 audit and its laid open count beside the recorded run's own (WORSE
@@ -164,7 +165,8 @@ def run_one(st, steps_dir, out, rounds, sets, timeout, after=None, prev=None):
     sys.path.insert(0, HERE)
     import bus_boards
     g = bus_boards.grade_board(os.path.join(od, 'bus.kicad_pcb'), [(os.path.join(od, 'bus.summary.json'),
-                                                                     dict(mode=st['mode']))])
+                                                                     dict(mode=st['mode']))],
+                               os.path.join(od, 'cur.kicad_pcb'), os.path.join(od, 'grade'))
     return dict(exit=rc, secs=round(time.time() - t0), **g)
 
 
@@ -287,6 +289,7 @@ def main():
             if a.cmd == 'run':
                 print(f'  {n}: exit {r.get("exit")}, {r.get("secs")} s -- {r.get("nets", 0)} bus net(s), '
                       f'{len(r.get("open") or [])} open' + (f' ({", ".join(r["open"][:8])})' if r.get('open') else '')
+                      + f', drc {r.get("drc")}, {len(r.get("walled") or [])} walled'
                       + (f' [{r["why"]}]' if r.get('why') else ''), flush=True)
             else:
                 print(f'  {n}: exit {r.get("exit")}, {r.get("secs")} s -- round 1 audit dive/static/shape/swim/pitch '
@@ -297,9 +300,9 @@ def main():
     for s_ in steps:
         r = rows.get(s_['name']) or {}
         if a.cmd == 'run':
-            fail = bool(r.get('open')) or bool(r.get('why')) or r.get('exit') not in (0, 1)
-            print(f'{s_["name"]:28s} {r.get("nets", 0):5d} nets {len(r.get("open") or []):4d} open {r.get("secs", 0):6} s'
-                  + ('  FAIL' if fail else ''))
+            fail = not r.get('ok') or bool(r.get('why')) or r.get('exit') not in (0, 1)
+            print(f'{s_["name"]:28s} {r.get("nets", 0):5d} nets {len(r.get("open") or []):4d} open drc {str(r.get("drc")):>3s} '
+                  f'{len(r.get("walled") or []):3d} walled {r.get("secs", 0):6} s' + ('  FAIL' if fail else ''))
         else:
             if r.get('why') == 'no recorded round':
                 print(f'{s_["name"]:28s} (no recorded round: run it with `run`)')
@@ -312,7 +315,7 @@ def main():
         ok &= not fail
     with open(os.path.join(out, 'report.json'), 'w', encoding='utf-8') as f:
         json.dump(dict(cmd=a.cmd, sets=sets, steps=rows), f, indent=1)
-    print(f'\nbus_steps {a.cmd}: {"every step clean" if ok else "OPEN nets or failed steps"} -- '
+    print(f'\nbus_steps {a.cmd}: {"every step clean: no bus net open, no DRC, no ball walled" if ok else "OPEN nets, DRC, walled balls or failed steps"} -- '
           f'{os.path.join(out, "report.json")}')
     sys.exit(0 if ok else 1)
 
