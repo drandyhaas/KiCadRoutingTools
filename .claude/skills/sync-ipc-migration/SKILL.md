@@ -80,6 +80,34 @@ vs main.
   wx pattern is identical on both branches, so it ports as-is.
 - **docs/, README.md, .claude/skills/** — take main's content additions
   (branch-agnostic). New skills on main are simply added.
+- **The deleted SWIG builder region of `py_router/kicad_parser.py`** — keep
+  the deletion (take the IPC side of every hunk there), then port each change
+  main made to the pcbnew builder into the kipy builder: a new Pad/PCBData
+  field "set by BOTH parse paths" needs its kipy read too (`git diff <base>
+  main -- py_router/kicad_parser.py`, look at `build_pcb_data_from_board`).
+
+### Auto-merge traps (a clean auto-merge is not a correct one)
+
+Each of these merged without a conflict and broke the IPC plugin silently,
+most behind an `except` that swallowed the error. Check every sync:
+
+- **An engine signature main changed.** For each engine function whose
+  signature changed in `git diff <base> main -- py_router/`, grep its callers
+  in `kicad_ipc_adapter.py` and `kicad_routing_plugin/`. A new REQUIRED
+  argument the adapter does not pass is a TypeError inside a guarded block
+  (the plane cleanup ran nowhere until it was found).
+- **A net-class lookup without `pcb_data`.** On IPC
+  `_get_netclass_parameters(name, pcb_data)` reads classes off `pcb_data`
+  and answers None without it; main's twin takes no `pcb_data`.
+  `grep -n "_get_netclass_parameters('Default')" kicad_routing_plugin/` must
+  find every call passing it, or an unticked run routes at the 0.25 fallback.
+- **A live-board read in merged code.** `pcbnew.GetBoard()`,
+  `GetDesignSettings()`, `m_*` attributes, `live_declared_rules(board)`: kipy
+  has none of these. The IPC twin of a live design-setting read is the
+  project file the steps wrote (`fix_kicad_drc_settings.project_rules`).
+- **A changed return shape.** A merged caller unpacking more values than the
+  IPC function returns raises after the work is done (the diff tab's apply
+  once returned two values to a three-value unpack).
 
 ## Step 3: Verify it really works under IPC
 
@@ -156,11 +184,23 @@ the third is specific to THIS branch:
   the same way a real failure does:
 
   ```bash
-  for f in tests/gui_parity/test_*.py; do
-      python3 "$f" >/tmp/g.out 2>&1
-      printf '%-60s %s\n' "$(basename "$f")" "$?"
-  done      # 0 = pass, 77 = declared SKIP, anything else = look at it
+  python3 tests/gui_parity/run_gui_parity.py     # 0 PASS, 77 SKIP, else FAIL
   ```
+
+  **A red gate is not necessarily the merge's.** Nothing runs
+  `tests/gui_parity/` on main either, so before blaming the merge, run the
+  same gate (main's version) on a clean main checkout. A gate red on both is
+  main's, and is fixed on main and merged, not patched here.
+
+  **Main's new SWIG gates** (`from kicad_routing_plugin import swig_gui`,
+  `pcbnew.LoadBoard`, live `GetDesignSettings`) die on import here. Port each
+  to `tests/gui_parity/fake_ipc_board.py` (live-board reads become `.kicad_pro`
+  reads), keep its arms and assertions, and give each port a negative control
+  (patch the guarded line, see it fail, restore byte for byte). Several new
+  gates are independent jobs: hand them to parallel subagents in this worktree,
+  each owning its own files and editing no plugin code (a gate that finds a
+  plugin bug stops and reports it). A pcbnew-only arm of a `tests/test_*.py`
+  unit test skips by name, saying where the IPC front gets that value.
 
   A gate whose SWIG half the port removed must be made to REFUSE BY NAME and
   exit 77, saying where the coverage went and which arm is not covered -- never
@@ -169,9 +209,6 @@ the third is specific to THIS branch:
 ## Step 4: Commit (do not push)
 
 Commit the merge with a message summarizing which fixes were ported and how IPC
-plumbing was preserved. Leave pushing to the user unless they ask. End the
-commit message with:
-
-```
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
-```
+plumbing was preserved, which gates were ported or refused, and the test
+results. Leave pushing to the user unless they ask. End the commit message
+with the attribution lines the session gives for commits.
