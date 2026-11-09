@@ -467,6 +467,36 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 LAYER_CUTS.append((n, k_, 1 - tl[n], entry[n] + d0_, entry[n] + d1_, entry[n] + v1_ + G / 2,
                                    entry[n] + d1_ + vm_, entry[n] + v0_, entry[n] + v1_))
                 VIN0[n] = min(VIN0[n], v0_)
+
+    def site_clear(n, k_, pt_=None):
+        """a through via at single lane n's stub end k_ (0 its tooth, 1 its berth) -- or at pt_ -- clear of every other
+        net's copper on every layer by a via's room -- measured, as the ends model measures a blocked front's"""
+        pt_ = ctx.ends[n][k_] if pt_ is None else pt_
+        nid = ctx.byname[n][0]
+        r_ = bd.VIA_SIZE / 2 + bd.CLEAR
+        if any(s_.net_id != nid and _pairs._pt_seg(pt_, (s_.start_x, s_.start_y), (s_.end_x, s_.end_y))
+               < r_ + s_.width / 2 for s_ in ctx.base_segments):
+            return False
+        if any(v_.net_id != nid and math.hypot(v_.x - pt_[0], v_.y - pt_[1]) < r_ + v_.size / 2 for v_ in ctx.base_vias):
+            return False
+        from routing_utils import point_to_pad_rect_dist
+        return not any(p_.net_id != nid and point_to_pad_rect_dist(pt_[0], pt_[1], p_) < r_
+                       for fp_ in ctx.pcb.footprints.values() for p_ in fp_.pads
+                       if abs(p_.global_x - pt_[0]) < 3 and abs(p_.global_y - pt_[1]) < 3)
+
+    def via_room(n, k_, upto):
+        """how far along single lane n's escape from its stub end k_ -- its tooth's way out, or back along its berth's
+        way in -- a via of its own first stands clear (site_clear), within `upto` mm; None where none does"""
+        d_ = ctx.tooth_dir.get(n) if k_ == 0 else ctx.stub_dir.get(n)
+        if not d_ or not math.hypot(*d_):
+            return 0.0 if site_clear(n, k_) else None
+        nd_ = math.hypot(*d_)
+        p_, s_ = ctx.ends[n][k_], 0.0
+        while s_ <= upto + 1e-9:
+            if site_clear(n, k_, (p_[0] + s_ * d_[0] / nd_, p_[1] + s_ * d_[1] / nd_)):
+                return s_
+            s_ += G / 2
+        return None
     # ...and a single lane the loop found blocked by an island on one layer -- its audit against it, or its snap stuck
     # beside it (whole_route's LAYER cuts, `lcuts` in the cut files: a wall the lanes cannot go round): on the other layer
     # across the island's box on the trunk, a track's clearance either side, its changes a via's clearance off it
@@ -487,6 +517,33 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 if blk_:
                     _under.append({'lane': n_, 'island': f'under {r_}', 'layer': blk_[0], 'box': list(Fr.group.boxes[r_]),
                                    'blocked': blk_, 'firm': True})
+    # ...and the board's KEEP-OUTS and the AREAS the agent driving the step asked the lanes to keep out of (whole_route's
+    # ROUND EDITS, BUS_AREAS: plan_audit.bus_areas), held firm off their layers along the stretch of each lane's
+    # REFERENCE route that comes within a lane's bar of one -- the audit holds every lane to them as to a keep-out, and
+    # cuts one the order sends there. (A keep-out the audit alone held: one lane cut off it a round, the next lane the
+    # order sent there in the round after -- two neighbouring lanes in turn, 2-3 mm deep in a rule area on In1/In2, the
+    # loop ending on it)
+    import plan_audit as _paa
+    _kos = [(f'keepout K{i_}', P_, H_, L_, B_, None)
+            for i_, (P_, H_, L_, B_) in enumerate(_paa.keepout_areas(ctx.pcb, ctx.cfg.layers))] if NL > 2 else []
+    _areas = [(f'area {i_}',) + tuple(a_) for i_, a_ in enumerate(_paa.bus_areas())] if NL > 2 else []
+    if _kos or _areas:
+        import whole_passages as _wpa
+        _refa = _wpa.references(ctx, Fr, G, rs, end, PITCH, TRK, CLR)
+        _bara = TRK / 2 + CLR + ctx.cfg.grid_step / 2
+        for nm_a, pa_, ha_, la_, ba_, na_ in _kos + _areas:
+            blk_ = sorted(LAYN.index(L_) for L_ in la_ if L_ in LAYN)
+            for n_ in M:
+                if not blk_ or (na_ is not None and n_ not in na_) or not len(_refa.get(n_, ())):
+                    continue
+                ra_ = _refa[n_]
+                us_ = ra_[_paa.keepout_dist(ra_[:, 1:3], pa_, ha_) <= _bara, 0]
+                if len(us_):
+                    _under.append({'lane': n_, 'island': nm_a, 'layer': blk_[0], 'box': list(ba_),
+                                   'blocked': blk_, 'firm': True, 'span': [float(us_.min()), float(us_.max())]})
+        print(f'   keep-outs and areas to keep out of: {len(_kos)} on the board, {len(_areas)} the round\'s; '
+              f'{sum(1 for c_ in _under if str(c_["island"]).startswith("keepout "))} and '
+              f'{sum(1 for c_ in _under if str(c_["island"]).startswith("area "))} lane(s) held off them')
     for fn_ in [None] + list(cuts) + list(soft_cuts):
         for c_ in (_under if fn_ is None else json.load(open(fn_)).get('lcuts', [])):
             k_lc = (c_['lane'], c_['island'], int(c_['layer']), tuple(round(float(v_), 6) for v_ in c_['box']),
@@ -530,13 +587,19 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 else:
                     off0 = n_ not in prs and (n_, 0) not in VEND and tli[n_] in blk_
                     off1 = n_ not in prs and (n_, 1) not in VEND and dli[n_] in blk_
+                # The window opens where a via of the lane's own first stands clear on its escape (via_room), not at
+                # its stub's end: at an exit two teeth leave stacked on two layers, a change at the stub's end stood on
+                # the other tooth's stub -- a lane of a two-part Ethernet and USB bus, its island a millimetre past its
+                # tooth, shipped open
                 if off0 and lo_c < entry[n_] + VIN0[n_] + G:
-                    w0_, w1_ = entry[n_], lo_c
-                    VIN0[n_] = 0.0
+                    r_ = via_room(n_, 0, lo_c - entry[n_]) or 0.0
+                    w0_, w1_ = entry[n_] + r_, lo_c
+                    VIN0[n_] = r_
                     CHAN_T0.add(n_)
                 elif n_ not in bname and off1 and hi_c > end[n_] - VIN1[n_] - G:
-                    w0_, w1_ = hi_c, end[n_]
-                    VIN1[n_] = 0.0
+                    r_ = via_room(n_, 1, end[n_] - hi_c) or 0.0
+                    w0_, w1_ = hi_c, end[n_] - r_
+                    VIN1[n_] = r_
                 CHAN_CUTS.add((n_, 'chan ' + c_['island'], L_, round(s0_ - t_, 4), round(s1_ + t_, 4), round(lo_c, 4),
                                round(hi_c, 4), w0_, w1_))
                 if blk_ is not None:
@@ -597,21 +660,6 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     # the lanes leave the source's surface escapes for whichever layer the plan gives them where the gap between the
     # arrays has no room for their changes (the zynq's U1 to U5)
     # (not a far-face lane: its route starts at the end of its lead-in round the source's corner, not at its tooth)
-    def site_clear(n, k_, pt_=None):
-        """a through via at single lane n's stub end k_ (0 its tooth, 1 its berth) -- or at pt_ -- clear of every other
-        net's copper on every layer by a via's room -- measured, as the ends model measures a blocked front's"""
-        pt_ = ctx.ends[n][k_] if pt_ is None else pt_
-        nid = ctx.byname[n][0]
-        r_ = bd.VIA_SIZE / 2 + bd.CLEAR
-        if any(s_.net_id != nid and _pairs._pt_seg(pt_, (s_.start_x, s_.start_y), (s_.end_x, s_.end_y))
-               < r_ + s_.width / 2 for s_ in ctx.base_segments):
-            return False
-        if any(v_.net_id != nid and math.hypot(v_.x - pt_[0], v_.y - pt_[1]) < r_ + v_.size / 2 for v_ in ctx.base_vias):
-            return False
-        from routing_utils import point_to_pad_rect_dist
-        return not any(p_.net_id != nid and point_to_pad_rect_dist(pt_[0], pt_[1], p_) < r_
-                       for fp_ in ctx.pcb.footprints.values() for p_ in fp_.pads
-                       if abs(p_.global_x - pt_[0]) < 3 and abs(p_.global_y - pt_[1]) < 3)
     # A single's tooth via only where a via at its stub's end is measured clear, as a berth via's is: the source's fanout
     # ends two to five nets' stubs at one point of a channel's exit, each on its own layer, and a via there stood on the
     # others' copper -- a lane changing layer 0.22 mm from where its neighbour's inner-layer stub ends with its own left
@@ -1507,6 +1555,78 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             print(f'   part gates: {len(GATE_OVER)} -- ' + ', '.join(
                 f'{k_[1][:28]} {k_[2]} {k_[0]} s {k_[3]:.2f}: room {k_[4]:.1f} for {len(k_[5])}' for k_, _v in GATE_OVER[:10])
                 + (' ...' if len(GATE_OVER) > 10 else ''))
+    # ---- PASSAGES (more routing layers than two, SOLVE_PASSAGES): every gap the fixed copper leaves on a layer across a
+    # frame's column -- between two parts' pads, a wall of holes, the board's edge, an array's box (whole_passages.Census:
+    # the census the ends model holds the source's faces to) -- holds the lanes on that layer there at the lane pitch.
+    # A lane stands in the gap its reference route crosses the column in; a lane over is priced W_FIRM, as a part gate's.
+    # A part gate sums a column's every gap on the layer: three lanes on F.Cu and a pair between an array's face and a
+    # WSON 1.35 mm off it, its one gap holding 4.9 lane pitches, passed it on the room beyond the WSON, and the solve put
+    # two via ends' teeth on that layer there too
+    PASS_OVER = []
+    if NL > 2 and MONO and (awx_settings.get('SOLVE_PASSAGES') or '1') == '1':
+        import whole_passages as _wp
+        bus_ = {ctx.byname[n][0] for n in M} | {ctx.byname[leg][0] for n in M for leg in prs.get(n, ()) if leg in ctx.byname}
+        CEN = _wp.Census(ctx, Fr, LAYN, TRK, CLR, VIA, PITCH, bus_nets=bus_, dest_boxes=dest_boxes)
+        REFP = _wp.references(ctx, Fr, G, rs, end, PITCH, TRK, CLR,
+                              ring_stack=(awx_settings.get('SOLVE_RING_STACK_REF') or '0') == '1')
+        QW_ = lambda v_: int(round(v_ * 1000))       # (widths and rooms in microns, as the part gates')
+        widp_ = {n: QW_(CEN.PMIN + (_pairs.pitch(TRK) if n in prs else 0.0)) for n in M}
+        PB_ = {}
+
+        def on_p(n, u_, L_):
+            """a literal set wherever lane n's run at route u_ is on layer L_ (one way: it only raises a row's demand)"""
+            q_ = Q(u_)
+            if (n, q_) not in PB_:
+                bef_ = []
+                for x_, _a in zip(*chg[n]):
+                    c_ = m.NewBoolVar('')
+                    m.Add(x_ <= q_).OnlyEnforceIf(c_)
+                    m.Add(x_ > q_).OnlyEnforceIf(c_.Not())
+                    bef_.append(c_)
+                for j_ in range(1, len(bef_)):
+                    m.AddImplication(bef_[j_], bef_[j_ - 1])
+                PB_[(n, q_)] = (bef_, {})
+            bef_, lits_ = PB_[(n, q_)]
+            if L_ not in lits_:
+                on_ = m.NewBoolVar('')
+                for j_ in range(len(bef_) + 1):
+                    m.AddBoolOr([e_.Not() for e_ in run_enf(bef_, j_)] + [run_lits(n, j_)[L_].Not(), on_])
+                lits_[L_] = on_
+            return lits_[L_]
+        seen_p = set()
+        for fk_, sp_, ring_ in _wp.frames(Fr):
+            s_ = 0.0
+            while s_ <= sp_.L:
+                pres_ = _wp.present(Fr, fk_, s_, entry, tend, end, Hn, u_ring)
+                if len(pres_) > 1:
+                    col_ = CEN.column(fk_, sp_, s_, ring_)
+                    offs_ = {n: float(sp_.project_pt(_wp.ref_at(REFP[n], u_))[1]) for n, u_ in pres_.items()
+                             if len(REFP[n])}
+                    for L_ in range(NL):
+                        runs_ = col_[L_]
+                        by_ = collections.defaultdict(list)
+                        for n, o_ in offs_.items():
+                            j_ = _wp.Census.run_of(runs_, o_)
+                            if j_ is not None:
+                                by_[j_].append(n)
+                        for j_, ls_ in by_.items():
+                            room_ = QW_(CEN.room(runs_[j_]))
+                            if sum(widp_[n] for n in ls_) <= room_:
+                                continue                    # (it cannot bind)
+                            # (the end runs a lane's tooth or berth stands on: fixed or the solve's, each counted)
+                            key_ = (fk_, L_, runs_[j_][2], runs_[j_][3], tuple(sorted(ls_)), int(s_ / 0.5))
+                            if key_ in seen_p:
+                                continue
+                            seen_p.add(key_)
+                            ov_ = m.NewIntVar(0, len(ls_), '')
+                            m.Add(sum(widp_[n] * on_p(n, pres_[n], L_) for n in ls_)
+                                  <= room_ + QW_(CEN.PMIN) * ov_)
+                            PASS_OVER.append(((fk_, LAYN[L_], round(s_, 2), runs_[j_][2], runs_[j_][3],
+                                               round(CEN.room(runs_[j_]) / CEN.PMIN, 1), sorted(ls_)), ov_))
+                s_ += 0.25
+        if PASS_OVER:
+            print(f'   passages: {len(PASS_OVER)} row(s) that can overfill -- ' + ', '.join(sorted(
+                {f'{k_[3][:14]}/{k_[4][:14]} {k_[1]} {k_[0]}' for k_, _v in PASS_OVER}))[:400])
     # ---- ROOM CUTS (probe GEO_ROOM_CUTS, whole_geo.room_cuts): the geometry found layer L with no room between u_lo
     # and u_hi for the lanes the plan put on it there -- it paid pitch, bound or static rows, spreading the shortfall,
     # and the snap met it as a lane with no path. Of those lanes, at most `cap` on L there (the lanes less the
@@ -2023,6 +2143,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             print(f"   the root's proof as a floor: {r_['over']} via(s) over two, {r_['vias']} vias")
     OBJ = W_OVER * sum(over.values()) + W_V * VIAS + W_SOFT * sum(soft_broken.values()) + sum(cost) \
         + W_FIRM * sum(firm_broken.values()) + W_FIRM * sum(v_ for _k, v_ in GATE_OVER) \
+        + W_FIRM * sum(v_ for _k, v_ in PASS_OVER) \
         + W_ROOM * sum(v_ for _k, v_ in ROOM_OVER)
     if REG_ON:
         OBJ = OBJ + W_REGION * sum(v_ for _k, v_ in REG_ON) + W_FIRM * sum(v_ for _k, v_ in REG_OVER)
@@ -2108,6 +2229,12 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             print(f"   part gates over: {len(J['gate_over'])} of {len(GATE_OVER)}"
                   + (f" -- {', '.join(f'{g_[1][:28]} {g_[2]} {g_[0]} s {g_[3]} +{g_[4]}' for g_ in J['gate_over'])}"
                      if J['gate_over'] else ''))
+        if PASS_OVER:
+            J['pass_over'] = [[k_[0], k_[1], k_[2], k_[3], k_[4], int(sv.Value(v_)), k_[6]] for k_, v_ in PASS_OVER
+                              if sv.Value(v_)]
+            print(f"   passages over: {len(J['pass_over'])} of {len(PASS_OVER)}"
+                  + (f" -- {', '.join(f'{g_[3][:14]}/{g_[4][:14]} {g_[1]} {g_[0]} s {g_[2]} +{g_[5]}' for g_ in J['pass_over'][:8])}"
+                     if J['pass_over'] else ''))
         if firm_broken:
             J['firm_broken'] = [list(s_) for s_, b_ in sorted(firm_broken.items()) if sv.Value(b_)]
             print(f"   firm cuts broken: {len(J['firm_broken'])} of {len(firm_broken)}"
@@ -2144,6 +2271,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                                             'soft cuts': W_SOFT * sum(soft_broken.values()), 'priced': sum(cost),
                                             'firm cuts': W_FIRM * sum(firm_broken.values()),
                                             'gates': W_FIRM * sum(v_ for _k, v_ in GATE_OVER),
+                                            'passages': W_FIRM * sum(v_ for _k, v_ in PASS_OVER),
                                             'room': W_ROOM * sum(v_ for _k, v_ in ROOM_OVER),
                                             'regions': (W_REGION * sum(v_ for _k, v_ in REG_ON) +
                                                         W_FIRM * sum(v_ for _k, v_ in REG_OVER)) if REG_ON else 0})

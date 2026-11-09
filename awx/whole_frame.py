@@ -1139,25 +1139,43 @@ def build(ctx, dest, _trunk=frozenset()):
     # (s4_pathF)
     # (a ring whose spine FOLDS BACK along the trunk from its start -- started past the corner it wraps -- is stacked
     # again from the destination's near corner: near_k, _stack_rings)
+    # (a part taken round for one ring is that ring's alone: its pads join the hull of the ring on whose stack it lies,
+    # never the other's -- a pin header along the board's edge beside the destination, too near for one ring's stack to
+    # pass inside it, ran the length of both arrays, and in a hull the two rings shared it pulled the OTHER ring's
+    # start back along the trunk to the source, 0.2 mm past one of its lanes' entry: eight crossings with no room)
     tails0, near_k = list(tails), frozenset()
     td_ = tuple(float(v) for v in F.spine.d[-1])
+    # (on more routing layers than two a ring's lanes pass a part beside the destination stacked across the layers they
+    # run on -- every routing layer but a ground plane's, route_layers.plane_kinds: a power plane's runs are priced, a
+    # ground plane's are not taken: a pin header along the memory's top face 2.4 mm off, the face's 21 lanes 4.2 mm side
+    # by side, was taken round on the board's edge, every top-face lane climbing through the header's pins and back; the
+    # human's lanes pass inside it on three layers)
+    import route_layers
+    RL_ = route_layers.layers()
+    kinds_ = route_layers.plane_kinds(pcb, RL_)
+    stack_layers = max(1, sum(1 for L_ in RL_ if kinds_.get(L_) != 'gnd')) if len(RL_) > 2 else 1
     while True:
-        tails, in_hull, packed = list(tails0), set(), {}
+        in_hull, rtails, packed = {}, {}, {}
+        F.ring_squeeze = {}
         for _pass in range(2 * len(pcb.footprints) + 2):
-            hits, room = _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, in_hull, packed,
-                                      near_k)
+            hits, room = _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails0, north, width, cen, in_hull, packed,
+                                      near_k, rtails)
             acted = False
             for k in sorted(hits):
                 ref_, inner = min(hits[k], key=lambda h: (h[1], h[0]))      # the nearest part on the stack
-                edge_in = room_inside(*room[k], inner, bd.TRACK, bd.CLEAR, bd.LANE_MIN)
+                edge_in = room_inside(*room[k], inner, bd.TRACK, bd.CLEAR, bd.LANE_MIN, layers=stack_layers)
                 if edge_in is not None and packed.get(k) != edge_in:
                     packed[k] = edge_in                     # inside: the lanes packed between the destination and it
+                    # (its reference stack squeezed into the gap where it fits only across its layers: the geometry
+                    # spaces the lanes on each layer)
+                    F.ring_squeeze[k] = min(1.0, (inner - bd.TRACK / 2 - bd.CLEAR - edge_in) / max(room[k][2], 1e-9))
                     acted = True
                 elif edge_in is None:
-                    in_hull.add(ref_)                       # no room: round it
+                    in_hull.setdefault(k, set()).add(ref_)  # no room: this ring goes round it
                     for p_ in pcb.footprints[ref_].pads:
                         hx, hy = (p_.size_x or 0.0) / 2, (p_.size_y or 0.0) / 2
-                        tails += [(p_.global_x + sx * hx, p_.global_y + sy * hy) for sx in (-1, 1) for sy in (-1, 1)]
+                        rtails.setdefault(k, []).extend((p_.global_x + sx * hx, p_.global_y + sy * hy)
+                                                        for sx in (-1, 1) for sy in (-1, 1))
                     acted = True
             if not acted:
                 break
@@ -1264,16 +1282,19 @@ def _rings_round(p_):
     return bool((p_.drill or 0) > 0 or '*.Cu' in p_.layers or set(RL) <= set(p_.layers))
 
 
-def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, in_hull, packed, near_k=frozenset()):
+def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, in_hull, packed, near_k=frozenset(),
+                 rtails=None):
     """each ring's lanes stacked on the handoff line outside the hull (F.o_h) -- or, a ring in `packed`, from that
     edge, between the destination and a part on its stack; a ring in `near_k` from the hull's near corner (build: its
     spine folded back from the whole hull's) -- its start and spine (F.Hk, F.rings). Returns (hits,
     room): hits {ring: [(part, its copper's nearest offset toward the destination, along the ring's side)]} for the
     parts (none in the hull) whose copper lies on a ring's stack -- within a clearance of its outermost lane's copper,
     on the handoff line from the ring's start out; room {ring: (the destination's copper's farthest offset on that
-    side, the facing face's lanes' edge, the ring's lanes' width)}"""
+    side, the facing face's lanes' edge, the ring's lanes' width)}. `tails` the hull's points both rings go round;
+    `rtails` {ring: points} a part's that ring alone goes round, `in_hull` {ring: those parts}"""
     PM = F.PM
-    hull = dpads + [F.bend[n] for n in PM] + tails
+    rtails = rtails or {}
+    own = lambda k: tails + rtails.get(k, [])          # noqa: E731  (ring k's hull points past the destination's)
     rpad = max((max(p.size_x or 0.0, p.size_y or 0.0) / 2 for r in F.dests for p in pcb.footprints[r].pads),
                default=0.0)
     # each ring lane's offset on the handoff line, from the ORDER (the berths', north to south), stacked innermost first
@@ -1286,7 +1307,7 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
         sg = north if k == 'N' else -north
         # (the outermost near-face lane's own room outside its centre: a pair's is half its pitch more)
         near_edge = max((sg * F.se[n][1] + (width(n) - bd.LANE_MIN) / 2 for n in near), default=-bd.LANE_MIN / 2)
-        pts_ = [F.spine.project_pt(p_) for p_ in hull]
+        pts_ = [F.spine.project_pt(p_) for p_ in dpads + [F.bend[n] for n in PM] + own(k)]
         e_all = max(sg * o_ for _u, o_ in pts_) + 2 * bd.LPITCH - bd.LANE_MIN
         mem = [n for n in F.final if F.cls.get(n) == k]
         e_ = max(near_edge, e_all)
@@ -1303,15 +1324,16 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
             loc_ = [sg * o_ for u_, o_ in pts_ if u_ <= F.H0 + 2 * bd.LPITCH] or [sg * o_ for _u, o_ in pts_]
             e_ = max(near_edge, max(loc_) + 2 * bd.LPITCH - bd.LANE_MIN)
             w_in = width(mem[-1] if k == 'N' else mem[0])
-            hk_hull = dpads + [F.gland.get(n, F.bend[n]) for n in mem] + tails
+            hk_hull = dpads + [F.gland.get(n, F.bend[n]) for n in mem] + own(k)
             o_st = lambda e: sg * (e + w_in / 2 + bd.LANE_MIN / 2) - sg * bd.LPITCH
             while e_ < e_all and _inside(F.spine.xy(F.H0, o_st(e_)), hk_hull, 2 * bd.LPITCH):
                 e_ = min(e_ + bd.LANE_MIN / 5, e_all)
         edge[k] = e_ if k not in packed else min(e_, packed[k])
         at = edge[k]
+        sq_ = (getattr(F, 'ring_squeeze', None) or {}).get(k, 1.0) if k in packed else 1.0
         for n in (mem[::-1] if k == 'N' else mem):
-            F.o_h[n] = sg * (at + width(n) / 2 + bd.LANE_MIN / 2)
-            at += width(n)
+            F.o_h[n] = sg * (at + sq_ * width(n) / 2 + bd.LANE_MIN / 2)
+            at += sq_ * width(n)
     F.rings, F.Hk = {}, {}
     wound = not (F.group.far_cut(F.dcut) if F.group else far_cut(F.dcut))
     for k in sorted(set(F.cls.values())):
@@ -1323,7 +1345,7 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
         # along the trunk until it clears the hull by two lane pitches
         o_start = F.o_h[min(mem, key=lambda n: sg * F.o_h[n])] - sg * bd.LPITCH
         s_start = F.H0
-        hull = dpads + stubs + tails
+        hull = dpads + stubs + own(k)
         while _inside(F.spine.xy(s_start, o_start), hull, 2 * bd.LPITCH) and s_start > 0:
             s_start -= bd.LANE_MIN / 5
         if (awx_settings.get('FRAME_HK_FLOOR') or '0') == '1':
@@ -1343,8 +1365,10 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
         F.Hk[k] = float(s_start)                         # this ring's lanes leave the trunk here
         _core, F.rings[k] = bd.ring_spine(dpads, [F.spine.xy(s_start, F.o_h[n]) for n in mem], stubs,
                                           F.spine.xy(s_start, o_start), ccw, tuple(float(v) for v in F.spine.d[-1]),
-                                          tails, wrap_side=wound)
+                                          own(k), wrap_side=wound)
     hits, room = {}, {}
+    d_u = [float(F.spine.project_pt(p_)[0]) for p_ in dpads]
+    d_lo, d_hi = min(d_u), max(d_u)             # (the destination's extent along the trunk)
     for k in F.rings:
         mem = [n for n in F.M if F.cls.get(n) == k]
         sg = north if k == 'N' else -north
@@ -1358,26 +1382,31 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
         b = F.spine.xy(F.Hk[k], F.o_h[out_])                                             # its outermost lane
         reach = (width(out_) - bd.LANE_MIN) / 2 + bd.TRACK / 2 + bd.CLEAR                 # its copper and a clearance
         for ref_, fp_ in pcb.footprints.items():
-            if ref_ in (src, *F.dests) or ref_ in in_hull:
+            if ref_ in (src, *F.dests) or ref_ in in_hull.get(k, ()):
                 continue
             rects = [(p_.global_x - (p_.size_x or 0.0) / 2, p_.global_y - (p_.size_y or 0.0) / 2,
                       p_.global_x + (p_.size_x or 0.0) / 2, p_.global_y + (p_.size_y or 0.0) / 2) for p_ in fp_.pads
                      if _rings_round(p_)]
             if any(_seg_rect(a, b, r_) < reach - 1e-9 for r_ in rects):
-                inner = min(o_of(c_) for r_ in rects for c_ in ((r_[0], r_[1]), (r_[0], r_[3]), (r_[2], r_[1]),
-                                                                  (r_[2], r_[3])))
+                # (its nearest copper where the ring runs: beside the destination, along the trunk -- a header the
+                # length of the board, its far end over the source where the slanted trunk runs nearer, read 2.4 mm
+                # nearer than it stands beside the memory, and the ring went round it on the board's edge)
+                cs_ = [c_ for r_ in rects for c_ in ((r_[0], r_[1]), (r_[0], r_[3]), (r_[2], r_[1]), (r_[2], r_[3]))]
+                loc_ = [c_ for c_ in cs_ if d_lo <= F.spine.project_pt(c_)[0] <= d_hi]
+                inner = min(o_of(c_) for c_ in (loc_ or cs_))
                 hits.setdefault(k, []).append((ref_, inner))
     return hits, room
 
 
-def room_inside(e_, near_e, sum_w, inner, track, clear, lane_min):
+def room_inside(e_, near_e, sum_w, inner, track, clear, lane_min, layers=1):
     """the stack's edge (the `edge` a ring's lanes are stacked from: a lane's pitch inside its first lane) that packs a
     ring's lanes between the destination's copper (its farthest offset on the ring's side, `e_`) and a part's nearest
     copper (`inner`), never inside the facing face's lanes (`near_e`); None when they do not fit. `sum_w`: the ring's
     lanes' widths (a lane's pitch each, a pair's more). Its first lane's copper a clearance off the destination's, its
-    last's a clearance off the part's"""
+    last's a clearance off the part's. `layers`: the layers the lanes stack across (build: a ring's signal layers on more
+    routing layers than two), each holding its share of them"""
     edge = max(near_e, e_ + clear + track / 2 - lane_min)
-    return edge if edge + sum_w + track / 2 + clear <= inner + 1e-9 else None
+    return edge if edge + sum_w / max(1, layers) + track / 2 + clear <= inner + 1e-9 else None
 
 
 def _seg_rect(a, b, r):

@@ -78,17 +78,21 @@ def grade(d):
     """{buses: [...], nets, open: [names], why}: every bus net of the run in `d` checked on its output board -- its
     pads on the bus's own parts (the source, the destination's every part) one piece of copper (check_connected's
     test, zones credited). A bus net's pads elsewhere (a termination's, a test point's) are the chain's later steps'"""
+    return grade_board(os.path.join(d, 'bus.kicad_pcb'), bus_summaries(d))
+
+
+def grade_board(out_, summaries):
+    """grade's test on the board `out_` for the buses `summaries` [(a bus's summary path, its entry)]"""
     sys.path.insert(0, os.path.join(ROOT, 'py_router'))
     sys.path.insert(0, os.path.join(ROOT, 'awx'))
     import collections
     import check_connected as cc
     from coherent_nets import by_key
     from kicad_parser import parse_kicad_pcb
-    out_ = os.path.join(d, 'bus.kicad_pcb')
     if not os.path.isfile(out_):
         return dict(buses=[], nets=0, open=[], why='no output board')
     buses, asked = [], []
-    for path, entry in bus_summaries(d):
+    for path, entry in summaries:
         if not path or not os.path.isfile(path):
             buses.append(dict(bus=f"{entry.get('src')}->{entry.get('dest')}", why='no summary'))
             continue

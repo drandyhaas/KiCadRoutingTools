@@ -20,6 +20,11 @@ again (priced its feedback and did not follow it): every end to avoid last named
 more; with --widen, both ends of every lane named (--name) to avoid as well -- an open lane named where it fails, whose
 failing end has no other place to go (a via-in-pad berth), freed and priced at its other end too. whole_route then
 runs that round's fanout again, not its route.
+whole_feedback.py --edits SIDECAR.plan.json OUT.json EDITS.json -- the ends a round's EDITS name (whole_route's ROUND
+EDITS: its `avoid` and `ban`, each {"lane", "end"} -- 0 the tooth, 1 the berth --, its `pairs`, two such each, and its
+`pin`, each {"lane", "end", "at", "layer"}) added to OUT as ends to avoid (priced), ends banned (whole_ends: none of the
+lane's options there), pairs of ends not to be chosen together, each end's points and layer read off the sidecar as
+laid, and ends pinned (the lane's option nearest `at`, in the sidecar's frame, on `layer` where one is).
 whole_feedback.py --now SIDECAR.plan.json HOT.json -- exit 0 (and name them) when a finding at the ends is one no solve
 moves: a pitch or a static clearance there comes of where the ends stand (a dive there is the solve's: its via cut
 moves it; a fold, the crossings the solve put round it) -- whole_loop stops at once, before paying a solve.
@@ -55,7 +60,8 @@ NOW = sys.argv[1] == '--now'
 REFUSED = sys.argv[1] == '--refused'
 NAME = sys.argv[1] == '--name'
 RAISE = sys.argv[1] == '--raise'
-if REPEAT or NOW or REFUSED or NAME or RAISE:
+EDITS = sys.argv[1] == '--edits'
+if REPEAT or NOW or REFUSED or NAME or RAISE or EDITS:
     sys.argv.pop(1)
 NAME_TOP = 3                                         # --name's last tier: the lanes most crossed, this many a round
 if NOW:
@@ -233,6 +239,58 @@ def failing_ends(ln):
     return sorted(ks) or [0, 1]
 
 
+if EDITS:
+    ed = json.load(open(hots[0]))
+    added = 0
+    for it_ in ed.get('avoid') or ():
+        e_ = end_of(LANE.get(it_['lane'], it_['lane']), int(it_['end']))
+        if e_ is None:
+            print(f'  whole_feedback: no lane {it_["lane"]} on the sidecar -- an end to avoid not added')
+            continue
+        added += put_avoid(dict(e_, times=int(it_['times'])) if it_.get('times') else e_)
+    # (an end BANNED: none of the lane's options at that end where it stands now, its laid end not held -- whole_ends)
+    fb.setdefault('ban', [])
+    seen_b = {json.dumps(x, sort_keys=True) for x in fb['ban']}
+    for it_ in ed.get('ban') or ():
+        e_ = end_of(LANE.get(it_['lane'], it_['lane']), int(it_['end']))
+        if e_ is None:
+            print(f'  whole_feedback: no lane {it_["lane"]} on the sidecar -- an end to ban not added')
+            continue
+        # (the place on every layer -- a tooth moved to another layer at the same exit is the same tooth -- or on the
+        # layer it names: 'laid' its laid one)
+        e_ = dict(e_, layer=e_['layer'] if it_.get('layer') == 'laid' else it_.get('layer'))
+        if json.dumps(e_, sort_keys=True) not in seen_b:
+            seen_b.add(json.dumps(e_, sort_keys=True))
+            fb['ban'].append(e_)
+            added += 1
+    # (an end PINNED: the lane's option nearest the point asked, in this sidecar's frame -- whole_route turned the
+    # agent's board point into it -- on the layer asked where one is; a later pin of the same end replaces it)
+    fb.setdefault('pin', [])
+    for it_ in ed.get('pin') or ():
+        ln_ = LANE.get(it_['lane'], it_['lane'])
+        if not legs_of(ln_):
+            print(f'  whole_feedback: no lane {it_["lane"]} on the sidecar -- a pin not added')
+            continue
+        p_ = {'lane': ln_, 'end': int(it_['end']), 'points': [[float(v_) for v_ in it_['at']]],
+              'layer': it_.get('layer')}
+        fb['pin'] = [x for x in fb['pin'] if (x['lane'], x['end']) != (ln_, p_['end'])] + [p_]
+        added += 1
+    seen = {json.dumps(x, sort_keys=True) for x in fb['pairs']}
+    for pr_ in ed.get('pairs') or ():
+        es_ = [end_of(LANE.get(x_['lane'], x_['lane']), int(x_['end'])) for x_ in pr_]
+        if len(es_) != 2 or None in es_:
+            print(f'  whole_feedback: a pair of ends not both on the sidecar -- not added: {pr_}')
+            continue
+        it = sorted(es_, key=lambda e: e['lane'])
+        key = json.dumps(it, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            fb['pairs'].append(it)
+            added += 1
+    json.dump(fb, open(out, 'w'), indent=1)
+    print(f'whole_feedback: {added} new from the round\'s edits, {len(fb["pairs"])} pairs, {len(fb["avoid"])} ends to '
+          f'avoid, {len(fb["ban"])} banned and {len(fb["pin"])} pinned in {out}')
+    sys.exit(0)
 if RAISE:
     raised = added = 0
     for x in fb['avoid']:

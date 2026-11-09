@@ -559,6 +559,7 @@ def plan_state(pcb, names, banned=frozenset()):
         prev = json.load(open(awx_settings.req('INCREMENTAL')))
         fb = json.load(open(awx_settings.req('FEEDBACK')))
         items = [e for pr in fb.get('pairs', ()) for e in pr] + list(fb.get('avoid', ()))
+        items += list(fb.get('ban', ())) + list(fb.get('pin', ()))       # (the round edits' ends: freed too)
         # (a lane the whole solve could not keep to two vias -- 'over', whole_route.add_over -- has both its ends freed:
         # its tooth and its berth are where the promise it could not keep was made)
         over = set(fb.get('over') or {})
@@ -1317,10 +1318,12 @@ def plan(base, names, work):
                     # squeezed 0.20 from SDQ0's, and the board kept for judging better than the one before)
                     return None, line
                 if res_r['rejected']:
-                    # the moves of the nets its DRC pairs name (all of them when no line names one)
+                    # the moves of the nets its DRC pairs name (all of them when no line names one) -- banned, and the
+                    # plan chosen again without them (the loop below), as for a move not laid as asked
                     hit = sorted({n for ln in res_r.get('pairs') or ()
                                   for n in (drc_line_nets(ln, net_keys(st['byname'])) or ())} & set(moves))
                     ban_moves(banned, moves, hit or list(moves), names)
+                    _trial.rejected = True
                     return None, line
                 if SRC_WALLS and PLAN_JUDGE == 'ends':
                     # (ends) a board whose teeth wall in a ball no bus net is on is not kept: the moves walling one
@@ -1393,10 +1396,13 @@ def plan(base, names, work):
                 # copper (measured at K35: 69 segments different, judged 198
                 # against 181)
                 rest = dict(src_out)
+                _trial.rejected = False
                 res, line = _trial(rest, f'{work}_srcres{r}_{_k}.kicad_pcb')
-                if res is None and getattr(_trial, 'missed', None):
-                    # the engine did not lay every move as asked: the board stays as it was, the misses banned, and
-                    # the plan is chosen again on it without them
+                if res is None and (getattr(_trial, 'missed', None) or (PLAN_JUDGE == 'ends' and _trial.rejected)):
+                    # the engine did not lay every move as asked, or its board broke the rules (its moves the DRC
+                    # names banned): the board stays as it was, and the plan is chosen again on it without them. A
+                    # rejected board ended the round, and the teeth as they stood were kept: the joint ends' teeth,
+                    # one walls retry's restored tooth clashing with its new neighbours, never asked again
                     print(line + '; the board NOT kept -- planned again without them')
                     st = plan_state(parse_kicad_pcb(board), names, banned)
                     src_out = {}
@@ -2251,6 +2257,13 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
     # braid routes pairs as members (BRAID_PAIRS), so the chain is
     # byte-identical without it; inert on a run with no pairs.
     _harm = int(awx_settings.get('PLAN_PAIRS', awx_settings.get('BRAID_PAIRS', '0')) or 0)
+    # (not under the ENDS judge: the ends model chooses a pair's two berths as ONE option -- one face and layer, its legs
+    # clear of each other -- and the whole solve's check holds another lane's end off the pair's layer between its tips
+    # (whole_frame.PairSplit). Harmonised after it, by the menus' layers alone, a dog-bone end between a pair's berths --
+    # a via end, its layer the solve's -- read as a split, and the pair re-chosen by fewest vias: two dog-bones onto
+    # surface F.Cu stubs that walled two plane balls of the destination the ends had kept a way down)
+    if PLAN_JUDGE == 'ends':
+        _harm = 0
     _pitch = 0.0
     if _harm:
         import pairs as _pairs
@@ -2531,6 +2544,10 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     pcb._fanout_all_foreign_immovable = True
     import joint_escape as _je
     _je.reserve_ball_vias(pcb)          # the whole-array fanout: the other balls' own via sites stay free
+    # (a plain bus's ends keep each plane ball a way down of its own -- whole_ends.plane_ways -- so the engine reserves
+    # no via in every plane ball's pad, as at the source: source_realize)
+    if PLAN_JUDGE == 'ends' and not awx_settings.get('FANOUT_JOINT'):
+        pcb._fanout_plane_ways = True
     tracks, vias_add, vias_rm, failed = [], [], [], []
     for r_ in [dref] + sorted({dof(nm) for nm in targets} - {dref}):
         tg_ = [nm for nm in targets if dof(nm) == r_]

@@ -835,6 +835,26 @@ def keepout_areas(pcb, layers):
     return out
 
 
+def bus_areas():
+    """the AREAS the agent driving the step asked the bus's lanes to keep out of (whole_route's ROUND EDITS `areas`,
+    BUS_AREAS -- in the PLAN's frame already): [(polygon, holes, the layers it keeps lanes off, its bbox, the lanes it
+    holds or None for every lane)], read as keepout_areas reads a rule area"""
+    import awx_settings
+    import json
+    f_ = awx_settings.get('BUS_AREAS')
+    if not f_ or not os.path.isfile(f_):
+        return []
+    out = []
+    for a_ in json.load(open(f_)):
+        P_ = np.array(a_['poly'], float)
+        if len(P_) < 3 or not a_.get('layers'):
+            continue
+        out.append((P_, [], set(a_['layers']),
+                    (float(P_[:, 0].min()), float(P_[:, 1].min()), float(P_[:, 0].max()), float(P_[:, 1].max())),
+                    set(a_['lanes']) if a_.get('lanes') else None))
+    return out
+
+
 def _inside(P, poly):
     """even-odd: the points P inside the closed polygon poly"""
     ins = np.zeros(len(P), bool)
@@ -886,6 +906,12 @@ def check_static(ctx, corridors, only=None):
                     pads.append((fp.reference, pd, Ls, 'pad'))
     name = lambda i: (ctx.net_key(ctx.pcb.nets[i].name) if i in ctx.pcb.nets else str(i))
     kos = keepout_areas(ctx.pcb, ctx.cfg.layers)
+    # (...and the areas the agent asked the lanes to keep out of, after the board's own: their K numbers whole_route's
+    # cuts read back the same way -- each for every lane, or those it names)
+    ko_lanes = [None] * len(kos)
+    for a_ in bus_areas():
+        kos.append(a_[:4])
+        ko_lanes.append(a_[4])
     hits, near_ = {}, set()
     for c in corridors:
         for nm in c.members:
@@ -938,6 +964,8 @@ def check_static(ctx, corridors, only=None):
                 # (a KEEP-OUT rule area whose tracks are not allowed on L: the samples' signed distance to it, inside
                 # negative -- the router stamps it as it stamps copper, and refuses a lane in it)
                 for k_, (poly_, holes_, lays_, bb_) in enumerate(kos):
+                    if ko_lanes[k_] is not None and nm not in ko_lanes[k_]:
+                        continue
                     if L in lays_ and bb_[0] <= x1 and x0 <= bb_[2] and bb_[1] <= y1 and y0 <= bb_[3]:
                         cand.append((keepout_dist(P, poly_, holes_), f'keepout K{k_} ' + '+'.join(sorted(lays_))))
                 for d, what in cand:

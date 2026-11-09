@@ -604,6 +604,10 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
                                                            kept={nm: original[nm] for nm in kept if original.get(nm)})
     else:
         _je.reserve_ball_vias(pcb)      # the whole-array fanout's promise to the others, kept by a bus-only re-fan
+        # (a plain bus's teeth asked by its ends model, exact_only: the ends keep each plane ball of the array a way down
+        # of its own -- whole_ends.plane_ways -- so the engine reserves no via in every plane ball's pad)
+        if exact_only and jspec is None:
+            pcb._fanout_plane_ways = True
         hints = {}
         for nm, m in src_choice.items():
             p = src_pad[nm]

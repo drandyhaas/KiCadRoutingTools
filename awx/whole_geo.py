@@ -21,7 +21,7 @@ per island and layer, in the lane order, pinned by the lanes' own ends), and a l
 its side is flipped to the other (GEO_FLIPS_FROM=POLISH.json,..: data the polish measured, never typed). What the
 LP had to pay is written as CUTS for the solve (the islands a lane could not be kept off, the changes it could not
 give their room). The bench from BENCH / NETS / DEST (whole_ctx)."""
-import sys, json, math, collections, functools, itertools, time
+import sys, json, math, collections, functools, time
 import awx_settings
 import numpy as np
 from scipy.optimize import linprog
@@ -388,9 +388,37 @@ for v_ in ctx.base_vias:
             if (awx_settings.get('SVIA_RING') or '1') == '1' else v_.size / 2
         VSTUB.append((v_.x - r, v_.y - r, v_.x + r, v_.y + r, ALL(), 'svia ' + ctx.net_key(ctx.pcb.nets[v_.net_id].name)
                       if v_.net_id in ctx.pcb.nets else 'svia', None))
+# ...and every OTHER net's TRACK in the FIELD, on a routing layer: an earlier step's lane (a bus routed before this
+# one) runs there as its vias stand -- each track in pieces of FIELD_PIECE, each piece a static a lane on its layer
+# goes round, the pieces of one net's copper one wall with its vias (the row below: one side for a lane). Seen by the
+# audit alone, two lanes leaving an array's face were laid along another bus's lane where it ran on the face line, and
+# across its turn into its via -- static every round, laid open -- where a way past the far side of the via was free
+FIELD_PIECE = 0.5
+STRK = []
+fx0_, fy0_ = min(b[0] for b in BOX) - FIELD_MARGIN, min(b[1] for b in BOX) - FIELD_MARGIN
+fx1_, fy1_ = max(b[2] for b in BOX) + FIELD_MARGIN, max(b[3] for b in BOX) + FIELD_MARGIN
+for s_ in ctx.base_segments:
+    if s_.net_id in NET_LANE or s_.layer not in LNAME:
+        continue
+    L_ = math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y)
+    k_ = max(1, int(math.ceil(L_ / FIELD_PIECE)))
+    r_ = s_.width / 2
+    lab_ = 'strk ' + whole_ctx.copper_name(ctx, s_)
+    for i_ in range(k_):
+        ax_ = s_.start_x + (s_.end_x - s_.start_x) * i_ / k_
+        ay_ = s_.start_y + (s_.end_y - s_.start_y) * i_ / k_
+        bx_ = s_.start_x + (s_.end_x - s_.start_x) * (i_ + 1) / k_
+        by_ = s_.start_y + (s_.end_y - s_.start_y) * (i_ + 1) / k_
+        pb_ = (min(ax_, bx_) - r_, min(ay_, by_) - r_, max(ax_, bx_) + r_, max(ay_, by_) + r_)
+        if pb_[2] < fx0_ or pb_[0] > fx1_ or pb_[3] < fy0_ or pb_[1] > fy1_:
+            continue
+        if any(pb_[0] >= b[0] and pb_[2] <= b[2] and pb_[1] >= b[1] and pb_[3] <= b[3] for b in BOX):
+            continue                        # (inside an array's box: no lane goes there)
+        STRK.append(pb_ + ({F(s_.layer)}, lab_, None))
 # ... and the LANES keep off the stub copper within a clearance block of the line, and off the stub vias
-for st_ in LSTUB + [v for v in VSTUB if v[5].startswith('svia ')]:
+for st_ in LSTUB + [v for v in VSTUB if v[5].startswith('svia ')] + STRK:
     STATIC.append(st_)
+log(f'field tracks: {len(STRK)} piece(s) of other nets\' tracks in the field')
 log(f'stub copper near the box lines: {len(VSTUB)} pieces for vias, {len(LSTUB)} for lanes')
 
 
@@ -1266,16 +1294,55 @@ def static_sides(sol):
                 if below_ok != above_ok:
                     for Ly in lys_:
                         ROOMLESS[(f, ii, Ly)] = 1 if not below_ok else -1
+    # ...and the BOARD'S EDGE, measured on the board: an island whose copper stands nearer the edge than a lane's
+    # centreline can (its clearance off the copper, the edge's off the line) leaves no way between them in ANY frame, and
+    # its side facing that edge is roomless wherever a frame meets it. Read in each frame alone it was missed where a
+    # ring meets the island past the ring's own reach of it: the ring, the island's home frame, held its outer lanes on
+    # the edge's side of a row of pads lining the edge, carried that side to the trunk, and the lanes ran off the board
+    need_e = LANE_ST + EDGE
+    for ii, st_ in enumerate(STATIC):
+        rects_ = ISL.get((st_[5], frozenset(st_[4])))
+        if not rects_:
+            continue                                 # (an island only: a part's pads)
+        x0_, y0_ = min(r_[0] for r_ in rects_), min(r_[1] for r_ in rects_)
+        x1_, y1_ = max(r_[2] for r_ in rects_), max(r_[3] for r_ in rects_)
+        shut_ = [(dx_, dy_) for gap_, dx_, dy_ in ((x0_ - BX0, -1, 0), (BX1 - x1_, 1, 0), (y0_ - BY0, 0, -1),
+                                                   (BY1 - y1_, 0, 1)) if gap_ < need_e]
+        if len(shut_) != 1:
+            continue                                 # (none; or walled on two sides, where the frames' measure decides)
+        cx_, cy_ = (x0_ + x1_) / 2, (y0_ + y1_) / 2
+        for f in FR:
+            if boxes[f][ii][1] < 0:
+                continue
+            sp = FR[f]['sp']
+            o0_ = float(sp.project_pt((cx_, cy_))[1])
+            o1_ = float(sp.project_pt((cx_ + shut_[0][0], cy_ + shut_[0][1]))[1])
+            if abs(o1_ - o0_) < 0.5:
+                continue                             # (the edge runs along the frame there, not across it)
+            for Ly in st_[4]:
+                ROOMLESS[(f, ii, Ly)] = -1 if o1_ > o0_ else 1
     vcol = collections.defaultdict(set)
     for (f, n, cu, kc) in sol['vias']:
         vcol[(f, n)].add(kc)
     # ONE side per lane and island, from the lane's mean first-pass offset over the island's span: chosen per
     # column, a lane descending through the span was told north at its first columns and south at its last
     mean_o = collections.defaultdict(list)
+    # (each frame's boxes by the columns their span reaches: the lanes' offsets tested against those alone -- a field's
+    # other tracks are thousands of pieces)
+    gmax_ = LANE_ST + max(hw.values(), default=0.0)
+    by_col = {}
+    for f, bl in boxes.items():
+        bc_ = by_col[f] = collections.defaultdict(list)
+        for ii, (sa, sb, _oa, _ob, _Ls, _lab, _own) in enumerate(bl):
+            if sb < sa:
+                continue
+            for k_ in range(int(math.floor((sa - gmax_) / G)), int(math.ceil((sb + gmax_) / G)) + 1):
+                bc_[k_].append(ii)
     for (f, n, k), o_ in sol['o'].items():
         s_ = k * G
-        for ii, (sa, sb, oa, ob, Ls, lab, own) in enumerate(boxes[f]):
-            g = LANE_ST + hw[n]
+        g = LANE_ST + hw[n]
+        for ii in by_col[f].get(k, ()):
+            (sa, sb, oa, ob, Ls, lab, own) = boxes[f][ii]
             if own != n and sa - g <= s_ <= sb + g and oa - WIN <= o_ <= ob + WIN:
                 mean_o[(f, n, ii)].append(o_)
     # ONE SPLIT PER ISLAND AND LAYER: the island stands BETWEEN two lanes of the order (where a human puts a part
@@ -1398,6 +1465,8 @@ def static_sides(sol):
         st_ = STATIC[ii]
         if st_[5].startswith('svia '):
             return [((st_[0] + st_[2]) / 2, (st_[1] + st_[3]) / 2, (st_[2] - st_[0]) / 2)]
+        if st_[5].startswith('strk '):
+            return [tuple(st_[:4])]
         return ISL.get((st_[5], frozenset(st_[4])))
 
     def shape_gap(pa, pb):
@@ -1474,7 +1543,7 @@ def static_sides(sol):
     # IO lanes across a PHY's north-face dog-bones, 0.06 mm between their rings, static every round. The side the
     # lane's first pass is on across the row's middle
     for f, bl in boxes.items():
-        sv_ = [ii for ii in range(len(bl)) if STATIC[ii][5].startswith('svia ') and bl[ii][1] >= 0]
+        sv_ = [ii for ii in range(len(bl)) if STATIC[ii][5].startswith(('svia ', 'strk ')) and bl[ii][1] >= 0]
         par_ = {ii: ii for ii in sv_}
 
         def root_(x):
@@ -1482,28 +1551,49 @@ def static_sides(sol):
                 par_[x] = par_[par_[x]]
                 x = par_[x]
             return x
-        for a, b in itertools.combinations(sv_, 2):
-            if not (set(bl[a][4]) & set(bl[b][4])) or abs(bl[a][0] - bl[b][0]) > WIN:
-                continue
-            if shape_gap(board_shape(a), board_shape(b)) < 2 * LANE_ST:
-                par_[root_(a)] = root_(b)
+        # (in order along the frame, each against those within WIN after it: every pair within WIN, as all pairs
+        # tested, at a field's thousands of track pieces)
+        sv_s = sorted(sv_, key=lambda ii: bl[ii][0])
+        for i_a, a in enumerate(sv_s):
+            for b in sv_s[i_a + 1:]:
+                if bl[b][0] - bl[a][0] > WIN:
+                    break
+                if not (set(bl[a][4]) & set(bl[b][4])):
+                    continue
+                if shape_gap(board_shape(a), board_shape(b)) < 2 * LANE_ST:
+                    par_[root_(a)] = root_(b)
         rows_ = collections.defaultdict(list)
         for ii in sv_:
             rows_[root_(ii)].append(ii)
         for comp in (c_ for c_ in rows_.values() if len(c_) > 1):
             owners_ = {bl[ii][6] for ii in comp}
-            o_mid = float(np.mean([(bl[ii][2] + bl[ii][3]) / 2 for ii in comp]))
             for n in sorted({n_ for (f_, n_, ii) in SIDE if f_ == f and ii in comp and n_ not in owners_}):
-                sides_ = {SIDE[(f, n, ii)] for ii in comp if (f, n, ii) in SIDE}
-                if len(sides_) < 2:
-                    continue
-                ms_ = [o_ for ii in comp for o_ in mean_o.get((f, n, ii), ())]
-                sd = -1 if (float(np.mean(ms_)) if ms_ else o_mid) < o_mid else 1
+                # (the row as THIS lane meets it: the members it passes on a layer of its own. A row joins a track's
+                # pieces on two layers through its via -- an earlier bus's lane along the array's face on F.Cu, its
+                # via, its In2 run away south -- and a lane on In2, held to the side the F track left room on, was
+                # sent below the whole row, across the In2 run)
+                mine_ = [ii for ii in comp if (f, n, ii) in SIDE]
+                o_mid = float(np.mean([(bl[ii][2] + bl[ii][3]) / 2 for ii in mine_]))
+                sides_ = {SIDE[(f, n, ii)] for ii in mine_}
+                # (a member with no room on one side on a layer this lane passes it on -- a track along the array's
+                # face -- holds the lane to the row's other side)
+                forced_ = {ROOMLESS[(f, ii, Ly)] for ii in mine_ for Ly in bl[ii][4] if (f, ii, Ly) in ROOMLESS
+                           and (f, ii, Ly) in SPLITS and n in SPLITS[(f, ii, Ly)][0]}
+                if len(forced_) == 1:
+                    sd = next(iter(forced_))
+                    if sides_ == {sd}:
+                        continue
+                else:
+                    if len(sides_) < 2:
+                        continue
+                    ms_ = [o_ for ii in mine_ for o_ in mean_o.get((f, n, ii), ())]
+                    sd = -1 if (float(np.mean(ms_)) if ms_ else o_mid) < o_mid else 1
                 for ii in comp:
                     if (f, n, ii) in SIDE:
                         SIDE[(f, n, ii)] = sd
-                log(f'  a row of {len(comp)} vias ({", ".join(sorted({bl[ii][5][5:] for ii in comp}))}) no lane passes '
-                    f'through: {n} {"below" if sd < 0 else "above"} the whole row')
+                nets_ = ", ".join(sorted({bl[ii][5][5:] for ii in comp}))
+                log(f'  a row of {len(comp)} vias/tracks ({nets_[:120]}) no lane passes through: {n} '
+                    f'{"below" if sd < 0 else "above"} the whole row')
 
     def extent(f, s_, ii, g):
         """(lo, hi): where column s_'s offset line in frame f meets part ii's pads grown by g (None: it misses them)"""

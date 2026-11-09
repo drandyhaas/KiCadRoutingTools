@@ -2203,6 +2203,19 @@ for some of the lanes exists:
   the second round took a tooth on another face and routed it. Only such
   proven-blocked teeth carry: the rest of a round's findings go to a feedback
   round alone;
+- with `route_bus.py --round-edits FILE`, a round also takes the **round
+  edits** an agent wrote after reading the round before, per bus and round:
+  ends banned (that place out of the lane's options) or pinned, ends to avoid
+  or not to choose together (priced), cuts and areas that hold lanes off
+  layers in a box or polygon (the solve holds them firm along the lanes'
+  reference routes, every audit as keep-outs), and raw cuts and flips for the
+  solve and the loop (`whole_route.round_edits`, `round_edit_files`;
+  `whole_feedback --edits`). An edit naming an end makes that round a
+  feedback round. The file is recorded with the step, so a replay runs the
+  same rounds with nobody looking. A bus round 1 left with two lanes open
+  closed in round 2 with two of its teeth banned, and the recorded file
+  replayed that round 2 identically. The `/plan-pcb-routing` skill has the
+  format;
 - when no round laid anything, the **last resort** is a partial plan on the
   last ends laid: the lanes the rounds named left out (else the three most
   crossed), then more, to a quarter and to half of the lanes -- never every

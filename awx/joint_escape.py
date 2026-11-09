@@ -212,15 +212,16 @@ def _seg_seg(p, q, a, b):
 
 def _sizes(pcb, foot):
     """The REAL sizes the engine lays the plan at, each item at its own: the fan track and clearance (the rung's),
-    hole to hole, a gap site's via (the rung's), a ball's via-in-pad as the engine sizes it for THAT pad
-    (clamp_via_to_pad on the fab ladder: zynq U1's 0.35 mm balls take no 0.45 mm via), the stacking pitch of two lanes
-    at that track, and the engine's own-ball disk (underpad home_r)."""
-    import braid as te
+    hole to hole, a gap site's via (the rung's, stepped down where the engine steps it down under this array:
+    rules.fan_via_at), a ball's via-in-pad as the engine sizes it for THAT pad (clamp_via_to_pad on the fab ladder:
+    a 0.35 mm ball takes no 0.45 mm via), the stacking pitch of two lanes at that track, and the engine's
+    own-ball disk (underpad home_r)."""
     import rules as _rules
     import source_realize as sr
     from list_nets import board_constraint, escalation_rungs
     from routing_defaults import HOLE_TO_HOLE_CLEARANCE
     from bga_fanout.geometry import clamp_via_to_pad
+    vs_, vd_ = _rules.fan_via_at(pcb, foot)
     tw, cl = sr.FAN_TRACK, sr.FAN_CLEAR
     h2h = _rules.active().hole_to_hole
     if h2h is None and getattr(pcb, 'source_path', ''):
@@ -232,18 +233,18 @@ def _sizes(pcb, foot):
     def inpad(p):
         """(radius, drill radius) of the via the engine lays in pad p"""
         if id(p) not in memo:
-            cs, cd = clamp_via_to_pad(te.VIA_SIZE, te.VIA_DRILL, p, floors)[:2]
+            cs, cd = clamp_via_to_pad(vs_, vd_, p, floors)[:2]
             memo[id(p)] = (cs / 2.0, (cd or 0.0) / 2.0)
         return memo[id(p)]
     pad_r = max((max(q.size_x, q.size_y) for q in foot.pads), default=0.4) / 2
     # a drop's via where the rung's does not fit: the fab ladder's own vias below it, largest first (radius, drill
     # radius) -- the sizes the ladder steps the whole array's vias down to, here one drop's
     drop_vias = sorted({(f['via_diameter'] / 2.0, f['via_drill'] / 2.0) for f in floors
-                        if f['via_diameter'] < te.VIA_SIZE - 1e-9}, reverse=True)
-    return dict(tw=tw, cl=cl, h2h=h2h, d_seg=tw + cl, vr=te.VIA_SIZE / 2.0, vdr=te.VIA_DRILL / 2.0, inpad=inpad,
+                        if f['via_diameter'] < vs_ - 1e-9}, reverse=True)
+    return dict(tw=tw, cl=cl, h2h=h2h, d_seg=tw + cl, vr=vs_ / 2.0, vdr=vd_ / 2.0, inpad=inpad,
                 drop_vias=drop_vias,
-                grow=te.VIA_SIZE + cl, stack=tw + cl + _rules.HUG_OVER,
-                r_home=max(pad_r + tw / 2 + cl, te.VIA_SIZE / 2 + tw / 2 + cl))
+                grow=vs_ + cl, stack=tw + cl + _rules.HUG_OVER,
+                r_home=max(pad_r + tw / 2 + cl, vs_ / 2 + tw / 2 + cl))
 
 
 _BOX_EPS = 1e-9         # (_hit's box tests: a box this much farther than a bar apart is past it, whatever the rounding)
@@ -527,7 +528,39 @@ def exit_ray_conflicts(opts, net_of, bus, vr, grid=None, bus_of=None):
     return out
 
 
-def sweep_crossings(pcb, grid, escape_to, refs, far_ang=None):
+def fixed_lanes(pcb, ref, grid, planned):
+    """[((x, y), the angle of its far end)]: the LANES an earlier step laid out of array `ref` -- each net with a ball
+    there that the plan does not escape (`planned`: short names) and LOCKED copper (another bus's): the point where its
+    copper leaves the array's box (its nearest end outside it), and the angle round the array's centre of the centroid
+    of its pads off the array. A later bus's tooth planned by the sweep of this bus's lanes alone was put on a face
+    an earlier bus's lanes leave by on every layer, and no lane from it got across them"""
+    sn = namer(pcb)
+    bb = grid.bbox
+    cx, cy = (bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0
+    on = {p.net_id for p in pcb.footprints[ref].pads if p.net_id}
+    segs = collections.defaultdict(list)
+    for s in pcb.segments:
+        if s.net_id in on and getattr(s, 'locked', False):
+            segs[s.net_id].append(s)
+    out = []
+    for nid, ss in sorted(segs.items()):
+        net = pcb.nets.get(nid)
+        if net is None or sn(net.name or '') in planned:
+            continue
+        far = [q for q in net.pads if q.component_ref != ref]
+        if not far:
+            continue
+        ends = [(x, y) for s in ss for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y))
+                if not (bb[0] <= x <= bb[2] and bb[1] <= y <= bb[3])]
+        if not ends:
+            continue
+        t = min(ends, key=lambda q: max(bb[0] - q[0], q[0] - bb[2], bb[1] - q[1], q[1] - bb[3]))
+        fx, fy = sum(q.global_x for q in far) / len(far), sum(q.global_y for q in far) / len(far)
+        out.append((t, math.degrees(math.atan2(-(fy - cy), fx - cx)) % 360.0))
+    return out
+
+
+def sweep_crossings(pcb, grid, escape_to, refs, far_ang=None, fixed=()):
     """n(net, exit point): how many lanes of OTHER buses the net's lane crosses when it leaves a shared array there --
     what running the buses one after another cannot plan. Each lane leaves the array's ring at its tooth and SWEEPS
     round it, the shorter way, to its destination's angle (the array's centre to the centroid of the destination's
@@ -537,7 +570,9 @@ def sweep_crossings(pcb, grid, escape_to, refs, far_ang=None):
     north teeth, a DDR tooth on an east face sweeping north across an FFC bus's. `escape_to` {net: its bus's
     destination}, `refs` {net: (x, y)} the teeth the other buses' lanes are taken to leave by (their preferred).
     `far_ang` {net of no bus: the angle of its far end}: such a net's lane sweeps to there, across the lanes of EVERY
-    bus -- routed before it, their copper lies across its way"""
+    bus -- routed before it, their copper lies across its way. `fixed` [((x, y), the angle of its far end)]: the lanes
+    an earlier step LAID out of the array (fixed_lanes), each from where it leaves the array's box -- crossed by any
+    lane here whose sweep meets theirs, as another bus's are"""
     sn = namer(pcb)
     cx, cy = (grid.bbox[0] + grid.bbox[2]) / 2.0, (grid.bbox[1] + grid.bbox[3]) / 2.0
 
@@ -556,6 +591,7 @@ def sweep_crossings(pcb, grid, escape_to, refs, far_ang=None):
         dang[d] = ang((sum(p.global_x for p in ps) / len(ps), sum(p.global_y for p in ps) / len(ps)))
     lanes = [(ang(t), dang[escape_to[n]], escape_to[n]) for n, t in sorted(refs.items())
              if escape_to.get(n) in dang]
+    lanes += [(ang(t), fa, ('fixed', i)) for i, (t, fa) in enumerate(fixed)]
     memo = {}
 
     def n_cross(nm, pt):
@@ -1429,7 +1465,8 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                 far_ang[nm_] = math.degrees(math.atan2(-(sum(q.global_y for q in ps_) / len(ps_) - cy_),
                                                        sum(q.global_x for q in ps_) / len(ps_) - cx_)) % 360.0
         sweep_n = sweep_crossings(pcb, bm.grid, escape_to, sweep if isinstance(sweep, dict) else
-                                  {n: tuple(g['tooth']) for n, g in (prefer or {}).items()}, far_ang=far_ang)
+                                  {n: tuple(g['tooth']) for n, g in (prefer or {}).items()}, far_ang=far_ang,
+                                  fixed=fixed_lanes(pcb, ref, bm.grid, bus_s | oth_s | drop_s))
     avoid_r = max(bm.grid.pitch_x, bm.grid.pitch_y)          # (an exit this near a crowded tooth: C_AVOID)
     # a crowded tooth ON ITS LAYER (`avoid`'s (x, y, layer)): a bus ball's run on RUN leaving within a pitch of it gives
     # that layer up -- its other layers still the colouring's, as a held run's are (below) -- where the price alone
@@ -1827,6 +1864,18 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
         stub_ = lambda k_: [v[k_][i] for i, (kind, _o, _pc) in enumerate(opts[k_]) if kind == 'stub']   # noqa: E731
         if stub_(kp) or stub_(kn):
             mdl.Add(sum(stub_(kp)) == sum(stub_(kn)))
+            # ...and, both dog-boned, by the SAME diagonal: the two vias then stand as the balls do, a pitch apart
+            # side by side, where the later bus whose teeth they are leaves them as a pair. Free, a later bus's
+            # pairs on one ball column were dog-boned to the north-west and the north-east, their vias 1.13 mm apart,
+            # and that bus's ends had no clean option for them
+            def diag_(k_, o_):
+                return o_.site[0] > items[k_][1].global_x, o_.site[1] > items[k_][1].global_y
+
+            def by_diag(k_, d_):
+                return sum(v[k_][i] for i, (kind, o_, _pc) in enumerate(opts[k_])
+                           if kind == 'stub' and diag_(k_, o_) == d_)
+            for d_ in sorted({diag_(k_, o_) for k_ in (kp, kn) for kind, o_, _pc in opts[k_] if kind == 'stub'}):
+                mdl.Add(by_diag(kp, d_) == by_diag(kn, d_))
         slots, lit = {}, {}
         for k_ in (kp, kn):
             sl = slots[k_] = collections.defaultdict(list)     # (face, layer, exit x, exit y) -> the leg's options
@@ -2599,6 +2648,94 @@ def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane
     return len(tracks), len(vias_add), sorted(set(failed))
 
 
+def laid_escapes(pcb0, ref, nets, sn):
+    """{ball key NET#PAD: escape}: the ESCAPE each ball of `nets` (short names) on `ref` already has on `pcb0` -- an
+    earlier step's field laid it -- where its net's copper leaves the array: `via` (x, y, size, drill) its net's via at
+    the ball (in its pad or a dog-bone's) or None, `run` [(a, b, layer, half width)] its tracks round the array, and
+    `tooth` its exit as a move's (escape_plan.PAST pitches past the outer balls, on its run's line): tooth, direction,
+    layer, kind"""
+    import escape_moves as em
+    from escape_plan import PAST
+    foot = pcb0.footprints[ref]
+    grid = em.grid_of(foot)
+    x0, y0, x1, y1 = grid.bbox
+    px, py = grid.pitch_x, grid.pitch_y
+    inbox = lambda q: x0 - 1.5 * px <= q[0] <= x1 + 1.5 * px and y0 - 1.5 * py <= q[1] <= y1 + 1.5 * py  # noqa: E731
+    out = {}
+    for p in foot.pads:
+        if not p.net_id or sn(p.net_name or '') not in nets:
+            continue
+        run = [((s_.start_x, s_.start_y), (s_.end_x, s_.end_y), s_.layer, s_.width / 2) for s_ in pcb0.segments
+               if s_.net_id == p.net_id and (inbox((s_.start_x, s_.start_y)) or inbox((s_.end_x, s_.end_y)))]
+        best = None
+        for a_, b_, L_, _h in run:
+            for q in (a_, b_):
+                dq, d = max((q[0] - x1, 'right'), (x0 - q[0], 'left'), (q[1] - y1, 'down'), (y0 - q[1], 'up'))
+                if dq > 0 and (best is None or dq > best[0]):
+                    best = (dq, q, d, L_)
+        if best is None:
+            continue                    # (no copper of its net leaves the array: no escape laid)
+        _dq, q, d, L_ = best
+        vs = [v for v in pcb0.vias if v.net_id == p.net_id and math.hypot(v.x - p.global_x, v.y - p.global_y)
+              <= 0.75 * max(px, py)]
+        via = (vs[0].x, vs[0].y, vs[0].size, vs[0].drill) if vs else None
+        kind = 'surface' if via is None else (
+            'via_in_pad' if math.hypot(via[0] - p.global_x, via[1] - p.global_y) < 1e-3 else 'dogbone')
+        tooth = {'right': (x1 + PAST * px, q[1]), 'left': (x0 - PAST * px, q[1]),
+                 'down': (q[0], y1 + PAST * py), 'up': (q[0], y0 - PAST * py)}[d]
+        out[f'{sn(p.net_name)}#{p.pad_number}'] = {
+            'via': via, 'run': run, 'tooth': {'tooth': tooth, 'direction': d, 'layer': L_, 'kind': kind}}
+    return out
+
+
+def _clears(esc, copper, clr):
+    """an escape `esc` (laid_escapes') stands its clearance `clr` off every piece of `copper` [(segments
+    [(a, b, layer, half width)], vias [(pt, radius)])]"""
+    vias_e = [((esc['via'][0], esc['via'][1]), esc['via'][2] / 2)] if esc['via'] else []
+    for segs, vias in copper:
+        for c, r in vias:
+            if any(math.hypot(c[0] - v[0], c[1] - v[1]) < r + rv + clr for v, rv in vias_e):
+                return False
+            if any(_pt_seg(c, a, b) < r + hw + clr for a, b, _L, hw in esc['run']):
+                return False
+        for a, b, L, hw in segs:
+            if any(_pt_seg(v, a, b) < rv + hw + clr for v, rv in vias_e):
+                return False
+            if any(L == L2 and _seg_seg(a, b, a2, b2) < hw + hw2 + clr for a2, b2, L2, hw2 in esc['run']):
+                return False
+    return True
+
+
+def later_hands(pcb, ref, later, sn):
+    """{P leg (short name): (hand, False)}: the HAND each pair of the later buses (`later` {net: its part}) is to leave
+    `ref` with -- P on the side of its travel its own part's pads have it, the travel taken from the array toward them
+    (pairs.hand): a pair route keeps P on one side from end to end, so a pair leaving with the other hand crosses its
+    legs over before its part. None for a pair whose two pads stand along that travel (no side to read). Each leg
+    escaped alone, a bus's field gave a later bus's pair's N leg the gap line on the far side of its P, and that
+    bus's step found no plan"""
+    import pairs as _pairs
+    foot = pcb.footprints[ref]
+    cx = sum(p.global_x for p in foot.pads) / len(foot.pads)
+    cy = sum(p.global_y for p in foot.pads) / len(foot.pads)
+    out = {}
+    for _b, (pn, nn) in sorted(_pairs.pair_names(list(later), admit_all=True).items()):
+        part = later.get(pn)
+        if part is None or later.get(nn) != part or part not in pcb.footprints:
+            continue
+        pads_ = {sn(q.net_name or ''): q for q in pcb.footprints[part].pads if q.net_id}
+        pp, np_ = pads_.get(pn), pads_.get(nn)
+        if pp is None or np_ is None:
+            continue
+        d = ((pp.global_x + np_.global_x) / 2 - cx, (pp.global_y + np_.global_y) / 2 - cy)
+        v = (pp.global_x - np_.global_x, pp.global_y - np_.global_y)
+        dn, vn = math.hypot(*d), math.hypot(*v)
+        if dn < 1e-9 or vn < 1e-9 or abs(d[0] * v[1] - d[1] * v[0]) < 0.5 * dn * vn:
+            continue                            # (its pads along the travel: no side)
+        out[pn] = (_pairs.hand((d[0] / dn, d[1] / dn), (pp.global_x, pp.global_y), (np_.global_x, np_.global_y)),
+                   False)
+    return out
+
+
 def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, passives_fixed=True, later=None):
     """(route_bus --escape, ESCAPE_JOINT) ONE fanout of a shared array for an ESCAPE bus, its other nets and its plane
     balls, laid as the escape step's FIELD. BOARD is the field the step's ends chose the bus's teeth on (`hold`, plan_array's
@@ -2626,6 +2763,20 @@ def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, pas
     sn = namer(pcb0)
     byname = {sn(n.name): (i, n) for i, n in pcb0.nets.items() if n.name}
     nets = sorted({sn(n) for n in list(bus) + list(others) + list(drops)} & set(byname))
+    # (the escapes the bus's balls -- and the later buses' -- already have here: an earlier step's field laid them round
+    # that step's copper, which stands: the fallback below for a ball this plan leaves none)
+    # (read off the board as the step got it, ESCAPE_LAID_BEFORE -- route_bus strips the bus's own copper before the
+    # field is planned -- else off this one)
+    lb_ = awx_settings.get('ESCAPE_LAID_BEFORE')
+    was_ = {}
+    keep_s = {sn(n) for n in list(bus) + list(later or ())}
+    if lb_ and os.path.isfile(lb_):
+        with contextlib.redirect_stdout(io.StringIO()):
+            pcb_lb = parse_kicad_pcb(lb_)
+        if ref in pcb_lb.footprints:
+            was_ = laid_escapes(pcb_lb, ref, keep_s, namer(pcb_lb))
+    else:
+        was_ = laid_escapes(pcb0, ref, keep_s, sn)
     stem = out[:-len('.kicad_pcb')] if out.endswith('.kicad_pcb') else out
     bare = f'{stem}.bare.kicad_pcb'
     with open(bare, 'w', encoding='utf-8') as f:
@@ -2637,15 +2788,21 @@ def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, pas
     prefer = {nm: dict(g) for nm, g in hold.items()}
     with awx_settings.given({**awx_settings.environ(), 'FANOUT_PASSIVES_FIXED': '1' if passives_fixed else '0'}):
         later_s = {sn(n): d for n, d in (later or {}).items()}
+        # (exit_rays: the plane drops planned again here kept out of the held teeth's ways out, as the whole-array
+        # plans keep them -- a GND drop laid 0.44 mm into a lane's way out of its held tooth, the round's every
+        # attempt to move it short, and the lane open)
         if later_s:
             log(f'  whole-array field of {ref}: {sum(1 for n in others if sn(n) in later_s)} net(s) of the buses after '
                 f'this one steered toward their own parts')
+            l_hands = later_hands(pcb, ref, later_s, sn)
             hints, rep = plan_array(pcb, ref, list(bus), list(others), layers, far=far_face(pcb, ref, dest),
-                                    drops=drops, prefer=prefer, log=log, debug=True,
-                                    escape_to={sn(n): dest for n in bus}, hold=hold, sweep=True, steer=set(later_s))
+                                    drops=drops, prefer=prefer, log=log, debug=True, exit_rays=True,
+                                    escape_to={sn(n): dest for n in bus}, hold=hold, sweep=True, steer=set(later_s),
+                                    hands=l_hands or None)
         else:
             hints, rep = plan_array(pcb, ref, list(bus), list(others), layers, far=far_face(pcb, ref, dest),
-                                    drops=drops, prefer=prefer, log=log, debug=True, escape_to=dest, hold=hold)
+                                    drops=drops, prefer=prefer, log=log, debug=True, exit_rays=True, escape_to=dest,
+                                    hold=hold)
         chosen = (rep.pop('debug', None) or {}).get('chosen') or {}
         bus_s = {sn(n) for n in bus}
         # (a bus ball the plan escaped with no tooth held -- its lane the step's ends gave none, or one whose held tooth
@@ -2672,8 +2829,71 @@ def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, pas
             else:
                 home = next((L for L in layers if L in p.layers), 'F.Cu')
                 tracks.append({'start': c, 'end': s, 'width': r.fan_track, 'layer': home, 'net_id': p.net_id})
-                vias.append({'x': s[0], 'y': s[1], 'size': r.via_size, 'drill': r.via_drill,
+                vias.append({'x': s[0], 'y': s[1], 'size': 2 * sz['vr'], 'drill': 2 * sz['vdr'],
                              'layers': ['F.Cu', 'B.Cu'], 'net_id': p.net_id})
+        # (FALLBACK: a bus ball the plan escaped by none of its options keeps the escape the EARLIER step's field laid
+        # it, where that escape clears every piece the plan chose -- its via laid here as the bus's are, its run stood
+        # in for the engine below, its exit the tooth the step may hold it to, `bus_free`. That field planned the ball
+        # round the earlier bus's copper, which stands; planned again here round this bus's held teeth, six balls the
+        # earlier bus's escapes had walled on every other way kept none, and never became lanes)
+        kept_ = []
+        cop_ = []
+        for k_, (kind_, o_) in chosen.items():
+            hw_ = r.fan_track / 2
+            if kind_ == 'escape':
+                vr_ = sz['inpad'](pads[k_])[0] if o_.site is not None and pads.get(k_) is not None and math.hypot(
+                    o_.site[0] - pads[k_].global_x, o_.site[1] - pads[k_].global_y) < 1e-3 else sz['vr']
+                cop_.append(([(a_, b_, L_, hw_) for a_, b_, L_ in (o_.legs or ())],
+                             [(tuple(o_.site), vr_)] if o_.site is not None else []))
+            elif kind_ == 'stub':
+                cop_.append(([(o_.a, o_.site, o_.layer, hw_)], [(tuple(o_.site), sz['vr'])]))
+            elif kind_ == 'drop':
+                cop_.append(([(o_.stub[0], o_.stub[1], o_.layer, hw_)] if o_.stub else [], [(tuple(o_.site), o_.r)]))
+            elif kind_ == 'strap':
+                cop_.append(([(o_.a, o_.b, o_.layer, hw_)], []))
+        for k_, esc_ in sorted(was_.items()):
+            if k_ in chosen or k_.split('#')[0] not in bus_s or k_.split('#')[0] in rep['bus_free'] \
+                    or k_ not in pads or not _clears(esc_, cop_, r.fan_clear):
+                continue
+            p_ = pads[k_]
+            if esc_['via']:
+                vx_, vy_, vs_, vd_ = esc_['via']
+                vias.append({'x': vx_, 'y': vy_, 'size': vs_, 'drill': vd_, 'layers': ['F.Cu', 'B.Cu'],
+                             'net_id': p_.net_id})
+                if esc_['tooth']['kind'] == 'dogbone':
+                    home_ = next((L for L in layers if L in p_.layers), 'F.Cu')
+                    tracks.append({'start': (p_.global_x, p_.global_y), 'end': (vx_, vy_), 'width': r.fan_track,
+                                   'layer': home_, 'net_id': p_.net_id})
+            rep['bus_free'][k_.split('#')[0]] = dict(esc_['tooth'])
+            cop_.append((esc_['run'], [((esc_['via'][0], esc_['via'][1]), esc_['via'][2] / 2)] if esc_['via'] else []))
+            kept_.append(k_)
+        if kept_:
+            log(f'  whole-array field of {ref}: {len(kept_)} bus ball(s) the plan left no escape keep the one laid '
+                f'here before: {", ".join(kept_)}')
+        rep['kept_laid'] = kept_
+        # (...and a LATER bus's ball the plan escaped by none of its options keeps its earlier escape the same way, after
+        # the bus's: laid WHOLE here, via and run, as the field lays the other nets -- that bus keeps it as its tooth,
+        # and the engine below leaves a ball carrying its own copper. Planned again here, a bus's field left a later
+        # bus's two balls nothing, the engine escaped one, and that bus went to its fanout with the other bare)
+        later_kept = []
+        for k_, esc_ in sorted(was_.items()):
+            nm_ = k_.split('#')[0]
+            if k_ in chosen or nm_ in bus_s or nm_ not in later_s or k_ not in pads \
+                    or not _clears(esc_, cop_, r.fan_clear):
+                continue
+            p_ = pads[k_]
+            if esc_['via']:
+                vx_, vy_, vs_, vd_ = esc_['via']
+                vias.append({'x': vx_, 'y': vy_, 'size': vs_, 'drill': vd_, 'layers': ['F.Cu', 'B.Cu'],
+                             'net_id': p_.net_id})
+            tracks += [{'start': a_, 'end': b_, 'width': 2 * hw_, 'layer': L_, 'net_id': p_.net_id}
+                       for a_, b_, L_, hw_ in esc_['run'] if L_ in layers]
+            cop_.append((esc_['run'], [((esc_['via'][0], esc_['via'][1]), esc_['via'][2] / 2)] if esc_['via'] else []))
+            later_kept.append(k_)
+        if later_kept:
+            log(f'  whole-array field of {ref}: {len(later_kept)} later bus ball(s) the plan left no escape keep the '
+                f'one laid here before: {", ".join(later_kept)}')
+        rep['later_kept'] = later_kept
         sited = f'{stem}.sited.kicad_pcb'
         with contextlib.redirect_stdout(sys.stderr):
             add_tracks_and_vias_to_pcb(bare, sited, tracks, vias, net_id_to_name={i: n.name for i, n in pcb.nets.items()})
@@ -2689,6 +2909,9 @@ def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, pas
                    for k, (kind, o) in sorted(chosen.items())
                    if k.split('#')[0] in bus_s and kind == 'escape'
                    for a_, b_, L_ in o.legs if L_ == o.layer and L_ in layers]
+        runs_in += [Segment(start_x=float(a_[0]), start_y=float(a_[1]), end_x=float(b_[0]), end_y=float(b_[1]),
+                            width=2 * hw_, layer=L_, net_id=pads[k].net_id)
+                    for k in kept_ for a_, b_, L_, hw_ in was_[k]['run'] if L_ in layers]
         with contextlib.redirect_stdout(sys.stderr):
             lay(sited, out, ref, [], list(others), layers, {at: h for at, h in hints.items() if at not in bus_at},
                 plane_drop='off', stand_in_tracks=runs_in)

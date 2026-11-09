@@ -732,6 +732,33 @@ and `--set K=V` runs an arm of a change behind a setting. A negotiated board sta
 routing process per bus: keep `-j` so the processes at once stay within the machine's
 routing budget.
 
+### Bus by bus (`bus_steps.py`): isolate a change, minutes not hours
+
+The boards' buses route in turn, so a change to one bus moves every bus after it, and a
+board is an hour or more. `tests/stress/bus_steps.py` takes a bus boards run apart:
+
+- `bus_steps.py record RUN_DIR STEPS_DIR` -- each bus a STEP: the board the buses before
+  it left in that run, and the settings route_bus gave it (an escape bus on an array an
+  earlier bus went through: the shared array planned whole with it, its ends on the
+  board before, the later buses' nets). Record once, from a run you trust.
+- `bus_steps.py run STEPS_DIR -j 6` -- every step routed alone, at once, on its recorded
+  board, graded as `bus_boards.py` grades a board. A later bus is judged on the same input
+  whatever an earlier bus does now. For a change to the fanout, the ends or the solve.
+  `--after RUN_OUT` starts each step on the board its previous step left in that run
+  instead: a later bus on this tree's earlier bus (an escape bus plans the later buses'
+  teeth on a shared array, so a fix there shows only in the bus after it).
+- `bus_steps.py replay STEPS_DIR -j 6` -- every step's recorded round again
+  (`awx/replay_round.py`: its fanout as recorded, the solve, the loop, the geometry and
+  the lay by this tree), with its round-1 audit and its laid open count beside the
+  recorded run's own: 25 s to 12 min a bus, the eleven recorded ones in about 13 min at
+  `-j 5`. For a change to the solve, the loop, the geometry, the polish or the lay.
+  `--keep-solve` takes the recorded first solve too -- only while the frame code is the
+  recording run's: a recorded solve on a frame changed since gave the loop's re-solve
+  no plan its warm start had.
+
+Judge one change at a time this way -- `replay` or `run` first, then the boards
+(`bus_boards.py`) before a commit.
+
 ## Replaying & A/B (no LLM)
 
 Each board's `runs_set*/<board>/redo_commands.sh` records every board-mutating

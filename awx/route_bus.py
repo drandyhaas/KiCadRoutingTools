@@ -2,7 +2,7 @@
 """route_bus.py -- the bus step: an array pair's bus routed on the board as it is.
 
     python3 route_bus.py BOARD.kicad_pcb OUT.kicad_pcb [--src U1 --dest U2] [--k K] [--rounds R] [--inproc]
-                         [--feedback-rounds F]
+                         [--feedback-rounds F] [--round-edits EDITS.json]
                          [--clearance C] [--track-width W] [--fanout-track-width W] [--via-size D] [--via-drill D]
                          [--json-out FILE]
     python3 route_bus.py BOARD.kicad_pcb OUT.kicad_pcb --bus SRC:DEST[:MODE[:LAYERS]] [--bus ...] [--sequential] [...]
@@ -830,6 +830,11 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                 f.write(txt_g)
             failed = list(failed) + [n for n in gated if n not in failed]
             log(f'  {src}: escape(s) between a pair\'s legs taken out, refused: {", ".join(short(n) for n in gated)}')
+        # (...and a pair the comb itself split -- a deeper ball's escape between its legs -- planned again with its
+        # legs together: repair_comb_splits)
+        repair_comb_splits(fanned, pcb, src, dest, [n for n in names if n not in set(failed)], short, run_rules,
+                           spec['layers'] if spec else list(pcb.board_info.copper_layers), work, whole_array, log,
+                           settings_env=joint)
     # (a pull pad the fanout joined to its lane, attach_pulls: on its net, none of the net's two ends --
     # coherent_nets.admissible reads BUS_ATTACHED, here and in the whole route's rounds)
     att_s = ','.join(f'{r_}.{n_}' for r_, n_, _t in attached)
@@ -878,6 +883,12 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             log('  the bus\'s own field: the turn failed -- the ends chosen on the shared field: ' + '; '.join(bad[:3]))
         else:
             escape_env['ESCAPE_ENDS_BASE'] = frame_e
+        # (...and the board as the step got it, the bus's copper on it, turned: the escapes an earlier step's field laid
+        # the bus's balls, which the shared field keeps for a ball its own plan leaves none -- joint_escape.escape_field;
+        # stripped above with the bus's copper, they were gone before the field could fall back on them)
+        laid_b = os.path.join(work, 'laid_before.kicad_pcb')
+        if not ff.turn_file(board, laid_b, q, cx, cy):
+            escape_env['ESCAPE_LAID_BEFORE'] = laid_b
 
     # 4. the whole route
     wr.INPROC = inproc
@@ -887,6 +898,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     try:
         rc, grade = wr.chain(K, os.path.join(work, 'run'), rounds, base=frame, dest=dest, F=feedback_rounds,
                              settings={**(settings or {}), **STEP_SETTINGS, _rules.SETTING: _rules.as_setting(run_rules),
+                                       'ROUND_EDITS_BUS': f'{src}:{dest}', 'ROUND_EDITS_TURN': f'{q},{cx},{cy}',
                                        **joint, **jsync,
                                        **({'FANOUT_ESCAPE': '1'} if escape else {}), **escape_env,
                                        **({'BUS_ATTACHED': att_s} if attached else {})})
@@ -1926,6 +1938,98 @@ def pair_gate_cuts(base, fanned, pcb, src, names, short=lambda n: n):
     return out
 
 
+def comb_splits(fanned, pcb, src, dest, names, settings_env=None):
+    """The pairs the comb on `fanned` left SPLIT AT THEIR TEETH -- another lane's tooth on the pair's layer between its
+    two -- as the whole route's fanout audit reads them (fanout_from_plan.fanout_audit, whole_frame's PairSplit) on
+    the board turned into the bus's flow frame: [(pair, [the lanes between])], short names, [] when none. The rounds'
+    audit refuses every board on which one stands, and on a plain bus no round re-plans a pair nobody asks to move"""
+    import fanout_from_plan as fp
+    import flow_frame as ff
+    import awx_settings
+    with tempfile.TemporaryDirectory() as td:
+        with contextlib.redirect_stdout(io.StringIO()):
+            q, cx, cy = ff.turn_for_ends(parse_kicad_pcb_quiet(fanned), src, dest, set(names))
+        frame = os.path.join(td, 'frame.kicad_pcb')
+        if ff.turn_file(fanned, frame, q, cx, cy):
+            return []
+        fp.copy_pro(fanned, frame)
+        with awx_settings.given({**awx_settings.environ(), **(settings_env or {}), 'BASE': frame}):
+            splits, _far, _stops = fp.fanout_audit(frame, list(names), dest)
+    return [(pr, list(ls)) for pr, end, ls in splits if end == 'tooth']
+
+
+def repair_comb_splits(fanned, pcb, src, dest, names, short, run_rules, layers, work, whole_array, log=print,
+                       settings_env=None):
+    """THE COMB'S SPLIT PAIRS RE-PLANNED: the source comb (the chain's fanout engine, mb.fanout_source) fans ball by
+    ball and keeps a pair's two escapes together only where its legs are neighbours on one row -- a DIAGONAL pair (one
+    leg a row in from the other) came out with a deeper ball's escape between its legs, and the whole route's audit
+    refused every round's board for it. Each pair split at its teeth (comb_splits), its two legs and the lanes standing
+    between them, are stripped and planned again by the whole-array plan (joint_escape.fan_array: plan_array, a pair's
+    legs held together, nothing between them) at the run's sizes, every other ball's copper as it stands. Kept only when
+    it leaves fewer pairs split and no ball bare that had an escape; on a plain bus the passives beneath are moved off
+    the new vias as for a refused ball. Returns the pairs repaired (short names)"""
+    import shutil
+    import awx_settings
+    import braid as te
+    import make_bench as mb
+    import pairs as _pairs
+    import joint_escape as je
+    import fanout_from_plan as fp
+    import flow_frame as ff
+    # (the audit reads the bus's nets by the whole route's names, as its rounds do: full, a pair whose leg names carry a
+    # sheet's path was never paired -- the setup looked its stand-in up by the path, and the step stopped)
+    full = {short(n): n for n in names}
+    splits = comb_splits(fanned, pcb, src, dest, sorted(full), settings_env)
+    if not splits:
+        return []
+    legs = _pairs.pair_names(sorted(full))
+    redo = []
+    for pr, between in splits:
+        redo += [full[x] for x in list(legs.get(pr, ())) + list(between) if x in full]
+    redo = list(dict.fromkeys(redo))
+    log(f'  {src}: the comb split {len(splits)} pair(s) at their teeth -- '
+        + '; '.join(f'{pr} (round {", ".join(ls)})' for pr, ls in splits)
+        + f' -- re-planned whole: {", ".join(short(n) for n in redo)}')
+    stripped = os.path.join(work, 'fanned_pairs_in.kicad_pcb')
+    txt, _n = mb.strip_pair_copper(open(fanned, encoding='utf-8').read(), pcb, redo)
+    with open(stripped, 'w', encoding='utf-8') as f:
+        f.write(txt)
+    fp.copy_pro(fanned, stripped)
+    dests = ff.dest_refs(dest)
+    to_ = dest
+    if len(dests) > 1:
+        to_ = {}
+        for d_ in dests:
+            for q_ in pcb.footprints[d_].pads:
+                if q_.net_name in set(redo):
+                    to_.setdefault(short(q_.net_name), d_)
+    far_ = je.far_face(pcb, src, dest) if isinstance(to_, str) else \
+        {n_: je.far_face(pcb, src, d_) for n_, d_ in to_.items()}
+    out = os.path.join(work, 'fanned_pairs.kicad_pcb')
+    with contextlib.redirect_stdout(sys.stderr):
+        _rr, reps_ = je.fan_array(stripped, out, src, redo, [], layers, drops=(), far=far_, log=lambda *a: None,
+                                  rungs=[run_rules], exit_rays=True, escape_to=to_)
+    bare = sorted({b_.split('#')[0] for b_ in reps_[-1]['bare']})
+    after = comb_splits(out, pcb, src, dest, sorted(full), settings_env) if not bare else splits
+    if bare or len(after) >= len(splits):
+        log(f'  {src}: the re-plan kept out -- '
+            + (f'balls left bare: {", ".join(short(n) for n in bare)}' if bare else
+               f'still split: {"; ".join(pr for pr, _ls in after)}') + ' -- the comb as it was')
+        return []
+    shutil.copyfile(out, fanned)
+    fp.copy_pro(out, fanned)
+    if not whole_array:
+        lock_ = je.passives_beyond(fanned, [src] + dests, names)
+        import whole_route as wr
+        wr.run([os.path.join('..', 'py_router', 'place_fanout_clearance.py'), fanned, fanned,
+                '--clearance', str(te.SPEC_CLEARANCE), '--beneath-only'] + (['--lock'] + lock_ if lock_ else []),
+               awx_settings.environ(), log_path=os.path.join(work, 'caps_pairs.log'), own_process=True)
+    fixed = sorted({pr for pr, _ls in splits} - {pr for pr, _ls in after})
+    log(f'  {src}: pairs re-planned together: {", ".join(fixed)}'
+        + (f'; still split: {"; ".join(pr for pr, _ls in after)}' if after else ''))
+    return fixed
+
+
 def hold_board_escapes(board, base, out, pcb, src, failed, names=(), short=lambda n: n):
     """The refused balls `failed` (full names) of `src` that can HOLD the escape `board` has them at `src`
     (escape_blocks): a net's whole escape where every piece of it stands clear of the copper `base` holds
@@ -2315,6 +2419,18 @@ def main():
                          'fed what the round before found (its crowded ends, its lanes over two vias, its open nets) '
                          'and choosing again from that round\'s board (default 0: every round a draw, but a round '
                          'whose solve had no plan is followed by a feedback round whatever F)')
+    ap.add_argument('--round-edits', metavar='EDITS.json',
+                    help='the ROUND EDITS: what the agent driving the step asks of its rounds after looking at the round '
+                         'before, per bus and round -- {"SRC:DEST": {"2": {"ban": [{"lane": L, "end": 0}], "pin": '
+                         '[{"lane": L, "end": 1, "at": [X, Y], "layer": LAYER}], "avoid": [{"lane": L, "end": 1}], '
+                         '"pairs": [[{"lane": A, "end": 0}, {"lane": B, "end": 0}]], "cuts": [{"lane": L, "box": '
+                         '[X0, Y0, X1, Y1], "layers": [..]}], "areas": [{"poly": [[X, Y], ..], "layers": [..], '
+                         '"lanes": [..]}], "raw_cuts": {CUT FILE}, "flips": [[LANE, ISLAND]], "frame": "board"}}}: its '
+                         'ends (0 the tooth, 1 the berth) banned (that place out of the lane\'s options), pinned, '
+                         'avoided (priced) or not to be chosen together make it a feedback round from the round before '
+                         '(--rounds must reach it); its cuts and areas keep lanes off layers there, its raw cuts and '
+                         'flips seed its solve and loop. Points in the board\'s frame ("frame": "bench" the round\'s '
+                         'bench). Recorded with the step, so a replay runs the same rounds with no one looking')
     ap.add_argument('--inproc', action='store_true', help='every stage in this process rather than each in its own')
     ap.add_argument('--whole-array', action='store_true',
                     help='the WHOLE-ARRAY fanout: after each round lays the bus at the two arrays, plan and lay '
@@ -2370,6 +2486,12 @@ def main():
         buses = [parse_bus(b) for b in a.bus] if a.bus else None
     except ValueError as e:
         ap.error(str(e))
+    if a.round_edits:
+        if not os.path.isfile(a.round_edits):
+            print(f'route_bus: no round edits file {a.round_edits}', file=sys.stderr)
+            sys.exit(2)
+        # (a setting every bus's whole route reads, its own section by its SRC:DEST -- the negotiated buses' processes too)
+        os.environ['ROUND_EDITS'] = os.path.abspath(a.round_edits)
     sizes = {n: getattr(a, n) for n in SIZE_ARGS if getattr(a, n) is not None}
     named = buses if buses is not None else ([(a.src, a.dest, None, None)] if a.src is not None else [])
     bad = bus_usage_errors(a.board, named, a.whole_array, a.escape) if named else []

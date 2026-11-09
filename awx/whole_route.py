@@ -288,12 +288,16 @@ def layer_cut(lane, island, box, layer):
 _TRACKS = {}       # (a bench file, its mtime and size) -> (its tracks by layer index, its keep-out areas' boxes, shapes)
 
 
-def _tracks_of(bench):
+def _tracks_of(bench, areas=None):
     """(the bench's tracks as (x0, y0, x1, y1, half width, net name) per routing-layer index (route_layers), the
     bboxes of its keep-out areas as plan_audit.keepout_areas lists them, and their shapes (polygon, holes) as point
-    lists), read once"""
+    lists), read once -- in the PLAN's frame, as the audit's points and the plan's lanes are: on a round of the other
+    chirality (its sidecar's chi), mirrored about the board's axis as repair_ends mirrors its points back. Read as the
+    board has them, a mirrored round's layer cuts met no other net's track at their place and held no other lane off
+    it: an earlier bus's In2 run took a different lane of the bus each round. `areas`: the round's areas file
+    (BUS_AREAS), its keep-outs listed after the board's as the audit lists them"""
     st_ = os.stat(bench)
-    key = (os.path.abspath(bench), st_.st_mtime_ns, st_.st_size)
+    key = (os.path.abspath(bench), st_.st_mtime_ns, st_.st_size, areas or '')
     if key not in _TRACKS:
         import route_layers
         sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
@@ -307,15 +311,31 @@ def _tracks_of(bench):
         by = collections.defaultdict(list)
         from coherent_nets import namer
         sn = namer(pcb)
+        side_ = os.path.splitext(bench)[0] + '.plan.json'
+        my = lambda y_: y_
+        ml = lambda L_: L_
+        if os.path.isfile(side_) and int(json.load(open(side_)).get('chi', 1)) < 0:
+            # (turned over: y about the axis, and F.Cu and B.Cu swapped -- braid.setup's turn-over, flip_frame)
+            from bga_fanout.flip_frame import mirror_axis, other_layer
+            cy2_ = 2 * mirror_axis(pcb)
+            my = lambda y_: cy2_ - y_
+            ml = other_layer
         for s_ in pcb.segments:
             if s_.layer in lays and not getattr(s_, 'graphic', False):
                 nm = sn(pcb.nets[s_.net_id].name) if s_.net_id in pcb.nets else ''
-                by[_layer_index(s_.layer)].append((s_.start_x, s_.start_y, s_.end_x, s_.end_y, s_.width / 2, nm))
+                by[_layer_index(ml(s_.layer))].append((s_.start_x, my(s_.start_y), s_.end_x, my(s_.end_y),
+                                                         s_.width / 2, nm))
         import plan_audit as _pa
         ka_ = _pa.keepout_areas(pcb, lays)
-        rnd = lambda P: [[round(float(x_), 4), round(float(y_), 4)] for x_, y_ in P]
+        rnd = lambda P: [[round(float(x_), 4), round(float(my(y_)), 4)] for x_, y_ in P]
+        box_ = lambda b_: [b_[0], min(my(b_[1]), my(b_[3])), b_[2], max(my(b_[1]), my(b_[3]))]
+        # (...and the agent's areas after them, in the plan's frame already -- the audit's K numbers: plan_audit)
+        with awx_settings.given({**awx_settings.environ(), 'BUS_AREAS': areas or ''}):
+            ar_ = _pa.bus_areas()
         _TRACKS.clear()
-        _TRACKS[key] = (dict(by), [k_[3] for k_ in ka_], [(rnd(k_[0]), [rnd(h_) for h_ in k_[1]]) for k_ in ka_])
+        _TRACKS[key] = (dict(by), [box_(k_[3]) for k_ in ka_] + [list(a_[3]) for a_ in ar_],
+                        [(rnd(k_[0]), [rnd(h_) for h_ in k_[1]]) for k_ in ka_]
+                        + [([[round(float(x_), 4), round(float(y_), 4)] for x_, y_ in a_[0]], []) for a_ in ar_])
     return _TRACKS[key]
 
 
@@ -358,7 +378,7 @@ def _via_ends(bench):
     return _VIA_ENDS[key]
 
 
-def audit_layer_cuts(audit, geo, bench=None):
+def audit_layer_cuts(audit, geo, bench=None, areas=None):
     """the LAYER cuts an audit's STATIC findings give: a lane found against a pad of an island (a geometry's 'islands',
     'REF.PAD' -> island) on one layer, the layer it was found on -- and, on more routing layers than two, a lane found
     against an ARRAY's own pad (no island), off the layer it was found on round that place (ARRAY_CUT_R): it was pushed
@@ -375,24 +395,49 @@ def audit_layer_cuts(audit, geo, bench=None):
     tracks are not allowed on some layers (plan_audit.keepout_areas -- the router stamps it, the plan did not see it:
     sdi_mipi_conv's wound SDI lanes round U15 laid on In2.Cu through the area east of it that keeps In1 and In2 clear,
     and the snap failed them there every round) is held off its layers where its laid path meets the area itself (its
-    polygon: own_spans), not the area's box -- the area east of U15 is an L whose box reaches U15's berths"""
+    polygon: own_spans), not the area's box -- the area east of U15 is an L whose box reaches U15's berths. And on more
+    than two, a PITCH finding at one lane's end (the geometry's `lanes`): the lane passing that end held off the
+    layer there"""
     import route_layers
     nl = len(route_layers.layers())
     out, isl, bxs = [], geo.get('islands') or {}, geo.get('island_boxes') or {}
+    ends_ = {n: (v['xy'][0], v['xy'][-1]) for n, v in (geo.get('lanes') or {}).items() if v.get('xy')}
     for ln in lines_of(audit):
+        p = re.match(r'PITCH (\S+)\s+(\S+)\s+([FB]|In\d+\.Cu) min [-\d.]+\s+over [\d.]+ mm\s+at \(([-\d.]+),\s*([-\d.]+)\)',
+                     ln)
+        if p and nl > 2:
+            # (two lanes short of their pitch on one layer at ONE lane's end -- its tooth or berth within the cut's box
+            # of the place, the other lane passing it: the end is the fanout's and stands where it is, so the lane
+            # passing is held off that layer there, as one found against another net's track. The history alone moves
+            # it nowhere: a group bus's lane squeezed past a berth on its layer every round, its change two millimetres
+            # on, tied to its crossings, and the loop stopped on the same finding with the berth's lane open. Both
+            # lanes ending there are the fanout's to part; neither, the solve's own crossing to price)
+            import rules as _rules
+            R_ = _rules.active()
+            x, y = float(p.group(4)), float(p.group(5))
+            r = max(ARRAY_CUT_R, 3 * (R_.track / 2 + R_.clearance + R_.grid / 2))
+            at_ = [any(math.hypot(e_[-2] - x, e_[-1] - y) <= r for e_ in ends_.get(n_, ()))
+                   for n_ in (p.group(1), p.group(2))]
+            if at_[0] != at_[1] and all(n_ in ends_ for n_ in (p.group(1), p.group(2))):
+                lane, pad = (p.group(2), p.group(1)) if at_[0] else (p.group(1), p.group(2))
+                c = {'lane': lane, 'island': pad, 'layer': 0, 'box': [x - r, y - r, x + r, y + r],
+                     'blocked': [_layer_index(p.group(3))], 'firm': True}
+                if c not in out:
+                    out.append(c)
+            continue
         k = re.match(r'STATIC (\S+)\s+([FB]|In\d+\.Cu) ([-+]?[\d.]+)/([\d.]+) keepout K(\d+) (\S+) at '
                      r'\(([-\d.]+),\s*([-\d.]+)\)', ln)
         if k:
             # (a KEEP-OUT area's layers: the lane held off them across its box -- the bench's, else round the place)
             lane, x, y, r = k.group(1), float(k.group(7)), float(k.group(8)), max(ARRAY_CUT_R, 3 * float(k.group(4)))
             blk = {_layer_index(k.group(2))} | {_layer_index(t_) for t_ in k.group(6).split('+')}
-            kb = _tracks_of(bench)[1] if bench else []
+            kb = _tracks_of(bench, areas)[1] if bench else []
             ki = int(k.group(5))
             box = list(kb[ki]) if ki < len(kb) else [x - r, y - r, x + r, y + r]
             c = {'lane': lane, 'island': 'keepout K' + k.group(5), 'layer': 0, 'box': box, 'blocked': sorted(blk)} \
                 if nl > 2 and len(blk) < nl else None
             if c and ki < len(kb):
-                c['poly'], c['holes'] = _tracks_of(bench)[2][ki]
+                c['poly'], c['holes'] = _tracks_of(bench, areas)[2][ki]
             if c and c not in out:
                 out.append(c)
             continue
@@ -468,6 +513,45 @@ def place_cuts(cuts, plan, bench, own=()):
             k = dict(c, lane=n, blocked=blk)
             if pts and blk and k not in cuts and k not in out:
                 out.append(k)
+        # ...and wherever else a lane's laid path meets THAT net's copper on a held layer: a track is a wall along its
+        # whole run, not at the place one lane was found. An earlier bus's lane from the array's face away on In2 took
+        # one lane in round 1, held off In2 at the place; another, laid over the same run 2.7 mm north on In1, was put
+        # on In2 in round 2 and crossed it there
+        r_ = max(ARRAY_CUT_R, 3 * bar)
+        run_ = {L: [s_ for s_ in tracks.get(L, []) if s_[5] == c['island']] for L in c['blocked']}
+        run_ = {L: ss for L, ss in run_.items() if ss}
+        if not run_:
+            continue
+        rb_ = [min(min(s_[0], s_[2]) - s_[4] for ss in run_.values() for s_ in ss) - bar,
+               min(min(s_[1], s_[3]) - s_[4] for ss in run_.values() for s_ in ss) - bar,
+               max(max(s_[0], s_[2]) + s_[4] for ss in run_.values() for s_ in ss) + bar,
+               max(max(s_[1], s_[3]) + s_[4] for ss in run_.values() for s_ in ss) + bar]
+        for n, v in lanes.items():
+            if n == c['lane'] or not v.get('xy'):
+                continue
+            hits_, cl_ = [], []
+            for p in _dense([list(q) for q in v['xy']], R.grid / 2):
+                if not (rb_[0] <= p[-2] <= rb_[2] and rb_[1] <= p[-1] <= rb_[3]):
+                    continue
+                ls_ = [L for L, ss in run_.items()
+                       if any(_seg_pt(p, (a, b), (e, f)) < hw + bar for a, b, e, f, hw, _nm in ss)]
+                if not ls_:
+                    continue
+                if cl_ and math.hypot(p[-2] - cl_[-1][0][-2], p[-1] - cl_[-1][0][-1]) > 2 * r_:
+                    hits_.append(cl_)
+                    cl_ = []
+                cl_.append((p, ls_))
+            if cl_:
+                hits_.append(cl_)
+            for cl_ in hits_:
+                xs_, ys_ = [p[-2] for p, _l in cl_], [p[-1] for p, _l in cl_]
+                bx_ = [min(xs_) - r_, min(ys_) - r_, max(xs_) + r_, max(ys_) + r_]
+                if any(bx_[0] <= p_[-2] <= bx_[2] and bx_[1] <= p_[-1] <= bx_[3] and (n, k_) not in vends
+                       for k_, p_ in ((0, v['xy'][0]), (1, v['xy'][-1]))):
+                    continue        # (a lane ENDING there: its end is the fanout's to move)
+                k = dict(c, lane=n, blocked=sorted({L for _p, ls_ in cl_ for L in ls_}), box=bx_)
+                if k not in cuts and k not in out:
+                    out.append(k)
     return out
 
 
@@ -903,7 +987,7 @@ def loop(solve, out, rounds, env, log):
             # answer to such an island, and it stands whatever flip names the lane and island
             import route_layers
             nl_ = len(route_layers.layers())
-            lcuts = [c for c in audit_layer_cuts(O(f'p{i}.audit'), gj, env.get('BENCH'))
+            lcuts = [c for c in audit_layer_cuts(O(f'p{i}.audit'), gj, env.get('BENCH'), env.get('BUS_AREAS'))
                      if nl_ > 2 or (c['lane'], c['island']) not in new]
             lcuts += place_cuts(lcuts, pj, env.get('BENCH'), set(env.get('NETS', '').split(',')))
             lcuts += [c for c in gj.get('lcuts', []) + pj.get('lcuts', []) if c not in lcuts]
@@ -2016,6 +2100,76 @@ def joint_loop_sync(env, pos, solve, say):
     return bool(ok_), (cuts_ if ok_ else None)
 
 
+def round_edits(env):
+    """{round: its edits}: this bus's section (ROUND_EDITS_BUS, SRC:DEST) of the ROUND EDITS file (ROUND_EDITS, route_bus
+    --round-edits) -- {} without one"""
+    f_ = env.get('ROUND_EDITS')
+    if not f_:
+        return {}
+    sec_ = json.load(open(f_)).get(env.get('ROUND_EDITS_BUS') or '') or {}
+    return {int(k_): v_ for k_, v_ in sec_.items()}
+
+
+def edit_frame(env, bench=None, frame='board'):
+    """(to_bench, to_plan, plan_layer): the ROUND EDITS' frame -- the BOARD's, as the agent driving the step reads it --
+    in the step's: a board point turned into the flow frame (ROUND_EDITS_TURN, route_bus: the bench's), and then, on a
+    round of pair chirality -1 (the bench's sidecar), turned over about the bench's mirror axis into the plan's; a board
+    layer's name in the plan (F.Cu and B.Cu swapped there, braid.setup). `frame` 'bench': the points are the bench's
+    already (a round's renders, frame_render, draw the bench), not turned"""
+    import flow_frame as ff
+    t_ = ((env.get('ROUND_EDITS_TURN') if frame != 'bench' else None) or '0,0,0').split(',')
+    q_, cx_, cy_ = int(float(t_[0])), float(t_[1]), float(t_[2])
+
+    def to_bench(p):
+        dx_, dy_ = ff._q(float(p[0]) - cx_, float(p[1]) - cy_, q_)
+        return cx_ + dx_, cy_ + dy_
+    cy2_, sw_ = None, (lambda L_: L_)
+    side_ = os.path.splitext(bench)[0] + '.plan.json' if bench else ''
+    if side_ and os.path.isfile(side_) and int(json.load(open(side_)).get('chi', 1)) < 0:
+        from bga_fanout.flip_frame import mirror_axis, other_layer
+        if PYR not in sys.path:
+            sys.path.insert(0, PYR)
+        from kicad_parser import parse_kicad_pcb
+        with contextlib.redirect_stdout(io.StringIO()):
+            cy2_ = 2 * mirror_axis(parse_kicad_pcb(bench))
+        sw_ = other_layer
+
+    def to_plan(p):
+        b_ = to_bench(p)
+        return (b_[0], cy2_ - b_[1]) if cy2_ is not None else b_
+    return to_bench, to_plan, sw_
+
+
+def round_edit_files(ed, d, env, bench):
+    """(cut file, flips file, areas file) -- each None where the round asks none -- of a round's ROUND EDITS `ed`, written
+    in the round's directory `d` in the plan's frame: each `areas` entry {"box" [x0, y0, x1, y1] or "poly" [[x, y]..],
+    "layers" [names], "lanes" [..] (every lane without)} and each `cuts` entry {"lane", "box" or "poly", "layers"} -- a
+    cut is an area of one lane: the solve holds it where the lane's reference route passes, the audit wherever the lane
+    goes -- turned from the board's frame (edit_frame); `raw_cuts` a cut file as the loop writes them (its frame, route u)
+    and `flips` [[lane, island]] as they are"""
+    if not ed:
+        return None, None, None
+    _to_bench, to_plan, plan_layer = edit_frame(env, bench, ed.get('frame') or 'board')
+
+    def area(a_, lanes):
+        b_ = a_.get('box')
+        pts_ = a_.get('poly') or [[b_[0], b_[1]], [b_[2], b_[1]], [b_[2], b_[3]], [b_[0], b_[3]]]
+        return {'poly': [[round(v_, 4) for v_ in to_plan(p_)] for p_ in pts_],
+                'layers': [plan_layer(L_) for L_ in a_['layers']], 'lanes': lanes}
+    ar_ = [area(a_, a_.get('lanes')) for a_ in ed.get('areas') or ()] + \
+          [area(c_, [c_['lane']]) for c_ in ed.get('cuts') or ()]
+    out_ = []
+    for nm_, obj_ in (('edits_cuts.json', ed.get('raw_cuts')), ('edits_flips.json', {'flips': ed['flips']} if
+                                                                ed.get('flips') else None),
+                      ('edits_areas.json', ar_ or None)):
+        f_ = None
+        if obj_:
+            f_ = os.path.join(d, nm_)
+            json.dump(obj_, open(f_, 'w'), indent=1)
+        out_.append(f_)
+    return tuple(out_)
+
+
 def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     """whole_chain.sh K OUTDIR ROUNDS: the exit code, the grade the last line printed. The bench and its destination
     are `base` and `dest` when given (route_bus.py), else BASE and DEST from the environment; `settings` go over the
@@ -2073,6 +2227,13 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     if os.path.exists(FBD):
         os.remove(FBD)
     draw, fed_left, prev = 0, 0, ''
+    # the ROUND EDITS: what the agent driving the step asked of its rounds after looking at the round before -- per
+    # round, `cuts` and `areas` (lanes kept off layers in a box or polygon: round_edit_files), `raw_cuts` (a cut file)
+    # and `flips` (side flips) the round's solve and loop start from, and `ban` / `pin` / `avoid` / `pairs` (ends by
+    # their lane and end, 0 the tooth and 1 the berth: whole_feedback --edits; a ban or a pin binds, an avoid is priced)
+    # that make it a feedback round, its fanout choosing again from the round before's board. In a file, so a replay
+    # runs the same rounds with no one looking
+    EDITS = round_edits(env)
     # the best result of the rounds so far, by its open nets, then its vias (and a result with a violation after every
     # clean one): the chain never ends with nothing when a round had a plan to lay
     best = None
@@ -2228,6 +2389,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, 'nets.lines'), 'w') as f:
             f.write(NETS.replace(',', '\n') + '\n')
+        ed_ = EDITS.get(r) or {}
         # (`fed`: the round this one follows with its findings -- a feedback round -- else '' and a draw)
         fed, prev = prev, ''
         if fed:
@@ -2361,6 +2523,17 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 log_path=os.path.join(d, 'hold.log'))
             for ln in grep(os.path.join(d, 'hold.log'), r'whole-array fanout of'):
                 say(ln[:220])
+        # (the round's own edits, written in the board's frame and read in the round's: raw cuts for its first solve
+        # and its loop, flips for the loop's geometry, areas -- its cuts among them -- for the solve and every audit)
+        ecuts, eflips, eareas = round_edit_files(ed_, d, env, bench)
+        if eareas:
+            env['BUS_AREAS'] = eareas
+        else:
+            env.pop('BUS_AREAS', None)
+        if ecuts or eflips or eareas:
+            say(f"  round {r}'s edits: " + ', '.join(f'{len(v_)} {k_}' for k_, v_ in sorted(ed_.items())
+                                                     if k_ in ('cuts', 'areas', 'flips') and v_)
+                + (', raw cuts' if ecuts else ''))
         sub = solvable(bench, nets_all)
         env.update(BENCH=bench, NETS=','.join(sub), DEST=dest)
         solve = os.path.join(d, 'solve.json')
@@ -2380,7 +2553,10 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             # (the buses ended now: this solve's and the coupled solve's model both read their lanes, and no other's)
             jfin = {'JOINT_FOREIGN': 'finished', 'JOINT_FINISHED': ','.join(sorted(
                 f_[:-len('.finished')] for f_ in os.listdir(env['JOINT_DIR']) if f_.endswith('.finished')))}
-        run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin},
+        # (the round's edited cuts held by its first solve too, each breakable at a price, as the loop's re-solves hold
+        # theirs: CUTS_FIRM)
+        ecut_env = {'CUTS': ecuts, 'CUTS_FIRM': '1'} if ecuts else {}
+        run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin, **ecut_env},
             log_path=os.path.join(d, 'solve.log'))
         for ln in grep(os.path.join(d, 'solve.log'), r'whole_solve:|workers:|crowded:|rules core:'):
             say(ln[:200])
@@ -2389,7 +2565,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             jcuts = joint_sync({**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin}, r, solve, say)
         # (the coupled solve's couplings held through the loop: joint_sync -- the env read at each loop's call, after
         # the relayer has put the relayed bench in it)
-        lenv = lambda: {**env, **({'SEED_CUTS': jcuts} if jcuts else {}),
+        lenv = lambda: {**env, **({'SEED_CUTS': ','.join(f_ for f_ in (jcuts, ecuts) if f_)} if jcuts or ecuts else {}),
+                        **({'SEED_FLIPS': eflips} if eflips else {}),
                         **({'JOINT_ROUND': str(r), 'JOINT_LOOP': '1'} if env.get('JOINT_DIR') else {})}
         crowded = json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []
         J, proved, rc, res, loopd = {}, False, None, None, os.path.join(d, 'loop')
@@ -2402,7 +2579,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             env['BENCH'] = bench
             env.pop('BENCH0', None)
             os.replace(crowded_f, crowded_f[:-len('.json')] + '0.json')
-            run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin},
+            run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin, **ecut_env},
                 log_path=os.path.join(d, 'solve_layers.log'))
             for ln in grep(os.path.join(d, 'solve_layers.log'), r'whole_solve:|workers:|crowded:|rules core:'):
                 say(ln[:200])
@@ -2419,7 +2596,34 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         else:
             J = json.load(open(solve))
             proved = J.get('proved', True)
+            vb_rows = lambda: (json.load(open(env['VBAN_WALLS'])) if env.get('VBAN_WALLS')
+                               and os.path.isfile(env['VBAN_WALLS']) else [])
+            vb0_ = vb_rows()
             bench = relayed(d, bench, J, env, say)
+            # ...a relay that WALLED A BALL kept the runs near it on the layers they were laid on and banned the plan's
+            # layers for them (relay_ends, VBAN_WALLS): the plan then asks those ends on layers the board does not give
+            # them, each such lane's band out at its end and laid open -- the bans read only by the loop's re-solves,
+            # and a round of one loop round has none. The round's solve again at once, with them, on the fanout's bench
+            # (a berth run moved onto In2.Cu walled a ball of the destination; six lanes BERTH-OUT, three laid open)
+            for _rs in range(2):
+                vb1_ = vb_rows()
+                if len(vb1_) <= len(vb0_):
+                    break
+                say(f"  {len(vb1_) - len(vb0_)} end layer(s) the relay walled a ball on -- the solve again without them")
+                vb0_ = vb1_
+                shutil.copy2(solve, solve[:-len('.json')] + f'_walls{_rs}.json')
+                os.remove(solve)
+                run(['whole_solve.py', solve], {**env, 'BENCH': env['BENCH0'], 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1',
+                                                **jfin}, log_path=os.path.join(d, f'solve_walls{_rs}.log'))
+                for ln in grep(os.path.join(d, f'solve_walls{_rs}.log'), r'whole_solve:|crowded:'):
+                    say(ln[:200])
+                if not os.path.isfile(solve):
+                    shutil.copy2(solve[:-len('.json')] + f'_walls{_rs}.json', solve)
+                    say('  no plan without them -- the plan before stands')
+                    break
+                J = json.load(open(solve))
+                proved = J.get('proved', True)
+                bench = relayed(d, env['BENCH0'], J, env, say)
             if not proved:
                 u = J.get('unproved') or {}
                 say(f"  the solve's plan is UNPROVED ({u.get('over')} over two vias against a bound of "
@@ -2486,41 +2690,57 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             say(stripped(run(['whole_feedback.py', '--name', os.path.join(d, 'fo.plan.json'), FB]
                              + (res['open_nets'] if res else crowded),
                              {**env, 'FB_ROUND': str(r), 'FB_CONN': os.path.join(d, 'conn.log')}, err=sys.stderr)[1]))
-        if (fed_left or no_plan) and r < R:
+        # (the agent's edits for the next round naming ENDS: a feedback round from this one, whatever F -- with the
+        # findings of this round's own audits only where F or a solve with no plan asks for them)
+        ed_n = EDITS.get(r + 1) or {}
+        teeth_n = bool(ed_n.get('avoid') or ed_n.get('pairs') or ed_n.get('ban') or ed_n.get('pin'))
+        if (fed_left or no_plan or teeth_n) and r < R:
             # ---- a FEEDBACK ROUND next -- and after a round whose solve had NO PLAN whatever F, within the R rounds: a
             # draw under the next seed may choose the same ends and find the same no room (a memory bus's four draws
             # chose the same ends, each solve with no room for one lane's crossings, and the bus was left 2 open; fed
             # the lane the solve named, the next round closed it) -- its findings: the ends the audits found crowded (a
             # loop that did not pass), and the lanes an unproved plan left over two vias, which the ends counted on
             # keeping at two
-            hots = []
-            if rc is not None and rc != 0:
-                for a in sorted(glob.glob(os.path.join(loopd, 'p*.audit'))) + \
-                        sorted(glob.glob(os.path.join(loopd, 'q*.audit'))):
-                    j, h = a[:-len('.audit')] + '.json', a[:-len('.audit')] + '.fbhot.json'
-                    run(['whole_gate.py', j, a, '--hot', h], env)
-                    hots.append(h)
-                hots += sorted(glob.glob(os.path.join(loopd, 'hs*.json')))     # the snapped plans' places
-            new_over = add_over(FBD, J.get('over_nets') if J and not proved else None)
-            # (the round, so an end named again in a later one is raised, not added: whole_feedback)
-            fbl = stripped(run(['whole_feedback.py', os.path.join(d, 'fo.plan.json'), FBD] + hots,
-                               {**env, 'FB_ROUND': str(r)}, err=sys.stderr)[1])
-            say(fbl)
-            if new_over:
-                say(f"  the ends to count {', '.join(new_over)} over two vias: the solve could not keep them at two")
-            nothing = 'whole_feedback: 0 new' in fbl and not new_over
-            if (res is not None and res['open']) or (nothing and res is None):
-                # a round that leaves nets OPEN names them to the fanout, whatever its audits found -- and one that
-                # lays NOTHING with nothing new from its audits names the lanes the ends model names on these ends (its
-                # nets over two, else its lanes loaded on the trunk, else its most crossed): their ends freed and to
-                # be avoided -- an open net's at the end where its trouble is, by the round's findings and its
-                # connectivity. A round with no plan names the lanes its solve's CROWD diagnosis found no room for
-                fbn = stripped(run(['whole_feedback.py', '--name', os.path.join(d, 'fo.plan.json'), FBD]
-                                   + (res['open_nets'] if res else crowded),
-                                   {**env, 'FB_ROUND': str(r), 'FB_HOTS': ','.join(hots),
-                                    'FB_CONN': os.path.join(d, 'conn.log')}, err=sys.stderr)[1])
-                say(fbn)
-                nothing = nothing and not re.search(r'whole_feedback: [1-9]', fbn)
+            nothing = True
+            if fed_left or no_plan:
+                hots = []
+                if rc is not None and rc != 0:
+                    for a in sorted(glob.glob(os.path.join(loopd, 'p*.audit'))) + \
+                            sorted(glob.glob(os.path.join(loopd, 'q*.audit'))):
+                        j, h = a[:-len('.audit')] + '.json', a[:-len('.audit')] + '.fbhot.json'
+                        run(['whole_gate.py', j, a, '--hot', h], env)
+                        hots.append(h)
+                    hots += sorted(glob.glob(os.path.join(loopd, 'hs*.json')))     # the snapped plans' places
+                new_over = add_over(FBD, J.get('over_nets') if J and not proved else None)
+                # (the round, so an end named again in a later one is raised, not added: whole_feedback)
+                fbl = stripped(run(['whole_feedback.py', os.path.join(d, 'fo.plan.json'), FBD] + hots,
+                                   {**env, 'FB_ROUND': str(r)}, err=sys.stderr)[1])
+                say(fbl)
+                if new_over:
+                    say(f"  the ends to count {', '.join(new_over)} over two vias: the solve could not keep them at two")
+                nothing = 'whole_feedback: 0 new' in fbl and not new_over
+                if (res is not None and res['open']) or (nothing and res is None):
+                    # a round that leaves nets OPEN names them to the fanout, whatever its audits found -- and one that
+                    # lays NOTHING with nothing new from its audits names the lanes the ends model names on these ends (its
+                    # nets over two, else its lanes loaded on the trunk, else its most crossed): their ends freed and to
+                    # be avoided -- an open net's at the end where its trouble is, by the round's findings and its
+                    # connectivity. A round with no plan names the lanes its solve's CROWD diagnosis found no room for
+                    fbn = stripped(run(['whole_feedback.py', '--name', os.path.join(d, 'fo.plan.json'), FBD]
+                                       + (res['open_nets'] if res else crowded),
+                                       {**env, 'FB_ROUND': str(r), 'FB_HOTS': ','.join(hots),
+                                        'FB_CONN': os.path.join(d, 'conn.log')}, err=sys.stderr)[1])
+                    say(fbn)
+                    nothing = nothing and not re.search(r'whole_feedback: [1-9]', fbn)
+            if teeth_n:
+                ef_ = os.path.join(d, 'edits_next.json')
+                # (a pin's point in the board's frame, turned into the bench's -- the sidecar's, the ends' menus')
+                tb_ = edit_frame(env, frame=ed_n.get('frame') or 'board')[0]
+                json.dump(dict(ed_n, pin=[dict(p_, at=list(tb_(p_['at']))) for p_ in ed_n.get('pin') or ()]),
+                          open(ef_, 'w'), indent=1)
+                fbe = stripped(run(['whole_feedback.py', '--edits', os.path.join(d, 'fo.plan.json'), FBD, ef_],
+                                   {**env, 'FB_ROUND': str(r)}, err=sys.stderr)[1])
+                say(fbe)
+                nothing = nothing and not re.search(r'whole_feedback: [1-9]', fbe)
             if not nothing:
                 base = advance(d, base)
                 prev, fed_left = d, max(0, fed_left - 1)

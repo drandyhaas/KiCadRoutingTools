@@ -3992,14 +3992,19 @@ def _generate_bga_fanout_core(footprint: Footprint,
         if _dbgos.environ.get('KICAD_FANOUT_RESCUE_DEBUG'):
             print(f"  [rescue-debug] dogbone branch end: failed={failed_nets} "
                   f"single_pass={_single_pass}")
-        if failed_nets and not _single_pass:
+        # An EXACT-ONLY plan (an 'exact_only' hint, the plan-follow's ladder stopped at its own move): a ball its move
+        # cannot be laid for stays bare, for its caller to keep the copper it had -- none of the rescues below lays it
+        # some other way, nor evicts a ball laid as asked to make room (an awx bus's realize: rescued balls laid as long
+        # surface runs across the face from the one asked, banned as refusals the next pass)
+        _rescue = not _single_pass and not any((h or {}).get('exact_only') for h in (escape_dir_hints or {}).values())
+        if failed_nets and _rescue:
             tracks, vias_to_add, failed_nets = _underpad_shrink_rescue(
                 footprint, pcb_data, grid, layers, _up_kw,
                 tracks, vias_to_add, failed_nets,
                 clearance_floor=_clearance_floor)
         # #652 directive 2: whatever the floor could not fit alongside the
         # committed escapes, try again with the nearest neighbour evicted.
-        if failed_nets and not _single_pass and env_knobs.FANOUT_RIP_RESCUE:
+        if failed_nets and _rescue and env_knobs.FANOUT_RIP_RESCUE:
             tracks, vias_to_add, failed_nets = _underpad_rip_rescue(
                 footprint, pcb_data, grid, layers, _up_kw,
                 tracks, vias_to_add, failed_nets,
@@ -4011,14 +4016,14 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # vialess track -- outer-row territory, the way humans escape it.
         # Exact interval geometry, not the router grid: the legal corridor
         # band can be a few um wide and off-grid.
-        if failed_nets and not _single_pass and env_knobs.FANOUT_SURFACE_RESCUE:
+        if failed_nets and _rescue and env_knobs.FANOUT_SURFACE_RESCUE:
             tracks, failed_nets = _surface_gap_escape(
                 footprint, pcb_data, tracks, vias_to_add, failed_nets,
                 track_width, clearance, exit_margin)
         # The joint escape takes none of #129's passes, and its third is one it needs too: a bare ball of a net whose
         # other balls carry copper, strapped to that copper inside the array (zynq_ad9364 U1: DDR3_VREF H6, its other
         # ball escaped, left bare with no escape room of its own)
-        if failed_nets and escape_method == 'jointescape' and not _single_pass:
+        if failed_nets and escape_method == 'jointescape' and _rescue:
             _still = set(failed_nets)
             _bv, _bt = _board_copper(pcb_data, {p.net_id for p in footprint.pads if p.net_name in _still})
             _bare = [p for p in footprint.pads if p.net_id and p.net_name in _still

@@ -1901,6 +1901,82 @@ pads past the protected bus. A non-zero `walled=` names balls of the arrays
 (not the bus's) that no later step can reach past the locked lanes: report
 those nets as open, do not spend `route.py` rounds on them.
 
+**Round 1 left lanes open? Review it, and record ROUND EDITS for the rounds
+after it (`--round-edits`).** A bus is meant to close in round 1, and a
+failure that is general belongs in the router, not in an edit. Where round 1
+leaves a few lanes open for a reason particular to the board -- a tooth or
+berth the ends put where a part or another net's copper crowds it, a pinch
+between two parts, a stretch the lanes should stay out of -- review round 1
+from its outputs on disk and write those judgements down as DATA, as a layout
+engineer marks up a first pass. The file is part of the recorded step, so a
+replay of the plan (a stress test, an A/B) runs the same later rounds with
+no one looking.
+
+1. **Read round 1** in `OUT.bus/SRC-DEST.bus/run/r1/`: the step's log
+   (`crowded ends: LANE at the teeth: ...`, `whole_feedback: ... the lanes
+   named: ...`), `loop.log` (each loop round's audit counts and the cuts it
+   made, `firm cuts broken`), `loop/pN.audit` (every finding: lane, layer,
+   how far short of its bar, against what, at which point -- in the PLAN's
+   frame), `fo.log` (the fanout: the teeth, berths and escapes). Look at the
+   lanes in question before deciding anything:
+
+   ```bash
+   python3 -X utf8 awx/frame_render.py OUT.bus/SRC-DEST.bus OUT.bus/SRC-DEST.bus/run/r1 \
+       r1.png X0,Y0,X1,Y1 --sizes CLR,TRK,FTRK,VIA,DRILL --dest DEST \
+       --plan OUT.bus/SRC-DEST.bus/run/r1/loop/g2.json --lanes NET_A,NET_B
+   ```
+
+   It draws the round's BENCH, which may be turned from the board: points read
+   off it go in a section with `"frame": "bench"`.
+
+2. **Write the edits file**, one section per bus (`"SRC:DEST"`, as in its
+   `--bus`) and round (`"2"` is the round after round 1). `end` 0 is a lane's
+   tooth at the source, 1 its berth at the destination; points and layers are
+   the BOARD's unless the section says `"frame": "bench"`:
+
+   ```json
+   {"U1:U2": {"2": {
+     "ban":   [{"lane": "NET_A", "end": 0}],
+     "pin":   [{"lane": "NET_B", "end": 1, "at": [x, y], "layer": "In1.Cu"}],
+     "avoid": [{"lane": "NET_C", "end": 0}],
+     "pairs": [[{"lane": "NET_D", "end": 0}, {"lane": "NET_E", "end": 0}]],
+     "cuts":  [{"lane": "NET_F", "box": [x0, y0, x1, y1], "layers": ["F.Cu"]}],
+     "areas": [{"poly": [[x, y], [x, y], [x, y]], "layers": ["F.Cu", "In1.Cu"]}],
+     "flips": [["NET_H", "ISLAND"]]}}}
+   ```
+
+   - `ban` -- that end's PLACE taken out of the lane's options, on every layer
+     (`"layer"` names one, `"laid"` the layer it was laid on), and the ends
+     chosen again without it. **This is the edit that moves a tooth or a
+     berth.** Measured: a bus round 1 left with two lanes open closed in round
+     2 with two of its teeth banned, and the recorded file replayed that round
+     2 identically.
+   - `pin` -- the end held to its options nearest `at` (on `layer`).
+   - `avoid`, `pairs` -- PRICED feedback: an end to keep away from, two ends not
+     to choose together. The ends rank walled balls and via changes above
+     them, so an `avoid` on its own does not move a tooth -- `ban` or `pin`
+     does.
+   - `cuts` (one lane) and `areas` (every lane, or those its `"lanes"` names)
+     -- lanes kept off those layers in the box or polygon: the solve holds
+     them off along their routes there, firm, and every audit treats the area
+     as a keep-out.
+   - `raw_cuts` (a cut file as the loop writes them, in its own frame) and
+     `flips` (`[lane, island]`) seed the round's solve and loop as they are.
+
+   `pin`, `cuts` and `areas` have not yet been measured closing a bus.
+
+3. **Rerun the step from the same input**, with the file and enough rounds to
+   reach it: `--rounds 2 --round-edits OUT_round_edits.json`. Round 1 runs as
+   before; edits to its ends make round 2 a feedback round from round 1. An
+   edit naming a lane round 1 did not lay is skipped, and the log says so
+   (`whole_feedback: no lane NET on the sidecar -- ...`). Keep the file beside
+   the plan's script (Step 9) and name it in the recorded command, so the
+   replay finds it.
+
+Report a bus that needed edits as such: round 1 closing on its own is still
+the goal, and an edit that would apply on every board is a router fix to make
+instead.
+
 **Known limits (it is experimental):** a bus's pairs run at the step's own
 pitch, not the net class's diff-pair gap (DDR 0.093/0.093 on h616_lpddr4,
 routed at 0.24 mm centre to centre), so state it where impedance matters; a

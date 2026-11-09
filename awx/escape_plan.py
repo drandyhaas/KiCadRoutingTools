@@ -217,7 +217,11 @@ def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE):
             continue                            # (the via stands past this face's exit line)
         lo, hi = (y0, y1) if a_ == 1 else (x0, x1)
         if in_pad:
-            lines = [(ball[a_], [site, P(ball[a_], e)])]
+            # (its own line, and half a pitch onto the gap line either side -- escape_moves' climb from a via in the
+            # pad: an earlier step's field laid such an escape for a later bus's ball, and that bus's menu, its own line
+            # alone, held no move at it -- three balls whose neighbours' vias closed their own lines stood open)
+            lines = [(ball[a_], [site, P(ball[a_], e)])] + \
+                [(ball[a_] + sg * h, [site, P(ball[a_] + sg * h, site[k]), P(ball[a_] + sg * h, e)]) for sg in (-1, 1)]
         else:
             lines = []
             for sg in (-1, 1):
@@ -432,6 +436,7 @@ def incremental_fixed(st, names):
     prev = json.load(open(awx_settings.req('INCREMENTAL')))
     fb = json.load(open(awx_settings.req('FEEDBACK')))
     items = [e for pr in fb.get('pairs', ()) for e in pr] + list(fb.get('avoid', ()))
+    items += list(fb.get('ban', ())) + list(fb.get('pin', ()))       # (the round edits' ends: freed too)
     over = set(fb.get('over') or {})
     free_b = {e['lane'] for e in items if e['end'] == 1} | over
     pr_i = _pairs.pair_names(list(names))

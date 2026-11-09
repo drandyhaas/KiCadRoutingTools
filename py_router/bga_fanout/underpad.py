@@ -1322,7 +1322,12 @@ def generate_underpad_escape(footprint: Footprint,
             carve_disks.append((p.global_x, p.global_y, _pk, top_idx, p.net_id))
     # Plane balls tap their plane through a via -> block all layers. Reserve each
     # ball's own clamped-via keepout (#378), not the nominal via_keep.
-    for p in plane_pads:
+    # A caller that plans the plane balls' ways down itself marks the board
+    # `_fanout_plane_ways` (awx's bus realize: its ends keep each plane ball a
+    # gap via or a strap) and reserves none of them: at a 0.5 mm pitch with a
+    # 0.25 mm via a via in every plane ball's pad closes every gap beside one,
+    # on every layer.
+    for p in ([] if getattr(pcb_data, '_fanout_plane_ways', False) else plane_pads):
         _vk = vkeep_for_pad(p) + _cx(p.net_id)                 # #1529
         occ.block_all(p.global_x, p.global_y, _vk)
         cs, cd = clamp_via_to_pad(via_size, via_drill, p, floors)[:2]
