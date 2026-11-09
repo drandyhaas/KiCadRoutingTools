@@ -2379,7 +2379,13 @@ class StrictRemovalModel:
       * no NEW soft joint (#319: _soft_joint_pairs, the guard every
         subtractive pass runs), and no NEW narrow pad joint (#416: a terminal
         whose cap meets its pad through a web under ``web_floor``, the
-        board's connection_width floor -- check_weird's narrow-pad-joint).
+        board's connection_width floor -- check_weird's narrow-pad-joint);
+      * no NEW KiCad-dangling joint (check_weird.kicad_dangling_end, #1793):
+        an end the no-dangle test credits because it lies on another track's
+        body is still one KiCad's DRC reports dangling when that track counts
+        for the other end. Removing one leg of a loop left that leg's last
+        short track lying in the surviving track's copper so; the loop now
+        loses another branch instead.
 
     Candidates are unlocked, non-graphic track segments outside
     ``readonly_ids``. They are tried in UNITS: every single segment, and every
@@ -2475,6 +2481,7 @@ class StrictRemovalModel:
             self._node_ends[b].append(i)
             self._seg_nodes.append((a, b))
         self._soft_base = _soft_joint_pairs(self.segs, self.vias, self.pads)
+        self._kd_base = {}          # segment index -> flagged on the board as is
         self._web_floor = float(web_floor or 0.0)
         self.valid = True
 
@@ -2683,7 +2690,37 @@ class StrictRemovalModel:
         kept_v = [v for j, v in enumerate(self.vias) if j not in D]
         if _soft_joint_pairs(kept, kept_v, self.pads) - self._soft_base:
             return False, prev_E, prev_D
+        if self._new_kicad_dangling(E, kept, kept_v):
+            return False, prev_E, prev_D
         return True, E, D
+
+    def _new_kicad_dangling(self, E, kept, kept_v):
+        """Does removing ``E`` flag a kept track KiCad-dangling that is not
+        flagged on the board as it came (#1793)? Only a track with an end
+        within reach of removed copper on its layer can change verdict: the
+        predicate reads the touchers of its two ends."""
+        from check_weird import kicad_dangling_end
+        gone = [self.segs[i] for i in E]
+        for i, s in enumerate(self.segs):
+            if i in E or getattr(s, 'graphic', False):
+                continue
+            reach = (s.width or 0) / 2.0
+            if not any(g.layer == s.layer and point_to_segment_distance(
+                    x, y, g.start_x, g.start_y, g.end_x, g.end_y)
+                    <= reach + (g.width or 0) / 2.0 + 1e-6
+                    for g in gone
+                    for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y))):
+                continue
+            if kicad_dangling_end(s, kept, kept_v, self.pads, [],
+                                  self.copper_layers) is None:
+                continue
+            if i not in self._kd_base:
+                self._kd_base[i] = kicad_dangling_end(
+                    s, self.segs, self.vias, self.pads, [],
+                    self.copper_layers) is not None
+            if not self._kd_base[i]:
+                return True
+        return False
 
     # ---- units ------------------------------------------------------------
     def _pass_through_via(self, j):
