@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 sys.path.insert(0, TESTS_DIR)
 sys.path.insert(0, os.path.join(ROOT_DIR, "rust_router"))
 
-from kicad_parser import BoardInfo, Footprint  # noqa: E402
+from kicad_parser import BoardInfo, Footprint, Zone  # noqa: E402
 from synth import make_pad, make_via, make_net, make_pcb  # noqa: E402
 from net_queries import (resolve_gnd_net_id, resolve_ground_domains,  # noqa: E402
                          ground_domain_bridges, resolve_return_net_id,
@@ -159,7 +159,15 @@ def run():
     except Exception as e:                                   # pragma: no cover
         print(f"  (skipped placement check: {e})")
     else:
-        e2e = _board()
+        # Each ground domain poured on two layers: a return via must join two
+        # (#1667).
+        def _poured(board):
+            board.zones = [Zone(net_id=nid, net_name=name, layer=lay,
+                                polygon=[(-5, -5), (35, -5), (35, 15), (-5, 15)])
+                           for nid, name in ((GND, 'GND'), (AGND, 'AGND'))
+                           for lay in ('F.Cu', 'B.Cu')]
+            return board
+        e2e = _poured(_board())
         # One via per signal net, far from any ground copper of either domain.
         e2e.vias = [make_via(4.0, 5.0, net_id=DSIG, size=0.45, drill=0.25,
                              layers=['F.Cu', 'B.Cu']),
@@ -182,7 +190,7 @@ def run():
               f"the digital via must get a GND return via, got {by_net}")
 
         # Explicit pin: everything on GND, including the analog via.
-        e2e2 = _board()
+        e2e2 = _poured(_board())
         e2e2.vias = list(e2e.vias)
         pinned = add_gnd_vias_to_existing_board(
             e2e2, 'GND', 3.0, cfg, build_base_obstacle_map(e2e2, cfg, []), coord)

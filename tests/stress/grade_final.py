@@ -14,6 +14,26 @@ import json, os, re, subprocess, sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HERE = os.path.dirname(os.path.abspath(__file__))  # tests/stress -- the shared graders
+sys.path.insert(0, REPO)
+from krt_capabilities import _tool_path  # where the #522 reorg put each CLI
+
+
+def _grader(name, *args):
+    """Run one of the repo's graders on the interpreter running this one.
+
+    Returns (returncode, stdout, why): `why` is None when the grader graded
+    (exit 0 or 1 -- both checkers' verdict codes, without a traceback, since
+    an uncaught exception also exits 1) and names the failure otherwise. A
+    grader that did not run is not a verdict: a missing file exits 2 with
+    `can't open file` on stderr and an empty stdout, which a stdout-only parse
+    read as "not connected" on every board (#1617).
+    """
+    o = subprocess.run([sys.executable, "-X", "utf8", _tool_path(REPO, name), *args],
+                       capture_output=True, text=True, timeout=1200)
+    if o.returncode in (0, 1) and "Traceback (most recent call last)" not in o.stderr:
+        return o.returncode, o.stdout, None
+    tail = (o.stderr.strip().splitlines() or ['no stderr'])[-1]
+    return o.returncode, o.stdout, f"{name} exited {o.returncode}: {tail}"[:150]
 
 
 def redo_final_and_clearance(txt):
@@ -186,8 +206,9 @@ def main():
         # netclass floor, NO baseline subtraction -- may over-count pre-existing.
         grade["grade_core_err"] = str(e)[:150]
         try:
-            o = subprocess.run(["python3", "-X", "utf8", f"{REPO}/check_drc.py", fp, "-c", str(grade_clr)],
-                               capture_output=True, text=True, timeout=1200).stdout
+            _rc, o, why = _grader("check_drc.py", fp, "-c", str(grade_clr))
+            if why:
+                raise RuntimeError(why)
             m = re.search(r"FOUND (\d+) DRC", o)
             grade["drc"] = int(m.group(1)) if m else (0 if "NO DRC" in o else None)
             grade["drc_final_raw"] = grade["drc"]
@@ -206,13 +227,14 @@ def main():
                 grade["drc_final_raw"] = grade["drc"]
             grade["drc_via_in_paste"] = _vip
         except Exception as e2:
-            grade["drc"] = None; grade["drc_err"] = str(e2)[:100]
+            grade["drc"] = None; grade["drc_err"] = str(e2)[:150]
     try:
-        o = subprocess.run(["python3", "-X", "utf8", f"{REPO}/check_connected.py", fp],
-                           capture_output=True, text=True, timeout=1200).stdout
-        grade["fully_connected"] = "ALL NETS FULLY CONNECTED" in o
+        rc, o, why = _grader("check_connected.py", fp)
+        if why:
+            raise RuntimeError(why)
+        grade["fully_connected"] = rc == 0 and "ALL NETS FULLY CONNECTED" in o
     except Exception as e:
-        grade["fully_connected"] = None; grade["conn_err"] = str(e)[:100]
+        grade["fully_connected"] = None; grade["conn_err"] = str(e)[:150]
 
     # Misgrade compares LIKE FOR LIKE: the agent's final_violations is its RAW final
     # DRC count, so compare it to our raw final (drc_final_raw), not the

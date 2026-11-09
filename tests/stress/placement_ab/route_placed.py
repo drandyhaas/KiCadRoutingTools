@@ -18,8 +18,9 @@ joins_needed, then vias, copper_mm, segments).
                  adds `--quick 2` to those steps and to every route_diff.py
                  step, skipping the copper polish too, and scores with
                  `py_tools/quick_score.py` (the connectivity of the nets
-                 without a zone, and board_score's quality counts), as the
-                 placement skill does:
+                 without a zone, the assembly against PLACED as at the other
+                 levels, and board_score's quality counts), as the placement
+                 skill does:
                  about half the time of level 1, and it picks seeds as well.
   --corpus DIR   the stress corpus (default $KICAD_STRESS_CORPUS, else
                  ~/Documents/kicad_stress_test).
@@ -135,7 +136,7 @@ def main(argv=None):
     if a.quick >= 2:
         # the seed judge's score, as the skill takes it (py_tools/quick_score.py)
         subprocess.run([sys.executable, '-X', 'utf8', os.path.join(repo, 'py_tools', 'quick_score.py'), final,
-                        '--json', os.path.join(d, 'score.json')],
+                        '--baseline', placed, '--json', os.path.join(d, 'score.json')],
                        cwd=repo, capture_output=True)
     else:
         subprocess.run([sys.executable, '-X', 'utf8', os.path.join(repo, 'py_tools', 'board_score.py'), final,

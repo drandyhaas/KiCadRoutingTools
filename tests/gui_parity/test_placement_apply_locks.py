@@ -124,6 +124,7 @@ def run():
                               "cannot see an absolute sibling import")
 
     app = wx.App(False)  # noqa: F841  (before any wx object)
+    wx.Log.SetActiveTarget(wx.LogStderr())
     from kicad_routing_plugin import gui_utils
     from kicad_routing_plugin.placement_gui import PlacementTab
 

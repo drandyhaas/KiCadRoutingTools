@@ -9,6 +9,7 @@ Trust nothing it told you. Measure it yourself, from the repo root.
 - **Input board (baseline):** `<INPUT BOARD>`
 - **Intent:** `<INTENT JSON, or "none">`
 - **Spec flags the board declares:** `<e.g. "--net-min-widths widths.json --impedance-nets USB_D*", or "none">`
+- **Whose rules the project holds (`full` mode):** `<aspirational | the user's own>`
 - **Mechanical facts to check:** `<e.g. "MK1-4 centred 4.0 mm from each corner; J1 on the west edge", or "none">`
 - **Write your verdict to:** `<RUN DIR>/verdict_<N>.txt`
 
@@ -33,9 +34,10 @@ Trust nothing it told you. Measure it yourself, from the repo root.
 4. **`full` mode, also:**
    - `python3 -X utf8 py_tools/board_score.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD> --json <RUN DIR>/verify_<N>_score.json`: blocking 0, unrouted 0, broken 0;
    - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD>`: DONE;
-   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD> --authored-from <INPUT BOARD>`: **report it, not gating**, and name any floor it lists. (Without `--authored-from` check_complete reads the floors against the project's recorded `fab_floor_origin` and DISCLOSES copper below them in its reason, without changing the verdict. The Board Setup minimums are the spec: pass `--min-track-width` / `--min-via-diameter` / `--min-via-drill` with them;)
+   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD> --authored-from <INPUT BOARD>`: on aspirational rules **report it, not gating**, and name any floor it lists; on the user's own rules **it gates**: DONE, and exit 5 UNSOUND is a FAIL. (Without `--authored-from` check_complete reads the floors against the project's recorded `fab_floor_origin` and DISCLOSES copper below them in its reason, without changing the verdict. The Board Setup minimums are the spec: pass `--min-track-width` / `--min-via-diameter` / `--min-via-drill` with them;)
    - `python3 -X utf8 py_router/check_connected.py <BOARD>`: no disconnected pads;
    - `python3 -X utf8 py_router/check_drc.py <BOARD> --baseline <INPUT BOARD>`: no violations. Pass no `--clearance-margin`: at check_drc's default margin this line grades what `board_score`'s `drc` grades, so the `drc` lens below cannot pass a graze the score blocks.
+   - `python3 -X utf8 tests/stress/kicad_drc_compare.py <BOARD> --baseline <INPUT BOARD>` and `python3 -X utf8 py_tools/check_cycles.py <BOARD>`: **report them, not gating** (neither decides `VERDICT=`, and neither writes to the board). Give the compare's `connwidth=`, `thermal=` and `dangling=` values and every `KICAD-ONLY` and `CHECKDRC-ONLY` row, and check_cycles' nets with loops or overlapping vias. An exit of 0 does not mean those three values are 0. Exit 2 is NOT RUN (no `kicad-cli`): write `NOT RUN`, never agreement. `/plan-pcb-routing`'s "Verify Results" has the rest of what each line and exit code means.
 5. **Declared classes.** Name every `ungraded` component as UNEXAMINED. If the
    board declares a class (diff pairs, impedance, length groups, high-speed
    nets, or widths given in `--net-min-widths`) and its component is
@@ -52,7 +54,8 @@ Trust nothing it told you. Measure it yourself, from the repo root.
    skew (max 0.15mm) (within_diff_pairs)))` in `<BOARD>.kicad_dru`); the
    project's `net_impedance` records and the power widths the run asked of
    `route.py` are measured with no flag (`impedance.declared_failing`,
-   `net_widths.requested_under`). Read them and report them. A net-class
+   `impedance.declared_ohms_off_target`, `net_widths.requested_under`). Read
+   them and report them. A net-class
    `track_width` is not a spec (the router discloses copper under it in
    `design_rules`), so it is not an ungraded declaration. For
    declared diff pairs, length groups or high-speed nets, also run the

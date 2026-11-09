@@ -122,6 +122,7 @@ def main():
     sys.path.insert(0, os.path.dirname(REPO))
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     import fix_kicad_drc_settings as F
     from kicad_parser import parse_kicad_pcb
     # routing_dialog.py is this branch's swig_gui.py (renamed by the IPC port).

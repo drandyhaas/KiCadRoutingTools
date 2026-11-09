@@ -48,7 +48,7 @@ already grade, and that `place_simple` reads wherever it reads the intent
 
 | brief | becomes | provenance |
 |---|---|---|
-| `interfaces[]` with an `edge` | an `edge_connectors[]` entry — `edge`, `overhang_mm`, `center_on_edge` / `along_edge_band`, `mating_face`, and `class: "edge_receptacle"` when `user_facing` is true | `source: "brief"` |
+| `interfaces[]` with an `edge` | an `edge_connectors[]` entry — `edge`, `overhang_mm`, `center_on_edge` / `along_edge_band`, `mating_face` (with its `mating_face_source`), `opens` (`min_reader` 25), and `class: "edge_receptacle"` when `user_facing` is true | `source: "brief"` |
 | `interfaces[]` with `edge: "unknown"` | an entry with **no** `edge` key | `source: "brief"`, a `note` naming the unknown |
 | `keepouts[]` | `keepouts[]`, verbatim; `kind` and `why` move into `context` | `context.source` |
 | `proximity[]` | `proximity[]`, one row per member of a list `ref`; `why` and `requirement` move into `context` | `source: "brief"`, `context.proximity_note` |
@@ -105,6 +105,9 @@ board alone gives.
       "overhang_mm": { "min": 0.0, "max": 0.65 },   // past the edge; never negative (#1532)
       "mating_face": "+y",                   // +x|-x|+y|-y in the footprint's own frame, or "unknown":
                                              // the side it opens on, for a body that names none
+      "mating_face_source": "3D model",      // what that face was read off (free text, #1652)
+      "opens": "outward",                    // "inward": the opening faces into the board, its
+                                             // back to the edge (an M.2 socket, #1769), or "unknown"
       "mount_mode": "edge_mount",            // compiled -- see below
       "cable_entry": "in_plane",             // compiled -- see below
       "cable_envelope_mm": { "depth": 2.0 }, // or "unknown"; NO default
@@ -303,7 +306,9 @@ every violation would cite a claim its reader cannot find.
 
 ```
 design brief DRIFT: 6 claim(s) the brief declares that this intent does not
-carry. The intent is what is graded -- re-run --emit-intent to fold them in:
+carry. The intent is what is graded -- re-run --emit-intent to fold them in
+(it writes a new file: it names each row of this one it drops, to write again
+after it):
   - USB1.edge: brief says 'east', the intent does not declare it
   - USB1.overhang_mm: brief says {'min': 0.0, 'max': 0.65}, the intent says
     {'max': 2.0, 'min': 0.0}
@@ -635,6 +640,10 @@ RF_Shielding footprints draw it as a ring (an outer and an inner outline),
 which leaves the inside open, and a can drawn that way has its room. A can
 that is not locked is named, because its zone is in board coordinates and does not
 follow a can a placer moves.
+
+A drawn can that is not declared and whose pads are a fence (one net,
+walling an open interior: #1722) is read as a frame: parts may stand inside
+it, and their height is not judged. Declaring its room is what judges it.
 
 Openings in the wall (a dashed fence, an in and an out, a single mouse-hole)
 are not declared: a drawn can's pads are the wall the router routes round.

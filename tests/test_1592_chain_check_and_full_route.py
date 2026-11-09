@@ -30,7 +30,8 @@ Checks:
   5. every route folder carries `redo_commands.sh`, a manifest of that route
      alone: the placement's copy and each step as run (with its env-knob
      prefix), which `redo_stress_test.parse_manifest` reads back -- while the
-     tools still record themselves into the caller's REDO_MANIFEST.
+     tools still record themselves into the caller's REDO_MANIFEST (all but
+     the --help step, which wrote nothing, #1640).
 
     python3 tests/test_1592_chain_check_and_full_route.py
 """
@@ -90,7 +91,7 @@ def checker_cases(td):
     evidence(BOARD, 'fixture board')
     r = check([sys.executable, '-X', 'utf8', CHECKER, write(os.path.join(td, 'chain.txt'), CHAIN),
                '--board', BOARD], accept=True)
-    ok('the compliant chain is OK', 'OK: 16 rule(s) checked, 1 skipped' in r.stdout, r.stdout[-600:])
+    ok('the compliant chain is OK', 'OK: 17 rule(s) checked, 1 skipped' in r.stdout, r.stdout[-600:])
     ok('...read as a judging chain, both steps board-mutating',
        'a judging chain' in r.stdout and '2 command(s), 2 of them board-mutating' in r.stdout,
        r.stdout[:400])
@@ -103,8 +104,8 @@ def checker_cases(td):
             .replace('{dir}', '.'))
     r = check([sys.executable, '-X', 'utf8', CHECKER, write(os.path.join(td, 'plan.sh'), plan),
                '--board', BOARD], accept=True)
-    ok('control: the same commands as a plan are OK, all 17 rules run',
-       'OK: 17 rule(s) checked, 0 skipped' in r.stdout and 'judging chain' not in r.stdout,
+    ok('control: the same commands as a plan are OK, all 18 rules run',
+       'OK: 18 rule(s) checked, 0 skipped' in r.stdout and 'judging chain' not in r.stdout,
        r.stdout[-600:])
 
     print('2. R04 reports what the chain does')
@@ -191,10 +192,11 @@ def runner_cases(td):
     rec = parse_manifest(evidence(caller, "the caller's manifest"))
     rec_tools = [next((os.path.basename(a) for a in argv if a.endswith('.py')), '?')
                  for _cwd, argv in rec]
-    # each tool records itself at the top of its main (route.py before its
-    # argparse, so its --help too); the judge's own copy is not a CLI run
+    # each tool records itself at the top of its main; the judge's own copy is
+    # not a CLI run, and route.py's --help wrote nothing, so the recorder took
+    # it back (#1640)
     ok("the tools still record themselves into the caller's REDO_MANIFEST",
-       rec_tools == ['copy_board.py', 'route.py'], str(rec_tools))
+       rec_tools == ['copy_board.py'], str(rec_tools))
     check([sys.executable, '-X', 'utf8', RUNNER, judge, '--chain', chain], accept=True)
     cmds = parse_manifest(evidence(os.path.join(run, 's0_route', 'redo_commands.sh'),
                                    'level-2 manifest'))

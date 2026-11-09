@@ -346,6 +346,29 @@ def load_plan(info, source='saved', augment=True):
 
 # ----------------------------------------------------------- CLI reference leg
 
+def recorded_engine_remaps(manifest, repo=None):
+    """`--remap` pairs that point a manifest's recorded engine at this checkout.
+
+    A manifest bakes the absolute path of the repo that recorded it, and
+    redo_stress_test keeps a recorded path that still exists. So from a worktree
+    this driver's "CLI at HEAD" ran the main checkout's engine, and a recording
+    from a since-deleted tree did not run at all. A root is what holds the tool:
+    `<root>/py_router/x.py`, or `<root>/x.py` for a script recorded before those
+    folders existed."""
+    repo = os.path.abspath(repo or REPO)
+    with open(manifest, encoding='utf-8', errors='replace') as fh:
+        text = fh.read()
+    roots = set()
+    for path in re.findall(r"""(?:^|[\s'"])((?:/|[A-Za-z]:[\\/])[^\s'"]*\.py)(?=$|[\s'"])""", text, re.M):
+        parent, name = os.path.split(path.replace('\\', '/'))
+        if os.path.basename(parent) in ('py_router', 'py_tools', 'py_placer'):
+            roots.add(os.path.dirname(parent))
+        elif any(os.path.isfile(os.path.join(repo, sub, name))
+                 for sub in ('', 'py_router', 'py_tools', 'py_placer')):
+            roots.add(parent)
+    return [(r, repo) for r in sorted(roots) if os.path.abspath(r) != repo]
+
+
 def build_cli_reference(info, workdir, timeout=10800, verbose=False):
     """Replay the recorded manifest at HEAD into <workdir>/cli_head.
 
@@ -370,9 +393,12 @@ def build_cli_reference(info, workdir, timeout=10800, verbose=False):
     # (fixed: grid.py now uses math.fsum). If a cross-version difference ever
     # returns it will surface HERE, as a copper divergence -- check the
     # interpreters before concluding the GUI is at fault.
+    engine = [x for old, new in recorded_engine_remaps(info['manifest'])
+              for x in ('--remap', f'{old}:{new}')]
     cmd = ['python3', '-X', 'utf8',
            os.path.join(STRESS_TESTS, 'redo_stress_test.py'), info['manifest'],
            '--workdir', dest,
+           *engine,
            '--remap', f"{info['rundir']}:{dest}",
            '--skip-checks', '--skip-validate']
     t0 = time.time()

@@ -28,8 +28,10 @@ the engine moves underneath them.
 
 **In the routing half, YOU PLAN and the scripts EXECUTE.** You choose the
 chain, the nets and the parameters, and you read the failures; `route.py` and
-its siblings lay the copper. You do not hand-place copper, and you do not work
-around a checker that refuses.
+its siblings lay the copper. You do not hand-place copper -- the one exception
+is a hand join checked by `check_join.py --keep-staged` after the closing
+`route.py` ("End every chain on route.py") -- and you do not work around a
+checker that refuses.
 
 That is the opposite of placement (`/plan-pcb-placement place`), where YOU DECIDE
 -- which parts move, where, and why -- and the scripts legalize and measure. The test for
@@ -52,10 +54,10 @@ in run 29, where KiCad's DRC was the only channel that saw copper against a
 part's own net-0 tab (#962, #994). It also reports KiCad's `connection_width`
 webs and `starved_thermal` spokes on lines of their own (`connwidth=`,
 `thermal=`; #406, #1334). Neither is part of its CONSISTENT verdict or its
-exit code, so read them before calling a board done. It needs `kicad-cli`,
-and `krt_registry` does not list it because it lives under `tests/`. Without
-`kicad-cli` it prints SKIP and `NOT RUN`, compares 0 boards and exits 2: record
-that as NOT RUN, never as agreement.
+exit code, so read them before calling a board done. `krt_registry` lists the
+tracked tools outside `tests/`, so it does not list this one. "Verify Results"
+(the example chain's Step 6) runs it and `check_cycles.py`, and says what to
+read and what each exit code means.
 
 Every runnable tool in this clone declares which door it serves and which of
 those two kinds it is. The routing door's own view, with each tool's purpose:
@@ -74,8 +76,21 @@ because its nets cannot be routed at all.
 ```bash
 mkdir -p wk        # neither tool creates it, and both write into it
 python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --json wk/assembly0.json
-python3 -X utf8 py_tools/board_score.py board.kicad_pcb --json wk/score0.json --quiet
+python3 -X utf8 py_tools/board_score.py board.kicad_pcb <spec flags> --json wk/score0.json --quiet
 ```
+
+`<spec flags>` are every spec the board declares (`--net-min-widths`,
+`--impedance-nets`, `--length-groups`, `--min-track-width` /
+`--min-via-diameter` / `--min-via-drill`), the same flags the final grade
+passes, so the baseline grades the same components the routed board is
+compared on; without them those specs read `ungraded`. Empty on a board that
+declares none.
+
+When placement left a floorplan intent, add `--intent <intent.json>` to
+`check_assembly`: only then does it read the overlaps that run waived
+(`overlap_waivers`, a declared pose's `accept_courtyard_overlap`), and without
+it such a pair reads NOT BUILDABLE. A `NOTE: no --intent` beside the verdict
+names the pairs a waiver could excuse.
 
 **What each one is for.** `check_assembly` decides this gate: read its
 `VERDICT:` line, **not** `blocking == 0`. `blocking` is only one of the
@@ -83,7 +98,15 @@ conjuncts that verdict is made of, so a board unbuildable through a
 coincident-origin stack, a containment or pad copper off the outline reads
 `blocking` 0 and is still NOT BUILDABLE. `board_score` decides NOTHING here —
 record its `unrouted` and `broken` counts as the BASELINE you will compare the
-routed board against at the end of the chain.
+routed board against at the end of the chain. One line of it to act on now: a
+`LIBRARY PAD GAPS` line (`components.drc.library_pad_gaps`) counts pairs of
+ONE footprint's pads closer than their clearance, which KiCad's DRC reports as
+`clearance` errors on every layout of the board and no route can clear. Tell
+the user before routing; `check_drc`'s WARNINGS name the pairs and gaps, and
+what clears them is the board's to decide (a `.kicad_dru` clearance rule
+that binds the pair, a pad or footprint `(clearance)` override, or a net tie).
+A pair a rule already clears is not counted; "up to N" means a rule check_drc
+cannot fully read may clear some of them.
 
 Classify from the JSON fields, not from exit status: `check_assembly` exits 4
 for any of its conjuncts, and the lines above its VERDICT name which one fired.
@@ -240,14 +263,21 @@ step, confirm the geometry actually has that problem:
    handles it.
 3. **Interior pads at fine pitch (<=0.6mm)?** → Yes, fanout is needed: those
    pads are boxed in, and ordinary routing cannot reach them (Step
-   5a-tuned-ii). **A perimeter at <=0.65mm with many pads (QFN/QFP)?** → A
-   candidate only. Every perimeter pad faces outward, so the router can
-   reach it without a fanout; the stubs only commit each escape in advance,
-   and that can cost more than it saves. On one board an LQFP-48 at 0.5 mm
-   routed worse with `qfn_fanout.py` than without, the chain otherwise the
-   same (blocking 30 vs 25, vias 77 vs 70). Route the chain with and without
-   the perimeter fanout and keep it only when it routes better (blocking,
-   then vias); one board is not enough to say which way it usually goes.
+   5a-tuned-ii). **A perimeter at <=0.65mm with many pads (QFN/QFP), or a
+   2-row SMD connector or socket at <=0.65mm?** → A candidate: compare it.
+   Every perimeter pad faces outward, so the router can reach it without a
+   fanout; the stubs commit each escape in advance, which can cost or save.
+   The chain otherwise the same, an LQFP-48 at 0.5 mm routed worse with
+   `qfn_fanout.py` than without (blocking 30 vs 25, vias 77 vs 70). On three
+   corpus boards (same sizes on both arms) `--quick 2` moved blocking both
+   ways (4 to 1, 8 to 4, 2 to 6) and the full route tied all three (blocking
+   0/0, 1/1, 0/0; vias +6, +9 and -2 with the fanout), so a level-2 gap alone
+   does not decide it. Make the comparison when you first route the board,
+   not after the retries: it costs one more route. Keep the fanout only when
+   the FULL route is better (blocking, then joins_needed, then vias). These
+   boards finish at the full level either way, so they do not show what a
+   fanout does on a board that does not; one board is not enough to say
+   which way it usually goes.
    **"Fine-pitch" is not one number in this file, and no sentence should be read
    as if it were.** It is the FANOUT trigger at <=0.6 mm interior / <=0.65 mm
    perimeter — the predicate in the code block above, the only executable one —
@@ -258,6 +288,9 @@ step, confirm the geometry actually has that problem:
    "fine-pitch" with no number means this trigger.
    Dense 2-row mezzanine/card-edge connectors at 0.4mm (CM4/CM5, 200+ pads)
    DO benefit -- use `qfn_fanout.py --escape-method underpad --allow-via-in-pad`.
+   The same shape at a coarser pitch (a 2-row socket at 0.5 mm) has no
+   measurement here: it is a candidate under the perimeter rule above, so
+   compare it.
 4. **Unsure?** The fanout tools now refuse or warn on wrong shapes
    (staggered arrays, non-arrays). Trust a refusal: if the tool says the part
    is not an array and the geometry checks above say the pins are reachable,
@@ -275,6 +308,7 @@ step, confirm the geometry actually has that problem:
 | DIP/SOIC (through-hole/SMD rows) | None needed | Standard routing handles these |
 | PLCC (SMD J-lead or THT socket) | None needed | Perimeter part; the THT socket's pins reach every layer. Never a BGA (#513 item 16) |
 | Sockets / headers / backplane connectors (THT) | None needed | All-layer reachable; pad count alone is not a fanout signal |
+| 2-row SMD connector or socket at <=0.65 mm | `qfn_fanout.py`, compared (rule 3 above) | Step 3's predicate flags it above 40 pads; route with and without |
 
 ### When to Use Fanout for BGA/PGA/LGA
 
@@ -608,9 +642,14 @@ manifest routes.
     `route_diff.py`, `route_planes.py`, `bga_fanout.py`, `qfn_fanout.py`, and
     `repair_planes.py` if it runs). A descent then stops at the board's own
     `rules.min_*` (an unset key falls back to the fab tier floor, an unset
-    `min_clearance` to the Default class), a via never rings below
-    `min_via_annular_width` (#1579), and a non-Default net never descends below
-    its own class. `--escalation off` instead when no size may move at all: a
+    `min_clearance` to the Default class), a descended via never rings below
+    `min_via_annular_width` (#1579), a via the step sizes itself (no
+    `--via-size` / `--via-drill`) starts at `min_via_diameter`,
+    `min_through_hole_diameter` and that ring (#1775), and a non-Default net
+    never descends below its own class. Under the default `fab` that
+    self-sized via keeps its built-in size, and with `--no-fix-drc-settings`
+    the step names each one below a Board Setup minimum (a WARNING line and
+    `board_setup_vias` in JSON_SUMMARY). `--escalation off` instead when no size may move at all: a
     net that cannot complete at the requested geometry fails and is reported
     (only a wide power/impedance net may neck, for at most 2 mm at a pad entry).
   - `--no-fix-drc-settings` on every one of those steps AND on
@@ -618,14 +657,48 @@ manifest routes.
     then ships the input's project as authored, and under `board` a descent
     stops at what KiCad grades that unchanged project at. (GUI: the Route
     tab's Escalation choice, and "Fix DRC settings after routing" unticked.)
-  - Request no size below the board's minimums. `--track-width`,
+  - Request no size below the minimum that binds the net. `--track-width`,
     `--via-size` / `--via-drill` come from the Board Setup constraints that
-    `list_nets.py --design-rules` prints, not from the fab floor; leave
+    `list_nets.py --design-rules` prints, not from the fab floor. The
+    project's own `.kicad_dru` may relax one of them for named nets (a
+    smaller via ring on two RF nets, say); `--design-rules` lists such rules
+    under the Board Constraints ("Rules in ... that RELAX a Board
+    Constraint"), with the condition each binds. Give those nets a step of
+    their own, `--nets <those nets> --via-size V --via-drill D`: an explicit
+    size applies to every net of its step, so a net the rule does not cover
+    ships below the board minimum (`check_drc`: VIA-ANNULAR). Leave
     `--clearance` / `--clearance-ceiling` (and the cap pass's `--clearance`)
     OMITTED so each class routes at its own clearance, as the project grades
     it; leave `--hole-to-hole-clearance` / `--board-edge-clearance` omitted
     too (they then read the board's own). Neither flag above stops an explicit
     request: it is drawn as asked, floored only at the physical fab floor.
+  - A rule with an `annular_width` constraint prints `.kicad_dru rule '<name>':
+    NOT honoured (annular_width ...)` at the start of a routing step, whatever
+    the vias are: a step that was given no via size holds it, an explicit
+    `--via-size` and a descent need not, so the line is a disclosure that
+    no chain removes. Whether the vias meet it is the line `route.py` and
+    `route_diff.py` print when they end, `.kicad_dru rule '<name>'
+    (annular_width min X mm): this step's N via(s) it binds meet it` or
+    `... K BELOW it` (`JSON_SUMMARY.design_rules.annular_rules`; `via_diameter`
+    and `hole_size` rules likewise, in `via_rules`), and `check_drc` for the
+    whole board. A via below a rule ships only when nothing else connected the
+    net, so read a `BELOW it` as a place to look, not a run to fail.
+  - An `edge_clearance` rule holds every step's tracks and vias with no flag
+    (`edge_rules` in `JSON_SUMMARY`), and its `(layer ...)` clause scopes only a
+    zone's gap: KiCad applies `(layer inner)` to an F.Cu track too.
+  - **A pair class the project SOLVED** (its own `diff_pair_width` /
+    `diff_pair_gap` from a fab or field solver, not the stock 0.2 / 0.25):
+    omit `--track-width` and `--diff-pair-gap`, so each pair is built at its
+    class geometry and graded at the gap KiCad grades it at (a `.kicad_dru`
+    rule binding the pair, else the class gap, floored at the board minimum;
+    #1630). `--impedance` would replace the class width with this tool's
+    closed-form solve at that gap, which can differ from the project's own
+    solver by several percent: pass it only when the user wants this tool's
+    width, and say so. To keep the class geometry AND have the ohms graded,
+    pass `--impedance <target> --impedance-declare-only`: the target is
+    recorded (`declare_only`) and no copper changes, now or in a later step,
+    and `check_impedance.py` (and `board_score`'s disclosure) then reads the
+    shipped pair against it and names a pair more than 10% off.
   - Every descent is a DECISION for the user, not one the run makes. Each one
     is a `design_rules` row in the step's `JSON_SUMMARY` (net, kind,
     requested, delivered, site) and in the `Design rules [...]` line; report
@@ -635,8 +708,8 @@ manifest routes.
   - At the end, `check_complete.py <routed> --authored-from <input board>`
     measures the copper against the floors the input project declared and
     names every size floor broken, with a count of the tracks, vias or holes
-    below it (verdict UNSOUND). That count is the disclosure; with the flags
-    above it should read nothing relaxed.
+    below it (verdict UNSOUND). On these rules this form gates DONE ("Stop
+    conditions"); with the flags above it should read nothing relaxed.
 
 ### Read the board's design rules and pass them to the CLI
 
@@ -696,7 +769,9 @@ Use the printed flags as-is:
   physical floor** instead (thinner is both more complete and faster — see "Route
   signals at the FAB floor by default" in Diagnose and Retry). Keep the net-class
   width only for **current-carrying nets** (`--power-nets`).
-  **Do NOT keep the net-class gap/width for impedance-controlled (diff-pair) nets** —
+  **Do NOT keep the net-class gap/width for impedance-controlled (diff-pair) nets**
+  (unless the project solved that class itself -- see "A pair class the project
+  SOLVED" under the user's own product rules) —
   the stock net class is usually wide (`diff_pair_gap` 0.25 / width 0.2 mm), and a
   fat pair is a wider bundle that gets dropped on congested boards (measured:
   a 4-layer FPGA corpus board routes all 13 of its pairs at `--diff-pair-gap 0.1` but loses 2 at
@@ -764,7 +839,23 @@ Use the printed flags as-is:
   given-up escape's ball is still served (another route, a strap, a via) has
   escaped. `qfn_fanout.py` lists escaped nets it flagged -- chiefly stub tips that
   end too close to a neighbour's (its `endpoint pairs too close` WARNING) -- as
-  `flagged_escaped_nets`, not as failures. **After every fanout, parse it;
+  `flagged_escaped_nets`, not as failures. `requested` counts only the pads a
+  `--nets` pattern SELECTED, so also read `unmatched` (#1641): one entry per
+  pattern that selected no pad on the part, with its `reason` --
+  `not_on_part`, `single_pad`, `unconnected` or
+  `no_such_net`. `failed == 0` with a non-empty `unmatched` is not a clean
+  fanout of that net. A QFN stub run with `--nets` via-drops the interior
+  pads its filter selects (#1717); one it cannot place fails its net and is
+  named in `skipped_interior` (`"U1.34"`) -- retry with a smaller
+  `--via-size`/`--via-drill`, or `--allow-via-in-pad`. `power_stubs_at_width`
+  (#1743) names each escape stub drawn at `--width` on a net that reads as
+  power or ground (`pad`, `net`, `width`, `escape`, `why`): for a `surface`
+  one, pass the route step's `--power-nets`/`--power-nets-widths` to the
+  fanout too; a `via-drop` stub stays at `--width` either way (`route.py`
+  keeps fanout copper as it finds it), so say so in the report. A `--nets` list none of whose patterns names a net on
+  the board is refused (exit 2, no board written), as `route.py` refuses one,
+  and a net name is matched literally (`--nets 'D[3]'` selects the bus member
+  `D[3]`, not `D3`). **After every fanout, parse it;
   if `failed > 0` (escaped < requested), re-run the fanout with `--clearance` at
   the manufacturing floor**, and `--clearance-ceiling` at it too: both fanouts
   keep and honour the other net classes otherwise, so a bare `--clearance` does
@@ -799,7 +890,10 @@ Use the printed flags as-is:
   `drc_grazes` class > 0 and there is headroom above the fab floor, re-run the
   fanout stepping toward — never below — the floor:**
   - `via_segment` / `pad_via` (#130): smaller **`--via-size` / `--via-drill`**
-    (and/or a thinner `--track-width`).
+    (and/or a thinner `--track-width`). When `bga_fanout`'s summary has an
+    `escape_budget`, the via, track and clearance do not fit the half-pitch: its
+    `can_take_effect` lists only what clears the fab floor (#1685), which at the
+    floor via on 0.5 mm pitch is `--escape-method dogbone` alone.
   - `segment_segment` (#179): thinner **`--width`** — the escape stubs carry the
     track width, so narrowing them widens the gap between the two converging
     diagonals. Step down toward the fab-floor track (e.g. 0.15 → 0.13 → 0.10 mm)
@@ -822,7 +916,12 @@ Use the printed flags as-is:
   the finalize still reports them unconnected, re-run the route step with this
   smaller via.) Keep the **standard** working via for
   general `route.py` routing and the bulk `route_planes.py` pour — the advanced
-  via is escape-only, not a board-wide default (issues #99/#122).
+  via is escape-only, not a board-wide default (issues #99/#122). A route-wide
+  advanced via is a recipe's deliberate choice, not that default: Step 2c's
+  bundle was screened with it, and the congestion escalation ("Route signals at
+  the FAB floor by default") passes a floor via on the whole signal step. The
+  "use ONLY" that `--design-rules` prints beside the escape via is this default;
+  it does not limit those two.
 - **Non-Default classes:** no separate pass is needed for their clearance.
   `route.py` / `route_diff.py` / the plane scripts auto-read every net's class
   clearance from the `.kicad_pro` and price each pair at `max(classA, classB)`,
@@ -930,13 +1029,21 @@ sometimes has pads that aren't a coupled connection — e.g. a P and an N test p
 several mm apart, or a logical pair daisy-chained through spread-out parts. If the
 coupled chain can't be routed, `route_diff.py` peels those far-apart pads off the
 chain (routing the genuinely-coupled terminals as a pair) and lists the affected
-nets under `single_ended_followup_nets` in its `JSON_SUMMARY` (and a "route them
-single-ended next" block on stdout). Those pads are **not** dropped — the **Signal
-Routing** step (`route.py --nets "*"`) connects them P→P / N→N along with
-every other unrouted net, since they remain unrouted after the diff-pair step. So:
-**do not exclude the diff-pair nets from the signal-routing step's net selection** —
-that step is what finishes the peeled pads. If you scope the signal step to specific
-nets instead of `"*"`, add any `single_ended_followup_nets` to it explicitly.
+nets under `single_ended_followup_nets` in its `JSON_SUMMARY`. That field holds
+**every** net the step left single-ended, so read why in
+`single_ended_followup_reasons` ({net: reason}, #1764) before acting on it:
+`peeled-terminals` (these peeled pads) and `electrically-short` are left
+single-ended **by design**; any other reason (`coupled-route-failed`,
+`no-escape-path`, ...) is a pair whose coupled route FAILED, which the pair gate
+below sends back to `route_diff`, never to `route.py` (that de-pairs it, #1399).
+The log's "left single-ended by this pair step" block, printed after the step's
+own single-ended fallback, groups the nets the same way and says which are still
+open. The by-design pads are **not** dropped — the **Signal Routing** step
+(`route.py --nets "*"`) connects them P→P / N→N along with every other unrouted
+net, since they remain unrouted after the diff-pair step. So: **do not exclude
+the diff-pair nets from the signal-routing step's net selection** — that step is
+what finishes the peeled pads. If you scope the signal step to specific nets
+instead of `"*"`, add the by-design `single_ended_followup_nets` to it explicitly.
 
 ### Check for DDR/High-Speed Memory Signals
 
@@ -966,24 +1073,39 @@ Report to user:
 
 ### High-Speed Signal Check (delegate to /find-high-speed-nets)
 
-Whether the plan includes GND return vias - and the `--gnd-via-distance` to use -
-is the `/find-high-speed-nets` skill's job: it classifies nets into speed tiers
+The board's speed tier - and the `--gnd-via-distance` to use - is the
+`/find-high-speed-nets` skill's job: it classifies nets into speed tiers
 (datasheet lookup, rise-time estimates) and maps tiers to recommended distances.
 Follow that skill's methodology here (its quick net-name/footprint scan decides
-whether the deeper datasheet pass is worth it) and put the recommended distance
-into the plan's GND-via step. Remember its physical floor: never set
+whether the deeper datasheet pass is worth it). Step 10 rule 10 says which tiers
+get a GND-via step; when the plan has one, put the recommended distance into
+it. Remember its physical floor: never set
 `--gnd-via-distance` below 3 x (via_size + clearance) -- 2.25 mm at the repo's
 own defaults (`routing_defaults.VIA_SIZE` 0.5 + `CLEARANCE` 0.25), and MORE on a
 board that routes wider. Compute it for the sizes this plan actually passes; the
-number is not a constant.
+number is not a constant. Where the GND-via step passes no `--via-size` or
+`--clearance`, those sizes are the Default net class of the board it reads
+(route_planes reads it; the repo defaults apply only when the board declares
+none) -- a class clearance an earlier step's `--clearance` /
+`--clearance-ceiling` lowered when it wrote its project back, though never a
+class via -- capped by the step's own `--clearance-ceiling` and pinned up to
+the physical fab floor. That is how `route_plan_check` R15 prices it given
+`--board` (#1709, #1735).
 
-Report to user when presenting the plan:
-- If high-speed nets found: "**GND Return Vias:** This board has [tier] signals ([examples]).
-  GND return vias are included in Step N with `--gnd-via-distance [X]mm`. Let me know if
-  you'd like to skip this step."
-- If no high-speed nets found: "**GND Return Vias:** The high-speed scan found
-  no nets that need them (only low-frequency I2C/UART/GPIO). The step is
-  included; it is cheap and harmless here. Want me to remove it?"
+Report to user when presenting the plan, by Step 10 rule 10 (the tier) and
+Step 3 of the example chain (what a return via needs):
+- High tier or above, with GND poured on two or more layers: "**GND Return Vias:**
+  This board has [tier] signals ([examples]). GND return vias are included in
+  Step N with `--gnd-via-distance [X]mm`. Let me know if you'd like to skip this
+  step."
+- High tier or above, with GND poured on one layer: "**GND Return Vias:** This
+  board has [tier] signals ([examples]), and this plan pours GND on one layer, so
+  it has no return vias: a return via needs GND on a second layer. Let me know if
+  you'd like GND poured on a second layer for them."
+- Medium tier or below: "**GND Return Vias:** The high-speed scan found [tier]
+  signals at most ([examples], or only low-frequency I2C/UART/GPIO), so this plan
+  has no return vias and ends at the Step 2 route. Let me know if you'd like them
+  anyway."
   Say what the SCAN found, not that the vias are "optional" -- optional invites
   dropping them on a board where the scan simply was not run, and a missing
   return path is not visible in any DRC.
@@ -1063,7 +1185,19 @@ python3 py_tools/check_impedance.py s5.kicad_pcb --coplanar-gap 0.2 --nets "RF*"
   `check_impedance.py` audit (item 3 above) reports how much of each net
   actually achieved it; the length over the net's OWN pads (and the pour's
   clearance step past them) is listed as `at its own pad` and never breaks
-  the declaration (#1582).
+  the declaration (#1582). It reads the gap on KiCad's own fill (#1624): the
+  fill stored in the board, else the fill model, which its JSON names as
+  `gap_source`; it runs no refill, so grade a `fill_for_delivery.py` copy to
+  read KiCad's own fill.
+- **When G is larger than the chain's routed clearance**, this meets the pour
+  step's rule never to pour wider than the routed clearance (Step 1 of the
+  example chain). KiCad fills a pour at
+  the larger of its zone clearance and each item's net-class clearance, so if
+  the coplanar nets are in a net class whose clearance is G, pour at the
+  chain's clearance: those nets get G and every other net the chain's
+  clearance. With no such class, `--zone-clearance G` is the only way to get
+  G -- the one exception to that rule, and it holds every other net's pour
+  off by G as well.
 
 **Report to the user** which nets you declared coplanar, the gap, and the plane
 step it is tied to — this is a coupled choice they may want to override. If the
@@ -1248,7 +1382,7 @@ Report to user:
 
 **THE DENSITY GATE COMES FIRST — plane-map aggression must scale with the
 board (15-board wave + controlled A/B, 2026-08-17).** The aggressive map
-below (outer floods, rail co-pours, many-rail splits) is what wins on dense
+below (outer floods, and rails co-poured on them) is what wins on dense
 BGA boards (orangecrab 18 KiCad-unconnected, the best from-scratch result of
 five arms; daisho 8-layer: 1 open, 0 new DRC). The SAME map applied to
 small boards was the wave's dominant failure source AND its dominant time
@@ -1473,11 +1607,13 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    **plane-drop vias** (#424), and because the pour already exists the drop
    pass can skip a via entirely where the fill already covers the ball
    (pour-direct) and land the rest on intact copper.
-1c. **After ALL fanouts are done — once, not per-BGA — run
-   `place_fanout_clearance.py`** to clear decoupling-cap / fanout-via
-   collisions (#130) before routing. The pass is board-global (it reads every
-   via and every BGA), so one late run sees everything; running it per-BGA
+1c. **On a board with a BGA/PGA, after ALL fanouts are done — once, not
+   per-BGA — run `place_fanout_clearance.py`** to clear decoupling-cap /
+   fanout-via collisions (#130) before routing. The pass is board-global (it
+   reads every via and every BGA), so one late run sees everything; running it per-BGA
    compounds cap displacement and changes what later fanouts route around.
+   It moves only parts near a BGA's ball field, so a board with no BGA, whose
+   only fanouts are `qfn_fanout.py`, skips it (#1710).
    A cap it leaves in DRC with a BGA's fanout copper: re-fan that BGA with
    `--immovable-refs <REF>` and run the pass again (#1521). See Step 1c.
 2. **Differential Pairs** - The most constrained routes claim their channels before
@@ -1506,7 +1642,7 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    any diff-pair pads peeled off in step 2, so keep the diff-pair nets in its
    selection (the `"*"` covers them). The fragility field steers it away from
    severing the Step 1 pours.
-4. **Finalize planes (only when GND return vias / stitching are wanted)** -
+4. **Finalize planes (only at the tier Step 10 rule 10 names)** -
    Re-run `route_planes` with the same nets/layers plus `--add-gnd-vias` (and
    any `--stitch-*` flags): an existing same-net zone is REPLACED in place, and
    the return/stitching vias now adapt around the finished signals — the #56
@@ -1569,12 +1705,25 @@ forbidden, the pour allowed):
 python3 -X utf8 py_router/add_rule_area.py board.kicad_pcb board_step0.kicad_pcb \
     --name MOUNT --mounting-holes 2>&1 | tee /tmp/step0_mount.txt
 
+When placement left a floorplan intent whose `covers[]` rows declare `holes[]`
+(where a module over a connector is screwed down), add `--intent <intent.json>`:
+each such site gets the same ring, named `MOUNT_<connector>_H<n>`, where
+check_assembly's `mountable` grades it (#1636). Nothing else keeps copper off a
+cover's hole site, and one track through it turns the cover from mountable to
+not after the route. A site where the board's own hole is fitted is left to
+that hole.
+
 A mounting hole here is a footprint that is one round drill of 2 mm or more
-with no signal net; a hole whose pad carries a net (a ground ring) gets no area,
-since its own copper has to reach it. The ring reaches 0.4 x the drill past the
-hole's edge (an ISO 7380 head); pass `--ring MM` for a wider washer or standoff.
-Read the list it prints: a hole that takes no screw (a test-fixture or alignment
-hole) needs no ring -- leave the step out then. When it writes nothing ("no
+with no signal net, or a closed Edge.Cuts circle of 2 to 7 mm that is not the
+board's outline (written as `<name>_CUT1`, `<name>_CUT2` ...). A wider
+Edge.Cuts circle is a window (a lens, a tube, a cable cut-out), not a screw
+hole, and gets no ring: 7 mm is ISO 273's coarse clearance hole for M6. A hole
+whose pad carries a net (a ground ring) gets no area, since its own copper has
+to reach it. The ring reaches 0.4 x the drill past the hole's edge (an ISO 7380
+head); pass `--ring MM` for a wider washer or standoff.
+Read the list it prints, one line per ring with its drill and its width: a hole
+that takes no screw (a test-fixture or alignment hole) needs no ring. Leave it
+out by the name the run prints: `--skip CUT2 H5`. When it writes nothing ("no
 mounting hole to write a ring for"), go on from `board.kicad_pcb`; otherwise
 every later step reads `board_step0.kicad_pcb` in its place, and check_drc
 grades the areas like any keep-out (`keepout`). Measured over the corpus's
@@ -1618,7 +1767,8 @@ old pour under the new zone. Read that line, and re-run with the layers it
 names.
 
 **Zone clearance is a MINIMUM-ALLOWED, not a target — never pass a
-`--zone-clearance` larger than the routed clearance.** The default already
+`--zone-clearance` larger than the routed clearance** (the one exception is a
+coplanar gap with no net class to carry it, Step 2b-i). The default already
 follows `--clearance` and auto-steps down to the fab floor when the pour
 can't thread the densest BGA via lattice; a larger value only stops pours
 from penetrating between balls/vias (human boards pour at ~0.1 for exactly
@@ -1725,10 +1875,22 @@ python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
 **What it hands on, and how to check it.** The last line of its log is the
 grade -- `BUS U1->U2 K=.. lanes=../.. vias=.. ... | on the board: ...
 connected=1 drc=.. planes=.. vs .. in walled=..` -- and `<out stem>.bus/summary.json`
-names every net routed and every one refused, with why. It exits 0 when the
-bus is handed on routed, connected and clean, and 1 when OUT is the board as it
-came (then the rest of the chain routes the whole bus with A*: carry on from
-OUT either way, it is not a chain failure). Its routed nets are **protected**
+names every net routed and every one refused, with why. It exits 0 whenever
+it writes OUT (#1738): the bus handed on routed, connected and clean, or OUT
+the board as it came, when the rest of the chain routes the whole bus with A*.
+Carry on from OUT either way -- it is not a chain failure, so the plan file's
+`set -e` (Step 9) does not stop there. Read which it was from the summary's
+`exit` and the log's last line. That `exit` is the WORST bus's status (the
+max over every bus the step routed, each on the board the one before handed
+on): 0 every bus handed on routed; 1 one or more came through as they came,
+while OUT may still carry the others routed (protected and locked); 2 the
+step's own check refused a bus (the turn back failed, its pull pads were not
+found again) and handed it on as it came. So read each bus's own status in
+the summary's `buses[].exit` (with `--bus` or the buses it finds; each
+`buses[].summary` is that bus's record) before deciding what the rest of the
+chain must route. The process exits non-zero only when it wrote no OUT: 2 for
+a usage error (a part the board does not have) or a `--src`/`--dest` bus whose turn into the
+flow frame failed, any other code otherwise. Its routed nets are **protected**
 in OUT's `.kicad_pro` (#521): later steps route round them and will not rip
 them. So:
 
@@ -1792,7 +1954,7 @@ to Step 2 once `failed == 0` (or the remaining `unescaped_nets` are understood a
 accepted). In a chain spell that floor `--clearance-ceiling` (#1529): a bare
 `--clearance` does not lower a net class the dropped balls sit in.
 
-### Step 1c: Optimize Decoupling-Cap Placement (run ONCE after ALL fanouts — issue #130)
+### Step 1c: Optimize Decoupling-Cap Placement (on a board with a BGA/PGA: run ONCE after ALL fanouts — issue #130)
 Nudges decoupling caps near the BGA off the foreign-net fanout vias (the
 `PAD-VIA` violations #130) and pulls each pad toward its nearest same-net
 ball. Run it on the fully-fanned board — after the LAST fanout, **before**
@@ -1957,16 +2119,16 @@ python3 -X utf8 py_router/route.py board_step1c.kicad_pcb board_step2.kicad_pcb 
     --no-bga-zones \
     --max-ripup 5 \
     --power-nets GND VCC <other PWR...> --power-nets-widths 0.3 0.4 <W...> \
-    --layers <ALL copper layers> --layer-costs <1.0 signals / -1 solid INNER planes / 3.0 a solid outer pour / 1.5 split-or-highway> \
+    --layers <ALL copper layers> --layer-costs <1.0 signals / -1 solid INNER planes / 3.0 a solid outer pour / 2.5 a split layer / 1.0-1.5 a highway> \
     2>&1 | tee /tmp/step2_routing.txt
 
 The `--layer-costs` line is NOT optional when Step 1 poured any solid plane:
 without it signals cross the pours at cost 1.0 and shred them (measured: split
 power pours at 0–2% connected under a BGA on a chain that omitted it). Order
 matches `--layers`; **-1 on solid INNER plane layers in this first pass**,
-3.0 on a solid outer pour, 1.0–1.5 on split/route+pour and highway layers,
-1.0 on F/B. On dense boards use the measured-optimal pricing from Step 2c
-instead (GND plane 6.0, rail pours 2.5, bus highway FREE).
+3.0 on a solid outer pour, 2.5 on a split/route+pour layer, 1.0–1.5 on highway
+layers, 1.0 on F/B. On dense boards use the measured-optimal pricing from Step
+2c instead (GND plane 6.0, bus highway FREE; a rail pour is 2.5 there too).
 
 **Signals keep off poured inner planes on this first pass (#1522).** A
 negative cost forbids track copper on the layer (the pour stays an obstacle
@@ -1987,6 +2149,9 @@ exists for (see the #185 figures below). Step 10 rule 8 does NOT settle this
 one — it ranks the pour TOPOLOGY (outer floods vs inner-only, fragility, rail
 co-pours), not the price — so the price follows whichever recipe that gate put
 you on, and nothing in this file ranks 3.0 against 6.0 by measurement.
+
+**A split layer has one price, 2.5, on both tiers.** That note is about solid
+planes. 2.5 is what Step 5a-tuned's STANDARD map and Step 2c's bundle carry.
 
 An earlier pass through this file raised THIS line to 6.0 to make one value
 appear everywhere; that traded a
@@ -2010,16 +2175,22 @@ rip/retry churn). Apply it whenever the board is dense enough that any
 fanout or escape is contested; on trivially-open boards the defaults are
 fine. That 62 → 23 is the BUNDLE's figure, not any one item's, and the
 bundle as screened also carried `--direction-preference-cost 5`, which has
-since been reverted (item 2).
+since been reverted (item 2). It was screened when a bare `--clearance` capped
+every net class, which is what `--clearance-ceiling` does now (#530), so item 1
+spells it that way.
 
 1. **Strict small features** (the single biggest lever on packed boards —
    lane pitch is quantized by track+clearance, and a 0.1 grid cannot
    express a 0.28 pitch at fat features):
-   `--track-width 0.0762 --clearance 0.0889 --via-size 0.25
+   `--track-width 0.0762 --clearance-ceiling 0.0889 --via-size 0.25
    --via-drill 0.15`
+   The route-wide via belongs to the bundle (Step 4, "Fine-pitch escape VIA").
    The fab-floor clamps pin track/clearance/via UP automatically (with a
-   warning) on boards whose layer count can't take them — passing those
-   four always yields a size the fab can make. The clamp is the PHYSICAL
+   warning) on boards whose layer count can't take them, and the ceiling
+   with them, so it lowers no net class below that floor — those four never
+   ask for a size the fab cannot make. What the board itself declares below
+   the floor (a net class, a pad clearance override, a `.kicad_dru` rule)
+   stays in the output project as declared. The clamp is the PHYSICAL
    fab floor: an explicit size is never pinned up to the `--fab-tier` floor
    or the board's own minimums. **This item is for aspirational rules only**
    (Step 4, "Whose rules"). The `.kicad_pro` floor writeback then lowers the
@@ -2200,9 +2371,9 @@ presumably by freeing corridor space.
 `--no-smoothing` exists for A/B only (`KICAD_SMOOTH_ROUTE=0/1` overrides either
 way). The lesson worth carrying: a two-board result is not a default change.
 
-### Step 3 of the example chain: Finalize Planes — GND Return Vias + Stitching (only if wanted)
-Skip this step entirely on low-speed boards. When the speed analysis calls
-for GND return vias or area stitching, re-run `route_planes` with the SAME
+### Step 3 of the example chain: Finalize Planes — GND Return Vias + Stitching (high speed tier or above)
+Step 10 rule 10 says when this step runs; below that tier the chain ends at
+the Step 2 route. When it runs, re-run `route_planes` with the SAME
 nets/layers as Step 1 plus the via flags: an existing same-net zone on the
 target layer is REPLACED in place (CLI default), and `--add-gnd-vias` places
 return-current vias that adapt around the now-finished signals — the old
@@ -2216,21 +2387,29 @@ lost for tap pads the drops already serve. Reconnect anything a chain does
 leave open with a follow-up `route.py` pass naming them,
 using the same parameters as Step 2.)
 
+**A return via needs GND on a second layer.** A via connects nothing unless it
+joins two layers of its net, and the closing `route.py` removes one that does
+not (#1166). A return via gets its layers from GND's pours: the placer keeps it
+off the net's own tracks and pads. So with GND poured on one layer, the STANDARD
+map's GND, `--add-gnd-vias` warns and places none; with GND on two or more it
+takes only a site inside two of those pours. A pour from an earlier step counts.
+Whether to pour GND on a second layer for them is a plane-map decision for the
+user, not something this step can settle.
+
 > **Note to user:** GND return vias improve signal integrity for high-speed
 > signals. Based on the speed analysis, this board has [speed_tier] signals,
-> so `--gnd-via-distance` is set to [X] mm. If this is a purely low-frequency
-> board (I2C/UART/GPIO only), drop `--add-gnd-vias`. Let me know if you'd
-> like that.
+> so `--gnd-via-distance` is set to [X] mm. Let me know if you'd rather skip
+> this step.
 
 python3 -X utf8 py_router/route_planes.py board_step2.kicad_pcb board_step4.kicad_pcb \
-    --nets GND VCC \
-    --plane-layers B.Cu F.Cu \
+    --nets <the Step 1 nets> \
+    --plane-layers <the Step 1 layers, GND on two or more> \
     --add-gnd-vias --gnd-via-distance 2.5 \
     2>&1 | tee /tmp/step3_planes.txt
 
 python3 -X utf8 py_router/route.py board_step4.kicad_pcb board_step4b.kicad_pcb \
-    --nets GND VCC \
-    --power-nets GND VCC --power-nets-widths <the Step 2 widths> \
+    --nets <the Step 1 nets> \
+    --power-nets <the Step 2 power nets> --power-nets-widths <the Step 2 widths> \
     --layers <ALL copper layers> --layer-costs <the Step 2 vector> \
     2>&1 | tee /tmp/step3_finalize.txt
 
@@ -2253,7 +2432,8 @@ are electrical targets, the floor is what fits:
 - Ultra-high (>1 GHz): the floor itself (2.25 mm at the default via+clearance);
   tighter is not buildable, so there is no tighter tier to offer
 - High (100 MHz - 1 GHz): 3.0 mm
-- Medium (10 - 100 MHz): 5.0 mm
+- Medium (10 - 100 MHz): 5.0 mm, which `/review-routed-board` grades coverage
+  at; this tier gets no via step (Step 10 rule 10)
 - Minimum physical limit: 3 x (via_size + clearance) -- 2.25 mm at the default
   0.5 via / 0.25 clearance, recomputed for whatever sizes the plan passes
 
@@ -2331,6 +2511,51 @@ through the stage partition (Step 5b). For each one, go back and handle it —
 route it, or add it to the plane step (a secondary ground gets its own pour
 region per Step 5b) — then re-verify. Do not declare the board done while the
 list has unjustified entries.
+
+**Two reported reads on every routed board.** `check_complete.py` runs neither
+of these, and only the first asks KiCad's own `connection_width` check, which sees
+a web in a pour (`check_weird.py`'s `narrow-pad-joint` reads one track-to-pad case).
+Run both and put their lines in the report. They are reported, not gating (#1334):
+neither one changes a DONE, and neither sends the board back on its own.
+
+```bash
+python3 -X utf8 tests/stress/kicad_drc_compare.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_kicad.txt
+python3 -X utf8 py_tools/check_cycles.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_cycles.txt
+```
+
+`kicad_drc_compare.py` took 2 s on a 21-part 2-layer board and 4 s on a 64-part
+one; it refills the zones of a staged copy, never your board, so allow longer on
+a large pour. Report from it:
+
+- **`connwidth=N@<W mm`**: copper webs narrower than W, one `CONNWIDTH` row each
+  (net, position), for instance a neck in a pour. W is the project's `min_connection`,
+  else its `min_track_width`, staged for this run: KiCad's check is off by
+  default, so a plain `kicad-cli pcb drc` of the same file can report none.
+  `connwidth=not-graded` means no floor was recorded to grade at.
+- **`thermal=` and `dangling=`**: pads short of spokes and dangling track ends
+  at the project's severity (`STARVED-THERMAL`, `TRACK-DANGLING` rows).
+- **Every `KICAD-ONLY` and `CHECKDRC-ONLY` row**, and any `NOT CLASSIFIED` line.
+
+Its exit code covers only the `KICAD-ONLY` and `CHECKDRC-ONLY` rows:
+
+| exit | means | do |
+|---|---|---|
+| 0 | compared, and the two engines agree on copper clearance. `connwidth=`, `thermal=` and `dangling=` can still be non-zero | read and report those three |
+| 1 | a `KICAD-ONLY` or `CHECKDRC-ONLY` row | name each row. A `KICAD-ONLY` `shorting_items` may be a short `check_drc` missed: look at that copper before presenting the board |
+| 2 | NOT RUN: no `kicad-cli`, or it failed on this board. It prints SKIP and `NOT RUN` and compares 0 boards | record NOT RUN, never agreement, and say so in the report. `py_tools/kicad_cli_path.py` says whether the tools can find it (#1418) |
+
+Add `--baseline <the board the chain started from>` to subtract what that board
+already carried, at the cost of a second KiCad run; a pile (parts staged off the
+outline) cancels little (#1333).
+
+`check_cycles.py` needs no KiCad and took 0.1 s on the same board. It lists
+signal nets whose copper closes a loop or stacks overlapping same-net vias, and
+exits 1 when there is one, 0 when not. Report each net with its `loops` and
+`ovlVias`; `python3 -X utf8 py_tools/check_cycles.py board_final.kicad_pcb --net
+<net> --verbose` shows the via coordinates of one net. Copper that
+`check_weird.py` calls removable already fails `check_complete`, so a loop left on
+a DONE board is one it did not call removable: tell the user rather than re-route
+for it.
 
 ### Alternative: VCC as Wide Traces (No Plane)
 
@@ -2529,8 +2754,9 @@ the better (blocking first, then vias, then copper).
 **Precedence: the Step 5a-tuned DENSITY GATE outranks this section.** The
 survey below describes HUMAN practice, and our engine measurably matches it
 only on DENSE boards. On STANDARD boards (the tier as Step 5a-tuned defines
-it — do not re-derive it here) the measured-optimal map is inner-only pours + rails as wide
-traces (see the Step 5a-tuned A/B: four small boards, floods → 16 opens
+it — do not re-derive it here) the measured-optimal map is Step 5a-tuned's:
+inner-only pours, the dominant rail poured, rails past six as wide traces (see
+the Step 5a-tuned A/B: four small boards, floods → 16 opens
 total; inner-only → 0). Read this section as the Tier-DENSE playbook and
 as background on why pours matter at all.
 
@@ -3270,7 +3496,7 @@ Rules of the loop:
   - Signal step fails a cluster of long cross-board nets while an inner
     layer is plane-reserved → revisit the plane→layer map (dense-board
     exception above): free one inner layer, drop its `--layer-costs` entry
-    to 1.0–1.5, re-run the failed nets.
+    to 1.0–1.5, re-run the step.
   - `preexisting_blockers` hints repeat for the same nets → re-run those
     nets with the hinted `--rip-existing-nets` set (the engine now
     self-escalates once in reconciliation; a manual retry may widen the set).
@@ -3293,7 +3519,10 @@ Rules of the loop:
     fitted to its own failures and penalises every engine change that fails a
     different net. An ordinary retry should use `--nets '*'` instead -- route.py
     skips already-connected nets, so a wildcard retries exactly what is still
-    broken. Ordering is the cheapest knob but rarely decisive:
+    broken, and it keeps the run's rip authority: the end-of-run reconciliation
+    takes a named blocker of any size inside `--nets`, and outside them only a
+    small one with no pour, so a named retry cannot clear a long net in the
+    way. Ordering is the cheapest knob but rarely decisive:
     measured on four corpus boards of varying density, an automatic
     failed-first restart NEVER beat the normal order (twice it graded
     worse), so an in-engine restart was tried and removed — only reach for
@@ -3321,6 +3550,23 @@ since #1112 it does so even when every net already reads connected and the
 step has nothing else to route). That closing `route.py` is the repair step;
 a standalone `repair_planes.py` is not, because it cannot read the sizes the
 chain routed at.
+
+**Hand joins are the one exception: they come AFTER the closing `route.py`.**
+A join written by hand and checked with
+`python3 -X utf8 py_tools/check_join.py <board> <NET> x,y,layer x,y,layer [via:x,y] --keep-staged <out>`
+is copper no route step owns, and no tool here locks it, so a later route
+step may rip its net and route it again (#1360). The order is: every route
+step, a late `route_diff.py` (a skew fix, say) included; then the closing
+`route.py`; then the joins, each reading the board the last one kept;
+nothing routes after them. Run `check_connected` and `check_drc` again on the
+last joined board, since new copper changes how the pours fill. If a route
+step has to run after the joins, apply the joins again after it.
+`route_plan_check` accepts `check_join.py ... --keep-staged OUT.kicad_pcb` lines after the
+final `route.py` and only there (R03, R04); a `check_join.py` without
+`--keep-staged` writes nothing, and goes in as a commented verification line
+like the other checks. The GUI plan form carries no join: `manifest_to_plan`
+refuses a kept join by name, so in the GUI apply the joins after the plan
+runs. A manifest replay (`redo_stress_test`) runs it as the copper step it is.
 
 ### Retrying a failed net
 
@@ -3356,8 +3602,8 @@ retry's `--nets` carries the poured nets too (#1032).
 `(current: ...)` tail.** The box-in hint suggests a clearance or track only when
 it is narrower than the run's own (`0.15` against a run above it), so on a board
 already routing at or below 0.15 the only novel token in the whole sentence is
-the grid. The tail tells you that, and the grid alone is not a lever (see
-below). A failure printed as `ROUTE FAILED - ripping N blocker net(s) (...) did
+the grid. The tail tells you that. Whether the grid helps is not guessed from
+the hint: it is settled by the one grid A/B below. A failure printed as `ROUTE FAILED - ripping N blocker net(s) (...) did
 not free a path` is not a box-in at all: the ladder found blockers, ripped and
 restored them.
 
@@ -3636,13 +3882,24 @@ you.
 
 - **Geometry still above the floor:** the parameters reading holds. Shrink it, and pair a
   finer grid **with** the shrink rather than spending the grid alone.
-- **Geometry already at the floor:** the parameters reading is exhausted, and this is
-  a placement question after all. A finer grid resolves the same obstacles more
-  precisely; it does not make a gap wider, and there is nothing left to pair it
-  with. Measured (run 20): `0.05 -> 0.025 -> 0.0125`, about 40 minutes, left
-  `unrouted` at exactly BUSY / Net-(U4-XTAL_P) / SCK at every resolution. Note
-  also that "ripup budget" is not a lever here at all — "no rippable blockers
-  found" means the blockers are not rippable copper.
+- **Geometry already at the floor:** shrinking is exhausted, but the grid is
+  not until it has been tried once. **Before calling the box-in a placement
+  question, run ONE grid A/B**: the same step at the default `--grid-step 0.1`
+  against `0.05` (`0.025` when the boxed-in part's pitch is ≤0.4 mm), sizes
+  unchanged, and **keep whichever grades better** (`check_connected`, then
+  `check_drc` at the routed clearance). Routing is deterministic, so the
+  comparison costs one route. A finer grid does not make a gap wider, but at
+  0.1 the router can miss a corridor that exists: on a QFN-56 at 0.4 mm
+  pitch (track 0.2, clearance 0.15, `--escalation off`) 0.05 alone
+  routed 9 of the 11 nets boxed in at 0.1 (#1765). The sign varies: on the
+  same nets at other sizes 0.05 did worse, which is why it is an A/B and not a
+  default. Only what is still boxed in on the better arm is a placement
+  question. Below 0.05 the gain shrinks, which is why the finer arm is 0.025
+  only at ≤0.4 mm pitch: on that QFN-56, 0.025 routed one more net than 0.05,
+  and on run 20's board `0.05 -> 0.025 -> 0.0125`, about 40 minutes,
+  left `unrouted` at exactly BUSY / Net-(U4-XTAL_P) / SCK at every
+  resolution. Note also that "ripup budget" is not a lever here at all — "no
+  rippable blockers found" means the blockers are not rippable copper.
 
 ## Step 9: Emit the plan as an executable artifact (always)
 
@@ -3661,13 +3918,26 @@ next to the board, so the exact tuned choices replay with no LLM:
    as `# cwd=` is read (#1337), and an `export` of a `KICAD_*` knob as the
    env prefix of every later command; other exports (`REDO_*`) are the
    recorder's, and are not replayed.
+   **Put a `set -e` line before or after the `cd`**, as `redo_commands.sh`
+   has: without it the file's exit code is only its LAST line's, so a step
+   that refused to run (exit 2, say a missing input board) leaves a file
+   that exits 0 with a final board that step never touched (#1708). R01
+   refuses a plan without it (#1735); spell it exactly `set -e`, the one
+   form the replayer and the converter skip as a directive. Under it a
+   step that exits non-zero stops the file there -- including a kept hand
+   join with a finding: carry on from that step's board by hand. (The bus
+   step exits 0 whenever it writes OUT, routed or not, Step 1a.)
+   **Every board a step reads is the plan's input or an EARLIER step's
+   output** (R18 below): a step whose input is its own output path, with no
+   earlier step writing that path, has no board to read.
    **Verification commands go in as COMMENTS, never executable lines** —
    the file's exit code is read by executors as the chain verdict, and a
    trailing read-only check that exits non-zero (violations found, or a
    wrong relative path) makes a chain whose `final.kicad_pcb` is perfectly
    good report as failed (measured: half the 15-board wave reported
    rc≠0 from exactly this). The last executable line must be the final
-   `route.py`.
+   `route.py`, or a hand join after it (`check_join.py ... --keep-staged OUT.kicad_pcb`,
+   the one exception in "End every chain on route.py").
 2. **`<board>_plan.json`** — the GUI AI-tab form:
 
    ```bash
@@ -3699,7 +3969,7 @@ the skill is the tuner; the plan file is its output.
 python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/route_plan_check.py <board>_plan.sh --board board.kicad_pcb
 ```
 
-Read-only, no model in the loop. It evaluates **seventeen** rules of this
+Read-only, no model in the loop. It evaluates **eighteen** rules of this
 skill that a recorded chain can answer, and REFUSES BY NAME, citing the
 SECTION here each rule comes from so you can argue with it at its source.
 
@@ -3711,7 +3981,7 @@ it: every rule applies with `{in}`/`{out}` as the boards, R01 (the `cd`
 line) is not asked, and a chain judge_seeds would refuse is exit 3 (#1592).
 
 **Run `--list` BEFORE you author the plan**, not after it is refused — it
-prints all seventeen in a few lines. The five that bite most often are: the
+prints all eighteen in a few lines. The five that bite most often are: the
 chain ends on `route.py`, verification is commented rather than executable,
 no pipes, Step 5b's net-coverage `assert`s, and one cap pass after the
 last fanout.
@@ -3719,7 +3989,10 @@ last fanout.
 Exit **0** checked and clean — proceed. **1** the checker itself crashed:
 nothing was proved, so fix the crash and do NOT run the plan. **2** usage.
 **3** the plan could not be read. **4** a rule failed. A refusal is not a
-malfunction: fix the plan, do not run it.
+malfunction: fix the plan, do not run it. A `NOTE` under a rule is a step the
+rule could not decide without `--board` (a size the step would read from the
+board's Default net class, say): it fails nothing, and passing `--board`
+decides it.
 
 It also PRINTS what it cannot decide, with the tool that owns each — nine
 rules need a routed board or a finished run, and an unchecked rule that says
@@ -3736,16 +4009,59 @@ board), and every `route_diff.py` step runs before it. So run the chain
 
 - `failed_diff_pairs`, `single_ended_diff_pairs` and `member_incomplete_pairs`;
 - for each pair they name, `pair_reports[].failure_reason` (with
-  `failure_stage` and `blocking_nets`).
+  `failure_stage` and `blocking_nets`);
+- on a step that matches P to N (`--diff-pair-intra-match`, or a `.kicad_dru`
+  skew rule binding the pair), each pair's `intra_pair_matching[].status`,
+  read off the shipped copper (#1622).
 
 A pair is ready for the all-nets step when it is in `routed_diff_pairs`, or
 in `single_ended_diff_pairs` with `failure_reason` `electrically-short` (too
-short for coupling to buy anything). A `member_incomplete_pairs` entry is
-expected only when the pair's members are in `single_ended_followup_nets` (a
-`partial` pair's peeled far terminals, or an `electrically-short` pair's
-members): the all-nets step closes them, and `check_connected` after it says
-whether it did. **Do not proceed to the all-nets step with any other pair
-failure.** Fix it first, at the cost of a pair step (minutes):
+short for coupling to buy anything). A `member_incomplete_pairs` entry is expected
+only when the pair's members are in `single_ended_followup_nets` **by design**,
+i.e. `single_ended_followup_reasons` gives them `peeled-terminals` (a `partial`
+pair's peeled far terminals) or `electrically-short`: the all-nets step closes
+them, and `check_connected` after it says whether it did. The same field also
+holds the members of a pair whose coupled route failed (any other reason): that
+pair is not ready, whatever the field says.
+
+On a matching step, a ready pair's `intra_pair_matching` status says what to do
+next; none of these stops the chain (`/diagnose-routing-failures`, "route_diff
+runs", defines them and each `reason`):
+
+- `matched`, `within-tolerance`: nothing.
+- `not-matchable` on an `electrically-short` pair: nothing. No copper at this
+  step can match it, `delta_mm` stays measured, and it records no tolerance, so
+  `check_drc` grades it only under a `.kicad_dru` rule the board declares.
+- `skipped` (`ac-coupled-xnet`): nothing at this step. The AC-coupled pass
+  matched the pair end to end, so the number to read is
+  `ac_coupled_xnets[].skew_mm`, not the per-side `delta_mm`. It records no
+  tolerance and nothing grades it, so compare it with `tolerance_mm` yourself
+  and report it if it is over.
+- `unmatched` with `reason` `not-measured`, on a pair whose members are in
+  `single_ended_followup_nets` with reason `peeled-terminals` (a peeled
+  pair): nothing yet. It has no length
+  until the all-nets step joins its far terminals, and `check_drc` grades it
+  after that step at its recorded tolerance.
+- Any other `unmatched`, and a peeled pair `check_drc` then finds out of range:
+  a skew the board ships out of its tolerance (`check_drc` grades it,
+  `board_score` counts it). It is a shipped blocker and nothing more: there is
+  no recipe for it, so carry it into the report rather than re-routing for it.
+  The step has already matched it again on the copper its cleanup left (the
+  record's `rematch`), so `reason` and `delta_mm` say what is left.
+- The exception (#1762): a pair in `single_ended_diff_pairs` that `check_drc`
+  finds out of range already ships as two single-ended members, so re-routing
+  it costs no coupling. One scoped `route.py --nets P N --force-reroute
+  --length-match-group P N --length-match-tolerance <tol>` strips both,
+  re-routes them and meanders the short one. Without `--force-reroute` a
+  connected pair is skipped (its `member_status` reads
+  `unmatched_board_copper`). A member the replan routes only partway keeps its
+  new, incomplete copper (only one that gets no copper is restored), so run
+  `check_connected` after it.
+
+**Do not proceed to the all-nets step with any other pair failure**: a pair in
+`failed_diff_pairs`, in `single_ended_diff_pairs` for any other `failure_reason`
+(its `not-matchable` status is that failure's), or with a member open that the
+next step will not close. Fix it first, at the cost of a pair step (minutes):
 `/diagnose-routing-failures` ("route_diff runs") maps each `failure_reason` to
 its fix, and a smaller track, gap and via (Step 4) fixes only some of them.
 Then run the rest of the chain.
@@ -3755,7 +4071,11 @@ Then run the rest of the chain.
 Say which one fired. **DONE** is `blocking == 0` **plus** `check_complete.py`
 DONE **plus** an independent verifier's PASS (`board_score` exits 0 at
 `blocking == 0` even on a board with ten HARD clauses violated, because a repo
-checker's clauses are not `board_score` components). A blocker that is
+checker's clauses are not `board_score` components). The form of
+`check_complete.py` that gates follows Step 4's "Whose rules" decision: on
+aspirational rules the form without `--authored-from`, with that flag's verdict
+reported; on the user's own rules `--authored-from <the board the chain started
+from>` (`/review-routed-board`'s Step 5 has both commands). A blocker that is
 geometrically unsatisfiable is a finding about the REQUIREMENT and needs the
 measurement that proves it. The plateau, "no approach left" and time-cap rules
 are `.claude/skills/plan-pcb-placement/SKILL.md` §5.
@@ -3846,15 +4166,19 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
    step (the peel machinery degrades gracefully) — note it in the plan
    rather than agonizing.
 8. **The Step 5a-tuned density gate outranks the pour-philosophy survey.**
-   Outer-layer floods, per-zone fragility `=0`, and rail co-pours are
-   DENSE-tier moves only; a STANDARD board gets inner-only pours and rails
-   as wide traces, no matter how many pads a rail has (measured: the four
-   flood-regressed wave boards all went to 0 opens and 3–5× faster on the
-   inner-only map).
+   Outer-layer floods, per-zone fragility `=0`, and rail co-pours (a rail
+   sharing an outer flood, the DENSE map's item 4) are DENSE-tier moves only;
+   a STANDARD board gets Step 5a-tuned's map: inner-only pours, the dominant
+   rail poured, up to six rails on a split layer (rule 9), rails past six as
+   wide traces (measured, flood boards against the inner-only map: the four
+   flood-regressed wave boards all went to 0 opens and 3–5× faster).
 9. **Never split more than six rails onto one plane layer** — prefer
    wide traces for the overflow (six measured: one fill island per rail,
    every BGA supply ball on its own rail's main island).
 10. **Stitch/GND-via tail only at high speed tier or above** (from
    `/find-high-speed-nets`) — and when it runs, the chain still ends on
-   `route.py`. Low-speed boards end at the Step 2 route (plus Step 2d
-   iterations) with no re-pour tail.
+   `route.py`. Low-speed and medium-tier boards end at the Step 2 route (plus
+   Step 2d iterations) with no re-pour tail: the medium tier's 5.0 mm row
+   grades return-via coverage in review and does not schedule this step.
+   This is the one statement of the rule; the other passages cite it. Return
+   vias also need GND on a second layer (Step 3 of the example chain).

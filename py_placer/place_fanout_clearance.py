@@ -89,7 +89,18 @@ Examples:
                              "preserves the clearance family specifically, not "
                              "the whole project: the size minima, the "
                              "severities and the fab-floor provenance are "
-                             "written either way (#441 chain of custody).")
+                             "written either way (#441 chain of custody). A "
+                             "value below the physical fab floor for the board's "
+                             "layer count is pinned up to it, with a warning, as "
+                             "the routing CLIs pin theirs (#1699); the cap stops "
+                             "at the netclass tier, so a class, a .kicad_dru rule "
+                             "or a pad override the board declares below the "
+                             "floor stays as declared.")
+    parser.add_argument("--fab-overrides", metavar="FILE", default=None,
+                        help="Path to a fab-floor override file (key=value lines), "
+                             "the routing CLIs' flag: it states the fab's own "
+                             "limits, so --clearance may go down to its floor. "
+                             "See fab_overrides.example.txt.")
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help=f"Position snap in mm (default: {defaults.GRID_STEP})")
     parser.add_argument("--board-edge-clearance", type=float, default=None,
@@ -206,6 +217,15 @@ Examples:
         except _fp1122.IntentError as exc:
             print(f"cannot use intent {args.intent}: {exc}", file=sys.stderr)
             return 2
+    # #1699: the routing CLIs' pin, and for their reason: this value is written
+    # into the project every later step reads. The floor is the physical one for
+    # the board's layer count, or the overrides file's; no tier moves it.
+    from fab_tiers import (count_copper_layers_in_file, enforce_fab_floors,
+                           fab_tier_from_args, set_default_fab_tier)
+    set_default_fab_tier(*fab_tier_from_args(args))
+    args.clearance = enforce_fab_floors(
+        count_copper_layers_in_file(args.input_file),
+        clearance=args.clearance).get('clearance', args.clearance)
     # This step mutates the board mid-pipeline (moves caps), so it must appear in
     # the stress-test redo manifest -- otherwise a pure redo_stress_test.py replay
     # breaks at the next step that reads the *_capopt board. No-op unless
@@ -268,6 +288,10 @@ Examples:
             # short to a pose that only grazes
             'shorted': list(result.get('shorted') or ()),
             'parted': list(result.get('parted') or ()),
+            # #1681: {cap: the mover moved to make room for it}
+            'made_room': dict(result.get('made_room') or {}),
+            # #1686: vias landed below the board's min_hole_to_hole
+            'below_hole_floor': list(result.get('below_hole_floor') or ()),
             # #1122: only when a cap's rotation is declared, so a run whose
             # intent declares none prints what it printed before.
             **({'declared_rotations': result['declared_rotations']}

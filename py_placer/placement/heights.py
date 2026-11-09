@@ -64,9 +64,10 @@ the board's two faces (#1603): a right-angle or edge-mount jack whose board
 slides into its slot hangs below the face past the edge, and seated wholly
 on the board that body is in the laminate. `body_in_board` finds it inside
 the outline (check_assembly gates it), and `depth_past_edge` gives the
-emitted `overhang_mm` band the floor that keeps it off the board. What a
-model draws on the part's own pads and holes (a lead in its hole) is the
-part's own, and is left out.
+emitted `overhang_mm` band the floor that keeps it off the board. Both read
+where the body IS, not the 0.25 mm cell it enters (#1659). What a model draws
+on the part's own pads and holes (a lead in its hole) is the part's own, and
+is left out.
 
 The heights come from one `kicad-cli pcb export glb` of the board, cached by
 the footprints' models (not their poses) in `~/.cache/krt_heights`, so the
@@ -130,12 +131,45 @@ DEPTH_FACE_MM = 0.2
 #: (ulx3s US1/US2, watchy J2). KiCad's stock edge-mount SMA jack seated
 #: wholly on the board reads 76 mm^2
 DEPTH_MIN_MM2 = 4.0
+#: ...or from this LONG a slice, mm: the longest side of that body's box in
+#: the part's own frame (#1635). Area alone let a thin slice along a body's
+#: front stand inside the edge however far along it ran: the stock SMA jack
+#: 0.7 mm in, its body 0.74 mm inside the edge across 6.5 mm, read 2.0 mm^2.
+#: Measured on the 22 tracked boards at their own poses: the longest such
+#: body inside an outline is 2.5 mm (a SOT-143 drawn low),
+#: against 6 mm for that jack's first row of cells; a micro-B receptacle's
+#: front lip, past the edge as drawn, is 5.25 mm long, so placed inside the
+#: outline it gates too
+DEPTH_MIN_SPAN_MM = 3.0
+#: ...of body more than this far inside the outline, mm (#1659): a slice closer
+#: to the edge does not gate on its length alone. KiCad grades edge clearance
+#: to the DRAWN line, so a pad ending on an outline drawn 0.1 mm wide overlaps
+#: it by 0.05 mm: an end-launch jack whose pads end level with the wall of its
+#: board slot has to stand at least that far in for KiCad to pass it. This is
+#: the smallest round value clearing that 0.05 mm, under the +/-0.2 mm a routed
+#: board edge is commonly specified at.
+DEPTH_EDGE_TOL_MM = 0.1
+#: the resolution a body's position at board depth is stored to, mm: 1 um, a
+#: byte per side of a cell. A reading within it of the tolerance is at the
+#: tolerance, so a floor rounded to it cannot land past the gate
+DEPTH_RES_MM = 0.001
+#: a body less than this inside the outline reads nothing: a model whose face
+#: is drawn on the edge, in the export's own rounding, mm
+DEPTH_READ_MM = 0.005
 #: the thickness of a board whose file says none, mm (KiCad's default)
 _THICKNESS_MM = 1.6
 #: kicad-cli's export, a hang guard (a 500-part board takes under a minute)
 EXPORT_TIMEOUT_S = 600
+#: #1720: an air gap inside a model, between a surface facing up (solid
+#: below) and the next one facing down (solid above), is read from this tall:
+#: under it is a seam between two drawn solids, not room, mm
+GAP_MIN_MM = 0.1
+#: #1734: where `_measure` stages the n-th footprint for the export, mm:
+#: (n * x, n * y). Distinct in x and in y for every part, so the export's
+#: frame is fit from poses no two parts share
+_CANON_STEP_MM = (5.0, 3.0)
 #: bump to invalidate every cached measurement
-_CACHE_VERSION = 6
+_CACHE_VERSION = 9
 
 #: IPC-7351 land-pattern names end their body dimensions with the height in
 #: 1/100 mm: CAPC1005X55N, QFN50P400X400X80-25N, SOIC127P600X175-8N,
@@ -352,8 +386,13 @@ class Heights:
     for the parts with room under them. Empty when nothing was measured."""
 
     def __init__(self, top=None, covers=None, note='', reached=(), bodies=None,
-                 set_aside=None, notices=(), depth=None, depth_note=None):
+                 set_aside=None, notices=(), depth=None, depth_note=None,
+                 frame_sure=True):
         self.top: Dict[str, Tuple[float, str]] = dict(top or {})
+        #: #1653: False when the export fit more than one frame to the parts'
+        #: poses (`frame_fits`), so which way a body faces in its own frame is
+        #: a guess: one resolved model fits a mirrored frame as well
+        self.frame_sure = bool(frame_sure)
         #: #1603: each modelled part's body at BOARD DEPTH, strictly between
         #: the board's two faces (`DEPTH_FACE_MM` in from each), outside its
         #: own pads and drilled holes: the cell centres (n, 2), local frame.
@@ -917,7 +956,7 @@ def with_declared(h: Heights, declared, pcb_data, pcb_file=None) -> Heights:
     notices += lift_notices + unresolved
     out = Heights(top, covers, note=note, reached=why or reached, bodies=bodies,
                   set_aside=set_aside, notices=notices, depth=h.depth,
-                  depth_note=h.depth_note)
+                  depth_note=h.depth_note, frame_sure=h.frame_sure)
     if len(_DECL_MEMO) > 64:
         _DECL_MEMO.clear()
     _DECL_MEMO[key] = out
@@ -1063,7 +1102,9 @@ def _key(staged, cli, iter_blocks, thickness=_THICKNESS_MM):
     """What the measurement depends on: each footprint's layer, models (the
     blocks, and the files' sizes and times) and pads, kicad-cli, and the
     board's thickness (where its board depth is, #1603) -- never its pose,
-    so every seed of a placement reads one measurement."""
+    so every seed of a placement reads one measurement. That holds because
+    `_measure` exports every part at a pose of its own (`_canonical_poses`),
+    never the board's (#1734)."""
     h = hashlib.sha1(f'v{_CACHE_VERSION}\0{cli}\0{thickness:g}'.encode())
     for _s, _e, fp, _raw, key in iter_blocks(staged):
         m = re.search(r'\(layer\s+"([^"]+)"', fp)
@@ -1123,12 +1164,17 @@ def _ipc_tops(pcb_data, have, names):
 def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
     """Export the staged board's parts and measure them: {'top': {ref: mm},
     'covers': {ref: [x0, y0, nx, ny, hex of uint16 centi-mm]}, 'bodies': (the
-    same, each cell's highest point), 'depth': {ref: [x0, y0, nx, ny, hex of
-    uint8 0/1]}, the cells where the part's body is at the depth of a board
-    `thickness` mm thick (`_depth_raster`), 'frame_fits'}, None when the
+    same, each cell's highest point), 'gaps': {ref: [x0, y0, nx, ny, hex of
+    the lowest air gap's floor, hex of its ceiling]} where the part's model
+    has solid both under and over a gap (`_gap_raster`, #1720), 'depth': {ref:
+    [x0, y0, nx, ny, hex of uint8 0/1, hex of each such cell's 4 uint8
+    sides]}, the cells where the part's body is at the depth of a board
+    `thickness` mm thick and where in each it is (`_depth_raster`),
+    'frame_fits'}, None when the
     export failed, or the reason when it timed out (never cached, so the next
     run measures again)."""
     import numpy as np
+    staged = _canonical_poses(staged)
     td = tempfile.mkdtemp(prefix='krt_heights_')
     try:
         brd = os.path.join(td, 'b.kicad_pcb')
@@ -1159,7 +1205,8 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
                         float(m.group(3)) if m.group(3) else 0.0)
     tris, norms, roots = _glb_parts(data, set(pcb_data.footprints or {}) & set(poses))
     if not roots:
-        return {'top': {}, 'covers': {}, 'depth': {}, 'frame_fits': 0}
+        return {'top': {}, 'covers': {}, 'depth': {}, 'gaps': {},
+                'frame_fits': 0}
     fps = pcb_data.footprints
     refs = sorted(roots)
     T = np.array([roots[r][:3, 3] for r in refs])
@@ -1190,7 +1237,7 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
     if faces is None:
         return None
     outward, top_face, bot_face = faces
-    out_top, out_cov, out_body, out_depth = {}, {}, {}, {}
+    out_top, out_cov, out_body, out_depth, out_gap = {}, {}, {}, {}, {}
     for r in refs:
         t = tris.get(r)
         if t is None:
@@ -1217,6 +1264,9 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
             continue          # a model that is not over its pads says nothing
         out_top[r] = round(float(q[:, :, 2].max()), 3)
         out_body[r] = _raster(q, high=True)
+        gap = _gap_raster(q, nh)
+        if gap is not None:
+            out_gap[r] = gap
         dep = _depth_raster(low, thickness)
         if dep is not None:
             out_depth[r] = dep
@@ -1227,11 +1277,41 @@ def _measure(staged, cli, pcb_data, thickness=_THICKNESS_MM):
             out_cov[r] = cov
     # `frame_fits`: how many frames put the most parts on their poses. More
     # than one, and which axis is UP is a guess: a board with one resolved
-    # model fits every frame, and the first (qfn_csi_underpad_diff J1, a
-    # 1x04 header read 1.27 mm tall) says nothing about what is below the
-    # face (#1603)
+    # model fits every frame, and the first (a 1x04 header read 1.27 mm tall)
+    # says nothing about what is below the face (#1603). Two models or more
+    # fit one frame: `_canonical_poses` gives each its own x and y (#1734)
     return {'top': out_top, 'covers': out_cov, 'bodies': out_body,
-            'depth': out_depth, 'frame_fits': int(fits)}
+            'gaps': out_gap, 'depth': out_depth, 'frame_fits': int(fits)}
+
+
+def _canonical_poses(staged):
+    """`staged` with the n-th footprint moved to (n * `_CANON_STEP_MM`), its
+    angle and side kept (#1734).
+
+    The cache key leaves the pose out, and the measurement read it twice.
+    The export's frame is fit to the parts' poses by the median miss, and on
+    a pile -- parts staged on a grid, more than half of them sharing one x --
+    a frame reading the board's face as a plan axis missed under half of
+    them and won the tie: every part measured on its side (a 4.34 mm jack
+    read 15.24 mm tall, its depth on another part), cached under the placed
+    board's key, and read back by the next run on the placed board. And the
+    export tessellates a curved model where it stands, so the same part
+    measured at two poses differed in a few cells by up to 0.24 mm. Each
+    part's position is only the way its node is found in the export; its
+    angle and side are in the key (its pads' angles, its layer), so the
+    position is replaced by one that depends on file order alone."""
+    from kicad_parser import footprint_at_match, iter_footprint_blocks
+    out, last = [], 0
+    for n, (s, e, fp, _raw, _k) in enumerate(iter_footprint_blocks(staged)):
+        m = footprint_at_match(fp)
+        if m is None:
+            continue
+        x, y = n * _CANON_STEP_MM[0], n * _CANON_STEP_MM[1]
+        out += [staged[last:s], fp[:m.start(1)], f'{x:g}',
+                fp[m.end(1):m.start(2)], f'{y:g}', fp[m.end(2):]]
+        last = e
+    out.append(staged[last:])
+    return ''.join(out)
 
 
 def _faces(refs, side, tris, roots, up, u, thickness):
@@ -1319,11 +1399,93 @@ def _raster(q, high=False):
     return [round(x0, 4), round(y0, 4), nx, ny, cm.tobytes().hex()]
 
 
+def _gap_raster(q, nh):
+    """#1720: the lowest AIR GAP inside a part's model over each cell -- a
+    socket's card slot, a side-entry housing's mouth -- as [x0, y0, nx, ny,
+    hex of its floor, hex of its ceiling] (uint16 centi-mm above the part's
+    face, 65535 where the cell has none), or None when no cell has one.
+
+    `_raster` keeps one value per cell, the lowest point (or the highest), so
+    a cavity between plastic below and plastic above is in neither. This
+    casts a vertical ray at each cell's centre through the model's surfaces
+    (`q`, local frame, and `nh`, each triangle's normal away from the face):
+    going up, a surface facing up ends solid and one facing down starts it,
+    so a facing-up surface followed by a facing-down one `GAP_MIN_MM` or more
+    above it bounds air with solid under and over it. A surface standing on
+    edge (|nh| under `_UP_FACING`) is a wall, which a vertical ray does not
+    cross. The model's geometry, not a datasheet's: what a socket's drawing
+    calls its card seat is the author's to weigh against it."""
+    import numpy as np
+    if not len(q):
+        return None
+    facing = np.where(nh > _UP_FACING, 1.0, np.where(nh < -_UP_FACING, -1.0, 0.0))
+    keep = facing != 0
+    if not keep.any():
+        return None
+    t = np.concatenate([q[keep], np.repeat(facing[keep][:, None, None], 3, 1)], 2)
+    t = _subdivide(t)
+    x0 = math.floor(t[:, :, 0].min() / CELL_MM) * CELL_MM
+    y0 = math.floor(t[:, :, 1].min() / CELL_MM) * CELL_MM
+    nx = int(math.ceil((t[:, :, 0].max() - x0) / CELL_MM)) + 1
+    ny = int(math.ceil((t[:, :, 1].max() - y0) / CELL_MM)) + 1
+    ax, ay = t[:, 0, 0], t[:, 0, 1]
+    bx, by = t[:, 1, 0], t[:, 1, 1]
+    cx, cy = t[:, 2, 0], t[:, 2, 1]
+    den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+    ok = np.abs(den) > 1e-12
+    # a subdivided triangle spans at most two cell centres each way
+    i0 = np.ceil((t[:, :, 0].min(1) - x0) / CELL_MM - 0.5).astype(int)
+    j0 = np.ceil((t[:, :, 1].min(1) - y0) / CELL_MM - 0.5).astype(int)
+    cells, zs, fs = [], [], []
+    for di in (0, 1):
+        for dj in (0, 1):
+            ii, jj = i0 + di, j0 + dj
+            px = x0 + (ii + 0.5) * CELL_MM
+            py = y0 + (jj + 0.5) * CELL_MM
+            with np.errstate(divide='ignore', invalid='ignore'):
+                w1 = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / den
+                w2 = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / den
+            w3 = 1.0 - w1 - w2
+            e = -1e-9
+            hit = ok & (w1 >= e) & (w2 >= e) & (w3 >= e) \
+                & (ii >= 0) & (ii < nx) & (jj >= 0) & (jj < ny)
+            if not hit.any():
+                continue
+            z = (w1 * t[:, 0, 2] + w2 * t[:, 1, 2] + w3 * t[:, 2, 2])[hit]
+            cells.append(ii[hit] * ny + jj[hit])
+            zs.append(z)
+            fs.append(t[hit, 0, 3])
+    if not cells:
+        return None
+    cell, z, f = np.concatenate(cells), np.concatenate(zs), np.concatenate(fs)
+    o = np.lexsort((z, cell))
+    cell, z, f = cell[o], z[o], f[o]
+    # a facing-up crossing, then a facing-down one above it in the same cell
+    g = (cell[:-1] == cell[1:]) & (f[:-1] > 0) & (f[1:] < 0) \
+        & (z[1:] - z[:-1] >= GAP_MIN_MM) & (z[:-1] > _ABOVE_MM)
+    if not g.any():
+        return None
+    k = np.nonzero(g)[0]
+    lo = np.full(nx * ny, np.inf)
+    hi = np.full(nx * ny, np.inf)
+    # the LOWEST gap per cell: crossings are sorted, so the first one wins
+    first = np.unique(cell[k], return_index=True)[1]
+    sel = k[first]
+    lo[cell[sel]] = z[sel]
+    hi[cell[sel]] = z[sel + 1]
+
+    def enc(a):
+        return np.where(np.isfinite(a), np.clip(np.round(a * 100), 0, 65534),
+                        65535).astype('<u2').reshape(nx, ny).tobytes().hex()
+    return [round(x0, 4), round(y0, 4), nx, ny, enc(lo), enc(hi)]
+
+
 def _depth_raster(q, thickness):
     """#1603: where a part's model is at BOARD DEPTH -- strictly between the
     faces of a board `thickness` mm thick, `DEPTH_FACE_MM` in from each -- as
-    a raster [x0, y0, nx, ny, hex of uint8 0/1], local frame, or None when it
-    is nowhere. `q` is the geometry that reaches below the face.
+    a raster [x0, y0, nx, ny, hex of uint8 0/1, hex of 4 uint8 per set cell],
+    local frame, or None when it is nowhere. `q` is the geometry that reaches
+    below the face.
 
     Two readings, united. A surface inside that slab: a wall or a pin that
     passes through it, a face that ends in it. And the model's cross-section
@@ -1331,7 +1493,16 @@ def _depth_raster(q, thickness):
     solid body through the board has surfaces in the slab only at its walls,
     and its area at board depth is the area between them. A row whose
     crossings do not pair up (an open mesh) is not filled, so a model drawn
-    without a closed shell cannot paint a row it does not occupy."""
+    without a closed shell cannot paint a row it does not occupy.
+
+    #1659: each set cell also says where in it the body IS, as the box
+    (x0, y0, x1, y1) of what lies there, in `DEPTH_RES_MM` from the cell's low
+    corner: a cell only says the model enters it, and a grid in the part's own
+    frame made one real depth read differently by where the face fell in its
+    cell. Every extreme of a body lies on a surface, and each surface is cut
+    to the slab and to the cell, so the box reaches exactly as far along either
+    axis as the body does. What the fill adds is its crossings, so the box of a
+    cell the body fills is cut at them too (`_fill_spans`)."""
     import numpy as np
     if not len(q):
         return None
@@ -1362,37 +1533,103 @@ def _depth_raster(q, thickness):
         seg = np.take_along_axis(pts[two], order[:, :, None], 1)
     if not len(s) and not len(seg):
         return None
-    xs = np.concatenate([s[:, :, 0].ravel(), seg[:, :, 0].ravel()])
-    ys = np.concatenate([s[:, :, 1].ravel(), seg[:, :, 1].ravel()])
+    wall = _in_slab_boxes(s, z_lo, z_hi) if len(s) else np.zeros((0, 4))
+    xs = np.concatenate([wall[:, 0], wall[:, 2], seg[:, :, 0].ravel()])
+    ys = np.concatenate([wall[:, 1], wall[:, 3], seg[:, :, 1].ravel()])
     x0 = math.floor(xs.min() / CELL_MM) * CELL_MM
     y0 = math.floor(ys.min() / CELL_MM) * CELL_MM
     nx = int(math.ceil((xs.max() - x0) / CELL_MM)) + 1
     ny = int(math.ceil((ys.max() - y0) / CELL_MM)) + 1
-    m = np.zeros((nx, ny), bool)
-    if len(s):
-        i0 = np.floor((s[:, :, 0].min(1) - x0) / CELL_MM).astype(int)
-        i1 = np.floor((s[:, :, 0].max(1) - x0) / CELL_MM).astype(int)
-        j0 = np.floor((s[:, :, 1].min(1) - y0) / CELL_MM).astype(int)
-        j1 = np.floor((s[:, :, 1].max(1) - y0) / CELL_MM).astype(int)
+    # the box of what lies in each cell: low sides at +inf, high at -inf until
+    # something does
+    lo = np.full((nx, ny, 2), np.inf)
+    hi = np.full((nx, ny, 2), -np.inf)
+    if len(wall):
+        i0 = np.floor((wall[:, 0] - x0) / CELL_MM).astype(int)
+        i1 = np.floor((wall[:, 2] - x0) / CELL_MM).astype(int)
+        j0 = np.floor((wall[:, 1] - y0) / CELL_MM).astype(int)
+        j1 = np.floor((wall[:, 3] - y0) / CELL_MM).astype(int)
         for di in (0, 1):
             for dj in (0, 1):
-                m[np.minimum(i0 + di, i1), np.minimum(j0 + dj, j1)] = True
+                ii, jj = np.minimum(i0 + di, i1), np.minimum(j0 + dj, j1)
+                cx, cy = x0 + ii * CELL_MM, y0 + jj * CELL_MM
+                np.minimum.at(lo[:, :, 0], (ii, jj), np.maximum(wall[:, 0], cx))
+                np.minimum.at(lo[:, :, 1], (ii, jj), np.maximum(wall[:, 1], cy))
+                np.maximum.at(hi[:, :, 0], (ii, jj), np.minimum(wall[:, 2], cx + CELL_MM))
+                np.maximum.at(hi[:, :, 1], (ii, jj), np.minimum(wall[:, 3], cy + CELL_MM))
     if len(seg):
-        cx = x0 + (np.arange(nx) + 0.5) * CELL_MM
-        ya, yb = seg[:, 0, 1], seg[:, 1, 1]
-        xa, xb = seg[:, 0, 0], seg[:, 1, 0]
-        lo_y, hi_y = np.minimum(ya, yb), np.maximum(ya, yb)
-        for j in range(ny):
-            yc = y0 + (j + 0.5) * CELL_MM
-            hit = (lo_y <= yc) & (yc < hi_y)
-            n = int(hit.sum())
-            if not n or n % 2:
-                continue
-            xh = np.sort(xa[hit] + (yc - ya[hit]) * (xb[hit] - xa[hit]) / (yb[hit] - ya[hit]))
-            m[:, j] |= (np.searchsorted(xh, cx) % 2) == 1
+        # filled along each row; across, cut by the columns where they pair
+        xa, xb = _fill_spans(seg, x0, y0, nx, ny)
+        ya, yb = _fill_spans(seg[:, :, ::-1], y0, x0, ny, nx)
+        ya, yb = ya.T, yb.T
+        fill = np.isfinite(xa)
+        cross = fill & np.isfinite(ya)
+        # a column that does not pair up says nothing: a wall in the cell does
+        cy = y0 + np.arange(ny)[None, :] * CELL_MM
+        walled = np.isfinite(lo[:, :, 1])
+        ly = np.where(cross, ya, np.where(walled, lo[:, :, 1], cy))
+        hy = np.where(cross, yb, np.where(walled, hi[:, :, 1], cy + CELL_MM))
+        lo[:, :, 0] = np.where(fill, np.minimum(lo[:, :, 0], xa), lo[:, :, 0])
+        hi[:, :, 0] = np.where(fill, np.maximum(hi[:, :, 0], xb), hi[:, :, 0])
+        lo[:, :, 1] = np.where(fill, np.minimum(lo[:, :, 1], ly), lo[:, :, 1])
+        hi[:, :, 1] = np.where(fill, np.maximum(hi[:, :, 1], hy), hi[:, :, 1])
+    m = np.isfinite(lo[:, :, 0])
     if not m.any():
         return None
-    return [round(x0, 4), round(y0, 4), nx, ny, m.astype('u1').tobytes().hex()]
+    ii, jj = np.nonzero(m)
+    origin = np.stack([x0 + ii * CELL_MM, y0 + jj * CELL_MM], 1)
+    sides = np.concatenate([lo[ii, jj] - origin, hi[ii, jj] - origin], 1)
+    sides = np.clip(np.round(sides / DEPTH_RES_MM), 0, 255).astype('u1')
+    return [round(x0, 4), round(y0, 4), nx, ny, m.astype('u1').tobytes().hex(),
+            sides.tobytes().hex()]
+
+
+def _in_slab_boxes(s, z_lo, z_hi):
+    """(n, 4) plan boxes (x0, y0, x1, y1) of what each triangle of `s` has
+    between heights `z_lo` and `z_hi`: its vertices there and where its edges
+    cross them. A sloped face has only that part at board depth."""
+    import numpy as np
+    z = s[:, :, 2]
+    pts = [s[:, :, :2]]
+    ok = [(z >= z_lo) & (z <= z_hi)]
+    for zp in (z_lo, z_hi):
+        for i in range(3):
+            a, b = s[:, i], s[:, (i + 1) % 3]
+            da, db = a[:, 2] - zp, b[:, 2] - zp
+            hit = da * db < 0
+            t = np.where(hit, da / np.where(hit, da - db, 1.0), 0.0)
+            pts.append((a[:, :2] + t[:, None] * (b[:, :2] - a[:, :2]))[:, None])
+            ok.append(hit[:, None])
+    pts, ok = np.concatenate(pts, 1), np.concatenate(ok, 1)[:, :, None]
+    return np.concatenate([np.where(ok, pts, np.inf).min(1),
+                           np.where(ok, pts, -np.inf).max(1)], 1)
+
+
+def _fill_spans(seg, x0, y0, nx, ny):
+    """The cross-section's segments `seg` (n, 2, 2) filled even-odd along each
+    row of cells: (lo, hi), each (nx, ny), the stretch of each cell the fill
+    covers at its row's centre, +inf and -inf where it does not cover the
+    cell's centre. A row whose crossings do not pair up is not filled."""
+    import numpy as np
+    lo = np.full((nx, ny), np.inf)
+    hi = np.full((nx, ny), -np.inf)
+    cx = x0 + (np.arange(nx) + 0.5) * CELL_MM
+    half = CELL_MM / 2.0
+    ya, yb = seg[:, 0, 1], seg[:, 1, 1]
+    xa, xb = seg[:, 0, 0], seg[:, 1, 0]
+    lo_y, hi_y = np.minimum(ya, yb), np.maximum(ya, yb)
+    for j in range(ny):
+        yc = y0 + (j + 0.5) * CELL_MM
+        hit = (lo_y <= yc) & (yc < hi_y)
+        n = int(hit.sum())
+        if not n or n % 2:
+            continue
+        xh = np.sort(xa[hit] + (yc - ya[hit]) * (xb[hit] - xa[hit]) / (yb[hit] - ya[hit]))
+        k = np.searchsorted(xh, cx, side='right')
+        at = (k % 2) == 1
+        lo[at, j] = np.maximum(xh[k[at] - 1], cx[at] - half)
+        hi[at, j] = np.minimum(xh[k[at]], cx[at] + half)
+    return lo, hi
 
 
 def _subdivide(t):
@@ -1538,17 +1775,18 @@ def _load(raw, pcb_data, pcb_file, names) -> Heights:
                                      f'{n_room} part(s) with room under them',
                    reached=reached, bodies=_bodies(raw.get('bodies') or {}, top),
                    set_aside=set_aside, notices=_set_aside_notices(set_aside),
+                   frame_sure=int(raw.get('frame_fits') or 0) == 1,
                    **_depths(raw, pcb_data))
 
 
 def _depths(raw, pcb_data):
     """`Heights`' `depth` and `depth_note` from a measurement (#1603): each
-    part's cells at board depth, local frame, less those within a cell of
-    its own pad copper or drilled holes. Under its own pad the board is there
-    at every pose, so what a model draws there -- a lead through its hole, a
-    peg in its NPTH, a lead drawn into its pad -- is the part's own and no
-    pose makes or mends it. Nothing is read when the frame is a guess
-    (`frame_fits`)."""
+    part's body at board depth as one box (x0, y0, x1, y1) per cell it enters
+    (#1659), local frame, less those within a cell of its own pad copper or
+    drilled holes. Under its own pad the board is there at every pose, so
+    what a model draws there -- a lead through its hole, a peg in its NPTH, a
+    lead drawn into its pad -- is the part's own and no pose makes or mends
+    it. Nothing is read when the frame is a guess (`frame_fits`)."""
     import numpy as np
     if 'depth' not in raw:
         return {'depth': {}, 'depth_note': 'measured before board depth was read'}
@@ -1558,20 +1796,24 @@ def _depths(raw, pcb_data):
     if fits != 1:
         return {'depth': {}, 'depth_note': (
             f'the export fits {fits} frames to the parts\' poses, so which way is '
-            f'up is a guess (one resolved model, or every one on a line)')}
+            f'up is a guess (one resolved model)')}
     fps = pcb_data.footprints or {}
     out = {}
-    for r, (x0, y0, nx, ny, hx) in (raw.get('depth') or {}).items():
+    for r, (x0, y0, nx, ny, hx, hb) in (raw.get('depth') or {}).items():
         fp = fps.get(r)
         if fp is None:
             continue
         m = np.frombuffer(bytes.fromhex(hx), 'u1').reshape(nx, ny).astype(bool)
+        ii, jj = np.nonzero(m)
+        sides = np.frombuffer(bytes.fromhex(hb), 'u1').reshape(-1, 4) * DEPTH_RES_MM
         own = _own_holes(fp)
         if own is not None:
-            m &= ~_mask(own, x0, y0, nx, ny)
-        ii, jj = np.nonzero(m)
+            keep = ~_mask(own, x0, y0, nx, ny)[ii, jj]
+            ii, jj, sides = ii[keep], jj[keep], sides[keep]
         if len(ii):
-            out[r] = np.stack([x0 + (ii + 0.5) * CELL_MM, y0 + (jj + 0.5) * CELL_MM], 1)
+            cx, cy = x0 + ii * CELL_MM, y0 + jj * CELL_MM
+            out[r] = np.stack([cx + sides[:, 0], cy + sides[:, 1],
+                               cx + sides[:, 2], cy + sides[:, 3]], 1)
     return {'depth': out, 'depth_note': None}
 
 
@@ -1615,29 +1857,54 @@ def body_in_board(h, pcb_data, poses=None) -> Dict[str, object]:
     the outline, so a mid-mount part over its slot reads nothing, and the
     part's own pads and holes are left out (`_depths`).
 
-    A cell counts when it lies WHOLLY inside the outline (all four corners on
-    the board), so a body that starts on the edge, as the designer seats an
-    edge-mount part, reads nothing. `poses` {ref: (x, y, rot)} overrides the
-    parts' board poses. `{'rows': [{'ref', 'area_mm2', 'box', 'gates'}],
-    'gating_refs', 'count', 'unmeasured', 'basis'}` -- `rows` every part
-    with any such cell, `gates` from `DEPTH_MIN_MM2`; `unmeasured` says why
-    nothing could be read (None when it was)."""
-    import numpy as np
+    Read on the body itself, not the cell it enters, so one real depth has
+    one verdict wherever its face falls on the grid (#1659): what counts is
+    the part of it inside the outline, and a body starting on the edge, as
+    the designer seats an edge-mount part, reads nothing. `poses` {ref: (x, y,
+    rot)} overrides the parts' board poses. `{'rows': [{'ref', 'area_mm2',
+    'span_mm', 'inside_mm', 'box', 'gates'}], 'gating_refs', 'count',
+    'unmeasured', 'basis'}` -- `rows` every part with any such body; `span_mm`
+    the longest side of its box in the part's own frame, `inside_mm` how far
+    its deepest point lies inside the outline: the distance to the NEAREST
+    outline, which is not the overhang that would clear it. `gates` from
+    `DEPTH_MIN_MM2` of area, or a `DEPTH_MIN_SPAN_MM` span (#1635) of body
+    more than `DEPTH_EDGE_TOL_MM` inside; `unmeasured` says why nothing could
+    be read (None when it was)."""
     basis = (f'the part\'s own 3D model (one kicad-cli GLB export) strictly between '
              f'the board\'s faces, {DEPTH_FACE_MM:g} mm in from each, its own pads '
-             f'and drilled holes left out, on {CELL_MM:g} mm cells wholly inside '
-             f'the outline; gates from {DEPTH_MIN_MM2:g} mm^2')
+             f'and drilled holes left out, as far as it lies inside the outline; '
+             f'gates from {DEPTH_MIN_MM2:g} mm^2, or from a {DEPTH_MIN_SPAN_MM:g} mm '
+             f'long slice more than {DEPTH_EDGE_TOL_MM:g} mm inside')
     note = getattr(h, 'depth_note', 'no heights')
     depth = getattr(h, 'depth', None) or {}
     out = {'rows': [], 'gating_refs': [], 'count': 0, 'unmeasured': note,
            'basis': basis}
     if note is not None or not depth:
         return out
-    from shapely import contains_xy, prepare
+    region = board_region(pcb_data)
+    if region is None:
+        out['unmeasured'] = 'the board has no outline'
+        return out
+    fps = pcb_data.footprints or {}
+    for ref in sorted(depth):
+        fp = fps.get(ref)
+        if fp is None:
+            continue
+        row = body_row(depth[ref], region, ref,
+                       (poses or {}).get(ref) or (fp.x, fp.y, fp.rotation or 0.0))
+        if row is not None:
+            out['rows'].append(row)
+    out['gating_refs'] = [r['ref'] for r in out['rows'] if r['gates']]
+    out['count'] = len(out['gating_refs'])
+    return out
+
+
+def board_region(pcb_data):
+    """The board `body_in_board` reads a body against: the outline's rings less
+    its cutouts, a plain rectangle being its bounds. None when it has none."""
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
     from check_drc import board_edge_geometry
-    # the outline's rings less its cutouts; a plain rectangle is its bounds
     _rings, outer, cutouts = board_edge_geometry(pcb_data.board_info, rect_ring=True)
     region = None
     if outer:
@@ -1645,65 +1912,124 @@ def body_in_board(h, pcb_data, poses=None) -> Dict[str, object]:
         if cutouts:
             region = region.difference(unary_union(
                 [Polygon(c).buffer(0) for c in cutouts if len(c) >= 3]))
-    if region is None or region.is_empty:
-        out['unmeasured'] = 'the board has no outline'
-        return out
-    prepare(region)
-    fps = pcb_data.footprints or {}
-    half = CELL_MM / 2.0
-    for ref in sorted(depth):
-        fp = fps.get(ref)
-        if fp is None:
-            continue
-        x, y, rot = (poses or {}).get(ref) or (fp.x, fp.y, fp.rotation or 0.0)
-        a = math.radians(-(rot % 360))
-        c, s = math.cos(a), math.sin(a)
-        pts = depth[ref]
-        inside = np.ones(len(pts), bool)
-        for dx, dy in ((-half, -half), (half, -half), (half, half), (-half, half)):
-            lx, ly = pts[:, 0] + dx, pts[:, 1] + dy
-            inside &= contains_xy(region, x + lx * c - ly * s, y + lx * s + ly * c)
-        if not inside.any():
-            continue
-        p = pts[inside]
-        bx, by = x + p[:, 0] * c - p[:, 1] * s, y + p[:, 0] * s + p[:, 1] * c
-        area = round(float(inside.sum()) * CELL_MM * CELL_MM, 4)
-        out['rows'].append({'ref': ref, 'area_mm2': area,
-                            'box': [round(float(bx.min()) - half, 3),
-                                    round(float(by.min()) - half, 3),
-                                    round(float(bx.max()) + half, 3),
-                                    round(float(by.max()) + half, 3)],
-                            'gates': area >= DEPTH_MIN_MM2})
-    out['gating_refs'] = [r['ref'] for r in out['rows'] if r['gates']]
-    out['count'] = len(out['gating_refs'])
-    return out
+    return None if region is None or region.is_empty else region
 
 
-def depth_past_edge(h, pcb_data, ref, edge, pose=None) -> Optional[float]:
+def body_row(boxes, region, ref, pose) -> Optional[Dict[str, object]]:
+    """`body_in_board`'s row for one part's body at board depth (`boxes`, from
+    `Heights.depth`) against `region` (`board_region`) at `pose`; None when none
+    of it lies inside."""
+    import numpy as np
+    import shapely
+    from shapely.affinity import affine_transform
+    x, y, rot = pose
+    a = math.radians(rot % 360)
+    c, s = math.cos(a), math.sin(a)
+    # the outline in the part's own frame, where its body's boxes are
+    local = affine_transform(region, [c, -s, s, c, -(c * x - s * y), -(s * x + c * y)])
+    shapely.prepare(local)
+    cx, cy = boxes[:, [0, 2, 2, 0]], boxes[:, [1, 1, 3, 3]]
+    on = shapely.contains_xy(local, cx, cy)
+    reach = np.where(on, shapely.distance(local.boundary, shapely.points(cx, cy)), 0.0).max(1)
+    keep = reach > DEPTH_READ_MM
+    if not keep.any():
+        return None
+    reach, on, p = reach[keep], on[keep], boxes[keep].copy()
+    area = np.maximum(p[:, 2] - p[:, 0], 0.0) * np.maximum(p[:, 3] - p[:, 1], 0.0)
+    # a box the outline crosses counts as far as it is inside
+    cross = ~on.all(1)
+    if cross.any():
+        q = p[cross]
+        cut = shapely.intersection(
+            shapely.box(q[:, 0], q[:, 1], np.maximum(q[:, 2], q[:, 0] + 1e-6),
+                        np.maximum(q[:, 3], q[:, 1] + 1e-6)), local)
+        p[cross] = shapely.bounds(cut)
+        area[cross] = shapely.area(cut)
+    px, py = p[:, [0, 2, 2, 0]], p[:, [1, 1, 3, 3]]
+    bx, by = x + px * c + py * s, y - px * s + py * c
+    total = round(float(area.sum()), 4)
+    beyond = reach > DEPTH_EDGE_TOL_MM + DEPTH_RES_MM
+    return {'ref': ref, 'area_mm2': total,
+            'span_mm': round(_box_span(p), 4),
+            'inside_mm': round(float(reach.max()), 3),
+            'box': [round(float(bx.min()), 3), round(float(by.min()), 3),
+                    round(float(bx.max()), 3), round(float(by.max()), 3)],
+            'gates': _gates(total, _box_span(p[beyond]) if beyond.any() else 0.0)}
+
+
+def _box_span(boxes) -> float:
+    """The longest side, mm, of the box round `boxes` (n, 4), in the frame
+    they are given in (the part's own)."""
+    return max(float(boxes[:, 2].max() - boxes[:, 0].min()),
+               float(boxes[:, 3].max() - boxes[:, 1].min()))
+
+
+def _gates(area: float, span: float) -> bool:
+    """Does a body at board depth this large inside the outline gate? `span`
+    is of the part of it more than `DEPTH_EDGE_TOL_MM` inside."""
+    return (area >= DEPTH_MIN_MM2 - 1e-9
+            or span >= DEPTH_MIN_SPAN_MM - 1e-9)
+
+
+def depth_past_edge(h, pcb_data, ref, edge, pose=None, bounds=None) -> Optional[float]:
     """#1603: how far `ref` at `pose` (its board pose by default) can move in
-    across the compass `edge` -- the board's bounds on that side, the line an
-    `overhang_mm` band is read from -- before a cell of its body at board
-    depth lies wholly inside that line, which is the cell `body_in_board`
-    reads: the innermost cell's far side, mm along the edge's outward
-    normal; negative when such a cell already does. None when no body of it
-    is at board depth, or none was read, or too little for any pose to gate
-    (under `DEPTH_MIN_MM2` in all).
+    across the compass `edge` -- the line an `overhang_mm` band is read from,
+    on that side of `bounds`, else of the board's -- before its body at board
+    depth stands more than `DEPTH_EDGE_TOL_MM` inside that line, which is where
+    `body_in_board` starts to gate (#1659): mm along the edge's outward
+    normal, negative when it already does. None when no body of it is at board
+    depth, or none was read, or too little for any pose to gate (under
+    `DEPTH_MIN_MM2` and `DEPTH_MIN_SPAN_MM` in all).
 
     So a part that must overhang to keep its body out of the laminate needs
     an `overhang_mm` of at least (its band reading here) minus this."""
-    pts = (getattr(h, 'depth', None) or {}).get(ref)
-    b = getattr(pcb_data.board_info, 'board_bounds', None)
+    import numpy as np
+    boxes = (getattr(h, 'depth', None) or {}).get(ref)
+    b = bounds or getattr(pcb_data.board_info, 'board_bounds', None)
     fp = (pcb_data.footprints or {}).get(ref)
-    if pts is None or len(pts) * CELL_MM * CELL_MM < DEPTH_MIN_MM2 or not b or fp is None:
+    if boxes is None or not len(boxes) or not b or fp is None:
         return None
+    area = float((np.maximum(boxes[:, 2] - boxes[:, 0], 0.0)
+                  * np.maximum(boxes[:, 3] - boxes[:, 1], 0.0)).sum())
+    if not _gates(area, _box_span(boxes)):
+        return None
+    x, y, rot = pose or (fp.x, fp.y, fp.rotation or 0.0)
+    a = math.radians(rot % 360)
+    c, s = math.cos(a), math.sin(a)
+    lx, ly = boxes[:, [0, 2, 2, 0]], boxes[:, [1, 1, 3, 3]]
+    bx, by = x + lx * c + ly * s, y - lx * s + ly * c
+    past = {'east': bx - b[2], 'west': b[0] - bx,
+            'north': b[1] - by, 'south': by - b[3]}.get(edge)
+    return None if past is None else float(past.min()) + DEPTH_EDGE_TOL_MM
+
+
+def model_past_edge(h, pcb_data, ref, edge, pose=None, bounds=None) -> Optional[float]:
+    """#1653: how far `ref`'s own 3D model reaches past the compass `edge`
+    at `pose` (its board pose by default): the outer side of its farthest
+    raised cell (`Heights.bodies`), mm along the edge's outward normal from
+    the bounds' line on that side (`bounds`, else the board's) -- positive
+    past it, negative when the model stops short of it. To the raster's
+    `CELL_MM`, and never short of the model: a cell the model enters counts
+    whole. None when no model of it was read, when the export's frame is a
+    guess (`Heights.frame_sure`: which way the model faces is then unknown),
+    or when the edge or the bounds are unknown."""
+    if not getattr(h, 'frame_sure', True):
+        return None
+    body = (getattr(h, 'bodies', None) or {}).get(ref)
+    b = bounds or getattr(pcb_data.board_info, 'board_bounds', None)
+    fp = (pcb_data.footprints or {}).get(ref)
+    if body is None or not len(body[0]) or not b or fp is None \
+            or edge not in ('north', 'south', 'east', 'west'):
+        return None
+    pts = body[0]
     x, y, rot = pose or (fp.x, fp.y, fp.rotation or 0.0)
     a = math.radians(-(rot % 360))
     c, s = math.cos(a), math.sin(a)
     bx = x + pts[:, 0] * c - pts[:, 1] * s
     by = y + pts[:, 0] * s + pts[:, 1] * c
-    past = {'east': bx - b[2], 'west': b[0] - bx,
-            'north': b[1] - by, 'south': by - b[3]}.get(edge)
-    return None if past is None else float(past.min()) + CELL_MM / 2.0
+    half = CELL_MM / 2.0
+    return float({'east': bx.max() + half - b[2], 'west': b[0] - bx.min() + half,
+                  'north': b[1] - by.min() + half, 'south': by.max() + half - b[3]}[edge])
 
 
 def _bodies(raw, top):

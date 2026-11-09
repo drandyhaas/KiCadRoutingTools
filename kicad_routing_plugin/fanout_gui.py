@@ -130,6 +130,11 @@ def cap_optimization_summary(result):
         summary += f"; {nudged} via(s) nudged with reconnect (#313)"
     if via_resolved:
         summary += f"; {len(via_resolved)} cap(s) freed by that nudge"
+    # #1686: unresolved because a via landed below the board's hole-to-hole
+    # floor to free them, not because they graze.
+    below = result.get('below_hole_floor') or []
+    _below_parts = {b.get('part') for b in below}
+    unresolved = [r for r in unresolved if r not in _below_parts]
     if unresolved:
         # The verdict has ALWAYS been via + track + pad (the engine's
         # graze_penalty is via #130 + track #278 + pad #275). This line said
@@ -150,6 +155,15 @@ def cap_optimization_summary(result):
     if shorted:
         summary += (f"; {len(shorted)} SHORTED to foreign copper (no pose "
                     f"apart from it): {', '.join(sorted(shorted))}")
+    # #1681: a mover moved so a stuck part could take a clear pose.
+    room = result.get('made_room') or {}
+    if room:
+        summary += (f"; {len(room)} moved to make room: "
+                    + ', '.join(f"{o} for {r}" for r, o in sorted(room.items())))
+    if below:
+        summary += (f"; {len(below)} via(s) below the board's min_hole_to_hole "
+                    f"to free a part, KiCad fails the pair: "
+                    f"{', '.join(sorted(_below_parts))}")
     # #1067: only when the step carried an intent (the key is absent else).
     decap = result.get('decap') or {}
     decap_broken = sorted(decap.get('broken') or {})
@@ -1672,19 +1686,30 @@ class FanoutTab(wx.Panel):
                         bga_fanout.generate_bga_fanout(
                             footprint, self.pcb_data, **kwargs)
                     skipped = list(bga_fanout.LAST_CANCEL_SKIPPED)
+                    misses = list(bga_fanout.LAST_FILTER_MISSES)
+                    interior = []
+                    power_stubs = []
+                    setup_vias = list(bga_fanout.LAST_BOARD_SETUP_VIAS)
                 else:
                     import qfn_fanout
                     tracks, vias, failed = qfn_fanout.generate_qfn_fanout(
                         footprint, self.pcb_data, **kwargs)
                     vias_to_remove = None
                     skipped = list(qfn_fanout.LAST_CANCEL_SKIPPED)
+                    misses = list(qfn_fanout.LAST_FILTER_MISSES)
+                    interior = list(qfn_fanout.LAST_SKIPPED_INTERIOR)
+                    power_stubs = list(qfn_fanout.LAST_POWER_STUBS_AT_WIDTH)
+                    setup_vias = list(qfn_fanout.LAST_BOARD_SETUP_VIAS)
                 # #857: the Design rules line bga_fanout.py / qfn_fanout.py
                 # print (the exit code is the CLI's alone).
                 from fab_tiers import finish_design_rules
                 finish_design_rules(None, 0)
                 self._operation_result = {
                     'tracks': tracks, 'vias': vias, 'failed': failed,
-                    'vias_to_remove': vias_to_remove, 'skipped': skipped}
+                    'vias_to_remove': vias_to_remove, 'skipped': skipped,
+                    'filter_misses': misses, 'skipped_interior': interior,
+                    'power_stubs_at_width': power_stubs,
+                    'board_setup_vias': setup_vias}
         except Exception as exc:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -1725,6 +1750,10 @@ class FanoutTab(wx.Panel):
                     res.get('tracks') or [], res.get('vias') or [],
                     failed_nets=res.get('failed'),
                     vias_to_remove=res.get('vias_to_remove'),
+                    filter_misses=res.get('filter_misses'),
+                    skipped_interior=res.get('skipped_interior'),
+                    power_stubs_at_width=res.get('power_stubs_at_width'),
+                    board_setup_vias=res.get('board_setup_vias'),
                     **apply_kw)
             # The plan executor's "this step produced its result" (gui_utils);
             # the error and cancel returns above produce none.
@@ -1875,6 +1904,10 @@ class FanoutTab(wx.Panel):
         clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
+        if shared.get('via_from_class'):
+            # #1676: a via nobody asked for starts at the board's .kicad_dru rules
+            from design_rules import run_via_for_rules
+            via_size, via_drill = run_via_for_rules(None, self.pcb_data, via_size, via_drill)
         layers = shared.get('layers', defaults.DEFAULT_LAYERS)
         # #861: say where the width came from. A user who typed 3 mil and got
         # 0.2 mm escapes had the Track Width override box unticked, so the
@@ -2063,6 +2096,10 @@ class FanoutTab(wx.Panel):
         allow_via_in_pad = config.get('allow_via_in_pad', False)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
+        if shared.get('via_from_class'):
+            # #1676: a via nobody asked for starts at the board's .kicad_dru rules
+            from design_rules import run_via_for_rules
+            via_size, via_drill = run_via_for_rules(None, self.pcb_data, via_size, via_drill)
 
         # The panel's escape layer: None = the part's mounted layer (F.Cu for
         # top, B.Cu for bottom), as qfn_fanout.py resolves an omitted --layer,
@@ -2148,7 +2185,9 @@ class FanoutTab(wx.Panel):
 
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
                               fanout_config=None, fanout_kind='bga',
-                              optimize_caps=False, vias_to_remove=None):
+                              optimize_caps=False, vias_to_remove=None,
+                              filter_misses=None, skipped_interior=None,
+                              power_stubs_at_width=None, board_setup_vias=None):
         """Apply fanout results to the board via the IPC adapter.
 
         Fanout produces dict-shaped tracks/vias (different from the
@@ -2172,6 +2211,21 @@ class FanoutTab(wx.Panel):
                 top layer no longer needs its via). The CLI writer strips
                 them from the file; the GUI must delete them from the live
                 board too (#508 finding 17 -- they were silently discarded).
+            filter_misses: the engine's LAST_FILTER_MISSES (#1641) -- each
+                selected net that had no pad to fan out on this part, and why
+                (a single-pad net, a net with no pad on the part, ...); listed in the
+                completion message, as the CLI lists them in `unmatched`.
+            skipped_interior: the QFN engine's LAST_SKIPPED_INTERIOR (#1717)
+                -- every selected interior pad the stub run's via-drop could
+                not place, listed as the CLI lists them in `skipped_interior`.
+            power_stubs_at_width: the QFN engine's LAST_POWER_STUBS_AT_WIDTH
+                (#1743) -- each escape stub drawn at the track width on a net
+                that reads as power or ground, listed as the CLI lists them
+                in `power_stubs_at_width`, with what widens them.
+            board_setup_vias: the engine's LAST_BOARD_SETUP_VIAS (#1775) --
+                the vias laid below the board's own Board Setup via minimums
+                with "Fix DRC settings" off, listed as the CLI lists them in
+                `board_setup_vias`.
         """
         from kicad_ipc_adapter import (
             begin_commit, get_board, make_track, make_via,
@@ -2374,6 +2428,32 @@ class FanoutTab(wx.Panel):
         msg += f"  {vias_added} vias\n"
         if cap_summary:
             msg += "\n" + cap_summary + "\n"
+        if filter_misses:
+            from bga_fanout import filter_miss_lines
+            msg += self._net_list("Selected nets with no pad to fan out",
+                                  [l.strip() for l in
+                                   filter_miss_lines(filter_misses, flag='')])
+        if skipped_interior:
+            msg += self._net_list(
+                "Selected interior pads given no copper (no clear via-drop "
+                "site)", skipped_interior)
+        if power_stubs_at_width:
+            from qfn_fanout import power_stubs_lines
+            msg += self._net_list(
+                f"Power/ground stubs drawn at the track width "
+                f"({power_stubs_at_width[0]['width']:g} mm)",
+                [f"{r['pad']} {r['net']} ({r['escape']}, {r['why']})"
+                 for r in power_stubs_at_width])
+            msg += "".join(f"{line.strip()}\n"
+                           for line in power_stubs_lines(power_stubs_at_width)[1:])
+        if board_setup_vias:
+            from design_rules import annular_grade_lines, via_size_grade_lines
+            msg += self._net_list(
+                "Vias below the board's Board Setup minimums (Fix DRC settings "
+                "is off; Escalation 'board' sizes the via to them)",
+                annular_grade_lines([r for r in board_setup_vias if 'smallest_ring' in r])
+                + via_size_grade_lines([r for r in board_setup_vias
+                                        if 'smallest_ring' not in r]))
         if failed_nets:
             if fanout_kind == 'qfn':
                 unescaped, flagged = self._qfn_failure_split(failed_nets, tracks,

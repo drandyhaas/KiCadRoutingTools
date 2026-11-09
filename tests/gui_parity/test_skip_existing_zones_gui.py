@@ -255,6 +255,7 @@ def main():
               os.path.join(REPO, 'tests', 'gui_parity')):
         sys.path.insert(0, p)
     app = wx.App(False)          # noqa: F841 - must outlive the dialogs
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
 
     for arm in ARMS:

@@ -73,8 +73,14 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `!GND` | Exclude net named "GND" |
 | `!*VCC*` | Exclude nets containing "VCC" |
 | `"*" "!GND" "!VCC"` | All nets except GND and VCC |
+| `D[3]` | The net named `D[3]` (a pattern that spells a board net is that net, not a `[...]` class, #1641) |
 
 **Note:** Nets starting with "unconnected-" (KiCad pins not connected in schematic) are automatically excluded.
+
+**Selected nothing (#1641):** each `--nets` pattern that selects no ball on the part is printed and listed
+in `JSON_SUMMARY`'s `unmatched`, with its `reason` (`not_on_part`, `single_pad`, `unconnected`, `no_such_net`); `requested` counts only what a
+pattern selected. A `--nets` list none of whose patterns names a net on the board is refused, exit 2, with no
+board written, as `route.py` refuses one.
 
 ## Options
 
@@ -116,9 +122,9 @@ advanced one under the default `--fab-tier auto`; it is warned and counted in
 ### Sizing the escape via to the pitch (issue #158)
 
 The channel engine runs one escape track down the **half-pitch** between adjacent
-via columns, so the via, track, and clearance must fit it or **every** escape
-grazes the neighbouring column's via by a few µm (a sub-clearance DRC violation
-the fanout would otherwise report as a clean `failed: 0`). The budget, per array:
+via columns, so the via, track, and clearance must fit it or an escape grazes
+the vias beside it by a few µm (a sub-clearance DRC violation the fanout would
+otherwise report as a clean `failed: 0`). The budget, per array:
 
 ```
 via_size  ≤  pitch − track_width − 2·clearance        (one escape track per channel)
@@ -129,8 +135,16 @@ Example: at 0.8 mm pitch with `--track-width 0.127 --clearance 0.1`, the escape
 via must be ≤ 0.473 mm — **Ø0.5 grazes (every escape ~13 µm short), Ø0.45 is
 clean** (pair with `--via-drill 0.25` to keep a 0.1 mm annular ring). When handed
 infeasible params, `bga_fanout` prints a `WARNING: escape via ... busts the
-half-pitch budget` with the recommended maximum. The `plan-pcb-routing` skill
-computes this automatically.
+half-pitch budget` and `JSON_SUMMARY.escape_budget` carries the same numbers.
+It names a smaller via, narrower track or smaller clearance only when that value
+clears the floor that would pin it back up (`fab_tiers.enforce_fab_floors`), and
+says which it cannot be otherwise, as at 0.5 mm pitch on the fab floor's 0.25 mm
+via, where neither fits (#1685); it always names `--escape-method dogbone`,
+which runs no track between the via columns but is another escape, which may
+drop balls this one does not. More escape layers is not a remedy: a via spans
+them all. The grazes stay disclosed and are not a failure: `failed` counts
+balls, and every one escaped. The `plan-pcb-routing` skill computes this
+automatically.
 
 On the **top layer** (the balls' own layer) the channel runs between two rows of
 balls instead of vias, so it needs `ball gap ≥ track_width + 2·clearance`, where
@@ -196,6 +210,28 @@ every class to the run clearance (#439), which hid copper laid below a class.
 `--clearance-ceiling <floor>`, as on the route steps: under a ceiling at the
 run clearance every class is at it and the escape is the one-clearance escape
 it always was.
+
+## Board edges and filled graphics (#1677, #1682)
+
+The fanout does not route on the shared obstacle map, so it reads two things no
+ball's copper may enter from the gates that speak for that map and for
+`check_drc`, in `check_drc.py`:
+
+- **`BoardEdgeGate`**: outside the outline, inside a cut-out, or within the edge
+  clearance of either. The clearance is `laid_copper_edge_clearance`: the board's
+  `min_copper_edge_clearance`, else `--clearance`, raised to the fab floor, and
+  only `--clearance` on a project that sets `copper_edge_clearance` to `ignore`.
+  There is no flag: the engine reads the board off `source_path`, on both fronts.
+- **`FilledCopperGate`**: a filled copper graphic foreign to the net, by the rule
+  the map and the checker use. A shape is own copper for the net it is tagged
+  with and the nets its own pads lift it for; a via stays off a net tie's copper
+  even for a tied net, since a drill cuts the bridge.
+
+The under-pad engines stamp both into their grid (a graphic in `_Occ.owned`, which
+is net-aware and takes no ball's home lift) and ask the gates for every via site
+and stub. The channel engine holds the outline and cut-outs as collision tracks
+(`board_copper_tracks`) and asks the gates in `manage_vias`. A ball that cannot
+escape past them is dropped and named, like any other.
 
 ## Plane-ball drops (#424)
 
@@ -405,7 +441,8 @@ bga_fanout/
 - **`find_differential_pairs()`** - Finds P/N pairs in a footprint
 - **`assign_layers_smart()`** - Assigns routes to layers avoiding collisions
 - **`rebalance_layers()`** - Rebalances routes across layers for even distribution
-- **`detect_collisions()`** - Detects track spacing violations
+- **`detect_collisions()`** - Detects track spacing violations between nets and pairs
+- **`pair_self_collisions()`** - Detects a diff pair's two legs colliding with each other (#1684): the `Validated:` line reports legs closer than the pair's spacing, and a pair whose legs touch is dropped and reported failed
 - **`resolve_collisions()`** - Attempts to fix collisions via rerouting
 - **`BGAGrid`** - Analyzes BGA pad grid geometry
 - **`FanoutRoute`** - Represents a single pad's fanout route
@@ -419,7 +456,9 @@ is nothing to fan, so a chain always has a next input), and the run ends with a
 (balls actually attempted, so skipped plane balls and already-fanned nets are
 not counted), `skipped_nc`, `clearance`, `track_width`, `layers`, `drc_grazes`
 (a `check_drc` pass over the output at `--clearance`: `pad_via`,
-`via_segment`, `pad_segment`, `segment_segment`, `total`; #130),
+`via_segment`, `pad_segment`, `segment_segment`, `segment_crossing`, `total`; #130),
+`escape_budget` (the half-pitch overrun and `can_take_effect`, `{}` when the via
+fits; #1685),
 `min_clearance_used`, `deferred_fanout_nets` (nets deliberately left for the
 route step; empty by default), `plane_drop` (per-net
 `gap`/`in_pad`/`existing`/`pour`/`failed` counts and the promised

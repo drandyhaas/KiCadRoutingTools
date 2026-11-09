@@ -29,6 +29,12 @@ route_planes.py on the same files:
           0.8 class -- but not inside 0.3. Negative control: the tab's
           explicit_net_clearances made to return None, i.e. the file unread.
 
+GND pours on F.Cu and B.Cu in those four, since a return via must join two
+layers (#1667), and the tab's two pours are not in its pcb_data yet, so they
+reach the engine as `poured_now`. A last arm pours GND on B.Cu alone: neither
+front places a via, and both say why (the console on the CLI, the completion
+dialog's result on the tab).
+
 In every arm the GUI and CLI must place the SAME vias, and the GUI's GND-via
 config is read back: all copper layers, an edge clearance at or above the fab
 copper-to-edge floor (the CLI's effective_board_edge_clearance), and the
@@ -230,9 +236,10 @@ class _Patched:
         return False
 
 
-def _gui(board_path, off=None, ncl=None):
+def _gui(board_path, off=None, ncl=None, pours=('F.Cu', 'B.Cu'), result=None):
     """The Planes tab's GND vias ({(x, y): via}) and the config it used, with
-    the Net Clearances File `ncl` (None = the field empty)."""
+    the Net Clearances File `ncl` (None = the field empty) and GND poured on
+    `pours`. `result`, a dict, receives the tab's operation result."""
     import add_gnd_vias
     # routing_dialog.py is this branch's swig_gui.py (renamed by the IPC port),
     # and build_pcb_data_from_board takes a KIPY board here: the board is
@@ -255,7 +262,7 @@ def _gui(board_path, off=None, ncl=None):
             kw.pop('net_clearances', None)
         return real(pcb_data, net, dist, config, obstacles, coord, **kw)
 
-    config = {'assignments': [(['GND'], ['B.Cu'])],
+    config = {'assignments': [(['GND'], list(pours))],
               'via_size': VIA, 'via_drill': DRILL, 'clearance': BASE,
               'track_width': 0.2, 'grid_step': 0.1, 'add_gnd_vias': True,
               'gnd_via_distance': 3.0, 'gnd_via_net': 'GND',
@@ -267,6 +274,8 @@ def _gui(board_path, off=None, ncl=None):
             else:
                 with off():
                     tab._run_create_planes(config)
+        if result is not None:
+            result.update(tab._operation_result)
         gnd = {n.net_id for n in tab.pcb_data.nets.values() if n.name == 'GND'}
         vias = {(round(v['x'], 3), round(v['y'], 3)): SimpleNamespace(**v)
                 for v in tab._new_vias if v['net_id'] in gnd}
@@ -275,14 +284,15 @@ def _gui(board_path, off=None, ncl=None):
     return vias, seen.get('config')
 
 
-def _cli(d, board_path, ncl=None):
+def _cli(d, board_path, ncl=None, pours=('F.Cu', 'B.Cu'), log=None):
     """route_planes.py's GND vias on the same files ({(x, y): via}), or None;
-    `ncl` is its --net-clearances file (None = omitted)."""
+    `ncl` is its --net-clearances file (None = omitted), and GND pours on
+    `pours`. `log`, a list, receives its stdout."""
     from kicad_parser import parse_kicad_pcb
     out = os.path.join(d, 'out_cli.kicad_pcb')
     r = subprocess.run(
         [sys.executable, '-X', 'utf8', os.path.join(REPO, 'py_router', 'route_planes.py'),
-         board_path, out, '--nets', 'GND', '--plane-layers', 'B.Cu',
+         board_path, out, '--nets', *['GND'] * len(pours), '--plane-layers', *pours,
          '--clearance', str(BASE), '--via-size', str(VIA), '--via-drill', str(DRILL),
          '--track-width', '0.2', '--grid-step', '0.1',
          '--add-gnd-vias', '--gnd-via-distance', '3.0',
@@ -291,6 +301,8 @@ def _cli(d, board_path, ncl=None):
     if r.returncode != 0 or not os.path.exists(out):
         print(r.stdout[-2000:] + r.stderr[-2000:])
         return None
+    if log is not None:
+        log.append(r.stdout)
     pcb = parse_kicad_pcb(out)
     gnd = {nid for nid, n in pcb.nets.items() if n.name == 'GND'}
     return {(round(v.x, 3), round(v.y, 3)): v for v in pcb.vias if v.net_id in gnd}
@@ -314,6 +326,7 @@ def main():
     from kicad_routing_plugin import routing_dialog as swig_gui
 
     app = wx.App(False)          # noqa: F841 - must outlive the dialogs
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
 
     real_map = obstacle_map.build_base_obstacle_map
@@ -392,6 +405,23 @@ def main():
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    print('--- one layer')
+    d = tempfile.mkdtemp(prefix='gndgui_one_')
+    try:
+        board, _ = _stage(d, ARMS[0])
+        res, log = {}, []
+        gui, _cfg = _gui(board, pours=('B.Cu',), result=res)
+        cli = _cli(d, board, pours=('B.Cu',), log=log)
+        why = 'poured only on B.Cu'
+        check('[one layer] the Planes tab places no return via', gui == {}, f'{sorted(gui)}')
+        check('[one layer] its result carries the reason for the completion dialog',
+              any(why in w for w in res.get('gnd_via_warnings') or ()),
+              f"{res.get('gnd_via_warnings')}")
+        check('[one layer] route_planes.py writes no return via', cli == {}, f'{sorted(cli or ())}')
+        check('[one layer] its log carries the same reason', bool(log) and why in log[0])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
     print('=' * 60)
     if FAILS:
         print(f"FAILED ({len(FAILS)}):")
@@ -400,7 +430,7 @@ def main():
         return 1
     print("PASS: the Planes tab's GND return vias keep class, .kicad_dru and "
           "every-layer clearance, take a Net Clearances File as given, and "
-          "match route_planes.py")
+          "match route_planes.py, on two GND layers and on one")
     return 0
 
 

@@ -83,6 +83,7 @@ def main():
               os.path.join(REPO, 'tests', 'gui_parity')):
         sys.path.insert(0, p)
     app = wx.App(False)  # noqa: F841  (before any wx object)
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
 
     # routing_dialog.py is this branch's swig_gui.py (renamed by the IPC port),

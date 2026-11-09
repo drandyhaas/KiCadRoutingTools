@@ -96,6 +96,7 @@ def main():
     sys.path.insert(0, os.path.dirname(REPO))
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     import json
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from fake_ipc_board import install as _install_fake_board, build_pcb_data_like_ipc

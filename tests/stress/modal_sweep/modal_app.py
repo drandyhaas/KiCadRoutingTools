@@ -608,9 +608,12 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
     exclude: comma-separated board names to SKIP this run -- the ad-hoc lever
             for multi-hour monsters that set the wall-clock floor (on sets
             11-20, four boards are half the cost and all of the 11 h floor).
-    limit:  keep only the N CHEAPEST boards -- a smoke test wants fast feedback,
-            and the default longest-first order would otherwise hand you the
-            50-minute monster first.
+    limit:  N > 0 keeps only the N CHEAPEST boards -- a smoke test wants fast
+            feedback, and the default longest-first order would otherwise hand
+            you the 50-minute monster first. N < 0 drops the |N| most EXPENSIVE
+            boards, which set an A/B's wall-clock floor (cloud_replay_sets
+            defaults to -3); it does nothing with `boards`. Both rank by
+            sweep_lib.load_cost_table.
     stage:  'full' = every arm x every board (minus board_value.json excludes).
             'screened' = successive halving: every arm first runs the ~12-board
             SCREEN set from board_value.json (~$0.15/arm); arms whose summed
@@ -671,9 +674,14 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
         missing = want - {b for _, b in board_list}
         if missing:
             raise SystemExit(f"not found in sets {set_list}: {sorted(missing)}")
-    if limit:
+    if limit > 0:
         board_list = sorted(board_list,
                             key=lambda sb: (costs.get(sb[1]) or {}).get("seconds", 1e9))[:limit]
+    elif limit < 0 and not boards:
+        # boards named by --boards are run as named
+        board_list, slowest = sl.drop_slowest(board_list, costs, -limit)
+        print(f"  --limit {limit}: dropped the {len(slowest)} slowest board(s): "
+              + ", ".join(f"{b} ({sec / 60:.0f} min)" for sec, _s, b in slowest))
 
     tasks = sl.build_tasks(arm_specs, board_list, costs)
     boards = board_list  # keep the downstream name

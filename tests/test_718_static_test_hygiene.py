@@ -719,9 +719,9 @@ _DECLARED_BASELINE_COUNT = 8
 #: `manifest_set_results_2026.json`, which would be a measurement. The pattern
 #: says what the shape actually is.
 _NOT_A_BASELINE = (
-    (r'tests/stress/manifest_set\d+(monster)?\.json$',
-     'stress-corpus manifests -- set1..set30 plus the three `monster` sets: '
-     'they name the boards to fetch and record nothing'),
+    (r'tests/stress/manifest_set\d+(monster|arc)?\.json$',
+     'stress-corpus manifests -- set1..set30, the three `monster` sets and '
+     '`set1arc`: they name the boards to fetch and record nothing'),
     (r'tests/stress/modal_sweep/arms\.[A-Za-z0-9_]+\.json$',
      'sweep ARM configurations, an input to a study. Deliberately not the '
      'whole modal_sweep/ directory: board_value.json and '

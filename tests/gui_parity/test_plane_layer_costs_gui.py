@@ -91,6 +91,7 @@ def main():
         return 0
 
     app = wx.App(False)          # noqa: F841 - must outlive the dialog
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
 
 # ipc-migration: the IPC RoutingDialog (routing_dialog.py, this branch's

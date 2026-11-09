@@ -49,6 +49,7 @@ RUN_ALL_TIMEOUT = 1800
 
 FIX = os.path.join(TESTS_DIR, 'fixtures', '1067', 'u30_crop.kicad_pcb')
 TOOL = run_utils.tool('place_fanout_clearance.py')
+NO_ROOM = os.path.join(TESTS_DIR, 'fanout_clearance_no_room.py')
 LIMIT = 2.5
 MOVED = re.compile(r'^Moved \d+ cap\(s\); resolved \d+/\d+ initial '
                    r'violations(?: \(\d+ freed by via-nudge\))?; \d+ '
@@ -65,9 +66,9 @@ def _intent_file(td):
     return path
 
 
-def _run(td, name, extra=()):
+def _run(td, name, extra=(), tool=None):
     out = os.path.join(td, name + '.kicad_pcb')
-    r = subprocess.run([sys.executable, '-X', 'utf8', TOOL, FIX, out,
+    r = subprocess.run([sys.executable, '-X', 'utf8', tool or TOOL, FIX, out,
                         '--clearance', '0.1'] + list(extra),
                        capture_output=True, text=True, encoding='utf-8',
                        errors='replace', cwd=ROOT)
@@ -216,7 +217,9 @@ def test_a_cap_left_grazing_is_compared():
     # 0.6 until #1520 priced the pads' round corners, which reorders the
     # descent: at 0.6 the ungated run now boxes C63 in as well
     budget = ['--max-displacement-cap', '2.0', '--max-displacement', '1.0']
-    _out, stdout = _run(td, 'tight', budget + ['--intent', ip])
+    # #1681's make-room rung held off: with it the gated pass moves another
+    # part out of C63's way and is kept, at every budget tried
+    _out, stdout = _run(td, 'tight', budget + ['--intent', ip], tool=NO_ROOM)
     s = _summary(stdout)
     cmp_ = s['decap']['compared']
     assert not s['decap']['broken'], s['decap']['broken']

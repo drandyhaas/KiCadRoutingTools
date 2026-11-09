@@ -5,7 +5,7 @@ the facing conjunct (its plastic says nothing about which way it is pressed),
 and `check_floorplan` printed `overhang ... pass` with no facing word -- so a
 switch whose actuator points along its edge read as graded and passed. The
 clause now reads `facing exempt (<policy>: ...)`, and a declared `mating_face`
-turns the conjunct on (`facing north [declared, strong] FAIL`).
+turns the conjunct on (`facing north [declared, unverified] FAIL`).
 """
 import os
 import sys
@@ -45,7 +45,9 @@ class TheExemptFacingClause(unittest.TestCase):
                          'mating_face': '-y'})
         self.assertIn(f['disposition'], ('pass', 'fail'))
         self.assertNotIn('exempt', tail)
-        self.assertIn('[declared, strong]', tail)
+        # #1652: a declared face reads `unverified`; it still fails at ERROR
+        self.assertIn('[declared, unverified]', tail)
+        self.assertTrue(f['strong'])
 
 
 if __name__ == '__main__':

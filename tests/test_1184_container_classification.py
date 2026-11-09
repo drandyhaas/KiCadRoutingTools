@@ -112,7 +112,8 @@ class AnSmdHolderIsABody(unittest.TestCase):
         self.assertEqual(g['containers'], {})
         self.assertTrue([p for p in g['courtyard_blocking_pairs']
                          if {p.a, p.b} == {'BAT1', 'DC1'}])
-        self.assertEqual((veto or (None,))[0], 'courtyard', veto)
+        # BAT1 draws no courtyard: not KiCad's courtyards_overlap (#1744)
+        self.assertEqual((veto or (None,))[0], 'estimated_courtyard', veto)
 
     def test_locked(self):
         """The issue: locked, the seeder exempted it and the grader did
@@ -121,7 +122,8 @@ class AnSmdHolderIsABody(unittest.TestCase):
         self.assertEqual(g['containers'], {})
         self.assertTrue([p for p in g['courtyard_blocking_pairs']
                          if {p.a, p.b} == {'BAT1', 'DC1'}])
-        self.assertEqual((veto or (None,))[0], 'courtyard', veto)
+        # BAT1 draws no courtyard: not KiCad's courtyards_overlap (#1744)
+        self.assertEqual((veto or (None,))[0], 'estimated_courtyard', veto)
 
 
 class AnOutlineNeverGates(unittest.TestCase):
@@ -176,9 +178,11 @@ class TheGuards(unittest.TestCase):
                 ' (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "N1"))\n')), {})
 
     def test_mostly_smd_copper_makes_it_a_body(self):
+        # On a second net: one net's pads walling the part in would make it
+        # a shield frame's fence instead (#1722), which is not this guard.
         smd = ''.join(
             f'    (pad "s{i}" smd rect (at {-17 + i} 13.5) (size 0.5 0.5)'
-            f' (layers "F.Cu") (net 1 "N1"))\n' for i in range(30))
+            f' (layers "F.Cu") (net 2 "N2"))\n' for i in range(30))
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(self._kinds(td, smd), {})
 

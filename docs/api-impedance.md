@@ -125,6 +125,14 @@ reads a wider gap over the pad and just past it, where the pour keeps its
 clearance from the PAD; that length is reported as `at its own pad` and does
 not break the declaration (#1582), while a pad with no pour beside it does.
 
+KiCad fills a pour at the larger of its zone clearance and the net class of
+each item it clears, so a line whose net class is the declared gap gets that
+gap from a pour whose zone clearance is below it. Step 3 reads the gap at exact
+distance on the fill stored in the board (#1624), as `fill_for_delivery.py`
+writes it; on a board with no stored fill it reads the fill model at the
+project's class clearances, to within half a model cell, and says so. It runs
+no refill: fill the board first to grade on KiCad's own fill.
+
 ## Width for a target impedance
 
 Bisection solvers over the formulas above (search range 0.05–5.0 mm; return
@@ -208,6 +216,21 @@ calculate_width_for_impedance(pcb, layer_name, target_z0,
 
 Inverse: returns `{'calculated_width_mm', 'calculated_width_mils',
 'verified_z0', 'is_coplanar', ...}` (or an `'error'` key).
+
+```python
+differential_gap_for_impedance(pcb, layer_name, trace_width, target_zdiff,
+                               min_gap, max_gap,
+                               coplanar_gap=0.0) -> Optional[Tuple[float, float]]
+```
+
+The other inverse, at a fixed width (#1747): the P/N gap in
+`[min_gap, max_gap]` that holds `target_zdiff`, with the differential
+impedance there, as `(gap, zdiff)`. Where no gap in the range reaches the
+target, the nearest end comes back with its own impedance -- `min_gap` when
+even it leaves the pair above the target (a narrow trace's own Z0 holds Zdiff
+up), `max_gap` when the pair is below it there. The gap is rounded up to
+0.1 µm, so it never drops under `min_gap`; `None` when the layer has no
+impedance model. `route_diff` uses it for a pair narrowed to fit.
 
 ```python
 calculate_layer_widths_for_impedance(pcb, layers, target_z0,
@@ -374,6 +397,14 @@ because two of them were silently wrong on real boards.
   needs a two-plane closed form or fab-calibrated tables. Treat inner-layer
   differential targets on strongly asymmetric stacks as ~5% figures, and
   confirm against your fab's coupon data when the window is tight.
+
+A project that sized its controlled-impedance class itself (a fab or field
+solver's width and gap) can keep that copper and still have it graded:
+`--impedance <ohms> --impedance-declare-only` on `route.py` / `route_diff.py`
+records the target (a `declare_only` net_impedance record, with each pair's
+built gap) and changes no copper, and no later step recomputes widths from
+it (#1630). `check_impedance.py` then reads the ohms back off the shipped
+copper on this module's formulas and names a net more than 10% off.
 
 Post-route verification lives in `check_impedance.py`:
 

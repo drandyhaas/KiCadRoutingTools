@@ -285,6 +285,15 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
     the floors in place. Without it, say the check did not run rather than
     implying it passed.
 
+    With ``authored_from``, a size floor is judged per object (#1627): each
+    track, via and hole against the floor that binds IT in the authored
+    project -- the Board Setup minimum, or the minimum an authored
+    ``.kicad_dru`` rule sets for it (resolved as check_drc resolves it) -- so
+    copper a scoped rule allows is not counted, and is reported under
+    ``measured_kept`` with ``held_by_rule`` and the rules. Against the
+    recorded ``fab_floor_origin`` there are no authored rules on disk, and the
+    count stays against the one origin value.
+
     The original board is also the REFERENCE (#1198): a floor its own copper
     breaks, at least as badly as this board does, is ``reference_too`` --
     reported, not counted against this board. A board that breaks it worse,
@@ -354,6 +363,15 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
     below = count_below_floors(board, _sizes) if _sizes else {}
     ref_below = (count_below_floors(authored_from, _sizes)
                  if (_sizes and authored_from) else {})
+    # #1627: with the authored board in hand, each object is compared with
+    # the floor that binds IT in the authored project -- Board Setup, then the
+    # authored .kicad_dru (never the graded board's: a rule a chain added
+    # cannot excuse its own copper) -- as check_drc resolves it.
+    per_obj = ref_obj = {}
+    if _sizes and authored_from:
+        from fix_kicad_drc_settings import size_values_below_authored
+        per_obj = size_values_below_authored(board, _sizes, authored_from)
+        ref_obj = size_values_below_authored(authored_from, _sizes, authored_from)
     relaxed = []
     unmeasured = []
     vacuous = []
@@ -378,6 +396,34 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
                 vacuous.append({'key': key, 'label': label, 'authored': was,
                                 'why': f'no {_FLOOR_OBJECT.get(key, "object")} '
                                        f'on the board'})
+            elif key in per_obj:
+                # #1627: the objects below their OWN authored floor
+                po = per_obj[key]
+                rv = (ref_obj.get(key) or {}).get('below') or []
+                if not po['below']:
+                    if po['held_by_rule']:
+                        measured_kept.append({
+                            'key': key, 'label': label, 'authored': was,
+                            'on_board': is_,
+                            'measured_by': 'authored .kicad_dru rules',
+                            'violations': 0,
+                            'held_by_rule': po['held_by_rule'],
+                            'rules': po['rules']})
+                    continue
+                worst = min(po['below'])
+                row = {'key': key, 'label': label, 'authored': was,
+                       'on_board': worst,
+                       'measured_by': 'authored floor per object',
+                       'violations': len(po['below'])}
+                if po['held_by_rule']:
+                    row['held_by_rule'] = po['held_by_rule']
+                    row['rules'] = po['rules']
+                if rv and worst >= min(rv) - _MIN_TOL:
+                    row['reference'] = min(rv)
+                    row['reference_violations'] = len(rv)
+                    reference_too.append(row)
+                else:
+                    relaxed.append(row)
             elif is_ < was - 1e-9:
                 ref = ref_min.get(key)
                 row = {'key': key, 'label': label, 'authored': was,
@@ -596,6 +642,19 @@ def _grade(a, doc):
             extra[name] = {'ran': True, 'exit': c, 'clean': c == 0}
     doc['components'] = extra
 
+    # ---- 2b. copper on another net's pad (#1680) ---------------------------
+    # `blocking` counts these with every other DRC item, as a number. A short
+    # is the one a reader must not have to go and find, so it is named.
+    contacts, contacts_err = [], None
+    if layers and not lyr_err:
+        try:
+            from kicad_parser import parse_kicad_pcb
+            from pad_contact import shipped_report
+            contacts = shipped_report(parse_kicad_pcb(a.board))
+        except Exception as exc:                                # noqa: BLE001
+            contacts_err = f'{type(exc).__name__}: {exc}'
+    doc['pad_contacts'] = contacts
+
     # ---- 3. the fab floors this board grades itself against ----------------
     try:
         floors = fab_floor_integrity(a.board, a.authored_from,
@@ -639,19 +698,57 @@ def _grade(a, doc):
             continue
         if _name == 'drc.dru_rules':
             # #1490: a .kicad_dru clearance rule check_drc does not model;
-            # #1527: or a `disallow` rule (token) it does not grade.
+            # #1527: or a `disallow` rule (token) it does not grade; #1707:
+            # or a `via_count` rule whose condition it does not read.
             reasons.append(
-                '.kicad_dru clearance or disallow rule(s) nothing grades: '
+                '.kicad_dru clearance, via_count or disallow rule(s) nothing grades: '
                 + ', '.join(repr(r) for r in
                             (_comps.get('drc') or {}).get('ungraded_rules', ()))
                 + ' -- the copper they bind is not graded at the rule here and '
                   'KiCad still enforces them')
+            continue
+        if _name == 'diff_pairs.unjoined_pairs':
+            # #1629: connected pairs whose skew nothing here measured.
+            _uj = (_comps.get('diff_pairs') or {}).get('unjoined_connected') or ()
+            reasons.append(
+                f'{len(_uj)} diff pair(s) connected but not measured (pads not '
+                f'joined by track copper): '
+                + ', '.join(f"{r['p_net']} / {r['n_net']}" for r in _uj[:4])
+                + (' ...' if len(_uj) > 4 else '')
+                + ' -- their skew is ungraded here and KiCad still grades it')
             continue
         _c = _comps.get(_name)
         if isinstance(_c, dict) and _c.get('declared'):
             notes.append(f'{_name}: the board DECLARES it '
                            f'({", ".join(sorted(_c["declared"]))}) and nothing '
                            f'grades it -- {_c.get("reason")}')
+    # #1626: what the board's own severities make KiCad warnings, or a check
+    # KiCad does not run -- check_drc lists them and does not count them.
+    _drc_c = _comps.get('drc') or {}
+    if _drc_c.get('severity_warnings'):
+        notes.append(f"{_drc_c['severity_warnings']} DRC finding(s) KiCad reports "
+                     f"as WARNINGS at the board's own severities (a .kicad_dru "
+                     f"rule's (severity warning) or the project's "
+                     f"rule_severities) -- check_drc lists them under WARNINGS")
+    if _drc_c.get('library_pad_gaps'):
+        # #1628: library geometry, not graded (#1306) -- but KiCad's DRC of
+        # this board will show them, so a DONE says so
+        _unv = _drc_c.get('library_pad_gaps_unverified')
+        notes.append(f"KiCad will report "
+                     + (f"up to {_drc_c['library_pad_gaps']} pair(s) ({_unv} may be "
+                        f"cleared by a .kicad_dru rule check_drc cannot fully read)"
+                        if _unv else f"{_drc_c['library_pad_gaps']} pair(s)")
+                     + f" of "
+                     f"library pads as clearance errors, once per copper layer "
+                     f"they share (one footprint's pads closer than their "
+                     f"clearance; no route can clear "
+                     f"them -- a .kicad_dru rule, a pad/footprint clearance "
+                     f"override or a net tie can; check_drc's WARNINGS name "
+                     f"the pairs)")
+    if _drc_c.get('severity_ignored'):
+        notes.append(f"{_drc_c['severity_ignored']} DRC finding(s) in a check the "
+                     f"project's rule_severities set to ignore, which KiCad "
+                     f"does not run")
     # ONE rule for what a `blocking` is (`converge.blocking_defect`, #1075):
     # `false` is falsy, so it used to read as a clean board and exit DONE.
     from converge import blocking_defect
@@ -663,6 +760,12 @@ def _grade(a, doc):
                        'null is not a zero')
     elif blocking:
         reasons.append(f'blocking = {blocking}')
+    if contacts_err:
+        reasons.append(f'pad contacts: did not run ({contacts_err})')
+    elif contacts:
+        from pad_contact import format_rows
+        reasons.append(f"{len(contacts)} via(s)/track(s) on another net's pad, "
+                       f"a short: " + '; '.join(format_rows(contacts, limit=5)))
     for name, r in sorted(extra.items()):
         if r.get('error'):
             reasons.append(f'{name}: did not run ({r["error"]})')
@@ -757,7 +860,7 @@ def _grade(a, doc):
     return code_out
 
 
-def main(argv=None):
+def build_parser():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -787,7 +890,11 @@ def main(argv=None):
                     help='per-instrument wall clock (default 3600). A timeout '
                          'is recorded as exit 124, never raised')
     ap.add_argument('--json', default=None, metavar='PATH')
-    a = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
 
     if not os.path.isfile(a.board):
         print(f'no such board: {a.board}', file=sys.stderr)

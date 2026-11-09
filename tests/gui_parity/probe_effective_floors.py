@@ -38,6 +38,7 @@ from kicad_routing_plugin import routing_dialog
 
 board_path = sys.argv[1]
 app = wx.App(False)
+wx.Log.SetActiveTarget(wx.LogStderr())
 # IPC: no in-process board -- back the plugin's "live board" with the file.
 from fake_ipc_board import install as _install_fake_board
 board = _install_fake_board(board_path)

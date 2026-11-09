@@ -33,6 +33,8 @@ For one manifest this reads:
                        track, so a net only a pour scopes is `pour_only`
       repair_planes.py --nets with --plane-layers, else the zones on the
                        board at that step (filtered by --nets/--plane-layers)
+      check_join.py    with --keep-staged, the one net its hand join lays
+                       (#1637); without it a check, never in the lineage
       qfn/bga_fanout   escape stubs on the part's pads: context only
                        (`escaped_by`), never routing -- a stub joins no pads
       no net           copy_board.py, cp, mv (a board copied); add_rule_area.py
@@ -81,6 +83,7 @@ for _d in (str(HERE), str(REPO / 'py_router'), str(REPO / 'py_placer'),
 
 import cli_argv_check  # noqa: E402
 from redo_stress_test import (board_io, compute_prune_keep,  # noqa: E402
+                              refused_commands,
                               is_check_cmd, parse_manifest)
 
 #: Self-recording steps that scope no net: they copy a board, draw a rule
@@ -92,7 +95,7 @@ NO_SCOPE_TOOLS = {'place_fanout_clearance.py', 'copy_board.py', 'cp', 'mv',
 FANOUT_TOOLS = {'qfn_fanout.py', 'bga_fanout.py'}
 REPAIR_TOOLS = {'repair_planes.py', 'route_disconnected_planes.py'}
 #: Step kinds that connect pads (a net they scope is routed by the chain).
-ROUTING_KINDS = {'route', 'pair', 'repair'}
+ROUTING_KINDS = {'route', 'pair', 'repair', 'join'}
 
 
 def _quiet(fn, *a, **k):
@@ -216,6 +219,11 @@ def step_scope(argv, cwd, pcb, zones):
             return 'repair', {n for n in nets if n in board_nets}, ''
         return 'repair', {n for n, ly in zones
                           if (not nets or n in nets) and (not layers or ly in layers)}, ''
+    if tool == 'check_join.py':
+        # A kept board (--keep-staged) lays a hand join of ONE net (#1637);
+        # a pure check never reaches the lineage (is_check_cmd).
+        net = ns.get('net')
+        return 'join', {net} if net in board_nets else set(), ''
     if tool in FANOUT_TOOLS:
         from net_queries import matches_net_filter
         ref = ns.get('component')
@@ -253,7 +261,7 @@ def lineage_scope(manifest, board=None):
     chain's unrouted input; by default the first lineage command's input."""
     from kicad_parser import parse_kicad_pcb
     cmds = parse_manifest(manifest)
-    keep, info = compute_prune_keep(cmds)
+    keep, info = compute_prune_keep(cmds, refused=refused_commands(cmds, manifest))
     board = board or input_board(cmds, keep, manifest)
     rep = {'manifest': str(manifest), 'board': board,
            'final': info.get('final_board'), 'lineage': [],

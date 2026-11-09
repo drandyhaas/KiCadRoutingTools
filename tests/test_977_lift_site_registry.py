@@ -74,6 +74,10 @@ REGISTRY = {
                         'working map clones it and prepare_obstacles_inplace '
                         'lifts per net, and the fallback path clones it '
                         'through build_single_ended_obstacles'),
+    ('py_router/diff_pair_custody.py', '_single_ended_engine'): (
+        CONSUMER_LIFTS, "the member fallback's single-ended base map (#1679): "
+                        'each member routes on a clone from '
+                        'build_single_ended_obstacles, which lifts'),
     ('py_router/obstacle_cache.py', 'build_working_obstacle_map'): (
         CONSUMER_LIFTS, 'the shared working map, lifted per net by '
                         'prepare_obstacles_inplace and put back by '
@@ -111,6 +115,13 @@ REGISTRY = {
                  '(#908 wired it into the single-ended paths only)'),
     ('py_router/route_diff.py', 'batch_route_diff_pairs'): (
         NO_LIFT, 'diff-pair base maps; see build_diff_pair_obstacles'),
+    ('py_router/routing_context.py', 'build_leg_base'): (
+        NO_LIFT, "the hybrid legs' fallback base map (#1736), stamped at the "
+                 "call's track width; the legs route on a clone from "
+                 'build_diff_pair_leg_obstacles; see build_diff_pair_obstacles'),
+    ('py_router/route_diff.py', '_pair_map_builder'): (
+        NO_LIFT, 'the base map of a pair narrowed to fit (#1742), built as its '
+                 "geometry's diff-pair base map is; see build_diff_pair_obstacles"),
     ('py_router/bga_fanout/__init__.py', '_generate_bga_fanout_core'): (
         NO_LIFT, 'BGA fanout escapes; built for every fanned net at once, so '
                  'the old bake never fired here either'),

@@ -39,7 +39,9 @@ sys.path.insert(0, TESTS_DIR)
 from kicad_parser import (BoardInfo, Net, Pad, PCBData, Segment,  # noqa: E402
                           StackupLayer, Via, parse_kicad_pcb)
 from net_queries import (net_match_length, net_pads_joined,  # noqa: E402
-                         pin_pair_path_length, _pad_holds_point)
+                         pin_pair_path_length, _pad_holds_point,
+                         _release_key, _stackup_height_nm,
+                         length_measure_release)
 from run_utils import evidence  # noqa: E402
 
 NET = 7
@@ -92,11 +94,14 @@ def quiet(fn, *a):
 def main():
     # 1. Synthetic.
     pcb, pa, pb = board([0.0, 10.0])
-    per_step = pcb.get_via_barrel_length('F.Cu', 'B.Cu') / 3.0
-    want = 10.0 + 2 * 2 * per_step          # F.Cu -> In2.Cu at each end
+    # F.Cu -> In2.Cu at each end, at the stackup between them as KiCad
+    # charges it (#1623; from 10.0.2 half of the inner layer ending the span)
+    half = _release_key(length_measure_release()) >= (10, 0, 2)
+    barrel = _stackup_height_nm(pcb, 'F.Cu', 'In2.Cu', half) / 1e6
+    want = 10.0 + 2 * barrel
     path = pin_pair_path_length(pcb, NET, pa, pb)
-    check('fixture: the stackup gives the via a barrel', per_step > 0,
-          f'{per_step:.4f} mm per layer step')
+    check('fixture: the stackup gives the via a barrel', barrel > 0,
+          f'{barrel:.4f} mm F.Cu -> In2.Cu')
     check('two vias-in-pad with the track on In2.Cu: the pads are joined',
           net_pads_joined(pcb, NET))
     check('the pin-pair path is the track plus each barrel F.Cu -> In2.Cu',

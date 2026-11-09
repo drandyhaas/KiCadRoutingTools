@@ -153,7 +153,9 @@ def export(board_text, board_dir, refs, cli=None, cache=CACHE):
     out_dir = os.path.join(cache, key)
     glb = os.path.join(out_dir, 'parts.glb')
     meta = os.path.join(out_dir, 'export.json')
-    note = ', '.join(s for s in (f"{counts['twin']} .wrl -> .step" if counts['twin'] else '',
+    note = ', '.join(s for s in (f"{counts['embedded']} embedded in the board"
+                                 if counts['embedded'] else '',
+                                 f"{counts['twin']} .wrl -> .step" if counts['twin'] else '',
                                  f"{counts['named']} found by file name" if counts['named'] else '',
                                  f"{counts['found']} found on the web" if counts['found'] else '')
                      if s)

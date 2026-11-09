@@ -29,6 +29,10 @@ MIN_AMPLITUDE = 0.2  # mm - minimum useful meander amplitude
 MIN_SEGMENT_LENGTH = 0.001  # mm - minimum meaningful segment length
 COLINEAR_DOT_THRESHOLD = 0.99  # dot product threshold for colinearity check
 POSITION_TOLERANCE = 0.01  # mm - tolerance for position comparisons
+# A distance within this of a clearance is AT it (#1703): KiCad's one-nanometre
+# unit, so a bump laid exactly at the pair's clearance is not refused on float
+# noise.
+AT_CLEARANCE_MM = 1e-6
 CORNER_BLOAT_FACTOR = 0.42  # sqrt(2) - 1, extra copper extension at 90-degree corners
 SPATIAL_CELL_SIZE = 2.0  # mm - spatial index cell size
 
@@ -470,6 +474,26 @@ def _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin) -> bool:
     return True
 
 
+def _keepout_gate(pcb_data):
+    """check_drc.copper_keepout_gate for the amplitude searches (#1761):
+    None when the board forbids copper nowhere."""
+    if pcb_data is None or getattr(pcb_data, 'board_info', None) is None:
+        return None
+    from check_drc import copper_keepout_gate
+    return copper_keepout_gate(pcb_data)
+
+
+def _bump_in_keepout(refuses, bump_segs, width, layer, net_ids) -> bool:
+    """True when a bump's copper (its centreline segments at `width`, on
+    `layer`) enters a keep-out forbidding it to any of `net_ids` (#1761)."""
+    for nid in net_ids:
+        if refuses([Segment(start_x=bx1, start_y=by1, end_x=bx2, end_y=by2,
+                            width=width, layer=layer, net_id=nid)
+                    for bx1, by1, bx2, by2 in bump_segs]):
+            return True
+    return False
+
+
 # Spatial-query slack for foreign copper wider than the config defaults (#370
 # B1): the per-object checks below grow the keep-out by (width - track_width)/2
 # (or (via.size - via_size)/2), so the cell queries must reach at least that much
@@ -664,7 +688,6 @@ def get_safe_amplitude_at_point(
     corner_margin = net_half * CORNER_BLOAT_FACTOR
     required_clearance = net_half + config.track_width / 2 + config.clearance + meander_clearance_margin + corner_margin
     via_clearance = config.via_size / 2 + net_half + config.clearance + meander_clearance_margin + corner_margin
-    paired_clearance = net_half + config.track_width / 2 + config.clearance
     pad_clearance = net_half + config.clearance + corner_margin
     # #1136: a foreign item (the pair partner included) is priced at the
     # clearance check_drc grades the pair at on this layer
@@ -681,8 +704,23 @@ def get_safe_amplitude_at_point(
         # the P/N partner at the pair's own value (#1134): route_diff builds
         # the coupled run at a gap raised to the class (#530) and to any
         # .kicad_dru rule binding the pair (#1145), so the partner sits at it
-        paired_clearance = net_half + config.track_width / 2 + config.pair_clearance(
-            net_id, paired_net_id, layer)
+        paired_base = net_half + config.pair_clearance(net_id, paired_net_id, layer)
+
+    def _seg_keepout(other_seg):
+        """The centreline distance a bump must keep from `other_seg`."""
+        if other_seg.net_id == paired_net_id:
+            # #1703: the partner at its OWN copper (the pair's width, not the
+            # run's base width), and a bump may sit AT the pair's clearance:
+            # its root lies on the routed centreline, one pitch (width + gap)
+            # from the partner, and a gap equal to the clearance is legal.
+            # One nanometre (KiCad's unit) takes the float noise out of that
+            # comparison: 0.3499999999999943 against 0.35 refused every bump.
+            return paired_base + (other_seg.width or 0.0) / 2.0 - AT_CLEARANCE_MM
+        c = required_clearance if _seg_clr is None else _seg_clr(other_seg.net_id)
+        # Foreign copper at its REAL width (#370 B1): a wide power trunk's
+        # edge extends (width - track_width)/2 beyond the generic keep-out.
+        # max() keeps the common case identical.
+        return c + max(0.0, (other_seg.width - config.track_width) / 2.0)
     if chamfer is None:
         chamfer = resolve_meander_chamfer(config, net_id, layer, own_width)
 
@@ -697,6 +735,10 @@ def get_safe_amplitude_at_point(
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     edge_margin = edge_clearance + net_half
     edge_geom = _board_edge_geom(pcb_data)
+    # #1761: nor may a bump enter a keep-out the route kept out of (a
+    # tracks-not-allowed rule area, a net-filtered keep-out), at the arms'
+    # copper (centreline + half the net's width), as check_drc grades it.
+    _ko_refuses = _keepout_gate(pcb_data)
 
     # Binary search for safe amplitude
     # Start with max_amplitude and reduce if there are conflicts
@@ -725,6 +767,9 @@ def get_safe_amplitude_at_point(
         # interior cutout (real Edge.Cuts geometry; bbox fallback, #370 B1).
         if not _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin):
             continue  # try a smaller amplitude that stays inside the outline
+        if _ko_refuses and _bump_in_keepout(_ko_refuses, bump_segs, net_w, layer,
+                                            (net_id,)):
+            continue  # try a smaller amplitude that stays out of the area
 
         # Use spatial index if available, otherwise fall back to full iteration
         if clearance_index is not None:
@@ -746,16 +791,7 @@ def get_safe_amplitude_at_point(
                     if other_seg.net_id == net_id:
                         continue
 
-                    # For paired net (intra-pair meanders), use minimum clearance
-                    if other_seg.net_id == paired_net_id:
-                        check_clearance = paired_clearance
-                    else:
-                        check_clearance = (required_clearance if _seg_clr is None
-                                           else _seg_clr(other_seg.net_id))
-                    # Foreign copper at its REAL width (#370 B1): a wide power
-                    # trunk's edge extends (width - track_width)/2 beyond the
-                    # generic keep-out. max() keeps the common case identical.
-                    check_clearance += max(0.0, (other_seg.width - config.track_width) / 2.0)
+                    check_clearance = _seg_keepout(other_seg)
 
                     # Check segment-to-segment distance
                     dist = segment_to_segment_distance(
@@ -822,14 +858,7 @@ def get_safe_amplitude_at_point(
                     if other_seg.net_id == net_id:
                         continue
 
-                    # For paired net (intra-pair meanders), use minimum clearance
-                    if other_seg.net_id == paired_net_id:
-                        check_clearance = paired_clearance
-                    else:
-                        check_clearance = (required_clearance if _seg_clr is None
-                                           else _seg_clr(other_seg.net_id))
-                    # Foreign copper at its REAL width (#370 B1).
-                    check_clearance += max(0.0, (other_seg.width - config.track_width) / 2.0)
+                    check_clearance = _seg_keepout(other_seg)
 
                     # Quick distance check
                     seg_center_x = (other_seg.start_x + other_seg.end_x) / 2
@@ -861,13 +890,7 @@ def get_safe_amplitude_at_point(
                         if other_seg.net_id == net_id:
                             continue
 
-                        if other_seg.net_id == paired_net_id:
-                            check_clearance = paired_clearance
-                        else:
-                            check_clearance = (required_clearance if _seg_clr is None
-                                               else _seg_clr(other_seg.net_id))
-                        # Foreign copper at its REAL width (#370 B1).
-                        check_clearance += max(0.0, (other_seg.width - config.track_width) / 2.0)
+                        check_clearance = _seg_keepout(other_seg)
 
                         dist = segment_to_segment_distance(
                             bx1, by1, bx2, by2,
@@ -2106,7 +2129,7 @@ def apply_length_matching_to_group(
                   f"help; use --diff-pair-intra-match for P/N skew, or give the pair "
                   f"room to route coupled.")
         else:
-            print(f"  Length matching group: no nets routed this run, skipping")
+            _board_copper_group_status(group_results, net_names, config, pcb_data)
         return net_results
     if board_seeded:
         _tr = sorted(n for n, r in board_seeded.items() if r.get('routed_this_run'))
@@ -2152,18 +2175,8 @@ def apply_length_matching_to_group(
     _lo, _hi = (window[0], window[1]) if window is not None else (None, None)
 
     def _record(name, length, state, shortfall=0.0):
-        rec = {'length_mm': round(length, 3), 'target_mm': round(target_length, 3),
-               'status': state}
-        if shortfall:
-            rec['shortfall_mm'] = round(shortfall, 3)
-        if _lo is not None or _hi is not None:
-            rec['window_mm'] = [_lo, _hi]
-            if (_lo is not None and length < _lo - 1e-6) or \
-                    (_hi is not None and length > _hi + 1e-6):
-                rec['in_window'] = False
-            else:
-                rec['in_window'] = True
-        member_status[name] = rec
+        member_status[name] = _member_record(length, target_length, state,
+                                             _lo, _hi, shortfall)
     if any(die.values()):
         print(f"  Pad-to-die included (#1248): "
               + _pad_to_die_note(die, group_results, pcb_data, 'mm'))
@@ -2220,7 +2233,8 @@ def apply_length_matching_to_group(
                 else:
                     print(f"    WARNING: {net_name} is {delta:.2f}mm SHORT of the group target "
                           f"but its copper was written in an earlier step -- the group is NOT "
-                          f"fully matched (route the whole group in one step to meander it)")
+                          f"fully matched (route the whole group in one step to meander it: "
+                          f"{force_reroute_hint(net_names)})")
             continue
 
         if delta <= config.length_match_tolerance:
@@ -2275,6 +2289,24 @@ def apply_length_matching_to_group(
             group_clearance_index.add_segments(new_segments, index_margin)
 
     # Per-member verdicts for the summary (run_length_matching reads them).
+    _store_member_status(config, member_status)
+    return net_results
+
+
+def _member_record(length, target, state, lo=None, hi=None, shortfall=0.0):
+    """One member's verdict for `length_match_groups[].member_status`."""
+    rec = {'length_mm': round(length, 3), 'target_mm': round(target, 3),
+           'status': state}
+    if shortfall:
+        rec['shortfall_mm'] = round(shortfall, 3)
+    if lo is not None or hi is not None:
+        rec['window_mm'] = [lo, hi]
+        rec['in_window'] = not ((lo is not None and length < lo - 1e-6)
+                                or (hi is not None and length > hi + 1e-6))
+    return rec
+
+
+def _store_member_status(config, member_status):
     try:
         statuses = getattr(config, '_length_match_status', None)
         if statuses is None:
@@ -2283,7 +2315,56 @@ def apply_length_matching_to_group(
         statuses.update(member_status)
     except AttributeError:
         pass
-    return net_results
+
+
+def force_reroute_hint(net_names):
+    """The command that re-routes and matches a group of connected members
+    (#1762): --force-reroute strips them before the route, so they re-enter
+    the run and the group meanders them."""
+    names = ' '.join(f"'{n}'" for n in net_names)
+    return (f"re-run with --force-reroute and --length-match-group {names} "
+            f"(both members in --nets) to strip, re-route and match them")
+
+
+def _board_copper_group_status(group_results, net_names, config, pcb_data):
+    """#1762: every member of the group is existing board copper (connected
+    before this run, so filter_already_routed kept it out of the route set).
+    Nothing here can meander it, but its verdict is still recorded -- the
+    target as the meander path would compute it (pad-to-die, the .kicad_dru
+    window), each member `matched` / `unmatched_board_copper` /
+    `over_target` -- and the skip line names the re-route that does match
+    it. Recording only: the group is NOT noted protected (#521), because an
+    unmatched group frozen against rips would refuse the very glob
+    --force-reroute that fixes it."""
+    tol = config.length_match_tolerance
+    die = {n: member_pad_to_die(r, n, pcb_data) for n, r in group_results.items()}
+    target = max(r['route_length'] + die[n] for n, r in group_results.items())
+    window = dru_length_window(list(group_results), pcb_data)
+    if window is not None:
+        target, _wnote = clamp_target_to_window(target, window, tol)
+    lo, hi = (window[0], window[1]) if window is not None else (None, None)
+    status, off = {}, []
+    for name, r in group_results.items():
+        length = r['route_length'] + die[name]
+        delta = target - length
+        if abs(delta) <= tol:
+            state = 'matched'
+        else:
+            state = 'unmatched_board_copper' if delta > 0 else 'over_target'
+            off.append(f"{name} {length:.2f}mm")
+        status[name] = _member_record(length, target, state, lo, hi,
+                                      max(delta, 0.0) if state != 'matched' else 0.0)
+    _store_member_status(config, status)
+    if off:
+        print(f"  Length matching group: no member was routed this run (all "
+              f"{len(group_results)} are existing board copper, which this pass "
+              f"cannot meander); {len(off)} out of the {tol:g}mm tolerance of the "
+              f"target {target:.2f}mm: {', '.join(off)} -- NOT matched; "
+              f"{force_reroute_hint(net_names)} (#1762)")
+    else:
+        print(f"  Length matching group: no member was routed this run; all "
+              f"{len(group_results)} (existing board copper) are within "
+              f"{tol:g}mm of the target {target:.2f}mm")
 
 
 def get_route_primary_layer(segments: List[Segment]) -> str:
@@ -3431,6 +3512,10 @@ def get_safe_amplitude_for_diff_pair(
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     edge_margin = edge_clearance + diff_pair_extra + net_half
     edge_geom = _board_edge_geom(pcb_data)
+    # #1761: the P/N copper must stay out of a keep-out too; the bump is a
+    # centreline, so it is judged at the pair's outer copper (2 x (offset +
+    # half width)) as each member's net.
+    _ko_refuses = _keepout_gate(pcb_data)
 
     # Combine all segments and vias
     all_segments = list(pcb_data.segments)
@@ -3460,6 +3545,10 @@ def get_safe_amplitude_for_diff_pair(
         # over an interior cutout (real Edge.Cuts geometry; bbox fallback, #370 B1).
         if not _bump_edge_clear(bump_segs, edge_geom, board_bounds, edge_margin):
             continue  # try a smaller amplitude that stays inside the outline
+        if _ko_refuses and _bump_in_keepout(
+                _ko_refuses, bump_segs, 2.0 * (diff_pair_extra + net_half),
+                layer_name, (p_net_id, n_net_id)):
+            continue  # try a smaller amplitude that stays out of the area
 
         # Check each bump segment
         for bx1, by1, bx2, by2 in bump_segs:
@@ -3572,6 +3661,14 @@ def apply_meanders_to_diff_pair(
         (modified_result, bump_count)
     """
     from routing_config import GridCoord
+
+    # #1742: a pair narrowed to fit is narrow only where the full width does
+    # not fit; regenerating P/N from the centreline here would lay it back at
+    # full width everywhere
+    if result.get('pair_narrowed_to'):
+        print(f"    Warning: diff pair narrowed to fit "
+              f"({result['pair_narrowed_to']:.4f}mm) - no centreline meanders")
+        return result, 0
 
     # Extract data from result
     centerline_grid = result.get('centerline_path_grid')
@@ -3961,7 +4058,8 @@ def apply_intra_pair_length_matching(
     pcb_data: PCBData,
     p_net_id: int = None,
     n_net_id: int = None,
-    status: dict = None
+    status: dict = None,
+    shipped: bool = False,
 ) -> dict:
     """
     Apply length matching within a differential pair by adding meanders to
@@ -3981,6 +4079,11 @@ def apply_intra_pair_length_matching(
             {'status', 'reason', 'delta_mm', 'delta_before_mm'} -- the outcome
             as data, so the caller can report per pair instead of leaving the
             printed log as the only record.
+        shipped: the board's copper is the copper that ships (the post-route
+            cleanup has run, #1622's re-match), so each member is measured as
+            KiCad's skew DRC measures it (`net_match_length`, mode 'total':
+            all its copper), not with `net_signal_length`'s estimate of what
+            a cleanup still to come will leave (#1704).
 
     Returns:
         Modified result dict with adjusted segments
@@ -4057,20 +4160,30 @@ def apply_intra_pair_length_matching(
     # sums above read P 12.00 < N 13.08 and the meander went on P, while the
     # board had P 21.31 > N 16.82 -- skew 4.51 -> 5.20 mm. The pair's copper
     # is on the board by now (each route is committed as it is found), so
-    # net_signal_length reads what the cleanup will leave of it. The result
-    # sums stay the fallback while a member's pads are not joined. It is a
-    # path measure, not KiCad's: where a track ends inside a via off its
-    # centre the shipped skew KiCad grades can differ by up to a via barrel
-    # (net_signal_length's docstring, #1583).
+    # net_signal_length reads what the cleanup will leave of it, measured as
+    # KiCad measures that copper (#1623). The result sums stay the fallback
+    # while a member's pads are not joined. What it cannot see is what the
+    # cleanup then changes (a graze re-bend, a collapsed loop): the pairs the
+    # cleanup moves out of tolerance are matched again on the shipped copper
+    # (rematch_intra_pairs_on_shipped_copper, #1622).
+    # #1704: on copper that ships there is no cleanup to come, so a member is
+    # read as KiCad reads it: all its copper. A track that ran past a corner
+    # and came back along itself read 2 mm short in the estimate, and the
+    # re-match said "already matched" on a pair KiCad graded 2 mm out.
     _board = None
     if pcb_data is not None:
-        from net_queries import net_signal_length
-        _bp = net_signal_length(pcb_data, p_net_id)
-        _bn = net_signal_length(pcb_data, n_net_id)
+        from net_queries import net_match_length, net_signal_length
+        if shipped:
+            _bp = net_match_length(pcb_data, p_net_id, 'total')
+            _bn = net_match_length(pcb_data, n_net_id, 'total')
+        else:
+            _bp = net_signal_length(pcb_data, p_net_id)
+            _bn = net_signal_length(pcb_data, n_net_id)
         if _bp is not None and _bn is not None:
             _board = (_bp, _bn)
     if _board is not None:
-        print(f"    P/N intra-pair: board copper P={_board[0]:.3f}mm, "
+        print(f"    P/N intra-pair: {'shipped' if shipped else 'board'} copper "
+              f"P={_board[0]:.3f}mm, "
               f"N={_board[1]:.3f}mm (the routing result read P={p_length:.3f}, "
               f"N={n_length:.3f})")
         # Each leg's offset is then everything the board has beyond the
@@ -4272,6 +4385,23 @@ def intra_pair_tolerance(config, p_net_id) -> float:
         p_net_id, config.length_match_tolerance)
 
 
+def intra_pair_config(config, p_net_id, tolerance, pair_geom=None):
+    """The config a pair is meandered with: `config` at the pair's own
+    tolerance and, when `pair_geom` ({p_net_id: (width, gap)}, route_diff's
+    `pair_diff_geom`) names the pair, at the width and gap it was ROUTED at
+    (#1703), as diff_pair_loop routes it. The meander keep-outs and the
+    chamfer are sized from `track_width`; at the run's base width a pair in
+    a narrower class priced its own bumps and its partner wider than they
+    are, and every bump away from the partner was refused at its root."""
+    import copy
+    cfg = copy.copy(config)
+    cfg.length_match_tolerance = tolerance
+    geom = (pair_geom or {}).get(p_net_id)
+    if geom:
+        cfg.track_width, cfg.diff_pair_gap = geom
+    return cfg
+
+
 def regrade_intra_pair_reports(reports, pair_copper, pcb_data, diff_pair_ids,
                                tolerance):
     """Decide each intra-pair record's status from the SHIPPED copper (#1303).
@@ -4327,8 +4457,103 @@ def regrade_intra_pair_reports(reports, pair_copper, pcb_data, diff_pair_ids,
     return reports
 
 
+def rematch_intra_pairs_on_shipped_copper(reports, diff_pair_ids, routed_results,
+                                          config, pcb_data, pair_geom=None):
+    """Match again, on the copper the post-route cleanup left, every pair the
+    cleanup moved out of its tolerance (#1622).
+
+    `run_intra_pair_matching` meanders before the cleanup, and the cleanup
+    then changes lengths with no regard to the match: a re-bend that clears
+    a graze, a pruned spur, a collapsed loop. A pair matched to 0.089 mm
+    shipped at 1.466 mm against 0.127 mm because the octolinear re-bend took
+    1.378 mm out of the meandered member. So for each pair whose matcher had
+    a single coupled result to meander, the shipped skew
+    (`net_queries.diff_pair_skew`, KiCad's measure) is read; a pair over its
+    tolerance gets `apply_intra_pair_length_matching` once more on the shipped
+    copper, and the new meander is kept only when it lowers that skew --
+    otherwise the copper goes back exactly as it was.
+
+    Fills `rec['rematch']` = {'skew_before_mm', 'skew_after_mm', 'kept'} on
+    every pair it tried, and on a kept one takes the second pass's status as
+    the matcher's (the regrade then decides it from the copper). Changes
+    `routed_results` and `pcb_data.segments` in place. Returns the number of
+    pairs whose re-match was kept."""
+    from net_queries import diff_pair_skew
+    by_name = dict(diff_pair_ids)
+    tried = []
+    for rec in reports:
+        if rec.get('status') in ('not-matchable', 'skipped'):
+            continue
+        pair = by_name.get(rec['pair'])
+        if pair is None:
+            continue
+        result = routed_results.get(pair.p_net_id)
+        if result is None or result is not routed_results.get(pair.n_net_id):
+            continue
+        tol = rec.get('tolerance_mm')
+        if tol is None:
+            tol = config.length_match_tolerance
+        before = diff_pair_skew(pcb_data, pair.p_net_id, pair.n_net_id)['skew_mm']
+        if before is None or before <= tol + 1e-9:
+            continue
+        tried.append((rec, pair, result, tol, before))
+    if not tried:
+        return 0
+    from pcb_modification import bump_copper_epoch
+    print("\n" + "=" * 60)
+    print("Intra-pair P/N re-match on the shipped copper (#1622)")
+    print("=" * 60)
+    kept = 0
+    for rec, pair, result, tol, before in tried:
+        print(f"\n{rec['pair']}: the post-route cleanup left the skew at "
+              f"{before:.3f}mm, over its {tol}mm tolerance")
+        cfg = intra_pair_config(config, pair.p_net_id, tol, pair_geom)
+        old_segments = list(result.get('new_segments') or [])
+        old_legs = [(lr, list(lr.get('new_segments') or []))
+                    for lr in (result.get('leg_results') or [])]
+        old_lengths = {k: result[k] for k in ('p_routed_length', 'n_routed_length')
+                       if k in result}
+        status = {}
+        apply_intra_pair_length_matching(
+            result, cfg, pcb_data, p_net_id=pair.p_net_id,
+            n_net_id=pair.n_net_id, status=status, shipped=True)
+        new_segments = list(result.get('new_segments') or [])
+        old_ids = {id(s) for s in old_segments}
+        new_ids = {id(s) for s in new_segments}
+        after = before
+        if old_ids != new_ids:
+            board_before = pcb_data.segments
+            pcb_data.segments = ([s for s in board_before
+                                  if id(s) not in old_ids - new_ids]
+                                 + [s for s in new_segments if id(s) not in old_ids])
+            bump_copper_epoch(pcb_data)
+            after = diff_pair_skew(pcb_data, pair.p_net_id, pair.n_net_id)['skew_mm']
+            if after is None or after >= before - 1e-9:
+                # no better on the copper KiCad grades: put it all back
+                pcb_data.segments = board_before
+                bump_copper_epoch(pcb_data)
+                result['new_segments'] = old_segments
+                for lr, segs in old_legs:
+                    lr['new_segments'] = segs
+                result.update(old_lengths)
+                after = before
+        ok = after < before - 1e-9
+        rec['rematch'] = {'skew_before_mm': round(before, 4),
+                          'skew_after_mm': round(after, 4), 'kept': ok}
+        if ok:
+            kept += 1
+            rec.update(status=status.get('status'), reason=status.get('reason'),
+                       delta_mm=status.get('delta_mm'))
+            print(f"    P/N intra-pair: re-match kept, shipped skew "
+                  f"{before:.3f} -> {after:.3f}mm")
+        else:
+            print(f"    P/N intra-pair: re-match did not lower the shipped skew "
+                  f"({before:.3f}mm); the copper is left as the cleanup left it")
+    return kept
+
+
 def run_intra_pair_matching(diff_pair_ids, routed_results, config, pcb_data,
-                            skip_p_net_ids=()):
+                            skip_p_net_ids=(), pair_geom=None):
     """Intra-pair P/N length matching over EVERY pair in the run (#766).
 
     Driven by the PAIR LIST, not by the shape of the results dict. The old loop
@@ -4355,7 +4580,6 @@ def run_intra_pair_matching(diff_pair_ids, routed_results, config, pcb_data,
                        members have copper, so the caller still learns the skew
       skipped          deliberately handled elsewhere (see reason)
     """
-    import copy
     skip = set(skip_p_net_ids or ())
     reports = []
     outer = config
@@ -4364,8 +4588,9 @@ def run_intra_pair_matching(diff_pair_ids, routed_results, config, pcb_data,
             continue
         # #1503: each pair at its own tolerance (a .kicad_dru P/N skew rule's,
         # the flag's, else the default)
-        config = copy.copy(outer)
-        config.length_match_tolerance = intra_pair_tolerance(outer, pair.p_net_id)
+        # the pair's own geometry where it routed at one (#1703)
+        config = intra_pair_config(outer, pair.p_net_id,
+                                   intra_pair_tolerance(outer, pair.p_net_id), pair_geom)
         rec = {'pair': pair_name, 'p_net': pair.p_net_name, 'n_net': pair.n_net_name,
                'status': None, 'reason': None,
                'delta_mm': None, 'delta_before_mm': None,

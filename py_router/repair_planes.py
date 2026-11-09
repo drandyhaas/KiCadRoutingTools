@@ -184,8 +184,18 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
     trace actually denied every good via site (Net-(C63-Pad1), 0.325mm from
     the best spot) was never identified. Vote find_via_position_blocker over a
     coarse ring of sites within the search radius and return the most common
-    non-protected, not-yet-ripped net."""
+    non-protected, not-yet-ripped net.
+
+    A site whose nearest net is a never-rip POUR casts no vote. #1620 made
+    every poured net never-rip, and the vote then handed such a site to the
+    runner-up behind the pour, whose rip frees none of them: on a board with
+    a second pour that elected a different blocker for a plane-pad tap than
+    before #1620, and the step ended with more open nets. Sites held by any other never-rip net
+    (a routed diff pair, locked copper) vote as they always have."""
     from collections import Counter
+    from kicad_parser import pour_zones
+    pours = {z.net_id for z in pour_zones(getattr(pcb_data, 'zones', None) or [])
+             if z.net_id and z.net_id != net_id and z.net_id in protected_net_ids}
     votes = Counter()
     step = max(blocker_config.grid_step * 4, 0.2)
     # Vote only the NEAR band: distant sites belong to other neighborhoods and
@@ -199,9 +209,15 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
             d = math.hypot(i, j) * step
             if d < 0.2 or d > r:
                 continue
+            x, y = pad.global_x + i * step, pad.global_y + j * step
             b = find_via_position_blocker(
-                pad.global_x + i * step, pad.global_y + j * step,
-                pcb_data, blocker_config, net_id, protected_net_ids, quiet=True)
+                x, y, pcb_data, blocker_config, net_id, None, quiet=True)
+            if b in pours:
+                continue
+            if b in protected_net_ids:
+                b = find_via_position_blocker(
+                    x, y, pcb_data, blocker_config, net_id, protected_net_ids,
+                    quiet=True)
             if b is not None and b not in protected_net_ids and b not in exclude_net_ids:
                 votes[b] += 1.0 / (0.3 + d)
     return votes.most_common(1)[0][0] if votes else None
@@ -701,25 +717,6 @@ def _report_unrouted_ripped_nets(pcb_data, ripped_net_ids):
           f"{', '.join(ripped_names)}")
 
 
-def _pad_label(pads, ref, x, y):
-    """The pad number(s) of `ref` at a graded point, or None.
-
-    Pads whose copper centre IS the point first, every one of them: stacked
-    pads (a multi-number thermal pad) share the copper, so the grade cannot
-    tell them apart and the label names them all, `33/34`. Failing that, the
-    pads whose copper box holds the point, so a point off the exact centre is
-    still named rather than left `?`."""
-    mine = [p for p in pads if p.component_ref == ref]
-    hits = [p for p in mine
-            if abs(p.global_x - x) < 1e-3 and abs(p.global_y - y) < 1e-3]
-    if not hits:
-        hits = [p for p in mine
-                if abs(p.global_x - x) <= p.size_x / 2 + 1e-3
-                and abs(p.global_y - y) <= p.size_y / 2 + 1e-3]
-    nums = list(dict.fromkeys(str(p.pad_number) for p in hits))
-    return '/'.join(nums) if nums else None
-
-
 def grade_plane_completion(board_file: str, net_names) -> Dict:
     """The plane nets this run was asked to connect, graded on the board it
     SHIPS.
@@ -743,11 +740,6 @@ def grade_plane_completion(board_file: str, net_names) -> Dict:
     grades: Dict[str, Dict] = {}
     for nid, g in grade_nets(pcb, sorted(i for i, n in pcb.nets.items()
                                          if n.name in wanted)).items():
-        pads = pcb.pads_by_net.get(nid) or []
-        for fp in g['failed_pads']:
-            label = _pad_label(pads, fp['component_ref'], fp['x'], fp['y'])
-            if label is not None:
-                fp['pad_number'] = label
         grades[pcb.nets[nid].name] = g
     rec = regrade_record([], grades, sorted(grades), board='file')
     out = {k: rec[k] for k in (
@@ -881,6 +873,9 @@ def repair_planes(
     board_edge_clearance: float = defaults.PLANE_EDGE_CLEARANCE,
     via_size: float = defaults.VIA_SIZE,
     via_drill: float = defaults.VIA_DRILL,
+    # #1676: no explicit via was asked for (--via-size omitted): the via
+    # starts at the board's .kicad_dru rules.
+    via_from_class: bool = False,
     max_iterations: int = defaults.MAX_ITERATIONS,
     verbose: bool = False,
     dry_run: bool = False,
@@ -924,6 +919,10 @@ def repair_planes(
     # sub-run's own explicit settings. The #562 finalize passes its run's;
     # None (the standalone CLI) = batch_route's defaults.
     route_knobs: Optional[dict] = None,
+    # #1621: net names the calling route step's --nets negates ('!/RF'),
+    # never ripped as a tap blocker here nor by the sub-runs below. The #562
+    # finalize passes its step's set; None (the standalone CLI) = none.
+    hands_off_nets: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -994,6 +993,10 @@ def repair_planes(
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
+    # #1676: a via this run sizes itself starts at the board's own via rules
+    if via_from_class:
+        from design_rules import run_via_for_rules
+        via_size, via_drill = run_via_for_rules(input_file, pcb_data, via_size, via_drill)
         # #1279: the board's `sense:<REF>.<PAD>` groups -- protected, or why
         # not. Only when this engine parsed the board: a caller handing it
         # pcb_data (route.py's in-run finalize) has reported them already.
@@ -1034,6 +1037,9 @@ def repair_planes(
     if getattr(pcb_data, '_input_copper', None) is None:
         from rip_up_reroute import mark_input_copper
         mark_input_copper(pcb_data)
+        # #1763: a standalone repair is its own invocation (failure hints)
+        from routing_diagnostics import note_invocation_input
+        note_invocation_input(pcb_data)
 
     # Resolve net IDs
     net_ids = []
@@ -1139,7 +1145,15 @@ def repair_planes(
     # and tap/join copper would route blind to the board's layer rules. Same
     # reasoning as the reconciliation sub-run's forwarded map.
     from kicad_dru import install_layer_clearances, install_track_clearances
-    install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    install_layer_clearances(config, layer_clearances, input_file, pcb_data,
+                             net_keepouts=True)
+    # Net-filtered keep-outs bind repair copper too: the base map blocks them
+    # (build_base_obstacles) and the pad taps check them. An in-run finalize
+    # takes the parent's list, for the same reason as the layer map above.
+    from net_keepouts import attach as _nk_attach
+    _nk_parent = (route_knobs or {}).get('net_keepouts')
+    _nk_attach(pcb_data, _nk_parent if _nk_parent is not None
+               else getattr(getattr(config, 'rules', None), 'net_keepouts', None))
     # #1135: and the track-to-track rules, as route.py installs them -- a
     # region join or a pad tap is a track like any other, and a board's
     # `A.Type == 'track' && B.Type == 'track'` rule binds it too (raise-only
@@ -1358,7 +1372,36 @@ def repair_planes(
 
     # Plane nets are never ripped to clear a blocker (--rip-blocker-nets); only
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
+    # EVERY net that pours on this board, not only the ones this call repairs
+    # (#1620): a rip takes the whole net, and a poured net's fanout stubs and
+    # taps come back from nothing -- the reconnect sees its pads credited by
+    # the fill model ("Already fully connected") whether or not KiCad's fill
+    # joins them, so a stub that was a pad's real connection stayed gone.
     plane_net_ids = set(unique_nets.keys())
+    from kicad_parser import pour_zones as _pour_zones1620
+    _other_pours = ({z.net_id for z in _pour_zones1620(
+        getattr(pcb_data, 'zones', None) or []) if z.net_id}
+        - plane_net_ids)
+    if _other_pours and rip_blocker_nets:
+        _ex = sorted(pcb_data.nets[i].name for i in _other_pours
+                     if i in pcb_data.nets)[:4]
+        print(f"  {len(_other_pours)} other poured net(s) excluded from "
+              f"blocker rip-up ({', '.join(_ex)}"
+              f"{'...' if len(_other_pours) > 4 else ''})")
+    plane_net_ids |= _other_pours
+    # #1621: the nets the calling step's --nets negates, handed over or
+    # stashed on this board by it; stashed here too, so the reconnect
+    # sub-runs that share this board leave them alone as well.
+    from protected_nets import stash_hands_off
+    _off_names = stash_hands_off(pcb_data, hands_off_nets)
+    _off_ids = ({nid for nid, n in pcb_data.nets.items() if n.name in _off_names}
+                - plane_net_ids)
+    if _off_ids and rip_blocker_nets:
+        _ex = sorted(pcb_data.nets[i].name for i in _off_ids)[:4]
+        print(f"  {len(_off_ids)} net(s) the step's --nets excludes kept out "
+              f"of blocker rip-up ({', '.join(_ex)}"
+              f"{'...' if len(_off_ids) > 4 else ''})")
+    plane_net_ids |= _off_ids
     # #521: nets protected in the sibling .kicad_pro (length-matched groups,
     # routed diff pairs) and nets with KiCad-LOCKED copper join the never-rip
     # set -- a blocker rip here strips the net for a later generic route.py
@@ -1666,7 +1709,12 @@ def repair_planes(
                 _phase2_immediate = False
                 _phase_rip_ids: List[int] = []  # #540: phase rip history,
                 #   kept even after a successful immediate reconnect
+                # Progress counts each PHASE on its own (#1751): a deferred
+                # pad is tried again in phase 2, so one count over
+                # `unconnected` reached 3/2.
                 _pr_idx = -1
+                _pr_total = len(unconnected)
+                _pr_phase = ""
                 while _pad_queue or _deferred_rip:
                     if not _pad_queue:
                         _phase2_immediate = _PLANE_IMMEDIATE_RECONNECT or (
@@ -1683,6 +1731,9 @@ def repair_planes(
                               f"{_mode_note})")
                         _pad_queue = [(p, l, True) for (p, l) in _deferred_rip]
                         _deferred_rip = []
+                        _pr_idx = -1
+                        _pr_total = len(_pad_queue)
+                        _pr_phase = " (rip pass)"
                     pad, pad_layer, _allow_rip = _pad_queue.pop(0)
                     _pr_idx += 1
                     if cancel_check and cancel_check():
@@ -1690,8 +1741,8 @@ def repair_planes(
                         break
                     _tapped_pads.append(pad)
                     if progress_callback:
-                        progress_callback(_pr_idx + 1, len(unconnected),
-                                          f"{net_name}: pad repair "
+                        progress_callback(_pr_idx + 1, _pr_total,
+                                          f"{net_name}: pad repair{_pr_phase} "
                                           f"{pad.component_ref}.{pad.pad_number}")
                     print(f"    Pad {pad.component_ref}.{pad.pad_number} ({pad_layer})...", end=" ", flush=True)
                     result = tap_pad_with_escalation(
@@ -3352,7 +3403,8 @@ def repair_planes(
             _res_wrap = []
             _out = run_post_route_cleanup(
                 _res_wrap, pcb_data, _scope,
-                SimpleNamespace(clearance=clearance, grid_step=grid_step),
+                SimpleNamespace(clearance=clearance, grid_step=grid_step,
+                                board_edge_clearance=_reconnect_edge()),
                 label='Plane ', phantom=False, via_nudge=False, neck=False,
                 microshift_max_shift=grid_step,
                 # 13 passes that reported nothing: the status bar sat on the
@@ -3754,6 +3806,7 @@ Examples:
     # Resolved here, before enforce_fab_floors and every downstream use.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
                            resolve_cli_floor)
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
     for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
                                       ('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
@@ -3811,6 +3864,7 @@ Examples:
         # The strap NECK floor must also be manufacturable (#513 item 9).
         min_track_width=getattr(args, 'min_track_width', None),
         clearance=getattr(args, 'clearance', None),
+        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
@@ -3818,6 +3872,7 @@ Examples:
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
     for _pname, _pfloor in _pinned_floors.items():
         setattr(args, _pname, _pfloor)
+    args._clearance_ceiling = getattr(args, 'clearance_ceiling', None)
 
     # #381 D9: --output FILE overrides the positional (matches route.py/route_diff).
     if getattr(args, 'output', None) is not None:
@@ -3890,6 +3945,7 @@ Examples:
         board_edge_clearance=args.board_edge_clearance,
         via_size=args.via_size,
         via_drill=args.via_drill,
+        via_from_class=not _vs_explicit,
         max_iterations=args.max_iterations,
         verbose=args.verbose,
         dry_run=args.dry_run,
@@ -3912,9 +3968,12 @@ Examples:
     # Dead-end sweep + gap-snap on the repaired plane copper (issue #84), gated
     # against connectivity + pours so it never breaks a net.
     if not args.dry_run:
+        from fix_kicad_drc_settings import effective_board_edge_clearance
         from pcb_modification import clean_plane_copper
-        _snapped, _removed = clean_plane_copper(args.output_file, net_names,
-                                                args.clearance, args.grid_step)
+        _snapped, _removed = clean_plane_copper(
+            args.output_file, net_names, args.clearance, args.grid_step,
+            effective_board_edge_clearance(
+                args.input_file, args.board_edge_clearance if _edge_given else 0.0))
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
         # Castellated landings (run-6 fix 1.7): reconnect/tap copper that

@@ -56,11 +56,11 @@ Validator-named blockers — identities proved by geometry validators such as vi
 
 Copper already committed on the input board can be ripped in two ways.
 
-**By default**, small pre-existing nets are rip candidates: a net that is unprotected (#521), not KiCad-locked, not zone-backed, not `!`-negated in `--nets`, and has at most 30 segments and 6 vias may be ripped when it blocks a net being routed. The rip is custody-backed: the victim is rerouted in the same run, or its original copper is restored, or -- when copper routed since the rip occupies its corridor -- at least its escape stub is kept (#468, #1156). The in-run plane finalize's pad repair may likewise rip a signal net that blocks a plane tap, under the same custody. `KICAD_RIP_PREEXISTING=0` and `KICAD_FINALIZE_RIP=0` switch the two off. The improvement gate still grades the result, so a run that broke more than it connected is reverted.
+**By default**, small pre-existing nets are rip candidates: a net that is unprotected (#521), not KiCad-locked, not zone-backed, not `!`-negated in `--nets`, and has at most 30 segments and 6 vias may be ripped when it blocks a net being routed. The rip is custody-backed: the victim is rerouted in the same run, or its original copper is restored, or -- when copper routed since the rip occupies its corridor -- at least its escape stub is kept (#468, #1156). The in-run plane finalize's pad repair may likewise rip a signal net that blocks a plane tap, under the same custody -- never a net that pours anywhere on the board, whether or not the finalize is repairing it (#1620), never a protected or locked net, and never a net the step's `--nets` negates (#1621); the finalize's reconnect sub-runs keep the same hands-off set. `KICAD_RIP_PREEXISTING=0` and `KICAD_FINALIZE_RIP=0` switch the two off. The improvement gate still grades the result, so a run that broke more than it connected is reverted.
 
 **`route.py --rip-existing-nets PATTERN [PATTERN …]`** extends the authority past those limits to the matching pre-existing routed nets, whatever their size: when one of them blocks a net the router is trying to route, it may be ripped up and re-routed like an in-run net. Use it on a board that a previous run (or another tool) already routed and that now needs a new net threaded through congested copper. Pass `'*'` to allow any non-plane net. Protected nets need their exact name, and KiCad-locked copper is never ripped. The failure hint names which blocking nets this run could already rip, so the flag is only prescribed for the ones it would add.
 
-One exception: the end-of-run reconciliation (see [After the Ladder](#after-the-ladder-the-recovery-tail)) auto-grants itself `--rip-existing-nets` authority over the pre-existing blockers that earlier failure hints named (#103, capped at 12; `KICAD_RECONCILE_RIP_ESCALATION=0` disables it). That escalation never takes a protected net, a plane-backed net, a net of more than 30 segments or 6 vias, or a net the caller excluded by pattern (`'!GND'` while planes pour in a later step is excluded *by plan*); only an explicit operator `--rip-existing-nets` can override the last.
+One exception: the end-of-run reconciliation (see [After the Ladder](#after-the-ladder-the-recovery-tail)) auto-grants itself `--rip-existing-nets` authority over the pre-existing blockers that earlier failure hints named (#103, capped at 12; `KICAD_RECONCILE_RIP_ESCALATION=0` disables it). That escalation never takes a protected net, a plane-backed net, a net of more than 30 segments or 6 vias, or a net the caller excluded by pattern (`'!GND'` while planes pour in a later step is excluded *by plan*; read from the run's hands-off set, as the main pass's candidacy reads it, #1757), and the #572 lap-authority harvest applies the same guard; only an explicit operator `--rip-existing-nets` can override the last.
 
 ### When to grant rip authority — and when not to
 
@@ -88,8 +88,10 @@ In rough order of preference for a congestion retry:
 1. **Re-run the whole signal step thinner** (fab-floor `--track-width`, finer
    `--grid-step`). Thinner is monotonically better on dense boards and destroys
    nothing.
-2. **Plain retry of the failed nets** — the in-run escalation supplies its own
-   targeted authority.
+2. **Plain retry with `--nets '*'`** — the in-run escalation supplies its own
+   targeted authority: a named blocker of any size inside `--nets`, and outside
+   them only a small one with no pour, so naming the failed nets gives up the
+   rest.
 3. **Named authority**: `--rip-existing-nets <the blockers the log named>`. The
    router prints exactly which pre-existing nets boxed each failure; ripping
    those is a decision, whereas `'*'` is a hope.
@@ -156,6 +158,18 @@ trading GND for /P0.17 on the raster; KiCad had GND split on the step's input
 already, so it was a plain gain and ships. Without a KiCad python the raster
 grade stands. The JSON report names the pour nets among `lost` / `gained` as
 `lost_zone` / `gained_zone`.
+
+The raster also errs the other way, and that error used to pass unchecked
+because it makes a run read *better*: it pours onto a pad that a thermal
+relief or a foreign net class's clearance keeps KiCad's fill off, so a
+fanout stub or tap the run removed read as no loss (`lost []`, accepted)
+while the end-of-run re-grade, which reads such a net on KiCad's fill, named
+it broken (#1619, #1620). So a pour net the final re-grade reads open while
+the raster credits it is graded on KiCad's exact fill of both boards
+whatever the verdict, together with every pour net the raster grades worse.
+With no refill to be had, such a net that the re-grade charges to this run
+(`broken_by_run`) takes the re-grade's reading, so the gate and the run's
+summary agree.
 
 The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
 (`lost`, `gained`, `worsened`,
@@ -238,11 +252,12 @@ After the main routing pass, `run_reroute_loop()` processes the queue of ripped 
 
 ## After the Ladder: the Recovery Tail
 
-A net still failed or open once the main pass, the reroute loop and Phase 3 are done gets three more attempts, all inside the shared engine (CLI and GUI alike), and all skipped by `--quick`:
+A net still failed or open once the main pass, the reroute loop and Phase 3 are done gets up to four more attempts, all inside the shared engine (CLI and GUI alike), and all skipped by `--quick`:
 
+0. **Own-requirement retry** (`net_rescue.own_requirement_retry`, #1618): a routing call prices every foreign obstacle at the widest requirement over its routed nets -- the class floor, and the class/type-scoped `.kicad_dru` stamps -- so a Default-class net routed beside a net held at 0.5 mm by its class or a rule is fenced out of gaps that are legal for it. When the net's own requirement differs from that shared one, it gets one whole-net retry at the run's own track and via sizes on a board-global map whose foreign copper is priced as THIS net requires. It is kept only when the net then grades fully connected, and it has no rip authority. It runs before the rescue, so a net that fits once its own clearance is honoured ships at full width instead of being narrowed. On a call whose routed nets share one requirement it has no candidate and does nothing; the outcome is `own_requirement_retry` in `JSON_SUMMARY`.
 1. **Net rescue** (`net_rescue.py`, #331/#371): a scoped retry in a small window around the net's remaining gap, first at the run's own sizes on a finer grid, then at the fab-floor track width with the clearance stepped down toward the fab floor and smaller vias, never below the net's own class or rule floors and only as far as `--escalation` allows (under `off`, the finer grid is the only retry). Each below-nominal clearance is recorded in the clearance ledger, so `check_drc` grades at it. It never rips: a committed edge must reduce the net's component count or it is removed again. `KICAD_NET_RESCUE=0` disables it.
-2. **Terminal escalation**: a whole-net retry with track width and via size stepping down together toward the fab-tier floor, clearance never reduced. A rung is kept only when the net then grades fully connected; no rip authority. Nothing narrows under `--escalation off`; `KICAD_TERMINAL_ESCALATION=0` disables it.
-3. **End-of-run reconciliation**: a nested `batch_route` (`final_reconcile=False`) retries every incomplete net, and every rip victim still in custody, against the finished board, with the #103 rip authority above. Inside it, once the reroute queue has drained, a victim that would ship as only its escape stub because copper routed since its rip took its corridor gets that corridor back: the squatting nets are ripped and requeued, and the victim restored whole and protected from re-ripping (#622 victim-priority restore; `KICAD_VICTIM_RESTORE=0` disables it). The reconciliation runs up to three laps, and a lap's own rip victims have no later pass to retry them: a victim a lap leaves open becomes a target of the next lap, which routes it with the same authority on the updated board (#1554).
+2. **Terminal escalation**: a whole-net retry with track width and via size stepping down together toward the fab-tier floor, clearance never reduced. A rung is kept only when the net then grades fully connected; no rip authority. Every edge it (and the own-requirement retry) lays passes the rescue's own net-tie gate: a route that runs alongside a net-tie partner pad within clearance, beyond KiCad's waiver (the contact must lie on the net's own pad), is refused, so the net stays open and is reported failed rather than shipped with clearance violations (#1697). Nothing narrows under `--escalation off`; `KICAD_TERMINAL_ESCALATION=0` disables it.
+3. **End-of-run reconciliation**: a nested `batch_route` (`final_reconcile=False`) retries every incomplete net, and every rip victim still in custody, against the finished board, with the #103 rip authority above. Inside it, once the reroute queue has drained, a victim that would ship as only its escape stub because copper routed since its rip took its corridor gets that corridor back: the squatting nets are ripped and requeued, and the victim restored whole and protected from re-ripping (#622 victim-priority restore; `KICAD_VICTIM_RESTORE=0` disables it). The reconciliation runs up to three laps, and a lap's own rip victims have no later pass to retry them: a victim a lap leaves open becomes a target of the next lap, which routes it with the same authority on the updated board (#1554). After the laps, a net still open on the static box-in verdict (its search died with nothing rippable, typically a fine-pitch pad off the run's grid) gets one more lap at half the run's grid, with rip authority over the blockers the last lap named for it; the authority passes the same guard as #103's (protected, negated-by-plan and plane-backed nets are never granted, locked copper is never ripped). The lap is whole-board, so it is skipped, and says so, when that map would exceed `routing_defaults.FINER_GRID_RUNG_MAX_CELLS` summed over the routing layers (#1763; `finer_grid_rung.py`). The per-net rescue's finer grid cannot do this: it routes through free space only, and the walls around such a pad are usually copper this same run laid.
 
 A rip victim that ends the run without a successful reroute is restored at terminal failure; `terminal_restores` in `JSON_SUMMARY` names each with its outcome (`full` is the only success, `full_open` and `stub` ship broken). The [improvement gate](#improvement-gate-600) then judges the whole run.
 

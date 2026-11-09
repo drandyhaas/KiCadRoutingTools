@@ -44,8 +44,11 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-#: The tools manifest_to_plan converts, by basename -> path under the repo.
+#: The tools manifest_to_plan converts, by basename -> path under the repo,
+#: and check_join, whose --keep-staged command is a copper step (#1637) that
+#: lineage_scope scopes and the pruner may find refused.
 TOOL_PATHS = {
+    'check_join.py': 'py_tools/check_join.py',
     'route.py': 'py_router/route.py',
     'route_diff.py': 'py_router/route_diff.py',
     'route_planes.py': 'py_router/route_planes.py',
@@ -318,7 +321,8 @@ POST_PARSE = {
     'bga_fanout.py': (_fab_overrides_missing,),
     'qfn_fanout.py': (_power_nets_count_mismatch, _fab_overrides_missing),
     'place_fanout_clearance.py': (_cap_clearance_not_finite,
-                                  _cap_intent_unreadable),
+                                  _cap_intent_unreadable,
+                                  _fab_overrides_missing),
 }
 
 #: Every post-parse refusal site in each tool's main, by fingerprint -- a
@@ -405,6 +409,7 @@ REFUSAL_SITES = {
             ('board', "the board's footprint references (#1562)"),
         'if _stagger_why and (not env_knobs.ALLOW_STAGGERED_BGA)':
             ('board', "the part's pad lattice (#500)"),
+        'if _refusal': ('board', "which nets the --nets patterns name (#1641)"),
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'qfn_fanout.py': {
@@ -414,6 +419,7 @@ REFUSAL_SITES = {
         'if args.component not in pcb_data.footprints':
             ('board', "the board's footprint references"),
         'if _single': ('board', "the part's pads (#1195: not a QFN/QFP)"),
+        'if _refusal': ('board', "which nets the --nets patterns name (#1641)"),
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'place_fanout_clearance.py': {
@@ -421,6 +427,7 @@ REFUSAL_SITES = {
             ('argv', '_cap_clearance_not_finite'),
         'call:load_intent_or_exit': ('file', '_cap_intent_unreadable'),
         'if _rc': ('file', '_cap_intent_unreadable'),
+        'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
         'call:tether_gate_spec': ('file', '_cap_intent_unreadable'),
         'except (TypeError, ValueError) from _fp1067.tether_gate_spec':
             ('file', '_cap_intent_unreadable'),

@@ -8,7 +8,11 @@ Pads of the SAME footprint are NOT flagged: a component's own adjacent pins are
 fixed library geometry (fine-pitch parts legitimately sit below the routing
 clearance) and are never pipeline-introduced -- flagging them would flood
 grading with pre-existing noise. The cases #234 targets are between different
-footprints (e.g. a cap nudged onto an IC pad).
+footprints (e.g. a cap nudged onto an IC pad). Since #1628 such a pair is
+PUBLISHED, not graded: run_drc returns it as an accepted `own-footprint-gap`
+row (KiCad still reports it as `clearance`), so "a violation" here is a row
+run_drc counts -- one with no `accepted` -- and the same-footprint case also
+checks that the pair is published on that channel.
 
     python3 tests/test_drc_pad_pad.py
 """
@@ -48,13 +52,18 @@ def _board(pad2_x, pad2_net=2, pad2_layer="F.Cu", same_footprint=False):
 )'''
 
 
-def _run(**kw):
+def _run(published=False, **kw):
+    """The pad-pad rows run_drc COUNTS (no `accepted`); with `published`,
+    the accepted `own-footprint-gap` rows instead (#1628)."""
     with tempfile.NamedTemporaryFile('w', suffix='.kicad_pcb', delete=False) as f:
         f.write(_board(**kw))
         path = f.name
     try:
         v = run_drc(path, clearance=0.1, quiet=True)
-        return [x for x in v if x['type'] == 'pad-pad']
+        if published:
+            return [x for x in v if x['type'] == 'pad-pad'
+                    and x.get('accepted') == 'own-footprint-gap']
+        return [x for x in v if x['type'] == 'pad-pad' and not x.get('accepted')]
     finally:
         os.unlink(path)
 
@@ -76,7 +85,7 @@ def _run_text(body, clearance=0.1, vtype='pad-pad'):
         path = f.name
     try:
         v = run_drc(path, clearance=clearance, quiet=True)
-        return [x for x in v if x['type'] == vtype]
+        return [x for x in v if x['type'] == vtype and not x.get('accepted')]
     finally:
         os.unlink(path)
 
@@ -116,6 +125,11 @@ def run():
     # Adjacent pins of the SAME footprint below clearance -> NOT flagged.
     check("same-footprint sub-clearance pins -> 0 violations (pre-existing noise)",
           len(_run(pad2_x=10.65, same_footprint=True)) == 0)
+    # ...but measured and published (#1628): KiCad reports it as clearance
+    _pub = _run(pad2_x=10.65, same_footprint=True, published=True)
+    check("same-footprint sub-clearance pins -> published as one "
+          "own-footprint-gap row, gap 0.05",
+          len(_pub) == 1 and abs(_pub[0]['gap_mm'] - 0.05) < 1e-6)
 
     # Two circle pads offset DIAGONALLY with a legal true (edge-to-edge) gap.
     # The old perimeter sampler walked the bounding box, whose corner sits

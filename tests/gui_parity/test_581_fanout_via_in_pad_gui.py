@@ -120,6 +120,7 @@ def main():
     from kicad_routing_plugin import routing_dialog
 
     app = wx.App(False)  # noqa: F841 - must outlive the dialog
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
 
     _install_fake_board(BOARD)

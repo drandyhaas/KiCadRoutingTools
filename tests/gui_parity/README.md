@@ -71,13 +71,23 @@ Engine parameters and defaults:
   reaches is gated on "Fix DRC settings" (#693).
 - `test_966_unset_clearance.py` — clearance resolution in every tab's shared
   config (#966).
+- `test_1691_ceiling_fab_floor_gui.py` — a plan's Clearance ceiling below the
+  physical fab floor is held at it: each tab's config, and the classes the route
+  step writes, against the CLI's (#1691).
+- `test_1698_plan_clearance_parity_gui.py` — the same flags through the CLI and a
+  plan on all three routing tabs: the map the engine is handed, the project the
+  plan writes, the live board and the copper (#1698).
+- `test_1699_cap_ceiling_fab_floor_gui.py` — an `optimize_caps` step's ceiling
+  below the physical fab floor is held at it: what the engine is handed, and the
+  classes written, against `place_fanout_clearance.py`'s (#1699).
 - `test_zero_diff_pair_width_gui.py` — a 0 class diff-pair width/gap resolves
   the way `route_diff.py` resolves it.
 - `test_settings_roundtrip.py` — the dialog's settings save and restore.
 
 Planes tab: `test_plane_all_layers_parity.py`, `test_plane_layer_costs_gui.py`,
 `test_gnd_vias_gui.py`, `test_skip_existing_zones_gui.py`,
-`test_1056_renamed_layers_gui.py` (all described below).
+`test_1056_renamed_layers_gui.py`, `test_1698_plane_step_leaves.py` (all
+described below).
 
 Fanout tab and cap placement:
 - `test_fanout_rotated_gui.py` — QFN fanout on a rotated footprint: the only
@@ -85,6 +95,9 @@ Fanout tab and cap placement:
 - `test_fanout_backside_gui.py` — BGA fanout on a part flipped to B.Cu.
 - `test_fanout_threaded_gui.py` — the escape runs on a worker thread and still
   applies (#621).
+- `test_1641_fanout_filter_misses_gui.py` — a selected net with no pad to fan
+  out (an interior pad, stub escape) is named in the completion message, and
+  a net named with a bus index (`D[3]`) is fanned out by its name.
 - `test_581_fanout_via_in_pad_gui.py`, `test_1195_qfn_floors_gui.py`,
   `test_fanout_floor_parity_gui.py` — described below.
 - `test_666_cap_move_gui.py` — a scoped cap move is applied, re-welded and
@@ -119,6 +132,7 @@ Text parser vs pcbnew (both parse paths, with pcbnew as the referee where it
 can be): `test_726_parse_path_parity.py` (duplicated references),
 `test_ref_label_pcbnew_parity.py` (reference labels, #481),
 `test_829_edge_cuts_owner_parity.py` (who owns the outline),
+`test_1700_arc_bounds_parity.py` (`board_bounds` off an Edge.Cuts arc),
 `test_751_via_protection_readback.py` (via protection on a SWIG without the
 enums), `test_via_type_parse_parity.py` (via spans, #1268),
 `test_962_paste_parity.py` and `test_962_native_graphic_overrun.py` (paste
@@ -592,11 +606,19 @@ pass. Run any directly:
   says "unchanged by this step but still below", in the CLI's words. On the
   code before that fix it fails 3 checks: the GUI's step 1 reported pcbnew's
   factory floors as relaxed, and its step 2 named different floors and values.
+- `test_1698_plane_step_leaves.py` -- what a Planes step leaves for the next
+  step, through the real dialog and plan executor against `route_planes.py` on
+  the same files: the copper-to-edge rule is the CLI's (the board's own, pinned
+  up to the fab floor), never the plane-zone inset, for the castellated retract
+  too; and the class map the step published to the fill model is gone, as it
+  is on the CLI, where the next step is a fresh process. On the code before
+  that fix it fails 6 checks.
 - `test_gnd_vias_gui.py` -- the Planes tab's **Add GND vias** step, run for
   real (nothing mocked) against `route_planes.py --add-gnd-vias` on the same
   files: return vias keep a net-class clearance (#1030), a `.kicad_dru` layer
   rule (#498), every copper layer (not the plane step's outer+pour set), and
-  the fab copper-to-edge floor; GUI and CLI place identical vias. On the
+  the fab copper-to-edge floor; GUI and CLI place identical vias, GND poured
+  on two layers (on one, #1667, both warn and place none). On the
   pre-2026-09-24 code it fails 9 checks, CLI included (its rules lookup read
   the output's not-yet-copied `.kicad_dru`). Its `file` arm (#1272) sets the
   Net Clearances File / `--net-clearances`: the file replaces the class map

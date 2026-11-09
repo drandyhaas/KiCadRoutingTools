@@ -20,8 +20,12 @@ the code emits, derived from the code rather than copied into this file:
      `fail_reason = '<code>'` refinement, each literal `failure_reason` --
      has a row in diagnose-routing-failures' pair table, and every code the
      table names is one of them;
-  4. negative controls: a table missing a code, and a cited key route_diff
-     does not emit, are both reported.
+  4. every `intra_pair_matching` status route_diff can ship (the matcher's
+     regrade and its two literal records) is defined by both skills, in
+     diagnose-routing-failures' "route_diff runs" section and in the routing
+     skill's all-nets gate, with the AC-coupled pass's number named (#1669);
+  5. negative controls: a table missing a code, a cited key route_diff does not
+     emit and a status left undefined are all reported.
 
 Static: reads sources and skills, spawns nothing.
 
@@ -161,8 +165,59 @@ def cited_pair_keys(text):
     """Backticked summary-looking keys: `*_pairs`, `*_followup_nets`, and the
     two route_diff record names."""
     return set(re.findall(
-        r'`((?:[a-z_]+_pairs)|single_ended_followup_nets|single_ended_fallback|'
+        r'`((?:[a-z_]+_pairs)|single_ended_followup_nets|single_ended_followup_reasons|'
+        r'single_ended_fallback|'
         r'casualty_reconcile)`', text))
+
+
+def _status_values(target, value):
+    """The strings `value` assigns to a `rec['status']` in `target`, tuple
+    assignments included."""
+    if isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple):
+        out = set()
+        for t, v in zip(target.elts, value.elts):
+            out |= _status_values(t, v)
+        return out
+    if (isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant)
+            and target.slice.value == 'status'):
+        return _returned(value)
+    return set()
+
+
+def intra_pair_statuses():
+    """Every status an `intra_pair_matching` record can ship with: what
+    regrade_intra_pair_reports assigns, and the `rec.update(status='...')`
+    literals in run_intra_pair_matching. The regrade rewrites every other
+    status, so the matcher's own words (`improved`) never ship."""
+    tree = _tree('length_matching.py')
+    out = set()
+    for node in ast.walk(_func(tree, 'regrade_intra_pair_reports')):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                out |= _status_values(t, node.value)
+    for node in ast.walk(_func(tree, 'run_intra_pair_matching')):
+        if isinstance(node, ast.Call) and getattr(node.func, 'attr', '') == 'update':
+            for kw in node.keywords:
+                if kw.arg == 'status' and isinstance(kw.value, ast.Constant):
+                    out.add(kw.value.value)
+    assert {'matched', 'within-tolerance', 'unmatched', 'not-matchable', 'skipped'} == out, \
+        sorted(out)
+    return out
+
+
+def status_problems(diag, routing, statuses):
+    out = []
+    sect = diag.split('### route_diff runs', 1)
+    body = sect[1].split('\n## ', 1)[0] if len(sect) == 2 else ''
+    gate = routing.split('A pair is ready for the all-nets step', 1)
+    gate = gate[1].split('### Stop conditions', 1)[0] if len(gate) == 2 else ''
+    for where, text in (('diagnose-routing-failures', body), ('plan-pcb-routing', gate)):
+        for st in sorted(statuses):
+            if f'`{st}`' not in text:
+                out.append(f'{where} does not define `intra_pair_matching` status `{st}`')
+        if 'ac_coupled_xnets' not in text:
+            out.append(f'{where} does not name `ac_coupled_xnets` for a `skipped` pair')
+    return out
 
 
 def problems(diag, routing, keys, fields, outcomes, codes):
@@ -213,6 +268,24 @@ def test_the_skills_read_route_diffs_pair_results_in_its_words():
     print(f'  PASS: {len(codes)} failure_reason codes, {len(outcomes)} '
           f'outcomes and the gate keys {", ".join(GATE_KEYS)} are read in '
           f'route_diff\'s own words')
+
+
+def test_both_skills_define_every_intra_pair_status():
+    statuses = intra_pair_statuses()
+    bad = status_problems(_read(DIAGNOSE), _read(ROUTING), statuses)
+    assert not bad, '\n  ' + '\n  '.join(bad)
+    print(f'  PASS: both skills define {", ".join(sorted(statuses))}')
+
+
+def test_the_status_check_trips_on_an_undefined_status():
+    statuses = intra_pair_statuses()
+    diag, routing = _read(DIAGNOSE), _read(ROUTING)
+    bad = status_problems(diag.replace('`not-matchable`', 'unmatchable'), routing, statuses)
+    assert any('diagnose-routing-failures does not define' in b and 'not-matchable' in b
+               for b in bad), bad
+    bad = status_problems(diag, routing.replace('`skipped`', 'passed over'), statuses)
+    assert any('plan-pcb-routing does not define' in b and 'skipped' in b for b in bad), bad
+    print('  PASS: an undefined status is reported, per skill')
 
 
 def test_the_check_trips_on_a_missing_code_and_an_invented_key():

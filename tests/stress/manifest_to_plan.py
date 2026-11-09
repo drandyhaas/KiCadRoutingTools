@@ -125,6 +125,13 @@ REFUSED_TOOLS = {
         'writes a copper keep-out rule area that every later route step obeys '
         '(#1200); the plan format has no step for it. Run it on the CLI and '
         'start the plan from its output'),
+    # A pure check_join is a check and never reaches this table; with
+    # --keep-staged it is a copper step a chain continues from (#1637).
+    'check_join.py': (
+        'with --keep-staged, lays a hand-drawn join (a polyline and its vias) '
+        'that it verified, and the chain continues from that board; the plan '
+        'format has no hand-join step. Run it on the CLI and start the plan '
+        'from its output'),
     'autoplan.py': (
         'builds its OWN chain of plane, fanout, decap, diff-pair and route '
         'steps from the board and runs it; the plan format has no step that '
@@ -394,6 +401,10 @@ BOOL_FLAGS = {
     # (--no-smoothing is in INVERTED_BOOL_FLAGS below: it used to be here as
     # `no_smoothing`, a name no control or alias matched.)
     '--add-gnd-vias': 'add_gnd_vias',
+    # #1630: route.py / route_diff.py record the --impedance target without
+    # solving widths (a checkbox of the same name on each tab). A switch, so
+    # here and not in FLAG_PARAMS, which would consume the next argument.
+    '--impedance-declare-only': 'impedance_declare_only',
     # #485: route_planes area via stitching toggles (planes-tab checkboxes
     # stitch_vias / stitch_edge_fence, applied by the plan executor's
     # generic loop).
@@ -863,6 +874,8 @@ CAP_FLAG_PARAMS = {
     # one parameter whose two branches decide whether the step clamps the
     # project at all.
     '--clearance': 'clearance',
+    # #1699: the shared control, whose file the ceiling's floor reads
+    '--fab-overrides': 'fab_overrides_path',
     '--capture-radius': 'cap_capture_radius',
     '--near-margin': 'cap_near_margin',
     '--step': 'cap_step',
@@ -933,9 +946,9 @@ def cap_optimization_step(argv, cwd=None):
             params[CAP_FLAG_PARAMS[a]] = _num(argv[i + 1]); i += 2
             # #1067: the CLI read a relative intent from ITS cwd; the GUI
             # would read it from the board's folder. Make it absolute here.
-            if (CAP_FLAG_PARAMS[a] == 'cap_intent_path' and cwd
+            if (CAP_FLAG_PARAMS[a] in PATH_PARAMS | {'cap_intent_path'} and cwd
                     and not os.path.isabs(argv[i - 1])):
-                params['cap_intent_path'] = os.path.normpath(
+                params[CAP_FLAG_PARAMS[a]] = os.path.normpath(
                     os.path.join(cwd, argv[i - 1]))
         elif a in CAP_BOOL_FLAGS:
             key, val = CAP_BOOL_FLAGS[a]; params[key] = val; i += 1
@@ -964,20 +977,10 @@ def prune_manifest(cmds, manifest=None):
     qfn_fanout has no --dry-run, so the CLI exited 2 with no output).
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from redo_stress_test import compute_prune_keep, is_check_cmd
-    from cli_argv_check import rejection
-    rejected = {}
-    for i, (_cwd, argv) in enumerate(cmds):
-        if is_check_cmd(argv) or '--help' in argv or '-h' in argv:
-            continue
-        why = rejection(argv, cwd=_cwd or (os.path.dirname(os.path.abspath(
-            manifest)) if manifest else None))
-        if why:
-            rejected[i] = why
-    keep, _info = compute_prune_keep(
-        [(c, ['true']) if i in rejected else (c, a)
-         for i, (c, a) in enumerate(cmds)])
-    return keep - set(rejected), rejected
+    from redo_stress_test import compute_prune_keep, refused_commands
+    rejected = refused_commands(cmds, manifest)
+    keep, _info = compute_prune_keep(cmds, refused=rejected)
+    return keep, rejected
 
 
 def plan_steps_from_manifest(manifest, keep_files=False):

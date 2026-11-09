@@ -98,6 +98,7 @@ def main():
     from kicad_routing_plugin import routing_dialog as swig_gui
 
     app = wx.App(False)                                          # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     _install_fake_board(BOARD)
     pcb_data = build_pcb_data_like_ipc(BOARD)
     dialog = swig_gui.RoutingDialog(None, pcb_data, BOARD)

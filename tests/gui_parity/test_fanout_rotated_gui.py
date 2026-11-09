@@ -123,8 +123,12 @@ def _copper_key(tracks):
 
 
 def _outward_counts(tracks, footprint):
-    """(outward, inward) escapes, judged in BOARD space against the package
-    centre -- front-independent by construction."""
+    """(outward, inward) escapes of the surface fan, judged in BOARD space
+    against the package centre -- front-independent by construction. An
+    interior pad's stub is its via-drop (#1717), which runs along the pad's
+    own axis, not outward, so it is not counted."""
+    from qfn_fanout.layout import analyze_qfn_layout, analyze_pad
+    layout = analyze_qfn_layout(footprint)
     gxs = [p.global_x for p in footprint.pads]
     gys = [p.global_y for p in footprint.pads]
     cx, cy = (min(gxs) + max(gxs)) / 2, (min(gys) + max(gys)) / 2
@@ -132,6 +136,8 @@ def _outward_counts(tracks, footprint):
     for p in footprint.pads:
         if p.net_id:
             by_net.setdefault(p.net_id, []).append(p)
+    interior = {id(p) for p in footprint.pads
+                if layout is not None and analyze_pad(p, layout).side == 'center'}
 
     outward = inward = 0
     for t in tracks:
@@ -142,7 +148,7 @@ def _outward_counts(tracks, footprint):
                 d = math.hypot(near[0] - p.global_x, near[1] - p.global_y)
                 if d < bd:
                     best, bd, far = p, d, other
-        if best is None or bd > 0.6:
+        if best is None or bd > 0.6 or id(best) in interior:
             continue
         rx, ry = best.global_x - cx, best.global_y - cy
         n = math.hypot(rx, ry) or 1.0
@@ -268,6 +274,7 @@ def main():
         return 0
 
     app = wx.App(False)  # noqa: F841 - must outlive the dialog
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
 
     r = []

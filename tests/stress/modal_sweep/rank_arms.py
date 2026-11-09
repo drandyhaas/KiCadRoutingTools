@@ -304,9 +304,10 @@ def main() -> int:
               f"recorded rescue retries its failures by name")
         print(f"    baseline leaves {base_v} net(s) incomplete there; arms: "
               + ", ".join(f"{n} {v:+}" for n, v in sorted(dmg.items(), key=lambda kv: kv[1])))
+        tag = ('DROPPED' if a.drop_rescue_clean
+               else 'still counted -- pass --drop-rescue-clean to exclude')
         print("    this cell penalises any change regardless of quality "
-              f"({'DROPPED' if a.drop_rescue_clean else 'still counted -- '
-                 'pass --drop-rescue-clean to exclude'})")
+              f"({tag})")
         if a.drop_rescue_clean:
             paired = [b for b in paired if b not in set(biased)]
     elif not have_shape:

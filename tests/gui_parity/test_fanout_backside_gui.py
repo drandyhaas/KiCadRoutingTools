@@ -230,6 +230,7 @@ def main():
         return 0
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
     r = []
     with tempfile.TemporaryDirectory() as td:

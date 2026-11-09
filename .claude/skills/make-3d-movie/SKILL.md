@@ -17,6 +17,10 @@ Invocation: `/make-3d-movie <board.kicad_pcb> [--route BOARD:SET |
   judge_seeds routes and judges them, so the movie picks the seed that run
   kept. Use it for a board a `/plan-pcb-placement` run placed. Pass one of
   `--route` and `--route-chain`, not both.
+- Either way the routes are routed afresh by that chain: the full route
+  in the movie is the chain's route of the best seed, NOT the route a
+  `/plan-pcb-routing` run shipped. To film a routing run itself, use
+  `py_router/route_movie.py RUNDIR --final <the kept board>` (2D).
 - `--seed` picks the seed of a placement-only movie (default 0). A kept
   seed is filmed with its start (Step 4).
 - A given groups or intent file is used in place of writing one.
@@ -68,7 +72,11 @@ You end with `wk/<run>/fixed.kicad_pcb`, `wk/<run>/intent.json` and
 ## Step 3: Find the missing 3D models
 
 A part whose model the installed library lacks is drawn as a box in its
-group's colour. List those models:
+group's colour. A model the board file itself carries (`kicad-embed://NAME`,
+with NAME in the board's or the footprint's embedded files) is drawn from the
+board, is never listed and is never replaced by a recorded answer; a
+`kicad-embed://` reference to a file the board does not carry is listed like
+any other. List those models:
 
 ```bash
 python3 movie3d/find_models.py missing wk/<run>/fixed.kicad_pcb

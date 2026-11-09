@@ -137,6 +137,10 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
     indices = list(range(len(steps))) if indices is None else list(indices)
 
     app = wx.App(False)
+    # wx's own log, too: its default target shows a logged error as a modal box
+    # from the next idle event, or at exit, which nobody can dismiss. Here and
+    # not sooner (wx.App resets it) or later (changing it flushes the old one).
+    wx.Log.SetActiveTarget(wx.LogStderr())
     # No user is present: a modal popup would hang the run forever. quiet=True
     # already suppresses the per-step completion popups; this covers the rest
     # (validation warnings, the plane-offer prompt's cousins).

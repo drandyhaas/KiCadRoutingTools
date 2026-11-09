@@ -4,7 +4,8 @@ The cost is `simple.Model`'s, exactly as it is priced -- each net's Manhattan
 spanning tree, crossings among those trees, claims, decaps, each group's gap
 tree, the halo, foreign-pad hits and congestion -- plus, while it runs, an
 OVERLAP penalty: the area where two parts' courtyards, each grown by half
-the clearance, intersect on a face they share (a drilled part presents only
+the clearance, intersect on a face they share (box by box for a courtyard
+drawn as several shapes, `_shape_correction`) (a drilled part presents only
 its lead boxes on its far face, as the seat gate pairs them), how far a
 courtyard is outside the board less its edge margin -- the real outline,
 cutouts and notches too -- and how far a part breaks the intent's keep-outs
@@ -149,6 +150,8 @@ def turns_alike(part, fp) -> bool:
     def boxes(rot):
         out = [part.rect(0.0, 0.0, rot), part.grade_rect(0.0, 0.0, rot),
                part.padbox(0.0, 0.0, rot), part.drawn_rect(0.0, 0.0, rot)]
+        own = getattr(out[0], 'boxes', None)    # a courtyard of several boxes
+        out += sorted(own) if own else []
         far = part.tht_rect(0.0, 0.0, rot)
         out += sorted(far_boxes(far)) if far is not None else []
         return [None if b is None else tuple(round(v, 4) for v in b) for b in out]
@@ -218,6 +221,8 @@ class Annealer:
         # instead (`_pins`, #1307).
         self.containers = frozenset(r for r in self.names if r in st.container_refs)
         self.frames = sorted(r for r in self.containers if r in st.frame_refs)
+        self.fences = frozenset(r for r in self.containers
+                                if st.container_kinds.get(r) == 'fence')
         bit = {}
         self.faces = {r: 0 if r in self.containers else
                       sum(1 << bit.setdefault(f, len(bit)) for f in set(st.parts[r].sides))
@@ -244,8 +249,14 @@ class Annealer:
             r for r in self.drilled
             if any(t[0] < c[0] or t[1] < c[1] or t[2] > c[2] or t[3] > c[3]
                    for c, f in [P[r].rects()] for t in far_boxes(f)))
+        # the parts whose courtyard is several boxes (`quench._ShapedPart`):
+        # the Rust sum prices them on the bounding box, `_shape_correction`
+        # box by box
+        self.shaped = frozenset(r for r in bodies
+                                if getattr(P[r].rect(), 'boxes', None))
         self.lam = LAM_START
         self.shoving = False        # an escape may shove: only in `repair`
+        self.local = False          # ... and only shove, never jump: `legalise`
         # #1443: the parts with room under them (`QuenchState.covers`)
         self.cover_list = sorted(r for r in st.covers if r not in self.containers)
 
@@ -263,6 +274,88 @@ class Annealer:
     def _grown(self, r):
         c, h = self.st.parts[r].rect(), self.half
         return (c[0] - h, c[1] - h, c[2] + h, c[3] + h)
+
+    def _box_area(self, a, b, pa=None, pb=None):
+        """The overlap of a same-face pair with a part of several boxes
+        (`shaped`): each box grown by half the clearance, summed box pair by
+        box pair, and never more than the grown bounding boxes' overlap,
+        which covers it (a box pair across the seam of two grown boxes
+        would count twice). `pa`, `pb`: their poses, else where they are."""
+        P, h = self.st.parts, self.half
+        ra = P[a].rect() if pa is None else P[a].rect(*pa)
+        rb = P[b].rect() if pb is None else P[b].rect(*pb)
+        # the grown bounding boxes as `_grown` forms them, so a pair that
+        # gains nothing from its boxes cancels the Rust sum's term exactly
+        GA = (ra[0] - h, ra[1] - h, ra[2] + h, ra[3] + h)
+        GB = (rb[0] - h, rb[1] - h, rb[2] + h, rb[3] + h)
+        ox = min(GA[2], GB[2]) - max(GA[0], GB[0])
+        oy = min(GA[3], GB[3]) - max(GA[1], GB[1])
+        if ox <= 0 or oy <= 0:
+            return 0.0
+        A = ([(c[0] - h, c[1] - h, c[2] + h, c[3] + h) for c in ra.boxes]
+             if getattr(ra, 'boxes', None) else [GA])
+        B = ([(c[0] - h, c[1] - h, c[2] + h, c[3] + h) for c in rb.boxes]
+             if getattr(rb, 'boxes', None) else [GB])
+        v = 0.0
+        for c in A:
+            for d in B:
+                bx = min(c[2], d[2]) - max(c[0], d[0])
+                if bx > 0:
+                    by = min(c[3], d[3]) - max(c[1], d[1])
+                    if by > 0:
+                        v += bx * by
+        return min(v, ox * oy)
+
+    def _shape_pair(self, a, b):
+        """Whether `_box_area` prices the pair: a part of several boxes
+        among them, on a face both have, and no other term reprices it --
+        a seated part's pair with a wall (`_seat_correction`), a pair with
+        a cover (the heights), a `_cross` pair (`_far_correction`, which
+        reads the boxes itself). Those keep the bounding box."""
+        if not (a in self.shaped or b in self.shaped):
+            return False
+        if not self.faces[a] & self.faces[b]:
+            return False
+        if self.seats and self._seat_pair(a, b) != 0.0:
+            return False
+        covers = self.st.covers
+        if covers and (a in covers or b in covers):
+            return False
+        return not (a in self.far_parts and b in self.far_parts
+                    and self._cross(a, b))
+
+    def _shape_correction(self, mine):
+        """What `_box_area` changes in a move's overlap, which the Rust sum
+        prices on the grown bounding boxes: each `_shape_pair` with a part in
+        `mine`, once -- a part of several boxes in `mine` with its neighbours
+        and the other movers, any other part in `mine` with the parts of
+        several boxes."""
+        mset = set(mine)
+        fix, seen, h = 0.0, set(), self.half
+        for a in mine:
+            # the index's neighbours of `a` and the other movers; a part of
+            # one box pairs only with the parts of several boxes among them
+            A = self._grown(a)
+            cand = ((self.model._ixp.query((A[0] - h, A[1] - h, A[2] + h, A[3] + h))
+                     - mset) | mset)
+            if a not in self.shaped:
+                cand &= self.shaped
+            for b in sorted(cand):
+                if b == a:
+                    continue
+                # apart now is apart from either side: no pair to price
+                B = self._grown(b)
+                ox = min(A[2], B[2]) - max(A[0], B[0])
+                oy = min(A[3], B[3]) - max(A[1], B[1])
+                if ox <= 0 or oy <= 0:
+                    continue
+                key = (a, b) if a < b else (b, a)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if self._shape_pair(a, b):
+                    fix += self._box_area(a, b) - ox * oy
+        return fix
 
     def _seat_pair(self, a, b):
         """For a pair with a seated part: None when it is not this term's to
@@ -320,7 +413,8 @@ class Annealer:
         where it is."""
         p, h = self.st.parts[r], self.half
         if face == p.side:
-            bs = (p.rect() if pose is None else p.rect(*pose),)
+            c = p.rect() if pose is None else p.rect(*pose)
+            bs = (c,) if type(c) is tuple else far_boxes(c)     # `_ShapedPart`
         else:
             bs = far_boxes(p.rects()[1] if pose is None else p.tht_rect(*pose))
         return [(b[0] - h, b[1] - h, b[2] + h, b[3] + h) for b in bs]
@@ -480,7 +574,8 @@ class Annealer:
             H = (min(h[0] for h in every), min(h[1] for h in every),
                  max(h[2] for h in every), max(h[3] for h in every))
             for b in (self.names if f in mset else mine):
-                if b in self.containers:
+                # another fence is priced on this one's wall (#1722)
+                if b in self.containers and b not in self.fences:
                     continue
                 pb = P[b]
                 c = pb.rect()
@@ -531,7 +626,8 @@ class Annealer:
              + w * (max(0.0, i[1] - c[1]) + max(0.0, c[3] - i[3])))
         g = self.gate
         if g is not None and not g.rect_bbox_decides(c):
-            amt = g.rect_outside_amount(c)
+            # the rings the part owns, as `pose_ok` exempts them (#1723)
+            amt = g.rect_outside_amount(c, skip_rings=self.st._owned_rings(r))
             if amt > BOARD_TOL:
                 v += max(FLOOR, amt * (w + hh))
         return v
@@ -590,6 +686,8 @@ class Annealer:
                 total += self._seat_correction(mine)
             if self.far_parts:
                 total += self._far_correction(mine)
+            if self.shaped:
+                total += self._shape_correction(mine)
             if self.frames:
                 total += self._pins(mine)
             if self.st.covers:
@@ -629,7 +727,8 @@ class Annealer:
                 if less:
                     oy -= less
                 if oy > 0:
-                    total += ox * oy
+                    total += (self._box_area(a, b) if self.shaped and self._shape_pair(a, b)
+                              else ox * oy)
         return total
 
     # -- proposals: {ref: new pose} or None --------------------------------------
@@ -786,6 +885,9 @@ class Annealer:
                 if (r in self.far_parts and b in self.far_parts and self._cross(r, b)
                         and self._far_area(r, b, at, poses.get(b)) <= 0.0):
                     continue
+                if (self.shaped and self._shape_pair(r, b)
+                        and self._box_area(r, b, at, poses.get(b)) <= 0.0):
+                    continue        # in a notch of the other's courtyard
                 if self.st.covers and (r in self.st.covers or b in self.st.covers):
                     P = self.st.parts
                     pa = at if at is not None else self.pose(r)
@@ -923,6 +1025,9 @@ class Annealer:
         before = self.overlap([r])
         if before <= CLEAN:
             return None
+        if self.local:      # `legalise`: a shove where it stands, never a jump
+            got = self._shove_best(r)
+            return got[1] if got else None
         ov, pose = self._board_pose(r)
         best = (ov - before, {r: pose})
         if self.shoving and ov > CLEAN:
@@ -1040,7 +1145,7 @@ class Annealer:
         ds.sort()
         return ds[len(ds) // 2] / -math.log(ACCEPT)
 
-    def repair(self, T: float) -> float:
+    def repair(self, T: float, refs=None, local: bool = False, guard=None) -> float:
         """A run that never came clean, mended where it stands: up to
         REPAIR_ROUNDS passes over the parts still overlapping, each one's
         escape -- with the SHOVE -- kept by the trial at the run's last
@@ -1055,20 +1160,29 @@ class Annealer:
         the seven stuck runs of noahfc, tigard and z80_devboard: 5-30% more
         cost when mended than the next fresh run, and noahfc's three routed
         worse), so it only saves a run that would otherwise leave a part
-        illegal. Returns the overlap left."""
-        self.shoving = True
+        illegal. With `refs`, only those parts are escaped (a shove may still
+        push the movable parts in their way): `legalise` passes the parts
+        that are not legal, so a part the overlap measure flags but the
+        legality admits is left where it stands. `local` makes each escape a
+        shove alone, never the jump to a random pose over the board, so a
+        part is mended where it stands or not at all. `guard({ref: pose})`,
+        when given, must accept an escape before it is tried: `legalise`
+        refuses one that breaks a part that was legal or carries a part too
+        far. Returns the overlap left."""
+        self.shoving, self.local = True, local
+        pick = self.mov if refs is None else sorted(set(refs) & self.movset)
         try:
             for _ in range(REPAIR_ROUNDS):
-                stuck = [r for r in self.mov if self.overlap([r]) > CLEAN]
+                stuck = [r for r in pick if self.overlap([r]) > CLEAN]
                 if not stuck:
                     break
                 for r in stuck:
                     new = self._escape(r)
-                    if new:
+                    if new and (guard is None or guard(new)):
                         self.trial(new, T)
             return self.overlap()
         finally:
-            self.shoving = False
+            self.shoving = self.local = False
 
 
 #: The anchored start: each pull's weight is scaled by exp(N(0, SPREAD)) per
@@ -1387,3 +1501,394 @@ def anneal(model, movable: List[str], *, moves: int = 11000,
             'best': final, 'tracked_best': best, 't0': t0,
             'reseated': reseated, 'repaired': repaired, 'loop_seconds': round(loop_seconds, 3),
             'stats': {kk: tuple(v) for kk, v in stats.items()}}
+
+
+#: mm the legaliser's nearest-legal walk reaches from where a part stands,
+#: the post-anneal step's own reach -- and the most any part may end from
+#: where the board put it, by every step of `legalise` together: a part
+#: that cannot be made legal within it is left where it is and named, never
+#: flung across the board
+LEGALISE_REACH = 6.0
+#: mm round a moved part within which `legalise` re-checks the parts that
+#: were legal: a move can only break a part it comes this close to
+LEGALISE_NEAR = 3.0
+#: mm further than the nearest pose KiCad's standard admits that `legalise`
+#: still prefers a pose place_simple's own spacing admits too (the courtyard
+#: clearance it keeps between parts): a preference, never a requirement
+SPACING_PREFERENCE_MM = 0.5
+
+
+def legalise(model, movable: List[str], *, seed: int = 0, seats=None,
+             census=None, baseline=None, premoved=()) -> Dict:
+    """The board's own poses, made legal to KiCad's standard where they are
+    not (#1756): no scatter and no anneal, only the anneal's two last steps
+    on the parts that need them.
+
+    THE STANDARD is the authoritative checkers', not place_simple's own
+    spacing, and each part of it is the checker's function (`kicad_why`):
+    pad copper past the outline by check_assembly's gate
+    (`seeder._pad_copper_off_board`) and drawn copper past it
+    (`seeder.graphic_copper_past`, check_drc's census); pad, hole and
+    graphic-copper clearance to every other part at check_drc's own
+    clearance model (`LegalityContext.pair_shortfall`); a drawn body inside
+    another (`_body_contained_at`) and a frame pin under a courtyard
+    (`_pin_conflict_at`, the grader's pin hits), as check_assembly gates
+    them; the board's rule-area keep-outs (`keepout_excess`) and the
+    intent's keep-outs and zones (`intent_clear`), which the floorplan grade
+    errors on; and courtyard overlap as check_assembly grades a move against
+    the board it started from (`census`, a `legality.CourtyardCensus` of the
+    board as handed in; `baseline`, the same channel's grade of the board
+    the run started from; `premoved`, the parts already moved off it -- a
+    declared pose, a cover's seat: a pair one of whose parts moved gates,
+    under the project's own courtyards_overlap severity, so an `ignore`
+    project waives them, and a part a declared pose now overlaps must move).
+    A courtyard pair the board already had is not ours to fix, and closer
+    than place_simple's spacing is not illegal.
+
+    Every part that standard admits stays exactly where it is. Each part it
+    does not goes to its nearest pose that meets it -- a part seated on an
+    edge (`seats`) slid along it (`edge_seat.reseat`), any other walked out
+    in square rings at its own turn, then at its others
+    (`simple.nearest_legal`), preferring a pose that keeps place_simple's
+    spacing too when one is within SPACING_PREFERENCE_MM of the nearest --
+    one part at a time, the move that frees the most other parts first,
+    then the shortest step (`walk`). A part no such walk frees is mended
+    with `Annealer.repair`, its escapes shoves alone (`local`), in two
+    passes: the parts that were legal held as walls, then free to be shoved
+    -- an escape kept only when each part it shoves stays legal. A seated
+    part is never shoved. Then the parts still illegal are walked again.
+
+    Every move is refused when it would break a part that was legal (the
+    standard re-asked of those within LEGALISE_NEAR mm of the parts it
+    moves, and the census of every part moved so far), take an intent decap
+    limit or claim further past its limit (`limits_hold`), or leave a part
+    more than LEGALISE_REACH mm from where the board put it. A part those
+    rules leave no pose is left where it ends and named. The random stream
+    (`seed`) is only the repair's.
+
+    Returns {'moved': {ref: {'from', 'to', 'mm'}}, 'reseated', 'repaired',
+    'illegal_before', 'illegal_after', 'why' ({ref: the first part of the
+    standard it fails, for the illegal ones}), 'broken' (parts that were
+    legal and are not: empty, as the rules refuse every move that would make
+    one), 'seconds'}."""
+    from placement import seeder as sd
+    from placement.legality import EPS, courtyard_error_gating
+    t_start = time.time()
+    seats = dict(seats or {})
+    st = model.state
+    ctx = st.legality_ctx
+    bands = (ctx.keepouts if ctx is not None and ctx.keepouts is not None
+             and ctx.keepouts.active else None)
+    mov = sorted(r for r in movable if r in st.parts)
+    model.reprice_all()
+    model.total()
+
+    def pose(r):
+        p = st.parts[r]
+        return (p.x, p.y, p.rot)
+    was = {r: pose(r) for r in mov}
+
+    def kicad_why(r, at=None):
+        """The first part of the standard `r` fails at `at` (default where it
+        stands), the courtyard aside (`census_pairs`), or None."""
+        p = st.parts[r]
+        at = pose(r) if at is None else at
+        p.ensure_rotation(at[2])
+        try:
+            if sd._pad_copper_off_board(st, r, *at) > EPS:
+                return 'pad copper past the outline'
+            if sd.graphic_copper_past(st, r, *at) > EPS:
+                return 'drawn copper past the outline'
+            rects = p.grade_rects(*at)
+            if not st.intent_clear(r, rects):
+                ko = st.keepout_blockers(r, rects)
+                ex = st.exclusive_blockers(r, rects)
+                return ('inside keep-out ' + ', '.join(repr(k) for k in ko) if ko else
+                        'inside the exclusive zone of block(s) '
+                        + ', '.join(repr(z) for z in ex) if ex else
+                        "outside its block's zone")
+            if bands is not None and ctx.keepout_excess(r, *at) > 0.0:
+                return 'inside a rule-area keep-out'
+            if st._body_contained_at(r, *at):
+                return 'its body inside another part'
+            if st.frame_refs and st._pin_conflict_at(r, *at) is not None:
+                return "a frame pin under a courtyard"
+            if ctx is not None:
+                g = p.grade_rect(*at)
+                reach = sd._pad_copper_overhang(st, r) + 1.0
+                for o, q in st.parts.items():
+                    if o == r or not (p.sides & q.sides):
+                        continue
+                    b = q.grade_rect()
+                    m = reach + sd._pad_copper_overhang(st, o)
+                    if (b[0] - m > g[2] or g[0] - m > b[2]
+                            or b[1] - m > g[3] or g[1] - m > b[3]):
+                        continue
+                    sf = ctx.pair_shortfall(r, o, pose_a=at)
+                    if (sf.pad > EPS or sf.pad_overlap or sf.stack
+                            or sf.hole > EPS):
+                        return f'pad clearance to {o}'
+            return None
+        finally:
+            p.ensure_rotation(p.rot)
+
+    # the courtyard as check_assembly --baseline <the run's board> grades it
+    base_court = ({(q.a, q.b) for q in baseline.pairs if q.kind == 'courtyard'}
+                  if baseline is not None else set())
+    base_pins = ({(q.a, q.b) for q in baseline.pin_blocking}
+                 if baseline is not None else set())
+    premoved = frozenset(premoved)
+
+    def census_pairs(extra=None):
+        """{(a, b)}: the courtyard pairs check_assembly would gate with every
+        part moved so far, and `extra` ({ref: pose}) on top, where they are."""
+        if census is None:
+            return set()
+        poses = {r: pose(r) for r in mov if pose(r) != was[r]}
+        poses.update(extra or {})
+        moved = set(poses) | premoved
+        if not moved:
+            return set()
+        g = census.grade(poses, moved=moved)
+        out = {(q.a, q.b) for q in g.gating or ()}
+        out |= {(q.a, q.b) for q in courtyard_error_gating(g.error_pairs, moved, base_court)}
+        out |= {(q.a, q.b) for q in g.pin_blocking
+                if (q.a in moved or q.b in moved) and (q.a, q.b) not in base_pins}
+        return out
+    movset = frozenset(mov)
+    gate = {'now': census_pairs()}
+
+    def court_bad():
+        """{ref: the part it overlaps}: the movable parts in a gating pair."""
+        out = {}
+        for a_, b_ in sorted(gate['now']):
+            if a_ in movset:
+                out.setdefault(a_, b_)
+            if b_ in movset:
+                out.setdefault(b_, a_)
+        return out
+    gate['bad'] = court_bad()
+
+    def fits(r):
+        return r not in gate['bad'] and kicad_why(r) is None
+
+    def census_ok(new):
+        """A move gates no courtyard pair that does not gate now, and leaves
+        none on a part it moves."""
+        if census is None:
+            return True
+        got = census_pairs(new)
+        return got <= gate['now'] and not any(a_ in new or b_ in new for a_, b_ in got)
+
+    before = [r for r in mov if not fits(r)]
+    was_legal = frozenset(mov) - set(before)
+    reseated: List[str] = []
+
+    def far(r, at):
+        return math.hypot(at[0] - was[r][0], at[1] - was[r][1]) > LEGALISE_REACH + 1e-9
+
+    def breaks(new):
+        """Whether putting the parts of `new` ({ref: pose}) where it says
+        breaks a part that was legal -- one of them, or one within
+        LEGALISE_NEAR mm of where they go -- the state left as it was."""
+        old = {r: pose(r) for r in new}
+        for r, q in new.items():
+            st.parts[r].ensure_rotation(q[2])
+            _place(st, r, *q)
+        boxes = [st.parts[r].rect() for r in new]
+        h = LEGALISE_NEAR
+        near = []
+        for o in sorted(was_legal):
+            if o in new:
+                near.append(o)
+                continue
+            b = st.parts[o].rect()
+            if any(c[0] - h < b[2] and b[0] < c[2] + h and c[1] - h < b[3] and b[1] < c[3] + h
+                   for c in boxes):
+                near.append(o)
+        bad = any(not fits(o) for o in near)
+        for r, q in old.items():
+            st.parts[r].ensure_rotation(q[2])
+            _place(st, r, *q)
+        return bad
+
+    def lim_over(refs):
+        """{term: mm past its limit} for the limits the parts of `refs` take
+        part in, at the live poses: the intent's decap limit terms --
+        measured raw, so a cap carried out past the grade's radius
+        (`decap_ungraded`) reads as far as it is, not as ungraded -- and
+        every claim with a `max_mm` (`Model.claim_over`)."""
+        refs = set(refs)
+        out = {}
+        if getattr(model, '_lim', None) is not None:
+            for i in sorted({i for r in refs for i in model._lof.get(r, ())}):
+                ds = [d for d in (model._lim_pair(i, m) for m in model._lmem[i])
+                      if d is not None]
+                out[('decap', i)] = max(0.0, (min(ds) if ds else 0.0) - model._lthr[i])
+        for k, c in enumerate(model.claims):
+            if (c[0] in refs or c[1] in refs) and model._cmax.get(id(c)) is not None:
+                out[('claim', k)] = model.claim_over(c)
+        return out
+
+    def limits_hold(new):
+        """Whether putting the parts of `new` where it says takes no decap
+        limit or claim further past its limit than it is, the state left as
+        it was: legalising never trades a clearance for a limit the
+        floorplan grade reads -- an ERROR there no route clears."""
+        base_over = lim_over(new)
+        if not base_over:
+            return True
+        old = {r: pose(r) for r in new}
+        for r, q in new.items():
+            st.parts[r].ensure_rotation(q[2])
+            _place(st, r, *q)
+        now = lim_over(new)
+        for r, q in old.items():
+            st.parts[r].ensure_rotation(q[2])
+            _place(st, r, *q)
+        return all(now[i] <= base_over[i] + 1e-9 for i in now)
+
+    def admits(new):
+        """Whether the move `new` ({ref: pose}) keeps every rule: no seated
+        part shoved, none past LEGALISE_REACH, no legal part broken, no
+        limit worse, no courtyard pair check_assembly would gate."""
+        if any(far(r, q) for r, q in new.items()):
+            return False
+        return not breaks(new) and limits_hold(new) and census_ok(new)
+
+    def guard(new):
+        """A repair's escape: `admits`, and it shoves no seated part."""
+        return not any(r in seats for r in new) and admits(new)
+
+    def search(r, spacing):
+        """r's nearest pose within reach that meets the standard -- and,
+        with `spacing`, place_simple's own spacing too -- or None."""
+        p = st.parts[r]
+        x0, y0, rot0 = p.x, p.y, p.rot
+
+        def acc(x, y, rot):
+            return kicad_why(r, (x, y, rot)) is None and limits_hold({r: (x, y, rot)})
+        was_clr = st.clearance
+        if not spacing:
+            st.clearance = 0.0      # courtyards may meet: KiCad asks no gap
+        try:
+            if r in seats:
+                got = reseat(st, seats[r])
+                if got and not acc(*got):
+                    got = None
+                return got
+            for rot in (rot0,) + tuple(q for q in ROTS if q != rot0):
+                got = nearest_legal(st, r, x0, y0, rot, frozenset(),
+                                    reach=LEGALISE_REACH, accept=acc)
+                if got and not far(r, got):
+                    return got
+            return None
+        finally:
+            st.clearance = was_clr
+            p.ensure_rotation(rot0)
+
+    def candidate(r):
+        """((turned, mm), pose): r's nearest pose that meets the standard,
+        breaks no rule (`admits`) and is within reach -- one that keeps
+        place_simple's spacing too when that is within
+        SPACING_PREFERENCE_MM further -- whether it turns r and how far it
+        is, or None; r left as it stands."""
+        x0, y0, rot0 = pose(r)
+        best = None
+        for spacing in (False, True):
+            got = search(r, spacing)
+            if got is None or not admits({r: got}):
+                continue
+            d = math.hypot(got[0] - x0, got[1] - y0)
+            if best is None or (spacing and d <= best[0] + SPACING_PREFERENCE_MM):
+                best = (d, got)
+        if best is None:
+            return None
+        d, got = best
+        # a turn is the bigger change, whatever the distance
+        return ((rot_key(got[2]) != rot_key(rot0), d), got)
+
+    def frees(r, at, todo):
+        """How many of the other parts in `todo` r's move to `at` makes
+        legal, r put back after."""
+        p = st.parts[r]
+        here = pose(r)
+        p.ensure_rotation(at[2])
+        _place(st, r, *at)
+        n = sum(1 for q in todo if q != r and fits(q))
+        p.ensure_rotation(here[2])
+        _place(st, r, *here)
+        return n
+
+    def walk(refs):
+        """The parts of `refs` that are not legal, one at a time, until each
+        is legal or has no pose in reach (`candidate`): first the move that
+        makes the most of the others legal too -- the part that overlaps
+        several, moved once, rather than each of those it overlaps -- then
+        a move that keeps the part's turn before one that turns it, then
+        the shortest step, then input order."""
+        todo = [r for r in refs if not fits(r)]
+        cache = {}
+        while todo:
+            for r in todo:
+                if r not in cache or (cache[r] is not None and not admits({r: cache[r][1]})):
+                    cache[r] = candidate(r)
+            live = [((-frees(r, cache[r][1], todo),) + cache[r][0], i, r)
+                    for i, r in enumerate(todo) if cache[r] is not None]
+            if not live:
+                return
+            r = min(live)[2]
+            at = cache.pop(r)[1]
+            st.parts[r].ensure_rotation(at[2])
+            st.apply_move(r, *at)
+            if r not in reseated:
+                reseated.append(r)
+            gate['now'] = census_pairs()
+            gate['bad'] = court_bad()
+            todo = [q for q in todo if q != r and not fits(q)]
+    walk(before)
+    model.reprice_all()
+    model.total()
+    repaired: List[str] = []
+    stuck = [r for r in mov if not fits(r) and r not in seats]
+    # the repair, twice: the parts that were legal held as walls, then free
+    # to be shoved where each stays legal (`guard`)
+    for free in (sorted(set(mov) - was_legal - set(seats)), sorted(set(mov) - set(seats))):
+        if not stuck:
+            break
+        a = Annealer(model, free, seed=seed)
+        a.lam = LAM_END
+        prior = {r: pose(r) for r in mov}
+        a.repair(T_END, refs=stuck, local=True, guard=guard)
+        for r in mov:
+            if pose(r) != prior[r]:
+                st.parts[r].ensure_rotation(pose(r)[2])
+                st.apply_move(r, *pose(r))
+                if r not in repaired:
+                    repaired.append(r)
+        gate['now'] = census_pairs()
+        gate['bad'] = court_bad()
+        model.reprice_all()
+        model.total()
+        walk([r for r in mov if not fits(r)])
+        model.reprice_all()
+        model.total()
+        stuck = [r for r in mov if not fits(r) and r not in seats]
+    moved = {}
+    for r in mov:
+        now = pose(r)
+        if now != was[r]:
+            moved[r] = {'from': [round(v, 4) for v in was[r]],
+                        'to': [round(v, 4) for v in now],
+                        'mm': round(math.hypot(now[0] - was[r][0], now[1] - was[r][1]), 4)}
+    gate['now'] = census_pairs()
+    gate['bad'] = court_bad()
+    why = {r: kicad_why(r) for r in mov}
+    for r, o in gate['bad'].items():
+        why[r] = why[r] or f'courtyard overlap with {o}, which check_assembly gates'
+    after = [r for r in mov if why[r] is not None]
+    return {'moved': moved, 'reseated': reseated, 'repaired': repaired,
+            'illegal_before': before, 'illegal_after': sorted(after),
+            'why': {r: why[r] for r in sorted(after)},
+            'broken': sorted(r for r in was_legal if r in after),
+            'seconds': round(time.time() - t_start, 2)}

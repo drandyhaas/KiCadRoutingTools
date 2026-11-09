@@ -84,6 +84,7 @@ def main():
     from kicad_routing_plugin import routing_dialog
 
     app = wx.App(False)
+    wx.Log.SetActiveTarget(wx.LogStderr())
     assert app is not None
     rows = []
     with tempfile.TemporaryDirectory(prefix='krt966-') as tmp:

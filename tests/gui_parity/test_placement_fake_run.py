@@ -69,6 +69,7 @@ def main():
     sys.path.insert(0, os.path.dirname(REPO))
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     from kicad_parser import parse_kicad_pcb
     from kicad_routing_plugin.ai_backend import BACKENDS
     from kicad_routing_plugin.placement_gui import PlacementTab

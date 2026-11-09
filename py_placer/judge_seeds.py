@@ -67,6 +67,13 @@ non-zero when nets fail, and the fast route still judges); a step whose
 The assembly is graded too, against the board the seeds were placed from
 (judge.json's `baseline`, which place_simple writes), as `--baseline`.
 
+THE CLEAN SEEDS. With no `--seeds`, a seed judge.json grades with a
+floorplan error or a NOT BUILDABLE assembly (its `floorplan` / `assembly`
+count above 0) is skipped and named: no route clears either, so it ranks
+last whatever its route (#1645). judge.json still names it (#1296). When
+every named seed is one, nothing is routed. `--seeds` routes exactly what it
+names, an unclean seed included (one repaired by hand).
+
 At the end the scored seeds are ranked by `quick_score.judge_key` (floorplan
 errors plus the assembly count, blocking, joins_needed, then vias, copper_mm,
 segments) and the best
@@ -79,7 +86,9 @@ without buses: the defaults, and `--layer-costs 1.0 1.0 --via-cost 600`),
 write one chain per arm and judge the seeds under each: the arms can pick
 different seeds (#1383). Keep a seed that wins under the arm the final route
 will use; where both arms will be routed, one that ranks first or second under
-both.
+both. This tool works in the folder judge.json is in and makes its files afresh
+there, so each arm needs a folder of its own, or the last leaves the only boards,
+logs and scores (plan-pcb-placement 3.7's recipe, #1666).
 
 LEVEL 2 IS A SCREEN, NOT A VERDICT. It skips the rescue tail and the plane
 finalize, so its vias and copper differ from the full route's by a few percent
@@ -106,7 +115,7 @@ boards, `chain.log` and the route's own `redo_commands.sh` in
 
 Exit codes: 0 every seed scored; 4 a seed's chain wrote no board or its
 score could not be read (named); 2 nothing run: judge.json unreadable or
-naming no seed, a seed's placement missing, `--full` with `--confirm`, or a
+naming no seed (with no `--seeds`, no seed without a placement defect), a seed's placement missing, `--full` with `--confirm`, or a
 chain that reads no `{in}`, writes no `{out}`, names an unknown placeholder
 or carries a shell builtin (`cd`, `export`: no shell runs the line).
 """
@@ -399,6 +408,24 @@ def confirm_all(close, ranking):
     return f"--seeds {','.join(map(str, close))} --confirm {k}"
 
 
+def placement_defects(doc, named):
+    """`{seed: why}` for the seeds of `named` whose placement judge.json
+    grades with a defect no route clears: a floorplan error or a NOT
+    BUILDABLE assembly (its `floorplan` / `assembly` count above 0, #1645).
+    place_simple ranks such seeds last rather than dropping them (#1296), so
+    the judge routes them only when named by `--seeds`. A seed judge.json
+    did not grade (None, or no entry) is not one."""
+    fp, asm = doc.get('floorplan') or {}, doc.get('assembly') or {}
+    out = {}
+    for s in named:
+        e, b = fp.get(str(s)), asm.get(str(s))
+        parts = ([f'{e} floorplan error(s)'] if e else []) + (
+            [f'assembly {b} (NOT BUILDABLE)'] if b else [])
+        if parts:
+            out[s] = ', '.join(parts)
+    return out
+
+
 def _line(res):
     if 'failed' in res:
         return f"FAILED: {res['failed']}"
@@ -475,6 +502,19 @@ def main(argv=None):
               + ". Nothing was routed: see plan-pcb-placement 3.6, 'When no seed can be "
               "judged'.", file=sys.stderr)
         return 2
+    if not a.seeds:
+        unclean = placement_defects(doc, named)
+        if unclean:
+            why = '; '.join(f"seed {s}: {t}" for s, t in unclean.items())
+            named = [s for s in named if s not in unclean]
+            if not named:
+                print(f"judge_seeds: every seed {a.judge} names carries a placement defect "
+                      f"no route clears ({why}). Nothing was routed: see plan-pcb-placement "
+                      f"3.6, 'When no seed can be judged' (--seeds routes a seed you name, "
+                      f"e.g. one repaired by hand).", file=sys.stderr)
+                return 2
+            print(f"judge_seeds: skipping seed(s) {', '.join(map(str, unclean))}, which "
+                  f"cannot be DONE as placed ({why}); --seeds routes a seed you name")
     missing = [s for s in named if not os.path.isfile(os.path.join(run, f's{s}.kicad_pcb'))]
     if missing:
         print(f"judge_seeds: no placement for seed(s) {', '.join(map(str, missing))} in {run}. "

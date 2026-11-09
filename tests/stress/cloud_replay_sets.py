@@ -771,18 +771,15 @@ def stage_run(args, sets, stress, plan):
            "--arms", str(arms_file), "--sets", ",".join(sets),
            "--stress-dir", str(stress), "--ignore-excludes"]
     if args.limit:
-        cmd += ["--limit", str(args.limit)]
+        cmd += [f"--limit={args.limit}"]   # one token: "-3" would read as a flag
     if args.boards:
         cmd += ["--boards", args.boards]
     if getattr(args, "exclude", ""):
-        # modal_app has no exclude flag, so express it as an explicit board LIST
-        # minus the exclusions. Needed because one hung board holds up every arm:
-        # core64_logic replays in 4 min historically and now never terminates,
-        # so every arm sits at 129/130 waiting on it.
+        # One hung board holds up every arm: core64_logic replays in 4 min
+        # historically and once never terminated, so every arm sat at 129/130
+        # waiting on it.
         drop = {b.strip() for b in args.exclude.split(",") if b.strip()}
-        keep = [b for _s, b in plan.get("boards", []) if b not in drop]
-        if keep and not args.boards:
-            cmd += ["--boards", ",".join(sorted(set(keep)))]
+        cmd += ["--exclude", ",".join(sorted(drop))]
         print(f"  excluding {len(drop)} board(s): {', '.join(sorted(drop))}")
     for _try in range(1, RATE_LIMIT_TRIES + 1):
         rc, out = sh_capture(cmd, env=env)
@@ -1177,7 +1174,11 @@ def main():
                          "(one listing per set; a stale manifest is re-uploaded)")
     ap.add_argument("--dry-run", action="store_true",
                     help="plan only, and make `upload` report sizes without pushing")
-    ap.add_argument("--limit", type=int, default=0, help="keep only the N cheapest boards (smoke)")
+    ap.add_argument("--limit", type=int, default=-3,
+                    help="N > 0 keeps only the N cheapest boards (smoke); N < 0 drops the "
+                         "|N| slowest, by each board's newest harvested replay time "
+                         "(default -3: the three slowest set an A/B's wall clock); "
+                         "0 runs every board. A negative N does nothing with --boards.")
     ap.add_argument("--boards", default="", help="restrict to these board names (smoke)")
     ap.add_argument("--exclude", default="",
                     help="board names to DROP (comma-separated). One non-terminating "

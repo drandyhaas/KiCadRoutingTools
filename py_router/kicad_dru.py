@@ -15,7 +15,10 @@ expression engine would silently manufacture wrong clearances):
   - ``(constraint clearance (min <val>))`` rules whose scope is pure layers:
       * a ``(layer <name>|outer|inner)`` clause, and/or
       * a ``(condition "A.onLayer('X') || B.onLayer('Y') ...")`` expression
-        containing ONLY onLayer terms joined by ``||``
+        containing ONLY onLayer terms joined by ``||`` (KiCad 10 no longer
+        compiles onLayer and then enforces no rule of the file;
+        design_rules.dru_refusals names it. Use existsOnLayer, which takes a
+        wildcard, or a layer clause)
   - a rule with NO scope applies to every copper layer (KiCad semantics)
   - later rules override earlier ones per layer (KiCad's engine walks the
     rules forward in file order; the last matching rule wins each field)
@@ -979,7 +982,10 @@ def install_track_clearances(config, track_clearances, input_file,
 # == 'HS'`, compared as KiCad compares it -- case-insensitive, a '*'/'?'
 # literal a wildcard), joined by && || !. A rule with a layer clause, a layer,
 # area, diff-pair or coupled term stays out (layer and coupled rules have their
-# own channels; the rest is #865).
+# own channels; the rest is #865), and so does a pad-scoped term, memberOfFootprint
+# or Pad_Number: this channel prices a net and a pad type, never one pad. Such a
+# rule is NOT GRADED by check_drc, which tags the violations it may make legal
+# `unverified`, reading the pad's own number (`design_rules.rule_may_match`).
 #
 # The grader reads it PAIR-EXACT (`ScopedClearanceRules.pair_value`). The
 # router's obstacle map is shared across a call's routed set, so it prices
@@ -1415,9 +1421,11 @@ def install_scoped_clearances(config, input_file, pcb_data, routed_net_ids=None,
     if sc is None:
         return
     try:
-        from fab_tiers import fab_floors
-        floor = fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None) or [])
-                           or 2).get('clearance')
+        # #1630: a rule's value floors at the board minimum, never at the
+        # Default class #1262 floors the clearance base at.
+        from fab_tiers import rule_fab_floors
+        floor = rule_fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None)
+                                    or []) or 2).get('clearance')
     except Exception:                                            # noqa: BLE001
         floor = None
     nets = [nid for nid, n in pcb_data.nets.items() if getattr(n, 'name', None)]
@@ -1619,12 +1627,13 @@ def _install_rules_quietly(config, input_file, pcb_data, net_keepouts=False):
         return
     try:
         from design_rules import install_design_rules
-        from fab_tiers import fab_floors
+        from fab_tiers import rule_fab_floors
         copper = list(getattr(getattr(pcb_data, 'board_info', None),
                               'copper_layers', None) or getattr(config, 'layers', []) or [])
         fab = None
         try:
-            fab = fab_floors(len(copper) or 2)
+            # #1630: the floor a rule- or class-set value is raised to
+            fab = rule_fab_floors(len(copper) or 2)
         except Exception:                                       # noqa: BLE001
             fab = None
         install_design_rules(config, input_file, pcb_data, fab_floor=fab,
@@ -1767,7 +1776,8 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
     target layers outside the routed subset -- via keep-outs still need them)
     and pinned up to the fab tier's clearance floor. Prints what is honored.
     ``net_keepouts``: the caller stamps net-filtered keep-outs (route.py /
-    route_diff.py), so the design rules derive them (net_keepouts.py)."""
+    route_diff.py / repair_planes.py), so the design rules derive them
+    (net_keepouts.py)."""
     if layer_clearances is not None:
         config.layer_clearances = dict(layer_clearances)
         _install_rules_quietly(config, input_file, pcb_data, net_keepouts)

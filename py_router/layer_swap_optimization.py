@@ -156,9 +156,11 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
             if point_to_segment_distance(v.x, v.y, sg.start_x, sg.start_y,
                                          sg.end_x, sg.end_y) < need:
                 return False, "pad via grazes a foreign track (via-segment)"
-    # A keep-out rule area forbidding vias, as check_drc grades it.
-    from check_drc import keepout_refusal
-    why = keepout_refusal(pcb_data, vias=new_vias)
+    # A keep-out rule area forbidding vias, as check_drc grades it, and the
+    # interior of a filled graphic (#1683), which the segment loop cannot see.
+    from check_drc import filled_graphic_refusal, keepout_refusal
+    why = keepout_refusal(pcb_data, vias=new_vias) or filled_graphic_refusal(
+        pcb_data, vias=new_vias, clearance=lambda sh: 0.0)
     if why:
         return False, f"pad {why}"
     return True, ""

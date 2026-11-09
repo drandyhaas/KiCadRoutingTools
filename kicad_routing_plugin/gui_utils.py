@@ -228,6 +228,22 @@ def redirect_prints_to_log(append_log):
         sys.stdout = original
 
 
+#: What was said before a tab's log capture began, for the next capture to carry.
+_log_notes = []
+
+
+def note_for_the_log(text):
+    """Say `text` in the log of the run it concerns. A run's parameters are read
+    before its tab starts capturing stdout, so a plain print there reaches the
+    terminal and never the log a GUI user reads: held until the next capture
+    starts, or printed now inside one."""
+    import sys
+    if isinstance(sys.stdout, StdoutRedirector):
+        print(text)
+    else:
+        _log_notes.append(text)
+
+
 def apply_drc_settings_fix(cfg, *, diff_pair=False, fix_kwargs=None,
                            hole_clearance=None):
     """Loosen the open project's DRC floors to the routed values (issue #160).
@@ -447,6 +463,8 @@ class StdoutRedirector:
     def __init__(self, callback, original_stdout):
         self.callback = callback
         self.original = original_stdout
+        while _log_notes:
+            self.write(_log_notes.pop(0) + '\n')
 
     def write(self, text):
         if text:

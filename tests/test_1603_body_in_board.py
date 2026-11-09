@@ -189,10 +189,11 @@ def unit(pcb):
     check('the pose place_simple chose gates J3, about 12 mm of its body inside',
           c['gating_refs'] == ['J3'] and row.get('area_mm2', 0) > 100
           and 18.5 < row['box'][0] < 19.5 and 30.5 < row['box'][2] <= 31.0, str(row))
-    nudge = (DESIGNED[0] - 0.15, DESIGNED[1], 0.0)
-    c = heights.body_in_board(h, pcb, {'J3': nudge})
-    check('0.15 mm in from the designer\'s pose, under a cell, reads nothing',
+    c = heights.body_in_board(h, pcb, {'J3': (DESIGNED[0] - 0.05, DESIGNED[1], 0.0)})
+    check('0.05 mm in from the designer\'s pose, inside the tolerance, does not gate',
           not c['gating_refs'], str(c['rows']))
+    c = heights.body_in_board(h, pcb, {'J3': (DESIGNED[0] - 0.15, DESIGNED[1], 0.0)})
+    check('...and 0.15 mm in does (#1659)', c['gating_refs'] == ['J3'], str(c['rows']))
     bi = pcb.board_info
     was = list(bi.board_cutouts or [])
     try:
@@ -212,8 +213,8 @@ def unit(pcb):
 
     print('depth_past_edge:')
     d = heights.depth_past_edge(h, pcb, 'J3', 'east', DESIGNED)
-    check("at the designer's pose J3 can move in about one cell before the gate reads it",
-          d is not None and 0.0 < d <= heights.CELL_MM + 0.05, f'{d}')
+    check("at the designer's pose J3 can move in by the tolerance before the gate reads it",
+          d is not None and abs(d - heights.DEPTH_EDGE_TOL_MM) < 0.002, f'{d}')
     check('...and none of a body too small to gate',
           heights.depth_past_edge(h2, pcb, 'C1', 'east') is None)
     return h

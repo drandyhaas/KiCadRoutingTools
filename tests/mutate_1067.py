@@ -160,7 +160,7 @@ ROWS = [
      "    print(gated_out + buf.getvalue(), end='')",
      (GRAZE,), 'KILLED'),
     ('manifest-intent-not-absolute', 'man',
-     "            if (CAP_FLAG_PARAMS[a] == 'cap_intent_path' and cwd",
+     "            if (CAP_FLAG_PARAMS[a] in PATH_PARAMS | {'cap_intent_path'} and cwd",
      "            if (False and cwd",
      (AIPLAN,), 'KILLED'),
     ('manifest-drops-intent', 'man',

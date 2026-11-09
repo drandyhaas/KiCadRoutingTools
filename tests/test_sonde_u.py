@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Test routing on the sonde_u board at the router defaults, then a GND plane
-on B.Cu with return vias; grades DRC and connectivity of the planed board.
+on both layers with return vias; grades DRC and connectivity of the planed board.
 """
 
 import argparse
@@ -25,7 +25,7 @@ def main():
 
     # Add some gnd vias and the gnd plane
     run('python3 py_router/route_planes.py kicad_files/sonde_u_routed.kicad_pcb kicad_files/sonde_u_planes.kicad_pcb '
-        '--nets GND --plane-layers B.Cu --add-gnd-vias', unbuffered)
+        '--nets GND GND --plane-layers F.Cu B.Cu --add-gnd-vias', unbuffered)
 
     if not args.no_checks:
         # Check for DRC errors

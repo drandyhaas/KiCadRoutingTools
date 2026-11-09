@@ -161,6 +161,7 @@ def main():
 
     real_engine = _fc.repair_fanout_clearance      # captured BEFORE patching
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     board = os.path.join(REPO, 'kicad_files', 'flat_hierarchy.kicad_pcb')
     dlg = RoutingDialog(None, parse_kicad_pcb(board), board)
     # #1067: a real intent file, so the step loads one and reaches the engine

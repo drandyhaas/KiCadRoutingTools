@@ -91,6 +91,22 @@ def note_impedance_specs(mapping: Dict[str, dict]) -> None:
     _note(IMPEDANCE_KEY, mapping)
 
 
+def impedance_reapplies(spec) -> bool:
+    """May a later step recompute widths from this net_impedance record?
+    Not from a DECLARE-ONLY one (#1630: `--impedance-declare-only` recorded
+    the target ohms of copper the project sized itself, so its widths are the
+    project's, never this tool's solve)."""
+    return isinstance(spec, dict) and not spec.get('declare_only')
+
+
+def impedance_graded(spec) -> bool:
+    """Does this record carry an impedance promise the shipped copper should
+    keep? A solved one (`applied` not False, #906) or a declare-only one
+    (#1630); an unapplied plain declaration is intent only."""
+    return isinstance(spec, dict) and bool(
+        spec.get('declare_only') or spec.get('applied') is not False)
+
+
 def consume_impedance_specs() -> Dict[str, dict]:
     return _consume(IMPEDANCE_KEY)
 
@@ -539,6 +555,42 @@ def stash_rip_overrides(pcb_data, patterns: Optional[Iterable[str]]) -> Set[str]
 def rip_override_names(pcb_data) -> Set[str]:
     """The exact-name rip overrides stashed for this run (empty set if none)."""
     return getattr(pcb_data, '_rip_override_names', None) or set()
+
+
+def negated_net_names(patterns: Optional[Iterable[str]], net_names) -> Set[str]:
+    """The nets a step's ``--nets`` patterns NEGATE ('!/RF', '!GND*'): the
+    names in ``net_names`` an exclusion pattern matches, read as the step's
+    own selection reads them (net_queries.split_net_patterns, so an
+    active-low literal such as '!RESET' that names a net is not a
+    negation)."""
+    if not patterns:
+        return set()
+    from net_queries import split_net_patterns, net_pattern_matches
+    names = {n for n in net_names if n}
+    _inc, exc = split_net_patterns(list(patterns), names)
+    if not exc:
+        return set()
+    return {n for n in names if any(net_pattern_matches(n, p) for p in exc)}
+
+
+def stash_hands_off(pcb_data, names: Optional[Iterable[str]]) -> Set[str]:
+    """Record the nets this run's ``--nets`` negates on pcb_data (#1621), so
+    every pass of the run that picks a net to rip -- the main pass's
+    candidacy, the plane finalize's blocker rip-up and the sub-runs that
+    share this board -- leaves them alone. A run ledger (RUN_LEDGERS):
+    unioned, so a nested sub-run, whose own patterns negate nothing, keeps
+    the outer run's set."""
+    names = {n for n in (names or ()) if n}
+    if names:
+        pcb_data._hands_off_names = set(
+            getattr(pcb_data, '_hands_off_names', None) or set()) | names
+    return getattr(pcb_data, '_hands_off_names', None) or set()
+
+
+def hands_off_names(pcb_data) -> Set[str]:
+    """The nets this run's ``--nets`` negates (stash_hands_off); empty when
+    none."""
+    return getattr(pcb_data, '_hands_off_names', None) or set()
 
 
 def rip_refusal(pcb_data, net_id: int, context: str = "in-run rip ladder",

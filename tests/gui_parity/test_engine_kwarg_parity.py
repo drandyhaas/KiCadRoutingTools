@@ -360,6 +360,7 @@ def check_class2(missing=None):
     os.environ.setdefault("WXSUPPRESS_SIZER_FLAGS_CHECK", "1")
     board = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
     app = wx.App(False)  # noqa: F841 -- must outlive the dialog
+    wx.Log.SetActiveTarget(wx.LogStderr())
     # IPC: the dialog reads its "live board" through kicad_ipc_adapter, so back
     # that with the fixture file (no running KiCad needed).
     _install_fake_board(board)

@@ -59,6 +59,7 @@ def main():
     from fake_ipc_board import build_pcb_data_like_ipc
 
     app = wx.App(False)
+    wx.Log.SetActiveTarget(wx.LogStderr())
     assert app is not None
     with tempfile.TemporaryDirectory(prefix='zero_dpw_gui_') as tmp:
         board_path = Path(tmp) / 'board.kicad_pcb'

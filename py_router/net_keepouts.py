@@ -21,6 +21,10 @@ nets come from the resolver's own evaluator (NetName, NetClass, Type, layer
 predicates ...), separately for tracks and for vias; a rule it cannot model
 completely stays reported as NOT honoured rather than half-applied.
 
+An `edge_clearance` rule that binds some nets harder than others (#1678,
+`derive_edge_bands`) takes the same stamp: the board's static edge band is the
+lowest floor over the nets, and a net above it gets the rest while it routes.
+
 A region is stamped into the obstacle map only while a net it binds routes:
 `stamp()` wraps the single-ended and diff-pair route entries, adds the cells
 (the same rasterisation and clearance band `add_rule_area_keepout_obstacles`
@@ -34,9 +38,11 @@ route_multipoint_main / _taps (and with them net_rescue, stub-swap and terminal
 escalation, which call them -- a rescue window is a shallow copy that carries
 the regions), and on the diff-pair side the pair route (its centreline map at
 `centerline_config`, its connectors' base map plain), the hybrid coupled middle
-and its legs (`stamping`). Copper laid by anything else -- the plane finalize's
-taps and region joins, which have their own A*, and post-route passes such as
-meanders -- does not see a region, so the run ends with `audit()` of the board
+and its legs (`stamping`). The plane finalize's region joins and oracle welds
+route on a map built for one plane net, which `block()` stamps for good
+(plane_region_connector.build_base_obstacles); its pad taps judge their sites
+and copper by `audit_items`. Copper laid by anything else, such as post-route
+meanders, does not see a region, so the run ends with `audit()` of the board
 it ships: bound-net copper found inside a region is printed and reported as
 JSON_SUMMARY / --json-out `net_keepouts`, never shipped silently. KiCad's DRC of
 the rule stays the authority.
@@ -324,6 +330,23 @@ def banned_layers(pcb_data, net_ids: Iterable[int]) -> FrozenSet[str]:
     return frozenset(out)
 
 
+def derive_edge_bands(floors, pcb_data) -> List[dict]:
+    """One entry per distinct set of `design_rules.EdgeFloors` a net holds above
+    the board's static band: {'name', 'edge_band': True, 'nets', 'track': {layer:
+    floor}, 'via': floor}. [] when every net is at the band."""
+    groups: Dict[tuple, set] = {}
+    for nid, name in ((nid, getattr(n, 'name', '')) for nid, n in pcb_data.nets.items()):
+        if not nid or not name or nid not in floors.track:
+            continue
+        track = {l: v for l, v in floors.track[nid].items() if v > floors.track_band + 1e-9}
+        via = floors.via[nid] if floors.via[nid] > floors.via_band + 1e-9 else None
+        if track or via is not None:
+            groups.setdefault((tuple(sorted(track.items())), via), set()).add(name)
+    return [{'name': 'edge clearance', 'edge_band': True, 'nets': frozenset(names),
+             'track': dict(track), 'via': via, 'layers': ['*.Cu']}
+            for (track, via), names in sorted(groups.items(), key=lambda kv: repr(kv[0]))]
+
+
 def binds(ko: dict, net_name: str) -> bool:
     """True when keep-out `ko` forbids its items to net `net_name`."""
     return net_name in ko.get('nets', ())
@@ -340,6 +363,51 @@ def attach(pcb_data, keepouts: Optional[List[dict]]) -> None:
         return
     pcb_data._net_keepouts = list(keepouts)
     pcb_data._net_keepout_cells = {}
+
+
+class _EdgeBandSink:
+    """What add_board_edge_obstacles stamps as permanent board geometry, handed
+    to a map a net's band comes and goes on: track cells on `layers` (indices)
+    and via cells, each only when asked for."""
+
+    def __init__(self, sink, layers=None, vias=False):
+        self.sink, self.layers, self.vias = sink, layers, vias
+
+    def _cells(self, arr):
+        if self.layers is None:
+            return
+        a = np.asarray(arr, dtype=np.int32).reshape(-1, 3)
+        a = a[np.isin(a[:, 2], list(self.layers))]
+        if len(a):
+            self.sink.add_blocked_cells_batch(a)
+
+    def _vias(self, arr):
+        if self.vias:
+            a = np.asarray(arr, dtype=np.int32).reshape(-1, 2)
+            if len(a):
+                self.sink.add_blocked_vias_batch(a)
+
+    add_static_blocked_cells_batch = add_blocked_cells_batch = _cells
+    add_static_blocked_vias_batch = add_blocked_vias_batch = _vias
+
+
+def _stamp_edge_band(sink, pcb_data, cfg, ko: dict) -> None:
+    """The native edge pass, at the floors ko holds its nets to."""
+    from dataclasses import replace
+    from obstacle_map import add_board_edge_obstacles
+    extra = getattr(cfg, 'edge_extra_clearance', 0.0) or 0.0
+    index = {l: i for i, l in enumerate(cfg.layers)}
+    by_value: Dict[float, list] = {}
+    for layer, v in ko['track'].items():
+        if layer in index:
+            by_value.setdefault(v, []).append(index[layer])
+    for v, layers in by_value.items():
+        add_board_edge_obstacles(_EdgeBandSink(sink, layers=layers), pcb_data,
+                                 replace(cfg, board_edge_clearance=v, edge_floors=None), extra)
+    if ko['via'] is not None:
+        add_board_edge_obstacles(_EdgeBandSink(sink, vias=True), pcb_data,
+                                 replace(cfg, board_edge_clearance=ko['via'], edge_floors=None),
+                                 extra)
 
 
 class _Recorder:
@@ -372,11 +440,23 @@ def _stamper(pcb_data, idx: Tuple[int, ...]):
     """`stamp(map, config)` that rasterises keep-outs `idx` into `map` with
     the native keep-out pass, so the rasterisation stays single-sourced."""
     from obstacle_map import add_rule_area_keepout_obstacles
+    from routing_config import extra_past_scalar
     kos = pcb_data._net_keepouts
     shim = SimpleNamespace(board_info=SimpleNamespace(
-        keepouts=[kos[i] for i in idx],
+        keepouts=[kos[i] for i in idx if not kos[i].get('edge_band')],
         board_bounds=getattr(pcb_data.board_info, 'board_bounds', None)))
-    return lambda sink, cfg: add_rule_area_keepout_obstacles(sink, shim, cfg)
+    bands = [kos[i] for i in idx if kos[i].get('edge_band')]
+
+    def stamp_into(sink, cfg):
+        if shim.board_info.keepouts:
+            # a centreline config's clearance carries the member half-pitch's
+            # scalar; what a layer's own half-pitch adds past it rides here
+            add_rule_area_keepout_obstacles(
+                sink, shim, cfg, extra_clearance=extra_past_scalar(
+                    getattr(cfg, 'edge_extra_clearance', 0.0) or 0.0))
+        for ko in bands:
+            _stamp_edge_band(sink, pcb_data, cfg, ko)
+    return stamp_into
 
 
 def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.ndarray]:
@@ -389,6 +469,7 @@ def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.n
     alone, a window's clipped cells would be handed to a whole-board route
     at the same geometry, which would then see only part of the region."""
     key = (idx, config.grid_step, config.track_width, config.clearance,
+           getattr(config, 'edge_extra_clearance', 0.0),
            config.via_size, config.via_drill, tuple(config.layers),
            getattr(pcb_data.board_info, 'board_bounds', None))
     cache: Dict = pcb_data.__dict__.setdefault('_net_keepout_cells', {})
@@ -403,10 +484,10 @@ def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.n
     return cache[key]
 
 
-@contextlib.contextmanager
-def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
-    """Block the keep-outs binding any of `net_ids` in `obstacles` for the
-    duration of the block, then remove exactly what was added.
+def block(obstacles, pcb_data, net_ids: Iterable[int], config):
+    """Block the keep-outs binding any of `net_ids` in `obstacles`; returns
+    the call that removes exactly what was added (`stamp`). A map built for
+    those nets alone (the plane finalize's base map) keeps them for good.
 
     Via cells reach every via map the list twins (add/remove_vias_list) do:
     rung 0 at the run's via, the #568 small rung at the run's via (a superset
@@ -414,12 +495,10 @@ def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
     (#1226 `_stamp_rungs_at_own_via`, whose remove twin re-derives the same
     rows), so a search at any rung sees the region."""
     if obstacles is None or not getattr(pcb_data, '_net_keepouts', None):
-        yield
-        return
+        return lambda: None
     idx = _binding(pcb_data, net_ids)
     if not idx:
-        yield
-        return
+        return lambda: None
     cells, vias = _cells_for(pcb_data, idx, config)
     from obstacle_map import _rung_small_armed, _stamp_rungs_at_own_via
     small = _rung_small_armed() and hasattr(obstacles, 'add_blocked_vias_small_batch')
@@ -432,9 +511,8 @@ def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
             obstacles.add_blocked_vias_small_batch(vias)
     if rungs:
         _stamp_rungs_at_own_via(obstacles, config, _stamper(pcb_data, idx))
-    try:
-        yield
-    finally:
+
+    def remove():
         if len(cells):
             obstacles.remove_blocked_cells_batch(cells)
         if len(vias):
@@ -444,19 +522,36 @@ def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
         if rungs:
             _stamp_rungs_at_own_via(obstacles, config, _stamper(pcb_data, idx),
                                     remove=True)
+    return remove
+
+
+@contextlib.contextmanager
+def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
+    """The keep-outs binding any of `net_ids`, blocked in `obstacles` for the
+    duration of the block (`block`)."""
+    remove = block(obstacles, pcb_data, net_ids, config)
+    try:
+        yield
+    finally:
+        remove()
 
 
 def centerline_config(config):
     """The geometry a diff-pair CENTRELINE map is stamped at. The members run
-    (track_width + diff_pair_gap) / 2 either side of the centreline, so the
+    (layer width + diff_pair_gap) / 2 either side of the centreline, so the
     band a region keeps the centreline out of grows by that offset -- the
-    extra clearance route_diff builds every other obstacle of that map with.
+    extra clearance route_diff builds every other obstacle of that map with
+    (`centreline_extra_clearance`, each layer's own, #1729): the clearance
+    takes the call's, and `edge_extra_clearance` carries the per-layer values
+    (the region stamp reads what a layer adds past the call's).
     Stamped at the plain run geometry, a member could come up to
     (track_width + diff_pair_gap) / 2 - clearance INTO the region
     (lvds_converter_dualclk /CLK+: its copper over the edge by 0.5 um)."""
     from dataclasses import replace
-    extra = (config.track_width + config.diff_pair_gap) / 2
-    return replace(config, clearance=config.clearance + extra)
+    from diff_pair_routing import centreline_extra_clearance
+    extra = centreline_extra_clearance(config)
+    return replace(config, clearance=config.clearance + float(extra),
+                   edge_extra_clearance=extra)
 
 
 def stamping(net_ids_of, maps_of, centerline: bool = False):
@@ -534,6 +629,8 @@ def audit_items(pcb_data, segments, vias, keepouts):
         return bool(name) and binds(ko, name)
 
     for ko in keepouts:
+        if ko.get('edge_band'):
+            continue    # edge_rule_grade's, and KiCad reports it under another name
         if ko.get('layer_ban'):
             # a track ban covers the board: every bound-net track on one of
             # its layers is an item KiCad does not allow
@@ -581,6 +678,42 @@ def audit_items(pcb_data, segments, vias, keepouts):
                     yield ko, 'via', v
 
 
+def via_site_filter(pcb_data, net_id: int, via_size: float, layers=None):
+    """An (x, y) -> bool predicate: may a via of `net_id` (diameter
+    `via_size`, spanning `layers`; None = a through via) sit at (x, y)
+    without entering a region that forbids it the net's vias? None when no
+    region does, so a caller adds nothing to its search.
+
+    For a via search that places on maps of its own, which `stamp()` never
+    reaches (the pad taps): skipping the sites `audit` would refuse lets the
+    search go on to the next site rather than fail. It judges each site by
+    `audit_items`, so the two cannot disagree; a bounding-box test keeps the
+    far sites cheap."""
+    net = pcb_data.nets.get(net_id)
+    name = getattr(net, 'name', None)
+    kos = [ko for ko in getattr(pcb_data, '_net_keepouts', None) or ()
+           if not ko.get('edge_band') and not ko.get('layer_ban')
+           and not ko.get('vias_allowed', True) and name and binds(ko, name)]
+    if not kos:
+        return None
+    view = SimpleNamespace(nets={net_id: net}, board_info=pcb_data.board_info)
+    r = via_size / 2
+    boxes = [(min(p[0] for p in ko['polygon']) - r, min(p[1] for p in ko['polygon']) - r,
+              max(p[0] for p in ko['polygon']) + r, max(p[1] for p in ko['polygon']) + r)
+             for ko in kos]
+    vlayers = list(layers or ())
+
+    def allowed(x, y):
+        near = [ko for ko, (x0, y0, x1, y1) in zip(kos, boxes)
+                if x0 <= x <= x1 and y0 <= y <= y1]
+        if not near:
+            return True
+        via = SimpleNamespace(x=x, y=y, size=via_size, layers=vlayers, net_id=net_id)
+        return next(audit_items(view, (), (via,), near), None) is None
+
+    return allowed
+
+
 def audit(pcb_data, segments, vias,
           keepouts: Optional[List[dict]] = None) -> Optional[List[dict]]:
     """The copper of `segments` / `vias` that a net-filtered keep-out forbids
@@ -591,13 +724,14 @@ def audit(pcb_data, segments, vias,
     keep-out.
 
     It reads only geometry, so it sees copper from every path, including the
-    ones stamp() does not reach (the plane finalize's taps and joins, post-route
-    meanders) and copper the input already had inside a region.
+    ones stamp() does not reach (post-route meanders) and copper the input
+    already had inside a region.
 
     `pcb_data` supplies the net names and copper layers of the copper given,
     and the keep-outs unless `keepouts` names them (a re-parsed output board
     carries none of its own)."""
     kos = keepouts if keepouts is not None else getattr(pcb_data, '_net_keepouts', None)
+    kos = [ko for ko in kos or () if not ko.get('edge_band')]
     if not kos:
         return None
     rows: Dict[Tuple[str, str], List[int]] = {}

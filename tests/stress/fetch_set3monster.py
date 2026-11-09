@@ -16,6 +16,12 @@ boards'. classify() puts any board at fps >= 500 in this tier regardless of
 layer count, and with no inner layers every net competes for the same two
 planes (the human routing spent 1506 vias).
 
+spartan6_4layer (frontcover/spartan6-4layer) was moved here out of set25
+on 2026-11-04 for the same reason as lora_cubesat_cm. It is monster by
+REPLAY TIME, not tier (4 layers, 153 footprints): its recorded chain spends
+~2.7 h in two route steps, and it was the last board left running in
+both arms of a sets 1-28 corpus A/B. set25 keeps the other 14.
+
 Downloads each board and its sibling project files -- the .kicad_pro (DRC floor,
 #441) and the .kicad_dru (per-layer clearance rules, #498) --
 into $STRESS_DIR/sources/github_set3monster/. After fetching, run `bash prep_set3monster.sh`

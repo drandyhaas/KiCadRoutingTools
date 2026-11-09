@@ -8,7 +8,8 @@ copper and every DRC passes while the head lands on it.
 This leaf module is the one definition of both questions:
 
   * ``mounting_holes(pcb)`` -- which footprints are mounting holes, and
-    which Edge.Cuts circles inside the outline are (#1502);
+    which Edge.Cuts circles inside the outline are (#1502) -- up to an M6
+    clearance hole; a wider circle is a window, not a mounting hole (#1648);
   * ``hole_copper(pcb)`` -- the other-net tracks and vias inside each hole's
     screw-head ring (``check_mounting_holes.py`` reports it); the same
     question at any site is ``copper_near``, and ``pads_near`` asks it of
@@ -122,13 +123,20 @@ def _main_hole(pads):
 #: An Edge.Cuts circle's bounding box this close to the board's is the board's
 #: own outline (a round board), not a hole in it.
 OUTLINE_MATCH_MM = 0.05
+#: An Edge.Cuts circle wider than this is a WINDOW (a lens, a tube, a cable
+#: cut-out), not a screw hole, and gets no head ring (#1648): ISO 273's
+#: coarse-series clearance hole for M6, the widest clearance any of its
+#: series gives the largest screw the ring derivation is read for (M2-M5
+#: above, fine series 2.2-5.3 mm). A footprint hole is not limited by it.
+EDGE_CUT_MAX_SCREW_DIAMETER = 7.0
 
 
 def edge_cut_holes(pcb) -> List[MountingHole]:
     """Every circle drawn on Edge.Cuts (a ``gr_circle``, a board cut-out with
-    no footprint) of MOUNT_HOLE_MIN_DRILL or more across that is a hole IN
-    the board rather than its outline (#1502): the same screw hole, drawn
-    with the outline instead of as a part. Read off the board file
+    no footprint) of MOUNT_HOLE_MIN_DRILL to EDGE_CUT_MAX_SCREW_DIAMETER
+    across that is a hole IN the board rather than its outline (#1502): the
+    same screw hole, drawn with the outline instead of as a part. A wider
+    circle is a window, not a screw hole (#1648). Read off the board file
     (``pcb.source_path``) with the parser's own circle pattern, since the
     parser keeps the circle only as outline segments; named ``CUT1``,
     ``CUT2`` ... in file order, on no net. [] without a board file."""
@@ -148,6 +156,8 @@ def edge_cut_holes(pcb) -> List[MountingHole]:
         r = math.hypot(ex - cx, ey - cy)
         if 2.0 * r < MOUNT_HOLE_MIN_DRILL:
             continue
+        if 2.0 * r > EDGE_CUT_MAX_SCREW_DIAMETER + 1e-6:
+            continue                        # a window, not a screw hole (#1648)
         if bounds is not None and all(
                 abs(a - b) <= OUTLINE_MATCH_MM
                 for a, b in zip((cx - r, cy - r, cx + r, cy + r), bounds)):

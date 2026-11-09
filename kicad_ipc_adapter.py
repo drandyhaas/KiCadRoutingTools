@@ -1515,7 +1515,7 @@ def apply_oracle_reconnect(board, *, nets, config, pcb_data,
 
 
 def apply_plane_copper_cleanup(board, *, net_names, clearance, grid_step,
-                               progress_callback=None,
+                               board_edge_clearance, progress_callback=None,
                                message: str = "KiCadRoutingTools: plane cleanup") -> dict:
     """CLI/GUI parity: apply pcb_modification.compute_plane_copper_cleanup's
     delta (the SAME core the CLI clean_plane_copper front runs) to the LIVE
@@ -1534,7 +1534,10 @@ def apply_plane_copper_cleanup(board, *, net_names, clearance, grid_step,
     # progress_callback: the shared 13-pass pipeline is silent, and the GUI
     # runs this on the UI thread during apply, so without it a slow cleanup
     # reads as a hang.
+    # board_edge_clearance: the board's own copper-to-edge rule pinned up to
+    # the fab floor (#1689), never the plane-zone inset.
     delta = compute_plane_copper_cleanup(pcb, net_names, clearance, grid_step,
+                                         board_edge_clearance,
                                          progress_callback=progress_callback)
     if delta.is_empty:
         return {"removed": 0, "added": 0, "snapped": 0}

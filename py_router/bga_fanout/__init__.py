@@ -80,6 +80,7 @@ from bga_fanout.diff_pair import find_differential_pairs
 _direct_route_nets: Set[str] = set()
 from bga_fanout.tracks import (
     detect_collisions,
+    pair_self_collisions,
     board_copper_tracks,
     generate_tracks_from_routes,
 )
@@ -942,6 +943,11 @@ def manage_vias(
             if (getattr(_p, 'drill', 0) or 0) > 0:
                 drill_capsules.append(pad_drill_capsule(_p))
 
+    from check_drc import (BoardEdgeGate, FilledCopperGate,
+                           laid_copper_edge_clearance)
+    _edge_gate = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
+    _filled_gate = FilledCopperGate(pcb_data)
+
     def via_in_pad_conflict(x, y, v_size, v_drill, net_id):
         """Reason a via physically cannot go at (x, y), or None (#370 B4):
 
@@ -968,6 +974,12 @@ def manage_vias(
             if d < vdr + prad + _h2h - 1e-6:
                 return "drill hole-to-hole vs a pad drill"
         vr = v_size / 2.0
+        # #1677, #1682: the board's edges and a filled graphic's interior,
+        # which the stroke loop below cannot see.
+        if _edge_gate.via_refused(x, y, v_size):
+            return "via ring vs the board edge"
+        if _filled_gate.via_hit(x, y, v_size, net_id, clearance) is not None:
+            return "via in a foreign filled graphic"
         for s in pcb_data.segments:
             if s.net_id == net_id:
                 continue
@@ -1339,9 +1351,12 @@ def select_adjacent_channels(
                 # Use closest channel above for one pad, closest below for the other
                 ch_above = channels_above[-1]  # closest above
                 ch_below = channels_below[0]   # closest below
-                # P/t goes to channel below, N/c goes to channel above
-                p_channel = ch_below
-                n_channel = ch_above
+                # P/t goes to channel below, N/c goes to channel above -- unless
+                # P sits above N (a diagonal pair), when that would cross (#1684)
+                if p_pad.global_y < n_pad.global_y - POSITION_TOLERANCE:
+                    p_channel, n_channel = ch_above, ch_below
+                else:
+                    p_channel, n_channel = ch_below, ch_above
             elif channels_above:
                 # Only channels above - use two adjacent ones
                 ch_above = channels_above[-1]
@@ -1378,9 +1393,13 @@ def select_adjacent_channels(
             if channels_left and channels_right:
                 ch_left = channels_left[-1]   # closest left
                 ch_right = channels_right[0]  # closest right
-                # P/t goes right, N/c goes left (consistent with horizontal)
-                p_channel = ch_right
-                n_channel = ch_left
+                # P/t goes right, N/c goes left (consistent with horizontal) --
+                # unless P sits left of N (a diagonal pair), when that would
+                # cross (#1684)
+                if p_pad.global_x < n_pad.global_x - POSITION_TOLERANCE:
+                    p_channel, n_channel = ch_left, ch_right
+                else:
+                    p_channel, n_channel = ch_right, ch_left
             elif channels_left:
                 ch_left = channels_left[-1]
                 idx = v_channels_sorted.index(ch_left)
@@ -1815,47 +1834,40 @@ def build_converge_route(
                 else:  # right
                     p_closer_to_edge = p_pad.global_x > n_pad.global_x
 
-                # Pad closer to edge uses between_ch (normal routing)
-                # Pad farther from edge jogs to adjacent_ch
-                # Choose adjacent_ch on the side of the farther pad
+                # Each pad's next channel on its OWN side of the pair. A pad
+                # taking the channel on its partner's side has to cross the
+                # partner's stub to get there (#1684), so the top pad always
+                # ends above the bottom pad.
+                ch_above = h_channels_sorted[between_idx - 1] if between_idx > 0 else None
+                ch_below = (h_channels_sorted[between_idx + 1]
+                            if between_idx < len(h_channels_sorted) - 1 else None)
+                p_side_ch = ch_above if p_is_top else ch_below
+                n_side_ch = ch_below if p_is_top else ch_above
+
+                # Pad closer to edge uses between_ch (normal routing) and the
+                # pad farther from edge jogs to the channel on its own side.
+                # An outermost-row pad has no channel there, so the two swap:
+                # it takes between_ch and its partner its own side's channel.
+                # With neither (a two-row array) the pair has one channel and
+                # takes the convergence fallback below.
                 if p_closer_to_edge:
-                    # P uses between, N jogs to adjacent
-                    # N is farther, so pick adjacent on N's side (above if N is top, below if N is bottom)
-                    n_is_top = n_pad.global_y < p_pad.global_y
-                    if n_is_top and between_idx > 0:
-                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                    elif not n_is_top and between_idx < len(h_channels_sorted) - 1:
-                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                    elif between_idx > 0:
-                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                    elif between_idx < len(h_channels_sorted) - 1:
-                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                    else:
-                        adjacent_ch = between_ch
-                    p_target_ch = between_ch
-                    n_target_ch = adjacent_ch
+                    p_target_ch, n_target_ch = (
+                        (between_ch, n_side_ch) if n_side_ch else
+                        (p_side_ch, between_ch) if p_side_ch else (None, None))
                 else:
-                    # N uses between, P jogs to adjacent
-                    # P is farther, so pick adjacent on P's side
-                    p_is_top_here = p_pad.global_y < n_pad.global_y
-                    if p_is_top_here and between_idx > 0:
-                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                    elif not p_is_top_here and between_idx < len(h_channels_sorted) - 1:
-                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                    elif between_idx > 0:
-                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                    elif between_idx < len(h_channels_sorted) - 1:
-                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                    else:
-                        adjacent_ch = between_ch
-                    p_target_ch = adjacent_ch
-                    n_target_ch = between_ch
+                    p_target_ch, n_target_ch = (
+                        (p_side_ch, between_ch) if p_side_ch else
+                        (between_ch, n_side_ch) if n_side_ch else (None, None))
             else:
-                # No channel between pads - use channels above and below
+                # No channel between pads - the top pad takes the channel above
+                # and the bottom pad the one below, or the fallback below
                 channels_above = [c for c in h_channels_sorted if c.position < top_pad_y]
                 channels_below = [c for c in h_channels_sorted if c.position > bot_pad_y]
-                p_target_ch = channels_above[-1] if channels_above and p_is_top else (channels_below[0] if channels_below else None)
-                n_target_ch = channels_below[0] if channels_below and not p_is_top else (channels_above[-1] if channels_above else None)
+                top_ch = channels_above[-1] if channels_above else None
+                bot_ch = channels_below[0] if channels_below else None
+                p_target_ch, n_target_ch = (top_ch, bot_ch) if p_is_top else (bot_ch, top_ch)
+                if p_target_ch is None or n_target_ch is None:
+                    p_target_ch = n_target_ch = None
 
             # Initialize route_ch with default before conditional assignment
             route_ch = channel
@@ -1980,6 +1992,33 @@ def build_inner_aligned_route(
     )
 
 
+def route_centreline(route: FanoutRoute) -> List[Tuple[float, float]]:
+    """A route's points from its pad to its exit, before any jog."""
+    return [p for p in (route.pad_pos, route.pre_channel_jog, route.channel_point,
+                        route.channel_point2, route.stub_end, route.exit_pos)
+            if p is not None]
+
+
+def route_legs_gap(routes: List[FanoutRoute]) -> float:
+    """The smallest centreline distance between a pair's two routes."""
+    from geometry_utils import segment_to_segment_distance
+    lines = [route_centreline(r) for r in routes]
+    return min(segment_to_segment_distance(*a0, *a1, *b0, *b1)
+               for a0, a1 in zip(lines[0], lines[0][1:])
+               for b0, b1 in zip(lines[1], lines[1][1:]))
+
+
+def pair_between_channel(p_pad: Pad, n_pad: Pad, channel: 'Channel',
+                         channels: List[Channel]) -> Optional['Channel']:
+    """The channel of `channel`'s orientation lying strictly between the pads."""
+    horizontal = channel.orientation == 'horizontal'
+    lo, hi = sorted((p_pad.global_y, n_pad.global_y) if horizontal
+                    else (p_pad.global_x, n_pad.global_x))
+    return next((c for c in channels if c.orientation == channel.orientation
+                 and lo + POSITION_TOLERANCE < c.position < hi - POSITION_TOLERANCE),
+                None)
+
+
 def build_diff_pair_routes(
     pair_id: str,
     pair: DiffPairPads,
@@ -2052,7 +2091,8 @@ def build_diff_pair_routes(
 
     # Create routes for both P and N
     # In adjacent-channel mode, p_channel and n_channel are different
-    for pad_info, offset, is_p_route, route_ch in [(p_pad, p_offset, True, p_channel), (n_pad, n_offset, False, n_channel)]:
+    legs = [(p_pad, p_offset, True, p_channel), (n_pad, n_offset, False, n_channel)]
+    for pad_info, offset, is_p_route, route_ch in legs:
         if is_half_edge:
             routes.append(build_half_edge_route(
                 pad_info, is_p_route, p_pad, n_pad, actual_escape_dir,
@@ -2073,7 +2113,81 @@ def build_diff_pair_routes(
                 grid, layers, exit_margin, pair_layer_assignments, pair_id
             ))
 
+    # A diagonal pair sharing a channel on one side of both pads: the far pad's
+    # 45 passes the near pad on its way there, and lands on or across it
+    # (#1684). The channel BETWEEN the two pads needs neither to pass the other.
+    if channel and not (is_half_edge or is_edge or is_cross_escape) \
+            and p_channel == n_channel:
+        between = pair_between_channel(p_pad, n_pad, channel, channels)
+        if between is not None and route_legs_gap(routes) < 2 * half_pair_spacing - 1e-6:
+            sign = 1 if ((p_pad.global_y > n_pad.global_y)
+                         if channel.orientation == 'horizontal'
+                         else (p_pad.global_x > n_pad.global_x)) else -1
+            routes = [
+                build_inner_aligned_route(
+                    pad_info, is_p_route,
+                    (sign if is_p_route else -sign) * half_pair_spacing,
+                    between, escape_dir, is_edge, grid, layers, exit_margin,
+                    pair_layer_assignments, pair_id)
+                for pad_info, _, is_p_route, _ in legs]
+
     return routes
+
+
+def escape_budget(half_pitch: float, via_size: float, via_drill: float,
+                  track_width: float, clearance: float,
+                  copper_layers: int) -> Optional[Dict]:
+    """What it would take for a channel escape to clear the vias beside it, or
+    None when it already does. Each size is read against the floor that would
+    pin it back up (fab_tiers.enforce_fab_floors), so `advice` only names a
+    value that can take effect (#1685); --escape-method dogbone is named
+    always, because it does not run tracks between the via columns."""
+    from fab_tiers import fab_floor_for_param, min_via_annular_ring
+    need = via_size / 2.0 + track_width / 2.0 + clearance
+    if need <= half_pitch + 1e-6:
+        return None
+
+    def _down(x):           # to 1 um, never up: the value is a ceiling
+        return math.floor(x * 1000.0 + 1e-6) / 1000.0
+
+    def _floor(name):
+        return fab_floor_for_param(name, copper_layers) or 0.0
+
+    ring = min_via_annular_ring(copper_layers) or 0.0
+    via_max = _down(2.0 * (half_pitch - track_width / 2.0 - clearance))
+    # the smallest via the floors let through: its own floor, and a ring round
+    # the smallest drill
+    via_min = max(_floor('via_size'), _floor('via_drill') + 2.0 * ring)
+    track_max = _down(2.0 * (half_pitch - via_size / 2.0 - clearance))
+    clearance_max = _down(half_pitch - via_size / 2.0 - track_width / 2.0)
+    can = []
+    if via_max >= via_min - 1e-9:
+        drill = via_drill if (via_max - via_drill) / 2.0 >= ring - 1e-9 \
+            else _floor('via_drill')
+        can.append(f"--via-size {via_max:.3f}"
+                   + ('' if drill == via_drill else f" --via-drill {drill:.3f}"))
+    if track_max >= _floor('track_width') - 1e-9:
+        can.append(f"--track-width {track_max:.3f}")
+    if clearance_max >= _floor('clearance') - 1e-9:
+        can.append(f"--clearance {clearance_max:.3f}")
+    cannot = []
+    if via_max < via_min - 1e-9:
+        cannot.append(f"a via of {via_max:.3f} (fab floor {via_min:.4g})")
+    if track_max < _floor('track_width') - 1e-9:
+        cannot.append(f"a track of {track_max:.3f} (fab floor {_floor('track_width'):.4g})")
+    if clearance_max < _floor('clearance') - 1e-9:
+        cannot.append(f"a clearance of {clearance_max:.3f} (fab floor {_floor('clearance'):.4g})")
+    said = ", ".join(can + ["--escape-method dogbone (another escape, which may drop "
+                            "balls this one does not)"])
+    can.append("--escape-method dogbone")
+    return {
+        'half_pitch_mm': round(half_pitch, 6),
+        'need_mm': round(need, 6),
+        'overrun_mm': round(need - half_pitch, 6),
+        'can_take_effect': can,
+        'advice': ("It would take " + " or ".join(cannot) + ". " if cannot else "")
+                  + "What can take effect: " + said + ".",
+    }
 
 
 def single_pad_net_ids(footprint: Footprint, pcb_data: PCBData) -> Set[int]:
@@ -2088,6 +2202,106 @@ def single_pad_net_ids(footprint: Footprint, pcb_data: PCBData) -> Set[int]:
         if len(pcb_data.pads_by_net.get(pad.net_id, [])) < 2:
             nc.add(pad.net_id)
     return nc
+
+
+#: #1641: why a --nets pattern selected no pad to fan out, by
+#: net_filter_misses' `reason`. `no_such_net` is the one a CLI refuses (exit
+#: 2) when every pattern has it, as route.py refuses a net list naming no net.
+FILTER_MISS_TEXT = {
+    'no_such_net': "no net of that name on this board",
+    'not_on_part': "no pad of {part} is on {nets}",
+    'unconnected': "{pads} {are} on a no-connect (unconnected-*) net",
+    'single_pad': ("{pads} {are} on a net with one pad board-wide, nothing "
+                   "to connect to (counted in skipped_nc)"),
+}
+
+
+def net_filter_misses(footprint: Footprint, pcb_data: PCBData,
+                      net_filter: Optional[List[str]]) -> List[Dict]:
+    """The --nets patterns that select NO pad of FOOTPRINT to fan out (#1641).
+
+    One dict per include pattern that selects nothing -- `pattern`,
+    `reason` (a FILTER_MISS_TEXT key), `part` (the footprint's reference),
+    `nets` (the board nets it names) and `pads` ("U1.33") -- in the
+    filter's order; [] with no filter, or when
+    every pattern selects a pad. A pattern's pads are judged as the fanouts'
+    own loops judge them: a no-connect or single-pad net is skipped (a QFN
+    run's interior pads are escaped by its via-drop, #1717, so they are
+    selected like any other). Exclusions only narrow what a pattern
+    names. Without this a filter that selected nothing printed "Found 0 pads"
+    and a summary of `requested: 0, failed: 0`, which reads the same as a
+    part with nothing to do.
+    """
+    from net_queries import split_net_patterns, net_pattern_matches, board_net_names
+    if not net_filter:
+        return []
+    known = frozenset(board_net_names(pcb_data))
+    includes, excludes = split_net_patterns(net_filter, known)
+    nc = single_pad_net_ids(footprint, pcb_data)
+    ref = getattr(footprint, 'reference', '?')
+    misses = []
+    for pat in includes:
+        nets = sorted(n for n in known if net_pattern_matches(n, pat, known)
+                      and not any(net_pattern_matches(n, e, known)
+                                  for e in excludes))
+        if not nets:
+            misses.append({'pattern': pat, 'reason': 'no_such_net',
+                           'part': ref, 'nets': [], 'pads': []})
+            continue
+        named = set(nets)
+        pads = [p for p in footprint.pads if p.net_id and p.net_name in named]
+        if not pads:
+            misses.append({'pattern': pat, 'reason': 'not_on_part',
+                           'part': ref, 'nets': nets, 'pads': []})
+            continue
+        why = []
+        for p in pads:
+            if p.net_name.lower().startswith('unconnected-'):
+                why.append('unconnected')
+            elif p.net_id in nc:
+                why.append('single_pad')
+            else:
+                break                           # this pattern selects a pad
+        else:
+            reason = 'single_pad' if 'single_pad' in why else why[0]
+            misses.append({'pattern': pat, 'reason': reason, 'part': ref,
+                           'nets': nets,
+                           'pads': sorted({f"{ref}.{p.pad_number}" for p in pads})})
+    return misses
+
+
+def filter_miss_lines(misses: List[Dict], flag: str = '--nets ') -> List[str]:
+    """Console lines for net_filter_misses' list, one per pattern; FLAG
+    prefixes the pattern (the GUI passes '', it has no --nets)."""
+    lines = []
+    for m in misses:
+        pads = m['pads']
+        shown = ', '.join(pads[:6]) + (f" (+{len(pads) - 6} more)" if len(pads) > 6 else '')
+        nets = ', '.join(m['nets'][:4]) + (' ...' if len(m['nets']) > 4 else '')
+        text = FILTER_MISS_TEXT.get(m['reason'], m['reason']).format(
+            part=m['part'], nets=nets or '-', pads=f"pad(s) {shown}",
+            are='is' if len(pads) == 1 else 'are',
+            them='it' if len(pads) == 1 else 'them')
+        lines.append(f"  {flag}{m['pattern']!r} selects no pad to fan out: {text}")
+    return lines
+
+
+def refuse_unknown_nets(misses: List[Dict], pcb_data: PCBData,
+                        net_filter) -> Optional[str]:
+    """The CLI's refusal when NOT ONE include pattern names a board net, as
+    route.py refuses a net list that names none (#1641); None otherwise.
+    MISSES is net_filter_misses' list for the same filter."""
+    from net_queries import split_net_patterns, board_net_names
+    if not net_filter:
+        return None
+    includes = split_net_patterns(net_filter, board_net_names(pcb_data))[0]
+    if includes and len(misses) == len(includes) \
+            and all(m['reason'] == 'no_such_net' for m in misses):
+        return (f"None of the {len(includes)} requested --nets pattern(s) "
+                f"names a net on this board -- nothing was fanned out and no "
+                f"board was written. First few: "
+                f"{', '.join(repr(p) for p in includes[:5])}")
+    return None
 
 
 
@@ -2417,6 +2631,10 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
 
     failed_nets = list(failed_nets)      # one entry per failed ball; removed one per ball served
     own_pads = list(footprint.pads)
+    from check_drc import (BoardEdgeGate, FilledCopperGate,
+                           laid_copper_edge_clearance)
+    _edge_gate = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
+    _filled_gate = FilledCopperGate(pcb_data)
     xs = sorted({round(p.global_x, 4) for p in own_pads})
     ys = sorted({round(p.global_y, 4) for p in own_pads})
     if len(xs) < 2 or len(ys) < 2:
@@ -2436,6 +2654,11 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
         """Exact clearance check of candidate segment AB (width track_width,
         layer lay) against every foreign pad / track / via, committed write
         lists included. Returns True if legal at `clearance`."""
+        # #1677, #1682: the board's edges and a filled graphic's interior.
+        if _edge_gate.segment_refused(ax, ay, bx, by, track_width) \
+                or _filled_gate.segment_hit(ax, ay, bx, by, track_width, lay, net_id,
+                                            clearance) is not None:
+            return False
         # Pads: same-layer SMD + all plated/NPTH holes.
         for fp2 in pcb_data.footprints.values():
             for p in fp2.pads:
@@ -3701,21 +3924,22 @@ def _generate_bga_fanout_core(footprint: Footprint,
 
     # Escape-budget guard (issue #158). The channel engine runs one escape track down
     # the half-pitch between adjacent via columns, so via/2 + track/2 + clearance must
-    # fit the half-pitch or EVERY escape grazes the neighbouring column's via by the
+    # fit the half-pitch or an escape grazes the neighbouring column's via by the
     # deficit -- and the run still reports failed:0, since the success metric ignores
     # sub-clearance grazes. We have all four numbers here, so warn (don't silently
     # ship the graze). Doesn't apply to underpad, which routes under the pad field.
     if escape_method not in ('underpad', 'dogbone', 'jointescape'):
-        half_pitch = min(grid.pitch_x, grid.pitch_y) / 2.0
-        need = via_size / 2.0 + track_width / 2.0 + clearance
-        if need > half_pitch + 1e-6:
-            via_max = 2.0 * (half_pitch - track_width / 2.0 - clearance)
+        _budget = escape_budget(
+            min(grid.pitch_x, grid.pitch_y) / 2.0, via_size, via_drill, track_width,
+            clearance, len(pcb_data.board_info.copper_layers or []) or 2)
+        if _budget:
             print(f"  WARNING: escape via {via_size:.3f}mm busts the half-pitch budget "
-                  f"(need {need:.4f} > half-pitch {half_pitch:.4f}mm) -> every escape "
-                  f"track grazes an adjacent via by ~{(need - half_pitch) * 1000:.0f}um "
-                  f"at clearance {clearance:.3f}. Use --via-size <= {via_max:.3f} "
-                  f"(>= drill {via_drill:.3f} + annular ring), a narrower track, or more "
-                  f"escape layers. See issue #158.")
+                  f"(need {_budget['need_mm']:.4f} > half-pitch "
+                  f"{_budget['half_pitch_mm']:.4f}mm) -> an escape track beside a via "
+                  f"column grazes its vias by ~{_budget['overrun_mm'] * 1000:.0f}um at "
+                  f"clearance {clearance:.3f}. {_budget['advice']} See issue #158.")
+            if _budget['overrun_mm'] > LAST_ESCAPE_BUDGET.get('overrun_mm', 0.0):
+                LAST_ESCAPE_BUDGET.update(_budget)
 
     # Under-pad grid escape (issue #122) - a separate engine for dense arrays.
     # Dog-bone (#128) is the same engine with gap-site vias instead of
@@ -3898,6 +4122,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # Calculate half-spacing for differential pairs
     # Each trace is offset from channel center by this amount
     half_pair_spacing = (track_width + diff_pair_gap) / 2
+    _pair_spacing = track_width + min(diff_pair_gap, clearance)
 
     # Check if channels are wide enough for both tracks of a diff pair
     # If not, route P and N in adjacent channels instead of same channel with offsets
@@ -4077,7 +4302,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     _board_bounds = (grid.min_x - _reach, grid.min_y - _reach,
                      grid.max_x + _reach, grid.max_y + _reach)
     _board_tracks = board_copper_tracks(pcb_data, layers, track_width,
-                                        _board_bounds)
+                                        _board_bounds, clearance)
 
     # Build routes - process differential pairs together
     def _run_pass(force_secondary_pairs):
@@ -4285,8 +4510,15 @@ def _generate_bga_fanout_core(footprint: Footprint,
             print(f"  After resolution: {new_collision_count} collisions remaining")
             collisions_remaining = new_collision_count
         else:
-            print(f"  Validated: No collisions")
             collisions_remaining = 0
+        # What was checked is tracks against tracks; a pad or a via is graded
+        # on the written board (JSON_SUMMARY drc_grazes).
+        _self_hits = pair_self_collisions(tracks, _pair_spacing)
+        if _self_hits:
+            print(f"  Validated: the two legs of {len({t[0]['pair_id'] for t in _self_hits})} "
+                  f"diff pair(s) run closer than their spacing")
+        elif collision_count == 0:
+            print(f"  Validated: no track-to-track collisions")
 
         # Post-resolution layer rebalancing for even distribution. With
         # --layer-costs this only balances across the cheapest tier so costly
@@ -4536,6 +4768,19 @@ def _generate_bga_fanout_core(footprint: Footprint,
               f"would short a foreign track (issue #123); retry with smaller "
               f"--via-size / --track-width / --clearance")
 
+    # A pair whose two legs still touch (#1684) is a short no layer move can
+    # resolve, so both escapes go and the route step takes the pair from its
+    # bare balls. Legs merely closer than their spacing ship, as any graze does,
+    # and drc_grazes counts them.
+    _self_pairs = {t[0]['pair_id'] for t in pair_self_collisions(tracks, track_width)}
+    if _self_pairs:
+        for r in [r for r in best_routes if r.pair_id in _self_pairs]:
+            _drop_escape(r)
+            if r.pad.net_name and r.pad.net_name not in failed_nets:
+                failed_nets.append(r.pad.net_name)
+        print(f"  WARNING: dropped the escapes of {len(_self_pairs)} diff pair(s) "
+              f"whose P and N touch (#1684): {sorted(_self_pairs)}")
+
     # Under-pad auto-fallback (issue #288). On dense/locked-neighbour arrays the
     # channel engine deterministically drops balls the grid escapes handle
     # (ecp5_mini HyperRAM 11/14 -> 14/14, icepi_zero ECP5 120/124 ->
@@ -4655,6 +4900,21 @@ LAST_PLANE_DROP_REPORT: Dict = {}
 # failure list reports a cancel as a routing defect -- which would send the
 # planner (or the user) into a pointless tighter-clearance retry.
 LAST_CANCEL_SKIPPED: List[str] = []
+
+# #1641: the --nets patterns the last generate_bga_fanout call selected no
+# ball with (net_filter_misses' dicts); EMPTY with no filter or when every
+# pattern selected one. JSON_SUMMARY `unmatched` and the fanout tab read it.
+LAST_FILTER_MISSES: List[Dict] = []
+
+# #1685: the worst half-pitch overrun the last generate_bga_fanout warned of
+# (escape_budget's dict, {} when none). JSON_SUMMARY `escape_budget` reads it.
+LAST_ESCAPE_BUDGET: Dict = {}
+
+# #1775: the vias the last generate_bga_fanout call laid below the board's own
+# Board Setup via minimums with the project writeback off
+# (`design_rules.board_setup_via_grade` rows); EMPTY when every via meets them.
+# JSON_SUMMARY `board_setup_vias` and the fanout tab read it.
+LAST_BOARD_SETUP_VIAS: List[Dict] = []
 
 
 def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
@@ -5080,6 +5340,9 @@ def generate_bga_fanout(footprint: Footprint,
     re-escaped at it (bga_fanout.class_clearance). Plane drops are laid one
     class at a time, lowest first, each at its class.
     """
+    # #1676: the rungs below start at the board's own via rules
+    from design_rules import install_board_via_rule_floors
+    install_board_via_rule_floors(pcb_data)
     # #1529: the classes first, so the probe below dumps the map the engine
     # runs at on both fronts (the CLI's is read from the file here, the GUI
     # hands its live board's).
@@ -5163,6 +5426,17 @@ def generate_bga_fanout(footprint: Footprint,
     if progress_callback:
         _nballs = sum(1 for _p in footprint.pads if _p.net_id)
         progress_callback(0, 0, f"BGA fanout {_ref}: escaping {_nballs} ball(s)...")
+    # #1641: each --nets pattern that selects no ball, and why; then every
+    # pattern that spells a board net verbatim is made literal, so a bus
+    # member 'D[3]' fans out itself rather than 'D3' in every pass below.
+    LAST_ESCAPE_BUDGET.clear()
+    LAST_BOARD_SETUP_VIAS.clear()   # #1775
+    LAST_FILTER_MISSES.clear()
+    LAST_FILTER_MISSES.extend(net_filter_misses(footprint, pcb_data, net_filter))
+    for _line in filter_miss_lines(LAST_FILTER_MISSES):
+        print(_line)
+    from net_queries import literal_net_patterns, board_net_names
+    net_filter = literal_net_patterns(net_filter, board_net_names(pcb_data))
     # #621: wrap the caller's predicate so we learn whether a cancel actually
     # FIRED, rather than re-asking afterwards -- re-asking would report a run
     # whose loops all completed as cut short if the flag flipped during the
@@ -5383,6 +5657,9 @@ def generate_bga_fanout(footprint: Footprint,
     _st962, _rec962 = via_protection_stamps(vias_to_add, [], pcb_data)
     apply_stamps_in_memory(_st962)
     print_via_protection_record(_rec962, "BGA fanout")
+    # #1775: the vias laid below the board's Board Setup via minimums
+    from design_rules import disclose_board_setup_vias
+    LAST_BOARD_SETUP_VIAS[:] = disclose_board_setup_vias(pcb_data, vias_to_add)
     # What both fronts report (the CLI's failed / unescaped_nets, the GUI
     # tab's failed list) is the nets still unescaped, not every route the
     # passes gave up: those per-route lists drove the retries above and stay
@@ -5429,9 +5706,9 @@ def main():
                              f'--width is an alias)')
     parser.add_argument('--clearance', type=float, default=defaults.BGA_CLEARANCE,
                         help=f'Track clearance in mm (default: {defaults.BGA_CLEARANCE})')
-    parser.add_argument('--via-size', type=float, default=defaults.BGA_VIA_SIZE,
+    parser.add_argument('--via-size', type=float, default=None,
                         help=f'Via outer diameter in mm (default: {defaults.BGA_VIA_SIZE})')
-    parser.add_argument('--via-drill', type=float, default=defaults.BGA_VIA_DRILL,
+    parser.add_argument('--via-drill', type=float, default=None,
                         help=f'Via drill size in mm (default: {defaults.BGA_VIA_DRILL})')
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
@@ -5538,12 +5815,25 @@ def main():
     # number nothing routed to. This front registers --clearance-ceiling and
     # used to ignore it.
     __import__('fab_tiers').apply_clearance_ceiling(args, 'bga_fanout')
+    # #1676: a via nobody asked for starts at the board's own .kicad_dru rules
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
+    args.via_size = defaults.BGA_VIA_SIZE if args.via_size is None else args.via_size
+    args.via_drill = defaults.BGA_VIA_DRILL if args.via_drill is None else args.via_drill
+    if not _vs_explicit:
+        from design_rules import run_via_for_rules
+        args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,
+                                                          args.via_drill, board_setup=False)
     set_default_fab_tier(*fab_tier_from_args(args))
     __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
+    if not _vs_explicit:
+        # #1775: and, under --escalation board, at its Board Setup minimums
+        from design_rules import via_for_board_setup
+        args.via_size, args.via_drill = via_for_board_setup(args.via_size, args.via_drill)
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
+        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
@@ -5650,6 +5940,12 @@ def main():
         # at the ceiling when one was given, as route.py's map is.
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
     )
+    # #1641: a --nets list naming no net on the board is refused, as route.py
+    # refuses one; a pattern naming a net with no ball here is in `unmatched`.
+    _refusal = refuse_unknown_nets(LAST_FILTER_MISSES, pcb_data, args.nets)
+    if _refusal:
+        print(f"Error: {_refusal}")
+        return 2
 
     if tracks:
         print(f"\nWriting {len(tracks)} tracks to {args.output}...")
@@ -5800,6 +6096,11 @@ def main():
         'failed': len(unescaped),
         'unescaped_nets': unescaped,
         'skipped_nc': len(single_pad_net_ids(footprint, pcb_data)),
+        # #1775: the vias laid below the board's own Board Setup via
+        # minimums, with the project writeback off. Disclosure only.
+        'board_setup_vias': list(LAST_BOARD_SETUP_VIAS),
+        # #1641: each --nets pattern that selected no ball, with its reason
+        'unmatched': list(LAST_FILTER_MISSES),
         'clearance': args.clearance,
         'track_width': args.track_width,
         'layers': list(args.layers) if args.layers else None,
@@ -5808,6 +6109,10 @@ def main():
         # every such row, the via_*/pad_* keys are the fanout-relevant #130
         # classes.
         'drc_grazes': drc_grazes,
+        # #1685: why the channel escape grazes its vias and what can take effect
+        # ({} when via, track and clearance fit the half-pitch). Not a failure:
+        # every ball escaped, and drc_grazes counts what shipped.
+        'escape_budget': dict(LAST_ESCAPE_BUDGET),
         # Smallest copper clearance any step actually routed at; downstream steps
         # and check_drc grade the board at this floor.
         'min_clearance_used': eff_clearance,

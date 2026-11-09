@@ -585,11 +585,15 @@ def kicad_dangling_end(s, others, net_vias, net_pads, net_zones,
     -- its far end mid-body, its root in that track's copper -- dangles in
     KiCad, while check_weird's T-junction rule credits both ends.
 
-    Reported only in that unambiguous shape: every item touching the segment
-    is a same-net TRACK, each one touches both ends, and no via, pad or zone
-    touches it. Where a via, pad or zone is involved KiCad's verdict turns on
-    zone-fill and anchor details this model does not reproduce, so it says
-    nothing rather than guess. Never size-filtered: KiCad warns at any length.
+    Reported only when both ends touch same-net TRACK copper, and no via,
+    pad or zone touches either end. A track touching just one end counts
+    for that end; it does not exempt a joint whose other contacts all count
+    for the same end. Where a via, pad or zone is involved KiCad's verdict
+    turns on zone-fill and anchor details this model does not reproduce, so
+    it says nothing rather than guess. Never size-filtered: KiCad warns at
+    any length. The touch test is a superset of KiCad's connectivity graph,
+    and an extra toucher only adds a count, so the model can miss a joint
+    but never invents one.
 
     ``others`` is the same-net track copper to judge against (``s`` itself is
     skipped by identity): every segment of the net, or any subset that still
@@ -611,7 +615,7 @@ def kicad_dangling_end(s, others, net_vias, net_pads, net_zones,
                 <= o.width / 2.0 + acc + 1e-9 for x, y in ends]
         if any(hits):
             touchers.append((o, hits))
-    if not touchers or not all(h[0] and h[1] for _o, h in touchers):
+    if not all(any(h[end] for _o, h in touchers) for end in (0, 1)):
         return None
     if any(s.layer in via_copper_layers(v, copper_layers)
            and min(math.hypot(v.x - x, v.y - y) for x, y in ends)
@@ -624,10 +628,13 @@ def kicad_dangling_end(s, others, net_vias, net_pads, net_zones,
            and any(point_in_polygon(x, y, z.polygon) for x, y in ends)
            for z in net_zones):
         return None
-    # Every toucher holds both ends, so each is counted once, at the end
-    # nearer one of its own endpoints; the other end is never counted.
+    # KiCad counts a one-end toucher for that end. A track touching both
+    # ends counts only for the nearer one, even beside a one-end neighbour.
     counts = [0, 0]
-    for o, _h in touchers:
+    for o, hits in touchers:
+        if hits[0] != hits[1]:
+            counts[0 if hits[0] else 1] += 1
+            continue
         d0, d1 = (min(math.hypot(o.start_x - x, o.start_y - y),
                       math.hypot(o.end_x - x, o.end_y - y)) for x, y in ends)
         counts[0 if d0 < d1 else 1] += 1
@@ -648,8 +655,9 @@ def _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
             'kicad-dangling', name, s.layer, free[0], free[1],
             f"segment ({s.start_x:.3f}, {s.start_y:.3f})-({s.end_x:.3f}, "
             f"{s.end_y:.3f}) w{s.width:.3f}: both ends lie on other {name} "
-            f"track(s) that hold the other end too -- KiCad's DRC reports "
-            f"track_dangling at ({free[0]:.3f}, {free[1]:.3f})",
+            f"track(s), but those contacts count for only one end -- "
+            f"KiCad's DRC reports track_dangling at "
+            f"({free[0]:.3f}, {free[1]:.3f})",
             size=None))
 
 

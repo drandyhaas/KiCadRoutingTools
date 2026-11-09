@@ -103,13 +103,16 @@ Three things to know before you trust its output:
 
   The suite image's self-skips have three different reasons, so read each
   `SKIP:` line rather than assuming:
-  - **No KiCad.** Seven would be recovered by giving the suite image KiCad:
+  - **No KiCad.** Eight would be recovered by giving the suite image KiCad:
     `test_910_fill_for_delivery`, the two `test_1279_*_pcbnew` tests and
     `test_1450_chamfered_pad_pcbnew` (each wants KiCad's bundled python), and three that run a pcbnew/wx half under
     KiCad's python and self-skip without one (found reviewing #1272: such a
     half used to print a skip and pass, so it ran nowhere):
     `test_505_min_connection_clamp`, `test_505_gui_half_runs` and
-    `test_engine_kwarg_parity_launch`.
+    `test_engine_kwarg_parity_launch`. An eighth needs kicad-cli rather than
+    KiCad's python: `test_1449_inrun_edge_floor` routes on every host, but
+    its oracle half -- KiCad's refill at the pinned edge -- runs only with
+    kicad-cli, and without it the file exits 77 (#1643).
   - **No `ortools`** (a local Python only). The `test_622_*` tests that plan
     with CP-SAT skip without it. `requirements.txt` lists it -- the bus step
     needs it (#1355) -- so the suite image installs it and runs them.
@@ -319,7 +322,7 @@ python3 tests/test_sonde_u.py -u
 
 **Pipeline stages:**
 1. Route all nets at the defaults (`sonde_u_routed.kicad_pcb`)
-2. GND plane on B.Cu with `route_planes.py --add-gnd-vias` (its default output, `sonde_u_routed_routed.kicad_pcb`)
+2. GND planes on F.Cu and B.Cu with `route_planes.py --add-gnd-vias` (its default output, `sonde_u_routed_routed.kicad_pcb`)
 3. DRC (at 0.2 mm) and connectivity on `sonde_u_routed.kicad_pcb`, the board from step 1
 
 ### test_guide_corridor.py - Guide-Corridor (Waypoint) Routing Test

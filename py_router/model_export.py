@@ -7,7 +7,8 @@ only `.step` models while old boards reference `.wrl`, and kicad-cli drops an
 unresolved model SILENTLY -- so a board is staged with each reference made
 absolute, a missing `.wrl` pointed at its `.step` twin, and a still-missing
 one looked up by file name in the library (and, for the movie only, the model
-the make-3d-movie skill found on the web, `found`).
+the make-3d-movie skill found on the web, `found`). A model embedded in the
+board file (`kicad-embed://`) is the board's own and is left as it is.
 """
 import json
 import os
@@ -22,6 +23,11 @@ _MODEL_DIR_VARS = ('KISYS3DMOD', 'KICAD6_3DMODEL_DIR', 'KICAD7_3DMODEL_DIR',
                    'KICAD8_3DMODEL_DIR', 'KICAD9_3DMODEL_DIR', 'KICAD10_3DMODEL_DIR')
 _MAC_CLI = '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli'
 _MODEL_RE = re.compile(r'(\(model\s+")([^"]+)(")')
+#: a model KiCad 10 keeps inside the board file: `kicad-embed://NAME`, NAME
+#: one of the `(embedded_files (file (name NAME) ...))` the board or the
+#: footprint carries (#1639)
+EMBED_SCHEME = 'kicad-embed://'
+_EMBEDDED_RE = re.compile(r'\(file\s*\(name\s+"([^"]*)"\)')
 TWIN_EXTS = ('.step', '.STEP', '.stp', '.STP')
 #: how `stage_models` names a part whose footprint names no model at all:
 #: this prefix and the footprint's library name
@@ -112,10 +118,36 @@ def _by_name(path, dirs):
     return None
 
 
-def _locate(path, dirs, board_dir):
+def embedded_names(text):
+    """The file names TEXT's `(embedded_files ...)` blocks hold, any type."""
+    return set(_EMBEDDED_RE.findall(text))
+
+
+def board_embedded_names(board_text):
+    """The files embedded at the board's own level -- the `(embedded_files)`
+    outside every footprint block -- which a footprint's `kicad-embed://`
+    reference also resolves to: KiCad's resolver reads the footprint's
+    files, then the board's."""
+    from kicad_parser import iter_footprint_blocks
+    rest, last = [], 0
+    for start, end, _fp, _raw, _key in iter_footprint_blocks(board_text):
+        rest.append(board_text[last:start])
+        last = end
+    rest.append(board_text[last:])
+    return embedded_names(''.join(rest))
+
+
+def _locate(path, dirs, board_dir, embedded=()):
     """The file model reference `path` names, made absolute; else its
     `.step` twin; else a library file of its name. Returns (file, how), or
-    (None, None)."""
+    (None, None). A `kicad-embed://NAME` whose NAME is in `embedded` (the
+    files the board and the footprint carry) is the board's own model,
+    returned as it is with how 'embedded' (#1639): kicad-cli reads it from
+    the file, so nothing is looked up and nothing replaces it. One with no
+    such file is missing like any other reference, and a library file of
+    its name may stand in."""
+    if path.startswith(EMBED_SCHEME) and path[len(EMBED_SCHEME):] in embedded:
+        return path, 'embedded'
     real = _resolve(path, dirs)
     if board_dir and not os.path.isabs(real) and '${' not in real:
         real = os.path.normpath(os.path.join(board_dir, real))
@@ -165,21 +197,27 @@ def stage_models(board_text, dirs, board_dir, found=None):
     before an equivalent: a footprint naming two models that are both
     missing must not get both). A part whose footprint names no model at all
     takes the one recorded for its footprint's name (`find_models.
-    footprint_key`), placed at the footprint's origin. Returns (text, counts
-    {'twin', 'named', 'found'}, missing: the shown references nothing
+    footprint_key`), placed at the footprint's origin. A `kicad-embed://`
+    model the board file carries is kept as it is and counted `embedded`
+    (#1639): it is neither missing nor replaced by a found one. Returns
+    (text, counts {'twin', 'named', 'found', 'embedded'}, missing: the
+    shown references nothing
     resolves, and `NO_MODEL` + the footprint name of each part
     that names none, found_refs: the parts drawn from a found model)."""
     from kicad_parser import iter_footprint_blocks
     if found is not None:
         import find_models
-    counts = {'twin': 0, 'named': 0, 'found': 0}
+    counts = {'twin': 0, 'named': 0, 'found': 0, 'embedded': 0}
+    board_embedded = (board_embedded_names(board_text) if EMBED_SCHEME in board_text
+                      else set())
     missing, found_refs, out, last = [], [], [], 0
     for start, end, fp, raw, key in iter_footprint_blocks(board_text):
         subs, pending = [], []
+        embedded = (board_embedded | embedded_names(fp)) if EMBED_SCHEME in fp else ()
         for m in _MODEL_RE.finditer(fp):
             if _hidden(fp, m.start()):
                 continue
-            real, how = _locate(m.group(2), dirs, board_dir)
+            real, how = _locate(m.group(2), dirs, board_dir, embedded)
             if real:
                 if how in counts:
                     counts[how] += 1

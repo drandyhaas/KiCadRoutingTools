@@ -108,7 +108,10 @@ def drc_json(board, work, name, *extra):
     del r
     with open(evidence(out, 'check_drc --json'), encoding='utf-8') as fh:
         doc = json.load(fh)
-    return [v for v in doc['items'] if v.get('own_footprint')]
+    # #1628: a gap short of contact is published too, as an accepted
+    # `own-footprint-gap` row -- a channel of its own, not a contact
+    return [v for v in doc['items'] if v.get('own_footprint')
+            and v.get('accepted') != 'own-footprint-gap']
 
 
 def summary(r):
@@ -199,7 +202,8 @@ def main():
                    '-q', '--baseline', turned], accept=True)
         with open(evidence(out, 'check_drc --json'), encoding='utf-8') as fh:
             self_items = [v for v in json.load(fh)['items']
-                          if v.get('own_footprint')]
+                          if v.get('own_footprint')
+                          and v.get('accepted') != 'own-footprint-gap']
         check('--baseline the turned board itself: every one inherited',
               len(self_items) == len(rows) and all(
                   v.get('accepted') == 'inherited-own-pad-contact'

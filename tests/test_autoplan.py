@@ -13,8 +13,8 @@
 3. `analyze` on in-repo boards: planes on B.Cu for 2 layers and on the first
    two inner layers for 4+, plane layers priced up, fine-pitch parts fanned
    out on the fine grid.
-4. `route_passes` with a scripted chain: a pass is kept only when it is no
-   worse on open nets and DRC and better on one; --finish keeps the input
+4. `route_passes` with a scripted chain: a pass is kept when it ranks above
+   the best so far, fewer open nets first, then fewer DRC; --finish keeps the input
    unless a pass beats it; the iteration budget is a forecast from reported
    counts, and a pass that reports none starts no other.
 5. --effort-factor refuses a non-finite or negative value.
@@ -294,8 +294,12 @@ def test_passes():
            "improving within budget: three passes")
     expect(_passes([(G(5), 100), (G(5), 50), (G(1), 10)]) == (2, 'out1', (5, 0)),
            "a pass no better than the best is not kept and ends the passes")
-    expect(_passes([(G(5, 2), 100), (G(4, 3), 50), (G(1), 10)]) == (2, 'out1', (5, 2)),
-           "fewer open nets bought with more DRC is not kept")
+    expect(_passes([(G(5, 2), 100), (G(0, 3), 50), (G(0), 10)]) == (2, 'out2', (0, 3)),
+           "fewer open nets bought with more DRC is kept: completion first")
+    expect(_passes([(G(5, 2), 100), (G(4, 3), 50), (G(1), 10)]) == (3, 'out3', (1, 0)),
+           "a pass closing nets with more DRC is kept and the passes go on")
+    expect(_passes([(G(4, 3), 100), (G(5, 0), 50), (G(1), 10)]) == (2, 'out1', (4, 3)),
+           "fewer DRC bought with more open nets is not kept")
     expect(_passes([(G(5, 3), 100), (G(5, 1), 50), (G(5, 1), 10)]) == (3, 'out2', (5, 1)),
            "fewer DRC at the same open count is kept")
     expect(_passes([(G(5), 100), (G(3), 120), (G(1), 10)]) == (2, 'out2', (3, 0)),

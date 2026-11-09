@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from typing import List, Set, Dict, Optional, Tuple, TYPE_CHECKING
+import contextlib
 import math
 import numpy as np
 from routing_config import GridCoord, GridRouteConfig
@@ -347,6 +348,13 @@ def build_diff_pair_leg_obstacles(base_obstacles, pcb_data, config, routed_net_i
       not block it, and the partner net's copper is re-added per-leg inside
       ``_route_hybrid_leg``.
 
+    - no via in another pair's connector region while that pair is not routed
+      (``pcb_data._pair_launch_via_cells``, recorded where route_diff blocks
+      those regions on the centreline map): a leg drops its own escape via,
+      and one in front of a neighbouring pair's pads seals that pair's launch.
+      The centreline map has always kept vias out of these regions; the leg
+      map is built from the other base and did not.
+
     Every hybrid call site (``_maybe_swap_to_hybrid``, the main-loop and reroute-loop
     last-resort hybrids, and the multipoint leg hybrid) builds the leg map through this
     one helper so it means the SAME thing regardless of entry path.
@@ -355,7 +363,94 @@ def build_diff_pair_leg_obstacles(base_obstacles, pcb_data, config, routed_net_i
         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
         all_unrouted_net_ids, p_net_id, n_net_id, gnd_net_id,
         track_proximity_cache, layer_map, 0.0)
+    regions = getattr(pcb_data, '_pair_launch_via_cells', None) or {}
+    unrouted = set(remaining_net_ids)
+    for (rp, rn), cells in regions.items():
+        if (rp, rn) != (p_net_id, n_net_id) and (rp in unrouted or rn in unrouted):
+            obstacles.add_blocked_vias_batch(np.asarray(cells, dtype=np.int32))
     return obstacles
+
+
+def hybrid_leg_maps(base_obstacles, pcb_data, config, routed_net_ids,
+                    remaining_net_ids, all_unrouted_net_ids,
+                    p_net_id, n_net_id, gnd_net_id,
+                    track_proximity_cache, layer_map):
+    """A hybrid pair's leg map, and a callable for its FALLBACK leg map (#1736).
+
+    The run's maps stamp pads and the board edge at each layer's width
+    (`stamp_track_width`), so a leg at that width clears them exactly. On a
+    fine-pitch part whose layer width is wider than its pads, the one legal
+    leg runs along its own pad's centreline, and the pad stamp's corner
+    keep-out (half a cell at a rectangular corner) can close it. The fallback
+    map stamps pads and the edge at the call's track width, as before #1736;
+    `_route_direct_coupled_middle` routes the legs on it only when none
+    attached on the first, and its assembled-route gate grades every leg at
+    its real width against foreign pads, vias and tracks, so a leg that
+    grazes is rejected, not shipped.
+
+    The fallback's base map is built at most once per run, the first time it
+    is asked for (`pcb_data._call_width_leg_base`, set where the run builds
+    its base map). The callable is None on a run whose stamps are the call's
+    width on every layer: there both maps are the same."""
+    legs = build_diff_pair_leg_obstacles(
+        base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+        all_unrouted_net_ids, p_net_id, n_net_id, gnd_net_id,
+        track_proximity_cache, layer_map)
+    build = getattr(pcb_data, '_call_width_leg_base', None)
+    if build is None:
+        return legs, None
+
+    def fallback():
+        base = build()
+        if base is None:
+            return None
+        from dataclasses import replace
+        return build_diff_pair_leg_obstacles(
+            base, pcb_data, replace(config, stamp_pads_at_call_width=True),
+            routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
+            p_net_id, n_net_id, gnd_net_id, track_proximity_cache, layer_map)
+    return legs, fallback
+
+
+@contextlib.contextmanager
+def _run_lift_records_kept(pcb_data):
+    """Put the board's per-build lift records back after a nested base build.
+    A base build rebinds them on the board it is given, and the run's own maps
+    are the ones they are read against later."""
+    keys = ('_net_tie_lift', '_graphic_own_pad_lift', '_graphic_own_pad_via_lift')
+    records = {k: getattr(pcb_data, k, None) for k in keys}
+    try:
+        yield
+    finally:
+        for k, v in records.items():
+            setattr(pcb_data, k, v)
+
+
+def call_width_leg_base(pcb_data, config, nets_to_route, net_clearances):
+    """The builder `hybrid_leg_maps` reads off `pcb_data._call_width_leg_base`:
+    the run's base map rebuilt with pads and the board edge stamped at the
+    call's track width, built on first call and kept. None when no layer's
+    stamp is wider than the call's width (the maps would be identical).
+
+    The build leaves the run's lift records on the board
+    (`_run_lift_records_kept`); the leg map is built through
+    `build_diff_pair_obstacles`, which reads none."""
+    if not any(config.stamp_track_width(layer) > config.track_width + 1e-9
+               for layer in config.layers):
+        return None
+    held = {}
+
+    def build_leg_base():
+        if 'map' not in held:
+            from dataclasses import replace
+            from obstacle_map import build_base_obstacle_map
+            print("Building call-width leg map for the hybrid leg fallback...")
+            with _run_lift_records_kept(pcb_data):
+                held['map'] = build_base_obstacle_map(
+                    pcb_data, replace(config, stamp_pads_at_call_width=True),
+                    nets_to_route, net_clearances=net_clearances)
+        return held['map']
+    return build_leg_base
 
 
 def build_single_ended_obstacles(
@@ -1041,6 +1136,21 @@ def release_own_pad_lift(obstacles, net_id, token):
         obstacles.add_blocked_via_spans_batch(vias)
 
 
+def record_pair_paths(routed_net_paths: Dict, pair, result: Dict) -> None:
+    """Record a routed pair's members in `routed_net_paths`, the set of routed
+    nets the blocking analysis can name (`analyze_frontier_blocking`, which
+    reads each member's copper off the board). A hybrid escape (#766) has no
+    grid path, but its middle, legs and vias are copper a later pair can be
+    blocked by, so its members are recorded with an empty path (#1736):
+    unrecorded, a pair it sealed was told no routed net blocked it."""
+    for nid, key in ((pair.p_net_id, 'p_path'), (pair.n_net_id, 'n_path')):
+        path = result.get(key)
+        if path:
+            routed_net_paths[nid] = path
+        elif result.get('hybrid_escape'):
+            routed_net_paths[nid] = []
+
+
 def record_diff_pair_success(
     pcb_data,
     result: Dict,
@@ -1098,10 +1208,7 @@ def record_diff_pair_success(
         pcb_data, pair.n_net_id, config, layer_map)
 
     # Track paths for blocking analysis
-    if result.get('p_path'):
-        routed_net_paths[pair.p_net_id] = result['p_path']
-    if result.get('n_path'):
-        routed_net_paths[pair.n_net_id] = result['n_path']
+    record_pair_paths(routed_net_paths, pair, result)
 
     # Track result for rip-up
     routed_results[pair.p_net_id] = result
@@ -1170,82 +1277,3 @@ def record_single_ended_success(
                                result.get('new_segments'),
                                result.get('new_vias'))
 
-
-def restore_ripped_net(
-    pcb_data,
-    ripped_saved,
-    ripped_ids: List[int],
-    was_in_results: bool,
-    routed_net_ids: List[int],
-    remaining_net_ids: List[int],
-    routed_results: Dict,
-    results: List[Dict],
-    config,
-    track_proximity_cache: Optional[Dict] = None,
-    layer_map: Optional[Dict] = None
-):
-    """
-    Restore a previously ripped net back to routed state.
-
-    Args:
-        pcb_data: PCB data structure
-        ripped_saved: The saved routing result to restore
-        ripped_ids: List of net IDs that were ripped (e.g., [p_net_id, n_net_id] for diff pair)
-        was_in_results: Whether the result was in the results list before ripping
-        routed_net_ids: List of routed net IDs (modified in place)
-        remaining_net_ids: List of remaining net IDs (modified in place)
-        routed_results: Dict of routed results (modified in place)
-        results: List of routing results (modified in place)
-        config: Routing configuration
-        track_proximity_cache: Optional cache of track proximity costs
-        layer_map: Optional layer name to index mapping
-    """
-    if not ripped_saved:
-        return
-
-    # #329 audit: this restore was blind, unlike restore_net (#134). Every
-    # caller restores IMMEDIATELY after its own failed attempt (which commits
-    # no copper), so a collision "cannot happen" -- but a graze/partial result
-    # that ever starts committing copper first would turn the verbatim re-add
-    # into a different-net short. Cheap belt-and-braces: skip the copper
-    # re-add if it would collide, and leave the net for the reroute queue
-    # (unrouted beats shorted); the bookkeeping below still runs so the net
-    # is tracked either way.
-    from rip_up_reroute import _saved_route_collides
-    if _saved_route_collides(ripped_saved, pcb_data, list(ripped_ids), config.clearance,
-                             config=config):
-        names = [pcb_data.nets[r].name if r in pcb_data.nets else str(r) for r in ripped_ids]
-        print(f"    restore of {'/'.join(names)} would collide with copper routed "
-              f"meanwhile -- leaving unrouted for reroute (#134 guard)")
-        for rid in ripped_ids:
-            if rid in routed_net_ids:
-                routed_net_ids.remove(rid)
-            if rid not in remaining_net_ids:
-                remaining_net_ids.append(rid)
-            routed_results.pop(rid, None)
-        if ripped_saved in results:
-            results.remove(ripped_saved)
-        return
-
-    add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
-    # #466: restored copper re-narrows the pour it had freed
-    from plane_fragility import fragility_on_copper_change
-    fragility_on_copper_change(config, pcb_data,
-                               ripped_saved.get('new_segments'),
-                               ripped_saved.get('new_vias'))
-
-    for rid in ripped_ids:
-        if rid not in routed_net_ids:
-            routed_net_ids.append(rid)
-        if rid in remaining_net_ids:
-            remaining_net_ids.remove(rid)
-        routed_results[rid] = ripped_saved
-
-    if was_in_results and ripped_saved not in results:
-        results.append(ripped_saved)
-
-    # Restore track proximity cache
-    if track_proximity_cache is not None and layer_map is not None:
-        for rid in ripped_ids:
-            track_proximity_cache[rid] = compute_track_proximity_for_net(
-                pcb_data, rid, config, layer_map)

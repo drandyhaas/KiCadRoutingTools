@@ -166,6 +166,8 @@ REGISTRY = {
     'py_tools/board_score.py': ('reporting', "per-tool wall seconds, SCORE_JSON "
                                 "tool_seconds (#1202)"),
     'py_router/route_diff.py': ('reporting', 'phase timing prints'),
+    'py_router/cli_banner.py': (
+        'reporting', "the CLI's whole-run `Wall time:` line before EXIT="),
     'py_router/global_plan.py': ('reporting', 'plan timing print'),
     'py_router/leg_rip.py': ('reporting', 'per-rip ms print'),
     'py_router/net_rescue.py': ('reporting', "per-net timing and summary['time']"),
@@ -243,7 +245,8 @@ REGISTRY = {
 
     # --- an event-loop yield ------------------------------------------------
     'kicad_routing_plugin/differential_gui.py': (
-        'throttle', 'time.sleep(0.01) yielding to the wx event loop'),
+        'reporting', "the run's wall_time shown after a routing run (#1780), "
+        'and time.sleep(0.01) yielding to the wx event loop'),
     'kicad_routing_plugin/planes_gui.py': (
         'throttle', '_time.sleep(0.01) yielding to the wx event loop'),
 

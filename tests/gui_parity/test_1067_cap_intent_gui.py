@@ -126,6 +126,7 @@ def main():
             for k, f in parse_kicad_pcb(board).footprints.items()}
 
     app = wx.App(False)  # noqa: F841
+    wx.Log.SetActiveTarget(wx.LogStderr())
     _install_fake_board(board)
     dlg = RoutingDialog(None, build_pcb_data_like_ipc(board), board)
 

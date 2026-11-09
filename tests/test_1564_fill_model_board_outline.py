@@ -2,8 +2,9 @@
 """#1564: the raster fill model fills only the BOARD, at KiCad's edge gap.
 
 KiCad's zone filler clips every fill to the board outline and knocks each
-Edge.Cuts item out at max(the zone's clearance, the board's
-min_copper_edge_clearance) before its min-thickness opening. ZoneFillModel
+Edge.Cuts item out at the board's min_copper_edge_clearance (the edge rule
+alone, whatever the zone's clearance: probed for #1643) before its
+min-thickness opening. ZoneFillModel
 clipped only to the ZONE polygon. A plane drawn as the board's bounding box
 -- which route_planes draws on every board -- overhangs each notch of a
 non-rectangular board, and the model poured the notch and the edge band:
@@ -12,10 +13,10 @@ only KiCad's refill saw the open. What each case pins:
 
 * a pour split by a foreign track that runs into a notch of the outline is
   two components: no fill in the notch, none around the track's end there;
-* the edge gap is the board's copper-to-edge rule when that rule is larger
-  than the zone clearance: a strip between the edge and a foreign track
-  that is wide enough at the zone clearance, but thinner than min_thickness
-  at the 0.3 mm rule, joins the two sides only when the board has no rule;
+* the edge gap is the board's copper-to-edge rule: a strip between the
+  edge and a foreign track that is wide enough at a 0.05 mm rule, but
+  thinner than min_thickness at a 0.3 mm rule, joins the two sides only at
+  the 0.05 rule;
 * a rectangular board (no outline ring, only bounds) is clipped to its
   bounds, and a board object with neither is left as it was.
 
@@ -81,29 +82,29 @@ def test_notch_does_not_join_the_pour():
 
 
 def _edge_strip_board(td, rule):
-    """Track copper top 0.45 below the notch's bottom edge (y=4): free at
-    the 0.1 zone clearance from 4.1 to 4.35, at a 0.3 rule from 4.3."""
+    """Track copper top 0.45 below the notch's bottom edge (y=4), whose
+    zone-clearance band ends at 4.35: free from 4.05 at a 0.05 rule, from
+    4.3 at a 0.3 rule (the edge gap is the rule alone, #1643)."""
     pcb = os.path.join(td, f'b{rule}.kicad_pcb')
     with open(pcb, 'w') as f:
         f.write('(kicad_pcb)\n')
-    if rule is not None:
-        with open(os.path.splitext(pcb)[0] + '.kicad_pro', 'w') as f:
-            json.dump({'board': {'design_settings': {'rules': {
-                'min_copper_edge_clearance': rule}}}}, f)
+    with open(os.path.splitext(pcb)[0] + '.kicad_pro', 'w') as f:
+        json.dump({'board': {'design_settings': {'rules': {
+            'min_copper_edge_clearance': rule}}}}, f)
     return _board([NOTCHED], (0, 0, 20, 10), [_seg(4.55)], source_path=pcb)
 
 
 def test_edge_rule_closes_a_thin_strip():
     with tempfile.TemporaryDirectory() as td:
-        m0 = ZoneFillModel(_edge_strip_board(td, None), _zone())
+        m0 = ZoneFillModel(_edge_strip_board(td, 0.05), _zone())
         m3 = ZoneFillModel(_edge_strip_board(td, 0.3), _zone())
     assert m0.ok and m3.ok
     assert _same(m0, LEFT, RIGHT), \
-        "fixture: with no edge rule the 0.25 mm strip must join the sides"
+        "fixture: at a 0.05 edge rule the 0.30 mm strip must join the sides"
     assert not _same(m3, LEFT, RIGHT), \
         "the board's 0.3 mm copper-to-edge rule is not applied to the fill"
-    print("  PASS: the strip joins at the zone clearance, not at the "
-          "board's 0.3 mm edge rule")
+    print("  PASS: the strip joins at a 0.05 mm edge rule, not at a "
+          "0.3 mm one")
 
 
 def test_rectangle_bounds_and_no_outline():

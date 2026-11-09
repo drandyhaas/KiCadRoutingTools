@@ -14,7 +14,8 @@ Scenarios:
      fallback (1,0) -- dot-product 0 means no flip, deterministically.
   3. UNSCOPED underpad run: the --nets safety guard holds -- no interior or
      GND copper is ever emitted, the EP is not via-dropped.
-  4. Scoped STUB run: the surface fan still skips all center pads.
+  4. Scoped STUB run: the surface fan has no edge for center pads, so the
+     run via-drops them (#1717), with the same outcome as 5.
   5. Scoped underpad WITHOUT --allow-via-in-pad: the off-pad offset ladder is
      blocked by the bottom perimeter row, so both INT pads drop cleanly.
   6. Scoped underpad WITH --allow-via-in-pad: both INT pads escape via a via
@@ -125,14 +126,16 @@ def main():
     check("unscoped: no interior/GND net dropped either",
           not set(dropped) & {'INT1', 'INT2', 'GND'})
 
-    # 4. Scoped stub: surface fan still skips center pads.
+    # 4. Scoped stub: the surface fan has no edge for center pads, so (#1717)
+    # the stub run gives them the underpad via-drop -- the same result as 5.
     fp2 = parse_kicad_pcb(BOARD).footprints['U1']
     buf = io.StringIO()
     with redirect_stdout(buf):
         stub = generate_qfn_fanout(fp2, parse_kicad_pcb(BOARD),
                                    net_filter=['INT*'], escape_method='stub',
                                    clearance=CLEARANCE)
-    check("scoped stub run returns empty", stub == ([], [], []))
+    check("scoped stub run via-drops them: both INT pads dropped, no copper",
+          stub[0] == [] and stub[1] == [] and sorted(stub[2]) == ['INT1', 'INT2'])
 
     # 5. Scoped underpad, no via-in-pad: boxed-in pads drop cleanly.
     tracks, vias, dropped = _fanout(parse_kicad_pcb(BOARD), ['INT*'], False)

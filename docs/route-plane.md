@@ -222,9 +222,16 @@ path close to each signal via.
 **Note:** Differential pair routing (`route_diff.py`) adds its own GND return vias automatically.
 This feature is for single-ended signal vias placed by `route.py`.
 
+**A return via needs its ground net poured on two layers.** A via that joins fewer than two layers
+connects nothing, and the next `route.py` removes it (#1166). The placer keeps a return via off the
+net's own tracks and pads, so its layers come from pours: on a net poured on one layer, or none, it
+warns and places none, on either front. On a net poured on more, a site must lie inside two of its
+pours, by the test the removal uses (`check_weird.via_support_parts`). A pour from an earlier step
+counts, as does one in this call.
+
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--add-gnd-vias` | off | Enable GND return via placement near signal vias (a post-pass on the written board) |
+| `--add-gnd-vias` | off | Enable GND return via placement near signal vias (a post-pass on the written board). Needs the ground net poured on two layers; on fewer it warns and places none |
 | `--gnd-via-net` | *auto* | Pin every return via to this net. Empty (the default) matches each signal to **its own ground domain** |
 | `--gnd-via-distance` | 2.0 | Maximum distance from signal via to place GND via (mm) |
 
@@ -355,13 +362,13 @@ centre-to-centre minimum, `max(via_size + clearance, via_drill + hole_to_hole)` 
 at or below that finds no position at all, and one only a little above it leaves few.
 
 Use the `/find-high-speed-nets` Claude Code skill to analyze component datasheets and determine
-the appropriate distance for your board. The `/plan-pcb-routing` skill includes this as a
-standard step when GND planes are present.
+the appropriate distance for your board. The `/plan-pcb-routing` skill includes this step at high
+speed tier or above, when GND is poured on two or more layers.
 
 #### Example
 
 ```bash
-python3 py_router/route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --add-gnd-vias --gnd-via-distance 2.0
+python3 py_router/route_planes.py input.kicad_pcb --nets GND GND --plane-layers F.Cu B.Cu --add-gnd-vias --gnd-via-distance 2.0
 ```
 
 Output:
@@ -593,7 +600,7 @@ The plane generation code is organized into several modules:
 | `route_planes.py` | Main CLI and orchestration - loads PCB, pours each net's zone, places thermal arrays and stitching, splits shared layers, and writes output |
 | `plane_io.py` | I/O utilities - zone extraction, PCB file reading/writing, net ID resolution |
 | `plane_obstacle_builder.py` | Obstacle map construction - builds grid-based maps for via placement and routing; pad classification |
-| `plane_fill_model.py` | Zone fill model with KiCad's filler semantics (clearance; the hole clearance from every foreign drill -- the board's `min_hole_clearance`, else pcbnew's factory 0.25 -- with an NPTH's hole kept the hole clearance alone; the minimum-width opening, its deflated fill sampled exactly at half-cell points, so a channel under `min_thickness` never joins; island removal; clipped to the board outline and kept `max(zone clearance, min_copper_edge_clearance)` from every Edge.Cuts item); gates stitching sites and fanout pour-direct, and is the zone credit of the connectivity grader, the oracle and the plane repairs |
+| `plane_fill_model.py` | Zone fill model with KiCad's filler semantics (clearance; the hole clearance from every foreign drill -- the board's `min_hole_clearance`, else pcbnew's factory 0.25 -- with an NPTH's hole kept the hole clearance alone; the minimum-width opening, its deflated fill sampled exactly at half-cell points, so a channel under `min_thickness` never joins; island removal; clipped to the board outline and kept the edge clearance alone from every Edge.Cuts item -- the board's `min_copper_edge_clearance`, replaced by a `.kicad_dru` `edge_clearance` rule that binds the zone on that layer, never the zone's or its class's clearance, as KiCad 10's filler does (#1643)); gates stitching sites and fanout pour-direct, and is the zone credit of the connectivity grader, the oracle and the plane repairs |
 | `plane_lattice.py` | The plane's web through a BGA via lattice: the pour clearance that still threads it |
 | `plane_write_reconcile.py` | Keeps the write list and `pcb_data` in step when a pass removes copper (#508) |
 | `add_gnd_vias.py` | GND return via placement (`--add-gnd-vias`) |
@@ -778,7 +785,9 @@ a short trace to an adjacent same-net pad (a connector GND pin to its shield
 pad). With `--rip-blocker-nets`, the repair does the same: when no via fits and
 no same-net via is within the close-reuse radius, it routes a trace to the
 nearest same-net pad/via reachable on the pad's layer. If a signal net crosses
-that corridor, it is **ripped** (up to `--max-rip-nets`), the pad connected, and
+that corridor, it is **ripped** (up to `--max-rip-nets`; never a net that pours
+anywhere on the board, a protected or locked net, or -- in a route step's
+finalize -- a net the step's `--nets` negates, #1620/#1621), the pad connected, and
 the ripped net reconnected in the same run: restore-first, then an end-of-run
 reconnect pass, with custody restore of its original copper if that fails
 (#517). Pass `--power-nets`/`--power-nets-widths` so the reconnect routes

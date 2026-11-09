@@ -36,12 +36,32 @@ or `--ring MM` -- named `<name>_<ref>` and forbidding tracks and vias (the pour
 stays allowed). A hole whose pad carries a net (a ground ring under a plated
 hole) gets none: its own copper has to reach it. KiCad's `unconnected-*` net of
 a pin left unconnected is not such a net, so that hole gets its area (pads stay
-allowed in it). `check_mounting_holes.py` grades the result. With no hole to
-ring (none on the board, or every one carries a net) the output is the input,
-copied unchanged.
+allowed in it). A closed Edge.Cuts circle of 2 to 7 mm that is not the
+board's outline is a hole too (#1502), named `CUT1`, `CUT2` ...; a wider one
+is a window (a lens, a tube, a cable cut-out), not a screw hole, and gets no
+ring (#1648: 7 mm is ISO 273's coarse clearance hole for M6,
+`mounting_holes.EDGE_CUT_MAX_SCREW_DIAMETER`). `--skip HOLE ...` leaves the
+named holes (as the run prints them) without a ring: a hole that takes no
+screw, such as an alignment or test-fixture hole.
+`check_mounting_holes.py` grades the result. With no hole to ring (none on the
+board, every one carries a net, or every one is skipped) the output is the
+input, copied unchanged.
+
+    python3 py_router/add_rule_area.py in.kicad_pcb out.kicad_pcb \\
+        --name MOUNT --mounting-holes --intent intent.json
+
+`--intent` (#1636) also rings each hole site a floorplan intent's
+`covers[].holes[]` declare -- where a module covering a connector is screwed
+down -- at the ring check_assembly's `mountable` grades, its connector at its
+pose on this board, named `<name>_<connector>_H<n>`. Nothing else keeps copper
+off such a site before routing, and a track through it turns the cover from
+mountable to not. A site where the board's own mounting hole is already
+fitted is left to that hole (ringed as itself, or open for its net). A cover
+row whose connector the board lacks, or has on the other face, writes nothing.
 
 Exit 0 written (the output always exists); 2 for an argparse usage error, a `--layers` entry that is not
-a copper layer of the board, or a `--ref` the board does not have; 1 for a
+a copper layer of the board, a `--ref` the board does not have, or a `--skip`
+name that is not one of its mounting holes; 1 for a
 malformed `--polygon` (a point that is not X,Y, or fewer than 3 points).
 """
 import argparse
@@ -150,9 +170,19 @@ def main():
     shape.add_argument('--mounting-holes', action='store_true',
                        help='one area per mounting hole: its screw-head ring '
                             '(see mounting_holes.py); --name is the prefix')
+    p.add_argument('--skip', nargs='+', default=None, metavar='HOLE',
+                   help='with --mounting-holes: leave these holes without a ring, '
+                        'by the names the run prints (a footprint reference, or '
+                        'CUT1, CUT2 ... for an Edge.Cuts circle), e.g. an '
+                        'alignment hole that takes no screw')
     p.add_argument('--ring', type=float, default=None, metavar='MM',
                    help='with --mounting-holes: how far past the hole edge '
                         'the screw head reaches (default 0.4 x the drill)')
+    p.add_argument('--intent', default=None, metavar='JSON',
+                   help='with --mounting-holes: also one area per hole site '
+                        "a floorplan intent's covers[].holes[] declare "
+                        '(#1636), where check_assembly\'s mountable grades '
+                        'it, its connector at its pose on this board')
     p.add_argument('--ref', default=None,
                    help="coordinates are in this footprint's local frame as "
                         "the file stores it (its pads' frame), so the area "
@@ -166,7 +196,21 @@ def main():
     args = p.parse_args()
     if args.mounting_holes and args.ref:
         p.error('--ref names a footprint frame for --rect / --polygon; '
-                '--mounting-holes finds the holes itself')
+                '--mounting-holes finds the holes itself (--skip leaves one out)')
+    if args.skip and not args.mounting_holes:
+        p.error('--skip names mounting holes to leave out; it needs --mounting-holes')
+    if args.intent and not args.mounting_holes:
+        p.error('--intent reads the cover hole sites for --mounting-holes')
+    intent = None
+    if args.intent:
+        import _placer_path  # noqa: F401  (placement lives in py_placer/)
+        from placement.floorplan import load_intent
+        try:
+            intent = load_intent(args.intent)
+        except (OSError, ValueError) as exc:
+            print(f"add_rule_area: error: cannot load intent {args.intent}: "
+                  f"{exc}", file=sys.stderr)
+            return 2
     if args.forbid is None:
         args.forbid = (['tracks', 'vias'] if args.mounting_holes
                        else ['tracks', 'vias', 'copperpour'])
@@ -186,8 +230,21 @@ def main():
         return 2
     if args.mounting_holes:
         from mounting_holes import mounting_holes, keepout_polygon
+        holes = mounting_holes(pcb)
+        unknown = sorted(set(args.skip or ()) - {h.ref for h in holes})
+        if unknown:
+            print(f"add_rule_area: error: --skip {', '.join(unknown)}: not a mounting "
+                  f"hole of this board (its holes: "
+                  f"{', '.join(h.ref for h in holes) or 'none'}). Nothing was written.",
+                  file=sys.stderr)
+            return 2
         areas, skipped = [], []
-        for hole in mounting_holes(pcb):
+        left_out = [h.ref for h in holes if h.ref in set(args.skip or ())]
+        if left_out:
+            print(f"add_rule_area: left without a ring, as --skip asks: {', '.join(left_out)}")
+        for hole in holes:
+            if hole.ref in left_out:
+                continue
             if hole.nets:
                 skipped.append(hole.ref)
                 continue
@@ -197,6 +254,27 @@ def main():
         if skipped:
             print(f"add_rule_area: left open, they carry a net: "
                   f"{', '.join(skipped)}")
+        if intent is not None:
+            from mounting_holes import MountingHole
+            from placement.floorplan import cover_hole_sites
+            fitted = []
+            for s in cover_hole_sites(intent, pcb):
+                tag = f"{s['connector']}_H{s['index'] + 1}"
+                if s['standoff'] is not None:
+                    # the board's own hole there is the site: it is ringed
+                    # above as itself, or left open for its net
+                    fitted.append(f"{tag} ({s['standoff']})")
+                    continue
+                x, y = s['at']
+                hole = MountingHole(tag, x, y, s['diameter_mm'], frozenset())
+                areas.append((f"{args.name}_{tag}", keepout_polygon(hole, args.ring),
+                              f"cover hole {s['index'] + 1} of {s['connector']}'s "
+                              f"covers[] row at ({x:.3f}, {y:.3f}), its screw-head "
+                              f"ring (drill {s['diameter_mm']:g}, "
+                              f"{hole.ring(args.ring):.2f} mm past the edge)"))
+            if fitted:
+                print(f"add_rule_area: cover hole site(s) with the board's own "
+                      f"hole fitted, left to it: {', '.join(fitted)}")
     else:
         pts, frame = area_points(args, pcb)
         areas = [(args.name, pts, frame)]
@@ -207,8 +285,9 @@ def main():
             copy_board(args.input_file, args.output_file)
     if not areas:
         # #1455: exit 0 means <out> exists, so a chain's next step can read it.
-        print("add_rule_area: no mounting hole to write a ring for; "
-              "the board is unchanged")
+        print("add_rule_area: no mounting hole "
+              + ("or cover hole site " if intent is not None else "")
+              + "to write a ring for; the board is unchanged")
         print(f"Wrote {args.output_file}")
         return 0
     with open(args.output_file, encoding='utf-8', newline='') as f:

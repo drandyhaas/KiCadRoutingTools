@@ -563,8 +563,16 @@ on the board as it came, and from nowhere once the locked lanes are laid, at
 the fab ladder's finest rung -- each one's net ships open. They are named in
 the log and in the summary's `walled`.
 
-It exits 0 when every bus net it hands on is connected and clean (those it put
-back are in `refused`), and 1 when it hands on none. A bus net it does not hand
+It exits 0 whenever it writes OUT (#1738): the bus nets it hands on connected
+and clean (those it put back are in `refused`), or none handed on and OUT the
+board as it came. The summary's `exit` says which, and over several buses it
+is the worst bus's status (`max`): 0 every bus routed; 1 one or more came
+through as they came, while OUT may still carry the others routed; 2 the
+step's own check refused a bus (the turn back failed, the pull pads were not
+found again) and handed it on as it came. Each bus's own status is
+`buses[].exit`. A non-zero process exit means no OUT was written: 2 for a
+usage error or a `--src`/`--dest` bus whose turn into the flow frame failed, any other code
+otherwise. A bus net it does not hand
 on goes back as it came: its earlier copper, where that copper still clears
 what the step laid.
 

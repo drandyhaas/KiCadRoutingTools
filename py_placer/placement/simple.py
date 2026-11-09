@@ -1184,7 +1184,15 @@ class Model:
         if drop_b:
             fb = tuple(None if i in drop_b else f for i, f in enumerate(fb))
         if pa.side == pb.side:
-            return self._halo_rects(pa, pb, pa.rect(), pb.rect(), fa, fb)
+            ra, rb = pa.rect(), pb.rect()
+            if type(ra) is tuple and type(rb) is tuple:
+                return self._halo_rects(pa, pb, ra, rb, fa, fb)
+            # a courtyard of several boxes (`quench._ShapedPart`): the box
+            # the other part comes nearest decides, so one in its notch is
+            # judged by the boxes round it
+            from .legality import far_boxes
+            return max(self._halo_rects(pa, pb, qa, qb, fa, fb)
+                       for qa in far_boxes(ra) for qb in far_boxes(rb))
         # On opposite faces, a drilled part among them: on each face they
         # share, a part on its far face presents its lead boxes alone
         # (`legality.rect_on`), as the seat gate measures the pair.
@@ -1192,8 +1200,10 @@ class Model:
         (ca, ta), (cb, tb) = pa.rects(), pb.rects()
         worst = 0.0
         for f in sorted(shared):
-            for ra in ((ca,) if f == pa.side else far_boxes(ta)):
-                for rb in ((cb,) if f == pb.side else far_boxes(tb)):
+            for ra in (((ca,) if type(ca) is tuple else far_boxes(ca))
+                       if f == pa.side else far_boxes(ta)):
+                for rb in (((cb,) if type(cb) is tuple else far_boxes(cb))
+                           if f == pb.side else far_boxes(tb)):
                     worst = max(worst, self._halo_rects(pa, pb, ra, rb, fa, fb))
         return worst
 
@@ -2475,11 +2485,15 @@ def target(model, ref, placed):
     return t
 
 
-def nearest_legal(state, ref, tx, ty, rot, exclude, reach=12.0, step=0.25):
+def nearest_legal(state, ref, tx, ty, rot, exclude, reach=12.0, step=0.25, accept=None):
     """The legal pose nearest (tx, ty) at `rot`, walking square rings out to
-    `reach` mm, or None."""
+    `reach` mm, or None. `accept(x, y, rot)`, when given, must also hold
+    there (place_simple's `--legalise-only` passes the intent's claims)."""
     _rot_ok(state, ref, rot)
-    if legal(state, ref, tx, ty, rot, exclude):
+
+    def fits(x, y):
+        return legal(state, ref, x, y, rot, exclude) and (accept is None or accept(x, y, rot))
+    if fits(tx, ty):
         return (tx, ty, rot)
     k = 1
     while k * step <= reach:
@@ -2487,7 +2501,7 @@ def nearest_legal(state, ref, tx, ty, rot, exclude, reach=12.0, step=0.25):
         for i in range(-k, k + 1):
             for x, y in ((tx + i * step, ty - k * step), (tx + i * step, ty + k * step),
                          (tx - k * step, ty + i * step), (tx + k * step, ty + i * step)):
-                if legal(state, ref, x, y, rot, exclude):
+                if fits(x, y):
                     d = (x - tx) ** 2 + (y - ty) ** 2
                     if best is None or d < best[0]:
                         best = (d, x, y)

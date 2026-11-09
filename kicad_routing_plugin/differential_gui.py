@@ -539,6 +539,19 @@ class DifferentialTab(wx.Panel):
             "Gap as spacing, overriding Pair Width. 0 = off (use Pair Width).")
         param_grid.Add(self.diff_impedance, 0, wx.EXPAND)
 
+        # #1630: declare the ohms without changing the pair geometry; named
+        # after the engine param, so a plan step reaches it
+        param_grid.Add(wx.StaticText(self, label="Declare Only:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.impedance_declare_only = wx.CheckBox(self, label="")
+        self.impedance_declare_only.SetValue(False)
+        self.impedance_declare_only.SetToolTip(
+            "#1630: with Diff Impedance > 0, RECORD the target ohms for these nets and "
+            "change nothing else -- they route at the project's own pair width and gap, as "
+            "without Diff Impedance, and check_impedance.py grades the copper against "
+            "the ohms. For a pair class the project sized itself; a later step never "
+            "recomputes widths from the record. (CLI: --impedance-declare-only)")
+        param_grid.Add(self.impedance_declare_only, 0, wx.EXPAND)
+
         # Min turning radius
         param_grid.Add(wx.StaticText(self, label="Min Turn Radius (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['diff_pair_min_turning_radius']
@@ -943,9 +956,11 @@ class DifferentialTab(wx.Panel):
     def _update_progress(self, current, total, step_name):
         """Update progress bar and status."""
         if total > 0:
-            percent = int(100 * current / total)
-            self.progress_bar.SetValue(percent)
+            # Range first, then a clamped value (#1751): wx asserts on a
+            # position past the range.
             self.progress_bar.SetRange(100)
+            self.progress_bar.SetValue(
+                max(0, min(100, int(100 * current / total))))
             self.status_text.SetLabel(f"{step_name} ({current}/{total})")
         else:
             # Setup phase - no count, just show the step name
@@ -956,6 +971,9 @@ class DifferentialTab(wx.Panel):
         """Run differential pair routing in a background thread."""
         import sys
         import time
+        # The run's wall time, as the Route tab reports it (#1780): the
+        # engine's total_time is the net search alone.
+        t0 = time.time()
 
         # Fresh clearance ledger so a prior op's fine-pitch clearance doesn't
         # leak into this board's DRC floor.
@@ -985,9 +1003,9 @@ class DifferentialTab(wx.Panel):
             # cross-class max(A,B)) -- mirrors the single-ended route tab
             # (swig_gui). Passing an explicit map STOPS the engine's internal
             # always-cap auto-read, so honoring classes (Min Clearance override
-            # unchecked) actually reaches the router. Checking Min Clearance
-            # (== the CLI passing --clearance) caps each class at
-            # min(class, clearance); unchecked routes each class in full.
+            # unchecked) actually reaches the router. The Clearance ceiling box
+            # (== the CLI passing --clearance-ceiling) caps each class at
+            # min(class, ceiling), #1698; unchecked routes each class in full.
             # #755: the fallback is routing_defaults.CLEARANCE, not a bare
             # literal -- this seeds EVERY net's priced clearance and the
             # Min-Clearance cap below, so a 0.1 here under-prices the whole
@@ -1016,7 +1034,7 @@ class DifferentialTab(wx.Panel):
                 if config.get('clamp_netclasses', False):
                     from fab_tiers import cap_net_clearances  # #1561 discloses
                     net_clearances = cap_net_clearances(
-                        net_clearances, _diff_clearance,
+                        net_clearances, config['clearance_ceiling'],
                         net_names={n.net_id: n.name for n in self.pcb_data.nets.values()},
                         class_of=all_net_to_class)
             except Exception as e:
@@ -1040,6 +1058,7 @@ class DifferentialTab(wx.Panel):
                 layer_costs=config.get('layer_costs') or None,  # per-layer bias (#193); None -> all 1.0
                 track_width=config.get('diff_pair_width', defaults.DIFF_PAIR_WIDTH),
                 impedance=config.get('impedance'),  # when set, overrides per-layer width
+                impedance_declare_only=config.get('impedance_declare_only', False),
                 # #486: CPW-over-ground vs microstrip. route_diff.py passes
                 # args.coplanar_gap here; without it the shared Coplanar Gap
                 # control is honoured for single-ended routing but silently
@@ -1063,6 +1082,7 @@ class DifferentialTab(wx.Panel):
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
+                via_from_class=config.get('via_from_class', False),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance',
                                                   defaults.HOLE_TO_HOLE_CLEARANCE),
                 board_edge_clearance=config.get('board_edge_clearance',
@@ -1176,6 +1196,7 @@ class DifferentialTab(wx.Panel):
                 'successful': successful,
                 'failed': failed,
                 'total_time': total_time,
+                'wall_time': time.time() - t0,
                 'results_data': results_data,
                 'config': config,
             }
@@ -1244,7 +1265,7 @@ class DifferentialTab(wx.Panel):
 
         successful = result.get('successful', 0)
         failed = result.get('failed', 0)
-        total_time = result.get('total_time', 0)
+        wall_time = result.get('wall_time', 0)
         results_data = result.get('results_data', {})
 
         # Apply results to the board
@@ -1254,7 +1275,7 @@ class DifferentialTab(wx.Panel):
         from .gui_utils import mark_plan_step_produced
         mark_plan_step_produced(self)
 
-        self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed in {total_time:.1f}s")
+        self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed in {wall_time:.1f}s")
 
         single_ended_pairs = results_data.get('single_ended_diff_pairs', [])
         skipped_bad_fanout = results_data.get('skipped_bad_fanout', [])
@@ -1266,11 +1287,21 @@ class DifferentialTab(wx.Panel):
             # The CLI summary's wording: a deferred pair is electrically
             # short, or its coupled route failed (#165, and a 2-terminal
             # pair's fallback defer), which is not the same thing.
-            from diff_pair_custody import deferred_reasons_text
+            # #1764: only the electrically short ones are routed single-ended
+            # next by design; a failed pair is retried as a pair.
+            from diff_pair_custody import deferred_reasons_text, split_deferred_pairs
             _why = deferred_reasons_text(results_data.get('pair_reports'),
                                          single_ended_pairs)
-            msg += (f"Deferred to single-ended: {len(single_ended_pairs)} "
-                    f"({_why} - route these single-ended next)\n")
+            _design, _failed = split_deferred_pairs(
+                results_data.get('pair_reports'), single_ended_pairs)
+            msg += f"Deferred to single-ended: {len(single_ended_pairs)} ({_why})\n"
+            if _design:
+                msg += (f"  by design, route these single-ended next: "
+                        f"{', '.join(_design)}\n")
+            if _failed:
+                msg += (f"  coupled route failed, retry these as pairs "
+                        f"(Force re-route), not single-ended: "
+                        f"{', '.join(_failed)}\n")
         if skipped_bad_fanout:
             msg += (f"Skipped: {len(skipped_bad_fanout)} "
                     f"(fanout stubs self-overlap - fix the fanout first)\n")
@@ -1300,7 +1331,7 @@ class DifferentialTab(wx.Panel):
         if _intra_bad:
             msg += (f"Intra-pair skew NOT matched on the board: "
                     f"{', '.join(_intra_bad)}\n")
-        msg += f"Time: {total_time:.1f}s\n\n"
+        msg += f"Time: {wall_time:.1f}s\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
         msg += f"  {vias_added} vias\n"
@@ -1359,7 +1390,7 @@ class DifferentialTab(wx.Panel):
         if board is None:
             wx.MessageBox("Board is no longer open", "Error",
                           wx.OK | wx.ICON_ERROR)
-            return 0, 0
+            return 0, 0, 0
 
         self._apply_status("Applying diff-pair copper to the board...")
 
@@ -1377,7 +1408,7 @@ class DifferentialTab(wx.Panel):
                 f"Failed to apply differential routing:\n\n{e}",
                 "Apply error", wx.OK | wx.ICON_ERROR,
             )
-            return 0, 0
+            return 0, 0, 0
 
         # Make the open project's DRC floors consistent with the routed diff-pair
         # values, including the Default net class's diff-pair gap/width (issue
@@ -1404,7 +1435,9 @@ class DifferentialTab(wx.Panel):
 
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
-        return counts["tracks"], counts["vias"]
+        # (added tracks, added vias, removed stale copper), as the caller
+        # unpacks it
+        return counts["tracks"], counts["vias"], counts.get("removed", 0)
 
     def _held_hole_clearance(self, board, results_data, clearance):
         """#1369: :func:`gui_utils.held_hole_clearance_live` for this tab."""
@@ -1435,6 +1468,7 @@ class DifferentialTab(wx.Panel):
             'diff_pair_width_from_class': not self.diff_pair_width_check.GetValue(),
             'diff_pair_gap_from_class': not self.diff_pair_gap_check.GetValue(),
             'impedance': self.diff_impedance.GetValue() or None,  # 0 = off
+            'impedance_declare_only': self.impedance_declare_only.GetValue(),
             'min_turning_radius': self.min_turning_radius.GetValue(),
             'max_setback_angle': self.max_setback_angle.GetValue(),
             'max_turn_angle': self.max_turn_angle.GetValue(),

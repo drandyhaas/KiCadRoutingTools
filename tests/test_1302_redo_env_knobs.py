@@ -122,13 +122,16 @@ def main():
            and toks[2] == 'python3', str(toks[:3]))
         # The timings record is written at exit by an atexit hook; call the
         # registered writer through a fresh process instead of exiting this one.
+        # The probe writes its output: a command that writes nothing is taken
+        # back out of the manifest, timings line and all (#1640).
+        out_b = os.path.join(tmp, 'b.kicad_pcb')
         with env_set(REDO_MANIFEST=man, REDO_RUNDIR=os.path.dirname(man),
                      **{KNOB: '0'}):
             check([sys.executable, '-c',
                    'import sys; sys.path.insert(0, "py_router"); '
-                   'sys.argv = ["py_router/route.py", "a.kicad_pcb", '
-                   '"b.kicad_pcb"]; import redo_record; '
-                   'redo_record.record_invocation()'], accept=True)
+                   f'sys.argv = ["py_router/route.py", "a.kicad_pcb", {out_b!r}]; '
+                   'import redo_record; redo_record.record_invocation(); '
+                   f'open({out_b!r}, "w").write("x")'], accept=True)
         tim = man[:-3] + '.timings.jsonl'
         rec = json.loads(open(evidence(tim, 'the timings log'),
                               encoding='utf-8').read().strip().splitlines()[-1])

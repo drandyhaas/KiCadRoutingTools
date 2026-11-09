@@ -428,6 +428,98 @@ RIP_LEAVES_PADS_HINT = (
     "routing aside -- CAGED there is placement, not copper.")
 
 
+# #1763: the nets that carried copper on the INVOCATION's input board, set
+# by the outermost batch_route. A nested sub-run (the final reconciliation
+# re-parses the board the outer pass wrote) reads the outer pass's copper as
+# its input, so without this every blocker it names reads "committed by an
+# earlier run/step" -- copper this same command laid. None = not recorded.
+_INVOCATION_INPUT_NETS = [None]
+
+
+def note_invocation_input(pcb_data) -> None:
+    """Record which nets carry copper on the invocation's input (#1763).
+    Called once by the outermost run, before it routes."""
+    nets = getattr(pcb_data, 'nets', None) or {}
+    ids = {s.net_id for s in (getattr(pcb_data, 'segments', None) or ())}
+    ids |= {v.net_id for v in (getattr(pcb_data, 'vias', None) or ())}
+    _INVOCATION_INPUT_NETS[0] = {nets[i].name for i in ids
+                                 if i in nets and nets[i].name}
+
+
+def laid_by_this_run(names) -> list:
+    """The nets of `names` that had no copper on the invocation's input, so
+    whatever copper they have now this run laid (#1763); [] when the input
+    was not recorded."""
+    inp = _INVOCATION_INPUT_NETS[0]
+    if inp is None:
+        return []
+    return [n for n in names if n not in inp]
+
+
+def _grid_steps_below(grid):
+    """The finer run grids a hint may name: grid/2, /4, /5, /8, /10, never
+    below the scoped rescue's own fine step (routing_defaults.RESCUE_GRID_STEP)."""
+    from routing_defaults import RESCUE_GRID_STEP
+    return [grid / k for k in (2, 4, 5, 8, 10)
+            if grid / k >= RESCUE_GRID_STEP - 1e-9]
+
+
+def pads_off_grid(pcb_data, net_id, grid_step):
+    """`(off, total, step, axes)` for `net_id`'s copper pads against the run
+    grid (#1763): how many pad centres sit off it, of how many, and the
+    coarsest finer step (_grid_steps_below) that puts the most pad
+    coordinates on grid -- with `axes` ('xy', 'x' or 'y') the axes on which
+    it puts every pad on grid. `step` is None when no pad is off, or when no
+    finer step puts more coordinates on grid than the run's own."""
+    pads = [p for p in ((getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id)
+                        or ()) if getattr(p, 'pad_type', '') != 'np_thru_hole']
+    if not pads or not grid_step or grid_step <= 0:
+        return 0, len(pads), None, ''
+
+    def on(v, g):
+        q = v / g
+        return abs(q - round(q)) * g <= 1e-4
+
+    def score(g):
+        return sum(on(p.global_x, g) + on(p.global_y, g) for p in pads)
+
+    off = sum(1 for p in pads if not (on(p.global_x, grid_step)
+                                      and on(p.global_y, grid_step)))
+    if not off:
+        return 0, len(pads), None, ''
+    best, best_score = None, score(grid_step)
+    for g in _grid_steps_below(grid_step):
+        sc = score(g)
+        if sc > best_score:
+            best, best_score = g, sc
+    if best is None:
+        return off, len(pads), None, ''
+    axes = ''.join(ax for ax, attr in (('x', 'global_x'), ('y', 'global_y'))
+                   if all(on(getattr(p, attr), best) for p in pads))
+    return off, len(pads), round(best, 6), axes
+
+
+def _on_grid_words(axes):
+    return 'on grid' if axes == 'xy' else (f'on grid in {axes}' if axes
+                                           else 'closer to the grid')
+
+
+def off_grid_lever(pcb_data, net_id, config, name=None) -> str:
+    """A sentence naming the scoped finer-grid re-route for a net whose pads
+    sit off the run grid, or '' (#1763)."""
+    try:
+        off, total, g, axes = pads_off_grid(pcb_data, net_id, config.grid_step)
+    except Exception:
+        return ''
+    if not off or g is None:
+        return ''
+    who = f" {name}'s" if name else " this net's"
+    return (f" {off} of{who} {total} pad(s) sit off the {config.grid_step:g} mm "
+            f"grid: re-route the failing nets scoped (--nets) at --grid-step {g:g}, "
+            f"which puts them {_on_grid_words(axes)} -- a rip at this grid does "
+            f"not move them.")
+
+
 def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
                               routed_net_ids=(), rip_existing_names=None,
                               return_names=False, anchors=None):
@@ -645,23 +737,35 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
                         f"protected (#521): naming {'it' if len(prot_out) == 1 else 'them'} "
                         f"EXACTLY, as the command does, is the deliberate "
                         f"override -- a glob would not lift it.")
+    # #1763: copper THIS invocation laid (the final reconciliation reads the
+    # outer pass's copper as pre-existing) is not "an earlier run/step"'s.
+    _own = laid_by_this_run(names)
+    if not _own:
+        origin = "pre-existing net(s) committed by an earlier run/step"
+    elif len(_own) == len(names):
+        origin = ("net(s) this run routed itself, earlier in the same "
+                  "invocation (not input copper)")
+    else:
+        origin = (f"net(s): {len(names) - len(_own)} committed by an earlier "
+                  f"run/step, {len(_own)} routed by this run itself "
+                  f"({' '.join(repr(n) for n in _own)})")
+    grid_txt = off_grid_lever(pcb_data, net_id, config)
     if not outside:
-        return _ret(f"Hint: the blocking copper belongs to pre-existing "
-                    f"net(s) committed by an earlier run/step.{had_txt}"
-                    f"{lock_txt}" + prot_txt, names)
+        return _ret(f"Hint: the blocking copper belongs to {origin}.{had_txt}"
+                    f"{lock_txt}{grid_txt}" + prot_txt, names)
     quoted = " ".join(f"'{n}'" for n in outside)
     # The net list appears ONCE, in the retry command -- naming them in the
     # prose as well doubled a hint that already runs to several hundred
     # characters, and the command is the half the reader acts on.
-    return _ret(f"Hint: the blocking copper belongs to {len(names)} pre-existing "
-            f"net(s) committed by an earlier run/step; {len(outside)} of them "
+    return _ret(f"Hint: the blocking copper belongs to {len(names)} {origin}; "
+            f"{len(outside)} of them "
             f"this run may not rip. Retry with --rip-existing-nets {quoted} to "
             f"rip and re-route them in this run (issue #103) -- the decisive "
             f"blocker may be any of them, so start with the full set (each "
             f"ripped net is re-routed and the run reports honestly if one "
             f"cannot be), then bisect if you want a minimal rip."
             f"{RIP_LEAVES_PADS_HINT}{prot_out_txt}"
-            f"{had_txt}{lock_txt}" + prot_txt, names)
+            f"{had_txt}{lock_txt}{grid_txt}" + prot_txt, names)
 
 
 def _escaped_on_input(pcb_data, net_id, bare, reach=0.05):
@@ -752,8 +856,10 @@ def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,
     plane_like = n_pads >= plane_like_pads
     remedy = ("re-create the plane for this net (route_planes.py), or fan it "
               "out explicitly" if plane_like else
-              "re-run the fanout for this net (bga_fanout.py / qfn_fanout.py "
-              "--escape-method underpad, or a smaller --via-size)")
+              "re-run the fanout for this net: bga_fanout.py, or for a "
+              "QFN/QFP pad qfn_fanout.py --escape-method underpad (the stub "
+              "escape skips interior pads, #1641), with a smaller --via-size "
+              "if the via did not fit")
     hint = (f"Hint: pad {where} is a fanout-dropped ball (no escape stub) -- "
             f"it sits inside {ref}'s pad field with no copper of {name} "
             f"attached, so no rip authority or retry can reach it"
@@ -966,7 +1072,8 @@ def same_net_pad_seal_hint(pcb_data, config, net_id, net_name=None,
     return _ret('')
 
 
-def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
+def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False,
+                      net_id=None):
     """One-line hint when a route died immediately with nothing rippable.
 
     A failure with almost no A* iterations and no rippable blockers means the
@@ -1002,6 +1109,16 @@ def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
     if iters >= 20000:
         return _ret("")
     finer = config.grid_step / 2
+    # #1763: pads off the run grid -- the step that puts them ON grid is the
+    # lever, and it is recorded with the verdict for the run's last word.
+    _off = (0, 0, None, '')
+    if net_id is not None and pcb_data is not None:
+        try:
+            _off = pads_off_grid(pcb_data, net_id, config.grid_step)
+        except Exception:
+            _off = (0, 0, None, '')
+    if _off[2] is not None:
+        finer = _off[2]
     # Don't steer users into an OOM (issue #105): halving the grid step
     # quadruples cell count. Above ~4M cells per layer, suggest scoping the
     # finer grid to the failing nets instead of a board-global parameter.
@@ -1029,11 +1146,17 @@ def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
         f"parts try a finer grid and/or smaller clearance/track, e.g. "
         f"{advice} "
         f"(current: grid {config.grid_step:g}, clearance {config.clearance:g}, "
-        f"track {config.track_width:g} mm)",
+        f"track {config.track_width:g} mm)"
+        + (f"; {_off[0]} of its {_off[1]} pad(s) sit off the "
+           f"{config.grid_step:g} mm grid, and --grid-step {_off[2]:g} puts "
+           f"them {_on_grid_words(_off[3])}" if _off[2] is not None else ""),
         # The same decision as data: the iteration count it was made on and
         # the geometry that was in force.
-        {'verdict': 'boxed_in_static', 'iterations': iters,
-         'geometry': {'grid_step': config.grid_step,
-                      'clearance': config.clearance,
-                      'track_width': config.track_width,
-                      'via_diameter': getattr(config, 'via_diameter', None)}})
+        dict({'verdict': 'boxed_in_static', 'iterations': iters,
+              'geometry': {'grid_step': config.grid_step,
+                           'clearance': config.clearance,
+                           'track_width': config.track_width,
+                           'via_diameter': getattr(config, 'via_diameter', None)}},
+             **({'pads_off_grid': _off[0], 'pads': _off[1],
+                 'on_grid_step': _off[2], 'on_grid_axes': _off[3]}
+                if _off[2] is not None else {})))

@@ -62,7 +62,12 @@ by `quick_score.judge_key`. The routes land in judge_seeds' names in
 from the repo root, as judge_seeds is run: the chain's commands run from the
 current folder. So the movie routes the seeds with the run's own chain and
 picks the seed its judge picks, where `--route` routes with the corpus
-board's recorded chain. The two options are exclusive.
+board's recorded chain. The two options are exclusive. Either way the
+flow's routes are routed AFRESH, in `--route-work`, by the chain: the full
+route the movie plays is that chain's route of the best seed, not the route a
+`/plan-pcb-routing` run shipped for the board (#1638). To film a routing run
+itself, give `py_router/route_movie.py` its run dir (and `--final` the board
+it kept).
 
 The movie films a seed the judge did NOT pick, so the pick is something the
 viewer sees happen: the judged seed the objective rates cheapest, or the next

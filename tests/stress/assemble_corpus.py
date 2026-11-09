@@ -107,7 +107,13 @@ SET_BLURB = {
         "so it lands here for lora_cubesat_cm's reason rather than the Antmicro\n"
         "boards'. classify() puts any board at fps >= 500 in this tier regardless of\n"
         "layer count, and with no inner layers every net competes for the same two\n"
-        "planes (the human routing spent 1506 vias)."
+        "planes (the human routing spent 1506 vias).\n"
+        "\n"
+        "spartan6_4layer (frontcover/spartan6-4layer) was moved here out of set25\n"
+        "on 2026-11-04 for the same reason as lora_cubesat_cm. It is monster by\n"
+        "REPLAY TIME, not tier (4 layers, 153 footprints): its recorded chain spends\n"
+        "~2.7 h in two route steps, and it was the last board left running in\n"
+        "both arms of a sets 1-28 corpus A/B. set25 keeps the other 14."
     ),
     "set29": (
         "set29 is the awesome-kicad-projects mining batch (2026-09-13): the\n"

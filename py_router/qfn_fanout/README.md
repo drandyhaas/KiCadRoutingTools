@@ -71,6 +71,7 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `!GND` | Exclude net named "GND" |
 | `!*VCC*` | Exclude nets containing "VCC" |
 | `"*" "!GND" "!VCC"` | All nets except GND and VCC |
+| `D[3]` | The net named `D[3]` (a pattern that spells a board net is that net, not a `[...]` class, #1641) |
 
 **Note:** Nets starting with "unconnected-" (KiCad pins not connected in schematic) are automatically excluded,
 and so is any net with **a single pad on the whole board** (#1342) -- a spare pin the schematic still names
@@ -78,6 +79,35 @@ and so is any net with **a single pad on the whole board** (#1342) -- a spare pi
 that only blocks routing. This is bga_fanout's #122 rule (`single_pad_net_ids`), applied whatever `--nets`
 says; the run prints `Skipping N single-pad/NC net(s)` and `JSON_SUMMARY` carries `skipped_nc`. Such a net
 counts as neither requested nor failed.
+
+**Selected nothing (#1641):** each `--nets` pattern that selects no pad on the part is printed and listed
+in `JSON_SUMMARY`'s `unmatched`, with its `reason` (`not_on_part`, `single_pad`, `unconnected`, `no_such_net`); `requested` counts only what a
+pattern selected. A `--nets` list none of whose patterns names a net on the board is refused, exit 2, with no
+board written, as `route.py` refuses one.
+
+**Interior pads a filter selected (#1717):** the surface fan has no edge for an interior pad, so a stub run
+with `--nets` gives each interior pad its filter selects the under-pad via-drop after the fan (the
+`--escape-method underpad` code, its clearance ladder, `--via-size`/`--via-drill`/`--allow-via-in-pad`), placed
+clear of the fan's stubs. A pad the via-drop cannot place fails its net, as an underpad run does, and is
+named in `JSON_SUMMARY`'s `skipped_interior` (`"U1.34"`) with one `WARNING` line. A run without `--nets` never
+via-drops an interior or exposed pad and lists nothing.
+
+**Power stubs drawn at `--width` (#1743):** the via-drop draws every pad-to-via stub at `--width`, and
+`--power-nets` widens only a surface stub (where it fits, #1318). So `JSON_SUMMARY`'s `power_stubs_at_width`
+lists each escape stub drawn at the track width on a net that reads as power or ground -- `pad` (`"U1.5"`),
+`net`, `width` (as drawn), `escape` (`surface` or `via-drop`) and `why` -- with a console `NOTE` saying what
+widens it. A net reads as power by the rules autoplan builds `--power-nets` from (`list_nets.
+power_net_evidence`): a ground or rail name, power pins on two or more parts, or a pour the board draws for it.
+A surface stub of a net `--power-nets` names is not listed; a via-drop stub is, while its named width is wider
+than drawn. Disclosure only: the copper is unchanged.
+
+**The via a run sizes itself (#1775):** with no `--via-size`/`--via-drill` the via-drop's via starts at
+0.45/0.25, raised to the board's `.kicad_dru` via rules (#1676) and, under `--escalation board` only, to its
+Board Setup `min_through_hole_diameter`, `min_via_diameter` and `min_via_annular_width` round the drill (a
+0.13 ring makes it 0.51/0.25). Under the default `fab` it keeps its size; with `--no-fix-drc-settings` a via
+laid below a Board Setup minimum is named in a `WARNING` line and in `JSON_SUMMARY`'s `board_setup_vias`
+(`rule`, `min`, `vias`, `below`, `smallest_ring` / `smallest`). bga_fanout.py does the same with its 0.5/0.3.
+The GUI fanout tab starts from the Default-class via instead and goes through the same raise and grade.
 
 ## Options
 

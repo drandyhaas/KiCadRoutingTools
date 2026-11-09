@@ -163,7 +163,9 @@ def select_blocking_branch(pcb_data, net_id: int, blocked_cells, config,
     """
     if not blocked_cells:
         return None
-    segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    # A net's copper art is not a branch of its route: nothing lays it again.
+    segs = [s for s in pcb_data.segments
+            if s.net_id == net_id and not getattr(s, 'graphic', False)]
     if len(segs) < 2:
         return None                      # nothing to subset
 

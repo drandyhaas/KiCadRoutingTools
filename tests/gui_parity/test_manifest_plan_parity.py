@@ -1477,6 +1477,7 @@ def check_cap_flags():
             '--max-displacement-cap', '6', '--displacement-growth', '2',
             '--max-passes', '7', '--cap-prefix', 'C',
             '--grid-step', '0.05', '--clearance', '0.1',
+            '--fab-overrides', 'fine.fab',
             '--default-via-size', '0.42', '--no-rotate',
             '--intent', 'x.intent.json', '--no-fix-drc-settings']
     step = m2p.cap_optimization_step(argv)
@@ -1498,6 +1499,7 @@ def check_cap_flags():
             ('--cap-prefix', 'cap_prefix', 'C'),
             ('--grid-step', 'grid_step', 0.05),
             ('--clearance', 'clearance', 0.1),
+            ('--fab-overrides', 'fab_overrides_path', 'fine.fab'),
             ('--default-via-size', 'cap_default_via_size', 0.42),
             ('--intent', 'cap_intent_path', 'x.intent.json'),
             ('--no-rotate', 'cap_allow_rotation', False),
@@ -2042,15 +2044,17 @@ def board_writing_tools():
 def tool_dispositions(rows, mapped, refused, noop):
     """[(path, why)] for every board-writing tool without EXACTLY ONE
     disposition. A `conditional` named check_* is the fourth: is_check_cmd
-    drops it before conversion (what it may write is a debug or staged copy).
-    An ACTOR named check_* gets no such pass -- is_check_cmd would drop the
-    board it writes without a word."""
+    drops it before conversion (what it may write is a debug copy) -- unless
+    the board it writes is one a chain continues from (check_join
+    --keep-staged, #1637), when it is not a check and its table entry is
+    its disposition. An ACTOR named check_* gets no such pass --
+    is_check_cmd would drop the board it writes without a word."""
     bad = []
     for rel, kind in rows:
         base = os.path.basename(rel)
         disp = [name for name, table in (('mapped', mapped), ('refused', refused),
                                          ('no-op', noop)) if base in table]
-        if kind == 'conditional' and base.startswith('check_'):
+        if kind == 'conditional' and base.startswith('check_') and not disp:
             disp.append('check')
         if not disp:
             bad.append((rel, f"a board-writing KRT_TOOL ({kind}) that "

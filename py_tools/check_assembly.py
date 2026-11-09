@@ -56,7 +56,8 @@ import sys
 #: keyed by `BodyOverlapPair.gate_exempt`.
 _GATE_EXEMPT_WHY = {
     'marker_class': 'a mount-hole/fiducial/testpoint is involved',
-    'container_class': 'a board-sized container is involved',
+    'container_class': ('a container (a board-sized frame or a shield '
+                        'frame, #1722) is involved'),
     'intent_declared': "named in the intent's overlap_waivers",
     'silk_drawn': 'a silk-drawn body, which never gates (#896)',
     'silk_enclosed': ('inside a CLOSED silk-drawn body: gates when a member '
@@ -572,7 +573,8 @@ def main():
         if g['containment_blocking']:
             print(f"    {g['containment_blocking']} of these BLOCK: a "
                   f"containment gates unless a mount-hole/fiducial/testpoint "
-                  f"or a board-sized container is involved, or the pair is "
+                  f"or a container (a board-sized frame or a shield frame) is "
+                  f"involved, or the pair is "
                   f"named in the intent's `overlap_waivers`. An `edge_class` "
                   f"waiver does NOT exempt -- it is a part-class lookup with "
                   f"no geometry in it, and it is what hid a part wholly "
@@ -589,7 +591,7 @@ def main():
                 for k, n in sorted(_why.items())) + '.')
             if set(_why) <= {'marker_class', 'container_class'}:
                 print(f"    Each is a by-design containment (a marker or a "
-                      f"board-sized container), which the corpus ships "
+                      f"container), which the corpus ships "
                       f"legitimately -- orangecrab FID2/J5 at 100%.")
     # BODY COVERAGE (#896). Printed UNCONDITIONALLY, including the fully
     # covered case: "which geometry was this board graded on" is a fact about
@@ -1113,17 +1115,38 @@ def main():
                    'unmeasured': f'{type(exc).__name__}: {str(exc)[:120]}',
                    'basis': None}
     through_gating = list(through['gating_refs'])
+    # #1662: what would clear it. `inside_mm` is the distance to the nearest
+    # outline, which reads no band: written as a minimum it still gated.
+    from placement.floorplan import body_clearing_overhang
+    for r in through['rows']:
+        if not r['gates']:
+            continue
+        try:
+            _clear = body_clearing_overhang(_heights.for_board(pcb, args.board, declared_heights),
+                                            pcb, args.board, r['ref'])
+        except Exception:                                    # noqa: BLE001
+            _clear = None
+        r['clearing_overhang_mm'] = _clear and _clear['by_face']
     if through['rows']:
         print(f"  BODY THROUGH THE BOARD ({len(through_gating)} part(s) GATE): "
               f"a part's own 3D model is at board depth inside the outline"
               + (" -- NOT BUILDABLE" if through_gating else ''))
         for r in through['rows']:
             b = r['box']
-            print(f"    {r['ref']} {r['area_mm2']}mm2 at x {b[0]}..{b[2]}, "
-                  f"y {b[1]}..{b[3]}"
+            print(f"    {r['ref']} {r['area_mm2']}mm2 over {r['span_mm']:g}mm, "
+                  f"{r['inside_mm']:g}mm inside the outline, at x "
+                  f"{b[0]}..{b[2]}, y {b[1]}..{b[3]}"
                   + ('' if r['gates'] else
-                     f"  [under {_heights.DEPTH_MIN_MM2:g}mm2: a model drawn "
-                     f"low, never gates]"))
+                     f"  [under {_heights.DEPTH_MIN_MM2:g}mm2, and no "
+                     f"{_heights.DEPTH_MIN_SPAN_MM:g}mm long slice more than "
+                     f"{_heights.DEPTH_EDGE_TOL_MM:g}mm inside: does not gate]"))
+            if r['gates']:
+                _by = r.get('clearing_overhang_mm')
+                print("      that depth is to the nearest outline, not the overhang it "
+                      "needs"
+                      + ("; the overhang_mm.min that keeps this body off the board, "
+                         "by the side of it at the edge: "
+                         + ', '.join(f"{f} {v:g}mm" for f, v in _by.items()) if _by else ''))
     elif through['unmeasured']:
         print(f"  body through the board: not measured ({through['unmeasured']})")
     # #1250, the NINTH: a test point a move left under another part's body
@@ -1137,6 +1160,43 @@ def main():
                          or own_gating or rule_gating or through_gating)
     verdict = 'NOT BUILDABLE' if not_buildable else 'buildable (blocking 0)'
     print(f"  VERDICT: {verdict}")
+    # #1665: an intent's waivers are read only with --intent, so a pair a
+    # placement run waived gates here while place_simple and the verifier call
+    # the same board buildable. Said only when it could matter: when a gating
+    # pair is one a waiver reaches (`PairWaivers`). Pad intersections, copper
+    # off the outline, a plug's mating region, own-pad shorts, rule-area items
+    # and a body through the board take no waiver.
+    waiver_candidates = None
+    if not args.intent:
+        _by_pair = {}
+        for _what, _pairs in (
+                ('containment', [(q.a, q.b) for q in g['containment_blocking_pairs']]),
+                ('closed silk body', [(q.a, q.b) for q in silk_gating]),
+                ('courtyard', [(q.a, q.b) for q in courtyard_gating]),
+                ('test point covered', [(t.testpoint, t.cover) for t in tp_gating]),
+                ('pin in courtyard', [(q.a, q.b) for q in pin_hits]),
+                ('coincident origin', [(a, b) for grp in stack_groups
+                                       for i, a in enumerate(grp['refs'])
+                                       for b in grp['refs'][i + 1:]])):
+            for _p in _pairs:
+                _by_pair.setdefault(tuple(sorted(_p)), []).append(_what)
+        waiver_candidates = [{'pair': list(k), 'channels': v}
+                             for k, v in sorted(_by_pair.items())]
+        if waiver_candidates:
+            _no_waiver = bool(g['blocking'] or off_outline_pads or mating
+                              or graphic_gating or own_gating or rule_gating
+                              or through_gating)
+            print("  NOTE: no --intent, so no waiver was read. An intent's "
+                  "`overlap_waivers` or `fixed_poses[].accept_courtyard_overlap` "
+                  "can excuse: "
+                  + ', '.join(f"{r['pair'][0]}<->{r['pair'][1]} "
+                              f"({', '.join(r['channels'])})"
+                              for r in waiver_candidates)
+                  + ". If a placement run left this board an intent, grade with "
+                    "--intent <intent.json> before acting on this verdict; with "
+                    "no intent behind it, the verdict stands."
+                  + (" Other conjuncts above take no waiver, and gate either way."
+                     if _no_waiver else ''))
 
     if args.json:
         doc = {
@@ -1160,6 +1220,9 @@ def main():
             # verdict back out of stdout rather than reading the JSON.
             'buildable': not not_buildable,
             'verdict': verdict,
+            # #1665: the gating pairs a waiver could excuse, none having been
+            # read; null with --intent, where the waivers were.
+            'waiver_candidates': waiver_candidates,
             'locked_contacts': len(locked_contact),
             'advisory': g['advisory'],
             'waived': g['waived'],

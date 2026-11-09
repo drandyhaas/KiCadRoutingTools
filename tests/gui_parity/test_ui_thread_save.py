@@ -60,6 +60,7 @@ BOARD = os.path.join(ROOT, "kicad_files", "splitflap_driver.kicad_pcb")
 def main():
     fails = []
     app = wx.App()  # noqa: F841 -- wx needs one before CallAfter works
+    wx.Log.SetActiveTarget(wx.LogStderr())
     board = pcbnew.LoadBoard(BOARD)
     if board is None:
         print(f"FAIL: could not load {BOARD}")

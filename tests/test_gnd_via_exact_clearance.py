@@ -39,7 +39,7 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 
-from kicad_parser import Via, Net, PCBData, BoardInfo, Segment       # noqa: E402
+from kicad_parser import Via, Net, PCBData, BoardInfo, Segment, Zone  # noqa: E402
 from routing_config import GridRouteConfig, GridCoord               # noqa: E402
 from obstacle_map import GridObstacleMap   # noqa: E402  (puts rust_router on sys.path)
 from add_gnd_vias import add_gnd_vias_to_existing_board             # noqa: E402
@@ -95,7 +95,12 @@ def main():
                         SIG: Net(net_id=SIG, name='SIG', pads=[]),
                         GND: Net(net_id=GND, name='GND', pads=[])},
                   footprints={}, vias=[sig_via], segments=segs,
-                  pads_by_net={0: [], SIG: [], GND: []})
+                  pads_by_net={0: [], SIG: [], GND: []},
+                  # GND on two layers: a return via must join two (#1667)
+                  zones=[Zone(net_id=GND, net_name='GND', layer=lay,
+                              polygon=[(140.0, 90.0), (150.0, 90.0),
+                                       (150.0, 97.0), (140.0, 97.0)])
+                         for lay in ('F.Cu', 'B.Cu')])
     cfg = GridRouteConfig(via_size=0.45, via_drill=0.2, track_width=0.0889,
                           clearance=CLEARANCE, grid_step=0.1, layers=list(LAYERS),
                           hole_to_hole_clearance=0.25)
