@@ -32,6 +32,7 @@ from startup_checks import exit_on_error_if_main
 exit_on_error_if_main(__name__)
 
 import time
+_RUN_T0 = time.monotonic()  # "Wall time" counts from here, ahead of the heavy imports
 import json
 from typing import List, Optional, Tuple, Dict, Set
 
@@ -1593,6 +1594,10 @@ def _late_dangling_via_sweep1166(pcb_data, output_file, return_results,
         elif output_file and os.path.isfile(output_file):
             from kicad_parser import parse_kicad_pcb as _pk1166
             board = _pk1166(output_file)
+            # the run's net-filtered keep-outs, which the weld's keep-out
+            # gate reads (#1784); the GUI's copy of pcb_data carries them
+            if getattr(pcb_data, '_net_keepouts', None):
+                board._net_keepouts = list(pcb_data._net_keepouts)
         else:
             return 0, 0
         name_of = {nid: n.name for nid, n in board.nets.items()}
@@ -1615,7 +1620,7 @@ def _late_dangling_via_sweep1166(pcb_data, output_file, return_results,
             return 0, 0
         gone = {id(x) for x in removed + dropped}
         # #1372: a via that was the only thing joining two track ends is
-        # removed with one end moved onto the other; the moved copy is new copper.
+        # removed with a connector track joining the ends; it is new copper.
         welded = list(_stats.get('added') or [])
         if return_results:
             for r in rd.get('results') or []:
@@ -5516,7 +5521,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # pad-group split wrongly splits genuinely-connected power/bus nets.
     from check_connected import (check_net_connectivity,
                                  net_break_within_outlines,
-                                 net_pad_pairs_within_outlines)
+                                 net_pad_pairs_within_outlines, failed_pad)
     # Per-net copper as it will be WRITTEN: the input board's original copper
     # MINUS everything the writer strips (cleanup strip lists + the #220/#284
     # stale strips of ripped/re-routed nets) plus the write-list's new copper.
@@ -5732,11 +5737,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # failures (no copper can join them); keep within-outline breaks.
         _broken, _dp = net_break_within_outlines(pcb_data, _r)
         if _dp:
-            _res['failed_pads_info'] = [
-                {'x': _p[0], 'y': _p[1],
-                 'component_ref': _p[3] if len(_p) > 3 else '?',
-                 'pad_number': '?'}
-                for _p in _dp]
+            _res['failed_pads_info'] = [failed_pad(_pads, _p) for _p in _dp]
         elif _res.get('failed_pads_info'):
             # Authoritatively connected now: drop a stale (stricter-model or
             # pre-rip) failure flag so the net is not reported as a phantom fail.
@@ -5829,11 +5830,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         failed_multipoint.append({
             'net_name': _net_name,
             'net_id': _nid,
-            'failed_pads': [
-                {'x': _p[0], 'y': _p[1],
-                 'component_ref': _p[3] if len(_p) > 3 else '?',
-                 'pad_number': '?'}
-                for _p in _dp],
+            'failed_pads': [failed_pad(_pads, _p) for _p in _dp],
         })
 
     # ---- FRAGMENT SWEEP -----------------------------------------------------
@@ -5898,12 +5895,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             except Exception:
                 _nf2_659 = _nf
             if _nf2_659 <= 1:
+                from check_connected import dead_copper_fate
                 print(f"  Fragment sweep: {_net_name} grades pad-connected "
                       f"and every extra fragment is DEAD copper "
                       f"({len(_dead_s659)} segment(s), {len(_dead_v659)} "
                       f"via(s) tied to no pad or pour) -- not a route (#659); "
-                      f"left to the late orphan sweep instead of the "
-                      f"reconciliation")
+                      f"not queued for the reconciliation: "
+                      f"{dead_copper_fate(_dead_s659, _dead_v659)}")
                 continue
         print(f"{RED}FRAGMENT SWEEP: {_net_name} grades pad-connected but its "
               f"copper is {_nf} separate fragment(s) "
@@ -6061,7 +6059,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if _debris659:
                                 _why659.append(
                                     f"{_debris659} to pad-less debris (the "
-                                    f"late orphan sweep removes it)")
+                                    f"late orphan sweep removes it, but "
+                                    f"keeps locked or sense-held copper)")
                             if _art659:
                                 _why659.append(
                                     f"{_art659} to net-tagged copper GRAPHICS "
@@ -6200,7 +6199,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         swap_pairs = summarize_target_swaps(single_ended_target_swaps)
         print(f"  Target swaps:  {len(swap_pairs)}")
     print(f"  Total vias:    {total_vias}")
-    print(f"  Total time:    {total_time:.2f}s")
+    print(f"  Search time:   {total_time:.2f}s (net search only, not the whole run)")
     print(f"  Iterations:    {total_iterations:,}")
     _frag = getattr(config, '_fragility_field', None)
     if _frag is not None and _frag.refreshes:
@@ -7975,7 +7974,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                   f"{len(_custody_links9)} remaining link(s) "
                                   f"point at PAD-LESS copper (#659) -- not "
                                   f"weld targets; the late orphan sweep "
-                                  f"removes them")
+                                  f"removes them, but keeps locked or "
+                                  f"sense-held copper")
                             _custody_links9 = _live9
                             # A net left with no live link has nothing for
                             # the reconcile to route. Drop it from custody --
@@ -9397,9 +9397,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Net-filtered keep-outs: the bound-net copper the SHIPPED board has
     # inside a region. stamp() keeps the router's own searches out, but the
-    # plane finalize's taps and joins and the post-route passes lay copper
-    # without it, and the input may already have some: KiCad grades every
-    # piece as items_not_allowed, so it is said here, not found there.
+    # post-route passes lay copper without it, and the input may already
+    # have some: KiCad grades every piece as items_not_allowed, so it is said
+    # here, not found there.
     _nk_shipped = None
     if final_reconcile and not _ckpt_stop and getattr(pcb_data, '_net_keepouts', None):
         try:
@@ -9932,7 +9932,7 @@ if __name__ == "__main__":
     # argparse runs -- the banner has to be decided before then too.
     if '--capabilities' not in sys.argv[1:]:
         import cli_banner
-        cli_banner.install()
+        cli_banner.install(run_started=_RUN_T0)
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
 

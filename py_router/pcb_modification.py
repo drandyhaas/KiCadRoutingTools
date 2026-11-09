@@ -2882,19 +2882,29 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
     import copy as _copy
     removed_s, removed_v = [], []
     tails = []
-    added_s = []                 # welded replacements for removed segments
+    added_s = []                 # weld connectors (#1372)
     tol = 1e-3
+    # #1784: a weld's connector lies in copper already there, so no clearance
+    # shrinks; but that copper was a VIA, and a rule area may forbid tracks
+    # and allow vias. The connector asks the one keep-out gate (#1760).
+    from check_drc import copper_keepout_gate
+    _ko_refuses = copper_keepout_gate(board)
 
     def weld_pair(v, a, b):
         """Two segments whose ends met inside a dangling via's barrel (#1372):
-        ``(old, new)`` with one of them moved so the two ends coincide, or
-        None. The via then joins nothing and can go without taking the
-        connection with it. The segment that moves is the one the sweep may
-        change; its replacement is a copy with a fresh identity."""
+        a connector track joining the two ends, or None. The via then joins
+        nothing and can go without taking the connection with it.
+
+        The connector lies inside the via's disc and the two ends' caps, so
+        it adds no copper nearer anything than the copper it replaces; when
+        it would not fit there, the via stays. Moving an end onto the other
+        instead re-aimed the whole track, into a foreign via's clearance.
+        The connector copies a track the sweep may change, so two locked or
+        protected tracks keep their via."""
         r = (getattr(v, 'size', 0.6) or 0.6) / 2.0
         best = None
-        for ea in ((a.start_x, a.start_y, 'start'), (a.end_x, a.end_y, 'end')):
-            for eb in ((b.start_x, b.start_y, 'start'), (b.end_x, b.end_y, 'end')):
+        for ea in ((a.start_x, a.start_y), (a.end_x, a.end_y)):
+            for eb in ((b.start_x, b.start_y), (b.end_x, b.end_y)):
                 da = math.hypot(ea[0] - v.x, ea[1] - v.y)
                 db = math.hypot(eb[0] - v.x, eb[1] - v.y)
                 if da > r or db > r:
@@ -2905,20 +2915,27 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
         if best is None or best[0] < tol:
             # ends that already meet need no weld: the via goes alone
             return None
-        _d, ea, eb = best
-        for mover, near, other_pt in ((a, ea, eb), (b, eb, ea)):
-            if keep_out(mover) or getattr(mover, 'graphic', False):
-                continue
-            new = _copy.copy(mover)
-            if near[2] == 'start':
-                new.start_x, new.start_y = other_pt[0], other_pt[1]
-            else:
-                new.end_x, new.end_y = other_pt[0], other_pt[1]
-            new.uuid = ''
-            new.start_x_str = new.start_y_str = ''
-            new.end_x_str = new.end_y_str = ''
-            return mover, new
-        return None
+        base = next((s for s in (a, b)
+                     if not keep_out(s) and not getattr(s, 'graphic', False)),
+                    None)
+        if base is None:
+            return None
+        d, ea, eb = best
+        w = min(a.width, b.width)
+        nx, ny = -(eb[1] - ea[1]) / d * w / 2, (eb[0] - ea[0]) / d * w / 2
+        if any(math.hypot(px + sx * nx - v.x, py + sx * ny - v.y) > r + 1e-9
+               for px, py in (ea, eb) for sx in (1, -1)):
+            return None
+        new = _copy.copy(base)
+        new.start_x, new.start_y = ea
+        new.end_x, new.end_y = eb
+        new.width = w
+        new.uuid = ''
+        new.start_x_str = new.start_y_str = ''
+        new.end_x_str = new.end_y_str = ''
+        if _ko_refuses and _ko_refuses(segments=[new]):
+            return None
+        return new
 
     def grade(nid, segs, vias, pads, zones):
         r = check_net_connectivity(nid, segs, vias, pads, zones)
@@ -3017,8 +3034,8 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
                 t_segs = [s for s in segs if id(s) not in gid]
                 if welded is not None:
                     # Two ends that met inside the barrel: the via is the
-                    # only thing joining them, so move one onto the other.
-                    t_segs = [s for s in t_segs if s is not welded[0]] + [welded[1]]
+                    # only thing joining them, so the connector takes over.
+                    t_segs.append(welded)
                 t_vias = [w for w in vias if w is not v]
                 after = grade(nid, t_segs, t_vias, pads, zones)
                 # No pad less connected, no dangling end where there was
@@ -3030,8 +3047,7 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
                 segs, vias, base = t_segs, t_vias, after
                 removed_s.extend(gone_s)
                 if welded is not None:
-                    removed_s.append(welded[0])
-                    added_s.append(welded[1])
+                    added_s.append(welded)
                 removed_v.append(v)
                 progressed = True
             # Dead tails (#1372): a track end that joins nothing on a net whose
@@ -3073,8 +3089,8 @@ def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
             board.vias = [v for v in board.vias if id(v) not in gv]
         if not progressed:
             break
-    # A weld's replacement that a later round removed never reached the file,
-    # and a removed segment that was only ever a replacement is not a strip.
+    # A weld's connector that a later round removed never reached the file,
+    # and a removed segment that was only ever a connector is not a strip.
     _gone = {id(x) for x in removed_s}
     _born = {id(a) for a in added_s}
     final_added = [a for a in added_s if id(a) not in _gone]
@@ -7599,6 +7615,17 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     scoped = [v for v in pcb_data.vias
               if id(v) in own_ids
               and (scope_net_ids is None or v.net_id in scope_net_ids)]
+    # #1782: a move must not carry the via into a keep-out -- a board rule
+    # area forbidding vias, or a net-filtered keep-out binding its net
+    from check_drc import copper_keepout_gate
+    _ko_refuses = copper_keepout_gate(pcb_data)
+
+    def _ko_at(v, x, y):
+        return bool(_ko_refuses(vias=[Via(
+            x=x, y=y, size=v.size, drill=v.drill,
+            layers=list(v.layers or ['F.Cu', 'B.Cu']), net_id=v.net_id,
+            via_type=getattr(v, 'via_type', 'through') or 'through')]))
+
     for v in scoped:
         if not (copper_flagged(v) or hole_flagged(v) or npth_copper_flagged(v)
                 or edge_flagged(v)):
@@ -7627,6 +7654,9 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         net_zones = zones_by_net.get(v.net_id, [])
         before = check_net_connectivity(v.net_id, net_segs, net_vias, net_pads,
                                         net_zones, pcb_data=pcb_data)
+        # a via already inside one (input-era geometry) may still move; it
+        # just may not move INTO one
+        _ko_free = _ko_refuses is not None and not _ko_at(v, v.x, v.y)
 
         for ang in (0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0):
             a = math.radians(ang)
@@ -7640,6 +7670,8 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                 continue
             nx, ny = round(v.x + dx * dist, 4), round(v.y + dy * dist, 4)
             if worst_gap(nx, ny, v, near)[0] < -1e-6:
+                continue
+            if _ko_free and _ko_at(v, nx, ny):
                 continue
 
             # apply, verify connectivity, revert on regression

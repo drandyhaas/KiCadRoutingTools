@@ -38,9 +38,11 @@ route_multipoint_main / _taps (and with them net_rescue, stub-swap and terminal
 escalation, which call them -- a rescue window is a shallow copy that carries
 the regions), and on the diff-pair side the pair route (its centreline map at
 `centerline_config`, its connectors' base map plain), the hybrid coupled middle
-and its legs (`stamping`). Copper laid by anything else -- the plane finalize's
-taps and region joins, which have their own A*, and post-route passes such as
-meanders -- does not see a region, so the run ends with `audit()` of the board
+and its legs (`stamping`). The plane finalize's region joins and oracle welds
+route on a map built for one plane net, which `block()` stamps for good
+(plane_region_connector.build_base_obstacles); its pad taps judge their sites
+and copper by `audit_items`. Copper laid by anything else, such as post-route
+meanders, does not see a region, so the run ends with `audit()` of the board
 it ships: bound-net copper found inside a region is printed and reported as
 JSON_SUMMARY / --json-out `net_keepouts`, never shipped silently. KiCad's DRC of
 the rule stays the authority.
@@ -482,10 +484,10 @@ def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.n
     return cache[key]
 
 
-@contextlib.contextmanager
-def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
-    """Block the keep-outs binding any of `net_ids` in `obstacles` for the
-    duration of the block, then remove exactly what was added.
+def block(obstacles, pcb_data, net_ids: Iterable[int], config):
+    """Block the keep-outs binding any of `net_ids` in `obstacles`; returns
+    the call that removes exactly what was added (`stamp`). A map built for
+    those nets alone (the plane finalize's base map) keeps them for good.
 
     Via cells reach every via map the list twins (add/remove_vias_list) do:
     rung 0 at the run's via, the #568 small rung at the run's via (a superset
@@ -493,12 +495,10 @@ def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
     (#1226 `_stamp_rungs_at_own_via`, whose remove twin re-derives the same
     rows), so a search at any rung sees the region."""
     if obstacles is None or not getattr(pcb_data, '_net_keepouts', None):
-        yield
-        return
+        return lambda: None
     idx = _binding(pcb_data, net_ids)
     if not idx:
-        yield
-        return
+        return lambda: None
     cells, vias = _cells_for(pcb_data, idx, config)
     from obstacle_map import _rung_small_armed, _stamp_rungs_at_own_via
     small = _rung_small_armed() and hasattr(obstacles, 'add_blocked_vias_small_batch')
@@ -511,9 +511,8 @@ def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
             obstacles.add_blocked_vias_small_batch(vias)
     if rungs:
         _stamp_rungs_at_own_via(obstacles, config, _stamper(pcb_data, idx))
-    try:
-        yield
-    finally:
+
+    def remove():
         if len(cells):
             obstacles.remove_blocked_cells_batch(cells)
         if len(vias):
@@ -523,6 +522,18 @@ def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
         if rungs:
             _stamp_rungs_at_own_via(obstacles, config, _stamper(pcb_data, idx),
                                     remove=True)
+    return remove
+
+
+@contextlib.contextmanager
+def stamp(obstacles, pcb_data, net_ids: Iterable[int], config):
+    """The keep-outs binding any of `net_ids`, blocked in `obstacles` for the
+    duration of the block (`block`)."""
+    remove = block(obstacles, pcb_data, net_ids, config)
+    try:
+        yield
+    finally:
+        remove()
 
 
 def centerline_config(config):
@@ -713,8 +724,8 @@ def audit(pcb_data, segments, vias,
     keep-out.
 
     It reads only geometry, so it sees copper from every path, including the
-    ones stamp() does not reach (the plane finalize's taps and joins, post-route
-    meanders) and copper the input already had inside a region.
+    ones stamp() does not reach (post-route meanders) and copper the input
+    already had inside a region.
 
     `pcb_data` supplies the net names and copper layers of the copper given,
     and the keep-outs unless `keepouts` names them (a re-parsed output board

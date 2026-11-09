@@ -294,9 +294,14 @@ kept out of 'corridor' (tracks, vias)`. A rule the tool cannot model completely
 outside every named area (`!A.intersectsArea(...)`), one that combines areas
 other than as a union (`a && b`), or one naming no area the board has -- stays
 `NOT honoured` and is listed in `design_rules.unsupported_rules`; nothing of it
-is applied. The run ends with an audit of the board it ships: bound-net copper
-inside a region (from a path that does not stamp the region, such as the plane
-finalize's taps and joins, or already in the input) is printed and reported as
+is applied. The plane step honours the same rules, standalone (`repair_planes.py`)
+and as route.py's in-run finalize: its region joins and the KiCad oracle's welds
+route with the plane net's regions blocked, a width upgrade or sub-grid via nudge
+that would reach into one is refused (`check_drc.copper_keepout_gate`, which
+also judges plain rule areas), and its pad taps refuse a site or trace inside
+one. The run ends with an audit of the board it ships: bound-net
+copper inside a region (from a path that does not stamp the region, such as a
+post-route pass, or already in the input) is printed and reported as
 `net_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (`[]` =
 clean; absent when the board has no such rule).
 
@@ -663,10 +668,16 @@ Notes:
   routing (`route_diff.py --keepout`), and across plane via-stitching and plane repair. KiCad
   native keep-out rule areas (`(zone … (keepout …))`) are honoured automatically everywhere too,
   with no flag. (Guide corridors, by contrast, steer single-ended/multipoint routing only.)
-  That includes the copper laid after the search: the soft-joint and stub-gap bridges and the
-  length-matching meander bumps refuse to enter a forbidding rule area or a net-filtered
+  That includes the copper laid after the search: the soft-joint and stub-gap bridges, the
+  length-matching meander bumps, the KiCad-oracle recheck's welds (its stitching via, sliver
+  weld, rescue escalation and exact-fill strap, #1778), the net rescue's bare-ball escape and the
+  GND return vias (`--add-gnd-vias`) refuse to enter a forbidding rule area or a net-filtered
   keep-out (`check_drc.copper_keepout_gate`, the copper grown by half its width, #1760/#1761),
-  and route.py / route_diff.py report what the routed board still has inside a forbidding rule
+  and so does a single-ended route's terminal copper (#1777): a pour-launch cell or a seeded
+  on-pad cell is offered as an endpoint only where its grid point and weld bridge clear the
+  area, a terminal bridge reaching in from the terminal's own copper is dropped, and a route
+  whose copper still enters an area fails that edge so the rip/retry ladder runs. route.py /
+  route_diff.py report what the routed board still has inside a forbidding rule
   area as `rule_area_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (rows of
   area, net, tracks, vias; `[]` = clean; absent when the board has no such area).
 - It's a non-copper User layer, so the polygon never affects manufacturing — it only steers the

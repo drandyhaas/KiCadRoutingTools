@@ -461,9 +461,9 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                     except Unsupported:
                         pass
                     else:
-                        rule.unsupported = (f"condition: {e} here; route.py and "
-                                            f"route_diff.py read it as a "
-                                            f"net-filtered keep-out")
+                        rule.unsupported = (f"condition: {e} here; route.py, "
+                                            f"route_diff.py and repair_planes.py "
+                                            f"read it as a net-filtered keep-out")
         if rule.layer_clause is not None and rule.unsupported is None:
             lc = rule.layer_clause
             if not (lc in ('outer', 'inner', '*.Cu', '*') or lc.endswith('.Cu')):

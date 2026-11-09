@@ -139,6 +139,39 @@ def test_gate_skips_padless_only_fragments():
           f"a pad-less-only fragment does NOT enroll the net (got {to_route})")
 
 
+def test_gate_says_locked_dead_copper_is_kept():
+    """#1781: the late orphan sweep keeps an island holding locked or
+    sense-held copper, so the gate's line must not promise to remove it.
+    The unlocked control must still say the sweep removes it, or the
+    locked arm could pass on a line that never printed."""
+    import contextlib
+    import io
+    pads = [make_pad(net_id=1, x=0.0, y=0.0, ref='U1', num='1'),
+            make_pad(net_id=1, x=10.0, y=0.0, ref='U2', num='1')]
+    lines = {}
+    for tag, kw in (('unlocked', {}), ('locked', {'locked': True}),
+                    ('held', {'held_by': 'sense:U1.1'})):
+        route = [make_seg(0.0, 0.0, 10.0, 0.0, net_id=1)]
+        island = [make_seg(4.0, 8.0, 6.0, 8.0, net_id=1, **kw)]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            to_route, _already = _gate(_pcb(route + island, [], pads))
+        lines[tag] = [ln for ln in buf.getvalue().splitlines()
+                      if 'DEAD copper' in ln]
+        check(to_route == [], f"{tag}: the dead island does not enroll the "
+              f"net (got {to_route})")
+    check(len(lines['unlocked']) == 1
+          and 'the late orphan sweep removes it' in lines['unlocked'][0],
+          f"unlocked control: the gate says the sweep removes it "
+          f"(got {lines['unlocked']})")
+    for tag in ('locked', 'held'):
+        check(len(lines[tag]) == 1
+              and 'removes' not in lines[tag][0]
+              and 'which the late orphan sweep keeps' in lines[tag][0],
+              f"{tag}: the gate says the copper is kept, not removed "
+              f"(got {lines[tag]})")
+
+
 def test_gate_still_routes_pad_bearing_fragments():
     """NEGATIVE CONTROL: the #578 fragment-gate case must survive. A third pad on its
     own fragment is a real open, and routing IS the repair."""
@@ -202,6 +235,7 @@ def main():
     for fn in (test_live_and_padless, test_bare_via_is_padless,
                test_graphic_is_its_own_class, test_kicad_item_kinds_are_trusted,
                test_gate_skips_padless_only_fragments,
+               test_gate_says_locked_dead_copper_is_kept,
                test_gate_still_routes_pad_bearing_fragments,
                test_phantom_split_is_not_dead_copper,
                test_real_debris_is_dead_copper):

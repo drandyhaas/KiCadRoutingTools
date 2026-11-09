@@ -961,6 +961,9 @@ class DifferentialTab(wx.Panel):
         """Run differential pair routing in a background thread."""
         import sys
         import time
+        # The run's wall time, as the Route tab reports it (#1780): the
+        # engine's total_time is the net search alone.
+        t0 = time.time()
 
         # Fresh clearance ledger so a prior op's fine-pitch clearance doesn't
         # leak into this board's DRC floor.
@@ -1183,6 +1186,7 @@ class DifferentialTab(wx.Panel):
                 'successful': successful,
                 'failed': failed,
                 'total_time': total_time,
+                'wall_time': time.time() - t0,
                 'results_data': results_data,
                 'config': config,
             }
@@ -1251,7 +1255,7 @@ class DifferentialTab(wx.Panel):
 
         successful = result.get('successful', 0)
         failed = result.get('failed', 0)
-        total_time = result.get('total_time', 0)
+        wall_time = result.get('wall_time', 0)
         results_data = result.get('results_data', {})
 
         # Apply results to the board
@@ -1261,7 +1265,7 @@ class DifferentialTab(wx.Panel):
         from .gui_utils import mark_plan_step_produced
         mark_plan_step_produced(self)
 
-        self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed in {total_time:.1f}s")
+        self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed in {wall_time:.1f}s")
 
         single_ended_pairs = results_data.get('single_ended_diff_pairs', [])
         skipped_bad_fanout = results_data.get('skipped_bad_fanout', [])
@@ -1317,7 +1321,7 @@ class DifferentialTab(wx.Panel):
         if _intra_bad:
             msg += (f"Intra-pair skew NOT matched on the board: "
                     f"{', '.join(_intra_bad)}\n")
-        msg += f"Time: {total_time:.1f}s\n\n"
+        msg += f"Time: {wall_time:.1f}s\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
         msg += f"  {vias_added} vias\n"

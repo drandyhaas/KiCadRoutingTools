@@ -22,7 +22,9 @@ Rows:
   - an escape via that joins nothing across layers once the net is whole is
     withdrawn -- the via only: an offset dogbone's trace stays in the result
     for the dead-end sweep -- while a via the route runs through is kept, and
-    so is every escape while the net is still open.
+    so is every escape while the net is still open and the rescue has made
+    progress (#1778 withdraws a terrain-only escape: test_1778_rescue_terrain_
+    withdrawn).
 
     python3 tests/test_own_tree_rip_and_escape.py
 """
@@ -104,7 +106,7 @@ def test_unused_escape_is_withdrawn():
     assert kept == [tap] and tap['new_vias'][0] in pcb.vias, "a used dogbone went"
     src = inspect.getsource(net_rescue.rescue_failed_nets)
     assert 'if tap_results and num <= 1:' in src, \
-        "escapes are withdrawn only once the net is whole"
+        "escapes are withdrawn once the net is whole"
 
 
 TESTS = [test_own_tree_rip_leaves_no_ghost, test_unused_escape_is_withdrawn]
