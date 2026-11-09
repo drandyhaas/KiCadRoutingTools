@@ -23,4 +23,4 @@ if __name__ == '__main__':
         print(_ek653.env_knobs_line(), flush=True)
     except Exception:
         pass
-    exit(main())
+    raise SystemExit(main())

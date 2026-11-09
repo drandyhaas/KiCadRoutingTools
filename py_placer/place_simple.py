@@ -680,6 +680,10 @@ def _many_seeds(ap, a):
     through as parsed; then the seeds to judge (`_name_judged`). Exit 2 if any
     seed failed outright, else 4 if any left parts illegal, else 0."""
     import subprocess
+    if getattr(sys, 'frozen', False):
+        from krt_standalone.process import popen
+    else:
+        popen = subprocess.Popen
     try:
         seeds = _seed_list(a.seeds)
     except ValueError:
@@ -739,7 +743,7 @@ def _many_seeds(ap, a):
         while pending and len(live) < jobs:
             s, out, cmd = pending.pop(0)
             log = open(os.path.splitext(out)[0] + '.log', 'w', encoding='utf-8')
-            live.append((s, out, log, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)))
+            live.append((s, out, log, popen(cmd, stdout=log, stderr=subprocess.STDOUT)))
         fin = [x for x in live if x[3].poll() is not None]
         if not fin:
             time.sleep(0.2)
@@ -1204,6 +1208,10 @@ def _preview(a, argv) -> int:
     written as draft `blocks[]`. Nothing else is written, and nothing reads
     the draft back unless an author pastes it."""
     import subprocess
+    if getattr(sys, 'frozen', False):
+        from krt_standalone.process import run as run_process
+    else:
+        run_process = subprocess.run
     import pose_score
     from placement import floorplan
     seed = 0 if a.seed is None else a.seed
@@ -1259,7 +1267,7 @@ def _preview(a, argv) -> int:
         doc['blocks'] = list(base.get('blocks') or ()) + blocks
         ipath = os.path.join(td, 'preview_intent.json')
         json.dump(doc, open(ipath, 'w', encoding='utf-8'))
-        r = subprocess.run(
+        r = run_process(
             [sys.executable, '-X', 'utf8',
              os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'py_tools',
                           'render_placement.py'),

@@ -137,6 +137,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+if getattr(sys, 'frozen', False):
+    from krt_standalone.process import run as run_process
+else:
+    run_process = subprocess.run
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLACEHOLDERS = ('in', 'out', 'dir', 'seed', 'run')
 #: `{name}` in a chain line; KiCad's overbar (`/~{RESET}`) is a net name, not one
@@ -334,8 +339,8 @@ def judge_seed(run, s, steps, intent, lock, baseline=None, full=False):
                          'step at level 2\n' if added else ''))
             log.flush()
             ts = time.time()
-            rc = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT,
-                                env=dict(os.environ, **knobs) if knobs else None).returncode
+            rc = run_process(argv, stdout=log, stderr=subprocess.STDOUT,
+                             env=dict(os.environ, **knobs) if knobs else None).returncode
             log.write(f'# exit {rc} in {time.time() - ts:.1f} s\n')
             log.flush()
             res['steps'].append({'step': i, 'exit': rc, 'quick_added': added})
@@ -357,7 +362,7 @@ def judge_seed(run, s, steps, intent, lock, baseline=None, full=False):
         with open(log_path, 'a', encoding='utf-8') as log:
             log.write(f"$ {' '.join(shlex.quote(a) for a in qs)}\n")
             log.flush()
-            rc = subprocess.run(qs, stdout=log, stderr=subprocess.STDOUT).returncode
+            rc = run_process(qs, stdout=log, stderr=subprocess.STDOUT).returncode
         try:
             with open(score, encoding='utf-8') as fh:
                 res['score'] = json.load(fh)

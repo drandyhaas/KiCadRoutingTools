@@ -84,6 +84,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+if getattr(sys, 'frozen', False):
+    from krt_standalone.process import run as run_process
+else:
+    run_process = subprocess.run
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -481,19 +485,6 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
 # Running steps
 
 
-#: Prints the nets check_connected leaves incomplete (unrouted or broken),
-#: one JSON list on its own line; run in a child so its output and state stay
-#: out of this process.
-_CONN_PROBE = (
-    "import contextlib, io, json, sys\n"
-    "sys.path.insert(0, sys.argv[1])\n"
-    "from check_connected import run_connectivity_check\n"
-    "with contextlib.redirect_stdout(io.StringIO()):\n"
-    "    issues = run_connectivity_check(sys.argv[2], quiet=True)\n"
-    "print('AUTOPLAN_OPEN: ' + json.dumps(sorted({i['net_name'] for i in issues"
-    " if i.get('net_name')})))\n")
-
-
 def _recorded_clearance(board):
     """The clearance BOARD's .kicad_pro records, or None. check_drc grades at
     the board's own recorded floors when there is one -- copper a step routed
@@ -534,7 +525,8 @@ class Chain:
         clearance), the chain's input as baseline."""
         env = _child_env()
         env['KICAD_NO_GRADE_RECONCILE'] = '1'
-        r = subprocess.run([sys.executable, '-X', 'utf8', '-c', _CONN_PROBE, HERE, board],
+        probe = os.path.normpath(os.path.join(HERE, '..', 'krt_standalone', 'connectivity_probe.py'))
+        r = run_process([sys.executable, '-X', 'utf8', probe, board],
                            capture_output=True, text=True, env=env)
         m = re.search(r'^AUTOPLAN_OPEN: (\[.*\])$', r.stdout, re.M)
         if r.returncode != 0 or not m:
@@ -560,7 +552,7 @@ class Chain:
             argv += ['--clearance', str(self.clearance)]
         if self.baseline:
             argv += ['--baseline', self.baseline]
-        subprocess.run(argv, capture_output=True, text=True, env=_child_env())
+        run_process(argv, capture_output=True, text=True, env=_child_env())
         try:
             with open(jpath) as fh:
                 d = json.load(fh)
@@ -596,8 +588,8 @@ class Chain:
             [a.replace('{IN}', self.cur).replace('{OUT}', out) for a in args]
         log = out[:-len('.kicad_pcb')] + '.log'
         with open(log, 'w') as fh:
-            rc = subprocess.run(argv, cwd=self.work, stdout=fh,
-                                stderr=subprocess.STDOUT, env=_child_env()).returncode
+            rc = run_process(argv, cwd=self.work, stdout=fh,
+                             stderr=subprocess.STDOUT, env=_child_env()).returncode
         text = open(log, errors='replace').read()
         summary = summary_min = None
         self.last_iterations = None

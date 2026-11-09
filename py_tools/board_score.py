@@ -187,9 +187,13 @@ def run_tool(root: str, tool: str, *args) -> tuple:
     cmd = [sys.executable, '-X', 'utf8', _tool_path(root, tool)] + [str(a) for a in args]
     env = dict(os.environ, KRT_NO_BANNER='1')
     import time as _time
+    if getattr(sys, 'frozen', False):
+        from krt_standalone.process import run
+    else:
+        run = subprocess.run
     t0 = _time.monotonic()
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                       encoding='utf-8', errors='replace', env=env)
+    p = run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding='utf-8', errors='replace', env=env)
     TOOL_SECONDS[tool] = TOOL_SECONDS.get(tool, 0.0) + (_time.monotonic() - t0)
     return p.returncode, p.stdout
 
