@@ -10,7 +10,6 @@ Turns /plan-pcb-routing output into GUI state and executes it:
 """
 
 import json
-import fnmatch
 
 import wx
 
@@ -1096,10 +1095,14 @@ def apply_step_selection(step, dialog, all_steps=None):
         # a name-per-half plan selected NO pairs and the signal step later
         # routed the pair single-ended/uncoupled (set11 USB D+/D-).
         nets_by_id = {i: n.name for i, n in dialog.pcb_data.nets.items()}
+        # The CLI's matcher (#1641): with the board's names a pattern that
+        # spells a net ('D[3]+') selects only that net, never a glob of it.
+        from net_queries import net_pattern_matches
+        known_names = {n for n in nets_by_id.values() if n}
         matched_display = set()
         for display_name, base_name, p_id, n_id in tab.pair_panel.all_pairs:
             cands = [base_name, nets_by_id.get(p_id, ""), nets_by_id.get(n_id, "")]
-            if any(fnmatch.fnmatchcase(c, w) or c == w
+            if any(net_pattern_matches(c, w, known_names)
                    for w in wanted for c in cands if c):
                 matched_display.add(display_name)
         if not matched_display:
@@ -1186,8 +1189,10 @@ def _match_net_names(pcb_data, globs):
             continue
         # Sheet-path aware, like the CLI's expand_net_patterns (#493): an
         # unqualified '!GND' must exclude the board's '/GND'.
-        if any(net_pattern_matches(net.name, g) for g in includes) and \
-                not any(net_pattern_matches(net.name, g) for g in excludes):
+        # #1641: with the board's names, a pattern that spells a net
+        # ('D[3]') selects only that net, as expand_net_patterns does.
+        if any(net_pattern_matches(net.name, g, known_names) for g in includes) and \
+                not any(net_pattern_matches(net.name, g, known_names) for g in excludes):
             names.append(net.name)
     return names
 

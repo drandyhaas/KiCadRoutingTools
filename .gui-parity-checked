@@ -1,3 +1,130 @@
+f4d871d882b2ffb2d8e45477bc39919320578ceb 2026-11-09 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of cdf00e88..252e1750 (263 commits, 242 non-merge) on main, macOS
+(KiCad 10.0.6), then brought to f4d871d8 by the fixes for the two gaps it
+found (78d12283, daa77a46) and the gate fixes after it (ebcc637b, f4d871d8). The range holds the #1617-#1649 round, #1650-#1702 (the #1698
+ceiling/plan-write work, #1691/#1699 fab-floor pins), #1703-#1747 (#1736
+hybrid pairs, #1742/#1747 narrowed couples), #1748-#1793 (keep-out gates
+#1749/#1760/#1777/#1778/#1782/#1783, #1775 Board Setup vias), PRs
+#1785-#1790 and the gate fixes 7ba63042 / 252e1750. Gates ran on the working
+tree at ebcc637b (one test-only commit past the audited SHA: the gate runner
+and two gate relaunch fixes, no engine or plugin code).
+
+METHOD. Read-only, plus gates.
+(A) Flags and kwargs: every argparse flag in py_router/, py_tools/,
+  py_placer/ and kicad_routing_plugin/ diffed by AST between the two commits;
+  the signature of every function the plugin calls, plus batch_route,
+  batch_route_diff_pairs, create_plane, repair_planes, the fanout entry
+  points and GridRouteConfig, diffed; the kicad_routing_plugin diff (11 files,
+  +406/-119) read in full.
+(B) Post-passes and results data: every hunk inside a CLI main() (route,
+  route_diff, route_planes, repair_planes, bga/qfn fanout,
+  place_fanout_clearance) read; new results/JSON keys traced to the GUI;
+  new parse-path fields (Pad.uuid, PCBData.use_height_for_length_calcs)
+  checked on both parse paths; the new keep-out gates traced to where their
+  per-run state (pcb_data._net_keepouts) is set.
+(C) Gates: see GATES.
+
+IN RANGE, NO GAP:
+- route.py / route_diff.py --impedance-declare-only (#1630) ->
+  batch_route / batch_route_diff_pairs(impedance_declare_only): the Advanced
+  tab's "declare only" box and the Differential tab's Declare Only box, both
+  named impedance_declare_only, passed at swig_gui:3890 and
+  differential_gui:1051; saved/restored (impedance_declare_only,
+  diff_impedance_declare_only); reset per step on both tabs (plus the
+  Differential tab's diff_impedance, 7580d564); FLAG_PARAMS maps the flag;
+  route_diff plan params resolve on the Differential tab first. The record is
+  written engine-side (note_impedance_specs).
+- via_from_class (#1676) on batch_route_diff_pairs, create_plane and
+  repair_planes, and bga/qfn --via-size/--via-drill now defaulting to None:
+  every routing config dict carries via_from_class = neither via override
+  ticked; the Differential and Planes tabs pass it; the fanout tab resolves
+  run_via_for_rules for BGA and QFN as the mains do, and under Escalation
+  'board' also to the Board Setup minimums (#1775, run_via_for_rules'
+  board_setup leg after set_fab_tier_from_config set the policy, the CLI's
+  order). repair_planes has no GUI front.
+- batch_route(edge_floors, rule_via_floors) and GridRouteConfig
+  edge_floors / board_edge_declared / edge_extra_clearance / pair_layer_gaps /
+  stamp_pads_at_call_width: nested-sub-run forwarding or engine-internal; the
+  top level installs them in design_rules.install_design_rules (both fronts,
+  no flag).
+- --clearance-ceiling held at the physical fab floor (#1691) and the
+  placement step's --clearance pin + --fab-overrides (#1699): the dialog's
+  _class_ceiling / _pinned_override pin the same way and say so in the run's
+  log (gui_utils.note_for_the_log); CAP_FLAG_PARAMS maps --fab-overrides to
+  fab_overrides_path. Each tab caps its class map at the ceiling, not the
+  run's clearance (6d7976c7).
+- #1698: the end-of-plan write harvests only steps that ran, by each step's
+  own flags (b282797b for the plane inset); the Planes tab writeback no
+  longer records its inset as the edge rule; the Planes tab's edge override
+  sets the pour inset as --board-edge-clearance does.
+- #1689 plane-copper cleanup edge floor: route_planes/repair_planes mains and
+  route.py's in-run finalize pass it; the Planes tab passes the live rule
+  pinned at fab_edge_floor (also for the castellated retract).
+- add_gnd_vias_to_existing_board(poured_now, warnings) (#1667): the Planes
+  tab passes this call's pours (its pcb_data does not hold them yet; the CLI
+  parses the written file) and shows the warnings.
+- Fanout disclosures: unmatched (#1641), skipped_interior (#1717),
+  power_stubs_at_width (#1743), board_setup_vias (#1775) are listed in the
+  fanout tab's completion message; made_room (#1681) and below_hole_floor
+  (#1686) in its cap summary. The CLIs' exit-2 refusal of a --nets list
+  naming no board net has no GUI twin by design (the engine lays nothing and
+  the tab lists the misses). escape_budget (#1685) is CLI JSON only; the
+  warning itself prints from the engine.
+- Engine-side end-of-run audits (pad_contacts / pad_grazes #1680/#1681,
+  rule_area_keepouts #1760, skew_moved_by_cleanup #1759) run on the GUI path
+  through _gui_write_model and land in results_data.
+- Differential tab: wall time (#1780), deferred pairs split by design vs
+  failed (#1764, diff_pair_custody.split_deferred_pairs).
+- Parse paths: Pad.uuid (#1737) and use_height_for_length_calcs (#1731) set by
+  both; the (transform ...) pose (#1657) is a text-format reading pcbnew does
+  natively; DesignRules.from_pcbnew reads the same .kicad_dru as
+  from_project, so the #1660/#1690/#1707/#1733 rule readings reach both.
+- Not GUI routing: place_simple --legalise-only (placement runs through the
+  skill), add_rule_area --intent/--skip and check_join --keep-staged (refused
+  as plan steps, named), edge_closeup, route_movie --final, check_complete
+  --authored-from, grade.py, route_plan_check, the placement-tool changes.
+
+GAPS FOUND, BOTH FIXED:
+1. #1641 literal net names in the GUI PLAN's selection (fixed 78d12283).
+   b238a0b6 made expand_net_patterns pass the board's names to
+   net_pattern_matches, so on the CLI a pattern with no '*'/'?' that spells a
+   net ('D[3]') selects that net only; ai_plan._match_net_names did not pass
+   them, so 'D[3]' selected [/D3, /D[3]] in the plan and '!D[3]' dropped /D3.
+   The route_diff step's pair match used fnmatch. Both now use the CLIs'
+   matcher with the board's names; test_1641_plan_literal_net_names compares
+   the plan with expand_net_patterns (5 checks fail without the fix).
+2. Net-filtered keep-outs on the plane step (fixed daa77a46). #1760/#1778's
+   gate reads pcb_data._net_keepouts, which create_plane never attached: the
+   CLI's route_planes (and its GND-via block, a second fresh parse) never
+   honoured a net-filtered .kicad_dru keep-out, and the Planes tab honoured
+   one only when an earlier Route/Differential run had left the list on its
+   long-lived PCBData. create_plane and the CLI's GND-via block now attach
+   (or clear) the board's own list, as repair_planes does.
+   test_create_plane_net_keepouts (CLI, its via landed inside before) and
+   test_gnd_vias_gui's new net keep-out arm (both fronts keep out and place
+   the same vias; the tab lands inside with create_plane's attach removed).
+
+OPEN, NOT RE-EXAMINED: the items carried by the 21abea9a and cdf00e88
+entries (standalone cap step size floors, live_net_clearances one class per
+net, coupled_pair_floors reading the saved .kicad_pro, the late-pass hole
+floor; Planes tab ignores route_planes --layers, Layer Costs order, the
+#1279 dangling-member warning is CLI-only).
+
+GATES. No-wx: test_manifest_plan_parity EXIT 0, test_cli_postpass_coverage
+EXIT 0. All 80 tests/gui_parity gates PASS on ebcc637b's tree, one wx
+process at a time: 76 through `python3` (re-exec into KiCad's python),
+test_ai_plan_outcome and test_zero_diff_pair_width_gui under KiCad's python
+directly, and test_966_unset_clearance / test_967_pad_geometry_coverage,
+which exited 2 / 77 under plain python3, PASS under KiCad's python directly.
+All four now relaunch themselves (ebcc637b, f4d871d8), so
+tests/gui_parity/run_gui_parity.py sweeps every gate from plain python3.
+Includes the two fixed today: test_666_cap_move_gui PASS (38 s) and
+test_fanout_threaded_gui PASS (no hang). test_gui_livechain_rp2350: neither
+chain introduces DRC at any stage. Neither gap was covered by a gate then;
+both are now (see GAPS).
+test_gui_engine_parity: PARITY, copper sets identical (799 segments, 128
+vias, 0 unconnected, 0 DRC on both fronts).
+
 cdf00e884486a3d2fc972fcfd6a69e490a7066e2 2026-11-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of 21abea9a..cdf00e88 (12 commits) on macOS (KiCad 10.0.6), for v0.23.8.
 kicad_routing_plugin/ is unchanged in the range; the engine changes are
