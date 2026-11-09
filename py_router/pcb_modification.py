@@ -3252,7 +3252,9 @@ def split_kicad_dangling_hosts(pcb_data: PCBData, scope_net_ids=None,
     another same-net track H's centreline, mid-body, while H's copper also
     reaches S's other end P. KiCad's TestTrackEndpointDangling counts H once,
     for the end of S nearer one of H's ENDPOINTS; when that is P, the T end F
-    is counted by nothing and KiCad's DRC reports track_dangling at F.
+    is counted by nothing and KiCad's DRC reports track_dangling at F. A
+    neighbour touching only P (the track S leads on to) counts for P as well,
+    so it leaves F just as uncounted (#1793).
 
     S is not redundant copper, it is the joint, so no removal pass may take it
     (the strict collapse, rightly, keeps it). The shape route.py shipped on a
