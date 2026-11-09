@@ -158,6 +158,56 @@ def split(tmp):
           f'{before} -> {connected(pcb)}')
 
 
+def mixed_contacts(tmp):
+    """A one-end neighbour must not hide the trunk's ambiguous contact."""
+    print('2b. a short inner-layer joint with a one-end neighbour')
+    for rise, expected in ((0.1, 1), (0.2, 0)):
+        rb = RoutingBoard(w=20, h=20,
+                          layers=('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'))
+        for ref, x, y in (('P1', 10, 10), ('P2', 17.2, 4.9),
+                          ('P3', 11.8, 13)):
+            rb.pad(ref, x, y, NET, tht=True)
+        spans = ((10, 10, 12.1, 10), (12.1, 10, 17.2, 4.9),
+                 (11.7, 10, 11.8, 10 + rise),
+                 (11.8, 10 + rise, 11.8, 13))
+        for span in spans:
+            rb.seg(*span, NET, w=0.127, layer='In1.Cu')
+        path = os.path.join(tmp, f'mixed_{rise}.kicad_pcb')
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(rb.text())
+        pcb = parse_kicad_pcb(evidence(path, 'the mixed-contact board'))
+        findings = kd(pcb)
+        # KiCad 10 reports the 0.1 mm rise at (11.7, 10): the trunk
+        # touches both joint ends but counts for the far end, as does the
+        # vertical (which touches ONLY that end). At 0.2 mm the trunk
+        # touches only the T end, so each end has its own contact.
+        check(f'rise {rise}: KiCad-dangling count is {expected}',
+              len(findings) == expected, f'{findings}')
+        before = connected(pcb)
+        pairs = split_kicad_dangling_hosts(pcb)
+        check(f'rise {rise}: split only the ambiguous trunk',
+              len(pairs) == expected, f'splits {len(pairs)}')
+        if pairs:
+            host, pieces = pairs[0]
+            check('split covers the same inner-layer trunk',
+                  is_(host, spans[0]) and len(pieces) == 2
+                  and is_(pieces[0], (10, 10, 11.7, 10))
+                  and is_(pieces[1], (11.7, 10, 12.1, 10))
+                  and all(p.width == host.width and p.layer == host.layer
+                          and p.net_id == host.net_id for p in pieces))
+        check(f'rise {rise}: no KiCad-dangling joint after the split',
+              not kd(pcb))
+        check(f'rise {rise}: all pads remain connected',
+              connected(pcb) == before == (True, 0))
+    # A physically free end is a dead-end sweep's job, not this joint test.
+    free = copy.copy(pcb.segments[2])
+    free.start_x, free.start_y = 11.7, 10
+    free.end_x, free.end_y = 11.7, 10.5
+    check('a physically free end is not a KiCad-dangling joint',
+          kicad_dangling_end(free, pcb.segments[:2], [], [], [],
+                             pcb.board_info.copper_layers) is None)
+
+
 def two_joints(tmp):
     print('3. two joints on one host: cut at both')
     rb = RoutingBoard(w=40, h=30)
@@ -357,6 +407,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         shape(tmp)
         split(tmp)
+        mixed_contacts(tmp)
         two_joints(tmp)
         exposed_tail(tmp)
         controls(tmp)
