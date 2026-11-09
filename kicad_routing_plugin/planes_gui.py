@@ -43,17 +43,15 @@ from .gui_utils import StdoutRedirector
 
 
 def _live_board_edge_clearance():
-    """The LIVE board's declared copper-to-edge rule in mm, else 0.0.
+    """The board's copper-to-edge rule PINNED UP TO THE FAB FLOOR, in mm
+    (``effective_board_edge_clearance(path, 0.0)``, as route_planes' main
+    reads it); 0.0 only when the file cannot be read.
 
-    The GUI counterpart of the CLI's
-    ``board_constraint(input_file, 'min_copper_edge_clearance')``: both
-    fronts must inset a pour by whatever the board declares, or they build
-    different pour outlines and every downstream consumer of the exact fill
-    (notably the plane-fragility cost field) diverges with them.
-
-    0.0 means "the board declares nothing", which the caller reads as
-    fall-back-to-PLANE_EDGE_CLEARANCE -- the same meaning board_constraint's
-    None carries on the CLI side.
+    It is the floor the GND vias, the castellated retract and the plane
+    cleanup hold, as main's front reads them (the live rule, max the fab
+    floor). As the pour inset's fallback it never differs from main's raw
+    declared rule: the config's inset is itself fab-floored, so that fallback
+    runs only when the fab floor is 0, where the two readings agree.
 
     IPC: kipy exposes no design-settings getter for m_CopperEdgeClearance, so
     the rule is read from the board's real project file instead -- the same
