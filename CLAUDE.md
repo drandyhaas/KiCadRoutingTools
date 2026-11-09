@@ -609,6 +609,12 @@ same change — and vice versa. When adding a flag, grep the
 through there too.
 
 **Parity gates (run these when touching CLI/GUI routing):**
+- **All of them at once: `python3 tests/gui_parity/run_gui_parity.py`**
+  (`--filter 1698 666` for some). `run_all.py` never collects
+  `tests/gui_parity/` and the suite image has no KiCad, so this sweep is the
+  only thing that runs these gates: one went stale on main unseen until a sync
+  ran it. One gate at a time, each killed with its process group past
+  `--timeout`; exit 77 is listed apart as a declared SKIP, never a pass.
 - `tests/gui_parity/test_714_mirror_pcbnew_parity.py` — needs KiCad python; the
   acceptance gate for the placement writer's **layer flip**. Compares the
   footprint block `write_placed_output` emits for a side change against the
@@ -734,6 +740,15 @@ through there too.
   `wxDialog::ShowModal`, no NSAlert). So every headless `wx.App` is followed at
   once by `wx.Log.SetActiveTarget(wx.LogStderr())`, which
   `tests/gui_parity/test_wx_log_no_modal.py` enforces.
+
+  **A hang with NO modal at all: `ExitMainLoop()` inside a nested `wx.Yield`.**
+  `sample` shows the main thread idle in `MainLoop`, no worker thread left.
+  Called while the UI thread is in a Yield (a tab's progress pump, the
+  dialog's per-net connectivity check), `app.ExitMainLoop()` stops the Yield's
+  run of the platform loop on macOS, not the MainLoop's, which then waits
+  forever. It is a timing race (a gate hung 3 runs in 25). End a headless loop
+  with `headless_plan.exit_main_loop(app)`, which waits until the loop is not
+  yielding; `run_plan` and `wx_pump.run_until` already do.
 
   Two caveats when reading its output:
   - It **REPORTS divergence; it is not pass/fail.** Known-deliberate divergences
