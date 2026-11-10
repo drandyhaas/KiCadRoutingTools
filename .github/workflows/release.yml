@@ -47,12 +47,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Built inside manylinux_2_28 (glibc 2.28), not on the runner: a
+          # binary built on ubuntu-latest needs that Ubuntu's glibc (2.38 on
+          # 24.04) and will not load on an older distribution. Newer glibc
+          # keeps every older symbol version, so this one file loads on any
+          # x86_64 Linux with glibc >= 2.28 (Ubuntu 20.04+, Debian 10+, RHEL 8+).
           - os: ubuntu-latest
             target_name: linux-x86_64
             artifact_src: rust_router/target/release/libgrid_router.so
             artifact_dst: grid_router-linux-x86_64.so
             cargo_target: ''
             extra_rustflags: ''
+            manylinux_image: quay.io/pypa/manylinux_2_28_x86_64
+            max_glibc: '2.28'
           - os: macos-15
             target_name: macos-arm64
             artifact_src: rust_router/target/release/libgrid_router.dylib
@@ -93,11 +100,44 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rust_router/target
-          key: ${{ runner.os }}-${{ matrix.target_name }}-cargo-${{ hashFiles('rust_router/Cargo.lock') }}
+          # The image is part of the key: target files a host build cached
+          # were compiled against the host's newer glibc.
+          key: ${{ runner.os }}-${{ matrix.target_name }}${{ matrix.manylinux_image && '-manylinux_2_28' || '' }}-cargo-${{ hashFiles('rust_router/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.target_name }}-cargo-
+            ${{ runner.os }}-${{ matrix.target_name }}${{ matrix.manylinux_image && '-manylinux_2_28' || '' }}-cargo-
+
+      - name: Build release binary (manylinux container)
+        if: matrix.manylinux_image
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.extra_rustflags }}
+          IMAGE: ${{ matrix.manylinux_image }}
+        run: |
+          docker run --rm -v "$PWD":/io -w /io -e RUSTFLAGS \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" "$IMAGE" \
+            bash -euo pipefail -c '
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+              source "$HOME/.cargo/env"
+              # pyo3 needs an interpreter at build time; abi3-py39 links no libpython.
+              export PATH=/opt/python/cp39-cp39/bin:$PATH
+              cargo build --release --manifest-path rust_router/Cargo.toml
+              chown -R "$HOST_UID:$HOST_GID" rust_router/target'
+
+      - name: Check the binary's glibc floor
+        if: matrix.max_glibc
+        shell: bash
+        env:
+          MAX_GLIBC: ${{ matrix.max_glibc }}
+        run: |
+          need=$(objdump -T "${{ matrix.artifact_src }}" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+          echo "highest glibc symbol version: $need (allowed: $MAX_GLIBC)"
+          if [ "$(printf '%s\n%s\n' "$need" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+            echo "::error::the Linux binary needs glibc $need, above the $MAX_GLIBC floor"
+            exit 1
+          fi
 
       - name: Build release binary
+        if: ${{ !matrix.manylinux_image }}
         shell: bash
         env:
           RUSTFLAGS: ${{ matrix.extra_rustflags }}
