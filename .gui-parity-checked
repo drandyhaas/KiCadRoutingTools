@@ -1,3 +1,10 @@
+e6bc31e2291a91327217cd668885e065a487ec92 2026-11-09 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Release v0.23.9 check at e6bc31e2. The commits after the f4d871d8 audit below
+(2f92162a, e6bc31e2) touch only this file, so the audit carries over
+unchanged. Gates re-run on a clean checkout of e6bc31e2, macOS, KiCad 10.0.6:
+tests/gui_parity/run_gui_parity.py 80 passed, 0 failed, 0 declared SKIP.
+Modal suite on e6bc31e2: 1290 passed, 0 failed (+24 self-skipped).
+
 f4d871d882b2ffb2d8e45477bc39919320578ceb 2026-11-09 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of cdf00e88..252e1750 (263 commits, 242 non-merge) on main, macOS
 (KiCad 10.0.6), then brought to f4d871d8 by the fixes for the two gaps it
