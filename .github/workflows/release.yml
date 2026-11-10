@@ -53,7 +53,7 @@ jobs:
             artifact_dst: grid_router-linux-x86_64.so
             cargo_target: ''
             extra_rustflags: ''
-          - os: macos-14
+          - os: macos-15
             target_name: macos-arm64
             artifact_src: rust_router/target/release/libgrid_router.dylib
             artifact_dst: grid_router-macos-arm64.so
@@ -65,7 +65,7 @@ jobs:
             extra_rustflags: '-C link-arg=-undefined -C link-arg=dynamic_lookup'
           # Cross-compile x86_64 macOS from the arm64 runner — macos-13
           # runners are scarce and queue for 30+ min in the free tier.
-          - os: macos-14
+          - os: macos-15
             target_name: macos-x86_64
             artifact_src: rust_router/target/x86_64-apple-darwin/release/libgrid_router.dylib
             artifact_dst: grid_router-macos-x86_64.so
