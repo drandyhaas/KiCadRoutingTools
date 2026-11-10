@@ -57,20 +57,6 @@ CROSS_SIN = 0.5              # |sin(angle)| above which a capsule is a crossing,
 PUSHES = 6                   # projections per round for a point wedged between obstacles
 
 
-def _arrays(obs):
-    """The (surviving) discs and capsules of an obstacle model as arrays.
-    A derived model (Obstacles.exclude) shares the base's lists and
-    rewrites its cells, so the survivors are the cells' contents."""
-    di = sorted({i for v in getattr(obs, '_near_d', {}).values() for i in v})
-    ci = sorted({i for v in getattr(obs, '_near_c', {}).values() for i in v})
-    D = np.array([(obs.discs[i][0], obs.discs[i][1], obs.discs[i][2]) for i in di],
-                 dtype=float).reshape(-1, 3)
-    C = np.array([(a[0], a[1], b[0] - a[0], b[1] - a[1], r)
-                  for i in ci for (a, b, r, _n) in (obs.caps[i],)],
-                 dtype=float).reshape(-1, 5)
-    return D, C
-
-
 def _near(D, C, P):
     """The candidates whose inflated box meets the string's box + MARGIN."""
     x0, y0 = P.min(0) - MARGIN
@@ -91,60 +77,6 @@ def _near(D, C, P):
     else:
         Cn = C
     return Dn, Cn
-
-
-def _deepest(Q, T, D, C):
-    """Per point: the deepest violated obstacle -> (depth, nx, ny), depth
-    <= 0 where none. `T` is the unit tangent per point, for the capsule
-    crossing rule."""
-    n = len(Q)
-    best = np.full(n, -np.inf)
-    nx = np.ones(n)
-    ny = np.zeros(n)
-    if len(D):
-        ex = Q[:, None, 0] - D[None, :, 0]
-        ey = Q[:, None, 1] - D[None, :, 1]
-        d = np.hypot(ex, ey)
-        depth = D[None, :, 2] - d
-        j = depth.argmax(1)
-        ar = np.arange(n)
-        bd = depth[ar, j]
-        dd = d[ar, j]
-        safe = np.where(dd < 1e-9, 1.0, dd)
-        ux = np.where(dd < 1e-9, 1.0, ex[ar, j] / safe)
-        uy = np.where(dd < 1e-9, 0.0, ey[ar, j] / safe)
-        m = bd > best
-        best[m], nx[m], ny[m] = bd[m], ux[m], uy[m]
-    if len(C):
-        ax, ay, sx, sy, r = C.T
-        L2 = sx * sx + sy * sy
-        L = np.sqrt(np.where(L2 > 0, L2, 1.0))
-        px = Q[:, None, 0] - ax[None]
-        py = Q[:, None, 1] - ay[None]
-        t = (px * sx[None] + py * sy[None]) / np.where(L2 > 1e-12, L2, 1.0)[None]
-        t = np.clip(np.where(L2[None] > 1e-12, t, 0.0), 0.0, 1.0)
-        ex = px - t * sx[None]
-        ey = py - t * sy[None]
-        d = np.hypot(ex, ey)
-        depth = r[None] - d
-        # a capsule crossed transversally is a dive: transparent
-        ux_ = (sx / L)[None]
-        uy_ = (sy / L)[None]
-        cross = np.abs(T[:, None, 0] * uy_ - T[:, None, 1] * ux_)
-        depth = np.where(cross > CROSS_SIN, -np.inf, depth)
-        j = depth.argmax(1)
-        ar = np.arange(n)
-        bd = depth[ar, j]
-        dd = d[ar, j]
-        safe = np.where(dd < 1e-9, 1.0, dd)
-        # the normal: away from the closest axis point, or the axis normal when on it
-        nax = (-sy / L)[j]
-        nay = (sx / L)[j]
-        ux = np.where(dd < 1e-9, nax, ex[ar, j] / safe)
-        uy = np.where(dd < 1e-9, nay, ey[ar, j] / safe)
-        m = bd > best
-        best[m], nx[m], ny[m] = bd[m], ux[m], uy[m]
-    return best, nx, ny
 
 
 def _tangents(P):
@@ -203,7 +135,9 @@ def _candidates(P, D, C, extra=None):
 
 
 def _deepest_k(Q, T, D, C, od, oc, dend=None, infl_d=None, infl_c=None, pad_d=None):
-    """_deepest over each point's own candidates. The spine's model
+    """Per point, over its own candidates (`od`, `oc`): the deepest
+    violated obstacle -> (depth, nx, ny), depth <= 0 where none; `T` the
+    unit tangent per point, for the capsule crossing rule. The spine's model
     (corridor.RampedObstacles): `pad_d` per POINT inflates every disc
     (the along-flow ramp, part_inflation); `dend` (per point, the
     distance to the nearer end) with `infl_c` per capsule inflates the
@@ -263,26 +197,6 @@ def _deepest_k(Q, T, D, C, od, oc, dend=None, infl_d=None, infl_c=None, pad_d=No
         m = bd > best
         best[m], nx[m], ny[m] = bd[m], ux[m], uy[m]
     return best, nx, ny
-
-
-def _project(P, free, D, C, od, oc, T=None):
-    """Push the free points out of their obstacles, onto the boundary
-    plus OUT; up to PUSHES times for a point wedged between two."""
-    idx = np.nonzero(free)[0]
-    if T is None:
-        T = _tangents(P)
-    for _k in range(PUSHES):
-        if not len(idx):
-            break
-        depth, ux, uy = _deepest_k(P[idx], T[idx], D, C, od[idx], oc[idx])
-        v = depth > 0.0
-        if not v.any():
-            break
-        sub = idx[v]
-        P[sub, 0] += ux[v] * (depth[v] + OUT)
-        P[sub, 1] += uy[v] * (depth[v] + OUT)
-        idx = sub
-    return P
 
 
 def _free_mask(P, ends):
@@ -358,45 +272,6 @@ def _hausdorff(A, B):
 
 
 BLOCK = 25        # rounds between shortcut-and-densify resamples, as before
-
-
-def _relax_level(P, ends, D, C, rounds, tol_h, step, obs):
-    """Blocks of BLOCK Jacobi rounds, a shortcut-and-densify after each
-    (the global straightening the diffusion cannot do), done when the
-    resampled polyline stops moving (Hausdorff below tol_h) or `rounds`
-    are spent. Returns (points, rounds used)."""
-    used = 0
-    prev = None
-    while used < rounds:
-        od, oc = _candidates(P, D, C)
-        anchor = P.copy()
-        for _it in range(BLOCK):
-            used += 1
-            n = len(P)
-            if n < 3:
-                break
-            free = _free_mask(P, ends)
-            Q = P.copy()
-            Q[1:-1] = 0.5 * P[1:-1] + 0.25 * (P[:-2] + P[2:])
-            dx = Q[:, 0] - P[:, 0]
-            dy = Q[:, 1] - P[:, 1]
-            mag = np.hypot(dx, dy)
-            sc = np.where(mag > CAP, CAP / np.where(mag > 0, mag, 1.0), 1.0)
-            Q[:, 0] = P[:, 0] + dx * sc
-            Q[:, 1] = P[:, 1] + dy * sc
-            Q[~free] = P[~free]
-            Q = _project(Q, free, D, C, od, oc, _tangents(Q))
-            P = Q
-            if np.hypot(P[:, 0] - anchor[:, 0], P[:, 1] - anchor[:, 1]).max() > 0.5:
-                od, oc = _candidates(P, D, C)
-                anchor = P.copy()
-        R = _resample(P, obs, step)
-        if prev is not None and len(prev) and _hausdorff(R, prev) < tol_h:
-            P = R
-            break
-        prev = R
-        P = R
-    return P, used
 
 
 def _batch_candidates(P, own, D, C, dnet, cnet):
@@ -497,15 +372,26 @@ def _round_b(B, D, C, od, oc):
     return moved
 
 
-def _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, tol_h, step):
+def _chord(end, step):
+    """a string's CHORD between its two ends, at `step`: what a string that is no taut path is taken as (relax_spine's
+    rule -- a string several chords long is wedged between overlapping pushes, not taut round anything)"""
+    return np.array(ts.densify([tuple(end[0]), tuple(end[1])], step), dtype=float)
+
+
+def _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, tol_h, step, frozen=()):
     """One spacing level for every string at once. Strings drop out of
-    the batch as they converge. Returns (polys, rounds used per string)."""
+    the batch as they converge. Returns (polys, rounds used per string, the
+    strings that DIVERGED here -- each taken as its chord). `frozen`: the
+    strings an earlier level found diverged, kept as they are."""
     n = len(polys)
     done = [None] * n
     used = [0] * n
     prev = [None] * n
-    active = list(range(n))
+    for s in frozen:
+        done[s] = polys[s]
+    active = [s for s in range(n) if s not in set(frozen)]
     cur = list(polys)
+    diverged_ = set()
     while active:
         B = _Batch([cur[s] for s in active], [ends[s] for s in active], [nids[s] for s in active])
         od, oc = _batch_candidates(B.P, B.own, D, C, dnet, cnet)
@@ -526,9 +412,14 @@ def _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, tol_h, step):
             R = _resample(parts[k], obss[s], step)
             diverged = len(R) > MAX_STRING_PTS
             if diverged:
+                # (taken as its CHORD, and relaxed no more: frozen where it stood, a string folded among overlapping
+                # pushes thousands of points long was densified four times over, relaxed again at the fine level and
+                # handed on as the lane's taut path -- 150 mm for a 20 mm chord)
                 import sys as _sys
-                print(f'  taut: string {s} DIVERGED ({len(R)} points at step {step}) -- frozen where it stands',
+                print(f'  taut: string {s} DIVERGED ({len(R)} points at step {step}) -- its chord taken',
                       file=_sys.stderr, flush=True)
+                R = _chord(ends[s], step)
+                diverged_.add(s)
             settled = diverged \
                 or (prev[s] is not None and len(prev[s]) and _hausdorff(R, prev[s]) < tol_h) \
                 or (used[s] >= rounds) or (moved[B.off[k]:B.off[k + 1]].max() < 1e-6)
@@ -539,7 +430,7 @@ def _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, tol_h, step):
             else:
                 nxt_active.append(s)
         active = nxt_active
-    return [done[s] if done[s] is not None else cur[s] for s in range(n)], used
+    return [done[s] if done[s] is not None else cur[s] for s in range(n)], used, diverged_
 
 
 def pad_discs(caps, cnets):
@@ -601,11 +492,16 @@ def relax_many(items, rounds: int = 400, start=None):
     # exact solver's string, to be polished where its contacts did not settle)
     polys = [np.array(ts.densify(list(start[k]) if start and start[k] is not None else [src, dst], COARSE), dtype=float)
              for k, (src, dst, _o) in enumerate(items)]
-    polys, u1 = _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, 0.02, COARSE)
+    polys, u1, div1 = _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, 0.02, COARSE)
     polys = [np.array(ts.densify([tuple(p) for p in P], STEP), dtype=float) for P in polys]
-    polys, u2 = _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, 0.02, STEP)
+    polys, u2, div2 = _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, 0.02, STEP, frozen=div1)
     out = []
     for s, P in enumerate(polys):
+        # (no taut path -- diverged at either level, or several chords long, relax_spine's cap: its chord, unpushed)
+        chord_ = math.hypot(ends[s][1][0] - ends[s][0][0], ends[s][1][1] - ends[s][0][1])
+        if s in div1 or s in div2 or float(np.hypot(np.diff(P[:, 0]), np.diff(P[:, 1])).sum()) > 3.0 * chord_ + 10.0:
+            out.append(([tuple(map(float, q)) for q in _chord(ends[s], STEP)], u1[s] + u2[s]))
+            continue
         R = _resample(P, obss[s], STEP)
         B = _Batch([R], [ends[s]], [nids[s]])
         od, oc = _batch_candidates(B.P, B.own, D, C, dnet, cnet)

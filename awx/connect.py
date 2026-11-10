@@ -728,7 +728,7 @@ def _connect_pair_cross(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                 legs = a[2] + b[2]              # each carries its approach piece
                 vias_ = vias0 + [a[3], b[3]]
                 why = _pairs.intra_ok(legs, vias_, p_id, n_id, cfg.track_width,
-                                      cfg.via_size, cfg.clearance)
+                                      cfg.via_size, cfg.clearance, h2h=_h2h(cfg))
                 if why is None:
                     return (legs, vias_), f'{"P" if first == p_id else "N"} first, {a[1]}, {b[1]}'
                 why_last = why
@@ -808,6 +808,11 @@ def _virtual_via_cells(virtual, cfg, v_track):
     return np.unique(np.concatenate(out), axis=0).astype(np.int32) if out else np.empty((0, 2), dtype=np.int32)
 
 
+def _h2h(cfg):
+    """the board's hole to hole the run routes at (run_config's cfg), drill edge to drill edge; 0 where none is set"""
+    return getattr(cfg, 'hole_to_hole_clearance', 0.0) or 0.0
+
+
 def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None, virt_tol=0.0, vias=()):
     """Why a connector's legs (Segments) are NOT clean against the
     window's foreign copper and the virtual lines -- a string -- or None.
@@ -818,8 +823,10 @@ def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None
     connector's own barrels, each checked as its copper disc on every
     layer."""
     import pairs as _pairs
+    import board_rules
     clr = cfg.clearance
     tw = cfg.track_width
+    hole_bar = board_rules.hole_track_clear(window, clr)
     own = set(own)
     dist = _pairs._seg_seg_dist
 
@@ -847,18 +854,37 @@ def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None
                 return f'leg on {L} grazes net {v.net_id} via at ({v.x:.2f},{v.y:.2f})'
         for fp in window.footprints.values():
             for pad in fp.pads:
-                if pad.net_id in own or pad.pad_type == 'np_thru_hole':
+                if pad.net_id in own:
+                    continue
+                if pad.pad_type == 'np_thru_hole':
+                    # (a hole with no copper: the leg off its WALL at the router's NPTH floor, every layer)
+                    if pad.drill and dist(s, pt(pad.global_x, pad.global_y, L)) \
+                            < hole_bar + s.width / 2 + pad.drill / 2 - 1e-6:
+                        return f'leg on {L} grazes hole {fp.reference}.{pad.pad_number}'
                     continue
                 if not (pad.drill > 0 or L in pad.layers
                         or any(l_.startswith('*') and l_.endswith('.Cu') for l_ in pad.layers)):
                     continue
                 r = math.hypot(pad.size_x, pad.size_y) / 2
                 if dist(s, pt(pad.global_x, pad.global_y, L)) < clr + s.width / 2 + r - 1e-6:
-                    # the disc is conservative: the rectangle's nearer edge decides
-                    ex = max(abs(pad.global_x - (s.start_x + s.end_x) / 2) - pad.size_x / 2, 0.0)
-                    ey = max(abs(pad.global_y - (s.start_y + s.end_y) / 2) - pad.size_y / 2, 0.0)
-                    if math.hypot(ex, ey) < clr + s.width / 2 - 1e-6:
+                    # (the disc is conservative: the pad's copper itself decides, measured from the segment's
+                    # nearest point -- from its MIDPOINT, a long leg ending on a pad passed as clean)
+                    if _pairs.seg_pad_distance((s.start_x, s.start_y), (s.end_x, s.end_y), pad) \
+                            < clr + s.width / 2 - 1e-6:
                         return f'leg on {L} grazes pad {fp.reference}.{pad.pad_number}'
+    # (the connector's own barrels, drill to drill, against every other hole near them -- any net's: hole to hole is
+    # the fab's, net-blind -- a via, a drilled pad's hole)
+    h2h = _h2h(cfg)
+    vd_ = getattr(cfg, 'via_drill', 0.0) or 0.0
+    for b_ in vias:
+        bd_ = getattr(b_, 'drill', 0.0) or vd_
+        holes_ = [(v.x, v.y, getattr(v, 'drill', 0.0) or vd_, f'via at ({v.x:.2f},{v.y:.2f})') for v in window.vias] \
+            + [(p_.global_x, p_.global_y, p_.drill, f'hole {fp.reference}.{p_.pad_number}')
+               for fp in window.footprints.values() for p_ in fp.pads if p_.drill]
+        for hx_, hy_, hd_, what_ in holes_:
+            d_ = math.hypot(hx_ - b_.x, hy_ - b_.y)
+            if 1e-6 < d_ < (bd_ + hd_) / 2 + h2h - 1e-6:
+                return f'barrel at ({b_.x:.2f},{b_.y:.2f}) within hole to hole of the {what_}'
     if band is not None and callable(band) and ends:
         for (x, y, L) in ends:
             ok = np.asarray(band(np.array([x]), np.array([y]), L), dtype=bool)
@@ -907,11 +933,19 @@ def _connect_pair_crossover(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_laye
                  if math.hypot(b_[0] - a_[0], b_[1] - a_[1]) > 1e-9]
         segs_ = list(more_segs) + joins + list(segs_g)
         vias_ = list(more_vias) + list(vias_g)
-        vw = make_local_window(pcb_, mg_[0], mg_[1], 2 * half + cfg.via_size + 3 * cfg.clearance + 1.0)
-        if _legs_clear(vw, joins, [p_id, n_id], cfg, virtual, layer_map) is not None:
+        # (EVERY piece laid here against the board's other copper -- the crossover's legs and barrels and the given
+        # connector with the joins: the joins alone were asked, and the rest went down unchecked -- in a window round
+        # all of it)
+        xs_ = [x_ for s_ in segs_ for x_ in (s_.start_x, s_.end_x)] + [v_.x for v_ in vias_]
+        ys_ = [y_ for s_ in segs_ for y_ in (s_.start_y, s_.end_y)] + [v_.y for v_ in vias_]
+        vw = make_local_window(pcb_, (min(xs_) + max(xs_)) / 2, (min(ys_) + max(ys_)) / 2,
+                               max(max(xs_) - min(xs_), max(ys_) - min(ys_)) / 2
+                               + cfg.via_size + 3 * cfg.clearance + 1.0)
+        if _legs_clear(vw, segs_, [p_id, n_id], cfg, virtual, layer_map, vias=vias_) is not None:
             return None
         import pairs as _pairs
-        if _pairs.intra_ok(segs_, vias_, p_id, n_id, cfg.track_width, cfg.via_size, cfg.clearance) is not None:
+        if _pairs.intra_ok(segs_, vias_, p_id, n_id, cfg.track_width, cfg.via_size, cfg.clearance,
+                           h2h=_h2h(cfg)) is not None:
             return None
         return segs_, vias_
     first = joined(pcb, (tuple(ent['P']), tuple(ent['N']), L1), a_given, xsegs, xvias)
@@ -1078,7 +1112,7 @@ def _routed_connector(pcb, p_id, n_id, tip_p, tip_n, d, layer, far, cfg, half, v
             print("    connector split: none")
         return None
     segs2, vias2, _ = out
-    why = _pairs.intra_ok(segs2, vias2, p_id, n_id, cfg.track_width, cfg.via_size, cfg.clearance)
+    why = _pairs.intra_ok(segs2, vias2, p_id, n_id, cfg.track_width, cfg.via_size, cfg.clearance, h2h=_h2h(cfg))
     if why is not None:
         if dbg:
             print(f"    connector split not clean: {why}")

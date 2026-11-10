@@ -899,6 +899,10 @@ def check_static(ctx, corridors, only=None):
     need = TW / 2 + CL + g / 2                   # the bar for a lane piece off the grid (it lands up to half a step off)
     cut = _neck_cut(ctx)
     pairs = getattr(ctx, 'pairs', {}) or {}
+    # (a hole with no copper: what the router keeps a track off its wall past the clearance, taken off its distance --
+    # board_rules.hole_track_clear: graded at the clearance alone, a lane the audit passed there the router refused)
+    import board_rules
+    hole_more = board_rules.hole_track_clear(ctx.pcb, CL) - CL
     pads = []
     for fp in ctx.pcb.footprints.values():
         for pd in fp.pads:
@@ -949,7 +953,7 @@ def check_static(ctx, corridors, only=None):
                     if L not in Ls or pd.net_id in own or not inb(pd.global_x, pd.global_y):
                         continue
                     if kind == 'hole':
-                        d = np.hypot(P[:, 0] - pd.global_x, P[:, 1] - pd.global_y) - (pd.drill or 0) / 2
+                        d = np.hypot(P[:, 0] - pd.global_x, P[:, 1] - pd.global_y) - (pd.drill or 0) / 2 - hole_more
                     else:       # the copper as KiCad draws it: rounded corners, a stadium for an oval -- and, a
                         # single's, in its corner zone as far again as the router's corner buffer
                         cr_ = _pairs.pad_corner_radius(pd)
@@ -1147,7 +1151,10 @@ def _polyline(run):
     for q in pts[1:]:
         if len(out) >= 2:
             e = out[-1]
-            if abs((e[0] - start[0]) * (q[1] - start[1]) - (e[1] - start[1]) * (q[0] - start[0])) < 1e-7:
+            # (on the line AND going on along it: a run doubling back on itself is collinear too, and merged it read
+            # as no turn at all -- out and straight back, a 180-degree fold, measured as the one turn after it)
+            if abs((e[0] - start[0]) * (q[1] - start[1]) - (e[1] - start[1]) * (q[0] - start[0])) < 1e-7 and \
+                    (e[0] - start[0]) * (q[0] - e[0]) + (e[1] - start[1]) * (q[1] - e[1]) > 0:
                 out[-1] = q
                 continue
             start = out[-1]

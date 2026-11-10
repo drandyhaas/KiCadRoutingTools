@@ -997,6 +997,8 @@ def solve_round(rows, trust):
     # the lanes' vertices numbered in one run (LANES's order): each vertex's lane VL, its index there VI; every term
     # of an active row as (row, vertex, coefficient)
     nm = list(LANES)
+    if not nm:
+        return None             # (no lane to move: the singles' polish round the pairs of a bus that has none crashed)
     lane_ = {n: l_ for l_, n in enumerate(nm)}
     LN = np.array([len(LANES[n]['X']) for n in nm], np.int64)
     OFF = np.concatenate([[0], np.cumsum(LN)])
@@ -1363,7 +1365,9 @@ for n, ln in LANES.items():
         if pieces and pieces[-1][4] == Ls[i]:
             a = pieces[-1]
             cr = (a[2] - a[0]) * (q[1] - a[1]) - (a[3] - a[1]) * (q[0] - a[0])
-            if abs(cr) < 1e-7:
+            # (collinear AND not doubling back: a piece doubling back merged into its net displacement, the fold gone --
+            # a repeated vertex, no length at all, merges as ever)
+            if abs(cr) < 1e-7 and (a[2] - a[0]) * (q[0] - a[2]) + (a[3] - a[1]) * (q[1] - a[3]) >= 0:
                 pieces[-1] = (a[0], a[1], float(q[0]), float(q[1]), a[4]); continue
         pieces.append((float(p[0]), float(p[1]), float(q[0]), float(q[1]), Ls[i]))
     res['lanes'][n] = {'xy': [(pieces[0][0], pieces[0][1])] + [(pc[2], pc[3]) for pc in pieces], 'pieces': pieces}

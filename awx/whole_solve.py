@@ -431,11 +431,14 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     # the ends' own copper is (two via rooms and a lane pitch), its own via room beyond it: inside, a dive has no room
     # beside it, the neighbours not yet spread from the array (a dive in a lane of 3.5 mm or less laid 20-34% open
     # against 4-8% without). Escape ends are checked against this solve before they are laid (whole_ends.solve_check:
-    # a candidate's, FRONT given; the plan sidecar's 'escape' for the round's), so a lane's layer near the arrays is
-    # the ends' to choose. Other ends were never chosen for it: a short lane, its crossings packed near the faces, has
-    # no window left for a change. (Relax 3, the round's last re-solve, lifts it alone: main)
+    # a candidate's, FRONT given, its context saying whether its ends are an escape's -- ctx.escape; the plan sidecar's
+    # 'escape' for the round's), so a lane's layer near the arrays is the ends' to choose. Other ends were never chosen
+    # for it: a short lane, its crossings packed near the faces, has no window left for a change -- and a candidate of
+    # such ends is held to the rooms its round's solve will hold it to, no wider: checked with the zones, fifteen
+    # lanes of a plain bus read as having no room for a change that the round's solve gave a third of a millimetre.
+    # (Relax 3, the round's last re-solve, lifts it alone: main)
     FACE_ZONE = 3 * VNEED + PITCH
-    if (front is not None or SIDE.get('escape')) and relax != 3:
+    if (getattr(ctx, 'escape', True) if front is not None else SIDE.get('escape')) and relax != 3:
         VIN0 = {n: max(v_, FACE_ZONE) for n, v_ in VIN0.items()}
         VIN1 = {n: max(v_, FACE_ZONE) for n, v_ in VIN1.items()}
     # ...a CROSSED pair's (pairs.opposite_hands: its legs swap once, at its first dive, a crossover) by the crossover's
@@ -501,8 +504,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     # beside it (whole_route's LAYER cuts, `lcuts` in the cut files: a wall the lanes cannot go round): on the other layer
     # across the island's box on the trunk, a track's clearance either side, its changes a via's clearance off it
     CHAN_CUTS, CHAN_T0 = set(), set()
-    CHAN_BLK = {}             # (lane, 'chan ISLAND') -> the island's layers (more than two: the run held off each)
-    CHAN_FIRM = set()         # (lane, 'chan ISLAND'): a cut held FIRM, as a keep-out's (its cut file's 'firm')
+    # (each by its whole cut: one island's name stands at several places -- a foreign net's tracks, an audit's cuts --
+    # and keyed by the lane and the name, a later cut's layers overwrote an earlier one's)
+    CHAN_BLK = {}             # cut -> the island's layers (more than two: the run held off each)
+    CHAN_FIRM = set()         # a cut held FIRM, as a keep-out's (its cut file's 'firm')
     # (each cut once: one the cut files carry twice -- a hard round's in CUTS and again in SOFT_CUTS -- read a second
     # time after the first had waived its lane's end room, found no window, and the two sorted None against a number)
     _seen_lc = set()
@@ -515,8 +520,12 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             for r_ in Fr.group._straight(Fr.bend[n_])[1]:
                 blk_ = [LAYN.index(L_) for L_ in LAYN if L_ not in Fr.group.open[r_]]
                 if blk_:
-                    _under.append({'lane': n_, 'island': f'under {r_}', 'layer': blk_[0], 'box': list(Fr.group.boxes[r_]),
-                                   'blocked': blk_, 'firm': True})
+                    # (a cut's 'layer' is, on two layers, the one the lane is held ON -- whole_route.layer_cut's -- and
+                    # on more the one it is held off: written the blocked one on two, the lane was held under the part
+                    # on the very layer its pads stand on)
+                    _under.append({'lane': n_, 'island': f'under {r_}',
+                                   'layer': (1 - blk_[0]) if NL == 2 else blk_[0],
+                                   'box': list(Fr.group.boxes[r_]), 'blocked': blk_, 'firm': True})
     # ...and the board's KEEP-OUTS and the AREAS the agent driving the step asked the lanes to keep out of (whole_route's
     # ROUND EDITS, BUS_AREAS: plan_audit.bus_areas), held firm off their layers along the stretch of each lane's
     # REFERENCE route that comes within a lane's bar of one -- the audit holds every lane to them as to a keep-out, and
@@ -591,21 +600,27 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 # its stub's end: at an exit two teeth leave stacked on two layers, a change at the stub's end stood on
                 # the other tooth's stub -- a lane of a two-part Ethernet and USB bus, its island a millimetre past its
                 # tooth, shipped open
+                # (...and where NO via of its own stands clear before the island, no window at all: the cut stands as
+                # any other, and a plan breaks it at its price -- read as 0, the window opened at the stub's end, where
+                # site_clear had just refused a via, its end room and stagger waived there)
                 if off0 and lo_c < entry[n_] + VIN0[n_] + G:
-                    r_ = via_room(n_, 0, lo_c - entry[n_]) or 0.0
-                    w0_, w1_ = entry[n_] + r_, lo_c
-                    VIN0[n_] = r_
-                    CHAN_T0.add(n_)
+                    r_ = via_room(n_, 0, lo_c - entry[n_])
+                    if r_ is not None:
+                        w0_, w1_ = entry[n_] + r_, lo_c
+                        VIN0[n_] = r_
+                        CHAN_T0.add(n_)
                 elif n_ not in bname and off1 and hi_c > end[n_] - VIN1[n_] - G:
-                    r_ = via_room(n_, 1, end[n_] - hi_c) or 0.0
-                    w0_, w1_ = hi_c, end[n_] - r_
-                    VIN1[n_] = r_
-                CHAN_CUTS.add((n_, 'chan ' + c_['island'], L_, round(s0_ - t_, 4), round(s1_ + t_, 4), round(lo_c, 4),
-                               round(hi_c, 4), w0_, w1_))
+                    r_ = via_room(n_, 1, end[n_] - hi_c)
+                    if r_ is not None:
+                        w0_, w1_ = hi_c, end[n_] - r_
+                        VIN1[n_] = r_
+                cut_ = (n_, 'chan ' + c_['island'], L_, round(s0_ - t_, 4), round(s1_ + t_, 4), round(lo_c, 4),
+                        round(hi_c, 4), w0_, w1_)
+                CHAN_CUTS.add(cut_)
                 if blk_ is not None:
-                    CHAN_BLK[(n_, 'chan ' + c_['island'])] = blk_
+                    CHAN_BLK[cut_] = blk_
                 if c_.get('firm'):
-                    CHAN_FIRM.add((n_, 'chan ' + c_['island']))
+                    CHAN_FIRM.add(cut_)
     CHAN_CUTS = sorted(CHAN_CUTS)
     XO = {n for n in prs if n in M and _pairs.opposite_hands(ctx, n)}
     for n in XO:
@@ -1378,6 +1393,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     # layer flipped by the changes before the span -- the other; soft as the geometry's cuts are, priced W_SOFT broken
     # (a keep-out area's, W_FIRM)
     for (n_, k_, L_, lo_u, hi_u, lo_c, hi_c, w0, w1) in LAYER_CUTS + CHAN_CUTS:
+        cut_ = (n_, k_, L_, lo_u, hi_u, lo_c, hi_c, w0, w1)
+        # (its broken flag by its span and layer too: two cuts of one lane and name from one place shared a flag, and
+        # the earlier was free to break)
+        bkey_ = ('layer', n_, str(k_), round(lo_u, 3), round(hi_u, 3), L_)
         cs_l, act_l = chg[n_]
         br_ = m.NewBoolVar('')
         bef = []
@@ -1390,7 +1409,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         if NL > 2:
             # (more layers than two: off the BLOCKED layers across the span -- a front's, its end's own; an island's,
             # every layer it stands on -- on any other)
-            blks_ = [(tli[n_] if k_ == 0 else dli[n_])] if k_ in (0, 1) else CHAN_BLK.get((n_, k_), [1 - L_])
+            blks_ = [(tli[n_] if k_ == 0 else dli[n_])] if k_ in (0, 1) else CHAN_BLK.get(cut_, [1 - L_])
             run_ = run_at(n_, bef)
             for blk_ in blks_:
                 m.Add(run_ != blk_).OnlyEnforceIf(br_.Not())
@@ -1401,17 +1420,18 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             # audit_layer_cuts): a lane planned across it on its layer is not laid either -- soft, sdi_mipi_conv's
             # SDI_D6, already over two vias, broke its cut under ~{DDR3_CS} three rounds running, the same plan and
             # the same crossing each, and the loop stopped NOT CONVERGING with the lane open)
-            (firm_broken if str(k_).startswith('chan keepout') or (n_, k_) in CHAN_FIRM else soft_broken)[
-                ('layer', n_, str(k_), round(lo_u, 3))] = br_     # (k_ a front's end, or an island's name)
+            (firm_broken if str(k_).startswith('chan keepout') or cut_ in CHAN_FIRM else soft_broken)[
+                bkey_] = br_     # (k_ a front's end, or an island's name)
             continue
         par = m.NewBoolVar('')
         m.AddBoolXOr(bef + [par.Not()])                        # par: an odd number of changes before the span
         m.Add(par == (tl[n_] ^ L_)).OnlyEnforceIf(br_.Not())
-        soft_broken[('layer', n_, str(k_), round(lo_u, 3))] = br_
+        # (a cut held FIRM priced so on two layers too: soft here whatever its file said)
+        (firm_broken if cut_ in CHAN_FIRM else soft_broken)[bkey_] = br_
     # (a cut's layer as the model holds it: on two layers the one the lane is held ON; on more, the one it is held OFF)
     held = lambda c_: (f'on {"FB"[c_[2]]}' if NL == 2 else
                        'off ' + ','.join(LAYN[b_] for b_ in ([tli[c_[0]] if c_[1] == 0 else dli[c_[0]]] if c_[1] in (0, 1)
-                                                            else CHAN_BLK.get((c_[0], c_[1]), [1 - c_[2]]))))
+                                                            else CHAN_BLK.get(tuple(c_), [1 - c_[2]]))))
     if LAYER_CUTS:
         print(f'   layer cuts (blocked fronts): {len(LAYER_CUTS)} -- ' + ', '.join(
             f'{c_[0]} {"tooth" if c_[1] == 0 else "berth"} {held(c_)} over {c_[3]:.2f}..{c_[4]:.2f}'
@@ -1440,13 +1460,18 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         LIDX_ = {L_: i_ for i_, L_ in enumerate(LAYN)}
         ALL_ = frozenset(range(NL))
         ISLB = {}                                      # (island, its layers) -> its box
+        import board_rules
         for (ref_, i_), lab_ in whole_ctx.part_islands(ctx, skip=(Fr.src, *Fr.dests)).items():
             p_ = ctx.pcb.footprints[ref_].pads[i_]
             if p_.pad_type == 'np_thru_hole':
-                hx_ = hy_ = (p_.drill or 0) / 2
+                # (a hole with no copper grown by what the router keeps a track off its wall past the clearance --
+                # board_rules.hole_track_clear -- as the geometry and the census grow it)
+                hx_ = hy_ = (p_.drill or 0) / 2 + board_rules.hole_track_clear(ctx.pcb, CLR) - CLR
                 ls_ = ALL_
             else:
-                hx_, hy_ = p_.size_x / 2, p_.size_y / 2
+                # (a tilted pad by the box round its copper turned, as the geometry boxes it: pairs.pad_extent)
+                hx_, hy_ = _pairs.pad_extent(p_.size_x / 2, p_.size_y / 2, _pairs.pad_tilt(p_),
+                                             _pairs.pad_corner_radius(p_))
                 ls_ = ALL_ if ((p_.drill or 0) > 0 or '*.Cu' in p_.layers) else \
                     frozenset(LIDX_[L_] for L_ in p_.layers if L_ in LIDX_)
             if not ls_:
@@ -2035,6 +2060,8 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             if key_ in t:
                 m.AddHint(t[key_], int(round(v_['u'] / G))); nh += 1
         for n_, chs_ in Hj['changes'].items():
+            if n_ not in chg:
+                continue                # (a lane of the hint's this bench does not plan: nothing to hint)
             cs_h, act_h = chg[n_]
             for i_ in range(KMAX):
                 if i_ < len(chs_):
@@ -2089,8 +2116,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         pads = ctx.pcb.nets[nid].pads
         dref_ = ctx.ends[leg][2] if leg in ctx.ends else Fr.dst       # (its own destination: DEST may name several)
         ties = [d_ for d_ in pads if d_.component_ref == dref_ and any(_pairs.under_pad(d_, q_, bd.VIA_SIZE) for q_ in pads)]
-        tie = any(abs(v.x - d_.global_x) <= d_.size_x / 2 and abs(v.y - d_.global_y) <= d_.size_y / 2
-                  for v in vs for d_ in ties)
+        tie = any(_pairs.in_pad(v.x, v.y, d_) for v in vs for d_ in ties)
         return len(vs) - int(tie), tie
     LV = {leg: _leg_vias(leg) for n in M for leg in (prs[n] if n in prs else (n,))}
     SV = {n: max(LV[leg][0] for leg in (prs[n] if n in prs else (n,))) for n in M}
@@ -2134,19 +2160,24 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                                       sorted(VEND), sorted((list(k_), sorted(v_)) for k_, v_ in VBAN.items()),
                                       sorted(list(map(list, p_)) for p_ in VSEP), sorted(TVIA), sorted(BVIA)] if NL > 2 else []),
                                   sort_keys=True).encode()).hexdigest()
-    root = None
-    if hint:
-        r_ = json.load(open(hint)).get('root')
-        if r_ and r_.get('sig') == sig:
-            root = r_
-            m.Add(W_OVER * sum(over.values()) + W_V * VIAS >= W_OVER * r_['over'] + W_V * r_['vias'])
-            print(f"   the root's proof as a floor: {r_['over']} via(s) over two, {r_['vias']} vias")
     OBJ = W_OVER * sum(over.values()) + W_V * VIAS + W_SOFT * sum(soft_broken.values()) + sum(cost) \
         + W_FIRM * sum(firm_broken.values()) + W_FIRM * sum(v_ for _k, v_ in GATE_OVER) \
         + W_FIRM * sum(v_ for _k, v_ in PASS_OVER) \
         + W_ROOM * sum(v_ for _k, v_ in ROOM_OVER)
     if REG_ON:
         OBJ = OBJ + W_REGION * sum(v_ for _k, v_ in REG_ON) + W_FIRM * sum(v_ for _k, v_ in REG_OVER)
+    # (the root's floor on the WHOLE objective, in whole vias: a re-solve's objective is the root's and more -- its cuts
+    # narrow the plans, its history and its cuts' prices add -- so no plan of it is cheaper. On the nets over two and the
+    # vias ALONE it was no floor: the root's plan had paid vias to keep the regions', gates' and room's prices down,
+    # and a re-solve was barred from a plan of fewer vias that paid them instead)
+    root = None
+    if hint and not CROWD:
+        r_ = json.load(open(hint)).get('root')
+        if r_ and r_.get('sig') == sig and r_.get('obj') is not None:
+            root = r_
+            m.Add(OBJ >= W_V * r_['obj'])
+            print(f"   the root's proof as a floor: {r_['obj']} vias' worth ({r_['over']} via(s) over two, "
+                  f"{r_['vias']} vias)")
     if CROWD:
         # (the diagnosis asks only for the fewest crowded lanes -- a whole via each, so the search stops, proved, as
         # soon as their count is)
@@ -2201,8 +2232,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         # (the root: this solve's own proof when it has no geometry cuts, else the one it was floored by -- never an
         # unproved plan's, which proves nothing)
         J['root'] = root if root is not None else \
-            ({'over': int(sum(sv.Value(over[n]) for n in M)), 'vias': int(sum(per.values()) - sum(drp.values())), 'sig': sig}
-             if not CUTS and not SOFT and NVC0 == 0 and proved else None)
+            ({'over': int(sum(sv.Value(over[n]) for n in M)), 'vias': int(sum(per.values()) - sum(drp.values())),
+              'obj': int(math.floor(sv.ObjectiveValue() / W_V + 1e-9)), 'sig': sig}
+             if not CUTS and not SOFT and NVC0 == 0 and proved and not CROWD else None)
         J['proved'] = bool(proved)
         if CROWD:
             J['crowded'] = [n for n in M if sv.Value(CROWD[n])]
@@ -2285,6 +2317,13 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         s_.parameters.num_workers = 1 if WLIT or RLIT else SOLVE_WORKERS        # (a core is one worker's)
         if WLIT or RLIT:
             m.AddAssumptions([m.GetBoolVarFromProtoIndex(i_) for i_ in sorted(WLIT)] + list(RLIT.values()))
+        else:
+            # (several workers REPRODUCIBLY, as the whole solve runs them: interleaved, sharing no clauses -- in parallel
+            # under a deterministic-time cap, a model near it read a plan on one run and none on the next, and the ends
+            # chose on the verdict)
+            s_.parameters.interleave_search = True
+            s_.parameters.share_glue_clauses = False
+            s_.parameters.share_binary_clauses = False
         s_.parameters.stop_after_first_solution = True
         s_.parameters.max_deterministic_time = CHECK_WORK
         st_ = s_.Solve(m)
@@ -2420,7 +2459,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         sw.parameters.fix_variables_to_their_hinted_value = True
         sw.parameters.max_deterministic_time = WARM_WORK
         if sw.Solve(m) in (cp_model.OPTIMAL, cp_model.FEASIBLE) and \
-                math.floor(sw.ObjectiveValue() / W_V) <= (W_OVER * root['over'] + W_V * root['vias']) // W_V:
+                math.floor(sw.ObjectiveValue() / W_V) <= root['obj']:
             warm = sw
     # ...and the warm start laid out whole is EVERY variable's hint: the round before's plan hints its crossings,
     # changes and layers, and the search found no plan of its own for 16 s on the two-end USB and Ethernet bus's
@@ -2479,7 +2518,11 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             sf_.parameters.share_glue_clauses = False
             sf_.parameters.share_binary_clauses = False
             sf_.parameters.stop_after_first_solution = first_ and one_
-            return sf_, sf_.Solve(model_)
+            # (in a process of its own, cp_seed.solve_apart: CP-SAT 9.15 dies in these solves on Linux -- the places'
+            # one-worker search stopped at its first plan, glibc reporting its heap corrupted as the search is taken
+            # down; the layer rule off, a segmentation fault in a worker's propagation -- and its death here ended the
+            # whole step, every stage of it. There it is a step with no plan, and the solve goes on as ever)
+            return cp_seed.solve_apart(model_, sf_)
         t1_ = time.time()
         m1_ = m.clone()
         for i_ in LAB_CT:

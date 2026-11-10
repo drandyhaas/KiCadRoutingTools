@@ -41,7 +41,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENABLED = awx_settings.get('PROBE_MEMO', '0') not in ('', '0')    # a harness's (evolve.py, the chains): off by default
 MEMO_DIR = awx_settings.get('PROBE_MEMO_DIR') or os.path.join(HERE, 'tmp', 'memo')
 KNOB_PREFIXES = ('BRAID_', 'PROBE_', 'PLAN_', 'TAUT_')
-KNOB_NAMES = ('DST_CLIMB', 'SRC_CLIMB')
+# (...and the settings the copper is laid at: the run's rules -- rules.SETTING, its sizes and clearance -- its routing
+# layers and its seed. Unkeyed, a probe laid at other rules or on other layers was read back as this run's)
+KNOB_NAMES = ('DST_CLIMB', 'SRC_CLIMB', 'AWX_RULES', 'ROUTE_LAYERS', 'BUS_SEED')
 
 _code_hash = None
 _stats = {'probe_hit': 0, 'probe_miss': 0, 'screen_hit': 0, 'screen_miss': 0,
@@ -60,12 +62,16 @@ def code_hash():
         _code_hash = 'pin:' + pin
         return _code_hash
     h = hashlib.sha1()
-    files = sorted(glob.glob(os.path.join(HERE, '*.py'))) + \
-        sorted(glob.glob(os.path.join(HERE, '..', 'py_router', '*.py')))
+    # (every .py under awx/, py_router/ and py_placer/, their packages too: the engine's fanout -- py_router/bga_fanout/,
+    # the engine replan's screen and probe -- and the placement the cap step runs live in subdirectories, and a glob of
+    # the top level alone served an edit there the verdicts of the code before it)
+    files = sorted(glob.glob(os.path.join(HERE, '*.py')))
+    for top in ('py_router', 'py_placer'):
+        files += sorted(glob.glob(os.path.join(HERE, '..', top, '**', '*.py'), recursive=True))
     for f in files:
         if os.path.basename(f) in ('evolve_movie.py',):
             continue
-        h.update(os.path.basename(f).encode())
+        h.update(os.path.relpath(f, os.path.join(HERE, '..')).encode())
         with open(f, 'rb') as fh:
             h.update(fh.read())
     try:

@@ -9,7 +9,7 @@
 2. escape_vias: off by default on any count of layers; 'dest' the destination's, 'both' both; anything else refused.
 3. relayer.run_to_via: a stub's run from its end back to its via, and that via; None short of a via or at a fork.
 4. relayer.clashes: another net's segment within the rule on a layer bans that layer, not one it is clear of; another
-   net's pad on F.Cu bans F.Cu; two runs that cross part; a run's own net bans nothing; a pair's legs one run, each
+   net's pad on F.Cu bans F.Cu, a tilted one by its copper turned; two runs that cross part; a run's own net bans nothing; a pair's legs one run, each
    held off its partner's pad and neck that stay (TX_D5_P moved onto F.Cu across TX_D5_N's ball).
 """
 import os
@@ -117,6 +117,16 @@ check(ban5.get('A') == {'F.Cu'}, 'another net\'s pad on F.Cu over the run bans F
 pcb6 = NS(segments=list(runA), vias=[], footprints={'U9': NS(pads=[pad(2.0, 0.2, 1)])})
 ban6, _ = relayer.clashes(pcb6, {'A': ({1}, runA)}, L3, CL)
 check(not ban6, 'the run\'s own net\'s pad bans nothing')
+# a pad turned 45 degrees (a 0402's 0.46 x 0.4, rect_rotation -45): its corner reaches 0.304 below its centre, where
+# its box on the board's axes stopped at 0.2 -- a run 0.375 below the centre 0.021 off its copper, 0.09 asked
+tilted = lambda y: NS(global_x=2.0, global_y=y, size_x=0.46, size_y=0.4, rect_rotation=-45.0, layers=['F.Cu'],
+                      pad_type='smd', net_id=7)
+banT, _ = relayer.clashes(NS(segments=list(runA), vias=[], footprints={'C1': NS(pads=[tilted(0.375)])}),
+                          {'A': ({1}, runA)}, L3, CL)
+check(banT.get('A') == {'F.Cu'}, 'a pad turned 45 degrees bans F.Cu where its corner comes within the rule')
+banT2, _ = relayer.clashes(NS(segments=list(runA), vias=[], footprints={'C1': NS(pads=[tilted(0.5)])}),
+                           {'A': ({1}, runA)}, L3, CL)
+check(not banT2, '...and nothing where its corner stays clear (0.146 off)')
 legP, legN = [seg(0, 0, 4, 0, 'B.Cu', 5)], [seg(0, 0.2, 4, 0.2, 'B.Cu', 6)]
 pcb7 = NS(segments=legP + legN, vias=[], footprints={})
 ban7, sep7 = relayer.clashes(pcb7, {'P': ({5, 6}, legP + legN)}, L3, CL)

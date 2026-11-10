@@ -22,6 +22,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+import pairs as _pairs  # noqa: E402
 
 
 def main():
@@ -84,8 +85,12 @@ def main():
                     continue
                 x, y = pd.global_x, my(pd.global_y)
                 if inside(x, y):
-                    ya, yb = sorted((y - pd.size_y / 2, y + pd.size_y / 2))
-                    d.rectangle([P(x - pd.size_x / 2, ya), P(x + pd.size_x / 2, yb)], fill=(205, 205, 225, 255))
+                    # (a tilted pad drawn turned, its corners on the board then mirrored with it)
+                    hx_, hy_, t_ = pd.size_x / 2, pd.size_y / 2, _pairs.pad_tilt(pd)
+                    d.polygon([P(pd.global_x + ox, my(pd.global_y + oy))
+                               for ox, oy in (_pairs.out_of_pad(lx, ly, t_)
+                                              for lx, ly in ((-hx_, -hy_), (hx_, -hy_), (hx_, hy_), (-hx_, hy_)))],
+                              fill=(205, 205, 225, 255))
         for sg in pcb.segments:
             if inside(sg.start_x, my(sg.start_y)) or inside(sg.end_x, my(sg.end_y)):
                 d.line([P(sg.start_x, my(sg.start_y)), P(sg.end_x, my(sg.end_y))],

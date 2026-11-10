@@ -67,6 +67,7 @@ import cp_seed  # noqa: E402
 PYR = os.path.normpath(os.path.join(HERE, '..', 'py_router'))
 PY = sys.executable
 PATIENCE = 2                               # the loop's rounds in a row without a new best
+HELD_DIVES = 2                             # a stopping loop's rounds more for its held plan's pairs (held_dives)
 INHERIT = object()                         # run(to=INHERIT): the command's output where the driver's own goes
 
 
@@ -114,6 +115,16 @@ def _stage_exit():
     if db is not None:
         db._memo_save(force=True)
         atexit.unregister(db._memo_report)
+    # ...and what a stage's process held and the next stage's never had, emptied: the cut phase's winding cuts judge
+    # prices at, the buses whose joint ends could not decide, the checks' memo (keyed with no seed, areas or finished
+    # buses) -- left, a round's ends were judged on an earlier round's cuts on another bench, and run in one process
+    # the chain chose otherwise than run as processes. (An array's last plan stays: the warm start checks it before it
+    # answers anything)
+    we = sys.modules.get('whole_ends')
+    if we is not None:
+        we.WIND_SEEN.clear()
+        we.JOINT_UNDECIDED.clear()
+        we._CHECK_MEMO.clear()
 
 
 def _inproc(argv, env, out_f, err_f):
@@ -128,23 +139,27 @@ def _inproc(argv, env, out_f, err_f):
     sys.argv = list(argv)
     sys.path.insert(0, os.path.dirname(os.path.abspath(argv[0])))
     rc = 0
-    with awx_settings.given(env), (_fds(out_f, err_f) if out_f is not None else contextlib.nullcontext()):
-        try:
-            runpy.run_path(argv[0], run_name='__main__')
-        except SystemExit as e:
-            if isinstance(e.code, str):         # sys.exit('why'): the interpreter prints it and exits 1
-                print(e.code, file=sys.stderr)
-            rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
-        except BaseException:
-            traceback.print_exc()
-            rc = 1
-        finally:
+    try:
+        with awx_settings.given(env), (_fds(out_f, err_f) if out_f is not None else contextlib.nullcontext()):
             try:
-                _stage_exit()
+                runpy.run_path(argv[0], run_name='__main__')
+            except SystemExit as e:
+                if isinstance(e.code, str):         # sys.exit('why'): the interpreter prints it and exits 1
+                    print(e.code, file=sys.stderr)
+                rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+            except Exception:
+                # (a stage's crash is its exit 1, as its own process's would be -- an interrupt is not: it stops the
+                # driver, as Ctrl-C stops a chain of processes)
+                traceback.print_exc()
+                rc = 1
             finally:
-                sys.stdout.flush(); sys.stderr.flush()
-    sys.argv = saved[0]
-    os.chdir(saved[1])
+                try:
+                    _stage_exit()
+                finally:
+                    sys.stdout.flush(); sys.stderr.flush()
+    finally:
+        sys.argv = saved[0]
+        os.chdir(saved[1])
     return rc
 
 
@@ -238,9 +253,9 @@ def loop_rounds():
 
 
 def lay_tries():
-    """the boards a loop that did not pass may lay (lay_rounds): LAY_TRY, else 2 -- the held plan's and one other
-    round's; 1 lays the held plan alone"""
-    return int(awx_settings.get('LAY_TRY') or '2')
+    """the boards a loop that did not pass may lay (lay_rounds): LAY_TRY where it is set -- N in all, 1 the held plan's
+    alone -- else 0, no limit: the held plan's, then every other round's until one lays with no net open"""
+    return int(awx_settings.get('LAY_TRY') or '0')
 
 
 class NotConverging(Exception):
@@ -297,7 +312,15 @@ def _tracks_of(bench, areas=None):
     it: an earlier bus's In2 run took a different lane of the bus each round. `areas`: the round's areas file
     (BUS_AREAS), its keep-outs listed after the board's as the audit lists them"""
     st_ = os.stat(bench)
-    key = (os.path.abspath(bench), st_.st_mtime_ns, st_.st_size, areas or '')
+    # (keyed by the bench -- and, negotiated, by the other buses' lanes as published now, JOINT_DIR/lanes: read once,
+    # a later round's cuts were made against those lanes as round 1 had them. The round's areas are added per call:
+    # in the key, the keep-out rows (with them) and the copper rows (without) re-parsed the board in turn)
+    jf_ = None
+    if awx_settings.get('JOINT_FOREIGN') and awx_settings.get('JOINT_DIR'):
+        jd_ = os.path.join(awx_settings.get('JOINT_DIR'), 'lanes')
+        jf_ = tuple(sorted((f_, os.stat(os.path.join(jd_, f_)).st_mtime_ns) for f_ in os.listdir(jd_)
+                           if f_.endswith('.json'))) if os.path.isdir(jd_) else ()
+    key = (os.path.abspath(bench), st_.st_mtime_ns, st_.st_size, awx_settings.get('JOINT_FOREIGN') or '', jf_)
     if key not in _TRACKS:
         import route_layers
         sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
@@ -329,14 +352,15 @@ def _tracks_of(bench, areas=None):
         ka_ = _pa.keepout_areas(pcb, lays)
         rnd = lambda P: [[round(float(x_), 4), round(float(my(y_)), 4)] for x_, y_ in P]
         box_ = lambda b_: [b_[0], min(my(b_[1]), my(b_[3])), b_[2], max(my(b_[1]), my(b_[3]))]
-        # (...and the agent's areas after them, in the plan's frame already -- the audit's K numbers: plan_audit)
-        with awx_settings.given({**awx_settings.environ(), 'BUS_AREAS': areas or ''}):
-            ar_ = _pa.bus_areas()
         _TRACKS.clear()
-        _TRACKS[key] = (dict(by), [box_(k_[3]) for k_ in ka_] + [list(a_[3]) for a_ in ar_],
-                        [(rnd(k_[0]), [rnd(h_) for h_ in k_[1]]) for k_ in ka_]
-                        + [([[round(float(x_), 4), round(float(y_), 4)] for x_, y_ in a_[0]], []) for a_ in ar_])
-    return _TRACKS[key]
+        _TRACKS[key] = (dict(by), [box_(k_[3]) for k_ in ka_], [(rnd(k_[0]), [rnd(h_) for h_ in k_[1]]) for k_ in ka_])
+    by_, kb_, ks_ = _TRACKS[key]
+    # (...and the agent's areas after the board's keep-outs, in the plan's frame already -- the audit's K numbers)
+    import plan_audit as _pa
+    with awx_settings.given({**awx_settings.environ(), 'BUS_AREAS': areas or ''}):
+        ar_ = _pa.bus_areas()
+    return (by_, kb_ + [list(a_[3]) for a_ in ar_],
+            ks_ + [([[round(float(x_), 4), round(float(y_), 4)] for x_, y_ in a_[0]], []) for a_ in ar_])
 
 
 _VIA_ENDS = {}      # (a bench file, its mtime and size) -> its single lanes' via ends {(lane, 0 tooth / 1 berth)}
@@ -702,18 +726,36 @@ def loop(solve, out, rounds, env, log):
     # every expensive stage through stage_cache.py -- on here, a harness's cache (STAGE_CACHE=0 runs them all)
     env['STAGE_CACHE'] = env.get('STAGE_CACHE') or '1'
     env['TAUT_MEMO'] = env.get('TAUT_MEMO') or '1'
+    # (the loop's directory its own: an earlier run's into it left plans, audits and the best round's record that this
+    # one read as its own -- the held plan, the feedback's hot files, the firm cuts known broken)
+    # (...never with what this loop is to read still in it -- its solve, a seed's cuts, flips or history: a loop asked
+    # to run again in the directory its own inputs stand in is refused, not run on what the clearing left)
+    solve = os.path.abspath(solve)
+    inside_ = [f_ for f_ in [solve] + [x_ for k_ in ('SEED_CUTS', 'SEED_FLIPS', 'SEED_HIST')
+                                       for x_ in (env.get(k_) or '').split(',') if x_]
+               if os.path.abspath(f_).startswith(os.path.abspath(out) + os.sep)]
+    if inside_:
+        log(f"=== the loop's directory {out} holds its own input ({os.path.basename(inside_[0])}): give it another")
+        return 1
+    if os.path.isdir(out):
+        shutil.rmtree(out)
     os.makedirs(out, exist_ok=True)
     O = lambda name: os.path.join(out, name)
-    solve = os.path.abspath(solve)
     st = dict(flips=env.get('SEED_FLIPS', ''), cuts=env.get('SEED_CUTS', ''), hist=env.get('SEED_HIST', ''),
               best=-1, best_i=0, stall=0, solve=solve)
     # (more routing layers than two, a relayed bench: each solve's plan on its own relayed bench -- the bench each
     # round's plans stand on, for the lay: plan_bench)
     benches = {}
+    seen = {}
 
     def bench_is(key):
         benches[key] = env['BENCH']
         json.dump(benches, open(O('benches.json'), 'w'), indent=1)
+
+    def keep_state():
+        # (each round's solve and flips, and every cut and history the loop holds: a loop run again on a repaired
+        # bench starts at this one's best round with them -- loop_seeds)
+        json.dump({'rounds': seen, 'cuts': st['cuts'], 'hist': st['hist']}, open(O('state.json'), 'w'), indent=1)
     # what a command inside the loop leaves unredirected: the round's loop.log in the chain, the terminal on its own
     err = log.f if log.f is not None else sys.stderr
     unredirected = log.f if log.f is not None else INHERIT
@@ -763,6 +805,15 @@ def loop(solve, out, rounds, env, log):
                 f"{PATIENCE} rounds without a better one")
             raise NotConverging
 
+    def scored(score, i):
+        """a round the loop STOPS at, scored as progress scores it and held where it is the best -- no stall counted, the
+        stop its caller's own. Stopped unscored, the round before stood as the plan the loop held (held_dives, the chain's
+        held_plan) though the stopping round had the fewer findings: its pairs were never tried, and the round before's,
+        with a dive the stopping round had moved clear, shipped a pair open"""
+        if st['best'] < 0 or score < st['best']:
+            st['best'], st['best_i'], st['stall'] = score, i, 0
+            json.dump({'i': i, 'score': score}, open(O('best.json'), 'w'))
+
     def resolve(i):
         """the solve again, warm, with every cut and every audit's history so far -- less an island cut a side flip has
         answered since (the flip puts that lane on the island's other side; the cut would keep holding it off the
@@ -780,7 +831,13 @@ def loop(solve, out, rounds, env, log):
             flipped = fl(st['flips'].split(','))
             cuts, vcuts, lcuts, ccuts = [], [], [], []
             for f in [f for f in st['cuts'].split(',') if f]:
-                c = json.load(open(f))
+                try:
+                    c = json.load(open(f))
+                except (OSError, ValueError):
+                    # (one cut file unreadable: the rest merged without it -- it used to fail the whole merge, and
+                    # every later re-solve ran with no cuts at all)
+                    traceback.print_exc(file=err)
+                    continue
                 # a cut from the geometry of round k whose flip that geometry had ALREADY been given (a polish of an
                 # earlier round found it, or the seed): both sides of the island failed -- the solve hears of it.
                 # Only a cut the flip answers, one from before it, is dropped (zynq K42: DQ10's cut at C98, made again
@@ -817,6 +874,12 @@ def loop(solve, out, rounds, env, log):
             # with ONE finding freed 14 lanes, holding the rest broke their cuts, and it widened to 37, 209 s. Only a
             # round whose audits name no lane frees the lanes the cuts name, as before)
             free_ = round_lanes(None, O(f'p{i}.audit'))
+            # (...and, the smooth plan passed and the singles did not fit round the pairs laid first, what those audits
+            # name -- the pairs held, and laid again keeping the singles' room. Unread, the smooth audit named nothing,
+            # the cut lanes went free, and the diving pair stayed held where it dove: the same finding three rounds
+            # running, and the loop stopped not converging)
+            for qa_ in (f'q{i}.audit', f'qk{i}.audit'):
+                free_ |= round_lanes(None, O(qa_))
             if os.path.isfile(O(f'hs{i}.json')):
                 # (the round's SNAPPED plan did not pass: what its audit, its lint and the snap's layer cuts name)
                 free_ |= round_lanes(O(f'lc{i}.json'), O('plan.found'))
@@ -949,8 +1012,55 @@ def loop(solve, out, rounds, env, log):
         if env.get('BENCH0'):
             env['BENCH'] = relay_ends(out, env['BENCH0'], json.load(open(s2)), log, name=f'bench{i + 1}', env=env)
 
-    def body():
-        for i in range(1, rounds + 1):
+    def held_dives(i):
+        """A loop stopping without a pass (crowded ends, not converging) is laid from the plan it holds (held_plan),
+        whose pairs are laid first as the snap moves them: a pair the snap cannot lay at a dive ships open. Such a dive
+        goes to the solve as a via cut (whole_snap's dive_cuts), as a passing round's does (smooth_passes), and the loop
+        goes on a round -- HELD_DIVES times at most -- and the round after it is held where its pairs all lay. The held
+        round's pairs laid first here are the held plan's (held_plan reads them). True when the loop goes on"""
+        hd_ = st.get('hd_from')
+        k = st['best_i'] if not hd_ or st['best_i'] >= hd_ else i
+        if not k or not os.path.isfile(O(f'p{k}.json')):
+            return False
+        pairs_, pl_ = O(f'hd{k}_pairs.json'), O(f'hd{k}_pairs.log')
+        if not os.path.isfile(pairs_):
+            if stage([pairs_], 'whole_snap.py', [O(f'p{k}.json'), pairs_, '--pairs'], pl_,
+                     BENCH=benches.get(str(k), env['BENCH'])) != 0 and not grep(pl_, r'^SNAP FAILED'):
+                return False
+        bad_ = grep(pl_, r'^SNAP FAILED')
+        if not bad_:
+            if k != st['best_i']:
+                # (its pairs all laid where the held round's did not: this round the plan the chain lays)
+                json.dump({'i': k, 'score': st['best'], 'snap': st['best_i']}, open(O('best.json'), 'w'))
+                log(f"  the plan held: round {k}'s, its pairs all laid (round {st['best_i']}'s were not)")
+            return False
+        # (...the cuts of the pairs stuck AT a dive: within the snap's widest reach of a via, RVIA_WIDE, of one of the
+        # plan's. A pair stuck at its start, every dive of it far along the lane, is no dive's to move -- a plain bus
+        # in turn, its five pairs stuck within 2 mm of their teeth by the buses before, each dive 15 mm on)
+        import braid as bd_
+        try:
+            hp_ = json.load(open(pairs_))
+            pv_ = json.load(open(O(f'p{k}.json'))).get('vias') or []
+        except (OSError, ValueError):
+            hp_, pv_ = {}, []
+        at_ = {c_['lanes'][0]: c_['xy'] for c_ in hp_.get('conflicts', []) if c_.get('lanes')}
+        d = [c_ for c_ in hp_.get('dive_cuts', []) if c_['lane'] in at_ and min(
+             (math.hypot(v_[1] - at_[c_['lane']][0], v_[2] - at_[c_['lane']][1]) for v_ in pv_ if v_[0] == c_['lane']),
+             default=math.inf) <= 6 * bd_.LANE_MIN]
+        if not d or st.get('hd', 0) >= HELD_DIVES or i >= rounds:
+            log(f"  the held round {k}'s pairs: {bad_[-1].split(': ', 1)[-1]}"
+                + ('' if d else ' -- none stuck at a dive of its own'))
+            return False
+        json.dump(own_spans({'vcuts': d}, json.load(open(O(f'g{k}.json')))), open(O(f'dc{i}.json'), 'w'))
+        st['cuts'] = (st['cuts'] + ',' if st['cuts'] else '') + O(f'dc{i}.json')
+        st['hd'], st['hd_from'] = st.get('hd', 0) + 1, i + 1
+        log(f"=== round {i}: the held round {k}'s pairs: {bad_[-1].split(': ', 1)[-1]} -- the solve again, "
+            f"{len(d)} dive(s) moved (via cuts)")
+        return resolve(i) is None
+
+    def body(start=1):
+        for i in range(start, rounds + 1):
+            st['cur'] = i
             if i > 1 and env.get('JOINT_DIR') and env.get('JOINT_BUS') and env.get('JOINT_ROUND') and \
                     st.get('xdone') != i - 1:
                 # (negotiated buses: round i - 1 went on without a solve again -- its new side flips, the geometry
@@ -960,6 +1070,8 @@ def loop(solve, out, rounds, env, log):
                 os.remove(O(f'hp{i}.json'))    # (a round that passes writes none: an earlier run's must not stand in)
             flips = st['flips']
             bench_is(str(i))
+            seen[str(i)] = {'solve': st['solve'], 'flips': flips}
+            keep_state()
             log(f"=== round {i}: geometry of {os.path.basename(st['solve'])}"
                 + (f" (flips from {os.path.basename(flips.split(',')[-1])})" if flips else ''))
             g, p = O(f'g{i}.json'), O(f'p{i}.json')
@@ -1023,7 +1135,10 @@ def loop(solve, out, rounds, env, log):
                     and (awx_settings.get('LOOP_NOW') or '1') == '1'
                     and run(['whole_feedback.py', '--now', sidecar, hp], env, to=unredirected)[0] == 0):
                 # ...and at once, when a finding there is one no solve moves (a pitch or a static clearance at the ends)
+                scored(2000 + f, i)
                 log(f"=== round {i}: ENDS CROWDED -- findings at the ends no solve moves: the fanout's to change")
+                if held_dives(i):
+                    continue
                 return 4
             # (two rounds running, the layer cuts excuse nothing: the finding stood through the solve that had the round
             # before's, so they did not move it. On the two-end USB and Ethernet bus every round had a layer cut at a
@@ -1032,8 +1147,11 @@ def loop(solve, out, rounds, env, log):
             if (not passes and not newflips and i > 1 and os.path.isfile(hp0) and os.path.isfile(hp)
                     and os.path.isfile(sidecar)
                     and run(['whole_feedback.py', '--repeat', sidecar, hp0, hp], env, to=unredirected)[0] == 0):
+                scored(2000 + f, i)
                 log(f"=== round {i}: ENDS CROWDED -- the same findings at the ends two rounds running: "
                     f"the fanout's to change")
+                if held_dives(i):
+                    continue
                 return 4
             if after > before:
                 progress(2000 + f, i, fresh=True)
@@ -1090,7 +1208,9 @@ def loop(solve, out, rounds, env, log):
                 log(f"=== round {i}: a pair cannot be laid")
                 return 1
             progress(1500, i)
-            st['cuts'] = (st['cuts'] + ',' if st['cuts'] else '') + O(f'dc{i}.json')
+            if os.path.isfile(O(f'dc{i}.json')):
+                # (a cut file is added only once written: one missing failed every merge after it, resolve)
+                st['cuts'] = (st['cuts'] + ',' if st['cuts'] else '') + O(f'dc{i}.json')
             log(f"=== round {i}: a pair cannot be laid at a dive -> the solve again, {nd if nd is not None else ''} "
                 f"dive(s) moved (via cuts)")
             rc = resolve(i)
@@ -1135,6 +1255,9 @@ def loop(solve, out, rounds, env, log):
                 st['flips'] = (st['flips'] + ',' if st['flips'] else '') + qf
                 log(f"  pairs held: {nq} new side flip(s) for the next geometry")
             progress(1000 + findings(gq), i, fresh=nq != 0)
+            # (...and the pairs laid again's findings, where they were laid again: theirs are places too)
+            if os.path.isfile(O(f'qk{i}.json')) and os.path.isfile(O(f'qk{i}.audit')):
+                addhot(O(f'qk{i}.json'), O(f'qk{i}.audit'), O(f'hqk{i}.json'))
             if not addhot(q, O(f'q{i}.audit'), O(f'hq{i}.json')):
                 log(f"=== round {i}: the singles do not fit round the pairs")
                 return 1
@@ -1149,6 +1272,9 @@ def loop(solve, out, rounds, env, log):
             return failed(sl)
         for ln in grep(sl, r'^snap:|FAILED'):
             log('  ' + ln)
+        if os.path.isfile(plan):
+            # (each round's snapped plan kept as its own: plan.json is the last round's, and held_plan holds the BEST)
+            shutil.copyfile(plan, O(f'plan{i}.json'))
         joint_publish(env, plan, 'snap')
         if stage([], 'whole_audit.py', [plan], O('plan.audit')) != 0:
             return failed(O('plan.audit'))
@@ -1182,10 +1308,16 @@ def loop(solve, out, rounds, env, log):
         return 'continue' if rc is None else rc
 
     try:
-        return body()
-    except NotConverging:
-        return 3
+        start_ = 1
+        while True:
+            try:
+                return body(start_)
+            except NotConverging:
+                if not held_dives(st['cur']):
+                    return 3
+                st['stall'], start_ = 0, st['cur'] + 1
     finally:
+        keep_state()
         if env.get('JOINT_ROUND'):
             joint_pos(env, (int(env['JOINT_ROUND']), int(env.get('JOINT_LOOP') or '1'), LOOP_END))
 
@@ -1337,11 +1469,17 @@ def relay_ends(d, bench, J, say, name='fo_layers', env=None):
                        for s_ in runs_.get(m_, ()) for t_ in (0.0, 0.25, 0.5, 0.75, 1.0)) or \
                 math.hypot(x - m_[1][0], y - m_[1][1]) < route_bus.WALL_NEAR
         kept_, keep_ = set(), list(moves)
+        # (a ball the round already took as walled -- no plan stood without the layers banned for it, WALLS_STAND: its
+        # runs laid as planned, not asked again)
+        stand_ = {k_ for k_ in ((env or {}).get('WALLS_STAND') or '').split(',') if k_}
         for _w in range(_ffp.WALL_RETRIES):
-            walls_ = route_bus.walls_made(bench, out, refs_, list(full_.values()),
-                                          [full_[n_] for n_ in moved if n_ in full_])
+            walls_ = {k_: v_ for k_, v_ in route_bus.walls_made(
+                bench, out, refs_, list(full_.values()), [full_[n_] for n_ in moved if n_ in full_]).items()
+                if k_ not in stand_}
             if not walls_:
                 break
+            if env is not None:
+                env['WALLS_LAST'] = ','.join(sorted(walls_))
             pads_ = {f'{r_}.{p_.pad_number}': p_ for r_ in refs_ for p_ in pcb_.footprints[r_].pads}
             grp_ = {m_[4] for k_ in walls_ if k_ in pads_ for m_ in keep_
                     if near_(m_, pads_[k_].global_x, pads_[k_].global_y)}
@@ -1387,6 +1525,17 @@ def relayed(d, bench, J, env, say, name='fo_layers'):
     return bench
 
 
+def loop_seeds(loopd):
+    """where a stopped loop got (its state.json and best.json), for the loop run again on its repaired bench: (the
+    solve its best round planned from, {SEED_CUTS, SEED_HIST: every cut and history it held, SEED_FLIPS: that round's
+    flips}). Run again from the round's first solve, a loop found its cuts again or did not: a DRAM bus's, whose best
+    round failed only on the 0402 moved off its lane, held one dive three rounds on the repaired bench and laid 1 open"""
+    k = json.load(open(os.path.join(loopd, 'best.json')))['i']
+    s_ = json.load(open(os.path.join(loopd, 'state.json')))
+    r_ = s_['rounds'][str(k)]
+    return r_['solve'], {'SEED_CUTS': s_['cuts'], 'SEED_FLIPS': r_['flips'], 'SEED_HIST': s_['hist']}
+
+
 def repair_ends(d, loopd, env, nets, say):
     """A loop stopped at CROWDED ENDS on STATIC findings (a lane too close, at its tooth, to copper the solve cannot
     move) has the round's fanout bench repaired where they stand, one lane at a time, before the round gives the ends
@@ -1398,7 +1547,10 @@ def repair_ends(d, loopd, env, nets, say):
       layer): the lane's own ball escaped again (ends_reescape), off that layer when the finding is on the tooth's own
       -- a lane that dives right past its tooth meets the copper on the layer it dives to, and the escape that clears it
       may be the one ON that layer.
-    A pair's own end, and at the berths anything but another net's via, are left to the next round. Each move is checked
+    - a movable passive's pad (a two-pad C/R/FB part by an array) at either end, a pair's dive against it too: the
+      part moved a short way off the lane's copper (ends_passive).
+    A pair's own end otherwise, and at the berths anything but another net's via or such a part, are left to the next
+    round. Each move is checked
     on the fanout's own obstacle model and chained on the last one's bench; a nudge refused for copper already clear as
     laid (the finding is another copper's) moves nothing. Measured on DDR and two-end buses on four and eight layers,
     the loop run again on the repaired ends: a round that stopped crowded passed in that round with fewer vias (a GND
@@ -1408,14 +1560,24 @@ def repair_ends(d, loopd, env, nets, say):
     if PYR not in sys.path:
         sys.path.insert(0, PYR)
     from kicad_parser import parse_kicad_pcb
-    # (the lanes whole_feedback named at the stop: '  STATIC LANE[/LANE] at the teeth|berths')
-    named = [(ln_, w_) for l_, w_ in re.findall(r'^  STATIC (\S+) at the (teeth|berths)',
+    # (the lanes whole_feedback named at the stop: '  STATIC|DIVE LANE[/LANE] at the teeth|berths')
+    named = [(ln_, w_) for l_, w_ in re.findall(r'^  (?:STATIC|DIVE) (\S+) at the (teeth|berths)',
                                                  open(os.path.join(d, 'loop.log')).read(), re.M) for ln_ in l_.split('/')]
     if not named:
         return None
     # (the stopping round's audit: the round of the last hot file, whose findings whole_feedback read)
     hps = sorted(glob.glob(os.path.join(loopd, 'hp[0-9]*.json')), key=lambda f_: int(re.sub(r'\D', '', os.path.basename(f_))))
     i_ = re.sub(r'\D', '', os.path.basename(hps[-1])) if hps else None
+    # (...but the round the loop GOES ON FROM, where it holds another: the loop run again starts at its best round's
+    # solve (loop_seeds), and the bench is repaired for THAT plan's copper. A pair's dive stood half a millimetre from
+    # one round's geometry to the next at one route place; the cap moved clear of the stopping round's dive was moved
+    # into the held round's, whose pairs had all laid, and the pair shipped open)
+    try:
+        b_ = str(json.load(open(os.path.join(loopd, 'best.json')))['i'])
+        if os.path.isfile(os.path.join(loopd, f'p{b_}.audit')):
+            i_ = b_
+    except (OSError, ValueError, KeyError):
+        pass
     aud = os.path.join(loopd, f'p{i_}.audit') if i_ else None
     if not aud or not os.path.isfile(aud):
         say('  crowded ends: no audit of the stopping round')
@@ -1427,15 +1589,28 @@ def repair_ends(d, loopd, env, nets, say):
         if m_:
             L_ = {'F': 'F.Cu', 'B': 'B.Cu'}.get(m_.group(2), m_.group(2))
             rows.append((float(m_.group(3)) - float(m_.group(4)), m_.group(1), L_, m_.group(5), m_.group(6).split(),
-                         (float(m_.group(7)), float(m_.group(8)))))
+                         (float(m_.group(7)), float(m_.group(8))), False))
+        # (...and a pair's DIVE short of static copper: 'DIVE LANE (x,y) pair static d/bar (KIND OBJ ...)', on every
+        # layer -- its barrels stand through them all)
+        m_ = re.match(r'^DIVE (\S+)\s+\(\s*([-\d.]+),\s*([-\d.]+)\)\s+pair\s+static ([-+]?[\d.]+)/([\d.]+) '
+                      r'\((copper|via|pad|hole|keepout) ([^)]+)\)', ln)
+        if m_:
+            rows.append((float(m_.group(4)) - float(m_.group(5)), m_.group(1), None, m_.group(6), m_.group(7).split(),
+                         (float(m_.group(2)), float(m_.group(3))), True))
+    dive_off = next((float(m_.group(1)) for ln in lines_of(aud)
+                     for m_ in [re.search(r'two barrels ([\d.]+) either side', ln)] if m_), None)
     bench0 = env.get('BENCH0') or env['BENCH']
     side = json.load(open(os.path.splitext(bench0)[0] + '.plan.json'))
     # (the audit's points are the plan's: on a board of the other chirality turned over, mirrored back to the board's)
-    CY = None
+    # (...and its layers the plan's too: turned over, F and B change places -- the board's layer is the other one)
+    CY, OL = None, (lambda L_: L_)
     if int(side.get('chi', 1)) < 0:
-        from bga_fanout.flip_frame import mirror_axis
-        CY = mirror_axis(parse_kicad_pcb(bench0))
-    pcbB = parse_kicad_pcb(env['BENCH'])
+        from bga_fanout.flip_frame import mirror_axis, other_layer
+        CY, OL = mirror_axis(parse_kicad_pcb(bench0)), other_layer
+    # (the stopping round's OWN bench -- on more routing layers than two each re-solve's ends relayed afresh, bench{i}:
+    # the copper the audit measured stands there, not on the round's first relay)
+    bench_r = plan_bench(loopd, f'p{i_}.json', env['BENCH'])
+    pcbB = parse_kicad_pcb(bench_r)
     from coherent_nets import namer
     sn = namer(pcbB)
     n2n = {i: sn(n.name) for i, n in pcbB.nets.items()}
@@ -1445,16 +1620,68 @@ def repair_ends(d, loopd, env, nets, say):
         L2 = (b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2
         t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * (b[0] - a[0]) + (p[1] - a[1]) * (b[1] - a[1])) / L2))
         return math.hypot(a[0] + t * (b[0] - a[0]) - p[0], a[1] + t * (b[1] - a[1]) - p[1])
+    # (a lane's rows AT THE END whole_feedback named -- in the box of the run's ends there (every lane's teeth, or its
+    # berths, on the bench's sidecar) grown by the front of a face, whole_feedback.FRONT: its worst row anywhere nudged
+    # a tooth for a finding mid-route or at the other end, an exit 4 that moved nothing that was found)
+    import braid as _bd_
+    reach_ = 2 * _bd_.VIA_NEED + _bd_.LANE_MIN
+    bxy_ = lambda q: (q[0], (2 * CY - q[1]) if CY is not None else q[1])     # noqa: E731
+
+    # (ends_near: whole_feedback's own test. A box of the ends grown by the front of a face, the repair's test before,
+    # stopped short of the feedback's beside a side face, where a finding counts within the width the face's lanes
+    # stack to: a memory lane's tooth 1.3 mm from a flash part's pad beside the array was named at the teeth, the
+    # repair found "no STATIC row of it there", and the loop ran again on the same ends to the same finding)
+    import ends_near as _en
+    ends_ = {n_: e_ for n_, e_ in (side.get('ends') or {}).items() if e_ and len(e_) > 1}
+    bxs_ = _en.boxes(ends_, side.get('dest_of') or {}) if ends_ else None
     cur, k, moved, blocked = bench0, 0, [], []
     for lane, where in dict.fromkeys(named):
         mine = sorted(r_ for r_ in rows if r_[1] == lane)
         if not mine:
             say(f"  crowded ends: {lane} at the {where}: no STATIC row of it in {os.path.basename(aud)}")
             continue
-        short, _, L, kind, obj, p0 = mine[0]             # (its worst row)
+        if bxs_ is not None:
+            mine = [r_ for r_ in mine if _en.near(ends_, bxs_, 0 if where == 'teeth' else 1, *bxy_(r_[5]), reach_,
+                                                  _bd_.LANE_MIN)]
+            if not mine:
+                say(f"  crowded ends: {lane} at the {where}: no STATIC row of it there in {os.path.basename(aud)}")
+                continue
+        short, _, L, kind, obj, p0, dive = mine[0]             # (its worst row)
+        pp_ = p0
         p0 = (p0[0], (2 * CY - p0[1]) if CY is not None else p0[1])
+        L = OL(L) if L else None
         net = obj[-1] if kind in ('pad', 'hole') else obj[0]
-        label = f"{kind} {' '.join(obj)} on {L} {short:+.3f}"
+        label = f"{'dive ' if dive else ''}{kind} {' '.join(obj)} on {L or 'every layer'} {short:+.3f}"
+        if kind == 'pad' and '.' in obj[0]:
+            # A PASSIVE's pad (a two-pad C/R/FB part by an array, unlocked: the cap step's own): the part moved off
+            # the copper the lane needs there (ends_passive) -- a decoupling cap in front of the destination's face,
+            # where its pairs dive to their berths, moves where no solve moves the dive past it. Only what the cap step
+            # itself would move; anything else goes on below as before
+            pref_ = obj[0].split('.', 1)[0]
+            flags_ = []
+            if dive and dive_off:
+                xy_ = (json.load(open(os.path.join(loopd, f'p{i_}.json'))).get('lanes', {}).get(lane) or {}).get('xy')
+                if xy_ and len(xy_) > 1:
+                    k_ = min(range(len(xy_) - 1), key=lambda q_: seg_d(pp_, xy_[q_], xy_[q_ + 1]))
+                    ux_, uy_ = xy_[k_ + 1][0] - xy_[k_][0], xy_[k_ + 1][1] - xy_[k_][1]
+                    flags_ = [f'--dive={dive_off:.4f},{ux_:.4f},{-uy_ if CY is not None else uy_:.4f}']
+            if not dive or flags_:
+                out_ = os.path.join(d, f'fo_ends{k}.kicad_pcb')
+                rc_ = run(['ends_passive.py', out_, pref_, f'{p0[0]:.4f},{p0[1]:.4f}'] + flags_,
+                          {**env, 'BENCH0': cur, 'BENCH': bench_r}, log_path=os.path.join(d, f'ends{k}.log'),
+                          own_process=True)[0]
+                got = grep(os.path.join(d, f'ends{k}.log'), r'^ends_passive: .*(moved|not moved|no passive|grazes|exited)')
+                k += 1
+                if rc_ != 2:
+                    say(f"  crowded ends: {lane} at the {where}: {label} -- "
+                        + (got[-1].split(': ', 1)[1][:150] if got else f'exit {rc_}'))
+                    if rc_ == 0 and os.path.isfile(out_):
+                        cur = out_
+                        moved.append(lane)
+                    continue
+        if dive:
+            say(f"  crowded ends: {lane} at the {where}: {label} -- left to the next round")
+            continue
         locked, at = False, None
         if kind == 'via':
             vv = [v for v in pcbB.vias if n2n.get(v.net_id) == net]
@@ -1482,7 +1709,8 @@ def repair_ends(d, loopd, env, nets, say):
                                                            else [])
         out_ = os.path.join(d, f'fo_ends{k}.kicad_pcb')
         args_ = [out_, who] + ([f'{p0[0]:.4f},{p0[1]:.4f}'] if tool == 'ends_nudge.py' else []) + flags
-        rc_ = run([tool] + args_, {**env, 'BENCH0': cur}, log_path=os.path.join(d, f'ends{k}.log'), own_process=True)[0]
+        rc_ = run([tool] + args_, {**env, 'BENCH0': cur, 'BENCH': bench_r}, log_path=os.path.join(d, f'ends{k}.log'),
+                  own_process=True)[0]
         got = grep(os.path.join(d, f'ends{k}.log'), r'^ends_(nudge|reescape): .*(moved|NO |re-escaped|no escape|goal is met)')
         say(f"  crowded ends: {lane} at the {where}: {label} -- "
             + (got[-1].split(': ', 1)[1][:150] if got else f'exit {rc_}'))
@@ -1494,6 +1722,89 @@ def repair_ends(d, loopd, env, nets, say):
         k += 1
     if blocked:
         put_blocked(os.path.join(os.path.dirname(d), BLOCKED_ENDS), side, blocked, say)
+    if not moved:
+        return None
+    return cur, os.path.join(d, 'loop_ends')
+
+
+PASSIVE_MOVES = 3              # parts repair_passives moves for a stopped loop at most
+
+
+def repair_passives(d, loopd, env, say):
+    """A loop that stopped WITHOUT PASSING (not converging, or at crowded ends repair_ends moved nothing for) on a
+    finding against a MOVABLE PASSIVE's pad -- a lane, or a pair's dive, too close to a pad of a two-pad C/R/FB part by
+    an array, in its last two rounds' audits (smooth, pairs held, pairs laid again) -- has that part moved a short way
+    off the copper the lane needs there (ends_passive, which moves only what the cap step itself would), PASSIVE_MOVES
+    parts at most, nearest the finding's own round first, and the loop run again on the repaired bench: no solve moves
+    a part, and the loop stopped with it in the way (an 0402 termination resistor beside the destination, a DRAM data
+    lane 0.07 mm short of its pad, the same finding three rounds running). (the repaired bench, the loop directory for
+    its new loop), or None when nothing moved"""
+    from kicad_parser import parse_kicad_pcb
+    rounds_ = sorted({int(m_.group(1)) for f_ in glob.glob(os.path.join(loopd, '*.audit'))
+                      for m_ in [re.search(r'[\\/](?:p|q|qk)(\d+)\.audit$', f_)] if m_})
+    found, dive_off = {}, None
+    for i_ in rounds_[-2:]:
+        for nm_ in (f'p{i_}', f'q{i_}', f'qk{i_}'):
+            aud = os.path.join(loopd, nm_ + '.audit')
+            if not os.path.isfile(aud):
+                continue
+            for ln in lines_of(aud):
+                m_ = re.search(r'two barrels ([\d.]+) either side', ln)
+                if m_:
+                    dive_off = float(m_.group(1))
+                m_ = re.match(r'^STATIC (\S+)\s+(?:[FB]|In\d+\.Cu) ([-+]?[\d.]+)/([\d.]+) pad (\S+)\.\S+ \S+ '
+                              r'at \(([-\d.]+),\s*([-\d.]+)\)', ln)
+                if m_:
+                    found[m_.group(4)] = dict(lane=m_.group(1), short=float(m_.group(2)) - float(m_.group(3)),
+                                              at=(float(m_.group(5)), float(m_.group(6))), dive=False, i=i_, plan=nm_)
+                    continue
+                m_ = re.match(r'^DIVE (\S+)\s+\(\s*([-\d.]+),\s*([-\d.]+)\)\s+pair\s+static ([-+]?[\d.]+)/([\d.]+) '
+                              r'\(pad (\S+)\.\S+', ln)
+                if m_:
+                    found[m_.group(6)] = dict(lane=m_.group(1), short=float(m_.group(4)) - float(m_.group(5)),
+                                              at=(float(m_.group(2)), float(m_.group(3))), dive=True, i=i_, plan=nm_)
+    # (a two-pad passive's reference: letters then a number -- an array's ball names its part U.., a pin a connector's)
+    found = {r_: f_ for r_, f_ in found.items() if re.match(r'^(C|R|FB|L)\d+$', r_)}
+    if not found:
+        return None
+    bench0 = env.get('BENCH0') or env['BENCH']
+    side = json.load(open(os.path.splitext(bench0)[0] + '.plan.json'))
+    CY = None
+    if int(side.get('chi', 1)) < 0:
+        from bga_fanout.flip_frame import mirror_axis
+        with contextlib.redirect_stdout(io.StringIO()):
+            CY = mirror_axis(parse_kicad_pcb(bench0))
+
+    def seg_d(p, a, b):
+        L2 = (b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2
+        t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * (b[0] - a[0]) + (p[1] - a[1]) * (b[1] - a[1])) / L2))
+        return math.hypot(a[0] + t * (b[0] - a[0]) - p[0], a[1] + t * (b[1] - a[1]) - p[1])
+    cur, moved, k = bench0, [], 0
+    for ref_, f_ in sorted(found.items(), key=lambda kv: (-kv[1]['i'], kv[1]['short']))[:PASSIVE_MOVES]:
+        p0 = (f_['at'][0], (2 * CY - f_['at'][1]) if CY is not None else f_['at'][1])
+        flags_ = []
+        if f_['dive']:
+            pf_ = os.path.join(loopd, f_['plan'] + '.json')
+            xy_ = (json.load(open(pf_)).get('lanes', {}).get(f_['lane']) or {}).get('xy') \
+                if os.path.isfile(pf_) else None
+            if not (xy_ and len(xy_) > 1 and dive_off):
+                continue
+            q_ = min(range(len(xy_) - 1), key=lambda q: seg_d(f_['at'], xy_[q], xy_[q + 1]))
+            ux_, uy_ = xy_[q_ + 1][0] - xy_[q_][0], xy_[q_ + 1][1] - xy_[q_][1]
+            flags_ = [f'--dive={dive_off:.4f},{ux_:.4f},{-uy_ if CY is not None else uy_:.4f}']
+        out_ = os.path.join(d, f'fo_parts{k}.kicad_pcb')
+        rc_ = run(['ends_passive.py', out_, ref_, f'{p0[0]:.4f},{p0[1]:.4f}'] + flags_,
+                  {**env, 'BENCH0': cur, 'BENCH': plan_bench(loopd, f"p{f_['i']}.json", env['BENCH'])},
+                  log_path=os.path.join(d, f'parts{k}.log'), own_process=True)[0]
+        got = grep(os.path.join(d, f'parts{k}.log'), r'^ends_passive: .*(moved|not moved|no passive|grazes|exited)')
+        k += 1
+        if rc_ == 2:
+            continue
+        say(f"  a stopped loop's part: {f_['lane']} {'dive ' if f_['dive'] else ''}against {ref_} "
+            f"{f_['short']:+.3f} (round {f_['i']}) -- " + (got[-1].split(': ', 1)[1][:150] if got else f'exit {rc_}'))
+        if rc_ == 0 and os.path.isfile(out_):
+            cur = out_
+            moved.append(ref_)
     if not moved:
         return None
     return cur, os.path.join(d, 'loop_ends')
@@ -1590,8 +1901,19 @@ def held_plan(loopd, env, i=None):
     by the round's number"""
     O = lambda name: os.path.join(loopd, name)
     pre = 'held_' if i is None else f'held{i}_'
-    if i is None and os.path.isfile(O('plan.json')):
-        return O('plan.json')
+    if i is None:
+        # (the BEST round's snapped plan, plan{i}.json -- a round that got to the snap scores below any that did not,
+        # so the best round is a snapped one wherever any was. plan.json alone is the LAST round's: held so, a loop
+        # whose round 2 snapped with two findings and round 4 with nine laid round 4, and the lays after it left the
+        # best round out as the one laid)
+        try:
+            bi_ = int(json.load(open(O('best.json')))['i'])
+        except (OSError, ValueError, KeyError, TypeError):
+            bi_ = None
+        if bi_ is not None and os.path.isfile(O(f'plan{bi_}.json')):
+            return O(f'plan{bi_}.json')
+        if os.path.isfile(O('plan.json')):
+            return O('plan.json')
     # (either separator: glob and os.path.join give '\' on Windows, and a '/'-only match there held no round at all)
     ps = sorted((f for f in glob.glob(O('p*.json')) if re.search(r'[\\/]p\d+\.json$', f)),
                 key=lambda f: int(re.search(r'[\\/]p(\d+)\.json$', f).group(1)))
@@ -1619,7 +1941,14 @@ def held_plan(loopd, env, i=None):
         if i is None:
             bs['held'] = rb
             json.dump(bs, open(O('benches.json'), 'w'), indent=1)
-    run(['whole_snap.py', src, O(pre + 'pairs.json'), '--pairs'], env, log_path=O(pre + 'pairs.log'))
+    m_ = re.search(r'[\\/]p(\d+)\.json$', src)
+    hd_ = O(f'hd{m_.group(1)}_pairs.json') if m_ else None
+    if hd_ and os.path.isfile(hd_) and not grep(hd_[:-len('.json')] + '.log', r'^SNAP FAILED'):
+        # (the loop's own pairs of that round, every one laid at its stop on the same bench: loop's held_dives)
+        shutil.copyfile(hd_, O(pre + 'pairs.json'))
+        shutil.copyfile(hd_[:-len('.json')] + '.log', O(pre + 'pairs.log'))
+    else:
+        run(['whole_snap.py', src, O(pre + 'pairs.json'), '--pairs'], env, log_path=O(pre + 'pairs.log'))
     if os.path.isfile(O(pre + 'pairs.json')) and \
             run(['whole_polish.py', O(pre + 'pairs.json'), O(pre + 'q.json')], env, log_path=O(pre + 'q.log'))[0] == 0:
         src = O(pre + 'q.json')
@@ -1684,16 +2013,18 @@ def pick_by_snap(loopd, env, plan, say):
 
 
 def lay_rounds(loopd, d, env, res, lay_, say, plan=None):
-    """N = lay_tries() (LAY_TRY, else 2; 1 off): a loop that did not pass chooses its round by the LAY, not by its
-    findings. The held round laid with nets open (`res`, lay_'s result), the loop's other rounds' smooth plans, fewest
-    findings first, each snapped as the held one is (held_plan) and laid (lay_(plan, tag) -> a result, or None) -- N
-    boards in all (a plan that lays none not counted), stopping at the first with no net open; the best by the lay's
-    own key (open nets, DRC, vias, copper) kept, its board and logs copied over the held one's names in `d`. Measured on the
-    zynq LVDS: the held round laid 10, 3, 2 and 2 open where the loop's best round laid 6, 0, 2 and 2 -- the findings
-    count a static clearance the snap goes round and a detour not at all. (`plan`: the probe LOOP_PICK_SNAP's held
-    plan in the held round's place)"""
+    """a loop that did not pass chooses its round by the LAY, not by its findings. The held round laid with nets open
+    (`res`, lay_'s result), the loop's other rounds' smooth plans, fewest findings first, each snapped as the held one
+    is (held_plan) and laid (lay_(plan, tag) -> a result, or None), stopping at the first with no net open -- every
+    round the loop ran where it must (lay_tries: LAY_TRY=N, N boards in all, a plan that lays none not counted; 1
+    off); the best by the lay's own key (open nets, DRC, vias, copper) kept, its board and logs copied over the held
+    one's names in `d`. Measured on the zynq LVDS: the held round laid 10, 3, 2 and 2 open where the loop's best round
+    laid 6, 0, 2 and 2 -- the findings count a static clearance the snap goes round and a detour not at all. And one
+    other round is not enough: on a bus of ten pairs the lay refused a pair of the held round's plan, the round of
+    fewest findings held nine lanes (a pair its snap could not lay) and left two nets open as well, and the third
+    round's plan laid all ten clean. (`plan`: the probe LOOP_PICK_SNAP's held plan in the held round's place)"""
     tries = lay_tries()
-    if tries <= 1 or (res is not None and not res['open']):
+    if tries == 1 or (res is not None and not res['open']):
         return res
     try:
         held_i = int(json.load(open(os.path.join(loopd, 'best.json')))['i'])
@@ -1713,11 +2044,12 @@ def lay_rounds(loopd, d, env, res, lay_, say, plan=None):
         sc[int(m.group(1))] = findings(stripped(run(['whole_gate.py', p, a], env)[1]))
     order = sorted(sc, key=lambda i: (sc[i], -i))
     say(f"  the held round {held_i} laid " + (f"open {res['open']}, drc {res['drc']}" if res else 'nothing')
-        + f" -- the loop's other rounds, fewest findings first, until {tries - 1} laid: "
+        + " -- the loop's other rounds, fewest findings first, until "
+        + (f"{tries - 1} laid: " if tries else "one lays with no net open: ")
         + ', '.join(f'{i} ({sc[i]})' for i in order))
     best, laid = res, 0
     for i in order:
-        if laid >= tries - 1:
+        if tries and laid >= tries - 1:
             break
         hp = held_plan(loopd, env, i=i)
         rr = lay_(hp, f'_h{i}') if hp else None
@@ -2213,6 +2545,10 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     BLOCKED = os.path.join(o, BLOCKED_ENDS)
     if os.path.exists(BLOCKED):
         os.remove(BLOCKED)
+    # (an earlier run's results in this OUTDIR: its best board, and every round's laid boards -- route_bus takes the
+    # best, else the last round's, and an earlier run's stood in for a run that laid nothing, graded as this one's)
+    for f_ in glob.glob(os.path.join(o, 'best.*')) + glob.glob(os.path.join(o, 'r[0-9]*', 'seq*.kicad_*')):
+        os.remove(f_)
     say = Log()
     r = 0
     # THE ROUNDS ARE DRAWS: the d-th draw searches under the step's seed plus d - 1 (cp_seed: every solve -- the
@@ -2409,6 +2745,9 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             if draw > 1:
                 env['BUS_SEED'] = str(seed0 + draw - 1)
             say(f"=== fanout round {r}" + (f": round 1 again under seed {seed0 + draw - 1}" if r > 1 else ''))
+        # (an earlier run's fanout of this round: a fanout that fails leaves no board, and one left from before stood in)
+        for f_ in glob.glob(os.path.join(d, 'fo.*')) + glob.glob(os.path.join(d, 'fo_*')):
+            os.remove(f_)
         fenv = dict(env)
         # (the run's nets, every round: a fanout never re-picks them off a later round's board -- K51's second round,
         # re-picked, dropped its three pairs while their teeth stood on the board, and the solve found them split)
@@ -2614,16 +2953,32 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 if len(vb1_) <= len(vb0_):
                     break
                 say(f"  {len(vb1_) - len(vb0_)} end layer(s) the relay walled a ball on -- the solve again without them")
+                vbp_ = vb0_
                 vb0_ = vb1_
                 shutil.copy2(solve, solve[:-len('.json')] + f'_walls{_rs}.json')
                 os.remove(solve)
+                # (as the round's first solve: its edited cuts held, and a negotiated bus's coupled again -- solved
+                # alone, the walls' plan replaced the coupled one and dropped the round's edits)
                 run(['whole_solve.py', solve], {**env, 'BENCH': env['BENCH0'], 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1',
-                                                **jfin}, log_path=os.path.join(d, f'solve_walls{_rs}.log'))
+                                                **jfin, **ecut_env}, log_path=os.path.join(d, f'solve_walls{_rs}.log'))
+                if os.path.isfile(solve) and env.get('JOINT_DIR') and env.get('JOINT_BUS'):
+                    jcuts = joint_sync({**env, 'BENCH': env['BENCH0'], 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1',
+                                        **jfin}, r, solve, say)
                 for ln in grep(os.path.join(d, f'solve_walls{_rs}.log'), r'whole_solve:|crowded:'):
                     say(ln[:200])
                 if not os.path.isfile(solve):
+                    # ...NO PLAN without them: the plan before stands, and stands WHOLE -- its bans the ones it was
+                    # solved under, every end of it laid on its layer, the ball taken as walled (WALLS_STAND: one ball
+                    # of another net named at the step's end, against a lane open for each end kept). Left with the
+                    # ends kept where they were laid, the plan asked six teeth on layers the bench did not give them --
+                    # six bands broken at the tooth, ten nets open -- and the loop's re-solves, reading the bans no
+                    # plan stood under, had none either
                     shutil.copy2(solve[:-len('.json')] + f'_walls{_rs}.json', solve)
-                    say('  no plan without them -- the plan before stands')
+                    json.dump(vbp_, open(env['VBAN_WALLS'], 'w'))
+                    env['WALLS_STAND'] = ','.join(sorted({k_ for k_ in (env.get('WALLS_STAND', '') + ','
+                                                                         + env.get('WALLS_LAST', '')).split(',') if k_}))
+                    say(f"  no plan without them -- the plan before stands, laid whole: {env['WALLS_STAND']} walled in")
+                    bench = relayed(d, env['BENCH0'], J, env, say)
                     break
                 J = json.load(open(solve))
                 proved = J.get('proved', True)
@@ -2638,16 +2993,24 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 say(ln[:170])
             say(f"  loop exit {rc} at {secs()} s")
             # ...stopped at crowded ends: the fanout bench repaired where they stand (repair_ends) and the loop run again
-            # on it, from the round's own solve -- the round's lay, and the next round's feedback, from the new loop
+            # on it, from where the stopped loop got (loop_seeds: its best round's solve, every cut it held) -- the
+            # round's lay, and the next round's feedback, from the new loop
             rep_ = repair_ends(d, loopd, env, sub, say) if rc == 4 else None
+            if rep_ is None and rc in (3, 4):
+                # (...and a loop stopped on a part's pad in its lanes' way, at the ends or not: the part moved a short
+                # way off them, and the loop run again on it as on repaired ends)
+                rep_ = repair_passives(d, loopd, env, say)
             if rep_ is not None:
+                solve_, seeds_ = loop_seeds(loopd)
                 b0_, loopd = rep_
                 env.pop('BENCH0', None)
                 env['BENCH'] = b0_
-                bench = relayed(d, b0_, J, env, say, name='fo_layers_ends')
+                bench = relayed(d, b0_, json.load(open(solve_)), env, say, name='fo_layers_ends')
+                say(f"  the loop again on the repaired ends from {os.path.basename(solve_)}, its "
+                    f"{len([c_ for c_ in seeds_['SEED_CUTS'].split(',') if c_])} cut file(s) held")
                 with open(os.path.join(d, 'loop_ends.log'), 'w') as lf:
-                    rc = loop(solve, loopd, loop_rounds(),
-                              {**lenv(), **({'JOINT_LOOP': '2'} if env.get('JOINT_DIR') else {})}, Log(lf))
+                    rc = loop(solve_, loopd, loop_rounds(),
+                              {**lenv(), **seeds_, **({'JOINT_LOOP': '2'} if env.get('JOINT_DIR') else {})}, Log(lf))
                 for ln in grep(os.path.join(d, 'loop_ends.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
                     say(ln[:170])
                 say(f"  the loop again on the repaired ends: exit {rc} at {secs()} s")
@@ -2662,19 +3025,25 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             if rc != 0:
                 say(f"  the loop did not pass -- laid from the plan it held: "
                     f"{os.path.relpath(plan, d) if plan else 'none'}")
-            try_ = rc != 0 and plan is not None and lay_tries() > 1
+            try_ = rc != 0 and plan is not None and lay_tries() != 1
             res = lay(r, d, plan, plan_bench(loopd, plan, bench), sub, quiet=try_) if plan else None
             if try_:
                 res = lay_rounds(loopd, d, env, res, lambda hp, tag: lay(r, d, hp, plan_bench(loopd, hp, bench), sub,
                                                                           tag=tag, quiet=True), say, plan=plan)
                 if res is not None:
                     say(res['grade'])
+                    # (the lay KEPT published, as an unquiet lay publishes itself: every lay here was quiet, and the
+                    # other buses went on reading this one's last plan, not its copper)
+                    joint_publish(env, None, f'round {r} laid', board=res['board'], nets=nets_all)
             if plan and res is None:
                 say("  no board laid from the plan (route_seq.log)")
         del env['BENCH']
         env.pop('VIA_ENDS', None)
         env.pop('BENCH0', None)
         env.pop('VBAN_WALLS', None)          # (a draw's own ends: its bans none of the next's)
+        env.pop('WALLS_STAND', None)
+        env.pop('WALLS_LAST', None)
+        env.pop('BUS_AREAS', None)           # (...its edit areas, in its frame, none of the next round's fanout's)
         if res is not None and (best is None or res['key'] < best['key']):
             best = res
         # done: a plan laid with NO NET OPEN -- whether or not its loop passed, proved or not, and whatever its

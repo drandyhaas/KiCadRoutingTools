@@ -41,6 +41,7 @@ import route_layers
 import corridor as _cor
 import braid as bd
 import pairs as _pairs
+import board_rules
 
 # every length below is in the design rules' own units: track, clearance, via size, a via's room, the lane pitch
 P_MIN = bd.LANE_MIN
@@ -273,7 +274,9 @@ for ref, fp in ctx.pcb.footprints.items():
     for i_, p in enumerate(fp.pads):
         drilled = bool(p.drill and p.drill > 0)
         if p.pad_type == 'np_thru_hole':
-            hx = hy = (p.drill or 0) / 2; Ls = ALL()
+            # (a hole with no copper grown by what the router keeps a track off its wall past the clearance --
+            # board_rules.hole_track_clear: held at the clearance alone, a lane the geometry laid there the router refused)
+            hx = hy = (p.drill or 0) / 2 + board_rules.hole_track_clear(ctx.pcb, CL) - CL; Ls = ALL()
         else:
             # (a tilted pad by the box round its copper turned -- pairs.pad_extent: its own (hx x hy) on the board's
             # axes left a 0402 turned 45 degrees up to 0.09 mm short of its copper)
@@ -1652,6 +1655,7 @@ def static_sides(sol):
             g = LANE_ST + hw[n]
             if at_end and not lab.startswith(('end ', 'stub ', 'svia ')):
                 continue
+            lane_side = None              # (the side this column's lane row takes of the island, where it has one)
             # (the exact extent REFINES the frame's box and never replaces it: a column's offset line is infinite, and in
             # a ring it met a 2x12 header 23 mm off -- K44, P2, 27 mm paid -- so the box's span gates it and its offsets
             # bound it)
@@ -1687,6 +1691,7 @@ def static_sides(sol):
                 if forced and (f, ii) not in SPLIT and not pinned and not carried:
                     side = forced             # never against the lane's own fixed end, nor against its home side
                 out.append((f, n, k, ext[0], ext[1], side, lab))
+                lane_side = side
             # (a pair's via is two barrels VX either side of its centreline -- its half width hw is less: 74 um short)
             # ...its row REFINED by the part's exact extent on the via's column, as a lane's is: a part past a ring's
             # end projects clamped onto it -- its box the ring's whole length and tens of millimetres across -- and
@@ -1699,7 +1704,11 @@ def static_sides(sol):
                 if ev_ is not None:
                     ev_ = (max(ev_[0], oa - g2), min(ev_[1], ob + g2))
                 if ev_ is not None and ev_[0] <= ev_[1] and max(ev_[0] - o_, o_ - ev_[1], 0.0) <= WIN:
-                    out.append((f, n, k, ev_[0], ev_[1], -1 if o_ < (ev_[0] + ev_[1]) / 2 else 1, 'via ' + lab))
+                    # (the via on the side its LANE passes the island, where the lane row decided one -- the split,
+                    # the side carried, its fixed end, a flip: read off the first pass's offset instead, a via row
+                    # could hold the via on one side while the lane row held the lane on the other, both paid)
+                    vs_ = lane_side if lane_side is not None else (-1 if o_ < (ev_[0] + ev_[1]) / 2 else 1)
+                    out.append((f, n, k, ev_[0], ev_[1], vs_, 'via ' + lab))
         if k in vcol[(f, n)]:
             for (sa, sb, oa, ob, Ls, lab, own), vr_ in zip(vboxes[f], VSTUB):
                 g2 = VIA_ST + max(hw[n], VX[n])

@@ -524,12 +524,18 @@ ground plane's (`colour_runs`, `route_layers.plane_kinds`). A via escape's run
   of the model's memory.
 - **The layers after**: each chosen run gets its layer from a small exact solve
   (`colour_runs`): the outer layer first, the inner ones kept for the bus, and
-  a bus lane on the layer its preferred tooth leaves by. A bus ball's run no
-  colouring holds has the plan asked again without that option, and of the two
-  plans the one that leaves fewer balls without an option is kept -- a bus
-  ball first -- once each one's uncoloured balls have taken an option that
-  stands. Judged by its uncoloured runs alone, the plan that coloured more was
-  kept and could leave a bus ball with no escape.
+  a bus lane on the layer its preferred tooth leaves by. The capacity rows
+  only count a group's runs against its layers, so a run through many groups
+  can meet every count and find each of its layers taken by one neighbour or
+  another (an inner ball's run out across twenty-three others on seven
+  layers). A bus ball's run no colouring holds has the plan asked again with
+  each run's layer the plan's own choice (`plan_array`'s `exact_layers`: a
+  literal per run and layer, at most one run of a group a layer, a pair's two
+  legs on one), and of the two plans the one that leaves fewer balls without
+  an option is kept -- a bus ball first. Asked again with those runs' options
+  out of the menus instead, a shared array's field of four buses left a bus
+  ball with no escape after three plans, where every ball has one. The first
+  plan is as before: a board whose colouring holds keeps its plan.
 
 Phase 2 runs the quick-restart worker alone there; the LP worker held a
 quarter of the plan's memory for half a percent of its cost. On the zynq at
@@ -661,7 +667,9 @@ lanes walling it lifted and routed again, in their order, round its way out --
 the via site nearest along the way its layer reaches with their lanes gone
 and their fanout standing (`route_bus.ball_way`), the way itself and the via
 reserved -- kept where every one of them routes and the ball is reached, else
-all as it was. Asked with the walling nets' whole copper gone, the site lay
+the next sites along its ways in turn (`WALL_SITES`, six at most), and all as
+it was when none serves. The nearest site alone lay a clearance off the lifted
+lane's own tooth, which stands, and left the lane no room to leave past it. Asked with the walling nets' whole copper gone, the site lay
 under one lane's own escape on an inner layer, which no lane routed again
 could clear; reserved as a straight line from the ball, the way round the end
 of the walling lane's own fanout run was left open, and the lane routed again
@@ -2154,12 +2162,14 @@ for some of the lanes exists:
   lanes refused at their teeth and berths, 33 nets open, where on its own
   bench it leaves 13;
 - a round's loop runs six rounds at most (`LOOP_ROUNDS`); a loop that does
-  not pass, its held plan laid with nets open, lays one other round's plan too
-  -- snapped on its own bench, the fewest findings first, a plan the snap lays
-  nothing of skipped (`LAY_TRY=N`: N boards in all, stopping at the first
-  with no net open; 1 lays the held plan alone) -- and keeps the better lay
-  (open nets, then DRC, vias, copper): on an LVDS bus the held round laid 10,
-  3, 2 and 2 nets open where the loop's best round laid 6, 0, 2 and 2;
+  not pass, its held plan laid with nets open, lays its other rounds' plans
+  too -- each snapped on its own bench, the fewest findings first, a plan the
+  snap lays nothing of skipped, stopping at the first with no net open
+  (`LAY_TRY=N`: N boards in all; 1 lays the held plan alone) -- and keeps the
+  best lay (open nets, then DRC, vias, copper): on an LVDS bus the held round
+  laid 10, 3, 2 and 2 nets open where the loop's best round laid 6, 0, 2 and
+  2, and on a bus of ten pairs the held round and the round of fewest
+  findings each left a pair open where the third round's plan laid all ten;
 - a round that lays nothing, or leaves nets open, is followed by **round 1
   again under the next seed**, up to `ROUNDS` (default 4): every solve of a
   round -- the

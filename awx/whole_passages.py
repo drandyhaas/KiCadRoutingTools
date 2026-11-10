@@ -51,13 +51,19 @@ class Census:
                            [(r_, B_) for r_, B_ in Fr.DBs.items() if B_ in dest_boxes(i)]):
                 obs.append(tuple(B_) + (frozenset([i]), 'dest ' + r_))
         isl = {}
+        import pairs as _pairs
+        import board_rules
         for (ref_, i_), lab_ in whole_ctx.part_islands(ctx, skip=(Fr.src, *Fr.dests)).items():
             p_ = ctx.pcb.footprints[ref_].pads[i_]
             if p_.pad_type == 'np_thru_hole':
-                hx_ = hy_ = (p_.drill or 0) / 2
+                # (a hole with no copper grown by what the router keeps a track off its wall past the clearance --
+                # board_rules.hole_track_clear -- as the geometry grows it)
+                hx_ = hy_ = (p_.drill or 0) / 2 + board_rules.hole_track_clear(ctx.pcb, clr) - clr
                 ls_ = ALL
             else:
-                hx_, hy_ = p_.size_x / 2, p_.size_y / 2
+                # (a tilted pad by the box round its copper turned, as the geometry boxes it: pairs.pad_extent)
+                hx_, hy_ = _pairs.pad_extent(p_.size_x / 2, p_.size_y / 2, _pairs.pad_tilt(p_),
+                                             _pairs.pad_corner_radius(p_))
                 ls_ = ALL if ((p_.drill or 0) > 0 or '*.Cu' in p_.layers) else \
                     frozenset(LI[L_] for L_ in p_.layers if L_ in LI)
             if not ls_:

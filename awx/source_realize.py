@@ -263,8 +263,12 @@ def measure_tooth(pcb, nm, pad, byname, dest_ref=None, which=None):
                               ('up', tooth[1] < y0 - hy * 0.5)) if ok]
     face = (beyond[0] if len(beyond) == 1
             else (seg_dir if seg_dir in beyond or not beyond else beyond[0]))
-    vias = [v for v in pcb.vias if v.net_id == nid
-            and math.hypot(v.x - pad.global_x, v.y - pad.global_y) < 6.0]
+    # (the escape's OWN vias: in its pad, a dog-bone's in a gap, a climb's along one -- every one inside the array's balls'
+    # box, half a pitch round; nearest the ball first. Any of the net's within 6 mm counted a routed lane's layer change
+    # beside the array, and read a surface tooth as a dog-bone, its site that via)
+    vias = sorted((v for v in pcb.vias if v.net_id == nid
+                   and x0 - hx <= v.x <= x1 + hx and y0 - hy <= v.y <= y1 + hy),
+                  key=lambda v: math.hypot(v.x - pad.global_x, v.y - pad.global_y))
     pad_r = max(pad.size_x, pad.size_y) / 2
     if any(math.hypot(v.x - pad.global_x, v.y - pad.global_y) <= pad_r + 0.01
            for v in vias):
@@ -400,8 +404,10 @@ def drc_pairs(board, nets=None, pcb_data=None, keys=None):
             try:
                 import fab_notes as _fn
                 _fn.apply_stamps_in_memory(_fn.via_protection_stamps(pcb_data.vias, [], pcb_data)[0])
-            except Exception:                                    # noqa: BLE001
-                pass
+            except Exception as e_:                              # noqa: BLE001
+                # (said, not swallowed: the gate then grades the vias in pads unstamped, and reads them so)
+                print(f'  scoped DRC gate: the ship-time via stamps not applied ({type(e_).__name__}: {e_}) -- '
+                      f'vias in pads graded as unprotected', file=sys.stderr)
         pats = net_patterns(nets, keys if keys is not None else net_keys(pcb_data) if pcb_data is not None else None)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
@@ -458,9 +464,11 @@ def _joint_spec():
 def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=print, hands=None, kept=None):
     """realize()'s engine call under the whole-array fanout: the source array planned jointly (joint_escape.plan_array)
     -- `names` (the stripped nets: those asked to move, the blockers freed with them, and the run's other nets `kept`
-    {net: its tooth as measured before the strip}, each held at that tooth) preferring their asks, the array's other
-    nets and plane balls with them, the bus never by the face away from the other array -- and the stripped nets laid as
-    planned by the joint escape engine (a planned pair's gate kept), each pair leaving with the hand `hands` asks (its
+    {net: its tooth as measured before the strip}, each kept at that tooth wherever the plan can, held there on a shared
+    array) kept at their asks wherever the plan can, the array's other nets and plane balls served round them, the bus
+    never by the face away from the other array
+    -- and the stripped nets laid as planned by the joint escape engine (a planned pair's gate kept), each pair leaving
+    with the hand `hands` asks (its
     berths', fanout_from_plan.berth_hands). Returns the engine's (tracks, vias to add, vias to remove, failed nets) and
     the stripped nets the plan left unplanned."""
     import joint_escape as _je
@@ -472,12 +480,29 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
                        'kind': m.kind} for nm, m in src_choice.items()}
     for nm, g in (kept or {}).items():
         prefer.setdefault(sn(nm), {k: g[k] for k in ('tooth', 'direction', 'layer', 'kind')})
-    # (and each kept one HELD where it stands -- plan_array's `hold`: its tooth, by its face, on its layer -- the asked
-    # teeth, the array's other nets and plane balls planned round them. Preferred alone, the plan moved the teeth nobody
-    # asked for wherever it was cheaper: a memory bus asked six teeth on a shared array, and the plan moved eleven more,
-    # an address line onto the face another bus's lanes leave by. An asked tooth is preferred, not held: held too, a
-    # clock pair's asked teeth stood against its held neighbours, and the plan let the pair go in every pass)
-    hold = {sn(nm): {k: g[k] for k in ('tooth', 'direction', 'layer')} for nm, g in (kept or {}).items()}
+    # (on a SHARED array -- the bus keeps the escapes the shared field laid it, route_bus.keeps_source_escapes -- each
+    # kept one HELD where it stands: plan_array's `hold`, its tooth by its face on its layer, the asked teeth, the
+    # array's other nets and plane balls planned round them, and a held run stackable as the field stacked it. Preferred
+    # alone, the plan moved the teeth nobody asked for wherever it was cheaper: a memory bus asked six teeth on a shared
+    # array, and the plan moved eleven more, an address line onto the face another bus's lanes leave by; priced high
+    # rather than held, it moved one 0.4 mm onto another layer to plan two balls the field had laid already. Off a
+    # shared array the kept teeth are not held but FIRM (below): held there, a pinned run cut the other nets' layers
+    # and the plan lost the last plan's start, 13-25 s a plan where it took 0.3)
+    import route_bus as _rb
+    hold = ({sn(nm): {k: g[k] for k in ('tooth', 'direction', 'layer')} for nm, g in (kept or {}).items()}
+            if _rb.keeps_source_escapes(sref, False, True, awx_settings.get('SOURCE_SHARED')) else None)
+    # (and every other tooth FIRM -- plan_array's `firm`: the asked ones at their asks, from the via site asked, and the
+    # kept ones not held where they stand -- kept wherever the plan can keep them, the array's other nets and plane balls
+    # served round them, and one a proved conflict cannot keep let go to its preference alone. Preferred alone, the
+    # plan moved them to serve more of the other balls: a memory bus asked 22 teeth and the plan laid five of them up
+    # to 1.6 mm off and moved nine nobody asked for, to drop four more plane balls; another's asked B.Cu teeth were laid
+    # on an inner layer. Held, one conflict lost them all: a pair no plan could hold beside its held neighbours left
+    # unplanned pass after pass, its copper restored and planned again)
+    firm = {sn(nm): {'tooth': tuple(m.exit_pt), 'direction': m.direction, 'layer': m.layer, 'site': m.site,
+                     'asked': True} for nm, m in src_choice.items()}
+    for nm, g in (kept or {}).items():
+        if sn(nm) not in (hold or {}):
+            firm.setdefault(sn(nm), {k: g[k] for k in ('tooth', 'direction', 'layer')})
     far = _je.far_face(pcb, sref, dref) if dref and dref in pcb.footprints else None
     # (the run's BLOCKED teeth -- whole_ends.round_feedback's: those an earlier round found no escape of their ball's
     # clears, whole_route.put_blocked -- each a PLACE on its layer every bus net's exit leaving there within a pitch of
@@ -502,7 +527,8 @@ def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=pri
     oth_ = {sn(n_) for n_ in a['others']}
     hints, rep = _je.plan_array(pcb, sref, [n_ for n_ in full if sn(n_) not in oth_], a['others'], jspec['layers'],
                                 far=far, prefer=prefer, drops=a['drops'], log=log, hands=hands,
-                                vias_only=route_layers.escape_vias('src'), exit_rays=True, avoid=avoid, hold=hold)
+                                vias_only=route_layers.escape_vias('src'), exit_rays=True, avoid=avoid, hold=hold,
+                                firm=firm)
     at_names = {(round(src_pad[nm].global_x, 3), round(src_pad[nm].global_y, 3)) for nm in names}
     hints = {at: h for at, h in hints.items() if at in at_names}
     unplanned = sorted(nm for nm in names
@@ -556,11 +582,9 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     n2n = {i: n.name for i, n in pcb.nets.items()}
     free = [nm for nm in dict.fromkeys(free) if nm not in src_choice]
     jspec = _joint_spec()
-    joint_ = jspec is not None and len(route_layers.layers()) > 2 and \
-        not any(x.get('hold') for x in jspec['arrays'] if x['ref'] == sref)
-    # (a source HELD as it stands -- route_bus JOINT_HOLD_SHARED, a shared array planned whole for every bus off it --
-    # is re-fanned as a plain bus's: the asked teeth alone, every other ball's copper immovable) THE BUS RE-PLANNED
-    # WHOLE (the whole-array fanout on more routing layers than two): every run net with a tooth at this array is
+    joint_ = jspec is not None and len(route_layers.layers()) > 2
+    # THE BUS RE-PLANNED WHOLE (the whole-array fanout on more routing layers than two): every run net with a tooth at
+    # this array is
     # stripped and planned again with the asked ones, each preferring the tooth it has (`kept`). The joint plan holds a
     # pair's two legs together with no other exit between them -- but only among the balls it plans: a leg asked alone,
     # re-planned beside its partner left on the board, and the pairs left there as obstacles, are held by nothing (zynq
@@ -655,6 +679,16 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
             escape_dir_hints=hints, net_clearances={})   # class-blind, as the plan (#1529)
     got = {t['net_id'] for t in tracks}
     ok = [nm for nm in names if byname[nm][0] in got]
+    # (a PAIR's legs laid together or neither, as a refused pair holds its escapes (route_bus.hold_board_escapes): a leg
+    # the engine refuses keeps its original copper, and its partner laid anew beside it stood on it -- a clock pair's
+    # new via on its partner's restored track, the realize rejected for the pair's own DRC pass after pass, the fanout
+    # four times as long)
+    import pairs as _pairs
+    for p_, n_ in _pairs.pair_names(names, admit_all=True).values():
+        if (p_ in ok) != (n_ in ok):
+            log(f'  source realize: {p_ if p_ not in ok else n_} refused -- its partner '
+                f'{n_ if p_ not in ok else p_} kept where it stood too')
+            ok = [x for x in ok if x not in (p_, n_)]
     restored = [nm for nm in names if nm not in ok]
     ok_ids = {byname[nm][0] for nm in ok}
     tracks = [t for t in tracks if t['net_id'] in ok_ids]

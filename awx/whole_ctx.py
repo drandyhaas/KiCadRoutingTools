@@ -76,7 +76,7 @@ def part_islands(ctx, skip=(), split=None):
                 hx = hy = (p.drill or 0) / 2
                 Ls = set(RL)
             else:
-                hx, hy = p.size_x / 2, p.size_y / 2
+                hx, hy = _pairs.pad_extent(p.size_x / 2, p.size_y / 2, _pairs.pad_tilt(p))
                 Ls = set(RL) if drilled else {L for L in RL if L in p.layers}
             if Ls:
                 boxes.append(((ref, i), p.global_x - hx, p.global_y - hy, p.global_x + hx, p.global_y + hy, Ls))

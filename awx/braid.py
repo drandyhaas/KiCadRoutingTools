@@ -743,49 +743,6 @@ def cross_reserve(ctx, nm):
 END_KEEP = TRACK + CLEAR + 0.05    # a virtual stamp keeps this off a free end
 
 
-def clip_round_lines(pieces, lines, keep_r=None):
-    """`pieces` [(p, q, layer)] with every stretch within keep_r of any of
-    the segments `lines` [(a, b)] cut out (a point piece a == b is a bare
-    end). Sampled along the piece at 0.05 mm: exact enough for a stamp."""
-    if keep_r is None:
-        keep_r = END_KEEP
-    out = []
-    for (p, q, lay) in pieces:
-        L = math.hypot(q[0] - p[0], q[1] - p[1])
-        n = max(2, int(L / 0.05) + 1)
-        keep = []
-        for i in range(n):
-            t = i / (n - 1)
-            x, y = p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])
-            near = False
-            for (a, b) in lines:
-                dx, dy = b[0] - a[0], b[1] - a[1]
-                L2 = dx * dx + dy * dy
-                if L2 < 1e-12:
-                    d = math.hypot(x - a[0], y - a[1])
-                else:
-                    u = max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / L2))
-                    d = math.hypot(x - a[0] - u * dx, y - a[1] - u * dy)
-                if d < keep_r:
-                    near = True
-                    break
-            keep.append(not near)
-        i = 0
-        while i < n:
-            if not keep[i]:
-                i += 1
-                continue
-            j = i
-            while j + 1 < n and keep[j + 1]:
-                j += 1
-            if j > i:
-                ta, tb = i / (n - 1), j / (n - 1)
-                out.append(((p[0] + ta * (q[0] - p[0]), p[1] + ta * (q[1] - p[1])),
-                            (p[0] + tb * (q[0] - p[0]), p[1] + tb * (q[1] - p[1])), lay))
-            i = j + 1
-    return out
-
-
 def clip_round_ends(pieces, ends, keep_r=None):
     """`pieces` [(p, q, layer)] with the stretch within keep_r of any
     of `ends` cut out. A virtual stamp must not cover another net's
@@ -847,6 +804,11 @@ _OBS_MEMO = {}
 # simply rebuilt.
 _OBS_BOARDS = []
 _OBS_KEEP_BOARDS = 2
+# (the memo is asked from the ends' worker threads too, whole_ends' pool: the boards' list and its eviction under a
+# lock, the eviction over a snapshot of the keys -- walked live, another thread's insert broke it, "dictionary changed
+# size during iteration")
+import threading as _threading
+_OBS_LOCK = _threading.RLock()
 
 
 def _obs_board_of(bkey):
@@ -857,14 +819,15 @@ def _obs_board_of(bkey):
 
 def _obs_remember(bkey):
     b = _obs_board_of(bkey)
-    if b in _OBS_BOARDS:
-        return
-    _OBS_BOARDS.append(b)
-    if len(_OBS_BOARDS) > _OBS_KEEP_BOARDS:
-        dead = set(_OBS_BOARDS[:-_OBS_KEEP_BOARDS])
-        del _OBS_BOARDS[:-_OBS_KEEP_BOARDS]
-        for k in [k for k in _OBS_MEMO if _obs_board_of(k) in dead]:
-            del _OBS_MEMO[k]
+    with _OBS_LOCK:
+        if b in _OBS_BOARDS:
+            return
+        _OBS_BOARDS.append(b)
+        if len(_OBS_BOARDS) > _OBS_KEEP_BOARDS:
+            dead = set(_OBS_BOARDS[:-_OBS_KEEP_BOARDS])
+            del _OBS_BOARDS[:-_OBS_KEEP_BOARDS]
+            for k in [k for k in list(_OBS_MEMO) if _obs_board_of(k) in dead]:
+                _OBS_MEMO.pop(k, None)
 
 
 def forget_obstacles():
@@ -872,8 +835,9 @@ def forget_obstacles():
     pure function of its key, so one asked for again is rebuilt; a step
     that is done with its models and goes on to a large solve frees their
     memory for it (joint_escape.plan_array: ~70 MB of zynq U1's)."""
-    _OBS_MEMO.clear()
-    del _OBS_BOARDS[:]
+    with _OBS_LOCK:
+        _OBS_MEMO.clear()
+        del _OBS_BOARDS[:]
 
 
 def unthreadable(fp, track=None, clear=None):
@@ -1128,9 +1092,8 @@ def _owner(pt, segs, pads):
                 seen.add(v)
                 stack.append(v)
     for p in pads:
-        rx, ry = p.size_x / 2 + 0.02, p.size_y / 2 + 0.02
         for (x, y) in seen:
-            if abs(x - p.global_x) <= rx and abs(y - p.global_y) <= ry:
+            if _pairs.in_pad(x, y, p, 0.02):
                 return p.component_ref
     p = min(pads, key=lambda q: ts.d2((q.global_x, q.global_y), pt))
     return p.component_ref
@@ -1399,8 +1362,7 @@ def _layer_at(pcb, nid, pt, default):
     net = pcb.nets.get(nid)
     for p in sorted(net.pads if net else (),
                     key=lambda q: ts.d2((q.global_x, q.global_y), pt)):
-        if abs(p.global_x - pt[0]) <= p.size_x / 2 + 0.02 \
-                and abs(p.global_y - pt[1]) <= p.size_y / 2 + 0.02:
+        if _pairs.in_pad(pt[0], pt[1], p, 0.02):
             cu = [L for L in p.layers if L.endswith('.Cu') and L != '*.Cu']
             if len(cu) == 1:
                 return cu[0]
@@ -1434,9 +1396,7 @@ def _end_dir(pcb, nid, pt, pads):
     while frontier:
         nxt = []
         for u in frontier:
-            inside = any(abs(u[0] - p.global_x) <= p.size_x / 2 + 0.02
-                         and abs(u[1] - p.global_y) <= p.size_y / 2 + 0.02
-                         for p in pads)
+            inside = any(_pairs.in_pad(u[0], u[1], p, 0.02) for p in pads)
             if inside and u != start:
                 continue
             for v, s in adj.get(u, ()):
@@ -3617,8 +3577,9 @@ class Corridor:
                               [L for L in ('F.Cu', 'B.Cu') if L in p.layers])
                 if not layers or hx <= 0 or hy <= 0:
                     continue
-                so = [sp.project_pt((p.global_x + dx, p.global_y + dy))
-                      for dx in (-hx, hx) for dy in (-hy, hy)]
+                so = [sp.project_pt((p.global_x + ox, p.global_y + oy))
+                      for ox, oy in (_pairs.out_of_pad(dx, dy, _pairs.pad_tilt(p))
+                                     for dx in (-hx, hx) for dy in (-hy, hy))]
                 s_lo = min(v[0] for v in so) - grow
                 s_hi = max(v[0] for v in so) + grow
                 o_lo = min(v[1] for v in so) - grow
@@ -4264,9 +4225,9 @@ class Corridor:
                     continue
                 if pd.shape == 'circle':
                     d = math.hypot(x - pd.global_x, y - pd.global_y) - pd.size_x / 2
-                else:
-                    dx = abs(x - pd.global_x) - pd.size_x / 2
-                    dy = abs(y - pd.global_y) - pd.size_y / 2
+                else:       # (in the pad's own frame: a tilted pad's copper is its box turned)
+                    dx, dy = _pairs.into_pad(x - pd.global_x, y - pd.global_y, _pairs.pad_tilt(pd))
+                    dx, dy = abs(dx) - pd.size_x / 2, abs(dy) - pd.size_y / 2
                     d = math.hypot(max(dx, 0), max(dy, 0)) + min(max(dx, dy), 0)
                 if d < need:
                     return False
@@ -5721,8 +5682,7 @@ def via_hits_foreign(pcb, nid, new_vias):
                         return (f'via ({v.x:.2f},{v.y:.2f}) on NPTH '
                                 f'hole {fp.reference}.{p.pad_number}')
                     continue
-                if abs(p.global_x - v.x) < vr + p.size_x / 2 + M \
-                        and abs(p.global_y - v.y) < vr + p.size_y / 2 + M:
+                if _pairs.in_pad(v.x, v.y, p, vr + M):
                     return (f'via ({v.x:.2f},{v.y:.2f}) on pad '
                             f'{fp.reference}.{p.pad_number}')
     return None
@@ -7120,7 +7080,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     # relax algorithm changes; per-net entries so a different K
     # fills in only what is missing. json round-trips floats exactly
     # (repr), so the cached run stays bit-identical.
-    TAUT_CACHE_VERSION = 4   # 2: taut_clean reseeds (0902); 3: rect and oval pads as capsules, a string's disc round them; 4: a filled copper graphic a wall
+    TAUT_CACHE_VERSION = 5   # 2: taut_clean reseeds (0902); 3: rect and oval pads as capsules, a string's disc round them; 4: a filled copper graphic a wall; 5: a string no taut path its chord
     log('taut paths...')
     import json as _json
     _tc_path = os.path.splitext(board)[0] + '.taut.json'
@@ -7315,71 +7275,6 @@ def _write_layer_jumps(board_path, names):
     return out
 
 
-def _seg_dist_so(p, q, a, b):
-    """Distance between segments p-q and a-b in the (s, o) plane (an
-    isometric frame of a straight spine)."""
-    def pd(pt, u, v):
-        dx, dy = v[0] - u[0], v[1] - u[1]
-        L2 = dx * dx + dy * dy
-        if L2 < 1e-12:
-            return math.hypot(pt[0] - u[0], pt[1] - u[1])
-        t = max(0.0, min(1.0, ((pt[0] - u[0]) * dx + (pt[1] - u[1]) * dy) / L2))
-        return math.hypot(pt[0] - u[0] - t * dx, pt[1] - u[1] - t * dy)
-
-    def cr(o_, a_, b_):
-        return (a_[0] - o_[0]) * (b_[1] - o_[1]) - (a_[1] - o_[1]) * (b_[0] - o_[0])
-    d1, d2, d3, d4 = cr(p, q, a), cr(p, q, b), cr(a, b, p), cr(a, b, q)
-    if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 != 0 and d2 != 0:
-        return 0.0
-    return min(pd(p, a, b), pd(q, a, b), pd(a, p, q), pd(b, p, q))
-
-
-def pitch_violations(bp, q=None):
-    """The PLAN-SIDE PITCH CHECK (2026-09-15): every pair of page lanes on
-    one page, in one corridor, whose planned centrelines come closer than
-    `q` (TRACK + CLEAR + a router's cell or two) perpendicular somewhere
-    both are on that page. Such a promise cannot be kept -- the braid
-    refuses the lane in band and the last call re-lays it (the K35/K41/K51
-    DQ group round C5, wall_probe census) -- so the planner should treat
-    the lane as it treats a swimmer: re-plan it with that berth barred.
-    Returns {net: [partner, ...]} over the nets of every violating pair."""
-    q = (TRACK + CLEAR + 0.05) if q is None else q
-
-    def on_layer(d, s_, L):
-        for (a, b, RL) in d.get('req', ()):
-            if a <= s_ <= b and RL != L:
-                return False
-        if L == 'B.Cu' and not any(lo <= s_ <= hi for (lo, hi) in d.get('bwin', ())):
-            return False
-        return True
-    out = {}
-    names = [n for n, d in bp.items() if d.get('page') and d.get('mid') and len(d['mid']) > 1]
-    for i, a in enumerate(names):
-        da = bp[a]
-        for b in names[i + 1:]:
-            db = bp[b]
-            if da['page'] != db['page'] or da.get('corridor') != db.get('corridor'):
-                continue
-            L = da['page']
-            worst = None
-            for (p, qq) in zip(da['mid'], da['mid'][1:]):
-                for (u, v) in zip(db['mid'], db['mid'][1:]):
-                    lo, hi = max(p[0], u[0]), min(qq[0], v[0])
-                    if hi < lo:
-                        continue
-                    d = _seg_dist_so(p, qq, u, v)
-                    if d >= q:
-                        continue
-                    s_m = (lo + hi) / 2
-                    if on_layer(da, s_m, L) and on_layer(db, s_m, L):
-                        if worst is None or d < worst:
-                            worst = d
-            if worst is not None:
-                out.setdefault(a, []).append(b)
-                out.setdefault(b, []).append(a)
-    return out
-
-
 def plan_braid(board, names, dest, plan, log=None):
     """THE PLANNER, callable on a plan before any destination copper
     exists: the braid's own setup (corridors as it forms them, spines)
@@ -7486,8 +7381,7 @@ def plan_braid(board, names, dest, plan, log=None):
                                         if sc and sc.page.get(nm) is None else None),
                        # dives under EARLIER corridors' lanes (2 each)
                        'cross_vias': cross.get(nm, 0),
-                       # the planned (s, o) geometry, for the plan-side
-                       # PITCH CHECK (pitch_violations): the lane's polyline,
+                       # the planned (s, o) geometry: the lane's polyline,
                        # its required-layer stretches and back-layer windows,
                        # the corridor's region
                        'mid': [tuple(q) for q in getattr(c, 'mid', {}).get(nm, ())],
@@ -7618,9 +7512,11 @@ def write_out(a, ctx, corridors, names, log):
         _tm.start(1)
     _res_list = [{'new_segments': list(out_segs.get(nm, []))} for nm in names]
     if awx_settings.get('BRAID_SMOOTH', '1') != '0':
+        # (its elbows checked at the run's clearance, as smooth_board checks them: a literal 0.1 passed copper under a
+        # supplied 0.15 and held back copper a 0.09 board takes)
         _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
             [r for k, r in enumerate(_res_list) if names[k] not in _legs],
-            pcb, kids, clearance=0.1, keep_input_copper=True)
+            pcb, kids, clearance=_rules.active().clearance, keep_input_copper=True)
     else:
         # BRAID_SMOOTH=0 (2026-09-18): a PROBE braid skips the smoother. It
         # never changes a via count, and it was ~3.7 s of a ~6 s two-lane

@@ -66,6 +66,7 @@ cfg = ctx.cfg
 # first rung (fab_tiers.escalation_rungs, none under --escalation off), never wider than the escape's own stub. The lay
 # narrows the same stretches, only where its own full-width search is refused (braid.route_lane_necked)
 import rules as _rules  # noqa: E402
+import board_rules  # noqa: E402
 import fab_tiers as _ft  # noqa: E402
 _rg = _ft.escalation_rungs(len(cfg.layers))
 NECK_W = min(_rules.active().fan_track, _rg[0]['track_width']) if _rg else None
@@ -307,8 +308,13 @@ def leg_clear(pts, L, net, n, near):
     return leg_static_clear(pts, L, net, near) and leg_placed_clear(pts, L, n)
 
 
+HOLE_MORE = board_rules.hole_track_clear(ctx.pcb, CL) - CL     # (a hole with no copper: the router's floor past CL)
+VIA_HOLE = max(CL, board_rules.board_hole_clear(ctx.pcb))     # (...and a via's copper off its wall)
+
+
 def leg_static_clear(pts, L, net, near):
-    """leg_clear against the board's fixed copper `near` (static_around's) alone: what never changes"""
+    """leg_clear against the board's fixed copper `near` (static_around's) alone: what never changes -- a hole with no
+    copper at the router's floor off its wall (board_rules.hole_track_clear)"""
     pads, segs, vias = near
     bar = TW / 2 + CL
     step = g / 4
@@ -321,7 +327,7 @@ def leg_static_clear(pts, L, net, near):
         if pd.net_id == net or L not in Ls:
             continue
         if kind == 'hole':
-            d = np.hypot(S_[:, 0] - pd.global_x, S_[:, 1] - pd.global_y) - (pd.drill or 0) / 2
+            d = np.hypot(S_[:, 0] - pd.global_x, S_[:, 1] - pd.global_y) - (pd.drill or 0) / 2 - HOLE_MORE
         else:
             d = _pairs.pad_distance(*_pairs.into_pad(S_[:, 0] - pd.global_x, S_[:, 1] - pd.global_y, _pairs.pad_tilt(pd)),
                                     pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd))
@@ -372,7 +378,10 @@ def via_clear(x, y, net, n, near, placed=None):
         if pd.net_id == net:
             continue
         if kind == 'hole':
-            if math.hypot(x - pd.global_x, y - pd.global_y) < cfg.via_drill / 2 + (pd.drill or 0) / 2 + h2h - 1e-9:
+            # (its drill off the hole's at hole to hole, and its COPPER off the hole's wall at VIA_HOLE: the router's
+            # #1038 keep-out, the board's copper-to-hole rule over the clearance)
+            if math.hypot(x - pd.global_x, y - pd.global_y) < max(cfg.via_drill / 2 + h2h, VR + VIA_HOLE) \
+                    + (pd.drill or 0) / 2 - 1e-9:
                 return False
             continue
         d = float(_pairs.pad_distance(*_pairs.into_pad(x - pd.global_x, y - pd.global_y, _pairs.pad_tilt(pd)),
@@ -417,7 +426,7 @@ def crossover_at(n, V, d, hand0, L1, L2):
     best = None
     for first in ('P', 'N'):
         c = _pairs.crossover(V, DIRS[d], hand0, HALF, cfg.via_size, VX[n], TW, CL, g, L1, L2, first=first,
-                             floor=_pairs.handover_setback(cfg))
+                             floor=_pairs.handover_setback(cfg), drill=cfg.via_drill, h2h=h2h)
         if c is None:
             continue
         # (measured against the copper placed so far within its reach alone, as an end connector's legs are: every
@@ -672,7 +681,7 @@ def build(n, neck=False):
                     continue
                 gx, gy = pd.global_x, pd.global_y
                 if kind == 'hole':
-                    mark(bad[L], (gx, gy, gx, gy), leg_bar + (pd.drill or 0) / 2, pt_d(gx, gy))
+                    mark(bad[L], (gx, gy, gx, gy), leg_bar + (pd.drill or 0) / 2 + HOLE_MORE, pt_d(gx, gy))
                     continue
                 hx, hy, cr, tl_ = pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd), _pairs.pad_tilt(pd)
                 ex_, ey_ = _pairs.pad_extent(hx, hy, tl_, cr)
@@ -815,7 +824,8 @@ def build(n, neck=False):
                     continue
                 gx, gy = pd.global_x, pd.global_y
                 if kind == 'hole':
-                    mark(sb, (gx, gy, gx, gy), cfg.via_drill / 2 + (pd.drill or 0) / 2 + h2h, pt_d(gx, gy), ox, oy)
+                    mark(sb, (gx, gy, gx, gy), max(cfg.via_drill / 2 + h2h, VR + VIA_HOLE) + (pd.drill or 0) / 2,
+                         pt_d(gx, gy), ox, oy)
                     continue
                 hx, hy, cr, tl_ = pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd), _pairs.pad_tilt(pd)
                 ex_, ey_ = _pairs.pad_extent(hx, hy, tl_, cr)
@@ -1053,7 +1063,7 @@ def _route(n, strict=True, wide=False, neck=False):
             dx_, dy_ = DIRS[d]
             step_ = g * math.hypot(dx_, dy_)
             c_ = _pairs.crossover((0.0, 0.0), (dx_, dy_), hand0, HALF, cfg.via_size, VX[n], TW, CL, g, 'F.Cu', 'B.Cu',
-                                  floor=_pairs.handover_setback(cfg))
+                                  floor=_pairs.handover_setback(cfg), drill=cfg.via_drill, h2h=h2h)
             return int(round(-c_['span'][0] / step_)) + PR, int(round(c_['span'][1] / step_)) + PR
         XS = {d: xo_steps(d) for d in range(8)}
         CAP = max(CAP, max(v[0] for v in XS.values()))

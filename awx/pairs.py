@@ -148,6 +148,14 @@ def pad_extent(hx, hy, tilt, cr=0.0):
     return ix * c + iy * s + cr, ix * s + iy * c + cr
 
 
+def in_pad(x, y, pad, grow=0.0):
+    """board points (x, y) -- arrays or numbers -- within a pad's square-cornered rectangle grown by `grow` a side,
+    turned by its tilt (into_pad). Read on the board's axes, a 0402 turned 45 degrees was a box 0.1 mm short of its
+    copper's corners"""
+    dx, dy = into_pad(x - pad.global_x, y - pad.global_y, pad_tilt(pad))
+    return (abs(dx) <= pad.size_x / 2 + grow) & (abs(dy) <= pad.size_y / 2 + grow)
+
+
 def corner_buffer(grid):
     """The router's corner buffer round a pad's corners for a single's track or via (routing_utils.
     pad_blocked_cells_array): half a grid step"""
@@ -352,6 +360,41 @@ def _pt_seg(p, a, b) -> float:
     return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
 
 
+def seg_pad_distance(a, b, pad) -> float:
+    """the least distance from segment a-b (board points) to a pad's copper -- pad_distance's rounded rectangle, turned
+    by the pad's tilt (into_pad) -- exactly: 0 where the segment reaches it. The box the corners round off (the
+    copper less the corner radius) measured against the segment, the radius taken off: the distance between two convex
+    shapes is a vertex of one against the other, or 0 where they cross"""
+    cr = pad_corner_radius(pad)
+    hx, hy = max(pad.size_x / 2 - cr, 0.0), max(pad.size_y / 2 - cr, 0.0)
+    tilt = pad_tilt(pad)
+    ax, ay = into_pad(a[0] - pad.global_x, a[1] - pad.global_y, tilt)
+    bx, by = into_pad(b[0] - pad.global_x, b[1] - pad.global_y, tilt)
+    # the segment against the box: clipped to it (Liang-Barsky), it crosses where any of it is left
+    t0, t1, dx, dy = 0.0, 1.0, bx - ax, by - ay
+    crosses = True
+    for p_, q_ in ((-dx, ax + hx), (dx, hx - ax), (-dy, ay + hy), (dy, hy - ay)):
+        if abs(p_) < 1e-15:
+            if q_ < 0:
+                crosses = False
+                break
+        else:
+            r_ = q_ / p_
+            if p_ < 0:
+                t0 = max(t0, r_)
+            else:
+                t1 = min(t1, r_)
+            if t0 > t1:
+                crosses = False
+                break
+    if crosses:
+        return 0.0
+    box = lambda x, y: math.hypot(max(abs(x) - hx, 0.0), max(abs(y) - hy, 0.0))   # noqa: E731
+    d = min(box(ax, ay), box(bx, by),
+            *(_pt_seg((sx * hx, sy * hy), (ax, ay), (bx, by)) for sx in (-1, 1) for sy in (-1, 1)))
+    return max(d - cr, 0.0)
+
+
 def poly_dist(A, B) -> float:
     """the least distance between two polylines [(x, y), ...]"""
     best = math.inf
@@ -448,7 +491,8 @@ def cut_span(pieces, P_in, P_out):
 
 
 def crossover(V, u, s_in: int, half: float, via_size: float, via_half: float, track: float, clearance: float,
-              grid: float, L1: str, L2: str, p_id: int = 1, n_id: int = 2, first: str = 'P', floor: float = 0.0):
+              grid: float, L1: str, L2: str, p_id: int = 1, n_id: int = 2, first: str = 'P', floor: float = 0.0,
+              drill: float = None, h2h: float = 0.0):
     """A pair's CROSSOVER at its dive V on a straight stretch along u (#622): the two legs swap sides the way a
     designer swaps them. The FIRST diver runs its old line on L1, steps out at 45 degrees to its barrel (away from
     the other leg, by what an ordinary dive gives a barrel: via_half - half), dives, and jogs at 45 degrees on L2 onto
@@ -462,7 +506,9 @@ def crossover(V, u, s_in: int, half: float, via_size: float, via_half: float, tr
     either side of the centre line, on each side's own hand -- its POSES `floor` further out (its own setback), each
     run on to a whole grid step from V along u so the pose is a grid point when V is. -> dict(entry={P, N}, exit={P, N}, poses=(in, out),
     legs={P: [(points, layer)], N: ...}, vias=[(x, y, 'P' | 'N')], span=(x_in, x_out) along u from V), or None when
-    its own legs would not clear"""
+    its own legs would not clear. `drill`, `h2h`: the barrels' drill and the board's hole to hole -- the stagger
+    keeps the drills that far apart too (min_via_center_distance's drill rule: with a 0.3 mm via the copper rule's
+    stagger left two 0.15 mm drills 0.26 apart, under a board's 0.3 hole to hole)"""
     ul = math.hypot(*u)
     ux, uy = u[0] / ul, u[1] / ul
     lx, ly = -uy, ux
@@ -472,7 +518,8 @@ def crossover(V, u, s_in: int, half: float, via_size: float, via_half: float, tr
     sg = 1.0 if yF0 > 0 else -1.0
     vy = sg * via_half                                        # both barrels' offset
     jog = half + via_half                                     # a jog's sideways reach (and its length along u at 45)
-    need = max(via_size + clearance, (via_size / 2 + track / 2 + clearance) / math.sin(math.pi / 4))
+    drill = via_size / 2 if drill is None else drill
+    need = max(via_size + clearance, (via_size / 2 + track / 2 + clearance) / math.sin(math.pi / 4), drill + h2h)
     dx = math.ceil(need / grid - 1e-9) * grid                 # the stagger
     xa = -math.floor(dx / 2 / grid) * grid
     xb = xa + dx
@@ -492,8 +539,8 @@ def crossover(V, u, s_in: int, half: float, via_size: float, via_half: float, tr
     ids = {'P': p_id, 'N': n_id}
     segs = [Segment(a[0], a[1], b[0], b[1], track, L, ids[k]) for k, v in legs.items() for pts, L in v
             for a, b in zip(pts, pts[1:]) if math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-9]
-    vs = [Via(x, y, via_size, via_size / 2, ['F.Cu', 'B.Cu'], ids[k]) for x, y, k in vias]    # (a THROUGH via)
-    if intra_ok(segs, vs, p_id, n_id, track, via_size, clearance) is not None:
+    vs = [Via(x, y, via_size, drill, ['F.Cu', 'B.Cu'], ids[k]) for x, y, k in vias]    # (a THROUGH via)
+    if intra_ok(segs, vs, p_id, n_id, track, via_size, clearance, h2h=h2h) is not None:
         return None
     return dict(entry={'P': to_xy(x_in, yP0), 'N': to_xy(x_in, -yP0)},
                 exit={'P': to_xy(x_out, -yP0), 'N': to_xy(x_out, yP0)},
@@ -512,7 +559,8 @@ def crossover_shape(cfg, u, side: int = 1):
     ux, uy = u[0] / ul, u[1] / ul
     half = pitch(cfg.track_width) / 2
     c = crossover((0.0, 0.0), (ux, uy), side, half, cfg.via_size, dive_offset(cfg, half), cfg.track_width,
-                  cfg.clearance, cfg.grid_step, 'F.Cu', 'B.Cu', floor=handover_setback(cfg))
+                  cfg.clearance, cfg.grid_step, 'F.Cu', 'B.Cu', floor=handover_setback(cfg),
+                  drill=cfg.via_drill, h2h=getattr(cfg, 'hole_to_hole_clearance', 0.0) or 0.0)
     if c is None:
         return None
     step = cfg.grid_step / max(abs(ux), abs(uy))
@@ -1078,9 +1126,7 @@ def under_pad(ball, pad, via_size: float) -> bool:
     # 50 um in each axis -- a partial overlap connects (the clock pair's
     # second resistor pad stands 0.28 mm off its ball and the human's
     # via-in-pad still reaches it); containment was too strict
-    r = via_size / 2.0
-    return (abs(pad.global_x - ball.global_x) <= pad.size_x / 2.0 + r - 0.05
-            and abs(pad.global_y - ball.global_y) <= pad.size_y / 2.0 + r - 0.05)
+    return bool(in_pad(ball.global_x, ball.global_y, pad, via_size / 2.0 - 0.05))
 
 
 def _seg_seg_dist(a, b) -> float:
@@ -1108,13 +1154,15 @@ def _seg_seg_dist(a, b) -> float:
 
 
 def intra_ok(segs, vias, p_id: int, n_id: int, track: float, via_size: float,
-             clearance: float, tol: float = 0.002) -> Optional[str]:
+             clearance: float, tol: float = 0.002, h2h: float = 0.0) -> Optional[str]:
     """The pair's own two legs keep the clearance from each other: segment
     to segment on one layer at track + clearance, a barrel to the other
     leg's segments (any layer) at via radius + clearance + half a track,
-    barrel to barrel at via size + clearance. None when clean, else a
-    line naming the first shortfall (the split's geometry at a hard turn
-    was the source of every intra-pair DRC the K36 chain shipped)."""
+    barrel to barrel at via size + clearance -- and every two barrels'
+    DRILLS `h2h` apart edge to edge, whatever their nets (the fab's hole to
+    hole is net-blind). None when clean, else a line naming the first
+    shortfall (the split's geometry at a hard turn was the source of every
+    intra-pair DRC the K36 chain shipped)."""
     P = [s for s in segs if s.net_id == p_id]
     N = [s for s in segs if s.net_id == n_id]
     need_ss = track + clearance - tol
@@ -1134,9 +1182,13 @@ def intra_ok(segs, vias, p_id: int, n_id: int, track: float, via_size: float,
             d = _seg_seg_dist(Segment(v.x, v.y, v.x, v.y, 0.0, b.layer, 0), b)
             if d < need_vs:
                 return f'a barrel {d:.3f} < {need_vs + tol:.3f} mm from the other leg at ({v.x:.2f},{v.y:.2f})'
-    need_vv = via_size + clearance - tol
     for v in vias:
         for w in vias:
-            if v is not w and v.net_id != w.net_id and math.hypot(v.x - w.x, v.y - w.y) < need_vv:
-                return f'barrels {math.hypot(v.x - w.x, v.y - w.y):.3f} < {need_vv + tol:.3f} mm apart at ({v.x:.2f},{v.y:.2f})'
+            if v is w:
+                continue
+            need_vv = max(via_size + clearance if v.net_id != w.net_id else 0.0,
+                          ((v.drill or 0.0) + (w.drill or 0.0)) / 2 + h2h if h2h else 0.0) - tol
+            d_ = math.hypot(v.x - w.x, v.y - w.y)
+            if d_ < need_vv and not (v.net_id == w.net_id and d_ < 1e-6):     # (one net's barrel met twice: one)
+                return f'barrels {d_:.3f} < {need_vv + tol:.3f} mm apart at ({v.x:.2f},{v.y:.2f})'
     return None

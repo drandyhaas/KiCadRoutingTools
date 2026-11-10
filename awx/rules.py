@@ -381,25 +381,6 @@ def fan_via_clear(rules):
     return rules.via_size / 2 + rules.fan_track / 2 + rules.clearance
 
 
-def fan_via_at(pcb, fp, rules=None):
-    """(via, drill) the escape fanout lays under footprint `fp`: the rules' via, stepped down the fab ladder where the
-    array's plane pours could not pass between two of them a pitch apart -- the engine's own choice for every via of
-    that part's fanout (bga_fanout: plane_lattice.plane_web_via, at the fanout's clearance, on the run's escalation
-    rungs). The plan prices its moves' vias at it: priced at the via asked, a 0.65 mm array's via-in-pad 0.325 off the
-    next column's run read as a conflict the engine's 0.3 mm via clears, and a strobe pair's teeth had no state free of
-    one -- the teeth as laid kept, two pairs' legs on two layers and no pair body between them"""
-    rules = rules or active()
-    memo = pcb.__dict__.setdefault('_fan_via_at', {})
-    key = (getattr(fp, 'reference', None), rules.via_size, rules.via_drill, rules.clearance)
-    if key not in memo:
-        from list_nets import escalation_rungs
-        from plane_lattice import plane_web_via
-        w = plane_web_via(fp, pcb, rules.via_size, rules.via_drill, rules.clearance,
-                          escalation_rungs(len(pcb.board_info.copper_layers or ()) or 4))
-        memo[key] = (w['via'], w['drill']) if w is not None and w['threads'] else (rules.via_size, rules.via_drill)
-    return memo[key]
-
-
 def active():
     """The rules in force in this process: the last installed, else the
     supplied (SETTING), else DEFAULT. A module initializes its constants

@@ -15,6 +15,12 @@ working tree is shipped as it stands, uncommitted edits and all.
 
 runs a whole routing chain (the route step's KiCad legs and grades want pcbnew and kicad-cli) in an image built on
 KiCad's own, with the same pins on KiCad's system python.
+
+    modal run awx/modal_whole.py::boards --seeds 2,3,4 --out DIR [--cases zynq,sdi] [--rounds R] [--sets "K=V;K=V"]
+
+runs the BUS BOARDS check (tests/stress/bus_boards.py), one container per board and SEED: the bus step's one seed
+(BUS_SEED, cp_seed -- every solve of a round searches under it, so another seed is another draw of the same board).
+Each run's log, the route's own log, its report row and the board it hands on come back under DIR/seedS/CASE.
 """
 from __future__ import annotations
 
@@ -40,11 +46,23 @@ KICAD = os.environ.get("MODAL_WHOLE_KICAD", "") in ("1", "true", "on")
 KICAD_IMAGE = "kicad/kicad:10.0.6"
 
 
+# The ROUTE's own python (run_board): uv's standalone build of the same version -- Clang, the tail-call interpreter,
+# BOLT -- with the same pins, beside the image's (Docker's, built by GCC, which the Modal runtime and the other
+# functions keep). Measured in one container: the interpreter's own work 1.2 to 1.6 times as fast (an int loop 0.49 s
+# against 0.31, 200k small numpy calls 0.45 against 0.37), CP-SAT and the big-array numpy the same; the JIT on, no
+# faster. The router's extension is one build for both: the same CPython ABI.
+ROUTE_PY = "/opt/uvpy/bin/python"
+
+
 def _base_image():
     if not KICAD:
         return (modal.Image.debian_slim(python_version=PY_VERSION)
                 .apt_install("curl", "procps", "build-essential", "zsh")
-                .pip_install(*PINS))
+                .pip_install(*PINS)
+                .run_commands("curl -LsSf https://astral.sh/uv/install.sh | sh",
+                              f"/root/.local/bin/uv python install {PY_VERSION}",
+                              f"/root/.local/bin/uv venv /opt/uvpy --python {PY_VERSION} --python-preference only-managed",
+                              "/root/.local/bin/uv pip install --python /opt/uvpy/bin/python " + " ".join(PINS)))
     # USER root: the image runs as USER kicad; python-is-python3: Modal's builder runs `python -m pip`;
     # --break-system-packages: PEP 668 guards the system python
     return (modal.Image.from_registry(KICAD_IMAGE, setup_dockerfile_commands=["USER root"])
@@ -70,6 +88,10 @@ image = (
         f" print('grid_router', grid_router.__version__)\"",
         f"cd {REPO}/awx && python3 -c \"import fanout_from_plan, whole_solve;"
         f" print('awx imports ok')\"",
+        *(() if KICAD else (
+            f"cd {REPO}/py_router && {ROUTE_PY} -c \"import sys, obstacle_map, grid_router;"
+            f" print('route python', sys.version.split()[0], 'grid_router', grid_router.__version__)\"",
+            f"cd {REPO}/awx && {ROUTE_PY} -c \"import fanout_from_plan, whole_solve; print('awx imports ok')\"",)),
     )
 )
 
@@ -154,6 +176,87 @@ def main(ks: str = "15,28,35,41,51", out: str = "modal_whole_out", rounds: int =
             (d / f"k{K}_run.tgz").write_bytes(res["tgz"])
         grade = next((ln for ln in reversed(res["log"].splitlines()) if ln.startswith("WHOLE ")), "(no grade)")
         print(f"K{K}: rc {res['rc']}, {res['secs']} s on {res['cpu'][:60]} -- {grade}", flush=True)
+
+
+@app.function(cpu=(2, 8), memory=(256, 16384), timeout=86400, max_containers=40)
+def run_board(case: str, seed: int = 1, rounds: int = 1, sets: list | None = None, cap: int = 79200) -> dict:
+    """One board of the BUS BOARDS check (tests/stress/bus_boards.py --cases CASE) under the bus step's seed (BUS_SEED),
+    in its own container: its report row, its log, the route's own log and the board it hands on. `sets`: K=V settings
+    for the run; `cap`: seconds the board may take before the check stops it (its row says so). (Two cores asked, eight
+    allowed: a single bus's fanout runs on about one, buses negotiated at once on one each; and a day allowed -- a
+    board's fanout took more than 3.5 times as long here as on the desk it was written at, a four-bus board ten
+    hours)"""
+    import json
+    out = "/tmp/bb"
+    cmd = [ROUTE_PY if os.path.exists(ROUTE_PY) else "python3", "-u", f"{REPO}/tests/stress/bus_boards.py",
+           "--cases", case, "--out", out, "-j", "1",
+           "--rounds", str(rounds), "--timeout", str(cap), "--set", f"BUS_SEED={seed}"]
+    for kv in sets or []:
+        cmd += ["--set", kv]
+    t0 = time.time()
+    p = subprocess.Popen(cmd, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                         start_new_session=True)
+    try:
+        log, _ = p.communicate(timeout=cap + 1800)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        log, _ = p.communicate()
+        log += f"\n(stopped {cap + 1800} s on)\n"
+    rep = Path(out) / "report.json"
+    row = json.loads(rep.read_text())["cases"].get(case) if rep.exists() else None
+    tb = io.BytesIO()
+    with tarfile.open(fileobj=tb, mode="w:gz") as t:
+        for f in ("run.log", "bus.kicad_pcb", "bus.kicad_pro", "bus.kicad_dru"):
+            if (Path(out) / case / f).exists():
+                t.add(str(Path(out) / case / f), arcname=f"{case}/{f}")
+    cpu = subprocess.run(["sh", "-c", "grep -m1 'model name' /proc/cpuinfo"], capture_output=True, text=True).stdout
+    return {"case": case, "seed": seed, "rc": p.returncode, "secs": round(time.time() - t0), "log": log, "row": row,
+            "cpu": cpu.strip(), "tgz": tb.getvalue()}
+
+
+@app.local_entrypoint()
+def boards(seeds: str = "1", cases: str = "", out: str = "modal_boards_out", rounds: int = 1, sets: str = ""):
+    """modal run awx/modal_whole.py::boards --seeds 2,3,4 --out DIR [--cases a,b] [--rounds R] [--sets "K=V;K=V"]: the
+    BUS BOARDS check, one container per board and seed -- every board (or `cases`) under each of `seeds`; each run's
+    files under DIR/seedS, DIR/report.json ({case/seed: its row}) written as the runs come back, and the table"""
+    import json
+    man = json.loads((_src / "tests" / "fixtures" / "bus_boards" / "manifest.json").read_text())["cases"]
+    cs = [c for c in cases.split(",") if c] or list(man)
+    ss = [int(x) for x in seeds.split(",") if x]
+    kv = [x for x in sets.split(";") if x]
+    d = Path(out)
+    d.mkdir(parents=True, exist_ok=True)
+    print(f"{len(cs) * len(ss)} run(s): {', '.join(cs)} under seed(s) {', '.join(map(str, ss))} -> {d}", flush=True)
+    rows = {}
+    for res in run_board.starmap([(c, s_, rounds, kv) for s_ in ss for c in cs], order_outputs=False,
+                                 return_exceptions=True):
+        if isinstance(res, BaseException):
+            print(f"a run failed in its container: {res!r}", flush=True)
+            continue
+        c, s_, r = res["case"], res["seed"], res["row"] or {}
+        sd = d / f"seed{s_}"
+        sd.mkdir(exist_ok=True)
+        (sd / f"{c}.log").write_text(res["log"])
+        if res["tgz"]:
+            with tarfile.open(fileobj=io.BytesIO(res["tgz"]), mode="r:gz") as t:
+                t.extractall(sd, filter="data")
+        rows[f"{c}/{s_}"] = dict(r, rc=res["rc"], wall=res["secs"], cpu=res["cpu"])
+        (d / "report.json").write_text(json.dumps(rows, indent=1))
+        print(f"{c} seed {s_}: " + (f"{len(r['open'])} open, drc {r['drc']}, {len(r['walled'])} walled"
+                                    if r else f"NO REPORT (rc {res['rc']})")
+              + f" -- {res['secs']} s on {res['cpu'][:48]}", flush=True)
+    print("\nboard        " + "  ".join(f"seed {s_:<10d}" for s_ in ss) + "   (open/drc/walled secs)")
+    bad = 0
+    for c in cs:
+        cells = []
+        for s_ in ss:
+            r = rows.get(f"{c}/{s_}")
+            ok = bool(r) and r.get("ok") and not r.get("why")
+            bad += 0 if ok else 1
+            cells.append(f"{len(r['open'])}/{r['drc']}/{len(r['walled'])} {r['secs']:>5d}s" if r and "open" in r
+                         else "none")
+        print(f"{c:12s} " + "  ".join(f"{x:<15s}" for x in cells))
+    print(f"\n{'every run clean' if not bad else f'{bad} run(s) NOT clean'} -- {d / 'report.json'}", flush=True)
 
 
 @app.function(cpu=(0.125, 4), memory=(256, 8192), timeout=14400)

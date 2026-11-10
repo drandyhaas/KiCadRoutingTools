@@ -52,6 +52,7 @@ import awx_settings
 import sys
 
 import braid as bd
+import ends_near
 import pairs as _pairs
 
 
@@ -98,43 +99,17 @@ def lanes_named(names):
     return list(dict.fromkeys(ln for ln in (LANE.get(n, n) for n in names) if legs_of(ln)))
 
 
-def box(pts):
-    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-boxes = {0: box([e[0] for e in ends.values()]), 1: box([e[1] for e in ends.values()])}
+# (at the ends: ends_near's one test, the ends' repair's too -- whole_route.repair_ends)
 # (a run to several parts, one source and several ends -- the sidecar's dest_of, fanout_from_plan: the berths' box of
 # each part, which the ends near one of them are at; one box round them all would span the gap between the parts)
-_DEST_OF = S.get('dest_of') or {}
-_bgroups = {}
-for _n, _e in ends.items():
-    _bgroups.setdefault(_DEST_OF.get(_n, ''), []).append(_e[1])
-BOXES = {0: [boxes[0]], 1: [box(v) for _k, v in sorted(_bgroups.items())] if len(_bgroups) > 1 else [boxes[1]]}
+BOXES = ends_near.boxes(ends, S.get('dest_of') or {})
 FRONT = 2 * bd.VIA_NEED + bd.LANE_MIN           # in front of a face: its band (whole_solve FACE_ROOM) and a lane pitch
-
-
-def side_reach(k, face, b):
-    """beside a side face ('N' or 'S') of box b of array k's ends: the width its ends' lanes stack to, and two
-    pitches"""
-    y0 = b[1] if face == 'N' else b[3]
-    n = sum(1 for e in ends.values() if abs(e[k][1] - y0) < 1e-3)
-    return (n + 2) * bd.LANE_MIN
-
-
-def gap(b, x, y):
-    return math.hypot(max(b[0] - x, 0.0, x - b[2]), max(b[1] - y, 0.0, y - b[3]))
 
 
 def near(k, x, y):
     """is (x, y) at array k's ends: beside a side face within its stack, else in front within the band (of the box
     of its ends nearest it)"""
-    b = min(BOXES[k], key=lambda b_: gap(b_, x, y))
-    dx = max(b[0] - x, 0.0, x - b[2])
-    dy = max(b[1] - y, 0.0, y - b[3])
-    if dx == 0.0 and dy > 0.0:
-        return dy <= side_reach(k, 'N' if y < b[1] else 'S', b)
-    return math.sqrt(dx * dx + dy * dy) <= FRONT
+    return ends_near.near(ends, BOXES, k, x, y, FRONT, bd.LANE_MIN)
 
 
 def end_of(lane, k):
@@ -235,7 +210,7 @@ def failing_ends(ln):
                 ks |= {k for k in (0, 1) if near(k, x, y)}
     if not ks:
         for x, y in disconnected(awx_settings.get('FB_CONN')).get(ln, ()):
-            ks.add(min((0, 1), key=lambda k: min(gap(b_, x, y) for b_ in BOXES[k])))
+            ks.add(min((0, 1), key=lambda k: min(ends_near.gap(b_, x, y) for b_ in BOXES[k])))
     return sorted(ks) or [0, 1]
 
 

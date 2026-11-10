@@ -39,6 +39,8 @@ def main():
     ap.add_argument('--solve-from', default=None, metavar='ROUND_DIR',
                     help="a recorded round whose first solve to take (with --fanout-from that round's fanout's)")
     ap.add_argument('--set', action='append', default=[], metavar='K=V', help='a setting for the round')
+    ap.add_argument('--rounds', type=int, default=1,
+                    help="the rounds to run (default 1); a recorded fanout and solve are the FIRST round's alone")
     a = ap.parse_args()
     work, out = os.path.abspath(a.work), os.path.abspath(a.out_dir)
     fo_from = os.path.abspath(a.fanout_from) if a.fanout_from else None
@@ -67,7 +69,8 @@ def main():
 
         def run_(argv, env, *x, **k):
             # (the round's fanout -- not a held one, which lays the round's own plan -- taken from the recorded round)
-            if argv and argv[0] == 'fanout_from_plan.py' and '--hold' not in argv:
+            if argv and argv[0] == 'fanout_from_plan.py' and '--hold' not in argv and \
+                    os.path.basename(os.path.dirname(argv[1])) == 'r1':
                 d_ = os.path.dirname(argv[1])
                 for f_ in ('fo.kicad_pcb', 'fo.kicad_pro', 'fo.kicad_prl', 'fo.plan.json', 'fo.log'):
                     if os.path.isfile(os.path.join(fo_from, f_)):
@@ -99,7 +102,7 @@ def main():
             return run1(argv, env, *x, **k)
         wr.run = run_s
     with rb.step_policy(rr, settings):
-        rc, grade = wr.chain(a.k, os.path.join(out, 'run'), 1, base=frame, dest=a.dest or os.environ.get('DEST') or 'U1',
+        rc, grade = wr.chain(a.k, os.path.join(out, 'run'), a.rounds, base=frame, dest=a.dest or os.environ.get('DEST') or 'U1',
                              F=0, settings=settings)
     print(f'replay_round: chain exit {rc}; {grade}')
     sys.exit(rc)

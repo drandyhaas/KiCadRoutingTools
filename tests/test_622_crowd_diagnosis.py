@@ -14,7 +14,7 @@ layers the lane's crossings and ends need -- free to break lane by lane, the few
 (OUT.crowded.json; whole_route says them in the round's log, and a round with no plan names them to the next round's
 fanout).
 
-On a generated four-copper bus (16 lanes, shuffled, a 2.5 mm channel), its round-1 bench laid by one round of the
+On a generated four-copper bus (16 lanes, shuffled, a 2.0 mm channel), its round-1 bench laid by one round of the
 whole route, this pins:
 
 1. as generated the solve has a plan, and the diagnosis on that model names no lane;
@@ -125,7 +125,9 @@ def main():
         # (the source's menu the bench crowds under: no climbs, no inner runs -- with the step's own, six-pitch climbs
         # on the inner layers, the ends find this bench room, and the check has nothing to diagnose)
         e.update(ROUTE_LAYERS=LAYERS, SRC_CLIMB='0', SRC_RUN_INNER='0', DST_ALONG='0')
-        for cmd in (['synth_bus.py', raw, '--k', '16', '--gap', '2.5', '--pattern', 'shuffle', '--seed', '1',
+        # (the channel 2.0 mm: at 2.5 the ends the whole route chooses for this bench leave a plan even with movers
+        # spaced as stayers -- 27 crossings and two changes -- and the diagnosis below had nothing to name)
+        for cmd in (['synth_bus.py', raw, '--k', '16', '--gap', '2.0', '--pattern', 'shuffle', '--seed', '1',
                      '--copper', '4'], ['make_bench.py', raw, 'SU1', 'SD1', bench0]):
             r = subprocess.run([sys.executable] + cmd, cwd=AWX, capture_output=True, text=True, timeout=600, env=e)
             if r.returncode != 0:

@@ -15,6 +15,8 @@ those decisions rest on, without a bench to route:
    bench's '/DDR3 16x1/SDQ15' read as SDQ15);
 3. held_plan: a loop's snapped plan when it has one; nothing when it held none; and its best round's plan snapped,
    and laid (plan_bench), on THAT round's bench -- not the first round's, whose via ends another solve relayed;
+   loop_seeds: a stopped loop's best round's solve and flips, and every cut and history it held, for the loop run
+   again on a repaired bench;
 4. whole_feedback --refused: the fanout audit's split pair (SDQS0 at its berth, SDQ3 between its tips) named as
    the two lanes' berths not to be chosen together, and a tooth on the source's far face (SDQ7) as an end to avoid --
    what the last resort leaves out when no round laid anything;
@@ -141,6 +143,15 @@ def main():
         pb = wr.plan_bench(loopd2, hp2, '/b/fo_layers.kicad_pcb')
         if pb != '/b/bench2.kicad_pcb':
             fails.append(f'plan_bench: the held plan laid on {pb}, want its round\'s bench2')
+        # the loop run again on a repaired bench starts at the stopped loop's best round, every cut it held
+        json.dump({'rounds': {'1': {'solve': '/r/solve.json', 'flips': ''},
+                              '2': {'solve': '/r/loop/s2.json', 'flips': '/r/loop/p1.json'}},
+                   'cuts': '/r/loop/dc1.json,/r/loop/c2.json', 'hist': '/r/loop/h1.json'},
+                  open(os.path.join(loopd2, 'state.json'), 'w'))
+        sv_, seeds_ = wr.loop_seeds(loopd2)
+        if sv_ != '/r/loop/s2.json' or seeds_ != {'SEED_CUTS': '/r/loop/dc1.json,/r/loop/c2.json',
+                                                  'SEED_FLIPS': '/r/loop/p1.json', 'SEED_HIST': '/r/loop/h1.json'}:
+            fails.append(f'loop_seeds: {sv_} {seeds_} -- want round 2\'s solve and flips, every cut and history')
         side = os.path.join(td, 'fo.plan.json')
         json.dump({'chi': 1, 'ends': {'SDQS0P': [[127.0, 66.0], [139.0, 68.2]], 'SDQS0N': [[127.0, 66.3],
                                                                                          [139.8, 68.2]],

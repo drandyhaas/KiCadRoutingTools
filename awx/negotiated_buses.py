@@ -468,7 +468,9 @@ def conflicts(out, bus_of, path, log=print):
     for it in items:
         n1, n2 = sk(it.get('net1')), sk(it.get('net2'))
         b1, b2 = bus_of.get(n1), bus_of.get(n2)
-        if (b1 or b2) and b1 != b2:
+        # (two NETS: a bus net against no net -- the board's edge, a hole -- is its own run's violation, which no
+        # merge makes and nothing here settles; counted between buses, it failed the step with nothing to give back)
+        if n1 and n2 and '<no net>' not in (n1, n2) and (b1 or b2) and b1 != b2:
             conf.append({'type': it['type'], 'net1': n1, 'bus1': b1, 'net2': n2, 'bus2': b2, 'layer': it.get('layer'),
                          'at': at(it)})
     with open(path, 'w', encoding='utf-8') as f:
@@ -499,7 +501,19 @@ def give_back(out, board, path, log=print):
         return []
     with contextlib.redirect_stdout(io.StringIO()):
         po, pi = parse_kicad_pcb(out), parse_kicad_pcb(board)
-    full = {f_ for f_, s_ in net_keys(po).items() if s_ in give}
+    # (never a net with a POUR: its copper here is the whole-array fanout's drops at every array, and given back for
+    # one drop that met a lane, every drop of the plane went -- as the step's own grade never puts a zone's net back;
+    # its conflict stays named for the rest of the chain)
+    keys_ = net_keys(po)
+    zone_ = {keys_.get(po.nets[z_.net_id].name, po.nets[z_.net_id].name) for z_ in (po.zones or [])
+             if z_.net_id in po.nets}
+    kept_ = sorted(set(give) & zone_)
+    give = [g_ for g_ in give if g_ not in zone_]
+    if kept_:
+        log(f'  the merged board: {", ".join(kept_)} met a bus\'s net but pour(s) -- not given back, named')
+    if not give:
+        return []
+    full = {f_ for f_, s_ in keys_.items() if s_ in give}
     ids = {i_ for i_, n_ in po.nets.items() if n_.name in full}
     r3 = lambda p_: (round(p_[0], 3), round(p_[1], 3))   # noqa: E731
     came = {frozenset((r3((s_.start_x, s_.start_y)), r3((s_.end_x, s_.end_y)))) | {s_.layer} for s_ in pi.segments
@@ -578,6 +592,9 @@ def _bus_job(work, phase, bus, inp, env, k, rounds, inproc, feedback_rounds, siz
     """(name, argv, env, log path): `bus` routed by itself on its own copy of `inp`, in work/PHASE/DEST/"""
     from copy_board import copy_board
     d_ = os.path.join(work, phase, bus[1])
+    # (the bus's directory its own run's: a process that died before it wrote left an earlier run's board and summary
+    # there for _bus_out to merge as this one's)
+    shutil.rmtree(d_, ignore_errors=True)
     os.makedirs(d_, exist_ok=True)
     own = os.path.join(d_, 'input.kicad_pcb')
     with contextlib.redirect_stdout(io.StringIO()):

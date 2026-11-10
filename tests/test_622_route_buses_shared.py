@@ -69,6 +69,14 @@ def run(buses, fail=(), sequential=False, left=None, neg_left=0, alone_left=None
     calls = []
     del NEG[:], SOLO[:], KEPT[:], ALONE[:]
 
+    def graded(open_):
+        """a board's grade as route_bus.board_grade gives it: these bus nets open, no violation, no ball walled in"""
+        return {'open': sorted(open_), 'drc': {'n': 0}, 'walled': {'walled': []}}
+
+    def grade(board, routed, buses, work_, log=print, tag='board'):
+        # (the board the buses left in turn: every net a step handed back)
+        return graded(n_ for v_ in (left or {}).values() for n_ in v_)
+
     def negotiate(board, out, grp, k, rounds, inproc, log, step_json, *a, solo=None, **kw):
         NEG.append(list(grp))
         SOLO.append([None if s_ is None else tuple(os.path.basename(p_) for p_ in s_) for s_ in solo or []])
@@ -78,7 +86,8 @@ def run(buses, fail=(), sequential=False, left=None, neg_left=0, alone_left=None
             json.dump({'routed': ['a'], 'refused': {f'n{j_}': 'open' for j_ in range(neg_left if i_ == 0 else 0)}},
                       open(sp_, 'w'))
             rows.append(dict(src=g_[0], dest=g_[1], mode=g_[2], exit=0, grade='', summary=sp_))
-        json.dump({'buses': rows}, open(step_json, 'w'))
+        # (...with the merged board's grade, as route_negotiated records it: route_buses keeps the better board by it)
+        json.dump({'buses': rows, 'grade': graded([f'n{j_}' for j_ in range(neg_left)])}, open(step_json, 'w'))
         shutil.copy(board, out)
         shutil.copy(board[:-len('.kicad_pcb')] + '.kicad_pro', out[:-len('.kicad_pcb')] + '.kicad_pro')
         return 0, []
@@ -96,8 +105,8 @@ def run(buses, fail=(), sequential=False, left=None, neg_left=0, alone_left=None
             json.dump({'routed': ['a'], 'refused': {n_: 'open' for n_ in ((alone_left if alone_ else left) or {})
                                                      .get((src, dest), [])}}, open(json_out, 'w'))
         return (1 if (src, dest) in fail else 0), f'BUS {src}->{dest}'
-    real, real_n = rb.route_bus, nb.route_negotiated
-    rb.route_bus, nb.route_negotiated = step, negotiate
+    real, real_n, real_g = rb.route_bus, nb.route_negotiated, rb.board_grade
+    rb.route_bus, nb.route_negotiated, rb.board_grade = step, negotiate, grade
     try:
         with tempfile.TemporaryDirectory() as td:
             b0 = os.path.join(td, 'b.kicad_pcb')
@@ -110,7 +119,7 @@ def run(buses, fail=(), sequential=False, left=None, neg_left=0, alone_left=None
                         for r_ in (json.load(open(sj)).get('buses') or []) if os.path.isfile(sj))
             return code, calls, b0, os.path.join(td, 'o.bus')
     finally:
-        rb.route_bus, nb.route_negotiated = real, real_n
+        rb.route_bus, nb.route_negotiated, rb.board_grade = real, real_n, real_g
 
 
 L4 = 'F.Cu,B.Cu,In1.Cu,In2.Cu'

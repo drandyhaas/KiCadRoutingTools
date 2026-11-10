@@ -426,7 +426,7 @@ def _nearest_on_segments(Q, T):
 
 def _deepest_plain(Q, caps, margin=0.0):
     """Per point: the deepest violated capsule of `caps` -> (depth, nx, ny),
-    depth <= 0 where none. taut_fast._deepest WITHOUT the crossing rule:
+    depth <= 0 where none. taut_fast._deepest_k's measure WITHOUT the crossing rule:
     on one layer nothing a packed run meets is a dive, every capsule
     pushes. Evaluated on the (point, capsule) pairs whose boxes overlap
     (the boxes grown by `margin`: with one, a LEGAL point within it of

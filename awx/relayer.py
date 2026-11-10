@@ -20,6 +20,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+import pairs as _pairs  # noqa: E402
 
 TOL = 1e-3                  # a stub's end, a segment's end and a via's centre: one point within this (mm)
 SLACK = 0.01                # (clashes) under the rule by more than this: the fanout's own grid lays a hair under it
@@ -84,12 +85,16 @@ def clashes(pcb, runs, layers, clear):
                 own = an == p.net_id
                 if own.all():
                     continue
-                hx, hy = p.size_x / 2, p.size_y / 2
-                c = [(p.global_x - hx, p.global_y - hy), (p.global_x + hx, p.global_y - hy),
-                     (p.global_x + hx, p.global_y + hy), (p.global_x - hx, p.global_y + hy)]
+                # (the run in the pad's own frame, where its copper is the axis-aligned box: read on the board's
+                # axes, a 0402 turned 45 degrees stood 0.1 mm short of its corners, and a dog-bone's run moved onto
+                # its layer 0.053 mm off it, 0.1 asked)
+                hx, hy, t_ = p.size_x / 2, p.size_y / 2, _pairs.pad_tilt(p)
+                r0 = np.stack(_pairs.into_pad(a0[:, 0] - p.global_x, a0[:, 1] - p.global_y, t_), axis=1)
+                r1 = np.stack(_pairs.into_pad(a1[:, 0] - p.global_x, a1[:, 1] - p.global_y, t_), axis=1)
+                c = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
                 e0, e1 = np.array(c, float), np.array(c[1:] + c[:1], float)
-                inside = ((np.abs(a0[:, 0] - p.global_x) <= hx) & (np.abs(a0[:, 1] - p.global_y) <= hy) & ~own).any()
-                hit = bool(inside or ((seg_seg_dist(a0, a1, e0, e1) < ah[:, None] + clear - SLACK).any(axis=1)
+                inside = ((np.abs(r0[:, 0]) <= hx) & (np.abs(r0[:, 1]) <= hy) & ~own).any()
+                hit = bool(inside or ((seg_seg_dist(r0, r1, e0, e1) < ah[:, None] + clear - SLACK).any(axis=1)
                                       & ~own).any())
             if hit:
                 ban.setdefault(k, set()).add(L)
@@ -158,7 +163,7 @@ def relayer(board, out, moves, log=print):
         lays |= {s.layer for s in pcb.segments if s.net_id == nid and id(s) not in gone_
                  and (touch(s.start_x, s.start_y) or touch(s.end_x, s.end_y))}
         for p in pcb.nets[nid].pads:
-            if abs(via.x - p.global_x) <= p.size_x / 2 and abs(via.y - p.global_y) <= p.size_y / 2:
+            if _pairs.in_pad(via.x, via.y, p):
                 lays |= ({'*'} if '*.Cu' in p.layers else {L for L in p.layers if L.endswith('.Cu')})
         if len(lays) == 1 and all(v is not via for v in drop):
             drop.append(via)

@@ -350,20 +350,13 @@ def plan_state(pcb, names, sref, dref, banned=frozenset(), log=print, hold_teeth
             import source_realize as sr
             menus[nm] = [m for m in escape_menu(pad, site, grid, faces, rlayers, copper)
                          if (nm, sr.move_sig(m)) not in banned]
-    # TEETH_HOLD (a plan sidecar, the frame's): each net's TOOTH held -- where its escape reaches the boundary, by which
-    # face, on which layer -- the menu cut to the moves there, the ends left to choose the berths; the shared array's
-    # whole-array fanout (joint_escape.plan_array, hold=) laid its field round exactly those teeth, so the bus leaves it
-    # as it left its own fanout. A net with no move there keeps its menu, and is named (`hold_teeth` {net: {'tooth',
-    # 'direction', 'layer'}}: the same, in memory -- the escape step's own ends' teeth, ESCAPE_JOINT)
+    # `hold_teeth` {net: {'tooth', 'direction', 'layer'}} (the escape step's own ends' teeth, ESCAPE_JOINT): each net's
+    # TOOTH held -- where its escape reaches the boundary, by which face, on which layer -- the menu cut to the moves
+    # there, the ends left to choose the berths; the shared array's whole-array fanout (joint_escape.plan_array, hold=)
+    # laid its field round exactly those teeth, so the bus leaves it as it left its own fanout. A net with no move there
+    # keeps its menu, and is named
     hold_ = dict(hold_teeth or {})
     hold_missed = []
-    hold_path = awx_settings.get('TEETH_HOLD')
-    if hold_path:
-        sc_ = json.load(open(hold_path))
-        for nm, t_ in (sc_.get('ends') or {}).items():
-            if nm in (sc_.get('tooth_layer') or {}) and nm not in hold_:
-                d_ = next(d for d, v in DIRS.items() if tuple(v) == tuple(sc_['tooth_dir'][nm]))
-                hold_[nm] = {'tooth': tuple(t_[0]), 'direction': d_, 'layer': sc_['tooth_layer'][nm]}
     if hold_:
         held_, miss_ = 0, []
         for nm in sorted(smenu):

@@ -301,7 +301,9 @@ def taut_paths(nets: Sequence[str],
     # mix with the old algorithm's inside a run. TAUT_FAST=0 keeps the old
     # per-string relaxation reachable for comparison.
     fast = awx_settings.get('TAUT_FAST', '1') != '0'
-    tag = '#fast' if fast else ''
+    # (#fast2: a string no taut path -- diverged, or past three chords -- is its chord, taut_fast; the memo's strings
+    # from before it were the folded ones)
+    tag = '#fast2' if fast else ''
     if fast:
         import taut_fast as tf
         todo = []

@@ -62,6 +62,7 @@ from plan_audit import plan, read_nets, dseg  # noqa: E402
 # route_bus.walls_made) has the lanes walling it lifted and routed again round its way kept -- the via site it escapes
 # by with them gone, reserved as a lane's line is (lift_walls). 0 = no test
 WALL_LIFT = (awx_settings.get('WALL_LIFT') or '1') == '1'
+WALL_SITES = 6      # (lift_walls) the via sites a walled ball's lanes are routed again round, the nearest first
 
 
 def lift_walls(ctx, laid, routed, board, names, dest, base_s, base_v):
@@ -81,15 +82,20 @@ def lift_walls(ctx, laid, routed, board, names, dest, base_s, base_v):
     refs = sorted(set(getattr(ctx, 'src_ref', {}).values()) | set(dest.split('+')))
     before = copy.copy(ctx.pcb)
     before.segments, before.vias = list(base_s), list(base_v)
+    # (the walls by the copper a lift takes away -- each lane's own, its fanout standing)
     walls = rb.walls_made(before, ctx.pcb, refs, list(full.values()), [full[m] for m in laid if m in full],
-                          project=board)
+                          project=board, only={full[m]: {id(o) for o in laid[m][1] + laid[m][2]}
+                                               for m in laid if m in full})
     rung = rb._cage_rung(ctx.pcb)
     for k, who in walls.items():
         lanes = [short[x] for x in who if short.get(x) in laid]
         r, n = k.split('.', 1)
         pad = next(p for p in ctx.pcb.footprints[r].pads if p.pad_number == n)
+        if not who:
+            print(f'{k} WALLED IN: no lane lifted frees it (its walls stand with every lane gone) -- not lifted')
+            continue
         if not lanes or len(lanes) < len(who):
-            print(f'{k} WALLED IN by {", ".join(who) or "no lane alone"}: not lifted (not every one is a laid single)')
+            print(f'{k} WALLED IN by {", ".join(who)}: not lifted (not every one is a laid single)')
             continue
         fixed = rb._fixed_nets(ctx.pcb, board, full.values())
         # (the way on the board as the lanes are routed again on it: their lane copper gone, their fanout's -- which
@@ -99,50 +105,62 @@ def lift_walls(ctx, laid, routed, board, names, dest, base_s, base_v):
         gone = copy.copy(ctx.pcb)
         gone.segments = [s for s in ctx.pcb.segments if id(s) not in drop_]
         gone.vias = [v for v in ctx.pcb.vias if id(v) not in drop_]
-        way = rb.ball_way(gone, pad, fixed, rung, with_path=True)
-        if way is None:
+        # (the nearest site first, then the next ones along the ball's ways: the nearest lay a clearance off the
+        # lifted lane's own tooth, which stands, and the lane routed again had no room to leave it past the via -- a
+        # supply ball's pocket between two memory lanes, a third lane's tooth beneath its mouth)
+        ways = rb.ball_way(gone, pad, fixed, rung, with_path=True, sites=WALL_SITES)
+        if not ways:
             print(f'{k} WALLED IN by {", ".join(lanes)}: no via site reached with them gone either')
             continue
-        (sx, sy), home, wpts = way
-        # (the WAY reserved, as the ball reaches the site: a straight line from the ball crossed the walling lane's
-        # own fanout run where the way went round its end, and the lane routed again took that end and walled the
-        # ball once more -- a source ball beside an Ethernet lane's tooth run)
-        vline = [(a_, b_, home) for a_, b_ in zip(wpts, wpts[1:]) if math.hypot(b_[0] - a_[0], b_[1] - a_[1]) > 1e-6]
         keep_s, keep_v = list(ctx.pcb.segments), list(ctx.pcb.vias)
-        ctx.pcb.segments = [s for s in keep_s if id(s) not in drop_]
-        ctx.pcb.vias = [v for v in keep_v if id(v) not in drop_]
-        routed.difference_update(lanes)
-        got, ok_, how = {}, True, []
-        for m in lanes:
-            cm = laid[m][0]
-            later = [om for om in cm.members if om != m and om not in routed]
-            # (in its band, else in none: a band that hugs a row's ends has no room round a via site off them)
-            r_ = None
-            for free_ in (False, True):
-                try:
-                    r_ = cm.route_lane(m, list(cm.virtual_of(later)) + vline,
-                                       list(cm.virtual_vias_of(later) or []) + [(sx, sy)], free=free_)
-                except Exception:
-                    r_ = None
-                if r_ is not None:
-                    how.append(f'{m} {"free" if free_ else "in band"}')
-                    break
-            if r_ is None:
-                ok_ = False
-                break
-            got[m] = r_
-            routed.add(m)
-        if ok_ and not rb._caged_on(ctx.pcb, {r: [n]}, rb._fixed_nets(ctx.pcb, board, full.values()), rung):
+        done_, said_ = False, None
+        for n_way, ((sx, sy), home, wpts) in enumerate(ways):
+            # (the WAY reserved, as the ball reaches the site: a straight line from the ball crossed the walling
+            # lane's own fanout run where the way went round its end, and the lane routed again took that end and
+            # walled the ball once more -- a source ball beside an Ethernet lane's tooth run)
+            vline = [(a_, b_, home) for a_, b_ in zip(wpts, wpts[1:])
+                     if math.hypot(b_[0] - a_[0], b_[1] - a_[1]) > 1e-6]
+            ctx.pcb.segments = [s for s in keep_s if id(s) not in drop_]
+            ctx.pcb.vias = [v for v in keep_v if id(v) not in drop_]
+            routed.difference_update(lanes)
+            got, ok_, how = {}, True, []
             for m in lanes:
-                laid[m] = (laid[m][0], list(got[m][0]), list(got[m][1]))
-            print(f'{k} WALLED IN by {", ".join(lanes)}: lifted and routed again round its via site '
-                  f'({sx:.3f},{sy:.3f}) -- reached ({", ".join(how)})')
-        else:
+                cm = laid[m][0]
+                later = [om for om in cm.members if om != m and om not in routed]
+                # (in its band, else in none: a band that hugs a row's ends has no room round a via site off them)
+                r_ = None
+                for free_ in (False, True):
+                    try:
+                        r_ = cm.route_lane(m, list(cm.virtual_of(later)) + vline,
+                                           list(cm.virtual_vias_of(later) or []) + [(sx, sy)], free=free_)
+                    except Exception as e_:
+                        # (a crash said as one, not read as "not routed again" -- main() books such crashes as errors)
+                        print(f'  lift_walls: {m} {"free" if free_ else "in band"}: route_lane raised '
+                              f'{type(e_).__name__}: {e_}', file=sys.stderr)
+                        r_ = None
+                    if r_ is not None:
+                        how.append(f'{m} {"free" if free_ else "in band"}')
+                        break
+                if r_ is None:
+                    ok_ = False
+                    break
+                got[m] = r_
+                routed.add(m)
+            if ok_ and not rb._caged_on(ctx.pcb, {r: [n]}, rb._fixed_nets(ctx.pcb, board, full.values()), rung):
+                for m in lanes:
+                    laid[m] = (laid[m][0], list(got[m][0]), list(got[m][1]))
+                print(f'{k} WALLED IN by {", ".join(lanes)}: lifted and routed again round its via site '
+                      f'({sx:.3f},{sy:.3f}) -- reached ({", ".join(how)})'
+                      + (f', the {n_way + 1}. site tried' if n_way else ''))
+                done_ = True
+                break
             ctx.pcb.segments, ctx.pcb.vias = keep_s, keep_v
             routed.update(lanes)
-            print(f'{k} WALLED IN by {", ".join(lanes)}: ' + ('routed again round its via site, still walled'
-                                                             if ok_ else 'not routed again round its via site')
-                  + f' ({sx:.3f},{sy:.3f} on {home}) -- left as laid')
+            said_ = said_ or (('routed again round its via site, still walled' if ok_
+                               else 'not routed again round its via site') + f' ({sx:.3f},{sy:.3f} on {home})')
+        if not done_:
+            print(f'{k} WALLED IN by {", ".join(lanes)}: {said_}'
+                  + (f', nor round the {len(ways) - 1} next' if len(ways) > 1 else '') + ' -- left as laid')
 
 
 def along(w, P):

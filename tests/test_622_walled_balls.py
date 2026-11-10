@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 BOARD = os.path.join(ROOT, 'kicad_files', 'ulx3s.kicad_pcb')
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
     import whole_ends as we  # noqa: E402
-    from kicad_parser import parse_kicad_pcb  # noqa: E402
+    from kicad_parser import parse_kicad_pcb, Zone  # noqa: E402
 
 BAD = []
 
@@ -76,9 +76,10 @@ short = lambda n: (n or '').split('/')[-1]
 # (GND's plane under U1: the board pours none, and a ball is never dropped to a plane that is not there)
 _xs, _ys = [p.global_x for p in foot.pads], [p.global_y for p in foot.pads]
 _gnd = next(i for i, n in pcb.nets.items() if short(n.name) == 'GND')
-pcb.zones = list(pcb.zones or []) + [types.SimpleNamespace(
-    net_id=_gnd, layer='In1.Cu', priority=0, polygon=[(min(_xs) - 5, min(_ys) - 5), (max(_xs) + 5, min(_ys) - 5),
-                                                      (max(_xs) + 5, max(_ys) + 5), (min(_xs) - 5, max(_ys) + 5)])]
+pcb.zones = list(pcb.zones or []) + [Zone(
+    net_id=_gnd, net_name=pcb.nets[_gnd].name, layer='In1.Cu', priority=0,
+    polygon=[(min(_xs) - 5, min(_ys) - 5), (max(_xs) + 5, min(_ys) - 5), (max(_xs) + 5, max(_ys) + 5),
+             (min(_xs) - 5, max(_ys) + 5)])]
 sigs = sorted({short(p.net_name) for p in foot.pads if p.net_id and short(p.net_name) not in ('GND', '')
                and not short(p.net_name).startswith(('+', 'VCC', 'Net-'))})[:2]
 byname = {short(n.name): (i, n) for i, n in pcb.nets.items() if n.name}

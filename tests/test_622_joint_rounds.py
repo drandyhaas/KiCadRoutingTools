@@ -175,7 +175,10 @@ def realize_asks(board, tmp, route_layers, tag, env=None, seen=None):
     seen = {} if seen is None else seen
 
     def plan_array(pcb_, ref, bus, others, layers, **kw):
-        seen['bus'], seen['prefer'], seen['avoid'] = list(bus), dict(kw.get('prefer') or {}), kw.get('avoid')
+        # (the FIRST call's asks: this stub plans nothing, so the realize restores every net it left unplanned and asks
+        # again without them -- the last call's bus is empty)
+        if 'bus' not in seen:
+            seen['bus'], seen['prefer'], seen['avoid'] = list(bus), dict(kw.get('prefer') or {}), kw.get('avoid')
         return {}, {'status': 'STUB', 'pairs_escaped': 0, 'pairs': 0, 'others_escaped': 0, 'others_strapped': 0,
                     'others_balls': 0, 'dropped': 0, 'plane_balls': 0, 'hands_held': [], 'hands_free': []}
 
