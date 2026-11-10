@@ -2836,9 +2836,11 @@ def main():
                              "selects (stub: after its fan, #1717); a run without --nets never "
                              "via-drops the exposed/thermal pad.")
     parser.add_argument('--via-size', type=float, default=None,
-                        help='Underpad escape via outer diameter (mm, default 0.45)')
+                        help="Underpad escape via outer diameter (mm, default the board's "
+                             "Default net-class via, else 0.45)")
     parser.add_argument('--via-drill', type=float, default=None,
-                        help='Underpad escape via drill diameter (mm, default 0.25)')
+                        help="Underpad escape via drill diameter (mm, default the board's "
+                             "Default net-class drill, else 0.25)")
     parser.add_argument('--board-edge-clearance', type=float, default=defaults.BOARD_EDGE_CLEARANCE,
                         help='Min clearance from stub/via copper to the Edge.Cuts '
                              'outline in mm (default 0 = use --clearance). Stubs '
@@ -2924,10 +2926,18 @@ def main():
     # stock 0.2 mm board minimum pinned 0.1 mm escape stubs up to 0.2.
     if getattr(args, 'track_width', None) is None:
         args.track_width = args.width
-    # #1676: a via nobody asked for starts at the board's own .kicad_dru rules
+    # #1795: a via nobody asked for starts at the board's Default net-class via,
+    # as on route.py and the GUI's QFN panel; #1676: raised to its .kicad_dru rules
     _vs_explicit = args.via_size is not None or args.via_drill is not None
-    args.via_size = 0.45 if args.via_size is None else args.via_size
-    args.via_drill = 0.25 if args.via_drill is None else args.via_drill
+    from list_nets import board_default_netclass_param
+    for _pname, _nckey, _fallback in (('via_size', 'via_diameter', 0.45),
+                                      ('via_drill', 'via_drill', 0.25)):
+        if getattr(args, _pname) is None:
+            _v = board_default_netclass_param(args.pcb, _nckey)
+            setattr(args, _pname, _v if _v else _fallback)
+            print(f"--{_pname.replace('_', '-')} not given; using "
+                  f"{'the board Default net-class' if _v else 'the fallback'} "
+                  f"{getattr(args, _pname)}mm.")
     if not _vs_explicit:
         from design_rules import run_via_for_rules
         args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,

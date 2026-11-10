@@ -12,7 +12,7 @@ self-sizing step and the GUI fanout tab go through):
   1. under `board` the self-sized via is raised to min_through_hole_diameter,
      min_via_diameter and the ring round its drill (0.51/0.25 here), with or
      without the writeback, and check_drc finds no annular violation;
-  2. under the default `fab` it keeps 0.45/0.25; with the writeback off the
+  2. under the default `fab` it keeps its size; with the writeback off the
      step prints a WARNING naming the Board Setup minimum and JSON_SUMMARY
      `board_setup_vias` carries the row (8 vias below 0.13);
   3. with the writeback on the row is absent (the writeback lowers the
@@ -20,12 +20,16 @@ self-sizing step and the GUI fanout tab go through):
   4. units: the GUI's policy setter (set_fab_tier_from_config) reaches the
      same raise and records the writeback; `board_setup=False` and an
      explicit policy other than board leave the via alone; annular_grade
-     grades a fanout's via dicts against the Board Setup ring only when asked.
+     grades a fanout's via dicts against the Board Setup ring only when asked;
+  5. the self-sized via starts at the board's Default net-class via (#1795), as on
+     route.py and the GUI fanout tab: a class via that holds the ring is laid
+     as declared under `fab`, and nothing is named.
 
 The fixture is the issue's: qfn_csi_underpad_diff plus J9, a 2-row 0.5 mm
 socket with two un-netted mounting tabs (so row B reads interior and is
 via-dropped), and a partner J10, with a project declaring ring 0.13, via 0.25,
-hole 0.15 and a Default class via 0.5/0.2.
+hole 0.15 and a Default class via of 0.45/0.25 (ring 0.10, as the GUI half
+uses) for 1-3, and the issue's 0.5/0.2 (ring 0.15) for 5.
 
     python3 tests/test_1775_self_sized_via_board_setup.py
 """
@@ -56,7 +60,7 @@ def ok(label, cond, detail=''):
 
 def make_board(base, class_via=(0.5, 0.2)):
     """The issue's board at BASE.kicad_pcb + .kicad_pro (CLASS_VIA: the
-    Default class via, which the GUI fanout tab starts from)."""
+    Default class via, which qfn_fanout and the GUI fanout tab start from)."""
     src = open(SRC, encoding='utf-8').read()
 
     def pad(num, x, y, w, h, net):
@@ -125,7 +129,7 @@ def drc_annular(out):
 
 
 def end_to_end(tmp):
-    board = make_board(os.path.join(tmp, 'b'))
+    board = make_board(os.path.join(tmp, 'b'), class_via=(0.45, 0.25))
     print('1. --escalation board raises the self-sized via')
     for wb in (False, True):
         out = os.path.join(tmp, f'board_{int(wb)}.kicad_pcb')
@@ -142,7 +146,7 @@ def end_to_end(tmp):
     print('2. default escalation, writeback off: kept and named')
     out = os.path.join(tmp, 'fab_0.kicad_pcb')
     log, s = run_fanout(board, out, 'fab', False)
-    ok('the via keeps its built-in size', via_sizes(out) == [(0.45, 0.25)],
+    ok('the via keeps the class size', via_sizes(out) == [(0.45, 0.25)],
        repr(via_sizes(out)))
     ok('a WARNING names the Board Setup minimum',
        'WARNING: Board Setup min_via_annular_width' in log and '8 BELOW it' in log)
@@ -157,6 +161,14 @@ def end_to_end(tmp):
     ok('no board_setup_vias row', s.get('board_setup_vias') == [],
        repr(s.get('board_setup_vias')))
     ok('FAB FLOOR RELAXED printed', 'FAB FLOOR RELAXED' in log)
+    print('5. the default escalation starts at the Default class via')
+    board = make_board(os.path.join(tmp, 'c'))
+    out = os.path.join(tmp, 'class_0.kicad_pcb')
+    log, s = run_fanout(board, out, 'fab', False)
+    ok('the vias laid are the class via', via_sizes(out) == [(0.5, 0.2)],
+       repr(via_sizes(out)))
+    ok('no board_setup_vias row', s.get('board_setup_vias') == [],
+       repr(s.get('board_setup_vias')))
 
 
 def units():

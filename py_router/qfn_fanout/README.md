@@ -101,13 +101,14 @@ power_net_evidence`): a ground or rail name, power pins on two or more parts, or
 A surface stub of a net `--power-nets` names is not listed; a via-drop stub is, while its named width is wider
 than drawn. Disclosure only: the copper is unchanged.
 
-**The via a run sizes itself (#1775):** with no `--via-size`/`--via-drill` the via-drop's via starts at
-0.45/0.25, raised to the board's `.kicad_dru` via rules (#1676) and, under `--escalation board` only, to its
+**The via a run sizes itself (#1775, #1795):** with no `--via-size`/`--via-drill` the via-drop's via starts at the
+board's Default net-class via, as on `route.py` and the GUI fanout tab (0.45/0.25 when the board declares
+none), raised to the board's `.kicad_dru` via rules (#1676) and, under `--escalation board` only, to its
 Board Setup `min_through_hole_diameter`, `min_via_diameter` and `min_via_annular_width` round the drill (a
-0.13 ring makes it 0.51/0.25). Under the default `fab` it keeps its size; with `--no-fix-drc-settings` a via
+0.13 ring raises 0.45/0.25 to 0.51/0.25). Under the default `fab` it keeps its size; with `--no-fix-drc-settings` a via
 laid below a Board Setup minimum is named in a `WARNING` line and in `JSON_SUMMARY`'s `board_setup_vias`
-(`rule`, `min`, `vias`, `below`, `smallest_ring` / `smallest`). bga_fanout.py does the same with its 0.5/0.3.
-The GUI fanout tab starts from the Default-class via instead and goes through the same raise and grade.
+(`rule`, `min`, `vias`, `below`, `smallest_ring` / `smallest`). bga_fanout.py does the same, starting from
+its 0.5/0.3.
 
 ## Options
 
@@ -122,8 +123,8 @@ The GUI fanout tab starts from the Default-class via instead and goes through th
 | `--nets`, `-n` | Net patterns to include | All nets |
 | `--grid-step` | Routing grid step (mm); stub ends are snapped to it (#149). Match the `--grid-step` you give `route.py` | 0.1 |
 | `--escape-method` | `stub` (surface 45° fan) or `underpad` (via-drop); with `--nets`, `underpad` also escapes **interior (under-body) pads** (issue #410) | stub |
-| `--via-size` | Underpad escape via outer diameter (mm) | 0.45 |
-| `--via-drill` | Underpad escape via drill diameter (mm) | 0.25 |
+| `--via-size` | Underpad escape via outer diameter (mm) | the board's Default class, else 0.45 |
+| `--via-drill` | Underpad escape via drill diameter (mm) | the board's Default class, else 0.25 |
 | `--board-edge-clearance` | Stub/via copper to the Edge.Cuts outline (mm); stubs are shortened or dropped, underpad vias near the edge rejected (#288) | the board's `min_copper_edge_clearance`, else `--clearance` |
 | `--allow-via-in-pad` | Underpad escape: let the via overlap its **own** pad so it can stagger *inward* (via-in-pad) | off |
 | `--same-net-pad-clearance` | `> 0` forbids via-in-pad (overrides `--allow-via-in-pad`) and is recorded in the sibling `.kicad_pro` for later steps (#581); `-1` allows it | the project's record, else allowed |
