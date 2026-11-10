@@ -185,68 +185,6 @@
    "uniques": 18
   }
  ],
- "2026-10-09": [
-  {
-   "count": 1517,
-   "path": "/drandyhaas/KiCadRoutingTools",
-   "title": "Overview",
-   "uniques": 886
-  },
-  {
-   "count": 434,
-   "path": "/drandyhaas/KiCadRoutingTools/issues",
-   "title": "/issues",
-   "uniques": 58
-  },
-  {
-   "count": 261,
-   "path": "/drandyhaas/KiCadRoutingTools/pulls",
-   "title": "/pulls",
-   "uniques": 21
-  },
-  {
-   "count": 84,
-   "path": "/drandyhaas/KiCadRoutingTools/tree/main",
-   "title": "/tree/main",
-   "uniques": 43
-  },
-  {
-   "count": 80,
-   "path": "/drandyhaas/KiCadRoutingTools/releases/tag/v0.22.1",
-   "title": "/releases/tag/v0.22.1",
-   "uniques": 66
-  },
-  {
-   "count": 77,
-   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_all.png",
-   "title": "/blob/main/docs/routed_all.png",
-   "uniques": 68
-  },
-  {
-   "count": 69,
-   "path": "/drandyhaas/KiCadRoutingTools/releases",
-   "title": "/releases",
-   "uniques": 48
-  },
-  {
-   "count": 66,
-   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_kit.png",
-   "title": "/blob/main/docs/routed_kit.png",
-   "uniques": 65
-  },
-  {
-   "count": 54,
-   "path": "/drandyhaas/KiCadRoutingTools/commits",
-   "title": "/commits",
-   "uniques": 4
-  },
-  {
-   "count": 46,
-   "path": "/drandyhaas/KiCadRoutingTools/commits/main",
-   "title": "/commits/main",
-   "uniques": 21
-  }
- ],
  "2026-10-10": [
   {
    "count": 1517,
@@ -2167,6 +2105,68 @@
    "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/claude-skills.md",
    "title": "/blob/main/docs/claude-skills.md",
    "uniques": 38
+  }
+ ],
+ "2026-11-10": [
+  {
+   "count": 2257,
+   "path": "/drandyhaas/KiCadRoutingTools",
+   "title": "Overview",
+   "uniques": 1207
+  },
+  {
+   "count": 1106,
+   "path": "/drandyhaas/KiCadRoutingTools/discussions/1364",
+   "title": "/discussions/1364",
+   "uniques": 741
+  },
+  {
+   "count": 860,
+   "path": "/drandyhaas/KiCadRoutingTools/issues",
+   "title": "/issues",
+   "uniques": 84
+  },
+  {
+   "count": 170,
+   "path": "/drandyhaas/KiCadRoutingTools/pulls",
+   "title": "/pulls",
+   "uniques": 35
+  },
+  {
+   "count": 127,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_all.png",
+   "title": "/blob/main/docs/routed_all.png",
+   "uniques": 102
+  },
+  {
+   "count": 108,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_kit.png",
+   "title": "/blob/main/docs/routed_kit.png",
+   "uniques": 94
+  },
+  {
+   "count": 83,
+   "path": "/drandyhaas/KiCadRoutingTools/tree/main",
+   "title": "/tree/main",
+   "uniques": 53
+  },
+  {
+   "count": 72,
+   "path": "/drandyhaas/KiCadRoutingTools/releases/tag/v0.23.7",
+   "title": "/releases/tag/v0.23.7",
+   "uniques": 60
+  },
+  {
+   "count": 60,
+   "path": "/drandyhaas/KiCadRoutingTools/releases",
+   "title": "/releases",
+   "uniques": 53
+  },
+  {
+   "count": 52,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/README.md",
+   "title": "/blob/main/README.md",
+   "uniques": 24
   }
  ]
 }
