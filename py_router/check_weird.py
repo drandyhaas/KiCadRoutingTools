@@ -525,7 +525,8 @@ def _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
 
 
 def _strict_removable(net_id, name, net_segs, net_vias, net_pads, has_zone,
-                      copper_layers, thorough, skipped_nets, web_floor=0.0):
+                      copper_layers, thorough, skipped_nets, web_floor=0.0,
+                      keep_centre_stubs=False):
     """The removal pass's own verdict on this net (#1063): the segment indices
     ``collapse_strict_redundant`` would remove from the board as it stands,
     graded by the SAME StrictRemovalModel. None when the model does not grade
@@ -549,7 +550,8 @@ def _strict_removable(net_id, name, net_segs, net_vias, net_pads, has_zone,
         skipped_nets.append((name, len(net_segs)))
         return None
     model = StrictRemovalModel(net_id, net_segs, net_vias, net_pads,
-                               copper_layers, web_floor=web_floor)
+                               copper_layers, web_floor=web_floor,
+                               keep_centre_stubs=keep_centre_stubs)
     if not model.valid:
         return None
     return strict_removable_segments(model)
@@ -1100,6 +1102,9 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
     # verdict. A board with no project falls back to its thinnest track.
     from fix_kicad_drc_settings import connection_width_floor
     min_track_w = connection_width_floor(pcb_data)
+    # #1798: the nets the removal pass keeps via-centre stubs on.
+    from cleanup_pipeline import _skew_bound_net_ids
+    skew_ids = _skew_bound_net_ids(pcb_data)
 
     net_ids = set(segs_by_net) | set(vias_by_net)
     check_ids = []
@@ -1132,7 +1137,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                               net_zones, findings)
         removable = _strict_removable(net_id, name, net_segs, net_vias,
                                       net_pads, has_zone, copper_layers,
-                                      thorough, skipped_nets, min_track_w)
+                                      thorough, skipped_nets, min_track_w,
+                                      keep_centre_stubs=net_id in skew_ids)
         _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
                       findings, removable)
         _check_removable(net_id, name, net_segs, removable, findings)

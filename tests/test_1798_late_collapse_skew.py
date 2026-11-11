@@ -14,7 +14,8 @@ Rows:
   1. the route_diff board grades both pairs within their recorded tolerance,
      and carries the stub (a track from a via's rim to its centre);
   2. check_weird does not call the stub removable (the collapse and the
-     checker share StrictRemovalModel, so both keep it);
+     checker share StrictRemovalModel, so both keep it) -- on a net a skew
+     rule grades, as this one is; on any other net the model removes it;
   3. after `route.py --nets '*'` the member's KiCad length is unchanged and
      check_drc grades 0 nets out of range;
   4. the disclosure, CLI: a redundant detour on a net a `.kicad_dru` skew
@@ -173,6 +174,31 @@ def main():
         check("the stub is not listed removable",
               not re.search(r'removable-segment.*' + re.escape(tag), w)
               and tag not in w, tag)
+        # The rule is scoped to the nets a skew rule grades: on any other net
+        # the stub is copper no grade reads, and keeping it everywhere moved
+        # later steps' routing (a corpus A/B, 13 boards worse / 5 better).
+        from kicad_parser import parse_kicad_pcb
+        from cleanup_pipeline import _skew_bound_net_ids
+        from pcb_modification import StrictRemovalModel, strict_removable_segments
+        pb = parse_kicad_pcb(b)
+        nid = next(k for k, n in pb.nets.items() if n.name == name)
+        check("the board's recorded tolerance makes the stub's net skew-graded",
+              nid in _skew_bound_net_ids(pb))
+        segs = [s for s in pb.segments if s.net_id == nid]
+        at = next(i for i, s in enumerate(segs)
+                  if {(round(s.start_x, 6), round(s.start_y, 6)),
+                      (round(s.end_x, 6), round(s.end_y, 6))}
+                  == {(round(stub.start_x, 6), round(stub.start_y, 6)),
+                      (round(stub.end_x, 6), round(stub.end_y, 6))})
+        verdict = {}
+        for keep in (True, False):
+            m = StrictRemovalModel(nid, segs, [v for v in pb.vias if v.net_id == nid],
+                                   pb.pads_by_net.get(nid, []),
+                                   pb.board_info.copper_layers,
+                                   keep_centre_stubs=keep)
+            verdict[keep] = m.valid and at in strict_removable_segments(m)
+        check("the model keeps the stub on a skew-graded net and removes it on "
+              "any other", verdict == {True: False, False: True}, str(verdict))
 
         print("3. the all-nets route.py step")
         before = net_len_mm(b, name)
