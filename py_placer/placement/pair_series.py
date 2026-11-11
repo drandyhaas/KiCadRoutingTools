@@ -138,9 +138,10 @@ def junction_geometry(pcb_data, j: Junction) -> Optional[Dict]:
     turn = abs(axis(pp) - axis(nn)) % 180.0
     turn = min(turn, 180.0 - turn)
 
+    from .legality import footprint_side
+
     def side(ref):
-        return ('B' if str(getattr(fps[ref], 'layer', 'F.Cu')).startswith('B')
-                else 'F')
+        return footprint_side(fps[ref])
     return {'sides': {j.p_ref: side(j.p_ref), j.n_ref: side(j.n_ref)},
             'axis_turn_deg': round(turn, 3), 'offset_mm': round(offset, 4),
             'gap_mm': round(math.hypot(dx, dy), 4)}

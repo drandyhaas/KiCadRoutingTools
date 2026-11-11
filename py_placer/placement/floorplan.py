@@ -11020,7 +11020,7 @@ def planar_net_findings(intent: Intent, pcb_data, pcb_file: str, *,
     unsettled = set(unsettled)
     out = []
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
-        face = 'B' if str(getattr(fp, 'layer', 'F.Cu')).startswith('B') else 'F'
+        face = legality.footprint_side(fp)
         flip = (sides or {}).get(ref, face) != face
         short = []
         for pad in fp.pads:

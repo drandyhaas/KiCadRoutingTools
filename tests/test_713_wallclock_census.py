@@ -166,6 +166,9 @@ REGISTRY = {
     'py_router/route.py': ('reporting', 'phase timing prints'),
     'py_placer/placement/decap_repair.py': (
         'reporting', "the repair's elapsed seconds in its record (#1382)"),
+    'py_placer/placement/escape_flow.py': (
+        'reporting', "a part's flow seconds in its result and the "
+        "check_reachability --part line (#1817); the flow reads no clock"),
     'py_tools/board_score.py': ('reporting', "per-tool wall seconds, SCORE_JSON "
                                 "tool_seconds (#1202)"),
     'py_router/route_diff.py': ('reporting', 'phase timing prints'),

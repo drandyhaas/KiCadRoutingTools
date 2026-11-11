@@ -185,7 +185,9 @@ def main():
         print(f'FAIL: {len(failures)}: ' + '; '.join(failures))
         return 1
     if skipped:
-        print('PART 1 PASS; part 2 skipped (exit 77)')
+        print('PART 1 PASS')
+        print('SKIP: part 2 needs kicad-cli (none found; set KICAD_CLI) -- '
+              'KiCad\'s own grade of the two boards was not checked')
         return 77
     print('ALL PASS')
     return 0

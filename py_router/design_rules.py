@@ -2871,6 +2871,7 @@ class CourtyardIndex:
         try:
             import _placer_path  # noqa: F401  (placement lives in py_placer/)
             from placement.parser import extract_courtyard_shapes
+            from placement.legality import footprint_side
             from shapely import affinity
             shapes = extract_courtyard_shapes(path)
         except Exception:                                      # noqa: BLE001
@@ -2880,7 +2881,7 @@ class CourtyardIndex:
             ref, lib = rules.footprint_ids.get(key, (key, None))
             if not any(_footprint_named(p, ref, lib) for p in patterns):
                 continue
-            own = 'B' if str(getattr(fp, 'layer', 'F.Cu')).startswith('B') else 'F'
+            own = footprint_side(fp)
             rot = (getattr(fp, 'rotation', 0.0) or 0.0) % 360
             for side, (geom, _how) in (shapes.get(key) or {}).items():
                 g = geom if abs(rot) < 0.01 else affinity.rotate(geom, -rot, origin=(0, 0))
