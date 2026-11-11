@@ -991,8 +991,11 @@ def route_diff_pairs(
                 # escape, whose terminal legs resolve polarity at the pads,
                 # runs next, then the single-ended follow-up (#1576: this
                 # said "SKIPPED - ... not allowed" whatever the policy was).
+                # #1802: "denied" only when the swap, routed as a probe,
+                # would have coupled the pair
                 _why = ("polarity swap needed but not allowed for this pair "
-                        "(--polarity-swap-nets), and no other candidate routed clean"
+                        "(--polarity-swap-nets): the swap would route, no other "
+                        "candidate routed clean"
                         if result.get('polarity_swap_denied') else
                         "polarity mismatch, and no candidate routed clean")
                 _next = ("trying the hybrid escape" if config.diff_pair_hybrid_escape
@@ -1432,6 +1435,7 @@ def route_diff_pairs(
                 # terminal with a point-to-point single-ended leg that drops its
                 # own escape via if needed (watchy USB_D). Returns None when it
                 # can't lay a clean route, so this can't make things worse.
+                hybrid_rejected = False
                 if config.diff_pair_hybrid_escape and result:
                     # Single-ended leg clearance map (built lazily, only now). See
                     # build_diff_pair_leg_obstacles for why base_obstacles + 0 clearance.
@@ -1471,6 +1475,7 @@ def route_diff_pairs(
                         invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
                         invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
                         continue
+                    hybrid_rejected = True
                 if not polarity_skip:
                     print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                     # #652: the FOURTH site that prints this line, and the one
@@ -1506,10 +1511,22 @@ def route_diff_pairs(
                 # arsenal) beats leaving the nets unrouted; the pair is
                 # reported under single_ended_followup_nets, not failed.
                 print(f"  Deferring {pair_name} to the single-ended follow-up pass")
+                # #1802: a polarity ladder fails at the terminal, where the
+                # candidates and the hybrid's middle and legs are all laid on
+                # the routing grid, and which of them fits changes with it --
+                # in either direction. Say so where every coupled path,
+                # the hybrid escape's included, was rejected.
+                _hint = (f"the outcome can change with the grid: one --grid-step "
+                         f"A/B (coarser and finer than {config.grid_step:g}) "
+                         f"before re-planning the pair"
+                         if hybrid_rejected and polarity_skip else None)
+                if _hint:
+                    print(f"  Retry hint: {_hint}")
                 state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
                 state.diff_pair_single_ended_nets[pair.n_net_id] = pair.n_net_name
                 record_pair_diag(state, pair_name, outcome='deferred',
                                  reason=fail_reason, stage='initial-route',
-                                 blocking_nets=fail_blockers or None)
+                                 blocking_nets=fail_blockers or None,
+                                 retry_hint=_hint)
 
     return successful, failed, total_time, total_iterations, route_index

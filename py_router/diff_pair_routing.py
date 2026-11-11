@@ -5850,23 +5850,25 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
             # could not, in ladder order: the verdict line below (#1576)
             not_made = []
 
-            if diff_pair.polarity_swap_allowed:
-                # No-swap candidate: the natural geometry, valid when its P/N
-                # (incl. bare-pad target stubs) do not actually cross.
-                no_swap = route_diff_pair_with_obstacles(
-                    pcb_data, diff_pair, config, obstacles, base_obstacles,
-                    unrouted_stubs, endpoints=endpoints,
-                    forced_source_dir=forced_source_dir,
-                    forced_target_dir=forced_target_dir,
-                    swap_allowed_ends=swap_allowed_ends, force_no_swap=True)
-                if not no_swap or no_swap.get('failed') or no_swap.get('probe_blocked'):
-                    not_made.append(('no swap', _ladder_failure_text(no_swap, pcb_data)))
-                elif _pn_tracks_cross_full(no_swap.get('new_segments', []),
-                                           pcb_data, p_net_id, n_net_id):
-                    not_made.append(('no swap', 'P/N tracks cross'))
-                else:
-                    spent_iterations += no_swap.get('iterations', 0)
-                    candidates.append(('no swap', no_swap))
+            # No-swap candidate: the natural geometry, valid when its P/N
+            # (incl. bare-pad target stubs) do not actually cross. It lays
+            # the pair as the schematic has it, so the swap policy has
+            # nothing to forbid here: a pair whose swap is denied gets it too,
+            # or a false-positive verdict sends it single-ended (#1802).
+            no_swap = route_diff_pair_with_obstacles(
+                pcb_data, diff_pair, config, obstacles, base_obstacles,
+                unrouted_stubs, endpoints=endpoints,
+                forced_source_dir=forced_source_dir,
+                forced_target_dir=forced_target_dir,
+                swap_allowed_ends=swap_allowed_ends, force_no_swap=True)
+            if not no_swap or no_swap.get('failed') or no_swap.get('probe_blocked'):
+                not_made.append(('no swap', _ladder_failure_text(no_swap, pcb_data)))
+            elif _pn_tracks_cross_full(no_swap.get('new_segments', []),
+                                       pcb_data, p_net_id, n_net_id):
+                not_made.append(('no swap', 'P/N tracks cross'))
+            else:
+                spent_iterations += no_swap.get('iterations', 0)
+                candidates.append(('no swap', no_swap))
 
             if swap_allowed:
                 # Swap candidate: same centerline, completed with the pad swap
@@ -5881,7 +5883,7 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
                     candidates.append(('pad swap', swap_result))
                 else:
                     not_made.append(('pad swap', _ladder_failure_text(swap_result, pcb_data)))
-            elif not diff_pair.polarity_swap_allowed:
+            elif swap_end in swap_allowed_ends:
                 not_made.append(('pad swap', 'not allowed for this pair (--polarity-swap-nets)'))
             else:
                 not_made.append(('pad swap', f'not possible at the {swap_end} end '
@@ -5936,9 +5938,38 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
                                         for name, r in candidates)
                     print(f"  Using {best_name} route ({lengths})")
                 best['iterations'] = spent_iterations
-                if policy_denied:
+                # The no-swap route winning shows the detector's verdict was
+                # a false positive: no swap was wanted, so none was denied.
+                if policy_denied and best_name != 'no swap':
                     best['polarity_swap_denied'] = True
                 return best
+
+            if policy_denied and swap_end in swap_allowed_ends:
+                # Every candidate the policy allows failed. Whether the
+                # denied swap is what is missing is a question of geometry,
+                # so route it as a probe, never shipped: the pair is reported
+                # polarity-swap-denied only when the swap would have coupled
+                # it, and a polarity mismatch when it fails like the rest
+                # (#1802).
+                probe = route_diff_pair_with_obstacles(
+                    pcb_data, diff_pair, config, obstacles, base_obstacles,
+                    unrouted_stubs, endpoints=endpoints,
+                    forced_source_dir=forced_source_dir,
+                    forced_target_dir=forced_target_dir,
+                    swap_allowed_ends=swap_allowed_ends, force_swap=True)
+                spent_iterations += (probe or {}).get('iterations', 0)
+                probe_ok = bool(probe and not probe.get('failed')
+                                and not probe.get('probe_blocked'))
+                not_made = [
+                    (name, (why + ('; probed, the swap would route' if probe_ok else
+                                   '; probed, the swap fails too: '
+                                   + _ladder_failure_text(probe, pcb_data)))
+                     if name == 'pad swap' else why)
+                    for name, why in not_made]
+                policy_denied = probe_ok
+            else:
+                # No swap is possible at that end whatever the policy says.
+                policy_denied = False
 
             # Every candidate failed: say which ran and why each did not make
             # it, rather than a cause the lines above contradict (#1576). The

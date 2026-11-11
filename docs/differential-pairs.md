@@ -449,15 +449,17 @@ bare-pad endpoints can flip - stub directions are fixed by existing copper.
 Flipped attempts get a full-loop turn budget since they must wrap around
 their endpoint, and every candidate is validated for P/N track crossings.
 
-For a pair with swaps allowed (`--polarity-swap-nets`), the pad-swap and
-connector-flip
-candidates **compete by routed length** and the shortest clean route wins; if
-only one mechanism succeeds, it is used. (When no end can flip - e.g. both
-ends have stubs - the swap is committed directly without re-routing.)
+The mismatch verdict is a suspicion: it compares P's side at the first and
+last centreline segments, so a route that turns can trip it. Every pair
+therefore also routes the **no-swap** candidate -- the pair as the schematic
+has it, rejected if its P and N tracks really cross -- whatever its swap
+policy (#1802). For a pair with swaps allowed (`--polarity-swap-nets`), the
+no-swap, pad-swap and connector-flip candidates **compete by routed length**
+and the shortest clean route wins; if only one succeeds, it is used.
 
 For a pair NOT matching `--polarity-swap-nets` (or with the flag absent
-entirely - the default), pad swaps never
-happen: only the flip resolution is tried.
+entirely - the default), pad swaps never ship: the no-swap and flip
+candidates compete.
 
 When no candidate produces a clean route (no crossing tracks are ever
 written), the coupled route gives up and the log names every candidate with
@@ -474,10 +476,22 @@ and if that fails too, the single-ended follow-up:
   COUPLED ROUTE FAILED - polarity mismatch, and no candidate routed clean; trying the hybrid escape
 ```
 
-A pair whose swap the policy denies reads `pad swap: not allowed for this pair
-(--polarity-swap-nets)` there, and its last line says so; such a pair is listed in
-`JSON_SUMMARY.polarity_swap_denied_pairs`. `no opposite-side option` is printed
-only when neither end can flip.
+For a pair whose swap the policy denies, the pad swap is then routed once as a
+probe, never shipped, to learn whether the swap is what is missing. Its row
+reads `pad swap: not allowed for this pair (--polarity-swap-nets); probed, the
+swap would route` or `...; probed, the swap fails too: <reason>`. Only in the
+first case is the pair reported `polarity-swap-denied` (its last line says so,
+and it is listed in `JSON_SUMMARY.polarity_swap_denied_pairs`); in the second
+it is a `polarity-mismatch`, which allowing the swap would not fix.
+`no opposite-side option` is printed only when neither end can flip.
+
+A pair whose ladder failed and whose hybrid escape was rejected as well
+(it is deferred to the single-ended follow-up) prints a
+`Retry hint:` line and carries it as `retry_hint` in its `pair_reports` row:
+the candidates and the hybrid's middle and legs are all laid on the routing
+grid, and whether one of them fits a tight terminal can change with
+`--grid-step`, in either direction, so one grid A/B (coarser and finer) comes
+before re-planning the pair.
 
 ## Via Placement
 
@@ -1014,7 +1028,7 @@ python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" 
 
 ## Limitations
 
-1. **Polarity swap** - Off by default; allow it per pair with `--polarity-swap-nets <patterns>` (`'*'` = every pair; the GUI's "Polarity-swap allowed nets" field, empty by default). Only allow pairs an endpoint can compensate (FPGA generic I/O, polarity-tolerant SerDes) - never USB/MIPI/TMDS (#279). For a denied pair, a mismatch is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible; denied-but-wanted swaps are listed in `polarity_swap_denied_pairs` in the JSON summary
+1. **Polarity swap** - Off by default; allow it per pair with `--polarity-swap-nets <patterns>` (`'*'` = every pair; the GUI's "Polarity-swap allowed nets" field, empty by default). Only allow pairs an endpoint can compensate (FPGA generic I/O, polarity-tolerant SerDes) - never USB/MIPI/TMDS (#279). For a denied pair, a suspected mismatch is routed as laid (no swap, rejected if P and N cross) and with the connectors out the opposite side at one end (bare-pad endpoints only); a pair a flip resolved, or (when none of those routes, the swap is probed) one the swap alone would have coupled, is listed in `polarity_swap_denied_pairs` in the JSON summary (#1802)
 2. **Fixed spacing** - Spacing is constant along each layer of the route (no tapering); with per-layer widths each layer keeps its own pitch
 3. **Grid snapping** - Centerline endpoints snap to grid for the search; the
    terminal endpoints of the generated geometry are un-snapped back to the

@@ -152,7 +152,9 @@ And across the buckets:
   (any other reason, e.g. `coupled-route-failed`): open copper, retried with
   `route_diff` below, never `route.py`. Open copper for any other pair too.
 - `polarity_swap_denied_pairs`: a P/N mismatch the run was not allowed to
-  resolve by a swap (#279); `polarity_swapped_pairs` lists the swaps it made.
+  resolve by a swap (#279) -- resolved by a connector flip, or left to the
+  hybrid escape or single-ended where the swap, probed, would have coupled
+  it (#1802); `polarity_swapped_pairs` lists the swaps it made.
 - `casualty_reconcile`: nets this step ripped whose reroute failed
   (`restored`, `rerouted`, `partial`, `unrecovered`).
 - `intra_pair_matching` (a step that matches P to N): one record per pair it
@@ -192,7 +194,10 @@ And across the buckets:
 `incomplete`), `failure_reason` and `failure_stage` (set only for `failed` and
 `deferred`; the stage is `pre-route`, `initial-route`, `multipoint`, `reroute`
 or `casualty-reconcile`), `incomplete_members`, and when they apply
-`blocking_nets`, `casualty`, `se_fallback` and `copper`. Classify each
+`blocking_nets`, `casualty`, `se_fallback`, `copper` and `retry_hint` (a
+pair deferred on a polarity mismatch after the hybrid escape was rejected
+too: one `--grid-step` A/B, coarser and finer, can change that outcome).
+Classify each
 `failure_reason` with the pair table in Step 3.
 
 ## Step 2: Correlate Failures Spatially
@@ -254,8 +259,8 @@ and for none of the polarity or graze codes.
 | `pose-router-failure` (#346), `multipoint-leg-failure` | The coupled search ran and was exhausted (for a multipoint pair, on one of its legs) | Capacity: the shrink, more `--layers`, a finer `--grid-step` |
 | `coupled-route-failed` | A multipoint pair no coupled chain could route, left whole for single-ended | It ships single-ended: a failure if the interface needs coupling; retry it as `pose-router-failure` |
 | `connector-graze` (#165/#246) | A route was found, then rejected: a connector, setback or offset segment grazes foreign copper by check_drc's measure. The step rips a grazed net it routed itself and retries; an earlier step's copper and every pad stay | The step's log names the grazed pad, via or track. Route the pair before that copper (an earlier step), or move the terminal join: a narrower track or smaller via there, or a fanout that lands the pair clear |
-| `polarity-swap-denied` (the pair is also in `polarity_swap_denied_pairs`) | P and N land on the wrong sides, and the swap that resolves it is not allowed for this pair | Only when the pair's endpoints tolerate a swap (plan-pcb-routing's polarity-swap policy; `/identify-diff-pairs` gives `polarity_swappable`): add it to `--polarity-swap-nets`. Otherwise no router flag fixes it: it is a pin swap in the schematic, or the pair routes single-ended |
-| `polarity-mismatch`, `pn-crossing` | A swap was tried and could not resolve the mismatch / P and N must cross and untangling failed. A `pn-crossing` pair can be in `polarity_swap_denied_pairs` too | The same policy question first; a `pn-crossing` pair may also clear on another layer pair (`--layers`) |
+| `polarity-swap-denied` (the pair is also in `polarity_swap_denied_pairs`) | P and N land on the wrong sides; every candidate the policy allows failed, and the swap, routed as a probe and not shipped, would couple the pair | In order: when the pair's endpoints tolerate a swap (plan-pcb-routing's polarity-swap policy; `/identify-diff-pairs` gives `polarity_swappable`), add it to `--polarity-swap-nets`; else, if the row carries a `retry_hint`, the one `--grid-step` A/B it names; only then is it a pin swap in the schematic, or the pair routes single-ended |
+| `polarity-mismatch`, `pn-crossing` | Every polarity candidate failed on geometry, the swap included (allowed, or probed when denied), so allowing a swap does not fix it / P and N must cross and untangling failed. A `pn-crossing` pair can be in `polarity_swap_denied_pairs` too | A `polarity-mismatch` row's `retry_hint` first (one `--grid-step` A/B, coarser and finer), then the terminal's geometry the ladder's rows name (the step's log); a `pn-crossing` pair: the policy question first, and it may also clear on another layer pair (`--layers`) |
 | `no-route` | Failed with no iterations and no blocked cells. An **intra-pair clearance** rejection reports this code too (no code of its own): P and N would sit closer than the clearance between them, after necking; the step's log says `intra-pair clearance` | For intra-pair: the terminal's geometry (its pads or fanout stubs), not a smaller gap, which is floored at the clearance |
 | `endpoint-resolution-failure` | The router found no usable endpoints for the pair | Check that the pair's pads (or fanout stubs) exist on the routed `--layers` |
 | `ripped-not-restored` (stage `casualty-reconcile`) | Another pair's route ripped it, and neither its reroute nor its restore landed (`casualty`) | Re-run route_diff on this pair alone (`--nets P N`) |

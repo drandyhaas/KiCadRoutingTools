@@ -1025,8 +1025,11 @@ every pair classifies swappable). Applied swaps are listed in `polarity_swapped_
 when they happen, the schematic sync step below applies (see "Schematic Synchronization
 After Swaps"). Pairs that *wanted* a swap but were denied are listed in
 `polarity_swap_denied_pairs` — surface these to the user (they routed via the
-opposite-side flip, or via the hybrid escape with uncoupled terminal legs, or failed honestly
-and may need a manual pin swap in the schematic). The log's `Polarity mismatch not resolved
+opposite-side flip, or every allowed candidate failed where the swap, probed and not
+shipped, would have coupled them: then the hybrid escape with uncoupled terminal legs, or a
+single-ended follow-up, and a manual pin swap in the schematic may be the fix). A denied
+pair is never listed for a swap that would not have routed either (#1802): it reads
+`polarity-mismatch`. The log's `Polarity mismatch not resolved
 by any coupled candidate:` block names each candidate tried and why it failed.
 
 **Far-apart terminal pads → single-ended follow-up (issue #121).** A "diff pair"

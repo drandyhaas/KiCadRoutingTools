@@ -39,8 +39,11 @@ def classify_diff_pair_failure(result: Optional[dict]) -> str:
 
     Codes (additive vocabulary - graders match on these strings):
       endpoint-resolution-failure  route returned None (no usable endpoints)
-      polarity-swap-denied         P/N mismatch, swap forbidden by policy (#279)
-      polarity-mismatch            P/N mismatch, swap attempted but unresolvable
+      polarity-swap-denied         P/N mismatch, swap forbidden by policy (#279),
+                                   and the swap, routed as a probe, would couple
+                                   the pair where nothing else did (#1802)
+      polarity-mismatch            P/N mismatch, and the swap (allowed, or probed
+                                   when denied) does not resolve it either
       pn-crossing                  P/N tracks must cross; untangle failed
       connector-graze              emitted geometry grazes committed foreign copper (#165/#246)
       no-escape-path               endpoint escape blocked (probe/setback: 0 search iterations)
@@ -569,6 +572,10 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
                 rep['narrowed_zdiff_ohm'] = {l: z for l, (_g, z) in sorted(_gz.items())}
         if diag.get('blocking_nets'):
             rep['blocking_nets'] = diag['blocking_nets']
+        if diag.get('retry_hint') and outcome in ('failed', 'deferred'):
+            # #1802: a polarity ladder and the hybrid escape both failed at
+            # the terminal; the run's grid can decide that
+            rep['retry_hint'] = diag['retry_hint']
         if diag.get('casualty'):
             rep['casualty'] = diag['casualty']
         if diag.get('se_fallback'):
