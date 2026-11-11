@@ -690,8 +690,9 @@ def ungraded_entries(parts: dict) -> list:
         # declaration nothing grades.
         + (['undersized.dru_rules']
            if (parts.get('undersized') or {}).get('ungraded_rules') else [])
-        # #1490: the clearance half -- a NetClass- / Type-scoped .kicad_dru
-        # clearance rule check_drc does not model.
+        # #1490: every other kind -- a .kicad_dru clearance, disallow,
+        # via_count, length, skew or diff_pair_uncoupled rule (#1813) check_drc
+        # does not model.
         + (['drc.dru_rules']
            if (parts.get('drc') or {}).get('ungraded_rules') else [])
         # #1629: a pair whose members connectivity passes but whose pads its
@@ -799,14 +800,23 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     rc, out = run_tool(root, 'check_drc.py', *args)
     # #1390: .kicad_dru size rules check_drc could not model. The copper they
     # bind is ungraded, whatever `undersized` says about the rest.
-    _unsz = sorted(set(re.findall(r"NOT GRADED \(size\): rule '([^']*)'", out)))
+    # #1490: and every other kind it does not grade -- a clearance rule it
+    # does not model, a `disallow` rule (#1527), a `via_count` (#1707),
+    # `length`, `skew` or `diff_pair_uncoupled` (#1813) rule whose condition
+    # it does not read. EVERY kind check_drc prints is read, never a list of
+    # known ones: a kind this scrape did not know was a rule nothing graded
+    # and the board read DONE.
+    _ng = re.findall(r"NOT GRADED \(([A-Za-z_]+)\): rule '([^']*)'", out)
+    _unsz = sorted({nm for kind, nm in _ng if kind == 'size'})
     _size_extra = {'ungraded_rules': _unsz} if _unsz else {}
-    # #1490: and the .kicad_dru clearance rules it does not model; #1527: and
-    # the `disallow` rules (or tokens) it does not grade; #1707: and the
-    # `via_count` rules whose condition it does not read.
-    _uncl = sorted(set(re.findall(
-        r"NOT GRADED \((?:clearance|disallow|via_count)\): rule '([^']*)'", out)))
-    _clr_extra = {'ungraded_rules': _uncl} if _uncl else {}
+    _kinds = {}
+    for kind, nm in _ng:
+        if kind != 'size':
+            _kinds.setdefault(nm, set()).add(kind)
+    _uncl = sorted(_kinds)
+    _clr_extra = ({'ungraded_rules': _uncl,
+                   'ungraded_rule_kinds': {nm: sorted(k) for nm, k in sorted(_kinds.items())}}
+                  if _uncl else {})
     # #1528: of `count`, the violations such a rule may make legal -- graded
     # at the class value, which KiCad may not report.
     _unv = re.search(r'UNVERIFIED \(clearance\): (\d+) violation', out)

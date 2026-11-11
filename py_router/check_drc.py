@@ -3430,8 +3430,11 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                  f"track copper): {', '.join(unmeasured[:6])}"
                  + (' ...' if len(unmeasured) > 6 else '') if unmeasured else ''))
         for rname, (why, nets) in undecided.items():
-            print(f"  NOT GRADED: rule '{rname}' ({why}) -- {len(nets)} net(s) "
-                  f"it may bind are not graded here; KiCad still grades them")
+            # #1813: the kind in parentheses, as every NOT GRADED line has it --
+            # board_score reads the rule from this line, and a bare form is a
+            # rule nothing downstream sees.
+            print(f"  NOT GRADED (length): rule '{rname}' ({why}) -- {len(nets)} "
+                  f"net(s) it may bind are not graded here; KiCad still grades them")
         for rname in unbound:
             print(f"  {_UNBOUND_RULE_NOTE.format(rname=rname)}")
         if graded:
@@ -4147,6 +4150,8 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     skew_rules = [r for r in rules if r.kind == 'skew']
     _sets, undecided = skew_rule_groups(path, pcb_data, skew_rules,
                                         names=names, member=member)
+    # #1813: which constraint each NOT GRADED rule is, for its console line
+    undecided_kind = {k: 'skew' for k in undecided}
     for rule, members in _sets:
         if not any(in_scope(m) for m in members):
             continue
@@ -4188,6 +4193,7 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
         if blocker is not None:
             undecided.setdefault(blocker.name, (blocker.unsupported, []))[1].append(
                 f"{names[p]} / {names[n]}")
+            undecided_kind.setdefault(blocker.name, 'diff_pair_uncoupled')
             continue
         if rp is None and rn is None:
             continue
@@ -4195,6 +4201,7 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
             undecided.setdefault(f"{(rp or rn).name}", (
                 "binds only one member of the pair (KiCad then grades that "
                 "member's copper alone)", []))[1].append(f"{names[p]} / {names[n]}")
+            undecided_kind.setdefault((rp or rn).name, 'diff_pair_uncoupled')
             continue
         if rp.max_mm is None or rp.max_mm < 0:
             continue
@@ -4283,7 +4290,8 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                   f"{n_chain} graded end to end, "
                   f"{summary['chains_out_of_range']} out of tolerance")
         for rname, (why, nn) in undecided.items():
-            print(f"  NOT GRADED: rule '{rname}' ({why}) -- {len(nn)} net(s)/pair(s) "
+            print(f"  NOT GRADED ({undecided_kind.get(rname, 'skew')}): rule "
+                  f"'{rname}' ({why}) -- {len(nn)} net(s)/pair(s) "
                   f"it may bind are not graded here; KiCad still grades them")
         for rname in unbound:
             print(f"  {_UNBOUND_RULE_NOTE.format(rname=rname)}")

@@ -92,7 +92,7 @@ def main():
         verdict = next((x for x in r.stdout.splitlines() if x.startswith('VERDICT')), '')
         check("check_complete: not DONE, naming them",
               not verdict.startswith('VERDICT: DONE')
-              and "disallow rule(s) nothing grades: 'court gap'" in verdict, verdict[:300])
+              and "rule(s) nothing grades: 'court gap' (clearance)" in verdict, verdict[:300])
 
         print("3. the router names the annular_width rule it does not honour")
         from kicad_parser import parse_kicad_pcb
