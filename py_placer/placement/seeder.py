@@ -84,6 +84,11 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     # margin -- the same cached compare, then the grade's own measure.
     if graphic_copper_past(state, ref, x, y, rot) > 1e-6:
         return False
+    # #1823: a cover's connector where its cover's own mounting hole has no
+    # board under it -- `mount_report` grades that site NOT mountable, and
+    # no standoff can be fitted there.
+    if cover_holes_past(state, ref, x, y, rot):
+        return False
     # BOTH rects, because `rule_keepout` grades both: a through-hole part's
     # leads pass through a keep-out even when its body sits on the far side,
     # so a courtyard-only seat would be accepted here and flagged there --
@@ -122,6 +127,33 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     if not state.exclusive_clear(ref, (r, tht)):
         return False
     return state.candidate_valid(ref, x, y, rot, exclude=exclude)
+
+
+def cover_holes_past(state, ref: str, x: float, y: float, rot: float
+                     ) -> List[Tuple[int, float]]:
+    """#1823: `[(hole index, mm), ...]` for each of a declared cover's own
+    mounting-hole sites (`covers[].holes[]`, `state.cover_hole_sites`) whose
+    drill reaches past the outline with its connector `ref` at (x, y, rot),
+    measured as the grade measures it (`floorplan.site_past_outline_mm`);
+    [] for a part that is no such connector. The drill's bounding box inside
+    the outline at the edge margin settles it for the common pose without
+    the circle."""
+    sites = (getattr(state, 'cover_hole_sites', None) or {}).get(ref)
+    if not sites:
+        return []
+    from .floorplan import site_past_outline_mm
+    from .heights import to_board
+    from .legality import BOARD_TOL, EPS
+    gate, out = state.edge_gate, []
+    for k, (lx, ly, d) in enumerate(sites):
+        sx, sy = to_board((lx, ly, lx, ly), (x, y, rot))[:2]
+        r = d / 2.0
+        if gate.rect_outside_amount((sx - r, sy - r, sx + r, sy + r)) <= BOARD_TOL:
+            continue
+        past = site_past_outline_mm(gate, sx, sy, d)
+        if past > EPS:
+            out.append((k, past))
+    return out
 
 
 def _pad_copper_overhang(state, ref: str) -> float:
@@ -687,7 +719,10 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
                    for n in state.keepout_blockers(ref, (r, tht)))
     reasons.extend(f"exclusive zone {n!r}"
                    for n in state.exclusive_blockers(ref, (r, tht)))
-    containers = getattr(state, 'container_refs', ()) or ()
+    # #1823: its cover's own mounting hole with no board under it
+    reasons.extend(f"its cover's hole {k + 1} is {mm:.3f}mm past the outline"
+                   for k, mm in cover_holes_past(state, ref, x, y, rot))
+    containers =getattr(state, 'container_refs', ()) or ()
     ctx = state.legality_ctx
     # #1212: a declared pose on a frame's pin is refused like a courtyard
     # overlap -- the frame's rect is skipped below, its pins are not. Judged

@@ -581,6 +581,11 @@ def illegal_reason(st, model, r):
         if st.edge_gate.rect_outside_amount(
                 rects[0], skip_rings=st._owned_rings(r)) > BOARD_TOL:
             return 'its courtyard is off the board'
+        from placement.seeder import cover_holes_past
+        holes = cover_holes_past(st, r, *pose)
+        if holes:       # #1823
+            return '; '.join(f"its cover's hole {k + 1} is {mm:.3f} mm past the outline"
+                             for k, mm in holes)
         ko = st.keepout_blockers(r, rects)
         if ko:
             return 'inside keep-out ' + ', '.join(repr(k) for k in ko)

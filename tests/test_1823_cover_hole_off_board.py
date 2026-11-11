@@ -168,10 +168,64 @@ def cli(td):
           'past the outline' in row and 'site clear' not in row, repr(row))
 
 
+def _state(path, doc):
+    from kicad_parser import parse_kicad_pcb
+    from placement.edge_seat import seat_state
+    with contextlib.redirect_stdout(io.StringIO()):
+        pcb = parse_kicad_pcb(path)
+        return seat_state(pcb, path, fp.intent_from_dict(doc, ''), {}, 0.2, 0.2)
+
+
+def seat(td):
+    print('6. the seat predicate holds the site on the board')
+    from placement.seeder import _fixed_pose_check, pose_ok
+    path = board(td, 'b6')
+    st = _state(path, intent())
+    check('the state carries J1\'s site in its own frame',
+          getattr(st, 'cover_hole_sites', {}).get('J1') == [(18.0, 0.0, 2.7)],
+          str(getattr(st, 'cover_hole_sites', None)))
+    check('pose_ok refuses J1 turned so the site is off the board',
+          not pose_ok(st, 'J1', 10.0, 30.0, 180.0, set()))
+    check('...and admits J1 where the site is on it', pose_ok(st, 'J1', 10.0, 30.0, 0.0, set()))
+    # 41 + 18 + 1.35 = 60.35: the drill 0.35 mm past the right edge, the
+    # courtyard well inside it
+    check('pose_ok refuses a drill that only just leaves the board',
+          not pose_ok(st, 'J1', 41.0, 30.0, 0.0, set()))
+    how, why, _c = _fixed_pose_check(st, 'J1', (10.0, 30.0, 180.0), {})
+    check('a declared/seated pose there is refused, naming the hole',
+          how is None and any("cover's hole 1 is 9.350mm past the outline" in w for w in why),
+          f"{how} {why}")
+    doc = intent()
+    del doc['covers'][0]['holes']
+    st = _state(path, doc)
+    check('with no holes[] the same poses are admitted',
+          not getattr(st, 'cover_hole_sites', None) and pose_ok(st, 'J1', 10.0, 30.0, 180.0, set())
+          and pose_ok(st, 'J1', 41.0, 30.0, 0.0, set()))
+
+
+def no_seat(td):
+    print('7. place_simple: a cover whose hole fits nowhere names why J1 is illegal')
+    # a 60 mm board, the hole 70 mm along: no pose of J1 puts it on the board
+    path = run_utils.evidence(board(td, 'b7'), 'the board')
+    doc = intent(holes=({'length_mm': 70, 'diameter_mm': 2.7},))
+    doc['covers'][0]['length_mm'] = 72
+    ip, gp = os.path.join(td, 'i7.json'), os.path.join(td, 'g7.json')
+    with open(ip, 'w') as fh:
+        json.dump(doc, fh)
+    with open(gp, 'w') as fh:
+        json.dump({'schema': 1, 'groups': [{'name': 'all', 'refs': ['J1']}]}, fh)
+    run_utils.evidence(ip, 'the intent')
+    run_utils.check(PY + [os.path.join(REPO, 'py_placer', 'place_simple.py'), path,
+                          os.path.join(td, 's{seed}.kicad_pcb'), '--intent', ip,
+                          '--groups', gp, '--seeds', '0'],
+                    refuse="illegal: J1 (its cover's hole 1 is", code=4)
+    check('refused with exit 4, naming the hole', True)
+
+
 def main():
     td = tempfile.mkdtemp(prefix='krt1823_')
     try:
-        for t in (off_board, on_board, ring, round_board, cli):
+        for t in (off_board, on_board, ring, round_board, cli, seat, no_seat):
             try:
                 t(td)
             except Exception as ex:                            # noqa: BLE001

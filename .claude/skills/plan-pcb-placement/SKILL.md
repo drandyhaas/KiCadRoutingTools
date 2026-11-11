@@ -720,7 +720,9 @@ under a card, and a tall part can be placed there.
 A standoff that cannot move (a locked boss, one at a declared pose) holds
 the connector instead: each seed seats it at the next legal quarter turn
 that puts the standoff at its length, and refuses before placing when no
-turn is legal. The `cover` rule is a warning unless the intent's `severity`
+turn is legal. It keeps each `holes[]` site's drill on the board too: a
+connector no pose of which does so is left illegal, the hole named. The
+`cover` rule is a warning unless the intent's `severity`
 makes it an error. `place_simple` also
 admits a part under the body only when its height is known and its top is
 0.5 mm or more under the underside; check_assembly gates one that is not. A

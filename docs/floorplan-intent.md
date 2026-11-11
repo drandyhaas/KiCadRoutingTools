@@ -1736,7 +1736,13 @@ drawing gives, and one rule grades whether it can go on:
   drill circle reaches past the outline (`past_outline_mm`, read on the
   circle, #1823): no standoff can be fitted where there is no board. A clear
   site with no standoff yet is reported (`standoff: null`), not judged.
-  Report only: `place_simple` does not price the sites.
+  `place_simple` holds every site on the board: its seat predicate
+  (`seeder.pose_ok`, and a declared or cover-seated pose's check) refuses a
+  pose of the connector that puts a site's drill past the outline, on the
+  same measure, and a connector no pose of which keeps them on is left
+  illegal, named (`its cover's hole 1 is ... past the outline`). It does not
+  price the sites, and does not keep other parts out of their rings: the
+  grade names a part there.
   Before routing, `add_rule_area.py --mounting-holes --intent <this intent>`
   writes each site's ring as a tracks-and-vias keep-out, so the router keeps
   copper out of it (#1636, `docs/utilities.md`).

@@ -1573,6 +1573,21 @@ class QuenchState:
         # containers.)
         self.covers = {r for r in self.heights.covers
                        if r in self.parts and r not in self.container_refs}
+        # #1823: each declared cover's own mounting-hole sites (`holes[]`),
+        # {connector: [(local x, local y, drill mm), ...]} in the connector's
+        # frame, for `seeder.pose_ok`: a connector pose that puts a site's
+        # drill past the outline is refused, as `mount_report` grades it.
+        # A row on the other face is left out, as the grade leaves it.
+        self.cover_hole_sites: Dict[str, List[Tuple[float, float, float]]] = {}
+        for _c in (declared_heights or {}).get('covers') or ():
+            _j = _c.get('connector')
+            _fpj = (pcb_data.footprints or {}).get(_j)
+            if not _c.get('holes') or _j not in self.parts or _fpj is None \
+                    or legality.footprint_side(_fpj) != _c.get('side'):
+                continue
+            self.cover_hole_sites.setdefault(_j, []).extend(
+                (*_heights.standoff_at(_c, _h), float(_h['diameter_mm']))
+                for _h in _c['holes'])
         self._overhangs = set()
         for _r in self.covers:
             _lb = self.heights.covers[_r].lift_box

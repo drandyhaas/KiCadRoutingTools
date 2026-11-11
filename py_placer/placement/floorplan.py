@@ -8910,6 +8910,19 @@ def _ring_gap(g, fp, pose, x, y, far) -> Optional[float]:
 _SITE_CIRCLE_N = 64
 
 
+def site_past_outline_mm(gate, x, y, d) -> float:
+    """#1823: how far a cover's hole site -- a drill of diameter `d` at
+    (x, y) -- reaches past the outline of `gate` (a
+    `legality.BoardOutlineGate`), 0.0 when it is on the board: a distance
+    read on the drill circle, since a bbox corner leaves a round board where
+    the hole does not. The grade (`_hole_sites`) and the seat
+    (`seeder.pose_ok`) read this one measure."""
+    return gate.points_overrun_mm(
+        (x + d / 2 * math.cos(2 * math.pi * i / _SITE_CIRCLE_N),
+         y + d / 2 * math.sin(2 * math.pi * i / _SITE_CIRCLE_N))
+        for i in range(_SITE_CIRCLE_N))
+
+
 def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, object]]:
     """#1537: each of a cover's own mounting holes (`holes[]`), where the row
     puts it -- `length_mm` along the axis, `off_mm` to the left of the centre
@@ -8969,14 +8982,9 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
             gaps = [g for g in [con_gap] + [p['gap_mm'] for p in con_pads] if g is not None]
             reach_con = {'ref': con, 'gap_mm': min(gaps),
                          'pads': [p['pad'] for p in con_pads]}
-        # #1823: how far the drill circle itself reaches past the outline, a
-        # distance read on the circle (a bbox corner leaves a round board
-        # where the hole does not). No standoff can be fitted where there
-        # is no board, so such a site does not fit.
-        past = gate.points_overrun_mm(
-            (x + d / 2 * math.cos(2 * math.pi * i / _SITE_CIRCLE_N),
-             y + d / 2 * math.sin(2 * math.pi * i / _SITE_CIRCLE_N))
-            for i in range(_SITE_CIRCLE_N))
+        # #1823: no standoff can be fitted where there is no board, so a
+        # site whose drill reaches past the outline does not fit
+        past = site_past_outline_mm(gate, x, y, d)
         site = {'index': k, 'at': [round(x, 3), round(y, 3)], 'length_mm': hl['length_mm'],
                 'off_mm': hl['off_mm'], 'diameter_mm': d, 'reach_mm': round(far, 3),
                 'standoff': st.ref if st is not None else None,
