@@ -6140,6 +6140,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         try:
             from design_rules import DesignRules as _DR
             from design_rules import SIZE_KINDS as _SZK
+            from design_rules import VIA_SIZE_KINDS as _VSK
             _size_rules = _DR.from_project(pcb_data, pcb_file, fab_floor=fab,
                                            copper_layers=copper_layers)
             if not (_size_rules.board_min or _size_rules.rules):
@@ -6148,6 +6149,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if not quiet:
                 print(f"  (design-rule size floors unavailable: {_dre})")
             _size_rules = None
+        # #1805: a via-size rule bound by a courtyard term is resolved by
+        # where each via stands (its disc against the part's courtyard)
+        _courtyards = (_size_rules.courtyard_index(pcb_data, pcb_file)
+                       if _size_rules is not None else None)
 
         def _track_floor(seg):
             if min_track_width is not None or _size_rules is None:
@@ -6165,8 +6170,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # KiCad's own value, before this tool's fab-profile raise: the
             # profile's `annular` term is enforced by no routing step, and the
             # fab half is the ring the floor's smallest via implies (#1433)
-            c = _size_rules.resolve('annular_width',
-                                    _size_rules.item_for_net(via.net_id, 'via', None),
+            c = _size_rules.resolve('annular_width', _size_rules.via_item(via, _courtyards),
                                     None, None)
             v = c.kicad_min if c.fab_bound else c.min
             return max(eff_min_via_ring, v) if v is not None else eff_min_via_ring
@@ -6174,10 +6178,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         def _via_floors(via):
             if _size_rules is None:
                 return eff_min_via_dia, eff_min_via_drill
+            _vi = _size_rules.via_item(via, _courtyards)
             d = (eff_min_via_dia if min_via_diameter is not None
-                 else (_size_rules.floor('via_diameter', via.net_id, type='via') or eff_min_via_dia))
+                 else (_size_rules.resolve('via_diameter', _vi, None, None).min
+                       or eff_min_via_dia))
             h = (eff_min_via_drill if min_via_drill is not None
-                 else (_size_rules.floor('hole_size', via.net_id, type='via') or eff_min_via_drill))
+                 else (_size_rules.resolve('hole_size', _vi, None, None).min
+                       or eff_min_via_drill))
             return d, h
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
@@ -6191,7 +6198,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if _size_rules is not None:
                 for _r in _size_rules.rules:
                     if _r.unsupported and not _r.honoured:
-                        _sk = sorted(k for k in _r.constraints if k in _SZK)
+                        _sk = sorted(k for k in _r.constraints if k in _SZK
+                                     and not (_courtyards and _r.courtyard_condition
+                                              and k in _VSK))
                         if _sk:
                             print(f"  NOT GRADED (size): rule '{_r.name}' "
                                   f"({', '.join(_sk)}): {_r.unsupported} -- "

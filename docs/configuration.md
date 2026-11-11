@@ -356,7 +356,16 @@ minimum (the last matching rule, as KiCad resolves it). An `annular_width` rule
 is also listed NOT honoured at the start of every step that reads the rules,
 whatever the vias are (#1490), since an explicit via and a descent need not hold
 it. `list_nets.py --design-rules` lists the rules that set a minimum below the
-Board Setup one, with the condition each binds.
+Board Setup one, with the condition each binds, and then the nets each via-size
+rule binds (#1805). A rule scoped by a courtyard term (`A.insideCourtyard('U1')`)
+is listed "bound by POSITION": KiCad applies it to a via whose disc overlaps that
+part's courtyard and to no other via of the same net, so its nets are an upper
+bound (the nets with a pad on the part). `check_drc.py` grades a via under such a
+rule by where it stands, as kicad-cli 10.0.6 does: `insideCourtyard()` and
+`intersectsCourtyard()` read either of the part's courtyards,
+`insideFrontCourtyard()` the one on the part's own side and
+`insideBackCourtyard()` the other. A rule whose condition is not read otherwise is
+listed as one that MAY relax. No routing step applies a courtyard-scoped rule.
 
 **Via count rules (#1707).** A `(constraint via_count (min N) (max M))` rule is
 not honoured by any routing step: a net is routed with the vias it needs

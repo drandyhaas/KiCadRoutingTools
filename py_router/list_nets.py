@@ -890,7 +890,8 @@ def _print_relaxing_dru_rules(pcb_path, constraints):
         return
     try:
         from design_rules import parse_dru, relaxing_rules
-        rows = relaxing_rules(parse_dru(open(dru, encoding='utf-8').read())[0], constraints)
+        with open(dru, encoding='utf-8') as fh:
+            rows = relaxing_rules(parse_dru(fh.read())[0], constraints)
     except Exception as e:                                     # noqa: BLE001
         print(f"  (.kicad_dru rules not read: {e})")
         return
@@ -901,11 +902,62 @@ def _print_relaxing_dru_rules(pcb_path, constraints):
     for r in rows:
         where = (f" if {r['condition']}" if r['condition'] else ' (no condition: every item)')
         layer = f" on {r['layer']}" if r['layer'] else ''
+        how = ''
+        if r['courtyard']:
+            how = (f" -- bound by POSITION: inside the courtyard of "
+                   f"{', '.join(r['courtyard'])} only")
+        elif r['unresolved']:
+            how = f" -- condition not read ({r['unresolved']}): it MAY relax"
         print(f"  - '{r['rule']}': {r['kind']} min {r['min']:g} "
-              f"(board {r['board_key']} {r['board']:g}){layer}{where}")
+              f"(board {r['board_key']} {r['board']:g}){layer}{where}{how}")
     print("  A size below the board minimum is legal only on those items: request it on a "
           "step of its own whose --nets are the nets the rule names; on any other net it "
           "ships below the board minimum (check_drc grades it).")
+    _print_relaxed_via_nets(pcb_path, rows)
+
+
+def _print_relaxed_via_nets(pcb_path, rows):
+    """#1805: the nets each relaxing via-size rule binds, so a plan can give
+    them the smaller via where the project allows it (an under-pad escape)."""
+    from design_rules import VIA_SIZE_KINDS
+    if not any(r['kind'] in VIA_SIZE_KINDS for r in rows):
+        return
+    try:
+        import contextlib
+        import io
+        from design_rules import DesignRules, relaxed_via_nets
+        with contextlib.redirect_stdout(io.StringIO()):
+            pcb = parse_kicad_pcb(pcb_path)
+            nets = relaxed_via_nets(DesignRules.from_project(pcb, pcb_path), pcb, rows)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  (nets of the via rules not resolved: {e})")
+        return
+    union = set()
+    lines = []
+    for r in rows:
+        got = nets.get(r['rule'])
+        if got is None or r['kind'] not in VIA_SIZE_KINDS:
+            continue
+        nets.pop(r['rule'])
+        kinds = ', '.join(x['kind'] for x in rows if x['rule'] == r['rule'])
+        if got['how'] == 'every':
+            lines.append(f"  - '{r['rule']}' ({kinds}): every via of the board")
+            continue
+        names = got['nets']
+        union |= set(names)
+        note = {'courtyard': (f"; its via inside the courtyard of "
+                              f"{', '.join(r['courtyard'])} only (the nets with a pad "
+                              f"there), held to the board minimum elsewhere"),
+                'may': "; the condition is not read, so these are the nets it MAY bind",
+                'condition': ''}[got['how']]
+        shown = ', '.join(names[:20]) + (f", ... ({len(names) - 20} more)"
+                                         if len(names) > 20 else '')
+        lines.append(f"  - '{r['rule']}' ({kinds}): {len(names)} net(s){note}: "
+                     f"{shown or '(none)'}")
+    print(f"Nets with a relaxed via rule ({len(union)}): candidates for a smaller via, "
+          f"such as an under-pad escape:")
+    for line in lines:
+        print(line)
 
 
 def print_design_rules(pcb_path):

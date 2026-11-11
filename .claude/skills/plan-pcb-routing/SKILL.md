@@ -663,10 +663,16 @@ manifest routes.
     project's own `.kicad_dru` may relax one of them for named nets (a
     smaller via ring on two RF nets, say); `--design-rules` lists such rules
     under the Board Constraints ("Rules in ... that RELAX a Board
-    Constraint"), with the condition each binds. Give those nets a step of
+    Constraint"), with the condition each binds, and under them "Nets with a
+    relaxed via rule", the nets each via-size rule binds. Give those nets a step of
     their own, `--nets <those nets> --via-size V --via-drill D`: an explicit
     size applies to every net of its step, so a net the rule does not cover
-    ships below the board minimum (`check_drc`: VIA-ANNULAR). Leave
+    ships below the board minimum (`check_drc`: VIA-ANNULAR). A rule marked
+    "bound by POSITION: inside the courtyard of U1 only" (`A.insideCourtyard('U1')`)
+    allows the smaller via only where it overlaps U1's courtyard: use it for
+    that part's under-pad escape (its fanout step), not for the nets' whole
+    route, whose vias elsewhere are held to the board minimum. A rule marked
+    "condition not read" may relax: check its condition by hand. Leave
     `--clearance` / `--clearance-ceiling` (and the cap pass's `--clearance`)
     OMITTED so each class routes at its own clearance, as the project grades
     it; leave `--hole-to-hole-clearance` / `--board-edge-clearance` omitted
