@@ -853,12 +853,13 @@ Use the printed flags as-is:
   fanout of that net. A QFN stub run with `--nets` via-drops the interior
   pads its filter selects (#1717); one it cannot place fails its net and is
   named in `skipped_interior` (`"U1.34"`) -- retry with a smaller
-  `--via-size`/`--via-drill`, or `--allow-via-in-pad`. A via-drop (underpad,
-  or those interior pads) also counts PADS (#1804): `pads_requested`,
-  `pads_escaped`, `pads_already_served`, `vias_placed`, and the pads it could
-  not place in `dropped_pads` (`"U1.57"`). A pad that already has its via is
-  skipped, so re-running the step on its own output for the same `--nets`
-  retries only the dropped pads. `power_stubs_at_width`
+  `--via-size`/`--via-drill`, or `--allow-via-in-pad`. A QFN run also counts
+  PADS (#1804, #1834; the surface fan's and the via-drop's together):
+  `pads_requested`, `pads_escaped`, `pads_already_served`, `vias_placed`, and
+  the pads it could not place in `dropped_pads` (`"U1.57"`). A pad that
+  already has its escape (its via, or a stub out past the part's pads) is
+  skipped, so re-running the step on its own output retries only the dropped
+  pads and lays no second stub. `power_stubs_at_width`
   (#1743) names each escape stub drawn at `--width` on a net that reads as
   power or ground (`pad`, `net`, `width`, `escape`, `why`): for a `surface`
   one, pass the route step's `--power-nets`/`--power-nets-widths` to the

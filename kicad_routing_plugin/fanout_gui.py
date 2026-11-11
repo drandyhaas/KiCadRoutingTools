@@ -1732,6 +1732,7 @@ class FanoutTab(wx.Panel):
                     power_stubs = []
                     setup_vias = list(bga_fanout.LAST_BOARD_SETUP_VIAS)
                     underpad_pads = {}
+                    stub_pads = {}
                 else:
                     import qfn_fanout
                     tracks, vias, failed = qfn_fanout.generate_qfn_fanout(
@@ -1745,6 +1746,8 @@ class FanoutTab(wx.Panel):
                     # #1804: the via-drop's pads, as the CLI's JSON_SUMMARY
                     underpad_pads = qfn_fanout.underpad_pad_counts(
                         footprint.reference)
+                    # #1834: the surface fan's pads, the same ledger
+                    stub_pads = qfn_fanout.stub_pad_counts(footprint.reference)
                 # #857: the Design rules line bga_fanout.py / qfn_fanout.py
                 # print (the exit code is the CLI's alone).
                 from fab_tiers import finish_design_rules
@@ -1755,7 +1758,7 @@ class FanoutTab(wx.Panel):
                     'filter_misses': misses, 'skipped_interior': interior,
                     'power_stubs_at_width': power_stubs,
                     'board_setup_vias': setup_vias,
-                    'underpad_pads': underpad_pads}
+                    'underpad_pads': underpad_pads, 'stub_pads': stub_pads}
         except Exception as exc:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -1801,6 +1804,7 @@ class FanoutTab(wx.Panel):
                     power_stubs_at_width=res.get('power_stubs_at_width'),
                     board_setup_vias=res.get('board_setup_vias'),
                     underpad_pads=res.get('underpad_pads'),
+                    stub_pads=res.get('stub_pads'),
                     **apply_kw)
             # The plan executor's "this step produced its result" (gui_utils);
             # the error and cancel returns above produce none.
@@ -2234,7 +2238,7 @@ class FanoutTab(wx.Panel):
                               optimize_caps=False, vias_to_remove=None,
                               filter_misses=None, skipped_interior=None,
                               power_stubs_at_width=None, board_setup_vias=None,
-                              underpad_pads=None):
+                              underpad_pads=None, stub_pads=None):
         """Apply fanout results to the pcbnew board.
 
         Args:
@@ -2272,6 +2276,9 @@ class FanoutTab(wx.Panel):
                 (`qfn_fanout.underpad_pad_counts`, #1804) -- the pads skipped
                 because each already had its via, and the dropped pads by
                 name, as the CLI's JSON_SUMMARY carries them.
+            stub_pads: the QFN engine's per-pad surface-fan ledger
+                (`qfn_fanout.stub_pad_counts`, #1834) -- the pads skipped
+                because each already had its surface escape.
         """
         import pcbnew
         from .swig_gui import _build_layer_mappings
@@ -2501,6 +2508,9 @@ class FanoutTab(wx.Panel):
         if (underpad_pads or {}).get('pads_already_served'):
             msg += (f"\nPads that already had a via escape, skipped: "
                     f"{underpad_pads['pads_already_served']}\n")
+        if (stub_pads or {}).get('pads_already_served'):
+            msg += (f"\nPads that already had their surface escape, skipped: "
+                    f"{stub_pads['pads_already_served']}\n")
         if (underpad_pads or {}).get('dropped_pads') and not skipped_interior:
             # (a stub run's via-drop drops only interior pads, listed below)
             msg += self._net_list("Pads dropped by the via-drop (no clear via "

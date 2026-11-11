@@ -326,8 +326,10 @@ escape counts as escaped), `clearance`, `track_width`, `escape_method`,
 output at `--clearance`: `pad_via`, `via_segment`, `pad_segment`,
 `segment_segment`, `total`; #179), `min_clearance_used`, `allow_via_in_pad`
 (plus `via_in_pad`, `via_in_pad_clamped`, `via_in_pad_offcentre`,
-`max_stub_mm` and the per-pad `pads_*` / `vias_placed` / `dropped_pads` for a
-run that via-dropped), `env_knobs`, and `design_rules` when a
+`max_stub_mm` for a run that via-dropped), the per-pad `pads_requested` =
+`pads_escaped` + `pads_already_served` + the pads named in `dropped_pads`,
+with `pads_reused` and `vias_placed` (the surface fan's pads and the
+via-drop's together), `env_knobs`, and `design_rules` when a
 feature was delivered below its requested size. Unless `--no-fix-drc-settings`,
 the output's `.kicad_pro` DRC floors are lowered to what the fanout drew (#160);
 a run that drew no copper writes no floors, and the via floors are written only
@@ -344,6 +346,20 @@ when it drew a via.
      position along the edge (0 at the edge midpoint, full length and a 45°
      angle at the outermost/corner pad)
 5. **Collision Check** - Validate endpoint spacing meets minimum spacing requirements
+
+A pad that already has its surface escape gets no second stub (#1834): same-net
+track copper on the pad's layer that starts on the pad's copper and, through
+tracks that touch, reaches a same-net via or ENDS outside the hull of the
+part's pads (a track end no other track continues: a stub's tip, a route's far
+end) -- or a via escape (`pad_has_via_escape`, #1804) -- serves it
+(`pad_has_stub_escape`). Such a pad is left out before the fan is planned (the
+run prints `N pad(s) already have their surface escape, skipped`) and counted
+in `pads_already_served`; its stub stays on the board, where the new stubs of
+other nets clear it. So the step re-run on its own output, with the same or
+other parameters, adds nothing, and a pad whose copper stays inside the hull (a
+stub cut back to the pad, a track inward, a tie to the next pin), or is a
+closed outline of tracks drawn round the pad, is escaped again. The fan angles are ramped over every selected pad, served or not, so a
+pad still to escape gets the stub a first run would have given it.
 
 ## Stub Pattern
 
