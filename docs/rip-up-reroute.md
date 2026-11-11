@@ -111,9 +111,9 @@ union-find `check_connected` uses:
 - **lost** — connected before, broken after
 - **gained** — broken (or bare) before, connected after
 
-The run is **rejected** when it ends worse on **either** axis — more nets broken
-than it connected, *or* more disconnected pads than it started with. Both must
-be non-worse to ship. A rejected run's output file is replaced by the input
+The run is **rejected** when it ends worse on **any** axis — more nets broken
+than it connected, *or* more disconnected pads than it started with, *or* more
+joins needed than it started with. All three must be non-worse to ship. A rejected run's output file is replaced by the input
 board, because in every recorded case the pre-rip board was the better
 artifact, and the chain keeps a board to continue from.
 
@@ -124,6 +124,17 @@ far larger than the ones it closed. An earlier version of this gate compared
 the two lexicographically with the net count first and shipped that board. Pad
 count is the honest measure of how much of the board is unreachable, so a run
 that raises it is worse regardless of the net tally.
+
+**The joins axis (#1808)** covers what the pad count cannot see. Disconnected
+pads are the pads outside a net's largest piece, so cutting an already-open
+net's other piece into more pieces moves nothing: an open net taken from 2
+pieces to 6, the same 5 pads stranded, used to grade as no change while
+`board_score`'s `broken` rose by 4. Each net's entry now carries the joins it
+still needs (its pad pieces minus one, within each board outline: the unit of
+`board_score`'s `broken` and `joins_needed`), the run is rejected when their
+sum rises, and a net that stayed open in more pieces is named in `fragmented`
+(and on the head line, `cut N open net(s) into more pieces [net 2->6]`) even
+when the sum does not rise.
 
 This is still not an "any regression" test: a pass that closes five nets and
 breaks one ships, provided the pad count did not rise — the recovered pads

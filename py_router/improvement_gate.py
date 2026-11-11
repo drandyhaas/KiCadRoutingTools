@@ -55,6 +55,15 @@ breaks one ships, provided the pad count did not rise: the recovered pads
 outnumber the lost ones, which is exactly the case where discarding the run
 would throw away more than it saves.
 
+The pad count has a blind spot of its own (#1808): it counts the pads outside
+a net's LARGEST piece, so cutting an already-open net's stray piece into more
+pieces moves nothing. Two such boards -- one open net in 2 pieces, then in 6,
+the same 5 pads stranded -- graded as no change while board_score's `broken`
+rose by 4. So the gate also counts the JOINS each net still needs (its pad
+pieces minus one, outline-aware, the unit board_score's `broken` and
+`joins_needed` use) and rejects a run that raises their sum: a third axis
+beside the other two, which no axis outvotes either.
+
 An exact draw on both axes ships, and is reported loudly with both net lists.
 `bms_sensor`'s retry reproduced today closes the three nets it was asked to
 close, breaks three others, and leaves the pad count unchanged at 3 -- a
@@ -78,8 +87,16 @@ def net_connectivity_map(pcb_data, tolerance: float = 0.02,
                          segs_by_net: Optional[Dict[int, list]] = None,
                          vias_by_net: Optional[Dict[int, list]] = None,
                          zones_by_net: Optional[Dict[int, list]] = None
-                         ) -> Dict[int, Tuple[bool, int]]:
-    """{net_id: (fully_connected, disconnected_pad_count)} per multi-pad net.
+                         ) -> Dict[int, Tuple[bool, int, int]]:
+    """{net_id: (fully_connected, disconnected_pad_count, joins_needed)} per
+    multi-pad net.
+
+    `joins_needed` is the net's pad pieces minus one (#1808), counted within
+    each board outline as the #409 pad-pair tally counts them: 0 exactly when
+    the net is connected, and the unit board_score's `broken` /
+    `joins_needed` use. Readers that index [0] and [1] are unaffected; a
+    2-tuple entry (a grade from elsewhere that has no piece count) is still
+    accepted everywhere below, its joins unknown.
 
     Copper defaults to the board's own segments/vias/zones; pass the
     *_by_net overrides to measure a WRITE MODEL (the copper a run is about
@@ -87,16 +104,23 @@ def net_connectivity_map(pcb_data, tolerance: float = 0.02,
     """
     segs_by_net, vias_by_net, zones_by_net = _copper_by_net(
         pcb_data, segs_by_net, vias_by_net, zones_by_net)
-    out: Dict[int, Tuple[bool, int]] = {}
+    out: Dict[int, Tuple[bool, int, int]] = {}
     for net_id, pads in (pcb_data.pads_by_net or {}).items():
         if not net_id or len(pads or []) < 2:
             continue          # net 0 pseudo-net / trivially connected
-        broken, dis_pads, _pairs = _grade_net(
+        broken, dis_pads, pairs = _grade_net(
             pcb_data, net_id, pads, segs_by_net.get(net_id, []),
             vias_by_net.get(net_id, []), zones_by_net.get(net_id, []),
             tolerance)
-        out[net_id] = (not broken, len(dis_pads) if broken else 0)
+        joins = max(1, pairs[0] - pairs[1]) if broken else 0
+        out[net_id] = (not broken, len(dis_pads) if broken else 0, joins)
     return out
+
+
+def entry_joins(entry) -> Optional[int]:
+    """The joins a map entry says its net still needs, or None when the
+    entry carries no piece count (a 2-tuple grade)."""
+    return entry[2] if len(entry) > 2 and entry[2] is not None else None
 
 
 def copper_signature(segments, vias, net_name) -> Dict[str, object]:
@@ -220,6 +244,14 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
     `zone_net_ids` (the nets that own a pour) adds `lost_zone` /
     `gained_zone`, the pour nets among `lost` / `gained`, which
     gate_verdict's tie rule reads.
+
+    `joins_needed_before` / `joins_needed_after` (#1808) sum the joins the
+    compared nets still need, over the nets whose entry carries a piece count
+    on BOTH sides (`joins_compared` of them); `fragmented` lists every net
+    open on both sides whose pieces rose, as (name, pieces before, pieces
+    after) -- a cut the pad count cannot see when the pads it strands were
+    already outside the net's largest piece. It may share a net with
+    `worsened`.
     """
     zone_ids = set(zone_net_ids or ())
     lost: List[str] = []
@@ -227,15 +259,27 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
     lost_zone: List[str] = []
     gained_zone: List[str] = []
     worsened: List[Tuple[str, int, int]] = []
+    fragmented: List[Tuple[str, int, int]] = []
     pads_before = pads_after = 0
+    joins_before = joins_after = 0
+    joins_compared = 0
     compared = 0
-    for net_id, (conn_b, dis_b) in before.items():
+    for net_id, entry_b in before.items():
         if net_id not in after:
             continue
-        conn_a, dis_a = after[net_id]
+        entry_a = after[net_id]
+        conn_b, dis_b = entry_b[0], entry_b[1]
+        conn_a, dis_a = entry_a[0], entry_a[1]
         compared += 1
         pads_before += dis_b
         pads_after += dis_a
+        j_b, j_a = entry_joins(entry_b), entry_joins(entry_a)
+        if j_b is not None and j_a is not None:
+            joins_compared += 1
+            joins_before += j_b
+            joins_after += j_a
+            if not conn_b and not conn_a and j_a > j_b:
+                fragmented.append((net_name(net_id), j_b + 1, j_a + 1))
         if conn_b and not conn_a:
             lost.append(net_name(net_id))
             if net_id in zone_ids:
@@ -252,8 +296,12 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
         'lost_zone': sorted(lost_zone),
         'gained_zone': sorted(gained_zone),
         'worsened': sorted(worsened),
+        'fragmented': sorted(fragmented),
         'disconnected_pads_before': pads_before,
         'disconnected_pads_after': pads_after,
+        'joins_needed_before': joins_before,
+        'joins_needed_after': joins_after,
+        'joins_compared': joins_compared,
         'nets_compared': compared,
     }
 
@@ -270,13 +318,14 @@ def pour_trade(cmp: Dict) -> bool:
 
 
 def gate_verdict(cmp: Dict) -> str:
-    """'reject' when the run left the board worse on EITHER axis.
+    """'reject' when the run left the board worse on ANY axis.
 
     Worse = more nets broken than connected, OR more disconnected pads than it
-    started with. Neither axis may outvote the other: spartan6_4layer gained 7
-    on the net count while DOUBLING its open pads (83 -> 154), because the nets
-    it broke were much larger than the ones it closed. See the module
-    docstring.
+    started with, OR more joins needed than it started with (#1808: an open
+    net cut into more pieces, its stranded pads unchanged). No axis may
+    outvote another: spartan6_4layer gained 7 on the net count while DOUBLING
+    its open pads (83 -> 154), because the nets it broke were much larger than
+    the ones it closed. See the module docstring.
 
     An exact draw on both axes ships -- unless it is a POUR TRADE
     (pour_trade): it broke a net that owns a pour to connect one that does
@@ -291,7 +340,9 @@ def gate_verdict(cmp: Dict) -> str:
     """
     net_delta = len(cmp['lost']) - len(cmp['gained'])
     pad_delta = cmp['disconnected_pads_after'] - cmp['disconnected_pads_before']
-    if net_delta > 0 or pad_delta > 0 or pour_trade(cmp):
+    join_delta = (cmp.get('joins_needed_after', 0)
+                  - cmp.get('joins_needed_before', 0))
+    if net_delta > 0 or pad_delta > 0 or join_delta > 0 or pour_trade(cmp):
         return 'reject'
     return 'accept'
 
@@ -349,7 +400,11 @@ def excluded_plane_attribution(before: Dict[int, Tuple[bool, int]],
         return {'nets': [], 'alone': False}
     ids = {nid for nid in before if net_name(nid) in excluded}
     hit = sorted(net_name(nid) for nid in ids if nid in after
-                 and after[nid][1] > before[nid][1])
+                 and (after[nid][1] > before[nid][1]
+                      or (entry_joins(before[nid]) is not None
+                          and entry_joins(after[nid]) is not None
+                          and entry_joins(after[nid])
+                          > entry_joins(before[nid]))))
     if not hit:
         return {'nets': [], 'alone': False}
     rest = compare_connectivity(
@@ -381,22 +436,32 @@ def format_report(cmp: Dict, verdict: str, action: str) -> str:
             shown += f", +{len(items) - cap} more"
         return f" [{shown}]" if items else ""
 
+    frag = list(cmp.get('fragmented') or [])
     head = ("IMPROVEMENT GATE: this run broke "
             f"{len(lost)} previously-connected net(s){_capped(lost)}, "
             f"worsened {len(wors)}"
             f"{_capped([f'{n} {b}->{a}' for n, b, a in wors])}, "
-            f"connected {len(cmp['gained'])}")
+            + (f"cut {len(frag)} open net(s) into more pieces"
+               f"{_capped([f'{n} {b}->{a}' for n, b, a in frag])}, "
+               if frag else "")
+            + f"connected {len(cmp['gained'])}")
     lines.append(head + f" -- {verdict.upper()}ED")
     if cmp['lost']:
         lines.append(f"  broken by this run: {', '.join(cmp['lost'])}")
     if worsened:
         lines.append("  more disconnected pads: " + ', '.join(
             f"{n} {b}->{a}" for n, b, a in worsened))
+    if frag:
+        lines.append("  more pieces (still open): " + ', '.join(
+            f"{n} {b}->{a}" for n, b, a in frag))
     if cmp['gained']:
         lines.append(f"  connected by this run: {', '.join(cmp['gained'])}")
     lines.append(f"  disconnected pads: {cmp['disconnected_pads_before']} "
                  f"-> {cmp['disconnected_pads_after']} "
                  f"over {cmp['nets_compared']} multi-pad net(s)")
+    if cmp.get('joins_compared'):
+        lines.append(f"  joins needed: {cmp['joins_needed_before']} -> "
+                     f"{cmp['joins_needed_after']}")
     if pour_trade(cmp):
         lines.append(f"  a draw that breaks pour net(s) "
                      f"{', '.join(cmp['lost_zone'])} to connect signal(s): "

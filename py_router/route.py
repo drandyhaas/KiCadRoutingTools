@@ -514,11 +514,12 @@ def _regrade_pour_fill(board, output_file: str,
 
 def _exact_pour_states(board, board_file: Optional[str], names,
                        project_from: Optional[str] = None
-                       ) -> Optional[Dict[str, Tuple[bool, int]]]:
-    """{net name: (connected, disconnected pad count)} for the pour nets
-    `names`, graded on KiCad's exact fill of `board_file` (`board` is its
-    parse): the pads outside the largest exact cluster are the disconnected
-    ones, as the improvement gate counts them. None when no refill can be had
+                       ) -> Optional[Dict[str, Tuple[bool, int, int]]]:
+    """{net name: (connected, disconnected pad count, joins needed)} for the
+    pour nets `names`, graded on KiCad's exact fill of `board_file` (`board`
+    is its parse): the pads outside the largest exact cluster are the
+    disconnected ones and the clusters past the first the joins needed, as
+    the improvement gate counts them (#1808). None when no refill can be had
     (no KiCad python, a failed refill) or the board has several outlines,
     where a cluster split may be a board boundary -- the caller keeps its
     raster grade then."""
@@ -542,10 +543,11 @@ def _exact_pour_states(board, board_file: Optional[str], names,
                if n == name for poly in polys]
         pcl = [c for c in _kef.exact_clusters(board, nid, isl) if c['pads']]
         if len(pcl) <= 1:
-            out[name] = (True, 0)
+            out[name] = (True, 0, 0)
             continue
         keep = max(pcl, key=lambda c: len(c['pads']))
-        out[name] = (False, sum(len(c['pads']) for c in pcl if c is not keep))
+        out[name] = (False, sum(len(c['pads']) for c in pcl if c is not keep),
+                     len(pcl) - 1)
     return out
 
 
@@ -9676,7 +9678,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         try:
             from improvement_gate import (net_connectivity_map,
                                           compare_connectivity, gate_verdict,
-                                          format_report,
+                                          format_report, entry_joins,
                                           excluded_plane_attribution)
             if return_results:
                 # The board the GUI applier will produce (_gui_write_model):
@@ -9730,6 +9732,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 {_name_of(i) for i in _zone_ids600
                  if i in _before_map and i in _after_map
                  and (_after_map[i][1] > _before_map[i][1]
+                      or (entry_joins(_after_map[i]) or 0)
+                      > (entry_joins(_before_map[i]) or 0)
                       or (_before_map[i][0] and not _after_map[i][0]))})
             # The same error the other way round (#1619, #1620): a pour net
             # the run's final re-grade read OPEN on KiCad's fill (or on the
@@ -9778,7 +9782,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for _nm600 in _taken600:
                     _after_map[_id600[_nm600]] = (
                         False, max(1, _rg_pads600.get(_nm600) or 0,
-                                   _after_map[_id600[_nm600]][1]))
+                                   _after_map[_id600[_nm600]][1]),
+                        max(1, entry_joins(_after_map[_id600[_nm600]]) or 0))
                 if _taken600:
                     print(f"  Improvement gate: pour net(s) "
                           f"{', '.join(_taken600)} graded as the final "
