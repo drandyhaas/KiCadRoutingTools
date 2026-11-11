@@ -1,3 +1,25 @@
+4f7f512f081573041edf245aec28cb6544f76c25 2026-11-11 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 772003a6..4f7f512f, the #1797-#1826 issue round (36 commits), macOS,
+KiCad 10.0.6.
+(A) Flags: the argparse diff adds flags only to checkers (check_complete
+  --kicad-rules, check_join, check_reachability --margin default, the new
+  check_return_vias); no routing CLI flag and no dialog control is added or
+  removed. No signature of batch_route, batch_route_diff_pairs, create_plane,
+  repair_planes or the fanout entry points changed.
+(B) Post-passes and results data: the CLI-side additions have their GUI
+  halves in the same commits: #1807's persisted lap record (swig_gui,
+  placement_run, ai_plan), #1804's per-pad via-drop ledger (fanout_gui,
+  gui_utils), #1826's 'not separable' seed status (placement_gui,
+  placement_run). Everything else (#1798 collapse scoping, #1808 joins gate,
+  #1802/#1803/#1812 and the rest) is inside the shared engines.
+GATES: tests/gui_parity/run_gui_parity.py on 62ac94fe, 81 passed, 0 failed,
+0 declared SKIP. The three later commits (aa9d438c, bd87f988, 4f7f512f)
+touch engine internals and tests only, no flag, control or results key.
+Modal suite on 62ac94fe 1313 passed / 5 failed, all fixed by aa9d438c and
+bd87f988 (filtered re-run green); filtered suite on 4f7f512f 38 passed, 0
+failed (test_1376's kicad-cli leg passed locally). Corpus A/B sets 1-28 on
+4f7f512f vs v0.23.9: 400/400 tied.
+
 e6bc31e2291a91327217cd668885e065a487ec92 2026-11-09 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Release v0.23.9 check at e6bc31e2. The commits after the f4d871d8 audit below
 (2f92162a, e6bc31e2) touch only this file, so the audit carries over
