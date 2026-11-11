@@ -306,7 +306,10 @@ def main(argv=None):
                          'dashes, passed to board_score and check_complete '
                          '(--mode full only; one either would refuse is '
                          'refused here); repeatable, e.g. '
-                         '--spec net-min-widths=widths.json')
+                         '--spec net-min-widths=widths.json. VALUE is one '
+                         'argument: a list is impedance-nets=A,B or a '
+                         'repeated --spec, never A B (read as one pattern '
+                         'holding a space)')
     ap.add_argument('--whose-rules', choices=(ASPIRATIONAL, USERS_OWN),
                     default=None,
                     help='whose rules the project holds, which decides the '

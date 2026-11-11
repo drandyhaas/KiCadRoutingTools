@@ -1221,7 +1221,13 @@ python3 -X utf8 py_tools/board_score.py routed.kicad_pcb --baseline start.kicad_
 - `--intent`, `--impedance-nets GLOB ...`, `--length-groups JSON`,
   `--net-min-widths JSON` — enable the floorplan, impedance, length and
   per-net width components (a path that is not a file leaves its component
-  ungraded).
+  ungraded). `--impedance-nets` takes one pattern per argument, or a
+  comma-joined list (`"A, B"` is A and B); a space inside an argument is part
+  of the pattern. Each pattern is accounted on its own: one naming no net of
+  the board makes impedance unknown and is named (`patterns_matching_no_net`
+  and an `IMPEDANCE PATTERNS` line), and when no named net has track copper
+  yet impedance is ungraded rather than unknown, so an unrouted board still
+  has a `blocking` number.
 - `--min-track-width` / `--min-via-diameter` / `--min-via-drill` /
   `--size-margin` — the board's spec size floors, when tighter than the fab's.
 - `--label` — free text carried into the JSON.

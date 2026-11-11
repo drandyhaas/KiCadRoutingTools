@@ -1137,7 +1137,44 @@ def _glob_literal(name: str) -> str:
     return '\\' + lit if lit.startswith('!') else lit
 
 
-def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
+def _account_impedance_patterns(asked, pcb):
+    """Each INCLUSION pattern of ``asked`` on its own, against the board's
+    nets (#1815): (patterns naming no net of the board, {pattern: the nets it
+    names}). An exclusion selects nothing by itself, so it is not accounted.
+    Matched as `score_impedance`'s `named` matches (check_impedance's own
+    matcher), so a pattern counted here selects the same nets there."""
+    from net_queries import (board_net_names, net_pattern_matches,
+                             split_net_patterns)
+    names = sorted(board_net_names(pcb))
+    known = set(names)
+    no_net, matched = [], {}
+    for p in asked:
+        inc = split_net_patterns([p], known)[0]
+        if not inc:
+            continue
+        hit = [n for n in names if net_pattern_matches(n, inc[0])]
+        if hit:
+            matched[p] = hit
+        else:
+            no_net.append(p)
+    return no_net, matched
+
+
+def _no_net_reason(no_net) -> str:
+    """The unknown reason for patterns that name no net of the board, with
+    the two accepted spellings when one holds whitespace: it was read as ONE
+    pattern, since a net name may hold a space (#1553)."""
+    why = ('--impedance-nets pattern(s) matching no net of the board: '
+           + ', '.join(repr(p) for p in no_net))
+    spaced = [p for p in no_net if any(ch.isspace() for ch in p)]
+    if spaced:
+        why += (f" ({', '.join(repr(p) for p in spaced)} was read as one "
+                f"pattern holding whitespace: give each pattern its own "
+                f"argument, or join them with commas)")
+    return why
+
+
+def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
     """check_impedance -- reference-plane continuity and declared-gap audit.
 
     Graded: the nets named by ``--impedance-nets``. `count` is the nets that
@@ -1159,7 +1196,16 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
     ``--nets <--impedance-nets>``: the selection is check_impedance's own
     matcher (`net_queries.matches_net_filter`), so a sheet-path net
     (``USB_D*`` names ``/USB_DP``) and ``!`` exclusions select the same nets
-    here as there."""
+    here as there.
+
+    Each asked pattern is accounted on its own (#1815). One naming no net of
+    the board is a finding about the spec: the component is UNKNOWN and the
+    reason names it, also when other patterns graded nets
+    (`patterns_matching_no_net`). One whose nets exist but were not analysed
+    is disclosed (`patterns_matching_no_routed_net`). When nothing was
+    analysed because no named net has track copper yet, the component is
+    UNGRADED, not unknown (#1814): "not routed yet" is what `unrouted` and
+    `broken` measure, as `length` does since #1246."""
     from net_queries import matches_net_filter, split_net_patterns
     declared = declared_impedance_nets(board)
     asked = list(nets or [])
@@ -1213,15 +1259,43 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
                             '(the project\'s impedance declarations are measured '
                             'in declared_failing, not graded)'), **extra)
     graded = [r for r in rows if named(r['net_name'])]
+    graded_names = {r['net_name'] for r in graded}
+    no_net, matched = (_account_impedance_patterns(asked, pcb)
+                       if pcb is not None else ([], {}))
+    extra['patterns_matching_no_net'] = no_net
+    extra['patterns_matching_no_routed_net'] = [
+        p for p, hit in matched.items() if not graded_names.intersection(hit)]
+    if no_net:
+        # A pattern naming no net of the board is a FINDING about the spec,
+        # not a pass, even beside patterns that graded (#1815: "A, B" used to
+        # grade A alone, one blocker better than the board). ran=True with
+        # count=None routes this to UNKNOWN (blocking None, exit 4), never to
+        # `ungraded`: the comma-joined form of --impedance-nets silently
+        # zero-matched for four whole runs on one board while blocking summed
+        # without the component and the exit code read 0 (test-board run 5).
+        return {'ran': True, 'count': None, 'reason': _no_net_reason(no_net),
+                **extra}
     if not graded:
-        # Asked for, but nothing matched -- that is a FINDING (the globs are
-        # wrong, or the nets are unrouted), not a pass. ran=True with count=None
-        # routes this to UNKNOWN (blocking None, exit 4), never to `ungraded`:
-        # the comma-joined form of --impedance-nets silently zero-matched for
-        # four whole runs on one board while blocking summed without the
-        # component and the exit code read 0 (test-board run 5, journal [11]).
+        if pcb is not None:
+            # check_impedance analyses only a net with a track segment, so a
+            # named net with none is "not routed yet" (#1814), which `unrouted`
+            # and `broken` already count: ungraded, as `length` does (#1246).
+            from net_queries import board_net_names
+            selected = {n for n in board_net_names(pcb) if named(n)}
+            tracked = {pcb.nets[s.net_id].name for s in pcb.segments
+                       if s.net_id and s.net_id in pcb.nets}
+            if selected and not selected & tracked:
+                return dict(skipped(f'{len(selected)} net(s) named by '
+                                    f'--impedance-nets have no track copper '
+                                    f'yet'), **extra)
+        # Nets named, with track copper, and none analysed (a net that owns a
+        # pour is a plane net, which check_impedance skips; or an exclusion
+        # removed every one): a finding, UNKNOWN as above.
+        notes = '; '.join(d.get('notes') or ())
         return {'ran': True, 'count': None,
-                'reason': 'no routed nets matched --impedance-nets', **extra}
+                'reason': 'no routed nets matched --impedance-nets'
+                          + (f' (check_impedance: {notes})' if notes else ''),
+                **extra}
     broken = sorted(r['net_name'] for r in graded if _broken(r))
     crossing = sorted(r['net_name'] for r in graded if r.get('crossings'))
     return {'ran': True, 'count': len(set(broken) | set(crossing)),
@@ -1873,10 +1947,13 @@ def build_parser():
     g.add_argument('--size-margin', type=float, metavar='MM',
                    help='absolute tolerance on the size checks (default: exact floor)')
     p.add_argument('--impedance-nets', nargs='+', action='extend', metavar='GLOB',
-                   help='route.py --nets glob syntax, SPACE separated; commas '
-                        'inside a token are split too (a comma-joined list used '
-                        'to become one impossible glob that silently matched '
-                        'nothing). Enables the impedance component')
+                   help='route.py --nets glob syntax, one pattern per argument; '
+                        'commas inside an argument are split too and each piece '
+                        'stripped ("A, B" is A and B). A space inside an '
+                        'argument is part of the pattern, since a net name may '
+                        'hold one. A pattern naming no net of the board makes '
+                        'impedance UNKNOWN and is named. Enables the impedance '
+                        'component')
     p.add_argument('--net-min-widths', metavar='JSON',
                    help='JSON FILE of {"<net glob>": <min mm>} -- per-net width '
                         'requirements. `undersized` only sees BOARD-WIDE floors, '
@@ -1947,6 +2024,15 @@ def main():
              '--min-via-diameter': args.min_via_diameter,
              '--min-via-drill': args.min_via_drill,
              '--size-margin': args.size_margin}
+    # ONE in-process parse for the in-process readers below (#1194): each
+    # parsed the board itself, so a parser warning (the two-line NET-TAGGED
+    # copper graphic notice) printed once per reader. Read-only for all. A
+    # board that will not parse leaves each to parse and report for itself.
+    try:
+        from kicad_parser import parse_kicad_pcb
+        _pcb = parse_kicad_pcb(args.board)
+    except Exception:                                        # noqa: BLE001
+        _pcb = None
     # A real temp dir, NOT a dotfile beside the board: these are intermediate
     # JSONs nobody reads twice, and scoring a board must leave nothing behind in
     # the user's project. `--json` is the copy you keep.
@@ -1957,9 +2043,11 @@ def main():
         floorplan = score_floorplan(root, args.board, args.intent, tmp)
         assembly = score_assembly(root, args.board, args.intent, tmp,
                                   args.clearance, baseline=args.baseline)
-        _imp_nets = ([g for tok in args.impedance_nets for g in tok.split(',') if g]
+        # #1815: each comma token is stripped, so "A, B" names B, not " B"
+        _imp_nets = ([g.strip() for tok in args.impedance_nets
+                      for g in tok.split(',') if g.strip()]
                      if args.impedance_nets else args.impedance_nets)
-        imped = score_impedance(root, args.board, _imp_nets, tmp)
+        imped = score_impedance(root, args.board, _imp_nets, tmp, pcb=_pcb)
         length = score_length(args.board, args.length_groups)
         net_widths = score_net_widths(args.board, args.net_min_widths)
 
@@ -1968,15 +2056,6 @@ def main():
     # counts and the stranded pads, or 9.1a's lever 2 has nothing to act on.
     # ...and `unrouted` carries its SHAPE. `count` is deliberately untouched, so
     # `blocking` below is unchanged by construction.
-    # ONE in-process parse for the three readers below (#1194): each parsed
-    # the board itself, so a parser warning (the two-line NET-TAGGED copper
-    # graphic notice) printed three times. Read-only for all three. A board
-    # that will not parse leaves each to parse and report for itself.
-    try:
-        from kicad_parser import parse_kicad_pcb
-        _pcb = parse_kicad_pcb(args.board)
-    except Exception:                                        # noqa: BLE001
-        _pcb = None
     shape = unrouted_shape(args.board, conn.get('unrouted_net_names', []),
                            pcb=_pcb)
     diff_pairs = score_diff_pairs(args.board, drc, pcb=_pcb)
@@ -2137,6 +2216,16 @@ def main():
               + (', ...' if len(_ru) > 6 else '')
               + " -- name a net in --net-min-widths to grade it")
     _imp = score['components'].get('impedance') or {}
+    # #1815: each --impedance-nets pattern accounted on its own
+    _pnn = _imp.get('patterns_matching_no_net') or []
+    _pnr = _imp.get('patterns_matching_no_routed_net') or []
+    if _pnn or _pnr:
+        print("IMPEDANCE PATTERNS: " + '; '.join(
+            [f"matching no net of the board (impedance is unknown): "
+             f"{', '.join(repr(p) for p in _pnn)}"] * bool(_pnn)
+            + [f"naming nets none of which was analysed (no track copper "
+               f"yet, or a plane net): {', '.join(repr(p) for p in _pnr)}"]
+            * bool(_pnr)))
     _df = _imp.get('declared_failing') or []
     if _df:
         print(f"DECLARED IMPEDANCE (measured, not graded): {len(_df)} net(s) the "
