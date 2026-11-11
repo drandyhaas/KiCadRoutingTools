@@ -172,6 +172,13 @@ total copper can fail on path length. Pads joined only through a zone return
 
 For time-matched groups use `calculate_route_propagation_time_ps()` from `impedance.py` instead, plus each pad's `die_delay` (`net_pad_to_die_delay`, ps), and compare against the ps tolerance. Lengths include via barrels from the stackup and, in `net_match_length`, every pad's pad-to-die length (`(die_length ...)`, #1248) -- the terms KiCad's length/skew DRC adds. A board that declares pad-to-die is graded wrong by raw copper: KiCad sees the difference as skew.
 
+A limit stated for a **lane through a series part** (an AC-coupling cap, a
+series resistor) is two nets end to end: write it as a `chains` group,
+`{"LANE": {"chains": [["/A_P", "/B_P"]], "max_mm": 12}}` (or `"chains":
+"auto"` for the board's AC-coupled pairs). A chain's length is its nets
+summed, the series part's own span reported apart; `min_mm` / `max_mm` bound
+each member, nets or chains (#1812).
+
 Report per group: the spread, the tolerance, and the worst offender net.
 
 ## Step 2b: Meander Arm-Spacing Audit (#501)

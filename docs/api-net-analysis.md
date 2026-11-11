@@ -389,6 +389,19 @@ copper (`mode='total'`) only once `net_pads_joined` holds, or the path between
 the net's first two pads (`mode='pin_pair'`). `None` in either mode means "not
 routed yet" (unrouted, stub-only, broken or plane-only), never `0.0`.
 
+A lane that runs through a **series part** (an AC-coupling capacitor, a series
+resistor) is two or more nets, and every per-net grade measures each alone.
+`chain_length.measure_chain(pcb, nets)` is the one end-to-end measurement
+(#1799, #1812): each net by `net_match_length`, summed in `track_mm` (None
+until every net is joined), each joint's part
+(`series_part_between`: one footprint with exactly two copper pads, one on
+each net) and its pad-centre `span_mm` reported apart and never added, and a
+joint no such part bridges listed in `unbridged`. `pair_chain_skew(pcb,
+p_nets, n_nets)` is a split differential signal's end-to-end skew.
+`board_score --length-groups` grades a group's `chains` with it (and
+`min_mm` / `max_mm` on any member), and `check_drc` grades a recorded
+AC-coupled chain with it.
+
 Both modes add the pads' **pad-to-die** length, as KiCad does (#1248): every
 pad of the net in `'total'` mode (KiCad's length/skew DRC), the measured pad
 pair in `'pin_pair'` mode (KiCad's tuner adds its start and end pads'). Pass

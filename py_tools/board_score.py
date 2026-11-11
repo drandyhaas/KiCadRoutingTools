@@ -1217,6 +1217,107 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
             **extra}
 
 
+#: The keys a `--length-groups` group may carry (#1812); any other is named
+#: in the group's detail as `unknown_keys`.
+LENGTH_GROUP_KEYS = frozenset({'nets', 'chains', 'tolerance_mm', 'min_mm',
+                               'max_mm', 'mode'})
+
+
+def _length_bounds(lengths: dict, lo, hi) -> list:
+    """The members of `lengths` ({label: mm}) outside [lo, hi] (#1812):
+    [{'member', 'length_mm', 'bound', 'limit_mm'}]."""
+    out = []
+    for m, L in sorted(lengths.items()):
+        if hi is not None and L > hi + 1e-6:
+            out.append({'member': m, 'length_mm': round(L, 4), 'bound': 'max',
+                        'limit_mm': hi})
+        elif lo is not None and L < lo - 1e-6:
+            out.append({'member': m, 'length_mm': round(L, 4), 'bound': 'min',
+                        'limit_mm': lo})
+    return out
+
+
+def _auto_chains(pcb) -> list:
+    """`"chains": "auto"`: the AC-coupled chains `diff_xnet` finds among the
+    board's pairs (KiCad's pairing, `kicad_dru.coupled_net_pairs`), each
+    pair's P side and N side as two chains. Only junctions where BOTH
+    polarities are bridged are found; any other lane is written out."""
+    from diff_xnet import find_ac_coupled_xnets
+    from kicad_dru import coupled_net_pairs
+    from routing_config import DiffPairNet
+    names = {nid: n.name for nid, n in pcb.nets.items() if nid and n.name}
+    dp = {}
+    for p, n in coupled_net_pairs(names):
+        key = f'{names[p]}/{names[n]}'
+        dp[key] = DiffPairNet(base_name=key, p_net_id=p, n_net_id=n,
+                              p_net_name=names[p], n_net_name=names[n])
+    xnets, _warnings = find_ac_coupled_xnets(pcb, dp)
+    chains = []
+    for xn in xnets:
+        chains.append([names[i] for i in xn.p_net_ids])
+        chains.append([names[i] for i in xn.n_net_ids])
+    return chains
+
+
+def _length_group_chains(pcb, chains, mode, tol, lo, hi) -> dict:
+    """One `--length-groups` group whose members are CHAINS (#1812): lanes
+    through series parts, each a list of nets in order, measured end to end
+    by `chain_length.measure_chain` -- the sum of its nets' lengths, each
+    series part's own span reported apart (`series_span_mm`), not added.
+    `tolerance_mm` is the spread across chains; `min_mm` / `max_mm` bound
+    each chain. A joint no 2-pad part bridges, or a net the board lacks, is
+    a finding about the spec (the group fails); a chain with a net not yet
+    joined by track copper leaves the group unmeasured (`unmeasured` True)."""
+    from chain_length import measure_chain, chain_label
+    if chains == 'auto':
+        try:
+            chains = _auto_chains(pcb)
+        except Exception as exc:                             # noqa: BLE001
+            return {'skipped': f'"chains": "auto" could not read the board\'s '
+                               f'AC-coupled chains: {type(exc).__name__}: {exc}',
+                    'pass': False}
+        if not chains:
+            return {'skipped': '"chains": "auto" found no AC-coupled chain on '
+                               'the board', 'pass': False}
+    if not isinstance(chains, list) or not chains or not all(
+            isinstance(c, list) and c and all(isinstance(n, str) for n in c)
+            for c in chains):
+        return {'skipped': '"chains" must be "auto" or a list of lists of net '
+                           'names', 'pass': False}
+    measured = {chain_label(c): measure_chain(pcb, c, mode=mode) for c in chains}
+    out = {'chains': {k: {'nets': m['nets'], 'track_mm': m['track_mm'],
+                          'net_mm': m['net_mm'], 'series_parts': m['joints'],
+                          'series_span_mm': m['span_mm']}
+                      for k, m in measured.items()},
+           'tolerance_mm': tol}
+    if lo is not None or hi is not None:
+        out.update(min_mm=lo, max_mm=hi)
+    missing = sorted({n for m in measured.values() for n in m['missing_nets']})
+    unbridged = {k: m['unbridged'] for k, m in measured.items() if m['unbridged']}
+    if missing or unbridged:
+        out['pass'] = False
+        if missing:
+            out['missing_nets'] = missing
+        if unbridged:
+            out['unbridged'] = {k: [f'{j}: no part with two copper pads, one '
+                                    f'on each net, joins them' for j in v]
+                                for k, v in unbridged.items()}
+        return out
+    unjoined = sorted({n for m in measured.values() for n in m['unjoined_nets']})
+    if unjoined:
+        out.update(skipped=f'{len(unjoined)} net(s) have pads not joined by '
+                           f'track copper (unrouted, stub-only, broken or '
+                           f'plane-only)', unjoined_nets=unjoined, unmeasured=True)
+        return out
+    lengths = {k: m['track_mm'] for k, m in measured.items()}
+    spread = max(lengths.values()) - min(lengths.values())
+    bounds = _length_bounds(lengths, lo, hi)
+    out.update(spread_mm=round(spread, 4), out_of_bounds=bounds,
+               worst=max(lengths, key=lengths.get))
+    out['pass'] = spread <= tol and not bounds
+    return out
+
+
 def score_length(board: str, groups_file: str) -> dict:
     """Length-match spread per declared group, via net_queries (no new geometry).
 
@@ -1229,6 +1330,22 @@ def score_length(board: str, groups_file: str) -> dict:
     `mode: "pin_pair"` measures the driver->receiver PATH instead of total net
     copper. Use it for any multipoint or stubbed net: total copper sums every
     branch and matches no real signal path.
+
+    `min_mm` / `max_mm` (#1812) bound each member's length; a member outside
+    fails the group and is named in `out_of_bounds`. With a bound, one net is
+    a group. A per-net limit KiCad grades belongs in a `.kicad_dru` length
+    rule (check_drc grades it); these keys are for a spec written here.
+
+    `chains` (#1812) replaces `nets` with lanes through series parts:
+    `[["/A_P", "/B_P"], ...]`, each chain's nets in order, joined by a part
+    with two copper pads, or `"auto"` for the board's AC-coupled pairs. A
+    chain's length is its nets' lengths summed (`chain_length.measure_chain`,
+    the measurement check_drc grades a recorded AC-coupled chain with); the
+    series parts' own spans are reported apart, never added. `tolerance_mm`
+    is then the spread across chains, and the bounds apply to each chain.
+
+    A key this function does not read is listed in the group's
+    `unknown_keys`.
 
     BOTH modes measure a member only once its pads are joined by track copper
     (`net_queries.net_match_length`), and a member that is not makes its whole
@@ -1257,16 +1374,36 @@ def score_length(board: str, groups_file: str) -> dict:
     by_name = {n.name: nid for nid, n in pcb.nets.items()}
     failures, unmeasured, detail = 0, 0, {}
     for gname, spec in groups.items():
-        names = [n for n in spec.get('nets', [])]
+        # #1812: a key this function does not read is named, never passed
+        # over -- an unread `max_mm` graded a lane over its limit a pass.
+        unknown = sorted(k for k in spec if k not in LENGTH_GROUP_KEYS)
         tol = float(spec.get('tolerance_mm', 0.1))
+        lo, hi = spec.get('min_mm'), spec.get('max_mm')
+        lo = None if lo is None else float(lo)
+        hi = None if hi is None else float(hi)
+        mode = 'pin_pair' if spec.get('mode') == 'pin_pair' else 'total'
+        if spec.get('chains') is not None:
+            res = _length_group_chains(pcb, spec['chains'], mode, tol, lo, hi)
+            if unknown:
+                res['unknown_keys'] = unknown
+            detail[gname] = res
+            if res.pop('unmeasured', False):
+                unmeasured += 1
+            elif not res.get('pass', True):
+                failures += 1
+            continue
+        names = [n for n in spec.get('nets', [])]
         ids = [by_name[n] for n in names if n in by_name]
         missing = [n for n in names if n not in by_name]
-        if len(ids) < 2:
-            detail[gname] = {'skipped': f'fewer than 2 of its nets exist on the '
+        # a bound is graded per member, so one net is a group then
+        need = 1 if (lo is not None or hi is not None) else 2
+        if len(ids) < need:
+            detail[gname] = {'skipped': f'fewer than {need} of its nets exist on the '
                                         f'board (missing: {missing})'}
+            if unknown:
+                detail[gname]['unknown_keys'] = unknown
             failures += 1          # a group naming nets that do not exist is a
             continue               # finding about the spec, not a pass
-        mode = 'pin_pair' if spec.get('mode') == 'pin_pair' else 'total'
         lengths, unjoined = {}, []
         for n in names:
             if n not in by_name:
@@ -1287,14 +1424,23 @@ def score_length(board: str, groups_file: str) -> dict:
                                         f'(unrouted, stub-only, broken or '
                                         f'plane-only)',
                              'unjoined_nets': unjoined, 'missing_nets': missing}
+            if unknown:
+                detail[gname]['unknown_keys'] = unknown
             unmeasured += 1
             continue
         spread = max(lengths.values()) - min(lengths.values())
-        ok = spread <= tol
+        bounds = _length_bounds(lengths, lo, hi)
+        ok = spread <= tol and not bounds
         failures += 0 if ok else 1
         detail[gname] = {'spread_mm': round(spread, 4), 'tolerance_mm': tol,
                          'pass': ok, 'missing_nets': missing,
                          'worst': max(lengths, key=lengths.get)}
+        if lo is not None or hi is not None:
+            detail[gname].update(min_mm=lo, max_mm=hi, out_of_bounds=bounds,
+                                 lengths_mm={n: round(v, 4)
+                                             for n, v in lengths.items()})
+        if unknown:
+            detail[gname]['unknown_keys'] = unknown
         # #1248: the lengths include each member's pad-to-die term, as KiCad's
         # DRC does. Disclosed only where a pad declares one, so a grade moved
         # by a term no copper shows says which term moved it.
@@ -1721,7 +1867,12 @@ def build_parser():
                         'pattern covers (requested_under), not graded')
     p.add_argument('--length-groups', metavar='JSON',
                    help='JSON FILE of {"group": {"nets": [...], '
-                        '"tolerance_mm": 0.1, "mode": "pin_pair"}} -- enables '
+                        '"tolerance_mm": 0.1, "mode": "pin_pair", "min_mm": .., '
+                        '"max_mm": ..}} -- or "chains": [[net, net, ...], ...] '
+                        'in place of "nets" for lanes through series parts '
+                        '(a chain is its nets summed; "chains": "auto" takes '
+                        'the AC-coupled pairs). A per-net limit KiCad grades '
+                        'belongs in a .kicad_dru length rule. Enables '
                         'the length component. A PATH, like --net-min-widths: '
                         'anything that is not an existing file leaves length '
                         'matching UNGRADED (ran: false) and the board scoring '
