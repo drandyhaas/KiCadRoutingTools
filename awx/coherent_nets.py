@@ -26,6 +26,19 @@ def net_keys(src):
     return short_net_names(src)
 
 
+_BLOCK_NET = re.compile(r'\(net "((?:[^"\\]|\\.)*)"\)')
+
+
+def block_net_name(block):
+    """The net NAME a board file's block -- a segment's, a via's -- carries, as the parser names the net: UNESCAPED
+    (kicad_parser's rule: a backslash and a quote are spelled escaped in the file). None where the block carries a
+    net's number, or none. Compared as the file spells it, a net with a backslash in its name matched nothing: a
+    merge left its copper of the shared field in place and took none of what its bus had routed -- one bus net open
+    and shorted on a board whose bus had routed it clean"""
+    m = _BLOCK_NET.search(block)
+    return m.group(1).replace('\\\\', '\\').replace('\\"', '"') if m else None
+
+
 def key_of(name, keys=None):
     """A net's name, as a checker's log or a pad gives it, by the whole route's name for it: `keys` (net_keys) when
     given, else -- or for a name not among them -- its last path part"""

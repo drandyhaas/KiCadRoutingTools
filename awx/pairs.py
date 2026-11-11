@@ -1113,6 +1113,12 @@ def under_pad(ball, pad, via_size: float) -> bool:
     and the pad counts as the ball for the ladder's two-pad rule."""
     if pad is ball:
         return False
+    # a via-in-pad stands in a BALL: a ROW PART's pad -- longer than it is wide (escape_moves._row_pads' own test),
+    # at a pitch a via does not fit -- has no such move in its menu, and a passive's pad beneath it is served by
+    # nothing there: a stub for the rest of the chain, as any pull's (a PHY's strap resistor on the back under one
+    # of its pads was read as served, its net as two-ended, and the net graded open with its lane laid)
+    if max(ball.size_x, ball.size_y) >= 1.5 * min(ball.size_x, ball.size_y):
+        return False
     # the served pad is the LARGER copper (a passive's pad under a ball):
     # the test is one-way, or a ball and the pad under it would each
     # exclude the other

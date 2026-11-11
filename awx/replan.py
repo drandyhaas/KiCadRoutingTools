@@ -130,7 +130,7 @@ import source_realize as sr  # noqa: E402
 import plan_ends as pe  # noqa: E402
 import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
-from coherent_nets import coherent_nets  # noqa: E402
+from coherent_nets import coherent_nets, block_net_name  # noqa: E402
 import rules as _rules  # noqa: E402  ONE source for every design rule
 import probe_memo as pm  # noqa: E402  the probe / screen memo (never pay for one twice)
 # (the board-text walk, in make_bench: the whole route strips a window with it and never imports this research CLI,
@@ -334,8 +334,8 @@ def dmenu_full(st):
 
 def block_net(block, nid, name):
     m = re.search(r'\(net (\d+)\)', block)
-    m2 = re.search(r'\(net "([^"]+)"\)', block)
-    return (m and int(m.group(1)) == nid) or (m2 and m2.group(1) == name)
+    m2 = block_net_name(block)
+    return (m and int(m.group(1)) == nid) or (m2 is not None and m2 == name)
 
 
 def _near(p, q):

@@ -85,6 +85,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+from coherent_nets import block_net_name  # noqa: E402
 
 # the caches are a harness's (awx-caches-off-by-default): the step runs every stage without them
 STEP_SETTINGS = {'TAUT_MEMO': '0', 'PROBE_MEMO': '0', 'STAGE_CACHE': '0'}
@@ -689,9 +690,9 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
             keep_ = []
 
             def _grab(block):
-                m_ = re.search(r'\(net "([^"]+)"\)', block)
+                m_ = block_net_name(block)
                 u_ = re.search(r'\(uuid "([^"]+)"\)', block)
-                if '(locked yes)' in block and m_ and short(m_.group(1)) in prot_ and \
+                if '(locked yes)' in block and m_ is not None and short(m_) in prot_ and \
                         not (u_ and u_.group(1) in have_):
                     keep_.append(block)
                 return False
@@ -1863,8 +1864,8 @@ def _clear_blocks(path, txt, blocks):
     cu, keep = {}, []
     for tok, b in blocks:
         m_id = re.search(r'\(net (\d+)\)', b)
-        m_nm = re.search(r'\(net "([^"]+)"\)', b)
-        nid = int(m_id.group(1)) if m_id else by_name.get(m_nm.group(1) if m_nm else '', 0)
+        m_nm = block_net_name(b)
+        nid = int(m_id.group(1)) if m_id else by_name.get(m_nm if m_nm is not None else '', 0)
         if tok == 'segment':
             w = float(re.search(r'\(width ([\d.e-]+)\)', b).group(1))
             L = re.search(r'\(layer "?([^")\s]+)"?\)', b).group(1)
@@ -1913,8 +1914,8 @@ def net_blocks(txt, token, net_ids, net_names=()):
             k += 1
         block = txt[j:k + 1]
         m = re.search(r'\(net (\d+)\)', block)
-        m2 = re.search(r'\(net "([^"]+)"\)', block)
-        if (m and int(m.group(1)) in net_ids) or (m2 and m2.group(1) in net_names):
+        m2 = block_net_name(block)
+        if (m and int(m.group(1)) in net_ids) or (m2 is not None and m2 in net_names):
             out.append(block)
         i = k + 1
 
@@ -2296,9 +2297,9 @@ def hold_board_escapes(board, base, out, pcb, src, failed, names=(), short=lambd
     name_of = {i: n.name for i, n in pcb.nets.items() if n.name}
 
     def net_of(b):
-        m_nm = re.search(r'\(net "([^"]+)"\)', b)
+        m_nm = block_net_name(b)
         m_id = re.search(r'\(net (\d+)\)', b)
-        return m_nm.group(1) if m_nm else name_of.get(int(m_id.group(1))) if m_id else None
+        return m_nm if m_nm is not None else name_of.get(int(m_id.group(1))) if m_id else None
     by_net = collections.defaultdict(list)
     for b in blocks:
         by_net[net_of(b)].append(('via' if b.lstrip().startswith('(via') else 'segment', b))
@@ -2569,9 +2570,9 @@ def lock_lanes(txt, net_ids, net_names=()):
             k = find_matching_paren(txt, j)
             block = txt[j:k]
             m = re.search(r'\(net (\d+)\)', block)
-            m2 = re.search(r'\(net "([^"]+)"\)', block)
+            m2 = block_net_name(block)
             at = block.find(before)
-            if ((m and int(m.group(1)) in net_ids) or (m2 and m2.group(1) in net_names)) and at > 0 \
+            if ((m and int(m.group(1)) in net_ids) or (m2 is not None and m2 in net_names)) and at > 0 \
                     and not re.search(r'\(locked[\s)]|^\(\w+\s+locked\b', block):
                 block = block[:at] + '(locked yes) ' + block[at:]
                 n += 1

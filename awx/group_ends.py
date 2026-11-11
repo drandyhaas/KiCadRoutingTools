@@ -610,8 +610,9 @@ def qfn_berths(st, pcb):
     the stub's tip, plain or with a via there where one has room on every copper layer (its lane then leaves on any
     layer). The stub's own copper rides on the move (`fan_legs`: laid with the berth, bus_plan) and not in its legs
     -- the ends' conflict test reads axis-aligned lanes, and the fan's stubs are already clear of each other. A pair's
-    legs keep their own moves (the fan would part them), as does a net the fan could not escape. The fan is held
-    inside the board's edge rule (the fanout's own edge model, given the board's rule), and so is a tip's via"""
+    legs keep their own moves (the fan would part them), as does a net the fan could not escape, and every net of a
+    part whose pads have more moves of their own than those two. The fan is held inside the board's edge rule (the
+    fanout's own edge model, given the board's rule), and so is a tip's via"""
     import dataclasses
     import braid as bd
     import pairs as _pairs
@@ -644,6 +645,12 @@ def qfn_berths(st, pcb):
     edge_ = float(getattr(cfg, 'board_edge_clearance', 0.0) or 0.0) or cfg.clearance
     on_ = lambda q, half: bd._on_board(pcb, q[0], q[1], edge_ + half)       # noqa: E731
     for ref, names in sorted(by_ref.items()):
+        # (ONLY A PART WHOSE PADS HAVE NO MOVE OF THEIR OWN but a stub and that stub with a via. One with more -- a
+        # two-row connector with room for vias between its rows, a dozen moves a pad -- keeps them: fanned too, its
+        # lanes arrived among its fanned stubs and its own pads, 38 findings in a bus's first audit for 6 and 13 of
+        # a board's 78 bus nets open for none)
+        if any(len(out[n]) > 2 for n in names):
+            continue
         foot = pcb.footprints[ref]
         # (the board without the run's own copper beside the part: the fan lays every one of its nets' stubs anew)
         xs, ys = [p.global_x for p in foot.pads], [p.global_y for p in foot.pads]
@@ -1420,10 +1427,22 @@ def bus_plan(b, state, lay, RL):
                 # is the via's far side. Laid on the lane's layer, it left its pad joined to nothing: seven nets of
                 # a bus open at one row part, each a berth with a via)
                 # (...and a berth the QFN fanout laid -- qfn_berths -- has its stub's copper beside it, on its own layer)
+                # (...and a berth whose via stands INSIDE its part -- between a two-row connector's rows -- has a run
+                # from that via out to its exit: the via's far side too, laid on the lane's layer. Left on the move's
+                # own layer, the run ended at the exit on the front layer and the lane arrived there on an inner one,
+                # no via between them: a dozen nets of a bus open at one connector, each 0.000 mm from its lane)
                 fan_ = getattr(bm_, 'fan_legs', None)
-                legs = [(tuple(p_), tuple(q_), Lg) for p_, q_, Lg in fan_] if fan_ else \
-                    [(tuple(p_), tuple(q_), RL[lay[lane][1]] if Lg == bm_.layer and not bm_.vias else Lg)
-                     for p_, q_, Lg in bm_.legs if math.hypot(q_[0] - p_[0], q_[1] - p_[1]) > 1e-6]
+                site_ = tuple(bm_.site) if bm_.vias and bm_.site is not None else None
+                at_ = lambda p_: site_ is not None and math.hypot(p_[0] - site_[0], p_[1] - site_[1]) < 1e-6  # noqa: E731
+                legs, past_ = [], False
+                for p_, q_, Lg in (() if fan_ else bm_.legs):
+                    past_ = past_ or at_(p_)
+                    if math.hypot(q_[0] - p_[0], q_[1] - p_[1]) > 1e-6:
+                        legs.append((tuple(p_), tuple(q_), RL[lay[lane][1]]
+                                     if Lg == bm_.layer and (past_ or not bm_.vias) else Lg))
+                    past_ = past_ or at_(q_)
+                if fan_:
+                    legs = [(tuple(p_), tuple(q_), Lg) for p_, q_, Lg in fan_]
                 copper.append((st['byname'][leg][0], legs,
                                tuple(bm_.site) if bm_.vias and bm_.site is not None else None))
     c_ = getattr(b, 'cut', None)

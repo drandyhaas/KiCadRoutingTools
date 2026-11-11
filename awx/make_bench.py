@@ -67,7 +67,7 @@ import fanout_from_plan as fp  # noqa: E402
 import source_realize as sr  # noqa: E402  FAN_TRACK / FAN_CLEAR
 import rules as _rules  # noqa: E402  ONE source for every design rule
 import route_layers  # noqa: E402  the routing layers: the first comb's escapes may take any of them
-from coherent_nets import net_keys, by_key, engine_filter  # noqa: E402  the whole route's names for nets
+from coherent_nets import net_keys, by_key, engine_filter, block_net_name  # noqa: E402  the whole route's names for nets
 sys.path.insert(0, os.path.join(HERE, '..', 'py_placer'))
 from placement.writer import write_placed_output  # noqa: E402
 
@@ -239,8 +239,8 @@ def strip_window(txt, nets, byname, box):
     def rm(token):
         def f(block):
             m = re.search(r'\(net (\d+)\)', block)
-            m2 = re.search(r'\(net "([^"]+)"\)', block)
-            nid = int(m.group(1)) if m else next((i for i, n in ids.items() if m2 and n == m2.group(1)), None)
+            m2 = block_net_name(block)
+            nid = int(m.group(1)) if m else next((i for i, n in ids.items() if m2 is not None and n == m2), None)
             if nid not in ids:
                 return False
             a, b, _ = block_geom(block, token)

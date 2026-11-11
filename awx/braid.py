@@ -78,6 +78,7 @@ import escape_moves as em  # noqa: E402
 from select_moves import pair_chirality  # noqa: E402
 from bga_fanout.flip_frame import to_front_frame, other_layer, mirror_axis  # noqa: E402
 from flow_frame import dest_refs  # noqa: E402  DEST naming one part or several ('U4+U3')
+from coherent_nets import block_net_name  # noqa: E402  a block's net name as the parser names it
 
 import rules as _rules  # noqa: E402  ONE source for every design rule
 
@@ -1324,9 +1325,9 @@ def strip_net_items(txt, token, net_ids, net_names=()):
             k += 1
         block = txt[j:k + 1]
         m = re.search(r'\(net (\d+)\)', block)
-        m2 = re.search(r'\(net "([^"]+)"\)', block)
+        m2 = block_net_name(block)
         if (m and int(m.group(1)) in net_ids) or \
-                (m2 and m2.group(1) in net_names):
+                (m2 is not None and m2 in net_names):
             out.append(txt[i:j].rstrip(' \t'))
             e = k + 1
             if e < len(txt) and txt[e] == '\n':

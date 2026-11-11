@@ -59,6 +59,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 import awx_settings  # noqa: E402
+from coherent_nets import block_net_name  # noqa: E402
 
 POLL = 5.0          # (s) between looks at the buses' processes
 RESERVED = 'reserved'   # (the protection a bus's nets carry on the shared field until the merge)
@@ -433,8 +434,8 @@ def merge(out, boards, log=print, field=None):
 
         def grab(block, ids=ids, names=names):
             m = re.search(r'\(net (\d+)\)', block)
-            m2 = re.search(r'\(net "([^"]+)"\)', block)
-            if (m and int(m.group(1)) in ids) or (m2 and m2.group(1) in names):
+            m2 = block_net_name(block)
+            if (m and int(m.group(1)) in ids) or (m2 is not None and m2 in names):
                 add.append(block)
             return False
         bt = open(b, encoding='utf-8').read()
@@ -555,8 +556,8 @@ def give_back(out, board, path, log=print):
     def laid_here(token):
         def f(block):
             m = re.search(r'\(net (\d+)\)', block)
-            m2 = re.search(r'\(net "([^"]+)"\)', block)
-            if not ((m and int(m.group(1)) in ids) or (m2 and m2.group(1) in full)):
+            m2 = block_net_name(block)
+            if not ((m and int(m.group(1)) in ids) or (m2 is not None and m2 in full)):
                 return False
             a_, b_, L_ = mb.block_geom(block, token)
             key = frozenset((r3(a_), r3(b_))) | {L_} if token == 'segment' else frozenset({r3(a_), 'via'})
