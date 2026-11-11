@@ -2429,6 +2429,297 @@ def grade_late_group_members(record, late, config, pcb_data):
     return all(r.get('status') == 'matched' for r in status.values())
 
 
+def _net_copper_path(segs, vias, pads):
+    """#1828: a 2-pad net's board copper as ONE path from one pad to the
+    other -- every segment, in order, each oriented to start where the one
+    before ends -- or None when the copper is not one path: a branch, a
+    loop, a separate piece, a piece meeting another away from its end
+    points. Track ends join where they coincide or sit on a via's centre; an
+    end that meets nothing so (a dangling end) joins by overlap, as KiCad's
+    connectivity reads copper: its round cap overlapping a via's pad, a
+    pad's copper on its layer, or another dangling end's cap. A via joins a
+    pad it overlaps. A segment both of whose ends land in one joint lies in
+    that joint's copper and is on no path: it is left out of the list.
+    Returns [(index into segs, segment)] in path order; reversed segments
+    are copies, the rest are the objects given."""
+    from dataclasses import replace
+    from geometry_utils import via_on_layer
+    from check_drc import point_to_pad_distance
+    pads = [p for p in pads if getattr(p, 'pad_type', '') != 'np_thru_hole']
+    if not segs or len(pads) != 2:
+        return None
+
+    def pad_on(p, layer):
+        ls = p.layers or ()
+        return (layer in ls or '*.Cu' in ls
+                or ('F&B.Cu' in ls and layer in ('F.Cu', 'B.Cu')))
+    parent = {}
+
+    def find(a):
+        parent.setdefault(a, a)
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def join(a, b):
+        parent[find(a)] = find(b)
+    eps = 1e-3
+    ends = []                                   # (node, x, y, layer, half width)
+    for i, s in enumerate(segs):
+        for k, (x, y) in enumerate(((s.start_x, s.start_y), (s.end_x, s.end_y))):
+            ends.append((('e', i, k), x, y, s.layer, (s.width or 0) / 2))
+    # Ends that coincide (1 um), or sit on a via's centre, join first. Only
+    # an end that meets nothing that way -- a dangling end -- is then joined
+    # by overlap (into a via's pad, a pad's copper, or another dangling end's
+    # cap): overlap-joining every end would fold a chain of track pieces
+    # shorter than a track width into one node.
+    groups: Dict = {}
+    for a, ax, ay, al, _aw in ends:
+        find(a)
+        groups.setdefault((round(ax * 1000), round(ay * 1000), al), []).append(a)
+    for members in groups.values():
+        for b in members[1:]:
+            join(b, members[0])
+    dangling = []
+    for a, ax, ay, al, aw in ends:
+        at_via = [j for j, v in enumerate(vias) if via_on_layer(v, al)
+                  and math.hypot(ax - v.x, ay - v.y) <= eps]
+        for j in at_via:
+            join(a, ('v', j))
+        if not at_via and len(groups[(round(ax * 1000), round(ay * 1000), al)]) == 1:
+            dangling.append((a, ax, ay, al, aw))
+    for n, (a, ax, ay, al, aw) in enumerate(dangling):
+        for j, v in enumerate(vias):
+            if (via_on_layer(v, al)
+                    and math.hypot(ax - v.x, ay - v.y) <= v.size / 2 + aw + eps):
+                join(a, ('v', j))
+        for k, p in enumerate(pads):
+            if pad_on(p, al) and point_to_pad_distance(ax, ay, p) <= aw + eps:
+                join(a, ('p', k))
+        for b, bx, by, bl, bw in dangling[n + 1:]:
+            if (a[1] != b[1] and al == bl
+                    and math.hypot(ax - bx, ay - by) <= aw + bw + eps):
+                join(a, b)
+    for j, v in enumerate(vias):
+        find(('v', j))
+        for k, p in enumerate(pads):
+            if any(pad_on(p, l) and via_on_layer(v, l) for l in ('F.Cu', 'B.Cu')) \
+                    and point_to_pad_distance(v.x, v.y, p) <= v.size / 2 + eps:
+                join(('v', j), ('p', k))
+    tip_a, tip_b = find(('p', 0)), find(('p', 1))
+    if tip_a == tip_b:
+        return None
+    adj: Dict = {}
+    inside = 0
+    for i in range(len(segs)):
+        ra, rb = find(('e', i, 0)), find(('e', i, 1))
+        if ra == rb:
+            # Both ends in one joint's copper (a stub inside a via's or a
+            # pad's copper): on no path, and left as it is.
+            inside += 1
+            continue
+        adj.setdefault(ra, []).append((i, rb))
+        adj.setdefault(rb, []).append((i, ra))
+    if any(len(e) > 2 for e in adj.values()):
+        return None
+    if {r for r, e in adj.items() if len(e) == 1} != {tip_a, tip_b}:
+        return None
+    if any(find(('v', j)) not in adj for j in range(len(vias))):
+        return None                             # a via no track reaches
+    out, used, cur = [], set(), tip_a
+    while True:
+        step = next(((i, r) for i, r in adj.get(cur, ()) if i not in used), None)
+        if step is None:
+            break
+        i, nxt = step
+        used.add(i)
+        s = segs[i]
+        if find(('e', i, 0)) != cur:
+            s = replace(s, start_x=s.end_x, start_y=s.end_y, end_x=s.start_x,
+                        end_y=s.start_y, start_x_str=s.end_x_str,
+                        start_y_str=s.end_y_str, end_x_str=s.start_x_str,
+                        end_y_str=s.start_y_str)
+        out.append((i, s))
+        cur = nxt
+    if cur != tip_b or len(used) + inside != len(segs):
+        return None
+    return out
+
+
+def rematch_late_member(record, late, routed_results, config, pcb_data,
+                        laid=None):
+    """#1828: match a length group that gained ONE member after the run's
+    matching pass, when that is safe; else return the reason it is not and
+    leave the group to the #1801 disclosure (`grade_late_group_members`).
+
+    A recovered result carries no `route_length` and may be several pieces,
+    re-matching at a higher target re-meanders members the first pass
+    finished, and a multipoint member's taps sit on its first-pass copper.
+    So this matches only when:
+      * length matching (not time), exactly one late member;
+      * every member is a 2-pad single-ended net (no Phase-3 taps);
+      * every member it lengthens is a net routed this run whose board
+        copper is ONE path between its pads (`_net_copper_path`) and holds
+        that result's copper -- measured whole, so its route_length is the
+        board's, input stubs included;
+      * no member the first pass graded is touched: when the first pass
+        matched the group, the late member must not be longer than its
+        target (plus the tolerance), and only the late member is meandered
+        to it. When the first pass matched nothing (the group had one
+        member then), the group is matched now as the matcher would have:
+        target the longest member, clamped to the `.kicad_dru` window.
+
+    Updates `record` (members, late_members, member_status as the meanders
+    leave it, `rematched`) and the meandered results' `new_segments` /
+    `route_length` in place -- the caller syncs pcb_data, and passes `laid`
+    (a list) when it re-matches several groups before that sync: the
+    meanders an earlier group laid are priced as obstacles from it, and this
+    group's are appended to it. Every member is
+    noted protected and length-graded, as the first pass notes a group it
+    matched; an unprotected meander is smoothed off by the cleanup. Returns
+    '' when it matched, else the reason it did not (the caller records it as
+    the group's `not_rematched`)."""
+    if getattr(config, 'time_matching', False):
+        return 'time matching'
+    if len(late) != 1:
+        return f'{len(late)} late members'
+    (late_name, phase), = late.items()
+    tol = config.length_match_tolerance
+    nid_of = {n.name: i for i, n in pcb_data.nets.items() if n.name}
+    names = sorted(set(record.get('members') or ()) | {late_name})
+    first = dict(record.get('member_status') or {})
+    targets = {r['target_mm'] for r in first.values() if 'target_mm' in r}
+    if len(names) < 2:
+        return 'a group of one'
+    if len(targets) > 1:
+        return 'the first pass graded its members against several targets'
+    segs_by: Dict[int, list] = {}
+    vias_by: Dict[int, list] = {}
+    for s in pcb_data.segments:
+        segs_by.setdefault(s.net_id, []).append(s)
+    for v in pcb_data.vias:
+        vias_by.setdefault(v.net_id, []).append(v)
+
+    def own_path(nid):
+        """(the result's segments on the board path, in path order; the
+        result's other segments, inside a joint's copper), or None."""
+        r = routed_results.get(nid)
+        if (not r or r.get('failed') or r.get('is_existing_route')
+                or r.get('is_diff_pair') or r.get('is_multipoint')
+                or not r.get('new_segments')):
+            return None
+        segs, vias = segs_by.get(nid, []), vias_by.get(nid, [])
+        board = {id(s) for s in segs}
+        if not ({id(s) for s in r['new_segments']} <= board
+                and {id(v) for v in r.get('new_vias', [])}
+                <= {id(v) for v in vias}):
+            return None
+        path = _net_copper_path(segs, vias, pcb_data.pads_by_net.get(nid, ()))
+        if path is None:
+            return None
+        mine = {id(s) for s in r['new_segments']}
+        on = [(i, s) for i, s in path if id(segs[i]) in mine]
+        on_ids = {id(segs[i]) for i, _s in on}
+        return ([s for _i, s in on],
+                [s for s in r['new_segments'] if id(s) not in on_ids])
+
+    lengths, die, paths = {}, {}, {}
+    graded_first = bool(targets)
+    for name in names:
+        nid = nid_of.get(name)
+        if nid is None or len(pcb_data.pads_by_net.get(nid, ())) != 2:
+            return f'{name} is not a 2-pad net'
+        r = routed_results.get(nid) or {}
+        if r.get('is_diff_pair') or r.get('is_multipoint'):
+            return f'{name} is a pair or multipoint member'
+        if graded_first and name != late_name:
+            continue
+        segs, vias = segs_by.get(nid, []), vias_by.get(nid, [])
+        if not segs or not _board_net_connected(pcb_data, nid, segs, vias):
+            return f'{name} is not connected on the board'
+        lengths[name] = calculate_route_length(segs, vias, pcb_data)
+        die[name] = member_pad_to_die({}, name, pcb_data)
+        paths[name] = own_path(nid)
+    window = dru_length_window(names, pcb_data)
+    lo, hi = (window[0], window[1]) if window is not None else (None, None)
+    if graded_first:
+        target = targets.pop()
+        if lengths[late_name] + die[late_name] > target + tol:
+            return (f'{late_name} is longer than the target {target:.2f}mm the '
+                    f'first pass matched the group to')
+    else:
+        target = max(lengths[n] + die[n] for n in lengths)
+        if window is not None:
+            target, _wnote = clamp_target_to_window(target, window, tol)
+    grow = [n for n in lengths if target - (lengths[n] + die[n]) > tol]
+    bad = [n for n in grow if paths[n] is None]
+    if bad:
+        return (f'{bad[0]} is not one path this run routed between its pads, '
+                f'so it cannot be meandered here')
+
+    print(f"  Length match group '{record.get('name')}': {late_name} (routed by "
+          f"{phase}) joined it after matching ran; matching it now (#1828), "
+          f"target={target:.2f}mm")
+    laid = [] if laid is None else laid
+    index = ClearanceIndex()
+    index.build(pcb_data, config, list(laid), [])
+    margin = config.track_width + config.clearance + config.meander_amplitude
+    final = dict(lengths)
+    for name in grow:
+        r = routed_results[nid_of[name]]
+        own = calculate_route_length(paths[name][0], r.get('new_vias', []),
+                                     pcb_data)
+        offset = lengths[name] - own     # copper the meanders do not touch
+
+        def metric(segs, vias, _off=offset):
+            return calculate_route_length(segs, vias, pcb_data) + _off
+        print(f"    {name}: {lengths[name] + die[name]:.2f}mm -> adding "
+              f"{target - lengths[name] - die[name]:.2f}mm")
+        _mod, new_segs, bumps, new_len = _apply_meanders_to_net_with_iteration(
+            dict(r, new_segments=paths[name][0]), target - die[name], lengths[name],
+            tol, config, pcb_data, list(laid), [], index, metric, lambda d: d)
+        if bumps > 0:
+            r['new_segments'] = new_segs + paths[name][1]
+            r['route_length'] = new_len
+            final[name] = new_len
+            index.add_segments(new_segs, margin)
+            laid.extend(new_segs)
+        print(f"      {name}: new length = {final[name] + die[name]:.2f}mm "
+              f"({bumps} bumps)")
+
+    status = dict(first) if graded_first else {}
+    for name in final:
+        length = final[name] + die[name]
+        delta = target - length
+        if abs(delta) <= tol:
+            state = 'matched'
+        elif delta < 0:
+            state = 'over_target'
+        else:                     # a member of `grow` the meanders left short
+            state = 'unmatched' if final[name] > lengths[name] else 'unmeanderable'
+        status[name] = _member_record(length, target, state, lo, hi,
+                                      max(delta, 0.0) if state != 'matched' else 0.0)
+    status[late_name]['recovered_by'] = phase
+    record['members'] = names
+    record['late_members'] = {late_name: phase}
+    record['member_status'] = status
+    record['rematched'] = True
+    _store_member_status(config, status)
+    # As the first pass does (#521, #444, #1583): the group's copper is now
+    # the matcher's, so every member is noted protected and length-graded --
+    # the cleanup's smoothing and graze passes then leave its meanders alone.
+    from protected_nets import note_protection_candidates
+    note_protection_candidates({n: 'length-matched' for n in names})
+    try:
+        config._length_matched_names = (
+            frozenset(getattr(config, '_length_matched_names', None) or ())
+            | set(names))
+    except AttributeError:
+        pass
+    return ''
+
+
 def get_route_primary_layer(segments: List[Segment]) -> str:
     """
     Determine the primary layer for a route (where most length is).

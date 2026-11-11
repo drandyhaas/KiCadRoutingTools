@@ -1010,13 +1010,17 @@ def regrade_late_group_members(
     inputs as `run_length_matching` (a pattern group's matches among routed
     and board-copper nets, the `auto` grouper over the call's scope) -- and
     for each group that gained a member whose copper now connects its pads,
-    grade every member from the board (`grade_late_group_members`), put the
-    late ones into `members`, and print one line naming them, the phase that
-    routed each (`recovered_by`, name -> phase) and the verdict. No copper is
-    changed and no protection is noted. Updates `report['groups']` in place;
-    returns the records it changed."""
+    match it when that is safe (#1828, `rematch_late_member`: one late 2-pad
+    member, and no member the first pass finished is lengthened -- the
+    record then carries `rematched`, and the caller must sync pcb_data with
+    the meandered results); otherwise grade every member from the board
+    (`grade_late_group_members`), changing no copper and noting no
+    protection, and record why in `not_rematched`. Either way the late ones join `members`, and one line names
+    them, the phase that routed each (`recovered_by`, name -> phase) and the
+    verdict. Updates `report['groups']` in place; returns the records it
+    changed."""
     from length_matching import (grade_late_group_members, _board_net_connected,
-                                 LATE_MEMBER_REASON)
+                                 rematch_late_member, LATE_MEMBER_REASON)
     records = report.get('groups')
     if records is None:
         return []
@@ -1059,6 +1063,7 @@ def regrade_late_group_members(
                                 names_now + board_names, group))))
     by_name = {(g['name'], g['source']): g for g in records}
     changed = []
+    laid: List = []       # meanders re-matched groups lay before the sync
     for name, source, patterns, members in current:
         rec = by_name.get((name, source))
         before = set(rec['members']) if rec else set()
@@ -1071,7 +1076,23 @@ def regrade_late_group_members(
             if patterns is not None:
                 rec['patterns'] = patterns
             records.append(rec)
+        # #1828: one late 2-pad member the group takes without lengthening a
+        # member the first pass finished is matched now; anything else is
+        # graded and named as it stands (#1801).
+        why_not = rematch_late_member(rec, late, routed_results, config,
+                                      pcb_data, laid=laid)
+        if not why_not:
+            changed.append(rec)
+            ms = rec['member_status']
+            ok = all((ms.get(m) or {}).get('status') == 'matched'
+                     for m in rec['members'])
+            print(f"  Length match group '{name}': "
+                  + ', '.join(f"{m} {ms[m]['length_mm']:.2f}mm"
+                              for m in rec['members'] if m in ms)
+                  + (" -- all within tolerance" if ok else " -- NOT matched"))
+            continue
         ok = grade_late_group_members(rec, late, config, pcb_data)
+        rec['not_rematched'] = why_not
         changed.append(rec)
         ms = rec.get('member_status') or {}
         lens = ', '.join(f"{m} {ms[m]['length_mm']:.2f}mm" for m in rec['members']
@@ -1079,7 +1100,8 @@ def regrade_late_group_members(
         tgt = next((r['target_mm'] for r in ms.values() if 'target_mm' in r), None)
         print(f"  Length match group '{name}': "
               + ', '.join(f"{m} (routed by {p})" for m, p in late.items())
-              + f" joined it after matching ran, so it was not matched (#1801). "
+              + f" joined it after matching ran, so it was not matched (#1801; "
+              + f"{why_not}). "
               + (f"Graded from the board against target {tgt:.2f}mm: " if tgt
                  is not None else "Lengths: ")
               + lens + (" -- all within tolerance" if ok else

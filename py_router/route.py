@@ -4876,10 +4876,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _lm_mark1801('the terminal escalation')
     if length_match_groups and not _ckpt_stop and _lm_phase1801:
         from routing_common import regrade_late_group_members
-        regrade_late_group_members(
+        _lm_late = regrade_late_group_members(
             _length_match_report, length_match_groups, routed_results, config,
             pcb_data, scope_net_ids=_length_match_scope_ids,
             recovered_by=_lm_phase1801)
+        if any(_g.get('rematched') for _g in _lm_late):
+            # #1828: a late member was meandered; pcb_data and the working
+            # map must carry the copper the writer will ship.
+            sync_pcb_data_segments(
+                pcb_data, routed_results, original_segment_ids, state, config,
+                original_via_ids=(original_via_ids
+                                  | {id(v) for v in all_swap_vias}))
 
     # Main-pass pre-existing rips (0805): pull every RIPPED pre-existing net
     # into the stale-strip scope -- a rerouted victim's ORIGINAL input copper
