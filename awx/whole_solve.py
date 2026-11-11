@@ -352,6 +352,26 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             if segs_:
                 runs_[(n, k_)] = (nids_, segs_)
         VBAN, VSEP = _relayer.clashes(ctx.pcb, runs_, LAYN, _rules.active().fan_clear)
+        # ...and THE LAYERS THE END HAS ROOM ON, where a group's model read them (the plan's `end_layers`, each leg's:
+        # the layers its exit's front is clear on -- a pair's, both legs'): every other layer banned. The runs' test
+        # above reads the copper beside a run INSIDE its array; what stands in front of the exit, past the array's
+        # edge, it does not -- a pair's berths were moved onto a layer with a capacitor 0.7 mm in front of one leg,
+        # and no end connector could be laid
+        el_ = getattr(ctx, 'end_layers', None) or {}
+        n_el = 0
+        for (n, k_) in sorted(VEND):
+            ok_ = None
+            for leg in (prs[n] if n in prs else (n,)):
+                ls_ = (el_.get(leg) or (None, None))[k_]
+                if ls_ is not None:
+                    ok_ = set(ls_) if ok_ is None else ok_ & set(ls_)
+            if ok_ is not None:
+                ban_ = {L_ for L_ in LAYN if L_ not in ok_}
+                if ban_ - (VBAN.get((n, k_)) or set()):
+                    n_el += 1
+                VBAN[(n, k_)] = (VBAN.get((n, k_)) or set()) | ban_
+        if n_el:
+            print(f'   via ends\' fronts: {n_el} end(s) kept off the layers their exits have no room on (the group\'s ends)')
         # (never the layer a run is laid on, nor two already laid on one: the fanout's own, as it stands)
         on_ = lambda key: (ctx.tooth_layer, ctx.dest_layer)[key[1]][key[0]]
         VBAN = {k_: v_ - {on_(k_)} for k_, v_ in VBAN.items() if v_ - {on_(k_)}}
@@ -2343,6 +2363,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         # (the lanes with no room for a change on these ends -- each a fact of its own tooth and berth alone: those two
         # ends on one layer, whatever the rest; whole_ends' joint loop holds such a lane to one layer)
         out_['nochange'] = sorted(n_ for n_ in M if CDOM[n_][0] >= CDOM[n_][1])
+        # (...and each lane's room as measured: its entry and its end along the frame, each end's room, the change's own)
+        out_['rooms'] = {n_: [float(entry[n_]), float(end[n_]), float(VIN0[n_]), float(VIN1[n_]), float(Dv[n_]),
+                              int(CDOM[n_][0]), int(CDOM[n_][1]), float(G)] for n_ in M}
         # (...and what each end's layer may be: the ends that are VIA ENDS, their layer the solve's, and the layers the
         # copper beside each one's run bans it -- the group's ends learn an end's banned layers from a refusal)
         if NL > 2:

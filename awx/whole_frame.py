@@ -344,6 +344,22 @@ def lead_obstacles(ctx, src, dest, SB, run_ids):
     return [(b_, L_) for b_, L_ in out if not (b_[0] >= SB[0] and b_[2] <= SB[2] and b_[1] >= SB[1] and b_[3] <= SB[3])]
 
 
+def _nests(mem, layer):
+    """a side's far-face lanes in their NESTS: one a LAYER (`layer(n)`, a lead-in's own), each nested by itself and
+    kept off its own layer's copper alone -- a hand's lead-ins round a chip are a nest a layer, close to it, the back
+    layer's passives over the inner layers' lanes. As ONE nest a lane's room apart whatever their layers, nine lanes
+    on three layers were pushed 4.9 mm out of the far face by pads on the back layer only, and in sight of the other
+    buses 17 mm, in among another bus's lanes. All in one where no layer is told"""
+    if not mem:
+        return []
+    if layer is None:
+        return [list(mem)]
+    by = {}
+    for n in mem:
+        by.setdefault(layer(n), []).append(n)
+    return list(by.values())
+
+
 def lead_ins(F, far, scut, width, SB, obst=(), layer=None):
     """{lane: [points]}: each far-face lane's LEAD-IN, from its tooth round the source's corner to its START on the
     north or south face (F.start). The trunk frame cannot carry a lane along the far face -- its columns stand across
@@ -358,10 +374,8 @@ def lead_ins(F, far, scut, width, SB, obst=(), layer=None):
     xf0 = min([SB[0]] + [F.tooth[n][0] for n in far])                 # the far face's teeth's line
     rest = [F.tooth[m][1] for m in F.M if m not in far]
     bar = bd.CLEAR + bd.TRACK / 2
-    for side in ('N', 'S'):
-        mem = [n for n in far if (F.tooth[n][1] <= scut) == (side == 'N')]
-        if not mem:
-            continue
+    for side, mem in [(side_, mem_) for side_ in ('N', 'S') for mem_ in _nests(
+            [n for n in far if (F.tooth[n][1] <= scut) == (side_ == 'N')], layer)]:
         # (innermost first: nearest the corner it rounds)
         mem.sort(key=lambda n: F.tooth[n][1] if side == 'N' else -F.tooth[n][1])
         sg = -1.0 if side == 'N' else 1.0                              # (y toward the side, out of the box)

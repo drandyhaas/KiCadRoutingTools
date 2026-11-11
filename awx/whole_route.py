@@ -2943,8 +2943,6 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         for ln in grep(os.path.join(d, 'solve.log'), r'whole_solve:|workers:|crowded:|rules core:'):
             say(ln[:200])
         jcuts = None
-        if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
-            jcuts = joint_sync({**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin}, r, solve, say)
         # (the coupled solve's couplings held through the loop: joint_sync -- the env read at each loop's call, after
         # the relayer has put the relayed bench in it)
         lenv = lambda: {**env, **({'SEED_CUTS': ','.join(f_ for f_ in (jcuts, ecuts) if f_)} if jcuts or ecuts else {}),
@@ -2956,6 +2954,14 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         # ...NO PLAN, its rules core naming teeth whose fixed layer cannot hold: those teeth escaped again off their
         # layer (repair_layers), and the solve asked again on the repaired bench
         rep_ = repair_layers(d, crowded_f, env, sub, say) if no_plan and os.path.isfile(crowded_f) else None
+        # (THE ROUND'S COUPLED SOLVE asked ONCE, with the plan this bus brings to it -- after the repaired bench's
+        # solve where there is one. Asked with no plan before that solve, this bus told the round it had none; the
+        # other bus went on alone, as it should with none to couple with; and this bus, solved again, asked a second
+        # time, ran the coupled solve against the request the other had left behind and waited for it to lay a plan
+        # it never took -- while the other waited for this one at the loop's first exchange: two buses idle from the
+        # thirteenth minute of a route, to be waited out for hours)
+        if rep_ is None and env.get('JOINT_DIR') and env.get('JOINT_BUS'):
+            jcuts = joint_sync({**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin}, r, solve, say)
         if rep_ is not None:
             bench = rep_
             env['BENCH'] = bench

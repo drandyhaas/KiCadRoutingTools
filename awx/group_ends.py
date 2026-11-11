@@ -84,6 +84,7 @@ import math
 import os
 import pickle
 import random
+import re
 import sys
 import time
 import types
@@ -102,7 +103,9 @@ BATCHES = int(awx_settings.get('GROUP_BATCHES') or '160')
 # workers and one for the neighbourhoods a four-bus model's search stood still from its 170th second at 2.3 times the
 # objective these two reach in 80 batches, and took 1.7 times as long
 SEARCH = ['no_lp', 'core']
-ROWS = 2            # the pattern's surface escapes: from this many outer rows (build_menus `pattern`)
+SEARCH_STALL = 8    # a search from a searched state: stopped at this many model reductions in a row with no better one
+WIDE_A_ROUND = 16   # a large set of rules that cannot hold together: its balls widened this many a round, at most
+ROWS = 2           # the pattern's surface escapes: from this many outer rows (build_menus `pattern`)
 OTHER = 'array'     # an array's balls that are no bus's, in the model's names: lanes at the array alone
 START_WORK = float(awx_settings.get('GROUP_START_WORK') or '120')   # the start's deterministic seconds, one worker
 BARE = 2.0          # mm round an array's balls: a bus's own fanout's copper there is not the group's
@@ -571,6 +574,116 @@ def place_round(box, d, p):
     return int(round(s * 1000))
 
 
+FAR_W = None                # (main: GROUP_FAR) a far-face tooth's price a leg in vias; None: whole_ends.FAR_TOOTH
+CHECK_DUMP = None           # (main: GROUP_CHECK_DUMP) a directory each check's bench is written to, or None
+ROW_STAGGERS = 1            # a fine-pitch row part's fan-out zone: this many rows of vias past the stubs' ends
+
+
+def row_zone(grid, direction):
+    """A FINE-PITCH ROW PART's fan-out zone along a pad's escape `direction` -- (stagger, out) in mm past the stub's end
+    its own menu gives it, or None where its pads stand a via and a clearance (and a grid step) apart or more: `stagger`
+    the least step along the stubs at which two neighbours' vias clear each other by a grid step, `out` the reach of
+    ROW_STAGGERS rows of vias and a via's room for a lane at the route's own track beyond the last -- the room the
+    part's fan (qfn_berths) and the vias at its tips take, which the prepared board's passives are moved off (main:
+    route_bus.clear_row_escapes)"""
+    import braid as bd
+    import escape_moves as em
+    import rules as _rules
+    rl = _rules.active()
+    gap, step = bd.VIA_SIZE + rl.clearance, rl.grid
+    pitch = grid.pitch_y if em.DIRS[direction][0] else grid.pitch_x
+    if pitch >= gap + step:
+        return None
+    up = lambda v: math.ceil(v / step - 1e-9) * step   # noqa: E731
+    stagger = up(math.sqrt((gap + step) ** 2 - pitch ** 2))
+    return stagger, ROW_STAGGERS * stagger + up(bd.VIA_SIZE / 2 + rl.clearance + bd.TRACK / 2 + step)
+
+
+def qfn_berths(st, pcb):
+    """a bus's destination menu (`st['dmenu']`, its own run's) with each ROW PART FANNED OUT FIRST BY THE QFN FANOUT
+    (py_router/qfn_fanout, its surface fan: a straight stub and a diverging 45-degree fan at the fanout's track, each
+    stub checked against the board and the others, the tips spread so that vias fit between them) -- the tool the
+    chain fans a QFN out with, where a row pad's own two moves here (its stub straight out, that stub with a via at
+    its end) leave a row of lanes that arrive on other layers nowhere to change: two neighbours' vias at their stubs'
+    ends cannot both be laid at a fine pitch, and the solve's own changes there stand a few hundredths of a mm from
+    their bars. Each net the fan escapes has, in place of its pad's own moves, its FANNED stub as its berth: ending at
+    the stub's tip, plain or with a via there where one has room on every copper layer (its lane then leaves on any
+    layer). The stub's own copper rides on the move (`fan_legs`: laid with the berth, bus_plan) and not in its legs
+    -- the ends' conflict test reads axis-aligned lanes, and the fan's stubs are already clear of each other. A pair's
+    legs keep their own moves (the fan would part them), as does a net the fan could not escape. The fan is held
+    inside the board's edge rule (the fanout's own edge model, given the board's rule), and so is a tip's via"""
+    import dataclasses
+    import braid as bd
+    import pairs as _pairs
+    import route_layers
+    import rules as _rules
+    from qfn_fanout import generate_qfn_fanout
+    rl = _rules.active()
+    RL = route_layers.layers()
+    cu = list(pcb.board_info.copper_layers or ())
+    kids = {st['byname'][n][0] for n in st['launch']}
+    legs_ = {leg for pr in _pairs.pair_names(list(st['launch'])).values() for leg in pr}
+    out = {n: list(v) for n, v in st['dmenu'].items()}
+    by_ref = collections.defaultdict(list)
+    for n in st['launch']:
+        pad = st['dst_pad'].get(n)
+        grid = ((st.get('dgrid_of') or {}).get(pad.component_ref) or st['dgrid']) if pad is not None else None
+        if grid is not None and getattr(grid, 'row', False) and n not in legs_ and out.get(n):
+            by_ref[pad.component_ref].append(n)
+    obs_ = {}
+
+    def obs(nid, L):
+        if (nid, L) not in obs_:
+            obs_[(nid, L)] = bd.build_obstacles(pcb, nid, kids, L)
+        return obs_[(nid, L)]
+    # (THE BOARD'S EDGE RULE, given to the fanout -- which shortens a fan that would pass it -- and held by the via
+    # at a stub's tip here: asked with none, the fanout held its stubs off the edge by the track clearance alone,
+    # and a part whose row faces the board's edge 1.6 mm off had five stubs and their vias laid past the board's
+    # own rule -- every berth of those nets ruled out once the field was measured, and the model no state)
+    cfg = bd.run_config(pcb, st.get('base'))
+    edge_ = float(getattr(cfg, 'board_edge_clearance', 0.0) or 0.0) or cfg.clearance
+    on_ = lambda q, half: bd._on_board(pcb, q[0], q[1], edge_ + half)       # noqa: E731
+    for ref, names in sorted(by_ref.items()):
+        foot = pcb.footprints[ref]
+        # (the board without the run's own copper beside the part: the fan lays every one of its nets' stubs anew)
+        xs, ys = [p.global_x for p in foot.pads], [p.global_y for p in foot.pads]
+        box = (min(xs) - 3.0, min(ys) - 3.0, max(xs) + 3.0, max(ys) + 3.0)
+        inb = lambda x, y: box[0] <= x <= box[2] and box[1] <= y <= box[3]     # noqa: E731
+        bare = copy.copy(pcb)
+        bare.segments = [s_ for s_ in pcb.segments if not (s_.net_id in kids and inb(s_.start_x, s_.start_y))]
+        bare.vias = [v_ for v_ in pcb.vias if not (v_.net_id in kids and inb(v_.x, v_.y))]
+        full = [st['byname'][n][1].name for n in names]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            tracks, _vias, failed = generate_qfn_fanout(
+                foot, bare, net_filter=full, layer=foot.layer, track_width=rl.fan_track, clearance=rl.clearance,
+                grid_step=rl.grid, escape_method='stub', via_size=bd.VIA_SIZE, via_drill=bd.VIA_DRILL,
+                net_clearances={}, clearance_ceiling=rl.clearance, board_edge_clearance=edge_)
+        by_net = collections.defaultdict(list)
+        for t_ in tracks:
+            by_net[t_['net_id']].append((tuple(t_['start']), tuple(t_['end']), t_['layer']))
+        for n in names:
+            nid, pad = st['byname'][n][0], st['dst_pad'][n]
+            segs = by_net.get(nid)
+            if not segs or st['byname'][n][1].name in set(failed or ()):
+                continue
+            p0 = (pad.global_x, pad.global_y)
+            pts = [q for a, b, _L in segs for q in (a, b)]
+            tip = max(pts, key=lambda q: math.hypot(q[0] - p0[0], q[1] - p0[1]))
+            b0 = out[n][0]
+            home = foot.layer
+            ms = dataclasses.replace(b0, kind='surface', layer=home, exit_pt=tip, vias=0, legs=[], site=None)
+            ms.fan_legs = list(segs)
+            new = [ms]
+            vl = cu if len(RL) > 2 else [home]
+            if on_(tip, bd.VIA_SIZE / 2) and \
+                    not any((obs(nid, L).point_violation(tip, pad=(bd.VIA_SIZE - bd.TRACK) / 2) or [0])[0] for L in vl):
+                mv = dataclasses.replace(b0, kind='dogbone', layer=home, exit_pt=tip, vias=1, legs=[], site=tip)
+                mv.fan_legs = list(segs)
+                new.append(mv)
+            out[n] = new
+    return out
+
+
 def load_bus(name, cap, arrays, log, cut=None, rank=False, cutvar=False, feedback=None, bare_ids=None):
     """a bus's ends model from its capture, under its own run's settings, its ends at the group's ARRAYS (`arrays`
     {ref: build_array's}: its source, and its destination where that is one) chosen from their menus: each such array
@@ -628,6 +741,8 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, cutvar=False, feedbac
                 menu[n] = [mv for mv in menu[n] if mv.layer != je.RUN or mv.runs_on]    # (no layer left: no option)
             st[('smenu', 'dmenu')[k_]] = menu
             st[('src_shared', 'dst_shared')[k_]] = True
+        if arr[1] is None:
+            st['dmenu'] = qfn_berths(st, pcb)
         st['sblock'] = {}
         if feedback is not None:
             # (what the bus's own step found crowded at these ends, whole_feedback's file: the ends model's own
@@ -684,8 +799,9 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, cutvar=False, feedbac
         # (what the group prices beside a bus's own ends, for its descents: a tooth on the shared source's FAR FACE --
         # the bus's own ends price it as a side face there, the group past any count of vias (main: `far`). Without
         # it the descents' ends put nine lanes of a four-bus group on far-face teeth, the start's with them)
-        B.dear = {(lane, 0): {i: we.FAR_TOOTH * len(lg) for i, o in enumerate(E.T[lane])
-                              if o[0] and o[0][0].direction == 'left'} for lane, lg in E.lanes}
+        fw_ = we.FAR_TOOTH if FAR_W is None else FAR_W
+        B.dear = {(lane, 0): {i: fw_ * len(lg) for i, o in enumerate(E.T[lane])
+                              if o[0] and o[0][0].direction == 'left'} for lane, lg in E.lanes} if fw_ else {}
         if arr[1] is not None:
             # (THE START, as a bus's own ends chose theirs: its own run's ends DESCENDED at the cut
             # (whole_ends.joint_descent). THE CUT round a ball array destination: its far face's middle -- each lane
@@ -1280,22 +1396,34 @@ def bus_plan(b, state, lay, RL):
     each leg's ends at its moves' exits, the layers the model gave them, the escape directions, the pair frame, the
     bus's cut, its nets in the run's order), and a row part's berths' own copper [(net id, legs [(a, b, layer)], its
     via's site or None)], each run on the layer the model gave it -- an array's copper is the array's (main's `laid`)"""
+    import joint_escape as je
     import whole_ends as we
     st, E = b.E.st, b.E
-    plan = {'ends': {}, 'tooth_layer': {}, 'dest_layer': {}, 'tooth_dir': {}, 'stub_dir': {}, 'chi': int(st['chi'])}
+    plan = {'ends': {}, 'tooth_layer': {}, 'dest_layer': {}, 'tooth_dir': {}, 'stub_dir': {}, 'chi': int(st['chi']),
+            'end_layers': {}}
     copper = []
     for lane, lg in E.lanes:
         to_, bo_ = E.T[lane][state[lane][0]], E.B[lane][state[lane][1]]
         for leg, tm, bm_ in zip(lg, to_[0], bo_[0]):
             plan['ends'][leg] = [[float(v) for v in tm.exit_pt], [float(v) for v in bm_.exit_pt]]
+            # (...and THE LAYERS EACH END HAS ROOM ON: a move whose run is laid on a layer to choose keeps the layers
+            # its exit's front is clear on -- a single's straight run out, a pair leg's with room for the pair
+            # (`runs_on`: load_bus, joint_escape) -- and an end whose layer the bus's solve may choose is held to
+            # them, whole_solve. Free of them, a solve moved a pair's berths onto the back layer, a capacitor 0.7 mm
+            # in front of one leg there, and the pair could not be laid; None: the end's one layer, or no reading)
+            plan['end_layers'][leg] = [sorted(m_.runs_on) if m_.layer == je.RUN and getattr(m_, 'runs_on', None)
+                                       else None for m_ in (tm, bm_)]
             plan['tooth_layer'][leg], plan['dest_layer'][leg] = RL[lay[lane][0]], RL[lay[lane][1]]
             plan['tooth_dir'][leg], plan['stub_dir'][leg] = list(we.FAR[tm.direction]), list(we.FAR[bm_.direction])
             if b.arr[1] is None:
                 # (a berth with a VIA at its stub's end: the stub stays on its pad's own layer and the lane's layer
                 # is the via's far side. Laid on the lane's layer, it left its pad joined to nothing: seven nets of
                 # a bus open at one row part, each a berth with a via)
-                legs = [(tuple(p_), tuple(q_), RL[lay[lane][1]] if Lg == bm_.layer and not bm_.vias else Lg)
-                        for p_, q_, Lg in bm_.legs if math.hypot(q_[0] - p_[0], q_[1] - p_[1]) > 1e-6]
+                # (...and a berth the QFN fanout laid -- qfn_berths -- has its stub's copper beside it, on its own layer)
+                fan_ = getattr(bm_, 'fan_legs', None)
+                legs = [(tuple(p_), tuple(q_), Lg) for p_, q_, Lg in fan_] if fan_ else \
+                    [(tuple(p_), tuple(q_), RL[lay[lane][1]] if Lg == bm_.layer and not bm_.vias else Lg)
+                     for p_, q_, Lg in bm_.legs if math.hypot(q_[0] - p_[0], q_[1] - p_[1]) > 1e-6]
                 copper.append((st['byname'][leg][0], legs,
                                tuple(bm_.site) if bm_.vias and bm_.site is not None else None))
     c_ = getattr(b, 'cut', None)
@@ -1341,6 +1469,13 @@ def bus_bench(b, laid, RL):
             add_via(nid, b.G.pt(c), 2 * r, 2 * dr)
     pcb.segments = list(pcb.segments) + segs
     pcb.vias = list(pcb.vias) + vias
+    if CHECK_DUMP:              # (a bench's: the check's bench as asked, to ask it again alone)
+        d_ = CHECK_DUMP
+        os.makedirs(d_, exist_ok=True)
+        n_ = sum(f.startswith(b.name + '.') for f in os.listdir(d_))
+        with open(os.path.join(d_, f'{b.name}.{n_}.pkl'), 'wb') as f:
+            pickle.dump({'pcb': pcb, 'nets': b.plan['nets'], 'dest': bus_dest(st), 'plan': b.plan,
+                         'base': st.get('base'), 'env': dict(b.env)}, f)
     ctx = whole_ctx.candidate(pcb, b.plan['nets'], bus_dest(st), b.plan, [], cfg=bd.run_config(pcb, st.get('base')),
                               board=st.get('base'))
     if ctx is not None:
@@ -1355,7 +1490,9 @@ def bus_check(b, laid, RL):
     'ends_y' (with a plan: {lane: [its tooth's layer, its berth's]} as the solve took them),
     'hands' (the lanes named for their hands: a pair's crossover with no place), 'endlay' ((lane, end): an end whose
     own layer cannot hold), 'nochange' (lanes no change fits in
-    on these ends: their window empty, or named for their change's room among their crossings), 'at'}; None where it
+    on these ends: their window empty, or named for their change's room among their crossings), 'short' (those of
+    them whose own window is empty -- too short between their two ends for a change, whatever the rest), 'crossing'
+    (the refusal read from its crossings with no window alone: `lanes` theirs, no rules asked), 'at'}; None where it
     cannot be asked"""
     import whole_frame
     import whole_solve
@@ -1378,7 +1515,8 @@ def bus_check(b, laid, RL):
                     'nochange': []}
         out = {'plan': bool(J and J.get('plan')), 'status': (J or {}).get('status'),
                'core': [tuple(k_) for k_ in (J or {}).get('core') or []], 'lanes': [],
-               'nochange': list((J or {}).get('nochange') or []), 'ends_y': (J or {}).get('ends_y') or {}}
+               'nochange': list((J or {}).get('nochange') or []), 'ends_y': (J or {}).get('ends_y') or {},
+               'short': list((J or {}).get('nochange') or [])}
         out['vban'] = [(n_, int(k_), list(ls_)) for n_, k_, ls_ in (J or {}).get('vban') or []]
         out['vend'] = {(n_, int(k_)) for n_, k_ in (J or {}).get('vend') or []}
         if int(b.plan.get('chi') or 1) < 0:
@@ -1387,17 +1525,22 @@ def bus_check(b, laid, RL):
             import braid as bd
             out['ends_y'] = {n_: [bd.other_layer(L_) for L_ in ls_] for n_, ls_ in out['ends_y'].items()}
             out['vban'] = [(n_, k_, [bd.other_layer(L_) for L_ in ls_]) for n_, k_, ls_ in out['vban']]
-        if not out['plan'] and out['status'] == 'INFEASIBLE':
-            Jl = whole_solve.solve(ctx, dest_, front={}, check=True, core=True, rules=True, lanecore=True)
-            jc_ = [tuple(k_) for k_ in (Jl or {}).get('core') or []]
-            if not out['core']:
-                out['core'] = jc_
-            out['lanes'] = sorted({r_[0] for r_ in (Jl or {}).get('rules') or []}
-                                  | {l_ for k_ in out['core'] + jc_ for l_ in k_})
-            # (...and by FAMILY -- the lanes' solve names a lane for all its rules as one: which rule of a lane cannot
-            # hold, a pair's hands among them)
+        if not out['plan'] and out['status'] == 'INFEASIBLE' and out['core']:
+            # (THE CROSSINGS WITH NO WINDOW name the lanes at fault, and the refusal is read from them alone: the
+            # lanes' core and the rules' below each build the solve's model again and take their core apart a rule at
+            # a time -- 109 s and 123 s where this verdict took 9, on a 53-lane bus -- and are asked only where no
+            # crossing is named)
+            out['lanes'] = sorted({l_ for k_ in out['core'] for l_ in k_})
+            out['rules'], out['hands'], out['endlay'], out['crossing'] = [], [], [], True
+        elif not out['plan'] and out['status'] == 'INFEASIBLE':
+            # (no crossing named with the windows alone: THE RULES that cannot hold together, each lane's by FAMILY
+            # -- which rule of a lane cannot hold, a pair's hands among them -- and the crossings their core names
+            # with them. Asked once: the lanes' own core, every rule of a lane as one, was a second solve as long
+            # that named lanes this one names by their rules)
             Jr = whole_solve.solve(ctx, dest_, front={}, check=True, core=True, rules=True)
+            out['core'] = [tuple(k_) for k_ in (Jr or {}).get('core') or []]
             out['rules'] = sorted({(r_[0], r_[1]) for r_ in (Jr or {}).get('rules') or []})
+            out['lanes'] = sorted({l_ for l_, _f in out['rules']} | {l_ for k_ in out['core'] for l_ in k_})
             out['hands'] = sorted({l_ for l_, f_ in out['rules'] if f_ == 'hands'})
             # (an end whose own layer cannot hold -- the solve's 'toothlay' / 'berthlay': (lane, end))
             out['endlay'] = sorted({(l_, ('toothlay', 'berthlay').index(f_)) for l_, f_ in out['rules']
@@ -1511,6 +1654,8 @@ def bus_stage(out_path, base, log=print):
             side[k] = plan[k]
     if plan.get('held_layers') is not None:     # (the lanes whose ends' layers stay the model's: layers_free)
         side['held_layers'] = [n for n in plan['held_layers'] if n in names]
+    if plan.get('end_layers'):                  # (the layers each end has room on: bus_plan)
+        side['end_layers'] = {n: plan['end_layers'][n] for n in names if n in plan['end_layers']}
     with open(out_path[:-len('.kicad_pcb')] + '.plan.json', 'w', encoding='utf-8') as f:
         json.dump(side, f, indent=1)
     by = collections.Counter((('tooth', 'berth')[k_], side[('tooth_layer', 'dest_layer')[k_]][n]) for n in names
@@ -1588,7 +1733,7 @@ def main():
             for d_ in st.get('dests') or [st['dref']]:
                 with awx_settings.given(cap['env']):
                     moved_ += rb.clear_row_escapes(prep, d_, full, sorted(keep - {sref, d_}),
-                                                   os.path.join(out, 'prepare'), lambda *a: None) or []
+                                                   os.path.join(out, 'prepare'), lambda *a: None, zone=row_zone) or []
         if moved_:
             log(f'  the board prepared: {len(set(moved_))} passive(s) moved off the row parts\' escapes -- '
                 + ', '.join(sorted(set(moved_))[:16]) + f' -> {prep}')
@@ -1803,8 +1948,10 @@ def main():
         n, new_held = 0, set()
         for it in items:
             sl_ = it.get('seg_loc')
+            # (...two tracks' own: where they cross, else where they come nearest -- read without these, two runs
+            # shorted on one layer taught nothing, and the model stopped on a field it could have answered)
             P = it.get('via_loc') or ([(sl_[0] + sl_[2]) / 2, (sl_[1] + sl_[3]) / 2] if sl_ else None) \
-                or it.get('closest_pt') or it.get('pad_loc')
+                or it.get('closest_pt') or it.get('pad_loc') or it.get('cross_point') or it.get('closest_pt1')
             if P is None:
                 continue
             static = None
@@ -1863,6 +2010,9 @@ def main():
     # layers are what keeps them apart, and stay the model's (the plan's `held_layers`). A bus alone on its arrays has
     # none held. GROUP_CUT=model: each ball array destination's CUT is the model's to choose with the ends)
     FREE = awx_settings.get('GROUP_LAYERS') == 'free'
+    global FAR_W, CHECK_DUMP
+    FAR_W = float(awx_settings.get('GROUP_FAR')) if awx_settings.get('GROUP_FAR') not in (None, '') else None
+    CHECK_DUMP = awx_settings.get('GROUP_CHECK_DUMP') or None
     CUTVAR = awx_settings.get('GROUP_CUT') == 'model'
     if awx_settings.get('GROUP_CUT_BEST'):        # (a bench's: how many of the guess's best counts the cuts offered span)
         import whole_ends as _we
@@ -1871,6 +2021,13 @@ def main():
     # ends' on the lines, as a bus's own ends had them)
     chk_try, spent, n_taught, adopts = -1, 0, 0, 0
     fresh, prev_x = {}, {}      # bus -> the lanes its last check's refusal named; bus -> its last state's crossings
+    if frm and any(fed.values()):
+        # (A RUN'S FINDINGS ARE ANSWERED BY THE REPAIR, as a check's refusal is: every lane held on its last state's
+        # ends but those the findings name and those that crossed one. Started near that state and searched whole
+        # again, a one-bus model moved 30 of its 78 other ends to answer 8 findings -- ends its audit had found
+        # nothing against -- and took the minutes of a first model)
+        fresh = {nm: set(fed.get(nm) or ()) for nm in caps}
+        prev_x = {nm: {tuple(pr_) for pr_ in x_} for nm, x_ in (R_.get('prev_x') or {}).items()}
     laid_try, M_ = 0, None      # the field's violations answered so far; the last laying's measure
     while True:
         chk_try += 1
@@ -2016,6 +2173,32 @@ def main():
                 if len(users) > 1 and 'region' not in off:
                     n_reg += region_rows(m, A, users, gate, RL,
                                          int(round(2 * ((A.box[2] - A.box[0]) + (A.box[3] - A.box[1])) * 1000)) + 4000)
+            # LANES OF ONE BUS HEADED FOR DIFFERENT PARTS (a bus to a group of parts) ARE TO EACH OTHER AS LANES OF TWO
+            # BUSES AT THEIR SOURCE: where two of them cross they leave it on different layers. They part where the
+            # trunk ends, so they cross before it does -- within a few mm of their exits where the parts stand close
+            # by, before a via fits -- and the bus's own rule (one of the two changes layer) asks for a change there
+            # is no place for: two lanes from surface ends 3.6 mm apart on one face, one to the part above and one to
+            # the part below across a 3 mm channel, were refused by the solve at two checks running, their teeth's
+            # layer and their crossing's the whole of its core
+            n_px = 0
+            if 'parts' not in off:
+                for b in buses:
+                    dp_ = b.E.st.get('dst_pad') or {}
+                    part_ = {l_: {getattr(dp_.get(leg), 'component_ref', None) for leg in (b.E.legs_of.get(l_) or (l_,))}
+                             for l_ in b.J.lanes}
+                    if len(set().union(*part_.values()) - {None}) < 2:
+                        continue
+                    for (a_, c_), xv_ in b.J.X.items():
+                        if (isinstance(xv_, int) and not xv_) or part_[a_] & part_[c_]:
+                            continue
+                        gl_ = gate('parts', b.name, a_, c_, lanes={(b.name, a_, 0), (b.name, c_, 0)})
+                        for q in range(NL):
+                            m.AddBoolOr([b.J.y[0][a_][q].Not(), b.J.y[0][c_][q].Not()]
+                                        + ([] if isinstance(xv_, int) else [xv_.Not()])).OnlyEnforceIf(gl_)
+                        n_px += 1
+                if n_px and rnd == 1:
+                    log(f'  lanes of one bus headed for different parts leave on different layers where they cross: '
+                        f'{n_px} pair(s) of lanes that may')
             # (a bus lane with no option left at an array among the moves offered -- each blocked in front, or its own
             # legs' in each other's way: its balls' whole menus, and the model built again)
             stuck = [(ref, key) for ref, r_ in rows.items() for key in r_.stuck]
@@ -2036,14 +2219,18 @@ def main():
             # any count of vias, yet no refusal -- for a lane with no other way out): in the lower rank it was taken to save
             # one change of layer, eighteen of one bus's teeth where its own run alone had two, its lanes round the array
             # through the other buses' fanout
+            # (GROUP_FAR=<vias a leg>: the far face at that price -- 0: at its way round's length and its crossings
+            # alone, the rule on the pattern below off -- once the route carries a lane round its source: the
+            # geometry's bound over the source follows the lead-in's side, whole_geo)
+            far_w = we.FAR_TOOTH if FAR_W is None else FAR_W
             far = []
             for b in buses:
                 if b.arr[0] is None:
                     continue
                 for l_ in b.J.lanes:
-                    far += [(int(round(1000 * we.FAR_TOOTH)) * b.J.npair[l_], x_) for i, x_ in b.J.xs[0][l_].items()
+                    far += [(int(round(1000 * far_w)) * b.J.npair[l_], x_) for i, x_ in b.J.xs[0][l_].items()
                             if b.E.T[l_][i][0] and b.E.T[l_][i][0][0].direction == 'left']
-            plane += far
+            plane += [t_ for t_ in far if t_[0]]
             # NO FAR-FACE TOOTH for a lane still on the pattern, a rule behind its own assumption: where no state holds it
             # the lane is named with the rules it meets (the ball behind it on their one via site, say), their balls get
             # their whole menus, and a lane on its whole menu may take the far face, at its price
@@ -2053,8 +2240,8 @@ def main():
                 for l_ in b.J.lanes:
                     fx = [x_ for i, x_ in b.J.xs[0][l_].items()
                           if b.E.T[l_][i][0] and b.E.T[l_][i][0][0].direction == 'left']
-                    if fx and not {(b.arr[0].ref, b.arr[0].ball_of[leg])
-                                   for leg in (b.E.legs_of.get(l_) or (l_,))} <= wide:
+                    if fx and far_w >= we.FAR_TOOTH and not {(b.arr[0].ref, b.arr[0].ball_of[leg])
+                                                             for leg in (b.E.legs_of.get(l_) or (l_,))} <= wide:
                         m.Add(sum(fx) == 0).OnlyEnforceIf(gate('far', b.name, l_, lanes={(b.name, l_, 0)}))
             # THE WAY ROUND an array, with the vias (the ends model's ride, at its one exchange rate -- select_moves.VIA_MM
             # of track a via): a lane that leaves an array by a face turned from its other end, or arrives by one, travels
@@ -2215,6 +2402,27 @@ def main():
             if qc == cp_model.INFEASIBLE:
                 by_ = {g_.Index(): name for name, g_ in gates.items()}
                 core_ = sorted(by_[i_] for i_ in sc.SufficientAssumptionsForInfeasibility() if i_ in by_)
+                # (a LARGE core is asked again with its own rules alone assumed, while that names fewer: the solver
+                # gives some set that cannot hold, not a small one. A core of 135 rules naming 203 lanes had 140
+                # balls offered their whole menus at once, and the search then ran on 205 of an array's 364 where
+                # 60 had served)
+                idx_ = {name: g_.Index() for name, g_ in gates.items()}
+                for _shrink in range(8):
+                    if len(core_) <= 12:
+                        break
+                    ms_ = m.Clone()
+                    ms_.ClearObjective()
+                    ms_.AddAssumptions([ms_.GetBoolVarFromProtoIndex(idx_[name]) for name in core_])
+                    ss_ = cp_seed.solver()
+                    ss_.parameters.num_workers = 1
+                    ss_.parameters.max_deterministic_time = START_WORK
+                    ss_.parameters.linearization_level = 0
+                    if ss_.Solve(ms_) != cp_model.INFEASIBLE:
+                        break
+                    less_ = sorted(by_[i_] for i_ in ss_.SufficientAssumptionsForInfeasibility() if i_ in by_)
+                    if not less_ or len(less_) >= len(core_):
+                        break
+                    core_ = less_
                 # (the lanes TWO of its rules name first: a rule names every lane of its row -- a group of vias its
                 # whole line of balls -- and the ones the rules cannot hold together are those they share. Every lane
                 # of every rule widened, a core of two rules over two of a bus's balls took sixteen balls' whole
@@ -2233,6 +2441,21 @@ def main():
                     more -= wide
                     if more:
                         break
+                # (a LARGE set's balls a few at a time, those whose lanes most of its rules name first: the solver's
+                # set is not a small one, and where the rules cannot hold for want of room over a whole face -- two
+                # dozen lanes that cross each other on four layers -- no smaller set exists (deletion left 138 of
+                # 264 rules in four minutes). All of them widened at once, a three-bus model had 190 balls' whole
+                # menus in its second round and one bus 10819 tooth options for 180)
+                if len(core_) > 12 and len(more) > WIDE_A_ROUND:
+                    rank_ = collections.Counter()
+                    for owner, lane, k_ in named:
+                        if owner.startswith(OTHER + ':'):
+                            rank_[(owner.split(':', 1)[1], lane)] += cnt_[(owner, lane, k_)]
+                        elif by_name[owner].arr[k_] is not None:
+                            A = by_name[owner].arr[k_]
+                            for leg in by_name[owner].E.legs_of[lane]:
+                                rank_[(A.ref, A.ball_of[leg])] += cnt_[(owner, lane, k_)]
+                    more = set(sorted(more, key=lambda rk: (-rank_[rk], rk))[:WIDE_A_ROUND])
                 if more:
                     kinds_ = collections.Counter(name[0] for name in core_)
                     log(f'  round {rnd}: no state in the pattern ({time.time() - t0:.0f} s) -- {len(core_)} rules that cannot '
@@ -2326,7 +2549,7 @@ def main():
         m.Minimize(W_TOP * sum(walls) + W_LEX * sum(chg) + sum(c_ * (W_LEX // 1000) * v_ for c_, v_ in plane)
                    + sum(cost) + const)
         log(f'  the objective: a change {W_LEX}, a walled ball {W_TOP}')
-        def _search():
+        def _search(stall=None):
             # (reproducible, as the joint ends' own: a count of interleaved batches, no clauses shared)
             s_ = cp_seed.solver()
             s_.parameters.num_workers = whole_solve.SOLVE_WORKERS
@@ -2336,6 +2559,29 @@ def main():
             s_.parameters.share_glue_clauses = False
             s_.parameters.share_binary_clauses = False
             s_.parameters.log_search_progress = '--log' in flags
+            s_.stalled = None
+            if stall:
+                # (...and STOPPED WHERE IT STALLS, a search that starts from a state already searched -- the rest with
+                # the ends held, the rest alone under the upper rank's cap, a repair: `stall` of the search's own model
+                # reductions in a row with no better state (its log's '#Model' against '#n' lines -- events of the
+                # deterministic search, never a clock; the whole solve's own rule). A one-bus model's search stood
+                # within a fortieth of its last state from its 80th second to its 199th; each of these ran as long)
+                at_ = {'n': 0, 'k': 0, 'have': False}
+
+                def _progress(line):
+                    if '--log' in flags:
+                        print(line, flush=True)
+                    if re.match(r'#\d+\s', line):
+                        at_['n'], at_['have'] = 0, True
+                    elif line.startswith('#Model'):
+                        at_['k'] += 1
+                        at_['n'] += at_['have']
+                        if at_['n'] >= stall:
+                            s_.stalled = at_['k']
+                            s_.StopSearch()
+                s_.parameters.log_search_progress = True
+                s_.parameters.log_to_stdout = False
+                s_.log_callback = _progress
             return s_
         # ---- THE REPAIR, after a check's refusal on this tier: every lane the refusal did not name HELD on the ends
         # it had -- but the lanes that crossed one it named -- and the rest solved for the objective: the state the
@@ -2380,12 +2626,13 @@ def main():
             mh = m.Clone()
             for i_ in sorted(hold_):
                 mh.Add(mh.GetBoolVarFromProtoIndex(i_) == 1)
-            sh = _search()
+            sh = _search(stall=SEARCH_STALL)
             rh = sh.Solve(mh)
             repaired = rh in (cp_model.OPTIMAL, cp_model.FEASIBLE)
             log(f'  the repair: every lane held on its ends but the {n_free} the refusal named or that crossed one'
                 + (f' and {n_let} more that could not stand with what it taught' if n_let else '') + ': '
                 + (f'[{sh.StatusName(rh)}]' if repaired else f'no state that way [{sh.StatusName(rh)}], searched whole')
+                + (f', stopped where it stalled (its {sh.stalled}th reduction)' if sh.stalled else '')
                 + f' ({time.time() - t0:.0f} s)')
         if repaired:
             sv, r, quick = sh, rh, True
@@ -2436,13 +2683,15 @@ def main():
                     mh.Add(mh.GetBoolVarFromProtoIndex(v.Index()) == vals_[v.Index()])
                 for i_, v_ in enumerate(vals_):
                     mh.AddHint(mh.GetIntVarFromProtoIndex(i_), v_)
-                sh = _search()
+                sh = _search(stall=SEARCH_STALL)
                 rh = sh.Solve(mh)
                 if rh in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     vals_ = [sh.Value(mh.GetIntVarFromProtoIndex(i_)) for i_ in range(len(vals_))]
                 ev_ = lambda e_: sum(c_ * vals_[v_.Index()] for c_, v_ in e_)      # noqa: E731
                 log(f'  the start: the state nearest the ends wanted, {got[0]} of {len(want_)} ends moved, the rest searched '
-                    f'with them held [{sh.StatusName(rh)}] ({time.time() - t0:.0f} s) -- '
+                    f'with them held [{sh.StatusName(rh)}]'
+                    + (f', stopped where it stalled (its {sh.stalled}th reduction)' if sh.stalled else '')
+                    + f' ({time.time() - t0:.0f} s) -- '
                     f'{sum(vals_[c_.Index()] for b in buses for c_ in b.J.chg.values())} lanes changing layer, '
                     f'{(ev_(plane) - ev_(far)) / 1000:.1f} vias\' worth of runs on a plane\'s layer, '
                     f'{sum(vals_[v_.Index()] for _c, v_ in far)} teeth on a far face')
@@ -2493,12 +2742,16 @@ def main():
                 m.Add(upper_ <= ua_)
                 m.Add(sum(walls) <= wa_)
                 m.Minimize(sum(cost) + const)
-                s2 = _search()
+                t1_ = time.time()
+                s2 = _search(stall=SEARCH_STALL)
                 r2 = s2.Solve(m)
                 if r2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     sv = s2
-                log(f'  the search: the upper rank {ua_ / 1000:.1f} vias\' worth, the rest {ra_ / 1000:.1f}; then the rest '
-                    f'alone under that cap: {sv.Value(sum(cost) + const) / 1000:.1f} ({time.time() - t0:.0f} s)')
+                log(f'  the search: the upper rank {ua_ / 1000:.1f} vias\' worth, the rest {ra_ / 1000:.1f} '
+                    f'({t1_ - t0:.0f} s); then the rest alone under that cap: '
+                    f'{sv.Value(sum(cost) + const) / 1000:.1f}'
+                    + (f', stopped where it stalled (its {s2.stalled}th reduction)' if s2.stalled else '')
+                    + f' ({time.time() - t1_:.0f} s)')
         if r not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             raise SystemExit(f'group_ends: no state [{sv.StatusName(r)}] in {time.time() - t0:.0f} s')
         log(f'group ends: [{sv.StatusName(r)}] in {time.time() - t0:.0f} s, the rest '
@@ -2620,8 +2873,14 @@ def main():
                         held_[nb_].add(lb_)
             for b in buses:
                 b.plan['held_layers'] = sorted(leg for l_ in held_[b.name] for leg in (b.E.legs_of.get(l_) or (l_,)))
+                # (...and how many pairs of them cross within the bus on a layer they share: their bus's solve cannot
+                # move their ends' layers, and has to place a change before each such crossing)
+                n_sh = sum(1 for (a_, c_), x_ in b.J.X.items()
+                           if a_ in held_[b.name] and c_ in held_[b.name] and (x_ if isinstance(x_, int) else sv.Value(x_))
+                           and set(b.lay[a_]) & set(b.lay[c_]))
                 log(f'  {b.name}: its ends\' layers its own solve\'s, but {len(held_[b.name])} of {len(b.J.lanes)} lanes\' '
-                    f'that cross another bus\'s lane or run along one under an array')
+                    f'that cross another bus\'s lane or run along one under an array'
+                    + (f' -- {n_sh} pair(s) of them cross each other on a layer they share' if n_sh else ''))
             if len(buses) > 1:
                 log(f'  lanes held for a crossing between buses: {n_x}; with those along another bus\'s run: '
                     f'{sum(len(v_) for v_ in held_.values())}')
@@ -2752,15 +3011,7 @@ def main():
                            if (l_, k_) in ve_ else 'fixed') for k_ in (0, 1))
                         + ('' if l_ not in (chk.get('nochange') or ()) else '; no room for a change'))
             if b.name not in lined:
-                # (its pattern ends refused: its balls offered THE LINES, and nothing held yet -- the ends it is
-                # refused on are the pattern's, most of them to move -- but what the refusal says of a lane's
-                # LENGTH, which is no end's doing)
-                rm_ = learned.setdefault(b.name, {'nochg': set(), 'nocross': set(), 'nogoods': [], 'xl': {},
-                                                  'hands': set(), 'endlay': []}).setdefault('room', {})
-                for l_ in chk.get('nochange') or ():
-                    if l_ in s_:
-                        kd_, ln_ = lane_run(b, l_, s_[l_][0], s_[l_][1])
-                        rm_[kd_] = max(rm_.get(kd_, -1e9), ln_)
+                # (its pattern ends refused: its balls offered THE LINES)
                 lined.add(b.name)
                 taught = newly = True
                 for A_ in b.arr.values():
@@ -2772,20 +3023,33 @@ def main():
                             expand(bpcb, A_, ks_)
                         log(f'    {A_.ref}: {b.name}\'s {len(ks_)} balls offered their site\'s every line, {n0_} -> '
                             f'{sum(len(A_.bm.menu[k]) for k in ks_)} moves')
-                continue
+                # (...answered by THE REPAIR on the lines: the lanes the refusal named, and those it found no room for
+                # a change in, free on their wider menus, every other lane held where the search put it. Searched
+                # whole again on the new tier, each bus's first refusal cost a second search as long as the first --
+                # five to ten minutes of a model's fifteen -- to move the few lanes it named)
+                fresh[b.name] = {l_ for l_ in chk.get('lanes') or () if l_ in s_} | \
+                    {l_ for l_ in chk.get('nochange') or () if l_ in s_}
+                # (...AND TAUGHT what the refusal says, as every later one: its lessons are of the ends refused, by
+                # their signatures, and stand on the lines' menus. Offered the lines and taught nothing, two buses
+                # were each refused a second time for the very lanes and rules of the first -- a check and a repair
+                # of four minutes each -- before anything was held)
             # (...a refusal that names no lane of a rule still teaches the lanes NO CHANGE FITS IN: read only with
             # the lanes named, such a refusal -- four lanes with no room for a change, none named -- taught nothing,
             # and the model stopped with no plan and nothing to learn)
             if chk.get('lanes') or [l_ for l_ in chk.get('nochange') or () if l_ in s_]:
                 L_ = learned.setdefault(b.name, {'nochg': set(), 'nocross': set(), 'nogoods': [], 'xl': {},
                                                  'hands': set(), 'endlay': []})
-                # (NO ROOM FOR A CHANGE is a lane's LENGTH's doing: of every lane the solve found none in -- named by
-                # the refusal or not -- the longest of its kind, and from here no lane of that kind as short changes
-                # layer, on any ends: lane_run. Learned a lane at a time, a bus with ten lanes across a 3 mm gap
-                # between its two parts was refused for one or two of them at each of six checks)
+                # (NO ROOM FOR A CHANGE is a lane's LENGTH's doing where its own WINDOW for one is empty (the check's
+                # `short`): of every such lane -- named by the refusal or not -- the longest of its kind, and from
+                # here no lane of that kind as short changes layer, on any ends: lane_run. Learned a lane at a time,
+                # a bus with ten lanes across a 3 mm gap between its two parts was refused for one or two of them at
+                # each of six checks. NOT a lane the refusal names for its change's room AMONG ITS CROSSINGS: that is
+                # those crossings' doing, and the lane is held to one layer for it (below) -- read as its length's,
+                # a lane 31 mm from its tooth to its berth taught that none of its kind changes layer, three checks
+                # banned a change on 1400 tooth options of 48 lanes, and the model had no state)
                 rm_ = L_.setdefault('room', {})
                 rm_new = False
-                for l_ in chk.get('nochange') or ():
+                for l_ in chk.get('short') or ():
                     if l_ in s_:
                         kd_, ln_ = lane_run(b, l_, s_[l_][0], s_[l_][1])
                         if ln_ > rm_.get(kd_, -1e9) + 1e-6:
@@ -2812,15 +3076,21 @@ def main():
                 # for all its rules as one, and what it cannot hold with a change it is first asked without. A pair
                 # 3 mm from its tooth to its berth, a change between them, was named at four checks running, its window
                 # for the change never empty, and came back each time with one end moved and the change kept)
+                # (...but not the lanes of a refusal read from its CROSSINGS alone (the check's `crossing`): what it
+                # says is that those two lanes' crossing has no window, and it is held apart below -- held to one
+                # layer besides, a lane from a surface end on one face to a part on the other had no end left, and
+                # its bus's own model no state)
                 nochg_ = {l_ for l_ in chk.get('nochange') or () if l_ in s_} | \
-                    {l_ for l_ in chk['lanes'] if l_ in s_ and b.lay[l_][0] != b.lay[l_][1]}
+                    ({l_ for l_ in chk['lanes'] if l_ in s_ and b.lay[l_][0] != b.lay[l_][1]}
+                     if not chk.get('crossing') else set())
                 n_taught += len((nochg_ - L_['nochg']) | {l_ for l_ in chk['lanes'] if l_ in s_})
                 new_ = bool(chk.get('lanes')) or bool(nochg_ - L_['nochg']) or rm_new
                 fresh[b.name] = {l_ for l_ in chk['lanes'] if l_ in s_} | nochg_
                 # (a refusal that teaches a LANE something new -- held to one layer, to its hands, an end off its
                 # layer -- is progress, of which there is only so much: it is none of the tries)
                 progressed = progressed or el_new_ or rm_new or bool(nochg_ - L_['nochg']) or \
-                    bool({l_ for l_ in chk.get('hands') or () if l_ in s_} - L_['hands'])
+                    bool({l_ for l_ in chk.get('hands') or () if l_ in s_} - L_['hands']) or \
+                    bool({frozenset(k_) for k_ in chk.get('core') or ()} - L_['nocross'])
                 L_['nochg'] |= nochg_
                 L_['hands'] |= {l_ for l_ in chk.get('hands') or () if l_ in s_}
                 L_['nocross'] |= {frozenset(k_) for k_ in chk.get('core') or ()}
@@ -2854,6 +3124,12 @@ def main():
             n_ban = teach_laid(M_['items'], buses, M_['moved']) if M_['items'] and laid_try < we.JOINT_TRIES else 0
             if not n_ban:
                 break
+            # (a lesson of the laid field is answered by THE REPAIR, as a check's refusal is: every lane held on its
+            # ends but the ones it named, and whatever stands on what it ruled out let go by the rules themselves --
+            # a held part, another ball's choice name no lane. With none named the model was solved whole again, a
+            # start and a search of five to ten minutes for one capacitor)
+            for b in buses:
+                fresh.setdefault(b.name, set())
             laid_try += 1
             log(f'  the field as laid, measured: DRC {M_["d_f"]} (the bare board {M_["d_b"]}) -- {n_ban} lesson(s): '
                 f'{n_ban - (len(held) - n_held)} end(s) or other ball\'s choice(s) at fault ruled out'
@@ -2882,7 +3158,7 @@ def main():
     pickle.dump({'wide': set(wide), 'lined': set(lined), 'prev_bus': prev_bus, 'prev_oth': prev_oth, 'learned': learned,
                  'cut_at': dict(cut_at), 'cuts': dict(cuts), 'layers_want': layers_want, 'searched': set(searched),
                  'cut_held': dict(cut_held), 'feedback': feedback, 'hard': hard, 'oth_ban': set(oth_ban),
-                 'held': dict(held)},
+                 'held': dict(held), 'prev_x': {nm: sorted(x_) for nm, x_ in prev_x.items()}},
                 open(os.path.join(out, 'resume.pkl'), 'wb'))
     if M_ is None or no_plan:
         M_ = lay_and_measure(laid)

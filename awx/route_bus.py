@@ -2056,7 +2056,7 @@ def keeps_source_escapes(src, escape, whole_array, setting):
     return src in str(setting).split(',')
 
 
-def clear_row_escapes(board, ref, names, keep, work, log=print):
+def clear_row_escapes(board, ref, names, keep, work, log=print, zone=None):
     """The movable passives beside a ROW PART `ref` (escape_moves.row_part: a QFN) moved off the bus's escapes there,
     on `board` in place: each of `names`' pads on it has one escape, straight out of its row, and a decoupling cap
     standing across it leaves its lane no end at all. The escapes are laid on a copy as the plan models them -- the
@@ -2064,7 +2064,9 @@ def clear_row_escapes(board, ref, names, keep, work, log=print):
     --clearance a ceiling), and the via the plan may stand at its end (escape_moves: a row pad's stub and a via at its
     end, the lane leaving it on any layer) --, the cap step moves the passives near `ref` off them
     (place_fanout_clearance --near, the parts `keep` locked: a termination's, a pull's) and the poses it leaves are put
-    on `board`. Returns the moved refs"""
+    on `board`. `zone` (grid, direction) -> (stagger, out) or None: a fine-pitch part's FAN-OUT ZONE (group_ends.
+    row_zone) -- the stub laid `out` mm farther, a via at each of its rows -- cleared as the stub and its via are.
+    Returns the moved refs"""
     import braid as te
     import escape_moves as em
     import route_layers
@@ -2086,9 +2088,20 @@ def clear_row_escapes(board, ref, names, keep, work, log=print):
     for p in foot.pads:
         if p.net_name in want:
             ms = em.enumerate_moves(p, grid, layers, lambda a, b, L: True, lambda q, L: True)
+            z_ = zone(grid, ms[0].direction) if zone is not None and ms else None
             for m in ms[:1]:
                 tracks += [{'start': tuple(a), 'end': tuple(b), 'width': width, 'layer': L, 'net_id': p.net_id}
                            for a, b, L in m.legs]
+                if z_ is not None:
+                    dx_, dy_ = em.DIRS[m.direction]
+                    e_ = tuple(m.exit_pt)
+                    tracks.append({'start': e_, 'end': (e_[0] + dx_ * z_[1], e_[1] + dy_ * z_[1]), 'width': width,
+                                   'layer': m.layer, 'net_id': p.net_id})
+                    k_ = 1
+                    while k_ * z_[0] < z_[1] - 1e-9:
+                        vias.append({'x': e_[0] + dx_ * k_ * z_[0], 'y': e_[1] + dy_ * k_ * z_[0], 'size': te.VIA_SIZE,
+                                     'drill': te.VIA_DRILL, 'layers': ['F.Cu', 'B.Cu'], 'net_id': p.net_id})
+                        k_ += 1
             # (...and the via at its end: a decap 0.3 mm off a stub's end blocked a via end there -- a group's QFN's
             # caps straddling its edge, in the strip where its neighbour connector's pins escape)
             for m in [m_ for m_ in ms if m_.site is not None][:1]:

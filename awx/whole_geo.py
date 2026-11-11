@@ -839,6 +839,11 @@ def build_and_solve(sides, prev=None):
     # the lane was held to a column before, which it cannot leave across the box -- and where that one stands on both
     # sides of the box, the side of the terminal ahead of it (corridor.held_interval)
     held_iv = {}
+    # (the far-face lanes, and the trunk's station past which the source's box stands behind a lane)
+    FAR_ = set(getattr(Fr, 'far', ()) or ())
+    S_SRC = max((FR['T']['sp'].project_pt(c_)[0] for c_ in ((BOX[0][0], BOX[0][1]), (BOX[0][0], BOX[0][3]),
+                                                           (BOX[0][2], BOX[0][1]), (BOX[0][2], BOX[0][3]))),
+                default=0.0) if FAR_ and 'T' in FR else 0.0
     # (a lane whose tooth -- or a trunk lane whose berth -- stands inside its array's grown box: bounded by the
     # array's pads on the trunk, where it leaves its tooth or reaches its berth)
     _in = lambda p_, b: b[0] + 1e-6 < p_[0] < b[2] - 1e-6 and b[1] + 1e-6 < p_[1] < b[3] - 1e-6
@@ -867,6 +872,13 @@ def build_and_solve(sides, prev=None):
         # as the nearer one, a trunk piece run on past the destination's corner took the tooth's side of it: zynq LVDS
         # K47, CTRL_IN0 / IN2 / IN3 held north of U5's box with their stack south of it, 12-15 mm of bound)
         end_ = v['o1'] if v['o1'] is not None else (Fr.o_h[n] if f == 'T' and n in cls else v['o0'])
+        # (...but a FAR-FACE lane over the SOURCE's box: the side its LEAD-IN rounds the source by -- the frame's, by
+        # where its tooth stands on the far face (whole_frame.lead_ins), which its reference follows and the solve's
+        # launch order reads -- not the side of its end ahead. A tooth north of the far face's cut whose berth stands
+        # south of the source was led in round the north and BOUNDED to the south: one lane paid 15.7 mm of bound, two
+        # cut across the array's corner 11.9 mm short of their pitch and 7.3 mm into a via inside it)
+        if f == 'T' and n in FAR_ and s_ <= S_SRC:
+            end_ = None
         lo_, hi_ = held_iv[(f, n)] = _cor.held_interval(iv, v['ref'](s_), held_iv.get((f, n)), end_)
         le([(j, -1.0)], -lo_, ('bound', f, k, n, 'lo'))
         le([(j, 1.0)], hi_, ('bound', f, k, n, 'hi'))

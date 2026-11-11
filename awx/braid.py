@@ -6680,6 +6680,9 @@ def mirror_plan(plan, M):
     for k in ('tooth_dir', 'stub_dir'):
         if k in plan:
             q[k] = {nm: [d[0], -d[1]] for nm, d in plan[k].items()}
+    if plan.get('end_layers'):          # (the layers each end has room on, a group's model's: group_ends.bus_plan)
+        q['end_layers'] = {nm: [None if ls_ is None else [other_layer(L) for L in ls_] for ls_ in e]
+                           for nm, e in plan['end_layers'].items()}
     if plan.get('alts'):
         q['alts'] = {nm: [dict(a, exit=list(M(*a['exit'])), layer=other_layer(a['layer']),
                              **({'dir': [a['dir'][0], -a['dir'][1]]} if a.get('dir') else {}))
@@ -6860,6 +6863,8 @@ def setup(board, names, dest, log, plan=None, pairs=False):
         ctx.src_cut = (2.0 * CY - float(plan['src_cut'])) if chi < 0 else float(plan['src_cut'])
     # (the nets whose ends' layers are HELD -- a group's model's, group_ends: the lanes that cross another bus's)
     ctx.held_layers = frozenset((plan or {}).get('held_layers') or ())
+    # (...and the layers each end has room on, where that model read them: a via end's layer is chosen among them)
+    ctx.end_layers = dict((plan or {}).get('end_layers') or {})
     if ctx.pages_first and EXACT_PAGES_ENV != '0':
         # a PAGES-FIRST plan (fanout_from_plan PLAN_PAGES): its two chains
         # were chosen to cover every lane, so the schedule pages it exactly
