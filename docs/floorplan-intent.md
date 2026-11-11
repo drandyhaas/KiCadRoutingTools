@@ -159,6 +159,7 @@ side, source, suspect, suspect_reason, why
 | `links[]` | `name`, `a`, `b` (each a list of reference globs), `max_mm`, `pads` (`{REF: [pad numbers]}`, needs `min_reader` 26), `why` (or `note` / `reason`), `context` (see "`links[]` and `chains[]`" below; needs `min_reader` 17) |
 | `chains[]` | `name`, `stages` (two or more lists of reference globs, in order), `max_mm` (one number, or one per link), `why` (or `note` / `reason`), `context` (needs `min_reader` 17) |
 | `rails[]` | `nets` (net-name globs, as `--nets` takes them), `why` (or `note` / `reason`), `context` (see "`rails[]`" below; needs `min_reader` 18) |
+| `pair_series[]` | `refs` (two references: a differential pair's P-leg and N-leg series parts), `why` (or `note` / `reason`), `context` (see "`pair_series[]`" below; needs `min_reader` 27) |
 | `replicate[]` | `from` (a sheet instance: its name or path, as `place_pose replicate --from` takes it), `to` (a list of them), or instead `channels` (copies inside one sheet: two or more lists of refs, the first the source, matched index for index; needs `min_reader` 19), `anchor`, `allow_net_mismatch` (`REF.PAD` entries), `only` or `skip` (refs; not both), `search_mm`, `tolerance_mm`, `why` (or `note` / `reason`), `context`, `source` (see "`replicate[]`" below; needs `min_reader` 11) |
 | `templates[]` | `anchor` (the chip), `members` (each `ref`, `at` [dx, dy] mm and `rot`, a quarter turn, in the chip's own frame; `pads` and `note` as the fit wrote them), `tolerance_mm`, `kind` (`switching stage` or `rf front end`), `ground_return_mm`, `source`, `why` (or `note` / `reason`), `context`, and the fit-written `fitted` (see "`templates[]`" below; needs `min_reader` 13, and 14 with `kind` or `ground_return_mm`) |
 | `covers[]` | `connector`, `side` (`F`/`B`), `axis_deg` (a quarter turn in the connector's frame), `width_mm`, `underside_mm`, `length_mm`, `offset_mm`, `start_mm` (where the body begins along the axis, signed; needs `min_reader` 23), `standoffs`, `holes` (needs `min_reader` 22), `removable`, `source`, `top_mm`, `insertion` (these two need `min_reader` 21), `why` (or `note` / `reason`), `context` (see "`covers[]` and `heights[]`" below; needs `min_reader` 15) |
@@ -192,11 +193,11 @@ written the way the neighbouring row spelled it cost the run its intent.
 its block declares and turns one with candidates only within them, and
 by the grade's `array_conflict`. `place_simple` does not read them.
 
-`severity` keys are checked too. The settable names are the twenty rules —
+`severity` keys are checked too. The settable names are the twenty-one rules —
 `envelope`, `zone_containment`, `zone_side`, `assembly_side`, `zone_exclusive`, `keepout`,
 `edge_connector`, `decap_distance`, `decap_ungraded`, `decap_pin_distance`,
-`proximity`, `keep_away`, `link`, `must_lock`, `legality`, `pins_to_edge`,
-`array_formation`, `replicate`, `template`, `cover` — plus the ten
+`proximity`, `keep_away`, `link`, `pair_series`, `must_lock`, `legality`,
+`pins_to_edge`, `array_formation`, `replicate`, `template`, `cover` — plus the ten
 findings raised outside the rule loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
 `block_unresolved`, `intent_zone_in_keepout`, `keepout_allow_unresolved`,
 `array_unresolved`, `array_conflict`, `fixed_pose_unresolved`,
@@ -217,9 +218,10 @@ only -- `error` is refused, because the rule is advisory by design),
 `edge_oversubscribed` (raised by check_floorplan's grade and by
 `--plan-only`), `planar_nets` (#1818: raised by the grade and by
 `--plan-only` when the board's own `.kicad_dru` keeps a net on one layer with
-no via; no intent key arms it), plus ten more raised BESIDE a rule's own name —
+no via; no intent key arms it), plus eleven more raised BESIDE a rule's own name —
 `decap_pin_distance_inferred` and `decap_pin_uncovered`,
 `proximity_unresolved`, `keep_away_unresolved`, `link_unresolved`,
+`pair_series_unresolved`,
 `replicate_unresolved`, `template_unresolved`, `template_broken`,
 `template_ground_return` and `cover_unresolved`.
 One measurement can support several claims, and
@@ -232,7 +234,7 @@ without demoting the second.
 Every name defaults to **error** except these, which default to **warn**:
 `assembly_side`, `decap_ungraded`, `decap_pin_distance_inferred`,
 `decap_pin_uncovered`, `keep_away` and `keep_away_unresolved`, `link` and
-`link_unresolved`, `replicate`
+`link_unresolved`, `pair_series` and `pair_series_unresolved`, `replicate`
 and `replicate_unresolved`, `template`, `template_unresolved` and
 `template_ground_return`,
 `keepout_allow_unresolved`,
@@ -341,6 +343,7 @@ Each `min_reader` level and the keys it covers:
 | 24 | `edge_connectors[].overhang_face` |
 | 25 | `edge_connectors[].opens` |
 | 26 | `links[].pads` |
+| 27 | `pair_series[]` |
 
 The emitter and the design-brief compiler stamp the level their output needs.
 
@@ -1219,6 +1222,8 @@ status from this list:
 | `keep_away_unresolved` | a keep-away rule has a side that matches no net on this board (**warn** by default) | same |
 | `link` | a declared link's two sets of parts are further apart than its `max_mm`: the gap between their nearest courtyards, Manhattan, 0 once they touch -- a part the link's `pads` names measured from those pads instead (#1819). One finding per link, naming the nearest pair. **warn** by default; `severity` may promote it | `simple.rect_gap` on the courtyard each part is seated on (`zone_parts`), the gap `place_simple` prices |
 | `link_unresolved` | a link has a side that matches no part on this board (**warn** by default) | same |
+| `pair_series` | a declared pair junction's two series parts do not sit as a matched pair: on different faces, pad axes more than 5 degrees from parallel, one more than 0.5 mm ahead of the other along the pair, or centres more than 5 mm apart. One finding per row, naming each departure. **warn** by default; `severity` may promote it | `placement.pair_series.junction_geometry` / `split_reasons` on pad centres |
+| `pair_series_unresolved` | a `pair_series` row whose two parts are not a junction on this board -- a part missing, or the router's detection does not join them (**warn** by default) | `pair_series.pair_junctions` (`diff_xnet.find_ac_coupled_xnets`) |
 | `replicate` | a declared copy target is not laid out as a translated copy of its source instance: a part further than `tolerance_mm` (default 0.05) from the best translation, or rotated, or on the other side. One finding per target, naming the worst parts. **warn** by default; `severity` may promote it | `replicate.measure_declared`: parts matched by schematic symbol as `place_pose replicate` matches them, offsets fitted by their median |
 | `replicate_unresolved` | a declaration the board cannot resolve -- an unknown or ambiguous sheet, instances not wired alike, a waiver naming no pad -- with `place_pose replicate`'s own reason (**warn** by default) | same |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
@@ -1269,6 +1274,7 @@ reading.
 | `decap_ungraded`, `decap_pin_uncovered`, `decap_pin_distance_inferred` | yes | — | `decap_ungraded` and `decap_pin_uncovered` are claims about what the GRADE covers rather than about any pose, and `decap_pin_distance_inferred` is a WARN about a pin inferred from a net name. A cap a `--decaps-from` reference holds leaving the radius is counted by `place_fanout_clearance --intent` as a decap claim made worse when it picks the arm to keep |
 | `legality` | yes | — | a whole-board aggregate against a BUDGET. The anneal keeps only an overlap-free state as its best, and the legality check holds every part clear of its neighbours |
 | `replicate` | yes | — | `place_pose replicate --intent` applies the declaration; an anneal after it may move a copied part, and the grade then reports it |
+| `pair_series` | yes | — | grade only, by decision (#1820): pulling a pair's series parts together would be a new objective term, which ships on a routed A/B over seeds; until then a seed that splits a pair is named by the grade |
 | `template` | yes | **seated, carried and priced**: each member starts at its template pose round its chip, moves rigidly with every move of the chip, and its mean pad distance from that pose costs `--template-weight` (default 100) per mm; a member's `jump` goes back to its pose, and a member joins the chip's group and is not priced as a decap | the final legality step can still nudge a member to its nearest legal pose; the grade then reports the drift |
 | `keep_away` | yes | **priced** whenever the intent declares a row (#1476): each part pair's shortfall below GAP, pad edge to pad edge as the grade measures it (the rule's own sides, `_keep_away_gaps` on `legality.pad_rect` rects, two pads of one net or one part never measured), costs `KEEP_AWAY_WEIGHT` (500) per mm -- a declared separation, so it outweighs the wire a breach saves | a soft term, so a crowded board can still end a seed inside a gap, which the grade then reports; the routers price it again once there are tracks |
 | `link` | yes | **priced**: a `within` term on the link's two sets of parts, nothing while their nearest courtyards (or a part's named `pads`, #1819) are within `max_mm`, `LINK_WEIGHT` (50) per mm past it; the groups the parts are in are never merged, unlike a `proximity` row across groups; the anchored start pulls the two sets together as a groups-file `near` does. `place_simple` prints each link past its `max_mm`, and `links` in its `--json` holds every link's gap (`past`, and the `severity` the grade gives it); a run of several seeds names each link a seed leaves past it on that seed's line and in one WARNING (the seeds past it, the seeds holding it, and whether the first judged seed breaks a link another holds), and carries every seed's rows in `judge.json`'s `links` (#1632) | a soft term, so a seed that cannot meet `max_mm` ends past it, which the grade then reports -- at **warn**, which the judge does not rank by; `severity: {"link": "error"}` makes it a floorplan error, which it does |
@@ -1483,6 +1489,29 @@ pads at the part's live pose), its `--json` `links` row carries the `pads`,
 and the finding's `measured.basis` says which side was measured on what. A
 named pad the part does not have (or has only unconnected) is
 `link_unresolved`. A `chains[]` stage does not take `pads`.
+
+### `pair_series[]`: a differential pair's two series parts, graded as a pair
+
+```jsonc
+"pair_series": [{ "refs": ["C1", "C2"],
+                  "context": { "source": "placement.pair_series",
+                               "pairs": ["DPA_P/DPA_N", "DPB_P/DPB_N"] } }]
+```
+
+A pair through AC-coupling caps or USB series resistors is two
+name-detected pairs joined by one two-pad part on each leg -- the junction
+`route_diff` routes as one signal (`diff_xnet.find_ac_coupled_xnets`). The
+two parts share no net, so nothing pulls them together, and when they are
+split `route_diff` can find the split side too short to couple and route it
+single-ended (#1820). `--emit-intent` writes one row per junction the board
+has (`refs`: the P-leg part, then the N-leg part; `min_reader` 27), and
+`pair_series` grades each at **warn**: the two on one face, pad axes within
+5 degrees of parallel, neither more than 0.5 mm ahead of the other along the
+pair, centres within 5 mm. The limits are read off 544 human junctions on
+110 corpus boards (all on one face, 539 parallel, offset 0.022 mm at the
+98th percentile); together they name 7 of the 544. Delete a row to accept a
+split on purpose. **Grade only**: `place_simple` does not read the key, so a
+seed can still split a pair and the grade then names it.
 
 ### `rails[]`: supplies priced as rails, whatever their fan-out
 

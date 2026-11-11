@@ -112,8 +112,12 @@ def main():
                   row.get('overhang_face') == '+x' and 'edge' not in row
                   and (row.get('overhang_mm') or {}).get('min', 0) > 11.5, str(row))
             check('...and the document says which reader acts on it',
-                  doc.get('min_reader') == floorplan.OVERHANG_FACE_READER
-                  <= floorplan.READER_VERSION, str(doc.get('min_reader')))
+                  # (#1820: the fixture's pair junction stamps its own reader)
+                  doc.get('min_reader') == max(
+                      floorplan.OVERHANG_FACE_READER,
+                      floorplan.PAIR_SERIES_READER if doc.get('pair_series')
+                      else 0) <= floorplan.READER_VERSION,
+                  str(doc.get('min_reader')))
             ev, line, errs = graded(src, row)
             check(f'graded at the fixture\'s pose: ~{READING} mm past the east edge, pass',
                   abs(ev.get('overhang_mm', 0) - READING) < 0.02

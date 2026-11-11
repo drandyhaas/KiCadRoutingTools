@@ -334,6 +334,13 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
   make it an error-graded claim. Each limit is priced, not guaranteed: a
   seed can leave a crystal past it, so read the grade's `proximity`
   warnings (the judge ranks only errors).
+- **A differential pair's series parts are graded, not placed.** The
+  emitted intent carries a `pair_series[]` row for each pair joined through
+  one series part per leg (AC caps, USB series resistors; `min_reader` 27),
+  and the grade warns (`pair_series`) when the two are not side by side on
+  one face with their pads parallel -- split, `route_diff` may route that
+  side single-ended. `place_simple` does not read the row, so put such a
+  pair's two parts in one group, and read the `pair_series` warnings.
 - **Hints, each a soft term of the objective:** `near` (a list of groups to
   sit against), `apart` (groups to keep 3 mm from), `edge` (`N`/`S`/`E`/`W`,
   a group that belongs on a board side; a group holding an edge connector

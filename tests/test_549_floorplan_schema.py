@@ -142,7 +142,9 @@ KEY_SETS = {
         # a chip's datasheet layout, seated and carried by place_simple.
         'templates',
         # #1443: a body a connector carries, and declared part heights.
-        'covers', 'heights', 'links', 'chains', 'rails'},
+        'covers', 'heights', 'links', 'chains', 'rails',
+        # #1820: a differential pair's two series parts.
+        'pair_series'},
     '_ENVELOPE_KEYS': {'rect', 'tolerance_mm'},
     '_DEFAULTS_KEYS': {'zone_tolerance_mm'},
     '_BLOCK_KEYS': {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
@@ -231,6 +233,8 @@ KEY_SETS = {
     '_CHAIN_KEYS': {'name', 'stages', 'max_mm', 'context'} | FREE,
     # #1478: supply nets priced as rails whatever their fan-out.
     '_RAILS_KEYS': {'nets', 'context'} | FREE,
+    # #1820: one junction's two series parts, graded only.
+    '_PAIR_SERIES_KEYS': {'refs', 'context'} | FREE,
     # #1211: `place_pose replicate`'s own flags, plus the grade's tolerance.
     '_REPLICATE_KEYS': {'from', 'to', 'channels', 'anchor', 'allow_net_mismatch',
                         'only', 'skip', 'search_mm', 'tolerance_mm',
@@ -292,6 +296,7 @@ def test_the_key_sets_are_exactly_what_is_documented():
         '_LINK_KEYS': 'links[]',
         '_CHAIN_KEYS': 'chains[]',
         '_RAILS_KEYS': 'rails[]',
+        '_PAIR_SERIES_KEYS': 'pair_series[]',
         '_REPLICATE_KEYS': 'replicate[]',
         '_COVER_KEYS': 'covers[]',
         '_COVER_STANDOFF_KEYS': 'covers[].standoffs[]',
@@ -419,6 +424,8 @@ def test_an_intent_using_every_known_key_loads():
                     'max_mm': [5, 10], 'why': 'w', 'context': {'why': 'w'}}],
         # #1478. Supplies priced as rails.
         'rails': [{'nets': ['+5V', '/VBUS'], 'why': 'w', 'context': {'why': 'w'}}],
+        # #1820. A pair's two series parts.
+        'pair_series': [{'refs': ['C1', 'C2'], 'why': 'w', 'context': {'why': 'w'}}],
         # #1211. `only` and `skip` are exclusive, so the second row carries
         # `skip`.
         'replicate': [{'from': 'CH1', 'to': ['CH2', 'CH3'], 'anchor': 'J1',
@@ -469,6 +476,7 @@ def test_an_intent_using_every_known_key_loads():
     seen |= set(raw['arrays'][0]) | set(raw['fixed_poses'][0])
     seen |= set(raw['keep_away'][0])
     seen |= set(raw['links'][0]) | set(raw['chains'][0]) | set(raw['rails'][0])
+    seen |= set(raw['pair_series'][0])
     for r in raw['replicate']:
         seen |= set(r)
     seen |= set(raw['dispositions'])
@@ -784,6 +792,8 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         # #1477: a link side matching no
                                         # part
                                         'link_unresolved',
+                                        # #1820
+                                        'pair_series_unresolved',
                                         # #1211: a copy the board cannot
                                         # resolve
                                         'replicate_unresolved',

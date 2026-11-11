@@ -251,7 +251,11 @@ EDGE_BAND_SANITY_MM = 5.0
 #: numbers]}`, so a named part is measured from those pads rather than from
 #: its courtyard. It changes the link's verdict and what place_simple pulls
 #: toward; an older build refuses the key by name.
-READER_VERSION = 26
+#: 27 (#1820): `pair_series[]` -- the two series parts of a differential
+#: pair (one per leg, the router's own junction), graded by `pair_series`
+#: for sitting as a matched pair; `--emit-intent` writes a row per junction.
+#: It changes the grade; an older build refuses the key by name.
+READER_VERSION = 27
 #: The reader version that first reads `templates[]`.
 TEMPLATES_READER = 13
 #: The reader version that first reads a template row's `kind` and
@@ -285,6 +289,10 @@ OVERHANG_FACE_READER = 24
 OPENS_READER = 25
 #: The reader version that first reads `links[].pads` (#1819).
 LINK_PADS_READER = 26
+#: The reader version that first reads `pair_series[]` (#1820).
+PAIR_SERIES_READER = 27
+#: The `context.source` of the `pair_series[]` rows `emit_intent` derives.
+PAIR_SERIES_SOURCE = 'placement.pair_series'
 #: #1475. The keep-outs a block's `fence_mm` compiles to are named
 #: `fence:<block>:<N|S|W|E>`; an intent may not name its own keep-out so.
 FENCE_KEEPOUT_PREFIX = 'fence:'
@@ -336,7 +344,7 @@ _TOP_LEVEL_KEYS = {
     'health', 'severity', 'context', 'overlap_waivers', 'min_reader',
     'assembly', 'proximity', 'dispositions', 'arrays', 'fixed_poses',
     'keep_away', 'replicate', 'templates', 'covers', 'heights',
-    'links', 'chains', 'rails',
+    'links', 'chains', 'rails', 'pair_series',
 }
 #: #959 (#997). WRITTEN answers to "why is this not graded", one map per kind
 #: of question: a rule the plan leaves dark, a budget key the emitter withheld,
@@ -575,6 +583,12 @@ _KEEP_AWAY_KEYS = {'rule', 'source', 'context'} | _FREE_TEXT_KEYS
 #: so a part at the wrong end of a long connector does not meet the link.
 _LINK_KEYS = {'name', 'a', 'b', 'max_mm', 'pads', 'context'} | _FREE_TEXT_KEYS
 _CHAIN_KEYS = {'name', 'stages', 'max_mm', 'context'} | _FREE_TEXT_KEYS
+#: #1820. The two series parts of one differential-pair junction (`refs`,
+#: the P-leg part and the N-leg part, exact references), graded by
+#: `pair_series` for sitting as a matched pair -- one face, pad axes
+#: parallel, side by side (`placement.pair_series`). Grade only: the placer
+#: does not read it.
+_PAIR_SERIES_KEYS = {'refs', 'context'} | _FREE_TEXT_KEYS
 #: #1478. Supply nets (net-name globs, as `--nets` takes them) that
 #: `place_simple` prices as rails whatever their fan-out.
 _RAILS_KEYS = {'nets', 'context'} | _FREE_TEXT_KEYS
@@ -758,6 +772,11 @@ class Intent:
     #: design fact. Read by `place_simple` only, which prices them as rails;
     #: nothing grades them.
     rails: Tuple[Dict[str, object], ...] = ()
+    #: #1820. A pair's two series parts, `[{refs: [P part, N part], why?,
+    #: context?}]`. EMITTED, one row per junction the board has
+    #: (`context.source` `placement.pair_series`). Graded by `pair_series`;
+    #: the placer does not read it.
+    pair_series: Tuple[Dict[str, object], ...] = ()
     #: #1211. Declared channel copies, `[{from, to[], anchor?, ...}]`. NEVER
     #: emitted: which instance is the template is a design decision. Copied
     #: by `place_pose replicate --intent`; graded by `replicate`, which the
@@ -1335,6 +1354,40 @@ def _link_claims(raw: Dict) -> List[Dict]:
             for k in range(len(stages) - 1):
                 add(f"{name}:{k}", stages[k], stages[k + 1],
                     _number(ms[k], f"{where}.max_mm", lo=0.0), where, row)
+    return out
+
+
+def _pair_series_claims(raw: Dict) -> List[Dict]:
+    """Validate `pair_series[]` (#1820), AT LOAD: each row's `refs`, two
+    distinct references, and no pair of parts twice."""
+    got = raw.get('pair_series')
+    if got is None:
+        return []
+    if not isinstance(got, list):
+        raise IntentError(f"pair_series: expected a list of rows, got "
+                          f"{type(got).__name__}")
+    out, seen = [], {}
+    for i, row in enumerate(got):
+        where = f"pair_series[{i}]"
+        if not isinstance(row, dict):
+            raise IntentError(f"{where}: expected an object")
+        _reject_unknown(row, _PAIR_SERIES_KEYS, where)
+        _entry_context(row, where)
+        _free_text_strings(row, where)
+        refs = row.get('refs')
+        if (not isinstance(refs, list) or len(refs) != 2
+                or not all(isinstance(r, str) and r for r in refs)
+                or refs[0] == refs[1]):
+            raise IntentError(f"{where}.refs: expected two distinct "
+                              f"references, the P-leg part and the N-leg "
+                              f"part, got {refs!r}")
+        key = frozenset(refs)
+        if key in seen:
+            raise IntentError(f"{where}: {refs[0]} and {refs[1]} repeat "
+                              f"pair_series[{seen[key]}]")
+        seen[key] = i
+        out.append({'refs': tuple(refs), 'source': where,
+                    'why': free_text(row), 'context': row.get('context') or {}})
     return out
 
 
@@ -2444,6 +2497,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         keep_away=tuple(_keep_away_claims(raw)),
         links=tuple(_link_claims(raw)),
         rails=tuple(_rail_claims(raw)),
+        pair_series=tuple(_pair_series_claims(raw)),
         replicate=tuple(_replicate_claims(raw)),
         templates=tuple(_template_claims(raw)),
         covers=tuple(_cover_claims(raw)),
@@ -8591,6 +8645,61 @@ def rule_link(ctx) -> Iterator[Violation]:
                 expected={'max_mm': ln['max_mm']})
 
 
+def rule_pair_series(ctx) -> Iterator[Violation]:
+    """A differential pair's two series parts sit as a matched pair (#1820):
+    on one face, their pad axes parallel, neither ahead of the other along
+    the pair, their centres near -- the limits `placement.pair_series` read
+    off 544 human junctions (`split_reasons`). One finding per declared row
+    that departs, naming each departure. A row whose two parts are not a
+    junction on this board (a part missing, or the router's detection does
+    not join them) is `pair_series_unresolved`. WARN by default."""
+    from .pair_series import junction_geometry, pair_junctions, split_reasons
+    junctions = {frozenset((j.p_ref, j.n_ref)): j
+                 for j in pair_junctions(ctx.pcb)[0]}
+    fps = getattr(ctx.pcb, 'footprints', None) or {}
+    for row in ctx.intent.pair_series:
+        refs = list(row['refs'])
+        j = junctions.get(frozenset(refs))
+        g = junction_geometry(ctx.pcb, j) if j is not None else None
+        if g is None:
+            missing = [r for r in refs if r not in fps]
+            yield Violation(
+                rule='pair_series_unresolved',
+                severity=ctx.intent.severity_of('pair_series_unresolved', WARN),
+                ref=refs[0],
+                message=(f"pair_series {refs[0]} / {refs[1]} ({row['source']}): "
+                         + (f"{' and '.join(missing)} not on this board"
+                            if missing else
+                            "not a junction of a differential pair on this "
+                            "board (one series part on each leg)")
+                         + ", so nothing is measured"),
+                measured={'refs': refs, 'missing': missing})
+            continue
+        why = split_reasons(g)
+        if not why:
+            continue
+        yield Violation(
+            rule='pair_series', severity=ctx.intent.severity_of('pair_series',
+                                                                WARN),
+            ref=j.n_ref,
+            message=(f"pair_series {j.p_ref} (P) / {j.n_ref} (N) "
+                     f"({row['source']}) do not sit as a matched pair: "
+                     f"{'; '.join(why)} -- route_diff may route that side "
+                     f"single-ended"),
+            measured={'refs': [j.p_ref, j.n_ref], 'pairs': list(j.pairs),
+                      'sides': g['sides'], 'axis_turn_deg': g['axis_turn_deg'],
+                      'offset_mm': g['offset_mm'], 'gap_mm': g['gap_mm'],
+                      'split': why},
+            expected={'one_face': True, 'max_turn_deg': _ps_limits()[0],
+                      'max_offset_mm': _ps_limits()[1],
+                      'max_gap_mm': _ps_limits()[2]})
+
+
+def _ps_limits():
+    from .pair_series import GAP_TOL_MM, OFFSET_TOL_MM, TURN_TOL_DEG
+    return TURN_TOL_DEG, OFFSET_TOL_MM, GAP_TOL_MM
+
+
 def rule_replicate(ctx) -> Iterator[Violation]:
     """Each declared copy target laid out as a translated copy of its
     source instance (#1211) -- how far it is from that, never how it got
@@ -9464,6 +9573,7 @@ RULES = (
     ('proximity', rule_proximity),
     ('keep_away', rule_keep_away),
     ('link', rule_link),
+    ('pair_series', rule_pair_series),
     ('must_lock', rule_must_lock),
     ('legality', rule_legality),
     ('pins_to_edge', rule_pins_to_edge),
@@ -9499,6 +9609,9 @@ _NON_RULE_SEVERITIES = frozenset({
     # no net on THIS board is a different claim from a distance. WARN by
     # default, like the rule it stands in for.
     'keep_away_unresolved',
+    # #1820, beside `pair_series`: a row whose parts are not a junction on
+    # this board is a different claim from how they sit.
+    'pair_series_unresolved',
     # #1477, beside `link` for the same reason: a side matching no part is
     # a different claim from a distance. WARN by default, like the rule.
     'link_unresolved',
@@ -9604,6 +9717,7 @@ _SKIP_REASON = {
     'proximity': 'the intent declares no proximity claims',
     'keep_away': 'the intent declares no keep_away rules',
     'link': 'the intent declares no links or chains',
+    'pair_series': 'the intent declares no pair_series',
     'must_lock': 'the intent declares no must_lock patterns',
     'legality': 'the intent declares no legality_budget',
     # The rule's exclusion list IS the declaration: without it every
@@ -9777,6 +9891,8 @@ def _wants(intent: Intent, rule: str) -> bool:
         return bool(intent.keep_away)
     if rule == 'link':
         return bool(intent.links)
+    if rule == 'pair_series':
+        return bool(intent.pair_series)
     if rule == 'must_lock':
         return bool(intent.must_lock)
     if rule == 'legality':
@@ -9819,6 +9935,7 @@ _ARMING_KEY = {
     'proximity': 'proximity[]',
     'keep_away': 'keep_away[]',
     'link': 'links[] or chains[]',
+    'pair_series': 'pair_series[]',
     'must_lock': 'must_lock[]',
     'legality': 'legality_budget',
     'pins_to_edge': 'edge_connectors[]',
@@ -9838,6 +9955,7 @@ _ARMING_KEY = {
 _RULE_DEFAULT_SEVERITY = dict({name: ERROR for name, _ in RULES},
                               assembly_side=WARN, decap_ungraded=WARN,
                               pins_to_edge=WARN, keep_away=WARN, link=WARN,
+                              pair_series=WARN,
                               replicate=WARN, template=WARN, cover=WARN)
 
 #: A rule whose severity the intent's map cannot change, because the rule
@@ -13486,6 +13604,18 @@ def emit_intent(pcb_data, pcb_file: str, *,
         doc['min_reader'] = max(int(doc.get('min_reader') or 0), OVERHANG_FACE_READER)
     if any('opens' in c for c in doc.get('edge_connectors') or ()):
         doc['min_reader'] = max(int(doc.get('min_reader') or 0), OPENS_READER)
+    # #1820: each differential-pair junction's two series parts (the
+    # router's own detection), graded by `pair_series` for sitting as a
+    # matched pair. Grade only -- place_simple does not read the key. They
+    # read no pose.
+    from .pair_series import pair_junctions
+    prow = [{'refs': [j.p_ref, j.n_ref],
+             'context': {'source': PAIR_SERIES_SOURCE, 'pairs': list(j.pairs)}}
+            for j in pair_junctions(pcb_data)[0]]
+    if prow:
+        doc['pair_series'] = prow
+        doc['min_reader'] = max(int(doc.get('min_reader') or 0),
+                                PAIR_SERIES_READER)
     return doc
 
 
