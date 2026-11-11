@@ -63,6 +63,40 @@ def _grade_tol(clearance: float, clearance_margin: float) -> float:
         return max(a, FP_EPS_MM)
     return max(clearance * clearance_margin, FP_EPS_MM)
 
+
+# #1803: the clearance shortfalls a run ACCEPTED that KiCad reports -- above
+# its absolute 500 nm and at or under the run's tolerance. Not graded, not
+# returned: counted, so a clean verdict says what it let through. A context
+# variable like _ABS_MARGIN_MM, set by run_drc only when its caller asks
+# (`within_margin=`), so a grade in another thread, and every check called
+# outside run_drc, is untouched.
+_WITHIN_MARGIN = contextvars.ContextVar('check_drc_within_margin', default=None)
+
+
+def _within_margin(overlap: float, tolerance: float) -> float:
+    """A pair check's overlap for its NO-violation return: the shortfall
+    itself when a run is counting (#1803) and it lies in KiCad's band
+    (KICAD_DRC_EPSILON_MM, tolerance], else 0.0 as before. Only run_drc's
+    graded pair sites read it, after their own waivers."""
+    if overlap > KICAD_DRC_EPSILON_MM and _WITHIN_MARGIN.get() is not None:
+        return overlap
+    return 0.0
+
+
+def _note_within_margin(pcb_data, net1: int, net2: int, overlap: float) -> None:
+    """Count one accepted shortfall into the run's record (#1803): how many,
+    and the largest with the two nets it lies between."""
+    rec = _WITHIN_MARGIN.get()
+    if rec is None or overlap <= 0.0:
+        return
+    rec['count'] = rec.get('count', 0) + 1
+    if overlap > rec.get('max_mm', 0.0):
+        def _nm(n):
+            net = pcb_data.nets.get(n)
+            return net.name if net else f"net_{n}"
+        rec['max_mm'] = overlap
+        rec['max_nets'] = sorted((_nm(net1), _nm(net2)))
+
 import routing_defaults as defaults
 
 
@@ -599,7 +633,7 @@ def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, cleara
     tolerance = _grade_tol(clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap, pt1, pt2
-    return False, 0.0, None, None
+    return False, _within_margin(overlap, tolerance), None, None
 
 
 def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float]:
@@ -624,7 +658,7 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
     tolerance = _grade_tol(clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap
-    return False, 0.0
+    return False, _within_margin(overlap, tolerance)
 
 
 def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float]:
@@ -641,7 +675,7 @@ def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_marg
     tolerance = _grade_tol(clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap
-    return False, 0.0
+    return False, _within_margin(overlap, tolerance)
 
 
 def point_to_rect_distance(px: float, py: float, cx: float, cy: float,
@@ -2344,9 +2378,10 @@ def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
                     best_pt = (px, py)
 
     overlap = clearance - best
-    if overlap > _grade_tol(clearance, clearance_margin):
+    _tol = _grade_tol(clearance, clearance_margin)
+    if overlap > _tol:
         return True, overlap, best_pt
-    return False, 0.0, None
+    return False, _within_margin(overlap, _tol), None
 
 
 #: How far a net-tie contact may stand off the tied net's own pad and still be
@@ -2535,9 +2570,10 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
             seg.start_x, seg.start_y, seg.end_x, seg.end_y, pad_polys)
         required_dist = seg.width / 2 + clearance
         overlap = required_dist - dist_to_pad
-        if overlap > _grade_tol(clearance, clearance_margin):
+        _tol = _grade_tol(clearance, clearance_margin)
+        if overlap > _tol:
             return True, overlap, closest_pt
-        return False, 0.0, None
+        return False, _within_margin(overlap, _tol), None
 
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
     corner_radius = pad_corner_radius(pad)
@@ -2572,7 +2608,7 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
     if overlap > tolerance:
         return True, overlap, closest_pt
 
-    return False, 0.0, None
+    return False, _within_margin(overlap, tolerance), None
 
 
 def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
@@ -2613,7 +2649,7 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
     if overlap > tolerance:
         return True, overlap
 
-    return False, 0.0
+    return False, _within_margin(overlap, tolerance)
 
 
 def npth_track_clearance(local_clearance: float, clearance: float,
@@ -5737,7 +5773,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             pcb_data: Optional[PCBData] = None,
             baseline=None,
             clearance_margin_mm: Optional[float] = None,
-            severity_overrides: Optional[Dict[str, str]] = None):
+            severity_overrides: Optional[Dict[str, str]] = None,
+            within_margin: Optional[dict] = None):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -5784,7 +5821,23 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             ``(severity ...)`` -- otherwise decide what is counted: a
             'warning' is listed under WARNINGS and accepted, an 'ignore' is
             dropped and counted on one line, as KiCad reports them.
+        within_margin: A dict this run fills (#1803) with the copper pair
+            clearance shortfalls it ACCEPTED that KiCad reports -- above
+            ``KICAD_DRC_EPSILON_MM`` and at or under the run's tolerance:
+            ``count``, and when it is not 0 ``max_mm`` and ``max_nets``. The
+            grade, the return value and the exit status do not change; None
+            (default) counts nothing.
     """
+    if within_margin is not None:
+        # Set for this call only, as clearance_margin_mm below is.
+        _kw = dict(locals())        # the parameters: nothing else is bound yet
+        _kw.pop('within_margin')
+        within_margin.setdefault('count', 0)
+        _tok = _WITHIN_MARGIN.set(within_margin)
+        try:
+            return run_drc(**_kw)
+        finally:
+            _WITHIN_MARGIN.reset(_tok)
     if clearance_margin_mm is not None:
         # Set for this call (and the run_drc calls it makes) only, then
         # restored; the inner call inherits it.
@@ -6239,6 +6292,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if _cv is not None:
                 _eff, _trule = _cv, None
             has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, _eff, clearance_margin)
+            if (not has_violation and overlap > 0.0     # #1803: accepted, counted
+                    and not _graphic_pair_is_same_net(seg1, seg2, net1, net2)):
+                _note_within_margin(pcb_data, net1, net2, overlap)
             if has_violation and _graphic_pair_is_same_net(seg1, seg2, net1, net2):
                 has_violation = False
                 # #995: published, not counted. A crossing always lands here
@@ -6482,6 +6538,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 if _cv is not None:
                     _eff = _cv
                 has_violation, overlap = check_via_segment_overlap(via, seg, _eff, clearance_margin)
+                if (not has_violation and overlap > 0.0     # #1803: accepted, counted
+                        and not _graphic_pair_is_same_net(seg, None, seg_net, via_net)):
+                    _note_within_margin(pcb_data, via_net, seg_net, overlap)
                 if has_violation and _graphic_pair_is_same_net(seg, None, seg_net, via_net):
                     has_violation = False
                     _own = _footprint_own_copper_owner(seg, None, seg_net, via_net)
@@ -6692,6 +6751,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if _cv is not None:
                 _eff = _cv
             has_violation, overlap = check_via_via_overlap(via1, via2, _eff, clearance_margin)
+            if not has_violation and overlap > 0.0 and net1 != net2:   # #1803
+                _note_within_margin(pcb_data, net1, net2, overlap)
             if has_violation:
                 net1_name = pcb_data.nets.get(net1, None)
                 net2_name = pcb_data.nets.get(net2, None)
@@ -6756,6 +6817,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             has_violation, overlap, closest_pt = check_pad_segment_overlap(
                 pad, seg, _eff, routing_layers, clearance_margin
             )
+            if (not has_violation and overlap > 0.0     # #1803: accepted, counted
+                    and not _graphic_pair_is_same_net(seg, None, seg_net, pad_net)):
+                _note_within_margin(pcb_data, pad_net, seg_net, overlap)
             if has_violation and _graphic_pair_is_same_net(seg, None, seg_net, pad_net):
                 has_violation = False
                 _own = _footprint_own_copper_owner(seg, None, seg_net, pad_net)
@@ -6810,6 +6874,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 has_violation, overlap = check_pad_via_overlap(
                     pad, via, _eff, routing_layers, clearance_margin
                 )
+                if not has_violation and overlap > 0.0:     # #1803
+                    _note_within_margin(pcb_data, pad_net, via_net, overlap)
                 if has_violation:
                     pad_net_name = pcb_data.nets.get(pad_net, None)
                     via_net_name = pcb_data.nets.get(via_net, None)
@@ -6869,6 +6935,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     _eff = _pad_pair_cl(pad1, pad2_net, other_pad=pad2, other_type='pad')
                     has_violation, overlap, closest_pt = check_pad_pad_overlap(
                         pad1, pad2, _eff, routing_layers, clearance_margin)
+                    if not has_violation and overlap > 0.0:     # #1803
+                        _note_within_margin(pcb_data, pad_net, pad2_net, overlap)
                     if has_violation:
                         n1 = pcb_data.nets.get(pad_net, None)
                         n2 = pcb_data.nets.get(pad2_net, None)
@@ -8729,6 +8797,7 @@ if __name__ == "__main__":
                   f"KiCad's own is an absolute {KICAD_DRC_EPSILON_MM:g} mm, "
                   f"--clearance-margin-mm)")
 
+    _within = {}    # #1803: filled by run_drc
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
                          args.hole_clearance,
@@ -8741,7 +8810,16 @@ if __name__ == "__main__":
                          check_pad_edge=args.check_pad_edge,
                          net_clearances=net_clearances,
                          baseline=args.baseline,
-                         clearance_margin_mm=args.clearance_margin_mm)
+                         clearance_margin_mm=args.clearance_margin_mm,
+                         within_margin=_within)
+    if _within.get('count') and not args.quiet:
+        # #1803: a clean verdict says what its tolerance let through that
+        # KiCad's 500 nm does not. The grade and the exit status are as before.
+        print(f"Accepted within the tolerance: {_within['count']} copper "
+              f"clearance shortfall(s) above KiCad's {KICAD_DRC_EPSILON_MM:g} mm, "
+              f"which KiCad's DRC reports (the largest {_within['max_mm']:.4f} mm, "
+              f"{' <-> '.join(_within['max_nets'])}); --clearance-margin-mm "
+              f"{KICAD_DRC_EPSILON_MM:g} lists them")
     if args.render and any(not v.get('accepted') for v in violations):
         render_violation_panels(args.pcb, violations, args.render)
     if args.json:
@@ -8837,6 +8915,14 @@ if __name__ == "__main__":
             },
             'violations': len(_real),
             'accepted': len(violations) - len(_real),
+            # #1803: copper pair clearance shortfalls above KiCad's 500 nm
+            # and inside this run's tolerance -- KiCad reports each; they are
+            # not items (--clearance-margin-mm 0.0005 lists them)
+            'within_margin': {
+                'count': _within.get('count', 0),
+                'max_mm': _within.get('max_mm'),
+                'max_nets': _within.get('max_nets'),
+                'above_mm': KICAD_DRC_EPSILON_MM},
             # #995: accepted, and each one an error in KiCad's own DRC
             'footprint_own_copper': sum(
                 1 for v in violations if v.get('accepted') == 'footprint-own-copper'),

@@ -19,6 +19,12 @@ Default 0.2 mm) by a known number of nanometres:
      kicad-cli: the pairs past check_drc's 5% margin match, and only the ones
      inside it are KICAD-ONLY).
 
+#1803 rows: a default run COUNTS the shortfalls it accepted above KiCad's
+500 nm (6 here: 600, 4000, 24000 nm on HV and 600, 4000, 9000 nm on Default)
+in one console line and the JSON's `within_margin`, with the grade, the exit
+status and run_drc's return unchanged; at `--clearance-margin-mm 0.0005` the
+count is 0 and no line is printed.
+
     python3 tests/test_1594_absolute_clearance_margin.py
 """
 import contextlib
@@ -110,14 +116,25 @@ def main():
         board = build(os.path.join(tmp, 'band.kicad_pcb'))
 
         print('1. the CLI')
-        rows, _ = drc_rows(board)
+        rows, out = drc_rows(board)
         check('the 5% default is unchanged', rows == AT_5PCT and len(rows) == 2,
               str(rows))
+        # #1803: what the 5% accepted that KiCad reports is counted, not graded
+        acc = re.findall(r'^Accepted within the tolerance: (\d+) copper clearance '
+                         r'shortfall\(s\) above KiCad\'s 0\.0005 mm.*the largest '
+                         r'([0-9.]+) mm, (\S+) <-> (\S+)\); --clearance-margin-mm '
+                         r'0\.0005 lists them$', out, re.M)
+        want = len(set(KICAD) - set(AT_5PCT))
+        check(f'#1803: the default run counts the {want} shortfalls it accepted above '
+              f'500 nm, the largest HV 24 um', want == 6 and acc ==
+              [('6', '0.0240', 'HV_24000nm_a', 'HV_24000nm_b')], str(acc))
         rows, out = drc_rows(board, '--clearance-margin-mm', '0.0005')
         check("--clearance-margin-mm 0.0005 reports exactly KiCad's pairs, on "
               "both classes", rows == KICAD and len(rows) == 8, str(rows))
         check('...and says which tolerance it graded at',
               'Clearance tolerance: 0.0005 mm on every pair' in out, out[:600])
+        check('#1803: ...and accepts nothing above it, so prints no count',
+              'Accepted within the tolerance' not in out)
         run_check([sys.executable, '-X', 'utf8',
                    os.path.join(ROOT, 'py_router', 'check_drc.py'), board,
                    '--clearance-margin', '0.1', '--clearance-margin-mm', '0.0005'],
@@ -132,9 +149,25 @@ def main():
                    os.path.join(ROOT, 'py_router', 'check_drc.py'), board,
                    '--no-size-checks', '--quiet', '--clearance-margin-mm', '0.0005',
                    '--json', js], refuse='FAILED', code=1)
-        ga = json.load(open(evidence(js, 'check_drc --json')))['graded_at']
+        doc = json.load(open(evidence(js, 'check_drc --json')))
+        ga = doc['graded_at']
         check('the JSON records the absolute margin',
               ga.get('clearance_margin_mm') == 0.0005, str(ga)[:200])
+        check('#1803: ...and within_margin.count 0',
+              (doc.get('within_margin') or {}).get('count') == 0,
+              str(doc.get('within_margin')))
+        js5 = os.path.join(tmp, 'drc5.json')
+        run_check([sys.executable, '-X', 'utf8',
+                   os.path.join(ROOT, 'py_router', 'check_drc.py'), board,
+                   '--no-size-checks', '--quiet', '--json', js5],
+                  refuse='FAILED', code=1)
+        doc5 = json.load(open(evidence(js5, 'check_drc --json')))
+        wm = doc5.get('within_margin') or {}
+        check('#1803: the default JSON: within_margin 6, the largest 24 um on HV, '
+              'and violations still 2',
+              wm.get('count') == 6 and abs((wm.get('max_mm') or 0) - 0.024) < 1e-9
+              and wm.get('max_nets') == ['HV_24000nm_a', 'HV_24000nm_b']
+              and doc5.get('violations') == 2, f"{wm} / {doc5.get('violations')}")
 
         print('2. run_drc holds the margin for that call only')
         from check_drc import run_drc, _ABS_MARGIN_MM
@@ -153,6 +186,19 @@ def main():
               f'{names(a)} / {names(b)}')
         check('the margin is restored after the call', _ABS_MARGIN_MM.get() is None,
               str(_ABS_MARGIN_MM.get()))
+        import check_drc as _cd
+        rec, rec_abs = {}, {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            c = run_drc(board, within_margin=rec, **kw)
+            run_drc(board, clearance_margin_mm=0.0005, within_margin=rec_abs, **kw)
+        check('#1803: counting changes nothing run_drc returns',
+              [(v['type'], v['net1'], v['net2'], v.get('overlap_mm')) for v in c]
+              == [(v['type'], v['net1'], v['net2'], v.get('overlap_mm')) for v in b],
+              f'{len(c)} vs {len(b)}')
+        check('#1803: in-process: 6 accepted at the fraction, 0 at the absolute margin',
+              rec.get('count') == 6 and rec_abs.get('count') == 0, f'{rec} / {rec_abs}')
+        check('#1803: the count is restored after the call',
+              _cd._WITHIN_MARGIN.get() is None, str(_cd._WITHIN_MARGIN.get()))
 
         print('3. kicad_drc_compare')
         import kicad_drc_compare as K

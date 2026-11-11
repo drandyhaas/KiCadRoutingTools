@@ -202,6 +202,8 @@ The DRC checker uses a 5% clearance margin by default to ignore tiny geometric a
 
 The margin is a fraction of each pair's own clearance, so it scales with the class: 10 µm at 0.2 mm, 25 µm at 0.5 mm. KiCad's tolerance is an absolute 500 nm on every pair (`net_queries.KICAD_DRC_EPSILON_MM`), so on a board with two classes no fraction reproduces KiCad's grade. `--clearance-margin-mm 0.0005` does (#1594): it replaces the fraction for every clearance grade of the run (pairs, copper-to-hole, hole-to-hole, board edge), and `run_drc(..., clearance_margin_mm=)` is the same in-process. The console line `Clearance tolerance: ...` and the `--json` `graded_at.clearance_margin` / `clearance_margin_mm` say which one a run used.
 
+What a run's tolerance let through that KiCad reports is counted, not graded (#1803): a copper pair clearance shortfall (track, via and pad pairs) above KiCad's 500 nm and at or under the run's tolerance prints `Accepted within the tolerance: N copper clearance shortfall(s) above KiCad's 0.0005 mm ... (the largest X mm, NET_A <-> NET_B); --clearance-margin-mm 0.0005 lists them` after the verdict, and the `--json` carries `within_margin` (`count`, `max_mm`, `max_nets`). The verdict, the exit status and the listed items are unchanged, so `NO DRC VIOLATIONS FOUND!` with no such line means KiCad's copper pair clearance grade agrees. `run_drc(..., within_margin={})` fills the same record in-process.
+
 ### Debug Visualization
 
 With `--debug-lines`, the checker writes a line on the `User.7` layer of the
