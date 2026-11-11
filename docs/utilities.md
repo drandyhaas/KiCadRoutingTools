@@ -1095,7 +1095,12 @@ net KiCad sees connected is reclassified CONNECTED (a fill-model artifact),
 and a net only KiCad sees unconnected is added as an issue, its stranded
 pads listed under `Disconnected pads` from KiCad's own fill (one pcbnew
 refill: a KiCad link names a zone island by the zone's first corner, so the
-link alone names no pad). One status line
+link alone names no pad). On a zone-backed net both grades list, the
+`Disconnected components` count is KiCad's (links + 1) when that is larger
+than the copper grade's pads-only count, which is kept as `pad_components`
+(#1811): KiCad links every copper cluster, a fill island holding only a via
+included, so joining an open pad never raises the count. "Agrees" means in
+number as well as in name. One status line
 always says whether the cross-check ran, agreed, changed something, or could
 not run (no `kicad-cli`, a DRC timeout), so a silent clean pass is never
 ambiguous. `KICAD_NO_GRADE_RECONCILE=1` disables it.

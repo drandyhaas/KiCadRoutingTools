@@ -1072,7 +1072,8 @@ def reconcile_status_line(recon: dict) -> str:
     cross-check exists.
 
     `recon` keys: state (ran | did_not_run | disabled | not_applicable |
-    error), links, reclass, kicad_only, detail. Kept a pure function of that
+    error), links, reclass, kicad_only, count_differs, recounted, detail.
+    Kept a pure function of that
     dict so the wording is testable without a board.
     """
     st = recon.get('state')
@@ -1084,7 +1085,15 @@ def reconcile_status_line(recon: dict) -> str:
         if recon.get('kicad_only'):
             parts.append(f"flagged {recon['kicad_only']} net(s) KiCad-only "
                          "UNCONNECTED")
-        if not recon.get('reclass') and not recon.get('kicad_only'):
+        # #1811: agreement is in NUMBER as well as in name -- a listed net
+        # whose piece count differs from KiCad's link count + 1 does not agree.
+        if recon.get('count_differs'):
+            parts.append(f"counted {recon['count_differs']} listed net(s) "
+                         f"in a different number of pieces"
+                         + (f" ({recon['recounted']} raised to KiCad's count)"
+                            if recon.get('recounted') else ""))
+        if not recon.get('reclass') and not recon.get('kicad_only') \
+                and not recon.get('count_differs'):
             parts.append("agrees with copper grading")
         return "KiCad refill cross-check: " + ", ".join(parts)
     if st == 'did_not_run':
@@ -2639,6 +2648,35 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                     print(f"  {len(_rev)} net(s) UNCONNECTED per KiCad "
                           f"refill though copper grading passed them: "
                           f"{_names}")
+                # #1811: a poured net the copper grade ALREADY lists kept its
+                # pads-only piece count, whatever KiCad's refill said -- and
+                # KiCad links every copper cluster of the net, a via-only fill
+                # island included (test_island_link_semantics). So 3 KiCad
+                # links read as 1 join, and joining the open pad (3 clusters
+                # left, read through the KiCad-only path above) RAISED the
+                # count to 2. Take KiCad's count where it is larger, keep the
+                # pads-only one beside it, and say so.
+                for _i in issues:
+                    if (_i.get('unrouted') or _i.get('kicad_only')
+                            or _i['net_id'] not in _zone_net_ids):
+                        continue
+                    _nl = [lk for lk in _links if lk[0] == _i['net_name']
+                           and not _link_cross_board(lk)]
+                    _was = _i.get('num_components') or 0
+                    if len(_nl) + 1 == _was:
+                        continue
+                    _recon['count_differs'] = _recon.get('count_differs', 0) + 1
+                    if len(_nl) + 1 < _was:
+                        continue
+                    _i['pad_components'] = _was
+                    _i['num_components'] = len(_nl) + 1
+                    _note = (f"KiCad refill reports {len(_nl)} unconnected "
+                             f"link(s), {len(_nl) + 1} copper piece(s); "
+                             f"copper grading counted {_was} by pads alone "
+                             f"(a fill island holding no pad is a piece too)")
+                    _i['message'] = (f"{_i['message']}; {_note}"
+                                     if _i.get('message') else _note)
+                    _recon['recounted'] = _recon.get('recounted', 0) + 1
         except Exception as _re:
             _recon['state'] = 'error'
             _recon['detail'] = str(_re)
