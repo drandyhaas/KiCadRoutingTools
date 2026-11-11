@@ -1887,10 +1887,26 @@ def main(argv=None):
     # `template` WARN, which does not move the judge: say so here (#1387)
     off = [d for d in drift if d['tolerance_mm'] is not None
            and d['worst_mm'] > d['tolerance_mm'] + 1e-6]
-    if off:
+    # ...and one past TEMPLATE_BROKEN_FACTOR x is `template_broken`, an
+    # ERROR unless the intent demotes it, which the judge does rank (#1821)
+    broken = [d for d in off
+              if d['worst_mm'] > floorplan.TEMPLATE_BROKEN_FACTOR * d['tolerance_mm'] + 1e-6]
+    drifted = [d for d in off if d not in broken]
+    if broken:
+        demoted = intent.severity_of('template_broken', floorplan.ERROR) != floorplan.ERROR
+        print("  WARNING: pulled off its datasheet template, past "
+              f"{floorplan.TEMPLATE_BROKEN_FACTOR:g} x the tolerance: " + ', '.join(
+                  f"{d['ref']} ({d['anchor']}) {d['worst_mm']:.2f} mm > "
+                  f"{floorplan.TEMPLATE_BROKEN_FACTOR * d['tolerance_mm']:g}"
+                  for d in broken)
+              + ("; the intent demotes `template_broken` to a WARN, so the judge ranks "
+                 "the seed no lower for it" if demoted else
+                 "; check_floorplan grades this `template_broken`, an ERROR, so the "
+                 "judge ranks the seed below every seed that grades clean"))
+    if drifted:
         print("  WARNING: off its datasheet template past the tolerance: " + ', '.join(
             f"{d['ref']} ({d['anchor']}) {d['worst_mm']:.2f} mm > {d['tolerance_mm']:g}"
-            for d in off) + "; check_floorplan grades this a WARN (unless the intent's "
+            for d in drifted) + "; check_floorplan grades this a WARN (unless the intent's "
             "`severity` promotes `template`), so the judge ranks the seed no lower for it")
     # a keep-out that binds a template member but not its chip forbids the
     # template pose where the chip stands (#1387), as does a declared cover

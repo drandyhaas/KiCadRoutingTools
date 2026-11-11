@@ -8582,6 +8582,12 @@ def rule_replicate(ctx) -> Iterator[Violation]:
 #: How many off-arrangement parts a `replicate` finding names.
 NAMED_WORST = 6
 
+#: #1821: a template member whose worst pad is past this many times its
+#: template's `tolerance_mm` (1.5 mm at the default 0.3) is `template_broken`,
+#: an ERROR by default, not the WARN `template`: 0.5 mm and 17.6 mm off a
+#: template were one warning, and the judge ranked neither seed lower.
+TEMPLATE_BROKEN_FACTOR = 5.0
+
 
 def rule_template(ctx) -> Iterator[Violation]:
     """Each declared datasheet template's members at the poses it gives
@@ -8596,10 +8602,14 @@ def rule_template(ctx) -> Iterator[Violation]:
     hold its members exactly where it was fitted and still be wrong, as an
     output cap given only its VOUT partner is seated past the inductor, its
     ground far from the chip's. WARN by default (all three names); the
-    `severity` map may promote any. Every template is recorded on
-    `ctx.template_measured`, passing ones too."""
+    `severity` map may promote any. A member past `TEMPLATE_BROKEN_FACTOR`
+    x `tolerance_mm` is `template_broken` instead (#1821), ERROR by default
+    (`severity.template_broken: warn` demotes it), one finding per template
+    beside the `template` finding for its other members off. Every template
+    is recorded on `ctx.template_measured`, passing ones too."""
     from .templates import GROUND_RETURN_MM, ground_returns, measure
     sev = ctx.intent.severity_of('template', default=WARN)
+    sev_broken = ctx.intent.severity_of('template_broken', default=ERROR)
     sev_unres = ctx.intent.severity_of('template_unresolved', default=WARN)
     sev_ground = ctx.intent.severity_of('template_ground_return', default=WARN)
     for i, decl in enumerate(ctx.intent.templates):
@@ -8636,6 +8646,27 @@ def rule_template(ctx) -> Iterator[Violation]:
                     measured={'index': i, 'over': len(far), 'max_mm': w['return_mm'],
                               'worst': [c['ref'] for c in far[:NAMED_WORST]]},
                     expected={'ground_return_mm': limit})
+        # #1821: a member past TEMPLATE_BROKEN_FACTOR x the tolerance is not
+        # a drift but a stage pulled apart: `template_broken`, an ERROR by
+        # default, so the judge ranks the seed below one that kept the stage
+        # together; between 1x and that it stays the WARN `template`
+        limit = TEMPLATE_BROKEN_FACTOR * tol
+        broken = [m for m in off if m['worst_mm'] > limit + legality.EPS]
+        row['broken'] = len(broken)
+        if broken:
+            worst = broken[0]
+            yield Violation(
+                rule='template_broken', severity=sev_broken, ref=worst['ref'],
+                block=ctx.owner.get(worst['ref']),
+                message=(f"{key}: {len(broken)} of {len(row['members'])} member(s) more "
+                         f"than {TEMPLATE_BROKEN_FACTOR:g} x the {tol:g}mm tolerance off "
+                         f"the template -- worst {worst['ref']}, a pad "
+                         f"{worst['worst_mm']:.2f}mm from its template position"
+                         + (" (on the other face)" if worst['side_differs'] else '')),
+                measured={'index': i, 'broken': len(broken), 'max_mm': worst['worst_mm'],
+                          'worst': [m['ref'] for m in broken[:NAMED_WORST]]},
+                expected={'max_mm': round(limit, 4)})
+        off = [m for m in off if m not in broken]
         if not off:
             continue
         worst = off[0]
@@ -9392,6 +9423,9 @@ _NON_RULE_SEVERITIES = frozenset({
     # Beside `template`: a template naming a ref the board does not have is
     # a different claim from a drift. WARN by default, like the rule.
     'template_unresolved',
+    # #1821, beside `template`: a member far past its tolerance (a stage
+    # pulled apart) is a different claim from a drift. ERROR by default.
+    'template_broken',
     # Beside `template` too: a switching stage's cap returning its ground
     # far from the chip's is a claim about the template itself, which a
     # member exactly at its pose can still break. WARN by default.

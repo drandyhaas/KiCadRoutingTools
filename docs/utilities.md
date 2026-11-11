@@ -1544,7 +1544,8 @@ python3 -X utf8 py_tools/fit_template.py board.kicad_pcb --sketch u2.sketch.json
 
 `place_simple` seats and carries the template and prices each member's
 drift (`--template-weight`); `check_floorplan` grades it (`template`, a
-WARN), and a switching stage's ground returns (`template_ground_return`, a
+WARN; `template_broken`, an ERROR, for a member past 5 x its tolerance,
+#1821), and a switching stage's ground returns (`template_ground_return`, a
 WARN). Exit 0 fitted. Exit 2 means one of:
 - an unreadable input;
 - a sketch the board cannot fit: a partner listed after its member, or no

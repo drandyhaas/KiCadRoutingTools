@@ -1099,8 +1099,9 @@ leaving that pose expensive.
 7. **The rest is automatic.** `place_simple` seats and carries the template
    (`--template-weight`, default 100 per mm of drift), and `check_floorplan`
    grades each member's drift from its template pose (`template`, a WARN,
-   past 0.3 mm by default, the row's `tolerance_mm`). On the unplaced board
-   every member reads off its pose; that is expected. Report each template
+   past 0.3 mm by default, the row's `tolerance_mm`; `template_broken`, an
+   ERROR the judge ranks a seed last for, past 5 x that). On the unplaced
+   board every member reads off its pose, most past 5 x; that is expected. Report each template
    in REPORT.md: the datasheet and figure, the parts matched, and the drift
    graded on the final board.
 

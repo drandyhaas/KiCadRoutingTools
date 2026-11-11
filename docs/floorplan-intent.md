@@ -217,11 +217,11 @@ only -- `error` is refused, because the rule is advisory by design),
 `edge_oversubscribed` (raised by check_floorplan's grade and by
 `--plan-only`), `planar_nets` (#1818: raised by the grade and by
 `--plan-only` when the board's own `.kicad_dru` keeps a net on one layer with
-no via; no intent key arms it), plus nine more raised BESIDE a rule's own name —
+no via; no intent key arms it), plus ten more raised BESIDE a rule's own name —
 `decap_pin_distance_inferred` and `decap_pin_uncovered`,
 `proximity_unresolved`, `keep_away_unresolved`, `link_unresolved`,
-`replicate_unresolved`, `template_unresolved`, `template_ground_return` and
-`cover_unresolved`.
+`replicate_unresolved`, `template_unresolved`, `template_broken`,
+`template_ground_return` and `cover_unresolved`.
 One measurement can support several claims, and
 an author must be able to set their severities apart: a pin inferred from a net
 name and a pin the pad declares are not the same evidence, and a proximity
@@ -1591,7 +1591,11 @@ Two things read it:
   on the board. A template with a member past `tolerance_mm` (default 0.3)
   or on the other face is one finding naming the worst members; every
   template prints a line, and `--json` carries the readings as
-  `templates[]`.
+  `templates[]`. A member past 5 x `tolerance_mm` (1.5 mm at the default) is
+  not a drift but a stage pulled apart: it is `template_broken` instead
+  (#1821), **error** by default, so the seed judge ranks such a seed below
+  one that kept its stage together; `{"template_broken": "warn"}` demotes
+  it. The members between 1 x and 5 x stay the `template` warning.
 - **A keep-out against a template** (`plan_template_keepout`, **warn** by
   default, raised by `--plan-only`): a keep-out that binds a member but not
   the chip (the chip's reference is in its `allow`, the member's is not)
