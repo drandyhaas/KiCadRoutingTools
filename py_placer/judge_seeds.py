@@ -440,6 +440,10 @@ def _line(res):
 
 
 def main(argv=None):
+    # each line reaches a pipe or a log when it is printed, not with the
+    # next seed's result (#1825)
+    import cli_banner
+    cli_banner.line_buffer_streams()
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('judge', help="place_simple's judge.json; the seeds' boards are beside it")
     ap.add_argument('--chain', required=True,

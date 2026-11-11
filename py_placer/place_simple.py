@@ -1336,6 +1336,9 @@ def _pass_counts(passes):
 
 
 def main(argv=None):
+    # each line reaches a pipe or a log when it is printed, not at exit (#1825)
+    import cli_banner
+    cli_banner.line_buffer_streams()
     ap = build_parser()
     a = ap.parse_args(argv)
     if not a.plan_checked and not a.preview:

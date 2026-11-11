@@ -107,6 +107,27 @@ def install_dash_hint() -> None:
     argparse.ArgumentParser.error = error
 
 
+def line_buffer_streams() -> None:
+    """Line-buffer stdout and stderr when they are not a tty (run-7 A11).
+
+    Redirected to a file or a pipe, stdout is BLOCK-buffered, so a run that
+    is killed -- a timeout, a stall, a closed session -- loses whatever sits
+    in the 8KB buffer, and a reader on a pipe sees nothing until the run
+    exits. One run-7 board's legalize log ended at 200 bytes that way, and
+    the stage was read as a silent no-op when it had in fact repaired 7
+    parts. These are minute-scale tools whose logs are the evidence; a
+    syscall per line is the right trade. A tty is already line-buffered, so
+    this only changes the redirected case. Called by `install`, and on its
+    own by the tools that print no banner (place_simple, judge_seeds:
+    #1825), whose seed children run the same `main`."""
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            if not _stream.isatty():
+                _stream.reconfigure(line_buffering=True)
+        except Exception:      # non-reconfigurable wrapper (a test's StringIO)
+            pass
+
+
 def install(run_started: float | None = None) -> None:
     """Print the CMD banner now; print EXIT=<rc> when the process ends."""
     global _installed
@@ -114,19 +135,7 @@ def install(run_started: float | None = None) -> None:
         return
     _installed = True
     install_dash_hint()
-    # Line-buffer the log (run-7 A11). Redirected to a file, stdout is
-    # BLOCK-buffered, so a run that is killed -- a timeout, a stall, a closed
-    # session -- loses whatever sits in the 8KB buffer. One run-7 board's
-    # legalize log ended at 200 bytes that way, and the stage was read as a
-    # silent no-op when it had in fact repaired 7 parts. These are minute-scale
-    # tools whose logs are the evidence; a syscall per line is the right trade.
-    # A tty is already line-buffered, so this only changes the redirected case.
-    for _stream in (sys.stdout, sys.stderr):
-        try:
-            if not _stream.isatty():
-                _stream.reconfigure(line_buffering=True)
-        except Exception:      # non-reconfigurable wrapper: keep the banner
-            pass
+    line_buffer_streams()
     print(f"CMD: {command_line()}", flush=True)
     # #653: the knobs that were actually in the environment. Printed next to
     # CMD because they are the OTHER half of "how was this invoked" -- a knob
