@@ -8743,7 +8743,8 @@ def mount_report(intent, pcb, pcb_file='', heights=None) -> List[Dict[str, objec
     a removable one over its way in), and since #1537 what stands at each
     of its own hole sites (`holes[]`, `_hole_sites`). `mountable` is False
     when a standoff is missing, off its place or off the board, a hole site
-    has a part, pad or other-net copper in its screw-head ring, a pair is
+    has a part, pad or other-net copper in its screw-head ring or lies past
+    the outline (#1823), a pair is
     refused, or two bodies each block the other's way in; None when the cover is not
     resolved on this board. Facts for `rule_mountable` and check_assembly;
     the body's overhang past the outline is reported, not judged (a module
@@ -8903,6 +8904,12 @@ def _ring_gap(g, fp, pose, x, y, far) -> Optional[float]:
                for b in rects)
 
 
+#: vertices of the polygon a cover's hole site's drill circle is measured on
+#: against the outline (#1823): inscribed, so it reads at most
+#: r * (1 - cos(pi / 64)), under 2 um for a 3 mm drill, short of the circle
+_SITE_CIRCLE_N = 64
+
+
 def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, object]]:
     """#1537: each of a cover's own mounting holes (`holes[]`), where the row
     puts it -- `length_mm` along the axis, `off_mm` to the left of the centre
@@ -8915,8 +8922,11 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
     occupancy box) and the pads and
     other-net copper inside it, on either face (the screw passes through the
     board). A site with anything in it appends to `why`; a free site with no
-    standoff yet is reported (`standoff` None), not judged, and so is a site
-    past the outline, as the body's own overhang is.
+    standoff yet is reported (`standoff` None), not judged. A site whose
+    drill circle reaches past the outline (`past_outline_mm`, measured on the
+    circle) does not fit and appends to `why` (#1823): no standoff can be
+    fitted where there is no board. The body's own overhang stays reported,
+    not judged.
 
     The cover's own connector is reported at a site, not judged (#1589):
     the site is drawn in that connector's frame, so no placement moves one
@@ -8959,15 +8969,25 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
             gaps = [g for g in [con_gap] + [p['gap_mm'] for p in con_pads] if g is not None]
             reach_con = {'ref': con, 'gap_mm': min(gaps),
                          'pads': [p['pad'] for p in con_pads]}
+        # #1823: how far the drill circle itself reaches past the outline, a
+        # distance read on the circle (a bbox corner leaves a round board
+        # where the hole does not). No standoff can be fitted where there
+        # is no board, so such a site does not fit.
+        past = gate.points_overrun_mm(
+            (x + d / 2 * math.cos(2 * math.pi * i / _SITE_CIRCLE_N),
+             y + d / 2 * math.sin(2 * math.pi * i / _SITE_CIRCLE_N))
+            for i in range(_SITE_CIRCLE_N))
         site = {'index': k, 'at': [round(x, 3), round(y, 3)], 'length_mm': hl['length_mm'],
                 'off_mm': hl['off_mm'], 'diameter_mm': d, 'reach_mm': round(far, 3),
                 'standoff': st.ref if st is not None else None,
-                'past_outline_mm': round(gate.rect_outside_amount((x - d / 2, y - d / 2,
-                                                                   x + d / 2, y + d / 2)), 3),
+                'past_outline_mm': round(past, 3),
                 'parts': parts, 'pads': pads, 'copper': copper, 'connector': reach_con}
-        site['fits'] = not (parts or pads or copper)
+        site['fits'] = not (parts or pads or copper) and not site['past_outline_mm']
         out.append(site)
-        if not site['fits']:
+        if site['past_outline_mm']:
+            why.append(f"hole {k + 1} ({hl['length_mm']:g}mm along, {hl['off_mm']:+g}mm off) "
+                       f"is {site['past_outline_mm']:g}mm past the outline: no standoff can be fitted there")
+        if parts or pads or copper:
             what = ([p['ref'] for p in parts]
                     + [f"pad {p['ref']}.{p['pad']}" for p in pads if p['ref'] not in
                        {q['ref'] for q in parts}]

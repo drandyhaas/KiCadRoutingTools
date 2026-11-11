@@ -421,14 +421,16 @@ def main():
                 print(f"      {w}")
             # #1537: each of the body's own hole sites, the free ones too
             for s in m.get('holes') or ():
+                _ring = bool(s['parts'] or s['pads'] or s['copper'])
                 print(f"      hole {s['index'] + 1} at ({s['at'][0]:.2f}, {s['at'][1]:.2f}), "
                       f"{s['diameter_mm']:g}mm, ring {s['reach_mm']:.2f}mm: "
                       + (f"standoff {s['standoff']}" if s['standoff'] else 'no standoff')
-                      + (', site clear' if s['fits'] else
-                         f", {len(s['parts'])} part(s), {len(s['pads'])} pad(s), "
-                         f"{len(s['copper'])} track/via(s) in the ring")
-                      + (f", {s['past_outline_mm']:g}mm past the outline"
-                         if s['past_outline_mm'] > 0 else '')
+                      + (', site clear' if s['fits'] else '')
+                      + (f", {len(s['parts'])} part(s), {len(s['pads'])} pad(s), "
+                         f"{len(s['copper'])} track/via(s) in the ring" if _ring else '')
+                      # #1823: a site past the outline does not fit
+                      + (f", {s['past_outline_mm']:g}mm past the outline: no board "
+                         f"under the hole" if s['past_outline_mm'] > 0 else '')
                       # #1589: its own connector, drawn in the same frame
                       + (f"; its connector {s['connector']['ref']} reaches the ring "
                          f"({s['connector']['gap_mm']:g}mm), not judged"

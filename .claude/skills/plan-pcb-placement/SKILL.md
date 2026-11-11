@@ -713,7 +713,7 @@ under a card, and a tall part can be placed there.
    row puts it: fix the row, or move the standoff. A `mountable` warning
    names why a body cannot go on (a standoff off the board, a part too tall
    under it, another body in its way, a part, pad or track at one of its
-   hole sites); check_assembly prints the same per
+   hole sites, a hole site past the outline); check_assembly prints the same per
    cover, with the order the cards go in.
 
 `place_simple` then holds each standoff at its length from the connector.

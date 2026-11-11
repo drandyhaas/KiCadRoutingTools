@@ -1732,9 +1732,11 @@ drawing gives, and one rule grades whether it can go on:
   `place_simple` seats it on (#1300), which the keep-out readers read it on
   too (#1730). So a keep-out of the ring's radius on a site holds every part
   the ring would name. A site with anything in it makes the
-  cover NOT mountable and is named in the finding; a clear site with no
-  standoff yet is reported (`standoff: null`), not judged, and so is a site
-  past the outline. Report only: `place_simple` does not price the sites.
+  cover NOT mountable and is named in the finding, and so does a site whose
+  drill circle reaches past the outline (`past_outline_mm`, read on the
+  circle, #1823): no standoff can be fitted where there is no board. A clear
+  site with no standoff yet is reported (`standoff: null`), not judged.
+  Report only: `place_simple` does not price the sites.
   Before routing, `add_rule_area.py --mounting-holes --intent <this intent>`
   writes each site's ring as a tracks-and-vias keep-out, so the router keeps
   copper out of it (#1636, `docs/utilities.md`).
