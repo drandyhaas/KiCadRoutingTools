@@ -165,12 +165,14 @@ And across the buckets:
     says what it means: an `electrically-short` pair has nothing to fix and
     records no tolerance, so `check_drc` grades it only under a `.kicad_dru`
     rule the board declares; on any other pair, fix that failure.
-  - `skipped`: `reason` `ac-coupled-xnet`, matched end to end by the AC-coupled
-    pass (`--ac-couple-match`). The number to read is
-    `ac_coupled_xnets[].skew_mm` (the record there also names its `nets` and
-    `bridges`), not the per-side `delta_mm`. It records no tolerance, so nothing
-    grades it: compare it with `tolerance_mm`. Not the `pair_reports` `outcome`
-    of the same name, a different field.
+  - `skipped`: `reason` `ac-coupled-xnet`, left to the end-to-end AC-coupled
+    pass (`--ac-couple-match`). Read the chain's own row,
+    `ac_coupled_xnets[]` (`nets`, `bridges`, `skew_mm` -- both sides summed on
+    the shipped copper -- `tolerance_mm`, and a `status` / `reason` in this
+    same vocabulary), not the per-side `delta_mm`. The chain's tolerance is
+    recorded on the board, so `check_drc` grades it end to end
+    (`chain-skew-out-of-range`) and `board_score` counts it (#1799). Not the
+    `pair_reports` `outcome` of the same name, a different field.
   - `unmatched`: over the tolerance, or not measurable yet. `reason`:
     `no-room-for-meanders` (no bump fits beside the shorter leg),
     `meanders-would-worsen`, `meanders-ran-out` (the bumps that fit fall short),

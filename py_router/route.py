@@ -1312,9 +1312,11 @@ def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
     import copy as _copy
     try:
         from check_drc import (skew_rule_groups, skew_group_snapshot,
-                               skew_moved_out_of_range)
+                               skew_moved_out_of_range, recorded_chain_groups)
         if before is None:
             groups, _u = skew_rule_groups(skew_path, pcb_data)
+            groups = list(groups) + [(None, p + n) for _c, p, n in
+                                     recorded_chain_groups(skew_path, pcb_data)]
             names = set(scope_names)
             if not any(pcb_data.nets[m].name in names for _r, ms in groups
                        for m in ms if m in pcb_data.nets):

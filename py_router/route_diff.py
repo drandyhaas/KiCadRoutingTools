@@ -451,8 +451,9 @@ def _nothing_to_do_document(status: str, extra: Optional[dict] = None) -> dict:
 
 def intra_pair_reports_to_record(intra_pair_reports, pair_reports):
     """The intra-pair records a step writes a tolerance for (#1503), which the
-    graders then hold the pair to. Not a `skipped` pair, matched end to end by
-    the AC-coupled pass, and not a pair too short to couple (#1669): nothing
+    graders then hold the pair to. Not a `skipped` pair, left to the
+    AC-coupled pass (its chain is recorded end to end instead, #1799), and
+    not a pair too short to couple (#1669): nothing
     matched it and no copper at this step can, so its skew stays measured and
     disclosed, and only a .kicad_dru rule the board declares grades it."""
     too_short = {r['pair'] for r in pair_reports
@@ -2323,13 +2324,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print("End-to-end AC-coupled diff-pair length matching (#196)")
         print("=" * 60)
         for _xn in ac_xnets:
-            _skew = apply_ac_coupled_length_matching(_xn, routed_results, config, pcb_data)
-            if _skew is not None:
-                ac_coupled_summary.append({
-                    'nets': "+".join(_xn.base_names),
-                    'skew_mm': round(_skew, 4),
-                    'bridges': _xn.bridge_refs,
-                })
+            _acr = apply_ac_coupled_length_matching(_xn, routed_results, config, pcb_data)
+            # #1799: the pass's own verdict; re-read off the shipped copper
+            # below (regrade_ac_chains), as the per-pair records are.
+            ac_coupled_summary.append({
+                'nets': "+".join(_xn.base_names),
+                'skew_mm': _acr['skew_mm'],
+                'tolerance_mm': _acr['tolerance_mm'],
+                'status': _acr['status'], 'reason': _acr['reason'],
+                'bridges': _xn.bridge_refs,
+                'p_nets': [pcb_data.nets[i].name for i in _xn.p_net_ids],
+                'n_nets': [pcb_data.nets[i].name for i in _xn.n_net_ids],
+            })
 
     # Sync pcb_data with length-matched segments
     # Stub layer-swap vias ride all_swap_vias, not any result's new_vias, and
@@ -2565,7 +2571,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             for r in intra_pair_reports_to_record(intra_pair_reports, pair_reports)})
         print(f"\n  Intra-pair (shipped copper, #1303): {len(_im)}/{len(_im) + len(_iu)} "
               f"pair(s) within {'/'.join(f'{t:g}' for t in _tols) or config.length_match_tolerance}mm"
-              + (f" ({len(_isk)} matched end-to-end by the AC-coupled pass)"
+              + (f" ({len(_isk)} left to the end-to-end AC-coupled pass)"
                  if _isk else ""))
         if _iu:
             print(f"  {RED}Intra-pair NOT matched: " + ", ".join(
@@ -2575,6 +2581,32 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                    if r.get('matcher_status') in ('matched', 'within-tolerance')
                    and r.get('matcher_delta_mm') is not None else "")
                 + ")" for r in _iu) + RESET)
+
+    # #1799: each AC-coupled chain's verdict from the shipped copper (both
+    # sides summed, chain_length), and its tolerance recorded on the board
+    # so check_drc / board_score grade the chain end to end from now on.
+    if ac_coupled_summary:
+        from length_matching import regrade_ac_chains
+        regrade_ac_chains(ac_coupled_summary, pcb_data)
+        _cm = [r for r in ac_coupled_summary
+               if r['status'] in ('matched', 'within-tolerance')]
+        _cu = [r for r in ac_coupled_summary if r not in _cm]
+        from protected_nets import note_intra_pair_tolerances, AC_CHAIN_PREFIX
+        note_intra_pair_tolerances({
+            AC_CHAIN_PREFIX + r['nets']: {
+                'p_nets': r['p_nets'], 'n_nets': r['n_nets'],
+                'bridges': r['bridges'], 'tolerance_mm': r['tolerance_mm'],
+                'source': 'cli' if intra_pair_tolerance is not None else 'default'}
+            for r in ac_coupled_summary if r.get('tolerance_mm') is not None})
+        _ctol = sorted({r['tolerance_mm'] for r in ac_coupled_summary})
+        print(f"  AC-coupled chains (shipped copper, #1799): {len(_cm)}/"
+              f"{len(ac_coupled_summary)} within "
+              f"{'/'.join(f'{t:g}' for t in _ctol)}mm end to end")
+        if _cu:
+            print(f"  {RED}AC-coupled chain NOT matched: " + ", ".join(
+                f"{r['nets']} ({r['reason'] or r['status']}"
+                + (f", skew={r['skew_mm']:.3f}mm" if r['skew_mm'] is not None else "")
+                + ")" for r in _cu) + RESET)
 
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)

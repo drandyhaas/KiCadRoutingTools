@@ -3950,18 +3950,62 @@ def skew_rule_groups(path, pcb_data, skew_rules=None, *, names=None,
     return out, undecided
 
 
+def recorded_chain_groups(path, pcb_data):
+    """[(chain record, P net ids, N net ids)] for every AC-coupled chain the
+    board's records hold (#1799, `kicad_dru.recorded_ac_chains`) whose nets
+    are all on the board. One definition for check_drc's grade, the #1759
+    snapshot and the graze passes' read-only set."""
+    from kicad_dru import recorded_ac_chains
+    ids = {n.name: nid for nid, n in pcb_data.nets.items() if nid and n.name}
+    out = []
+    for ch in recorded_ac_chains(path):
+        p = [ids.get(n) for n in ch['p_nets']]
+        n = [ids.get(x) for x in ch['n_nets']]
+        if None in p or None in n:
+            continue
+        out.append((ch, tuple(p), tuple(n)))
+    return out
+
+
+def chain_skew_row(pcb_data, ch):
+    """One recorded chain's end-to-end grade (#1799): {'skew_mm', 'p_mm',
+    'n_mm', 'excess_mm', 'spans_differ', 'measure'} on
+    `chain_length.pair_chain_skew`, or None when a side is unmeasured."""
+    from chain_length import pair_chain_skew
+    m = pair_chain_skew(pcb_data, ch['p_nets'], ch['n_nets'])
+    if m['skew_mm'] is None:
+        return None
+    return {'skew_mm': m['skew_mm'], 'p_mm': m['p']['track_mm'],
+            'n_mm': m['n']['track_mm'],
+            'excess_mm': round(max(m['skew_mm'] - ch['tolerance_mm'], 0.0), 4),
+            'spans_differ': m['spans_differ'], 'measure': m}
+
+
 def skew_group_snapshot(pcb_data, path, scope_ids=None):
     """{(rule name, members): row} for every group a skew rule grades
     (skew_rule_groups) with a member in `scope_ids` (all when None), measured
     as check_drc grades it (`net_match_length(mode 'total')`). A row carries
     the group's spread (`skew_mm`, longest minus shortest), its bounds and
     `excess_mm`, how far the worst member is out of them (0 within); None for
-    a group a member of which cannot be measured. {} when no rule binds."""
+    a group a member of which cannot be measured. {} when no rule binds.
+    A recorded AC-coupled chain (#1799) is one group, keyed by its rule name
+    and every net of both sides, graded end to end (`chain_skew_row`)."""
     groups, _undecided = skew_rule_groups(path, pcb_data)
-    if not groups:
-        return {}
-    from net_queries import net_match_length
     out = {}
+    for ch, p_ids, n_ids in recorded_chain_groups(path, pcb_data):
+        members = p_ids + n_ids
+        if scope_ids is not None and not any(m in scope_ids for m in members):
+            continue
+        row = chain_skew_row(pcb_data, ch)
+        key = (f"chain {ch['name']}", members)
+        out[key] = None if row is None else {
+            'nets': list(ch['p_nets']) + list(ch['n_nets']),
+            'rule': f"AC-coupled chain {ch['name']}",
+            'skew_mm': row['skew_mm'], 'min_mm': None,
+            'max_mm': ch['tolerance_mm'], 'excess_mm': row['excess_mm']}
+    if not groups:
+        return out
+    from net_queries import net_match_length
     for rule, members in groups:
         if scope_ids is not None and not any(m in scope_ids for m in members):
             continue
@@ -4042,7 +4086,9 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     # #1503: with the pairs a route_diff step matched, at the tolerance it
     # matched them to, wherever the .kicad_dru's own rule does not bind them
     rules, notes = board_skew_rules(path, kinds=('skew', 'diff_pair_uncoupled'))
-    if not rules:
+    # #1799: and the AC-coupled chains a route_diff step matched end to end
+    chains = recorded_chain_groups(path, pcb_data)
+    if not rules and not chains:
         if notes and not quiet:
             for n in notes:
                 print(f"  .kicad_dru: {n}")
@@ -4140,6 +4186,36 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                 'limit_mm': rp.max_mm,
                 'gap_window': [gmin, gap.max]})
 
+    # ---- recorded AC-coupled chains (#1799) ---------------------------
+    # Each side's nets summed (chain_length), |P - N| against the tolerance
+    # the chain was matched to. KiCad has no rule that sums a polarity across
+    # nets, so this row has no KiCad counterpart.
+    from chain_length import chain_label
+    from kicad_dru import RECORDED_AC_CHAIN_RULE
+    n_chain = 0
+    for ch, p_ids, n_ids in chains:
+        if not any(in_scope(m) for m in p_ids + n_ids):
+            continue
+        row = chain_skew_row(pcb_data, ch)
+        if row is None:
+            unmeasured.append(f"chain {ch['name']}")
+            continue
+        n_chain += 1
+        if row['skew_mm'] <= ch['tolerance_mm'] + 1e-6:
+            continue
+        p_lab, n_lab = chain_label(ch['p_nets']), chain_label(ch['n_nets'])
+        short, long_ = ((p_lab, n_lab) if row['p_mm'] < row['n_mm']
+                        else (n_lab, p_lab))
+        violations.append({
+            'type': 'chain-skew-out-of-range', 'net1': short, 'net2': long_,
+            'chain': ch['name'], 'rule': RECORDED_AC_CHAIN_RULE,
+            'severity': 'error', 'skew_mm': row['skew_mm'],
+            'length_mm': min(row['p_mm'], row['n_mm']),
+            'target_mm': max(row['p_mm'], row['n_mm']), 'bound': 'max',
+            'limit_mm': ch['tolerance_mm'], 'min_mm': None,
+            'max_mm': ch['tolerance_mm'], 'bridges': ch['bridges'],
+            'spans_differ': row['spans_differ']})
+
     from kicad_dru import unbound_length_rules
     unbound = [r.name for kind_rules in (skew_rules, unc_rules)
                for r in unbound_length_rules(kind_rules, names, member)]
@@ -4151,6 +4227,10 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                'uncoupled_graded': n_unc,
                'uncoupled_over': sum(1 for v in violations
                                      if v['type'] == 'diff-pair-uncoupled'),
+               'chains_graded': n_chain,
+               'chains_out_of_range': sum(
+                   1 for v in violations
+                   if v['type'] == 'chain-skew-out-of-range'),
                'unmeasured': unmeasured,
                'not_graded': {k: {'reason': r, 'nets': nn}
                               for k, (r, nn) in undecided.items()}}
@@ -4162,6 +4242,10 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
               + (f"; {len(unmeasured)} not measured (pads not joined by track "
                  f"copper): {', '.join(unmeasured[:4])}"
                  + (' ...' if len(unmeasured) > 4 else '') if unmeasured else ''))
+        if chains:
+            print(f"  AC-coupled chains (recorded by route_diff, #1799): "
+                  f"{n_chain} graded end to end, "
+                  f"{summary['chains_out_of_range']} out of tolerance")
         for rname, (why, nn) in undecided.items():
             print(f"  NOT GRADED: rule '{rname}' ({why}) -- {len(nn)} net(s)/pair(s) "
                   f"it may bind are not graded here; KiCad still grades them")
@@ -8237,6 +8321,18 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    .kicad_dru rule '{v['rule']}'"
                               + (" (within_diff_pairs)" if v.get('within_diff_pairs') else '')
                               + " (KiCad: skew_out_of_range)")
+                    elif vtype == 'chain-skew-out-of-range':
+                        print(f"  {v['net1']}: {v['skew_mm']:.4f}mm shorter than "
+                              f"{v['net2']} end to end ({v['length_mm']:.4f} vs "
+                              f"{v['target_mm']:.4f}mm of track), max "
+                              f"{v['limit_mm']:.4f}mm")
+                        print(f"    AC-coupled chain {v['chain']} via "
+                              f"{', '.join(v.get('bridges') or ()) or '?'}, "
+                              f"recorded by route_diff (#1799; no KiCad rule "
+                              f"grades a chain)"
+                              + ("; the series parts' spans differ between "
+                                 "the sides and are not counted"
+                                 if v.get('spans_differ') else ''))
                     elif vtype == 'diff-pair-uncoupled':
                         print(f"  {v['net1']} / {v['net2']}: uncoupled "
                               f"{v['uncoupled_mm']:.4f}mm > max {v['limit_mm']:.4f}mm "

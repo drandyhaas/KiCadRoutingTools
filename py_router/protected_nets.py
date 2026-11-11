@@ -52,6 +52,13 @@ POWER_WIDTHS_KEY = "power_widths"
 #: | 'dru' | 'default'} -- what the graders hold a pair to when no
 #: .kicad_dru skew rule binds it (`kicad_dru.recorded_intra_pair_rules`).
 INTRA_KEY = "intra_pair_tolerance"
+#: #1799: the same map carries each AC-coupled chain a route_diff step
+#: matched end to end, keyed AC_CHAIN_PREFIX + its pairs joined by '+':
+#: {'p_nets': [...], 'n_nets': [...] (each side's nets in lane order),
+#: 'bridges': [refs], 'tolerance_mm', 'source'} -- graded end to end
+#: (`kicad_dru.recorded_ac_chains`, check_drc). No 'n' key, so the pair
+#: reader passes over it.
+AC_CHAIN_PREFIX = "ac-chain:"
 
 _GLOB_CHARS = set('*?[')
 

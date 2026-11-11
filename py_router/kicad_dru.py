@@ -613,8 +613,11 @@ def recorded_intra_pair_rules(board_path: str) -> List[LengthRule]:
         rec = read_intra_pair_tolerances(pro_path_for_board(board_path))
     except Exception:
         return []
+    from protected_nets import AC_CHAIN_PREFIX
     out = []
     for p, r in sorted(rec.items()):
+        if p.startswith(AC_CHAIN_PREFIX):
+            continue                      # a chain: recorded_ac_chains (#1799)
         try:
             tol = float(r['tolerance_mm'])
         except (KeyError, TypeError, ValueError):
@@ -625,6 +628,41 @@ def recorded_intra_pair_rules(board_path: str) -> List[LengthRule]:
         out.append(LengthRule(RECORDED_INTRA_RULE, None, None, tol,
                               (('netname', p), ('netname', n)), '', 'error',
                               'skew', True))
+    return out
+
+
+#: the name a recorded AC-coupled chain grades under (#1799)
+RECORDED_AC_CHAIN_RULE = 'route_diff AC-coupled chain (recorded)'
+
+
+def recorded_ac_chains(board_path: str) -> List[dict]:
+    """The AC-coupled chains the board's records hold (#1799): one per chain
+    a route_diff step matched end to end with --ac-couple-match, as
+    {'name', 'p_nets', 'n_nets', 'bridges', 'tolerance_mm', 'source'}. KiCad
+    has no rule that sums a polarity across nets, so check_drc alone grades
+    them (`chain_length.pair_chain_skew`)."""
+    if not board_path:
+        return []
+    try:
+        from protected_nets import (AC_CHAIN_PREFIX, pro_path_for_board,
+                                    read_intra_pair_tolerances)
+        rec = read_intra_pair_tolerances(pro_path_for_board(board_path))
+    except Exception:
+        return []
+    out = []
+    for key, r in sorted(rec.items()):
+        if not key.startswith(AC_CHAIN_PREFIX) or not isinstance(r, dict):
+            continue
+        try:
+            tol = float(r['tolerance_mm'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        p, n = list(r.get('p_nets') or ()), list(r.get('n_nets') or ())
+        if len(p) < 2 or len(p) != len(n):
+            continue
+        out.append({'name': key[len(AC_CHAIN_PREFIX):], 'p_nets': p,
+                    'n_nets': n, 'bridges': list(r.get('bridges') or ()),
+                    'tolerance_mm': tol, 'source': r.get('source')})
     return out
 
 

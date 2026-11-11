@@ -120,14 +120,17 @@ def _skew_bound_net_ids(pcb_data):
     intra-pair tolerances and its .kicad_dru skew rules. The graze passes
     that change copper LENGTH leave these nets' INPUT copper alone: a pair an
     earlier step matched has no re-match in a later route.py step, so a
-    re-bend that straightened its meander shipped it out of tolerance."""
+    re-bend that straightened its meander shipped it out of tolerance.
+    A recorded AC-coupled chain's nets (#1799) are skew-graded too."""
     try:
-        from check_drc import skew_rule_groups
-        groups, _undecided = skew_rule_groups(
-            getattr(pcb_data, 'source_path', '') or '', pcb_data)
+        from check_drc import skew_rule_groups, recorded_chain_groups
+        path = getattr(pcb_data, 'source_path', '') or ''
+        groups, _undecided = skew_rule_groups(path, pcb_data)
+        chains = recorded_chain_groups(path, pcb_data)
     except Exception:
         return set()
-    return {m for _rule, members in groups for m in members}
+    return ({m for _rule, members in groups for m in members}
+            | {m for _ch, p, n in chains for m in p + n})
 
 
 @dataclass

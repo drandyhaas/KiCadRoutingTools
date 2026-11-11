@@ -4032,11 +4032,12 @@ runs", defines them and each `reason`):
 - `not-matchable` on an `electrically-short` pair: nothing. No copper at this
   step can match it, `delta_mm` stays measured, and it records no tolerance, so
   `check_drc` grades it only under a `.kicad_dru` rule the board declares.
-- `skipped` (`ac-coupled-xnet`): nothing at this step. The AC-coupled pass
-  matched the pair end to end, so the number to read is
-  `ac_coupled_xnets[].skew_mm`, not the per-side `delta_mm`. It records no
-  tolerance and nothing grades it, so compare it with `tolerance_mm` yourself
-  and report it if it is over.
+- `skipped` (`ac-coupled-xnet`): nothing at this step. The pair is matched
+  end to end with its chain, so read the chain's row in `ac_coupled_xnets[]`
+  (`skew_mm`, `tolerance_mm`, `status`), not the per-side `delta_mm`. The
+  chain's tolerance is recorded, so `check_drc` grades it
+  (`chain-skew-out-of-range`) and `board_score` counts it (#1799); a chain
+  over it is a shipped blocker like any other `unmatched` pair below.
 - `unmatched` with `reason` `not-measured`, on a pair whose members are in
   `single_ended_followup_nets` with reason `peeled-terminals` (a peeled
   pair): nothing yet. It has no length

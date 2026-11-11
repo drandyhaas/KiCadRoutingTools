@@ -102,7 +102,9 @@ VIA_PASTE_TYPES = frozenset({'via-in-paste'})
 # (check_drc's pair-rule pass, KiCad's skew_out_of_range and
 # diff_pair_uncoupled_length_too_long). Split out of `drc` into the
 # `diff_pairs` component, which carries each pair's measurement beside them.
-PAIR_RULE_TYPES = frozenset({'skew-out-of-range', 'diff-pair-uncoupled'})
+# #1799: and a recorded AC-coupled chain's end-to-end skew (no KiCad rule).
+PAIR_RULE_TYPES = frozenset({'skew-out-of-range', 'diff-pair-uncoupled',
+                             'chain-skew-out-of-range'})
 
 _DRC_TOTAL = re.compile(r'^FOUND (\d+) DRC VIOLATIONS', re.M)
 # The per-type header carries an OPTIONAL suffix between the count and the
@@ -1067,7 +1069,16 @@ def score_diff_pairs(board: str, drc: dict, pcb=None) -> dict:
     if unbound:
         detail['unbound_rules'] = [r.name for r in unbound]
     live = [r for r in rules if all(r is not u for u in unbound)]
-    if not live:
+    # #1799: an AC-coupled chain a route_diff step matched end to end is
+    # recorded with its tolerance, and check_drc grades it: a declaration.
+    try:
+        from check_drc import recorded_chain_groups
+        chains = [ch['name'] for ch, _p, _n in recorded_chain_groups(board, pcb)]
+    except Exception:                                        # noqa: BLE001
+        chains = []
+    if chains:
+        detail['ac_coupled_chains'] = chains
+    if not live and not chains:
         why = ('no .kicad_dru skew / diff_pair_uncoupled rule declares what '
                'the pairs must meet' if not rules else
                f"the .kicad_dru rule(s) {', '.join(repr(r.name) for r in unbound)} "
