@@ -794,7 +794,10 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'plan_template_keepout',
                                         # #1443: a cover the board cannot
                                         # resolve
-                                        'cover_unresolved'}
+                                        'cover_unresolved',
+                                        # #1818: a pad a one-layer, no-via
+                                        # net cannot reach
+                                        'planar_nets'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         # Two names accept one direction only, and say so at load:

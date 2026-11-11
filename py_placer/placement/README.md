@@ -661,6 +661,14 @@ contract.
   can is solid: on thunderscope, where the human board puts 354 parts under
   four cans and a heatsink, the placer ended with 6 and 16 parts illegal, and
   placed cleanly only with the cans removed.
+- **The order of one-layer, no-via nets.** `check_floorplan`'s `planar_nets`
+  finds a pad such a net cannot reach on its layer (#1818), but not two such
+  nets that must cross between the parts they join, for example two
+  connectors whose pins come in opposite orders. A check could take the
+  pair's order inversions (`pair_order.pair_inversions`), route one net on
+  its layer, stamp it, and ask whether the other still reaches its pads
+  (`reachability.pad_reachability` on that one layer), in both orders, naming
+  the part a track passes behind when only one order completes.
 - **Rows formed after placement.** A declared `arrays[]` row is graded only.
   A pass after the anneal could line a row's members up inside the space
   they already took, keeping their order, pitch and one rotation, and keep

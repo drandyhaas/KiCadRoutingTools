@@ -46,7 +46,7 @@ import math
 import os
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from kicad_parser import non_aperture_pads
 from . import legality
@@ -9362,7 +9362,11 @@ _NON_RULE_SEVERITIES = frozenset({
     # board does not have (ERROR), or one the anchor cannot grade (WARN).
     'fixed_pose_unresolved',
     # #1060: a declared courtyard waiver, disclosed (WARN by default).
-    'fixed_pose_overlap_waived'})
+    'fixed_pose_overlap_waived',
+    # #1818. Raised by `grade` and `plan_check` (`planar_net_findings`),
+    # armed by the BOARD's .kicad_dru rather than an intent key: a pad its
+    # one-layer, no-via net cannot reach. ERROR by default.
+    'planar_nets'})
 
 #: Every rule name an intent may set a severity for. Derived from `RULES`, so a
 #: new rule is settable the moment it is registered -- a hand-listed set would
@@ -10657,6 +10661,69 @@ def _planned_sides(intent: Intent,
     return declared_sides(declared_side_claims(intent, blocks))[0]
 
 
+def planar_net_findings(intent: Intent, pcb_data, pcb_file: str, *,
+                        sides: Optional[Dict[str, str]] = None,
+                        unsettled: Iterable[str] = ()) -> List[Violation]:
+    """#1818: one `planar_nets` finding per part with a pad its net cannot
+    reach: the board's `.kicad_dru` keeps the net on one copper layer with no
+    via (`net_keepouts.planar_nets`, read as the routing steps read it) and
+    the pad has no copper on that layer. No placement routes such a net to
+    that pad; route.py leaves it open. ERROR unless the intent's severity map
+    demotes it. Armed by the BOARD's rules file, with no intent key: on a
+    board without such a rule it finds nothing.
+
+    `sides` ({ref: 'F' | 'B'}) prices a part on that face instead of its
+    board face (`plan_check`'s declared faces); a part in `unsettled`
+    (`plan_check`: movable, no declared face) may still change face, so its
+    finding is a WARN that says so."""
+    from net_keepouts import planar_nets
+    from check_drc import pad_copper_layers
+    from kicad_parser import flip_layer_token
+    planar = planar_nets(pcb_data, pcb_file)
+    if not planar:
+        return []
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ())
+    inner = max(0, len(copper) - 2)
+    unsettled = set(unsettled)
+    out = []
+    for ref, fp in sorted((pcb_data.footprints or {}).items()):
+        face = 'B' if str(getattr(fp, 'layer', 'F.Cu')).startswith('B') else 'F'
+        flip = (sides or {}).get(ref, face) != face
+        short = []
+        for pad in fp.pads:
+            net = planar.get(int(getattr(pad, 'net_id', 0) or 0))
+            if net is None or getattr(pad, 'pad_type', '') == 'np_thru_hole':
+                continue
+            lays = pad_copper_layers(pad, copper)
+            if flip:
+                lays = {flip_layer_token(l, inner) for l in lays}
+            if net['layer'] not in lays:
+                short.append((pad.pad_number, net, sorted(lays)))
+        if not short:
+            continue
+        layers = sorted({n['layer'] for _p, n, _l in short})
+        rules = sorted({r for _p, n, _l in short for r in n['rules']})
+        pads = '; '.join(f"pad {p} ({n['name']}) on {', '.join(l) or 'no copper layer'}"
+                         for p, n, l in short)
+        loose = ref in unsettled
+        out.append(Violation(
+            rule='planar_nets',
+            severity=WARN if loose else intent.severity_of('planar_nets', ERROR),
+            ref=ref,
+            message=(f"{ref}{' on its declared face ' + sides[ref] if flip else ''}: "
+                     f"{pads} -- the board's .kicad_dru ({', '.join(rules)}) keeps "
+                     f"{'that net' if len(short) == 1 else 'those nets'} on "
+                     f"{', '.join(layers)} with no via, so no route reaches "
+                     f"{'it' if len(short) == 1 else 'them'}"
+                     + (" on this face; no face is declared for the part, so "
+                        "placement may still turn it over" if loose else '')),
+            measured={'pads': [{'pad': p, 'net': n['name'], 'layers': l}
+                               for p, n, l in short]},
+            expected={'layer': layers[0] if len(layers) == 1 else layers,
+                      'rules': rules}))
+    return out
+
+
 def edge_oversubscribed_findings(intent: Intent, pcb_data, pcb_file: str, *,
                                  clearance: Optional[float] = None,
                                  board_edge_clearance: Optional[float] = None,
@@ -11570,6 +11637,16 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             message=f"templates[{f['index']}] ({f['anchor']}): " + template_keepout_text(f),
             measured={k: f[k] for k in ('keepout', 'forced', 'at')},
             expected={'allow': f['ref']}))
+    # #1818: the pads a one-layer, no-via net cannot reach, each part on the
+    # face it will be placed on. That is settled for a declared face or a
+    # FILE lock (the finding's own severity); a movable part with no declared
+    # face may still change face (a groups file's `flippable`), so its
+    # finding is a WARN here and the grade judges it once it is placed.
+    planar = planar_net_findings(
+        intent, pcb_data, pcb_file, sides=planned_sides,
+        unsettled=set(ctx.parts) - set(planned_sides) - set(ctx.locked))
+    out.extend(planar)
+    measured['planar_nets'] = [v.to_dict() for v in planar]
     out.sort(key=lambda v: v.sort_key())
     return out, measured
 
@@ -11687,6 +11764,8 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
             intent, pcb_data, pcb_file, clearance=clearance,
             board_edge_clearance=board_edge_clearance,
             group_sources=group_sources))
+    # #1818: a pad its one-layer, no-via net cannot reach, by the board's rules
+    violations.extend(planar_net_findings(intent, pcb_data, pcb_file))
     if mechanical:
         violations.extend(mechanical_drift(intent, pcb_data, mechanical,
                                            skip=mechanical_skip))
