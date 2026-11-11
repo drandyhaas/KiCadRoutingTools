@@ -16,6 +16,23 @@ from net_queries import find_pad_nearest_to_position
 from pcb_modification import swap_pad_nets_in_pcb_data
 
 
+def pending_swap_targets(pcb_data: PCBData, swap_info: dict):
+    """What `apply_polarity_swap` relabels for a route's `swap_target_pads`,
+    read before it does: (P stub positions, N stub positions, P pad, N pad).
+    The copper at the P positions and the P pad take N's net, and the reverse;
+    the pads are swapped only when both are found. One lookup for the swap
+    and for the checks that judge a swap route before it is applied (#1830)."""
+    p_pos = swap_info['p_pos']
+    n_pos = swap_info['n_pos']
+    p_net_id = swap_info['p_net_id']
+    n_net_id = swap_info['n_net_id']
+    p_stub_positions = find_connected_segment_positions(pcb_data, p_pos[0], p_pos[1], p_net_id)
+    n_stub_positions = find_connected_segment_positions(pcb_data, n_pos[0], n_pos[1], n_net_id)
+    pad_p = find_pad_nearest_to_position(pcb_data, p_net_id, p_pos[0], p_pos[1])
+    pad_n = find_pad_nearest_to_position(pcb_data, n_net_id, n_pos[0], n_pos[1])
+    return p_stub_positions, n_stub_positions, pad_p, pad_n
+
+
 def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: List[dict],
                         pair_name: str = None, already_swapped: Set[str] = None) -> bool:
     """
@@ -55,9 +72,9 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: List[dict],
     p_net_id = swap_info['p_net_id']
     n_net_id = swap_info['n_net_id']
 
-    # Find segments connected to each stub position and swap their net IDs
-    p_stub_positions = find_connected_segment_positions(pcb_data, p_pos[0], p_pos[1], p_net_id)
-    n_stub_positions = find_connected_segment_positions(pcb_data, n_pos[0], n_pos[1], n_net_id)
+    # The segments connected to each stub position, and the target pads
+    p_stub_positions, n_stub_positions, pad_p, pad_n = pending_swap_targets(
+        pcb_data, swap_info)
 
     for seg in pcb_data.segments:
         seg_start = pos_key(seg.start_x, seg.start_y)
@@ -74,10 +91,6 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: List[dict],
             via.net_id = n_net_id
         elif via.net_id == n_net_id and via_pos in n_stub_positions:
             via.net_id = p_net_id
-
-    # Find the target pads for swap
-    pad_p = find_pad_nearest_to_position(pcb_data, p_net_id, p_pos[0], p_pos[1])
-    pad_n = find_pad_nearest_to_position(pcb_data, n_net_id, n_pos[0], n_pos[1])
 
     if pad_p and pad_n:
         pad_swaps.append({

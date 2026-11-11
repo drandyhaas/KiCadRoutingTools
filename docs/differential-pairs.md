@@ -442,6 +442,12 @@ The router also detects if polarity differs between source and target (P on the 
 The swap changes pad net assignments on the **board only** - update the
 schematic to match (the CLI can do this with `--schematic-dir`).
 
+A pad-swap route is judged on the board as the swap will leave it (#1830):
+its terminal neck, its widening and the foreign-copper graze check (#165)
+read the two target pads, and the stub copper the swap relabels, under their
+post-swap nets. P landing on the pad it will own is therefore not a graze of
+the partner's pad; P passing the pad N will own still is.
+
 There is a second, purely geometric resolution: re-routing with the
 connectors taken out the **opposite side at one end** (flipping one end flips
 its P/N handedness; flipping both would reintroduce the mismatch). Only
