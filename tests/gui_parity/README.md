@@ -103,6 +103,8 @@ Fanout tab and cap placement:
 - `test_1641_fanout_filter_misses_gui.py` — a selected net with no pad to fan
   out (an interior pad, stub escape) is named in the completion message, and
   a net named with a bus index (`D[3]`) is fanned out by its name.
+- `test_1804_fanout_underpad_rerun_gui.py` — the QFN via-drop run again on the
+  CLI's own output lays nothing and names every pad served, as the CLI does.
 - `test_581_fanout_via_in_pad_gui.py`, `test_1195_qfn_floors_gui.py`,
   `test_fanout_floor_parity_gui.py` — described below.
 - `test_666_cap_move_gui.py` — a scoped cap move is applied, re-welded and

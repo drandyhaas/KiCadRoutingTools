@@ -250,6 +250,20 @@ past it (#202), and needs IPC-4761 Type VII (filled + capped + plated) — the r
 prints a FAB NOTE naming the pads. `JSON_SUMMARY` carries `allow_via_in_pad`,
 `via_in_pad`, `via_in_pad_clamped`, `via_in_pad_offcentre` and `max_stub_mm`.
 Name and behaviour match the "Allow via-in-pad" option elsewhere in the tools.
+
+A pad that already has its via escape gets no second one (#1804): a same-net
+via reaching the escape layer either overlaps the pad's copper or is joined to
+it by one same-net track on the pad's layer (`pad_has_via_escape`). Such a pad
+on the input is left out before the escape runs (the run prints `N pad(s)
+already have a via escape, skipped`), so the step re-run on its own output adds
+nothing and a retry tries only the pads still unserved; a pad stacked with
+another (an exposed pad's rectangle and the thermal hole at its centre) whose
+copper a via of the same run already overlaps is served by it, not dropped.
+The via-drop's PADS are in `JSON_SUMMARY` beside the per-net counts:
+`pads_requested` = `pads_escaped` + `pads_already_served` + the dropped pads,
+named in `dropped_pads` (`"U1.57"`); `pads_reused` (bridged to an existing
+via) and `vias_placed`. A net whose selected pads were all served counts as
+escaped.
 Example:
 
 ```bash
@@ -311,8 +325,9 @@ escape counts as escaped), `clearance`, `track_width`, `escape_method`,
 `via_size`, `via_drill`, `layer`, `drc_grazes` (a `check_drc` pass over the
 output at `--clearance`: `pad_via`, `via_segment`, `pad_segment`,
 `segment_segment`, `total`; #179), `min_clearance_used`, `allow_via_in_pad`
-(plus `via_in_pad`, `via_in_pad_clamped`, `via_in_pad_offcentre` and
-`max_stub_mm` for an underpad run), `env_knobs`, and `design_rules` when a
+(plus `via_in_pad`, `via_in_pad_clamped`, `via_in_pad_offcentre`,
+`max_stub_mm` and the per-pad `pads_*` / `vias_placed` / `dropped_pads` for a
+run that via-dropped), `env_knobs`, and `design_rules` when a
 feature was delivered below its requested size. Unless `--no-fix-drc-settings`,
 the output's `.kicad_pro` DRC floors are lowered to what the fanout drew (#160);
 a run that drew no copper writes no floors, and the via floors are written only
