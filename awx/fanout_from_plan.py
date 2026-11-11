@@ -1720,6 +1720,11 @@ def main():
     print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {te.CLEAR}), '
           f'track {te.TRACK}, fanout {sr.FAN_TRACK}/{sr.FAN_CLEAR}, '
           f'via {te.VIA_SIZE}/{te.VIA_DRILL}  [{_r.source}]')
+    if awx_settings.get('GROUP_ENDS'):
+        # THE GROUP'S ENDS (a bus step on a group's field, group_ends.py): no fanout and no end chosen -- the board is
+        # the round's as it stands, its ends and their plan the group's model's (group_ends.bus_stage)
+        import group_ends
+        return group_ends.bus_stage(out_path, base)
     if awx_settings.get('FANOUT_ESCAPE') == '1':
         # THE ESCAPE FANOUT (route_bus --escape): the ends planned among the escapes of a dog-boned base and laid as
         # they are (escape_plan.py)

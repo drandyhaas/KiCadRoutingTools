@@ -21,10 +21,10 @@ array keeps the escapes that bus's step laid it there, a whole-array one when na
 keeps_source_escapes). DEST may name several parts, SRC:U4+U3: a GROUP BUS, one source and several ends, the buses to
 them one plain bus planned and laid whole in one frame -- the whole route's trunk runs to the first, and each other's
 lanes leave it on a branch (whole_frame), crossing the others on the trunk only. BUSES OFF ONE ARRAY -- found, or named
-by --bus -- are routed IN TURN first, and NEGOTIATED where a bus after the first leaves nets open that it closes alone:
-every bus at the same time, each by its own whole route in its own frame and a process of its own, on one shared field,
-every step of each in sight of the others and their solves coupled (negotiated_buses.py), where the negotiation takes
-them (route_buses); --sequential routes the buses one after another only.
+by --bus -- are routed NEGOTIATED: every bus at the same time, each by its own whole route in its own frame and a
+process of its own, on one shared field, every step of each in sight of the others and their solves coupled
+(negotiated_buses.py), where the negotiation takes them (route_buses) -- and what it leaves is the step's result;
+--sequential routes the buses one after another instead.
 
 route_bus() takes a board as the chain hands it on and writes it back with the bus laid, in the board's own frame,
 at the chain's sizes (resolve_rules: the routing CLIs' flags, an omitted one resolved as route.py resolves it):
@@ -242,16 +242,14 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
     the process exits 0 whenever OUT is written (cli_exit, #1738). The summary (--json-out, default
     <OUT>.bus/summary.json) holds each bus's own, and the buses found and not taken.
 
-    BUSES OFF ONE ARRAY are routed IN TURN first, as given, each on the board the one before left: where none after the
-    first leaves a net open that it closes when routed ALONE (on the board before the group), that is the step. Where
-    one does -- its way out taken by the buses before it -- the group is NEGOTIATED, each seeing the others
-    (negotiated_buses.route_negotiated: the shared field planned once for all of them, each bus's teeth from its run in
-    turn and that bus's from its run alone, every bus on that shared field in its own frame and a process of its own,
-    their plans one coupled solve, merged), in one step where the first of them comes, and kept unless it leaves more
-    nets open. The first of them may be whole-array or plain and the rest plain or escape: where their modes come from
+    BUSES OFF ONE ARRAY are NEGOTIATED, each seeing the others (negotiated_buses.route_negotiated: each bus's ends
+    chosen by itself for its teeth, all at the same time; the shared field planned once for all of them; every bus on that shared field
+    in its own frame and a process of its own, their plans one coupled solve; merged), in one step where the first of
+    them comes -- and what the negotiation leaves is the step's result: no pass in turn before it, none to fall back
+    on after. The first of them may be whole-array or plain and the rest plain or escape: where their modes come from
     `whole_array` only, the first takes it; a group the negotiation does not take (an escape bus first, a whole-array
-    one after the first or to several parts, routing layers apart -- negotiated_buses.check) is routed sequentially
-    only, and why is named. `sequential`: every bus sequentially only.
+    one after the first or to several parts, routing layers apart -- negotiated_buses.check) is routed sequentially,
+    and why is named. `sequential`: every bus sequentially.
 
     Sequential, A SHARED ARRAY: an escape bus on an array an earlier bus was handed on through has that array planned
     whole with it each round (ESCAPE_JOINT), its ends chosen on the board as it was before the first such earlier bus
@@ -301,12 +299,9 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
     inputs, through = [], {}        # (each step's input board; {array: the first step handed on through it})
     done = set()
 
-    def step_settings(bus, thr, on, tag=''):
+    def step_settings(bus, thr, on):
         """the settings `bus`'s run takes on the board `on`, the arrays an earlier bus was handed on through `thr`
-        ({array: that step's index in `inputs`}): its layers, and an escape bus's shared arrays planned whole with it.
-        One rule for the run in turn and the run alone: alone, given its layers only, an escape bus on an array a bus
-        before the group went through differed from its run in turn by more than the group's lanes, and the group was
-        blamed for the difference"""
+        ({array: that step's index in `inputs`}): its layers, and an escape bus's shared arrays planned whole with it"""
         s, d, mode = bus[0], bus[1], bus[2]
         settings = {'ROUTE_LAYERS': bus[3]} if bus[3] else {}
         parts_ = [s] + _ff_dest_refs(d)                 # (DEST may name several parts: one source, several ends)
@@ -321,7 +316,7 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
             # this bus's lanes leave by, on their exit line, had no escape that cleared them in any of its rounds)
             later_ = later_nets(on, bus, resolved)
             if later_:
-                lp_ = os.path.join(work, f'{s}-{d}{tag}.later.json')
+                lp_ = os.path.join(work, f'{s}-{d}.later.json')
                 with open(lp_, 'w', encoding='utf-8') as f_:
                     json.dump(later_, f_, indent=0, sort_keys=True)
                 settings['ESCAPE_JOINT_LATER'] = lp_
@@ -365,35 +360,6 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
                 if os.path.isfile(q_):
                     os.remove(q_)
 
-    def harm(step_json):
-        """(balls walled in, DRC violations the step answers for) its summary records -- board_grade's two terms past
-        the open nets -- or None where it records neither"""
-        try:
-            s_ = json.load(open(step_json))
-        except (OSError, ValueError, TypeError):
-            return None
-        d_ = s_.get('drc') or {}
-        if None in (d_.get('bus'), d_.get('board'), d_.get('input')):
-            return None
-        return len((s_.get('walled') or {}).get('walled') or ()), max(d_['bus'], d_['board'] - d_['input'], 0)
-
-    def alone_step(bus, on, thr):
-        """`bus` routed by itself on the board `on` (the group's, before any bus of it; `thr` the arrays handed on
-        through before it): (its board, its summary, the nets it hands back), nothing of the pass's bookkeeping touched
-        -- what it leaves open alone is its own, not the buses' before it"""
-        s, d, mode = bus[0], bus[1], bus[2]
-        step_out = os.path.join(work, f'{s}-{d}.alone.kicad_pcb')
-        step_json = os.path.join(work, f'{s}-{d}.alone.summary.json')
-        _fresh(step_out, step_json)
-        route_bus(on, step_out, s, d, k, rounds, inproc, log, json_out=step_json, whole_array=mode == 'whole-array',
-                  escape=mode == 'escape', settings=step_settings(bus, thr, on, '.alone') or None,
-                  feedback_rounds=feedback_rounds, **sizes)
-        try:
-            left = sorted((json.load(open(step_json)).get('refused') or {}))
-        except (OSError, ValueError):
-            left = None
-        return step_out, step_json, left
-
     for bus in resolved:
         s, d = bus[0], bus[1]
         if s in negotiated:
@@ -401,97 +367,31 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
                 continue
             done.add(s)
             grp = negotiated[s]
-            # SEQUENTIALLY FIRST (Andy, 2026-11-05: the buses stay sequential except where they meet and leave nets
-            # open): every bus in turn, as given, on the board the one before left -- and where none leaves a net open
-            # BECAUSE OF the buses before it, that is the step. Negotiated, three buses off one array left the escape bus
-            # 21 to 28 nets open on the shared field, where in turn all three closed. A bus after the first that leaves
-            # nets open is routed again ALONE, on the board before the group: the nets it closes there were the buses'
-            # before it -- its way out taken by their lanes, a fourth bus 14 of 20 -- and the group is negotiated once
-            # the pass is done, each bus its own teeth from its run in turn, one the buses took nets from its run alone
-            # (in place of a solo run: negotiated_buses' `solo`). A net it leaves open alone too is its own. The first
-            # bus's run in turn IS its run alone. The negotiated result is kept unless it leaves more nets open than the
-            # whole pass in turn: a pass stopped at the first such bus counted every net of the buses it never reached
-            # against it, and a negotiation leaving the escape bus 29 open beat it
-            n0, i0, cur0, through0 = len(runs), len(inputs), cur, dict(through)
-            seq, teeth, caused = [], [], {}
-            for i_, b_ in enumerate(grp):
-                seq.append(sequential_step(b_))
-                teeth.append(seq[-1])
-                left_ = seq[-1][2]
-                # (...and the balls it walls in and the DRC it adds, as board_grade counts them: a bus the buses before
-                # it made wall a ball in, its nets all closed, was routed in turn and never negotiated)
-                h_ = harm(seq[-1][1])
-                if not left_ and (left_ is None or h_ is None or h_ == (0, 0)):
-                    if left_ is None:
-                        caused[b_[1]] = []          # (nothing handed on: no count to judge by -- negotiated)
-                    continue
-                if i_ == 0:
-                    log(f'route_bus: {b_[1]}, the first in turn, left {len(left_)} net(s) open'
-                        + (f', {h_[0]} ball(s) walled in, drc {h_[1]}' if h_ and h_ != (0, 0) else '')
-                        + ' by itself -- its own')
-                    continue
-                alone_ = alone_step(b_, cur0, through0)
-                c_ = sorted(set(left_) - set(alone_[2])) if alone_[2] is not None else list(left_)
-                ha_ = harm(alone_[1])
-                worse_ = h_ is not None and ha_ is not None and (h_[0] > ha_[0] or h_[1] > ha_[1])
-                if c_ or worse_:
-                    caused[b_[1]] = c_
-                    teeth[-1] = alone_
-                    log(f'route_bus: {b_[1]} left {len(left_)} net(s) open in turn'
-                        + (f', {len(c_)} of them closed alone ({", ".join(c_[:8])})' if c_ else '')
-                        + (f'; walled {h_[0]}, drc {h_[1]} in turn against {ha_[0]}, {ha_[1]} alone' if worse_ else '')
-                        + ' -- the buses before it took them')
-                else:
-                    log(f'route_bus: {b_[1]} left {len(left_)} net(s) open in turn, and alone too -- its own')
-            if not caused:
-                log(f'route_bus: the {len(grp)} buses off {s} routed in turn, none left a net open the buses before it '
-                    f'took -- not negotiated')
-                continue
-            log(f'route_bus: the buses off {s} negotiated -- {", ".join(sorted(caused))} left net(s) open the buses '
-                f'before took: their teeth from their runs in turn'
-                + (f', {", ".join(sorted(d_ for d_, v_ in caused.items() if v_))}\'s from their runs alone'
-                   if any(caused.values()) else ''))
-            seq_state = (cur, runs[n0:], codes[n0:], inputs[i0:], dict(through))
-            cur, through = cur0, through0
-            del runs[n0:], codes[n0:], inputs[i0:]
-            solo = [(o_, j_) if os.path.isfile(o_) and os.path.isfile(j_) else None for o_, j_, _l in teeth]
+            # NEGOTIATED, and nothing before or after it: the group's one step. Routed in turn first, each bus again
+            # alone where it left nets open, and negotiated only then, every bus of a group of four was routed three
+            # times over -- nearly four hours, where the negotiation is the one of the three that routes every bus in
+            # sight of the others -- and the board came of whichever arm had happened to leave fewer nets open. What
+            # the negotiation leaves open is the step's result, named: such a net is the negotiation's to close, not
+            # another pass's
             name = f'{s}-{"_".join(g_[1] for g_ in grp)}'
             step_out = os.path.join(work, f'{name}.kicad_pcb')
             step_json = os.path.join(work, f'{name}.summary.json')
+            _fresh(step_out, step_json)
             inputs.append(cur)
             code, _g = negotiated_buses.route_negotiated(cur, step_out, grp, k, rounds, inproc, log, step_json,
-                                                         feedback_rounds, solo=solo, **sizes)
-            got = json.load(open(step_json)).get('buses') if os.path.isfile(step_json) else None
-            # (the better of the two by each one's board, graded as a step's own: its bus nets open, its DRC and its
-            # balls walled in, all told -- board_grade; the negotiation's merged board graded by negotiated_buses)
-            nets_of = collections.defaultdict(set)
-            for js_ in [j_ for _o, j_, _l in seq] + [r_.get('summary') for r_ in got or []]:
-                try:
-                    s_ = json.load(open(js_))
-                except (OSError, ValueError, TypeError):
-                    continue
-                nets_of[(s_.get('src'), str(s_.get('dest')))] |= set(s_.get('routed') or []) | set(s_.get('refused') or {})
-            gnets_ = [(g_[0], g_[1].split('+'), sorted(nets_of[(g_[0], g_[1])])) for g_ in grp]
-            seq_g = board_grade(cur0, seq_state[0], gnets_, os.path.join(work, f'{name}.in_turn'), log=log,
-                                tag='in_turn') if os.path.isfile(seq_state[0]) else None
-            neg_g = json.load(open(step_json)).get('grade') if os.path.isfile(step_json) else None
-            told = lambda g_: None if not g_ or g_['drc']['n'] is None else \
-                len(g_['open']) + g_['drc']['n'] + len(g_['walled']['walled'])  # noqa: E731
-            # (a grade whose check_drc gave no verdict -- a crash -- said so: the other arm is kept, and that is why)
-            say_ = lambda g_: 'no grade' if not g_ else \
-                f'{len(g_["open"])} open, ' + (f'drc {g_["drc"]["n"]}' if g_['drc']['n'] is not None else
-                                               'NO DRC VERDICT (check_drc gave none)') + \
-                f', {len(g_["walled"]["walled"])} walled'  # noqa: E731
-            neg_open, seq_open = told(neg_g), told(seq_g)
-            if neg_open is None or (seq_open is not None and seq_open < neg_open):
-                log(f'route_bus: the negotiation left {say_(neg_g)} on the board, the buses in turn {say_(seq_g)} -- '
-                    f'the buses in turn kept')
-                cur, rs_, cs_, is_, through = seq_state
-                del inputs[i0:]
-                runs.extend(rs_), codes.extend(cs_), inputs.extend(is_)
-                continue
-            log(f'route_bus: the negotiation left {say_(neg_g)} on the board, the buses in turn {say_(seq_g)} -- '
-                f'negotiated')
+                                                         feedback_rounds, **sizes)
+            try:
+                sj_ = json.load(open(step_json))
+            except (OSError, ValueError):
+                sj_ = {}
+            got, neg_g = sj_.get('buses'), sj_.get('grade')
+            # (a grade whose check_drc gave no verdict -- a crash -- said so)
+            log('route_bus: the negotiation left '
+                + ('no grade' if not neg_g else
+                   f'{len(neg_g["open"])} open, '
+                   + (f'drc {neg_g["drc"]["n"]}' if neg_g['drc']['n'] is not None
+                      else 'NO DRC VERDICT (check_drc gave none)')
+                   + f', {len(neg_g["walled"]["walled"])} walled') + ' on the board')
             codes.append(code)
             for r_ in got or [dict(src=s, dest=g_[1], mode=g_[2], exit=None, grade=None, summary=None) for g_ in grp]:
                 ex_ = 1 if r_['exit'] is None else r_['exit']
@@ -592,10 +492,18 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     # ball of the array whole, each escape chosen with every other ball's, and they stay as the bus's teeth -- fanned
     # out again for the bus alone, a full array sends a ball out by any face with room: zynq U1's ETH_RXCTL and
     # ETH_RXD2 out of the south face into the LVDS bus's escapes, its OTG_DATA6, NXT and STP into the LVDS lanes
-    kept = []
-    if keeps_source_escapes(src, escape, whole_array, awx_settings.get('SOURCE_SHARED')):
-        kept = escape_blocks(txt, pcb, src, names)
-    txt, n_cut = mb.strip_pair_copper(txt, pcb, names)
+    # THE GROUP'S ENDS (GROUP_ENDS=DIR, group_ends.py's output): the board is the group's field -- every array of the
+    # buses off one array fanned out as their one model chose, this bus's teeth and berths among them -- and the bus's
+    # copper on it is its ends: nothing stripped, nothing fanned out, no end chosen again (the fanout stage of each
+    # round hands the round the model's own plan, group_ends.bus_stage)
+    group = awx_settings.get('GROUP_ENDS')
+    kept, n_cut = [], 0
+    if group:
+        log(f'  the group\'s ends ({group}): the bus\'s copper on the board is its teeth and berths, kept as laid')
+    else:
+        if keeps_source_escapes(src, escape, whole_array, awx_settings.get('SOURCE_SHARED')):
+            kept = escape_blocks(txt, pcb, src, names)
+        txt, n_cut = mb.strip_pair_copper(txt, pcb, names)
     if kept:
         end = txt.rstrip().rfind(')')
         txt = txt[:end].rstrip() + '\n' + ''.join(f'  {b}\n' for b in kept) + txt[end:]
@@ -618,7 +526,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     by_name_ = {nn_.name: nn_ for nn_ in pcb.nets.values() if nn_.name}
     keep_ = {p_.component_ref for p_ in pull_pads} | {
         q_.component_ref for n_ in names if n_ in by_name_ for q_ in by_name_[n_].pads}
-    for d in dests:
+    for d in ([] if group else dests):
         clear_row_escapes(base, d, names, sorted(keep_ - {src, d}), work, log)
 
     # 2. the source fanned out, the project floor, the ladder
@@ -630,6 +538,8 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     # right after, each round, every array's other nets and plane balls are planned and laid jointly round the bus
     # copper just laid (fanout_from_plan.joint_others)
     whole_array = whole_array and not escape    # (the escape fanout lays no whole-array plan: the field is dog-boned)
+    if group:
+        whole_array = escape = False            # (the group's ends: every bus alike, no fanout of its own)
     # (a protected net's copper at an array stands as it is -- an earlier step's routed net, or a later bus's escapes
     # reserved there: the whole-array plan plans round it, never again)
     from protected_nets import read_protected_nets as _rpn, pro_path_for_board as _ppb
@@ -661,7 +571,26 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     # destination lost: the zynq DDR's, laid, the ends model's 86 vias with six nets over two and two ends blocked in
     # front against the chain's teeth's 70, its solve 264 crossings to the chain's 202; round the chain's teeth the
     # whole-array plan still serves every other net of U1 and 131 of its 132 plane balls)
-    if escape:
+    if group:
+        import shutil
+        import group_ends
+        shutil.copyfile(base, fanned)
+        fp.copy_pro(base, fanned)
+        with contextlib.redirect_stdout(sys.stderr):
+            fix_project_for_output(fanned, clearance=te.SPEC_CLEARANCE, track_width=sr.FAN_TRACK,
+                                   via_diameter=te.VIA_SIZE, via_drill=te.VIA_DRILL, verbose=False)
+        failed = []
+        # (the run's nets and their order the model's: the ladder, one net a line)
+        mine_ = {short(n) for n in names}
+        gnets = [n for n in group_ends.bus_nets(group, dest) if n in mine_]
+        # (the ends' layers the bus's own solve's, where the model left them to it -- its plan's `held_layers` names
+        # the lanes it did not; GROUP_LAYERS=free: every end's, a bench's)
+        group_free = awx_settings.get('GROUP_LAYERS') == 'free' or group_ends.layers_free(group, dest)
+        with open(os.path.splitext(fanned)[0] + '.ladder.txt', 'w', encoding='utf-8') as f:
+            f.write(f'# the group\'s ends: the nets its model gave the bus to {dest} ends, in its order\n'
+                    + ''.join(n + '\n' for n in gnets))
+        log(f'  no fanout: {len(gnets)} of the bus\'s {len(names)} nets with ends in the group\'s model')
+    elif escape:
         # THE ESCAPE FANOUT (--escape): no source fanout -- every netted ball of both arrays DOG-BONED the human's way
         # (dogbone_arrays: each ball's via on a gap point, the ball lines free below the balls' layer; an outer-ring
         # ball with a clear way out on its own layer left without one, as the human leaves it), the passives
@@ -886,7 +815,8 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     with contextlib.redirect_stdout(sys.stderr), att_given():
         # (a net bare at both arrays -- outer balls left to leave on their own layer -- is a lane the escape fanout lays
         # from its pads: braid.bare_lane)
-        mb.write_ladder(fanned, names, log=log, bare_ok=escape)
+        if not group:
+            mb.write_ladder(fanned, names, log=log, bare_ok=escape)
         if fanned_e:
             # (ESCAPE_JOINT_ENDS: the bus alone's ladder -- its rivers read on its own field, so the run's nets, their
             # order and the K cut are the bus alone's: the ends chosen on that field in that order are its ends)
@@ -944,6 +874,11 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                                        'ROUND_EDITS_BUS': f'{src}:{dest}', 'ROUND_EDITS_TURN': f'{q},{cx},{cy}',
                                        **joint, **jsync,
                                        **({'FANOUT_ESCAPE': '1'} if escape else {}), **escape_env,
+                                       # (the group's ends: each end's layer the model's, held -- the model chose
+                                       # them so that no two runs of any bus share a line on a layer under an array)
+                                       # (GROUP_LAYERS=free, a bus alone on its arrays: its via ends' layers the
+                                       # solve's own, as the model's check asked them)
+                                       **({'VIA_ENDS': '0'} if group and not group_free else {}),
                                        **({'BUS_ATTACHED': att_s} if attached else {})})
     finally:
         if jsync:
@@ -962,7 +897,8 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         if short(n) in {short(f) for f in failed}:
             refused.setdefault(short(n), 'no escape at the source fanout')
         elif short(n) not in ladder:
-            refused.setdefault(short(n), 'not in the ladder: no free stub end at the source')
+            refused.setdefault(short(n), 'no ends in the group\'s model' if group else
+                               'not in the ladder: no free stub end at the source')
         elif short(n) in cut:
             refused.setdefault(short(n), f'its pair cut by --k {K}: left out with its other leg')
         elif short(n) not in nets:
@@ -989,6 +925,19 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         if code:
             log(f'route_bus: {why} -- {os.path.basename(out)} is the board as it came')
         return code, g
+
+    if awx_settings.get('ENDS_ONLY'):
+        # THE ENDS ONLY (a negotiation's solo run, for the bus's teeth): OUT is the round's ends board turned back --
+        # the fanout's escapes on the layers of the first plan, nothing laid past them -- and the summary names the
+        # nets with ends there as its 'routed'. Not a board to hand on: read for where the bus leaves its array
+        ends_b = os.path.join(work, 'run', 'ends.kicad_pcb')
+        if not os.path.isfile(ends_b):
+            return finish(1, f'the whole route chose no ends (exit {rc})', grade)
+        bad = ff.turn_file(ends_b, out, -q, cx, cy)
+        if bad:
+            return finish(2, 'the turn back failed: ' + '; '.join(bad[:6]), grade)
+        summary['ends_only'] = True
+        return finish(0, '', grade, routed=nets)
 
     if seq is None:
         return finish(1, f'the whole route laid nothing (exit {rc})', grade)
@@ -1252,6 +1201,46 @@ def walled_grade(board, routed, refs, names, log=print):
     return out
 
 
+def plane_balls_grade(routed, refs, log=print):
+    """the PLANE BALLS of the step's arrays `refs` on the board `routed`, POURED FOR REAL: its zones filled by KiCad's
+    own filler (kicad_exact_fill.refill_islands_ex), each ball on a net with a pour read as joined to an island of it
+    (exact_clusters: the fill's own geometry, no model of it) or not -- a ball fanned out as a signal and left a stub,
+    a drop whose via stands in a part of a split layer its net does not pour, a pour a bus's run cut the ball off
+    from. And each such net's islands, a pour cut to pieces by runs across it. "No ball walled in" is not "connected":
+    a board with none walled had a quarter of its plane balls on no pour. {balls, joined, off: ['REF.PAD (net)'],
+    islands: {net: count}, secs}; with no KiCad to pour with, {skipped: why}"""
+    import kicad_exact_fill as kf
+    from kicad_parser import parse_kicad_pcb
+    t0 = time.time()
+    isl, st = kf.refill_islands_ex(routed)
+    if isl is None:
+        log(f'  plane balls: not poured ({st.reason}{": " + st.detail if st.detail else ""}) -- not checked')
+        return dict(skipped=st.reason)
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        pcb = parse_kicad_pcb(routed)
+    # (the ball arrays among them: a row part's pins on a plane's net are the chain's later steps' to tap)
+    import escape_moves as em
+    refs = [r for r in refs if r in pcb.footprints and not em.row_part(pcb.footprints[r])]
+    by_net = collections.defaultdict(list)
+    for (nm, layer), polys in isl.items():
+        by_net[nm] += [(layer, p_) for p_ in polys]
+    n, off, islands = 0, [], {}
+    for nid, net in sorted(pcb.nets.items(), key=lambda kv: kv[1].name or ''):
+        balls = [p_ for r in refs if r in pcb.footprints for p_ in pcb.footprints[r].pads if p_.net_id == nid]
+        if not net.name or net.name not in by_net or not balls:
+            continue
+        with contextlib.redirect_stdout(io.StringIO()):
+            cl = kf.exact_clusters(pcb, nid, by_net[net.name])
+        joined = {id(p_) for c in cl if c.get('islands') for p_ in c.get('pads') or ()}
+        n += len(balls)
+        off += [f'{p_.component_ref}.{p_.pad_number} ({net.name})' for p_ in balls if id(p_) not in joined]
+        islands[net.name] = len(by_net[net.name])
+    out = dict(balls=n, joined=n - len(off), off=sorted(off), islands=islands, secs=round(time.time() - t0, 1))
+    log(f'  plane balls, poured for real: {n - len(off)} of {n} joined to a pour of their net'
+        + (f' -- NOT: {", ".join(sorted(off)[:12])}{" ..." if len(off) > 12 else ""}' if off else ''))
+    return out
+
+
 def board_grade(board, routed, buses, work, log=print, tag='board'):
     """A bus step's output `routed` graded against the board it came in with, `board`, for the three things a step
     answers for on the BOARD -- `buses` [(source, [destination parts], [its nets, full names])]: every bus net's pads on
@@ -1315,13 +1304,14 @@ def board_grade(board, routed, buses, work, log=print, tag='board'):
     # larger of the two, never their sum, which counted a bus net's new violation twice)
     n_drc = None if None in (d_bus, d_out, d_in) else max(d_bus, d_out - d_in, 0)
     walled = walled_grade(board, routed, refs, names, log)
+    plane_balls = plane_balls_grade(routed, refs, log)
     ok = not open_ and n_drc == 0 and not walled['walled']
     log(f'  on the board: {len(open_)} bus net(s) open of {len(names)}'
         + (f' ({", ".join(keys.get(n, n) for n in open_[:8])})' if open_ else '')
         + f', drc {n_drc} (bus {d_bus}, board {d_out} vs {d_in} in), walled {len(walled["walled"])}'
         + (' -- clean' if ok else ''))
     return dict(open=open_, nets=len(names), drc=dict(bus=d_bus, board=d_out, input=d_in, n=n_drc), walled=walled,
-                ok=ok)
+                plane_balls=plane_balls, ok=ok)
 
 
 def _cage_rung(pcb):
@@ -2689,11 +2679,10 @@ def main():
                          'ends among the escapes that field has and lays them as they are (escape_plan); '
                          'overrides --whole-array')
     ap.add_argument('--sequential', action='store_true',
-                    help='every bus SEQUENTIAL only, one after another: buses off one array are routed in turn first '
-                         'by default, and NEGOTIATED where a bus after the first leaves nets open that it closes '
-                         'routed alone -- every bus at the same time, each in its own frame (negotiated_buses.py: the '
-                         'shared field planned once for all of them from their runs\' teeth, every bus routed on that '
-                         'shared field in a process of its own, their plans one coupled solve, and merged)')
+                    help='every bus SEQUENTIAL, one after another: buses off one array are NEGOTIATED by default -- '
+                         'every bus at the same time, each in its own frame (negotiated_buses.py: the shared field '
+                         'planned once for all of them from the teeth of each one\'s own ends, every bus routed on that shared '
+                         'field in a process of its own, their plans one coupled solve, and merged)')
     ap.add_argument('--json-out', help='the summary: the nets routed and refused (and why), the rules, the grade '
                                      '(default: <OUT>.bus/summary.json)')
     g = ap.add_argument_group('sizes', 'the chain\'s sizes, as the routing CLIs take them; one omitted is resolved as '

@@ -87,6 +87,15 @@ def gnd_run_vias(inner=True):
     return float(awx_settings.get('PLANE_GND_RUN') or '10') if inner else 1.0
 
 
+def pwr_run_vias(inner=True):
+    """PLANE_PWR_RUN: a lane's run on a POWER plane's layer, in vias over the same run on a signal layer (default 10,
+    a ground plane's), whatever its length -- with its length's price beside it (pwr_vias_per_mm): a supply's pour is
+    cut round the run and its pieces must be joined again, so the layer is a FALLBACK, taken only where it saves that
+    many vias. At its length's price alone a bus laid half its exits on a supply's layer, 738 mm of it, where a hand
+    had 13 mm. With no inner signal layer (`inner` False: inner_signal), a via"""
+    return float(awx_settings.get('PLANE_PWR_RUN') or '10') if inner else 1.0
+
+
 def pwr_vias_per_mm():
     """PLANE_PWR_X: a POWER plane's layer prices a run's length this many times a signal layer's (default 2) -- the
     excess, in vias per mm at the one exchange rate (select_moves.VIA_MM): a supply's pour is cut round the run, and its
@@ -99,14 +108,15 @@ def pwr_vias_per_mm():
 def run_price(kind, inner=True):
     """the ENDS model's price of a run on a layer of kind `kind` (plane_kinds), in vias over the same run on a signal
     layer (the exact route's and the ends kernel's, which know no run's length): a ground plane's gnd_run_vias, a power
-    plane's VIA_MM of run at pwr_vias_per_mm -- with no inner signal layer (`inner` False), a via either"""
+    plane's pwr_run_vias and VIA_MM of run at pwr_vias_per_mm -- with no inner signal layer (`inner` False), a via
+    either"""
     if kind == 'gnd':
         return gnd_run_vias(inner)
     if kind == 'pwr':
         if not inner:
             return 1.0
         import select_moves
-        return pwr_vias_per_mm() * select_moves.VIA_MM
+        return pwr_run_vias(inner) + pwr_vias_per_mm() * select_moves.VIA_MM
     return 0.0
 
 

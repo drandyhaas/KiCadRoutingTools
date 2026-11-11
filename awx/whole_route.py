@@ -1356,6 +1356,29 @@ def count_open(conn_log):
 LENGTH_ROWS = ('length-out-of-range', 'skew-out-of-range')
 
 
+def standing_hots(d, loopd):
+    """the hot files (written beside the audits, `.hard.fbhot.json`) of the findings that STAND in each of a round's
+    loops -- `d`/loop on the ends as given, `loopd` the one on repaired ends where there was one: a PITCH or a STATIC
+    finding (the ends' own doing) of the loop's last audit that its audit before had too, by its kind and its lanes;
+    a loop of one audit: that audit's"""
+    out = []
+    for ld_ in dict.fromkeys([os.path.join(d, 'loop'), loopd]):
+        hs = sorted(glob.glob(os.path.join(ld_, 'p*.fbhot.json')),
+                    key=lambda f: int(re.sub(r'\D', '', os.path.basename(f).split('.')[0]) or 0))
+        if not hs:
+            continue
+        key = lambda it: (it[2], tuple(sorted(it[3] if len(it) > 3 else ())))     # noqa: E731
+        last = [it for it in json.load(open(hs[-1])).get('hot', []) if it[2] in ('PITCH', 'STATIC')]
+        if len(hs) > 1:
+            before = {key(it) for it in json.load(open(hs[-2])).get('hot', [])}
+            last = [it for it in last if key(it) in before]
+        if last:
+            f = hs[-1][:-len('.fbhot.json')] + '.hard.fbhot.json'
+            json.dump({'hot': last}, open(f, 'w'))
+            out.append(f)
+    return out
+
+
 def drc_count(json_path):
     """(violations, length rows) of check_drc's --json: the violations less the rows of the board's length rules
     (LENGTH_ROWS), and those rows; (None, 0) when it wrote none"""
@@ -2547,7 +2570,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         os.remove(BLOCKED)
     # (an earlier run's results in this OUTDIR: its best board, and every round's laid boards -- route_bus takes the
     # best, else the last round's, and an earlier run's stood in for a run that laid nothing, graded as this one's)
-    for f_ in glob.glob(os.path.join(o, 'best.*')) + glob.glob(os.path.join(o, 'r[0-9]*', 'seq*.kicad_*')):
+    for f_ in glob.glob(os.path.join(o, 'best.*')) + glob.glob(os.path.join(o, 'ends.*')) \
+            + glob.glob(os.path.join(o, 'r[0-9]*', 'seq*.kicad_*')):
         os.remove(f_)
     say = Log()
     r = 0
@@ -2600,6 +2624,21 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         if base != was and 'BASE' in env:
             env['BASE'] = base
         return base
+
+    def ends_only(r, bench, planned):
+        """ENDS_ONLY: the round stops at its ENDS -- the fanout's escapes on the layers its first plan put them on (the
+        relayed bench; the fanout's own where the solve had no plan) -- handed on as OUTDIR/ends.kicad_pcb, and nothing
+        is cut, polished, snapped or laid. Where a bus leaves its array is settled there: over 25 recorded runs the
+        final routed board had 2 of 979 teeth at another place than the fanout's and 57 on another layer than the first
+        plan's, 420 on another than the fanout's alone. (the chain's status, its grade line)"""
+        for ext in ('.kicad_pcb', '.kicad_pro', '.kicad_dru'):
+            src_ = bench[:-len('.kicad_pcb')] + ext
+            if os.path.isfile(src_):
+                shutil.copyfile(src_, os.path.join(o, 'ends' + ext))
+        g = (f"ENDS K={K} round={r} secs={secs()} -- the ends only: the fanout's escapes, "
+             + ("on the layers of the first plan" if planned else "the solve with no plan for them"))
+        say(g)
+        return 0, g
 
     def lay(r, d, plan, bench, nets=None, tag='', quiet=False):
         """route_lanes all at once on PLAN, graded: the result (its key, open nets, violation, grade line, board), or
@@ -2931,6 +2970,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             # (a re-solve with no diagnosis of its own -- its setup refused the repaired bench -- keeps the first's)
             crowded = (json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []) or crowded
             no_plan = not os.path.isfile(solve)
+        if no_plan and env.get('ENDS_ONLY'):
+            return ends_only(r, bench, False)
         if no_plan:
             say("  no plan from the solve -- nothing for this round to lay"
                 + (f" (no room for the crossings of {', '.join(crowded)})" if crowded else ''))
@@ -2983,6 +3024,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 J = json.load(open(solve))
                 proved = J.get('proved', True)
                 bench = relayed(d, env['BENCH0'], J, env, say)
+            if env.get('ENDS_ONLY'):
+                return ends_only(r, bench, True)
             if not proved:
                 u = J.get('unproved') or {}
                 say(f"  the solve's plan is UNPROVED ({u.get('over')} over two vias against a bound of "
@@ -3063,6 +3106,48 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             say(stripped(run(['whole_feedback.py', '--name', os.path.join(d, 'fo.plan.json'), FB]
                              + (res['open_nets'] if res else crowded),
                              {**env, 'FB_ROUND': str(r), 'FB_CONN': os.path.join(d, 'conn.log')}, err=sys.stderr)[1]))
+        if (res is None or res['open']) and env.get('GROUP_ENDS') and rc is not None:
+            # (THE GROUP'S ENDS are not this step's to change -- its fanout stage lays the group's model's own each
+            # round: what this round's audits found crowded at the ends, and the nets it left open, are written for
+            # the model, as a round's findings are for its fanout -- `o`/group_findings.json, group_ends --feedback)
+            GF = os.path.join(o, 'group_findings.json')
+            ghots = []
+            # (the loop on the model's own ends, and the one on the ends this step repaired, where it did)
+            for ld_ in dict.fromkeys([os.path.join(d, 'loop'), loopd]):
+                for a in sorted(glob.glob(os.path.join(ld_, 'p*.audit'))) + \
+                        sorted(glob.glob(os.path.join(ld_, 'q*.audit'))):
+                    j, h = a[:-len('.audit')] + '.json', a[:-len('.audit')] + '.fbhot.json'
+                    run(['whole_gate.py', j, a, '--hot', h], env)
+                    ghots.append(h)
+                ghots += sorted(glob.glob(os.path.join(ld_, 'hs*.json')))
+            say('  for the group\'s model: ' + stripped(run(
+                ['whole_feedback.py', os.path.join(d, 'fo.plan.json'), GF] + ghots,
+                {**env, 'FB_ROUND': str(r)}, err=sys.stderr)[1]))
+            # (...and, in a file of their own, the findings that are THE ENDS' OWN and STOOD: a pitch or a static
+            # clearance at the ends -- what no solve moves, whole_feedback --now -- in a loop's last audit and the
+            # one before it. The model rules those ends out; the rest it prices. Every audit's findings ruled out
+            # together, a bus with three rounds of them had 17 ends and 8 pairs named, and no state)
+            hhots = standing_hots(d, loopd)
+            GH = os.path.join(o, 'group_findings_hard.json')
+            if os.path.exists(GH):
+                os.remove(GH)
+            if hhots:
+                say('  for the group\'s model, to rule out: ' + stripped(run(
+                    ['whole_feedback.py', os.path.join(d, 'fo.plan.json'), GH] + hhots,
+                    {**env, 'FB_ROUND': str(r)}, err=sys.stderr)[1]))
+            # (...and the ends of the nets the round left OPEN, each at the end where its trouble is: a net the route
+            # could not close on these ends has an end that does not serve it. Priced alone, a bus's eleven open
+            # nets had their ends wanted again and the model answered with the same state)
+            if res is not None and res['open']:
+                say('  for the group\'s model, to rule out: ' + stripped(run(
+                    ['whole_feedback.py', '--name', os.path.join(d, 'fo.plan.json'), GH] + res['open_nets'],
+                    {**env, 'FB_ROUND': str(r), 'FB_HOTS': ','.join(ghots), 'FB_CONN': os.path.join(d, 'conn.log')},
+                    err=sys.stderr)[1]))
+            say('  for the group\'s model: ' + stripped(run(
+                ['whole_feedback.py', '--name', os.path.join(d, 'fo.plan.json'), GF]
+                + (res['open_nets'] if res else crowded),
+                {**env, 'FB_ROUND': str(r), 'FB_HOTS': ','.join(ghots), 'FB_CONN': os.path.join(d, 'conn.log')},
+                err=sys.stderr)[1]))
         # (the agent's edits for the next round naming ENDS: a feedback round from this one, whatever F -- with the
         # findings of this round's own audits only where F or a solve with no plan asks for them)
         ed_n = EDITS.get(r + 1) or {}

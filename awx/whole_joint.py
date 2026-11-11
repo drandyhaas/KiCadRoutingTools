@@ -37,6 +37,12 @@ W_CROSS = int(awx_settings.get('JOINT_W_CROSS') or '20')    # a broken coupling,
 # the same re-solve still broke both (its search stopped at 894 vias-worth); at this, none, for 546.6 against 534
 W_RUN_CROSS = int(awx_settings.get('JOINT_W_RUN_CROSS') or '100000')
 BATCHES = int(awx_settings.get('JOINT_BATCHES') or '100')   # the search's interleaved batches at most
+# ROOM: a lane's change of layer within this (mm along its lane) of a place another bus's lane meets it is CRAMPED --
+# allowed (a via's room off the place is the rule), priced, so that a change takes open run where its lane has some.
+# The places are read off the buses' reference paths, and the laid-out lanes pass a few mm off them: a change put a
+# via's room past its lane's last meeting with another bus stood, laid out, among that bus's lanes
+ROOM = float(awx_settings.get('JOINT_ROOM') or '4')
+W_ROOM = float(awx_settings.get('JOINT_W_ROOM') or '1')     # a cramped change, in vias
 WORKERS = 4
 
 
@@ -189,6 +195,7 @@ def main():
             m.AddImplication(bb, a_)
             out.append(bb)
         return out
+    met = {}                               # (bus, lane) -> where along it (u) another bus's lane meets it
     free = m.NewBoolVar('')                # (a run's own lane: its changes held off nothing -- bits_at's `k_` set)
     m.Add(free == 1)
 
@@ -210,6 +217,10 @@ def main():
                         ua = min(max(ua, pa.entry[a]), pa.end[a])
                         ub = min(max(ub, pb.entry[b]), pb.end[b])
                         k_ = m.NewBoolVar('')
+                        if not run_a:
+                            met.setdefault((A, a), []).append(ua)
+                        if not run_b:
+                            met.setdefault((B, b), []).append(ub)
                         # (a run before its lane's entry, or past its end, reads the lane's layer there: its first or
                         # its last)
                         ba_ = bits_at(pa, a, ua, free if run_a else k_)
@@ -234,8 +245,31 @@ def main():
                         cpl.append((A, a, round(ua, 3), B, b, round(ub, 3), [round(X[0], 3), round(X[1], 3)]))
     print(f'  couplings: {len(cpl)} crossings and near misses (within {NEAR:.3f} mm) of two buses\' lanes, '
           f'{nvia} of them within a via\'s reach ({NEAR_V:.3f} mm)')
+    # ROOM: each lane's stretches among another bus's lanes (its meetings with them, ROOM either side, joined where
+    # they overlap), and each of its changes inside one priced
+    cramped = []
+    if ROOM > 0:
+        for (bus_, n_), us_ in sorted(met.items()):
+            p_ = parts[bus_]
+            pad_ = p_.QU(p_.VNEED) + p_.QU(ROOM)
+            spans = []
+            for U_ in sorted(p_.Q(u_) for u_ in us_):
+                if spans and U_ - pad_ <= spans[-1][1]:
+                    spans[-1][1] = U_ + pad_
+                else:
+                    spans.append([U_ - pad_, U_ + pad_])
+            cs_, act = p_.chg[n_]
+            for x_, a_ in zip(cs_, act):
+                for lo_, hi_ in spans:
+                    bf, af, inn = m.NewBoolVar(''), m.NewBoolVar(''), m.NewBoolVar('')
+                    m.Add(x_ <= lo_).OnlyEnforceIf(bf)
+                    m.Add(x_ >= hi_).OnlyEnforceIf(af)
+                    m.AddBoolOr([bf, af, inn, a_.Not()])
+                    cramped.append(inn)
+        print(f'  room: a change within {ROOM:g} mm of a place another bus\'s lane meets its lane priced '
+              f'{W_ROOM:g} via(s): {len(cramped)} (change, stretch) pairs over {len(met)} lanes')
     OBJ = sum(p.OBJ for p in parts.values()) + W_CROSS * W_V * sum(brk) + \
-        (W_RUN_CROSS - W_CROSS) * W_V * sum(brk_run)
+        (W_RUN_CROSS - W_CROSS) * W_V * sum(brk_run) + int(round(W_ROOM * W_V)) * sum(cramped)
     m.Minimize(OBJ)
     # the buses' own plans laid out whole: every hinted variable held, the couplings' literals completed
     sh = cp_seed.solver()
@@ -248,18 +282,22 @@ def main():
         n_b0 = sum(sh.Value(k_) for k_ in brk)
         print(f'  the buses\' own plans side by side: [{sh.StatusName(st_h)}] {sh.ObjectiveValue() / W_V:.1f} '
               f'vias-worth, {n_b0} of {len(brk)} couplings broken')
+        n_c0 = sum(sh.Value(c_) for c_ in cramped)
+        if cramped:
+            print(f'  room: {n_c0} cramped change(s) in the buses\' own plans')
         vals_h = [sh.Value(m.GetIntVarFromProtoIndex(i_)) for i_ in range(len(m.Proto().variables))]
         m.ClearHints()
         for i_, v_ in enumerate(vals_h):
             m.AddHint(m.GetIntVarFromProtoIndex(i_), v_)
     else:
         print(f'  the buses\' own plans side by side: [{sh.StatusName(st_h)}] -- the search from their hints only')
-    if st_h in ok and n_b0 == 0:
+    if st_h in ok and n_b0 == 0 and n_c0 == 0:
         # (the buses' own plans breaking NO coupling: nothing for the coupled solve to settle, and its search would only
         # search each bus's own model again, just solved by that bus -- four such searches, 198 to 264 s each, ended
         # where they began or 2 vias-worth lower, one of them with no couplings at all. Each bus keeps its own plan, as
         # the coupled plan: `own`, nothing written over its solve, and no coupling settled to hold through its loop)
-        print(f'  coupled search: none -- the buses\' own plans break no coupling: each bus\'s own is the coupled plan',
+        print(f'  coupled search: none -- the buses\' own plans break no coupling and cramp no change: each bus\'s own '
+              'is the coupled plan',
               flush=True)
         json.dump({'round': rnd, 'couplings': len(cpl), 'secs': round(time.time() - t0, 1), 'all': cpl,
                    'broken_alone': [], 'broken': [], 'own': True}, open(os.path.join(rd, 'joint.json'), 'w'), indent=1)
@@ -284,6 +322,8 @@ def main():
         print(f'  coupled search: [{s_.StatusName(st)}] {secs:.0f}s, {s_.ObjectiveValue() / W_V:.1f} vias-worth '
               f'(bound {s_.BestObjectiveBound() / W_V:.1f}), {sum(s_.Value(k_) for k_ in brk)} of {len(brk)} '
               f'couplings broken')
+    if cramped and sv is not None:
+        print(f'  room: {sum(sv.Value(c_) for c_ in cramped)} cramped change(s) in the coupled plan')
     rep = {'round': rnd, 'couplings': len(cpl), 'secs': round(secs, 1), 'all': cpl,
            'broken_alone': [c for c, k_ in zip(cpl, brk) if st_h in ok and sh.Value(k_)]}
     for c in rep['broken_alone']:

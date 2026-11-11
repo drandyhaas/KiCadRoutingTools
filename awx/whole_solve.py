@@ -321,9 +321,14 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         return True
     VEND = {}
     if NL > 2 and (awx_settings.get('VIA_ENDS') or '1') == '1':
-        VEND = {(n, k_): True for n in M for k_ in (0, 1) if via_end(n, k_)}
+        # (...but a lane a GROUP's model holds to its layers -- the plan's `held_layers`, group_ends: it crosses
+        # another bus's lane, and their layers are what keeps the two apart)
+        hl_ = getattr(ctx, 'held_layers', None) or ()
+        held_ = {n for n in M if any(leg in hl_ for leg in (prs[n] if n in prs else (n,)))}
+        VEND = {(n, k_): True for n in M for k_ in (0, 1) if n not in held_ and via_end(n, k_)}
         print(f'   {NL} routing layers {",".join(LAYN)}; via ends, their layers the solve\'s: '
-              f'{sum(1 for k_ in VEND if k_[1] == 0)} teeth, {sum(1 for k_ in VEND if k_[1] == 1)} berths of {len(M)} lanes')
+              f'{sum(1 for k_ in VEND if k_[1] == 0)} teeth, {sum(1 for k_ in VEND if k_[1] == 1)} berths of {len(M)} lanes'
+              + (f' ({len(held_)} lanes held to the group\'s layers)' if held_ else ''))
     # ...where their runs can lie: a via end's run (its stub from the via out, as the relayer moves it) on another
     # layer lies beside the copper there -- another net's stub or pad within the rule bans that layer, and two runs
     # within the rule of each other (crossing, laid on two layers) end on different layers (the ns3_rev synth: two
@@ -991,11 +996,12 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     W_ENDS = int(awx_settings.get('SOLVE_ENDS_PRICE') or '0')
     # (a PLANE's layer priced (route_layers.plane_kinds, more layers than two and a signal layer among them): a GROUND
     # plane's per run, the flat price of each run a lane lays on it whatever its length (route_layers.gnd_run_vias) --
-    # the layer kept for the lanes that save that many vias by it; a POWER plane's by the run's LENGTH
+    # the layer kept for the lanes that save that many vias by it; a POWER plane's per run too
+    # (route_layers.pwr_run_vias: a fallback, as a ground plane's) and by the run's LENGTH
     # (route_layers.pwr_vias_per_mm). Priced per cell (by the pour's fragility), a DDR bus's first solve took 709 s for
     # 308 and laid 78 vias for 40)
     PL_IDX, PW_IDX = [], []
-    PL_PRICE = [0] * NL         # (a run's flat price on each layer, in vias: a ground plane's)
+    PL_PRICE = [0] * NL         # (a run's flat price on each layer, in vias: a ground plane's, a power plane's)
     PW_MM = 0.0                 # (a power plane's run, in vias a mm)
     if NL > 2:
         _w, kinds_ = _plane_weights(ctx, LAYN)
@@ -1003,7 +1009,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
             # (every inner layer a plane's -- no inner signal layer: a run on any plane a via, flat)
             in_ = route_layers.inner_signal(kinds_)
             PL_PRICE = [route_layers.gnd_run_vias(in_) if kinds_[L_] == 'gnd' else
-                        (0.0 if in_ else 1.0) if kinds_[L_] == 'pwr' else 0.0 for L_ in LAYN]
+                        route_layers.pwr_run_vias(in_) if kinds_[L_] == 'pwr' else 0.0 for L_ in LAYN]
             PL_IDX = [i_ for i_ in range(NL) if PL_PRICE[i_] > 0]
             PW_MM = route_layers.pwr_vias_per_mm() if in_ else 0.0
             PW_IDX = [i_ for i_ in range(NL) if kinds_[LAYN[i_]] == 'pwr'] if PW_MM > 0 else []
@@ -1081,6 +1087,11 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 if (n, k_e) in VEND:
                     for L_b in sorted(VBAN.get((n, k_e), ())):
                         m.Add(y_e != LAYN.index(L_b)).OnlyEnforceIf(kept(n, fam='vban'))
+                    if check and not hint:
+                        # (a check's first plan starts each via end on the layer its ends gave it: the layers it
+                        # answers with (ends_y) are then the ends' own but where the plan needs another -- unhinted,
+                        # 45 of a bus's 47 lanes came back on other layers)
+                        m.AddHint(y_e, L_e)
                 else:
                     # (the rule's family names the END whose layer is fixed: a rules core then says which of a lane's
                     # ends cannot hold its layer -- the tooth's, or the berth's)
@@ -2332,6 +2343,15 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         # (the lanes with no room for a change on these ends -- each a fact of its own tooth and berth alone: those two
         # ends on one layer, whatever the rest; whole_ends' joint loop holds such a lane to one layer)
         out_['nochange'] = sorted(n_ for n_ in M if CDOM[n_][0] >= CDOM[n_][1])
+        # (...and what each end's layer may be: the ends that are VIA ENDS, their layer the solve's, and the layers the
+        # copper beside each one's run bans it -- the group's ends learn an end's banned layers from a refusal)
+        if NL > 2:
+            out_['vend'] = sorted([n_, k_] for (n_, k_) in VEND)
+            out_['vban'] = sorted([n_, k_, sorted(v_)] for (n_, k_), v_ in VBAN.items() if v_)
+        # (...and, with a plan on more layers than two, the layer it gives each lane's two ENDS -- a via end's is the
+        # solve's to choose: the group's ends take them, group_ends.py)
+        if STATUS['plan'] and NL > 2:
+            out_['ends_y'] = {n_: [LAYN[s_.Value(YL[n_][0])], LAYN[s_.Value(YL[n_][KMAX])]] for n_ in M if n_ in YL}
         if (WLIT or RLIT) and st_ == cp_model.INFEASIBLE:
             suff_ = list(s_.SufficientAssumptionsForInfeasibility())
             out_['core'] = sorted({WLIT[i_] for i_ in suff_ if i_ in WLIT})

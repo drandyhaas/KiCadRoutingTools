@@ -6858,6 +6858,8 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     ctx.src_cut = None
     if plan and plan.get('src_cut') is not None:
         ctx.src_cut = (2.0 * CY - float(plan['src_cut'])) if chi < 0 else float(plan['src_cut'])
+    # (the nets whose ends' layers are HELD -- a group's model's, group_ends: the lanes that cross another bus's)
+    ctx.held_layers = frozenset((plan or {}).get('held_layers') or ())
     if ctx.pages_first and EXACT_PAGES_ENV != '0':
         # a PAGES-FIRST plan (fanout_from_plan PLAN_PAGES): its two chains
         # were chosen to cover every lane, so the schedule pages it exactly

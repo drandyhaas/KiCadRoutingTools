@@ -376,6 +376,8 @@ def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
     ctx.dest_entry = {nm: (float(p_[0]), my_(p_[1])) for nm, p_ in plan['dest_entry'].items()} \
         if plan.get('dest_entry') else None
     ctx.src_cut = None if plan.get('src_cut') is None else my_(plan['src_cut'])
+    # (the nets whose ends' layers are HELD -- a group's model's, group_ends: the lanes that cross another bus's)
+    ctx.held_layers = frozenset(plan.get('held_layers') or ())
     pe = plan['ends']
     # (each net's end at the destination part it reaches: DEST may name several, braid.net_dest)
     ends = {nm: (tuple(pe[nm][0]), tuple(pe[nm][1]), bd.net_dest(byname[nm][1], dest)) for nm in names if nm in pe}

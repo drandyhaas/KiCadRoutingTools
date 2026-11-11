@@ -190,9 +190,9 @@ def own_via(pcb, pad, nid, grid):
     return (v.x, v.y) if v is not None else None
 
 
-def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE):
+def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE, own_line=False):
     """every escape the ball at `pad` has from its via at `site`, by each of `faces`, on each of `layers` (the module's
-    docstring): [Move]"""
+    docstring): [Move]. `own_line`: only its runs straight out along the ball's own line"""
     net = copper.net_key(getattr(pad, 'net_name', '') or '')
     nid = pad.net_id
     home = next((L for L in pad.layers if L.endswith('.Cu')), 'F.Cu')
@@ -237,7 +237,7 @@ def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE):
                     ln = ln0 + sg * m * 2 * h
                     lines.append((ln, [site, P(ln0, site[k]), P(ln0, row), P(ln, row), P(ln, e)]))
         for ln, path in lines:
-            if not (lo - 1e-6 <= ln <= hi + 1e-6):
+            if not (lo - 1e-6 <= ln <= hi + 1e-6) or (own_line and abs(ln - ball[a_]) > 1e-6):
                 continue
             path = dedupe(path)
             for L in layers:

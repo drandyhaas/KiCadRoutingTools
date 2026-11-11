@@ -384,27 +384,53 @@ def _straps(pcb, grid, items, obs):
     return straps
 
 
-def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_clear, inpad_r, run):
+def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_clear, inpad_r, run, pattern=False,
+                       lines=False):
     """(`escape_to`) ball p's moves as the ESCAPE FIELD has them (escape_plan.escape_menu / escape_out), from
     EVERY site it could take -- each of its four diagonal gap points whose via and stub stand clear (`site_clear(q, r)`,
     `stub_clear(a, b)`), its pad (a via in it, radius `inpad_r`), and no via at all (a surface escape out of the outer
     ring): the SITE is part of the move, so a ball's dog-bone is chosen with every neighbour's escape and drop, not before
     them. `run` (more routing layers than two): one move per site and path, its legs past the stub on RUN (the
-    layers it clears the caller's to find) -- escape_menu's copy per layer was the model three times over"""
+    layers it clears the caller's to find) -- escape_menu's copy per layer was the model three times over.
+    `pattern` (the group's ends, group_ends.py): THE PATTERN's moves alone, the fanout a hand lays -- a dog-bone to the
+    gap point toward the array's nearest corner (every via away from the centre, no two balls' at one point) run
+    straight out along the ball's own row or column, no side-step, by each face; and a surface escape by a face the
+    ball stands within `pattern` rows of (True: one). A ball of the OUTER RING takes the gap point beside that one
+    INWARD: toward the corner its via would stand outside the outer balls, in the way out of its neighbours' exits (232
+    of a 248-ball array's 992 such moves, each in some bus exit's way). Its inward point is the one the ball behind it
+    dog-bones to, so of the two one leaves on the surface -- the outer one, as a hand mostly has it, or the one behind
+    it through the gap, the outer ball then free to run under the array to any face. No other move is enumerated --
+    but, `lines` (with `pattern`): from that one via site, EVERY LINE it can leave along by each face, not the ball's
+    own alone (escape_menu's lines beside the via, the streets a pitch over and their side-steps): some thirty moves
+    a ball where the pattern has a handful, the exits' order round the array no longer the balls' own"""
     import copy
     import escape_plan as ep
     hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
     c = (p.global_x, p.global_y)
     out = []
-    for sx in (-1, 1):
-        for sy in (-1, 1):
-            q = (c[0] + sx * hx, c[1] + sy * hy)
-            if site_clear(q, None) and stub_clear(c, q):
-                out += ep.escape_menu(p, q, grid, faces, layers, copper)
-    if site_clear(c, inpad_r):
-        out += ep.escape_menu(p, c, grid, faces, layers, copper)
+    if pattern:
+        x0, y0, x1, y1 = grid.bbox
+        # (toward the nearest corner -- but never outside the outer balls: an outer ball's the one beside it inward)
+        dx, dy = (hx if c[0] >= (x0 + x1) / 2 else -hx), (hy if c[1] >= (y0 + y1) / 2 else -hy)
+        q = (c[0] + (dx if x0 - 1e-6 <= c[0] + dx <= x1 + 1e-6 else -dx),
+             c[1] + (dy if y0 - 1e-6 <= c[1] + dy <= y1 + 1e-6 else -dy))
+        if site_clear(q, None) and stub_clear(c, q):
+            out += (ep.escape_menu(p, q, grid, faces, layers, copper) if lines else
+                    ep.escape_menu(p, q, grid, faces, layers, copper, side=0, own_line=True))
+        depth = {'left': (c[0] - x0) / (2 * hx), 'right': (x1 - c[0]) / (2 * hx),
+                 'up': (c[1] - y0) / (2 * hy), 'down': (y1 - c[1]) / (2 * hy)}
+        surface = ep.escape_out(p, grid, [d for d in faces if depth[d] < pattern - 0.5], copper)
+    else:
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                q = (c[0] + sx * hx, c[1] + sy * hy)
+                if site_clear(q, None) and stub_clear(c, q):
+                    out += ep.escape_menu(p, q, grid, faces, layers, copper)
+        if site_clear(c, inpad_r):
+            out += ep.escape_menu(p, c, grid, faces, layers, copper)
+        surface = None
     if not run:
-        return out + ep.escape_out(p, grid, faces, copper)
+        return out + (surface if surface is not None else ep.escape_out(p, grid, faces, copper))
     seen, col = set(), []
     for m in out:
         geo = tuple((tuple(a), tuple(b), L == home) for a, b, L in m.legs)
@@ -416,7 +442,7 @@ def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_cl
         m2.layer = RUN
         m2.legs = [(a, b, home if L == home else RUN) for a, b, L in m.legs]
         col.append(m2)
-    return col + ep.escape_out(p, grid, faces, copper)
+    return col + (surface if surface is not None else ep.escape_out(p, grid, faces, copper))
 
 
 def _via_clear(pcb, obs, nid, q, r, sz):
@@ -1065,12 +1091,16 @@ def array_pairs(foot, nets, sn):
 
 
 def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=CLIMB, street=2, only=None,
-                vias_only=False, exit_rays=False, escape_to=None, hold=None, pocket_teeth=None, firm=None):
+                vias_only=False, exit_rays=False, escape_to=None, hold=None, pocket_teeth=None, firm=None,
+                all_faces=False, pattern=False, lines=False):
     """Every ball's OPTIONS for plan_array (its escapes, its straps, its drops, each with its copper as a Piece at its
     real size), and what they were built from: a namespace of foot, grid, bus_s, oth_s, drop_s, sz, items, menu (the
     escapes alone, per ball), balls, opts, via_r (a move's via radius), t_menu. `only` (a set of ball keys, NET#PAD):
     those balls alone -- a round that plans again only the balls whose copper did not stand (carry). `firm`
-    (plan_array's): the teeth kept wherever the plan can, each ball's menu whole."""
+    (plan_array's): the teeth kept wherever the plan can, each ball's menu whole. `all_faces` (with `escape_to`: the
+    GROUP's ends, group_ends.py): each bus ball's escapes by EVERY face of the array -- which face a bus leaves by is
+    the group's to choose, every bus's balls offered the same. `pattern` (the group's too): each such ball's PATTERN
+    moves alone (escape_field_moves), a pair's leg those of them with room for the pair at the exit and no other."""
     import braid as te
     import escape_moves as em
     import fanout_from_plan as fp
@@ -1145,6 +1175,8 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
             return sides_[dest]
 
         def esc_faces(p, dest, far_ok=False):
+            if all_faces:
+                return list(ep.DIRS)
             toward_, far_ = sides(dest)
 
             def half(d):
@@ -1190,7 +1222,8 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
             moves = escape_field_moves(
                 p, grid, home, lays, esc_faces(p, dest_of(nm), far_ok=far_held), esc_copper,
                 lambda q, r, _n=p.net_id: _via_clear(pcb, obs, _n, q, r or sz['vr'], sz),
-                lambda a, b, _n=p.net_id, _h=home: obs(_n, _h).seg_clear(a, b), sz['inpad'](p)[0], bool(runs))
+                lambda a, b, _n=p.net_id, _h=home: obs(_n, _h).seg_clear(a, b), sz['inpad'](p)[0], bool(runs),
+                pattern=pattern, lines=lines)
         else:
             with contextlib.redirect_stdout(io.StringIO()):
                 moves = em.enumerate_moves(
@@ -1275,7 +1308,8 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
             for m in moves:
                 if room_.get(id(m)):
                     m.runs_on = room_[id(m)]
-            moves = [m for m in moves if id(m) in room_] or moves
+            # (`pattern`: none with room is none offered -- the ball's whole menu is the caller's to ask for)
+            moves = [m for m in moves if id(m) in room_] or ([] if pattern else moves)
         menu[key] = moves
         dmenu[key] = []
     # (no option into a laid pair's POCKET (laid_pockets), the pair's own room to close past its teeth: an escape there
