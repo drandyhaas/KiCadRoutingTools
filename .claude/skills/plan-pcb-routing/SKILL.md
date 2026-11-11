@@ -671,7 +671,9 @@ manifest routes.
     "bound by POSITION: inside the courtyard of U1 only" (`A.insideCourtyard('U1')`)
     allows the smaller via only where it overlaps U1's courtyard: use it for
     that part's under-pad escape (its fanout step), not for the nets' whole
-    route, whose vias elsewhere are held to the board minimum. A rule marked
+    route, whose vias elsewhere are held to the board minimum. `check_drc`
+    grades such a rule's tracks, pads and clearances by position as well
+    (#1832); no routing step applies it, so its copper routes at the class. A rule marked
     "condition not read" may relax: check its condition by hand. Leave
     `--clearance` / `--clearance-ceiling` (and the cap pass's `--clearance`)
     OMITTED so each class routes at its own clearance, as the project grades

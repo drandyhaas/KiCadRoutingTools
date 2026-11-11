@@ -364,8 +364,16 @@ bound (the nets with a pad on the part). `check_drc.py` grades a via under such 
 rule by where it stands, as kicad-cli 10.0.6 does: `insideCourtyard()` and
 `intersectsCourtyard()` read either of the part's courtyards,
 `insideFrontCourtyard()` the one on the part's own side and
-`insideBackCourtyard()` the other. A rule whose condition is not read otherwise is
-listed as one that MAY relax. No routing step applies a courtyard-scoped rule.
+`insideBackCourtyard()` the other. It grades a `track_width` or `clearance` rule
+of that kind by position too (#1832): a track by its capsule (partly inside
+binds; one only touching the courtyard's edge does not; its own layer does not
+matter), a pad by its copper (one straddling the edge binds), and a clearance
+pair under the last matching rule in file order, its condition tried both ways,
+so `A.insideCourtyard('U1')` binds a pair one of whose items is inside -- each
+measured on kicad-cli 10.0.6. Such a rule is then not NOT GRADED. A rule whose
+condition is not read otherwise is listed as one that MAY relax. No routing step
+applies a courtyard-scoped rule: the router routes that copper at the class
+value.
 
 **Via count rules (#1707).** A `(constraint via_count (min N) (max M))` rule is
 not honoured by any routing step: a net is routed with the vias it needs

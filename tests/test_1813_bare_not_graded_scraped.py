@@ -29,6 +29,7 @@ import run_utils  # noqa: E402
 PY = [sys.executable, '-X', 'utf8']
 BOARD = os.path.join('kicad_files', 'cap_chain.kicad_pcb')
 COURT = "A.insideCourtyard('C1')"
+UNREAD = "A.getField('x') == 'y'"
 failures = []
 
 
@@ -129,9 +130,11 @@ def main():
         r = run(complete(b))
         check('check_complete does not call it ungraded',
               'nothing grades' not in r.stdout, r.stdout[-400:])
-        b = stage(td, 'clearance', 'cap stub', 'clearance (min 0.3mm)', COURT)
+        # a courtyard-scoped clearance rule is graded by position (#1832); a
+        # term nothing reads keeps a clearance rule NOT GRADED
+        b = stage(td, 'clearance', 'cap stub', 'clearance (min 0.3mm)', UNREAD)
         s, drc = score(b)
-        check('the courtyard clearance rule is listed as before, kind clearance',
+        check('an unread clearance rule is listed as before, kind clearance',
               drc.get('ungraded_rules') == ['cap stub']
               and drc.get('ungraded_rule_kinds') == {'cap stub': ['clearance']},
               json.dumps(drc)[:400])

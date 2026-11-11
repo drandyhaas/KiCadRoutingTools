@@ -15,10 +15,10 @@ KiCad accepts as blocking DRC. Now:
 3. check_drc grades the pairs at the rule: the /GND<->HS items leave the
    count (KiCad: 0 with the rule), the rest stay, and the rule is no longer
    listed ungraded;
-4. a rule that stays unmodelled (insideCourtyard) is still NOT GRADED, and
+4. a rule that stays unmodelled (getField()) is still NOT GRADED, and
    the violations it may make legal are TAGGED `unverified_rule` and counted
    apart (`UNVERIFIED (clearance): N`, JSON `unverified`, board_score
-   `drc.unverified`) -- still counted, since a courtyard term nothing here
+   `drc.unverified`) -- still counted, since a term nothing here
    reads makes nearly every HS pair "maybe".
 
     python3 tests/test_1528_netname_scoped_clearance.py
@@ -43,8 +43,9 @@ BOARD = os.path.join(REPO, 'kicad_files', 'lvds_converter_dualclk.kicad_pcb')
 PATS = ['/CLK*', '/DATA*']
 GND_HS = ('(rule "gnd_hs" (constraint clearance (min 0.2mm)) '
           '(condition "A.NetName == \'/GND\' && B.NetClass == \'HS\'"))')
-COURT = ('(rule "court_hs" (constraint clearance (min 0.2mm)) '
-         '(condition "A.insideCourtyard(\'IC4\') && A.NetClass == \'HS\'"))')
+#: a term nothing reads (a courtyard term was one until #1832 read it by position)
+UNREAD = ('(rule "unread_hs" (constraint clearance (min 0.2mm)) '
+          '(condition "A.getField(\'x\') == \'y\' && A.NetClass == \'HS\'"))')
 failures = []
 
 
@@ -134,10 +135,10 @@ def evaluator():
     if maybe is None:
         check('three-valued rule reading exists', False)
         return
-    cr = d.parse_dru(COURT)[0][0]
+    cr = d.parse_dru(UNREAD)[0][0]
     ast = d.parse_condition_maybe(cr.condition_src)
     dflt = d.RuleItem(type='track', effective_class='Default')
-    check('insideCourtyard && NetClass: "maybe" for an HS item, "no" for two Default ones',
+    check('getField && NetClass: "maybe" for an HS item, "no" for two Default ones',
           maybe(cr, ast, b, dflt, 'F.Cu', ['F.Cu']) is None
           and maybe(cr, ast, dflt, dflt, 'F.Cu', ['F.Cu']) is False)
 
@@ -185,7 +186,7 @@ def main():
                         accept=True)
         run_utils.evidence(routed, 'routed board')
         boards = {}
-        for tag, rules in (('norule', ()), ('rule', (GND_HS,)), ('court', (COURT,))):
+        for tag, rules in (('norule', ()), ('rule', (GND_HS,)), ('unread', (UNREAD,))):
             boards[tag] = copy_board(routed, os.path.join(td, tag + '.kicad_pcb'))
             write_project(boards[tag], 0.5)
             if rules:
@@ -213,19 +214,21 @@ def main():
               json.dumps(d)[:300])
 
         print('4. an unmodelled rule stays NOT GRADED; what it may relax is counted apart')
-        out_c, doc_c = drc(boards['court'], td, 'court')
-        check('court_hs is NOT GRADED', "NOT GRADED (clearance): rule 'court_hs'" in out_c)
-        tagged = [it for it in doc_c['items'] if it.get('unverified_rule') == 'court_hs']
+        out_c, doc_c = drc(boards['unread'], td, 'unread')
+        check('unread_hs is NOT GRADED', "NOT GRADED (clearance): rule 'unread_hs'" in out_c)
+        # the counted ones (a library pad gap it may clear is tagged too, #1706)
+        tagged = [it for it in doc_c['items'] if it.get('unverified_rule') == 'unread_hs'
+                  and not it.get('accepted')]
         check('the violations it may relax are tagged with it',
               tagged and doc_c.get('unverified') == len(tagged), f"{doc_c.get('unverified')}")
         check('they involve an HS net, the only class the rule can bind',
               all(hs(it.get('net1')) or hs(it.get('net2')) for it in tagged))
         check('...and stay counted', doc_c['violations'] == doc_n['violations'],
               f"{doc_c['violations']} vs {doc_n['violations']}")
-        s = score(boards['court'])
+        s = score(boards['unread'])
         d = (s.get('components') or {}).get('drc') or {}
         check('board_score: drc.unverified counts them apart, the rule ungraded',
-              d.get('unverified') == len(tagged) and d.get('ungraded_rules') == ['court_hs'],
+              d.get('unverified') == len(tagged) and d.get('ungraded_rules') == ['unread_hs'],
               json.dumps(d)[:300])
     finally:
         shutil.rmtree(td, ignore_errors=True)

@@ -105,6 +105,10 @@ SIZE_KINDS = frozenset({
 })
 #: The kinds a via is sized by (`relaxed_via_nets`, `CourtyardIndex`, #1805)
 VIA_SIZE_KINDS = ('annular_width', 'via_diameter', 'hole_size')
+#: The kinds check_drc grades by where each item stands when a courtyard
+#: term binds them: a via's size (#1805), a track's width and the clearance
+#: of tracks, vias and pads (#1832). The router reads none of them.
+COURTYARD_GRADED_KINDS = VIA_SIZE_KINDS + ('track_width', 'clearance')
 # The kinds a rule may carry without being reported as "parsed, not
 # consumed". WIDER than what is read today: the resolver's callers ask only
 # for track_width / via_diameter / hole_size (draw_size, floor), copper
@@ -297,7 +301,8 @@ class Rule:
     # #1805: the condition parsed WITH its courtyard predicates
     # (parse_condition(courtyards=True)) when they are all it does not read.
     # `unsupported` stays set: only an item whose `courtyards` were measured
-    # (check_drc's vias) is resolved against it, by position.
+    # (check_drc's vias, and #1832 its tracks and pads) is resolved against
+    # it, by position. No routing step measures one, so none reads the rule.
     courtyard_condition: object = None
     # set by net_keepouts.derive_area_keepouts when the router honours the
     # rule as a net-filtered keep-out: what it honours, for the report
@@ -2230,6 +2235,27 @@ class DesignRules:
         return replace(item, courtyards=courtyards.of_disc(
             float(via.x), float(via.y), float(via.size) / 2.0))
 
+    def track_item(self, seg, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
+        """#1832: `via_item`'s twin for a track segment on its own layer
+        (a footprint's graphic copper is typed 'graphic'); with
+        ``courtyards``, the courtyards its capsule overlaps measured."""
+        item = self.item_for_net(int(getattr(seg, 'net_id', 0) or 0),
+                                 'graphic' if getattr(seg, 'graphic', False) else 'track',
+                                 getattr(seg, 'layer', None))
+        if courtyards is None:
+            return item
+        return replace(item, courtyards=courtyards.of_capsule(
+            float(seg.start_x), float(seg.start_y), float(seg.end_x), float(seg.end_y),
+            float(seg.width or 0.0) / 2.0))
+
+    def pad_item(self, pad, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
+        """#1832: `item_for_pad` with, given ``courtyards``, the courtyards
+        the pad's copper overlaps measured."""
+        item = self.item_for_pad(pad)
+        if courtyards is None:
+            return item
+        return replace(item, courtyards=courtyards.of_pad(pad))
+
     def via_floors(self, net_id: int = 0) -> Dict[str, float]:
         """#1676: the minimums `.kicad_dru` rules set on a via of ``net_id``, in
         fab_tiers FLOOR_KEYS vocabulary (`via_diameter`, `via_drill`,
@@ -2849,7 +2875,8 @@ def _courtyard_patterns(node) -> Set[str]:
 
 
 class CourtyardIndex:
-    """#1805: the part courtyards a via overlaps, as KiCad's courtyard
+    """#1805: the part courtyards a via overlaps (#1832: a track or a pad,
+    `of_capsule` / `of_pad`), as KiCad's courtyard
     predicates read them (`_COURTYARD_FUNCS`): its disc against each drawn
     courtyard of the parts the board's courtyard rules name, tagged 'front'
     for the courtyard on the part's own side and 'back' for the other. The
@@ -2899,6 +2926,58 @@ class CourtyardIndex:
                 continue
             p = p or Point(x, y)
             if g.distance(p) < r - 1e-9:
+                out.add((ref, lib, side))
+        return frozenset(out)
+
+    def of_capsule(self, x0: float, y0: float, x1: float, y1: float,
+                   r: float) -> FrozenSet[Tuple[str, Optional[str], str]]:
+        """#1832: the courtyards a track of half-width ``r`` overlaps, its
+        capsule against each outline as `of_disc` reads a via's disc. Measured
+        on kicad-cli 10.0.6: a track partly inside binds, one whose capsule
+        only reaches the courtyard's edge does not, and the track's own layer
+        does not matter (a B.Cu track under a front part's F.CrtYd binds
+        insideFrontCourtyard())."""
+        from shapely.geometry import LineString, Point
+        geom = (Point(x0, y0) if (x0, y0) == (x1, y1)
+                else LineString([(x0, y0), (x1, y1)]))
+        return self._of(geom, r)
+
+    def of_pad(self, pad) -> FrozenSet[Tuple[str, Optional[str], str]]:
+        """#1832: the courtyards a pad's copper overlaps -- its shape as
+        check_drc measures it (`_pad_copper_core`: custom polygons, round
+        corners, tilt). Measured on kicad-cli 10.0.6: a pad straddling the
+        courtyard's edge binds."""
+        from shapely.geometry import LineString, Point, Polygon
+        from shapely.ops import unary_union
+        from check_drc import _pad_copper_core
+        polys, r = _pad_copper_core(pad)
+        parts = []
+        for poly in polys:
+            pts = list(dict.fromkeys((float(x), float(y)) for x, y in poly))
+            if len(pts) == 1:
+                parts.append(Point(pts[0]))
+            elif len(pts) == 2 or Polygon(pts).area <= 1e-12:
+                parts.append(LineString(pts))
+            else:
+                parts.append(Polygon(pts))
+        if not parts:
+            return frozenset()
+        return self._of(parts[0] if len(parts) == 1 else unary_union(parts), r)
+
+    def _of(self, geom, r: float) -> FrozenSet[Tuple[str, Optional[str], str]]:
+        """The courtyards ``geom`` grown by ``r`` overlaps: within less than
+        ``r`` of the outline, or, at ``r`` 0, sharing area with it (a shape
+        that only touches the outline does not, as in KiCad)."""
+        bx0, by0, bx1, by1 = geom.bounds
+        out = set()
+        for ref, lib, side, g, (x0, y0, x1, y1) in self.parts:
+            if bx1 < x0 - r or bx0 > x1 + r or by1 < y0 - r or by0 > y1 + r:
+                continue
+            if r > 0:
+                hit = g.distance(geom) < r - 1e-9
+            else:
+                hit = g.intersects(geom) and g.intersection(geom).area > 1e-12
+            if hit:
                 out.add((ref, lib, side))
         return frozenset(out)
 

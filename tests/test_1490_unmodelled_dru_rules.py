@@ -4,7 +4,8 @@ check_drc reads .kicad_dru clearance through three channels: layer-scoped
 rules (#498), class track-to-track rules (#735) and coupled-pair rules
 (#1293), and since #1491 class/type-scoped rules (`A.NetClass == 'HS' &&
 B.NetClass == 'HS'`, `B.Type == 'Pad'`; since #1528 also `A.NetName == ...`).
-A clearance rule scoped any other way (`A.insideCourtyard(...)`) got one
+A clearance rule scoped any other way (`A.insideCourtyard(...)` then, read
+by position since #1832; `A.getField(...)` here) got one
 console note and was graded by nothing, so board_score said drc 0 and
 check_complete said DONE while KiCad reported the errors. It is now named `NOT GRADED (clearance)`, the
 clearance half of #1390's size disclosure: board_score lists `drc.dru_rules`
@@ -37,7 +38,7 @@ DRU = '''(version 1)
 (rule "name gap" (constraint clearance (min 0.3mm))
   (condition "A.NetName == '/HS0' && B.NetName == '/HS1'"))
 (rule "court gap" (constraint clearance (min 0.3mm))
-  (condition "A.insideCourtyard('P3') && A.NetClass == 'HS'"))
+  (condition "A.getField('x') == 'y' && A.NetClass == 'HS'"))
 (rule "inner tight" (constraint clearance (min 0.15mm)) (layer inner))
 (rule "pair gap" (constraint clearance (min 0.12mm))
   (condition "A.NetClass == 'HS' && AB.isCoupledDiffPair()"))
@@ -70,7 +71,7 @@ def main():
         r = run([os.path.join('py_router', 'check_drc.py'), b])
         named = sorted(set(ln.split("'")[1] for ln in r.stdout.splitlines()
                            if 'NOT GRADED (clearance)' in ln))
-        check("the courtyard-scoped rule is named", named == ['court gap'],
+        check("the rule with an unread term is named", named == ['court gap'],
               f'{named}\n{r.stdout[-600:]}')
         check('the NetClass-, Type- (#1491) and NetName-scoped (#1528) rules are '
               'graded, so not named', not {'hs gap', 'hs pad', 'name gap'} & set(named))
