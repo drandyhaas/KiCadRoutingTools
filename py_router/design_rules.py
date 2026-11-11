@@ -505,10 +505,13 @@ def _via_attr(v, key):
 # Condition expressions
 # --------------------------------------------------------------------------
 # Grammar (the KiCad rule language subset we evaluate):
-#   expr   := or
-#   or     := and ('||' and)*
-#   and    := not ('&&' not)*
+#   expr   := and
+#   and    := or ('&&' or)*
+#   or     := not ('||' not)*
 #   not    := '!' not | atom
+# '||' binds TIGHTER than '&&', as in KiCad (#1797): its grammar declares
+#   `%left G_BOOL_AND.` before `%left G_BOOL_OR.`, and kicad-cli 10.0.6 reads
+#   `X && Y || Z` as `X && (Y || Z)` and `X || Y && Z` as `(X || Y) && Z`.
 #   atom   := '(' expr ')' | cmp
 #   cmp    := term (('=='|'!=') term)?
 #   term   := ITEM '.' NAME '(' args ')' | ITEM '.' NAME | STRING | NUMBER | 'L'
@@ -696,7 +699,7 @@ class _KiCadCompile:
     def run(self):
         if not self.toks:
             return
-        kind = self._or()
+        kind = self._and()
         if self.i != len(self.toks):
             raise Unsupported(f"it does not expect {self._peek()[1]!r} there")
         if kind == self.PLAIN:
@@ -717,11 +720,11 @@ class _KiCadCompile:
             a = self._pair(a, down(), op)
         return a
 
-    def _or(self):
-        return self._chain(('||',), self._and)
-
     def _and(self):
-        return self._chain(('&&',), self._cmp)
+        return self._chain(('&&',), self._or)
+
+    def _or(self):
+        return self._chain(('||',), self._cmp)
 
     def _cmp(self):
         a = self._add()
@@ -763,7 +766,7 @@ class _KiCadCompile:
                 raise Unsupported(f"{v}{nv}: {nv!r} is not a unit it knows")
             return self.UNIT
         if k == 'op' and v == '(':
-            kind = self._or()
+            kind = self._and()
             if not self._is_op(')'):
                 raise Unsupported("an unclosed parenthesis")
             self._next()
@@ -810,7 +813,7 @@ class _KiCadCompile:
                 continue
             props += k == 'name'
             others += 1
-            if self._or() == self.PLAIN:
+            if self._and() == self.PLAIN:
                 raise Unsupported(f"{item}.{name}() with a plain number")
         self._next()
         if need and props and not strings:
@@ -941,23 +944,23 @@ class _Parser:
         return v
 
     def parse(self):
-        node = self.or_()
+        node = self.and_()
         if self.i != len(self.toks):
             raise Unsupported(f"trailing {self.peek()[1]!r}")
         return node
 
-    def or_(self):
-        node = self.and_()
-        while self.peek() == ('op', '||'):
-            self.take()
-            node = ('or', node, self.and_())
-        return node
-
     def and_(self):
-        node = self.not_()
+        node = self.or_()
         while self.peek() == ('op', '&&'):
             self.take()
-            node = ('and', node, self.not_())
+            node = ('and', node, self.or_())
+        return node
+
+    def or_(self):
+        node = self.not_()
+        while self.peek() == ('op', '||'):
+            self.take()
+            node = ('or', node, self.not_())
         return node
 
     def not_(self):
@@ -969,7 +972,7 @@ class _Parser:
     def atom(self):
         if self.peek() == ('op', '('):
             self.take()
-            node = self.or_()
+            node = self.and_()
             self.take('op', ')')
             return node
         return self.cmp()
