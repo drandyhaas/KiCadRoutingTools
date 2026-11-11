@@ -1599,6 +1599,11 @@ Two things read it:
   pose is known (locked in the board, or a `fixed_poses[]` entry) the member's
   template pose is tested against the region and the finding says it lies
   inside; otherwise it says the region admits the chip but binds the member.
+  A declared cover (`covers[]`) is read the same way (#1821): where the chip
+  and the cover's connector have known poses, a member whose template pose
+  has less room under the body than the 0.5 mm margin (or whose height is
+  unknown, or which is reached from above) is named with the cover; otherwise
+  a body that admits the chip but not the member is.
   `place_simple` names the same conflict for a placed chip, and a member left
   past its `tolerance_mm`, in its report (`template_keepout`, `template_off`).
 - **The ground return** (`template_ground_return`, **warn** by default), on a

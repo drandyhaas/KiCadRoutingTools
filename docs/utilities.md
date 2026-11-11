@@ -466,7 +466,9 @@ python3 -X utf8 py_placer/place_simple.py board.kicad_pcb preview.png \
   floorplan error, so such a seed cannot be DONE as placed, and the limit it
   breaks often made it the cheapest. They are printed, a WARNING naming each
   judged seed that carries an error, and written to `judge.json` beside the
-  boards (`judge` in judging order, then the `scattered`, `clustered`,
+  boards (`judge` in judging order, `clean` the judged seeds graded
+  buildable and floorplan-clean -- the printed line counts them, of the
+  legal seeds, and says when none is, #1824 -- then the `scattered`, `clustered`,
   `anchored` and `illegal` seeds, `floorplan`: each seed's error count,
   `refused`: the declared poses that are not legal, and `oversubscribed`:
   the edges that cannot seat all their declared parts together -- both the
