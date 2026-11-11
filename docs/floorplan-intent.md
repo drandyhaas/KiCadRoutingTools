@@ -2196,7 +2196,9 @@ the other signal layers could take:
   `deficit_floor > 0` says the face is short *even using every other layer* — a
   strictly stronger verdict than `deficit > 0`. **`deficit_floor == 0` proves
   nothing**, which is why nothing gates on it and why the floorplan report
-  prints its line only when it is positive.
+  prints its line only when it is positive. Whether a part's nets can leave
+  it all at once is a different instrument, a maximum flow over the free
+  space round it: `check_reachability.py BOARD --part REF` (#1817).
 - **`supply_bound` names which term binds**, and that is the actionable half.
   `via_slots` does not depend on the layer count, so the `min` saturates almost
   at once — on every in-repo board the answer at 2 signal layers equals the

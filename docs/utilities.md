@@ -3242,6 +3242,26 @@ python3 py_tools/check_reachability.py board.kicad_pcb --pad U3.23 --track 0.15 
 only the JSON; `--json-out PATH` also writes it. Exit 2 when an argument names
 nothing on the board (a ref, a pad number) or the board cannot be read.
 
+`--part REF` (#1817) asks the question one pad at a time cannot: how many of
+the part's signal nets can leave a window round it (`--margin`, default 3 mm)
+AT ONCE, each by its own track. N pads that share one lane each read PASSABLE
+under `--pad`; here they share it. It is a maximum flow
+(`placement/escape_flow.py`) over a lattice of half-lane cells, at the track
+and clearance the lane ledger prices at (`--track` / `--clearance` / `--via`
+override), each net's own halo usable only by that net, another part's copper
+of the same net a place to end, a via wherever one fits on every layer and no
+rule area bans it. Plane nets (ground and supply names) and nets with no
+copper off the part are no demand. The lattice OVER-STATES capacity (two
+tracks a lane apart cannot share a half-lane cell, but a one-lane gap
+straddling two cells reads as two), so **a positive deficit is a proof** --
+exit 1, naming the parts whose copper closes the cut -- and 0 (exit 0) is
+"not proven short". A pad no track of this width can legally touch is
+counted as escaping and named.
+
+```bash
+python3 py_tools/check_reachability.py board.kicad_pcb --part U3
+```
+
 ## Net Forensics (`net_forensics.py`)
 
 For each named net: its copper **islands** (which pads sit in each), the

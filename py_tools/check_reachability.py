@@ -253,6 +253,56 @@ def _fab_wrap(board, floors, tier=None, overrides=None):
     return {n: floors[n]['value'] for n in _FAB_KEYS if n in floors}, fab
 
 
+def _part_main(args, pcb):
+    """`--part REF` (#1817): the part's simultaneous escape, one line, or the
+    JSON document. Exit 0 no deficit, 1 a positive deficit (a proof), 2 a ref
+    this board does not have."""
+    from placement import escape_flow, reachability
+    if args.part not in pcb.footprints:
+        print(f"cannot resolve: no part {args.part!r} on this board",
+              file=sys.stderr)
+        print("(exit 2 -- this is an argument that names nothing on this board, "
+              "NOT a deficit, which is exit 1)", file=sys.stderr)
+        return 2
+    try:
+        f = escape_flow.part_flow(
+            pcb, args.part, args.board,
+            margin_mm=(args.margin if args.margin is not None
+                       else escape_flow.DEFAULT_MARGIN_MM),
+            track_width=args.track, clearance=args.clearance,
+            via_diameter=args.via,
+            layers=args.layers.split(',') if args.layers else None)
+    except reachability.ScipyRequired as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    d = f.to_dict()
+    if args.json_out:
+        with open(args.json_out, 'w', encoding='utf-8') as fh:
+            json.dump(d, fh, indent=2)
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return 1 if f.deficit else 0
+    ru = f.rules
+    print(f"{f.ref}: demand {f.demand} net(s), flow {f.flow}, deficit "
+          f"{f.deficit} -- at track {ru['track_mm']:g} / clearance "
+          f"{ru['clearance_mm']:g} / via {ru['via_mm']:g} mm, window "
+          f"{ru['margin_mm']:g} mm round its pads, {len(f.layers)} layer(s)")
+    if f.deficit:
+        print(f"  PROVEN SHORT: at most {f.flow} of its {f.demand} nets can "
+              f"leave at once (the lattice over-states capacity)"
+              + (f"; the cut runs past {', '.join(f.cut_refs[:8])}"
+                 if f.cut_refs else ''))
+    else:
+        print("  not proven short: the lattice over-states capacity, so this "
+              "is no promise the router finds every exit")
+    if f.unstartable:
+        print(f"  counted as escaping, no legal start at this track width: "
+              f"{', '.join(f.unstartable)}")
+    if f.ignored:
+        print(f"  plane nets, no demand: {', '.join(f.ignored)}")
+    return 1 if f.deficit else 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -260,6 +310,15 @@ def main(argv=None):
     p.add_argument('board')
     p.add_argument('--pad', help="REF.PADNUM, e.g. U3.23 -- sets --at and "
                                  "--net from the pad itself")
+    p.add_argument('--part', metavar='REF',
+                   help="how many of REF's signal nets can leave it AT ONCE "
+                        "(#1817): a maximum flow over a lattice that "
+                        "over-states capacity, so a positive deficit is a "
+                        "proof and 0 is 'not proven short'. Prices lanes at "
+                        "the rules the lane ledger uses; --track/--clearance/"
+                        "--via override them, --margin is the window round "
+                        "the part's pads (default 3). Exit 1 only for a "
+                        "positive deficit")
     p.add_argument('--at', help="x,y of the stranded pad (mm)")
     p.add_argument('--net', help="net name; inferred from --pad when given")
     p.add_argument('--layers', default=None,
@@ -279,10 +338,11 @@ def main(argv=None):
                    help="raster step in mm (default 0.01). A throat is only "
                         "resolved to +/- one step, so halve it if the margin "
                         "comes out inside a step of zero")
-    p.add_argument('--margin', type=float, default=4.0,
+    p.add_argument('--margin', type=float, default=None,
                    help="half-size of the view around the seed, mm "
-                        "(default 4.0). Reachability is LOCAL; a whole board "
-                        "at 10um costs memory for nothing")
+                        "(default 4.0; with --part, the window round the "
+                        "part's pads, default 3.0). Reachability is LOCAL; a "
+                        "whole board at 10um costs memory for nothing")
     p.add_argument('--view', default=None, help="x0,y0,x1,y1 to override")
     p.add_argument('--json', action='store_true',
                    help="print the result as JSON on stdout, and nothing else "
@@ -334,6 +394,11 @@ def main(argv=None):
         print(f"cannot resolve: {args.board} did not parse: "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
+
+    if args.part:
+        return _part_main(args, pcb)
+    if args.margin is None:
+        args.margin = 4.0
 
     # EVERY argument-resolution failure below leaves here as exit 2. None of
     # them is a statement about the board's geometry, and 1 is reserved for the
