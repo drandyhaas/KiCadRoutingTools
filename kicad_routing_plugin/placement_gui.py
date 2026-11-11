@@ -331,7 +331,11 @@ def _cand_caption(row):
         text = f"{head} — placed; fast route pending"
     else:
         text = f"{head} — placing"
-    tag = {"KEPT": "kept", "best": "best fast route"}.get(row["status"])
+    tag = {"KEPT": "kept", "best": "best fast route",
+           "best, not separable": "best fast route, not separable from the "
+           "seeds marked so: confirm with a full route",
+           "not separable": "not separable from the best fast route: "
+           "confirm with a full route"}.get(row["status"])
     return f"{text} ({tag})" if tag else text
 
 
@@ -424,7 +428,9 @@ class PlacementTab(wx.Panel):
             "One row per seed: its fast route's blocking nets, vias, "
             "copper and segments. 'best' is the best fast route, 'clean' a "
             "fast route with no blocking net, 'KEPT' the board the run "
-            "returned. Select a row to see its board.")
+            "returned. 'not separable': every seed leaves many nets blocked "
+            "in the fast route, and these seeds lie within its spread of the "
+            "best, so it cannot rank them. Select a row to see its board.")
         self.cand_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_cand_selected)
         cand_sizer.Add(self.cand_list, 1, wx.EXPAND | wx.ALL, 3)
         self.preview = BoardPreview(self)

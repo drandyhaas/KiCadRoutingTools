@@ -1381,7 +1381,12 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    copper reads -2% to +8% off the full route's per seed, and when every seed
    routes its blocking is decided by one open net. Seeds that lie within that
    spread of the best (the same defects, blocking within 1, copper within 10%)
-   are NOTEd; settle them with `--confirm close`, which routes those seeds
+   are NOTEd. When the best leaves many nets blocked at level 2 the chain does
+   not route the board at that level: the band grows to 15% of the best's
+   blocking (joins_needed compared the same way, copper not), and the run says
+   `every judged seed leaves N-M nets blocked at level 2` and names the seeds
+   it cannot separate (`not_separable`; the GUI marks them `not separable`).
+   Settle close seeds with `--confirm close`, which routes those seeds
    again at the full level (`--quick` off every route step, into
    `s<S>_full.kicad_pcb` and `s<S>_full.score.json`) and names the best of
    them by the same key (`--confirm K` confirms the K best instead).

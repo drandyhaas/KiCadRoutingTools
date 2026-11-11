@@ -1462,7 +1462,11 @@ python3 -X utf8 py_placer/judge_seeds.py wk/run/judge.json --chain wk/run/judge_
 - Level 2 is a screen, not a verdict: its copper reads a few percent off the
   full route's per seed. Seeds within that spread of the best (the same
   placement defects, blocking within 1 net, copper within 10%) are NOTEd
-  (`close` in `JSON_SUMMARY:`), and `--confirm close` routes them again at
+  (`close` in `JSON_SUMMARY:`). Where the best leaves many nets blocked at
+  level 2, the band grows to 15% of its blocking (rounded up), joins_needed
+  is compared the same way and copper is not, and the run says that every
+  judged seed leaves N-M nets blocked there and which seeds it cannot
+  separate (`not_separable`, #1826). `--confirm close` routes them again at
   the full level (`--quick` taken off every route step) into
   `s<S>_full.kicad_pcb` / `s<S>_full.score.json` and names the best of them
   (`confirmed`); `--confirm K` confirms the K best ranked instead.
