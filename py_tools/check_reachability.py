@@ -288,10 +288,14 @@ def _part_main(args, pcb):
           f"{ru['clearance_mm']:g} / via {ru['via_mm']:g} mm, window "
           f"{ru['margin_mm']:g} mm round its pads, {len(f.layers)} layer(s)")
     if f.deficit:
-        print(f"  PROVEN SHORT: at most {f.flow} of its {f.demand} nets can "
-              f"leave at once (the lattice over-states capacity)"
+        print(f"  PROVEN SHORT at these rules: at most {f.flow} of its "
+              f"{f.demand} nets can leave at once (the lattice over-states "
+              f"capacity)"
               + (f"; the cut runs past {', '.join(f.cut_refs[:8])}"
-                 if f.cut_refs else ''))
+                 if f.cut_refs else '')
+              + (" -- its own pads: at this track and via no path leaves "
+                 "them, so narrower geometry (a finer class, smaller vias) "
+                 "is the other answer" if f.cut_refs == (f.ref,) else ''))
     else:
         print("  not proven short: the lattice over-states capacity, so this "
               "is no promise the router finds every exit")

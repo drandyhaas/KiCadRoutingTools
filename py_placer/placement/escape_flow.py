@@ -35,6 +35,11 @@ What it does not say: a flow of 0 deficit is not a route (the router still
 has to find it, and the window is a local question); the clearance is the
 single lane clearance the ledger prices at (`escape.lane_pitch_parts`), not
 each pair's class, which is the generous reading on a multi-class board.
+And the proof is AT THOSE RULES: a part a human escapes with narrower
+tracks or smaller vias than the board's Default class reads short here --
+measured, a 0.8 mm BGA-121 escaped with 0.15-0.19 mm tracks and 0.4 mm vias
+on a board whose Default class is 0.2 mm / 0.6 mm reads 19 nets short, its
+own pads at the cut (`stranded` names the nets left without a path).
 
 The cut, when the deficit is positive, is named as parts: the copper nearest
 each saturated lattice cell on the source side of the minimum cut
@@ -71,6 +76,7 @@ class PartFlow:
     unstartable: Tuple[str, ...] = ()
     local: Tuple[str, ...] = ()
     ignored: Tuple[str, ...] = ()
+    stranded: Tuple[str, ...] = ()
     seconds: float = 0.0
 
     @property
@@ -87,6 +93,7 @@ class PartFlow:
                               for l, x, y in self.cut_cells],
                 'unstartable': list(self.unstartable),
                 'local': list(self.local), 'ignored': list(self.ignored),
+                'stranded': list(self.stranded),
                 'seconds': round(self.seconds, 2),
                 'basis': 'max flow on a half-lane lattice that over-states '
                          'capacity: deficit > 0 is a proof, 0 is not proven '
@@ -502,9 +509,15 @@ def part_flow(pcb, ref, pcb_file=None, *, margin_mm: float = DEFAULT_MARGIN_MM,
             y = view[1] + (cxy // ncx + 0.5) * cell
             cells.append((layers[li], x, y))
             for e in reach.nearest_foreign(board, x, y, None, (layers[li],)):
-                if e.get('ref') and e['ref'] != ref:
+                if e.get('ref'):
                     refs[e['ref']] = refs.get(e['ref'], 0) + 1
         res.cut_cells = tuple(cells)
         res.cut_refs = tuple(sorted(refs, key=lambda r: (-refs[r], r)))
+        # nets whose source the residual still reaches got no path: when no
+        # lattice cell is saturated, the cut is at their own halos -- the
+        # part's own pads (and the rules) close them in
+        res.stranded = tuple(names[n] for n in demand if seen[S0 + nidx[n]])
+        if not cells:
+            res.cut_refs = (ref,)
     res.seconds = time.time() - t0
     return res

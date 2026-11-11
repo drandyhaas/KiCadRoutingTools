@@ -3261,7 +3261,12 @@ tracks a lane apart cannot share a half-lane cell, but a one-lane gap
 straddling two cells reads as two), so **a positive deficit is a proof** --
 exit 1, naming the parts whose copper closes the cut -- and 0 (exit 0) is
 "not proven short". A pad no track of this width can legally touch is
-counted as escaping and named.
+counted as escaping and named. The proof is AT THE RULES PRICED: a part
+escaped with narrower tracks or smaller vias than the Default class reads
+short (a 0.8 mm BGA a human escaped at 0.15-0.19 mm tracks and 0.4 mm vias,
+on a 0.2 mm / 0.6 mm Default class, reads 19 nets short, its own pads at the
+cut, and 0 at `--track 0.15 --clearance 0.15 --via 0.4`); `stranded` names
+the nets left without a path.
 
 ```bash
 python3 py_tools/check_reachability.py board.kicad_pcb --part U3
