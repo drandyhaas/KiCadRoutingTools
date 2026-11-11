@@ -1893,10 +1893,11 @@ def main(argv=None):
             for d in off) + "; check_floorplan grades this a WARN (unless the intent's "
             "`severity` promotes `template`), so the judge ranks the seed no lower for it")
     # a keep-out that binds a template member but not its chip forbids the
-    # template pose where the chip stands (#1387)
+    # template pose where the chip stands (#1387), as does a declared cover
+    # too low for the member (#1821)
     tk = [f for f in floorplan.template_keepout_findings(
         intent, state.parts, lambda r: (state.parts[r].x, state.parts[r].y, state.parts[r].rot),
-        state.heights.height)
+        state.heights.height, state.heights)
         if f['forced']]
     for f in tk:
         print(f"  WARNING: {floorplan.template_keepout_text(f)}")

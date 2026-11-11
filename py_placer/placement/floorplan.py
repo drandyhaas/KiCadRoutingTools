@@ -9035,23 +9035,34 @@ def rule_mountable(ctx) -> Iterator[Violation]:
 
 
 def template_keepout_findings(intent, parts, anchor_pose=None,
-                               height=None) -> List[Dict]:
-    """The intent's keep-outs against its datasheet templates (#1387): a
-    keep-out that binds a template MEMBER but not the template's anchor makes
-    the template pose forbidden wherever the anchor stands under it, and the
-    member is then carried (`simple.follow`) into the region it may not enter
-    -- or left off its template pose. Nothing else says so: the keep-out
-    admits the chip, the template places its support parts, and the drift is
-    only a WARN.
+                               height=None, heights=None) -> List[Dict]:
+    """The intent's keep-outs and covers against its datasheet templates
+    (#1387, #1821): a keep-out that binds a template MEMBER but not the
+    template's anchor makes the template pose forbidden wherever the anchor
+    stands under it, and the member is then carried (`simple.follow`) into
+    the region it may not enter -- or left off its template pose. A declared
+    cover (`covers[]`) too low for a member does the same where its body
+    stands over the member's template pose. Nothing else says so: the
+    keep-out or the cover admits the chip, the template places its support
+    parts, and the drift is only a WARN.
 
-    `parts` maps each ref to an object with `sides`, `ensure_rotation` and
-    `grade_rects` (a `quench.QuenchState`'s parts). `anchor_pose(ref)` gives
-    the anchor's `(x, y, rot)` where it is known (a placement, a locked or
-    declared pose), else None. `height(ref)` gives a part's known height
-    (else None): a height-limited keep-out admits a part no taller than its
-    limit (#1443), and binds it here only as `keepouts_for_ref` binds it. Returns `[{'index', 'anchor', 'ref', 'keepout',
-    'forced', 'at'}]`: `forced` where the member's template pose for that
-    anchor pose lies inside the keep-out (`at` is the pose); else the keep-out
+    `parts` maps each ref to an object with `side`, `sides`,
+    `ensure_rotation`, `grade_rects` and `bounds_by_rot` (a
+    `quench.QuenchState`'s parts). `anchor_pose(ref)` gives a part's
+    `(x, y, rot)` where it is known (a placement, a locked or declared pose),
+    else None: the template's anchor, and a cover's connector. `height(ref)`
+    gives a part's known height (else None): a height-limited keep-out admits
+    a part no taller than its limit (#1443), and binds it here only as
+    `keepouts_for_ref` binds it. `heights` (a `heights.Heights` carrying the
+    intent's covers) judges a member under a cover as the seat does
+    (`Heights.under_declared` on the occupancy the seat reads): too little
+    room under the body (`MARGIN_MM`), an unknown height or a part reached
+    from above binds it. Returns `[{'index', 'anchor', 'ref', 'keepout',
+    'cover', 'forced', 'at'}]` (`keepout` None for a cover's finding, `cover`
+    the cover's connector, None for a keep-out's; a cover's finding also
+    carries `room_mm`): `forced` where the member's template pose for that
+    anchor pose lies inside the keep-out, or under the cover's body where
+    the connector stands (`at` is the pose); else the keep-out or the cover
     admits the anchor but not the member, so some anchor poses are refused
     their own template."""
     from .templates import member_target
@@ -9059,7 +9070,7 @@ def template_keepout_findings(intent, parts, anchor_pose=None,
     for i, decl in enumerate(intent.templates):
         a = decl['anchor']
         A = parts.get(a)
-        if A is None or not intent.keepouts:
+        if A is None:
             continue
         free = {k['name'] for k in intent.keepouts} - {
             k['name'] for k in keepouts_for_ref(
@@ -9076,16 +9087,72 @@ def template_keepout_findings(intent, parts, anchor_pose=None,
                     P.ensure_rotation(pose[2])
                     if keepout_hit(k, P.grade_rects(*pose)):
                         out.append({'index': i, 'anchor': a, 'ref': m['ref'],
-                                    'keepout': k['name'], 'forced': True,
+                                    'keepout': k['name'], 'cover': None, 'forced': True,
                                     'at': [round(v, 3) for v in pose]})
                 elif k['name'] in free:
                     out.append({'index': i, 'anchor': a, 'ref': m['ref'],
-                                'keepout': k['name'], 'forced': False, 'at': None})
+                                'keepout': k['name'], 'cover': None, 'forced': False,
+                                'at': None})
+            if heights is not None:
+                out.extend(_template_cover_findings(intent, parts, anchor_pose, heights,
+                                                    i, a, apose, m, P))
+    return out
+
+
+def _template_cover_findings(intent, parts, anchor_pose, heights, i, a, apose, m, P):
+    """`template_keepout_findings`' cover half (#1821), for template `i`'s
+    member `m` (part `P`) of anchor `a` at `apose` (None: unknown): one
+    finding per cover on the member's face whose body binds it."""
+    from .heights import MARGIN_MM
+    from .templates import member_target
+    out = []
+    for c in intent.covers:
+        con = c['connector']
+        cov = heights.covers.get(con)
+        if (con in (a, m['ref']) or con not in parts or P.side != c['side']
+                or getattr(cov, 'decl', None) is None or m['ref'] in cov.decl[2]):
+            continue
+        under = cov.decl[1]
+
+        def binds(ref):
+            t = heights.height(ref) if ref in cov.decl[3] else heights.under_height(ref)
+            return t is None or not math.isfinite(t) or t + MARGIN_MM > under + 1e-9
+
+        cpose = anchor_pose(con) if anchor_pose is not None else None
+        if apose is not None and cpose is not None:
+            pose = member_target(apose, m)
+            u = heights.under_declared(con, cpose, m['ref'], pose, P.bounds_by_rot[0.0])
+            if u is not None and (u.get('reached') or u['room_mm'] is None
+                                  or u['room_mm'] < MARGIN_MM - 1e-9):
+                out.append({'index': i, 'anchor': a, 'ref': m['ref'], 'keepout': None,
+                            'cover': con, 'forced': True, 'room_mm': u['room_mm'],
+                            'at': [round(v, 3) for v in pose]})
+        elif binds(m['ref']) and (parts[a].side != c['side'] or a in cov.decl[2]
+                                  or not binds(a)):
+            out.append({'index': i, 'anchor': a, 'ref': m['ref'], 'keepout': None,
+                        'cover': con, 'forced': False, 'room_mm': None, 'at': None})
     return out
 
 
 def template_keepout_text(f: Dict) -> str:
     """One finding of `template_keepout_findings`, in words."""
+    if f.get('cover'):
+        from .heights import MARGIN_MM
+        con, r, an = f['cover'], f['ref'], f['anchor']
+        if f['forced']:
+            room = ('its height is unknown or it is reached from above'
+                    if f.get('room_mm') is None else
+                    f"{f['room_mm']:g} mm of room over it, under the {MARGIN_MM:g} mm "
+                    f"margin")
+            return (f"the cover on {con} stands over {r}, a member of {an}'s template, "
+                    f"where the template puts {r} at ({f['at'][0]:g}, {f['at'][1]:g}, "
+                    f"{f['at'][2]:g}) for {an}'s pose, and {r} does not fit under its "
+                    f"body ({room}): the template pose is forbidden there, so {r} cannot "
+                    f"stand on its template; declare {r} lower if it is, or move {an} "
+                    f"or {con}")
+        return (f"the cover on {con} admits {an} under its body but not {r}, a member of "
+                f"its template: wherever {an} stands with {r}'s template pose under the "
+                f"body, {r} cannot be on the template")
     if f['forced']:
         return (f"keep-out {f['keepout']!r} binds {f['ref']}, a member of {f['anchor']}'s "
                 f"template, and the template puts {f['ref']} at "
@@ -11657,14 +11724,19 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         return None
     _th = (_ctx_heights(ctx).height if any(
         k.get('max_height_mm') is not None for k in intent.keepouts) else None)
-    for f in template_keepout_findings(intent, state.parts, _anchor_pose, _th):
+    #    #1821: and a declared cover too low for a member, judged as the seat
+    #    judges it
+    _hc = _ctx_heights(ctx) if intent.templates and intent.covers else None
+    for f in template_keepout_findings(intent, state.parts, _anchor_pose, _th, _hc):
         out.append(Violation(
             rule='plan_template_keepout',
             severity=intent.severity_of('plan_template_keepout', WARN),
             ref=f['ref'], block=ctx.owner.get(f['ref']),
             message=f"templates[{f['index']}] ({f['anchor']}): " + template_keepout_text(f),
-            measured={k: f[k] for k in ('keepout', 'forced', 'at')},
-            expected={'allow': f['ref']}))
+            measured={k: f[k] for k in (('keepout', 'forced', 'at') if f.get('keepout')
+                                        else ('cover', 'forced', 'at', 'room_mm'))},
+            expected=({'allow': f['ref']} if f.get('keepout') else
+                      {'fits_under': f['cover']})))
     # #1818: the pads a one-layer, no-via net cannot reach, each part on the
     # face it will be placed on. That is settled for a declared face or a
     # FILE lock (the finding's own severity); a movable part with no declared
