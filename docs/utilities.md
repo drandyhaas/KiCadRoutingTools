@@ -2682,7 +2682,8 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
    `route.py --force-reroute`, single-ended; a net that route lays no copper
    for keeps its pair copper.
 6. **Route**: `route.py` over every net, with the poured nets and rails as
-   power nets, a finer grid around fine-pitch parts and deeper rip-up on
+   power nets at 0.3 (`autoplan.RAIL_WIDTH`; a net the caller's `--power-nets`
+   select at its width), a finer grid around fine-pitch parts and deeper rip-up on
    congested boards; the members of any pair `route_diff.py` could not couple
    are rippable, so the stubs it left do not block their partners. The first
    pass keeps signals off the planes; up to two further passes on the result
@@ -2728,6 +2729,54 @@ Options:
                      price lets every step cross them (the plan-pcb-routing
                      skill's route step uses 3.0), trading reference integrity
                      for routability.
+  --keep-pours       Take the planes from the board's own pours, as --finish
+                     does, in a full run, and pour none: step 2 does not run,
+                     so every pour ships with the outline, clearance, pad
+                     connection and priority the board drew, and signals keep
+                     off the inner layers the pours cover (--plane-layer-cost).
+                     Without it, step 2 replaces a same-net pour on a plane
+                     layer with its own.
+  --power-nets PATTERN [...] --power-nets-widths MM [...]
+                     route.py's own flags, given to every route step (the
+                     passes and the diff-pair reroute) ahead of autoplan's
+                     rails: route.py routes a net at the width of the first
+                     pattern that selects it (fnmatch), so a net they select,
+                     a rail included, routes at their width, and every other
+                     net keeps autoplan's choice. One finite width above 0 per
+                     pattern, or the run is refused before any step (exit 2).
+                     The analysis states each routed net they give a width
+                     (`net_widths`).
+  --nets PATTERN [...]
+                     Route only the nets the patterns select, read as
+                     route.py's own --nets reads them (wildcards, a sheet's
+                     last component, a leading `!` excluding): every fanout
+                     and route step is given the patterns in place of `*`,
+                     the diff-pair step and step 2 only the pairs and planes
+                     among those nets, and a pour, power net or pair outside
+                     them is left as the board has it. The analysis states
+                     the nets they select (`nets`); patterns that together
+                     select none are refused before any step (exit 2).
+  --track-width MM   route.py's --track-width for every route step, in place
+                     of the fab track floor; the fanout and diff-pair steps
+                     keep the floor their escapes need.
+  --quick LEVEL      route.py's --quick LEVEL (1 or 2) for every route step:
+                     a chain to judge a placement by, not to ship.
+  --json-out FILE    Also write FILE: `status`, `shipped_step` (the step whose
+                     board ships, `input` for the input under --finish),
+                     `shipped_board`, `route_summary` -- the object route.py's
+                     own --json-out wrote for the route pass that shipped (each
+                     pass runs with one) -- and the chain as in plan.json
+                     (`analysis`, `steps`, `final`, `grade`). `status` is
+                     `route_pass`; otherwise `route_pass_without_summary`,
+                     `no_route_pass` (a board from another step, or the input)
+                     or `no_board`, each with `why` and a null `route_summary`.
+                     A file already at FILE is removed when the run starts.
+  --fab-tier {standard,advanced,auto}, --fab-overrides FILE, --escalation {off,board,fab}
+                     The shared fab flags: autoplan's floors (step 1) come
+                     from them, and each one given is passed to every step
+                     that takes them (planes, fanout, diff pairs, route) and
+                     to the check_drc that grades each step; the decap step
+                     takes none.
 ```
 
 The chain, each step's arguments, return code, iterations and grade are
@@ -2743,7 +2792,9 @@ tools' own selectors, which also match a pattern's last sheet component and
 read a leading `!` as an exclusion: `GND` is passed as `GN[D/]`, `-BATT` as
 `[--]BAT[T/]`, `!RESET` as `[ -!]RESE[T/]`, and a sheet-qualified name as
 written. Each pattern is checked against the board's nets; a net no pattern
-isolates is left out of the power, exclusion and pair lists, and named.
+isolates is left out of the power, exclusion and pair lists, and named. The
+caller's `--nets` and `--power-nets` are patterns already and reach the steps
+as given.
 
 ### Example
 

@@ -100,7 +100,7 @@ KNOWN_MODULES = (
 FLAG_SCRIPTS = ('route.py', 'route_diff.py', 'route_planes.py',
                 'repair_planes.py', 'place_simple.py',
                 'check_drc.py', 'check_floorplan.py',
-                'bga_fanout.py', 'qfn_fanout.py')
+                'bga_fanout.py', 'qfn_fanout.py', 'autoplan.py')
 # NOT here, deliberately: `place_pose.py`. This tuple's contract, enforced by
 # `tests/test_798_registrar_flags.py`, is that every flag the source registers
 # is visible in `--help` as an option and accepted by the top-level parser.
@@ -428,8 +428,12 @@ def script_flags(path, _depth=1):
             own_package = (mod == os.path.splitext(os.path.basename(path))[0])
             for sib in (os.path.join(root, mod + '.py'),
                         os.path.join(root, mod, '__init__.py')):
+                # A module of registrar FUNCTIONS is credited per function
+                # below: unioning its every flag hands a script that calls one
+                # of its registrars, or none, the flags of all of them.
                 if (os.path.isfile(sib) and os.path.abspath(sib) != me
-                        and (own_package or not _builds_own_parser(sib))):
+                        and (own_package or not _builds_own_parser(sib))
+                        and (own_package or not _registrar_functions(sib))):
                     # The shim->package hop does not spend the level: the
                     # package is this script, and its registrars (fab tier,
                     # escalation, the DRC-settings flags) are one level from
