@@ -1289,21 +1289,99 @@ def power_net_order(item):
     return (-pads, leaf not in ('GND', 'VSS'), name)
 
 
+# Supply-name rules of `power_name_kind` (#1835), read on the net's LAST
+# hierarchical path part only: a sheet path (`/VBUS_SWITCH/SET`) names a
+# place, not the net.
+#: Ground and supply stems, matched inside one alphanumeric chunk of the leaf,
+#: so the compound spellings still read: AGND, GNDA, GNDPLL, CPVSS, AVDD,
+#: DVDD, VDDQ, VDDIO, VCCINT, VCCAUX, MGTAVCC, INTVCC, VBATT.
+_GND_STEMS = ('GND', 'VSS')
+_RAIL_STEMS = ('VCC', 'VDD', 'VBUS', 'VBAT')
+#: VIN is also inside ordinary words (DRIVING, MOVING, SAVING), so it reads
+#: only at the start or the end of its chunk: VIN, VIN1, VINT, AVIN, 3V3VIN.
+_EDGE_RAIL_STEMS = ('VIN',)
+#: Plus-signed voltages read anywhere in the leaf: HDMI_+5V, BMS.+5V.
+_SIGNED_RAILS = ('+3.3', '+5', '+12', '+1.8', '+2.5')
+#: Rail-shaped WHOLE leaf: +5V, -12V, 5V, 3V3, 1V8, 12V0, 3.3V ...
+_RAIL_LEAF_RE = re.compile(r'^[+-]?(\d+(\.\d+)?V\d*|\d+V\d+)$')
+#: Words that make a supply-named net a signal ABOUT that supply: an enable,
+#: a power-good, a sense or detect line, a feedback node, a flag, a bus line.
+#: Matched as a whole token of the leaf (split on every non-alphanumeric and
+#: on a lower-to-upper case step), or as what follows the stem inside its
+#: chunk (VBUSDET, VBUSEN, VCCOEN). SEN takes no digit: SEN1_VCC is a
+#: sensor's supply, VDDQ_SEN_+ a sense line.
+_SIGNAL_WORD_RE = re.compile(
+    r'(?:EN|ENA|ENABLE|NEN|PEN|PG|PGOOD|PGD|PWRGD|PWRGOOD|BAD|SENSE|SNS|DET'
+    r'|DETECT|MON|ALERT|OK|CTRL|FLG|FLAG|FAULT|FB|OV|UV|DISCH|SEL|ON'
+    r'|OFF|OVERRIDE|SCL|SDA|IRQ)\d*|SEN')
+_CHUNK_RE = re.compile(r'[A-Za-z0-9]+')
+#: Words inside a mixed-case chunk (GNDDetect -> GND, Detect). An all-caps
+#: chunk is one word: SEN1 is not SEN, 1.
+_CAMEL_RE = re.compile(r'[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+')
+
+
+def _signal_word(token):
+    return bool(_SIGNAL_WORD_RE.fullmatch(token))
+
+
+def power_name_kind(name):
+    """'gnd', 'vcc' or None: what a net NAME alone says it is (#1835).
+
+    Read on the last path part. Ground: a chunk holding GND or VSS. Rail: a
+    chunk holding VCC, VDD, VBUS or VBAT, or starting or ending with VIN; a
+    plus-signed voltage (`HDMI_+5V`); a rail-shaped whole leaf (`3V3`,
+    `-12V`); or a name starting with `+`/`-` that holds a digit (#91). Either
+    is refused when the leaf also holds a signal word (`VBUS_EN`,
+    `VBAT_SENSE`, `PG_+3.3VA`, `GND_SCL`, `VBUSDET`): such a net is a line
+    about a supply, not the supply. Matching is by chunk, never across the
+    whole name, so `/DRIVING_LED` holds no VIN and `/VBUS_SWITCH/SET` is
+    read as `SET`."""
+    if not name:
+        return None
+    leaf = name.rsplit('/', 1)[-1]
+    up = leaf.upper()
+    chunks = [c.upper() for c in _CHUNK_RE.findall(leaf)]
+    tokens = set(chunks)
+    for c in _CHUNK_RE.findall(leaf):
+        if c != c.upper():
+            tokens.update(p.upper() for p in _CAMEL_RE.findall(c))
+    if any(_signal_word(t) for t in tokens):
+        return None
+
+    def stem_in(chunk, stems, edge=False):
+        for s in stems:
+            i = chunk.find(s)
+            if i < 0:
+                continue
+            if edge and not (i == 0 or i + len(s) == len(chunk)):
+                continue
+            rest = chunk[i + len(s):]
+            # A signal word after the stem in the same chunk (VBUSDET).
+            if rest and any(_signal_word(rest[k:]) for k in range(len(rest))
+                            if len(rest) - k >= 2):
+                return False
+            return True
+        return False
+
+    if any(stem_in(c, _GND_STEMS) for c in chunks):
+        return 'gnd'
+    if (any(stem_in(c, _RAIL_STEMS) or stem_in(c, _EDGE_RAIL_STEMS, edge=True)
+            for c in chunks)
+            or any(v in up for v in _SIGNED_RAILS)
+            or (name[0] in '+-' and any(ch.isdigit() for ch in name))
+            or _RAIL_LEAF_RE.match(up)):
+        return 'vcc'
+    return None
+
+
 def find_power_nets(pcb_data):
     """Find power and ground nets by name patterns and connection count.
 
-    Returns (gnd_nets, vcc_nets, candidate_nets) - candidates are unmatched
-    nets whose pad count rivals the detected power rails (issue #91: rails
-    like '-12V', '/5V', '/3V3', and bare 'VDC' defeat prefix patterns; pad
-    count catches them).
+    The name rule is `power_name_kind` (#1835). Returns (gnd_nets, vcc_nets,
+    candidate_nets) - candidates are unmatched nets whose pad count rivals
+    the detected power rails (issue #91: rails like '-12V', '/5V', '/3V3',
+    and bare 'VDC' defeat prefix patterns; pad count catches them).
     """
-    import re
-    gnd_patterns = ['GND', 'VSS', 'AGND', 'DGND', 'PGND', 'GNDA', 'GNDD']
-    vcc_patterns = ['VCC', 'VDD', '+3.3', '+5', '+12', '+1.8', '+2.5', 'VBUS', 'VBAT', 'VIN']
-    # Rail-shaped names, checked against the LAST hierarchical path component:
-    # +5V, -12V, 5V, 3V3, 1V8, 12V0, 3.3V ...
-    rail_re = re.compile(r'^[+-]?(\d+(\.\d+)?V\d*|\d+V\d+)$')
-
     gnd_nets = []
     vcc_nets = []
     matched = set()
@@ -1311,16 +1389,12 @@ def find_power_nets(pcb_data):
     for net in pcb_data.nets.values():
         if not net.name:
             continue
-        name_upper = net.name.upper()
-        leaf = name_upper.rsplit('/', 1)[-1]
         pad_count = len(net.pads)
-
-        if any(g in name_upper for g in gnd_patterns):
+        kind = power_name_kind(net.name)
+        if kind == 'gnd':
             gnd_nets.append((net.name, pad_count))
             matched.add(net.name)
-        elif (any(v in name_upper for v in vcc_patterns)
-              or (net.name[0] in '+-' and any(c.isdigit() for c in net.name))
-              or rail_re.match(leaf)):
+        elif kind == 'vcc':
             vcc_nets.append((net.name, pad_count))
             matched.add(net.name)
 

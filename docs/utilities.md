@@ -2310,6 +2310,14 @@ Outer-layer flood hint: SMD counts above are pads an F.Cu/B.Cu pour of that net
 would reach by fill contact (no via each); ...
 ```
 
+A name reads as ground or a rail on its last path part only, chunk by chunk
+(`list_nets.power_name_kind`, #1835): GND/VSS, VCC/VDD/VBUS/VBAT anywhere in
+a chunk (AVDD, VCCINT, GNDA), VIN at a chunk's start or end (so DRIVING is
+not VIN), a `+5`-style voltage, a rail-shaped leaf (`3V3`, `-12V`). A name
+that also holds a signal word -- an enable, power-good, sense, detect,
+feedback, monitor, alert or flag (`VBUS_EN`, `PG_+3.3VA`, `VBAT_SENSE`,
+`VBUSDET`, `GND_SCL`) -- is a line about a supply and reads as neither.
+
 Component nets (`--component U2A`):
 ```
 Nets on U2A (42 total):
