@@ -895,10 +895,52 @@ def _illegal_every_seed(seeds, summaries):
             for r in sorted(common)}
 
 
+def placement_grade(summary):
+    """'defect' when a seed's summary carries floorplan errors or an
+    assembly blocking count above 0 (the seeds judge_seeds skips unless
+    --seeds names them, #1645), 'clean' when both are graded 0, else
+    'ungraded'. A report written before the assembly grade existed counts
+    0 there, as `judge_order` counts it."""
+    e = (summary.get('floorplan') or {}).get('errors')
+    asm = summary.get('assembly')
+    b = 0 if asm is None else asm.get('blocking')
+    if e or b:
+        return 'defect'
+    return 'clean' if e == 0 and b == 0 else 'ungraded'
+
+
+def judged_counts_text(k, judge, n_legal, grade):
+    """The parenthesis of place_simple's `judge seeds` line, built from the
+    run's own counts (#1824): how many seeds are named of how many are legal
+    (`--judge` k at most) and how many of them graded buildable and
+    floorplan-clean. When none did, it says judge_seeds routes none of them
+    unless --seeds names them."""
+    if not judge:
+        return f"no legal seed to judge, --judge {k}"
+    n = {g: sum(1 for s in judge if grade[s] == g) for g in ('clean', 'defect', 'ungraded')}
+    head = f"{len(judge)} of {n_legal} legal seed(s), --judge {k}"
+    if n['clean'] == len(judge):
+        return f"{head}; each graded buildable and floorplan-clean, lowest cost first"
+    if n['defect'] == len(judge):
+        return (f"{head}; NONE graded buildable and floorplan-clean, so judge_seeds "
+                f"routes none of them unless --seeds names them; fewest defects first, "
+                f"then lowest cost")
+    parts = [f"{n['clean']} graded buildable and floorplan-clean"]
+    if n['defect']:
+        parts.append(f"{n['defect']} with a placement defect, which judge_seeds skips "
+                     f"unless --seeds names it")
+    if n['ungraded']:
+        parts.append(f"{n['ungraded']} not graded")
+    return (f"{head}; " + ', '.join(parts)
+            + "; graded before not graded, fewest defects first, then lowest cost")
+
+
 def _name_judged(a, seeds, summaries):
     """A run of several seeds' last step: the `--judge` legal seeds to judge
     (`judge_order`), printed and written to `judge.json` beside the seeds'
-    boards (`judge` in judging order; `scattered`, `clustered`, `anchored` and
+    boards (`judge` in judging order; `clean` the judged seeds graded
+    buildable and floorplan-clean, which the printed line counts (#1824);
+    `scattered`, `clustered`, `anchored` and
     `illegal` list the seeds by start and verdict, `illegal_why` each illegal
     seed's parts with the check each fails and `illegal_every_seed` the parts
     illegal in every seed, WARNED once (#1540), `refused` and
@@ -914,8 +956,15 @@ def _name_judged(a, seeds, summaries):
     #1632), and
     `baseline` the board the seeds were placed from, which judge_seeds hands
     quick_score so the fast route's score grades assembly the same way)."""
-    judge = judge_order({s: summaries[s] for s in seeds if s in summaries})[:a.judge]
+    legal = judge_order({s: summaries[s] for s in seeds if s in summaries})
+    judge = legal[:a.judge]
+    grade = {s: placement_grade(summaries[s]) for s in legal}
+    clean_legal = [s for s in legal if grade[s] == 'clean']
     doc = {'judge': judge,
+           # the judged seeds graded buildable and floorplan-clean, both
+           # counts 0 (#1824); judge_seeds skips a judged seed with either
+           # count above 0 unless --seeds names it
+           'clean': [s for s in judge if grade[s] == 'clean'],
            'scattered': [s for s in seeds if summaries.get(s, {}).get('start')
                          not in ('clustered', 'anchored')],
            'clustered': [s for s in seeds if summaries.get(s, {}).get('start') == 'clustered'],
@@ -971,13 +1020,13 @@ def _name_judged(a, seeds, summaries):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(doc, f, indent=1)
     print(f"place_simple: judge seeds {', '.join(map(str, judge)) or 'none'} "
-          f"(the {a.judge} legal seeds of lowest cost, buildable and floorplan-clean "
-          f"first) -> {path}")
+          f"({judged_counts_text(a.judge, judge, len(legal), grade)}) -> {path}")
+    of_legal = f"{len(clean_legal)} of {len(legal)} legal seed(s)"
     for s in judge:
         asm = summaries[s].get('assembly') or {}
         if asm.get('blocking'):
             print(f"  WARNING: seed {s} is judged {_asm_text(asm)}: it cannot be DONE as "
-                  f"placed (fewer than {a.judge} legal seeds are buildable and clean); "
+                  f"placed ({of_legal} buildable and floorplan-clean); "
                   f"judge_seeds skips it unless --seeds names it")
         elif asm and asm.get('blocking') is None:
             print(f"  WARNING: seed {s} is judged with its {_asm_text(asm)}: grade it with "
@@ -985,7 +1034,7 @@ def _name_judged(a, seeds, summaries):
         fp = summaries[s].get('floorplan') or {}
         if fp.get('errors'):
             print(f"  WARNING: seed {s} is judged with {_fp_text(fp)}: it cannot be DONE "
-                  f"as placed (fewer than {a.judge} legal seeds grade clean); judge_seeds "
+                  f"as placed ({of_legal} buildable and floorplan-clean); judge_seeds "
                   f"skips it unless --seeds names it")
         elif fp and fp.get('errors') is None:
             print(f"  WARNING: seed {s} is judged with its {_fp_text(fp)}: grade it with "
