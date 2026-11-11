@@ -1258,7 +1258,17 @@ components do not block DONE but are named in the verdict line -- except a
 INCOMPLETE: every rule `check_drc` names `NOT GRADED (<kind>)` (size,
 clearance, disallow, via_count, length, skew, diff_pair_uncoupled; #1390,
 #1490, #1813), which `board_score` lists in `undersized.ungraded_rules` or
-`drc.ungraded_rules` (with `drc.ungraded_rule_kinds`). A component the BOARD declares and nothing grades (a project
+`drc.ungraded_rules` (with `drc.ungraded_rule_kinds`). `--kicad-rules` (#1810,
+off by default) has KiCad's own DRC grade those rules: one `kicad-cli pcb drc`
+of a staged copy, on the fill as shipped, whose error-severity violations are
+counted per rule KiCad names in them. A rule with none is disclosed (`judged
+by KiCad <version>`) and stops blocking; one with N blocks, named with its
+count; one KiCad's report cannot be attributed to stays as before, saying why
+(no kicad-cli, a timeout, a rules file KiCad refuses whole (#1690), a rule
+name the file declares twice or one containing a quote, or a violation type
+kicad-cli cut at 199 rows). The per-rule results are the document's
+`kicad_rules`, `measured_by: kicad-cli`. With the flag the verdict depends on
+the installed KiCad. A component the BOARD declares and nothing grades (a project
 diff-pair net class with no `.kicad_dru` skew / `diff_pair_uncoupled` rule
 that binds it) is named apart, `DISCLOSED, not counted`. Net impedance
 declarations recorded by `route.py --impedance` and the power widths route.py
@@ -1285,7 +1295,7 @@ reference excuses only the kinds of pair it also breaks, at least as badly.
 `--baseline` is handed to
 `board_score`. It takes `board_score`'s spec flags (`--clearance`, `--intent`,
 `--impedance-nets`, `--length-groups`, `--net-min-widths`, the size floors),
-`--skip-slow` (only `board_score`, not the added instruments) and `--timeout S`
+`--kicad-rules`, `--skip-slow` (only `board_score`, not the added instruments) and `--timeout S`
 per instrument (default 3600). Exit 2 usage, 3 board state.
 
 ## Route Review (`route_review.py`)
