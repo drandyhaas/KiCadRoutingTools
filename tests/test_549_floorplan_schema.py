@@ -226,7 +226,8 @@ KEY_SETS = {
     # #1253: one rule per row, in route.py's own syntax.
     '_KEEP_AWAY_KEYS': {'rule', 'source', 'context'} | FREE,
     # #1477: two sets of parts within max_mm; a chain of such links.
-    '_LINK_KEYS': {'name', 'a', 'b', 'max_mm', 'context'} | FREE,
+    # #1819: a link's `pads`, the pads a linked part is measured from.
+    '_LINK_KEYS': {'name', 'a', 'b', 'max_mm', 'pads', 'context'} | FREE,
     '_CHAIN_KEYS': {'name', 'stages', 'max_mm', 'context'} | FREE,
     # #1478: supply nets priced as rails whatever their fan-out.
     '_RAILS_KEYS': {'nets', 'context'} | FREE,
@@ -412,6 +413,7 @@ def test_an_intent_using_every_known_key_loads():
                        'source': 'brief', 'context': {'why': 'w'}}],
         # #1477. A link and a chain of them.
         'links': [{'name': 'l', 'a': ['U3'], 'b': ['C*'], 'max_mm': 8,
+                   'pads': {'U3': ['1']},
                    'why': 'w', 'context': {'why': 'w'}}],
         'chains': [{'name': 'c', 'stages': [['J1'], ['U3'], ['U1']],
                     'max_mm': [5, 10], 'why': 'w', 'context': {'why': 'w'}}],

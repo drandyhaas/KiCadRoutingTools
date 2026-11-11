@@ -232,9 +232,12 @@ def hints(doc, state, movable, args, intent=None):
         a, b = ([r for r in names if any(fnmatch.fnmatchcase(r, p) for p in ln[k])]
                 for k in ('a', 'b'))
         if a and b and any(r in mov for r in a + b):
+            # `pads` (#1819): a named part is measured from those pads
+            pads = {r: tuple(v) for r, v in (ln.get('pads') or {}).items() if r in a + b}
             out.append({'key': f"link:{ln['name']}", 'kind': 'within', 'a': a, 'b': b,
                         'edge': None, 'weight': LINK_WEIGHT,
-                        'max_mm': float(ln['max_mm']), 'link': ln['name']})
+                        'max_mm': float(ln['max_mm']), 'link': ln['name'],
+                        **({'pads': pads} if pads else {})})
     return out
 
 
@@ -1939,6 +1942,9 @@ def main(argv=None):
             # and so whether the judge reads it (#1632)
             links.append({'link': h['link'], 'gap_mm': round(gap, 3), 'max_mm': h['max_mm'],
                           'past': past,
+                          # the pads a part is measured from (#1819); else courtyards
+                          **({'pads': {r: list(v) for r, v in h['pads'].items()}}
+                             if h.get('pads') else {}),
                           'severity': intent.severity_of('link', floorplan.WARN)})
             if past:
                 print(f"  link {h['link']}: {gap:.2f} mm, past its {h['max_mm']:g} mm")

@@ -447,8 +447,9 @@ def test_the_loader_refuses_every_malformed_along_edge_claim():
     # `start_mm` and a hole or standoff behind the connector's origin. 24
     # since #1714: an emitted floor row's `overhang_face`, the side its
     # distance band was read along. 25 since #1769: an edge row's `opens`,
-    # a part whose opening faces into the board, its back to the edge.
-    assert fp.READER_VERSION == 25, (
+    # a part whose opening faces into the board, its back to the edge. 26
+    # since #1819: a link's `pads`, the pads a linked part is measured from.
+    assert fp.READER_VERSION == 26, (
         f"{fp.READER_VERSION}: the field vocabulary grew. Re-state this "
         f"literal and say which field arrived, the way #712, #837, #902, "
         f"#893, #959 and #1051 did")

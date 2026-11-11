@@ -247,7 +247,11 @@ EDGE_BAND_SANITY_MM = 5.0
 #: the board (an M.2 or SO-DIMM socket, its card over the board), so the seat
 #: and the facing conjunct put its BACK at the edge. It changes the facing
 #: verdict and the seat's turns; an older build refuses the key by name.
-READER_VERSION = 25
+#: 26 (#1819): `links[].pads` -- the pads a link is for, `{REF: [pad
+#: numbers]}`, so a named part is measured from those pads rather than from
+#: its courtyard. It changes the link's verdict and what place_simple pulls
+#: toward; an older build refuses the key by name.
+READER_VERSION = 26
 #: The reader version that first reads `templates[]`.
 TEMPLATES_READER = 13
 #: The reader version that first reads a template row's `kind` and
@@ -279,6 +283,8 @@ BEHIND_READER = 23
 OVERHANG_FACE_READER = 24
 #: The reader version that first reads `edge_connectors[].opens` (#1769).
 OPENS_READER = 25
+#: The reader version that first reads `links[].pads` (#1819).
+LINK_PADS_READER = 26
 #: #1475. The keep-outs a block's `fence_mm` compiles to are named
 #: `fence:<block>:<N|S|W|E>`; an intent may not name its own keep-out so.
 FENCE_KEEPOUT_PREFIX = 'fence:'
@@ -563,8 +569,11 @@ _KEEP_AWAY_KEYS = {'rule', 'source', 'context'} | _FREE_TEXT_KEYS
 #: #1477. Two sets of parts (`a`, `b`: reference globs) whose nearest
 #: courtyards are within `max_mm` of each other; a chain, consecutive
 #: `stages` (each a list of reference globs) linked so, at one `max_mm` or
-#: one per link.
-_LINK_KEYS = {'name', 'a', 'b', 'max_mm', 'context'} | _FREE_TEXT_KEYS
+#: one per link. `pads` (#1819), `{REF: [pad numbers]}` as on
+#: `proximity[]`, names the pads a link is for: a part named there is
+#: measured from those pads (`legality.pad_rect`), not from its courtyard,
+#: so a part at the wrong end of a long connector does not meet the link.
+_LINK_KEYS = {'name', 'a', 'b', 'max_mm', 'pads', 'context'} | _FREE_TEXT_KEYS
 _CHAIN_KEYS = {'name', 'stages', 'max_mm', 'context'} | _FREE_TEXT_KEYS
 #: #1478. Supply nets (net-name globs, as `--nets` takes them) that
 #: `place_simple` prices as rails whatever their fan-out.
@@ -1248,13 +1257,45 @@ def _link_claims(raw: Dict) -> List[Dict]:
                               f"reference globs")
         return t
 
-    def add(name, a, b, m, src, row):
+    def add(name, a, b, m, src, row, pads=None):
         if name in seen:
             raise IntentError(f"{src}: the link name {name!r} repeats "
                               f"{seen[name]}")
         seen[name] = src
         out.append({'name': name, 'a': a, 'b': b, 'max_mm': m, 'source': src,
-                    'why': free_text(row), 'context': row.get('context') or {}})
+                    'why': free_text(row), 'context': row.get('context') or {},
+                    'pads': pads or {}})
+
+    def link_pads(v, a, b, where):
+        """`links[].pads` (#1819): each named ref on exactly one side, each
+        list a non-empty list of pad-number strings."""
+        if v is None:
+            return {}
+        if not isinstance(v, dict) or not v:
+            raise IntentError(f"{where}: expected a non-empty "
+                              f"{{'REF': ['1', '2']}}")
+        got = {}
+        for who, nums in v.items():
+            on = [k for k, pats in (('a', a), ('b', b))
+                  if any(fnmatch.fnmatchcase(str(who), p) for p in pats)]
+            if len(on) != 1:
+                raise IntentError(
+                    f"{where}: a pad list for {who!r}, which "
+                    + ("neither side of this link names" if not on else
+                       "both sides of this link name, so the pads cannot say "
+                       "which end they are"))
+            if not isinstance(nums, (list, tuple)) or not nums:
+                raise IntentError(f"{where}.{who}: expected a non-empty list "
+                                  f"of pad numbers")
+            for n in nums:
+                if not isinstance(n, str):
+                    raise IntentError(
+                        f"{where}.{who}: pad {n!r} has type "
+                        f"{type(n).__name__}; pad numbers are strings. "
+                        f"`Pad.pad_number` is a string, so {n!r} would match "
+                        f"no pad")
+            got[str(who)] = tuple(nums)
+        return got
 
     for key, keys in (('links', _LINK_KEYS), ('chains', _CHAIN_KEYS)):
         got = raw.get(key)
@@ -1272,10 +1313,12 @@ def _link_claims(raw: Dict) -> List[Dict]:
             _free_text_strings(row, where)
             name = str(row.get('name') or f"{key[:-1]}{i}")
             if key == 'links':
-                add(name, refs(row.get('a'), f"{where}.a"),
-                    refs(row.get('b'), f"{where}.b"),
+                a = refs(row.get('a'), f"{where}.a")
+                b = refs(row.get('b'), f"{where}.b")
+                add(name, a, b,
                     _number(row.get('max_mm'), f"{where}.max_mm", lo=0.0),
-                    where, row)
+                    where, row,
+                    link_pads(row.get('pads'), a, b, f"{where}.pads"))
                 continue
             stages = row.get('stages')
             if not isinstance(stages, list) or len(stages) < 2:
@@ -8472,10 +8515,16 @@ def rule_link(ctx) -> Iterator[Violation]:
     on the courtyard place_simple seats each part on (`zone_parts`) -- the
     gap `place_simple`'s `within` term prices (`simple.rect_gap`), so the
     placer and the grade read one number. A side matching no part is
-    `link_unresolved`. WARN by default."""
+    `link_unresolved`. WARN by default.
+
+    A part the link's `pads` names (#1819) is measured from the rects of
+    those pads (`legality.pad_rect`, its connected pads of those numbers --
+    the rects `simple.Model._pad_rects` gives the placer), not from its
+    courtyard; a named pad the part does not have is `link_unresolved`."""
     from .simple import rect_gap as manhattan_gap
     parts = _ctx_zone_parts(ctx)
     names = sorted(parts)
+    fps = getattr(ctx.pcb, 'footprints', None) or {}
     for ln in ctx.intent.links:
         sides = [sorted({r for r in names for pat in ln[k]
                          if fnmatch.fnmatchcase(r, pat)}) for k in ('a', 'b')]
@@ -8490,18 +8539,55 @@ def rule_link(ctx) -> Iterator[Violation]:
                 measured={'link': ln['name'], 'empty_sides': empty},
                 expected={'max_mm': ln['max_mm']})
             continue
-        gap, pair = min((manhattan_gap(parts[a].rect, parts[b].rect), (a, b))
+        named = ln.get('pads') or {}
+        rects: Dict[str, list] = {}
+        missing = []
+        for who, nums in sorted(named.items()):
+            fp = fps.get(who)
+            if who not in parts or fp is None:
+                missing.append(f"{who} (not on this board)")
+                continue
+            got = [legality.pad_rect(p) for p in fp.pads
+                   if p.net_id > 0 and str(p.pad_number) in nums]
+            have = {str(p.pad_number) for p in fp.pads if p.net_id > 0}
+            lost = [n for n in nums if n not in have]
+            if lost:
+                missing.append(f"{who} pad(s) {', '.join(lost)}")
+                continue
+            rects[who] = got
+        if missing:
+            yield Violation(
+                rule='link_unresolved',
+                severity=ctx.intent.severity_of('link_unresolved', WARN),
+                message=(f"link {ln['name']!r} ({ln['source']}): its pads name "
+                         f"{'; '.join(missing)}, which this board has no "
+                         f"connected pad for, so nothing is measured"),
+                measured={'link': ln['name'], 'unresolved_pads': missing},
+                expected={'max_mm': ln['max_mm']})
+            continue
+
+        def boxes(r):
+            return rects.get(r) or [parts[r].rect]
+        gap, pair = min((min(manhattan_gap(x, y) for x in boxes(a)
+                             for y in boxes(b)), (a, b))
                         for a in sides[0] for b in sides[1])
         if gap > ln['max_mm'] + legality.EPS:
+            basis = [(f"{r} pads {', '.join(named[r])}" if r in rects
+                      else f"{r} courtyard") for r in pair]
             yield Violation(
                 rule='link', severity=ctx.intent.severity_of('link', WARN),
                 ref=pair[0],
                 message=(f"link {ln['name']!r} ({ln['source']}): its nearest "
                          f"parts {pair[0]} and {pair[1]} are {gap:.2f}mm "
-                         f"apart, courtyard to courtyard (Manhattan), past "
-                         f"its {ln['max_mm']:g}mm"),
+                         f"apart, "
+                         + ("courtyard to courtyard" if not named else
+                            f"{basis[0]} to {basis[1]}")
+                         + f" (Manhattan), past its {ln['max_mm']:g}mm"),
                 measured={'link': ln['name'], 'gap_mm': round(gap, 4),
-                          'pair': list(pair)},
+                          'pair': list(pair),
+                          **({'basis': {r: ('pads' if r in rects else
+                                            'courtyard') for r in pair}}
+                             if named else {})},
                 expected={'max_mm': ln['max_mm']})
 
 

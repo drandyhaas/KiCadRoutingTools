@@ -1069,6 +1069,8 @@ class Model:
         if h['kind'] == 'edge':
             side = self._edge_side(h)
             return min((side(P[r].rect()), (r,)) for r in h['a'])
+        if h.get('pads'):
+            return self._pads_gap(h)
         A, B = h['a'], h['b']
         best, wit = math.inf, None
         if seed is not None:
@@ -1081,6 +1083,29 @@ class Model:
             best, wit = float(G.flat[k]), (A[k // len(B)], B[k % len(B)])
         return best, wit
 
+    def _pads_gap(self, h):
+        """`(gap, witness)` of a link that names pads (#1819): the least
+        Manhattan gap between the two sides, a part named in `h['pads']`
+        taken as the rects of those pads at its live pose (`_pad_rects`, as
+        `legality.pad_rect` gives them -- the rects `floorplan.rule_link`
+        grades), any other part as its courtyard."""
+        P, named = self.state.parts, h['pads']
+
+        def boxes(r):
+            if r in named:
+                got = [q for n in named[r] for q in self._pad_rects(r, n)]
+                if got:
+                    return got
+            return [P[r].rect()]
+        best, wit = math.inf, None
+        for a in h['a']:
+            ba = boxes(a)
+            for b in h['b']:
+                g = min(rect_gap(x, y) for x in ba for y in boxes(b))
+                if g < best:
+                    best, wit = g, (a, b)
+        return best, wit
+
     def _hint_local(self, h, moving):
         """`(gap, witness)` with `moving` at their live poses and every other
         part where it is committed: the committed gap and its witness stand
@@ -1089,6 +1114,11 @@ class Model:
         no further away than the committed gap. A witness that moved needs
         the full search."""
         gap, wit = self._hw[h['key']]
+        if h.get('pads'):
+            # a pad-named link (#1819): measured whole whenever a member moves
+            if any(r in moving for r in h['a']) or any(r in moving for r in h['b']):
+                return self._pads_gap(h)
+            return gap, wit
         if any(r in moving for r in wit):
             return self._hint_full(h, wit if h['kind'] != 'edge' else None)
         P = self.state.parts

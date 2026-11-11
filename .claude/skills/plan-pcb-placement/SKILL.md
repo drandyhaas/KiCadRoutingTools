@@ -299,8 +299,10 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
     distance (the fold, below): both parts in one group, the intent's
     `proximity[]`; across groups, a `links[]` row (`a` the subject, `b` its
     partner), which keeps both groups. A link measures courtyard to
-    courtyard and has no `pads`, so a note at another group's pin is held
-    only to that part. When the subject belongs with that pin's part (a
+    courtyard unless it names pads: for a note at another group's pin, add
+    `pads` (`{"J1": ["7", "8"]}`, as on `proximity[]`; `min_reader` 26), so
+    the subject is held to that pin and not to the nearest point of a long
+    part. When the subject belongs with that pin's part (a
     cap at its supply pin), move it into that group and write the
     `proximity[]` row with `pads` instead. With nobody to ask, use
     2.0 mm for a part named at a pin (a row with `pads`) and 5.0 mm for a
