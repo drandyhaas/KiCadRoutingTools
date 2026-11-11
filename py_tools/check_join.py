@@ -68,6 +68,11 @@ Examples:
     p.add_argument('--keep-staged', metavar='PATH', default=None,
                    help='also write the staged board (input + candidate) '
                         'here, for inspection in KiCad')
+    p.add_argument('--no-snap', action='store_true',
+                   help='leave a point typed within 1 um of a same-net track '
+                        'end, via centre or pad anchor where it is, and '
+                        'report it as a near-miss-endpoint violation instead '
+                        '(default: move it onto that end, and say so)')
     p.add_argument('-q', '--quiet', action='store_true',
                    help='print only the verdict and the violations')
     return p
@@ -131,6 +136,55 @@ def _drc_knobs(board, quiet):
         if not quiet:
             print(f"  (netclass/edge rules not read: {e})")
     return clearance, net_clearances, edge, h2h
+
+
+def _same_net_anchors(pcb, net_id, copper):
+    """{layer: [(x_nm, y_nm, what)]}: where this net's copper ENDS on each
+    layer -- its track ends, the centres of its vias, and its pads' anchors
+    (PAD::GetPosition). KiCad joins two tracks into one run only when their
+    ends are equal to the nanometre, and cuts a run at a pad's outline only
+    when it ends exactly on the pad's anchor (#1800); a join end that misses
+    one of these by a few nanometres connects copper to copper but is measured
+    as a separate run, in-pad stretch included."""
+    from geometry_utils import via_copper_layers
+    from net_queries import _nm, _pad_anchor_nm, expand_pad_layers
+    out = {}
+    for s in pcb.segments:
+        if s.net_id == net_id and not getattr(s, 'graphic', False):
+            for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+                out.setdefault(s.layer, []).append(
+                    (_nm(x), _nm(y), 'track end'))
+    for v in pcb.vias:
+        if v.net_id == net_id:
+            for layer in via_copper_layers(v, copper):
+                out.setdefault(layer, []).append(
+                    (_nm(v.x), _nm(v.y), 'via centre'))
+    for p in (pcb.nets[net_id].pads if net_id in pcb.nets else ()):
+        if p.pad_type == 'np_thru_hole':
+            continue
+        ax, ay = _pad_anchor_nm(p)
+        for layer in expand_pad_layers(p.layers, copper):
+            out.setdefault(layer, []).append(
+                (ax, ay, f"pad anchor {p.component_ref}.{p.pad_number}"))
+    return out
+
+
+def _near_miss(x, y, layers, anchors):
+    """The nearest same-net anchor on any of `layers` within COORD_TOL of
+    (x, y) when NO anchor there equals it to the nanometre, as
+    (x_nm, y_nm, what, distance_nm); else None."""
+    from net_queries import _nm
+    px, py = _nm(x), _nm(y)
+    tol = COORD_TOL * 1e6
+    best = None
+    for layer in layers:
+        for ax, ay, what in anchors.get(layer, ()):
+            if (ax, ay) == (px, py):
+                return None
+            d = math.hypot(ax - px, ay - py)
+            if d <= tol and (best is None or d < best[3]):
+                best = (ax, ay, what, d)
+    return best
 
 
 def _violation_sig(v):
@@ -229,8 +283,47 @@ def main(argv=None):
                  or board_default_netclass_param(args.board, 'via_drill')
                  or defaults.VIA_DRILL)
 
-    # ---- candidate geometry + the join-shape checks ------------------------
+    # ---- ends that ALMOST meet the net's own copper (#1800) ----------------
+    # Typed within a micron of a same-net end but not on it, a join still
+    # connects copper to copper, yet KiCad measures it as a run of its own:
+    # 40 nm off a pad anchor counted the 0.12 mm inside the pad. Move such a
+    # point onto the end (or, with --no-snap, refuse it by name). A via token
+    # at a polyline point moves with that point, so the two stay coincident.
     violations = []
+    anchors = _same_net_anchors(pcb, net_id, copper)
+    # One decision per typed coordinate, over every layer it is typed on (a
+    # layer change types it twice) and, under a via token, every layer.
+    on_layers = {}
+    for x, y, layer in pts:
+        on_layers.setdefault((x, y), set()).add(layer)
+    via_keys = []
+    for vx, vy in via_pts:
+        key = next((k for k in on_layers
+                    if math.hypot(vx - k[0], vy - k[1]) <= COORD_TOL),
+                   (vx, vy))
+        on_layers.setdefault(key, set()).update(copper)
+        via_keys.append(key)
+    final = {}
+    for (x, y), layers in on_layers.items():
+        final[(x, y)] = (x, y)
+        hit = _near_miss(x, y, sorted(layers), anchors)
+        if hit is None:
+            continue
+        ax, ay, what, d = hit
+        if args.no_snap:
+            violations.append(
+                f"near-miss-endpoint: ({x:.6f},{y:.6f}) is {d / 1000:.3f} um "
+                f"from a same-net {what} at ({ax / 1e6:.6f},{ay / 1e6:.6f}) "
+                f"-- KiCad joins ends only when equal to the nanometre; type "
+                f"the end exactly")
+            continue
+        final[(x, y)] = (ax / 1e6, ay / 1e6)
+        print(f"  snapped ({x:.6f},{y:.6f}) -> ({ax / 1e6:.6f},{ay / 1e6:.6f})"
+              f": {d / 1000:.3f} um from a same-net {what}")
+    pts = [final[(x, y)] + (layer,) for x, y, layer in pts]
+    via_pts = [final[k] for k in via_keys]
+
+    # ---- candidate geometry + the join-shape checks ------------------------
     cand_segs = []
     for p, q in zip(pts, pts[1:]):
         if p[2] == q[2]:
@@ -269,6 +362,19 @@ def main(argv=None):
         if _violation_sig_stub(f) not in pre:
             violations.append(f"stacked-copper: {f['detail']} "
                               f"[{f['layer']}]")
+
+    # The length a length or skew rule reads, as KiCad measures it (#1800).
+    if not args.quiet and (cand_segs or cand_vias):
+        try:
+            from net_queries import kicad_net_length_nm
+            _pads = pcb.nets[net_id].pads
+            _before = kicad_net_length_nm(pcb, own_segs, own_vias, _pads)
+            _after = kicad_net_length_nm(pcb, own_segs + cand_segs,
+                                         own_vias + cand_vias, _pads)
+            print(f"{args.net} length as KiCad measures it: "
+                  f"{_before / 1e6:.4f} mm -> {_after / 1e6:.4f} mm")
+        except Exception as e:                               # noqa: BLE001
+            print(f"  (net length not measured: {e})")
 
     # ---- the real DRC engine, staged-vs-baseline ---------------------------
     if cand_segs or cand_vias:

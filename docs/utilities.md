@@ -274,6 +274,14 @@ KiCad's DRC deliberately never does. Track width and via geometry default
 from the board's own Default netclass; override with `--width` /
 `--via-size` / `--via-drill`. `--keep-staged PATH` writes the staged board
 for inspection in KiCad; `-q` prints only the verdict and the violations.
+A point or `via:` typed within 1 um of one of the net's own track ends, via
+centres or pad anchors, but not on it to the nanometre, is moved onto it and
+a `snapped ...` line says so (#1800): KiCad merges track ends only when they
+are equal, and cuts a run at a pad only when it ends exactly on the pad's
+anchor, so a near miss connects yet is measured longer -- 0.12 mm through a
+1.7 mm pad. `--no-snap` leaves it as typed and reports a
+`near-miss-endpoint` violation. The net's length as KiCad measures it is
+printed before and after the join.
 Exit 0 clean, 1 violations, 2 usage errors.
 
 ## Placer (`place_simple.py`)
