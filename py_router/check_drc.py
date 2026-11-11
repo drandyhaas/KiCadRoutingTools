@@ -346,44 +346,77 @@ def _expand_cu(pad_layers: List[str], routing_layers: List[str]) -> List[str]:
 
 
 class SpatialIndex:
-    """Grid-based spatial index for fast proximity queries."""
+    """Grid-based spatial index for fast proximity queries.
 
-    def __init__(self, cell_size: float = 2.0):
-        """Initialize with given cell size in mm."""
+    Why a query finds every pair (#1838): a segment is indexed in EVERY cell
+    its centreline touches, a pad in every cell its copper box spans, a via
+    in its centre's cell, and every query reads the cells its own item is in
+    plus the eight around each. Two points less than one cell apart lie in
+    the same or adjacent cells, so a pair is found whenever its reach -- the
+    clearance plus what each item's copper adds to its indexed shape (a
+    track's half-width, a via's radius, nothing for a pad) -- is under the
+    cell size. `reach_cell_size` sizes the cell from that reach."""
+
+    #: The cell size when nothing on the board reaches further (mm)
+    DEFAULT_CELL = 2.0
+
+    def __init__(self, cell_size: float = DEFAULT_CELL, reach: Optional[float] = None):
+        """Initialize with given cell size in mm. ``reach`` (at most the cell
+        size, the default) is the furthest two items' indexed shapes stand
+        apart when they are a pair to check; `get_nearby_segments` leaves out
+        a segment past it."""
         self.cell_size = cell_size
         self.inv_cell_size = 1.0 / cell_size
+        self.reach = cell_size if reach is None else min(cell_size, reach)
         # Dict[layer][cell_key] -> list of (object, net_id)
         self.cells_by_layer: Dict[str, Dict[Tuple[int, int], List[Tuple[Any, int]]]] = defaultdict(lambda: defaultdict(list))
         # For objects that span all layers (vias)
         self.all_layer_cells: Dict[Tuple[int, int], List[Tuple[Any, int]]] = defaultdict(list)
 
+    @staticmethod
+    def pair_reach(max_clearance: float, max_track_width: float,
+                   max_via_size: float) -> float:
+        """#1838: how far apart two items' indexed shapes can stand and still
+        be a pair to check: the largest clearance plus the largest track
+        width or via diameter (two half-widths, a radius and a half-width, or
+        two radii), with a margin for rounding."""
+        reach = (max_clearance or 0.0) + max(max_track_width or 0.0, max_via_size or 0.0)
+        return reach * 1.01 + 1e-6
+
+    @classmethod
+    def reach_cell_size(cls, max_clearance: float, max_track_width: float,
+                        max_via_size: float) -> float:
+        """#1838: a cell larger than any pair's reach (`pair_reach`), so the
+        one-cell neighbourhood every query reads is enough: the default
+        unless that reach exceeds it."""
+        return max(cls.DEFAULT_CELL, cls.pair_reach(max_clearance, max_track_width,
+                                                    max_via_size))
+
     def _get_cell(self, x: float, y: float) -> Tuple[int, int]:
-        """Get cell coordinates for a point."""
-        return (int(x * self.inv_cell_size), int(y * self.inv_cell_size))
+        """Get cell coordinates for a point (floor, so every cell has the
+        same width on both sides of 0)."""
+        return (math.floor(x * self.inv_cell_size), math.floor(y * self.inv_cell_size))
 
     def _get_segment_cells(self, seg: Segment) -> Set[Tuple[int, int]]:
-        """Get all cells a segment passes through."""
-        cells = set()
+        """Every cell the segment's centreline touches, exactly (#1838): per
+        column of cells, the span of y the line has there. Sampling the line
+        every half cell could step over a corner the line clips."""
         x1, y1 = seg.start_x, seg.start_y
         x2, y2 = seg.end_x, seg.end_y
-
-        # Add endpoint cells
-        cells.add(self._get_cell(x1, y1))
-        cells.add(self._get_cell(x2, y2))
-
-        # Walk along segment and add intermediate cells
+        if x2 < x1:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+        c, inv = self.cell_size, self.inv_cell_size
         dx = x2 - x1
-        dy = y2 - y1
-        length = math.sqrt(dx*dx + dy*dy)
-        if length > 0:
-            # Sample every half cell size
-            steps = max(1, int(length * self.inv_cell_size * 2))
-            for i in range(1, steps):
-                t = i / steps
-                x = x1 + t * dx
-                y = y1 + t * dy
-                cells.add(self._get_cell(x, y))
-
+        cells = set()
+        for cx in range(math.floor(x1 * inv), math.floor(x2 * inv) + 1):
+            xa, xb = max(x1, cx * c), min(x2, (cx + 1) * c)
+            if dx > 0:
+                ya = y1 + (y2 - y1) * (xa - x1) / dx
+                yb = y1 + (y2 - y1) * (xb - x1) / dx
+            else:
+                ya, yb = y1, y2
+            for cy in range(math.floor(min(ya, yb) * inv), math.floor(max(ya, yb) * inv) + 1):
+                cells.add((cx, cy))
         return cells
 
     def add_segment(self, seg: Segment, net_id: int):
@@ -440,17 +473,29 @@ class SpatialIndex:
                     layer_cells[(cx, cy)].append((pad, net_id))
 
     def get_nearby_segments(self, seg: Segment) -> List[Tuple[Segment, int]]:
-        """Get segments that might be near the given segment (same layer, nearby cells)."""
-        cells = self._get_segment_cells(seg)
+        """Get segments that might be near the given segment (same layer):
+        those in the cells it touches and the eight around each (#1838: the
+        cells it touches alone parted two tracks either side of a cell line,
+        however close). A segment whose box stands `reach` or more off the
+        query's box is out of every pair's reach and is left out."""
         layer_cells = self.cells_by_layer[seg.layer]
-
+        c = self.reach
+        x0, x1 = min(seg.start_x, seg.end_x) - c, max(seg.start_x, seg.end_x) + c
+        y0, y1 = min(seg.start_y, seg.end_y) - c, max(seg.start_y, seg.end_y) + c
         seen = set()
         result = []
-        for cell in cells:
-            for obj, net_id in layer_cells.get(cell, []):
-                if isinstance(obj, Segment) and id(obj) not in seen:
-                    seen.add(id(obj))
-                    result.append((obj, net_id))
+        for cx, cy in self._get_segment_cells(seg):
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for obj, net_id in layer_cells.get((cx + dx, cy + dy), []):
+                        if id(obj) in seen or not isinstance(obj, Segment):
+                            continue
+                        seen.add(id(obj))
+                        if (max(obj.start_x, obj.end_x) <= x0 or min(obj.start_x, obj.end_x) >= x1
+                                or max(obj.start_y, obj.end_y) <= y0
+                                or min(obj.start_y, obj.end_y) >= y1):
+                            continue
+                        result.append((obj, net_id))
         return result
 
     def get_nearby_for_via(self, via: Via, layer: str) -> List[Tuple[Any, int]]:
@@ -6381,7 +6426,27 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # Build spatial index for fast proximity queries
     if not quiet:
         print("Building spatial index...")
-    spatial_idx = SpatialIndex(cell_size=2.0)  # 2mm cells
+    # #1838: the cell outgrows the largest pair reach, so the one-cell
+    # neighbourhood each query reads finds every pair (SpatialIndex)
+    _max_clr = max([clearance, _board_min_clr or 0.0] + list(_ncl_by_id.values())
+                   + list((_lcl or {}).values())
+                   + [getattr(pd, 'local_clearance', 0.0) or 0.0
+                      for fp in pcb_data.footprints.values() for pd in fp.pads])
+    _dru_path = os.path.splitext(pcb_file)[0] + '.kicad_dru' if pcb_file else ''
+    if _dru_path and os.path.isfile(_dru_path):
+        try:
+            from design_rules import parse_dru as _pd
+            with open(_dru_path, encoding='utf-8') as _fh:
+                for _r in _pd(_fh.read())[0]:
+                    _v = (_r.constraints.get('clearance') or {}).get('min')
+                    if isinstance(_v, (int, float)):
+                        _max_clr = max(_max_clr, float(_v))
+        except Exception:                                      # noqa: BLE001
+            pass
+    _reach_in = (_max_clr, max([s.width or 0.0 for s in pcb_data.segments] or [0.0]),
+                 max([v.size or 0.0 for v in pcb_data.vias] or [0.0]))
+    spatial_idx = SpatialIndex(cell_size=SpatialIndex.reach_cell_size(*_reach_in),
+                               reach=SpatialIndex.pair_reach(*_reach_in))
 
     # Add all segments to spatial index
     for seg in pcb_data.segments:

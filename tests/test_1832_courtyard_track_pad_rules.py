@@ -126,9 +126,7 @@ KICAD_WIDTH = {
 
 #: N/M pairs 0.30 mm apart (0.375 for 'pad_out'); a pad is (x, y) of its
 #: centre, a track (x, y) of its start, as kicad-cli reports them. U1 stands
-#: at (100, 101) here, its F.CrtYd (98,99)-(102,103): the 'one_in' pair
-#: straddles y = 103, not an even millimetre, where check_drc's 2 mm
-#: segment cells would part two tracks before any rule is asked.
+#: at (100, 101) here, its F.CrtYd (98,99)-(102,103).
 CLEAR_PAIRS = {
     'both_in': ((99, 101), (99, 101.45)),
     'one_in': ((99, 102.8), (99, 103.25)),          # N inside, M outside
