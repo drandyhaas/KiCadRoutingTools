@@ -182,7 +182,7 @@ def seat(td):
     path = board(td, 'b6')
     st = _state(path, intent())
     check('the state carries J1\'s site in its own frame',
-          getattr(st, 'cover_hole_sites', {}).get('J1') == [(18.0, 0.0, 2.7)],
+          getattr(st, 'cover_hole_sites', {}).get('J1') == [(18.0, 0.0, 2.7, 0)],
           str(getattr(st, 'cover_hole_sites', None)))
     check('pose_ok refuses J1 turned so the site is off the board',
           not pose_ok(st, 'J1', 10.0, 30.0, 180.0, set()))

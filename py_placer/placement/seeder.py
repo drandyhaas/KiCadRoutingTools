@@ -135,7 +135,9 @@ def cover_holes_past(state, ref: str, x: float, y: float, rot: float
     mounting-hole sites (`covers[].holes[]`, `state.cover_hole_sites`) whose
     drill reaches past the outline with its connector `ref` at (x, y, rot),
     measured as the grade measures it (`floorplan.site_past_outline_mm`);
-    [] for a part that is no such connector. The drill's bounding box inside
+    [] for a part that is no such connector. A hole that screws into the
+    enclosure (`mount: enclosure`, #1833) is not among the sites. The
+    drill's bounding box inside
     the outline at the edge margin settles it for the common pose without
     the circle."""
     sites = (getattr(state, 'cover_hole_sites', None) or {}).get(ref)
@@ -145,7 +147,7 @@ def cover_holes_past(state, ref: str, x: float, y: float, rot: float
     from .heights import to_board
     from .legality import BOARD_TOL, EPS
     gate, out = state.edge_gate, []
-    for k, (lx, ly, d) in enumerate(sites):
+    for lx, ly, d, k in sites:
         sx, sy = to_board((lx, ly, lx, ly), (x, y, rot))[:2]
         r = d / 2.0
         if gate.rect_outside_amount((sx - r, sy - r, sx + r, sy + r)) <= BOARD_TOL:

@@ -168,7 +168,7 @@ KEY_SETS = {
     '_COVER_STANDOFF_KEYS': {'ref', 'length_mm', 'rot', 'off_mm'},
     '_COVER_INSERTION_KEYS': {'angle_deg', 'travel_mm'},
     # #1537: one hole site, placed as a standoff is, from the body's drawing.
-    '_COVER_HOLE_KEYS': {'length_mm', 'off_mm', 'diameter_mm'} | FREE,
+    '_COVER_HOLE_KEYS': {'length_mm', 'off_mm', 'diameter_mm', 'mount'} | FREE,
     '_HEIGHT_KEYS': {'ref', 'height_mm', 'underside_mm', 'under_cover', 'source',
                      'context'} | FREE,
     '_EDGE_CONNECTOR_KEYS': {
@@ -448,7 +448,7 @@ def test_an_intent_using_every_known_key_loads():
                     'standoffs': [{'ref': 'MH2', 'length_mm': 42, 'rot': 0, 'off_mm': 0.0}],
                     'top_mm': 3.5, 'insertion': {'angle_deg': 25, 'travel_mm': 2},
                     'holes': [{'length_mm': 40, 'off_mm': 8.0, 'diameter_mm': 2.7,
-                               'why': 'w', 'note': 'n'}],
+                               'mount': 'enclosure', 'why': 'w', 'note': 'n'}],
                     'removable': True, 'source': 's', 'why': 'w', 'note': 'n', 'context': {'why': 'w'}}],
         'heights': [{'ref': 'U9', 'height_mm': 0.8, 'underside_mm': 2.0, 'source': 's',
                      'under_cover': True, 'why': 'w', 'note': 'n', 'context': {'why': 'w'}}],

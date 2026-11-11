@@ -255,7 +255,11 @@ EDGE_BAND_SANITY_MM = 5.0
 #: pair (one per leg, the router's own junction), graded by `pair_series`
 #: for sitting as a matched pair; `--emit-intent` writes a row per junction.
 #: It changes the grade; an older build refuses the key by name.
-READER_VERSION = 27
+#: 28 (#1833): `covers[].holes[].mount` -- `enclosure`, a hole that screws
+#: into the enclosure and may stand past the board edge, so the grade does
+#: not judge it for that and the placer does not refuse a pose for it. It
+#: changes the verdict and the seat; an older build refuses the key by name.
+READER_VERSION = 28
 #: The reader version that first reads `templates[]`.
 TEMPLATES_READER = 13
 #: The reader version that first reads a template row's `kind` and
@@ -291,6 +295,8 @@ OPENS_READER = 25
 LINK_PADS_READER = 26
 #: The reader version that first reads `pair_series[]` (#1820).
 PAIR_SERIES_READER = 27
+#: The reader version that first reads `covers[].holes[].mount` (#1833).
+HOLE_MOUNT_READER = 28
 #: The `context.source` of the `pair_series[]` rows `emit_intent` derives.
 PAIR_SERIES_SOURCE = 'placement.pair_series'
 #: #1475. The keep-outs a block's `fence_mm` compiles to are named
@@ -448,12 +454,18 @@ _KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'max_height_mm',
 #: placed as a standoff is, from its drawing -- a site, not a part, so it
 #: needs nothing on the board. #1589: `start_mm`, where the body begins along
 #: the axis (signed; default the origin), and a hole's or standoff's
-#: `length_mm` signed, a site behind the origin.
+#: `length_mm` signed, a site behind the origin. #1833: a hole's `mount`,
+#: `board` (the default) or `enclosure` -- a screw into the enclosure, which
+#: may stand past the board edge.
 _COVER_KEYS = {'connector', 'side', 'axis_deg', 'width_mm', 'underside_mm',
                'length_mm', 'offset_mm', 'start_mm', 'standoffs', 'holes', 'removable',
                'source', 'top_mm', 'insertion', 'context'} | _FREE_TEXT_KEYS
 _COVER_STANDOFF_KEYS = {'ref', 'length_mm', 'rot', 'off_mm'}
-_COVER_HOLE_KEYS = {'length_mm', 'off_mm', 'diameter_mm'} | _FREE_TEXT_KEYS
+_COVER_HOLE_KEYS = {'length_mm', 'off_mm', 'diameter_mm', 'mount'} | _FREE_TEXT_KEYS
+#: #1833: what a `covers[].holes[]` site screws into. `board`: a standoff on
+#: the board, so the site must be on it (#1823). `enclosure`: a boss of the
+#: enclosure, so where it lands is reported, not judged.
+COVER_HOLE_MOUNTS = ('board', 'enclosure')
 _COVER_INSERTION_KEYS = {'angle_deg', 'travel_mm'}
 #: #1443. One `heights[]` row: a part's `height_mm` (its top above its face)
 #: and/or `underside_mm` (the room under its body, across its occupancy),
@@ -1641,6 +1653,12 @@ def _cover_claims(raw: Dict) -> List[Dict]:
             hole = {'length_mm': _number(hl['length_mm'], f"{w}.length_mm"),
                     'off_mm': _number(hl.get('off_mm', 0.0), f"{w}.off_mm"),
                     'diameter_mm': d}
+            mnt = hl.get('mount', 'board')
+            if mnt not in COVER_HOLE_MOUNTS:
+                raise IntentError(f"{w}.mount: expected one of "
+                                  f"{', '.join(COVER_HOLE_MOUNTS)}, got {mnt!r}")
+            if mnt != 'board':
+                hole['mount'] = mnt
             txt = free_text(hl)
             if txt:
                 hole['why'] = txt
@@ -8969,8 +8987,8 @@ def mount_report(intent, pcb, pcb_file='', heights=None) -> List[Dict[str, objec
     a removable one over its way in), and since #1537 what stands at each
     of its own hole sites (`holes[]`, `_hole_sites`). `mountable` is False
     when a standoff is missing, off its place or off the board, a hole site
-    has a part, pad or other-net copper in its screw-head ring or lies past
-    the outline (#1823), a pair is
+    has a part, pad or other-net copper in its screw-head ring or, screwed
+    into the board, lies past the outline (#1823, #1833), a pair is
     refused, or two bodies each block the other's way in; None when the cover is not
     resolved on this board. Facts for `rule_mountable` and check_assembly;
     the body's overhang past the outline is reported, not judged (a module
@@ -9078,7 +9096,8 @@ def cover_hole_sites(intent, pcb) -> List[Dict[str, object]]:
     """#1636: every declared cover's `holes[]` site on this board, where
     `mount_report` grades it: `{connector, index (0-based), at (x, y),
     diameter_mm, standoff}` -- `standoff` the board's own mounting hole
-    fitted there (its ref), else None. A row whose connector the board lacks,
+    fitted there (its ref), else None; `mount` (`board` or `enclosure`,
+    #1833). A row whose connector the board lacks,
     or has on the other face, is left out (`mount_report` calls it
     unresolved). For a step that keeps copper off the sites BEFORE routing
     (`add_rule_area --mounting-holes --intent`), so the router is given the
@@ -9101,7 +9120,8 @@ def cover_hole_sites(intent, pcb) -> List[Dict[str, object]]:
             st = _cover_site_standoff(mounts, x, y)
             out.append({'connector': con, 'index': k, 'at': (x, y),
                         'diameter_mm': float(hl['diameter_mm']),
-                        'standoff': st.ref if st is not None else None})
+                        'standoff': st.ref if st is not None else None,
+                        'mount': hl.get('mount', 'board')})
     return out
 
 
@@ -9164,8 +9184,10 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
     standoff yet is reported (`standoff` None), not judged. A site whose
     drill circle reaches past the outline (`past_outline_mm`, measured on the
     circle) does not fit and appends to `why` (#1823): no standoff can be
-    fitted where there is no board. The body's own overhang stays reported,
-    not judged.
+    fitted where there is no board. A site whose row says `mount:
+    enclosure` (#1833) screws into the enclosure, not the board: its
+    `past_outline_mm` is reported, not judged, as the body's own overhang
+    is; its ring is judged as any site's.
 
     The cover's own connector is reported at a site, not judged (#1589):
     the site is drawn in that connector's frame, so no placement moves one
@@ -9211,14 +9233,18 @@ def _hole_sites(c, pose, pcb, geo, poses, sides, gate, why) -> List[Dict[str, ob
         # #1823: no standoff can be fitted where there is no board, so a
         # site whose drill reaches past the outline does not fit
         past = site_past_outline_mm(gate, x, y, d)
+        mount = hl.get('mount', 'board')
         site = {'index': k, 'at': [round(x, 3), round(y, 3)], 'length_mm': hl['length_mm'],
-                'off_mm': hl['off_mm'], 'diameter_mm': d, 'reach_mm': round(far, 3),
+                'off_mm': hl['off_mm'], 'diameter_mm': d, 'mount': mount,
+                'reach_mm': round(far, 3),
                 'standoff': st.ref if st is not None else None,
                 'past_outline_mm': round(past, 3),
                 'parts': parts, 'pads': pads, 'copper': copper, 'connector': reach_con}
-        site['fits'] = not (parts or pads or copper) and not site['past_outline_mm']
+        # #1833: an enclosure's hole past the outline is reported, not judged
+        off = bool(site['past_outline_mm']) and mount == 'board'
+        site['fits'] = not (parts or pads or copper) and not off
         out.append(site)
-        if site['past_outline_mm']:
+        if off:
             why.append(f"hole {k + 1} ({hl['length_mm']:g}mm along, {hl['off_mm']:+g}mm off) "
                        f"is {site['past_outline_mm']:g}mm past the outline: no standoff can be fitted there")
         if parts or pads or copper:

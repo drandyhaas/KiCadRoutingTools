@@ -164,7 +164,7 @@ side, source, suspect, suspect_reason, why
 | `templates[]` | `anchor` (the chip), `members` (each `ref`, `at` [dx, dy] mm and `rot`, a quarter turn, in the chip's own frame; `pads` and `note` as the fit wrote them), `tolerance_mm`, `kind` (`switching stage` or `rf front end`), `ground_return_mm`, `source`, `why` (or `note` / `reason`), `context`, and the fit-written `fitted` (see "`templates[]`" below; needs `min_reader` 13, and 14 with `kind` or `ground_return_mm`) |
 | `covers[]` | `connector`, `side` (`F`/`B`), `axis_deg` (a quarter turn in the connector's frame), `width_mm`, `underside_mm`, `length_mm`, `offset_mm`, `start_mm` (where the body begins along the axis, signed; needs `min_reader` 23), `standoffs`, `holes` (needs `min_reader` 22), `removable`, `source`, `top_mm`, `insertion` (these two need `min_reader` 21), `why` (or `note` / `reason`), `context` (see "`covers[]` and `heights[]`" below; needs `min_reader` 15) |
 | `covers[].standoffs[]` | `ref`, `length_mm` (signed; behind the connector's origin needs `min_reader` 23), `rot`, `off_mm` (needs `min_reader` 21) |
-| `covers[].holes[]` | `length_mm` (signed, as a standoff's), `off_mm`, `diameter_mm`, `why` (or `note` / `reason`) (needs `min_reader` 22) |
+| `covers[].holes[]` | `length_mm` (signed, as a standoff's), `off_mm`, `diameter_mm`, `mount` (`board`, the default, or `enclosure`; needs `min_reader` 28), `why` (or `note` / `reason`) (needs `min_reader` 22) |
 | `covers[].insertion` | `angle_deg`, `travel_mm` (needs `min_reader` 21) |
 | `heights[]` | `ref`, `height_mm`, `underside_mm`, `under_cover` (needs `min_reader` 20), `source`, `why` (or `note` / `reason`), `context` (needs `min_reader` 15) |
 | `arrays[]` | `name`, `members` (an ORDERED list of literal refs, at least two), `serves` (a ref, or `"unknown"`), `order` (`"pin"`, `"declared"` or `"unknown"`), `rotation` (degrees, `"shared"` or `"unknown"`), `pitch_mm` (`"auto"` or mm), `axis` (`"auto"`, `"x"` or `"y"`), `allow_mixed`, `why` (or `note` / `reason`), `context`, and the compiler-written `source` (see "Arrays" below; needs `min_reader` 7) |
@@ -344,6 +344,7 @@ Each `min_reader` level and the keys it covers:
 | 25 | `edge_connectors[].opens` |
 | 26 | `links[].pads` |
 | 27 | `pair_series[]` |
+| 28 | `covers[].holes[].mount` |
 
 The emitter and the design-brief compiler stamp the level their output needs.
 
@@ -1794,7 +1795,7 @@ drawing gives, and one rule grades whether it can go on:
   drill circle reaches past the outline (`past_outline_mm`, read on the
   circle, #1823): no standoff can be fitted where there is no board. A clear
   site with no standoff yet is reported (`standoff: null`), not judged.
-  `place_simple` holds every site on the board: its seat predicate
+  `place_simple` holds every board site on the board: its seat predicate
   (`seeder.pose_ok`, and a declared or cover-seated pose's check) refuses a
   pose of the connector that puts a site's drill past the outline, on the
   same measure, and a connector no pose of which keeps them on is left
@@ -1813,6 +1814,14 @@ drawing gives, and one rule grades whether it can go on:
   carries `connector` (`{ref, gap_mm, pads}`, check_assembly prints `its
   connector J1 reaches the ring`); a site that lands on its own connector is
   a declaration to read again.
+  A hole that screws into the enclosure rather than the board -- a boss
+  past the board edge under an overhanging module -- says `"mount":
+  "enclosure"` (#1833, `min_reader` 28; the default is `board`). Its site
+  is reported where it lands, with `mount` and `past_outline_mm`, and is not
+  judged for standing past the outline, as the body's own overhang is not:
+  `mountable` names no reason for it and `place_simple` does not hold it on
+  the board. Its screw-head ring is judged as any site's. Nothing checks
+  that such a site is OFF the board.
 
 The `mountable` rule (WARN unless `severity` promotes it, armed by any
 `covers[]`) reads `floorplan.mount_report` per cover: each standoff on the
