@@ -236,8 +236,15 @@ counts, as does one in this call.
 | `--gnd-via-distance` | 2.0 | Maximum distance from signal via to place GND via (mm) |
 
 The algorithm:
-1. Finds all signal vias (nets that are not a ground net)
-2. Skips signal vias that already have a **same-domain** GND via or through-hole GND pad within the distance threshold
+1. Finds all signal vias: nets that are neither a ground net nor a power net
+   (`list_nets.power_net_evidence`: a rail name, power pins on two or more
+   parts, or a pour the board draws for the net). A supply rail's via needs no
+   return via of its own (#1816)
+2. Skips signal vias that already have a **same-domain** GND via or drilled GND pad within the distance threshold
+
+Steps 1 and 2 are `return_vias.ReturnViaModel`, the same test
+`py_tools/check_return_vias.py` reports coverage with, so the step and the
+check cannot disagree.
 3. For each remaining signal via, searches outward from the minimum viable distance (via-to-via clearance) in 24 angles (every 15°)
 4. Places the GND via at the closest valid position that respects track clearances, on the signal's own ground net
 

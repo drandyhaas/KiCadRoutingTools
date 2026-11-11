@@ -224,23 +224,23 @@ was routed by this tool below the recommendation — the
 
 ## Step 3: GND Return Via Coverage
 
-For high-speed nets (use `/find-high-speed-nets` results if available, else the name-pattern tiers from `/plan-pcb-routing`), check each signal via has a GND via nearby:
+For high-speed nets (use `/find-high-speed-nets` results if available, else the name-pattern tiers from `/plan-pcb-routing`), check each signal via has a GND via nearby. Run `check_return_vias.py` once per speed tier, with that tier's nets and distance:
 
-```python
-from kicad_parser import pad_is_plated_through
-gnd_ids = {n.net_id for n in pcb.nets.values() if n.name and 'GND' in n.name.upper()}
-# GND vias, and plated through-hole GND pads, are return paths
-gnd_pts = [(v.x, v.y) for v in pcb.vias if v.net_id in gnd_ids]
-gnd_pts += [(p.global_x, p.global_y) for fp in pcb.footprints.values()
-            for p in fp.pads if p.net_id in gnd_ids and pad_is_plated_through(p)]
-for via in pcb.vias:
-    if via.net_id in high_speed_net_ids:
-        nearest = min((((x-via.x)**2 + (y-via.y)**2)**0.5 for x, y in gnd_pts),
-                      default=float('inf'))
-        # Flag if nearest > recommended distance for the net's speed tier
-        # (ultra-high: the 3 x (via_size + clearance) floor, 2.25mm at the
-        # default 0.5 via / 0.25 clearance; high: 3.0mm; medium: 5.0mm)
+```bash
+# ultra-high: the 3 x (via_size + clearance) floor, 2.25mm at the default 0.5 via / 0.25 clearance
+python3 py_tools/check_return_vias.py board.kicad_pcb --nets <ultra-high nets> --distance 2.25 --json rv_ultra.json
+# high: 3.0mm
+python3 py_tools/check_return_vias.py board.kicad_pcb --nets <high nets> --distance 3.0 --json rv_high.json
+# medium: 5.0mm
+python3 py_tools/check_return_vias.py board.kicad_pcb --nets <medium nets> --distance 5.0 --json rv_medium.json
 ```
+
+It counts a via or drilled pad of the signal's OWN ground domain as a return
+path, leaves power-rail vias out, and is the same test `route_planes.py
+--add-gnd-vias` places return vias by. Report `uncovered` of `signal_vias` per
+tier, and the worst nets from `by_net`. It exits 0 whatever it counts, so read
+the numbers. A count inside a BGA field, or at a layer change between two
+layers that share one reference plane, over-reads.
 
 The medium distance grades coverage only: `/plan-pcb-routing` runs no via step
 at that tier (its Step 10 rule 10), so a medium-tier miss is a note, not a

@@ -1413,6 +1413,27 @@ def _length_group_chains(pcb, chains, mode, tol, lo, hi) -> dict:
     return out
 
 
+def score_return_vias(pcb, nets) -> dict:
+    """Ground return-via coverage of the nets ``--impedance-nets`` names
+    (#1816): `count` is their signal vias with no via or drilled pad of their
+    own ground domain within `routing_defaults.GND_VIA_DISTANCE`, by the test
+    the --add-gnd-vias step itself uses (`return_vias`). ADVISORY: published
+    beside `drc_rule_pairs`, never summed into `blocking` -- the chain adds
+    return vias only where the board's ground is poured on two layers."""
+    if pcb is None:
+        return skipped('the board did not parse')
+    from net_queries import board_net_names, matches_net_filter
+    from return_vias import return_via_coverage
+    from routing_defaults import GND_VIA_DISTANCE
+    want = {n for n in board_net_names(pcb) if matches_net_filter(n, nets)}
+    rep = return_via_coverage(
+        pcb, GND_VIA_DISTANCE,
+        net_ids={nid for nid, n in pcb.nets.items() if n.name in want})
+    if rep['uncovered'] is None:
+        return dict(skipped(rep['reason']), **rep)
+    return {'ran': True, 'count': rep['uncovered'], **rep}
+
+
 def score_length(board: str, groups_file: str) -> dict:
     """Length-match spread per declared group, via net_queries (no new geometry).
 
@@ -2088,6 +2109,10 @@ def main():
     advisory = {'drc_rule_pairs': rule_pairs,
                 'drc_via_in_paste': drc.get('via_in_paste')
                 or {'ran': drc.get('ran'), 'count': None, 'by_type': {}}}
+    # #1816: the return-via coverage of the impedance nets, measured only
+    # when they are named, and never in `blocking`.
+    if _imp_nets:
+        advisory['return_vias'] = score_return_vias(_pcb, _imp_nets)
     # #1171: with --baseline, check_drc has already accepted every via the
     # input had under solder (`inherited-via-in-paste`), so what is left is a
     # site THIS run made -- a via it laid or re-laid there, or a part it moved
@@ -2149,7 +2174,7 @@ def main():
           f"joins_needed={score['joins_needed']}")
     _adv_bits = ' '.join(f'{k}={v}' for k, v in score['advisory'].items() if v)
     if _adv_bits:
-        print(f"ADVISORY (floor-governed, not blocking): {_adv_bits}")
+        print(f"ADVISORY (not blocking): {_adv_bits}")
     # #1626: findings KiCad itself reports as warnings, or does not check, at
     # the board's own severities -- disclosed, never counted.
     _drc_c = score['components'].get('drc') or {}
@@ -2226,6 +2251,12 @@ def main():
             + [f"naming nets none of which was analysed (no track copper "
                f"yet, or a plane net): {', '.join(repr(p) for p in _pnr)}"]
             * bool(_pnr)))
+    _rv = score['components'].get('return_vias') or {}
+    if _rv.get('count'):
+        print(f"RETURN VIAS (measured, not blocking): {_rv['count']} of "
+              f"{_rv['signal_vias']} signal via(s) on the --impedance-nets nets "
+              f"have no {_rv['gnd_net']}-domain via or drilled pad within "
+              f"{_rv['distance_mm']:g} mm -- check_return_vias.py lists them")
     _df = _imp.get('declared_failing') or []
     if _df:
         print(f"DECLARED IMPEDANCE (measured, not graded): {len(_df)} net(s) the "

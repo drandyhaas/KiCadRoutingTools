@@ -18,6 +18,7 @@ runnable tool in the clone with a one-line purpose.
   [copper hygiene](#copper-hygiene-checker-check_weirdpy) ·
   [non-orthonormal segments](#non-orthonormal-segment-checker-check_orthonormalpy) ·
   [impedance](#impedance-audit-check_impedancepy) ·
+  [return vias](#return-via-coverage-check_return_viaspy) ·
   [reachability](#reachability-check-check_reachabilitypy) ·
   [net forensics](#net-forensics-net_forensicspy) ·
   [hand-join verifier](#hand-join-verifier-check_joinpy)
@@ -1227,7 +1228,9 @@ python3 -X utf8 py_tools/board_score.py routed.kicad_pcb --baseline start.kicad_
   the board makes impedance unknown and is named (`patterns_matching_no_net`
   and an `IMPEDANCE PATTERNS` line), and when no named net has track copper
   yet impedance is ungraded rather than unknown, so an unrouted board still
-  has a `blocking` number.
+  has a `blocking` number. With `--impedance-nets` the score also carries
+  `advisory.return_vias`: the named nets' signal vias with no ground return
+  via within 2.0 mm (`check_return_vias.py`), never in `blocking`.
 - `--min-track-width` / `--min-via-diameter` / `--min-via-drill` /
   `--size-margin` — the board's spec size floors, when tighter than the fab's.
 - `--label` — free text carried into the JSON.
@@ -3168,6 +3171,37 @@ gap -- no ground beside it, or a gap off the declaration -- over more than
 --impedance-nets` counts by; the audit names those nets); else 0
 (`--exit-zero`: always 0). The model and every option are in
 [Impedance API](api-impedance.md).
+
+## Return Via Coverage (`check_return_vias.py`)
+
+Which signal vias have no ground return via nearby? It reports every signal via
+with no via or drilled pad of its OWN ground domain within `--distance`, per
+net, as text and JSON. Read-only, report-only (exit 0 whatever it counts; 3 for
+a missing board).
+
+```bash
+python3 py_tools/check_return_vias.py routed.kicad_pcb [--nets GLOB ...] \
+    [--distance MM] [--gnd-via-net NAME] [--json report.json]
+```
+
+- `--nets` — only the vias of these nets (`route.py --nets` glob syntax);
+  default every signal via.
+- `--distance` — default 2.0 mm, the `--add-gnd-vias` step's own
+  `--gnd-via-distance` default. The review skill passes its tier distances.
+- `--gnd-via-net` — pin every return to one ground net, as the step's flag
+  does; default each via's own ground domain (#489).
+
+A signal via is a via on a net that is neither ground (every ground domain) nor
+power (`list_nets.power_net_evidence`: a rail name, power pins on two or more
+parts, or a pour the board draws for the net). The test is
+`return_vias.ReturnViaModel`, the one `route_planes.py --add-gnd-vias` and the
+Planes tab skip a covered via with, so the check and the step cannot disagree.
+The JSON carries `signal_vias`, `uncovered`, `power_vias` (left out),
+`distance_mm`, `gnd_net`, `by_net` and every `uncovered_vias` entry with its
+nearest return distance. A raw count over-reads vias inside a BGA field, and a
+layer change between two layers that share one reference plane: the stackup is
+not consulted. `board_score --impedance-nets` publishes the count for the named
+nets as `advisory.return_vias`, outside `blocking`.
 
 ## Reachability Check (`check_reachability.py`)
 

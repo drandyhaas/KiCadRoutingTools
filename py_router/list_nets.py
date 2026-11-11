@@ -1300,12 +1300,14 @@ def power_pin_parts(net):
             if p.pintype in ('power_in', 'power_out')}
 
 
-def power_net_evidence(pcb_data):
+def power_net_evidence(pcb_data, zones=None):
     """{net_id: why} for each net the general rules read as power or ground,
     the rules autoplan builds a chain's --power-nets from: a ground or rail
     NAME (`find_power_nets`, not its pad-count candidates), power pins on two
     or more parts (`power_pin_parts`), and a pour the board draws for it.
-    A disclosure input (#1743): it decides no width."""
+    A disclosure input (#1743): it decides no width. ZONES stands in for
+    `pcb_data.zones` when the caller's board does not hold its pours yet
+    (the Planes tab's, before they are applied)."""
     from kicad_parser import pour_zones
     gnd, vcc, _cand = find_power_nets(pcb_data)
     by_name = {}
@@ -1323,7 +1325,8 @@ def power_net_evidence(pcb_data):
             parts = power_pin_parts(net)
             if len(parts) >= 2:
                 why[nid] = f"power pins on {len(parts)} parts"
-    for z in pour_zones(getattr(pcb_data, 'zones', None)):
+    for z in pour_zones(zones if zones is not None
+                        else getattr(pcb_data, 'zones', None)):
         nid = getattr(z, 'net_id', 0)
         if nid and nid not in why and not getattr(z, 'in_footprint', False):
             why[nid] = 'the board pours it'
