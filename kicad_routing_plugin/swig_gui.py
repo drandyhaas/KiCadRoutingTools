@@ -4462,6 +4462,11 @@ class RoutingDialog(wx.Dialog):
                                         persist_intra_pair_tolerances)
             persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances(),
                                           board=board)
+            # #1807: the improvement gate's record of this step's trade, for
+            # the next step's gate (a rejected step's too).
+            from improvement_gate import consume_lap_history
+            from protected_nets import persist_lap_history
+            persist_lap_history(_pro, consume_lap_history(), board=board)
         except Exception:
             pass
 

@@ -2486,6 +2486,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if json_out or final_reconcile:
         from route_summary import reset_run_state as _reset_run1069
         _reset_run1069()
+    if final_reconcile:
+        # #1807: no earlier run's gate record may be persisted as this one's.
+        from improvement_gate import note_lap_history as _nlh1807
+        _nlh1807(None)
     if not _SUMMARY_SINK:
         # First (outermost) entry of this process's run: start the
         # protected-net refusal record clean. The nested sub-runs re-enter
@@ -4783,6 +4787,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # never disturbed.
     _pe_ripped_reg = getattr(pcb_data, '_preexisting_rips', None) or {}
     _pe_outcomes: Dict[str, str] = {}
+    _pe_attackers: Dict[str, List[str]] = {}
     _victim_retry_names: List[str] = []
     if _pe_ripped_reg:
         sweep_scope_ids |= set(_pe_ripped_reg)
@@ -4896,11 +4901,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         for _rid in sorted(_pe_ripped_reg):
             _rname = _pe_ripped_reg[_rid]
             _blocked_for = None
-            for _ev in reversed(state.net_history.get(_rid, []) or []):
+            # #1807: every net this victim was ripped for, in order (the
+            # outcome text names the last one only).
+            for _ev in state.net_history.get(_rid, []) or []:
                 if _ev.get('event') == 'ripped_by':
                     _blocked_for = (_ev.get('details')
                                     or {}).get('ripping_net_name')
-                    break
+                    if _blocked_for and _blocked_for not in \
+                            _pe_attackers.setdefault(_rname, []):
+                        _pe_attackers[_rname].append(_blocked_for)
             _r_pe = routed_results.get(_rid)
             if _r_pe is None:
                 _out_pe = ('NOT RECOVERED (still open; see '
@@ -6380,6 +6389,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Main-pass pre-existing rips (0805): {victim net: outcome}. Key
         # absent when no pre-existing net was ripped.
         summary['preexisting_rips'] = _pe_outcomes
+    if _pe_attackers:
+        # #1807: {victim net: [the nets it was ripped for, in order]} -- the
+        # structured twin of preexisting_rips' "[was blocking ...]" text,
+        # which names only the last.
+        summary['rip_attackers'] = {n: a for n, a in _pe_attackers.items()
+                                    if a}
     if casualty_summary and casualty_summary.get('attempted'):
         # T5 custody: casualties-only reconcile tally (additive; key absent
         # when no rip casualty occurred -- the common case).
@@ -9864,6 +9879,33 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if _cmp['lost'] or _verdict == 'reject':
                 print("\n" + RED + format_report(_cmp, _verdict, _action)
                       + RESET)
+            # #1807: this step's trade against the earlier steps' recorded
+            # ones -- a retry that breaks what the step before it connected
+            # (or runs a trade already rejected) is a RIP CYCLE -- and the
+            # new record for the step boundary to persist, a rejected step's
+            # too: its board reverts, but what it tried is news to the next.
+            try:
+                from improvement_gate import (lap_entry, lap_history,
+                                              rip_cycle, format_rip_cycle,
+                                              note_lap_history, LAP_HISTORY)
+                from protected_nets import _pcb_data_namespace as _ns1807
+                _att1807: Dict[str, List[str]] = {}
+                for _sm in list(_SUMMARY_SINK) + [summary]:
+                    for _vn, _an in ((_sm or {}).get('rip_attackers')
+                                     or {}).items():
+                        for _x in _an or ():
+                            if _x not in _att1807.setdefault(_vn, []):
+                                _att1807[_vn].append(_x)
+                _hist1807 = lap_history(_ns1807(pcb_data, input_file))
+                _cyc1807 = rip_cycle(_hist1807, _cmp, _att1807)
+                if _cyc1807:
+                    _gate_report['rip_cycle'] = _cyc1807
+                    print(RED + format_rip_cycle(_cyc1807) + RESET)
+                _ent1807 = lap_entry(_cmp, _verdict, _att1807)
+                note_lap_history((_hist1807 + [_ent1807])[-LAP_HISTORY:]
+                                 if _ent1807 else None)
+            except Exception as _e1807:     # noqa: BLE001 -- a report
+                print(f"  (rip-cycle record skipped: {_e1807})")
             print(f"JSON_IMPROVEMENT_GATE: {json.dumps(_gate_report)}")
             if return_results:
                 results_data['improvement_gate'] = _gate_report
@@ -11080,6 +11122,18 @@ For differential pair routing, use route_diff.py:
                 persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
+    # #1807: the improvement gate's record of this step's trade, for the next
+    # step's gate -- written after a REVERT too (the board and its rules are
+    # the input's; only this record is added to the project), because what a
+    # rejected step tried is what the next step must not run again unseen.
+    if args.output_file and os.path.isfile(args.output_file):
+        try:
+            from improvement_gate import consume_lap_history
+            from protected_nets import persist_lap_history, pro_path_for_board
+            persist_lap_history(pro_path_for_board(args.output_file),
+                                consume_lap_history())
+        except Exception as e:
+            print(f"  (skipped route-step trade record: {e})")
     # #910: OPT-IN delivery fill. Last, because it is the only step that wants
     # the board AND its .kicad_pro already final -- the fill is graded against
     # the project's real netclasses, and the floor writeback above is what

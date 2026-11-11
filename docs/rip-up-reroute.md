@@ -183,8 +183,9 @@ With no refill to be had, such a net that the re-grade charges to this run
 summary agree.
 
 The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
-(`lost`, `gained`, `worsened`,
-`disconnected_pads_before/after`, `nets_compared`, `verdict`, and, when a
+(`lost`, `gained`, `worsened`, `fragmented`,
+`disconnected_pads_before/after`, `joins_needed_before/after`,
+`nets_compared`, `verdict`, `rip_cycle` when there is one (below), and, when a
 poured net outside `--nets` got worse, `excluded_plane_nets` /
 `rejected_on_excluded_plane_nets_alone`), so a chain can
 assert on it instead of grepping prose. The `--json-out` file carries the
@@ -215,6 +216,26 @@ rejected.** Re-running it with *more* rip authority is the one response
 guaranteed not to help; change the approach instead (thinner, finer grid,
 different layer budget, or accept the open net and report it) -- unless the
 report says the verdict rests on excluded plane nets alone, above.
+
+**A RIP CYCLE is named across steps (#1807).** Each route step is its own
+process, so a retry that broke what the step before it connected could not
+tell, and a rejected trade was run again step after step with the same
+report. Every gated step that lost or gained a net appends its trade (`lost`,
+`gained`, `verdict`, and `attackers`: each lost net's rippers) to the board's
+records, `kicad_routing_tools.route_laps` (the last four, through
+`tool_records` on both fronts; a REJECTED step writes it too, into the
+reverted output's project, because what it tried is news to the next step).
+The next step's gate compares its own trade with the newest accepted entry --
+the step that made its input board -- and prints `RIP CYCLE:` with the
+contested set when it broke nets that step connected, or connected nets that
+step broke by breaking others, or repeats a trade already rejected since. The
+same goes into `JSON_IMPROVEMENT_GATE` as `rip_cycle` (`undone`, `redone`,
+`contested`, `previous`, `repeats_rejected`, `attackers`). The contested nets
+compete for the same room: route them together in one step's `--nets` with a
+changed approach rather than repeating the retry. `JSON_SUMMARY`'s
+`rip_attackers` (`{victim: [nets it was ripped for, in order]}`) is the
+structured twin of `preexisting_rips`' `[was blocking ...]` text, which names
+only the last.
 
 `KICAD_IMPROVEMENT_GATE=0` disables the gate — for A/B measurement, or when you
 deliberately want the regressed board on disk to inspect it.

@@ -413,6 +413,142 @@ def excluded_plane_attribution(before: Dict[int, Tuple[bool, int]],
     return {'nets': hit, 'alone': gate_verdict(rest) == 'accept'}
 
 
+# ---- the record of earlier steps' trades (#1807) ------------------------------
+# Each route.py step is its own process, and a retry step that breaks what the
+# step before it connected could not tell: the gate's lists were printed and
+# forgotten. Every gated step that traded nets (lost or gained something)
+# appends its lists to the board's records (`kicad_routing_tools`, through
+# tool_records like every other record, so the GUI's records survive KiCad's
+# project save), and the next step's gate compares its own trade with them.
+
+#: The records key: a list of the last LAP_HISTORY gated trades, oldest first,
+#: each {'lost', 'gained', 'verdict', 'attackers'} -- `attackers` maps a lost
+#: net to the nets the run ripped it for, in order.
+LAP_KEY = 'route_laps'
+LAP_HISTORY = 4
+
+# Process-local, like protected_nets' notes: the gate notes the new history,
+# the step boundary that knows the output's records persists it.
+_lap_note: List[Optional[list]] = [None]
+
+
+def lap_entry(cmp: Dict, verdict: str, attackers=None) -> Optional[Dict]:
+    """This step's record, or None when it traded nothing (no net lost or
+    gained): a step that changed no net's state leaves the earlier trade the
+    one the board carries."""
+    if not cmp.get('lost') and not cmp.get('gained'):
+        return None
+    att = attackers or {}
+    return {'lost': sorted(cmp['lost']), 'gained': sorted(cmp['gained']),
+            'verdict': verdict,
+            'attackers': {n: list(att[n]) for n in sorted(cmp['lost'])
+                          if att.get(n)}}
+
+
+def lap_history(ns) -> List[Dict]:
+    """The recorded trades in a records namespace, oldest first ([] when
+    none or malformed)."""
+    h = (ns or {}).get(LAP_KEY)
+    if not isinstance(h, list):
+        return []
+    return [e for e in h if isinstance(e, dict)
+            and isinstance(e.get('lost'), list)
+            and isinstance(e.get('gained'), list)]
+
+
+def rip_cycle(history: List[Dict], cmp: Dict, attackers=None
+              ) -> Optional[Dict]:
+    """A RIP CYCLE: this step's trade against the trade that made its input
+    board -- the newest ACCEPTED record (a rejected step's board was
+    discarded, so its trade is not on the board).
+
+    - `undone`: nets this step broke that that step connected;
+    - `redone`: nets this step connected that that step broke -- a cycle
+      only when this step broke something to do it (otherwise a repair);
+    - `repeats_rejected`: an identical trade (same lost, same gained) was
+      already REJECTED since that step: the retry is running it again.
+
+    Returns None when none holds, else {'undone', 'redone', 'contested'
+    (every net of this step's trade, `undone` and `redone` included),
+    'previous' (that step's lost / gained / verdict), 'repeats_rejected',
+    'attackers' ({lost net: [nets it was ripped for]}, both steps')}."""
+    lost, gained = set(cmp.get('lost') or ()), set(cmp.get('gained') or ())
+    if not lost and not gained:
+        return None
+    acc = None
+    rejected_since = []
+    for e in reversed(history or []):
+        if e.get('verdict') == 'accept':
+            acc = e
+            break
+        rejected_since.append(e)
+    undone = sorted(lost & set(acc['gained'])) if acc else []
+    redone = sorted(gained & set(acc['lost'])) if (acc and lost) else []
+    repeats = any(set(e['lost']) == lost and set(e['gained']) == gained
+                  for e in rejected_since)
+    if not undone and not redone and not repeats:
+        return None
+    contested = set(lost) | gained
+    att: Dict[str, List[str]] = {}
+
+    def _add(n, names):
+        for x in names or ():
+            if x not in att.setdefault(n, []):
+                att[n].append(x)
+    if undone or redone:
+        for n, a in (acc.get('attackers') or {}).items():
+            if n in contested:
+                _add(n, a)
+    for n in sorted(lost):
+        _add(n, (attackers or {}).get(n))
+    att = {n: a for n, a in att.items() if a}
+    return {'undone': undone, 'redone': redone,
+            'contested': sorted(contested),
+            'previous': ({'lost': list(acc['lost']),
+                          'gained': list(acc['gained']),
+                          'verdict': acc['verdict']} if acc else None),
+            'repeats_rejected': repeats,
+            'attackers': att}
+
+
+def format_rip_cycle(cyc: Dict) -> str:
+    """The one console line (and its advice) for a rip_cycle()."""
+    parts = []
+    if cyc['undone']:
+        parts.append(f"this run broke {', '.join(cyc['undone'])}, which the "
+                     f"route step that made its input board connected")
+    if cyc['redone']:
+        parts.append(f"this run connected {', '.join(cyc['redone'])}, which "
+                     f"the route step that made its input board broke, by "
+                     f"breaking others")
+    if cyc['repeats_rejected']:
+        parts.append("an earlier step tried this exact trade and was "
+                     "REJECTED")
+    att = cyc.get('attackers') or {}
+    line = ("RIP CYCLE: " + "; ".join(parts)
+            + f". Contested set: {', '.join(cyc['contested'])}")
+    if att:
+        line += " (ripped for: " + "; ".join(
+            f"{n} by {', '.join(a)}" for n, a in sorted(att.items())) + ")"
+    return (line + ". These nets compete for the same room: a retry of one "
+            "at a time trades them back and forth. Route the contested set "
+            "together in one step's --nets, with a changed approach (finer "
+            "grid, thinner track, other layers), rather than repeating this "
+            "retry.")
+
+
+def note_lap_history(history: Optional[list]) -> None:
+    """The gate's new history for this step, for the step boundary to
+    persist (None: nothing to record)."""
+    _lap_note[0] = history
+
+
+def consume_lap_history() -> Optional[list]:
+    h = _lap_note[0]
+    _lap_note[0] = None
+    return h
+
+
 def format_report(cmp: Dict, verdict: str, action: str) -> str:
     """The human line(s). Names the nets -- a count alone is not actionable,
     and the whole point of the gate is that the operator can see WHICH

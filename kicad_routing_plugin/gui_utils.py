@@ -927,6 +927,10 @@ def persist_live_tool_records(board, same_net_pad_clearance=None):
             # #678: the fanout tab's pour-served balls, same step boundary.
             persist_pour_served_pads(_pro, consume_pour_served_pads(),
                                      board=board)
+            # #1807: the improvement gate's record of this step's trade.
+            from improvement_gate import consume_lap_history
+            from protected_nets import persist_lap_history
+            persist_lap_history(_pro, consume_lap_history(), board=board)
             # #581: an ACTIVE same-net pad via clearance, as every CLI routing
             # step records it, so a later chain step keeps vias off same-net
             # pads too (the persist is a no-op for <= 0).

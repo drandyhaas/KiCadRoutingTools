@@ -98,6 +98,11 @@ REGISTRY = {
     # (ai_plan._write_drc_floors) and each manual step
     # (gui_utils.update_live_drc_floors) persist in the GUI.
     'persist_pour_served_pads': ['_write_drc_floors', 'update_live_drc_floors'],
+    # #1807: the improvement gate's record of a step's net trade (the gate
+    # notes it inside batch_route on both fronts); route.py's main persists it
+    # into the output project, the Route tab's apply and the shared GUI record
+    # writer onto the live board.
+    'persist_lap_history': ['persist_lap_history'],
     # GND return vias near signal vias
     'add_gnd_vias_to_existing_board': ['add_gnd_vias_to_existing_board'],
     # run-6 fix 1.7: castellated-landing retract (route.py + both plane
