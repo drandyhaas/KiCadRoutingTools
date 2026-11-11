@@ -2367,6 +2367,68 @@ def _board_copper_group_status(group_results, net_names, config, pcb_data):
               f"{tol:g}mm of the target {target:.2f}mm")
 
 
+#: The reason a group member carries when a phase AFTER the run's one
+#: matching pass routed it (#1801): route.py's own-requirement retry, rescue
+#: or terminal escalation recovered a net its main loop failed.
+LATE_MEMBER_REASON = 'member-recovered-after-matching'
+
+
+def grade_late_group_members(record, late, config, pcb_data):
+    """#1801: grade a length-match group that gained members after the run's
+    matching pass, from the board copper as it now stands (no copper is
+    changed). `record` is the group's `length_match_groups` entry, `late`
+    {member name: the phase that routed it}. Every member is measured
+    (`calculate_route_length` + pad-to-die, as the matcher measures) and
+    graded against the target the matcher would set -- the longest member,
+    clamped to the `.kicad_dru` window. A member out of the tolerance gets
+    `reason` LATE_MEMBER_REASON; a late member also gets `recovered_by`.
+    Under time matching the late members are recorded unmatched, with their
+    length and no target (this pass grades length only). Updates `record`
+    in place and returns whether every member is within tolerance."""
+    from net_queries import calculate_route_length
+    nid_of = {n.name: i for i, n in pcb_data.nets.items() if n.name}
+    names = sorted(set(record.get('members') or ()) | set(late))
+    record['members'] = names
+    record['late_members'] = dict(sorted(late.items()))
+    lengths = {}
+    for name in names:
+        nid = nid_of.get(name)
+        segs = [s for s in pcb_data.segments if s.net_id == nid]
+        vias = [v for v in pcb_data.vias if v.net_id == nid]
+        lengths[name] = calculate_route_length(segs, vias, pcb_data)
+    status = dict(record.get('member_status') or {})
+    if getattr(config, 'time_matching', False):
+        for name in late:
+            status[name] = {'length_mm': round(lengths[name], 3),
+                            'status': 'unmatched', 'reason': LATE_MEMBER_REASON,
+                            'recovered_by': late[name]}
+        record['member_status'] = status
+        _store_member_status(config, {n: status[n] for n in late})
+        return False
+    tol = config.length_match_tolerance
+    die = {n: member_pad_to_die({}, n, pcb_data) for n in names}
+    target = max(lengths[n] + die[n] for n in names)
+    window = dru_length_window(names, pcb_data)
+    if window is not None:
+        target, _wnote = clamp_target_to_window(target, window, tol)
+    lo, hi = (window[0], window[1]) if window is not None else (None, None)
+    for name in names:
+        length = lengths[name] + die[name]
+        delta = target - length
+        state = ('matched' if abs(delta) <= tol
+                 else 'unmatched' if delta > 0 else 'over_target')
+        rec = _member_record(length, target, state, lo, hi,
+                             max(delta, 0.0) if state != 'matched' else 0.0)
+        if state != 'matched':
+            rec['reason'] = LATE_MEMBER_REASON
+        if name in late:
+            rec['recovered_by'] = late[name]
+        status[name] = rec
+    record['member_status'] = status
+    _store_member_status(config, status)
+    return all(r.get('status') == 'matched' for r in status.values())
+
+
 def get_route_primary_layer(segments: List[Segment]) -> str:
     """
     Determine the primary layer for a route (where most length is).

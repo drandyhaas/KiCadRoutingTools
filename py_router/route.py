@@ -4621,6 +4621,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         run_length_matching(routed_results, length_match_groups, config, pcb_data,
                             scope_net_ids=_length_match_scope_ids,
                             report=_length_match_report)
+    # #1801: which phase first gives a net a result after this pass; the
+    # group members they route are graded after the terminal escalation.
+    _lm_phase1801 = {}
+
+    def _lm_mark1801(phase, _have=set(routed_results)):
+        for _nid in list(routed_results):
+            if _nid not in _have:
+                _have.add(_nid)
+                if _nid in pcb_data.nets:
+                    _lm_phase1801[pcb_data.nets[_nid].name] = phase
 
     # Sync pcb_data with length-matched segments before Phase 3
     # This ensures tap routes see meanders from other nets as obstacles
@@ -4824,16 +4834,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # its own clearance is honoured routes at full width. Inert when every
     # routed net shares one requirement. Engine-side, so the GUI inherits it.
     from net_rescue import own_requirement_retry
+    _lm_mark1801('a pass between matching and the rescues')
     own_requirement_summary = None if (_ckpt_stop or quick) else \
         own_requirement_retry(
             state, single_ended_nets, net_clearances=net_clearances,
             progress_callback=progress_callback, cancel_check=cancel_check)
+    _lm_mark1801('the own-requirement retry')
     if progress_callback:
         progress_callback(0, 0, "Rescuing failed nets...")
     from net_rescue import rescue_failed_nets
     rescue_summary = None if (_ckpt_stop or quick) else rescue_failed_nets(
         state, single_ended_nets, net_clearances=net_clearances,
         progress_callback=progress_callback, cancel_check=cancel_check)
+    _lm_mark1801('the rescue')
 
     # Terminal geometry escalation ("better than shipping opens",
     # 2026-08-05): whole-net retry with track width + via size marching down
@@ -4858,6 +4871,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         terminal_geometry_escalation(
             state, _esc_scope, net_clearances=net_clearances,
             progress_callback=progress_callback, cancel_check=cancel_check)
+    _lm_mark1801('the terminal escalation')
+    if length_match_groups and not _ckpt_stop and _lm_phase1801:
+        from routing_common import regrade_late_group_members
+        regrade_late_group_members(
+            _length_match_report, length_match_groups, routed_results, config,
+            pcb_data, scope_net_ids=_length_match_scope_ids,
+            recovered_by=_lm_phase1801)
 
     # Main-pass pre-existing rips (0805): pull every RIPPED pre-existing net
     # into the stale-strip scope -- a rerouted victim's ORIGINAL input copper
