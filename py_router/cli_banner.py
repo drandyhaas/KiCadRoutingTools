@@ -118,8 +118,9 @@ def line_buffer_streams() -> None:
     parts. These are minute-scale tools whose logs are the evidence; a
     syscall per line is the right trade. A tty is already line-buffered, so
     this only changes the redirected case. Called by `install`, and on its
-    own by the tools that print no banner (place_simple, judge_seeds:
-    #1825), whose seed children run the same `main`."""
+    own by the tools that print no banner: place_simple and judge_seeds
+    (#1825), whose seed children run the same `main`; place_fanout_clearance,
+    run_plan, place_movie and the bga/qfn fanout fronts (#1829)."""
     for _stream in (sys.stdout, sys.stderr):
         try:
             if not _stream.isatty():
