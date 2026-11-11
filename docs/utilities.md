@@ -3249,7 +3249,12 @@ python3 py_tools/check_reachability.py board.kicad_pcb --pad U3.23 --track 0.15 
   nearest foreign pads, the shortfall and the relief distance per direction,
   which `render_placement.py --defect-json` crops a panel to.
 
-`--track` / `--via` / `--clearance` default to the board's Default net class;
+`--track` / `--via` / `--clearance` default to the board's Default net class,
+then its `min_track_width` / `min_via_diameter` constraint, then
+`routing_defaults` (track 0.3, clearance 0.25, via 0.5) -- `escape.lane_rules`,
+the resolver `--part` and the lane ledger share (#1837) -- and are wrapped at
+the fab floor; the knobs line names each value's source (`fixed default` on a
+board with no project), and `--json` carries them as `floors`;
 `--layers` (seed pad's layer first), `--step` (raster, 0.01 mm), `--margin`
 (4 mm view half-size) or `--view` set the measurement window. `--json` prints
 only the JSON; `--json-out PATH` also writes it. Exit 2 when an argument names
@@ -3259,9 +3264,10 @@ nothing on the board (a ref, a pad number) or the board cannot be read.
 the part's signal nets can leave a window round it (`--margin`, default 3 mm)
 AT ONCE, each by its own track. N pads that share one lane each read PASSABLE
 under `--pad`; here they share it. It is a maximum flow
-(`placement/escape_flow.py`) over a lattice of half-lane cells, at the track
-and clearance the lane ledger prices at (`--track` / `--clearance` / `--via`
-override), each net's own halo usable only by that net, another part's copper
+(`placement/escape_flow.py`) over a lattice of half-lane cells, at the rules
+`--pad` resolves (the same resolver and fab wrap; `--track` / `--clearance` /
+`--via` override), printed with their sources and carried in the JSON as
+`rule_sources`, each net's own halo usable only by that net, another part's copper
 of the same net a place to end, a via wherever one fits on every layer and no
 rule area bans it. Plane nets (ground and supply names) and nets with no
 copper off the part are no demand. The lattice OVER-STATES capacity (two

@@ -199,8 +199,9 @@ def _floors(pcb_file):
 # Mechanisms, one per group:
 #   escape   `_blocked_span` charges every co-located neighbour that shares a
 #            face, is not a container (#835), its PAD COPPER (#841), against
-#            the band -- so on a PILE supply -> 0 and deficit == demand for
-#            every part but the largest.
+#            the band -- so on a PILE supply -> 0 and deficit == lane_demand
+#            for every part but the largest, where `served` (#1836) is
+#            whatever the pile happens to stack across each face.
 #            `deficit_lanes` becomes a netlist count wearing an escape
 #            verdict's clothes, and `blockers` names parts to move that are
 #            not anywhere. The side and container filters cut the charge on a
@@ -231,6 +232,12 @@ POSITION_DEPENDENT = (
     'measurements.escape.worst[].worst_face_floor',
     'measurements.escape.worst[].worst_deficit_floor',
     'measurements.escape.worst[].faces[].deficit_floor',
+    # #1836: which face nets end on a neighbour across the band is a fact
+    # about where the neighbours STAND -- on a pile every part is across
+    # from every other.
+    'measurements.escape.worst[].faces[].served',
+    'measurements.escape.worst[].faces[].served_by',
+    'measurements.escape.worst[].faces[].lane_demand',
     'measurements.locks.high',
     'measurements.locks.lock_argv',
     'measurements.locks.tally.findings_high',
@@ -642,7 +649,8 @@ def _jsonable(v):
     return str(v)
 
 
-def measurements_section(pcb, pcb_file, skipped, clearance, edge):
+def measurements_section(pcb, pcb_file, skipped, clearance, edge,
+                         clearance_source=None):
     """The numbers that say a placement will fight the router.
 
     `escape` is the one that is a BINDING constraint rather than a
@@ -652,8 +660,12 @@ def measurements_section(pcb, pcb_file, skipped, clearance, edge):
     """
     out = {}
     from placement.escape import escape_ledger
+    # #1837: the clearance is the one this brief resolved (`floors`), so the
+    # ledger is told its source rather than reporting it as 'cli'.
     led = _safe('measurements.escape', escape_ledger, skipped, pcb,
-                pcb_file=pcb_file, clearance=clearance)
+                pcb_file=pcb_file, clearance=clearance,
+                rule_sources=({'clearance': clearance_source}
+                              if clearance_source else None))
     if led is not None:
         # `PartEscape` exposes `worst` (a FaceLedger or None) and NO
         # `worst_deficit` attribute -- that name exists only as a key in its
@@ -663,6 +675,10 @@ def measurements_section(pcb, pcb_file, skipped, clearance, edge):
         from placement.options import deficit_totals
         tot = deficit_totals(led)
         out['escape'] = {'parts': len(led),
+                         # #1837: what every escape number here is priced
+                         # at, each with its source
+                         'lane_rules': (led[0].to_dict()['lane_rules']
+                                        if led else {}),
                          'worst': [_jsonable(p) for p in led[:WORST_N]],
                          'deficit_parts': tot['parts'],
                          'deficit_lanes': tot['lanes']}
@@ -796,7 +812,9 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
         clr, edge, _knobs = board_floor_knobs(
             pcb_file, clearance=clearance,
             board_edge_clearance=board_edge_clearance)
+        clr_source = (_knobs.get('clearance') or {}).get('source')
     except Exception as e:                       # noqa: BLE001 - disclosed
+        clr_source = 'cli' if clearance is not None else 'fixed default'
         clr = 0.25 if clearance is None else clearance
         edge = board_edge_clearance
         if edge is None:
@@ -820,7 +838,8 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
     brief['structure'] = _safe('structure', structure_section, skipped, pcb,
                                pcb_file, skipped)
     brief['measurements'] = _safe('measurements', measurements_section,
-                                  skipped, pcb, pcb_file, skipped, clr, edge)
+                                  skipped, pcb, pcb_file, skipped, clr, edge,
+                                  clr_source)
     if fit:
         f = _safe('fit', fit_section, skipped, pcb, pcb_file, fit, fit_step,
                   clr, edge, skipped)

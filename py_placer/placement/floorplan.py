@@ -13985,19 +13985,30 @@ def format_text(r: GradeResult) -> str:
         esc = r.health.get('escape_lanes') or []
         short = [p for p in esc if p.get('worst_deficit')]
         if short:
+            from .escape import format_rules
             lines.append(
                 f"    escape lanes ({r.health.get('escape_deficit_parts')} of "
                 f"{r.health.get('escape_parts')} fine-pitch part(s) have a "
                 f"face that cannot pass its own nets):")
+            # #1837: the rules every number below was priced at, and where
+            # each came from -- a board with no project says 'fixed default'.
+            if short[0].get('lane_rules'):
+                lines.append(f"      priced at "
+                             f"{format_rules(short[0]['lane_rules'])}")
             for p in short[:3]:
                 w = next((f for f in p['faces']
                           if f['face'] == p['worst_face']), None)
                 if not w:
                     continue
+                # #1836: nets that end on a neighbour across the face need
+                # no lane, so `demand` is shown less those.
+                served = (f" less {w['served']} served directly by "
+                          f"{', '.join(w.get('served_by', [])[:3])}"
+                          if w.get('served') else '')
                 lines.append(
                     f"      {p['ref']} {w['face']}: supply {w['supply']} < "
-                    f"demand {w['demand']} (short {w['deficit']} lane(s) at "
-                    f"{w['lane_pitch_mm']}mm pitch)")
+                    f"demand {w['demand']}{served} (short {w['deficit']} "
+                    f"lane(s) at {w['lane_pitch_mm']}mm pitch)")
                 if w['blockers']:
                     lines.append(
                         f"        {w['blocked_mm']}mm of that face is taken by "

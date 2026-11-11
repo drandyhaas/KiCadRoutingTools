@@ -137,8 +137,10 @@ def main(td):
     with contextlib.redirect_stdout(io.StringIO()):
         led = escape.escape_ledger(tp, pcb_file=tig, fine_at_board_rules=True)
     f = next(f for p in led for f in p.faces if (f.ref, f.face) == ('U3', 'south'))
-    ok('control: the ledger still reads U3 south demand 10 supply 2 deficit 8',
-       (f.demand, f.supply, f.deficit, f.deficit_floor) == (10, 2, 8, 0),
+    # #1836: its GND pin ends on J6's GND pad across the band, so 9 of the
+    # 10 need a lane
+    ok('control: the ledger still reads U3 south demand 10 supply 2 deficit 7',
+       (f.demand, f.supply, f.deficit, f.deficit_floor) == (10, 2, 7, 0),
        (f.demand, f.supply, f.deficit, f.deficit_floor))
 
     # the CLI: a positive deficit exits 1, an unknown ref 2 for its reason

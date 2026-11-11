@@ -2208,7 +2208,14 @@ Three things keep it honest:
 
 - **The lane pitch is read from the board**, not assumed. At 0.20 mm a face
   passes and at 0.35 mm the same face is short, so a constant would manufacture
-  or hide a structural finding depending on the board it met.
+  or hide a structural finding depending on the board it met. Track,
+  clearance and via come from `escape.lane_rules`, the one resolver
+  `check_reachability --pad` and `--part` use too: the board's Default net
+  class, then its board constraint, then `routing_defaults` (track 0.3,
+  clearance 0.25, via 0.5 -- what route.py routes an undeclared board at).
+  Every row carries `lane_rules` with each value's source, and the `--health`
+  block prints them (`priced at track 0.3 [fixed default] / ...`), so a
+  number priced at a default says so.
 - **`blockers` names who ate the lanes.** A count says a face is short; the
   blocker list says which neighbour to move. Read that field first — it is the
   difference between a signal and an action. A neighbour is charged only if it
@@ -2218,6 +2225,15 @@ Three things keep it honest:
   copper — not its courtyard, which is an assembly keep-out a track may legally run under, and
   not the bbox of its pad centres, which gives a two-terminal passive a
   zero-width body.
+- **A net that ends across the face needs no lane** (#1836). When a charged
+  neighbour has a pad of a face net in the escape band, across from that
+  net's own pin (within the band's depth along the face), the net is
+  `served` there -- a series array facing the IC pins it terminates, a
+  decoupling cap facing its power pin. `deficit` is counted against
+  `lane_demand = demand - served`; the neighbour stays charged for every net
+  that does not end on it, and is named in `served_by` rather than read as
+  the part to move. A same-net pad beyond the band (the far terminal of a
+  part whose near pad is another net) serves nothing.
 - **Interior pads count toward no face** and are reported separately. A boxed-in
   pad does not escape sideways at any pitch; it needs a via. Rolling it into a
   face's demand would blame the face for a fanout problem.
@@ -2228,7 +2244,7 @@ Three things keep it honest:
 the other signal layers could take:
 
     supply_other_max = min(via_slots, (signal_layers - 1) x lanes along the face)
-    deficit_floor    = max(0, demand - supply - supply_other_max)
+    deficit_floor    = max(0, lane_demand - supply - supply_other_max)
 
 - **`deficit_floor` is a LOWER bound**, the dual of an upper bound on supply.
   `deficit_floor > 0` says the face is short *even using every other layer* — a

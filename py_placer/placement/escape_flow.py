@@ -33,7 +33,7 @@ THE MODEL OVER-STATES CAPACITY, ON PURPOSE, so `deficit > 0` is a proof and
 
 What it does not say: a flow of 0 deficit is not a route (the router still
 has to find it, and the window is a local question); the clearance is the
-single lane clearance the ledger prices at (`escape.lane_pitch_parts`), not
+single lane clearance the ledger prices at (`escape.lane_rules`), not
 each pair's class, which is the generous reading on a multi-class board.
 And the proof is AT THOSE RULES: a part a human escapes with narrower
 tracks or smaller vias than the board's Default class reads short here --
@@ -78,6 +78,9 @@ class PartFlow:
     ignored: Tuple[str, ...] = ()
     stranded: Tuple[str, ...] = ()
     seconds: float = 0.0
+    #: #1837: where track_width / clearance / via_diameter came from
+    #: (`escape.lane_rules`' sources).
+    rule_sources: Dict[str, str] = field(default_factory=dict)
 
     @property
     def deficit(self) -> int:
@@ -88,6 +91,7 @@ class PartFlow:
                 'deficit': self.deficit, 'nets': list(self.nets),
                 'window': [round(v, 4) for v in self.window],
                 'rules': {k: round(v, 4) for k, v in self.rules.items()},
+                'rule_sources': dict(self.rule_sources),
                 'layers': list(self.layers), 'cut_refs': list(self.cut_refs),
                 'cut_cells': [[l, round(x, 3), round(y, 3)]
                               for l, x, y in self.cut_cells],
@@ -124,30 +128,26 @@ def _rect_fn(rot):
 
 
 def _resolve_rules(pcb, pcb_file, track_width, clearance, via_diameter,
-                   edge_clearance):
+                   edge_clearance, rule_sources=None):
+    """`(LaneRules, edge_clearance)`: track, clearance and via through
+    `escape.lane_rules`, the one resolver the lane ledger and
+    `check_reachability --pad` use too (#1837), each with its source."""
     import routing_defaults as defaults
-    tw, clr, dr = escape.lane_pitch_parts(pcb, pcb_file, track_width,
-                                          clearance, return_rules=True)
+    rules = escape.lane_rules(pcb, pcb_file, track_width=track_width,
+                              clearance=clearance, via_diameter=via_diameter,
+                              sources=rule_sources)
     path = pcb_file or getattr(pcb, 'source_path', None)
-    via, edge = via_diameter, edge_clearance
-    if path and (via is None or edge is None):
+    edge = edge_clearance
+    if path and edge is None:
         try:
             import list_nets
-            if dr is None:
-                dr = list_nets.read_design_rules(path)
-            if via is None:
-                via = list_nets.board_floor(
-                    path, 'via_diameter', None,
-                    getattr(defaults, 'VIA_SIZE', 0.5), dr)[0]
-            if edge is None:
-                edge = list_nets.board_floor_knobs(path, design_rules=dr)[1]
+            edge = list_nets.board_floor_knobs(
+                path, design_rules=rules.design_rules)[1]
         except Exception:                                   # noqa: BLE001
             pass
-    if not via:
-        via = getattr(defaults, 'VIA_SIZE', 0.5)
     if edge is None:
         edge = getattr(defaults, 'BOARD_EDGE_CLEARANCE', 0.5)
-    return float(tw), float(clr), float(via), float(edge)
+    return rules, float(edge)
 
 
 def demand_nets(pcb, ref, ignore_net_ids=()) -> Tuple[List[int], List[int]]:
@@ -185,10 +185,14 @@ def part_flow(pcb, ref, pcb_file=None, *, margin_mm: float = DEFAULT_MARGIN_MM,
               via_diameter: Optional[float] = None,
               edge_clearance: Optional[float] = None,
               ignore_net_ids: Sequence[int] = (),
-              layers: Optional[Sequence[str]] = None) -> PartFlow:
+              layers: Optional[Sequence[str]] = None,
+              rule_sources: Optional[Dict[str, str]] = None) -> PartFlow:
     """How many of `ref`'s signal nets leave a window `margin_mm` round its
-    pads at once, at the rules `escape_ledger` prices lanes at. See the
-    module docstring for what the number proves."""
+    pads at once, at the rules `escape_ledger` prices lanes at
+    (`escape.lane_rules`). `rule_sources` labels explicit values the caller
+    resolved itself (`check_reachability --part` passes its fab-wrapped
+    floors); `PartFlow.rule_sources` publishes where each rule came from. See
+    the module docstring for what the number proves."""
     import time
     from scipy import ndimage
     from scipy.sparse import csr_matrix
@@ -198,9 +202,9 @@ def part_flow(pcb, ref, pcb_file=None, *, margin_mm: float = DEFAULT_MARGIN_MM,
     reach._require_scipy()
     if ref not in pcb.footprints:
         raise KeyError(ref)
-    tw, clr, via, edge_c = _resolve_rules(pcb, pcb_file, track_width,
-                                          clearance, via_diameter,
-                                          edge_clearance)
+    rules, edge_c = _resolve_rules(pcb, pcb_file, track_width, clearance,
+                                   via_diameter, edge_clearance, rule_sources)
+    tw, clr, via = rules.track_width, rules.clearance, rules.via_diameter
     lane = tw + clr
     cell = lane / 2.0
     k = max(1, int(math.ceil(cell / MAX_STEP_MM - 1e-9)))
@@ -220,7 +224,8 @@ def part_flow(pcb, ref, pcb_file=None, *, margin_mm: float = DEFAULT_MARGIN_MM,
                    rules={'track_mm': tw, 'clearance_mm': clr, 'via_mm': via,
                           'edge_clearance_mm': edge_c, 'lane_mm': lane,
                           'cell_mm': cell, 'step_mm': step,
-                          'margin_mm': margin_mm})
+                          'margin_mm': margin_mm},
+                   rule_sources=dict(rules.sources))
     if not demand:
         res.seconds = time.time() - t0
         return res
