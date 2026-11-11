@@ -932,7 +932,12 @@ against).
 A per-part sheet a model can reason from: each part's value, package and body
 size, each pad with its net and pin function, which board face its partners
 are on, what each cap decouples, and the pin-order pairs marked `CROSSED`
-(a pair whose order crosses costs a via per net at every rotation).
+(a pair whose order crosses costs a via per net at every rotation). A pair
+composed through per-leg series parts (AC caps, USB series resistors) carries
+`series_pose` per junction -- the two parts' faces, the angle between their
+pad axes, how far one stands ahead of the other along the pair, their gap --
+and the sheet names a junction whose two parts do not sit as a matched pair
+(#1820, `placement/pair_series.py`, limits read off 544 human junctions).
 
 ```bash
 python3 -X utf8 py_tools/board_context.py board.kicad_pcb --md
