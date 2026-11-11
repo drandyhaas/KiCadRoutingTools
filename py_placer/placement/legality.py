@@ -3862,6 +3862,12 @@ def grade_body_overlap(pcb_data, clearance: float,
             # so a reader can tell a housing outline from a fab outline
             # rather than being told only that something was judged.
             'body_sources': dict(body_sources),
+            # #1822. The courtyard channel's own: what each part's occupancy
+            # was graded on (`GradedPart.source`). A pair with a member that
+            # is not `courtyard` was graded on a stand-in (.Fab body, silk,
+            # pad box) and is not a KiCad courtyards_overlap finding.
+            'courtyard_sources': {r: gp.source
+                                  for r, gp in _cg.parts.items()},
             'fab_rejected_refs': fab_rejected_refs,
             # #896. The tightest DRAWN-body seam on the board, signed
             # (negative = overlap). `body_overlap_pairs` reports a depth only

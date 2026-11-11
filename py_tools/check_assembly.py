@@ -65,6 +65,26 @@ _GATE_EXEMPT_WHY = {
 }
 
 
+def _undrawn_courtyard_note(q, sources) -> str:
+    """#1822: '(J3: pad_bbox; no drawn courtyard)' for a courtyard-channel
+    pair with a member graded on a stand-in (`GradedPart.source` other than
+    'courtyard'), else ''. Such a pair is this tool's estimate: KiCad
+    reports no courtyards_overlap for it (`courtyard_error_pairs`)."""
+    undrawn = [f"{r}: {sources[r]}" for r in (q.a, q.b)
+               if sources.get(r, 'courtyard') != 'courtyard']
+    return f"({', '.join(undrawn)}; no drawn courtyard)" if undrawn else ''
+
+
+def _courtyard_pair_dict(q, sources) -> dict:
+    """A courtyard-channel pair for --json, with each member's graded
+    source (#1822) beside the pair's own fields."""
+    d = q._asdict()
+    if q.kind == 'courtyard':
+        d['a_source'] = sources.get(q.a, '')
+        d['b_source'] = sources.get(q.b, '')
+    return d
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Assembly (body-overlap) audit of a placed board.")
@@ -418,6 +438,7 @@ def main():
               f"not a baseline (#1103), so every advisory pair counts as new")
     _cb_keys = {(q.a, q.b) for q in g['courtyard_blocking_pairs']}
     _body_src = g.get('body_sources') or {}
+    _cy_src = g.get('courtyard_sources') or {}
     for q in g['pairs']:
         label = ('BLOCKING' if q.kind == 'pad_intersection'
                  else (('HEIGHT-BLOCKING' if q.kind == 'height' else 'COURTYARD-BLOCKING')
@@ -440,6 +461,11 @@ def main():
             _sa, _sb = _body_src.get(q.a, ''), _body_src.get(q.b, '')
             if 'silk' in (_sa, _sb):
                 kind = f'body({_sa}/{_sb})'
+        elif kind == 'courtyard':
+            # #1822: the same for the courtyard channel -- a member that
+            # draws no courtyard was graded on a stand-in, and KiCad reports
+            # no courtyards_overlap for the pair.
+            kind += _undrawn_courtyard_note(q, _cy_src)
         print(f"    {q.a} <-> {q.b}  {kind}  {q.area_mm2}mm2 "
               f"side {q.side}  {label}{cont}{star}")
         # Different-net pads touching is a short on top of the overlap. Say so
@@ -806,8 +832,10 @@ def main():
                        else '  baseline\'s own (no member moved)')
             _what = (f"under a raised body too low for it" if q.kind == 'height'
                      else f"depth {q.depth_mm}mm")
+            _basis = (_undrawn_courtyard_note(q, _cy_src)
+                      if q.kind == 'courtyard' else '')
             print(f"    {q.a} <-> {q.b}  {q.area_mm2}mm2  {_what}  "
-                  f"side {q.side}{_mv}")
+                  f"side {q.side}{'  ' + _basis if _basis else ''}{_mv}")
         print("    A deliberate overlap is accepted by naming the pair in the "
               "intent's `overlap_waivers`, where the acceptance is visible.")
 
@@ -1226,7 +1254,7 @@ def main():
             'locked_contacts': len(locked_contact),
             'advisory': g['advisory'],
             'waived': g['waived'],
-            'pairs': [q._asdict() for q in g['pairs']],
+            'pairs': [_courtyard_pair_dict(q, _cy_src) for q in g['pairs']],
             'contained': g['contained'],
             # The BLOCKING subset, published beside the total for exactly the
             # reason `buildable` is published above: it is one of the five
@@ -1256,18 +1284,18 @@ def main():
             # NOTE `b_body_overlap_pairs` in render_placement's checklist is
             # PAD INTERSECTIONS, not this -- the name predates this channel.
             'courtyard_blocking': g['courtyard_blocking'],
-            'courtyard_blocking_pairs': [q._asdict()
+            'courtyard_blocking_pairs': [_courtyard_pair_dict(q, _cy_src)
                                          for q in g['courtyard_blocking_pairs']],
             # The subset that actually GATES buildable: census pairs where a
             # member MOVED vs --baseline. None (not 0) without a baseline --
             # "not measured" must never read as "measured clean".
             'courtyard_blocking_gating': (len(courtyard_gating)
                                           if moved_refs is not None else None),
-            'courtyard_blocking_gating_pairs': [q._asdict()
+            'courtyard_blocking_gating_pairs': [_courtyard_pair_dict(q, _cy_src)
                                                 for q in courtyard_gating],
             # #1385: of those, the pairs below the run-23 floors that gate
             # only because the project declares the rule an error.
-            'courtyard_error_gating_pairs': [q._asdict()
+            'courtyard_error_gating_pairs': [_courtyard_pair_dict(q, _cy_src)
                                              for q in courtyard_error_gating],
             'silk_enclosed_gating_pairs': [q._asdict() for q in silk_gating],
             # #1095: the severity the courtyard channel was graded at (None
@@ -1279,8 +1307,10 @@ def main():
             'courtyard_gating_basis': ('moved-vs-baseline'
                                        if moved_refs is not None
                                        else 'no-baseline: report-only'),
-            'courtyard_pairs': [q._asdict() for q in g['pairs']
-                                if q.kind == 'courtyard'],
+            # #1822: each with `a_source` / `b_source`, what its members
+            # were graded on -- a member that is not `courtyard` draws none.
+            'courtyard_pairs': [_courtyard_pair_dict(q, _cy_src)
+                                for q in g['pairs'] if q.kind == 'courtyard'],
             # #1443: the heights the grade read, and the parts under a raised
             # body too low for them (kind 'height', in courtyard_blocking)
             'heights': g.get('heights'),
