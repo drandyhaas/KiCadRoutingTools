@@ -3421,7 +3421,7 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                'out_of_range': sum(1 for v in violations
                                    if v['type'] == 'length-out-of-range'),
                'unmeasured': unmeasured, 'unbound_rules': unbound,
-               'not_graded': {k: {'reason': r, 'nets': n}
+               'not_graded': {k: {'kind': 'length', 'reason': r, 'nets': n}
                               for k, (r, n) in undecided.items()}}
     if not quiet:
         print(f"Length rules (.kicad_dru, #1313): {len(rules)} rule(s); "
@@ -3566,7 +3566,7 @@ def _via_count_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet
     out_n = sum(1 for v in violations if v['type'] == 'via-count-out-of-range')
     summary = {'rules': len(rules), 'graded': graded, 'out_of_range': out_n,
                'unbound_rules': unbound,
-               'not_graded': {k: {'reason': r, 'nets': n}
+               'not_graded': {k: {'kind': 'via_count', 'reason': r, 'nets': n}
                               for k, (r, n) in undecided.items()}}
     if not quiet:
         print(f"Via-count rules (.kicad_dru, #1707): {len(rules)} rule(s); "
@@ -3932,7 +3932,8 @@ def _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
     rows = [row for _r, row in found.values()]
     violations.extend(rows)
     summary = {'rules': len(rules), 'not_allowed': len(rows),
-               'not_graded': dict(sorted(not_graded.items()))}
+               'not_graded': {k: {'kind': 'disallow', 'reason': why}
+                              for k, why in sorted(not_graded.items())}}
     if not quiet:
         print(f"Disallow rules (.kicad_dru, #1527): {len(rules)} rule(s); "
               f"{len(rows)} track/via item(s) not allowed")
@@ -4275,7 +4276,8 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                    1 for v in violations
                    if v['type'] == 'chain-skew-out-of-range'),
                'unmeasured': unmeasured,
-               'not_graded': {k: {'reason': r, 'nets': nn}
+               'not_graded': {k: {'kind': undecided_kind.get(k, 'skew'),
+                                  'reason': r, 'nets': nn}
                               for k, (r, nn) in undecided.items()}}
     if not quiet:
         print(f"Diff-pair rules (.kicad_dru, #1303): {len(rules)} rule(s); skew: "
@@ -5782,7 +5784,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             baseline=None,
             clearance_margin_mm: Optional[float] = None,
             severity_overrides: Optional[Dict[str, str]] = None,
-            within_margin: Optional[dict] = None):
+            within_margin: Optional[dict] = None,
+            not_graded: Optional[list] = None):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -5835,6 +5838,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             ``count``, and when it is not 0 ``max_mm`` and ``max_nets``. The
             grade, the return value and the exit status do not change; None
             (default) counts nothing.
+        not_graded: A list this run appends one row to (#1831) for every
+            `.kicad_dru` rule it names NOT GRADED, quiet or not: ``{'rule',
+            'kind', 'reason'}``, plus ``nets`` where the pass knows which nets
+            the rule may bind, and the rule's ``constraints`` for a `size` row,
+            ``clearance_mm`` / ``condition`` for a `clearance` one. ``kind`` is
+            the one the console line names. None (default) collects nothing.
     """
     if within_margin is not None:
         # Set for this call only, as clearance_margin_mm below is.
@@ -5856,6 +5865,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             return run_drc(**_kw)
         finally:
             _ABS_MARGIN_MM.reset(_tok)
+
+    def _note_not_graded(kind, rule, reason, nets=None, **extra):
+        """#1831: one NOT GRADED rule, for the caller's `not_graded` list (the
+        --json document), printed or not."""
+        if not_graded is None:
+            return
+        row = {'rule': rule, 'kind': kind, 'reason': str(reason) if reason else None}
+        if nets is not None:
+            row['nets'] = list(nets)
+        row.update(extra)
+        not_graded.append(row)
     # Board-edge clearance: the explicit/board value when set, else the fab
     # copper-to-edge floor (0.20, #439 -- the routers pin the edge up to it, so a
     # project-less final's copper is >=0.20 from the edge) or the copper clearance,
@@ -6074,8 +6094,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             (_nm, _mm, _cond) for _nm, _mm, _cond
             in read_board_unmodelled_clearance_rules(pcb_file, _board_copper)
             if _nm not in _graded_coupled and _nm not in _graded_scoped]
-    if not quiet:
-        for _nm, _mm, _cond in _unmodelled_clr:
+    for _nm, _mm, _cond in _unmodelled_clr:
+        _note_not_graded('clearance', _nm,
+                         'its scope is not modelled here: the copper it binds is graded '
+                         'at the class or layer value', clearance_mm=_mm, condition=_cond)
+        if not quiet:
             print(f"  NOT GRADED (clearance): rule '{_nm}' (clearance {_mm:g}mm"
                   + (f", condition {_cond!r}" if _cond else '')
                   + "): its scope is not modelled here -- the copper it binds is "
@@ -6190,18 +6213,20 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
                   f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm"
                   + ("; per-net board/rule minimums applied (#530)" if _size_rules else ""))
-            # #1390: a .kicad_dru size rule whose condition is not modelled
-            # (A.insideCourtyard(), ...) binds copper the minimums above
-            # know nothing about, and used to vanish: the clearance half got
-            # a note, the track_width half none, and KiCad's own DRC then
-            # reported errors this grader called clean.
-            if _size_rules is not None:
-                for _r in _size_rules.rules:
-                    if _r.unsupported and not _r.honoured:
-                        _sk = sorted(k for k in _r.constraints if k in _SZK
-                                     and not (_courtyards and _r.courtyard_condition
-                                              and k in _VSK))
-                        if _sk:
+        # #1390: a .kicad_dru size rule whose condition is not modelled
+        # (A.insideCourtyard(), ...) binds copper the minimums above
+        # know nothing about, and used to vanish: the clearance half got
+        # a note, the track_width half none, and KiCad's own DRC then
+        # reported errors this grader called clean.
+        if _size_rules is not None:
+            for _r in _size_rules.rules:
+                if _r.unsupported and not _r.honoured:
+                    _sk = sorted(k for k in _r.constraints if k in _SZK
+                                 and not (_courtyards and _r.courtyard_condition
+                                          and k in _VSK))
+                    if _sk:
+                        _note_not_graded('size', _r.name, _r.unsupported, constraints=_sk)
+                        if not quiet:
                             print(f"  NOT GRADED (size): rule '{_r.name}' "
                                   f"({', '.join(_sk)}): {_r.unsupported} -- "
                                   f"the copper it binds is not graded here; "
@@ -7919,11 +7944,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     _keepout_pass(pcb_data, routing_layers, matching_net_ids, _baseline_pd,
                   violations, _accepted_edge,
                   _grade_tol(clearance, clearance_margin), quiet)
-    _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet)
-    _via_count_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet)
-    _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet)
-    _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
-                        violations, quiet)
+    # #1831: each pass names the rules it could not grade in its summary
+    for _summary in (
+            _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet),
+            _via_count_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet),
+            _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet),
+            _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
+                                violations, quiet)):
+        for _nm, _e in sorted(((_summary or {}).get('not_graded') or {}).items()):
+            _note_not_graded(_e['kind'], _nm, _e['reason'], _e.get('nets'))
 
     # #1306: ONE footprint's own pads, graded as KiCad grades them. A contact
     # between two of its pads on different nets is a `pad-pad` violation
@@ -8815,6 +8844,7 @@ if __name__ == "__main__":
                   f"--clearance-margin-mm)")
 
     _within = {}    # #1803: filled by run_drc
+    _not_graded = []    # #1831: filled by run_drc, --quiet or not
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
                          args.hole_clearance,
@@ -8828,7 +8858,7 @@ if __name__ == "__main__":
                          net_clearances=net_clearances,
                          baseline=args.baseline,
                          clearance_margin_mm=args.clearance_margin_mm,
-                         within_margin=_within)
+                         within_margin=_within, not_graded=_not_graded)
     if _within.get('count') and not args.quiet:
         # #1803: a clean verdict says what its tolerance let through that
         # KiCad's 500 nm does not. The grade and the exit status are as before.
@@ -8968,6 +8998,11 @@ if __name__ == "__main__":
             # #1528: of `violations`, the ones an unmodelled .kicad_dru
             # clearance rule may make legal (each names its `unverified_rule`)
             'unverified': sum(1 for v in _real if v.get('unverified_rule')),
+            # #1831: every .kicad_dru rule this run did not grade, one row per
+            # NOT GRADED line ({rule, kind, reason}, `nets` where the pass
+            # knows them): `violations` is a partial grade while any is
+            # listed, since KiCad still grades those rules. [] = none.
+            'not_graded': _not_graded,
             'by_type': dict(_c.Counter(v.get('type') for v in _real)),
             # CONTACT, per type. `overlap_mm >= clearance` means the two pieces
             # of copper physically reach each other -- required_dist is
