@@ -127,7 +127,9 @@ def _skew_bound_net_ids(pcb_data):
         path = getattr(pcb_data, 'source_path', '') or ''
         groups, _undecided = skew_rule_groups(path, pcb_data)
         chains = recorded_chain_groups(path, pcb_data)
-    except Exception:
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  (#1759 skew-graded nets unread, none held: "
+              f"{type(e).__name__}: {e})")
         return set()
     return ({m for _rule, members in groups for m in members}
             | {m for _ch, p, n in chains for m in p + n})
@@ -142,33 +144,17 @@ def _centre_stub_net_ids(pcb_data):
     both grade: a later step's collapse took the stub off a net held to a
     length window, and the net left the window by a via radius.
 
-    The length-rule nets are selected as check_drc._length_rule_pass selects
-    them: two pads or more, and the rule KiCad applies to the net
-    (kicad_dru.binding_length_rule) has a min or a max. A net whose binding
-    rule is not modelled is left out, as that pass leaves it ungraded. The
-    graze passes' read-only set (#1759) stays _skew_bound_net_ids."""
+    The length-rule nets are the ones check_drc's length pass grades
+    (check_drc.length_rule_nets). The graze passes' read-only set (#1759)
+    stays _skew_bound_net_ids."""
     ids = set(_skew_bound_net_ids(pcb_data))
     try:
-        from kicad_dru import read_board_length_rules, binding_length_rule
-        path = getattr(pcb_data, 'source_path', '') or ''
-        rules, _notes = read_board_length_rules(path)
-        if not rules:
-            return ids
-        from list_nets import net_class_memberships
-        names = {nid: n.name for nid, n in pcb_data.nets.items()
-                 if nid and n.name}
-        member = net_class_memberships(path, names)
-        board_names = set(names.values())
-        for nid, name in names.items():
-            if len(pcb_data.pads_by_net.get(nid) or ()) < 2:
-                continue
-            rule, _blocker = binding_length_rule(rules, name, member.get(nid),
-                                                 board_names)
-            if rule is not None and (rule.min_mm is not None
-                                     or rule.max_mm is not None):
-                ids.add(nid)
-    except Exception:
-        pass
+        from check_drc import length_rule_nets
+        ids |= set(length_rule_nets(getattr(pcb_data, 'source_path', '') or '',
+                                    pcb_data).bound)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  (#1798 .kicad_dru length-rule nets unread, their via-centre "
+              f"stubs not held: {type(e).__name__}: {e})")
     return ids
 
 

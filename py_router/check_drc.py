@@ -14,7 +14,7 @@ import fnmatch
 import os
 import re
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from typing import List, Tuple, Set, Optional, Dict, Any
 from kicad_parser import parse_kicad_pcb, Segment, Via, Pad, PCBData
 from geometry_utils import (
@@ -3389,6 +3389,47 @@ _UNBOUND_RULE_NOTE = ("NOT GRADING: rule '{rname}' binds no net on this board "
                       "later rule takes every net it matches) -- it grades nothing")
 
 
+LengthRuleNets = namedtuple('LengthRuleNets',
+                            'rules notes bound undecided names member')
+
+
+def length_rule_nets(path, pcb_data, net_ids=None):
+    """The `.kicad_dru` length windows (#1313) and the nets they grade.
+
+    `bound` is {net id: rule} in net-name order, for every net (in `net_ids`
+    when given) with two pads or more whose binding rule -- KiCad's, the last
+    match in file order (`kicad_dru.binding_length_rule`) -- has a min or a
+    max. `undecided` is {rule name: (reason, [net names])} for the nets whose
+    walk reaches a rule of unmodelled scope first. `names` and `member` are
+    the board's net names by id and their class memberships. With no rule,
+    `rules` is [] and only `notes` may say why. check_drc's length pass
+    grades `bound`; the strict collapse keeps those nets' via-centre stubs
+    (#1798, cleanup_pipeline._centre_stub_net_ids)."""
+    from kicad_dru import read_board_length_rules, binding_length_rule
+    rules, notes = read_board_length_rules(path)
+    if not rules:
+        return LengthRuleNets([], notes, {}, {}, {}, {})
+    from list_nets import net_class_memberships
+    names = {nid: n.name for nid, n in pcb_data.nets.items() if nid and n.name}
+    board_names = set(names.values())
+    member = net_class_memberships(path, names)
+    bound, undecided = {}, {}
+    for nid, name in sorted(names.items(), key=lambda kv: kv[1]):
+        if net_ids is not None and nid not in net_ids:
+            continue
+        if len(pcb_data.pads_by_net.get(nid) or ()) < 2:
+            continue
+        rule, blocker = binding_length_rule(rules, name, member.get(nid),
+                                            board_names)
+        if blocker is not None:
+            undecided.setdefault(blocker.name,
+                                 (blocker.unsupported, []))[1].append(name)
+        elif rule is not None and (rule.min_mm is not None
+                                   or rule.max_mm is not None):
+            bound[nid] = rule
+    return LengthRuleNets(rules, notes, bound, undecided, names, member)
+
+
 def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     """Grade every `.kicad_dru` length window (#1313).
 
@@ -3410,31 +3451,18 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     skipped. Returns the summary, or None when the board has no length rule.
     """
     path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
-    from kicad_dru import read_board_length_rules, binding_length_rule
-    rules, notes = read_board_length_rules(path)
-    if not rules:
-        if notes and not quiet:
-            for n in notes:
+    lr = length_rule_nets(path, pcb_data, matching_net_ids)
+    if not lr.rules:
+        if lr.notes and not quiet:
+            for n in lr.notes:
                 print(f"  .kicad_dru: {n}")
         return None
-    from list_nets import net_class_memberships
     from net_queries import net_match_length
-    names = {nid: n.name for nid, n in pcb_data.nets.items() if nid and n.name}
-    board_names = set(names.values())
-    member = net_class_memberships(path, names)
-    graded, unmeasured, undecided = 0, [], {}
-    for nid, name in sorted(names.items(), key=lambda kv: kv[1]):
-        if matching_net_ids is not None and nid not in matching_net_ids:
-            continue
-        if len(pcb_data.pads_by_net.get(nid) or ()) < 2:
-            continue
-        rule, blocker = binding_length_rule(rules, name, member.get(nid),
-                                            board_names)
-        if blocker is not None:
-            undecided.setdefault(blocker.name, (blocker.unsupported, []))[1].append(name)
-            continue
-        if rule is None or (rule.min_mm is None and rule.max_mm is None):
-            continue
+    rules, notes, names, member = lr.rules, lr.notes, lr.names, lr.member
+    undecided = lr.undecided
+    graded, unmeasured = 0, []
+    for nid, rule in lr.bound.items():
+        name = names[nid]
         length = net_match_length(pcb_data, nid, 'total')
         if length is None:
             unmeasured.append(name)
