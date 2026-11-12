@@ -14,6 +14,8 @@ Checks (no routing):
      an unread term is listed as unresolved;
   2. `relaxed_via_nets`: the net-and-courtyard rule binds exactly /WR, the
      class-and-courtyard rule only nets with a pad on U1, the net rule /RD;
+     the same nets when each rule also has a `(layer outer)` clause, which
+     `list_nets.py` prints on the rule line;
   3. `list_nets.py --design-rules` prints the three rules, marks the two
      bound by position, and names the nets; the net-name rule's line is as
      before (#1649);
@@ -120,6 +122,25 @@ def engine(td):
     ok(nets['ring_unread'] == {'nets': ['/OE'], 'how': 'may'}, f"unread: {nets['ring_unread']}")
     ok(dr.via_floors(next(i for i, n in pcb.nets.items() if n.name == '/RD')) == {'annular': 0.07},
        "control: /RD keeps its rule floor")
+    # the same rules with a (layer outer) clause: a net has no layer, so the
+    # clause is the row's `layer` and the nets are still the condition's
+    lpath = stage(td, 'el', DRU.replace('  (condition', '  (layer outer)\n  (condition'))
+    lpcb, ldr = load(lpath)
+    lrows = relaxing_rules(ldr.rules, ldr.board_min)
+    ok(len(lrows) == 3 and all(r['layer'] == 'outer' for r in lrows),
+       f"three rules with a layer clause listed: {[(r['rule'], r['layer']) for r in lrows]}")
+    lnets = relaxed_via_nets(ldr, lpcb, lrows)
+    ok(lnets.get('ring_by_net') == {'nets': ['/RD'], 'how': 'condition'},
+       f"(layer outer) /RD: {lnets.get('ring_by_net')}")
+    ok(lnets.get('ring_by_net_in_courtyard') == {'nets': ['/WR'], 'how': 'courtyard'},
+       f"(layer outer) /WR: {lnets.get('ring_by_net_in_courtyard')}")
+    out = check(PY + [os.path.join(REPO, 'py_router', 'list_nets.py'), lpath, '--design-rules'],
+                accept=True).stdout
+    ok("  - 'ring_by_net': annular_width min 0.07 (board min_via_annular_width 0.1) on outer "
+       "if A.NetName == '/RD'\n" in out, "the rule line names the layer clause")
+    ok("  - 'ring_by_net' (annular_width): 1 net(s): /RD\n" in out,
+       "list_nets names the net of a rule with a layer clause")
+    ok('): 0 net(s)' not in out, "no rule of the three is printed with no net")
 
 
 def listing(td):

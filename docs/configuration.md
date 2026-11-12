@@ -357,7 +357,8 @@ is also listed NOT honoured at the start of every step that reads the rules,
 whatever the vias are (#1490), since an explicit via and a descent need not hold
 it. `list_nets.py --design-rules` lists the rules that set a minimum below the
 Board Setup one, with the condition each binds, and then the nets each via-size
-rule binds (#1805). A rule scoped by a courtyard term (`A.insideCourtyard('U1')`)
+rule binds (#1805): the nets its condition names, whatever `(layer ...)` clause
+the rule line shows. A rule scoped by a courtyard term (`A.insideCourtyard('U1')`)
 is listed "bound by POSITION": KiCad applies it to a via whose disc overlaps that
 part's courtyard and to no other via of the same net, so its nets are an upper
 bound (the nets with a pad on the part). `check_drc.py` grades a via under such a

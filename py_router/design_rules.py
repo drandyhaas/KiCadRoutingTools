@@ -2495,7 +2495,10 @@ def relaxed_via_nets(dr: 'DesignRules', pcb_data, rows) -> Dict[str, Dict[str, o
     (an UPPER BOUND: a courtyard term read as "the net has a pad on that
     part"; KiCad binds the via by where it stands, so the same net's via
     outside the courtyard is held to the board minimum), 'may' (nets the
-    unread condition does not rule out), or 'every' (no condition)."""
+    unread condition does not rule out), or 'every' (no condition).
+
+    A net has no layer, so the nets are those the rule's CONDITION names: a
+    `(layer ...)` clause is the row's ``layer`` and does not empty the list."""
     out: Dict[str, Dict[str, object]] = {}
     by_name = {r.name: r for r in dr.rules}
     pads_on: Dict[int, Set[str]] = {}
@@ -2513,6 +2516,7 @@ def relaxed_via_nets(dr: 'DesignRules', pcb_data, rows) -> Dict[str, Dict[str, o
             continue
         nets = []
         maybe = parse_condition_maybe(r.condition_src) if row.get('unresolved') else None
+        cond_only = replace(r, layer_clause=None)
         for nid, name in sorted(dr.net_names.items(), key=lambda kv: kv[1]):
             if not nid or not name:
                 continue
@@ -2520,12 +2524,12 @@ def relaxed_via_nets(dr: 'DesignRules', pcb_data, rows) -> Dict[str, Dict[str, o
             if row.get('courtyard'):
                 cy = frozenset((dr.footprint_ids.get(k, (k, None)) + (s,))
                                for k in pads_on.get(nid, ()) for s in ('front', 'back'))
-                hit = _rule_matches(r, replace(item, courtyards=cy), None, None,
+                hit = _rule_matches(cond_only, replace(item, courtyards=cy), None, None,
                                     (), (row['kind'], ctx_names), r.courtyard_condition)
             elif maybe is not None:
                 hit = _eval3(maybe, item, None, None, (row['kind'], ctx_names)) is not False
             else:
-                hit = _rule_matches(r, item, None, None, (), (row['kind'], ctx_names))
+                hit = _rule_matches(cond_only, item, None, None, (), (row['kind'], ctx_names))
             if hit:
                 nets.append(name)
         out[r.name] = {'nets': nets, 'how': ('courtyard' if row.get('courtyard') else
