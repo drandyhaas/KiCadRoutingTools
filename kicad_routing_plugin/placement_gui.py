@@ -1124,62 +1124,15 @@ class PlacementTab(wx.Panel):
         self.set_status(msg)
         self.append_log("Placement apply: " + msg + "\n")
 
-    def _pose_moves(self, board, result_pcb, pcbnew):
-        """[(ref, live_fp, parsed_fp)] for every footprint whose pose differs.
+    # The appliers are result_apply's, shared with the Autorouter tab; these
+    # keep the names the tab and its gates call.
 
-        #829: a footprint that draws the board's own outline is skipped here.
-        This applier is a SECOND mover -- it writes poses onto the live board
-        with SetPosition/SetOrientationDegrees/Flip and never goes through
-        `placement.writer.write_placed_output`, so the CLI-side guard does not
-        reach it. And it cannot be assumed safe because the CLI already
-        refused: the move list is a diff of the RESULT board against the LIVE
-        board, not a replay of what the CLI decided, so a live board that has
-        drifted from the staged input (the user nudged something in KiCad while
-        the run was going) produces moves the CLI never proposed. `Flip` is the
-        worst of them -- it MIRRORS the owned geometry, which no amount of
-        inspection recovers.
-        """
-        moves = []
-        # Resolve by the PCBData key, not by the bare reference (#726): two
-        # blocks sharing a reference are `TP4` and `TP4~2`, and
-        # FindFootprintByReference would hand both of them the first block.
-        from .gui_utils import live_footprints_by_key
-        live = live_footprints_by_key(board)
-        unreachable = []
-        self._outline_skipped = []
-        for ref, parsed in sorted(result_pcb.footprints.items()):
-            if getattr(parsed, 'owns_board_outline', False):
-                # #829, and it goes BEFORE the lookup: an outline owner is not
-                # ours to move, so whether the live board can be made to find
-                # it is beside the point.
-                #
-                # DISCLOSED, not silent. The confirmation dialog is built from
-                # `moves`, so a footprint dropped here would otherwise appear
-                # nowhere at all and the live board would diverge from the
-                # result board the user can open beside it. The CLI writer
-                # raises for the same reason; this front cannot raise mid-apply
-                # without leaving the board half-updated, so it reports.
-                self._outline_skipped.append(ref)
-                continue
-            fp = live.get(ref) or board.FindFootprintByReference(ref)
-            if fp is None:
-                # Part exists only in the result; never invent parts. Collected
-                # rather than dropped in silence, for the same reason the CLI
-                # writer reports an unapplied placement (#726): a pose the run
-                # produced and the board never received is the failure nobody
-                # looks at.
-                unreachable.append(ref)
-                continue
-            pos = fp.GetPosition()
-            live_x = pcbnew.ToMM(pos.x)
-            live_y = pcbnew.ToMM(pos.y)
-            live_rot = fp.GetOrientationDegrees() % 360
-            live_back = fp.IsFlipped()
-            parsed_back = str(parsed.layer or "F.Cu").startswith("B")
-            if (abs(live_x - parsed.x) > 1e-4 or abs(live_y - parsed.y) > 1e-4
-                    or abs((live_rot - (parsed.rotation or 0) % 360 + 180) % 360 - 180) > 1e-3
-                    or live_back != parsed_back):
-                moves.append((ref, fp, parsed))
+    def _pose_moves(self, board, result_pcb, pcbnew):
+        """[(ref, live_fp, parsed_fp)] for every footprint whose pose differs
+        (result_apply.pose_moves); an outline owner (#829) is left out and
+        named in self._outline_skipped, a part only in the result reported."""
+        from .result_apply import pose_moves
+        moves, self._outline_skipped, unreachable = pose_moves(board, result_pcb, pcbnew)
         if unreachable:
             print("WARNING: %d part(s) in the result are not on the live "
                   "board, so their poses were not applied: %s"
@@ -1187,172 +1140,20 @@ class PlacementTab(wx.Panel):
         return moves
 
     def _lock_changes(self, board, result_pcb):
-        """[(ref, live_fp, want_locked)] for every footprint whose KiCad lock
-        differs from the result board's (#1054).
-
-        A SEPARATE pass from `_pose_moves`, because a lock is not a pose:
-        `place_pose lock` stamps `(locked yes)` on a part and changes nothing
-        else, so a pose diff never sees it. The result board is mirrored in
-        BOTH directions. Placement
-        unlocks on purpose -- `place_pose unlock` is the only way to move a
-        KiCad-locked part, and make_unplaced strips each moved part's lock --
-        so keeping the live lock would ship a part locked at a pose nobody
-        locked it at. The caller names every change before applying any.
-
-        An outline owner (#829) is included: `_pose_moves` skips it because
-        moving it would resize the board, and a lock moves nothing. A part
-        missing from the live board was already reported by `_pose_moves`.
-        """
-        from .gui_utils import live_footprints_by_key
-        live = live_footprints_by_key(board)
-        changes = []
-        for ref, parsed in sorted(result_pcb.footprints.items()):
-            fp = live.get(ref) or board.FindFootprintByReference(ref)
-            if fp is None:
-                continue
-            want = bool(getattr(parsed, 'locked', False))
-            if bool(fp.IsLocked()) != want:
-                changes.append((ref, fp, want))
-        return changes
+        """result_apply.lock_changes (#1054)."""
+        from .result_apply import lock_changes
+        return lock_changes(board, result_pcb)
 
     def _apply_pose(self, fp, parsed, pcbnew):
-        from kicad_parser import mm_to_iu
-        parsed_back = str(parsed.layer or "F.Cu").startswith("B")
-        if fp.IsFlipped() != parsed_back:
-            fp.Flip(fp.GetPosition(), False)
-        fp.SetPosition(pcbnew.VECTOR2I(mm_to_iu(parsed.x), mm_to_iu(parsed.y)))
-        fp.SetOrientationDegrees(parsed.rotation or 0)
+        from .result_apply import apply_pose
+        apply_pose(fp, parsed, pcbnew)
 
     def _apply_copper(self, board, result_pcb, pcbnew):
-        """Make the live board's tracks and vias the result board's copper.
-
-        The result board is the authority: a Place + Route run's contract is
-        that placement invalidates prior copper, so live copper the result
-        does not carry is removed and copper it adds is created. A live
-        track, arc or via the result carries UNCHANGED -- same geometry,
-        layer, width and net, and for a via the same size, drill, layer pair
-        and type -- is KEPT rather than removed and recreated (#1279).
-        Recreating gave every item a new uuid, which took it out of any KiCad
-        group: a `sense:<REF>.<PAD>` group lost its members, KiCad dropped
-        the emptied group on save, and the Kelvin branch it declared was no
-        longer protected; an unchanged arc also came back as chords. A kept
-        via takes the result's protection spec. A created item takes its
-        KiCad lock from the result's `locked`, which is the file's own
-        `(locked ...)` token (#521) -- a sense hold is `held_by`, never a lock,
-        so Apply never writes one. RemoveNative, never Remove (see the
-        SWIG-registry warning in swig_gui). Returns (tracks_added,
-        vias_added).
-        """
-        from kicad_parser import mm_to_iu, pcbnew_track_copper
-        from .swig_gui import _build_layer_mappings
-        from .gui_utils import apply_via_protection, set_via_layers
-        name_to_id, _ = _build_layer_mappings()
-
-        # Result-board net ids can differ from live net codes; map by name.
-        def live_net_code(net_id):
-            net = result_pcb.nets.get(net_id)
-            if net is not None:
-                live = board.FindNet(net.name)
-                if live is not None:
-                    return live.GetNetCode()
-            return net_id
-
-        def result_net_name(net_id):
-            net = result_pcb.nets.get(net_id)
-            return net.name if net is not None else ''
-
-        # Keys compare in internal units, the resolution both boards hold.
-        def seg_key(s, net_name):
-            a = (mm_to_iu(s.start_x), mm_to_iu(s.start_y))
-            b = (mm_to_iu(s.end_x), mm_to_iu(s.end_y))
-            return (min(a, b), max(a, b), mm_to_iu(s.width), s.layer, net_name)
-
-        def via_key(v, net_name):
-            return (mm_to_iu(v.x), mm_to_iu(v.y), mm_to_iu(v.size),
-                    mm_to_iu(v.drill), tuple(v.layers or ()),
-                    getattr(v, 'via_type', 'through'), net_name)
-
-        # The result's copper, by key. Copper GRAPHICS parse into segments too
-        # (#337 board gr_*, #908 footprint fp_*): they are drawings, not
-        # tracks. The live board keeps its own (a footprint's travel with its
-        # pose), and as a PCB_TRACK each would be a net-0 track over its own
-        # pads.
-        want_segs, want_vias = {}, {}
-        for seg in result_pcb.segments:
-            if getattr(seg, "graphic", False):
-                continue
-            want_segs.setdefault(seg_key(seg, result_net_name(seg.net_id)),
-                                 []).append(seg)
-        for via in result_pcb.vias:
-            want_vias.setdefault(via_key(via, result_net_name(via.net_id)),
-                                 []).append(via)
-
-        # The live copper through the extractor every live read uses, so an
-        # arc's pieces are chorded exactly as the result's parse chords them;
-        # `owners` maps each piece back to its one live item.
-        owners = {}
-        live_segs, live_vias = pcbnew_track_copper(board, owners=owners)
-        items = {}
-        for s in live_segs:
-            it = owners[id(s)]
-            items.setdefault(id(it), (it, 'seg', []))[2].append(
-                seg_key(s, it.GetNetname()))
-        for v in live_vias:
-            it = owners[id(v)]
-            items[id(it)] = (it, 'via', [via_key(v, it.GetNetname())])
-
-        kept = []
-        for it, kind, keys in items.values():
-            pool = want_segs if kind == 'seg' else want_vias
-            need = {}
-            for k in keys:
-                need[k] = need.get(k, 0) + 1
-            if all(len(pool.get(k, ())) >= n for k, n in need.items()):
-                taken = [pool[k].pop() for k in keys]
-                kept.append((it, kind, taken))
-            else:
-                board.RemoveNative(it)
-        for it, kind, taken in kept:
-            if kind == 'via':
-                # Keep the result's tenting/plugging spec (#489 §8); an empty
-                # spec leaves the via inheriting the board's, as it was.
-                apply_via_protection(it, getattr(taken[0], "tenting_attrs", None))
-
-        tracks_added = vias_added = 0
-        for seg in (s for segs in want_segs.values() for s in segs):
-            track = pcbnew.PCB_TRACK(board)
-            # mm_to_iu, never FromMM(round(...)) (#493 item 5 / #362).
-            track.SetStart(pcbnew.VECTOR2I(mm_to_iu(seg.start_x),
-                                           mm_to_iu(seg.start_y)))
-            track.SetEnd(pcbnew.VECTOR2I(mm_to_iu(seg.end_x),
-                                         mm_to_iu(seg.end_y)))
-            track.SetWidth(mm_to_iu(seg.width))
-            track.SetLayer(name_to_id.get(seg.layer, pcbnew.F_Cu))
-            track.SetNetCode(live_net_code(seg.net_id))
-            # #521: user-pinned copper must come back pinned - the whole
-            # protection chain (never-rippable, no override) rests on it.
-            track.SetLocked(bool(getattr(seg, "locked", False)))
-            board.Add(track)
-            tracks_added += 1
-        for via in (v for vias in want_vias.values() for v in vias):
-            pcb_via = pcbnew.PCB_VIA(board)
-            pcb_via.SetPosition(pcbnew.VECTOR2I(mm_to_iu(via.x), mm_to_iu(via.y)))
-            pcb_via.SetWidth(mm_to_iu(via.size))
-            pcb_via.SetDrill(mm_to_iu(via.drill))
-            pcb_via.SetNetCode(live_net_code(via.net_id))
-            if getattr(via, "layers", None) and len(via.layers) >= 2:
-                set_via_layers(pcb_via, name_to_id.get(via.layers[0], pcbnew.F_Cu),
-                               name_to_id.get(via.layers[-1], pcbnew.B_Cu),
-                               getattr(via, "via_type", None))
-            pcb_via.SetLocked(bool(getattr(via, "locked", False)))  # #521
-            # Keep a via's own tenting/plugging spec (#489 §8).
-            apply_via_protection(pcb_via, getattr(via, "tenting_attrs", None))
-            board.Add(pcb_via)
-            vias_added += 1
-        print(f"Placement apply: {len(kept)} unchanged track(s)/via(s) kept, "
-              f"{len(items) - len(kept)} removed, {tracks_added} track(s) and "
-              f"{vias_added} via(s) added")
-        return tracks_added, vias_added
+        """Make the live board's tracks and vias the result board's copper
+        (result_apply.apply_copper). Returns (tracks_added, vias_added)."""
+        from .result_apply import apply_copper
+        c = apply_copper(board, result_pcb, pcbnew)
+        return c['tracks_added'], c['vias_added']
 
     # ------------------------------------------------------ beautify labels
 
