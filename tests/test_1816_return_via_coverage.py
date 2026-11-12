@@ -15,7 +15,11 @@ Pinned here:
   3. a power-rail via is not a signal via: the check leaves it out and the
      step places no return via for it;
   4. the CLI writes the counts, and board_score's advisory count stays out of
-     `blocking`.
+     `blocking`;
+  5. nothing left out reads as covered: a `--nets` pattern naming no net of
+     the board is named and exits 2 instead of printing `0 of 0` alone, and a
+     net left out as power is named with the reason, by the check and by
+     board_score when `--impedance-nets` names it.
 """
 import json
 import math
@@ -92,6 +96,10 @@ def t_power_via_is_not_a_signal_via():
     rep = return_via_coverage(b, 2.0)
     assert rep['signal_vias'] == 1 and rep['power_vias'] == 1, rep
     assert all(u['net'] != '+3V3' for u in rep['uncovered_vias']), rep
+    assert rep.get('power_nets') == {'+3V3': {
+        'vias': 1, 'why': 'its name reads as a supply rail'}}, rep.get('power_nets')
+    # ... and only over the nets asked
+    assert return_via_coverage(b, 2.0, net_ids={g489.DSIG}).get('power_nets') == {}
 
     # The step: with the power via as the only via, it places nothing.
     from routing_config import GridRouteConfig, GridCoord
@@ -142,8 +150,77 @@ def t_cli_and_board_score_advisory():
           f"blocking {s['blocking']} without it")
 
 
+#: A signal net of the fixture, with 3 vias, and the name it is given below:
+#: one that reads as a supply rail by name alone (it holds "VIN").
+SIGNAL, AS_RAIL = 'Net-(U2A-DATA_12)', '/VIN_AUX'
+
+
+def t_nothing_left_out_reads_as_covered():
+    tool = [sys.executable, '-X', 'utf8',
+            os.path.join(ROOT, 'py_tools', 'check_return_vias.py')]
+    score = [sys.executable, '-X', 'utf8',
+             os.path.join(ROOT, 'py_tools', 'board_score.py')]
+    with tempfile.TemporaryDirectory() as td:
+        # a pattern naming no net of the board
+        js = os.path.join(td, 'none.json')
+        check(tool + [BOARD, '--nets', 'NO_SUCH_NET', '--json', js],
+              refuse="PATTERNS matching no net of the board: 'NO_SUCH_NET'", code=2)
+        with open(evidence(js, 'check_return_vias JSON'), encoding='utf-8') as f:
+            assert json.load(f)['patterns_matching_no_net'] == ['NO_SUCH_NET']
+        two = f'{SIGNAL}, Net-(U2A-DATA_22)'
+        check(tool + [BOARD, '--nets', two],
+              refuse=f"({two!r} was read as one pattern holding whitespace", code=2)
+        r = check(tool + [BOARD, '--nets', SIGNAL, 'NO_SUCH_NET'],
+                  refuse="PATTERNS matching no net of the board: 'NO_SUCH_NET'", code=2)
+        assert 'Return vias: 3 of 3 signal via(s)' in r.stdout, r.stdout[:400]
+        r = check(tool + [BOARD, '--nets', SIGNAL, '--json', js], accept=True)
+        assert 'PATTERNS' not in r.stdout and 'Left out as power' not in r.stdout, \
+            r.stdout[:400]
+        with open(evidence(js, 'check_return_vias JSON'), encoding='utf-8') as f:
+            rep = json.load(f)
+        assert rep['patterns_matching_no_net'] == [] and rep['power_nets'] == {} \
+            and rep['signal_vias'] == 3, rep
+
+        # the same board with that one net renamed: the name alone reads as a rail
+        with open(evidence(BOARD, 'fixture board'), encoding='utf-8', newline='') as f:
+            text = f.read()
+        assert text.count(f'"{SIGNAL}"') == 3 and f'"{AS_RAIL}"' not in text, \
+            'the fixture changed'
+        b = os.path.join(td, 'b.kicad_pcb')
+        with open(b, 'w', encoding='utf-8', newline='') as f:
+            f.write(text.replace(f'"{SIGNAL}"', f'"{AS_RAIL}"'))
+        why = 'its name reads as a supply rail'
+        r = check(tool + [evidence(b, 'renamed board'), '--nets', AS_RAIL,
+                          '--json', js], accept=True)
+        assert 'Return vias: 0 of 0 signal via(s)' in r.stdout \
+            and '(3 power-rail via(s) left out)' in r.stdout, r.stdout[:400]
+        assert f'  {AS_RAIL}: 3 via(s) -- {why}' in r.stdout, r.stdout[:600]
+        with open(evidence(js, 'check_return_vias JSON'), encoding='utf-8') as f:
+            rep = json.load(f)
+        assert rep['power_nets'] == {AS_RAIL: {'vias': 3, 'why': why}} \
+            and rep['power_vias'] == 3 and rep['signal_vias'] == 0, rep
+
+        # board_score: the named net's 0 is not printed as nothing to see
+        sj = os.path.join(td, 'score.json')
+        r = check(score + [b, '--impedance-nets', AS_RAIL, '--json', sj, '--quiet'],
+                  refuse=f"3 via(s) on --impedance-nets net(s) were left out as "
+                         f"power, not examined: {AS_RAIL} ({why})", code=4)
+        with open(evidence(sj, 'board_score JSON'), encoding='utf-8') as f:
+            s = json.load(f)
+        assert s['advisory'].get('return_vias') == 0, s['advisory']
+        assert s['components']['return_vias']['power_nets'] == {
+            AS_RAIL: {'vias': 3, 'why': why}}, s['components']['return_vias']
+        # ... and the count is what it was: 380 signal vias, all uncovered
+        full = return_via_coverage(parse_kicad_pcb(b), 2.0)
+        assert (full['signal_vias'], full['uncovered'], full['power_vias']) == \
+            (380, 380, 3), full
+    print("  PASS: a pattern naming no net exits 2 and is named; a net left out "
+          "as power is named with its reason, by the check and by board_score")
+
+
 if __name__ == '__main__':
     t_no_return_copper_and_one_via_covers()
     t_other_domain_covers_nothing()
     t_power_via_is_not_a_signal_via()
     t_cli_and_board_score_advisory()
+    t_nothing_left_out_reads_as_covered()

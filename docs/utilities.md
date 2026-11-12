@@ -3220,8 +3220,8 @@ gap -- no ground beside it, or a gap off the declaration -- over more than
 
 Which signal vias have no ground return via nearby? It reports every signal via
 with no via or drilled pad of its OWN ground domain within `--distance`, per
-net, as text and JSON. Read-only, report-only (exit 0 whatever it counts; 3 for
-a missing board).
+net, as text and JSON. Read-only, report-only (exit 0 whatever it counts; 2
+when a `--nets` pattern names no net of the board; 3 for a missing board).
 
 ```bash
 python3 py_tools/check_return_vias.py routed.kicad_pcb [--nets GLOB ...] \
@@ -3229,7 +3229,10 @@ python3 py_tools/check_return_vias.py routed.kicad_pcb [--nets GLOB ...] \
 ```
 
 - `--nets` — only the vias of these nets (`route.py --nets` glob syntax);
-  default every signal via.
+  default every signal via. Each pattern is accounted on its own: one naming
+  no net of the board is named (`PATTERNS matching no net of the board`,
+  `patterns_matching_no_net`) and the exit is 2, since the `0 of 0` it selects
+  would read as full coverage.
 - `--distance` — default 2.0 mm, the `--add-gnd-vias` step's own
   `--gnd-via-distance` default. The review skill passes its tier distances.
 - `--gnd-via-net` — pin every return to one ground net, as the step's flag
@@ -3241,11 +3244,14 @@ parts, or a pour the board draws for the net). The test is
 `return_vias.ReturnViaModel`, the one `route_planes.py --add-gnd-vias` and the
 Planes tab skip a covered via with, so the check and the step cannot disagree.
 The JSON carries `signal_vias`, `uncovered`, `power_vias` (left out),
-`distance_mm`, `gnd_net`, `by_net` and every `uncovered_vias` entry with its
-nearest return distance. A raw count over-reads vias inside a BGA field, and a
-layer change between two layers that share one reference plane: the stackup is
-not consulted. `board_score --impedance-nets` publishes the count for the named
-nets as `advisory.return_vias`, outside `blocking`.
+`power_nets` (the nets those vias are on, each with its via count and why it
+reads as power, also listed on the console), `distance_mm`, `gnd_net`, `by_net`
+and every `uncovered_vias` entry with its nearest return distance. A raw count
+over-reads vias inside a BGA field, and a layer change between two layers that
+share one reference plane: the stackup is not consulted. `board_score
+--impedance-nets` publishes the count for the named nets as
+`advisory.return_vias`, outside `blocking`, and its `RETURN VIAS` line names a
+named net whose vias were left out as power.
 
 ## Reachability Check (`check_reachability.py`)
 

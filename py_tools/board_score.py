@@ -1137,29 +1137,6 @@ def _glob_literal(name: str) -> str:
     return '\\' + lit if lit.startswith('!') else lit
 
 
-def _account_impedance_patterns(asked, pcb):
-    """Each INCLUSION pattern of ``asked`` on its own, against the board's
-    nets (#1815): (patterns naming no net of the board, {pattern: the nets it
-    names}). An exclusion selects nothing by itself, so it is not accounted.
-    Matched as `score_impedance`'s `named` matches (check_impedance's own
-    matcher), so a pattern counted here selects the same nets there."""
-    from net_queries import (board_net_names, net_pattern_matches,
-                             split_net_patterns)
-    names = sorted(board_net_names(pcb))
-    known = set(names)
-    no_net, matched = [], {}
-    for p in asked:
-        inc = split_net_patterns([p], known)[0]
-        if not inc:
-            continue
-        hit = [n for n in names if net_pattern_matches(n, inc[0])]
-        if hit:
-            matched[p] = hit
-        else:
-            no_net.append(p)
-    return no_net, matched
-
-
 def _no_net_reason(no_net) -> str:
     """The unknown reason for patterns that name no net of the board, with
     the two accepted spellings when one holds whitespace: it was read as ONE
@@ -1260,7 +1237,10 @@ def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
                             'in declared_failing, not graded)'), **extra)
     graded = [r for r in rows if named(r['net_name'])]
     graded_names = {r['net_name'] for r in graded}
-    no_net, matched = (_account_impedance_patterns(asked, pcb)
+    # #1815: each pattern accounted on its own, matched as `named` matches
+    # (check_impedance's own matcher), so it selects the same nets here.
+    from net_queries import account_net_patterns
+    no_net, matched = (account_net_patterns(asked, pcb)
                        if pcb is not None else ([], {}))
     extra['patterns_matching_no_net'] = no_net
     extra['patterns_matching_no_routed_net'] = [
@@ -2259,11 +2239,19 @@ def main():
                f"yet, or a plane net): {', '.join(repr(p) for p in _pnr)}"]
             * bool(_pnr)))
     _rv = score['components'].get('return_vias') or {}
-    if _rv.get('count'):
+    _rvp = _rv.get('power_nets') or {}
+    if _rv.get('count') or (_rvp and _rv.get('count') is not None):
+        # a named net read as power is not examined: say so, or its 0 reads
+        # as full coverage
         print(f"RETURN VIAS (measured, not blocking): {_rv['count']} of "
               f"{_rv['signal_vias']} signal via(s) on the --impedance-nets nets "
               f"have no {_rv['gnd_net']}-domain via or drilled pad within "
-              f"{_rv['distance_mm']:g} mm -- check_return_vias.py lists them")
+              f"{_rv['distance_mm']:g} mm"
+              + (f"; {_rv['power_vias']} via(s) on --impedance-nets net(s) "
+                 f"were left out as power, not examined: "
+                 + ', '.join(f"{n} ({r['why']})" for n, r in list(_rvp.items())[:8])
+                 + (', ...' if len(_rvp) > 8 else '') if _rvp else '')
+              + " -- check_return_vias.py lists them")
     _df = _imp.get('declared_failing') or []
     if _df:
         print(f"DECLARED IMPEDANCE (measured, not graded): {len(_df)} net(s) the "

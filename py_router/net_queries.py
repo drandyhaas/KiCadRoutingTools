@@ -188,6 +188,27 @@ def board_net_names(pcb_data) -> Set[str]:
     return names
 
 
+def account_net_patterns(patterns, pcb_data):
+    """Each INCLUSION pattern of PATTERNS on its own, against the board's
+    nets (#1815): (patterns naming no net of the board, {pattern: the nets it
+    names}). An exclusion selects nothing by itself, so it is not accounted.
+    Matched with `net_pattern_matches`, as `matches_net_filter` matches an
+    inclusion, so a pattern counted here selects the same nets there."""
+    names = sorted(board_net_names(pcb_data))
+    known = set(names)
+    no_net, matched = [], {}
+    for p in patterns:
+        inc = split_net_patterns([p], known)[0]
+        if not inc:
+            continue
+        hit = [n for n in names if net_pattern_matches(n, inc[0])]
+        if hit:
+            matched[p] = hit
+        else:
+            no_net.append(p)
+    return no_net, matched
+
+
 def literal_net_patterns(patterns: Optional[List[str]],
                          known_net_names) -> Optional[List[str]]:
     """PATTERNS with each one that spells a board net verbatim made literal.
