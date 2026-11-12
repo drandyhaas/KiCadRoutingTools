@@ -388,9 +388,13 @@ against F.Cu whatever layers the via spans: `(layer "F.Cu")` and `(layer outer)`
 bind the vias the condition names, `(layer "B.Cu")`, an inner layer and
 `(layer inner)` bind none. A `hole_size` rule's clause is not tested: the rule
 binds under any. A `via_diameter` rule's clause is tested as an `annular_width`
-one's from kicad-cli 10.0.7, and not at all on 10.0.6, so it follows the
+one's from kicad-cli 10.0.7, and not at all on 10.0.6 (measured on 10.0.6 and
+10.0.7 only). The graders (`check_drc.py`, `list_nets.py`) follow the
 installed kicad-cli (the newest reading without one), as the length measure
-does (measured on 10.0.6 and 10.0.7 only).
+does. The routing steps do not, since copper may not depend on the machine
+(`DesignRules.resolve_for_copper`): they take the strictest of the two
+readings, so a via they size passes on either release -- a tightening rule
+binds where either release binds it, a relaxing one only where both do.
 
 **Via count rules (#1707).** A `(constraint via_count (min N) (max M))` rule is
 not honoured by any routing step: a net is routed with the vias it needs

@@ -28,9 +28,11 @@ via type alike, on 10.0.7 and on 10.0.6):
 2. the #1805 board (glasgow_revC, `(layer outer)` on the courtyard rule):
    only the via outside U1's courtyard is flagged, and no rule is NOT GRADED.
 3. the routing steps' via floors (`DesignRules.via_floors`) on the by-net
-   boards: a rule sets its net's floor exactly where `KICAD_BINDS` says KiCad
-   binds the via, as each release reads it; the #1805 board's courtyard rule
-   sets none (no routing step reads a courtyard rule).
+   boards do NOT follow the installed release (copper may not depend on the
+   environment): they are identical with either release forced, and are the
+   strictest reading -- a tightening rule's floor where any release binds the
+   via, a relaxing rule's only where every release does. The #1805 board's
+   courtyard rule sets none (no routing step reads a courtyard rule).
 4. kicad-cli's own report of the four boards (needs kicad-cli; exit 77
    without it, after parts 1 to 3), against the installed release's table.
 """
@@ -235,7 +237,7 @@ FLOOR_KEY = {'annular_width': 'annular', 'via_diameter': 'via_diameter',
 
 
 def routing_floors(boards, b):
-    print("3. the routing steps' via floors bind the vias KiCad binds")
+    print("3. the routing steps' via floors: one reading, legal on every release")
     from kicad_parser import parse_kicad_pcb
     from design_rules import DesignRules
     import net_queries
@@ -244,21 +246,29 @@ def routing_floors(boards, b):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             pcb = parse_kicad_pcb(path)
             return pcb, DesignRules.from_project(pcb, path)
-    try:
-        for release in sorted(BINDS_BY_RELEASE):
-            net_queries.use_length_measure_release(release)
-            table = binds_for(release)
-            for direction in ('relax', 'tighten'):
+    for direction in ('relax', 'tighten'):
+        # the strictest reading: a tightening rule binds where ANY release
+        # binds it, a relaxing one only where EVERY release does
+        tables = list(BINDS_BY_RELEASE.values())
+        want = {(kind, clause) for kind, clause in NETS
+                if (any if direction == 'tighten' else all)(clause in t[kind] for t in tables)}
+        got = {}
+        try:
+            for release in sorted(BINDS_BY_RELEASE):
+                net_queries.use_length_measure_release(release)
                 pcb, dr = load(boards[(direction, 'net')])
                 ids = {n.name: i for i, n in pcb.nets.items()}
-                bad = [(kind, clause) for kind, clause in NETS
-                       if (FLOOR_KEY[kind] in dr.via_floors(ids[net_name(kind, clause)]))
-                       != (clause in table[kind])]
-                ok(not bad, f"as kicad-cli {release} reads it, {direction}: via_floors sets "
-                            f"a floor where KiCad binds the via, and none elsewhere"
-                            f"{(': differs on ' + str(bad[:4])) if bad else ''}")
-    finally:
-        net_queries.use_length_measure_release(None)
+                got[release] = {(kind, clause) for kind, clause in NETS
+                                if FLOOR_KEY[kind] in dr.via_floors(ids[net_name(kind, clause)])}
+        finally:
+            net_queries.use_length_measure_release(None)
+        same = len({frozenset(g) for g in got.values()}) == 1
+        ok(same, f"{direction}: via_floors is the same whatever release is installed"
+                 f"{'' if same else ': ' + str({r: sorted(g ^ want) for r, g in got.items()})}")
+        bad = sorted(next(iter(got.values())) ^ want)
+        ok(not bad, f"{direction}: and it is the strictest reading (a relaxation every "
+                    f"release grants, a tightening any release applies)"
+                    f"{(': differs on ' + str(bad[:4])) if bad else ''}")
     pcb, dr = load(b)
     wr = next(i for i, n in pcb.nets.items() if n.name == '/WR')
     ok(dr.via_floors(wr) == {}, f"control: the courtyard rule sets no floor: {dr.via_floors(wr)}")

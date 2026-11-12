@@ -1561,15 +1561,23 @@ def _footprint_named(pattern: str, ref: Optional[str], lib: Optional[str]) -> bo
 _VIA_DIAMETER_CLAUSE_FROM = '10.0.7'
 
 
+#: Set only inside `DesignRules.resolve_for_copper`: the via_diameter
+#: reading to resolve under, in place of the installed release's.
+_via_diameter_reading: Optional[bool] = None
+
+
 def _via_clause_tested(kind: str) -> bool:
     """Whether KiCad tests the (layer ...) clause of a ``kind`` rule
     (`VIA_SIZE_KINDS`) for a via, as the release the tool reproduces
     (`net_queries.length_measure_release`: the installed kicad-cli's, the
-    newest modelled without one) grades it."""
+    newest modelled without one) grades it. That is the GRADERS' reading;
+    copper reads every release's at once (`DesignRules.resolve_for_copper`)."""
     if kind == 'annular_width':
         return True
     if kind != 'via_diameter':
         return False
+    if _via_diameter_reading is not None:
+        return _via_diameter_reading
     from net_queries import length_measure_release, _release_key
     return _release_key(length_measure_release()) >= _release_key(_VIA_DIAMETER_CLAUSE_FROM)
 
@@ -1965,12 +1973,35 @@ class DesignRules:
     def resolve(self, kind: str, a: RuleItem, b: Optional[RuleItem] = None,
                 layer: Optional[str] = None) -> Constraint:
         kind = canonical_kind(kind)
-        key = (kind, a, b, layer)
+        key = (kind, a, b, layer, _via_diameter_reading if kind == 'via_diameter' else None)
         c = self._cache.get(key)
         if c is None:
             c = self._resolve(kind, a, b, layer)
             self._cache[key] = c
         return c
+
+    def resolve_for_copper(self, kind: str, a: RuleItem, b: Optional[RuleItem] = None,
+                           layer: Optional[str] = None) -> Constraint:
+        """`resolve` for what decides COPPER, which must not depend on the
+        installed kicad-cli: a via's `via_diameter` is resolved under every
+        modelled release's reading of a (layer ...) clause (`_via_clause_tested`)
+        and the strictest minimum kept, so a via sized by it passes on each
+        release, and a relaxation one release does not grant is not taken.
+        Every other kind and item reads the same on every release."""
+        global _via_diameter_reading
+        kind = canonical_kind(kind)
+        if kind != 'via_diameter' or a.type != 'via':
+            return self.resolve(kind, a, b, layer)
+        found = []
+        try:
+            for tested in (False, True):
+                _via_diameter_reading = tested
+                found.append(self.resolve(kind, a, b, layer))
+        finally:
+            _via_diameter_reading = None
+        return max(found, key=lambda c: (c.min or 0.0,
+                                         (c.kicad_min if c.fab_bound else c.min) or 0.0,
+                                         c.min_rule is not None))
 
     def _resolve(self, kind: str, a: RuleItem, b: Optional[RuleItem],
                  layer: Optional[str]) -> Constraint:
@@ -2198,7 +2229,7 @@ class DesignRules:
         """The smallest value DRC accepts for ``kind`` on this net/layer (with
         the fab floor applied). None when nothing declares one."""
         a = self.item_for_net(net_id or 0, type, layer)
-        return self.resolve(kind, a, b, layer).min
+        return self.resolve_for_copper(kind, a, b, layer).min
 
     def draw_size(self, kind: str, net_id: int, layer: Optional[str] = None,
                   default: Optional[float] = None, type: Optional[str] = None,
@@ -2212,7 +2243,7 @@ class DesignRules:
         if type is None:
             type = 'via' if kind in ('via_diameter', 'hole_size') else 'track'
         a = self.item_for_net(net_id, type, layer, diff_pair=diff_pair)
-        c = self.resolve(kind, a, None, layer)
+        c = self.resolve_for_copper(kind, a, None, layer)
         v = self.cli.get(kind)
         if v is None:
             v = c.opt
@@ -2346,7 +2377,7 @@ class DesignRules:
                                 ('annular_width', 'annular')):
             if self.severity_of(kind) == 'ignore':
                 continue
-            c = self.resolve(kind, item, None, None)
+            c = self.resolve_for_copper(kind, item, None, None)
             v = c.kicad_min if c.fab_bound else c.min
             if c.min_rule is not None and v is not None and v > 0:
                 out[floor_key] = float(v)
@@ -2386,7 +2417,7 @@ class DesignRules:
                 continue
             item = self.item_for_net(int(_via_attr(v, 'net_id')), 'via')
             for kind, have in (('via_diameter', size), ('hole_size', drill)):
-                c = self.resolve(kind, item, None, None)
+                c = self.resolve_for_copper(kind, item, None, None)
                 need = c.kicad_min if c.fab_bound else c.min
                 rule, setup = c.min_rule, False
                 if rule is None:
