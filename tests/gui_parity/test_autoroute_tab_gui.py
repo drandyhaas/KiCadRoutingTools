@@ -9,7 +9,7 @@ the confirmation box, answered Yes) and checks:
 
   layout   the main notebook opens on page 0, "Auto", and the pages are
            tab_names.MAIN_PAGES ("Advanced", not "Advanced options"); the
-           Auto sub-tabs are Autorouter, AI Routing, AI Placement
+           Auto sub-tabs are Autorouter, AI Routing, AI Placement, Labels
   run      the tab's checklist ends with every row terminal, in the states
            the CLI's own run reports for the same steps, and ships the same
            step with the same open-net and DRC grade
@@ -296,12 +296,12 @@ def run(keep):
         check("a fresh dialog opens on the Auto page", nb.GetSelection() == 0,
               f"selection {nb.GetSelection()}")
         sub = [dlg.ai_notebook.GetPageText(i) for i in range(dlg.ai_notebook.GetPageCount())]
-        check("Auto sub-tabs: Autorouter, AI Routing, AI Placement",
-              tuple(sub) == AUTO_SUBTABS == ('Autorouter', 'AI Routing', 'AI Placement'),
-              sub)
+        check("Auto sub-tabs: Autorouter, AI Routing, AI Placement, Labels",
+              tuple(sub) == AUTO_SUBTABS == ('Autorouter', 'AI Routing', 'AI Placement',
+                                             'Labels'), sub)
         check("the sub-tab panels are the dialog's tabs",
-              [dlg.ai_notebook.GetPage(i) for i in range(3)]
-              == [dlg.autoroute_tab, dlg.ai_tab, dlg.placement_tab])
+              [dlg.ai_notebook.GetPage(i) for i in range(4)]
+              == [dlg.autoroute_tab, dlg.ai_tab, dlg.placement_tab, dlg.labels_tab])
 
         tab = dlg.autoroute_tab
 

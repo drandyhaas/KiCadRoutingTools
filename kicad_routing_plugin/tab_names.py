@@ -12,7 +12,7 @@ MAIN_PAGES = (AUTO_PAGE, "Route", "Advanced", "Differential", "Fanout",
               "Planes", "Log", "About")
 
 #: The Auto page's sub-tabs, left to right.
-AUTO_SUBTABS = ("Autorouter", "AI Routing", "AI Placement")
+AUTO_SUBTABS = ("Autorouter", "AI Routing", "AI Placement", "Labels")
 
 #: The pages a saved `active_tab` / `ai_active_subtab` INDEX named before the
 #: Auto page moved to the front (it was "AI Drive", index 5, with sub-tabs

@@ -26,7 +26,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - [Support](#support) — donate via Ko-fi, GitHub Sponsors or PayPal
 - [Features](#features)
 - [Quick Start](#quick-start)
-- [KiCad Plugin](#kicad-plugin) — GUI, the **Auto** tab (the Autorouter, AI routing and placement), installation
+- [KiCad Plugin](#kicad-plugin) — GUI, the **Auto** tab (the Autorouter, AI routing and placement, labels), installation
 - [Command-Line Interface](#command-line-interface) — routing, planes, verification
 - [Documentation](#documentation) — full guide for every feature
 - [Project Structure](#project-structure) & [Module Overview](#module-overview)
@@ -337,7 +337,8 @@ python3 package_pcm.py --binary-dir ./path/to/release/artifacts
   the result does not have is removed), the zones with their fills (not refilled), and
   the design rules the result was graded against -- after listing every change.
 - *AI Routing* sub-tab: plan a routing chain with `/plan-pcb-routing` and run its steps; review and diagnose; save/load plans (see [AI assistance](#ai-assistance-auto-tab) above)
-- *AI Placement* sub-tab: place (and route) the board with `/plan-pcb-placement`; Beautify Labels
+- *AI Placement* sub-tab: place (and route) the board with `/plan-pcb-placement`
+- *Labels* sub-tab: Beautify Labels -- uniform, non-overlapping reference-designator silkscreen, the CLI's `py_placer/beautify_labels.py`
 
 **Route Tab:**
 - Net selection with filtering and component filtering
@@ -842,7 +843,8 @@ KiCadRoutingTools/
 │   ├── result_apply.py       # Apply Result to Board: poses, tracks/vias, zones, rules from a result file
 │   ├── ai_gui.py             # Auto tab, AI Routing sub-tab (spawns the agent CLI headless, streams transcript)
 │   ├── ai_plan.py            # Routing plans: parse, fill the tabs, run the steps (PlanExecutor)
-│   ├── placement_gui.py      # Auto tab, AI Placement sub-tab (+ Beautify Labels)
+│   ├── placement_gui.py      # Auto tab, AI Placement sub-tab
+│   ├── labels_gui.py         # Auto tab, Labels sub-tab (Beautify Labels)
 │   ├── placement_run.py      # Placement run folders, prompts and progress (krt_placement/)
 │   ├── ai_backend.py         # Agent CLI backend selection (Claude Code / opencode)
 │   ├── board_swaps.py        # Shared board pad/net swap helpers

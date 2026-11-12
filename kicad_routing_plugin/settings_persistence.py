@@ -305,9 +305,11 @@ def get_dialog_settings(dialog):
         'placement_effort': dialog.placement_tab.get_effort_value(),
         'placement_extra_instructions': dialog.placement_tab.extra_instructions.GetValue(),
         'placement_last_workdir': getattr(dialog.placement_tab, 'last_workdir', '') or '',
-        # The labels options travel as ONE dict so the panel can grow fields
-        # without new persistence keys.
-        'placement_labels_options': dialog.placement_tab.labels_options.get_config(),
+        # Labels sub-tab: the options travel as ONE dict so the panel can
+        # grow fields without new persistence keys. Saved under its own key;
+        # a file from before the Labels sub-tab has them as
+        # 'placement_labels_options', which restore still reads.
+        'labels_options': dialog.labels_tab.labels_options.get_config(),
         # Autorouter sub-tab: its options, keyed by the CLI's param names.
         'autoroute_options': dialog.autoroute_tab.get_config(),
 
@@ -892,9 +894,9 @@ def restore_dialog_settings(dialog, settings):
     if 'placement_extra_instructions' in settings:
         dialog.placement_tab.extra_instructions.SetValue(
             settings['placement_extra_instructions'])
-    if isinstance(settings.get('placement_labels_options'), dict):
-        dialog.placement_tab.labels_options.set_config(
-            settings['placement_labels_options'])
+    _labels = settings.get('labels_options', settings.get('placement_labels_options'))
+    if isinstance(_labels, dict):
+        dialog.labels_tab.labels_options.set_config(_labels)
     if isinstance(settings.get('autoroute_options'), dict):
         dialog.autoroute_tab.set_config(settings['autoroute_options'])
     if 'placement_last_workdir' in settings and settings['placement_last_workdir']:

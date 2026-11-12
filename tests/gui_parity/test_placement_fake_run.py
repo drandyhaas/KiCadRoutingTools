@@ -249,25 +249,28 @@ def main():
     check("report button armed", tab.open_report_btn.IsEnabled())
     check("apply armed", tab.apply_btn.IsEnabled())
     check("buttons re-armed", tab.place_btn.IsEnabled()
-          and tab.place_route_btn.IsEnabled() and tab.action_btn.IsEnabled())
+          and tab.place_route_btn.IsEnabled())
     check("cancel back to Close", tab.cancel_btn.GetLabel() == "Close")
 
-    # --- Beautify Labels through the tab: pins the engine's summary/result
-    # contract against the GUI's completion handler (a field rename in
-    # placement.labels must fail HERE, not silently in a user session).
-    tab._on_action(None)
-    if tab._routing_thread is None:
+    # --- Beautify Labels, now on its own Labels tab: pins the engine's
+    # summary/result contract against the GUI's completion handler (a field
+    # rename in placement.labels must fail HERE, not silently in a user
+    # session). test_labels_tab_gui grades it against the CLI on a live board.
+    from kicad_routing_plugin.labels_gui import LabelsTab
+    ltab = LabelsTab(frame, pcb_data, board, append_log=lambda t: logged.append(t))
+    ltab._on_action(None)
+    if ltab._routing_thread is None:
         check("beautify engine importable (#481 phase 1 present)", False,
-              tab.status_text.GetLabel())
+              ltab.status_text.GetValue())
     else:
         check("beautify finished before timeout",
-              pump_until(lambda: tab._routing_thread is None, 120))
-        label = tab.status_text.GetLabel().replace("\n", " ")
+              pump_until(lambda: ltab._routing_thread is None, 120))
+        label = ltab.status_text.GetValue().replace("\n", " ")
         check("beautify summary contract", label.startswith("Labels:")
               and "unplaceable" in label, label)
         check("beautify applied 0 (no live board headless)",
               " 0 applied" in label, label)
-        check("beautify re-armed", tab.action_btn.IsEnabled())
+        check("beautify re-armed", ltab.action_btn.IsEnabled())
 
     # --- KEEP_RUNS (#1057): a second run through the tab prunes this
     # board's oldest run folders, keeps the newest, and says so in the log.

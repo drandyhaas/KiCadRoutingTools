@@ -169,6 +169,10 @@ AI Placement tab: `test_placement_apply_locks.py` (below),
 copper graphics), `test_placement_fake_run.py` (the whole runner against a
 fake claude CLI, `fixtures/fake_claude.py`).
 
+Labels tab: `test_labels_tab_gui.py` -- the REAL Beautify Labels button on a
+live board against `py_placer/beautify_labels.py`: every Reference label's
+position, angle, size and thickness the same.
+
 Tools, not gates: `diff_engine_kwargs.py` (below), `probe_effective_floors.py`
 (the one-off probe behind the splitflap track-width measurement below), and
 `wx_pump.py` (waits on a tab's worker with a real wx MainLoop: Yield-pumping

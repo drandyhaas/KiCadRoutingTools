@@ -1,11 +1,11 @@
 """
-KiCad Routing Tools - Placement sub-tab (AI tab notebook).
+KiCad Routing Tools - AI Placement sub-tab (Auto tab notebook).
 
 Two Claude-Code-driven actions ("Place" via /plan-pcb-placement place, "Place +
-Route" via /plan-pcb-placement full) plus
-the non-AI "Beautify Labels" action. The layout follows the Routing sub-tab:
-a large pane on the left (here the run's candidates table and the preview,
-with the labels options under them), the "AI" control column on the right,
+Route" via /plan-pcb-placement full); the non-AI "Beautify Labels" action has
+its own Labels sub-tab (labels_gui). The layout follows the AI Routing sub-tab:
+a large pane on the left (here the run's candidates table and the preview),
+the "AI" control column on the right,
 then the progress gauge, a status row and the transcript across the full
 width.
 
@@ -78,102 +78,6 @@ def _fmt_elapsed(seconds):
     if h:
         return f"{h}h {m:02d}m {s:02d}s"
     return f"{m}m {s:02d}s"
-
-
-class LabelsOptionsPanel(wx.Panel):
-    """Options for Beautify Labels: two rows of label/control pairs with the
-    two checkboxes beside them, a strip under the run preview.
-
-    Control attribute names deliberately equal the future plan-step param
-    names (label_size, label_orientation, ...) - the AI plan executor applies
-    snake_case params by control attribute name.
-    """
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        grid = wx.FlexGridSizer(cols=6, vgap=4, hgap=6)
-
-        def row(label, ctrl, tooltip):
-            grid.Add(wx.StaticText(self, label=label), 0,
-                     wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
-            ctrl.SetToolTip(tooltip)
-            grid.Add(ctrl, 0, wx.EXPAND)
-            return ctrl
-
-        self.label_size = row(
-            "Text size:",
-            wx.SpinCtrlDouble(self, min=0.3, max=3.0, initial=1.0, inc=0.05, size=(78, -1)),
-            "Uniform reference-label font height (and width).")
-        self.label_thickness = row(
-            "Thickness:",
-            wx.SpinCtrlDouble(self, min=0.05, max=0.5, initial=0.15, inc=0.01, size=(78, -1)),
-            "Uniform stroke thickness.")
-        self.label_min_size = row(
-            "Min size:",
-            wx.SpinCtrlDouble(self, min=0.3, max=3.0, initial=0.7, inc=0.05, size=(78, -1)),
-            "Shrink floor when the uniform size does not fit; equal to the "
-            "text size disables shrinking.")
-        self.label_orientation = row(
-            "Orientation:", wx.Choice(self, choices=["horizontal", "vertical"], size=(118, -1)),
-            "Preferred label direction; the other direction is a fallback "
-            "when the preferred one does not fit.")
-        self.label_orientation.SetSelection(0)
-        self.label_max_distance = row(
-            "Max dist:",
-            wx.SpinCtrlDouble(self, min=0.5, max=10.0, initial=2.0, inc=0.25, size=(78, -1)),
-            "How far beyond the part's courtyard a label may be pushed.")
-        self.label_include_hidden = wx.CheckBox(self, label="Include hidden labels")
-        self.label_include_hidden.SetToolTip(
-            "Also place labels that are currently hidden (they stay hidden; "
-            "only their pose and size are tidied).")
-        self.label_skip_locked = wx.CheckBox(self, label="Skip locked parts")
-        self.label_skip_locked.SetToolTip(
-            "Leave the labels of KiCad-locked footprints untouched.")
-        checks = wx.BoxSizer(wx.VERTICAL)
-        checks.Add(self.label_include_hidden, 0, wx.BOTTOM, 4)
-        checks.Add(self.label_skip_locked, 0)
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
-        sizer.Add(grid, 0, wx.ALIGN_CENTER_VERTICAL)
-        sizer.Add(checks, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
-        self.SetSizer(sizer)
-
-    def get_config(self):
-        """Engine LabelConfig kwargs (keys = LabelConfig field names)."""
-        return {
-            'size': self.label_size.GetValue(),
-            'thickness': self.label_thickness.GetValue(),
-            'min_size': self.label_min_size.GetValue(),
-            'orientation': self.label_orientation.GetStringSelection() or 'horizontal',
-            'max_distance': self.label_max_distance.GetValue(),
-            'include_hidden': self.label_include_hidden.GetValue(),
-            'skip_locked': self.label_skip_locked.GetValue(),
-        }
-
-    def set_config(self, config):
-        try:
-            if 'size' in config:
-                self.label_size.SetValue(float(config['size']))
-            if 'thickness' in config:
-                self.label_thickness.SetValue(float(config['thickness']))
-            if 'min_size' in config:
-                self.label_min_size.SetValue(float(config['min_size']))
-            if 'orientation' in config:
-                idx = self.label_orientation.FindString(str(config['orientation']))
-                if idx != wx.NOT_FOUND:
-                    self.label_orientation.SetSelection(idx)
-            if 'max_distance' in config:
-                self.label_max_distance.SetValue(float(config['max_distance']))
-            if 'include_hidden' in config:
-                self.label_include_hidden.SetValue(bool(config['include_hidden']))
-            if 'skip_locked' in config:
-                self.label_skip_locked.SetValue(bool(config['skip_locked']))
-        except (TypeError, ValueError):
-            pass  # a malformed saved dict must not break dialog restore
-
-    def reset_to_defaults(self):
-        self.set_config({'size': 1.0, 'thickness': 0.15, 'min_size': 0.7,
-                         'orientation': 'horizontal', 'max_distance': 2.0,
-                         'include_hidden': False, 'skip_locked': False})
 
 
 class BoardPreview(wx.Panel):
@@ -355,7 +259,7 @@ class _StatusField(wx.TextCtrl):
 
 
 class PlacementTab(wx.Panel):
-    """Placement sub-tab of the AI notebook (see module docstring)."""
+    """AI Placement sub-tab of the Auto notebook (see module docstring)."""
 
     def __init__(self, parent, pcb_data, board_filename, on_complete=None,
                  append_log=None, sync_pcb_data_callback=None):
@@ -379,10 +283,7 @@ class PlacementTab(wx.Panel):
                                 for bid in BACKEND_IDS}
         self._last_backend = self.backend
 
-        # Plan-executor contract (ai_plan.PlanExecutor): the beautify action
-        # is the plan-drivable non-AI action on this tab.
         self._cancel_requested = False
-        self._routing_thread = None
 
         self._runner = None
         self._monitor = None
@@ -413,8 +314,7 @@ class PlacementTab(wx.Panel):
         top = wx.BoxSizer(wx.HORIZONTAL)
 
         # Left: the run's candidates (where the Routing tab lists its planned
-        # steps) with the selected one's board beside them, and the Beautify
-        # Labels options as a strip under both.
+        # steps) with the selected one's board beside them.
         left = wx.BoxSizer(wx.VERTICAL)
         cand_box = wx.StaticBox(self, label="Candidates")
         cand_sizer = wx.StaticBoxSizer(cand_box, wx.HORIZONTAL)
@@ -437,19 +337,6 @@ class PlacementTab(wx.Panel):
         cand_sizer.Add(self.preview, 1, wx.EXPAND | wx.ALL, 3)
         left.Add(cand_sizer, 1, wx.EXPAND)
 
-        labels_box = wx.StaticBox(self, label="Beautify Labels (no AI)")
-        labels_sizer = wx.StaticBoxSizer(labels_box, wx.HORIZONTAL)
-        self.labels_options = LabelsOptionsPanel(self)
-        labels_sizer.Add(self.labels_options, 0,
-                         wx.ALIGN_CENTER_VERTICAL | wx.ALL, 3)
-        labels_sizer.AddStretchSpacer(1)
-        self.action_btn = wx.Button(self, label="Beautify Labels")
-        self.action_btn.SetToolTip(
-            "Uniform, non-overlapping reference-designator silkscreen. "
-            "Moves and restyles only the labels, never the parts.")
-        labels_sizer.Add(self.action_btn, 0,
-                         wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        left.Add(labels_sizer, 0, wx.EXPAND | wx.TOP, 6)
         top.Add(left, 1, wx.EXPAND | wx.RIGHT, 8)
 
         # Right: the "AI" column, built the way the Routing tab builds its.
@@ -516,8 +403,8 @@ class PlacementTab(wx.Panel):
                        wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         self.stop_btn = wx.Button(self, label="Cancel")
         self.stop_btn.SetToolTip(
-            "Cancel the running placement or label job; a placement run's "
-            "partial artifacts are kept in its folder.")
+            "Cancel the running placement run; its partial artifacts are "
+            "kept in its folder.")
         self.stop_btn.Disable()
         ctrl_sizer.Add(self.stop_btn, 0,
                        wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
@@ -585,7 +472,6 @@ class PlacementTab(wx.Panel):
         self.place_btn.Bind(wx.EVT_BUTTON, lambda e: self._start_ai_run("place"))
         self.place_route_btn.Bind(wx.EVT_BUTTON,
                                   lambda e: self._start_ai_run("place_route"))
-        self.action_btn.Bind(wx.EVT_BUTTON, self._on_action)
         self.apply_btn.Bind(wx.EVT_BUTTON, self._on_apply)
         self.stop_btn.Bind(wx.EVT_BUTTON, self._on_stop)
         self.close_btn.Bind(wx.EVT_BUTTON, self._on_close)
@@ -676,9 +562,7 @@ class PlacementTab(wx.Panel):
     # ------------------------------------------------------------- AI runs
 
     def _busy(self):
-        return ((self._runner is not None and self._runner.is_running())
-                or (self._routing_thread is not None
-                    and self._routing_thread.is_alive()))
+        return self._runner is not None and self._runner.is_running()
 
     def _start_ai_run(self, mode):
         if self._busy():
@@ -778,7 +662,6 @@ class PlacementTab(wx.Panel):
         self.place_btn.Enable(not running and self.backend.find_cli() is not None)
         self.place_route_btn.Enable(
             not running and self.backend.find_cli() is not None)
-        self.action_btn.Enable(not running)
         self.apply_btn.Enable(not running and self._pending_result is not None
                               and self._pending_result.get("board") is not None)
         self.stop_btn.Enable(running)
@@ -1155,172 +1038,14 @@ class PlacementTab(wx.Panel):
         c = apply_copper(board, result_pcb, pcbnew)
         return c['tracks_added'], c['vias_added']
 
-    # ------------------------------------------------------ beautify labels
-
-    def _on_action(self, event):
-        """Beautify Labels: canonical worker-thread pattern (plan-drivable)."""
-        if self._busy():
-            wx.MessageBox("A placement operation is already running.",
-                          "Placement", wx.OK | wx.ICON_WARNING)
-            return
-        try:
-            from placement.labels import beautify_labels, LabelConfig  # noqa: F401
-        except ImportError:
-            self.set_status(
-                "Beautify Labels: the label engine (placement.labels) could "
-                "not be imported.")
-            return
-        if self.sync_pcb_data_callback:
-            self.sync_pcb_data_callback()
-        self._cancel_requested = False
-        self.action_btn.Disable()
-        self.stop_btn.Enable()
-        self.set_status("Beautifying labels...")
-        config = self.labels_options.get_config()
-        self._routing_thread = threading.Thread(
-            target=self._run_beautify, args=(config,), daemon=True)
-        self._routing_thread.start()
-
-    def run_beautify_labels(self, log=None):
-        """Programmatic entry. NOT synchronous (unlike run_cap_optimization):
-        it starts the worker thread and returns - a future plan action must
-        use a busy predicate that polls action_btn, never `lambda: False`."""
-        self._on_action(None)
-
-    def _run_beautify(self, config):
-        from .gui_utils import StdoutRedirector
-        original_stdout = sys.stdout
-        sys.stdout = StdoutRedirector(self.append_log, original_stdout)
-        result = None
-        error = None
-        try:
-            from placement.labels import beautify_labels, LabelConfig
-            import pcbnew
-            from kicad_parser import build_pcb_data_from_board
-            board = pcbnew.GetBoard()
-            if board is not None:
-                pcb_data = build_pcb_data_from_board(board)
-            else:
-                pcb_data = self.pcb_data  # headless tests
-            def progress(current, total, label=""):
-                wx.CallAfter(self._update_progress, current, total, label)
-                time.sleep(0.01)  # let the main thread paint
-            result = beautify_labels(
-                pcb_data, self.board_filename,
-                LabelConfig(**config),
-                cancel_check=lambda: self._cancel_requested,
-                progress_callback=progress)
-        except Exception as e:
-            error = str(e)
-        finally:
-            sys.stdout = original_stdout
-        wx.CallAfter(self._beautify_finished, result, error)
-
-    def _update_progress(self, current, total, label):
-        if not self:
-            return
-        if total:
-            self.progress_bar.SetValue(min(100, int(current * 100 / total)))
-        else:
-            self.progress_bar.Pulse()
-        if label:
-            self.set_status(f"Beautify: {label}")
-
-    def _beautify_finished(self, result, error):
-        if not self:
-            return
-        self._routing_thread = None
-        self.progress_bar.SetValue(0)
-        self.action_btn.Enable()
-        self.stop_btn.Disable()
-        if self._cancel_requested:
-            self.set_status("Beautify cancelled.")
-            return
-        if error is not None:
-            self.set_status(f"Beautify failed: {error}")
-            self.append_log(f"Beautify labels failed: {error}\n")
-            return
-        applied = self._apply_labels_to_board(result)
-        summary = result.get("summary", {})
-        counts = {k: summary.get(k, 0)
-                  for k in ("placed", "shrunk", "rotated", "shrunk_rotated")}
-        unchanged_refs = summary.get("unchanged_refs", [])
-        status = (f"Labels: {sum(counts.values())} placed "
-                  f"({counts['shrunk'] + counts['shrunk_rotated']} shrunk, "
-                  f"{counts['rotated'] + counts['shrunk_rotated']} rotated), "
-                  f"{len(unchanged_refs)} unplaceable, {applied} applied")
-        self.set_status(status)
-        self.append_log("Beautify labels: " + status + "\n")
-        for ref in unchanged_refs[:20]:
-            self.append_log(f"  unplaceable: {ref}\n")
-        if self.on_complete:
-            self.on_complete()
-
-    def _apply_labels_to_board(self, result):
-        """Apply LabelResults to the live board's Reference fields.
-
-        Writes the FILE-frame values the CLI writer would emit (position is
-        absolute; the angle is the node's own (at) rotation, which pcbnew
-        stores verbatim on the text item) - so CLI and GUI outputs match by
-        construction, whatever the angle-storage semantics turn out to be.
-        """
-        try:
-            import pcbnew
-        except ImportError:
-            return 0
-        board = pcbnew.GetBoard()
-        if board is None:
-            return 0
-        from kicad_parser import mm_to_iu
-        from .gui_utils import live_footprints_by_key
-        _live_labels = live_footprints_by_key(board)
-        applied = 0
-        for r in result.get("results", []):
-            action = getattr(r, "action", None) or (
-                r.get("action") if isinstance(r, dict) else None)
-            if action not in ("placed", "shrunk", "rotated", "shrunk_rotated"):
-                continue
-            get = (lambda k, _r=r: getattr(_r, k, None)) \
-                if not isinstance(r, dict) else r.get
-            # Same #726 resolution as _pose_moves: a label result names a
-            # PCBData key, which for a duplicated reference is `TP4~2`.
-            _k = get("reference")
-            fp = _live_labels.get(_k) or board.FindFootprintByReference(_k)
-            if fp is None:
-                continue
-            ref = fp.Reference()
-            size = mm_to_iu(get("size"))
-            ref.SetTextSize(pcbnew.VECTOR2I(size, size))
-            ref.SetTextThickness(mm_to_iu(get("thickness")))
-            ref.SetPosition(pcbnew.VECTOR2I(mm_to_iu(get("world_x")),
-                                            mm_to_iu(get("world_y"))))
-            # file_rotation is the stored (at ...) angle, which the KiCad 10
-            # probe showed pcbnew's GetTextAngle/SetTextAngle round-trips
-            # verbatim (ABSOLUTE, not footprint-relative).
-            angle = float(get("file_rotation") or 0)
-            try:
-                ref.SetTextAngle(pcbnew.EDA_ANGLE(angle, pcbnew.DEGREES_T))
-            except (AttributeError, TypeError):
-                ref.SetTextAngleDegrees(angle)
-            if hasattr(ref, "SetHorizJustify"):
-                ref.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_CENTER)
-                ref.SetVertJustify(pcbnew.GR_TEXT_V_ALIGN_CENTER)
-            applied += 1
-        if applied:
-            pcbnew.Refresh()
-        return applied
-
     # -------------------------------------------------------- cancel/close
 
     def _on_stop(self, event):
-        """Cancel the running placement run or label job (Routing: Cancel)."""
+        """Cancel the running placement run (Routing: Cancel)."""
         if self._runner is not None and self._runner.is_running():
             self._runner.cancel()
             self.set_status(
                 "Cancelling — partial artifacts are kept in the workdir...")
-        elif self._routing_thread is not None and self._routing_thread.is_alive():
-            self._cancel_requested = True
-            self.set_status("Cancelling...")
         self.stop_btn.Disable()
 
     def _on_close(self, event):

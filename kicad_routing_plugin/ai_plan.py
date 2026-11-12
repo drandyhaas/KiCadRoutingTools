@@ -1489,7 +1489,7 @@ class PlanExecutor:
         me = threading.current_thread()
         owners = [self.dialog]
         for attr in ('differential_tab', 'planes_tab', 'fanout_tab',
-                     'placement_tab'):
+                     'labels_tab'):
             owner = getattr(self.dialog, attr, None)
             if owner is not None:
                 owners.append(owner)

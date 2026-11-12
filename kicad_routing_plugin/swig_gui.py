@@ -370,7 +370,8 @@ class RoutingDialog(wx.Dialog):
         # opens on it. A nested notebook: "Autorouter" (autoroute.py on a
         # snapshot of the board), "AI Routing" (the route-only AI assistant,
         # issue #40), "AI Placement" (Claude-driven placement runs, issue
-        # #481). self.ai_tab / self.placement_tab / self.autoroute_tab point at
+        # #481) and "Labels" (Beautify Labels). self.ai_tab /
+        # self.placement_tab / self.labels_tab / self.autoroute_tab point at
         # the PANELS inside the nested notebook, so every consumer (settings
         # persistence, _ai_params, resets) reaches them by attribute, never
         # by page index; the page added here is the container.
@@ -2162,12 +2163,13 @@ class RoutingDialog(wx.Dialog):
     def _create_ai_tab(self):
         """Create the Auto tab: a nested notebook hosting, left to right,
         "Autorouter" (autoroute.py run on a snapshot of the board), "AI
-        Routing" (the AI-skills tab, issue #40 - route-only by design) and "AI
-        Placement" (Claude-driven placement runs). Returns the container panel;
-        sets self.autoroute_tab / self.ai_tab / self.placement_tab /
-        self.ai_notebook."""
+        Routing" (the AI-skills tab, issue #40 - route-only by design), "AI
+        Placement" (Claude-driven placement runs) and "Labels" (Beautify
+        Labels). Returns the container panel; sets self.autoroute_tab /
+        self.ai_tab / self.placement_tab / self.labels_tab / self.ai_notebook."""
         from .ai_gui import AITab
         from .placement_gui import PlacementTab
+        from .labels_gui import LabelsTab
         from .autoroute_gui import AutorouteTab
 
         container = wx.Panel(self.notebook)
@@ -2197,6 +2199,15 @@ class RoutingDialog(wx.Dialog):
             sync_pcb_data_callback=self._sync_pcb_data_from_board,
         )
         self.ai_notebook.AddPage(self.placement_tab, AUTO_SUBTABS[2])
+        self.labels_tab = LabelsTab(
+            self.ai_notebook,
+            self.pcb_data,
+            self.board_filename,
+            on_complete=self._on_tab_operation_complete,
+            append_log=self._append_log,
+            sync_pcb_data_callback=self._sync_pcb_data_from_board,
+        )
+        self.ai_notebook.AddPage(self.labels_tab, AUTO_SUBTABS[3])
         sizer.Add(self.ai_notebook, 1, wx.EXPAND)
         container.SetSizer(sizer)
         return container
@@ -2806,7 +2817,7 @@ class RoutingDialog(wx.Dialog):
         except Exception:
             pass
         try:
-            self.placement_tab.labels_options.reset_to_defaults()
+            self.labels_tab.labels_options.reset_to_defaults()
         except Exception:
             pass
         try:
