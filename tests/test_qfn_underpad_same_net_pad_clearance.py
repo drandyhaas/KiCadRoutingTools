@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(ROOT, 'py_tools'))
 
 from kicad_parser import BoardInfo, Footprint, Net, Pad, PCBData  # noqa: E402
 from qfn_fanout import generate_qfn_fanout                       # noqa: E402
+from paste_apertures import aperture_distance, build_paste_apertures  # noqa: E402
 
 VIA_SIZE = 0.4
 VIA_DRILL = 0.2
@@ -38,7 +39,7 @@ def _pad(num, x, y, sx, sy):
                net_id=1, net_name='N1', pad_type='smd')
 
 
-def _fixture():
+def _fixture(paste_margin=None):
     # Four same-net perimeter pads make a tiny QFN-like footprint. The left and
     # right pads have their long axis pointed outward, so the first legacy
     # underpad candidate is exactly via_size/2 past the pad edge.
@@ -48,6 +49,12 @@ def _fixture():
         _pad(3, 0.0, -1.5, 0.2, 1.0),
         _pad(4, 0.0, 1.5, 0.2, 1.0),
     ]
+    if paste_margin is not None:
+        # #962: a paste opening larger than its pad -- the pad test cannot see
+        # the part of it past the copper
+        for p in pads:
+            p.layers = ['F.Cu', 'F.Paste']
+            p.paste_margin = paste_margin
     fp = Footprint(reference='U1', footprint_name='Synthetic_QFN',
                    x=0.0, y=0.0, rotation=0.0, layer='F.Cu', pads=pads)
     bi = BoardInfo(layers={0: 'F.Cu', 31: 'B.Cu'},
@@ -56,11 +63,12 @@ def _fixture():
     net = Net(1, 'N1', pads=list(pads))
     pcb = PCBData(board_info=bi, nets={1: net}, footprints={'U1': fp},
                   vias=[], segments=[], pads_by_net={1: pads})
+    pcb.paste_apertures = build_paste_apertures(pcb.footprints, bi, [])
     return fp, pcb
 
 
-def _run(snpc, allow_via_in_pad=False):
-    fp, pcb = _fixture()
+def _run(snpc, allow_via_in_pad=False, paste_margin=None):
+    fp, pcb = _fixture(paste_margin)
     with contextlib.redirect_stdout(io.StringIO()):
         return generate_qfn_fanout(
             fp, pcb, layer='B.Cu', track_width=0.1, clearance=0.0,
@@ -118,6 +126,15 @@ def main():
     check('allow_via_in_pad=True still honors an active clearance',
           (not vias2) or gap2 >= GAP - 1e-6,
           f'min edge gap {gap2:.4f}, vias={len(vias2)}, dropped={dropped2}')
+
+    _t3, vias3, dropped3 = _run(GAP, paste_margin=0.3)
+    _fp, pcb3 = _fixture(0.3)
+    gap3 = min((aperture_distance(v['x'], v['y'], ap) - v['size'] / 2
+                for v in vias3 for ap in pcb3.paste_apertures), default=float('inf'))
+    check('active clearance keeps every via that far off a paste opening larger than its pad',
+          bool(pcb3.paste_apertures) and ((not vias3) or gap3 >= GAP - 1e-6),
+          f'min paste gap {gap3:.4f}, openings={len(pcb3.paste_apertures)}, '
+          f'vias={len(vias3)}, dropped={dropped3}')
 
     if fails:
         print('FAIL: ' + '; '.join(fails))

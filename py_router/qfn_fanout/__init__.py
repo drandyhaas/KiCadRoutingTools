@@ -1333,6 +1333,21 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # relaxed; 0 when it declares none).
     from obstacle_map import resolve_hole_clearance
     _hole_clr = resolve_hole_clearance(pcb_data, cfg)
+    # #581/#962: under an active same-net pad via clearance the net's solder
+    # paste OPENINGS are kept clear too, as on the routing path
+    # (`same_net_pad_via_keepout_cells`): a graphic opening, a paste-only
+    # window or an opening larger than its pad is not seen by the pad test.
+    _paste_aps = {}
+
+    def _paste_hit(vx, vy, net_id):
+        if same_net_pad_clearance <= 0:
+            return False
+        if net_id not in _paste_aps:
+            from obstacle_map import paste_keepout_apertures
+            _paste_aps[net_id] = paste_keepout_apertures(pcb_data, net_id)
+        from paste_apertures import aperture_distance
+        return any(aperture_distance(vx, vy, ap) < via_size / 2 + same_net_pad_clearance - 1e-6
+                   for ap in _paste_aps[net_id])
 
     def via_clears(vx, vy, net_id, placed, px=None, py=None):
         """Is a via at (vx, vy) legal, given the board AND this run's own output?
@@ -1381,6 +1396,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
         _cand = _Via(x=vx, y=vy, size=via_size, drill=via_drill,
                      layers=list(_via_cu), net_id=net_id)
+        if _paste_hit(vx, vy, net_id):
+            return False
         for pad, gx, gy, reach, hole in _pad_discs:
             if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
                 # #581: an active same-net pad via clearance keeps the via that far off every
