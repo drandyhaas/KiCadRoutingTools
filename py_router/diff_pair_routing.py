@@ -3555,9 +3555,19 @@ def _pad_obstacle_segments(pad, layer_names):
         r = 0.0
     w = 2.0 * max(short / 2.0, math.sqrt(2.0) * (short / 2.0 - r) + r)
     if sx >= sy:
-        a = (cx - half, cy, cx + half, cy, w)
+        a = [cx - half, cy, cx + half, cy, w]
     else:
-        a = (cx, cy - half, cx, cy + half, w)
+        a = [cx, cy - half, cx, cy + half, w]
+    # A pad with a drawn outline (a chamfered rect, #1450, keeps shape
+    # 'roundrect' and its rratio on the uncut corners; a custom pad) is not
+    # the rounded box above: a shallow chamfer reaches past the roundrect
+    # corner. Distance to the spine is convex, so the outline's farthest
+    # copper is a vertex; its arcs are inscribed at 1 um sagitta, added back.
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        reach = max(_pt_seg_dist(px, py, a[0], a[1], a[2], a[3])
+                    for poly in polys for px, py in poly)
+        a[4] = 2.0 * max(short / 2.0, reach + 0.001)
     cu = [L for L in (pad.layers or []) if L.endswith('.Cu')]
     if (getattr(pad, 'drill', 0) or 0) > 0 or not cu:
         cu = list(layer_names)  # THT / unknown copper -> block every routing layer
