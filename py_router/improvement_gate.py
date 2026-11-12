@@ -423,7 +423,8 @@ def excluded_plane_attribution(before: Dict[int, Tuple[bool, int]],
 
 #: The records key: a list of the last LAP_HISTORY gated trades, oldest first,
 #: each {'lost', 'gained', 'verdict', 'attackers'} -- `attackers` maps a lost
-#: net to the nets the run ripped it for, in order.
+#: net to the nets the run ripped it for, in order. The newest ACCEPTED trade
+#: is always one of them (`trim_lap_history`).
 LAP_KEY = 'route_laps'
 LAP_HISTORY = 4
 
@@ -454,6 +455,19 @@ def lap_history(ns) -> List[Dict]:
     return [e for e in h if isinstance(e, dict)
             and isinstance(e.get('lost'), list)
             and isinstance(e.get('gained'), list)]
+
+
+def trim_lap_history(history: List[Dict]) -> List[Dict]:
+    """The LAP_HISTORY records a step leaves: the last ones, and always the
+    newest ACCEPTED one -- the step that made the board every retry after it
+    ran on, which `rip_cycle` compares with. Rejected retries leave the board
+    as it was, so they push each other out of the record, never that step."""
+    h = list(history or [])
+    kept = h[-LAP_HISTORY:]
+    if any(e.get('verdict') == 'accept' for e in kept):
+        return kept
+    acc = next((e for e in reversed(h) if e.get('verdict') == 'accept'), None)
+    return [acc] + h[-(LAP_HISTORY - 1):] if acc else kept
 
 
 def rip_cycle(history: List[Dict], cmp: Dict, attackers=None

@@ -10093,7 +10093,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             try:
                 from improvement_gate import (lap_entry, lap_history,
                                               rip_cycle, format_rip_cycle,
-                                              note_lap_history, LAP_HISTORY)
+                                              note_lap_history,
+                                              trim_lap_history)
                 from protected_nets import _pcb_data_namespace as _ns1807
                 _att1807: Dict[str, List[str]] = {}
                 for _sm in list(_SUMMARY_SINK) + [summary]:
@@ -10108,7 +10109,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _gate_report['rip_cycle'] = _cyc1807
                     print(RED + format_rip_cycle(_cyc1807) + RESET)
                 _ent1807 = lap_entry(_cmp, _verdict, _att1807)
-                note_lap_history((_hist1807 + [_ent1807])[-LAP_HISTORY:]
+                note_lap_history(trim_lap_history(_hist1807 + [_ent1807])
                                  if _ent1807 else None)
             except Exception as _e1807:     # noqa: BLE001 -- a report
                 print(f"  (rip-cycle record skipped: {_e1807})")
