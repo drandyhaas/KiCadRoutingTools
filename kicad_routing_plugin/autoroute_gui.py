@@ -254,29 +254,29 @@ class AutorouteTab(wx.Panel):
             self.step_list.InsertColumn(i, name, width=width)
         self.step_list.SetToolTip(
             "One row per step autoroute planned, and each step it added while "
-            "running. Select a row for its command line, decisions and log.")
+            "running. Select a row for its command line, decisions and log, "
+            "shown below the run's summary.")
         self.step_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_row_selected)
         self.step_list.Bind(wx.EVT_SIZE, self._on_list_size)
-        steps_sizer.Add(self.step_list, 1, wx.EXPAND | wx.ALL, 3)
-        self.summary_text = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                        size=(-1, 44))
-        steps_sizer.Add(self.summary_text, 0, wx.EXPAND | wx.ALL, 3)
-        left.Add(steps_sizer, 3, wx.EXPAND | wx.TOP, 6)
-
-        detail_box = wx.StaticBox(self, label="Details")
-        detail_sizer = wx.StaticBoxSizer(detail_box, wx.VERTICAL)
-        self.detail_text = wx.TextCtrl(
+        steps_sizer.Add(self.step_list, 3, wx.EXPAND | wx.ALL, 3)
+        # ONE text box under the list, to the bottom: the run's summary, then
+        # the selected step's details (command, decisions, grade, log tail).
+        self.info_text = wx.TextCtrl(
             self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2 | wx.HSCROLL)
-        self.detail_text.SetFont(wx.Font(11, wx.FONTFAMILY_TELETYPE,
-                                         wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        detail_sizer.Add(self.detail_text, 1, wx.EXPAND | wx.ALL, 3)
+        self.info_text.SetFont(wx.Font(11, wx.FONTFAMILY_TELETYPE,
+                                       wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        steps_sizer.Add(self.info_text, 2, wx.EXPAND | wx.ALL, 3)
         drow = wx.BoxSizer(wx.HORIZONTAL)
         self.open_log_btn = wx.Button(self, label="Open Step Log")
         self.open_log_btn.SetToolTip("Open the selected step's full log")
         self.open_log_btn.Disable()
         drow.Add(self.open_log_btn, 0)
-        detail_sizer.Add(drow, 0, wx.ALL, 3)
-        left.Add(detail_sizer, 2, wx.EXPAND | wx.TOP, 6)
+        steps_sizer.Add(drow, 0, wx.ALL, 3)
+        left.Add(steps_sizer, 1, wx.EXPAND | wx.TOP, 6)
+        self._summary_value = ""
+        self._detail_value = ""
+        self._detail_error = False
+        self._render_info()
         top.Add(left, 1, wx.EXPAND | wx.RIGHT, 8)
 
         ctrl_box = wx.StaticBox(self, label="Autorouter")
@@ -400,8 +400,10 @@ class AutorouteTab(wx.Panel):
             return
         self._reset_run_state()
         self.step_list.DeleteAllItems()
-        self.detail_text.SetValue("")
-        self.summary_text.SetValue("")
+        self._summary_value = ""
+        self._detail_value = ""
+        self._detail_error = False
+        self._render_info()
         self.apply_btn.Disable()
         self.open_log_btn.Disable()
         self.progress_bar.SetValue(0)
@@ -697,6 +699,22 @@ class AutorouteTab(wx.Panel):
         self.set_status(f"{el} -- {what}; {c['done']} done, {c['failed']} failed, "
                         f"{c['skipped']} skipped, {c['pending']} to go")
 
+    def _render_info(self):
+        """The box under the steps: the run's summary, then the selected
+        step's details; a hint while neither exists. Rewritten only on a
+        change, so the timer's refresh does not reset the scroll position."""
+        parts = [t for t in (self._summary_value, self._detail_value) if t]
+        text = "\n\n".join(parts) if parts else (
+            "Select a step for its command line, decisions, grade and log.")
+        if self.info_text.GetValue() == text:
+            return
+        self.info_text.SetValue(text)
+        if self._detail_error and self._detail_value:
+            start = len(self._summary_value) + 2 if self._summary_value else 0
+            first = self._detail_value.split("\n", 1)[0]
+            self.info_text.SetStyle(start, start + len(first),
+                                    wx.TextAttr(wx.Colour(190, 0, 0)))
+
     def _on_row_selected(self, event):
         self._show_row(event.GetIndex())
 
@@ -742,11 +760,9 @@ class AutorouteTab(wx.Panel):
             if tail:
                 out.append("--- log tail ---")
                 out += tail
-        text = "\n".join(out)
-        if self.detail_text.GetValue() != text:
-            self.detail_text.SetValue(text)
-            if row.get('error_tail'):
-                self.detail_text.SetStyle(0, len(out[0]), wx.TextAttr(wx.Colour(190, 0, 0)))
+        self._detail_value = "\n".join(out)
+        self._detail_error = bool(row.get('error_tail'))
+        self._render_info()
         self.open_log_btn.Enable(bool(row.get('log')) and os.path.isfile(row.get('log') or ''))
 
     def _on_open_log(self, event):
@@ -776,13 +792,15 @@ class AutorouteTab(wx.Panel):
         ok = (self.returncode == 0 and s.get('output') and os.path.isfile(s['output']))
         if self._stopped:
             self.set_status(f"Stopped after {el}; the work folder keeps what ran.")
-            self.summary_text.SetValue("Stopped: no result to apply.")
+            self._summary_value = "Stopped: no result to apply."
+            self._render_info()
         elif ok:
             self.set_status(
                 f"Finished in {el}: shipped {s.get('final_tag')} -- "
                 f"{s.get('open')} open net(s), {s.get('drc')} real DRC. "
                 f"Review, then Apply Result to Board.")
-            self.summary_text.SetValue(self._final_summary(s))
+            self._summary_value = self._final_summary(s)
+            self._render_info()
         else:
             # Outright failure: say so plainly, with the child's last words.
             why = s.get('error') or ''
@@ -790,14 +808,16 @@ class AutorouteTab(wx.Panel):
             if self.plan is None:
                 why = why or "it stopped before it planned anything"
             self.set_status(f"Autorouter FAILED (exit code {self.returncode}) after "
-                            f"{el}: {why or 'see the details pane'}")
-            self.summary_text.SetValue("Failed: no result to apply.")
-            self.detail_text.SetValue(
+                            f"{el}: {why or 'its last output is below the steps'}")
+            self._summary_value = "Failed: no result to apply."
+            self._detail_error = False
+            self._detail_value = (
                 f"The autorouter exited with code {self.returncode}.\n"
                 + (f"{why}\n" if why else "")
                 + "Command: " + " ".join(shlex.quote(a) for a in self.argv) + "\n"
                 + "--- its last output ---\n" + "\n".join(tail))
             self._shown_row = None
+            self._render_info()
         self.apply_btn.Enable(bool(ok and not self._stopped))
         self.append_log(f"Autorouter finished (exit code {self.returncode}) in {el}\n")
 

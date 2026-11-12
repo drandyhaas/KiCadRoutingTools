@@ -19,7 +19,7 @@ the confirmation box, answered Yes) and checks:
            zones (net, layers, outline, fill), footprint poses, and tracks
            and vias
   failure  a step made to fail (KRT_AUTOROUTE_FAIL_STEPS) shows FAILED in
-           its row, and its exit code and error in the detail pane; a run
+           its row, and its exit code and error in the box under the steps; a run
            whose every step fails says FAILED in the status and arms no
            Apply; Stop kills a run mid-route and says so
 
@@ -469,8 +469,8 @@ def run(keep, board_file=BOARD, require_moves=False):
               shipped and tab.step_list.GetItemText(shipped[0], 2) == 'done, shipped',
               tab.step_list.GetItemText(shipped[0], 2) if shipped else 'no row')
         check("the summary says what Apply brings",
-              'Apply makes the open board match it' in tab.summary_text.GetValue(),
-              tab.summary_text.GetValue())
+              'Apply makes the open board match it' in tab.info_text.GetValue(),
+              tab.info_text.GetValue())
         skipped = [rw for rw in tab.rows if rw['state'] == 'skipped']
         check("a skipped row says why",
               all(rw.get('result', '').startswith('skipped: ') and len(rw['result']) > 9
@@ -519,9 +519,12 @@ def run(keep, board_file=BOARD, require_moves=False):
         if i is not None:
             tab.step_list.SetItemState(i, wx.LIST_STATE_SELECTED, wx.LIST_STATE_SELECTED)
             tab._show_row(i)
-        detail = tab.detail_text.GetValue()
-        check("the detail pane shows its exit code and error",
+        detail = tab.info_text.GetValue()
+        check("the box under the steps shows its exit code and error",
               'exit code 3' in detail and AR.FAIL_STEP_MESSAGE in detail, detail[:400])
+        check("that box still leads with the run's summary",
+              detail.startswith('Ships ') and detail.index('Ships ') < detail.index('exit code 3'),
+              detail[:200])
         check("the chain went on: route done", rows.get('route', (0, {}))[1].get('state') == 'done')
 
         # ---- every step fails
