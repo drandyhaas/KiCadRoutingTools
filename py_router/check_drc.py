@@ -3873,10 +3873,6 @@ def _own_gap_rule_pass(pcb_file, pcb_data, board_copper, unmodelled, census,
 
 
 #: a `disallow` via token -> the Via.via_type values it forbids (None = any)
-_DISALLOW_VIA_TYPES = {'via': None, 'through_via': {'through'},
-                       'micro_via': {'micro'},
-                       'blind_via': {'blind', 'blind_buried'},
-                       'buried_via': {'buried', 'blind_buried'}}
 
 
 def _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
@@ -3899,7 +3895,8 @@ def _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
     path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
     if not path or not os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
         return None
-    from design_rules import (DesignRules, DISALLOW_GRADED, _rule_matches)
+    from design_rules import (DesignRules, DISALLOW_GRADED, DISALLOW_VIA_TYPES,
+                              _rule_matches)
     dr = DesignRules.from_project(pcb_data, path, copper_layers=list(routing_layers))
     rules = [r for r in dr.rules if 'disallow' in r.constraints
              and not str(r.unsupported or '').startswith('severity')]
@@ -3939,9 +3936,7 @@ def _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
                                                severity=rule.severity))
 
     track_rules = [r for r in evaluable if 'track' in _tokens(r)]
-    via_rules = [(r, [t for t in _tokens(r) if t in _DISALLOW_VIA_TYPES])
-                 for r in evaluable]
-    via_rules = [(r, ts) for r, ts in via_rules if ts]
+    via_rules = [r for r in evaluable if _tokens(r) & set(DISALLOW_VIA_TYPES)]
     memo: Dict[tuple, Optional[object]] = {}
     if track_rules:
         for s in pcb_data.segments:
@@ -3969,16 +3964,7 @@ def _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
             on = tuple(via_copper_layers(v, copper))
             key = ('v', v.net_id, vt, on)
             if key not in memo:
-                it = dr.item_for_net(
-                    v.net_id, 'via', None, layers=frozenset(on),
-                    via_type=vt if vt in ('through', 'micro', 'blind', 'buried')
-                    else 'blind_buried')
-                memo[key] = next(
-                    (r for r, ts in reversed(via_rules)
-                     if any(_DISALLOW_VIA_TYPES[t] is None or vt in _DISALLOW_VIA_TYPES[t]
-                            for t in ts)
-                     and any(_rule_matches(r, it, None, l, copper, ctx) for l in on)),
-                    None)
+                memo[key] = dr.via_disallow_rule(v.net_id, vt, on)
             if memo[key] is not None:
                 _flag(v, memo[key], {
                     'type': 'items-not-allowed', 'item': 'via',

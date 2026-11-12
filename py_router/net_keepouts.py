@@ -297,21 +297,16 @@ def derive_layer_bans(rules, pcb_data) -> List[dict]:
     return out
 
 
-#: The `disallow` tokens that forbid the through via, the only via a routing
-#: step lays (`design_rules.DISALLOW_NOT_LAID` names the others)
-_THROUGH_VIA_TOKENS = frozenset({'via', 'through_via'})
-
-
 def planar_nets(pcb_data, board_path: Optional[str] = None) -> Dict[int, dict]:
     """#1818: the nets the board's `.kicad_dru` keeps on ONE copper layer with
     no via, read as the routing steps read them: the track bans
     `derive_layer_bans` derives leave the net one permitted layer, and a
     rule forbids its through via (`disallow via` / `through_via`) or allows
-    it none (`via_count (max 0)`). The via ban is read at no layer and on
-    each copper layer: a through via has copper on all of them, so a rule a
-    `(layer ...)` clause scopes to one forbids it, as check_drc and KiCad
-    grade it (`(layer "F.Cu") ... (constraint disallow track via)` is the
-    whole declaration in one rule). `{net_id: {'name', 'layer', 'rules'}}`,
+    it none (`via_count (max 0)`). The via ban is the one check_drc grades
+    (`DesignRules.via_disallow_rule`): a through via has copper on every
+    layer, so a rule a `(layer ...)` clause scopes to one of them forbids it
+    (`(layer "F.Cu") ... (constraint disallow track via)` is the whole
+    declaration in one rule), and the rule named is the one that bans it. `{net_id: {'name', 'layer', 'rules'}}`,
     {} on a board with no rules file or no such net. Such a net reaches a
     pad only on that layer: a via cannot carry it to a pad's other face."""
     path = board_path or getattr(pcb_data, 'source_path', '') or ''
@@ -340,18 +335,16 @@ def planar_nets(pcb_data, board_path: Optional[str] = None) -> Dict[int, dict]:
         left = [l for l in copper if l not in banned[name]]
         if len(left) != 1:
             continue
-        via = dr.item_for_net(nid, 'via', via_type='through')
-        d = next((c for c in (dr.resolve('disallow', via, None, lay)
-                              for lay in [None] + copper)
-                  if _THROUGH_VIA_TOKENS & set(c.disallow or ())), None)
-        vc = dr.resolve('via_count', via, None, None)
-        if d is not None:
-            why = d.source
+        ban = dr.via_disallow_rule(nid, 'through', copper)
+        vc = dr.resolve('via_count', dr.item_for_net(nid, 'via', via_type='through'),
+                        None, None)
+        if ban is not None:
+            why = ban.name
         elif vc.max is not None and vc.max <= 0:
-            why = vc.source
+            why = vc.source.replace('rule ', '').strip('"')
         else:
             continue
-        rules = sorted(ban_rules[name]) + [why.replace('rule ', '').strip('"')]
+        rules = sorted(ban_rules[name]) + [why]
         out[nid] = {'name': name, 'layer': left[0], 'rules': sorted(set(rules))}
     return out
 

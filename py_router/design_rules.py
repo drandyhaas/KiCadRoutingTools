@@ -152,6 +152,12 @@ _ROUTER_UNHONOURED_WHY = {
 # reported NOT honoured -- check_drc grades the track and via ones.
 DISALLOW_NOT_LAID = frozenset({'micro_via', 'blind_via', 'buried_via'})
 DISALLOW_GRADED = frozenset({'track', 'via', 'through_via'}) | DISALLOW_NOT_LAID
+#: The via `disallow` tokens and the via types each forbids (None: every via),
+#: as KiCad's items_not_allowed reads them (#1527, `DesignRules.via_disallow_rule`)
+DISALLOW_VIA_TYPES = {'via': None, 'through_via': {'through'},
+                      'micro_via': {'micro'},
+                      'blind_via': {'blind', 'blind_buried'},
+                      'buried_via': {'buried', 'blind_buried'}}
 
 
 def disallow_router_reason(tokens, honoured_tokens=frozenset()) -> Optional[str]:
@@ -2285,6 +2291,41 @@ class DesignRules:
         if courtyards is None:
             return item
         return replace(item, courtyards=courtyards.of_pad(pad))
+
+    def via_disallow_rule(self, net_id: int, via_type: str = 'through',
+                          layers: Optional[Sequence[str]] = None) -> Optional['Rule']:
+        """The `disallow` rule KiCad's items_not_allowed names for a via of
+        ``net_id`` and ``via_type`` with copper on ``layers`` (default every
+        copper layer), or None: the LAST rule in file order whose tokens
+        forbid that via type (`DISALLOW_VIA_TYPES`) and that binds the via on
+        one of the layers it has copper on (`_rule_matches`), so a rule a
+        `(layer ...)` clause scopes to one of them forbids it. Rules the
+        resolver does not evaluate (a rule area, an unread condition) are not
+        read here. check_drc's grade and `net_keepouts.planar_nets` both ask
+        this, so a no-via net is the one check_drc flags a via on."""
+        on = tuple(layers if layers is not None else self.copper_layers)
+        key = ('_via_disallow', net_id, via_type, on)
+        if key in self._cache:
+            return self._cache[key]
+        item = self.item_for_net(
+            net_id, 'via', None, layers=frozenset(on),
+            via_type=via_type if via_type in ('through', 'micro', 'blind', 'buried')
+            else 'blind_buried')
+        ctx = ('disallow', self._net_name_set())
+        hit = None
+        for r in reversed(self.rules):
+            if r.unsupported or r.area_condition is not None or 'disallow' not in r.constraints:
+                continue
+            tokens = r.constraints['disallow'].get('disallow', ())
+            if not any(t in DISALLOW_VIA_TYPES and (DISALLOW_VIA_TYPES[t] is None
+                                                    or via_type in DISALLOW_VIA_TYPES[t])
+                       for t in tokens):
+                continue
+            if any(_rule_matches(r, item, None, l, self.copper_layers, ctx) for l in on):
+                hit = r
+                break
+        self._cache[key] = hit
+        return hit
 
     def via_floors(self, net_id: int = 0) -> Dict[str, float]:
         """#1676: the minimums `.kicad_dru` rules set on a via of ``net_id``, in
