@@ -6532,6 +6532,29 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                   "each track, via and pad stands: "
                   + ", ".join(f"'{r.name}':{r.constraints['clearance']['min']:g}"
                               for r in _cy_dr.rules if r.name in _cy_clr))
+    # #1843: a rule whose only unread terms are rule-area predicates binds by
+    # position too -- each track, via and pad against the board's named rule
+    # areas, on the layers the area is drawn on (`AreaIndex`). The items of
+    # the channel above carry the areas they stand in, so it grades these
+    # rules as it grades the courtyard ones.
+    if _cy_dr is not None:
+        try:
+            _area_idx = _cy_dr.area_index(pcb_data)
+        except Exception as _are:                              # noqa: BLE001
+            if not quiet:
+                print(f"  .kicad_dru: area-scoped rules not read by position ({_are})")
+            _area_idx = None
+        if _area_idx is not None:
+            _area_clr = frozenset(
+                r.name for r in _cy_dr.rules if r.area_scoped_condition is not None
+                and (r.constraints.get('clearance') or {}).get('min') is not None)
+            _cy_clr = _cy_clr | _area_clr
+            _unmodelled_clr = [row for row in _unmodelled_clr if row[0] not in _area_clr]
+            if _area_clr and not quiet:
+                print("Area-scoped clearance rules (.kicad_dru, #1843), graded by where "
+                      "each track, via and pad stands: "
+                      + ", ".join(f"'{r.name}':{r.constraints['clearance']['min']:g}"
+                                  for r in _cy_dr.rules if r.name in _area_clr))
     _cy_items: Dict[int, tuple] = {}
 
     def _cy_item(obj):
@@ -6725,6 +6748,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # where each via stands (its disc against the part's courtyard), and
         # #1832 a track_width rule by where each track stands (its capsule)
         _courtyards = _cy_idx if _size_rules is not None else None
+        # #1843: and a track_width rule bound by a rule area the same way
+        _size_areas = None
+        if _size_rules is not None:
+            try:
+                _size_areas = _size_rules.area_index(pcb_data)
+            except Exception:                                  # noqa: BLE001
+                _size_areas = None
 
         def _track_floor(seg):
             if min_track_width is not None or _size_rules is None:
@@ -6773,7 +6803,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 if _r.unsupported and not _r.honoured:
                     _sk = sorted(k for k in _r.constraints if k in _SZK
                                  and not (_courtyards and _r.courtyard_condition
-                                          and k in _CY_SIZE))
+                                          and k in _CY_SIZE)
+                                 and not (_size_areas is not None and k == 'track_width'
+                                          and _r.area_scoped_condition is not None))
                     if _sk:
                         _note_not_graded('size', _r.name, _r.unsupported, constraints=_sk)
                         if not quiet:

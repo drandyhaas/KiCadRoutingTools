@@ -109,6 +109,8 @@ VIA_SIZE_KINDS = ('annular_width', 'via_diameter', 'hole_size')
 #: term binds them: a via's size (#1805), a track's width and the clearance
 #: of tracks, vias and pads (#1832). The router reads none of them.
 COURTYARD_GRADED_KINDS = VIA_SIZE_KINDS + ('track_width', 'clearance')
+#: #1843: the kinds a rule scoped by a rule area is graded for, by position
+AREA_GRADED_KINDS = ('clearance', 'track_width')
 # The kinds a rule may carry without being reported as "parsed, not
 # consumed". WIDER than what is read today: the resolver's callers ask only
 # for track_width / via_diameter / hole_size (draw_size, floor), copper
@@ -282,6 +284,12 @@ class RuleItem:
     local_clearance: Optional[float] = None
     # the rule areas the item lies in, for an areas=True condition only
     areas: FrozenSet[str] = frozenset()
+    # #1843: the rule areas the item's copper was MEASURED against
+    # (`AreaIndex`), as (area name, copper layer) pairs: `area_layers` the
+    # ones it overlaps, `area_enclosed` the ones it lies wholly inside. None =
+    # not measured: a rule's `area_scoped_condition` is then not read for it.
+    area_layers: Optional[FrozenSet[Tuple[str, str]]] = None
+    area_enclosed: Optional[FrozenSet[Tuple[str, str]]] = None
     # #1805: the courtyards the item's copper overlaps, as (reference, library
     # id, 'front' | 'back' of that part), for a rule's `courtyard_condition`
     # (`CourtyardIndex`). None = not measured: a courtyard term then reads as
@@ -310,6 +318,12 @@ class Rule:
     # (check_drc's vias, and #1832 its tracks and pads) is resolved against
     # it, by position. No routing step measures one, so none reads the rule.
     courtyard_condition: object = None
+    # #1843: a clearance / track_width rule's condition parsed WITH its
+    # rule-area predicates (parse_condition(areas=True)) when they are all it
+    # does not read. `unsupported` stays set: only an item measured against
+    # the board's rule areas (`DesignRules.area_index`) is resolved against
+    # it, by position. No routing step measures one, so none reads the rule.
+    area_scoped_condition: object = None
     # set by net_keepouts.derive_area_keepouts when the router honours the
     # rule as a net-filtered keep-out: what it honours, for the report
     honoured: Optional[str] = None
@@ -479,6 +493,13 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                                                                courtyards=True)
                 except Unsupported:
                     pass
+                if rule.courtyard_condition is None and (
+                        set(rule.constraints) & set(AREA_GRADED_KINDS)):
+                    try:
+                        rule.area_scoped_condition = parse_condition(
+                            rule.condition_src, areas=True)
+                    except Unsupported:
+                        pass
                 # A rule that only disallows, on a rule area: the routing
                 # steps read it as a net-filtered keep-out (net_keepouts);
                 # the resolver and every other step still do not.
@@ -498,6 +519,7 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
             if not (lc in ('outer', 'inner', '*.Cu', '*') or lc.endswith('.Cu')):
                 rule.unsupported = rule.unsupported or f"layer clause {lc!r} (non-copper)"
                 rule.courtyard_condition = None
+                rule.area_scoped_condition = None
         rule.unconsumed_kinds = sorted(k for k in rule.constraints
                                        if k not in CONSUMED_KINDS)
         if 'clearance' in rule.constraints and rule.unsupported is None:
@@ -1374,7 +1396,20 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
         return bool(_call(node, a, b, layer, ctx))
     if op == 'area':
         it = _item(node[1], a, b)
-        return it is not None and node[3] in it.areas
+        if it is None:
+            return False
+        if it.area_layers is None:
+            return node[3] in it.areas
+        # #1843: measured by position, as kicad-cli 10.0.8 reads them.
+        # insideArea() is intersectsArea(), read on the layer the constraint
+        # is asked on (a through via inside an F.Cu area is not in it on
+        # B.Cu). enclosedByArea() is the item lying wholly inside an area it
+        # shares a layer with, whichever layer is asked about.
+        if node[2] == 'enclosedbyarea':
+            return any(name == node[3] for name, _l in it.area_enclosed or ())
+        if layer is not None:
+            return (node[3], layer) in it.area_layers
+        return any(name == node[3] for name, _l in it.area_layers)
     if op == 'courtyard':
         it = _item(node[1], a, b)
         if it is None:
@@ -2065,11 +2100,18 @@ class DesignRules:
                 continue
             cond = None
             if rule.unsupported:
-                # #1805: a courtyard rule binds only an item measured by position
+                # #1805: a courtyard rule binds only an item measured by
+                # position; #1843: so does a rule-area rule
                 cond = rule.courtyard_condition
-                if cond is None or a.courtyards is None or (
-                        b is not None and b.courtyards is None):
-                    continue
+                if cond is not None:
+                    if a.courtyards is None or (b is not None and b.courtyards is None):
+                        continue
+                else:
+                    cond = rule.area_scoped_condition
+                    if (cond is None or kind not in AREA_GRADED_KINDS
+                            or a.area_layers is None
+                            or (b is not None and b.area_layers is None)):
+                        continue
             if not _rule_matches(rule, a, b, layer, self.copper_layers, ctx, cond):
                 continue
             spec = rule.constraints[kind]
@@ -2292,11 +2334,32 @@ class DesignRules:
         idx = CourtyardIndex(self, pcb_data, board_path)
         return idx if idx.available else None
 
+    def area_index(self, pcb_data) -> Optional['AreaIndex']:
+        """#1843: measure the board's named rule areas for the rules that
+        bind by one (`Rule.area_scoped_condition`), and from then on fill
+        every `via_item` / `track_item` / `pad_item` with the areas its
+        copper stands in, so those rules resolve by position. A rule naming
+        an area the board does not draw as a rule area is left unread (its
+        `area_scoped_condition` is cleared). Returns the index, or None when
+        no rule is left to read that way."""
+        idx = AreaIndex(self, pcb_data)
+        self._area_index = idx if idx.names else None
+        self._cache.clear()
+        return self._area_index
+
+    def _in_areas(self, item: RuleItem, measure) -> RuleItem:
+        idx = getattr(self, '_area_index', None)
+        if idx is None:
+            return item
+        over, inside = measure(idx)
+        return replace(item, area_layers=over, area_enclosed=inside)
+
     def via_item(self, via, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
         """The RuleItem of one via of the board; with ``courtyards``, the
         courtyards its disc overlaps measured (#1805), so a rule bound by a
         courtyard term resolves for it."""
         item = self.item_for_net(int(getattr(via, 'net_id', 0) or 0), 'via')
+        item = self._in_areas(item, lambda idx: idx.of_via(via, self.copper_layers))
         if courtyards is None:
             return item
         return replace(item, courtyards=courtyards.of_disc(
@@ -2309,6 +2372,7 @@ class DesignRules:
         item = self.item_for_net(int(getattr(seg, 'net_id', 0) or 0),
                                  'graphic' if getattr(seg, 'graphic', False) else 'track',
                                  getattr(seg, 'layer', None))
+        item = self._in_areas(item, lambda idx: idx.of_track(seg))
         if courtyards is None:
             return item
         return replace(item, courtyards=courtyards.of_capsule(
@@ -2319,6 +2383,7 @@ class DesignRules:
         """#1832: `item_for_pad` with, given ``courtyards``, the courtyards
         the pad's copper overlaps measured."""
         item = self.item_for_pad(pad)
+        item = self._in_areas(item, lambda idx: idx.of_pad(pad, self.copper_layers))
         if courtyards is None:
             return item
         return replace(item, courtyards=courtyards.of_pad(pad))
@@ -3042,6 +3107,130 @@ def _courtyard_negated(node, odd: bool = False) -> bool:
     return any(_courtyard_negated(c, odd) for c in node[1:])
 
 
+def _pad_copper_geometry(pad):
+    """(shape, radius) of a pad's copper as check_drc measures it
+    (`_pad_copper_core`: custom polygons, round corners, tilt): the copper is
+    ``shape`` grown by ``radius``. (None, 0.0) for a pad with no shape."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+    from check_drc import _pad_copper_core
+    polys, r = _pad_copper_core(pad)
+    parts = []
+    for poly in polys:
+        pts = list(dict.fromkeys((float(x), float(y)) for x, y in poly))
+        if len(pts) == 1:
+            parts.append(Point(pts[0]))
+        elif len(pts) == 2 or Polygon(pts).area <= 1e-12:
+            parts.append(LineString(pts))
+        else:
+            parts.append(Polygon(pts))
+    if not parts:
+        return None, 0.0
+    return (parts[0] if len(parts) == 1 else unary_union(parts)), r
+
+
+def _ast_area_names(node, out: set) -> set:
+    """Every rule-area name an areas=True condition AST mentions."""
+    if isinstance(node, tuple) and node:
+        if node[0] == 'area':
+            out.add(node[3])
+        else:
+            for x in node[1:]:
+                _ast_area_names(x, out)
+    return out
+
+
+class AreaIndex:
+    """#1843: which of the board's named rule areas an item's copper stands
+    in, for the rules that bind by one (`Rule.area_scoped_condition`), as
+    kicad-cli 10.0.8 reads the area predicates (measured on probe boards):
+    an item partly inside an area is in it (`insideArea()` is
+    `intersectsArea()`), `enclosedByArea()` wants the whole item inside, and
+    an area holds an item only on the copper layers the area is drawn on.
+
+    The areas are the parser's (`board_info.keepouts`, every rule area with
+    a name). `names` is the areas found; a rule naming one the board does
+    not have is cleared of its `area_scoped_condition`, so it stays unread
+    and named rather than read as binding nothing."""
+
+    def __init__(self, rules: 'DesignRules', pcb_data):
+        from shapely.geometry import Polygon
+        wanted: Set[str] = set()
+        for r in rules.rules:
+            if r.area_scoped_condition is not None:
+                wanted |= _ast_area_names(r.area_scoped_condition, set())
+        self.areas: List[tuple] = []          # (name, layers, polygon, bounds)
+        board = getattr(pcb_data, 'board_info', None)
+        for ko in (getattr(board, 'keepouts', None) or []) if wanted else []:
+            name = ko.get('name')
+            pts = ko.get('polygon') or []
+            if name not in wanted or len(pts) < 3:
+                continue
+            try:
+                g = Polygon(pts, [h for h in (ko.get('holes') or []) if len(h) >= 3])
+                if not g.is_valid:
+                    g = g.buffer(0)
+            except Exception:                                  # noqa: BLE001
+                continue
+            if g.is_empty:
+                continue
+            self.areas.append((name, frozenset(ko.get('layers') or ()), g, g.bounds))
+        self.names = frozenset(a[0] for a in self.areas)
+        for r in rules.rules:
+            if r.area_scoped_condition is not None and not (
+                    _ast_area_names(r.area_scoped_condition, set()) <= self.names):
+                r.area_scoped_condition = None
+
+    def _of(self, geom, r: float, layers):
+        """(overlapped, enclosing) (name, layer) pairs for copper ``geom``
+        grown by ``r`` on ``layers``. Copper that only reaches an area's
+        edge does not overlap it."""
+        over, inside = set(), set()
+        layers = set(layers)
+        gx0, gy0, gx1, gy1 = geom.bounds
+        shape = None
+        for name, alayers, g, (x0, y0, x1, y1) in self.areas:
+            on = layers & alayers
+            if not on or gx1 + r < x0 or gx0 - r > x1 or gy1 + r < y0 or gy0 - r > y1:
+                continue
+            if r > 0:
+                if g.distance(geom) >= r - 1e-9:
+                    continue
+            elif not g.intersects(geom) or g.intersection(geom).area <= 1e-12:
+                continue
+            for layer in on:
+                over.add((name, layer))
+            if shape is None:
+                shape = geom.buffer(r) if r > 0 else geom
+            if g.buffer(1e-9).contains(shape):
+                for layer in on:
+                    inside.add((name, layer))
+        return frozenset(over), frozenset(inside)
+
+    def of_track(self, seg):
+        from shapely.geometry import LineString, Point
+        a = (float(seg.start_x), float(seg.start_y))
+        b = (float(seg.end_x), float(seg.end_y))
+        geom = Point(a) if a == b else LineString([a, b])
+        return self._of(geom, float(seg.width or 0.0) / 2.0, (seg.layer,))
+
+    def of_via(self, via, copper_layers):
+        from shapely.geometry import Point
+        from geometry_utils import via_copper_layers
+        try:
+            layers = via_copper_layers(via, list(copper_layers))
+        except Exception:                                      # noqa: BLE001
+            layers = list(copper_layers)
+        return self._of(Point(float(via.x), float(via.y)), float(via.size) / 2.0, layers)
+
+    def of_pad(self, pad, copper_layers):
+        from check_drc import pad_copper_layers
+        geom, r = _pad_copper_geometry(pad)
+        if geom is None:
+            return frozenset(), frozenset()
+        return self._of(geom, r, pad_copper_layers(pad, list(copper_layers)))
+
+
 class CourtyardIndex:
     """#1805: the part courtyards a via overlaps (#1832: a track or a pad,
     `of_capsule` / `of_pad`), as KiCad's courtyard
@@ -3115,22 +3304,10 @@ class CourtyardIndex:
         check_drc measures it (`_pad_copper_core`: custom polygons, round
         corners, tilt). Measured on kicad-cli 10.0.6: a pad straddling the
         courtyard's edge binds."""
-        from shapely.geometry import LineString, Point, Polygon
-        from shapely.ops import unary_union
-        from check_drc import _pad_copper_core
-        polys, r = _pad_copper_core(pad)
-        parts = []
-        for poly in polys:
-            pts = list(dict.fromkeys((float(x), float(y)) for x, y in poly))
-            if len(pts) == 1:
-                parts.append(Point(pts[0]))
-            elif len(pts) == 2 or Polygon(pts).area <= 1e-12:
-                parts.append(LineString(pts))
-            else:
-                parts.append(Polygon(pts))
-        if not parts:
+        geom, r = _pad_copper_geometry(pad)
+        if geom is None:
             return frozenset()
-        return self._of(parts[0] if len(parts) == 1 else unary_union(parts), r)
+        return self._of(geom, r)
 
     def _of(self, geom, r: float) -> FrozenSet[Tuple[str, Optional[str], str]]:
         """The courtyards ``geom`` grown by ``r`` overlaps: within less than
