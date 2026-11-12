@@ -5600,6 +5600,8 @@ def severity_key(v: dict, clearance: float) -> Optional[str]:
     the clearance family is KiCad's `shorting_items`."""
     t = v.get('type')
     key = KICAD_SEVERITY_KEY.get(t)
+    if t == 'via-drill-size' and v.get('via_type') == 'micro':
+        return 'microvia_drill_out_of_range'     # #1844: KiCad's own key for it
     if key == 'clearance':
         req = v.get('required_mm')
         req = req if isinstance(req, (int, float)) else clearance
@@ -5820,18 +5822,21 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
         nid = _nid(v.get('net1')) or 0
         layer = v.get('layer') if typ == 'track' else None
         item = size_rules.item_for_net(nid, typ, layer)
-        if courtyards is not None:
-            # #1805 / #1832: a courtyard rule binds by where the item stands
+        if typ == 'via' and v.get('via_loc') and (
+                courtyards is not None or v.get('via_type')):
+            # #1805: a courtyard rule binds by where the via stands; #1844: a
+            # micro via resolves at its own minimums
+            if not vias_at:
+                vias_at.update(((round(w.x, 6), round(w.y, 6)), w) for w in pcb_data.vias)
+            w = vias_at.get((round(v['via_loc'][0], 6), round(v['via_loc'][1], 6)))
+            if w is not None:
+                item = size_rules.via_item(w, courtyards)
+        elif courtyards is not None:
+            # #1832: a courtyard rule binds by where the track stands
             if typ == 'track' and v.get('seg_loc') and isinstance(v.get('width'), (int, float)):
                 from dataclasses import replace as _dc_replace
                 item = _dc_replace(item, courtyards=courtyards.of_capsule(
                     *v['seg_loc'], v['width'] / 2.0))
-            elif typ == 'via' and v.get('via_loc'):
-                if not vias_at:
-                    vias_at.update(((round(w.x, 6), round(w.y, 6)), w) for w in pcb_data.vias)
-                w = vias_at.get((round(v['via_loc'][0], 6), round(v['via_loc'][1], 6)))
-                if w is not None:
-                    item = size_rules.via_item(w, courtyards)
         c = size_rules.resolve(kind, item, None, layer)
         val = v.get(field)
         if c.kicad_min is None or not isinstance(val, (int, float)):
@@ -5879,7 +5884,10 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
         if v['type'] in _size_kinds:
             reports, rule = _size_rule(v)
             _val = v.get(_size_kinds[v['type']][2])
-            if not reports or (isinstance(_val, (int, float))
+            # #1844: the fab floor's via sizes do not bind a micro via
+            _fab_binds = not (v.get('via_type') == 'micro'
+                              and v['type'] in ('via-size', 'via-drill-size'))
+            if not reports or (_fab_binds and isinstance(_val, (int, float))
                                and _val < _fab_size[v['type']] - 1e-9):
                 kept.append(v)                   # the fab floor's, not KiCad's
                 continue
@@ -6752,17 +6760,25 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if _size_rules is None:
                 return eff_min_via_dia, eff_min_via_drill
             _vi = _size_rules.via_item(via, _courtyards)
+            # #1844: a micro via is graded at the board's micro via minimums;
+            # the fab floor's via numbers are for a mechanical drill
+            _micro = _vi.via_type == 'micro'
             d = (eff_min_via_dia if min_via_diameter is not None
                  else (_size_rules.resolve('via_diameter', _vi, None, None).min
-                       or eff_min_via_dia))
+                       or (0.0 if _micro else eff_min_via_dia)))
             h = (eff_min_via_drill if min_via_drill is not None
                  else (_size_rules.resolve('hole_size', _vi, None, None).min
-                       or eff_min_via_drill))
+                       or (0.0 if _micro else eff_min_via_drill)))
             return d, h
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
                   f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm"
                   + ("; per-net board/rule minimums applied (#530)" if _size_rules else ""))
+            if _size_rules is not None and any(
+                    getattr(v, 'via_type', None) == 'micro' for v in pcb_data.vias):
+                print("  micro vias: graded at the board's micro via minimums "
+                      "(Board Setup drill, net class diameter, .kicad_dru rules), "
+                      "not the fab floor's mechanical via sizes")
         # #1390: a .kicad_dru size rule whose condition is not modelled
         # (A.insideCourtyard(), ...) binds copper the minimums above
         # know nothing about, and used to vanish: the clearance half got
@@ -8532,6 +8548,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'min_size': _vd,
                         'shortfall_mm': dia_short,
                         'via_loc': (via.x, via.y),
+                        **({'via_type': 'micro'}
+                           if getattr(via, 'via_type', None) == 'micro' else {}),
                     })
                 if drill_bad:
                     violations.append({
@@ -8541,6 +8559,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'min_drill': _vh,
                         'shortfall_mm': drill_short,
                         'via_loc': (via.x, via.y),
+                        **({'via_type': 'micro'}
+                           if getattr(via, 'via_type', None) == 'micro' else {}),
                     })
 
     _via_in_paste_pass(pcb_data, matching_via_nets, _baseline_pd, violations,
