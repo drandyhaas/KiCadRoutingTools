@@ -20,10 +20,17 @@ Rows:
      the two per-pair tolerances are recorded and check_drc prints the two
      per-pair rows, as before;
   4. the #1759 snapshot (the graze passes' and the end-of-run guard's
-     measure) carries the chain as one group.
+     measure) carries the chain as one group;
+  5. the GUI's leg: batch_route_diff_pairs(return_results=True) returns the
+     chain's row (`ac_coupled_xnets`), whose member pairs read `skipped`,
+     and the completion dialog names a chain left over tolerance from it,
+     in the engine's words (`length_matching.ac_chains_not_matched`).
 
     python3 tests/test_1799_ac_chain_graded.py
 """
+import ast
+import contextlib
+import io
 import json
 import os
 import re
@@ -142,6 +149,68 @@ def main():
         check("the chain is one group, out of range",
               len(rows) == 1 and rows[0]['max_mm'] == 0.01
               and rows[0]['excess_mm'] > 0.1, str(snap))
+
+        print("5. the GUI's leg")
+        from route_diff import batch_route_diff_pairs
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rd = batch_route_diff_pairs(
+                a, '', NETS, layers=['F.Cu', 'B.Cu'], track_width=0.15,
+                diff_pair_gap=0.25, diff_pair_intra_match=True,
+                ac_couple_match=True, intra_pair_tolerance=0.01,
+                length_match_tolerance=0.01, return_results=True,
+                pcb_data=parse_kicad_pcb(a))[3]
+        said = re.search(r'AC-coupled chain NOT matched: ([^\n\x1b]*)', buf.getvalue())
+        if said is None:
+            print("  [BROKEN TEST] the engine named no chain NOT matched on this "
+                  "leg:\n" + buf.getvalue()[-800:])
+            return 1
+        members = [(x['pair'], x['status']) for x in rd.get('intra_pair_matching') or []]
+        check("the member pairs read skipped, so the per-pair list names nothing",
+              members == [('DPA', 'skipped'), ('DPB', 'skipped')], str(members))
+        chains = rd.get('ac_coupled_xnets')
+        check("results_data carries the chain's row, unmatched at 0.01",
+              isinstance(chains, list) and len(chains) == 1
+              and chains[0].get('nets') == 'DPA+DPB'
+              and chains[0].get('status') == 'unmatched'
+              and chains[0].get('tolerance_mm') == 0.01
+              and abs((chains[0].get('skew_mm') or 0) - 0.1148) < 1e-3,
+              f"ac_coupled_xnets: {chains}")
+        try:
+            from length_matching import ac_chains_not_matched
+        except ImportError as e:
+            ac_chains_not_matched = None
+            check("length_matching words the chains not matched", False, str(e))
+        if ac_chains_not_matched is not None:
+            named = ac_chains_not_matched(chains)
+            check("the chain is named with its reason and shipped skew",
+                  named == ['DPA+DPB (meanders-would-worsen, skew=0.115mm)'],
+                  str(named))
+            check("...in the words of the engine's console line",
+                  ', '.join(named) == said.group(1).strip(), said.group(1))
+            check("a chain inside its tolerance is not named",
+                  ac_chains_not_matched(doc2.get('ac_coupled_xnets')) == []
+                  and ac_chains_not_matched(None) == [])
+        # The dialog itself needs wx; read its source instead: the handler
+        # that builds the completion message names the chains from the key.
+        with open(evidence(os.path.join(ROOT, 'kicad_routing_plugin',
+                                        'differential_gui.py'), 'the tab'),
+                  encoding='utf-8') as fh:
+            tree = ast.parse(fh.read())
+        body = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                     and n.name == '_on_routing_complete_body'), None)
+        if body is None:
+            print("  [BROKEN TEST] differential_gui has no "
+                  "_on_routing_complete_body: the dialog moved")
+            return 1
+        calls = [ast.unparse(n) for n in ast.walk(body) if isinstance(n, ast.Call)
+                 and getattr(n.func, 'id', '') == 'ac_chains_not_matched']
+        texts = [n.value for n in ast.walk(body) if isinstance(n, ast.Constant)
+                 and isinstance(n.value, str)]
+        check("the completion dialog names the chains from results_data",
+              calls == ["ac_chains_not_matched(results_data.get('ac_coupled_xnets'))"]
+              and any('AC-coupled chain NOT matched end to end' in t for t in texts),
+              str(calls))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print('FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL OK')
