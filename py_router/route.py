@@ -1297,36 +1297,39 @@ def _print_skew_moved(rows, what):
               + " -- route.py does not re-match it (#1759)")
 
 
+def _skew_row_key(row):
+    """A skew row's group by NAME (rule, nets): the CLI measures the shipped
+    board on a re-parse of the written file, whose net ids need not be the
+    ones the run's pcb_data carries."""
+    return (row['rule'], tuple(sorted(row['nets'])))
+
+
+def _skew_by_name(snap):
+    """A check_drc.skew_group_snapshot keyed by _skew_row_key, its measured
+    groups only (a group either side cannot measure is never compared)."""
+    return {_skew_row_key(r): r for r in (snap or {}).values() if r}
+
+
 def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
-                            write_model, skew_path, scope_names, before=None,
-                            rows=True):
+                            write_model, skew_path, scope_names):
     """#1798: the #1759 skew measurement, on the board the end-of-run passes
     (_late_strict_collapse1063 and the rest) read and change -- the written
     file on the CLI, the write model on the GUI, pcb_data itself on the
-    "nothing to route" return. Those passes run after the in-run cleanup's
-    before/after measurement, so a group they moved out of its tolerance
-    shipped unnamed.
-
-    With `before` None: the snapshot ({} when no skew rule binds a net in
-    `scope_names`, which costs no parse). With `before`: the rows of the
-    groups moved out of range since (check_drc.skew_moved_out_of_range), or,
-    with `rows` False, the snapshot of `before`'s groups as the board now
-    stands."""
+    "nothing to route" return -- keyed by name (_skew_by_name), for the
+    groups with a member in `scope_names`. {} when no skew rule binds a net
+    in scope, which costs no parse, and when the measurement fails, which is
+    said on the console."""
     import copy as _copy
-    empty = {} if before is None or not rows else []
     try:
         from check_drc import (skew_rule_groups, skew_group_snapshot,
-                               skew_moved_out_of_range, recorded_chain_groups)
-        if before is None:
-            groups, _u = skew_rule_groups(skew_path, pcb_data)
-            groups = list(groups) + [(None, p + n) for _c, p, n in
-                                     recorded_chain_groups(skew_path, pcb_data)]
-            names = set(scope_names)
-            if not any(pcb_data.nets[m].name in names for _r, ms in groups
-                       for m in ms if m in pcb_data.nets):
-                return {}
-        elif not before:
-            return empty
+                               recorded_chain_groups)
+        groups, _u = skew_rule_groups(skew_path, pcb_data)
+        groups = list(groups) + [(None, p + n) for _c, p, n in
+                                 recorded_chain_groups(skew_path, pcb_data)]
+        names = set(scope_names)
+        if not any(pcb_data.nets[m].name in names for _r, ms in groups
+                   for m in ms if m in pcb_data.nets):
+            return {}
         if return_results:
             board = _copy.copy(pcb_data)
             if write_model is not None:
@@ -1340,64 +1343,42 @@ def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
             from kicad_parser import parse_kicad_pcb as _pk1798
             board = _pk1798(output_file)
         else:
-            return empty
-        if before is None:
-            ids = {nid for nid, n in board.nets.items() if n.name in names}
-            return skew_group_snapshot(board, skew_path, ids)
-        ids = {m for (_r, ms) in before for m in ms}
-        now = skew_group_snapshot(board, skew_path, ids)
-        return skew_moved_out_of_range(before, now) if rows else now
+            return {}
+        ids = {nid for nid, n in board.nets.items() if n.name in names}
+        return _skew_by_name(skew_group_snapshot(board, skew_path, ids))
     except Exception as _e:                                     # noqa: BLE001
         print(f"  (#1798 end-of-run skew measurement failed: "
               f"{type(_e).__name__}: {_e})")
-        return empty
+        return {}
 
 
-def _skew_row_key(row):
-    """A skew row's group by NAME (rule, nets): the CLI measures the shipped
-    board on a re-parse of the written file, whose net ids need not be the
-    ones the run's pcb_data carries."""
-    return (row['rule'], tuple(sorted(row['nets'])))
-
-
-def _shipped_skew_rows1798(in_run_rows, at_input, at_late, shipped):
+def _shipped_skew_rows1798(in_run_rows, at_input, shipped):
     """#1798: the step's skew_moved_by_cleanup rows, read on the board it
-    ships. Two comparisons used to be reported side by side: the post-route
-    cleanup's (#1759: `at_input`, the snapshot before it, against the board
-    right after it -- `in_run_rows`, already printed) and the end-of-run
-    passes' (`at_late` against `shipped`). The first one's after-value is
-    not the shipped board's once a late pass touches the group again: a pair
-    was named at 0.39 mm, shipped at 0.3378 mm for another reason (the late
-    collapse took back the in-run bridge and removed a via-centre stub), and
-    the change that shipped had no line.
+    ships. ONE comparison, from `at_input` (the #1759 snapshot taken before
+    the post-route cleanup) to `shipped` (_late_skew_snapshot1798 after the
+    end-of-run passes), so every pass between them is in it. The post-route
+    cleanup's own rows (`in_run_rows`, printed as it ran) describe a board
+    that need not ship: a late pass can take back copper the cleanup laid
+    (a pair was named at 0.39 mm and shipped at 0.0878 mm) or move the group
+    again. The rows returned replace them.
 
-    So a group the post-route line named is compared from `at_input` to
-    `shipped`: further out than it came in, its row carries the shipped skew
-    and, when that is not the value already printed, a WARNING gives it; no
-    further out, it has no row and one closing line says so. Every other
-    group is compared from `at_late`, as before. Returns (rows, replaced):
-    the rows measured on the shipped board, and the keys (_skew_row_key) of
-    the in-run rows they replace -- an in-run row whose group the shipped
-    board could not measure is not in `replaced` and stands."""
+    A row is printed unless the post-route line already gave it at the skew
+    it ships at. A group that line named and that ships no further out than
+    it came in gets no row and one closing line. A group that line named
+    and that the shipped board cannot measure keeps its in-run row."""
     from check_drc import skew_moved_out_of_range
-
-    def by_name(snap):
-        return {_skew_row_key(r): r for r in (snap or {}).values() if r}
-    before, after = by_name(at_input), by_name(shipped)
-    said = {_skew_row_key(r): r for r in in_run_rows}
-    said = {k: r for k, r in said.items() if k in before and k in after}
-    rows = [r for r in skew_moved_out_of_range(at_late or {}, shipped or {})
-            if _skew_row_key(r) not in said]
-    _print_skew_moved(rows, "the end-of-run cleanup (#1798)")
-    for k in sorted(said):
-        now = skew_moved_out_of_range({k: before[k]}, {k: after[k]})
-        if now:
-            rows += now
-            if abs(now[0]['skew_after_mm'] - said[k]['skew_after_mm']) > 1e-4:
-                _print_skew_moved(
-                    now, "the post-route and end-of-run (#1798) cleanups")
+    rows = skew_moved_out_of_range(_skew_by_name(at_input), shipped)
+    said = {_skew_row_key(r): r for r in in_run_rows or ()}
+    _print_skew_moved(
+        [r for r in rows if _skew_row_key(r) not in said
+         or abs(said[_skew_row_key(r)]['skew_after_mm']
+                - r['skew_after_mm']) > 1e-4],
+        "the post-route and end-of-run cleanups (#1798)")
+    for k in sorted(said.keys() - {_skew_row_key(r) for r in rows}):
+        a = shipped.get(k)
+        if a is None:
+            rows.append(said[k])
             continue
-        a = after[k]
         within = a['excess_mm'] <= 1e-4
         _lim = ' / '.join(f"{_k[:3]} {a[_k]:g}" for _k in ('min_mm', 'max_mm')
                           if a[_k] is not None)
@@ -1408,13 +1389,7 @@ def _shipped_skew_rows1798(in_run_rows, at_input, at_late, shipped):
               + f": skew {a['skew_mm']:.4f} mm after the end-of-run cleanup "
               f"(#1798), not the {said[k]['skew_after_mm']:.4f} mm the "
               f"post-route cleanup's WARNING gave")
-    return rows, set(said)
-
-
-def _skew_rows_as_shipped1798(old_rows, rows, replaced):
-    """`old_rows` without the in-run rows `rows` replaces, then `rows`."""
-    return [r for r in old_rows or [] if _skew_row_key(r) not in replaced] \
-        + list(rows)
+    return rows
 
 
 def _late_strict_collapse1063(pcb_data, output_file, return_results, results_data,
@@ -3708,9 +3683,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                       _scope1166, keep_input_copper)
             _late_orphan_sweep659(pcb_data, output_file, as_gui, rd,
                                   None, keep_input_copper, skip_routing)
-            _moved = _late_skew_snapshot1798(
-                pcb_data, output_file, as_gui, rd, None, _skew_path1798,
-                _scope1166, before=_sk)
+            _moved = []
+            if _sk:
+                from check_drc import skew_moved_out_of_range as _smo1798
+                _moved = _smo1798(_sk, _late_skew_snapshot1798(
+                    pcb_data, output_file, as_gui, rd, None, _skew_path1798,
+                    _scope1166))
             _print_skew_moved(_moved, "the end-of-run cleanup (#1798)")
             return _moved
         if return_results:
@@ -9137,17 +9115,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # before the sweep, the #962 via stamp and the #1069 re-grade, so all of
     # them read the collapsed board. Outermost run only, both fronts.
     _finished1525 = set()
-    # #1798: the #1759 measurement around these passes too -- the in-run
-    # cleanup's before/after closed before them, so a group they moved out
-    # of its tolerance shipped unnamed.
-    _late_skew1798 = []
-    _skew_before1798 = {}
-    if final_reconcile and not skip_routing and not _ckpt_stop and quick < 2:
-        _skew_before1798 = _late_skew_snapshot1798(
-            pcb_data, output_file, return_results, locals().get('results_data'),
-            _gui_write_model, input_file or getattr(pcb_data, 'source_path', '')
-            or '', {pcb_data.nets[_n].name for _n in sweep_scope_ids
-                    if _n in pcb_data.nets})
     if final_reconcile and not skip_routing and not _ckpt_stop and quick < 2:
         # #1217: split the tracks KiCad-dangling joints land on FIRST, so the
         # collapse grades each piece: a host's stretch past its joint can be
@@ -9209,22 +9176,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
              if _n not in pcb_data.nets
              or pcb_data.nets[_n].name not in _finished1525},
             keep_input_copper, skip_routing)
-    _skew_replaced1798 = set()
-    if _skew_before1798:
-        # The rows describe the board that ships: a group the post-route
-        # cleanup's line named is measured again from the snapshot that
-        # comparison started at, and its row replaced.
-        _late_skew1798, _skew_replaced1798 = _shipped_skew_rows1798(
-            skew_moved_by_cleanup, _skew_before1759, _skew_before1798,
+    # #1798: the skew-graded groups, measured on the board that ships, from
+    # the #1759 snapshot taken before the post-route cleanup -- the end-of-run
+    # passes above can move a group again, or take back what the cleanup did
+    # to it. These rows replace the cleanup's in --json-out and results_data.
+    _late_skew1798 = None
+    if (_skew_before1759 and final_reconcile and not skip_routing
+            and not _ckpt_stop and quick < 2):
+        _late_skew1798 = _shipped_skew_rows1798(
+            skew_moved_by_cleanup, _skew_before1759,
             _late_skew_snapshot1798(
                 pcb_data, output_file, return_results,
-                locals().get('results_data'), _gui_write_model,
-                input_file or getattr(pcb_data, 'source_path', '') or '', (),
-                before=_skew_before1798, rows=False))
+                locals().get('results_data'), _gui_write_model, _skew_path1759,
+                {m for r in _skew_before1759.values() if r for m in r['nets']}))
         if return_results and locals().get('results_data') is not None:
-            results_data['skew_moved_by_cleanup'] = _skew_rows_as_shipped1798(
-                results_data.get('skew_moved_by_cleanup'), _late_skew1798,
-                _skew_replaced1798)
+            results_data['skew_moved_by_cleanup'] = _late_skew1798
 
     # #962: declare Type VII on every via this run put in a pad or a paste
     # opening. It runs HERE because this is after the last pass that adds or
@@ -9707,14 +9673,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # predates the finalize, so it cannot carry this.
             if _merged is not None and _via_in_pad962 is not None:
                 _merged['via_in_pad'] = _via_in_pad962
-            # #1798: likewise the groups the end-of-run passes moved, and
-            # the in-run rows as the shipped board reads them.
-            if _merged is not None and (_late_skew1798 or _skew_replaced1798):
-                _rows1798 = _skew_rows_as_shipped1798(
-                    _merged.get('skew_moved_by_cleanup'), _late_skew1798,
-                    _skew_replaced1798)
-                if _rows1798:
-                    _merged['skew_moved_by_cleanup'] = _rows1798
+            # #1798: likewise the skew rows, read on the shipped board.
+            if _merged is not None and _late_skew1798 is not None:
+                if _late_skew1798:
+                    _merged['skew_moved_by_cleanup'] = _late_skew1798
                 else:
                     _merged.pop('skew_moved_by_cleanup', None)
             # #1146: likewise the keep-away reading of the shipped board.

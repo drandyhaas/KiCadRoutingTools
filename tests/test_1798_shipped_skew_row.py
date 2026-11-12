@@ -8,9 +8,11 @@ the end-of-run passes can change the group again.
 
 The chain: an underpad QFN fanout, route_diff matches and records the pair
 CSI_CLK, then `route.py --nets '*'` routes the two CSI_D0 nets single-ended.
-Its post-route cleanup lays a short bridge on CSI_CLK_N and names the pair
-at the skew that gives; the end-of-run collapse then removes that bridge and
-other copper of the pair. The row kept the first number, which no board had.
+Its post-route cleanup's stub-gap snap lays a 32 um segment on CSI_CLK_N
+from a track end just outside a via's rim to a point inside it, which KiCad
+then measures into the via, and names the pair at the skew that gives; the
+end-of-run collapse then removes that segment. The row kept the first
+number, which no board had.
 
 Rows:
   1. the chain, CLI: the post-route line names the pair, the end-of-run
@@ -19,11 +21,14 @@ Rows:
      number -- or, when the pair ships within its rule, no row and one
      closing line;
   2. ...and batch_route in memory (the GUI's leg) returns the same rows;
-  3. unit, on snapshots: a group named in-run and shipped at another skew is
-     one row at the shipped skew; shipped no further out than it came in is
-     no row and a closing line; shipped as named is the row, unsaid twice; a
-     group only the end-of-run passes moved is reported as before; a group
-     the shipped board cannot measure keeps its in-run row.
+  3. unit, on snapshots: the rows are one comparison, from the snapshot
+     before the post-route cleanup to the shipped board. A group named in-run
+     and shipped at another skew is one row at the shipped skew; shipped no
+     further out than it came in is no row and a closing line; shipped as
+     named is the row, unsaid twice; a group only the end-of-run passes moved
+     is a row and a WARNING; a group out of range at the input that ships no
+     further out is no row; a group the shipped board cannot measure keeps
+     its in-run row.
 
     python3 tests/test_1798_shipped_skew_row.py
 """
@@ -158,59 +163,51 @@ def snap(skew, ids=(1, 2), mx=0.1):
 def unit_rows():
     print("3. unit: the rows, from snapshots")
     try:
-        from route import _shipped_skew_rows1798, _skew_rows_as_shipped1798
+        from route import _shipped_skew_rows1798, _skew_by_name
     except ImportError as e:
         check("route.py compares the in-run rows with the shipped board", False,
               str(e))
         return
-    key = (RULE, ('A_N', 'A_P'))
     named = [{'nets': ['A_P', 'A_N'], 'rule': RULE, 'skew_before_mm': 0.0878,
               'skew_after_mm': 0.39, 'min_mm': None, 'max_mm': 0.1,
               'was_within': True}]
 
-    def run(in_run, at_input, at_late, shipped):
+    def run(in_run, at_input, shipped):
+        # The shipped board is a re-parse: its net ids are (7, 8), and
+        # _late_skew_snapshot1798 keys it by name.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rows, replaced = _shipped_skew_rows1798(in_run, at_input, at_late,
-                                                    shipped)
+            rows = _shipped_skew_rows1798(in_run, at_input,
+                                          _skew_by_name(shipped))
         return ([(x['skew_before_mm'], x['skew_after_mm']) for x in rows],
-                replaced, buf.getvalue())
+                buf.getvalue())
 
-    # The shipped snapshot is keyed by another parse's net ids: (7, 8).
-    rows, rep, out = run(named, snap(0.0878), snap(0.39, (7, 8)),
-                         snap(0.3378, (7, 8)))
+    rows, out = run(named, snap(0.0878), snap(0.3378, (7, 8)))
     check("named in-run, shipped at another skew: one row at the shipped skew",
-          rows == [(0.0878, 0.3378)] and rep == {key}, f"{rows} {rep}")
+          rows == [(0.0878, 0.3378)], str(rows))
     check("...and one WARNING gives it", out.count('WARNING') == 1
-          and 'the post-route and end-of-run (#1798) cleanups moved A_P / A_N'
+          and 'the post-route and end-of-run cleanups (#1798) moved A_P / A_N'
           in out and '0.0878 -> 0.3378 mm' in out, out.strip())
-    rows, rep, out = run(named, snap(0.0878), snap(0.39, (7, 8)),
-                         snap(0.0878, (7, 8)))
-    check("named in-run, shipped as it came in: no row, the in-run row replaced",
-          rows == [] and rep == {key}, f"{rows} {rep}")
+    rows, out = run(named, snap(0.0878), snap(0.0878, (7, 8)))
+    check("named in-run, shipped as it came in: no row", rows == [], str(rows))
     check("...and one closing line", ' moved ' not in out and out.count('\n') == 1
           and "A_P / A_N ships within its skew rule 'r' (max 0.1 mm): skew "
               "0.0878 mm after the end-of-run cleanup (#1798), not the 0.3900 mm"
           in out, out.strip())
-    rows, rep, out = run(named, snap(0.0878), snap(0.39, (7, 8)),
-                         snap(0.39, (7, 8)))
+    rows, out = run(named, snap(0.0878), snap(0.39, (7, 8)))
     check("named in-run, shipped as named: the row, and nothing said twice",
-          rows == [(0.0878, 0.39)] and rep == {key} and out == '',
-          f"{rows} {rep} {out.strip()}")
-    rows, rep, out = run([], snap(0.05), snap(0.05, (7, 8)), snap(0.3, (7, 8)))
-    check("moved by the end-of-run passes only: their row and their WARNING",
-          rows == [(0.05, 0.3)] and rep == set() and out.count('WARNING') == 1
-          and 'the end-of-run cleanup (#1798) moved A_P / A_N' in out,
-          f"{rows} {rep} {out.strip()}")
-    rows, rep, out = run(named, snap(0.0878), snap(0.39, (7, 8)),
-                         snap(None, (7, 8)))
+          rows == [(0.0878, 0.39)] and out == '', f"{rows} {out.strip()}")
+    rows, out = run([], snap(0.05), snap(0.3, (7, 8)))
+    check("moved by the end-of-run passes only: its row and its WARNING",
+          rows == [(0.05, 0.3)] and out.count('WARNING') == 1
+          and 'cleanups (#1798) moved A_P / A_N' in out,
+          f"{rows} {out.strip()}")
+    rows, out = run([], snap(0.3), snap(0.25, (7, 8)))
+    check("out of range at the input and shipped no further out: no row",
+          rows == [] and out == '', f"{rows} {out.strip()}")
+    rows, out = run(named, snap(0.0878), snap(None, (7, 8)))
     check("not measurable on the shipped board: the in-run row stands",
-          rows == [] and rep == set() and out == '', f"{rows} {rep} {out.strip()}")
-    other = dict(named[0], nets=['B_P', 'B_N'])
-    new = dict(named[0], skew_after_mm=0.3378)
-    check("the replaced in-run row goes, another group's stays",
-          _skew_rows_as_shipped1798([named[0], other], [new], {key})
-          == [other, new])
+          rows == [(0.0878, 0.39)] and out == '', f"{rows} {out.strip()}")
 
 
 def main():
