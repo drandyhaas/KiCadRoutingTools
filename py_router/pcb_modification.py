@@ -2481,13 +2481,15 @@ class StrictRemovalModel:
             self._via_by_layer.append(dict(by_layer))
         # #1798: per via, per layer, the segments with an end ON the via's
         # centre (connectivity.VIA_CENTRE_TOL, #1235's definition of 'on').
-        # See _centre_lost_vias. _centre_far: (via, segment) -> which of the
-        # segment's two ends (its index in _seg_nodes) is the one OFF the
-        # centre; absent for a segment with both ends on it.
+        # See _centre_lost_vias. _centre_far: (via, segment) -> for a centred
+        # segment whose OTHER end also lies on the via's copper (a stub from
+        # the centre out to the rim), which of its two ends (its index in
+        # _seg_nodes) that is.
         from connectivity import VIA_CENTRE_TOL
         self._via_centred = []
         self._centre_far = {}
         for j, v in enumerate(self.vias):
+            reach = (getattr(v, 'size', 0.6) or 0.6) / 2.0
             centred = defaultdict(set)
             for L, ss in self._via_by_layer[j].items():
                 for i in ss:
@@ -2496,7 +2498,8 @@ class StrictRemovalModel:
                     d1 = math.hypot(s.end_x - v.x, s.end_y - v.y)
                     if min(d0, d1) <= VIA_CENTRE_TOL:
                         centred[L].add(i)
-                        if max(d0, d1) > VIA_CENTRE_TOL:
+                        if VIA_CENTRE_TOL < max(d0, d1) < \
+                                reach + s.width / 2 - 1e-6:
                             self._centre_far[(j, i)] = 0 if d0 > d1 else 1
             self._via_centred.append(dict(centred))
 
@@ -2562,10 +2565,12 @@ class StrictRemovalModel:
         of its via, and a pair leaving that via on the same layer joins it
         there through a stub of its own: removing that stub left the pad's
         track at the centre and the pair's track ending on the rim, a via
-        radius shorter. So a removal is also refused when a newly removed
-        centred segment's far end is the end of a kept track that touches
-        this via on this layer, and no other kept segment runs from that end
-        to the centre."""
+        radius shorter. So a removal is also refused when it newly takes such
+        a stub -- a centred segment whose far end lies on the via's copper --
+        while a kept track still ends at that far end and no kept segment
+        runs from there to the centre. A centred track whose far end lies
+        off the via is not a stub: removing it takes no track's way into
+        the centre."""
         touched = set()
         for i in E:
             if i not in prev_E:
@@ -2574,10 +2579,9 @@ class StrictRemovalModel:
             if j in D:
                 continue
             for L, centred in self._via_centred[j].items():
-                on_layer = self._via_by_layer[j].get(L, ())
                 if all(i in E for i in centred) and \
                         not all(i in prev_E for i in centred) and \
-                        any(i not in E for i in on_layer):
+                        any(i not in E for i in self._via_by_layer[j].get(L, ())):
                     return True
                 for i in centred:
                     far = self._centre_far.get((j, i))
@@ -2585,8 +2589,7 @@ class StrictRemovalModel:
                         continue
                     mates = [k for k in self._node_ends[self._seg_nodes[i][far]]
                              if k != i and k not in E]
-                    if any(k in on_layer for k in mates) and \
-                            not any(k in centred for k in mates):
+                    if mates and not any(k in centred for k in mates):
                         return True
         return False
 

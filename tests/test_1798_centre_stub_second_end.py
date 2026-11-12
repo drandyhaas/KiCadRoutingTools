@@ -19,6 +19,8 @@ Rows:
      the stub under keep_centre_stubs and removes it without; a duplicate of
      the stub is still removable; a redundant detour that leaves the centre
      through such a stub still goes, its outer run first and then the stub;
+     a direct track from the centre to where the stub's onward track ends
+     stays removable, the stub does not;
   2. the route_diff board carries the shape (a stub, a track carrying on
      from it that touches the via, another track end at that centre) on a
      pair graded within its recorded tolerance;
@@ -121,6 +123,17 @@ def unit_rows():
     check("a redundant detour from the centre still goes: its outer run, then "
           "the stub nothing carries on from", {3, 4} <= as_is and then,
           f"{as_is} then the stub: {then}")
+    # Control: a direct track from the centre to a point the stub's onward
+    # track also reaches. That track touches the via, but at the stub's far
+    # end, which the stub still joins to the centre: removing the direct
+    # track takes no track's way into the via, so it stays removable.
+    pads2 = [pad('U1', 0, 0), pad('U2', 10, 3)]
+    fork = [to_centre, seg(2, 0, 6, 3), seg(2, 0, 2, 0.29), seg(2, 0.29, 6, 3),
+            seg(6, 3, 10, 3)]
+    got = removable(fork, [via], pads2, True)
+    check("a direct track from the centre beside a stub and its onward track "
+          "stays removable; the stub does not", 1 in got and 2 not in got,
+          str(sorted(got)))
 
 
 def shape(path):
