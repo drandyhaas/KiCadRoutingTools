@@ -989,7 +989,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                          track_width, clearance, via_size, via_drill, grid_step,
                          allow_via_in_pad=False, board_edge_clearance=0.0,
                          progress_callback=None, net_clearances=None,
-                         fanned_net_ids=None):
+                         fanned_net_ids=None, same_net_pad_clearance=0.0):
     """Via-drop escape (issue #164): instead of a surface 45-degree fan, run a
     short stub from each pad to a through-via just past the pad edge and let
     signal routing pick the net up on an inner/back layer. This escapes a
@@ -1383,6 +1383,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                      layers=list(_via_cu), net_id=net_id)
         for pad, gx, gy, reach, hole in _pad_discs:
             if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
+                # #581: an active same-net pad via clearance keeps the via that far off every
+                # same-net SMD pad (an open via beside a pad wicks solder), not only out of it.
+                if (same_net_pad_clearance > 0
+                        and not (pad.drill and pad.drill > 0)
+                        and check_pad_via_overlap(pad, _cand, same_net_pad_clearance,
+                                                  _via_cu, 0.0)[0]):
+                    return False
                 continue
             if _pad_has_no_copper(pad):
                 # An NPTH hole: the via's copper is held off the hole wall at
@@ -2364,7 +2371,8 @@ def generate_qfn_fanout(footprint: Footprint,
                                         allow_via_in_pad=allow_via_in_pad,
                                         board_edge_clearance=board_edge_clearance,
                                         progress_callback=progress_callback,
-                                        net_clearances=_nc, fanned_net_ids=_nets)
+                                        net_clearances=_nc, fanned_net_ids=_nets,
+                                        same_net_pad_clearance=same_net_pad_clearance or 0.0)
         res = _drop_run(clearance)
         res_pads = list(LAST_UNDERPAD_REPORT.get('dropped_pads', ()))
         # #1328: the underpad escape escalates as the surface stub does. Its
