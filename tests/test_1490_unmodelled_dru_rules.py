@@ -11,7 +11,11 @@ check_complete said DONE while KiCad reported the errors. It is now named `NOT G
 clearance half of #1390's size disclosure: board_score lists `drc.dru_rules`
 ungraded and check_complete reads INCOMPLETE. The router names an
 `annular_width` rule it does not honour (no routing step sizes a via by it)
-in `design_rules.unsupported_rules`.
+in `design_rules.unsupported_rules`, and a `hole_clearance` rule (section 4):
+check_drc grades one, but no routing step reads it -- copper is kept off holes
+at the board's min_hole_clearance or the fab floor -- so a route step lists it
+NOT honoured on its console and in its JSON summary rather than passing it as
+consumed.
 
     python3 tests/test_1490_unmodelled_dru_rules.py
 """
@@ -30,6 +34,12 @@ import run_utils  # noqa: E402
 
 PY = [sys.executable, '-X', 'utf8']
 BOARD = os.path.join('kicad_files', 'flat_hierarchy.kicad_pcb')
+#: a small unrouted board with plated and NPTH holes, routed in section 4
+ROUTE_BOARD = os.path.join('kicad_files', 'esp_prog.kicad_pcb')
+HOLE_DRU = '''(version 1)
+(rule "via hole" (constraint hole_clearance (min 0.254mm))
+  (condition "A.Type == 'Track' && B.Type == 'Via'"))
+'''
 DRU = '''(version 1)
 (rule "hs gap" (constraint clearance (min 0.3mm))
   (condition "A.NetClass == 'HS' && B.NetClass == 'HS'"))
@@ -100,6 +110,28 @@ def main():
         from design_rules import DesignRules
         names = [n for n, _w in DesignRules.from_project(parse_kicad_pcb(b), b).unsupported()]
         check("design_rules.unsupported() lists 'via ring'", 'via ring' in names, f'{names}')
+
+        print("4. a route step names the hole_clearance rule it does not honour")
+        h = os.path.join(td, 'h', 'h.kicad_pcb')
+        os.makedirs(os.path.dirname(h))
+        run([os.path.join('py_router', 'copy_board.py'), ROUTE_BOARD, h])
+        run_utils.evidence(h)
+        with open(os.path.join(td, 'h', 'h.kicad_dru'), 'w') as fh:
+            fh.write(HOLE_DRU)
+        why = dict(DesignRules.from_project(parse_kicad_pcb(h), h).unsupported())
+        check("design_rules.unsupported() lists 'via hole' as hole_clearance",
+              why.get('via hole', '').startswith('hole_clearance: '), f'{why}')
+        r = run_utils.check(PY + [os.path.join('py_router', 'route.py'), h,
+                                  os.path.join(td, 'h', 'out.kicad_pcb')], accept=True)
+        check("route.py says the rule is NOT honoured and that KiCad enforces it",
+              any(ln.strip().startswith(".kicad_dru rule 'via hole': NOT honoured "
+                                        "(hole_clearance: ")
+                  and ln.endswith('KiCad will still enforce it')
+                  for ln in r.stdout.splitlines()), r.stdout[-800:])
+        rows = [ln for ln in r.stdout.splitlines() if ln.startswith('JSON_SUMMARY:')]
+        block = json.loads(rows[-1].split(':', 1)[1]).get('design_rules', {}) if rows else {}
+        check("route.py's JSON summary lists it in design_rules.unsupported_rules",
+              block.get('unsupported_rules') == ['via hole'], json.dumps(block)[:400])
     finally:
         shutil.rmtree(td, ignore_errors=True)
     if failures:
