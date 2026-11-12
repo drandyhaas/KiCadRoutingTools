@@ -1282,11 +1282,14 @@ of a staged copy, on the fill as shipped, whose error-severity violations are
 counted per rule KiCad names in them. A rule with none is disclosed (`judged
 by KiCad <version>`) and stops blocking; one with N blocks, named with its
 count; one KiCad's report cannot be attributed to stays as before, saying why
-(no kicad-cli, a timeout, a rules file KiCad refuses whole (#1690), a rule
+(no kicad-cli, a timeout, a rules file KiCad does not load (#1690), a rule
 name the file declares twice or one containing a quote, or a violation type
-kicad-cli cut at 199 rows). The per-rule results are the document's
-`kicad_rules`, `measured_by: kicad-cli`. With the flag the verdict depends on
-the installed KiCad. A component the BOARD declares and nothing grades (a project
+kicad-cli cut at 199 rows). Whether KiCad loaded the file is asked of KiCad:
+the staged copy's rules file gets one probe rule that KiCad reports once, at
+warning severity, and a report with no row naming it or any rule of the file
+is a file KiCad dropped, whatever the reason. The per-rule results are the
+document's `kicad_rules`, `measured_by: kicad-cli`. With the flag the verdict
+depends on the installed KiCad. A component the BOARD declares and nothing grades (a project
 diff-pair net class with no `.kicad_dru` skew / `diff_pair_uncoupled` rule
 that binds it) is named apart, `DISCLOSED, not counted`. Net impedance
 declarations recorded by `route.py --impedance` and the power widths route.py
