@@ -497,7 +497,7 @@ def run(keep, board_file=BOARD, require_moves=False):
         print("PARITY: " + json.dumps(PARITY, sort_keys=True), flush=True)
         if require_moves:
             check("the run moved parts, so Apply's poses are exercised", moved_by_run,
-                  "no part moved")
+                  ", ".join(moved_by_run) or "no part moved")
             check("the run poured zones, so Apply's zones are exercised",
                   PARITY.get('zones', 0) > 0)
         if board_file != BOARD:
