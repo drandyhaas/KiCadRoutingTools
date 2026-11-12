@@ -19,6 +19,7 @@ runnable tool in the clone with a one-line purpose.
   [non-orthonormal segments](#non-orthonormal-segment-checker-check_orthonormalpy) ·
   [impedance](#impedance-audit-check_impedancepy) ·
   [return vias](#return-via-coverage-check_return_viaspy) ·
+  [power drop](#power-drop-report-check_power_droppy) ·
   [reachability](#reachability-check-check_reachabilitypy) ·
   [net forensics](#net-forensics-net_forensicspy) ·
   [hand-join verifier](#hand-join-verifier-check_joinpy)
@@ -3243,6 +3244,60 @@ nearest return distance. A raw count over-reads vias inside a BGA field, and a
 layer change between two layers that share one reference plane: the stackup is
 not consulted. `board_score --impedance-nets` publishes the count for the named
 nets as `advisory.return_vias`, outside `blocking`.
+
+## Power Drop Report (`check_power_drop.py`)
+
+How many millivolts does each load lose, and how much current does each via
+carry, with every load drawing at once (#1847)? The "Power trace ampacity"
+line a route step prints names a net's narrowest segment and its rating; it
+does not know the loads. This solves each net of a loads file as one resistor
+network of its tracks, vias and copper pours. Read-only, report-only (exit 0 whatever it
+finds; 3 for a missing board or loads file, 2 for a loads file it cannot read).
+
+```bash
+python3 py_tools/check_power_drop.py routed.kicad_pcb --loads loads.json \
+    [--via-plating-um UM] [--pour-mesh-mm MM] [--temp-rise C] [--json report.json]
+```
+
+The loads file states what a board file cannot -- which pad feeds the net and
+what each load draws (pads as `REF.PAD`, currents in A):
+
+```json
+{"nets": {"+3V3": {"sources": ["J1.1"],
+                   "loads": {"U1.1": 0.5, "U2.1": 0.3}}}}
+```
+
+- A track segment is `rho * length / (width * thickness)`, at its layer's own
+  copper weight from the stackup (1 oz without one). A via is a barrel
+  between the layers it is joined on, `rho * height / (pi * (drill - wall) *
+  wall)`, its height from the stackup (1.6 mm of board without one).
+- A copper pour is a sheet of `rho / thickness` ohms per square: its fill is
+  read from the fill model (`plane_fill_model.get_fill_models`, the copper the
+  pour lays around foreign items) and solved on a square mesh, each cell
+  weighted by the share of it that is copper. A via, a pad and a track end on
+  the pour meet the cells under their copper.
+- `--pour-mesh-mm` — the mesh cell, default 0.25. A 20 x 2 mm strip between
+  two pads reads within 1% of `rho * L / (W * t)` at the default.
+- `--via-plating-um` — the barrel wall, default 25. It is an ASSUMPTION about
+  the fab, and the report says so until the flag states it.
+- `--temp-rise` — the rise the ratings are read at, default 10 °C: IPC-2152
+  for a track (`plane_resistance.calculate_max_current_ipc2152`), IPC-2221 on
+  the barrel's plated cross-section for a via.
+
+Per net it prints the current solved and the worst drop, each load's drop,
+each via's current against its rating, and the track segments carrying the
+most (every one in `--json`), marking `OVER` what exceeds its rating. Several
+vias in parallel share the current by their resistances, so a rail that
+needs two vias and has one shows that via over its rating.
+
+What is not in the solve is named, never guessed: a load with no copper path
+to a source is `NOT SOLVED` and gets no number; **thermal-relief spokes are
+not modelled** (a pad's contact with a pour is taken as solid, so its drop
+reads low by the spokes' resistance); a pour with no fill model is left out
+and the drop is then an upper bound; footprint graphic copper is left out; a
+pad reference that is not on the net is an error on that net. The pour is
+read from this tool's fill model of the zone, not from KiCad's stored fill.
+The engine is `power_drop.solve_net`.
 
 ## Reachability Check (`check_reachability.py`)
 
