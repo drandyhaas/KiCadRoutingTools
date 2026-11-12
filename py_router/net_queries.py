@@ -209,6 +209,22 @@ def account_net_patterns(patterns, pcb_data):
     return no_net, matched
 
 
+def no_net_patterns_note(no_net, flag: str, commas: bool = False) -> str:
+    """The line naming the NO_NET patterns of FLAG (`account_net_patterns`'
+    first answer), with the accepted spellings when one holds whitespace: it
+    was read as ONE pattern, since a net name may hold a space (#1553).
+    COMMAS says whether FLAG also splits a token at its commas."""
+    note = (f"{flag} pattern(s) matching no net of the board: "
+            + ', '.join(repr(p) for p in no_net))
+    spaced = [p for p in no_net if any(ch.isspace() for ch in p)]
+    if spaced:
+        note += (f" ({', '.join(repr(p) for p in spaced)} was read as one "
+                 f"pattern holding whitespace: give each pattern its own "
+                 f"argument" + (", or join them with commas" if commas else "")
+                 + ")")
+    return note
+
+
 def literal_net_patterns(patterns: Optional[List[str]],
                          known_net_names) -> Optional[List[str]]:
     """PATTERNS with each one that spells a board net verbatim made literal.

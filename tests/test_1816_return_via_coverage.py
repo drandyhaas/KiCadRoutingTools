@@ -164,17 +164,20 @@ def t_nothing_left_out_reads_as_covered():
         # a pattern naming no net of the board
         js = os.path.join(td, 'none.json')
         check(tool + [BOARD, '--nets', 'NO_SUCH_NET', '--json', js],
-              refuse="PATTERNS matching no net of the board: 'NO_SUCH_NET'", code=2)
+              refuse="--nets pattern(s) matching no net of the board: 'NO_SUCH_NET'", code=2)
         with open(evidence(js, 'check_return_vias JSON'), encoding='utf-8') as f:
             assert json.load(f)['patterns_matching_no_net'] == ['NO_SUCH_NET']
         two = f'{SIGNAL}, Net-(U2A-DATA_22)'
-        check(tool + [BOARD, '--nets', two],
-              refuse=f"({two!r} was read as one pattern holding whitespace", code=2)
+        r = check(tool + [BOARD, '--nets', two],
+                  refuse=f"({two!r} was read as one pattern holding whitespace",
+                  code=2)
+        # --nets does not split at commas, so the hint must not offer them
+        assert 'commas' not in r.stdout, r.stdout[:400]
         r = check(tool + [BOARD, '--nets', SIGNAL, 'NO_SUCH_NET'],
-                  refuse="PATTERNS matching no net of the board: 'NO_SUCH_NET'", code=2)
+                  refuse="--nets pattern(s) matching no net of the board: 'NO_SUCH_NET'", code=2)
         assert 'Return vias: 3 of 3 signal via(s)' in r.stdout, r.stdout[:400]
         r = check(tool + [BOARD, '--nets', SIGNAL, '--json', js], accept=True)
-        assert 'PATTERNS' not in r.stdout and 'Left out as power' not in r.stdout, \
+        assert 'matching no net' not in r.stdout and 'Left out as power' not in r.stdout, \
             r.stdout[:400]
         with open(evidence(js, 'check_return_vias JSON'), encoding='utf-8') as f:
             rep = json.load(f)

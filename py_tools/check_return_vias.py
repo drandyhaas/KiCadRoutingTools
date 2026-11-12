@@ -68,7 +68,7 @@ def main(argv=None) -> int:
 
     from kicad_parser import parse_kicad_pcb
     from net_queries import (account_net_patterns, board_net_names,
-                             matches_net_filter)
+                             matches_net_filter, no_net_patterns_note)
     from return_vias import return_via_coverage
     pcb = parse_kicad_pcb(a.board)
     net_ids, no_net = None, []
@@ -84,12 +84,7 @@ def main(argv=None) -> int:
            'patterns_matching_no_net': no_net, **rep, 'caveat': CAVEAT}
 
     if no_net:
-        spaced = [p for p in no_net if any(ch.isspace() for ch in p)]
-        print("PATTERNS matching no net of the board: "
-              + ', '.join(repr(p) for p in no_net)
-              + (f" ({', '.join(repr(p) for p in spaced)} was read as one "
-                 f"pattern holding whitespace: give each pattern its own "
-                 f"argument)" if spaced else '')
+        print(no_net_patterns_note(no_net, '--nets')
               + " -- the count below covers only the nets the other "
                 "patterns name")
     if rep['uncovered'] is None:

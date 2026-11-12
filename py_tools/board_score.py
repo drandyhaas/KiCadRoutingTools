@@ -1137,20 +1137,6 @@ def _glob_literal(name: str) -> str:
     return '\\' + lit if lit.startswith('!') else lit
 
 
-def _no_net_reason(no_net) -> str:
-    """The unknown reason for patterns that name no net of the board, with
-    the two accepted spellings when one holds whitespace: it was read as ONE
-    pattern, since a net name may hold a space (#1553)."""
-    why = ('--impedance-nets pattern(s) matching no net of the board: '
-           + ', '.join(repr(p) for p in no_net))
-    spaced = [p for p in no_net if any(ch.isspace() for ch in p)]
-    if spaced:
-        why += (f" ({', '.join(repr(p) for p in spaced)} was read as one "
-                f"pattern holding whitespace: give each pattern its own "
-                f"argument, or join them with commas)")
-    return why
-
-
 def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
     """check_impedance -- reference-plane continuity and declared-gap audit.
 
@@ -1239,7 +1225,7 @@ def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
     graded_names = {r['net_name'] for r in graded}
     # #1815: each pattern accounted on its own, matched as `named` matches
     # (check_impedance's own matcher), so it selects the same nets here.
-    from net_queries import account_net_patterns
+    from net_queries import account_net_patterns, no_net_patterns_note
     no_net, matched = (account_net_patterns(asked, pcb)
                        if pcb is not None else ([], {}))
     extra['patterns_matching_no_net'] = no_net
@@ -1253,7 +1239,8 @@ def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
         # `ungraded`: the comma-joined form of --impedance-nets silently
         # zero-matched for four whole runs on one board while blocking summed
         # without the component and the exit code read 0 (test-board run 5).
-        return {'ran': True, 'count': None, 'reason': _no_net_reason(no_net),
+        return {'ran': True, 'count': None, 'reason': no_net_patterns_note(
+                    no_net, '--impedance-nets', commas=True),
                 **extra}
     if not graded:
         if pcb is not None:
@@ -2240,18 +2227,20 @@ def main():
             * bool(_pnr)))
     _rv = score['components'].get('return_vias') or {}
     _rvp = _rv.get('power_nets') or {}
-    if _rv.get('count') or (_rvp and _rv.get('count') is not None):
-        # a named net read as power is not examined: say so, or its 0 reads
-        # as full coverage
-        print(f"RETURN VIAS (measured, not blocking): {_rv['count']} of "
-              f"{_rv['signal_vias']} signal via(s) on the --impedance-nets nets "
-              f"have no {_rv['gnd_net']}-domain via or drilled pad within "
-              f"{_rv['distance_mm']:g} mm"
-              + (f"; {_rv['power_vias']} via(s) on --impedance-nets net(s) "
-                 f"were left out as power, not examined: "
-                 + ', '.join(f"{n} ({r['why']})" for n, r in list(_rvp.items())[:8])
-                 + (', ...' if len(_rvp) > 8 else '') if _rvp else '')
-              + " -- check_return_vias.py lists them")
+    # Printed when a via is uncovered, and also when a named net's vias were
+    # left out as power: its 0 would otherwise read as full coverage.
+    if _rv.get('count') is not None and (_rv['count'] or _rvp):
+        _line = (f"RETURN VIAS (measured, not blocking): {_rv['count']} of "
+                 f"{_rv['signal_vias']} signal via(s) on the --impedance-nets "
+                 f"nets have no {_rv['gnd_net']}-domain via or drilled pad "
+                 f"within {_rv['distance_mm']:g} mm")
+        if _rvp:
+            _line += (f"; {_rv['power_vias']} via(s) on --impedance-nets "
+                      f"net(s) were left out as power, not examined: "
+                      + ', '.join(f"{n} ({r['why']})"
+                                  for n, r in list(_rvp.items())[:8])
+                      + (', ...' if len(_rvp) > 8 else ''))
+        print(_line + " -- check_return_vias.py lists them")
     _df = _imp.get('declared_failing') or []
     if _df:
         print(f"DECLARED IMPEDANCE (measured, not graded): {len(_df)} net(s) the "

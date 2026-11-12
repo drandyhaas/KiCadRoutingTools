@@ -3237,7 +3237,7 @@ python3 py_tools/check_return_vias.py routed.kicad_pcb [--nets GLOB ...] \
 
 - `--nets` — only the vias of these nets (`route.py --nets` glob syntax);
   default every signal via. Each pattern is accounted on its own: one naming
-  no net of the board is named (`PATTERNS matching no net of the board`,
+  no net of the board is named (`--nets pattern(s) matching no net of the board`,
   `patterns_matching_no_net`) and the exit is 2, since the `0 of 0` it selects
   would read as full coverage.
 - `--distance` — default 2.0 mm, the `--add-gnd-vias` step's own
