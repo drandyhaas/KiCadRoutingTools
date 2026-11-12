@@ -5,7 +5,6 @@ Tiny in-memory board on upstream's #581 fixture, real Rust A*: with an active
 clearance a via may not land in or beside a same-net SMD pad; with none, the
 legacy in-pad via is kept.
 """
-import ast
 from pathlib import Path
 import sys
 
@@ -13,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 for sub in ('py_router', 'py_tools', 'rust_router', 'tests'):
     sys.path.insert(0, str(ROOT / sub))
 from test_581_same_net_pad_via_clearance import _pad, _pcb
-from routing_config import GridRouteConfig, GridCoord
+from routing_config import GridRouteConfig
 from plane_region_connector import build_base_obstacles, route_plane_connection_wide
 from obstacle_map import same_net_pad_via_keepout_cells
 
@@ -58,21 +57,15 @@ def main():
                 [(6, 6, 'F.Cu')], [(6, 6, 'B.Cu')], 0, cfg.layers, obs, cfg, [(6, 6)],
                 max_iterations=10000)
             check('existing barrel reused without new via', reused is not None and not reused[1])
-            # The direct stitch fallback must reject this same blocked site.
-            tree = ast.parse((ROOT/'py_router/kicad_oracle.py').read_text(encoding='utf-8'))
-            assignments = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
-                           and any(isinstance(t, ast.Name) and t.id == '_ok649' for t in n.targets)
-                           and not (isinstance(n.value, ast.Constant) and n.value.value is False)]
-            check('one direct-stitch initial guard', len(assignments) == 1)
-            for x, want in ((6, False), (8, True)):
-                # upstream's own clearance test passes (nothing foreign here); the
-                # same-net pad keep-out is the term under test
-                import kicad_oracle
-                env = dict(vars(kicad_oracle), config=cfg, base_obstacles=obs, GridCoord=GridCoord,
-                           _vx=x, _vy=6, pcb_data=pcb, net_id=1, _h2h=0.2,
-                           _stitch_via_clear=lambda *a: True)
-                got = eval(compile(ast.Expression(assignments[0].value), 'stitch-guard', 'eval'), env)
-                check(f'direct stitch at {x}: {want}', got == want)
+            # The oracle's direct stitch bypasses A* and asks the same map.
+            from kicad_oracle import _same_net_pad_via_blocked
+            for x, want in ((6, True), (8, False)):
+                check(f'direct stitch blocked at {x}: {want}',
+                      _same_net_pad_via_blocked(cfg, obs, x, 6) == want)
+        else:
+            from kicad_oracle import _same_net_pad_via_blocked
+            check(f'{gap}: direct stitch keeps the in-pad via',
+                  not _same_net_pad_via_blocked(cfg, obs, 6, 6))
 
     print(f'{len(failures)} failure(s)')
     return bool(failures)
