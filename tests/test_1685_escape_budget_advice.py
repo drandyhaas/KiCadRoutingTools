@@ -168,13 +168,13 @@ def test_advice_takes_effect(work):
            (r['escape_budget'], r['drc_grazes']))
 
 
-class Scripted:
+class Scripted(AP.ChainEvents):
     """Chain.run scripted: the summary of each rung, by its index."""
 
     def __init__(self, rows):
         self.rows, self.runs = rows, []
 
-    def run(self, kind, args, tag):
+    def run(self, kind, args, tag, **kw):
         i = len(self.runs)
         self.runs.append(tag)
         return f'r{i}', self.rows[i], {}

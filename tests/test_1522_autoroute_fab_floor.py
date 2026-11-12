@@ -43,7 +43,7 @@ def test_analyze():
            f"clearance {a['clearance']} is the fab floor {floor}, not the class {declared}")
 
 
-class RecordingChain:
+class RecordingChain(AP.ChainEvents):
     """Chain.run recorded; every fanout rung reports a dropped escape, so the
     whole ladder runs."""
 
@@ -53,7 +53,7 @@ class RecordingChain:
         self.steps = []
         self.last_iterations = 100
 
-    def run(self, kind, args, tag):
+    def run(self, kind, args, tag, **kw):
         self.runs.append((kind, tag, list(args)))
         self.steps.append({'tag': tag, 'ok': True})
         s ={'escaped': 1, 'failed': 1} if kind in ('bga', 'qfn') else {}

@@ -212,6 +212,53 @@ def main():
                   f"forms, old 0 -> auto, new ticked 0 -> explicit 0)")
         restore_dialog_settings(dlg, settings)
 
+    # 7. The Auto page moved to the front. A file an older plugin saved names
+    #    the open page by INDEX in the old order; it must come back as the
+    #    page it named. And the Autorouter's options must round-trip by value.
+    if settings is not None:
+        from kicad_routing_plugin.tab_names import page_index
+        bad = []
+        old = dict(settings)
+        for k in ('active_tab_name', 'ai_active_subtab_name'):
+            old.pop(k, None)
+        old.update({'active_tab': 1, 'ai_active_subtab': 1})
+        restore_dialog_settings(dlg, old)
+        got = (dlg.notebook.GetPageText(dlg.notebook.GetSelection()),
+               dlg.ai_notebook.GetPageText(dlg.ai_notebook.GetSelection()))
+        if got != ('Advanced', 'AI Placement'):
+            bad.append(f"legacy file: pages {got}, want ('Advanced', 'AI Placement') "
+                       f"-- old index 1 was 'Advanced options' and 'Placement'")
+        named = dict(settings, active_tab_name='Planes', active_tab=0,
+                     ai_active_subtab_name='AI Placement', ai_active_subtab=0)
+        restore_dialog_settings(dlg, named)
+        got = (dlg.notebook.GetPageText(dlg.notebook.GetSelection()),
+               dlg.ai_notebook.GetPageText(dlg.ai_notebook.GetSelection()))
+        if got != ('Planes', 'AI Placement'):
+            bad.append(f"by name: pages {got}, want ('Planes', 'AI Placement')")
+        opts = dlg.autoroute_tab.options
+        opts.finish.SetValue(True)
+        opts.effort_factor.SetValue(3.5)
+        opts.plane_layer_cost.SetValue(2.5)
+        saved = get_dialog_settings(dlg)
+        dlg2 = RoutingDialog(None, parse_kicad_pcb(board), board)
+        try:
+            if page_index(dlg2.notebook, 'Auto') != 0 or dlg2.notebook.GetSelection() != 0:
+                bad.append("a fresh dialog does not open on the Auto page")
+            restore_dialog_settings(dlg2, saved)
+            want = {'finish': True, 'effort_factor': 3.5, 'plane_layer_cost': 2.5}
+            got2 = dlg2.autoroute_tab.get_config()
+            if got2 != want:
+                bad.append(f"autoroute options: restored {got2}, want {want}")
+        finally:
+            dlg2.Destroy()
+        if bad:
+            failures.append("Auto tab restore: " + "; ".join(bad))
+        else:
+            print("  Auto tab restore: OK (legacy page index, pages by name, "
+                  "autoroute options by value)")
+        dlg.autoroute_tab.reset_to_defaults()
+        restore_dialog_settings(dlg, settings)
+
     dlg.Destroy()
 
     print()

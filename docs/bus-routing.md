@@ -15,7 +15,7 @@ Without bus routing, each net in a data bus is routed independently and the resu
 python3 py_router/route.py board.kicad_pcb --nets "DATA*" --bus
 ```
 
-The GUI's Advanced options tab has the same switch ("Enable bus routing", with the four parameters below) and the `bus` ordering choice. `route_diff.py` accepts the `--bus` flags, but pairs are never bus-routed: the parameters are ignored there.
+The GUI's Advanced tab has the same switch ("Enable bus routing", with the four parameters below) and the `bus` ordering choice. `route_diff.py` accepts the `--bus` flags, but pairs are never bus-routed: the parameters are ignored there.
 
 ## Command-Line Options
 

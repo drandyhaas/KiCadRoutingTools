@@ -12,9 +12,9 @@ Building blocks:
   and returns the machine-readable RESULT=<value> last line
 - run_skill_dialog(): the one-call helper the other tabs use (CLI-missing
   guard + prompt phrasing + modal run)
-- AITab: the "Routing" page of the routing dialog's "AI Drive" tab
+- AITab: the "AI Routing" page of the routing dialog's "Auto" tab
   (backend/model/effort selection, planning, plan execution, review,
-  diagnosis); the "Placement" page beside it is placement_gui.PlacementTab
+  diagnosis); the "AI Placement" page beside it is placement_gui.PlacementTab
 """
 
 import os
@@ -384,7 +384,7 @@ def run_skill_dialog(parent, title, skill, skill_args, instructions, intro,
 
 
 class AITab(wx.Panel):
-    """AI Drive's Routing page: run AI skills headless and bring results
+    """The Auto tab's AI Routing page: run AI skills headless and bring results
     into the GUI."""
 
     def __init__(self, parent, board_filename, log_callback=None, routing_dialog=None):

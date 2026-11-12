@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Make a GUI routing plan (plan.json) from a recorded command chain (#507).
 
-A plan JSON is what the GUI's AI Drive tab loads (its Routing sub-tab: Load...
+A plan JSON is what the GUI's Auto tab loads (its AI Routing sub-tab: Load...
 next to "Parsed result")
 and what ``run_plan.py`` executes headless. Every stress run writes one; this
 makes the same file on demand from any recorded manifest:

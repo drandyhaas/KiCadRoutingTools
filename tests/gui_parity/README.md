@@ -155,7 +155,16 @@ openings and graphic copper), `test_967_pad_geometry_coverage.py`,
 (the placement writer's layer flip against pcbnew's own `Flip`; the flip's
 acceptance gate, which exits 2 rather than skipping without pcbnew).
 
-Placement tab: `test_placement_apply_locks.py` (below),
+Auto tab, Autorouter sub-tab: `test_autoroute_tab_gui.py` -- the dialog's page
+and sub-tab order, then the REAL tab runs autoroute.py on splitflap_driver and
+its checklist must end in the CLI's own step states and shipped grade; after
+Apply the live board, saved as KiCad saves it, must grade as the CLI's output
+(check_connected issues, check_drc violations) with the same zones, poses,
+tracks and vias; a step made to fail (`KRT_AUTOROUTE_FAIL_STEPS`) must show in
+its row and the detail pane, a run that fails outright must say FAILED, and
+Stop must end a run mid-route. About two minutes.
+
+AI Placement tab: `test_placement_apply_locks.py` (below),
 `test_placement_apply_graphics.py` (Apply lays tracks, never the result's
 copper graphics), `test_placement_fake_run.py` (the whole runner against a
 fake claude CLI, `fixtures/fake_claude.py`).

@@ -2635,6 +2635,9 @@ or two intent blocks declaring one part at different angles.
 
 ## Deterministic Plan Router (`autoroute.py`)
 
+The plugin's **Auto › Autorouter** sub-tab runs this script on a snapshot of the
+open board and shows its plan and steps from the event lines below.
+
 Routes a board through a chain built from the board itself -- footprints,
 net names, layer count and the board's own design rules -- without an agent.
 It makes the same kinds of choices the plan-pcb-routing skill asks an agent
@@ -2747,6 +2750,20 @@ the best board the chain has ships (with `--finish`, the input board itself),
 replacing the output and its whole sibling set. The input may be a board
 inside `<output>.autoroute/` from an earlier run: it is staged before that
 directory is cleared.
+
+Besides its prose the run prints one JSON object per line for a program to
+follow it (the plugin's Autorouter sub-tab reads nothing else):
+
+| Line | When | What it carries |
+|------|------|-----------------|
+| `AUTOROUTE_ANALYSIS` | first | everything `analyze()` read off the board, including where the rules came from (`rules_source`), why each part is fanned out (`fanout_why`) and why the larger ones are not (`not_fanned`), and the grounds and rails it found |
+| `AUTOROUTE_PLAN` | after the analysis | the design rules and `rules_why`, planes, parts, pairs, power nets, and `steps`: one `{tag, tool, what, why, optional}` row per step it means to run; an optional row runs only if what comes before calls for it |
+| `AUTOROUTE_STEP` | each step start and end | `state` `running`, then `done` or `failed` (one of each per step run), or `skipped` with its `reason` for a planned step that never ran. An ending carries `seconds`, `rc`, a one-line `result`, the step's own `summary` (escapes, caps moved, pairs routed, routed/failed/vias), the `cmd` and `log`, a route pass's `grade` (open nets, real DRC) and whether it was `kept`, and on failure `error_tail`, the last lines of its log. A step the plan did not list (a fanout's next rung, a re-fan, the pair re-route) names its planned row as `parent` |
+| `AUTOROUTE_DECISION` | when the chain chooses | `{tag, kept, why}`: the fanout rung kept, a re-fan or a route pass kept or not, the pair nets ripped or re-routed |
+| `AUTOROUTE_SUMMARY` | last | the shipped step (`final_step`, `final_tag`), `output`, `open`, `open_nets`, `drc`, `drc_items`, `seconds`; with `error` when nothing shipped |
+
+`KRT_AUTOROUTE_FAIL_STEPS` (step tags, comma separated) makes those steps run
+a stand-in that exits 3, so a test can drive the failure path on a real board.
 
 Net names reach every tool as patterns that select that net alone through the
 tools' own selectors, which also match a pattern's last sheet component and
@@ -3550,7 +3567,7 @@ marks the board modified so your next save keeps it. A single **"Fix DRC setting
 after routing"** checkbox on the **Route tab** controls this for every routing
 action in the dialog — single-ended routing, differential pairs, and plane
 create/repair all read that one shared toggle (it is on by default); a **"Relax
-non-routing DRC severities in the project"** checkbox on the **Advanced options
+non-routing DRC severities in the project"** checkbox on the **Advanced
 tab** is the GUI counterpart of `--relax-drc-severities` (off by default). Both
 front-ends share the same target-computing logic (`compute_targets` /
 `severity_plan` in `fix_kicad_drc_settings.py`) and differ only in how they apply

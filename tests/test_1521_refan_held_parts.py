@@ -202,7 +202,7 @@ def test_held_parts():
     check("a locked part is never held (the fanout already clears it)", got == {}, got)
 
 
-class ScriptedChain:
+class ScriptedChain(AP.ChainEvents):
     """Chain.run and Chain.check_drc scripted: each board's report is
     REPORTS[board]; a fanout run reports FAILED[tag] dropped escapes."""
 
@@ -213,7 +213,7 @@ class ScriptedChain:
         self.runs = []
         self.steps = []
 
-    def run(self, kind, args, tag):
+    def run(self, kind, args, tag, **kw):
         out = f'{tag}.out'
         self.runs.append((kind, tag, args, self.cur))
         n = self.failed.get(tag, 0)

@@ -10,7 +10,7 @@ placements that route from the ones that do not. Parts the board locks stay
 where they are.
 
 The `plan-pcb-placement` skill (`.claude/skills/plan-pcb-placement/`) runs the
-whole loop, and the KiCad plugin's **AI Drive › Placement** tab runs the skill.
+whole loop, and the KiCad plugin's **Auto › AI Placement** tab runs the skill.
 
 ![tigard: the pile, and seed 0 placed](../../docs/placement-tigard-placed.png)
 
@@ -486,7 +486,7 @@ and routed in full ([Utilities](../../docs/utilities.md#placement-movie-place_mo
 
 ## The GUI tab
 
-The KiCad plugin's **AI Drive › Placement** tab runs the same skill on the open
+The KiCad plugin's **Auto › AI Placement** tab runs the same skill on the open
 board, laid out like the routing tab: the AI column sets the backend (Claude
 Code), model, effort and extra instructions, and **Place (AI)** runs
 `/plan-pcb-placement place`, **Place + Route (AI)** runs `full`, headless on a
@@ -500,7 +500,7 @@ placement back (after Place + Route, its tracks and vias too). **Beautify
 Labels** tidies reference designators without AI (the CLI is
 `py_placer/beautify_labels.py`).
 
-![the AI Drive › Placement tab](../../docs/placement-ai-tab.png)
+![the Auto › AI Placement tab](../../docs/placement-ai-tab.png)
 
 ## Decap clearance after fanout: place_fanout_clearance
 

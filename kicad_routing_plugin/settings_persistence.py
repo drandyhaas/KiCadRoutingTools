@@ -4,6 +4,26 @@ KiCad Routing Tools - Dialog Settings Persistence
 Handles saving and restoring dialog settings between invocations.
 """
 
+from .tab_names import LEGACY_MAIN_PAGES, LEGACY_AUTO_SUBTABS, page_index
+
+
+def _page_name(notebook):
+    """The title of NOTEBOOK's open page, or '' when none is open."""
+    i = notebook.GetSelection()
+    return notebook.GetPageText(i) if i >= 0 else ''
+
+
+def _restore_page(notebook, name, legacy_index, legacy_pages):
+    """Open NOTEBOOK's page NAME; with no name (a file an older plugin saved),
+    the page its LEGACY_INDEX named in that plugin's page order LEGACY_PAGES.
+    A page that no longer exists leaves the notebook on its default page."""
+    if not name and isinstance(legacy_index, int) and \
+            0 <= legacy_index < len(legacy_pages):
+        name = legacy_pages[legacy_index]
+    i = page_index(notebook, name) if name else None
+    if i is not None:
+        notebook.SetSelection(i)
+
 
 def get_dialog_settings(dialog):
     """Get all current dialog settings for persistence.
@@ -15,8 +35,11 @@ def get_dialog_settings(dialog):
         dict: All settings that should be persisted
     """
     settings = {
-        # Tab selection
+        # Tab selection, by page NAME: an index re-points when a page moves
+        # (the Auto page moved to the front). `active_tab` (the index) is
+        # still written for an older plugin reading this file.
         'active_tab': dialog.notebook.GetSelection(),
+        'active_tab_name': _page_name(dialog.notebook),
 
         # Net selections (use net names for persistence across reloads)
         'net_panel_checked': list(dialog.net_panel.get_selected_nets()),
@@ -106,7 +129,7 @@ def get_dialog_settings(dialog):
         'board_edge_clearance_override': dialog.edge_clearance_check.GetValue(),
         'direction_choice': dialog.direction_choice.GetSelection(),
 
-        # Advanced options
+        # Advanced tab
         'mps_reverse_rounds': dialog.mps_reverse_rounds.GetValue(),
         'mps_layer_swap': dialog.mps_layer_swap.GetValue(),
         'keep_input_copper': dialog.keep_input_copper.GetValue(),
@@ -271,17 +294,22 @@ def get_dialog_settings(dialog):
         'opencode_effort': dialog.ai_tab.get_effort_value_for('opencode'),
         'ai_plan': dialog.ai_tab.get_plan_state(),
 
-        # Placement sub-tab of the AI notebook (issue #481). The labels
-        # options travel as ONE dict so the panel can grow fields without new
-        # persistence keys; the transcript is deliberately NOT persisted (an
-        # hours-long run's stream can be tens of MB).
+        # The Auto notebook's open sub-tab, by name (see active_tab_name).
         'ai_active_subtab': dialog.ai_notebook.GetSelection() if hasattr(dialog, 'ai_notebook') else 0,
+        'ai_active_subtab_name': (_page_name(dialog.ai_notebook)
+                                  if hasattr(dialog, 'ai_notebook') else ''),
+        # AI Placement sub-tab (issue #481); the transcript is deliberately
+        # NOT persisted (an hours-long run's stream can be tens of MB).
         'placement_backend': dialog.placement_tab.get_backend_value(),
         'placement_model': dialog.placement_tab.get_model_value(),
         'placement_effort': dialog.placement_tab.get_effort_value(),
         'placement_extra_instructions': dialog.placement_tab.extra_instructions.GetValue(),
         'placement_last_workdir': getattr(dialog.placement_tab, 'last_workdir', '') or '',
+        # The labels options travel as ONE dict so the panel can grow fields
+        # without new persistence keys.
         'placement_labels_options': dialog.placement_tab.labels_options.get_config(),
+        # Autorouter sub-tab: its options, keyed by the CLI's param names.
+        'autoroute_options': dialog.autoroute_tab.get_config(),
 
         # Log content
         'log_content': dialog.log_text.GetValue(),
@@ -309,9 +337,10 @@ def restore_dialog_settings(dialog, settings):
     dialog.fanout_tab.net_panel.suspend_check()
     dialog.planes_tab.net_panel.suspend_check()
 
-    # Restore tab selection
-    if 'active_tab' in settings:
-        dialog.notebook.SetSelection(settings['active_tab'])
+    # Restore tab selection: by name, else a legacy index read through the
+    # page order it was saved under.
+    _restore_page(dialog.notebook, settings.get('active_tab_name'),
+                  settings.get('active_tab'), LEGACY_MAIN_PAGES)
 
     # Note: Net selections are restored at the END of this function
     # because setting filters/checkboxes below triggers events that clear selections
@@ -850,10 +879,9 @@ def restore_dialog_settings(dialog, settings):
     # Placement sub-tab (issue #481). Restoring the last workdir re-surfaces
     # a previous session's report/preview buttons when the artifacts
     # still exist on disk.
-    if 'ai_active_subtab' in settings and hasattr(dialog, 'ai_notebook'):
-        idx = settings['ai_active_subtab']
-        if isinstance(idx, int) and 0 <= idx < dialog.ai_notebook.GetPageCount():
-            dialog.ai_notebook.SetSelection(idx)
+    if hasattr(dialog, 'ai_notebook'):
+        _restore_page(dialog.ai_notebook, settings.get('ai_active_subtab_name'),
+                      settings.get('ai_active_subtab'), LEGACY_AUTO_SUBTABS)
     if 'placement_backend' in settings:
         # Unsupported/unknown saved ids revert to Claude Code inside the tab.
         dialog.placement_tab.set_backend_value(settings['placement_backend'])
@@ -864,10 +892,11 @@ def restore_dialog_settings(dialog, settings):
     if 'placement_extra_instructions' in settings:
         dialog.placement_tab.extra_instructions.SetValue(
             settings['placement_extra_instructions'])
-    if 'placement_labels_options' in settings and isinstance(
-            settings['placement_labels_options'], dict):
+    if isinstance(settings.get('placement_labels_options'), dict):
         dialog.placement_tab.labels_options.set_config(
             settings['placement_labels_options'])
+    if isinstance(settings.get('autoroute_options'), dict):
+        dialog.autoroute_tab.set_config(settings['autoroute_options'])
     if 'placement_last_workdir' in settings and settings['placement_last_workdir']:
         dialog.placement_tab.restore_last_workdir(
             settings['placement_last_workdir'])
