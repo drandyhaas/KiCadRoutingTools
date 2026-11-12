@@ -157,6 +157,15 @@ python3 build_router.py --clean           # remove all build artifacts
 
 ### 3. Choose Your Interface
 
+**To route a whole board automatically, use one of two ways** -- and an AI assistant
+asked to route a board with this package should do the same:
+
+- `python3 py_router/autoroute.py board.kicad_pcb routed.kicad_pcb` (Option C): no
+  agent; it plans the chain from the board's own rules, footprints and nets and runs it.
+  The plugin's **Auto › Autorouter** tab runs the same script.
+- the `/plan-pcb-routing` skill (Option B): an agent analyzes the board, plans the
+  chain step by step with you, and runs it.
+
 **Option A: KiCad Plugin (Recommended for interactive use)**
 
 ```bash
@@ -198,7 +207,29 @@ See [Claude Skills](docs/claude-skills.md) for what each skill does and how they
 
 All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-auto-tab) below. The plugin can run the analysis and routing skills through [opencode](https://opencode.ai) instead of Claude Code (issue #503) - a Backend dropdown on the Auto tab selects the agent CLI, and opencode's `provider/model` strings open the door to other model providers. The placement runs need Claude Code, because they write files and opencode's analysis agent may not. The skills' output contracts are tuned on Claude models; smaller models may follow them less reliably.
 
-**Option C: Manual Command Line (For scripting and automation)**
+**Option C: Command Line -- route a whole board with `autoroute.py`**
+
+```bash
+# Route the whole board: planes, fanouts, decap clearance, diff pairs and route
+# passes, chosen from the board's own rules, footprints and nets
+python3 py_router/autoroute.py my_board.kicad_pcb routed.kicad_pcb
+
+# See its plan first, without running anything
+python3 py_router/autoroute.py my_board.kicad_pcb routed.kicad_pcb --dry-run
+```
+
+Every step it ran, with its log and board, is in `routed.kicad_pcb.autoroute/`
+(`plan.json` there records the chain and each pass's grade), and its last line,
+`AUTOROUTE_SUMMARY`, names the shipped step with its open nets and DRC. See
+[`autoroute.py`](docs/utilities.md#deterministic-plan-router-autoroutepy). The
+plugin's **Auto › Autorouter** tab runs the same script on the open board.
+
+**Option D: A hand-built chain (the manual / expert path)**
+
+When a board needs steps `autoroute.py` does not take -- impedance control, length
+matching, keep-away rules, buses, a particular plane map, or a net class that is a
+real requirement rather than aspirational -- run the tools yourself, the kind of chain
+`/plan-pcb-routing` plans:
 
 ```bash
 # Optionally place the board first, by its functional groups (see py_placer/placement/README.md)
@@ -313,8 +344,10 @@ python3 package_pcm.py --binary-dir ./path/to/release/artifacts
    **Select → All Tracks in Net**. Any nets you have selected are automatically
    pre-checked for routing when the plugin opens.
 4. Go to **Tools → External Plugins → KiCadRoutingTools**
-5. Configure routing parameters and select (or adjust) the nets to route
-6. Click **Route** to run the router -- or, to route the whole board hands-off, **Auto › Autorouter › Run Autorouter**, then **Apply Result to Board**
+5. To route the whole board hands-off: **Auto › Autorouter ›
+   Run Autorouter**, review its steps, then **Apply Result to Board**
+6. Or, by hand: configure routing parameters, select (or adjust) the nets to route,
+   and click **Route** on the Route tab
 
 ### Plugin Tabs
 
@@ -415,6 +448,19 @@ All `--nets` options support fnmatch-style wildcards and exclusion patterns:
 - Nets starting with "unconnected-" are automatically excluded
 - Use quotes around patterns with special characters
 
+### Route a Whole Board
+
+`autoroute.py` routes a whole board with no agent (the other way is the
+`/plan-pcb-routing` skill): it reads the board's rules, footprints and nets, plans the
+chain (planes, fanouts, decap clearance, diff pairs, route passes) and runs it, each
+step as its own process. The commands below are the tools it runs, for a hand-built
+chain.
+
+```bash
+python3 py_router/autoroute.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
+python3 py_router/autoroute.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --dry-run
+```
+
 ### Route Nets
 
 ```bash
@@ -473,11 +519,6 @@ python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_
 # Typical workflow: create GND plane first, then route all signals
 python3 py_router/route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu
 python3 py_router/route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite
-
-# No agent: build the whole chain (planes, fanouts, decaps, diff pairs, route)
-# from the board's own rules and footprints, and run it; --dry-run prints the plan
-python3 py_router/autoroute.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
-python3 py_router/autoroute.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --dry-run
 ```
 
 ### Create Power/Ground Planes

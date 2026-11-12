@@ -21,6 +21,14 @@ render reported 1315 crossings where the truth was 357. It hits `--nets`,
 so `~/Documents/...` then arrives as an unusable `/c/Users/...`. Pass
 Windows-style paths (`C:/Users/...`) in the same command.
 
+## Routing a board
+
+**Asked to route a whole board, use one of the two full-route ways:** run
+`python3 py_router/autoroute.py board.kicad_pcb out.kicad_pcb` (no agent: it plans
+and runs the whole chain from the board itself; read its `AUTOROUTE_*` lines and
+`<out>.autoroute/`, and grade the result), or the `/plan-pcb-routing` skill (an agent
+analyzes the board and plans the chain step by step).
+
 ## Commit only what worked
 
 **Do not commit unsuccessful knobs or code, and do not document unsuccessful

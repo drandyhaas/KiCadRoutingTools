@@ -2635,8 +2635,10 @@ or two intent blocks declaring one part at different angles.
 
 ## Deterministic Plan Router (`autoroute.py`)
 
-The plugin's **Auto › Autorouter** sub-tab runs this script on a snapshot of the
-open board and shows its plan and steps from the event lines below.
+One of the two ways to route a whole board (the other is the `/plan-pcb-routing`
+skill, where an agent plans the chain). The plugin's **Auto › Autorouter** sub-tab
+runs it on a snapshot of the open board and shows its plan and steps from the event
+lines below.
 
 Routes a board through a chain built from the board itself -- footprints,
 net names, layer count and the board's own design rules -- without an agent.
