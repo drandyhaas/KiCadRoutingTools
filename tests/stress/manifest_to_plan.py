@@ -401,6 +401,8 @@ BOOL_FLAGS = {
     # (--no-smoothing is in INVERTED_BOOL_FLAGS below: it used to be here as
     # `no_smoothing`, a name no control or alias matched.)
     '--add-gnd-vias': 'add_gnd_vias',
+    # route.py's mask-artwork keep-outs (a checkbox of the same name).
+    '--mask-keepouts': 'mask_keepouts',
     # #1630: route.py / route_diff.py record the --impedance target without
     # solving widths (a checkbox of the same name on each tab). A switch, so
     # here and not in FLAG_PARAMS, which would consume the next argument.

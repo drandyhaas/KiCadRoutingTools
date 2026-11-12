@@ -1245,7 +1245,8 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     items_not_allowed; found reviewing #1278). Where it differs by layer (the
     member half-pitch, #1729) each layer's track band takes its own.
     """
-    keepouts = getattr(pcb_data.board_info, 'keepouts', None)
+    from mask_artwork import routing_keepouts
+    keepouts = routing_keepouts(pcb_data.board_info)
     if not keepouts:
         return
 

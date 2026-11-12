@@ -5768,7 +5768,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     # layers). Margin mirrors add_rule_area_keepout_obstacles: copper AND
     # clearance stay out (centreline >= clearance + w/2 from the boundary).
     _keepout_areas = []          # (rings, bbox, layer_tokens_or_None)
-    for _ko in (getattr(pcb_data.board_info, 'keepouts', None) or []):
+    from mask_artwork import routing_keepouts
+    for _ko in routing_keepouts(pcb_data.board_info):
         if _ko.get('tracks_allowed', True):
             continue
         _poly = _ko.get('polygon') or []
