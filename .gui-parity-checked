@@ -1,3 +1,31 @@
+33c52e0a22be4ff4f63b33f7eb839ee934f021b0 2026-11-12 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 4f7f512f..33c52e0a: the #1828-#1838 issue round, the Autorouter
+GUI tab and the autoplan -> autoroute rename (28 commits), macOS, KiCad 10.0.6.
+(A) Flags: no routing CLI flag added or removed; the only argparse change is
+  autoroute.py --effort-factor reading its default from EFFORT_FACTOR. No
+  signature of batch_route, batch_route_diff_pairs, create_plane,
+  repair_planes or the fanout entry points changed. autoplan.py is renamed
+  autoroute.py with no alias, in manifest_to_plan and lineage_scope too.
+(B) Post-passes and results data: #1828's re-sync after a late re-match is
+  inside batch_route (both fronts); #1834's stub_pads ledger reaches the
+  fanout tab (test_1834_fanout_stub_rerun_gui); the rest of the round is in
+  the shared engines or the graders. New GUI: the Auto > Autorouter tab runs
+  the CLI autoroute.py itself on a snapshot, and its Apply
+  (result_apply.py, shared with AI Placement's Place + Route) is gated to
+  the nanometre against the CLI output (test_autoroute_tab_gui,
+  test_placement_apply_zones_gui); Beautify Labels moved to the Labels tab
+  (test_labels_tab_gui). Settings round trip covers the renamed pages and
+  the legacy page index and label keys. #1827 and the smoother follow-up
+  were dropped before this audit (not on main).
+GATES: tests/gui_parity/run_gui_parity.py on 33c52e0a, 85 passed, 0 failed,
+0 declared SKIP. Modal suite on 33c52e0a 1328 passed / 0 failed (+26
+self-skipped). Corpus A/B sets 1-28 on 33c52e0a vs 4f7f512f: 399 of 400 boards
+ship identical copper (open nets 288 -> 287, real DRC 11 -> 11, CPU +1.4%);
+the one mover, set6/ulx5m_gatemate 5 -> 4 open, is its manifest rebuilt to
+start from the clean input. KiCad DRC moved by 1-2 on five boards whose files
+are identical but for uuids (the baseline subtraction under kicad-cli's
+199-per-type cap).
+
 4f7f512f081573041edf245aec28cb6544f76c25 2026-11-11 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of 772003a6..4f7f512f, the #1797-#1826 issue round (36 commits), macOS,
 KiCad 10.0.6.
