@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tied ground and supply nets are ordered by name, not by the board file (#1755).
 
-find_power_nets and autoplan sorted grounds and rails by pad count only, so a
+find_power_nets and autoroute sorted grounds and rails by pad count only, so a
 tie kept the order the board file lists its nets in: the same netlist poured
 AGND or GND, and listed its rails in either order, depending on that order.
 Both now sort by `list_nets.power_net_order` -- pad count descending, then a
@@ -11,7 +11,7 @@ the name.
   1. the key: on a tie GND and VSS lead (at any hierarchy depth), the rest go
      by name; pad count still decides first;
   2. the issue's boards (gen.py, 3 pads per net): both net orders give the
-     same find_power_nets lists and the same autoplan `planes` / `power_nets`
+     same find_power_nets lists and the same autoroute `planes` / `power_nets`
      -- GND poured ahead of AGND, rails by name.
 
     python3 tests/test_1755_power_net_ties.py
@@ -64,15 +64,15 @@ def gen(path, a, b):
 
 
 def analysis(board, work):
-    r = subprocess.run([sys.executable, '-B', '-X', 'utf8', 'py_router/autoplan.py', board,
+    r = subprocess.run([sys.executable, '-B', '-X', 'utf8', 'py_router/autoroute.py', board,
                         work, '--dry-run'], cwd=ROOT, capture_output=True, text=True,
                        encoding='utf-8', errors='replace')
     out = r.stdout + r.stderr
     if 'Traceback' in out:
-        raise AssertionError(f'BROKEN TEST: autoplan crashed:\n{out[-1500:]}')
-    m = re.search(r'^AUTOPLAN_ANALYSIS: (.*)$', out, re.M)
+        raise AssertionError(f'BROKEN TEST: autoroute crashed:\n{out[-1500:]}')
+    m = re.search(r'^AUTOROUTE_ANALYSIS: (.*)$', out, re.M)
     if not m:
-        raise AssertionError(f'BROKEN TEST: no AUTOPLAN_ANALYSIS line:\n{out[-1500:]}')
+        raise AssertionError(f'BROKEN TEST: no AUTOROUTE_ANALYSIS line:\n{out[-1500:]}')
     a = json.loads(m.group(1))
     return a['planes'], a['power_nets']
 
@@ -102,8 +102,8 @@ def board_checks(tmp):
             got[(x, y)] = analysis(p, os.path.join(tmp, f'w_{x}_{y}'))
         ok(f'{a}/{b}: find_power_nets order-independent', fpn[(a, b)] == fpn[(b, a)],
            repr(fpn))
-        ok(f'{a}/{b}: autoplan order-independent', got[(a, b)] == got[(b, a)], repr(got))
-        ok(f'{a}/{b}: autoplan answer', tuple(got[(a, b)]) == want, repr(got[(a, b)]))
+        ok(f'{a}/{b}: autoroute order-independent', got[(a, b)] == got[(b, a)], repr(got))
+        ok(f'{a}/{b}: autoroute answer', tuple(got[(a, b)]) == want, repr(got[(a, b)]))
 
 
 def main():

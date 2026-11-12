@@ -2633,12 +2633,12 @@ still replay.
 Exit 0 written (unresolved caps are reported, not failed); 2 unreadable input,
 or two intent blocks declaring one part at different angles.
 
-## Deterministic Plan Router (`autoplan.py`)
+## Deterministic Plan Router (`autoroute.py`)
 
 Routes a board through a chain built from the board itself -- footprints,
 net names, layer count and the board's own design rules -- without an agent.
 It makes the same kinds of choices the plan-pcb-routing skill asks an agent
-to make, and runs each step as its own process in `<output>.autoplan/`:
+to make, and runs each step as its own process in `<output>.autoroute/`:
 
 1. **Design rules**: the fab clearance floor for every step, as the route
    steps' `--clearance-ceiling` (a finished board meets the fab floor; a net
@@ -2648,7 +2648,7 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
 2. **Planes first**: on 4+ layer boards, the fewest inner layers that put a
    plane next to every signal layer, so each signal layer has a reference:
    In1+In2 on 4 layers, In1+In4 on 6, In1+In3+In6 on 8
-   (`autoplan.plane_layers`). The first is GND, the second the dominant rail
+   (`autoroute.plane_layers`). The first is GND, the second the dominant rail
    (when one reaches 10 pads), any others GND again. Signals are kept off
    them until the route step's later passes (`--plane-layer-cost`). GND on B.Cu on 2-layer
    boards, where the pour is an outer layer the signals share. Rails are the nets
@@ -2671,7 +2671,7 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
    finer one counts). A two-row part (DFN, a connector), a part whose pads
    form neither shape (a mezzanine aside), a through-hole part other than a PGA, and any
    connector, socket, header or magnetics by footprint name
-   (`autoplan.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
+   (`autoroute.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
    A part that drops escapes or leaves grazes is retried with the fine via
    (BGA), then with the dogbone (BGA) or under-pad (QFN) method, keeping the
    attempt that escaped most, then grazed least (`drc_grazes`, less what the
@@ -2696,7 +2696,7 @@ to make, and runs each step as its own process in `<output>.autoplan/`:
    congested boards; the members of any pair `route_diff.py` could not couple
    are rippable, so the stubs it left do not block their partners. The first
    pass keeps signals off the planes; up to two further passes on the result
-   may cross them at 3.0 (`autoplan.PLANE_FALLBACK_COST`), so a plane carries
+   may cross them at 3.0 (`autoroute.PLANE_FALLBACK_COST`), so a plane carries
    only what could not route without it.
 
 A step that fails is skipped and the chain continues from the last good board.
@@ -2713,10 +2713,10 @@ earlier board.
 ### Usage
 
 ```bash
-python3 py_router/autoplan.py input.kicad_pcb output.kicad_pcb [OPTIONS]
+python3 py_router/autoroute.py input.kicad_pcb output.kicad_pcb [OPTIONS]
 
 Options:
-  --dry-run          Print the analysis (AUTOPLAN_ANALYSIS) and exit
+  --dry-run          Print the analysis (AUTOROUTE_ANALYSIS) and exit
   --finish           Run step 6 alone on a board another chain has already
                      prepared and routed: the planes are read from the board's
                      pours (not its teardrops), and the input board is graded
@@ -2741,11 +2741,11 @@ Options:
 ```
 
 The chain, each step's arguments, return code, iterations and grade are
-written to `<output>.autoplan/plan.json`; the last line is `AUTOPLAN_SUMMARY`
+written to `<output>.autoroute/plan.json`; the last line is `AUTOROUTE_SUMMARY`
 with the final step and its open and DRC counts. If no route pass succeeds,
 the best board the chain has ships (with `--finish`, the input board itself),
 replacing the output and its whole sibling set. The input may be a board
-inside `<output>.autoplan/` from an earlier run: it is staged before that
+inside `<output>.autoroute/` from an earlier run: it is staged before that
 directory is cleared.
 
 Net names reach every tool as patterns that select that net alone through the
@@ -2759,10 +2759,10 @@ isolates is left out of the power, exclusion and pair lists, and named.
 
 ```bash
 # Route an unrouted board end to end, no agent
-python3 py_router/autoplan.py board.kicad_pcb board_routed.kicad_pcb
+python3 py_router/autoroute.py board.kicad_pcb board_routed.kicad_pcb
 
 # Close what an agent's chain left open, as its last step
-python3 py_router/autoplan.py step9_route.kicad_pcb board_finished.kicad_pcb --finish
+python3 py_router/autoroute.py step9_route.kicad_pcb board_finished.kicad_pcb --finish
 ```
 
 ## Build Script (`build_router.py`)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Route a board through a deterministic plan built from the board itself.
 
-    python3 py_router/autoplan.py board.kicad_pcb routed.kicad_pcb
-    python3 py_router/autoplan.py board.kicad_pcb routed.kicad_pcb --dry-run
+    python3 py_router/autoroute.py board.kicad_pcb routed.kicad_pcb
+    python3 py_router/autoroute.py board.kicad_pcb routed.kicad_pcb --dry-run
 
 The plan-pcb-routing skill has an agent read a board and choose a command
 chain. This makes the same kinds of choices from board facts alone -- the
@@ -54,7 +54,7 @@ pours, and the input board is itself a candidate, so a pass ships only if it
 beats it. route.py works on the nets still open, but like any route step it
 may rip and reroute existing copper and runs its plane finalize.
 
-Every step runs as its own process in <output>.autoplan/, so a step that
+Every step runs as its own process in <output>.autoroute/, so a step that
 fails is skipped and the chain continues from the last good board. Each route
 pass is graded: open nets as check_connected reports them (the KiCad
 cross-check off, so the grade is deterministic) and real violations as
@@ -66,7 +66,7 @@ stay within --effort-factor times the first pass's -- a forecast from counts
 the router reproduces exactly, not a cap on the pass itself -- and not at all
 when a pass reported no iterations. If no route pass succeeds, the best board
 the chain has ships (with --finish, the input board itself). The chain and
-every grade are written to <output>.autoplan/plan.json.
+every grade are written to <output>.autoroute/plan.json.
 """
 from __future__ import annotations
 
@@ -463,7 +463,7 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
         else:
             unnamed.append(n)
     if unnamed:
-        print(f"AUTOPLAN: no pattern selects only {', '.join(unnamed)} on this "
+        print(f"AUTOROUTE: no pattern selects only {', '.join(unnamed)} on this "
               f"board; left out of the power, exclusion and pair lists", flush=True)
     power_nets = [n for n in power_nets if n in globs]
     pairs = [n for i in range(0, len(pairs) - 1, 2) for n in pairs[i:i + 2]
@@ -490,7 +490,7 @@ _CONN_PROBE = (
     "from check_connected import run_connectivity_check\n"
     "with contextlib.redirect_stdout(io.StringIO()):\n"
     "    issues = run_connectivity_check(sys.argv[2], quiet=True)\n"
-    "print('AUTOPLAN_OPEN: ' + json.dumps(sorted({i['net_name'] for i in issues"
+    "print('AUTOROUTE_OPEN: ' + json.dumps(sorted({i['net_name'] for i in issues"
     " if i.get('net_name')})))\n")
 
 
@@ -536,7 +536,7 @@ class Chain:
         env['KICAD_NO_GRADE_RECONCILE'] = '1'
         r = subprocess.run([sys.executable, '-X', 'utf8', '-c', _CONN_PROBE, HERE, board],
                            capture_output=True, text=True, env=env)
-        m = re.search(r'^AUTOPLAN_OPEN: (\[.*\])$', r.stdout, re.M)
+        m = re.search(r'^AUTOROUTE_OPEN: (\[.*\])$', r.stdout, re.M)
         if r.returncode != 0 or not m:
             print(f"  grade: check_connected failed on {os.path.basename(board)}",
                   flush=True)
@@ -1014,15 +1014,15 @@ def main():
     args = ap.parse_args()
 
     a = analyze(args.input_file, finish=args.finish, plane_cost=args.plane_layer_cost)
-    print("AUTOPLAN_ANALYSIS: " + json.dumps(a, sort_keys=True), flush=True)
+    print("AUTOROUTE_ANALYSIS: " + json.dumps(a, sort_keys=True), flush=True)
     if args.dry_run:
         return 0
     out = os.path.abspath(args.output_file)
-    work = out + '.autoplan'
+    work = out + '.autoroute'
     from copy_board import copy_board
     # Stage the input before clearing the work directory: it may live there
     # (a previous run's step board).
-    stage = tempfile.mkdtemp(prefix='.autoplan_input_', dir=os.path.dirname(out))
+    stage = tempfile.mkdtemp(prefix='.autoroute_input_', dir=os.path.dirname(out))
     try:
         staged = os.path.join(stage, 'input.kicad_pcb')
         copy_board(os.path.abspath(args.input_file), staged)
@@ -1039,16 +1039,16 @@ def main():
         # No route pass finished: ship the best board the chain has -- the
         # input itself for --finish, else the last step that succeeded.
         final = ch.cur
-        print(f"AUTOPLAN: no route pass finished; shipping "
+        print(f"AUTOROUTE: no route pass finished; shipping "
               f"{os.path.basename(final)}", flush=True)
     with open(os.path.join(work, 'plan.json'), 'w') as fh:
         json.dump({'analysis': a, 'steps': ch.steps, 'final': final,
                    'grade': grade}, fh, indent=1)
     if not final:
-        print("AUTOPLAN: no route pass produced a board", flush=True)
+        print("AUTOROUTE: no route pass produced a board", flush=True)
         return 1
     _ship(final, out)
-    print("AUTOPLAN_SUMMARY: " + json.dumps(
+    print("AUTOROUTE_SUMMARY: " + json.dumps(
         {'final_step': os.path.basename(final),
          'open': grade['open'] if grade else None,
          'drc': grade['drc'] if grade else None,

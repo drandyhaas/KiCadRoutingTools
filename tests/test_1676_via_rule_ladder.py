@@ -18,7 +18,7 @@ descent may go below a declared minimum to the tier floor. So:
   3. `rule_floors` carries a net-conditioned rule per net.
   4. the end-of-step grade names each rule: `via_size_grade`, its lines, and
      `disclose_step_rules`, which JSON_SUMMARY.design_rules carries.
-  5. the working via `list_nets` and autoplan hand a step is the smallest the
+  5. the working via `list_nets` and autoroute hand a step is the smallest the
      rule file accepts, replacing the Board Setup minimum of its kind.
   6. routed end to end on a small board: the rule arm starts at the raised via;
      a control arm with no rule file keeps the via it had, and every rule is

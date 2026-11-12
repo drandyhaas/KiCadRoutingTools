@@ -329,7 +329,7 @@ GUI's Via Size override unticked) starts from a via that meets the
 raised to the hole minimum, and the diameter to the diameter minimum and to the
 drill plus the ring each side. Which vias a rule binds is its condition, read as
 KiCad reads it, and a kind the project's `rule_severities` ignore raises nothing.
-The working via `list_nets.py --design-rules` and `autoplan.py` hand a step is
+The working via `list_nets.py --design-rules` and `autoroute.py` hand a step is
 sized the same way, and a rule's minimum replaces the Board Setup minimum of its
 kind there, as it does in KiCad. An explicit via is drawn as asked.
 

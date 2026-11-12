@@ -577,7 +577,7 @@ the command. It's cheap, only touches caps near a BGA, and is a no-op when
 nothing collides — but run it ONCE after ALL fanouts are done, before signal
 routing, never once per BGA: two passes compound the displacement (see Step 1c
 for the measurement). A cap it leaves in DRC with a BGA's fanout copper is not
-left for a manual nudge: re-fan that BGA with the cap held, as `autoplan.py`
+left for a manual nudge: re-fan that BGA with the cap held, as `autoroute.py`
 does (Step 1c, #1521).
 
 Report to user:
@@ -2042,7 +2042,7 @@ compound and costs one step instead of N.
 Verify with `check_drc.py board_step1c.kicad_pcb -c 0.1` (PAD-VIA count drops).
 
 **If this step leaves a cap/resistor in DRC with a BGA's fanout copper, try
-re-fanning that BGA with the part held** -- the loop `autoplan.py` runs itself
+re-fanning that BGA with the part held** -- the loop `autoroute.py` runs itself
 (#1521). Read `check_drc --json` on this step's output: an unaccepted `pad-via` /
 `pad-segment` item on a 2-pad C/R/FB part, against a via or track of a net of
 that BGA's balls. A `short: true` item always qualifies; a graze below the
@@ -2155,7 +2155,7 @@ and through-vias still span it), so every solid inner plane stays a whole
 reference. The rule is a soft one across the chain: a later pass over the
 nets this one leaves open (Step 2d) may cross the planes, at a positive
 price: 3.0, or Step 2c's 6.0 on a GND plane. A plane then carries only what
-could not route without it, which is the rule `autoplan.py` follows.
+could not route without it, which is the rule `autoroute.py` follows.
 
 **Two prices, deliberately, and this is the one to start from.** (On a solid
 INNER plane either is the price a later pass crosses it at; the first pass

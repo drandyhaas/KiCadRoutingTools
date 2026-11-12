@@ -42,7 +42,7 @@ For one manifest this reads:
                        place_pose.py, beautify_labels.py (parts, labels or
                        existing vias moved, no pad joined); fill_for_delivery.py
                        (the board's own zones filled, as KiCad does).
-                       autoplan.py routes its whole chain in one recorded
+                       autoroute.py routes its whole chain in one recorded
                        step, so it stays `unmodelled`
   * the board's ROUTABLE nets, the ones check_connected grades: named, >= 2
     pads, not an auto-named 'unconnected-*', pads not already joined by
@@ -88,7 +88,7 @@ from redo_stress_test import (board_io, compute_prune_keep,  # noqa: E402
 
 #: Self-recording steps that scope no net: they copy a board, draw a rule
 #: area, move parts or labels, or fill the board's own zones -- none routes a
-#: pad of any net (#1593). autoplan.py is NOT here: it routes.
+#: pad of any net (#1593). autoroute.py is NOT here: it routes.
 NO_SCOPE_TOOLS = {'place_fanout_clearance.py', 'copy_board.py', 'cp', 'mv',
                   'add_rule_area.py', 'place_pose.py', 'beautify_labels.py',
                   'fill_for_delivery.py'}

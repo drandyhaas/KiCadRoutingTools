@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""autoplan.py: the plan it reads off a board, how it picks a board, and a run.
+"""autoroute.py: the plan it reads off a board, how it picks a board, and a run.
 
 1. `_glob` gives every net a pattern that selects that net alone through the
    selectors the chain's tools use -- `expand_net_patterns` (route.py
@@ -20,7 +20,7 @@
 5. --effort-factor refuses a non-finite or negative value.
 6. Real runs on splitflap_driver: end to end, --finish, and --finish on a
    board inside the output's own work directory with a stale sibling at the
-   output -- graded by check_connected, not by autoplan's own summary.
+   output -- graded by check_connected, not by autoroute's own summary.
 """
 import json
 import os
@@ -32,13 +32,13 @@ from types import SimpleNamespace
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 sys.path.insert(0, os.path.join(ROOT, 'tests'))
-import autoplan as AP                                        # noqa: E402
+import autoroute as AP                                        # noqa: E402
 from net_queries import (expand_net_patterns, identify_power_nets,  # noqa: E402
                          matches_net_filter)
 from run_utils import check, evidence                        # noqa: E402
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
-SCRIPT = os.path.join(ROOT, 'py_router', 'autoplan.py')
+SCRIPT = os.path.join(ROOT, 'py_router', 'autoroute.py')
 FAILS = []
 
 
@@ -359,7 +359,7 @@ def _connected(board):
     return r.returncode, r.stdout + r.stderr
 
 
-def _autoplan(*argv):
+def _autoroute(*argv):
     return subprocess.run([sys.executable, '-X', 'utf8', SCRIPT, *argv],
                           capture_output=True, text=True, timeout=1800)
 
@@ -368,15 +368,15 @@ def test_run():
     print("end to end on splitflap_driver")
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, 'routed.kicad_pcb')
-        r = _autoplan(BOARD, out)
-        expect(r.returncode == 0, f"autoplan exits 0 (rc={r.returncode})")
+        r = _autoroute(BOARD, out)
+        expect(r.returncode == 0, f"autoroute exits 0 (rc={r.returncode})")
         if r.returncode:
             print(r.stdout[-3000:], r.stderr[-3000:])
             return
         evidence(out, 'routed board')
         expect(os.path.exists(out[:-len('.kicad_pcb')] + '.kicad_pro'),
                "the routed board ships with its .kicad_pro")
-        plan = json.load(open(out + '.autoplan/plan.json'))
+        plan = json.load(open(out + '.autoroute/plan.json'))
         tags = [s['tag'] for s in plan['steps']]
         expect(tags[0] == 'planes' and tags[1] == 'route',
                f"planes first, then route ({tags})")
@@ -388,13 +388,13 @@ def test_run():
             print(text[-2000:])
 
         fin = os.path.join(tmp, 'finished.kicad_pcb')
-        r = _autoplan(out, fin, '--finish')
+        r = _autoroute(out, fin, '--finish')
         expect(r.returncode == 0, f"--finish exits 0 (rc={r.returncode})")
         if r.returncode:
             print(r.stdout[-3000:], r.stderr[-3000:])
             return
         evidence(fin, 'finished board')
-        fplan = json.load(open(fin + '.autoplan/plan.json'))
+        fplan = json.load(open(fin + '.autoroute/plan.json'))
         expect([s['tag'] for s in fplan['steps']] == ['input'],
                "--finish on a fully connected board grades it and runs no pass")
         expect(('GND', 'B.Cu') in [tuple(p) for p in fplan['analysis']['planes']],
@@ -403,13 +403,13 @@ def test_run():
 
         print("input inside the output's work directory, stale sibling at the output")
         inner = [s for s in plan['steps'] if s['tag'] == 'route'][0]['log']
-        inner = os.path.join(out + '.autoplan', inner[:-len('.log')] + '.kicad_pcb')
+        inner = os.path.join(out + '.autoroute', inner[:-len('.log')] + '.kicad_pcb')
         evidence(inner, 'step board inside the work directory')
         stale = out[:-len('.kicad_pcb')] + '.kicad_dru'
         open(stale, 'w').write('(version 1)\n(rule stale (constraint clearance (min 5mm)))\n')
-        r = _autoplan(inner, out, '--finish')
+        r = _autoroute(inner, out, '--finish')
         expect(r.returncode == 0 and 'Traceback' not in r.stdout + r.stderr,
-               f"a board inside <output>.autoplan/ is staged before the directory is cleared (rc={r.returncode})")
+               f"a board inside <output>.autoroute/ is staged before the directory is cleared (rc={r.returncode})")
         if r.returncode:
             print(r.stdout[-3000:], r.stderr[-3000:])
             return
@@ -428,7 +428,7 @@ def main():
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s)")
         return 1
-    print("PASS: autoplan")
+    print("PASS: autoroute")
     return 0
 
 

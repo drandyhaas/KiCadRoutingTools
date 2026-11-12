@@ -1420,7 +1420,7 @@ def find_power_nets(pcb_data):
 
 def power_pin_parts(net):
     """The parts with a `power_in` / `power_out` pin on NET. Two or more is
-    autoplan's rail rule for a net no name pattern catches: one part's power
+    autoroute's rail rule for a net no name pattern catches: one part's power
     pins are its own supply tap, an enable or a misdeclared connector pin."""
     return {p.component_ref for p in net.pads
             if p.pintype in ('power_in', 'power_out')}
@@ -1428,7 +1428,7 @@ def power_pin_parts(net):
 
 def power_net_evidence(pcb_data, zones=None):
     """{net_id: why} for each net the general rules read as power or ground,
-    the rules autoplan builds a chain's --power-nets from: a ground or rail
+    the rules autoroute builds a chain's --power-nets from: a ground or rail
     NAME (`find_power_nets`, not its pad-count candidates), power pins on two
     or more parts (`power_pin_parts`), and a pour the board draws for it.
     A disclosure input (#1743): it decides no width. ZONES stands in for

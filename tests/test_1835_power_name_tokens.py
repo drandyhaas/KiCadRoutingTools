@@ -7,14 +7,14 @@ hierarchical name, so `/DRIVING_LED` (DRI-VIN-G) was a rail, every `VBUS_EN`,
 `VBAT_SENSE`, `PG_VDD` too, `NN_GND_SCL` was ground, and a net under a
 `/VBUS_SWITCH/` sheet was a rail whatever its own name. Those reached
 power_net_evidence (return-via coverage, --add-gnd-vias, the Planes tab, the
-qfn power-stub note) and autoplan's --power-nets (routed at 0.3 mm).
+qfn power-stub note) and autoroute's --power-nets (routed at 0.3 mm).
 
   1. find_power_nets over a table of names: real rails and grounds in every
      spelling stay, enable / power-good / sense / detect / feedback / bus
      lines and path-only matches leave;
   2. the in-repo sonde_u board: `/VCC_SENSE-ERROR*` is no longer power by
      name, GND and VCC still are;
-  3. autoplan on a generated board: an enable line with 3 pads stays out of
+  3. autoroute on a generated board: an enable line with 3 pads stays out of
      `power_nets`, the rail beside it stays in.
 
     python3 tests/test_1835_power_name_tokens.py
@@ -90,7 +90,7 @@ def board_checks():
 
 def gen(path, a, b):
     """Three 2-pin parts, each with one pad on `a` and one on `b`: 3 pads a net,
-    autoplan's cut, and no power pins, so only the names decide."""
+    autoroute's cut, and no power pins, so only the names decide."""
     def fp(i):
         pad = lambda n, dx, net: (f'(pad "{n}" smd rect (at {dx} 0) (size 1 1) '
                                   f'(layers "F.Cu" "F.Mask" "F.Paste") (net "{net}"))')
@@ -107,18 +107,18 @@ def gen(path, a, b):
     return run_utils.evidence(path, 'generated board')
 
 
-def autoplan_checks(tmp):
-    print('3. autoplan: an enable line is not a --power-nets rail')
+def autoroute_checks(tmp):
+    print('3. autoroute: an enable line is not a --power-nets rail')
     board = gen(os.path.join(tmp, 'en.kicad_pcb'), '/Supply/VCC_IO_EN', '/Supply/+3V3')
-    r = subprocess.run([sys.executable, '-B', '-X', 'utf8', 'py_router/autoplan.py', board,
+    r = subprocess.run([sys.executable, '-B', '-X', 'utf8', 'py_router/autoroute.py', board,
                         os.path.join(tmp, 'work'), '--dry-run'], cwd=ROOT,
                        capture_output=True, text=True, encoding='utf-8', errors='replace')
     out = r.stdout + r.stderr
     if 'Traceback' in out:
-        raise AssertionError(f'BROKEN TEST: autoplan crashed:\n{out[-1500:]}')
-    m = re.search(r'^AUTOPLAN_ANALYSIS: (.*)$', out, re.M)
+        raise AssertionError(f'BROKEN TEST: autoroute crashed:\n{out[-1500:]}')
+    m = re.search(r'^AUTOROUTE_ANALYSIS: (.*)$', out, re.M)
     if not m:
-        raise AssertionError(f'BROKEN TEST: no AUTOPLAN_ANALYSIS line:\n{out[-1500:]}')
+        raise AssertionError(f'BROKEN TEST: no AUTOROUTE_ANALYSIS line:\n{out[-1500:]}')
     power = json.loads(m.group(1))['power_nets']
     ok('the rail is a power net', '/Supply/+3V3' in power, repr(power))
     ok('the enable line is not', '/Supply/VCC_IO_EN' not in power, repr(power))
@@ -129,7 +129,7 @@ def main():
     try:
         table_checks()
         board_checks()
-        autoplan_checks(tmp)
+        autoroute_checks(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:

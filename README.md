@@ -458,8 +458,8 @@ python3 py_router/route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwri
 
 # No agent: build the whole chain (planes, fanouts, decaps, diff pairs, route)
 # from the board's own rules and footprints, and run it; --dry-run prints the plan
-python3 py_router/autoplan.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
-python3 py_router/autoplan.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --dry-run
+python3 py_router/autoroute.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
+python3 py_router/autoroute.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --dry-run
 ```
 
 ### Create Power/Ground Planes
@@ -709,7 +709,7 @@ KiCadRoutingTools/
 │   ├── route_movie.py            # Movie of a routing run, step by step (route_trace.py records the router's events)
 │   ├── make_plan.py              # Recorded command chain -> GUI routing plan (plan.json)
 │   ├── run_plan.py               # Run a GUI routing plan headless, through the real plugin dialog
-│   ├── autoplan.py               # Build a routing chain from the board itself and run it, no agent
+│   ├── autoroute.py              # Build a routing chain from the board itself and run it, no agent
 │   ├── add_rule_area.py          # Write a copper keep-out rule area onto a board
 │   ├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
 │   ├── plane_obstacle_builder.py # Obstacle map building for plane via placement
@@ -1001,7 +1001,7 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 | `route_movie.py` / `place_movie.py` | Movie of a routing run / of a placement, step by step | [Utilities](docs/utilities.md#routing-movie-route_moviepy) |
 | `render_power.py` | A board's power components over its rails | [Utilities](docs/utilities.md#power-view-render_powerpy) |
 | `make_plan.py` / `run_plan.py` | Build a GUI routing plan from a recorded chain / run one headless | [Plans from the CLI](docs/claude-skills.md#plans-from-the-command-line) |
-| `autoplan.py` | Route a board end to end with no agent: a plane, fanout, decap, diff-pair and route chain built from the board itself | [Utilities](docs/utilities.md#deterministic-plan-router-autoplanpy) |
+| `autoroute.py` | Route a board end to end with no agent: a plane, fanout, decap, diff-pair and route chain built from the board itself | [Utilities](docs/utilities.md#deterministic-plan-router-autoroutepy) |
 
 ```bash
 # Full option list for any tool
