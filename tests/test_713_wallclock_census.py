@@ -243,12 +243,29 @@ REGISTRY = {
         'only when neither a redo manifest nor step numbers give the chain '
         'order; discovery matches `getmtime(`.'),
 
+    # --- the autorouter and its tab -----------------------------------------
+    'py_router/autoroute.py': (
+        'record',
+        "each AUTOROUTE_STEP event's `t` timestamp and each step's and the "
+        "run's `seconds`, as data in its event lines and plan.json. Which "
+        'pass ships is decided by its grade (open nets, then real DRC), '
+        'never by a clock.'),
+    'kicad_routing_plugin/autoroute_gui.py': (
+        'hang_detector',
+        "Stop sends SIGTERM to the autoroute child's process group and, if it "
+        'has not exited 3 s later (_kill_at, read on the UI tick), SIGKILL; '
+        'the run then reads Stopped with no result to apply, never a result. '
+        'The rest is elapsed time shown in the step rows and the status.'),
+
     # --- an event-loop yield ------------------------------------------------
     'kicad_routing_plugin/differential_gui.py': (
         'reporting', "the run's wall_time shown after a routing run (#1780), "
         'and time.sleep(0.01) yielding to the wx event loop'),
     'kicad_routing_plugin/planes_gui.py': (
         'throttle', '_time.sleep(0.01) yielding to the wx event loop'),
+    'kicad_routing_plugin/labels_gui.py': (
+        'throttle', "time.sleep(0.01) in Beautify Labels' progress callback, "
+        'yielding to the wx event loop so the bar paints'),
 
     # --- no clock at all ----------------------------------------------------
     'py_router/routing_common.py': (
