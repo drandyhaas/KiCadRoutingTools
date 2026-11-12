@@ -2297,8 +2297,10 @@ Options:
   --layers, -l        Routing layers (default: F.Cu B.Cu)
   --track-width, --width, -w  Track width in mm (default: 0.3)
   --clearance         Track clearance in mm (default: 0.25)
-  --via-size          Via outer diameter in mm (default: 0.5)
-  --via-drill         Via drill size in mm (default: 0.3)
+  --via-size          Via outer diameter in mm (default: the board's Default
+                      net-class via, else 0.5)
+  --via-drill         Via drill size in mm (default: the board's Default
+                      net-class drill, else 0.3)
   --nets, -n          Net patterns to include
   --diff-pairs, -d    Differential pair patterns (e.g., "*lvds*")
   --diff-pair-gap     Gap between P/N traces in mm (default: 0.1)

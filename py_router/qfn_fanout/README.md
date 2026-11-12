@@ -107,8 +107,8 @@ none), raised to the board's `.kicad_dru` via rules (#1676) and, under `--escala
 Board Setup `min_through_hole_diameter`, `min_via_diameter` and `min_via_annular_width` round the drill (a
 0.13 ring raises 0.45/0.25 to 0.51/0.25). Under the default `fab` it keeps its size; with `--no-fix-drc-settings` a via
 laid below a Board Setup minimum is named in a `WARNING` line and in `JSON_SUMMARY`'s `board_setup_vias`
-(`rule`, `min`, `vias`, `below`, `smallest_ring` / `smallest`). bga_fanout.py does the same, starting from
-its 0.5/0.3.
+(`rule`, `min`, `vias`, `below`, `smallest_ring` / `smallest`). bga_fanout.py does the same, from the
+same class via (0.5/0.3 when the board declares none).
 
 ## Options
 

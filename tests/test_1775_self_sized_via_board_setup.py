@@ -23,7 +23,8 @@ self-sizing step and the GUI fanout tab go through):
      grades a fanout's via dicts against the Board Setup ring only when asked;
   5. the self-sized via starts at the board's Default net-class via (#1795), as on
      route.py and the GUI fanout tab: a class via that holds the ring is laid
-     as declared under `fab`, and nothing is named.
+     as declared under `fab`, and nothing is named;
+  6. bga_fanout's does too (glasgow U30, class via 0.45/0.25).
 
 The fixture is the issue's: qfn_csi_underpad_diff plus J9, a 2-row 0.5 mm
 socket with two un-netted mounting tabs (so row B reads interior and is
@@ -33,6 +34,8 @@ uses) for 1-3, and the issue's 0.5/0.2 (ring 0.15) for 5.
 
     python3 tests/test_1775_self_sized_via_board_setup.py
 """
+import contextlib
+import io
 import json
 import os
 import re
@@ -201,11 +204,43 @@ def units():
         fab_tiers.set_escalation_policy(*prev)
 
 
+def bga_class_via(tmp):
+    """6. bga_fanout's self-sized via starts at the Default class via too
+    (#1795), as the GUI's BGA panel does: glasgow U30 with its class via set
+    to 0.45/0.25 lays its first-rung vias at 0.45/0.25, never the old 0.5/0.3."""
+    print('6. bga_fanout starts at the Default class via')
+    sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+    from copy_board import copy_board
+    board = os.path.join(tmp, 'glasgow.kicad_pcb')
+    with contextlib.redirect_stdout(io.StringIO()):
+        copy_board(os.path.join(ROOT, 'kicad_files', 'glasgow_revC.kicad_pcb'), board)
+    pro = os.path.splitext(board)[0] + '.kicad_pro'
+    proj = json.load(open(pro, encoding='utf-8'))
+    for c in proj['net_settings']['classes']:
+        if c['name'] == 'Default':
+            c['via_diameter'], c['via_drill'] = 0.45, 0.25
+    json.dump(proj, open(pro, 'w', encoding='utf-8'), indent=2)
+    out = os.path.join(tmp, 'glasgow_out.kicad_pcb')
+    r = run_utils.check([sys.executable, '-B', '-X', 'utf8', 'py_router/bga_fanout.py', board,
+                         '--output', out, '--component', 'U30',
+                         '--layers', 'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu',
+                         '--nets', '*', '!GND', '!+3V3', '!+1V2', '--track-width', '0.12'],
+                        accept=True)
+    run_utils.evidence(out, 'bga fanout output')
+    log = r.stdout + r.stderr
+    ok('it says where the via came from',
+       '--via-size not given; using the board Default net-class 0.45mm.' in log)
+    sizes = via_sizes(out)
+    ok('the class via is laid, the old constant is not',
+       (0.45, 0.25) in sizes and (0.5, 0.3) not in sizes, repr(sizes))
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix='t1775_')
     try:
         units()
         end_to_end(tmp)
+        bga_class_via(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
