@@ -2386,15 +2386,16 @@ class StrictRemovalModel:
         for the other end. Removing one leg of a loop left that leg's last
         short track lying in the surviving track's copper so; the loop now
         loses another branch instead;
-      * on a net a skew rule grades (``keep_centre_stubs``), no kept via
-        that a track on a layer reached AT ITS CENTRE is left reached there
-        only by track ends off it (#1798: _centre_lost_vias). A rim-to-centre
-        stub (the via-centre bridge close_soft_joints lays, #1235) is what
-        KiCad's length DRC measures the run into the via by; without it the
-        track ends on the rim, the net measures a via radius shorter and the
-        barrel may go uncharged -- a matched pair failed its recorded skew
-        after an all-nets step collapsed one. On any other net the stub is
-        copper no grade reads, and it stays removable.
+      * on a net a skew rule grades or a .kicad_dru length rule binds
+        (``keep_centre_stubs``, cleanup_pipeline._centre_stub_net_ids), no
+        kept via that a track on a layer reached AT ITS CENTRE is left
+        reached there only by track ends off it (#1798: _centre_lost_vias).
+        A rim-to-centre stub (the via-centre bridge close_soft_joints lays,
+        #1235) is what KiCad's length DRC measures the run into the via by;
+        without it the track ends on the rim, the net measures a via radius
+        shorter and the barrel may go uncharged -- a matched pair failed its
+        recorded skew after an all-nets step collapsed one. On any other net
+        the stub is copper no grade reads, and it stays removable.
 
     Candidates are unlocked, non-graphic track segments outside
     ``readonly_ids``. They are tried in UNITS: every single segment, and every
@@ -3254,8 +3255,8 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
     from fix_kicad_drc_settings import connection_width_floor
     web_floor = connection_width_floor(pcb_data, shipped=True)
     # #1798: the nets whose via-centre stubs a length grade reads.
-    from cleanup_pipeline import _skew_bound_net_ids
-    skew_ids = _skew_bound_net_ids(pcb_data)
+    from cleanup_pipeline import _centre_stub_net_ids
+    stub_ids = _centre_stub_net_ids(pcb_data)
 
     removed_ids = set()
     dropped_via_ids = set()
@@ -3282,7 +3283,7 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
                                    copper_layers, readonly_ids=readonly,
                                    droppable_via_ids=droppable,
                                    web_floor=web_floor,
-                                   keep_centre_stubs=net_id in skew_ids)
+                                   keep_centre_stubs=net_id in stub_ids)
         if not model.valid:
             continue
         _dbg = None

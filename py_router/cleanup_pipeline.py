@@ -133,6 +133,45 @@ def _skew_bound_net_ids(pcb_data):
             | {m for _ch, p, n in chains for m in p + n})
 
 
+def _centre_stub_net_ids(pcb_data):
+    """Nets the strict collapse and check_weird keep via-centre stubs on
+    (#1798, StrictRemovalModel's keep_centre_stubs): the nets whose length,
+    as KiCad measures it, a grade reads. Those are the skew-graded nets
+    (_skew_bound_net_ids) and every net a .kicad_dru `length` rule binds,
+    which check_drc's length pass (#1313) and KiCad (length_out_of_range)
+    both grade: a later step's collapse took the stub off a net held to a
+    length window, and the net left the window by a via radius.
+
+    The length-rule nets are selected as check_drc._length_rule_pass selects
+    them: two pads or more, and the rule KiCad applies to the net
+    (kicad_dru.binding_length_rule) has a min or a max. A net whose binding
+    rule is not modelled is left out, as that pass leaves it ungraded. The
+    graze passes' read-only set (#1759) stays _skew_bound_net_ids."""
+    ids = set(_skew_bound_net_ids(pcb_data))
+    try:
+        from kicad_dru import read_board_length_rules, binding_length_rule
+        path = getattr(pcb_data, 'source_path', '') or ''
+        rules, _notes = read_board_length_rules(path)
+        if not rules:
+            return ids
+        from list_nets import net_class_memberships
+        names = {nid: n.name for nid, n in pcb_data.nets.items()
+                 if nid and n.name}
+        member = net_class_memberships(path, names)
+        board_names = set(names.values())
+        for nid, name in names.items():
+            if len(pcb_data.pads_by_net.get(nid) or ()) < 2:
+                continue
+            rule, _blocker = binding_length_rule(rules, name, member.get(nid),
+                                                 board_names)
+            if rule is not None and (rule.min_mm is not None
+                                     or rule.max_mm is not None):
+                ids.add(nid)
+    except Exception:
+        pass
+    return ids
+
+
 @dataclass
 class CleanupOutcome:
     """What the pipeline did, for the caller's writer/summary plumbing."""
