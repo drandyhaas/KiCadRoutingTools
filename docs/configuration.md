@@ -372,7 +372,9 @@ matter), a pad by its copper (one straddling the edge binds), and a clearance
 pair under the last matching rule in file order, its condition tried both ways,
 so `A.insideCourtyard('U1')` binds a pair one of whose items is inside -- each
 measured on kicad-cli 10.0.6. Such a rule is then not NOT GRADED. A rule whose
-condition is not read otherwise is listed as one that MAY relax. No routing step
+condition is not read otherwise, or whose courtyard term is negated
+(`!A.insideCourtyard('U1')` binds a via outside that part), is listed as one
+that MAY relax, with the nets its other terms do not rule out. No routing step
 applies a courtyard-scoped rule: the router routes that copper at the class
 value.
 

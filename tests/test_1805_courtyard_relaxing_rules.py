@@ -18,7 +18,8 @@ Checks (no routing):
      `list_nets.py` prints on the rule line;
   3. `list_nets.py --design-rules` prints the three rules, marks the two
      bound by position, and names the nets; the net-name rule's line is as
-     before (#1649);
+     before (#1649); a rule whose courtyard term is NEGATED is not marked
+     "inside the courtyard", and its net is listed as one it may bind;
   4. check_drc on two /WR vias with a 0.07 ring flags the one at (100, 80)
      and not the one on pad U1.2 -- what kicad-cli 10.0.6 reports on the
      same board -- and prints no NOT GRADED line for the courtyard rule;
@@ -61,6 +62,14 @@ DRU = '''(version 1)
 '''
 UNREAD = '''(rule "ring_unread"
   (condition "A.NetName == '/OE' && A.getField('x') == 'y'")
+  (constraint annular_width (min 0.07mm)))
+'''
+NEGATED = '''(version 1)
+(rule "ring_outside_u1"
+  (condition "A.NetName == '/WR' && !A.insideCourtyard('U1')")
+  (constraint annular_width (min 0.07mm)))
+(rule "ring_not_rd_in_u1"
+  (condition "!(A.NetName == '/RD') && A.insideCourtyard('U1')")
   (constraint annular_width (min 0.07mm)))
 '''
 VIAS = ((65.85, 92.75), (100, 80))      # on pad U1.2, and well outside U1
@@ -166,6 +175,31 @@ def listing(td):
               accept=True)
     ok('RELAX' not in r.stdout and 'relaxed via rule' not in r.stdout,
        "control: no rules file, no RELAX block")
+    # a NEGATED courtyard term binds a via OUTSIDE the part: the rule is never
+    # listed as bound inside it, and its net is still named
+    neg = stage(td, 'g', NEGATED)
+    pcb, dr = load(neg)
+    rows = relaxing_rules(dr.rules, dr.board_min)
+    by = {x['rule']: x for x in rows}
+    row = by.get('ring_outside_u1', {})
+    ok(row.get('courtyard') == [] and 'negated courtyard term' in (row.get('unresolved') or ''),
+       f"the negated rule names no courtyard and says why: {row.get('courtyard')}, "
+       f"{row.get('unresolved')}")
+    ok(by.get('ring_not_rd_in_u1', {}).get('courtyard') == ['U1']
+       and by['ring_not_rd_in_u1']['unresolved'] is None,
+       "control: a negation on another term leaves the rule bound inside U1")
+    nets = relaxed_via_nets(dr, pcb, rows)
+    ok(nets.get('ring_outside_u1') == {'nets': ['/WR'], 'how': 'may'},
+       f"the negated rule's net: {nets.get('ring_outside_u1')}")
+    out = check(PY + [os.path.join(REPO, 'py_router', 'list_nets.py'), neg, '--design-rules'],
+                accept=True).stdout
+    line = next((x for x in out.splitlines() if x.startswith("  - 'ring_outside_u1': ")), '')
+    ok('inside the courtyard of' not in line and 'a negated courtyard term' in line
+       and line.endswith('it MAY relax'), f"its rule line: ...{line[-95:]}")
+    ok("  - 'ring_outside_u1' (annular_width): 1 net(s); the condition is not read, so these "
+       "are the nets it MAY bind: /WR\n" in out, "its nets line names /WR as a net it may bind")
+    ok(out.count('bound by POSITION: inside the courtyard of U1 only') == 1,
+       "control: the other rule is the one line marked inside U1")
 
 
 def grade(td):

@@ -2467,7 +2467,9 @@ def relaxing_rules(rules, board_min) -> List[dict]:
     #1805: a rule whose condition is not fully read is listed too.
     ``courtyard`` names the parts its courtyard terms name, when they are all
     it does not read: it binds by POSITION, inside those courtyards only.
-    ``unresolved`` is why it could not be read otherwise (it may relax).
+    ``unresolved`` is why it could not be read otherwise (it may relax). A
+    rule with a NEGATED courtyard term (`!A.insideCourtyard('U1')`) binds
+    outside that part, so it names no courtyard and is ``unresolved``.
     A rule unread for anything but its condition (an ignored severity, a
     value, a non-copper layer clause) relaxes nothing and is left out."""
     out = []
@@ -2475,6 +2477,10 @@ def relaxing_rules(rules, board_min) -> List[dict]:
         if r.unsupported and not r.unsupported.startswith('condition'):
             continue
         cy = sorted(_courtyard_patterns(r.courtyard_condition))
+        unresolved = r.unsupported if r.unsupported and not cy else None
+        if cy and _courtyard_negated(r.courtyard_condition):
+            cy, unresolved = [], ('a negated courtyard term: it binds by position, '
+                                  'outside the part')
         for kind, spec in sorted(r.constraints.items()):
             key = BOARD_MIN_KEYS.get(kind)
             v, b = spec.get('min'), (board_min or {}).get(key)
@@ -2483,8 +2489,7 @@ def relaxing_rules(rules, board_min) -> List[dict]:
                 out.append({'rule': r.name, 'kind': kind, 'min': v, 'board': b,
                             'board_key': key, 'condition': r.condition_src,
                             'layer': r.layer_clause, 'courtyard': cy,
-                            'unresolved': (r.unsupported if r.unsupported and not cy
-                                           else None)})
+                            'unresolved': unresolved})
     return out
 
 
@@ -2876,6 +2881,18 @@ def _courtyard_patterns(node) -> Set[str]:
     for c in node[1:]:
         out |= _courtyard_patterns(c)
     return out
+
+
+def _courtyard_negated(node, odd: bool = False) -> bool:
+    """A courtyard term of an AST stands under an odd number of negations: it
+    holds for an item OUTSIDE the part it names."""
+    if not isinstance(node, tuple) or not node:
+        return False
+    if node[0] == 'courtyard':
+        return odd
+    if node[0] == 'not':
+        odd = not odd
+    return any(_courtyard_negated(c, odd) for c in node[1:])
 
 
 class CourtyardIndex:
