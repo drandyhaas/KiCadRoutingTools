@@ -307,7 +307,11 @@ def planar_nets(pcb_data, board_path: Optional[str] = None) -> Dict[int, dict]:
     no via, read as the routing steps read them: the track bans
     `derive_layer_bans` derives leave the net one permitted layer, and a
     rule forbids its through via (`disallow via` / `through_via`) or allows
-    it none (`via_count (max 0)`). `{net_id: {'name', 'layer', 'rules'}}`,
+    it none (`via_count (max 0)`). The via ban is read at no layer and on
+    each copper layer: a through via has copper on all of them, so a rule a
+    `(layer ...)` clause scopes to one forbids it, as check_drc and KiCad
+    grade it (`(layer "F.Cu") ... (constraint disallow track via)` is the
+    whole declaration in one rule). `{net_id: {'name', 'layer', 'rules'}}`,
     {} on a board with no rules file or no such net. Such a net reaches a
     pad only on that layer: a via cannot carry it to a pad's other face."""
     path = board_path or getattr(pcb_data, 'source_path', '') or ''
@@ -337,9 +341,11 @@ def planar_nets(pcb_data, board_path: Optional[str] = None) -> Dict[int, dict]:
         if len(left) != 1:
             continue
         via = dr.item_for_net(nid, 'via', via_type='through')
-        d = dr.resolve('disallow', via, None, None)
+        d = next((c for c in (dr.resolve('disallow', via, None, lay)
+                              for lay in [None] + copper)
+                  if _THROUGH_VIA_TOKENS & set(c.disallow or ())), None)
         vc = dr.resolve('via_count', via, None, None)
-        if _THROUGH_VIA_TOKENS & set(d.disallow or ()):
+        if d is not None:
             why = d.source
         elif vc.max is not None and vc.max <= 0:
             why = vc.source
