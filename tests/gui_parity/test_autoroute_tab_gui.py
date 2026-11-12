@@ -388,9 +388,11 @@ def run(keep, board_file=BOARD, require_moves=False):
     app = wx.App(False)  # noqa: F841
     wx.Log.SetActiveTarget(wx.LogStderr())
     asked = []
+    asked_styles = []
 
     def _yes(msg, *a, **k):
         asked.append(msg)
+        asked_styles.append(a[1] if len(a) > 1 else k.get('style', 0))
         return wx.YES
     wx.MessageBox = _yes
     board = pcbnew.LoadBoard(src)
@@ -481,13 +483,25 @@ def run(keep, board_file=BOARD, require_moves=False):
         from kicad_routing_plugin.result_apply import plan_apply
         unticked = "\n".join(plan_apply(board, s['output'], pcbnew, fix_drc=False).lines())
         check("with 'Fix DRC settings' unticked, Apply says it leaves the rules (#693)",
-              'Design rules: NOT changed' in unticked, unticked[-300:])
+              'Design rules: not changed' in unticked, unticked[-300:])
         check("the dialog's box is ticked, so this Apply lowers the rules",
               dlg.fix_drc_check.GetValue())
         tab._on_apply(None)
         check("Apply asked first, naming the zones and copper",
               asked and 'Zones:' in asked[-1] and 'Tracks and vias:' in asked[-1],
               asked[-1][:300] if asked else 'not asked')
+        # Applied, the board IS the result: a second Apply has nothing to do,
+        # says so, and offers OK alone rather than a Continue? question.
+        from kicad_routing_plugin.result_apply import NOTHING_TO_CHANGE
+        again = plan_apply(board, s['output'], pcbnew)
+        check("after Apply, the same result has nothing to change",
+              not again.has_changes and again.lines() == [NOTHING_TO_CHANGE],
+              "\n".join(again.lines())[:300])
+        tab._on_apply(None)
+        check("a second Apply says nothing changes, with OK alone",
+              asked[-1] == NOTHING_TO_CHANGE
+              and not (asked_styles[-1] & wx.YES_NO) and (asked_styles[-1] & wx.OK),
+              f"{asked[-1][:120]!r} style={asked_styles[-1]}")
         compare_saved(board, cli_out, os.path.join(tmp, 'gui', 'routed.kicad_pcb'),
                       own_result=s['output'])
         before = board_facts(src)['poses']

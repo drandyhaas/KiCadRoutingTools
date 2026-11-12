@@ -873,6 +873,11 @@ class AutorouteTab(wx.Panel):
             wx.MessageBox(f"Could not read the result board: {e}", "Autorouter",
                           wx.OK | wx.ICON_ERROR)
             return
+        if not plan.has_changes:
+            self.last_apply_message = "\n\n".join(plan.lines())
+            wx.MessageBox(self.last_apply_message, "Apply Autorouter Result",
+                          wx.OK | wx.ICON_INFORMATION)
+            return
         lines = plan.lines()
         lines.append("The open board is made to match the result board; it may "
                      "have changed since the run started, and this list is against "

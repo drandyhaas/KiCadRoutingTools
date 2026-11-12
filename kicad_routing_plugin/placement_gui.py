@@ -939,41 +939,39 @@ class PlacementTab(wx.Panel):
 
         moves = self._pose_moves(board, result_pcb, pcbnew)
         locks = self._lock_changes(board, result_pcb)
-        with_copper = self._mode == "place_route"
 
         def _refs(refs):
             return ", ".join(refs[:30]) + (", ..." if len(refs) > 30 else "")
-        lines = [f"{len(moves)} footprint(s) will move."]
+        lines = []
         if moves:
-            lines.append(_refs([r for r, _fp, _p in moves]))
+            lines.append(f"{len(moves)} footprint(s) will move: "
+                         f"{_refs([r for r, _fp, _p in moves])}")
         # #1054: the run's locks are part of its result (`place_pose
         # lock/unlock` stamps and strips them), so Apply mirrors them -- and
         # NAMES them first, an unlock above all.
         to_lock = [r for r, _fp, want in locks if want]
         to_unlock = [r for r, _fp, want in locks if not want]
         if to_lock:
-            lines.append(f"{len(to_lock)} footprint(s) will be LOCKED, as the "
+            lines.append(f"{len(to_lock)} footprint(s) will be locked, as the "
                          f"result board has them: {_refs(to_lock)}")
         if to_unlock:
-            lines.append(f"{len(to_unlock)} footprint(s) will be UNLOCKED, as "
+            lines.append(f"{len(to_unlock)} footprint(s) will be unlocked, as "
                          f"the result board has them: {_refs(to_unlock)}")
         # #829: say what was NOT applied. A skip the dialog does not mention is
         # a live board that silently disagrees with the result board.
         _skipped = getattr(self, '_outline_skipped', None)
         if _skipped:
             lines.append(
-                f"NOT applied: {', '.join(_skipped)} -- these draw the board "
+                f"Not applied: {', '.join(_skipped)} -- these draw the board "
                 f"outline, so moving them would resize the board. Their poses "
                 f"in the result board are left alone here; edit part and "
                 f"outline together in KiCad if one really must move (#829).")
-        if with_copper:
-            lines.append("Place + Route additionally makes the live board's "
-                         "tracks and vias the run's routing: copper the run "
-                         "kept unchanged stays as it is (groups included), "
-                         "the rest is replaced. Replaced arc tracks come "
-                         "back as short straight segments (the parser "
-                         "linearizes arcs) - if the run changed any, open "
-                         "the result board file instead.")
+        if not moves and not locks:
+            lines.insert(0, "Nothing to change: the open board already has the "
+                            "result's part poses and locks.")
+            wx.MessageBox("\n\n".join(lines), "Apply Placement Result",
+                          wx.OK | wx.ICON_INFORMATION)
+            return
         lines.append("The live board may have changed since the run started - "
                      "this diff is against its state right now. Continue?")
         if wx.MessageBox("\n\n".join(lines), "Apply Placement Result",
@@ -984,10 +982,6 @@ class PlacementTab(wx.Panel):
             self._apply_pose(fp, parsed, pcbnew)
         for _ref, fp, want in locks:
             fp.SetLocked(want)
-        tracks_added = vias_added = 0
-        if with_copper:
-            tracks_added, vias_added = self._apply_copper(board, result_pcb, pcbnew)
-
         board.BuildConnectivity()
         from .gui_utils import refill_all_zones
         refill_all_zones(board)
@@ -1007,9 +1001,6 @@ class PlacementTab(wx.Panel):
         if locks:
             msg += (f", {len(to_lock)} lock(s) set and {len(to_unlock)} "
                     f"cleared")
-        if with_copper:
-            msg += (f", {tracks_added} track(s), {vias_added} via(s) added "
-                    f"(unchanged copper kept)")
         msg += ". Use Edit -> Undo in pcbnew to revert."
         self.set_status(msg)
         self.append_log("Placement apply: " + msg + "\n")
@@ -1030,6 +1021,11 @@ class PlacementTab(wx.Panel):
                           "Placement", wx.OK | wx.ICON_ERROR)
             return
         self._outline_skipped = plan.outline_skipped
+        if not plan.has_changes:
+            self.last_apply_message = "\n\n".join(plan.lines())
+            wx.MessageBox(self.last_apply_message, "Apply Placement Result",
+                          wx.OK | wx.ICON_INFORMATION)
+            return
         lines = plan.lines()
         lines.append("Place + Route makes the live board the run's routed "
                      "board. The live board may have changed since the run "

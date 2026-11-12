@@ -110,7 +110,8 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False, order_board=None):
     never a lock. RemoveNative, never Remove (see the SWIG-registry warning
     in swig_gui).
 
-    Returns {'kept', 'removed', 'tracks_added', 'vias_added', 'nets'}, where
+    Returns {'kept', 'removed', 'arcs_removed', 'tracks_added', 'vias_added',
+    'nets'}, where
     'nets' is [(item, net code)] for every item the result decides the net
     of, so a caller re-pins them after BuildConnectivity (which reassigns a
     netcode over a stale fill). DRY_RUN counts and changes nothing.
@@ -181,6 +182,7 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False, order_board=None):
     add_segs = [s for segs in want_segs.values() for s in segs]
     add_vias = [v for vias in want_vias.values() for v in vias]
     out = {'kept': len(kept), 'removed': len(removed),
+           'arcs_removed': sum(1 for it in removed if it.GetClass() == 'PCB_ARC'),
            'tracks_added': len(add_segs), 'vias_added': len(add_vias), 'nets': []}
     if dry_run:
         return out
@@ -491,6 +493,10 @@ def apply_rules(board, result_path, fix_drc=True):
 
 # -------------------------------------------------------------- the whole
 
+NOTHING_TO_CHANGE = ("Nothing to change: the open board already matches the "
+                     "result -- its parts, locks, tracks, vias and zones.")
+
+
 class ApplyPlan:
     """What Apply will change, computed against the live board as it is now."""
 
@@ -508,42 +514,73 @@ class ApplyPlan:
         self.rules = rules          # the result's project declares floors
         self.fix_drc = fix_drc      # ... and the dialog may lower the live ones
 
+    @property
+    def has_changes(self):
+        """Does Apply change the board: a part moved, locked or unlocked, a
+        track or via removed or added, a zone removed or added? Design rules
+        alone do not count: they are only-lowered to the result's, and a run
+        that changes no copper has no new floor to bring."""
+        c, z = self.copper or {}, self.zones or {}
+        return bool(self.moves or self.locks
+                    or c.get('removed') or c.get('tracks_added') or c.get('vias_added')
+                    or z.get('remove') or z.get('add'))
+
     def lines(self):
-        """The confirmation box's text, one paragraph per kind of change."""
+        """The confirmation box's text, one paragraph per kind of change.
+        Only what is non-zero is named; a plan that changes nothing says so
+        in one line (the callers then show it with OK alone, not Continue)."""
+        if not self.has_changes:
+            return [NOTHING_TO_CHANGE]
         def refs(rs):
             return ", ".join(rs[:30]) + (", ..." if len(rs) > 30 else "")
-        out = [f"{len(self.moves)} footprint(s) will move"
-               + (f": {refs([r for r, _f, _p in self.moves])}" if self.moves else ".")]
+
+        def counts(parts):
+            return ", ".join(f"{n} {what}" for n, what in parts if n)
+        out = []
+        if self.moves:
+            out.append(f"{len(self.moves)} footprint(s) will move: "
+                       f"{refs([r for r, _f, _p in self.moves])}")
         to_lock = [r for r, _f, want in self.locks if want]
         to_unlock = [r for r, _f, want in self.locks if not want]
         if to_lock:
-            out.append(f"{len(to_lock)} footprint(s) will be LOCKED, as the result "
+            out.append(f"{len(to_lock)} footprint(s) will be locked, as the result "
                        f"has them: {refs(to_lock)}")
         if to_unlock:
-            out.append(f"{len(to_unlock)} footprint(s) will be UNLOCKED, as the "
+            out.append(f"{len(to_unlock)} footprint(s) will be unlocked, as the "
                        f"result has them: {refs(to_unlock)}")
         if self.outline_skipped:
-            out.append(f"NOT moved: {', '.join(self.outline_skipped)} -- these draw "
+            out.append(f"Not moved: {', '.join(self.outline_skipped)} -- these draw "
                        f"the board outline (#829).")
         if self.unreachable:
-            out.append(f"NOT applied: {len(self.unreachable)} part(s) only in the "
+            out.append(f"Not applied: {len(self.unreachable)} part(s) only in the "
                        f"result: {refs(self.unreachable)}")
         if self.copper is not None:
             c = self.copper
-            out.append(f"Tracks and vias: {c['kept']} unchanged kept, {c['removed']} "
-                       f"live item(s) the result does not have REMOVED, "
-                       f"{c['tracks_added']} track(s) and {c['vias_added']} via(s) "
-                       f"added. Replaced arcs come back as short straight segments.")
+            what = counts([(c['removed'], "removed (live items the result does not have)"),
+                           (c['tracks_added'], "track(s) added"),
+                           (c['vias_added'], "via(s) added"),
+                           (c['kept'], "unchanged kept")])
+            if c['removed'] or c['tracks_added'] or c['vias_added']:
+                line = f"Tracks and vias: {what}."
+                if c.get('arcs_removed'):
+                    line += (f" {c['arcs_removed']} of the removed items are arcs; "
+                             f"the result's copper in their place is short "
+                             f"straight segments.")
+                out.append(line)
         if self.zones is not None:
             z = self.zones
-            out.append(f"Zones: {len(z['keep'])} unchanged kept, {len(z['remove'])} "
-                       f"removed, {len(z['add'])} added from the result, with the "
-                       f"result's fills (not refilled; press B in KiCad to refill).")
+            if z['remove'] or z['add']:
+                what = counts([(len(z['remove']), "removed"),
+                               (len(z['add']), "added from the result"),
+                               (len(z['keep']), "unchanged kept")])
+                out.append(f"Zones: {what}"
+                           + (", with the result's fills (not refilled; press B "
+                              "in KiCad to refill)" if z['add'] else "") + ".")
         if self.rules and self.fix_drc:
             out.append("Design rules: the live board's floors and net classes are "
                        "lowered to the result project's, as a routing step does.")
         elif self.rules:
-            out.append("Design rules: NOT changed -- 'Fix DRC settings after "
+            out.append("Design rules: not changed -- 'Fix DRC settings after "
                        "routing' is unticked, so the live board keeps its floors "
                        "and KiCad may grade the result's fine copper against them.")
         return out
