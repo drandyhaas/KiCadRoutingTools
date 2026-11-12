@@ -222,7 +222,8 @@ process, so a retry that broke what the step before it connected could not
 tell, and a rejected trade was run again step after step with the same
 report. Every gated step that lost or gained a net appends its trade (`lost`,
 `gained`, `verdict`, and `attackers`: each lost net's rippers) to the board's
-records, `kicad_routing_tools.route_laps` (the last four, through
+records, `kicad_routing_tools.route_laps` (the last four, the newest accepted
+one always among them however many rejected retries follow it, through
 `tool_records` on both fronts; a REJECTED step writes it too, into the
 reverted output's project, because what it tried is news to the next step).
 The next step's gate compares its own trade with the newest accepted entry --

@@ -188,9 +188,13 @@ The DRC checker validates:
 20. **`.kicad_dru` `disallow` rules** (`items-not-allowed`, #1527) - Every `(constraint disallow track|via|through_via|micro_via|blind_via|buried_via)` rule, graded per track and per via as KiCad's `items_not_allowed`, one row per item naming the last matching rule in file order. A rule whose condition the resolver evaluates (`A.NetClass == 'HS' && A.Layer != 'F.Cu'`, a `(layer ...)` clause, `A.NetName == ...`) binds a track on its own layer and a via on each layer it has copper on; a via's `A.Layer` is undefined, as KiCad reads it, so `A.Layer` comparisons never bind a via. A rule on a named rule area is graded through the router's own net-filtered keep-out (`net_keepouts.derive_area_keepouts` + `audit_items`). What neither reaches -- another token (`pad`, `zone`, `hole`, ...) or a condition outside both models -- is named `NOT GRADED (disallow)`; `board_score` lists it in `drc.ungraded_rules` and `check_complete` reads INCOMPLETE. `board_score` counts the rows in `drc` (blocking).
 21. **`.kicad_dru` via count rules** (`via-count-out-of-range`, #1707) - Every `(constraint via_count (min N) (max M))` rule, graded as KiCad's `too_many_vias`: each pad, track and via is bound by the last matching rule in file order (conditions read by the `design_rules` resolver), the items are grouped by binding rule and net, and each group's vias are counted. So the count is every via of the net, a stray one included, and a `min` flags a net with no vias (a one-pad net, and the no-net pads as one net) where a `max` flags only a net with more; a rule bound only by a net's vias (`A.Type == 'Via' && ...`) counts them, and one bound only by its pads counts none. A `(severity ignore)` rule binds and reports nothing, a `warning` rule is a warning (listed, not counted) and an `exclusion` rule an error, as kicad-cli 10.0.6 reports them. Measured equal to kicad-cli 10.0.6's rows (net, rule, bound and count) on a routed corpus board with 89 and on probe boards covering a stray via, `min`, `max`, both, an unconditioned rule and the three severities. An item whose binding rule turns on a term the resolver cannot read (`insideCourtyard()`, ...) leaves the rule `NOT GRADED (via_count)` for its net, which `board_score` lists in `drc.ungraded_rules`. No routing step honours the rule (route.py and route_diff.py list it NOT honoured); `board_score` counts the rows in `drc` (blocking).
 
+22. **`.kicad_dru` `hole_clearance` rules** (`track-hole`, `via-hole`, `pad-hole`) - Every `(constraint hole_clearance (min ..))` rule, graded as KiCad's `hole_clearance` (`check_drc.hole_rule_grade`): every via drill, plated and NPTH hole against the copper of each track, via and pad of ANOTHER net (two net-less items are one net), on each copper layer both occupy (a blind or buried via's hole on its own span only). The value binding a pair is KiCad's: a pad clearance override on either item first (graded by check 7, as before), else the last matching rule in file order, read either way round by the `design_rules` resolver, a `(layer ...)` clause scoping the copper item's layer; else the board minimum, which check 7 grades on NPTH holes only. A rule REPLACES that minimum, below it too, so a check 7 row a binding rule clears is dropped, never below the NPTH fab floor for a track. Where the two items' copper also fails its clearance, KiCad reports the clearance row alone (except a pad against a via's hole), and so does this. One row per pair of items, naming its rule (`required_mm`, `rule`); a `(severity ignore)` rule decides its pairs and reports nothing, a `warning` rule's rows are warnings. A rule whose condition the resolver cannot read is named `NOT GRADED (hole_clearance)`. Zone fill is not graded (KiCad's filler knocks out at the rule). Measured on kicad-cli 10.0.6 on probe boards (`tests/test_dru_hole_clearance_grade.py`) and on three corpus boards with JLCPCB- and PCBWay-style rules, tightened until they bite: every pair kicad-cli reports, check_drc reports. kicad-cli stops testing an item's neighbours on a layer after its first violation there, so it may list fewer pairs than check_drc, and a different subset from run to run. No routing step honours the rule: copper is kept off another net's NPTH holes at the board's `min_hole_clearance` (or the fab floor) and off plated holes at the copper clearance, so every routing step that reads the rules lists it NOT honoured (`JSON_SUMMARY.design_rules.unsupported_rules`).
+
 A clearance or `track_width` rule whose only unread terms are courtyard predicates (`A.insideCourtyard('U1')`, ...) is graded by where each item stands (#1832; a via's sizes since #1805): a track by its capsule, a pad by its copper, against the part's drawn courtyard, as kicad-cli 10.0.6 reads them; a row such a rule priced names it (`courtyard_rule`, with its `required_mm`), and its severity is the rule's. A `.kicad_dru` clearance rule check_drc does not model otherwise (`A.getField(...)`, a layer clause beside a name term) is named `NOT GRADED (clearance)` (#1490). The violations it MAY make legal -- the rule relaxes the pair's requirement to a value the gap meets, and its condition, read three-valued with the unmodelled terms unknown, does not rule the pair out -- stay counted but are tagged `unverified_rule` (#1528): a console line `UNVERIFIED (clearance): N violation(s) ...`, the `--json` `unverified` count and `board_score`'s `drc.unverified` say how many of the count KiCad may not report.
 
 Every rule named `NOT GRADED (<kind>)` is also a row of the `--json` `not_graded` list (#1831), `--quiet` or not: `{rule, kind, reason}`, with `nets` where the pass knows which nets the rule may bind (length, via_count, skew, diff_pair_uncoupled), `constraints` on a `size` row and `clearance_mm` / `condition` on a `clearance` one. While the list is not empty, `violations` is a partial grade: KiCad still grades those rules. `run_drc(..., not_graded=[])` fills the same rows in-process.
+
+A rule of a constraint kind check_drc has no pass for is named too, whatever its condition: `NOT GRADED (<kind>): rule '<name>' (check_drc has no grade for this constraint)`, for `assertion`, `courtyard_clearance`, `creepage`, `physical_clearance`, `physical_hole_clearance` and `track_segment_length` (`kicad_dru.UNGRADED_KINDS`; the two `physical_*` kinds bind silkscreen and footprint graphics too, which nothing here grades against holes or copper). A `hole_clearance` rule is graded (check 22). A rule whose own severity is warning, ignore or exclusion is left out, and so is a `courtyard_clearance` rule whose `min` is 0 or below (absent reads as 0, as a fab template's test-point courtyard exclusion `(min -1mm)` is): it can only relax KiCad's courtyard check, which kicad-cli 10.0.6 runs at its default under min 0 and skips for a pair a min below 0 binds, so it raises no error KiCad would not report without it (`tests/test_dru_courtyard_relaxing_rule.py`). `board_score` lists it in `drc.ungraded_rules` and `check_complete` reads the board INCOMPLETE, as for every other rule nothing here grades; `check_complete --kicad-rules` has KiCad judge it.
 
 **Severity (#1626).** Each finding is graded at the severity KiCad gives it. The KiCad check a row answers to is its type's (`check_drc.KICAD_SEVERITY_KEY`: the clearance family is `clearance`, or `shorting_items` when the copper of two real nets touches; drill pairs `hole_to_hole`; edge rows `copper_edge_clearance`; size rows `track_width` / `via_diameter` / `drill_out_of_range` / `annular_width`; `disallow` and keep-out rows `items_not_allowed`; the length, skew and uncoupled rows their own). A project `rule_severities` of `ignore` is a check KiCad does not run: the row is accepted `severity-ignore` and counted on a `SEVERITY IGNORE` line. Otherwise the violating `.kicad_dru` rule's own `(severity ...)` decides when it has one (a clearance row is asked of the same resolver that graded it), and the project's severity when it has not; a `warning` is accepted `severity-warning` and listed under WARNINGS (`SEVERITY WARNING: N finding(s)`, each with the rule or project key that set it). An unset severity is an error. A `(severity ignore)` clearance rule is read by no clearance channel, but KiCad still resolves to it: when it is the last rule in file order that binds a clearance row's two items (asked of the `design_rules` resolver, three-valued, so only a certain binding counts), the row is accepted `severity-ignore` under that rule (#1733; measured on kicad-cli 10.0.6 for a rule alone, one after an error rule, which it overrides, and one before an error rule, which overrides it, on tracks, a layer rule and a pad pair). That precedence (a rule's severity over the project's error or warning, a project `ignore` over any rule) was measured on kicad-cli 10.0.6. A severity governs KiCad's rule and not the physical fab floor: a spacing row whose gap is below the fab floor of its kind (copper clearance, hole to hole, copper to edge; touching copper included) and a size row below the fab floor's size (or one only the fab floor makes, which KiCad does not report) keep counting. `--json` counts `severity_warnings` and `severity_ignored`; `board_score` carries both in `drc` and prints them (not blocking); `check_complete` discloses them. `kicad_drc_compare` grades its staged copy, whose copper classes it stages at `error`, with `run_drc(severity_overrides=...)` set to the same.
 Same-net copper overlaps -- a track crossing its own net on one layer, two same-net vias touching -- are printed as warnings, not violations, as KiCad permits them. So is a part's net-less footprint copper touching its own pad's net (`footprint-own-copper`, #995), which KiCad's DRC reports as `shorting_items` but is not a short.
@@ -1274,19 +1278,28 @@ clean only against floors a DRC writeback lowered; exit 5). Ungraded
 components do not block DONE but are named in the verdict line -- except a
 `.kicad_dru` rule `check_drc` cannot model, which makes the verdict
 INCOMPLETE: every rule `check_drc` names `NOT GRADED (<kind>)` (size,
-clearance, disallow, via_count, length, skew, diff_pair_uncoupled; #1390,
-#1490, #1813), which `board_score` lists in `undersized.ungraded_rules` or
+clearance, disallow, via_count, length, skew, diff_pair_uncoupled, and the
+kinds it has no pass for: assertion, courtyard_clearance of min above 0,
+creepage, physical_clearance, physical_hole_clearance, track_segment_length, and a
+hole_clearance rule whose condition it cannot read; #1390, #1490, #1813),
+which `board_score` lists in
+`undersized.ungraded_rules` or
 `drc.ungraded_rules` (with `drc.ungraded_rule_kinds`). `--kicad-rules` (#1810,
 off by default) has KiCad's own DRC grade those rules: one `kicad-cli pcb drc`
 of a staged copy, on the fill as shipped, whose error-severity violations are
 counted per rule KiCad names in them. A rule with none is disclosed (`judged
 by KiCad <version>`) and stops blocking; one with N blocks, named with its
 count; one KiCad's report cannot be attributed to stays as before, saying why
-(no kicad-cli, a timeout, a rules file KiCad refuses whole (#1690), a rule
+(no kicad-cli, a timeout, a rules file KiCad does not load (#1690), a rule
 name the file declares twice or one containing a quote, or a violation type
-kicad-cli cut at 199 rows). The per-rule results are the document's
-`kicad_rules`, `measured_by: kicad-cli`. With the flag the verdict depends on
-the installed KiCad. A component the BOARD declares and nothing grades (a project
+kicad-cli cut at 199 rows). Whether KiCad loaded the file is asked of KiCad:
+the staged copy's rules file gets one probe rule that KiCad reports once, at
+warning severity, and a report with no row naming it or any rule of the file
+is a file KiCad dropped, whatever the reason; the refusal model check_drc and
+the routing steps read (#1690) only adds its reason when it knows one, and
+stands in for KiCad's answer only when kicad-cli cannot be asked. The per-rule results are the
+document's `kicad_rules`, `measured_by: kicad-cli`. With the flag the verdict
+depends on the installed KiCad. A component the BOARD declares and nothing grades (a project
 diff-pair net class with no `.kicad_dru` skew / `diff_pair_uncoupled` rule
 that binds it) is named apart, `DISCLOSED, not counted`. Net impedance
 declarations recorded by `route.py --impedance` and the power widths route.py
@@ -3217,8 +3230,8 @@ gap -- no ground beside it, or a gap off the declaration -- over more than
 
 Which signal vias have no ground return via nearby? It reports every signal via
 with no via or drilled pad of its OWN ground domain within `--distance`, per
-net, as text and JSON. Read-only, report-only (exit 0 whatever it counts; 3 for
-a missing board).
+net, as text and JSON. Read-only, report-only (exit 0 whatever it counts; 2
+when a `--nets` pattern names no net of the board; 3 for a missing board).
 
 ```bash
 python3 py_tools/check_return_vias.py routed.kicad_pcb [--nets GLOB ...] \
@@ -3226,7 +3239,10 @@ python3 py_tools/check_return_vias.py routed.kicad_pcb [--nets GLOB ...] \
 ```
 
 - `--nets` — only the vias of these nets (`route.py --nets` glob syntax);
-  default every signal via.
+  default every signal via. Each pattern is accounted on its own: one naming
+  no net of the board is named (`--nets pattern(s) matching no net of the board`,
+  `patterns_matching_no_net`) and the exit is 2, since the `0 of 0` it selects
+  would read as full coverage.
 - `--distance` — default 2.0 mm, the `--add-gnd-vias` step's own
   `--gnd-via-distance` default. The review skill passes its tier distances.
 - `--gnd-via-net` — pin every return to one ground net, as the step's flag
@@ -3238,11 +3254,14 @@ parts, or a pour the board draws for the net). The test is
 `return_vias.ReturnViaModel`, the one `route_planes.py --add-gnd-vias` and the
 Planes tab skip a covered via with, so the check and the step cannot disagree.
 The JSON carries `signal_vias`, `uncovered`, `power_vias` (left out),
-`distance_mm`, `gnd_net`, `by_net` and every `uncovered_vias` entry with its
-nearest return distance. A raw count over-reads vias inside a BGA field, and a
-layer change between two layers that share one reference plane: the stackup is
-not consulted. `board_score --impedance-nets` publishes the count for the named
-nets as `advisory.return_vias`, outside `blocking`.
+`power_nets` (the nets those vias are on, each with its via count and why it
+reads as power, also listed on the console), `distance_mm`, `gnd_net`, `by_net`
+and every `uncovered_vias` entry with its nearest return distance. A raw count
+over-reads vias inside a BGA field, and a layer change between two layers that
+share one reference plane: the stackup is not consulted. `board_score
+--impedance-nets` publishes the count for the named nets as
+`advisory.return_vias`, outside `blocking`, and its `RETURN VIAS` line names a
+named net whose vias were left out as power.
 
 ## Reachability Check (`check_reachability.py`)
 
@@ -3299,9 +3318,16 @@ exit 1, naming the parts whose copper closes the cut -- and 0 (exit 0) is
 counted as escaping and named. The proof is AT THE RULES PRICED: a part
 escaped with narrower tracks or smaller vias than the Default class reads
 short (a 0.8 mm BGA a human escaped at 0.15-0.19 mm tracks and 0.4 mm vias,
-on a 0.2 mm / 0.6 mm Default class, reads 19 nets short, its own pads at the
-cut, and 0 at `--track 0.15 --clearance 0.15 --via 0.4`); `stranded` names
-the nets left without a path.
+on a 0.2 mm / 0.6 mm Default class, reads 19 nets short, and 0 at
+`--track 0.15 --clearance 0.15 --via 0.4`); `stranded` names the nets left
+without a path. When no lattice cell is saturated those nets are closed in
+where they start, and the cut is named as the OTHER parts with pad copper
+within a halo's reach of their pads (clearance + half the wider of track and
+via + one cell) on any layer: a part in front of a pin, or one on the far
+side taking the via site -- on that BGA the capacitors under it, and with
+those gone it reads 0 short at the same class. Only when no other part is
+that close, and none lines the space the pads still open into, does the line
+name the part's own pads and narrower geometry as the other answer.
 
 ```bash
 python3 py_tools/check_reachability.py board.kicad_pcb --part U3
