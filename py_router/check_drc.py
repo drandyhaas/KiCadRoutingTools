@@ -3728,7 +3728,7 @@ LengthRuleNets = namedtuple('LengthRuleNets',
                             'rules notes bound undecided names member')
 
 
-def length_rule_nets(path, pcb_data, net_ids=None):
+def length_rule_nets(path, pcb_data, net_ids=None, time_domain: bool = False):
     """The `.kicad_dru` length windows (#1313) and the nets they grade.
 
     `bound` is {net id: rule} in net-name order, for every net (in `net_ids`
@@ -3741,7 +3741,7 @@ def length_rule_nets(path, pcb_data, net_ids=None):
     grades `bound`; the strict collapse keeps those nets' via-centre stubs
     (#1798, cleanup_pipeline._centre_stub_net_ids)."""
     from kicad_dru import read_board_length_rules, binding_length_rule
-    rules, notes = read_board_length_rules(path)
+    rules, notes = read_board_length_rules(path, time_domain=time_domain)
     if not rules:
         return LengthRuleNets([], notes, {}, {}, {}, {})
     from list_nets import net_class_memberships
@@ -3786,7 +3786,7 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     skipped. Returns the summary, or None when the board has no length rule.
     """
     path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
-    lr = length_rule_nets(path, pcb_data, matching_net_ids)
+    lr = length_rule_nets(path, pcb_data, matching_net_ids, time_domain=True)
     if not lr.rules:
         if lr.notes and not quiet:
             for n in lr.notes:
@@ -3796,8 +3796,30 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     rules, notes, names, member = lr.rules, lr.notes, lr.names, lr.member
     undecided = lr.undecided
     graded, unmeasured = 0, []
+    timing = _TimeDomain(path, pcb_data, member, names)
     for nid, rule in lr.bound.items():
         name = names[nid]
+        if rule.unit == 'ps':
+            # #1846: a bound in time units, against the tuning profile's delay
+            length = timing.delay(nid, rule, undecided)
+            if length is None:
+                if not timing.unmodelled(nid):
+                    unmeasured.append(name)
+                continue
+            graded += 1
+            bound = limit = None
+            if rule.min_mm is not None and length < rule.min_mm - 1e-6:
+                bound, limit = 'min', rule.min_mm
+            elif rule.max_mm is not None and length > rule.max_mm + 1e-6:
+                bound, limit = 'max', rule.max_mm
+            if bound:
+                violations.append({
+                    'type': 'length-out-of-range', 'net1': name, 'rule': rule.name,
+                    'severity': rule.severity, 'unit': 'ps',
+                    'delay_ps': round(length, 4), 'bound': bound, 'limit_ps': limit,
+                    'min_ps': rule.min_mm, 'max_ps': rule.max_mm,
+                    'excess_ps': round(abs(length - limit), 4)})
+            continue
         length = net_match_length(pcb_data, nid, 'total')
         if length is None:
             unmeasured.append(name)
@@ -3851,7 +3873,52 @@ def _length_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
             print(f"  (length) {length_measure_note()}")
         for n in notes:
             print(f"  .kicad_dru: {n}")
+        timing.report('length')
     return summary
+
+
+class _TimeDomain:
+    """#1846: the delays a time-domain (`ps`) length or skew rule is graded
+    against -- `tuning_profiles.DelayModel`, built on first use -- and what
+    one pass has to say about them afterwards."""
+
+    def __init__(self, path, pcb_data, member, names):
+        self._args = (path, pcb_data, member)
+        self._names = names
+        self._model = None
+        self._zero: Dict[str, List[str]] = {}     # KiCad's own 0 ps, by reason
+        self._unmodelled: set = set()
+        self.used = False
+
+    def delay(self, nid, rule, undecided):
+        """The net's delay in ps; None when it is not measured. A net whose
+        profile is not modelled is listed under ``rule`` in ``undecided``."""
+        if self._model is None:
+            from tuning_profiles import DelayModel
+            self._model = DelayModel(*self._args)
+        ps, why = self._model.net_delay(nid)
+        self.used = True
+        if ps is None:
+            if 'not modelled' in why:
+                self._unmodelled.add(nid)
+                undecided.setdefault(rule.name, (why, []))[1].append(self._names[nid])
+            return None
+        if why:
+            self._zero.setdefault(why, []).append(self._names[nid])
+        return ps
+
+    def unmodelled(self, nid) -> bool:
+        return nid in self._unmodelled
+
+    def report(self, kind: str) -> None:
+        if not self.used:
+            return
+        print(f"  ({kind}) time-domain bounds are graded against the project's "
+              f"tuning profiles: each layer's delay, the via delay and the "
+              f"pad-to-die delays (#1846)")
+        for why, nets in sorted(self._zero.items()):
+            print(f"  ({kind}) {len(nets)} net(s) measure 0 ps, as in KiCad: {why} "
+                  f"({', '.join(sorted(nets)[:6])}{' ...' if len(nets) > 6 else ''})")
 
 
 def _via_count_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
@@ -4520,7 +4587,8 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                            coupled_net_pairs)
     # #1503: with the pairs a route_diff step matched, at the tolerance it
     # matched them to, wherever the .kicad_dru's own rule does not bind them
-    rules, notes = board_skew_rules(path, kinds=('skew', 'diff_pair_uncoupled'))
+    rules, notes = board_skew_rules(path, kinds=('skew', 'diff_pair_uncoupled'),
+                                    time_domain=True)
     # #1799: and the AC-coupled chains a route_diff step matched end to end
     chains = recorded_chain_groups(path, pcb_data)
     if not rules and not chains:
@@ -4548,10 +4616,19 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                                         names=names, member=member)
     # #1813: which constraint each NOT GRADED rule is, for its console line
     undecided_kind = {k: 'skew' for k in undecided}
+    timing = _TimeDomain(path, pcb_data, member, names)
     for rule, members in _sets:
         if not any(in_scope(m) for m in members):
             continue
-        lens = {m: net_match_length(pcb_data, m, 'total') for m in members}
+        timed = rule.unit == 'ps'
+        if timed:
+            # #1846: a skew bound in time units, on the profiles' delays
+            lens = {m: timing.delay(m, rule, undecided) for m in members}
+            if any(timing.unmodelled(m) for m in members):
+                undecided_kind.setdefault(rule.name, 'skew')
+                continue
+        else:
+            lens = {m: net_match_length(pcb_data, m, 'total') for m in members}
         if any(v is None for v in lens.values()):
             unmeasured.append(' / '.join(names[m] for m in members))
             continue
@@ -4566,7 +4643,17 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                 bound, limit = 'max', rule.max_mm
             elif rule.min_mm is not None and skew < rule.min_mm - 1e-6:
                 bound, limit = 'min', rule.min_mm
-            if bound:
+            if bound and timed:
+                violations.append({
+                    'type': 'skew-out-of-range', 'net1': names[m],
+                    'net2': names[top], 'rule': rule.name,
+                    'severity': rule.severity, 'unit': 'ps',
+                    'within_diff_pairs': rule.within_diff_pairs,
+                    'skew_ps': round(skew, 4), 'delay_ps': round(lens[m], 4),
+                    'target_ps': round(lens[top], 4), 'bound': bound,
+                    'limit_ps': limit, 'min_ps': rule.min_mm,
+                    'max_ps': rule.max_mm})
+            elif bound:
                 violations.append({
                     'type': 'skew-out-of-range', 'net1': names[m],
                     'net2': names[top], 'rule': rule.name,
@@ -4694,6 +4781,8 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
             print(f"  {_UNBOUND_RULE_NOTE.format(rname=rname)}")
         for n in notes:
             print(f"  .kicad_dru: {n}")
+    if not quiet:
+        timing.report('skew')
     return summary
 
 
@@ -9038,6 +9127,19 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                             print(f"    Layer(s): {v['layer']}, copper {v['intrusion_mm']:.3f}mm "
                                   f"past the area edge")
                             print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'skew-out-of-range' and v.get('unit') == 'ps':
+                        print(f"  {v['net1']}: {v['skew_ps']:.2f} ps earlier than "
+                              f"{v['net2']} ({v['delay_ps']:.2f} vs "
+                              f"{v['target_ps']:.2f} ps), {v['bound']} "
+                              f"{v['limit_ps']:.2f} ps")
+                        print(f"    .kicad_dru rule '{v['rule']}'"
+                              + (" (within_diff_pairs)" if v.get('within_diff_pairs') else ''))
+                    elif vtype == 'length-out-of-range' and v.get('unit') == 'ps':
+                        print(f"  {v['net1']}: delay {v['delay_ps']:.2f} ps "
+                              f"{'<' if v['bound'] == 'min' else '>'} {v['bound']} "
+                              f"{v['limit_ps']:.2f} ps ({v['excess_ps']:.2f} ps "
+                              f"{'short' if v['bound'] == 'min' else 'over'})")
+                        print(f"    .kicad_dru rule '{v['rule']}'")
                     elif vtype == 'skew-out-of-range':
                         print(f"  {v['net1']}: {v['skew_mm']:.4f}mm shorter than "
                               f"{v['net2']} ({v['length_mm']:.4f} vs "
