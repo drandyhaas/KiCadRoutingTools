@@ -307,6 +307,10 @@ class AutorouteTab(wx.Panel):
         self.open_folder_btn.Disable()
         ctrl_sizer.Add(self.open_folder_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         ctrl_sizer.AddStretchSpacer(1)
+        # The About tab's Donate button, sized to this column.
+        from .about_tab import donate_button
+        self.donate_btn = donate_button(self, size=(160, 40), point_boost=3)
+        ctrl_sizer.Add(self.donate_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         ctrl_sizer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.ALL, 5)
         self.close_btn = wx.Button(self, label="Close")
         self.close_btn.SetToolTip("Close dialog")
