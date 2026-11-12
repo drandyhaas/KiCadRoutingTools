@@ -185,7 +185,8 @@ def part1(b):
               doc['reason'][:300])
         with open(dru, 'w', encoding='utf-8') as fh:
             fh.write(RULE.replace('(version 1)\n', ''))
-        # the real grader: it refuses before it would need kicad-cli
+        # the real grader: KiCad's answer (when kicad-cli is here) or the
+        # refusal model's, which names the reason either way
         code, doc = graded(b['met'], None, '--kicad-rules')
         check('fails closed on a rules file KiCad refuses whole (#1690)',
               code == 4 and 'KiCad enforces no rule of the .kicad_dru' in doc['reason'],
@@ -217,6 +218,18 @@ def part1_probe(b):
         return fake
 
     probe = PROBE
+    import kicad_parser
+    real_parse = kicad_parser.parse_kicad_pcb
+
+    def no_parse(*_a, **_k):
+        raise AssertionError('a full parse')
+    kicad_parser.parse_kicad_pcb = no_parse
+    try:
+        name, rule = check_complete._load_probe(board)
+    finally:
+        kicad_parser.parse_kicad_pcb = real_parse
+    check('the probe reads the references off the text, with no full parse of the board',
+          name == probe and "A.Reference != 'J1'" in rule, f'{name}: {rule}')
     try:
         with open(dru, 'rb') as fh:
             before = fh.read()
@@ -263,6 +276,28 @@ def part1_probe(b):
               'probe takes another name',
               f'(rule "{probe} 2" (severity warning)' in (seen.get('staged') or '')
               and g.get('errors_by_rule') == {probe: 1}, str(g))
+        # the refusal model only says why: a file it refuses (no version line)
+        # that KiCad's report shows loaded is graded by KiCad, and one KiCad
+        # did not load carries the model's reason beside KiCad's answer
+        with open(dru, 'w', encoding='utf-8') as fh:
+            fh.write(RULE.replace('(version 1)\n', ''))
+        check_complete._kicad_drc_report = answering(
+            [_row(probe, 'warning', 'assertion_failure'), _row('court gap')])
+        g = check_complete.kicad_rule_grade(board)
+        check('a file the model refuses but KiCad loaded: KiCad grades it',
+              g.get('errors_by_rule') == {'court gap': 1}, str(g)[:300])
+        check_complete._kicad_drc_report = answering([])
+        g = check_complete.kicad_rule_grade(board)
+        check('a file the model refuses and KiCad did not load: KiCad\'s answer '
+              'with the model\'s reason',
+              NOT_LOADED in g.get('error', '') and 'no (version ...) line' in g['error'],
+              str(g)[:300])
+        check_complete._kicad_drc_report = (
+            lambda *_a, **_k: {'error': 'kicad-cli not found (set KICAD_CLI)'})
+        g = check_complete.kicad_rule_grade(board)
+        check('... and KiCad cannot be asked: the model\'s reason stands in',
+              g.get('error', '').startswith('KiCad enforces no rule of the .kicad_dru')
+              and 'no (version ...) line' in g['error'], str(g)[:300])
         with open(dru, 'w', encoding='utf-8') as fh:
             fh.write(RULE)
 

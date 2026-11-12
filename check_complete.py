@@ -222,14 +222,19 @@ def _load_probe(board, taken=()):
     never counted, the grader leaves its name out of the per-rule counts, and
     KiCad reports every assertion rule that binds an item, so the probe takes
     nothing from an assertion of the file's own on the same footprint
-    (measured on kicad-cli 10.0.7: the report with the probe is the report
-    without it plus the probe's one row, also on a project whose
-    `rule_severities` ignores `assertion_failure`)."""
+    (measured on kicad-cli 10.0.6 and 10.0.7: the report with the probe is the
+    report without it plus the probe's one row, also on a project whose
+    `rule_severities` ignores `assertion_failure`).
+
+    The references are read off the board's text by the parser's own block
+    scan (`kicad_parser.iter_footprint_blocks`), not a full parse: the probe
+    needs a name, and a large board's full parse costs seconds."""
     import collections
     import re
     try:
-        from kicad_parser import parse_kicad_pcb
-        refs = [fp.reference for fp in parse_kicad_pcb(board).footprints.values()]
+        from kicad_parser import iter_footprint_blocks
+        with open(board, encoding='utf-8') as fh:
+            refs = [raw for _s, _e, _t, raw, _k in iter_footprint_blocks(fh.read())]
     except Exception as exc:                                    # noqa: BLE001
         return None, (f'the board could not be read for a footprint to probe '
                       f'the rules file with: {type(exc).__name__}: {exc}')
@@ -261,33 +266,34 @@ def kicad_rule_grade(board, timeout=3600):
     silence about a rule is no grade of it). A warning-severity row counts 0,
     as check_drc does not count it (#1626). Never raises.
 
-    Whether KiCad loaded the file is asked of KiCad, not only of the refusal
-    model (`read_board_kicad_refusals`, which names the faults it knows): the
-    staged copy's rules file gets one more rule, `_load_probe`, and a report
-    with no row naming it is a file KiCad dropped."""
+    Whether KiCad loaded the file is KiCad's answer: the staged copy's rules
+    file gets one more rule, `_load_probe`, and a report with no row naming
+    it, or any rule of the file, is a file KiCad dropped. The refusal model
+    (`read_board_kicad_refusals`, which every tool that does not ask KiCad
+    reads) only says WHY, when it knows: beside a file KiCad did not load,
+    or in place of KiCad's answer when KiCad cannot be asked."""
     import re
     try:
         from design_rules import read_board_kicad_refusals
         refused = read_board_kicad_refusals(board)
     except Exception as exc:                                    # noqa: BLE001
-        return {'error': f'the rules file could not be read: '
-                         f'{type(exc).__name__}: {exc}'}
-    if refused:
-        return {'error': 'KiCad enforces no rule of the .kicad_dru ('
-                         + '; '.join(((f"rule '{r['rule']}': " if r['rule'] else '')
-                                      + r['reason']) for r in refused) + ')'}
+        refused = [{'rule': '', 'reason': f'the rules file could not be read: '
+                                          f'{type(exc).__name__}: {exc}'}]
+    known = ('KiCad enforces no rule of the .kicad_dru ('
+             + '; '.join(((f"rule '{r['rule']}': " if r['rule'] else '')
+                          + r['reason']) for r in refused) + ')') if refused else ''
     try:
         taken = _dru_rule_names(board)
     except Exception:                                           # noqa: BLE001
         taken = []
     probe, rule = _load_probe(board, taken)
     if probe is None:
-        return {'error': rule}
+        return {'error': known or rule}
     report = _kicad_drc_report(
         board, timeout,
         rules_edit=lambda text: text.rstrip('\n') + '\n' + rule + '\n')
     if 'error' in report:
-        return report
+        return {'error': known} if known else report
     by_rule, by_type, loaded = {}, {}, False
     for v in report.get('violations') or ():
         # the probe's row counts toward its type's 199 rows: it took one
@@ -306,7 +312,8 @@ def kicad_rule_grade(board, timeout=3600):
         return {'error': 'KiCad did not load the .kicad_dru: a probe rule '
                          'appended to the staged copy of it did not fire, so '
                          'KiCad enforces none of the file\'s rules and its '
-                         'silence about a rule is no grade of it'}
+                         'silence about a rule is no grade of it'
+                         + (f' ({known})' if known else '')}
     return {'kicad_version': str(report.get('kicad_version') or 'unknown'),
             'errors_by_rule': by_rule,
             'capped_types': sorted(t for t, n in by_type.items()

@@ -1292,7 +1292,9 @@ name the file declares twice or one containing a quote, or a violation type
 kicad-cli cut at 199 rows). Whether KiCad loaded the file is asked of KiCad:
 the staged copy's rules file gets one probe rule that KiCad reports once, at
 warning severity, and a report with no row naming it or any rule of the file
-is a file KiCad dropped, whatever the reason. The per-rule results are the
+is a file KiCad dropped, whatever the reason; the refusal model check_drc and
+the routing steps read (#1690) only adds its reason when it knows one, and
+stands in for KiCad's answer only when kicad-cli cannot be asked. The per-rule results are the
 document's `kicad_rules`, `measured_by: kicad-cli`. With the flag the verdict
 depends on the installed KiCad. A component the BOARD declares and nothing grades (a project
 diff-pair net class with no `.kicad_dru` skew / `diff_pair_uncoupled` rule
