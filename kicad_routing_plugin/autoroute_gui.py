@@ -71,6 +71,24 @@ _COLUMNS = (("#", 34), ("Step", 150), ("State", 96), ("Time", 56), ("Result", 42
 
 _LOG_TAIL_LINES = 14
 
+#: Each run's work folder is a temp folder with this prefix; a new run keeps
+#: the newest KEEP_RUNS - 1 earlier ones, so the folders do not pile up.
+WORKDIR_PREFIX = 'krt_autoroute_'
+KEEP_RUNS = 5
+
+
+def _prune_workdirs(keep):
+    try:
+        root = tempfile.gettempdir()
+        dirs = [os.path.join(root, d) for d in os.listdir(root)
+                if d.startswith(WORKDIR_PREFIX)]
+        dirs = [d for d in dirs if os.path.isdir(d)]
+        dirs.sort(key=lambda d: os.path.getmtime(d), reverse=True)
+        for d in dirs[keep:]:
+            shutil.rmtree(d, ignore_errors=True)
+    except OSError:
+        pass
+
 
 def _fmt_secs(s):
     if s is None:
@@ -384,7 +402,8 @@ class AutorouteTab(wx.Panel):
         self.apply_btn.Disable()
         self.open_log_btn.Disable()
         self.progress_bar.SetValue(0)
-        self.workdir = tempfile.mkdtemp(prefix='krt_autoroute_')
+        _prune_workdirs(KEEP_RUNS - 1)
+        self.workdir = tempfile.mkdtemp(prefix=WORKDIR_PREFIX)
         try:
             staged = self._snapshot(self.workdir)
         except Exception as e:                                  # noqa: BLE001
