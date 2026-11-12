@@ -166,7 +166,9 @@ Stop must end a run mid-route. About two minutes.
 
 AI Placement tab: `test_placement_apply_locks.py` (below),
 `test_placement_apply_graphics.py` (Apply lays tracks, never the result's
-copper graphics), `test_placement_fake_run.py` (the whole runner against a
+copper graphics), `test_placement_apply_zones_gui.py` (a Place + Route Apply
+lands the run's poured zones and grades as the result file, through
+result_apply), `test_placement_fake_run.py` (the whole runner against a
 fake claude CLI, `fixtures/fake_claude.py`).
 
 Labels tab: `test_labels_tab_gui.py` -- the REAL Beautify Labels button on a

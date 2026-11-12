@@ -262,8 +262,11 @@ class PlacementTab(wx.Panel):
     """AI Placement sub-tab of the Auto notebook (see module docstring)."""
 
     def __init__(self, parent, pcb_data, board_filename, on_complete=None,
-                 append_log=None, sync_pcb_data_callback=None):
+                 append_log=None, sync_pcb_data_callback=None, get_fix_drc=None):
         super().__init__(parent)
+        # The dialog's "Fix DRC settings after routing" box: a Place + Route
+        # Apply lowers the live floors to the result's only when ticked (#693).
+        self.get_fix_drc = get_fix_drc or (lambda: True)
         self.pcb_data = pcb_data
         self.board_filename = board_filename
         self.on_complete = on_complete
@@ -417,8 +420,9 @@ class PlacementTab(wx.Panel):
         self.apply_btn.Enable(False)
         self.apply_btn.SetToolTip(
             "Apply the finished run's board back to the live board "
-            "(footprint poses; Place + Route also replaces all tracks/vias). "
-            "Asks for confirmation first.")
+            "(footprint poses; Place + Route also makes its tracks, vias, "
+            "poured zones and design rules the run's). Asks for confirmation "
+            "first.")
         ctrl_sizer.Add(self.apply_btn, 0,
                        wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
@@ -922,6 +926,9 @@ class PlacementTab(wx.Panel):
             wx.MessageBox("Board is no longer open.", "Placement",
                           wx.OK | wx.ICON_ERROR)
             return
+        if self._mode == "place_route":
+            self._apply_routed(board, outputs["board"], pcbnew)
+            return
         from kicad_parser import parse_kicad_pcb
         try:
             result_pcb = parse_kicad_pcb(outputs["board"])
@@ -1004,6 +1011,48 @@ class PlacementTab(wx.Panel):
             msg += (f", {tracks_added} track(s), {vias_added} via(s) added "
                     f"(unchanged copper kept)")
         msg += ". Use Edit -> Undo in pcbnew to revert."
+        self.set_status(msg)
+        self.append_log("Placement apply: " + msg + "\n")
+
+    def _apply_routed(self, board, result_path, pcbnew):
+        """Place + Route: make the live board the run's routed board through
+        result_apply, as the Autorouter tab does -- poses and locks, tracks and
+        vias (the result's own uuids and order), the zones the run poured with
+        their fills (not refilled, so the board grades as the result file
+        does), and the result project's design rules when "Fix DRC settings
+        after routing" is ticked (#693). Every change is listed first."""
+        from .result_apply import plan_apply, run_apply
+        try:
+            plan = plan_apply(board, result_path, pcbnew,
+                              fix_drc=bool(self.get_fix_drc()))
+        except Exception as e:                                  # noqa: BLE001
+            wx.MessageBox(f"Could not read the result board: {e}",
+                          "Placement", wx.OK | wx.ICON_ERROR)
+            return
+        self._outline_skipped = plan.outline_skipped
+        lines = plan.lines()
+        lines.append("Place + Route makes the live board the run's routed "
+                     "board. The live board may have changed since the run "
+                     "started - this list is against its state right now. "
+                     "Continue?")
+        self.last_apply_message = "\n\n".join(lines)
+        if wx.MessageBox(self.last_apply_message, "Apply Placement Result",
+                         wx.YES_NO | wx.ICON_WARNING) != wx.YES:
+            return
+        stats = run_apply(board, plan, pcbnew)
+        self.last_apply_stats = stats
+        if self.sync_pcb_data_callback:
+            self.sync_pcb_data_callback()
+        if self.on_complete:
+            self.on_complete()
+        c = stats.get('copper') or {}
+        z = stats.get('zones') or {}
+        msg = (f"Applied: {stats['moved']} footprint pose(s), {stats['locks']} "
+               f"lock change(s), {c.get('tracks_added', 0)} track(s) and "
+               f"{c.get('vias_added', 0)} via(s) added, {c.get('removed', 0)} "
+               f"removed, {z.get('added', 0)} zone(s) added and "
+               f"{z.get('removed', 0)} removed. Use Edit -> Undo in pcbnew to "
+               f"revert.")
         self.set_status(msg)
         self.append_log("Placement apply: " + msg + "\n")
 
