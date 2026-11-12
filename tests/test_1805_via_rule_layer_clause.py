@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""#1805: check_drc reads the `(layer ...)` clause of a via-size rule as
-kicad-cli does for a via.
+"""#1805: check_drc, and the routing steps' via floors, read the `(layer ...)`
+clause of a via-size rule as kicad-cli does for a via.
 
 A `.kicad_dru` rule may scope a via's ring, diameter or hole by layer:
 `(rule "r" (layer outer) (condition "A.insideCourtyard('U1')") (constraint
@@ -9,12 +9,15 @@ rule with a clause then bound nothing: a relaxing rule's via was flagged where
 KiCad passes it, a tightening rule's via passed where KiCad flags it, and
 nothing said the rule was not applied.
 
-kicad-cli 10.0.7 grades a via's ring and diameter on F.Cu whatever layers the
-via spans, and its hole on no layer. So (`KICAD_BINDS`, measured on `board()`
-with one rule per file, 84 files, every via type alike):
+kicad-cli grades a via's ring on F.Cu whatever layers the via spans, and its
+hole on no layer; its diameter on F.Cu from 10.0.7, on no layer on 10.0.6. So
+(`KICAD_BINDS`, measured on `board()` with one rule per file, 84 files, every
+via type alike, on 10.0.7 and on 10.0.6):
 
-  annular_width, via_diameter   bind under no clause, "F.Cu" and outer; not
+  annular_width                 binds under no clause, "F.Cu" and outer; not
                                 under "B.Cu", "In1.Cu", "In2.Cu" or inner
+  via_diameter                  as annular_width from 10.0.7; on 10.0.6 under
+                                every clause
   hole_size                     binds under every clause
 
 1. check_drc.py on four boards -- rules that RELAX the Board Setup minimum and
@@ -24,10 +27,12 @@ with one rule per file, 84 files, every via type alike):
    flags exactly the vias `KICAD_BINDS` says KiCad flags.
 2. the #1805 board (glasgow_revC, `(layer outer)` on the courtyard rule):
    only the via outside U1's courtyard is flagged, and no rule is NOT GRADED.
-3. control: the routing steps resolve a via rule by net, with no layer, and a
-   rule with a clause still sets no floor there.
+3. the routing steps' via floors (`DesignRules.via_floors`) on the by-net
+   boards: a rule sets its net's floor exactly where `KICAD_BINDS` says KiCad
+   binds the via, as each release reads it; the #1805 board's courtyard rule
+   sets none (no routing step reads a courtyard rule).
 4. kicad-cli's own report of the four boards (needs kicad-cli; exit 77
-   without it, after parts 1 to 3).
+   without it, after parts 1 to 3), against the installed release's table.
 """
 import contextlib
 import io
@@ -48,14 +53,30 @@ PY = [sys.executable, '-X', 'utf8']
 CHECK_DRC = os.path.join(REPO, 'py_router', 'check_drc.py')
 GLASGOW = os.path.join(REPO, 'kicad_files', 'glasgow_revC.kicad_pcb')
 
-#: kicad-cli 10.0.7: the layer clauses ('' = none) under which a rule of each
-#: kind binds a via its condition names -- through, blind, buried, micro alike
-KICAD_BINDS = {
-    'annular_width': {'', '"F.Cu"', 'outer'},
-    'via_diameter': {'', '"F.Cu"', 'outer'},
-    'hole_size': {'', '"F.Cu"', '"B.Cu"', '"In1.Cu"', '"In2.Cu"', 'outer', 'inner'},
-}
 CLAUSES = ['', '"F.Cu"', '"B.Cu"', '"In1.Cu"', '"In2.Cu"', 'outer', 'inner']
+#: per kicad-cli release measured: the layer clauses ('' = none) under which a
+#: rule of each kind binds a via its condition names -- through, blind,
+#: buried, micro alike. A release before 10.0.7 reads as 10.0.6.
+BINDS_BY_RELEASE = {
+    '10.0.7': {'annular_width': {'', '"F.Cu"', 'outer'},
+               'via_diameter': {'', '"F.Cu"', 'outer'},
+               'hole_size': set(CLAUSES)},
+    '10.0.6': {'annular_width': {'', '"F.Cu"', 'outer'},
+               'via_diameter': set(CLAUSES),
+               'hole_size': set(CLAUSES)},
+}
+
+
+def binds_for(release):
+    from net_queries import _release_key
+    return BINDS_BY_RELEASE['10.0.7' if _release_key(release) >= (10, 0, 7) else '10.0.6']
+
+
+with contextlib.redirect_stdout(io.StringIO()):
+    from net_queries import length_measure_release
+    #: the table of the release check_drc reproduces: the installed kicad-cli's
+    RELEASE = length_measure_release()
+KICAD_BINDS = binds_for(RELEASE)
 #: kind: (check_drc's type, kicad-cli's types, the .kicad_pro key, the Board
 #: Setup minimum the rule relaxes / tightens, the relaxing / tightening rule).
 #: Every via is 0.4 / 0.2: ring 0.1, diameter 0.4, hole 0.2.
@@ -209,17 +230,38 @@ def issue_board(td):
     return b
 
 
-def routing_control(b):
-    print("3. control: the routing steps' reading is unchanged")
+FLOOR_KEY = {'annular_width': 'annular', 'via_diameter': 'via_diameter',
+             'hole_size': 'via_drill'}
+
+
+def routing_floors(boards, b):
+    print("3. the routing steps' via floors bind the vias KiCad binds")
     from kicad_parser import parse_kicad_pcb
     from design_rules import DesignRules
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        pcb = parse_kicad_pcb(b)
-        dr = DesignRules.from_project(pcb, b)
+    import net_queries
+
+    def load(path):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            pcb = parse_kicad_pcb(path)
+            return pcb, DesignRules.from_project(pcb, path)
+    try:
+        for release in sorted(BINDS_BY_RELEASE):
+            net_queries.use_length_measure_release(release)
+            table = binds_for(release)
+            for direction in ('relax', 'tighten'):
+                pcb, dr = load(boards[(direction, 'net')])
+                ids = {n.name: i for i, n in pcb.nets.items()}
+                bad = [(kind, clause) for kind, clause in NETS
+                       if (FLOOR_KEY[kind] in dr.via_floors(ids[net_name(kind, clause)]))
+                       != (clause in table[kind])]
+                ok(not bad, f"as kicad-cli {release} reads it, {direction}: via_floors sets "
+                            f"a floor where KiCad binds the via, and none elsewhere"
+                            f"{(': differs on ' + str(bad[:4])) if bad else ''}")
+    finally:
+        net_queries.use_length_measure_release(None)
+    pcb, dr = load(b)
     wr = next(i for i, n in pcb.nets.items() if n.name == '/WR')
-    ok(dr.via_floors(wr) == {}, f"via_floors of the rule's net sets no floor: {dr.via_floors(wr)}")
-    plain = dr.resolve('annular_width', dr.item_for_net(wr, 'via'), None, None)
-    ok(plain.min_rule is None, f"a net's via, no layer: no rule binds ({plain.source})")
+    ok(dr.via_floors(wr) == {}, f"control: the courtyard rule sets no floor: {dr.via_floors(wr)}")
 
 
 def kicad(boards, cli):
@@ -246,7 +288,7 @@ def main():
     try:
         boards = {(d, c): stage(td, d, c) for d in ('relax', 'tighten') for c in CONDS}
         tool(td, boards)
-        routing_control(issue_board(td))
+        routing_floors(boards, issue_board(td))
         with contextlib.redirect_stdout(io.StringIO()):
             from kicad_oracle import find_kicad_cli
             cli = find_kicad_cli(warn=False)

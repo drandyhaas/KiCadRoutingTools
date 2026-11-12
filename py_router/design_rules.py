@@ -281,11 +281,6 @@ class RuleItem:
     # (`CourtyardIndex`). None = not measured: a courtyard term then reads as
     # unknown and the rule stays unread, as it always was.
     courtyards: Optional[FrozenSet[Tuple[str, Optional[str], str]]] = None
-    # #1805: one via of the board, under grade (`DesignRules.via_item`): a
-    # via-size rule's (layer ...) clause is read as KiCad reads it for a via
-    # (`_rule_matches`). An item of a net (`item_for_net`) has no layer, and
-    # such a rule does not bind it.
-    graded_via: bool = False
 
 
 @dataclass
@@ -1553,6 +1548,26 @@ def _footprint_named(pattern: str, ref: Optional[str], lib: Optional[str]) -> bo
         ':' in pattern and lib is not None and _wx_matches(pattern, lib)))
 
 
+#: #1805: the first kicad-cli release that tests a `via_diameter` rule's
+#: (layer ...) clause for a via (against F.Cu, as every release measured tests
+#: an `annular_width` rule's). 10.0.6 does not test it, as no release measured
+#: tests a `hole_size` rule's. Measured on 10.0.6 and 10.0.7 only.
+_VIA_DIAMETER_CLAUSE_FROM = '10.0.7'
+
+
+def _via_clause_tested(kind: str) -> bool:
+    """Whether KiCad tests the (layer ...) clause of a ``kind`` rule
+    (`VIA_SIZE_KINDS`) for a via, as the release the tool reproduces
+    (`net_queries.length_measure_release`: the installed kicad-cli's, the
+    newest modelled without one) grades it."""
+    if kind == 'annular_width':
+        return True
+    if kind != 'via_diameter':
+        return False
+    from net_queries import length_measure_release, _release_key
+    return _release_key(length_measure_release()) >= _release_key(_VIA_DIAMETER_CLAUSE_FROM)
+
+
 def _rule_matches(rule: Rule, a: RuleItem, b: Optional[RuleItem],
                   layer: Optional[str], copper_layers: Sequence[str],
                   ctx=None, condition=None) -> bool:
@@ -1560,16 +1575,17 @@ def _rule_matches(rule: Rule, a: RuleItem, b: Optional[RuleItem],
     `courtyard_condition`).
 
     A rule with a (layer ...) clause binds on the layers it names, so not
-    without ``layer`` -- except a via under grade (`RuleItem.graded_via`) and
-    a via-size rule, read as kicad-cli 10.0.7 grades a via (measured on
-    through, blind, buried and micro vias alike): the clause of an
-    `annular_width` or `via_diameter` rule is tested against F.Cu whatever
-    layers the via spans, and the clause of a `hole_size` rule is not tested."""
+    without ``layer`` -- except a via-size rule on a via (#1805), read as
+    kicad-cli grades a via, through, blind, buried and micro alike: where the
+    clause is tested (`_via_clause_tested`) it is tested against F.Cu, whatever
+    layers the via spans and whichever layer is asked about. Every reader of a
+    via's size -- check_drc's grade, `via_floors`, the step grades,
+    `draw_size`, `rule_floors` -- so binds the vias KiCad binds."""
     lay = rule.layers_for(copper_layers)
     if lay is not None:
         kind = ctx[0] if ctx else None
-        if layer is None and a.graded_via and kind in VIA_SIZE_KINDS:
-            if kind != 'hole_size' and 'F.Cu' not in lay:
+        if a.type == 'via' and kind in VIA_SIZE_KINDS:
+            if 'F.Cu' not in lay and _via_clause_tested(kind):
                 return False
         elif layer is None or layer not in lay:
             return False
@@ -2240,13 +2256,10 @@ class DesignRules:
         return idx if idx.available else None
 
     def via_item(self, via, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
-        """The RuleItem of one via of the board, for grading it: a via-size
-        rule with a (layer ...) clause resolves for it as KiCad reads the
-        clause for a via (`RuleItem.graded_via`). With ``courtyards``, the
-        courtyards its disc overlaps are measured too (#1805), so a rule bound
-        by a courtyard term resolves for it."""
-        item = replace(self.item_for_net(int(getattr(via, 'net_id', 0) or 0), 'via'),
-                       graded_via=True)
+        """The RuleItem of one via of the board; with ``courtyards``, the
+        courtyards its disc overlaps measured (#1805), so a rule bound by a
+        courtyard term resolves for it."""
+        item = self.item_for_net(int(getattr(via, 'net_id', 0) or 0), 'via')
         if courtyards is None:
             return item
         return replace(item, courtyards=courtyards.of_disc(
@@ -2485,8 +2498,10 @@ def relaxing_rules(rules, board_min) -> List[dict]:
     ``courtyard`` names the parts its courtyard terms name, when they are all
     it does not read: it binds by POSITION, inside those courtyards only.
     ``unresolved`` is why it could not be read otherwise (it may relax). A
-    rule with a NEGATED courtyard term (`!A.insideCourtyard('U1')`) binds
-    outside that part, so it names no courtyard and is ``unresolved``.
+    rule its courtyard terms do not CONFINE to the parts (`_courtyard_confines`:
+    a negated term, `!A.insideCourtyard('U1')`, or one ORed with another,
+    `A.insideCourtyard('U1') || A.NetName == 'X'`) binds outside them, so it
+    names no courtyard and is ``unresolved``.
     A rule unread for anything but its condition (an ignored severity, a
     value, a non-copper layer clause) relaxes nothing and is left out."""
     out = []
@@ -2495,9 +2510,12 @@ def relaxing_rules(rules, board_min) -> List[dict]:
             continue
         cy = sorted(_courtyard_patterns(r.courtyard_condition))
         unresolved = r.unsupported if r.unsupported and not cy else None
-        if cy and _courtyard_negated(r.courtyard_condition):
-            cy, unresolved = [], ('a negated courtyard term: it binds by position, '
-                                  'outside the part')
+        if cy and not _courtyard_confines(r.courtyard_condition):
+            cy, unresolved = [], (
+                'a negated courtyard term: it binds by position, outside the part'
+                if _courtyard_negated(r.courtyard_condition) else
+                'a courtyard term another term stands in for (||): it binds '
+                'outside the part too')
         for kind, spec in sorted(r.constraints.items()):
             key = BOARD_MIN_KEYS.get(kind)
             v, b = spec.get('min'), (board_min or {}).get(key)
@@ -2519,8 +2537,9 @@ def relaxed_via_nets(dr: 'DesignRules', pcb_data, rows) -> Dict[str, Dict[str, o
     outside the courtyard is held to the board minimum), 'may' (nets the
     unread condition does not rule out), or 'every' (no condition).
 
-    A net has no layer, so the nets are those the rule's CONDITION names: a
-    `(layer ...)` clause is the row's ``layer`` and does not empty the list."""
+    A `(layer ...)` clause is read as KiCad reads it for a via
+    (`_rule_matches`): it does not empty the list where KiCad binds the via
+    through it (outer, "F.Cu"), and does where KiCad binds none."""
     out: Dict[str, Dict[str, object]] = {}
     by_name = {r.name: r for r in dr.rules}
     pads_on: Dict[int, Set[str]] = {}
@@ -2529,16 +2548,22 @@ def relaxed_via_nets(dr: 'DesignRules', pcb_data, rows) -> Dict[str, Dict[str, o
             if getattr(pad, 'net_id', 0):
                 pads_on.setdefault(int(pad.net_id), set()).add(key)
     ctx_names = dr._net_name_set()
+    copper = list(dr.copper_layers or ())
     for row in rows:
         r = by_name.get(row['rule'])
         if r is None or row['kind'] not in VIA_SIZE_KINDS or r.name in out:
+            continue
+        ctx = (row['kind'], ctx_names)
+        if not _rule_matches(replace(r, condition=None), dr.item_for_net(0, 'via'),
+                             None, None, copper, ctx):
+            # its layer clause binds no via, whatever the condition names
+            out[r.name] = {'nets': [], 'how': 'condition'}
             continue
         if r.condition_src is None:
             out[r.name] = {'nets': [], 'how': 'every'}
             continue
         nets = []
         maybe = parse_condition_maybe(r.condition_src) if row.get('unresolved') else None
-        cond_only = replace(r, layer_clause=None)
         for nid, name in sorted(dr.net_names.items(), key=lambda kv: kv[1]):
             if not nid or not name:
                 continue
@@ -2546,12 +2571,12 @@ def relaxed_via_nets(dr: 'DesignRules', pcb_data, rows) -> Dict[str, Dict[str, o
             if row.get('courtyard'):
                 cy = frozenset((dr.footprint_ids.get(k, (k, None)) + (s,))
                                for k in pads_on.get(nid, ()) for s in ('front', 'back'))
-                hit = _rule_matches(cond_only, replace(item, courtyards=cy), None, None,
-                                    (), (row['kind'], ctx_names), r.courtyard_condition)
+                hit = _rule_matches(r, replace(item, courtyards=cy), None, None,
+                                    copper, ctx, r.courtyard_condition)
             elif maybe is not None:
-                hit = _eval3(maybe, item, None, None, (row['kind'], ctx_names)) is not False
+                hit = _eval3(maybe, item, None, None, ctx) is not False
             else:
-                hit = _rule_matches(cond_only, item, None, None, (), (row['kind'], ctx_names))
+                hit = _rule_matches(r, item, None, None, copper, ctx)
             if hit:
                 nets.append(name)
         out[r.name] = {'nets': nets, 'how': ('courtyard' if row.get('courtyard') else
@@ -2898,6 +2923,39 @@ def _courtyard_patterns(node) -> Set[str]:
     for c in node[1:]:
         out |= _courtyard_patterns(c)
     return out
+
+
+def _courtyard_confines(node) -> bool:
+    """The condition AST is false wherever every courtyard term is false: the
+    rule binds an item only inside a courtyard it names. A term under a `!`
+    (`!A.insideCourtyard('U1')`) or beside an `||` that another term can
+    satisfy does not confine it."""
+    def false_without(n):           # false when every courtyard term is false
+        if not isinstance(n, tuple) or not n:
+            return False
+        op = n[0]
+        if op == 'courtyard':
+            return True
+        if op == 'and':
+            return any(false_without(c) for c in n[1:])
+        if op == 'or':
+            return all(false_without(c) for c in n[1:])
+        if op == 'not':
+            return true_without(n[1])
+        return False
+
+    def true_without(n):            # true when every courtyard term is false
+        if not isinstance(n, tuple) or not n:
+            return False
+        op = n[0]
+        if op == 'and':
+            return all(true_without(c) for c in n[1:])
+        if op == 'or':
+            return any(true_without(c) for c in n[1:])
+        if op == 'not':
+            return false_without(n[1])
+        return False
+    return false_without(node)
 
 
 def _courtyard_negated(node, odd: bool = False) -> bool:

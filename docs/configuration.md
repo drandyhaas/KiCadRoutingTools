@@ -357,8 +357,8 @@ is also listed NOT honoured at the start of every step that reads the rules,
 whatever the vias are (#1490), since an explicit via and a descent need not hold
 it. `list_nets.py --design-rules` lists the rules that set a minimum below the
 Board Setup one, with the condition each binds, and then the nets each via-size
-rule binds (#1805): the nets its condition names, whatever `(layer ...)` clause
-the rule line shows. A rule scoped by a courtyard term (`A.insideCourtyard('U1')`)
+rule binds (#1805): the nets its condition names, its `(layer ...)` clause read
+as below (a clause that binds no via names no net). A rule scoped by a courtyard term (`A.insideCourtyard('U1')`)
 is listed "bound by POSITION": KiCad applies it to a via whose disc overlaps that
 part's courtyard and to no other via of the same net, so its nets are an upper
 bound (the nets with a pad on the part). `check_drc.py` grades a via under such a
@@ -372,21 +372,25 @@ matter), a pad by its copper (one straddling the edge binds), and a clearance
 pair under the last matching rule in file order, its condition tried both ways,
 so `A.insideCourtyard('U1')` binds a pair one of whose items is inside -- each
 measured on kicad-cli 10.0.6. Such a rule is then not NOT GRADED. A rule whose
-condition is not read otherwise, or whose courtyard term is negated
-(`!A.insideCourtyard('U1')` binds a via outside that part), is listed as one
+condition is not read otherwise, or whose courtyard terms do not confine it to
+the part (`!A.insideCourtyard('U1')` binds a via outside that part,
+`A.insideCourtyard('U1') || A.NetName == 'X'` X's via anywhere), is listed as one
 that MAY relax, with the nets its other terms do not rule out. No routing step
 applies a courtyard-scoped rule: the router routes that copper at the class
 value.
 
-**A via rule's `(layer ...)` clause (#1805).** `check_drc.py` reads it as
-kicad-cli 10.0.7 does for a via, of any type (through, blind, buried, micro). An
-`annular_width` or `via_diameter` rule is tested against F.Cu whatever layers the
-via spans: `(layer "F.Cu")` and `(layer outer)` bind the vias the condition names,
-`(layer "B.Cu")`, an inner layer and `(layer inner)` bind none. A `hole_size`
-rule's clause is not tested: the rule binds under any. The routing steps resolve
-a via rule by net, with no layer, so there a rule with a clause sets no floor
-(`design_rules.via_floors`), and the end-of-step grade holds its vias to the
-Board Setup minimum.
+**A via rule's `(layer ...)` clause (#1805).** Every reader of a via's size
+reads it as kicad-cli does for a via, of any type (through, blind, buried,
+micro): `check_drc.py`, the routing steps' via floors (`design_rules.via_floors`,
+the per-net via size, the escalation rungs), the end-of-step via grades and
+`list_nets.py --design-rules`. An `annular_width` rule's clause is tested
+against F.Cu whatever layers the via spans: `(layer "F.Cu")` and `(layer outer)`
+bind the vias the condition names, `(layer "B.Cu")`, an inner layer and
+`(layer inner)` bind none. A `hole_size` rule's clause is not tested: the rule
+binds under any. A `via_diameter` rule's clause is tested as an `annular_width`
+one's from kicad-cli 10.0.7, and not at all on 10.0.6, so it follows the
+installed kicad-cli (the newest reading without one), as the length measure
+does (measured on 10.0.6 and 10.0.7 only).
 
 **Via count rules (#1707).** A `(constraint via_count (min N) (max M))` rule is
 not honoured by any routing step: a net is routed with the vias it needs
