@@ -3477,6 +3477,20 @@ def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[
     return sorted(unique, key=lambda l: (layer_order.get(l, len(routing_layers)), l))
 
 
+def pad_on_layer(pad, layer: str) -> bool:
+    """True when PAD stands on copper LAYER as an obstacle: a drilled pad (a
+    plated barrel, or an NPTH hole) on every layer, any other pad on the
+    copper layers its `layers` names, the wildcards read as
+    `expand_pad_layers` reads them (``*.Cu`` every layer, ``F&B.Cu`` front
+    and back). Cheap enough for a per-pad, per-candidate loop."""
+    if (getattr(pad, 'drill', 0) or 0) > 0:
+        return True
+    layers = getattr(pad, 'layers', None) or ()
+    return (layer in layers or '*.Cu' in layers
+            or (layer in ('F.Cu', 'B.Cu')
+                and ('F&B.Cu' in layers or 'F&B' in layers)))
+
+
 def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
     """
     Net IDs the stub-proximity costs treat as still needing routing.

@@ -62,6 +62,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from net_queries import pad_on_layer
+
 from . import escape
 from . import reachability as reach
 
@@ -69,6 +71,10 @@ from . import reachability as reach
 DEFAULT_MARGIN_MM = 3.0
 #: The finest raster step used, mm (the cell is an integer number of steps).
 MAX_STEP_MM = 0.02
+#: Cells of a closed pocket read for the copper that lines it, at most, spread
+#: evenly over it: `reachability.nearest_foreign` walks every pad, track and
+#: via of the board on each call, and any cell of a pocket names its walls.
+POCKET_SAMPLES = 200
 
 
 @dataclass
@@ -204,7 +210,7 @@ def halo_closers(board, ref, net_ids, layers, reach_mm) -> Dict[str, int]:
             a, b, rr = pad_drill_capsule(p)
             return (min(a[0], b[0]) - rr, min(a[1], b[1]) - rr,
                     max(a[0], b[0]) + rr, max(a[1], b[1]) + rr)
-        if not any(reach._pad_on_layer(p, lay) for lay in layers):
+        if not any(pad_on_layer(p, lay) for lay in layers):
             return None
         return (p.global_x - p.size_x / 2.0, p.global_y - p.size_y / 2.0,
                 p.global_x + p.size_x / 2.0, p.global_y + p.size_y / 2.0)
@@ -324,7 +330,7 @@ def part_flow(pcb, ref, pcb_file=None, *, margin_mm: float = DEFAULT_MARGIN_MM,
                                reach._capsule, a[0], a[1], b[0], b[1], rr)
                 continue
             for li, lay in enumerate(layers):
-                if not reach._pad_on_layer(p, lay):
+                if not pad_on_layer(p, lay):
                     continue
                 got = _stamp(owner[li], (p.net_id or 0) + 1, view, step, bb,
                              _rect_fn(getattr(p, 'rect_rotation', 0.0) or 0.0),
@@ -581,7 +587,8 @@ def part_flow(pcb, ref, pcb_file=None, *, margin_mm: float = DEFAULT_MARGIN_MM,
                                 clr + max(tw, via) / 2.0 + cell)
             far: Dict[str, int] = {}
             pocket = np.nonzero(seen[np.arange(N) * 2] & (ncls == 1))[0]
-            for nd in pocket[::max(1, len(pocket) // 200)]:
+            stride = max(1, math.ceil(len(pocket) / POCKET_SAMPLES))
+            for nd in pocket[::stride]:
                 cxy = int(ncell_of[nd])
                 for e in reach.nearest_foreign(
                         board, view[0] + (cxy % ncx + 0.5) * cell,

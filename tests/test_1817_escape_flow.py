@@ -17,8 +17,8 @@ What the cut is NAMED as when no lattice cell is saturated (`cut_naming`): a
 3 x 3 grid of pads (U2) whose centre pad leaves only by a via. Another part's
 pad under it on B.Cu takes the via site, and the cut must name that part;
 with no other part in reach and a via too wide to fit, the cut is U2's own
-pads, the one case where narrower geometry is the answer. The same on
-glasgow_revC's U30, whose 19 stranded nets stand over the capacitors under
+pads, the one case where narrower geometry is the answer. The same on a
+0.8 mm BGA fixture whose 19 stranded nets stand over the capacitors under
 it, and on a fence closed all round, further out than a halo reaches.
 
     python3 tests/test_1817_escape_flow.py
@@ -185,10 +185,10 @@ def cut_naming(td):
 
     # the repository's own case: a 0.8 mm BGA with capacitors under it
     gl = evidence(os.path.join(ROOT, 'kicad_files', 'glasgow_revC.kicad_pcb'),
-                  'glasgow_revC')
+                  'the BGA fixture')
     evidence(gl[:-len('.kicad_pcb')] + '.kicad_pro', 'its project (the rules)')
     u = escape_flow.part_flow(parse_kicad_pcb(gl), 'U30', gl)
-    ok('glasgow_revC U30: 19 nets stranded with no lattice cell saturated',
+    ok('the fixture BGA: 19 nets stranded with no lattice cell saturated',
        (u.deficit, len(u.stranded), u.cut_cells) == (19, 19, ()),
        (u.deficit, u.stranded, u.cut_cells))
     ok('its cut is the capacitors under it (C24 over most stranded balls), '
