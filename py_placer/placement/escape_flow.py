@@ -38,12 +38,21 @@ each pair's class, which is the generous reading on a multi-class board.
 And the proof is AT THOSE RULES: a part a human escapes with narrower
 tracks or smaller vias than the board's Default class reads short here --
 measured, a 0.8 mm BGA-121 escaped with 0.15-0.19 mm tracks and 0.4 mm vias
-on a board whose Default class is 0.2 mm / 0.6 mm reads 19 nets short, its
-own pads at the cut (`stranded` names the nets left without a path).
+on a board whose Default class is 0.2 mm / 0.6 mm reads 19 nets short
+(`stranded` names the nets left without a path).
 
 The cut, when the deficit is positive, is named as parts: the copper nearest
 each saturated lattice cell on the source side of the minimum cut
 (`reachability.nearest_foreign`) -- the parts whose copper closes the pocket.
+When NO lattice cell is saturated the stranded nets are closed in where they
+start, and the cut is every OTHER part with pad copper within a halo's reach
+of their pads on any analysed layer (`halo_closers`): a part in front of a
+pin, or one on the far side that takes the via site, since a via must fit on
+every layer. On that BGA they are the capacitors under it, and with those
+gone it reads 0 short at the same class. Shared space the stranded nets
+still open into, closed further out than a halo reaches, names the copper
+nearest it the same way. Only when neither names another part is the cut the
+part's own pads (`cut_refs == (ref,)`).
 """
 from __future__ import annotations
 
@@ -177,6 +186,47 @@ def demand_nets(pcb, ref, ignore_net_ids=()) -> Tuple[List[int], List[int]]:
         if n in elsewhere:
             demand.append(n)
     return sorted(demand), sorted(ignored)
+
+
+def halo_closers(board, ref, net_ids, layers, reach_mm) -> Dict[str, int]:
+    """`{other ref: pads}`: every part but `ref` with pad copper, or a drilled
+    hole, within `reach_mm` of one of `ref`'s pads of `net_ids`, and how many
+    of those pads it stands that close to. Copper counts on any of `layers`,
+    not the pad's own alone: a via must fit on every layer, so a pad on the
+    far side takes the site. A pad of the same net is a place to end, never a
+    wall. Rectangles as the model stamps them."""
+    from kicad_parser import pad_drill_capsule
+
+    def box(p):
+        if getattr(p, 'pad_type', '') == 'np_thru_hole':
+            if not (p.drill or 0) > 0:
+                return None
+            a, b, rr = pad_drill_capsule(p)
+            return (min(a[0], b[0]) - rr, min(a[1], b[1]) - rr,
+                    max(a[0], b[0]) + rr, max(a[1], b[1]) + rr)
+        if not any(reach._pad_on_layer(p, lay) for lay in layers):
+            return None
+        return (p.global_x - p.size_x / 2.0, p.global_y - p.size_y / 2.0,
+                p.global_x + p.size_x / 2.0, p.global_y + p.size_y / 2.0)
+
+    mine = [(p.net_id, box(p)) for p in board.footprints[ref].pads
+            if p.net_id in net_ids]
+    mine = [(n, a) for n, a in mine if a is not None]
+    hits: Dict[str, int] = {}
+    for r, f in board.footprints.items():
+        if r == ref:
+            continue
+        boxes = [(q.net_id, box(q)) for q in f.pads]
+        for n, a in mine:
+            for qn, b in boxes:
+                if b is None or qn == n:
+                    continue
+                dx = max(0.0, a[0] - b[2], b[0] - a[2])
+                dy = max(0.0, a[1] - b[3], b[1] - a[3])
+                if math.hypot(dx, dy) <= reach_mm:
+                    hits[r] = hits.get(r, 0) + 1
+                    break
+    return hits
 
 
 def part_flow(pcb, ref, pcb_file=None, *, margin_mm: float = DEFAULT_MARGIN_MM,
@@ -518,11 +568,30 @@ def part_flow(pcb, ref, pcb_file=None, *, margin_mm: float = DEFAULT_MARGIN_MM,
                     refs[e['ref']] = refs.get(e['ref'], 0) + 1
         res.cut_cells = tuple(cells)
         res.cut_refs = tuple(sorted(refs, key=lambda r: (-refs[r], r)))
-        # nets whose source the residual still reaches got no path: when no
-        # lattice cell is saturated, the cut is at their own halos -- the
-        # part's own pads (and the rules) close them in
-        res.stranded = tuple(names[n] for n in demand if seen[S0 + nidx[n]])
+        # nets whose source the residual still reaches got no path
+        stranded = [n for n in demand if seen[S0 + nidx[n]]]
+        res.stranded = tuple(names[n] for n in stranded)
         if not cells:
-            res.cut_refs = (ref,)
+            # no lattice cell is saturated: the stranded nets are closed in
+            # where they start. The cut is the other parts within a halo's
+            # reach of their pads, then whatever lines the shared space the
+            # residual still reaches from them (a pocket closed further
+            # out) -- and the part's own pads only when both name nobody
+            near = halo_closers(board, ref, set(stranded), layers,
+                                clr + max(tw, via) / 2.0 + cell)
+            far: Dict[str, int] = {}
+            pocket = np.nonzero(seen[np.arange(N) * 2] & (ncls == 1))[0]
+            for nd in pocket[::max(1, len(pocket) // 200)]:
+                cxy = int(ncell_of[nd])
+                for e in reach.nearest_foreign(
+                        board, view[0] + (cxy % ncx + 0.5) * cell,
+                        view[1] + (cxy // ncx + 0.5) * cell, None,
+                        (layers[int(nlay[nd])],)):
+                    r = e.get('ref')
+                    if r and r != ref and r not in near:
+                        far[r] = far.get(r, 0) + 1
+            res.cut_refs = tuple(
+                sorted(near, key=lambda r: (-near[r], r))
+                + sorted(far, key=lambda r: (-far[r], r))) or (ref,)
     res.seconds = time.time() - t0
     return res

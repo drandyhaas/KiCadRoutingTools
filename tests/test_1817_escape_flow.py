@@ -13,6 +13,14 @@ The lattice over-states capacity by design (a one-track gap straddling two
 half-lane cells reads two), so the assertions are bounds: the one-track
 opening must read SHORT and at least its true capacity, never a constant.
 
+What the cut is NAMED as when no lattice cell is saturated (`cut_naming`): a
+3 x 3 grid of pads (U2) whose centre pad leaves only by a via. Another part's
+pad under it on B.Cu takes the via site, and the cut must name that part;
+with no other part in reach and a via too wide to fit, the cut is U2's own
+pads, the one case where narrower geometry is the answer. The same on
+glasgow_revC's U30, whose 19 stranded nets stand over the capacitors under
+it, and on a fence closed all round, further out than a halo reaches.
+
     python3 tests/test_1817_escape_flow.py
 """
 import contextlib
@@ -99,6 +107,95 @@ def flow(path):
     return escape_flow.part_flow(parse_kicad_pcb(path), 'U1', path, **RULES)
 
 
+def grid(path, cap=False):
+    """U2: 3 x 3 pads of 0.4 mm at 0.8 mm pitch round (10, 10) on F.Cu, nets
+    G1..G9, each also on X2 outside the window. Between two pads there is
+    0.4 mm, no room for a 0.2 mm track at 0.2 mm clearance, so the centre pad
+    (G5) leaves only by a via on itself. `cap`: C1, a B.Cu part with one pad
+    of another net under that pad."""
+    nets = ''.join(f'  (net {k} "G{k}")\n' for k in range(1, 10))
+    nets += '  (net 10 "CAP")\n'
+    upads = ''.join(f'    (pad "{k}" smd rect (at {((k - 1) % 3 - 1) * 0.8:g}'
+                    f' {((k - 1) // 3 - 1) * 0.8:g}) (size 0.4 0.4)'
+                    f' (layers "F.Cu") (net {k} "G{k}"))\n' for k in range(1, 10))
+    xpads = ''.join(f'    (pad "{k}" smd rect (at 0 {k - 1}) (size 0.3 0.3)'
+                    f' (layers "F.Cu") (net {k} "G{k}"))\n' for k in range(1, 10))
+    c1 = ('  (footprint "t:CAP" (layer "B.Cu") (at 10 10)\n'
+          '    (property "Reference" "C1" (at 0 0) (layer "B.SilkS"))\n'
+          '    (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "B.Cu")'
+          ' (net 10 "CAP"))\n  )\n' if cap else '')
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb (version 20240108) (generator pcbnew)\n'
+                 '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+                 '  (net 0 "")\n' + nets +
+                 '  (gr_rect (start 0 0) (end 40 30) (stroke (width 0.1) (type default))'
+                 ' (layer "Edge.Cuts"))\n'
+                 '  (footprint "t:GRID" (layer "F.Cu") (at 10 10)\n'
+                 '    (property "Reference" "U2" (at 0 0) (layer "F.SilkS"))\n'
+                 + upads + '  )\n'
+                 '  (footprint "t:FAR" (layer "F.Cu") (at 30 5)\n'
+                 '    (property "Reference" "X2" (at 0 0) (layer "F.SilkS"))\n'
+                 + xpads + '  )\n' + c1 + ')\n')
+    return path
+
+
+def cut_naming(td):
+    """The cut when no lattice cell is saturated: the parts that close the
+    stranded pads in, and the part's own pads only when there are none."""
+    cli = os.path.join(ROOT, 'py_tools', 'check_reachability.py')
+    rules = ['--track', '0.2', '--clearance', '0.2', '--via', '0.6']
+
+    def g(path, **kw):
+        return escape_flow.part_flow(parse_kicad_pcb(path), 'U2', path,
+                                     **dict(RULES, **kw))
+    bare = grid(os.path.join(td, 'grid.kicad_pcb'))
+    capped = grid(os.path.join(td, 'grid_cap.kicad_pcb'), cap=True)
+    free = g(bare)
+    ok('control: the centre pad leaves by a via on itself', free.deficit == 0,
+       free.to_dict())
+    cap = g(capped)
+    ok('a pad under it on B.Cu takes the via site: G5 is stranded, no lattice '
+       'cell saturated', (cap.deficit, cap.stranded, cap.cut_cells)
+       == (1, ('G5',), ()), cap.to_dict())
+    ok('the cut names the part that took the site, not the part itself',
+       cap.cut_refs == ('C1',), cap.cut_refs)
+    r = check([sys.executable, '-X', 'utf8', cli, capped, '--part', 'U2'] + rules,
+              refuse='the cut runs past C1 -- no lattice cell is saturated',
+              code=1)
+    ok('and the line does not send the reader to narrower geometry',
+       'its own pads' not in r.stdout and 'narrower geometry' not in r.stdout,
+       r.stdout)
+    wide = g(bare, via_diameter=1.0)
+    ok('no other part in reach, a via too wide to fit: the cut is the part\'s '
+       'own pads', (wide.deficit, wide.stranded, wide.cut_refs)
+       == (1, ('G5',), ('U2',)), wide.to_dict())
+    check([sys.executable, '-X', 'utf8', cli, bare, '--part', 'U2', '--track',
+           '0.2', '--clearance', '0.2', '--via', '1.0'],
+          refuse='the cut runs past U2 -- its own pads: at this track and via '
+                 'no path leaves them, so narrower geometry', code=1)
+    print('  PASS  that case alone prints the narrower-geometry sentence')
+
+    # a fence closed all round, 2 mm from the row: no halo reaches it and no
+    # cell is saturated, the pocket simply has no way out
+    shut = board(os.path.join(td, 'shut.kicad_pcb'), gap=0.0)
+    f = escape_flow.part_flow(parse_kicad_pcb(shut), 'U1', shut,
+                              layers=('F.Cu',), **RULES)
+    ok('a pocket closed further out names what lines it',
+       (f.flow, f.cut_cells, f.cut_refs) == (0, (), ('F1',)), f.to_dict())
+
+    # the repository's own case: a 0.8 mm BGA with capacitors under it
+    gl = evidence(os.path.join(ROOT, 'kicad_files', 'glasgow_revC.kicad_pcb'),
+                  'glasgow_revC')
+    evidence(gl[:-len('.kicad_pcb')] + '.kicad_pro', 'its project (the rules)')
+    u = escape_flow.part_flow(parse_kicad_pcb(gl), 'U30', gl)
+    ok('glasgow_revC U30: 19 nets stranded with no lattice cell saturated',
+       (u.deficit, len(u.stranded), u.cut_cells) == (19, 19, ()),
+       (u.deficit, u.stranded, u.cut_cells))
+    ok('its cut is the capacitors under it (C24 over most stranded balls), '
+       'not U30', u.cut_refs[:1] == ('C24',) and 'U30' not in u.cut_refs
+       and all(r.startswith('C') for r in u.cut_refs), u.cut_refs)
+
+
 def main(td):
     one = flow(board(os.path.join(td, 'one.kicad_pcb'), gap=0.7))
     # the opening's free width for a track centreline is 0.7 - 2 x (0.2 + 0.1)
@@ -156,6 +253,8 @@ def main(td):
     check([sys.executable, '-X', 'utf8', cli, path, '--part', 'NOSUCH'],
           refuse="no part 'NOSUCH' on this board", code=2)
     print('  PASS  --part NOSUCH exits 2 naming the ref')
+
+    cut_naming(td)
 
 
 if __name__ == '__main__':

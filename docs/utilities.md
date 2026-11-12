@@ -3313,9 +3313,16 @@ exit 1, naming the parts whose copper closes the cut -- and 0 (exit 0) is
 counted as escaping and named. The proof is AT THE RULES PRICED: a part
 escaped with narrower tracks or smaller vias than the Default class reads
 short (a 0.8 mm BGA a human escaped at 0.15-0.19 mm tracks and 0.4 mm vias,
-on a 0.2 mm / 0.6 mm Default class, reads 19 nets short, its own pads at the
-cut, and 0 at `--track 0.15 --clearance 0.15 --via 0.4`); `stranded` names
-the nets left without a path.
+on a 0.2 mm / 0.6 mm Default class, reads 19 nets short, and 0 at
+`--track 0.15 --clearance 0.15 --via 0.4`); `stranded` names the nets left
+without a path. When no lattice cell is saturated those nets are closed in
+where they start, and the cut is named as the OTHER parts with pad copper
+within a halo's reach of their pads (clearance + half the wider of track and
+via + one cell) on any layer: a part in front of a pin, or one on the far
+side taking the via site -- on that BGA the capacitors under it, and with
+those gone it reads 0 short at the same class. Only when no other part is
+that close, and none lines the space the pads still open into, does the line
+name the part's own pads and narrower geometry as the other answer.
 
 ```bash
 python3 py_tools/check_reachability.py board.kicad_pcb --part U3
