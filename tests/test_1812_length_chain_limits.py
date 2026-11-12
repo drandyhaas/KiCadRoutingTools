@@ -17,7 +17,10 @@ Rows (score_length on group files this test writes):
   5. a chain whose nets no 2-pad part joins fails with a reason naming it,
      a key the function does not read is named, and on the unrouted input
      the chain group is unmeasured (`ran` false), not failed;
-  6. `"chains": "auto"` finds both sides of the AC-coupled pair.
+  6. `"chains": "auto"` finds both sides of the AC-coupled pair;
+  7. board_score's net-name audit does not read a chain's label ("A + B") as
+     a net: no `NET-NAME MISMATCH` for a chain group, while a name in a chain
+     or a `nets` group's `worst` that the board lacks is still caught.
 
     python3 tests/test_1812_length_chain_limits.py
 """
@@ -45,7 +48,7 @@ def check(name, cond, detail=''):
 
 
 def main():
-    from board_score import score_length
+    from board_score import audit_net_names, score_length
     from kicad_parser import parse_kicad_pcb
     from net_queries import net_match_length
     tmp = tempfile.mkdtemp(prefix='t1812_')
@@ -123,6 +126,43 @@ def main():
         check("both sides of the AC-coupled pair",
               got == ['DPA_N + DPB_N', 'DPA_P + DPB_P'] and s['count'] == 0,
               str(got))
+
+        print("7. the net-name audit and a chain's label")
+        s = grade({'LANE_P': {'chains': [['DPA_P', 'DPB_P']], 'tolerance_mm': 0.5,
+                              'max_mm': 12}})
+        g = s['groups']['LANE_P']
+        a = audit_net_names(r, {'components': {'length': s}})
+        check("the chain group's worst is its label, and the audit reads no "
+              "unknown net in it",
+              g.get('worst') == 'DPA_P + DPB_P' and a.get('ran')
+              and a.get('unknown_count') == 0, json.dumps(a)[:300])
+        check("the chain's own nets are the names audited",
+              a.get('checked') == 2, json.dumps(a)[:300])
+        g['chains']['DPA_P + DPB_P']['net_mm']['DPB_Q'] = 1.0
+        a = audit_net_names(r, {'components': {'length': s}})
+        check("a net in a chain that the board lacks is still caught, by field",
+              a.get('unknown') == {'components.length.groups[].chains[].net_mm':
+                                   ['DPB_Q']}, json.dumps(a)[:300])
+        a = audit_net_names(r, {'components': {'length': {'groups': {
+            'OLD': {'worst': 'DPA_P + DPB_P', 'pass': True}}}}})
+        check("a nets group's worst that is no net is still caught",
+              a.get('unknown') == {'components.length.groups[].worst':
+                                   ['DPA_P + DPB_P']}, json.dumps(a)[:300])
+        gf = os.path.join(tmp, 'lane.json')
+        with open(gf, 'w', encoding='utf-8') as fh:
+            json.dump({'LANE_P': {'chains': [['DPA_P', 'DPB_P']],
+                                  'tolerance_mm': 0.5, 'max_mm': 20}}, fh)
+        sj = os.path.join(tmp, 'score.json')
+        p = run_check([sys.executable, '-B', '-X', 'utf8', tool('board_score.py'),
+                       r, '--length-groups', evidence(gf, 'groups file'),
+                       '--json', sj, '--quiet'], accept=True)
+        with open(evidence(sj, 'score document'), encoding='utf-8') as fh:
+            doc = json.load(fh)
+        check("board_score prints no NET-NAME MISMATCH for the lane",
+              'NET-NAME MISMATCH' not in (p.stdout or '') + (p.stderr or '')
+              and doc['net_name_audit'].get('unknown_count') == 0
+              and doc['components']['length']['count'] == 0,
+              ((p.stdout or '') + (p.stderr or ''))[:300])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print('FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL OK')

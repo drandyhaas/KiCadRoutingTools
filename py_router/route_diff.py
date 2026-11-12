@@ -2586,11 +2586,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # sides summed, chain_length), and its tolerance recorded on the board
     # so check_drc / board_score grade the chain end to end from now on.
     if ac_coupled_summary:
-        from length_matching import regrade_ac_chains
+        from length_matching import regrade_ac_chains, ac_chains_not_matched
         regrade_ac_chains(ac_coupled_summary, pcb_data)
-        _cm = [r for r in ac_coupled_summary
-               if r['status'] in ('matched', 'within-tolerance')]
-        _cu = [r for r in ac_coupled_summary if r not in _cm]
+        _cu = ac_chains_not_matched(ac_coupled_summary)
         from protected_nets import note_intra_pair_tolerances, AC_CHAIN_PREFIX
         note_intra_pair_tolerances({
             AC_CHAIN_PREFIX + r['nets']: {
@@ -2599,14 +2597,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 'source': 'cli' if intra_pair_tolerance is not None else 'default'}
             for r in ac_coupled_summary if r.get('tolerance_mm') is not None})
         _ctol = sorted({r['tolerance_mm'] for r in ac_coupled_summary})
-        print(f"  AC-coupled chains (shipped copper, #1799): {len(_cm)}/"
+        print(f"  AC-coupled chains (shipped copper, #1799): "
+              f"{len(ac_coupled_summary) - len(_cu)}/"
               f"{len(ac_coupled_summary)} within "
               f"{'/'.join(f'{t:g}' for t in _ctol)}mm end to end")
         if _cu:
-            print(f"  {RED}AC-coupled chain NOT matched: " + ", ".join(
-                f"{r['nets']} ({r['reason'] or r['status']}"
-                + (f", skew={r['skew_mm']:.3f}mm" if r['skew_mm'] is not None else "")
-                + ")" for r in _cu) + RESET)
+            print(f"  {RED}AC-coupled chain NOT matched: "
+                  + ", ".join(_cu) + RESET)
 
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
@@ -2940,6 +2937,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # #1303: the intra-pair status, re-read off the shipped copper
             # (JSON_SUMMARY['intra_pair_matching']); [] without the flag.
             'intra_pair_matching': intra_pair_reports,
+            # #1799: same data as JSON_SUMMARY['ac_coupled_xnets'], each
+            # chain's end-to-end verdict on the shipped copper ([] without a
+            # chain). Its member pairs read `skipped` just above, so without
+            # this key the GUI had no verdict for the chain at all.
+            'ac_coupled_xnets': ac_coupled_summary,
             # Per-pair diagnostics + casualty custody tally (additive), same
             # data as the CLI JSON_SUMMARY keys of the same names.
             'pair_reports': pair_reports,

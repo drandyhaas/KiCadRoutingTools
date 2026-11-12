@@ -2386,15 +2386,16 @@ class StrictRemovalModel:
         for the other end. Removing one leg of a loop left that leg's last
         short track lying in the surviving track's copper so; the loop now
         loses another branch instead;
-      * on a net a skew rule grades (``keep_centre_stubs``), no kept via
-        that a track on a layer reached AT ITS CENTRE is left reached there
-        only by track ends off it (#1798: _centre_lost_vias). A rim-to-centre
-        stub (the via-centre bridge close_soft_joints lays, #1235) is what
-        KiCad's length DRC measures the run into the via by; without it the
-        track ends on the rim, the net measures a via radius shorter and the
-        barrel may go uncharged -- a matched pair failed its recorded skew
-        after an all-nets step collapsed one. On any other net the stub is
-        copper no grade reads, and it stays removable.
+      * on a net a skew rule grades or a .kicad_dru length rule binds
+        (``keep_centre_stubs``, cleanup_pipeline._centre_stub_net_ids), no
+        kept via that a track on a layer reached AT ITS CENTRE is left
+        reached there only by track ends off it (#1798: _centre_lost_vias).
+        A rim-to-centre stub (the via-centre bridge close_soft_joints lays,
+        #1235) is what KiCad's length DRC measures the run into the via by;
+        without it the track ends on the rim, the net measures a via radius
+        shorter and the barrel may go uncharged -- a matched pair failed its
+        recorded skew after an all-nets step collapsed one. On any other net
+        the stub is copper no grade reads, and it stays removable.
 
     Candidates are unlocked, non-graphic track segments outside
     ``readonly_ids``. They are tried in UNITS: every single segment, and every
@@ -2480,18 +2481,26 @@ class StrictRemovalModel:
             self._via_by_layer.append(dict(by_layer))
         # #1798: per via, per layer, the segments with an end ON the via's
         # centre (connectivity.VIA_CENTRE_TOL, #1235's definition of 'on').
-        # See _centre_lost_vias.
+        # See _centre_lost_vias. _centre_far: (via, segment) -> for a centred
+        # segment whose OTHER end also lies on the via's copper (a stub from
+        # the centre out to the rim), which of its two ends (its index in
+        # _seg_nodes) that is.
         from connectivity import VIA_CENTRE_TOL
         self._via_centred = []
+        self._centre_far = {}
         for j, v in enumerate(self.vias):
+            reach = (getattr(v, 'size', 0.6) or 0.6) / 2.0
             centred = defaultdict(set)
             for L, ss in self._via_by_layer[j].items():
                 for i in ss:
                     s = self.segs[i]
-                    if min(math.hypot(s.start_x - v.x, s.start_y - v.y),
-                           math.hypot(s.end_x - v.x, s.end_y - v.y)) \
-                            <= VIA_CENTRE_TOL:
+                    d0 = math.hypot(s.start_x - v.x, s.start_y - v.y)
+                    d1 = math.hypot(s.end_x - v.x, s.end_y - v.y)
+                    if min(d0, d1) <= VIA_CENTRE_TOL:
                         centred[L].add(i)
+                        if VIA_CENTRE_TOL < max(d0, d1) < \
+                                reach + s.width / 2 - 1e-6:
+                            self._centre_far[(j, i)] = 0 if d0 > d1 else 1
             self._via_centred.append(dict(centred))
 
         # --- endpoint nodes: degree, dangle guard, unit chaining --------------
@@ -2549,7 +2558,19 @@ class StrictRemovalModel:
         track ending on the rim, so removing the stub keeps connectivity but
         shortens the net by a via radius and can drop the barrel from the
         length. Such a removal is refused. Removing every track the via has
-        on that layer is not this case (the via grading above owns it)."""
+        on that layer is not this case (the via grading above owns it).
+
+        Another track end staying at the centre does not make up for a
+        removed stub. A fanned-out part's pad-to-via track ends at the centre
+        of its via, and a pair leaving that via on the same layer joins it
+        there through a stub of its own: removing that stub left the pad's
+        track at the centre and the pair's track ending on the rim, a via
+        radius shorter. So a removal is also refused when it newly takes such
+        a stub -- a centred segment whose far end lies on the via's copper --
+        while a kept track still ends at that far end and no kept segment
+        runs from there to the centre. A centred track whose far end lies
+        off the via is not a stub: removing it takes no track's way into
+        the centre."""
         touched = set()
         for i in E:
             if i not in prev_E:
@@ -2562,6 +2583,14 @@ class StrictRemovalModel:
                         not all(i in prev_E for i in centred) and \
                         any(i not in E for i in self._via_by_layer[j].get(L, ())):
                     return True
+                for i in centred:
+                    far = self._centre_far.get((j, i))
+                    if far is None or i not in E or i in prev_E:
+                        continue
+                    mates = [k for k in self._node_ends[self._seg_nodes[i][far]]
+                             if k != i and k not in E]
+                    if mates and not any(k in centred for k in mates):
+                        return True
         return False
 
     # ---- anchoring: check_weird's dangling-end definition -------------------
@@ -3254,8 +3283,8 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
     from fix_kicad_drc_settings import connection_width_floor
     web_floor = connection_width_floor(pcb_data, shipped=True)
     # #1798: the nets whose via-centre stubs a length grade reads.
-    from cleanup_pipeline import _skew_bound_net_ids
-    skew_ids = _skew_bound_net_ids(pcb_data)
+    from cleanup_pipeline import _centre_stub_net_ids
+    stub_ids = _centre_stub_net_ids(pcb_data)
 
     removed_ids = set()
     dropped_via_ids = set()
@@ -3282,7 +3311,7 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
                                    copper_layers, readonly_ids=readonly,
                                    droppable_via_ids=droppable,
                                    web_floor=web_floor,
-                                   keep_centre_stubs=net_id in skew_ids)
+                                   keep_centre_stubs=net_id in stub_ids)
         if not model.valid:
             continue
         _dbg = None

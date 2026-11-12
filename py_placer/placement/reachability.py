@@ -53,6 +53,9 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from net_queries import pad_on_layer
+
+
 def _open_room(view) -> float:
     """Clearance-adjusted room assigned to a cell with NO foreign copper of any
     class within reach.
@@ -190,13 +193,6 @@ def rule_area_keepouts(pcb, layer):
                     bool(ko.get('tracks_allowed', True)),
                     bool(ko.get('vias_allowed', True))))
     return out
-
-
-def _pad_on_layer(pad, layer) -> bool:
-    if pad.drill and pad.drill > 0:
-        return True                               # a barrel blocks every layer
-    layers = pad.layers or []
-    return layer in layers or any(l in ('*.Cu',) for l in layers)
 
 
 def outline_edges(pcb):
@@ -340,7 +336,7 @@ def slack_field(pcb, target_net_id, layer, view, base_clearance,
                     _capsule(grid_for(None), p1[0], p1[1], p2[0], p2[1], r,
                              view, step)
                 continue
-            if not _pad_on_layer(p, layer):
+            if not pad_on_layer(p, layer):
                 continue
             g = (own if p.net_id == target_net_id else
                  grid_at(pricing.pad(p, layer)) if pricing is not None else
@@ -904,12 +900,12 @@ def nearest_foreign(pcb, x, y, net_id, layers=None, net_clearances=None,
                 continue
             if getattr(p, 'pad_type', '') == 'np_thru_hole':
                 continue
-            # `_pad_on_layer`, the SAME predicate `slack_field` stamps
+            # `pad_on_layer`, the SAME predicate `slack_field` stamps
             # with. A second, nearly-identical test re-created blocker 3
             # through another door: a pad declared on `*.Cu` is stamped into
             # the field and forms the throat, but `set(p.layers) & lay` does
             # not match it, so a CAGED result shipped near=[] refs=[] again.
-            if lay and not any(_pad_on_layer(p, l) for l in lay):
+            if lay and not any(pad_on_layer(p, l) for l in lay):
                 continue
             d = _point_rect_dist(x, y, p.global_x, p.global_y,
                                  p.size_x, p.size_y,

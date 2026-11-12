@@ -4844,6 +4844,19 @@ def regrade_ac_chains(rows, pcb_data):
     return rows
 
 
+def ac_chains_not_matched(rows):
+    """The `ac_coupled_xnets` rows left over tolerance end to end (#1799),
+    one text per chain: "DPA+DPB (meanders-would-worsen, skew=0.115mm)".
+    A row is listed unless its status is 'matched' or 'within-tolerance'.
+    The engine's console line and the GUI's completion dialog both name the
+    chains from this, so the two fronts cannot word a verdict differently."""
+    return [f"{r['nets']} ({r.get('reason') or r.get('status')}"
+            + (f", skew={r['skew_mm']:.3f}mm" if r.get('skew_mm') is not None
+               else "") + ")"
+            for r in rows or []
+            if r.get('status') not in ('matched', 'within-tolerance')]
+
+
 def rematch_intra_pairs_on_shipped_copper(reports, diff_pair_ids, routed_results,
                                           config, pcb_data, pair_geom=None):
     """Match again, on the copper the post-route cleanup left, every pair the

@@ -1137,43 +1137,6 @@ def _glob_literal(name: str) -> str:
     return '\\' + lit if lit.startswith('!') else lit
 
 
-def _account_impedance_patterns(asked, pcb):
-    """Each INCLUSION pattern of ``asked`` on its own, against the board's
-    nets (#1815): (patterns naming no net of the board, {pattern: the nets it
-    names}). An exclusion selects nothing by itself, so it is not accounted.
-    Matched as `score_impedance`'s `named` matches (check_impedance's own
-    matcher), so a pattern counted here selects the same nets there."""
-    from net_queries import (board_net_names, net_pattern_matches,
-                             split_net_patterns)
-    names = sorted(board_net_names(pcb))
-    known = set(names)
-    no_net, matched = [], {}
-    for p in asked:
-        inc = split_net_patterns([p], known)[0]
-        if not inc:
-            continue
-        hit = [n for n in names if net_pattern_matches(n, inc[0])]
-        if hit:
-            matched[p] = hit
-        else:
-            no_net.append(p)
-    return no_net, matched
-
-
-def _no_net_reason(no_net) -> str:
-    """The unknown reason for patterns that name no net of the board, with
-    the two accepted spellings when one holds whitespace: it was read as ONE
-    pattern, since a net name may hold a space (#1553)."""
-    why = ('--impedance-nets pattern(s) matching no net of the board: '
-           + ', '.join(repr(p) for p in no_net))
-    spaced = [p for p in no_net if any(ch.isspace() for ch in p)]
-    if spaced:
-        why += (f" ({', '.join(repr(p) for p in spaced)} was read as one "
-                f"pattern holding whitespace: give each pattern its own "
-                f"argument, or join them with commas)")
-    return why
-
-
 def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
     """check_impedance -- reference-plane continuity and declared-gap audit.
 
@@ -1260,7 +1223,10 @@ def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
                             'in declared_failing, not graded)'), **extra)
     graded = [r for r in rows if named(r['net_name'])]
     graded_names = {r['net_name'] for r in graded}
-    no_net, matched = (_account_impedance_patterns(asked, pcb)
+    # #1815: each pattern accounted on its own, matched as `named` matches
+    # (check_impedance's own matcher), so it selects the same nets here.
+    from net_queries import account_net_patterns, no_net_patterns_note
+    no_net, matched = (account_net_patterns(asked, pcb)
                        if pcb is not None else ([], {}))
     extra['patterns_matching_no_net'] = no_net
     extra['patterns_matching_no_routed_net'] = [
@@ -1273,7 +1239,8 @@ def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
         # `ungraded`: the comma-joined form of --impedance-nets silently
         # zero-matched for four whole runs on one board while blocking summed
         # without the component and the exit code read 0 (test-board run 5).
-        return {'ran': True, 'count': None, 'reason': _no_net_reason(no_net),
+        return {'ran': True, 'count': None, 'reason': no_net_patterns_note(
+                    no_net, '--impedance-nets', commas=True),
                 **extra}
     if not graded:
         if pcb is not None:
@@ -1837,9 +1804,16 @@ def declared_net_names(score: dict) -> dict:
         'components.broken.poured_nets': list(broken.get('poured_nets') or ()),
         'components.broken.nets': list((broken.get('nets') or {}).keys()),
         'components.net_widths.nets': list((widths.get('nets') or {}).keys()),
+        # A group of chains (#1812) names its `worst` by the chain's LABEL
+        # ("A + B"), which is no net; the nets it measured are in `net_mm`.
         'components.length.groups[].worst':
             [g['worst'] for g in (length.get('groups') or {}).values()
-             if isinstance(g, dict) and g.get('worst')],
+             if isinstance(g, dict) and g.get('worst') and not g.get('chains')],
+        'components.length.groups[].chains[].net_mm':
+            [n for g in (length.get('groups') or {}).values()
+             if isinstance(g, dict) and isinstance(g.get('chains'), dict)
+             for ch in g['chains'].values() if isinstance(ch, dict)
+             for n in (ch.get('net_mm') or {})],
         'components.length.groups[].unjoined_nets':
             [n for g in (length.get('groups') or {}).values()
              if isinstance(g, dict) for n in (g.get('unjoined_nets') or ())],
@@ -2252,11 +2226,21 @@ def main():
                f"yet, or a plane net): {', '.join(repr(p) for p in _pnr)}"]
             * bool(_pnr)))
     _rv = score['components'].get('return_vias') or {}
-    if _rv.get('count'):
-        print(f"RETURN VIAS (measured, not blocking): {_rv['count']} of "
-              f"{_rv['signal_vias']} signal via(s) on the --impedance-nets nets "
-              f"have no {_rv['gnd_net']}-domain via or drilled pad within "
-              f"{_rv['distance_mm']:g} mm -- check_return_vias.py lists them")
+    _rvp = _rv.get('power_nets') or {}
+    # Printed when a via is uncovered, and also when a named net's vias were
+    # left out as power: its 0 would otherwise read as full coverage.
+    if _rv.get('count') is not None and (_rv['count'] or _rvp):
+        _line = (f"RETURN VIAS (measured, not blocking): {_rv['count']} of "
+                 f"{_rv['signal_vias']} signal via(s) on the --impedance-nets "
+                 f"nets have no {_rv['gnd_net']}-domain via or drilled pad "
+                 f"within {_rv['distance_mm']:g} mm")
+        if _rvp:
+            _line += (f"; {_rv['power_vias']} via(s) on --impedance-nets "
+                      f"net(s) were left out as power, not examined: "
+                      + ', '.join(f"{n} ({r['why']})"
+                                  for n, r in list(_rvp.items())[:8])
+                      + (', ...' if len(_rvp) > 8 else ''))
+        print(_line + " -- check_return_vias.py lists them")
     _df = _imp.get('declared_failing') or []
     if _df:
         print(f"DECLARED IMPEDANCE (measured, not graded): {len(_df)} net(s) the "

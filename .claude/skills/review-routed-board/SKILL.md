@@ -239,8 +239,12 @@ It counts a via or drilled pad of the signal's OWN ground domain as a return
 path, leaves power-rail vias out, and is the same test `route_planes.py
 --add-gnd-vias` places return vias by. Report `uncovered` of `signal_vias` per
 tier, and the worst nets from `by_net`. It exits 0 whatever it counts, so read
-the numbers. A count inside a BGA field, or at a layer change between two
-layers that share one reference plane, over-reads.
+the numbers. Exit 2 is a `--nets` pattern that names no net of the board
+(`patterns_matching_no_net`): correct the tier's list and run it again, never
+report that run's count. Report every net in `power_nets` too: those vias were
+left out as power and not examined, each with the reason, and a signal net
+whose name reads as a rail is among them. A count inside a BGA field, or at a
+layer change between two layers that share one reference plane, over-reads.
 
 The medium distance grades coverage only: `/plan-pcb-routing` runs no via step
 at that tier (its Step 10 rule 10), so a medium-tier miss is a note, not a
