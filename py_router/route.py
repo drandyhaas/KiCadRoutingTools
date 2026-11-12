@@ -9588,13 +9588,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     print(f"\n{RED}  {_ra_line}{RESET}" if _ra_shipped else f"  {_ra_line}")
                     if return_results and _rd_ra is not None:
                         _rd_ra['rule_area_keepouts'] = _ra_shipped
-                    # the --json-out document carries the shipped reading;
-                    # a reader of the log alone takes it from this line
-                    print('JSON_SHIPPED_AUDIT: '
-                          + json.dumps({'rule_area_keepouts': _ra_shipped}))
         except Exception as _rae:                               # noqa: BLE001
             print(f"  WARNING: rule-area keep-out audit skipped "
                   f"({type(_rae).__name__}: {_rae})")
+    # the --json-out document carries both shipped readings; a reader of the
+    # log alone takes them from this line
+    _shipped_audit = {k: v for k, v in (('net_keepouts', _nk_shipped),
+                                        ('rule_area_keepouts', _ra_shipped))
+                      if v is not None}
+    if _shipped_audit:
+        print('JSON_SHIPPED_AUDIT: ' + json.dumps(_shipped_audit))
 
     # #1680/#1681: copper on or inside the clearance of another net's pad, on
     # the board this run ships: a short whose net was outside this step or
