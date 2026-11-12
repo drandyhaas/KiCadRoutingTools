@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from pathlib import Path
 
 # Memory tiers, resized 2026-08-10 from 414 MEASURED cloud tasks (real Linux
@@ -117,6 +118,46 @@ def recorded_repo_prefix(manifest_text: str) -> str | None:
     m = re.search(r"python3\S*(?: -X \S+)? (\S+?)/[A-Za-z_0-9.]+\.py",
                   manifest_text)
     return m.group(1) if m else None
+
+
+AUTOROUTE_OUTPUT = "autoroute.kicad_pcb"
+
+
+def autoroute_manifest(manifest_text: str, tool: str) -> str:
+    """The recorded chain replaced by ONE autoroute.py run on the same input.
+
+    The autorouter arm asks what the deterministic planner makes of a board
+    the recorded chain was run on, so it keeps exactly two things of the
+    recording: the `# cwd=` line (which stages the corpus at its recorded
+    path) and the input board, the first .kicad_pcb token of the first
+    command -- the same token `ab_replay_grade.manifest_baseline` reads, so
+    the grade subtracts the same pre-existing conditions as the recorded
+    chain's. Everything the recorded chain chose (steps, nets, layers,
+    clearances) is dropped: autoroute.py reads them off the board.
+    """
+    lines = manifest_text.splitlines()
+    cwd = next((ln for ln in lines if re.match(r"^#\s*cwd=", ln)), None)
+    if cwd is None:
+        raise ValueError("manifest has no '# cwd=' line")
+    src = None
+    for ln in lines:
+        st = ln.strip()
+        if not st or st.startswith("#"):
+            continue
+        try:
+            words = shlex.split(st)
+        except ValueError:          # an unbalanced quote: read it as ab_replay_grade does
+            words = st.split()
+        toks = [t.strip("'\"") for t in words if t.strip("'\"").endswith(".kicad_pcb")]
+        if toks:
+            src = toks[0]
+            break
+    if src is None:
+        raise ValueError("manifest names no input board")
+    head = [ln for ln in lines[:3] if ln.startswith("#") and "cwd=" not in ln]
+    return "\n".join(head + ["set -e", cwd,
+                             f"python3 -u -X utf8 {shlex.quote(tool)} "
+                             f"{shlex.quote(src)} {AUTOROUTE_OUTPUT}"]) + "\n"
 
 
 def recorded_corpus_prefix(manifest_text: str) -> str | None:
