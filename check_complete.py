@@ -876,7 +876,8 @@ def _grade(a, doc):
     _comps = (score.get('components') or {}) if isinstance(score, dict) else {}
     # #1390 / #1490 / #1813: a .kicad_dru rule check_drc cannot model -- a
     # size rule (`undersized`), or a clearance, disallow, via_count, length,
-    # skew or diff_pair_uncoupled rule (`drc`). It blocks: nothing here
+    # skew or diff_pair_uncoupled rule, or one of a kind check_drc has no
+    # pass for (`kicad_dru.UNGRADED_KINDS`) (`drc`). It blocks: nothing here
     # graded it. With --kicad-rules (#1810) KiCad's own DRC grades it: a rule
     # KiCad finds met is disclosed and stops blocking, one it finds broken
     # blocks with its count, and one it cannot attribute blocks as before.

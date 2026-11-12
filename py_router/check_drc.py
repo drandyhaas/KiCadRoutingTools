@@ -6233,6 +6233,20 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                   + (f", condition {_cond!r}" if _cond else '')
                   + "): its scope is not modelled here -- the copper it binds is "
                     "graded at the class or layer value; KiCad still enforces it")
+    # A rule of a constraint kind no pass here grades, whatever its
+    # condition: named, so it reaches the verdict the way every other
+    # rule this checker does not grade does (#1490, #1813), and the
+    # --json `not_graded` list (#1831).
+    if pcb_file:
+        from kicad_dru import read_board_ungraded_kind_rules
+        for _nm, _kind in read_board_ungraded_kind_rules(pcb_file):
+            _note_not_graded(_kind, _nm,
+                             'check_drc has no grade for this constraint: '
+                             'the items it binds are not graded here')
+            if not quiet:
+                print(f"  NOT GRADED ({_kind}): rule '{_nm}' (check_drc has no "
+                      f"grade for this constraint) -- the items it binds are "
+                      f"not graded here; KiCad still enforces it")
     _coupled_cl = _chan.coupled
     _chan_layers = bool(_lcl) or _coupled_dr is not None
 

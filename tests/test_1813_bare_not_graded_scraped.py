@@ -9,6 +9,11 @@ Every NOT GRADED line now carries its kind, board_score reads EVERY kind into
 `drc.ungraded_rules` (and `drc.ungraded_rule_kinds`), and check_complete
 names the rule with its kind and reads INCOMPLETE.
 
+A rule of a constraint KIND check_drc has no pass for (physical_clearance,
+hole_clearance, courtyard_clearance, an assertion, ...) printed no line at
+all, whatever its condition, so nothing listed it either. Each is now named
+`NOT GRADED (<kind>)` and reaches the verdict the same way (row 5).
+
 No KiCad and no routing needed: the rule is named before anything is measured.
 
     python3 tests/test_1813_bare_not_graded_scraped.py
@@ -53,6 +58,28 @@ def stage(td, sub, name, constraint, cond):
     with open(os.path.join(d, 'b.kicad_dru'), 'w', encoding='utf-8') as fh:
         fh.write(f'(version 1)\n(rule "{name}" (constraint {constraint})\n'
                  f'  (condition "{cond}"))\n')
+    return b
+
+
+#: One unconditional rule of each kind check_drc has no pass for. KiCad
+#: 10.0.7 reports error rows naming each on the routed cap_chain board.
+NO_PASS = (('physical_clearance', '(min 5mm)'),
+           ('physical_hole_clearance', '(min 5mm)'),
+           ('hole_clearance', '(min 5mm)'),
+           ('courtyard_clearance', '(min 50mm)'),
+           ('creepage', '(min 50mm)'),
+           ('track_segment_length', '(min 50mm)'),
+           ('assertion', '"A.Type == \'nope\'"'))
+
+
+def stage_rules(td, sub, rules):
+    d = os.path.join(td, sub)
+    os.makedirs(d)
+    b = os.path.join(d, 'b.kicad_pcb')
+    run([os.path.join('py_router', 'copy_board.py'), BOARD, b])
+    run_utils.evidence(b)
+    with open(os.path.join(d, 'b.kicad_dru'), 'w', encoding='utf-8') as fh:
+        fh.write('(version 1)\n' + rules)
     return b
 
 
@@ -140,6 +167,47 @@ def main():
               json.dumps(drc)[:400])
         run_utils.check(PY + complete(b), refuse="nothing grades: 'cap stub' (clearance)", code=4)
         check('check_complete: INCOMPLETE naming the clearance rule', True)
+
+        print('5. a rule of a kind check_drc has no pass for is named and blocks')
+        b = stage_rules(td, 'kinds', ''.join(
+            f'(rule "r {kind}" (constraint {kind} {value}))\n' for kind, value in NO_PASS))
+        r = run([os.path.join('py_router', 'check_drc.py'), b])
+        for kind, _value in NO_PASS:
+            check(f'check_drc: NOT GRADED ({kind})',
+                  f"NOT GRADED ({kind}): rule 'r {kind}' (check_drc has no grade "
+                  f"for this constraint)" in r.stdout, r.stdout[-500:])
+        # #1831: every NOT GRADED line is a row of --json `not_graded`, --quiet too
+        jout = os.path.join(td, 'kinds.json')
+        run([os.path.join('py_router', 'check_drc.py'), b, '--json', jout, '--quiet'])
+        with open(run_utils.evidence(jout, 'the --json document'), encoding='utf-8') as fh:
+            rows = {(x.get('rule'), x.get('kind')) for x in json.load(fh).get('not_graded') or []}
+        check('check_drc --json: each is a `not_graded` row, --quiet or not',
+              {(f'r {k}', k) for k, _v in NO_PASS} <= rows, repr(sorted(rows)))
+        s, drc = score(b)
+        check('board_score: each is listed with its kind',
+              drc.get('ungraded_rule_kinds') == {f'r {k}': [k] for k, _v in NO_PASS}
+              and 'drc.dru_rules' in (s.get('ungraded') or []),
+              json.dumps(drc.get('ungraded_rule_kinds')))
+        b = stage_rules(td, 'physical', '(rule "probe" (constraint physical_clearance (min 5mm)))\n')
+        try:
+            run_utils.check(PY + complete(b),
+                            refuse="nothing grades: 'probe' (physical_clearance)", code=4)
+            said = ''
+        except AssertionError as exc:
+            said = str(exc)
+        check('check_complete: INCOMPLETE naming the rule and its kind',
+              not said, said[:700])
+        b = stage_rules(td, 'quiet',
+                        '(rule "warn" (severity warning) (constraint physical_clearance (min 5mm)))\n'
+                        '(rule "ign" (severity ignore) (constraint hole_clearance (min 5mm)))\n'
+                        '(rule "graded" (constraint clearance (min 0.1mm)))\n'
+                        '(rule "fill" (constraint zone_connection solid))\n')
+        r = run([os.path.join('py_router', 'check_drc.py'), b])
+        check('a warning or ignored rule, a kind check_drc grades and a fill '
+              'kind are not named (and the rules file was read)',
+              'NOT GRADED' not in r.stdout
+              and 'Per-layer clearance rules (.kicad_dru' in r.stdout,
+              (r.stdout + r.stderr)[-500:])
     except AssertionError as exc:
         check('a run_utils assertion held', False, str(exc)[:1500])
     finally:
