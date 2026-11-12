@@ -625,6 +625,9 @@ def step_summary(kind, text, summary, summary_min):
     if kind == 'decap':
         m = _DECAP_MOVED.search(text or '')
         if not m:
+            if 'No caps moved' in (text or ''):
+                # its early exit: no fanout via on the board to clear caps off
+                return {'moved': 0}, 'moved 0 caps: no fanout via to clear them off'
             return {}, 'no summary line'
         d = dict(zip(('moved', 'resolved', 'initial', 'unresolved'),
                      map(int, m.groups())))

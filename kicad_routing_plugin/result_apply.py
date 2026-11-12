@@ -97,7 +97,7 @@ def apply_pose(fp, parsed, pcbnew):
 
 # ------------------------------------------------------------ tracks/vias
 
-def apply_copper(board, result_pcb, pcbnew, dry_run=False):
+def apply_copper(board, result_pcb, pcbnew, dry_run=False, order_board=None):
     """Make the live board's tracks and vias the result board's copper.
 
     A live track, arc or via the result carries UNCHANGED -- same geometry,
@@ -113,7 +113,9 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False):
     Returns {'kept', 'removed', 'tracks_added', 'vias_added', 'nets'}, where
     'nets' is [(item, net code)] for every item the result decides the net
     of, so a caller re-pins them after BuildConnectivity (which reassigns a
-    netcode over a stale fill). DRY_RUN counts and changes nothing."""
+    netcode over a stale fill). DRY_RUN counts and changes nothing.
+    ORDER_BOARD, the result loaded by pcbnew, gives the order the created
+    items go on in (its own); without it they keep the parse's order."""
     from kicad_parser import mm_to_iu, pcbnew_track_copper
     from .swig_gui import _build_layer_mappings
     from .gui_utils import apply_via_protection, set_via_layers
@@ -191,7 +193,7 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False):
             # Keep the result's tenting/plugging spec (#489 §8); an empty spec
             # leaves the via inheriting the board's, as it was.
             apply_via_protection(it, getattr(taken[0], "tenting_attrs", None))
-    for seg in add_segs:
+    def make_track(seg):
         track = pcbnew.PCB_TRACK(board)
         # mm_to_iu, never FromMM(round(...)) (#493 item 5 / #362).
         track.SetStart(pcbnew.VECTOR2I(mm_to_iu(seg.start_x), mm_to_iu(seg.start_y)))
@@ -201,9 +203,9 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False):
         track.SetNetCode(live_net_code(seg.net_id))
         # #521: user-pinned copper must come back pinned.
         track.SetLocked(bool(getattr(seg, "locked", False)))
-        board.Add(track)
-        out['nets'].append((track, track.GetNetCode()))
-    for via in add_vias:
+        return track
+
+    def make_via(via):
         pcb_via = pcbnew.PCB_VIA(board)
         pcb_via.SetPosition(pcbnew.VECTOR2I(mm_to_iu(via.x), mm_to_iu(via.y)))
         pcb_via.SetWidth(mm_to_iu(via.size))
@@ -216,11 +218,63 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False):
         pcb_via.SetLocked(bool(getattr(via, "locked", False)))  # #521
         # Keep a via's own tenting/plugging spec (#489 §8).
         apply_via_protection(pcb_via, getattr(via, "tenting_attrs", None))
-        board.Add(pcb_via)
-        out['nets'].append((pcb_via, pcb_via.GetNetCode()))
+        return pcb_via
+
+    # Created items go on in the RESULT's own order, appended after the kept
+    # ones -- the order the CLI's writer leaves (kept copper where it was, new
+    # copper after it). KiCad's zone filler is order-sensitive at the
+    # nanometre: the same items in another order refill with a vertex 1 nm
+    # off (measured: a CLI board refilled with its tracks reversed gives the
+    # area the GUI board gave when Add's default INSERT put them in reverse).
+    rank = _file_order(order_board, pcbnew) if order_board is not None else {}
+    adds = [('seg', s) for s in add_segs] + [('via', v) for v in add_vias]
+    adds.sort(key=lambda kv: rank.get(_parsed_order_key(kv[0], kv[1], mm_to_iu),
+                                      len(rank)))
+    for kind, item in adds:
+        made = make_track(item) if kind == 'seg' else make_via(item)
+        _append(board, made, pcbnew)
+        out['nets'].append((made, made.GetNetCode()))
     print(f"Apply: {len(kept)} unchanged track(s)/via(s) kept, {len(removed)} "
           f"removed, {len(add_segs)} track(s) and {len(add_vias)} via(s) added")
     return out
+
+
+def _append(board, item, pcbnew):
+    """board.Add, at the END of the board's list: the Python Add takes no
+    mode and INSERTs at the front, which reverses a run of added items."""
+    item.thisown = 0            # what board.Add does: the board owns it now
+    board.AddNative(item, pcbnew.ADD_MODE_APPEND)
+
+
+def _parsed_order_key(kind, item, nm):
+    """An order key for a PARSED segment or via (see _file_order)."""
+    if kind == 'seg':
+        a, b = (nm(item.start_x), nm(item.start_y)), (nm(item.end_x), nm(item.end_y))
+        return ('seg', min(a, b), max(a, b), nm(item.width), item.layer)
+    return ('via', nm(item.x), nm(item.y), nm(item.size))
+
+
+def _file_order(result_board, pcbnew):
+    """{order key: index} of the result board's tracks and vias in the order
+    the board holds them, which is its file's. Arcs are left out (the parse
+    chords them); a key not found sorts last."""
+    from .swig_gui import _build_layer_mappings
+    _n2i, id_to_name = _build_layer_mappings()
+    rank = {}
+    for i, t in enumerate(result_board.GetTracks()):
+        cls = t.GetClass()
+        if cls == 'PCB_VIA':
+            p = t.GetPosition()
+            key = ('via', p.x, p.y, t.GetWidth(pcbnew.F_Cu))
+        elif cls == 'PCB_TRACK':
+            a = (t.GetStart().x, t.GetStart().y)
+            b = (t.GetEnd().x, t.GetEnd().y)
+            key = ('seg', min(a, b), max(a, b), t.GetWidth(),
+                   id_to_name.get(t.GetLayer(), t.GetLayerName()))
+        else:
+            continue
+        rank.setdefault(key, i)
+    return rank
 
 
 def repin_nets(pinned):
@@ -275,8 +329,9 @@ def zone_plan(board, result_board):
     """{'keep': [(live, result)], 'add': [result], 'remove': [live]} -- the
     live board-level zones the result carries unchanged, the result's zones
     the live board lacks, and the live zones the result does not have."""
+    result_zones = _board_zones(result_board)
     pool = {}
-    for rz in _board_zones(result_board):
+    for rz in result_zones:
         pool.setdefault(_zone_signature(rz), []).append(rz)
     keep, remove = [], []
     for lz in _board_zones(board):
@@ -285,7 +340,8 @@ def zone_plan(board, result_board):
             keep.append((lz, twins.pop()))
         else:
             remove.append(lz)
-    add = [rz for zs in pool.values() for rz in zs]
+    left = {id(rz) for zs in pool.values() for rz in zs}
+    add = [rz for rz in result_zones if id(rz) in left]  # in the result's order
     return {'keep': keep, 'add': add, 'remove': remove}
 
 
@@ -310,7 +366,7 @@ def apply_zones(board, plan, pcbnew):
     for rz in plan['add']:
         nz = pcbnew.ZONE(rz)          # the copy carries outline, settings and fill
         nz.SetParent(board)
-        board.Add(nz)
+        _append(board, nz, pcbnew)              # in the result's order
         net = board.FindNet(rz.GetNetname()) if rz.GetNetCode() else None
         nz.SetNetCode(net.GetNetCode() if net is not None else 0)
         _copy_fill(nz, rz)
@@ -470,7 +526,7 @@ def run_apply(board, plan, pcbnew):
     stats = {'moved': len(plan.moves), 'locks': len(plan.locks)}
     pinned = []
     if plan.copper is not None:
-        c = apply_copper(board, plan.result_pcb, pcbnew)
+        c = apply_copper(board, plan.result_pcb, pcbnew, order_board=plan.result_board)
         pinned = c.pop('nets')
         stats['copper'] = c
     if plan.zones is not None:

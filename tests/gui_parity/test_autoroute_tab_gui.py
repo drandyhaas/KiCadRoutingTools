@@ -29,7 +29,12 @@ into it like its siblings, and exits 77 with a SKIP: reason when there is
 none -- never 0.
 
     python3 tests/gui_parity/test_autoroute_tab_gui.py [--keep DIR]
+    python3 tests/gui_parity/test_autoroute_tab_gui.py --board B.kicad_pcb [--require-moves]
     python3 tests/gui_parity/test_autoroute_tab_gui.py --apply-check INPUT CLI_OUTPUT
+
+--board runs the layout, run and apply arms on another board (the failure and
+Stop arms stay with splitflap); --require-moves also asserts the run moved a
+part and poured a zone, so poses and zones are really applied.
 
 --apply-check skips the runs: it applies a CLI output to its input loaded as
 the live board and compares as above, for a board too slow to run twice.
@@ -56,8 +61,9 @@ KICAD_PYTHONS = [
             key=path_version_key, reverse=True),
 ]
 BOARD = os.path.join(REPO, 'kicad_files', 'splitflap_driver.kicad_pcb')
-RUN_TIMEOUT = 900
+RUN_TIMEOUT = 3600
 FAILS = []
+PARITY = {}                    # the numbers the run prints as PARITY: {...}
 
 
 def check(name, ok, detail=''):
@@ -114,35 +120,72 @@ def grade(board):
 
 
 def board_facts(path):
-    """Zones, poses, tracks and vias of the board at PATH, as comparable
-    multisets (coordinates to 1 um)."""
-    from kicad_parser import parse_kicad_pcb
+    """The copper of the board at PATH as comparable multisets, coordinates in
+    integer NANOMETRES (kicad_parser.mm_to_iu, the unit both files hold):
+    tracks (endpoints, width, layer, net), vias (position, size, drill,
+    layers, net), footprint poses (position, angle to 0.001 deg, side), and
+    the board-level zones read through pcbnew (zone_facts)."""
+    from kicad_parser import parse_kicad_pcb, mm_to_iu as nm
     pcb = parse_kicad_pcb(path)
     name = {nid: n.name for nid, n in pcb.nets.items()}
-    r = lambda v: round(float(v), 3)
-    zones = Counter()
-    for z in pcb.zones:
-        if z.in_footprint:
-            continue
-        zones[(z.net_name, z.layer, tuple((r(x), r(y)) for x, y in z.polygon),
-               len(z.holes), z.priority, z.clearance, z.min_thickness,
-               z.pad_connection)] += 1
-    # The fill: the parser keeps no fill polygons, so count the file's.
-    import re
-    with open(path, encoding='utf-8', errors='replace') as fh:
-        text = fh.read()
-    zones[('filled_polygon blocks', len(re.findall(r'\(filled_polygon\b', text)))] += 1
-    poses = {ref: (r(fp.x), r(fp.y), round(float(fp.rotation or 0) % 360, 2), fp.layer)
+    poses = {ref: (nm(fp.x), nm(fp.y), round(float(fp.rotation or 0) % 360, 3), fp.layer)
              for ref, fp in pcb.footprints.items()}
     segs = Counter()
     for s in pcb.segments:
         if getattr(s, 'graphic', False):
             continue
-        a, b = (r(s.start_x), r(s.start_y)), (r(s.end_x), r(s.end_y))
-        segs[(min(a, b), max(a, b), r(s.width), s.layer, name.get(s.net_id))] += 1
-    vias = Counter((r(v.x), r(v.y), r(v.size), r(v.drill), tuple(v.layers or ()),
-                    name.get(v.net_id)) for v in pcb.vias)
-    return {'zones': zones, 'poses': poses, 'tracks': segs, 'vias': vias}
+        a, b = (nm(s.start_x), nm(s.start_y)), (nm(s.end_x), nm(s.end_y))
+        segs[(min(a, b), max(a, b), nm(s.width), s.layer, name.get(s.net_id))] += 1
+    vias = Counter((nm(v.x), nm(v.y), nm(v.size), nm(v.drill), tuple(v.layers or ()),
+                    getattr(v, 'via_type', 'through'), name.get(v.net_id))
+                   for v in pcb.vias)
+    zones, fills, refills = zone_facts(path)
+    return {'zones': zones, 'fills': fills, 'refills': refills, 'poses': poses,
+            'tracks': segs, 'vias': vias}
+
+
+def _poly_facts(ps):
+    """(area in nm^2, sorted outline+hole vertex tuples) of a SHAPE_POLY_SET."""
+    pts = []
+    for i in range(ps.OutlineCount()):
+        chains = [ps.Outline(i)] + [ps.Hole(i, h) for h in range(ps.HoleCount(i))]
+        for ch in chains:
+            pts.append(tuple(sorted((ch.CPoint(j).x, ch.CPoint(j).y)
+                                    for j in range(ch.PointCount()))))
+    return int(round(ps.Area())), tuple(sorted(pts))
+
+
+def zone_facts(path):
+    """Through pcbnew, with the board's own project: (zones, fills, refills).
+    zones: each board-level zone's net, layers, outline and holes in nm and
+    its fill settings. fills: {(net, layer): (area nm^2, vertices)} of the
+    fill the FILE carries. refills: the same after ZONE_FILLER refills every
+    zone -- what the user gets on pressing B, which reads the copper, the
+    zones and the project's rules together."""
+    import pcbnew
+    b = pcbnew.LoadBoard(path)
+    zones = Counter()
+    fills, refills = {}, {}
+
+    def per_layer(store):
+        for z in b.Zones():
+            for ly in z.GetLayerSet().Seq():
+                key = (z.GetNetname(), b.GetLayerName(ly))
+                a, v = _poly_facts(z.GetFilledPolysList(ly))
+                old = store.get(key, (0, ()))
+                store[key] = (old[0] + a, tuple(sorted(old[1] + v)))
+    for z in b.Zones():
+        ol = z.Outline()
+        zones[(z.GetNetname(), tuple(b.GetLayerName(ly) for ly in z.GetLayerSet().Seq()),
+               _poly_facts(ol)[1], z.GetIsRuleArea(), z.GetAssignedPriority(),
+               z.GetLocalClearance(), z.GetMinThickness(), int(z.GetPadConnection()),
+               z.GetThermalReliefGap(), z.GetThermalReliefSpokeWidth())] += 1
+    per_layer(fills)
+    zl = list(b.Zones())
+    if zl:
+        pcbnew.ZONE_FILLER(b).Fill(zl)
+    per_layer(refills)
+    return zones, fills, refills
 
 
 def project_rules(board):
@@ -199,17 +242,36 @@ def compare_saved(board, cli_out, gui_out):
     check("check_drc: the same violation count", cli_g[2] == gui_g[2],
           f"cli {cli_g[2]} gui {gui_g[2]}")
     cf, gf = board_facts(cli_out), board_facts(gui_out)
-    check("the same zones (net, layer, outline, fill)", cf['zones'] == gf['zones'],
-          f"cli {sorted(cf['zones'].items())[:3]} gui {sorted(gf['zones'].items())[:3]}")
+    check("the same zones (net, layers, outline and holes to the nm, fill settings)",
+          cf['zones'] == gf['zones'] and len(cf['zones']) > 0,
+          f"{sum(cf['zones'].values())} cli, {sum(gf['zones'].values())} gui; "
+          f"only cli {list((cf['zones'] - gf['zones']).keys())[:2]}")
+    check("the same zone fill as saved, per net and layer (area nm^2 and vertices)",
+          cf['fills'] == gf['fills'],
+          f"cli {[(k, v[0]) for k, v in cf['fills'].items()]} "
+          f"gui {[(k, v[0]) for k, v in gf['fills'].items()]}")
+    check("the same zone fill after a refill, per net and layer (area nm^2 and vertices)",
+          cf['refills'] == gf['refills'] and any(v[0] for v in cf['refills'].values()),
+          f"cli {[(k, v[0]) for k, v in cf['refills'].items()]} "
+          f"gui {[(k, v[0]) for k, v in gf['refills'].items()]}")
+    PARITY.update({'zones': sum(cf['zones'].values()),
+                   'fill_saved_mm2': round(sum(v[0] for v in cf['fills'].values()) / 1e12, 3),
+                   'fill_refilled_mm2': round(sum(v[0] for v in cf['refills'].values()) / 1e12, 3)})
     moved = [k for k in cf['poses'] if cf['poses'][k] != gf['poses'].get(k)]
-    check("the same footprint poses", not moved and len(cf['poses']) == len(gf['poses']),
-          f"{len(moved)} differ: {moved[:5]}")
-    check("the same tracks", cf['tracks'] == gf['tracks'],
+    check("the same footprint poses, to the nm", not moved and len(cf['poses']) == len(gf['poses']),
+          f"{len(moved)} differ: " + "; ".join(f"{k} cli {cf['poses'][k]} gui {gf['poses'].get(k)}"
+                                               for k in moved[:4]))
+    check("the same tracks, to the nm", cf['tracks'] == gf['tracks'],
           f"cli {sum(cf['tracks'].values())} gui {sum(gf['tracks'].values())}, "
           f"{sum((cf['tracks'] - gf['tracks']).values())} only in the CLI's, "
           f"{sum((gf['tracks'] - cf['tracks']).values())} only in the GUI's")
-    check("the same vias", cf['vias'] == gf['vias'],
+    check("the same vias, to the nm", cf['vias'] == gf['vias'],
           f"cli {sum(cf['vias'].values())} gui {sum(gf['vias'].values())}")
+    PARITY.update({'issues': (cli_g[0], gui_g[0]), 'drc': (cli_g[2], gui_g[2]),
+                   'tracks': (sum(cf['tracks'].values()), sum(gf['tracks'].values())),
+                   'vias': (sum(cf['vias'].values()), sum(gf['vias'].values())),
+                   'poses_compared': len(cf['poses'])})
+    print("PARITY: " + json.dumps(PARITY, sort_keys=True), flush=True)
     return cli_g, gui_g
 
 
@@ -240,7 +302,7 @@ def apply_check(src, cli_out, tmp):
 
 # --------------------------------------------------------------------- run
 
-def run(keep):
+def run(keep, board_file=BOARD, require_moves=False):
     import pcbnew
     import wx
     sys.path.insert(0, REPO)
@@ -254,7 +316,7 @@ def run(keep):
     os.makedirs(tmp, exist_ok=True)
     src = os.path.join(tmp, 'in', 'board.kicad_pcb')
     os.makedirs(os.path.dirname(src), exist_ok=True)
-    copy_board(BOARD, src)
+    copy_board(board_file, src)
 
     # ---- the CLI, on the same file the dialog opens
     print("CLI: autoroute.py", flush=True)
@@ -375,6 +437,20 @@ def run(keep):
               asked and 'Zones:' in asked[-1] and 'Tracks and vias:' in asked[-1],
               asked[-1][:300] if asked else 'not asked')
         compare_saved(board, cli_out, os.path.join(tmp, 'gui', 'routed.kicad_pcb'))
+        before = board_facts(src)['poses']
+        after = board_facts(cli_out)['poses']
+        moved_by_run = sorted(k for k in after if after[k] != before.get(k))
+        PARITY['parts_moved_by_run'] = moved_by_run
+        print("PARITY: " + json.dumps(PARITY, sort_keys=True), flush=True)
+        if require_moves:
+            check("the run moved parts, so Apply's poses are exercised", moved_by_run,
+                  "no part moved")
+            check("the run poured zones, so Apply's zones are exercised",
+                  PARITY.get('zones', 0) > 0)
+        if board_file != BOARD:
+            # The failure, outright-failure and Stop arms do not depend on the
+            # board, and re-running a big board three more times buys nothing.
+            return _verdict(tmp)
 
         # ---- one step made to fail
         print("tab: a failing step", flush=True)
@@ -416,6 +492,10 @@ def run(keep):
             wx.GetApp().ProcessPendingEvents()
         except Exception:                                       # noqa: BLE001
             pass
+    return _verdict(tmp)
+
+
+def _verdict(tmp):
     print(f"\nwork: {tmp}")
     if FAILS:
         print(f"VERDICT: FAIL ({len(FAILS)}): " + "; ".join(FAILS))
@@ -437,7 +517,10 @@ def main():
         i = sys.argv.index('--apply-check')
         src, out = (os.path.abspath(a) for a in sys.argv[i + 1:i + 3])
         sys.exit(apply_check(src, out, keep or tempfile.mkdtemp(prefix='krt_apply_')))
-    sys.exit(run(keep))
+    board_file = BOARD
+    if '--board' in sys.argv:
+        board_file = os.path.abspath(sys.argv[sys.argv.index('--board') + 1])
+    sys.exit(run(keep, board_file, require_moves='--require-moves' in sys.argv))
 
 
 if __name__ == '__main__':
