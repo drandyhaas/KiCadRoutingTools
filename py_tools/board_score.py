@@ -1837,9 +1837,16 @@ def declared_net_names(score: dict) -> dict:
         'components.broken.poured_nets': list(broken.get('poured_nets') or ()),
         'components.broken.nets': list((broken.get('nets') or {}).keys()),
         'components.net_widths.nets': list((widths.get('nets') or {}).keys()),
+        # A group of chains (#1812) names its `worst` by the chain's LABEL
+        # ("A + B"), which is no net; the nets it measured are in `net_mm`.
         'components.length.groups[].worst':
             [g['worst'] for g in (length.get('groups') or {}).values()
-             if isinstance(g, dict) and g.get('worst')],
+             if isinstance(g, dict) and g.get('worst') and not g.get('chains')],
+        'components.length.groups[].chains[].net_mm':
+            [n for g in (length.get('groups') or {}).values()
+             if isinstance(g, dict) and isinstance(g.get('chains'), dict)
+             for ch in g['chains'].values() if isinstance(ch, dict)
+             for n in (ch.get('net_mm') or {})],
         'components.length.groups[].unjoined_nets':
             [n for g in (length.get('groups') or {}).values()
              if isinstance(g, dict) for n in (g.get('unjoined_nets') or ())],
