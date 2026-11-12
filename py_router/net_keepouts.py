@@ -403,20 +403,32 @@ def derive_edge_bands(floors, pcb_data) -> List[dict]:
 def derive_contact_fingers(pcb_data) -> List[dict]:
     """One via-only region per copper pad of a mating-contact footprint
     (#1116): a PCB-edge plug (`floorplan.is_board_copper_plug`, #1098) or
-    card-edge fingers (`part_class.is_card_fingers`). A drilled hole in a
+    card-edge fingers (`part_class.is_card_fingers`) whose fingers stand at
+    the outline (`floorplan.fingers_at_outline`). A drilled hole in a
     contact finger damages the plating the socket wipes against, so no net's
     via may touch the pad's copper; tracks stay allowed, since they must
-    leave the finger. [] when the board has no such footprint."""
+    leave the finger. [] when the board has no such footprint.
+
+    The outline test is what separates a mating edge from the other
+    unassembled pad footprints the two predicates accept -- a Tag-Connect or
+    pogo-pin target, touch pads, solder pads -- which sit inside the board,
+    and where human boards do drop vias."""
     import _placer_path  # noqa: F401  (placement lives in py_placer/)
-    from placement.floorplan import is_board_copper_plug
+    from placement.floorplan import is_board_copper_plug, fingers_at_outline
+    from placement.legality import BoardOutlineGate
     from placement.part_class import is_card_fingers
     from check_pads import pad_outline_polygon
     from paste_apertures import pad_has_copper
     copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
     names = frozenset(n.name for nid, n in pcb_data.nets.items() if nid and n.name)
     out: List[dict] = []
+    gate = None
     for ref, fp in sorted((getattr(pcb_data, 'footprints', None) or {}).items()):
         if not (is_board_copper_plug(fp) or is_card_fingers(fp)):
+            continue
+        if gate is None:
+            gate = BoardOutlineGate(pcb_data.board_info, 0.0)
+        if not fingers_at_outline(fp, gate):
             continue
         for p in fp.pads:
             if not pad_has_copper(p) or p.size_x <= 0 or p.size_y <= 0:

@@ -20,13 +20,17 @@ via in the finger.
   1. derive: one via-only region per finger, binding every net, each
      covering its pad; tracks allowed;
   2. control: the same footprint WITH a 3D model and SMD pads (an assembled
-     part) derives nothing;
+     part) derives nothing, and nor does the plug moved inside the board
+     (fingers away from the outline: a pogo or test-pad target);
   3. stamped while a net routes, a region reaches the #568 small via rung
      only on a map that populates it: a rescue clone carries no small rung,
      and one holding the region ALONE would hide every other via block from
      a rung-1 search (#1070), which then laid a via on a foreign track;
   4. route.py --nets SIG: the net routes, check_connected passes, and no via
-     touches a finger's copper.
+     touches a finger's copper;
+  5. check_drc grades a via in a finger as a counted `keepout` row
+     (`contact_finger`), accepted `inherited-keepout` only when the
+     `--baseline` board had it, and finds none on the routed board.
 
     python3 tests/test_1116_contact_finger_via.py
 """
@@ -46,7 +50,9 @@ import run_utils                                                 # noqa: E402
 from kicad_parser import parse_kicad_pcb                         # noqa: E402
 
 failures = []
-PLUG_AT = (10.0, 10.0)
+# The fingers (6 mm, centred on the plug) end 0.1 mm inside the bottom edge
+# (y = 20): a mating edge stands at the outline (`floorplan.fingers_at_outline`).
+PLUG_AT = (10.0, 16.9)
 FINGER_X = (-3.75, -1.25, 1.25, 3.75)
 FINGER_NETS = ('SIG', 'N2', 'N3', 'N4')
 
@@ -87,11 +93,11 @@ def _ref(ref):
             '\t\t\t\t\t(size 1.27 1.27)\n\t\t\t\t)\n\t\t\t)\n\t\t)\n' % ref)
 
 
-def _plug(assembled):
+def _plug(assembled, at=PLUG_AT):
     """J1: four 1.5 x 6 mm fingers at 90 degrees. `assembled` makes it an
     ordinary SMD part with a 3D model (the control)."""
     kind = 'smd' if assembled else 'connect'
-    out = ['\t(footprint "Test:Plug"\n\t\t(layer "F.Cu")\n\t\t(at %g %g)\n' % PLUG_AT,
+    out = ['\t(footprint "Test:Plug"\n\t\t(layer "F.Cu")\n\t\t(at %g %g)\n' % at,
            _ref('J1')]
     if not assembled:
         out.append('\t\t(attr exclude_from_pos_files board_only)\n')
@@ -118,8 +124,8 @@ def _edge(x1, y1, x2, y2):
             '\t\t(layer "Edge.Cuts")\n\t)\n' % (x1, y1, x2, y2))
 
 
-def write_board(path, assembled=False):
-    parts = [HEAD, _plug(assembled),
+def write_board(path, assembled=False, plug_at=PLUG_AT):
+    parts = [HEAD, _plug(assembled, plug_at),
              _bottom_pad('U1', PLUG_AT[0] + FINGER_X[0], PLUG_AT[1] + 1.0, 'SIG')]
     corners = [(0, 0), (30, 0), (30, 20), (0, 20)]
     for i in range(4):
@@ -168,6 +174,9 @@ def derive(tmp):
            for p, r in zip(fingers, regs)))
     print('2. control: an assembled part')
     pcb = parse(write_board(os.path.join(tmp, 'control.kicad_pcb'), assembled=True))
+    ok('derives nothing', derive_contact_fingers(pcb) == [])
+    print('2b. control: the same plug inside the board (a pogo or test-pad target)')
+    pcb = parse(write_board(os.path.join(tmp, 'inside.kicad_pcb'), plug_at=(15.0, 9.0)))
     ok('derives nothing', derive_contact_fingers(pcb) == [])
 
 
@@ -227,12 +236,50 @@ def route(tmp):
     ok('SIG connected (check_connected)', True)
 
 
+    return out
+
+
+def _finger_rows(board, baseline=None):
+    from check_drc import run_drc
+    with contextlib.redirect_stdout(io.StringIO()):
+        rows = run_drc(board, clearance=0.2, quiet=True, max_print=0,
+                       check_sizes=False, baseline=baseline)
+    return [r for r in rows if r.get('contact_finger')]
+
+
+def grade(tmp, routed):
+    print('5. check_drc grades a via in a finger')
+    src = write_board(os.path.join(tmp, 'grade_in.kicad_pcb'))
+    with open(src, encoding='utf-8') as fh:
+        text = fh.read()
+    x, y = PLUG_AT[0] + FINGER_X[1], PLUG_AT[1]
+    via = ('\t(via\n\t\t(at %g %g)\n\t\t(size 0.6)\n\t\t(drill 0.3)\n'
+           '\t\t(layers "F.Cu" "B.Cu")\n\t\t(net "N2")\n\t)\n' % (x, y))
+    bad = os.path.join(tmp, 'grade_via.kicad_pcb')
+    with open(bad, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(text[:text.rstrip().rfind(')')] + via + ')\n')
+    run_utils.evidence(bad, 'board with a via in finger 2')
+    rows = _finger_rows(bad)
+    ok('one contact-finger row, counted', len(rows) == 1 and not rows[0].get('accepted')
+       and rows[0]['type'] == 'keepout' and rows[0]['area'] == 'contact finger J1.2',
+       repr(rows))
+    rows = _finger_rows(bad, baseline=bad)
+    ok('--baseline that had it: accepted inherited-keepout',
+       len(rows) == 1 and rows[0].get('accepted') == 'inherited-keepout', repr(rows))
+    rows = _finger_rows(bad, baseline=src)
+    ok('--baseline without it: still counted',
+       len(rows) == 1 and not rows[0].get('accepted'), repr(rows))
+    if routed:
+        ok('the routed board grades no finger via', _finger_rows(routed) == [],
+           repr(_finger_rows(routed)))
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix='t1116_')
     try:
         derive(tmp)
         rungs(tmp)
-        route(tmp)
+        grade(tmp, route(tmp))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
