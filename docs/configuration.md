@@ -378,6 +378,16 @@ that MAY relax, with the nets its other terms do not rule out. No routing step
 applies a courtyard-scoped rule: the router routes that copper at the class
 value.
 
+**A via rule's `(layer ...)` clause (#1805).** `check_drc.py` reads it as
+kicad-cli 10.0.7 does for a via, of any type (through, blind, buried, micro). An
+`annular_width` or `via_diameter` rule is tested against F.Cu whatever layers the
+via spans: `(layer "F.Cu")` and `(layer outer)` bind the vias the condition names,
+`(layer "B.Cu")`, an inner layer and `(layer inner)` bind none. A `hole_size`
+rule's clause is not tested: the rule binds under any. The routing steps resolve
+a via rule by net, with no layer, so there a rule with a clause sets no floor
+(`design_rules.via_floors`), and the end-of-step grade holds its vias to the
+Board Setup minimum.
+
 **Via count rules (#1707).** A `(constraint via_count (min N) (max M))` rule is
 not honoured by any routing step: a net is routed with the vias it needs
 (completion first), so every step that reads the rules lists it NOT honoured on

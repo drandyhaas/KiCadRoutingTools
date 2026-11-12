@@ -281,6 +281,11 @@ class RuleItem:
     # (`CourtyardIndex`). None = not measured: a courtyard term then reads as
     # unknown and the rule stays unread, as it always was.
     courtyards: Optional[FrozenSet[Tuple[str, Optional[str], str]]] = None
+    # #1805: one via of the board, under grade (`DesignRules.via_item`): a
+    # via-size rule's (layer ...) clause is read as KiCad reads it for a via
+    # (`_rule_matches`). An item of a net (`item_for_net`) has no layer, and
+    # such a rule does not bind it.
+    graded_via: bool = False
 
 
 @dataclass
@@ -1552,12 +1557,21 @@ def _rule_matches(rule: Rule, a: RuleItem, b: Optional[RuleItem],
                   layer: Optional[str], copper_layers: Sequence[str],
                   ctx=None, condition=None) -> bool:
     """``condition``: the AST to read instead of ``rule.condition`` (a
-    `courtyard_condition`)."""
+    `courtyard_condition`).
+
+    A rule with a (layer ...) clause binds on the layers it names, so not
+    without ``layer`` -- except a via under grade (`RuleItem.graded_via`) and
+    a via-size rule, read as kicad-cli 10.0.7 grades a via (measured on
+    through, blind, buried and micro vias alike): the clause of an
+    `annular_width` or `via_diameter` rule is tested against F.Cu whatever
+    layers the via spans, and the clause of a `hole_size` rule is not tested."""
     lay = rule.layers_for(copper_layers)
     if lay is not None:
-        if layer is None:
-            return False
-        if layer not in lay:
+        kind = ctx[0] if ctx else None
+        if layer is None and a.graded_via and kind in VIA_SIZE_KINDS:
+            if kind != 'hole_size' and 'F.Cu' not in lay:
+                return False
+        elif layer is None or layer not in lay:
             return False
     condition = rule.condition if condition is None else condition
     if condition is None:
@@ -2226,10 +2240,13 @@ class DesignRules:
         return idx if idx.available else None
 
     def via_item(self, via, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
-        """The RuleItem of one via of the board; with ``courtyards``, the
-        courtyards its disc overlaps measured (#1805), so a rule bound by a
-        courtyard term resolves for it."""
-        item = self.item_for_net(int(getattr(via, 'net_id', 0) or 0), 'via')
+        """The RuleItem of one via of the board, for grading it: a via-size
+        rule with a (layer ...) clause resolves for it as KiCad reads the
+        clause for a via (`RuleItem.graded_via`). With ``courtyards``, the
+        courtyards its disc overlaps are measured too (#1805), so a rule bound
+        by a courtyard term resolves for it."""
+        item = replace(self.item_for_net(int(getattr(via, 'net_id', 0) or 0), 'via'),
+                       graded_via=True)
         if courtyards is None:
             return item
         return replace(item, courtyards=courtyards.of_disc(
