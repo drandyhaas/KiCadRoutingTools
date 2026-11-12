@@ -2181,6 +2181,7 @@ class RoutingDialog(wx.Dialog):
             on_complete=self._on_tab_operation_complete,
             append_log=self._append_log,
             sync_pcb_data_callback=self._sync_pcb_data_from_board,
+            get_fix_drc=lambda: self.fix_drc_check.GetValue(),
         )
         self.ai_notebook.AddPage(self.autoroute_tab, AUTO_SUBTABS[0])
         self.ai_tab = AITab(

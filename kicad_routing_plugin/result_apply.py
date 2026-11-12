@@ -355,15 +355,19 @@ def result_rules(result_path):
     return targets, sev, classes
 
 
-def apply_rules(board, result_path):
+def apply_rules(board, result_path, fix_drc=True):
     """Lower the live board's design settings to the result project's, and
-    carry the result's records onto the board. Returns change strings."""
+    carry the result's records onto the board. Returns change strings.
+
+    FIX_DRC is the dialog's "Fix DRC settings after routing" box: unticked,
+    the floors, classes and severities are left as they are (#693, the
+    rule every GUI writer of them keeps), and only the records travel."""
     changes = []
     targets, sev, classes = result_rules(result_path)
-    if targets or sev:
+    if fix_drc and (targets or sev):
         from fix_kicad_drc_settings import apply_targets_to_board
         changes += apply_targets_to_board(board, targets, sev) or []
-    if classes:
+    if fix_drc and classes:
         # Each other class to the result's own value, only-lower: no ceiling
         # binds, and the result's clearance is the class's "descent".
         from fix_kicad_drc_settings import clamp_nondefault_netclasses_on_board
@@ -387,7 +391,7 @@ class ApplyPlan:
     """What Apply will change, computed against the live board as it is now."""
 
     def __init__(self, result_path, result_pcb, result_board, moves, outline_skipped,
-                 unreachable, locks, copper, zones, rules):
+                 unreachable, locks, copper, zones, rules, fix_drc=True):
         self.result_path = result_path
         self.result_pcb = result_pcb
         self.result_board = result_board
@@ -397,7 +401,8 @@ class ApplyPlan:
         self.locks = locks
         self.copper = copper
         self.zones = zones
-        self.rules = rules
+        self.rules = rules          # the result's project declares floors
+        self.fix_drc = fix_drc      # ... and the dialog may lower the live ones
 
     def lines(self):
         """The confirmation box's text, one paragraph per kind of change."""
@@ -430,14 +435,20 @@ class ApplyPlan:
             out.append(f"Zones: {len(z['keep'])} unchanged kept, {len(z['remove'])} "
                        f"removed, {len(z['add'])} added from the result, with the "
                        f"result's fills (not refilled; press B in KiCad to refill).")
-        if self.rules:
+        if self.rules and self.fix_drc:
             out.append("Design rules: the live board's floors and net classes are "
                        "lowered to the result project's, as a routing step does.")
+        elif self.rules:
+            out.append("Design rules: NOT changed -- 'Fix DRC settings after "
+                       "routing' is unticked, so the live board keeps its floors "
+                       "and KiCad may grade the result's fine copper against them.")
         return out
 
 
-def plan_apply(board, result_path, pcbnew, *, copper=True, zones=True, rules=True):
-    """An ApplyPlan for making BOARD match the result at RESULT_PATH."""
+def plan_apply(board, result_path, pcbnew, *, copper=True, zones=True, rules=True,
+               fix_drc=True):
+    """An ApplyPlan for making BOARD match the result at RESULT_PATH. FIX_DRC
+    is the dialog's "Fix DRC settings after routing" box (apply_rules)."""
     from kicad_parser import parse_kicad_pcb
     result_pcb = parse_kicad_pcb(result_path)
     moves, outline_skipped, unreachable = pose_moves(board, result_pcb, pcbnew)
@@ -445,9 +456,9 @@ def plan_apply(board, result_path, pcbnew, *, copper=True, zones=True, rules=Tru
     cop = apply_copper(board, result_pcb, pcbnew, dry_run=True) if copper else None
     result_board = pcbnew.LoadBoard(result_path) if zones else None
     zp = zone_plan(board, result_board) if zones else None
-    has_rules = rules and any(result_rules(result_path)[:2])
+    has_rules = rules and any(result_rules(result_path))
     return ApplyPlan(result_path, result_pcb, result_board, moves, outline_skipped,
-                     unreachable, locks, cop, zp, has_rules)
+                     unreachable, locks, cop, zp, has_rules, fix_drc=fix_drc)
 
 
 def run_apply(board, plan, pcbnew):
@@ -464,8 +475,7 @@ def run_apply(board, plan, pcbnew):
         stats['copper'] = c
     if plan.zones is not None:
         stats['zones'] = apply_zones(board, plan.zones, pcbnew)
-    if plan.rules:
-        stats['rules'] = apply_rules(board, plan.result_path)
+    stats['rules'] = apply_rules(board, plan.result_path, fix_drc=plan.fix_drc)
     board.BuildConnectivity()
     stats['repinned'] = repin_nets(pinned)
     if stats['repinned']:

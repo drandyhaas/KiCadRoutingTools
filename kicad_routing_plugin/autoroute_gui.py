@@ -196,9 +196,12 @@ class AutorouteTab(wx.Panel):
     """The Autorouter sub-tab (see module docstring)."""
 
     def __init__(self, parent, board_filename, on_complete=None, append_log=None,
-                 sync_pcb_data_callback=None):
+                 sync_pcb_data_callback=None, get_fix_drc=None):
         super().__init__(parent)
         self.board_filename = board_filename
+        # The dialog's "Fix DRC settings after routing" box: Apply lowers the
+        # live board's floors to the result's only when it is ticked (#693).
+        self.get_fix_drc = get_fix_drc or (lambda: True)
         self.on_complete = on_complete
         self.append_log = append_log or (lambda text: None)
         self.sync_pcb_data_callback = sync_pcb_data_callback
@@ -845,7 +848,7 @@ class AutorouteTab(wx.Panel):
             return
         from .result_apply import plan_apply, run_apply
         try:
-            plan = plan_apply(board, res, pcbnew)
+            plan = plan_apply(board, res, pcbnew, fix_drc=bool(self.get_fix_drc()))
         except Exception as e:                                  # noqa: BLE001
             wx.MessageBox(f"Could not read the result board: {e}", "Autorouter",
                           wx.OK | wx.ICON_ERROR)

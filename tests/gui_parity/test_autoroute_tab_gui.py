@@ -364,6 +364,12 @@ def run(keep):
         check("Apply armed", tab.apply_btn.IsEnabled())
 
         print("tab: apply", flush=True)
+        from kicad_routing_plugin.result_apply import plan_apply
+        unticked = "\n".join(plan_apply(board, s['output'], pcbnew, fix_drc=False).lines())
+        check("with 'Fix DRC settings' unticked, Apply says it leaves the rules (#693)",
+              'Design rules: NOT changed' in unticked, unticked[-300:])
+        check("the dialog's box is ticked, so this Apply lowers the rules",
+              dlg.fix_drc_check.GetValue())
         tab._on_apply(None)
         check("Apply asked first, naming the zones and copper",
               asked and 'Zones:' in asked[-1] and 'Tracks and vias:' in asked[-1],
