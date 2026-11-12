@@ -220,18 +220,49 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False, order_board=None):
         apply_via_protection(pcb_via, getattr(via, "tenting_attrs", None))
         return pcb_via
 
-    # Created items go on in the RESULT's own order, appended after the kept
-    # ones -- the order the CLI's writer leaves (kept copper where it was, new
-    # copper after it). KiCad's zone filler is order-sensitive at the
-    # nanometre: the same items in another order refill with a vertex 1 nm
-    # off (measured: a CLI board refilled with its tracks reversed gives the
-    # area the GUI board gave when Add's default INSERT put them in reverse).
-    rank = _file_order(order_board, pcbnew) if order_board is not None else {}
-    adds = [('seg', s) for s in add_segs] + [('via', v) for v in add_vias]
-    adds.sort(key=lambda kv: rank.get(_parsed_order_key(kv[0], kv[1], mm_to_iu),
-                                      len(rank)))
-    for kind, item in adds:
+    # The live board ends up holding its tracks and vias in the RESULT's
+    # order, and a created item takes the result item's own uuid. KiCad's
+    # zone filler is not order-free at the nanometre (measured: a board
+    # refilled with its tracks reversed moves one vertex 1 nm), and KiCad
+    # saves tracks sorted by type, layer and uuid. So a refill in the session
+    # after Apply is the refill of the result file opened in KiCad, and the
+    # applied board, saved, lists its tracks as the result saved by KiCad.
+    # A kept item is moved to its place (out of the list and back, its group
+    # restored: BOARD::Remove takes an item out of its group); its uuid and
+    # group membership are unchanged. Without ORDER_BOARD: created items in
+    # the parse's order, after the kept ones.
+    found = _file_order(order_board, pcbnew) if order_board is not None else {}
+    _n2i, id_to_name = _build_layer_mappings()
+    tail = 10 ** 9
+    seq = []
+    for it, _kind, _taken in kept:
+        hits = found.get(_live_order_key(it, id_to_name, pcbnew)) or []
+        index, uuid = hits.pop(0) if hits else (-1, None)
+        seq.append((index, 'kept', it, uuid))
+    uuids = {it.m_Uuid.AsString() for it, _k, _t in kept}
+    for n, (kind, item) in enumerate([('seg', s) for s in add_segs]
+                                     + [('via', v) for v in add_vias]):
+        hits = found.get(_parsed_order_key(kind, item, mm_to_iu)) or []
+        index, uuid = hits.pop(0) if hits else (tail + n, None)
+        seq.append((index, kind, item, uuid))
+    seq.sort(key=lambda r: r[0])
+    for index, kind, item, uuid in seq:
+        if kind == 'kept':
+            if found and index >= 0:
+                # The result's twin may carry another uuid: a step ripped
+                # this copper and laid it again, identically. The item takes
+                # the result's uuid, as the result has it.
+                mine = item.m_Uuid.AsString()
+                new = uuid if uuid and uuid != mine and uuid not in uuids else None
+                if new:
+                    uuids.discard(mine)
+                    uuids.add(new)
+                _move_to_end(board, item, pcbnew, new_uuid=new)
+            continue
         made = make_track(item) if kind == 'seg' else make_via(item)
+        if uuid and uuid not in uuids:
+            made.SetUuid(pcbnew.KIID(uuid))
+            uuids.add(uuid)
         _append(board, made, pcbnew)
         out['nets'].append((made, made.GetNetCode()))
     print(f"Apply: {len(kept)} unchanged track(s)/via(s) kept, {len(removed)} "
@@ -254,27 +285,44 @@ def _parsed_order_key(kind, item, nm):
     return ('via', nm(item.x), nm(item.y), nm(item.size))
 
 
+def _live_order_key(t, id_to_name, pcbnew):
+    """The order key of a pcbnew track or via (see _parsed_order_key)."""
+    if t.GetClass() == 'PCB_VIA':
+        p = t.GetPosition()
+        return ('via', p.x, p.y, t.GetWidth(pcbnew.F_Cu))
+    if t.GetClass() == 'PCB_TRACK':
+        a = (t.GetStart().x, t.GetStart().y)
+        b = (t.GetEnd().x, t.GetEnd().y)
+        return ('seg', min(a, b), max(a, b), t.GetWidth(),
+                id_to_name.get(t.GetLayer(), t.GetLayerName()))
+    return None                 # an arc: the parse chords it
+
+
 def _file_order(result_board, pcbnew):
-    """{order key: index} of the result board's tracks and vias in the order
-    the board holds them, which is its file's. Arcs are left out (the parse
-    chords them); a key not found sorts last."""
+    """{order key: [(index, uuid), ...]} of the result board's tracks and
+    vias, in the order the board holds them (its file's)."""
     from .swig_gui import _build_layer_mappings
     _n2i, id_to_name = _build_layer_mappings()
-    rank = {}
+    found = {}
     for i, t in enumerate(result_board.GetTracks()):
-        cls = t.GetClass()
-        if cls == 'PCB_VIA':
-            p = t.GetPosition()
-            key = ('via', p.x, p.y, t.GetWidth(pcbnew.F_Cu))
-        elif cls == 'PCB_TRACK':
-            a = (t.GetStart().x, t.GetStart().y)
-            b = (t.GetEnd().x, t.GetEnd().y)
-            key = ('seg', min(a, b), max(a, b), t.GetWidth(),
-                   id_to_name.get(t.GetLayer(), t.GetLayerName()))
-        else:
-            continue
-        rank.setdefault(key, i)
-    return rank
+        key = _live_order_key(t, id_to_name, pcbnew)
+        if key is not None:
+            found.setdefault(key, []).append((i, t.m_Uuid.AsString()))
+    return found
+
+
+def _move_to_end(board, item, pcbnew, new_uuid=None):
+    """Move a live board ITEM to the end of the board's list, keeping the
+    item itself and its group; NEW_UUID, when given, is set while the item
+    is off the board, so the board's own uuid index follows it."""
+    group = item.GetParentGroup()
+    board.RemoveNative(item)
+    item.ClearFlags(pcbnew.STRUCT_DELETED)
+    if new_uuid:
+        item.SetUuid(pcbnew.KIID(new_uuid))
+    _append(board, item, pcbnew)
+    if group is not None and item.GetParentGroup() is None:
+        group.AddItem(item)
 
 
 def repin_nets(pinned):

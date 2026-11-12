@@ -139,9 +139,9 @@ def board_facts(path):
     vias = Counter((nm(v.x), nm(v.y), nm(v.size), nm(v.drill), tuple(v.layers or ()),
                     getattr(v, 'via_type', 'through'), name.get(v.net_id))
                    for v in pcb.vias)
-    zones, fills, refills = zone_facts(path)
-    return {'zones': zones, 'fills': fills, 'refills': refills, 'poses': poses,
-            'tracks': segs, 'vias': vias}
+    zones, fills, refills, uuids = zone_facts(path)
+    return {'zones': zones, 'fills': fills, 'refills': refills, 'uuids': uuids,
+            'poses': poses, 'tracks': segs, 'vias': vias}
 
 
 def _poly_facts(ps):
@@ -155,37 +155,56 @@ def _poly_facts(ps):
     return int(round(ps.Area())), tuple(sorted(pts))
 
 
-def zone_facts(path):
-    """Through pcbnew, with the board's own project: (zones, fills, refills).
-    zones: each board-level zone's net, layers, outline and holes in nm and
-    its fill settings. fills: {(net, layer): (area nm^2, vertices)} of the
-    fill the FILE carries. refills: the same after ZONE_FILLER refills every
-    zone -- what the user gets on pressing B, which reads the copper, the
-    zones and the project's rules together."""
+def fill_facts(b):
+    """{(net, layer): (area nm^2, vertices)} of the fills board B holds."""
+    store = {}
+    for z in b.Zones():
+        for ly in z.GetLayerSet().Seq():
+            key = (z.GetNetname(), b.GetLayerName(ly))
+            a, v = _poly_facts(z.GetFilledPolysList(ly))
+            old = store.get(key, (0, ()))
+            store[key] = (old[0] + a, tuple(sorted(old[1] + v)))
+    return store
+
+
+def refill(b):
+    """Refill every zone of pcbnew board B in place (what B does in KiCad)
+    and return fill_facts."""
     import pcbnew
+    zl = list(b.Zones())
+    if zl:
+        pcbnew.ZONE_FILLER(b).Fill(zl)
+    return fill_facts(b)
+
+
+def zone_facts(path):
+    """Through pcbnew, with the board's own project: (zones, fills, refills,
+    uuids). zones: each board-level zone's net, layers, outline and holes in
+    nm and its fill settings. fills: the fill the FILE carries, per net and
+    layer. refills: the fill after the board goes through a KiCad save and
+    reload (which lists tracks by type, layer and uuid) and ZONE_FILLER
+    refills every zone -- what a user gets on pressing B after saving.
+    uuids: the uuids of its tracks, vias and zones."""
+    import pcbnew
+    import shutil
     b = pcbnew.LoadBoard(path)
     zones = Counter()
-    fills, refills = {}, {}
-
-    def per_layer(store):
-        for z in b.Zones():
-            for ly in z.GetLayerSet().Seq():
-                key = (z.GetNetname(), b.GetLayerName(ly))
-                a, v = _poly_facts(z.GetFilledPolysList(ly))
-                old = store.get(key, (0, ()))
-                store[key] = (old[0] + a, tuple(sorted(old[1] + v)))
     for z in b.Zones():
         ol = z.Outline()
         zones[(z.GetNetname(), tuple(b.GetLayerName(ly) for ly in z.GetLayerSet().Seq()),
                _poly_facts(ol)[1], z.GetIsRuleArea(), z.GetAssignedPriority(),
                z.GetLocalClearance(), z.GetMinThickness(), int(z.GetPadConnection()),
                z.GetThermalReliefGap(), z.GetThermalReliefSpokeWidth())] += 1
-    per_layer(fills)
-    zl = list(b.Zones())
-    if zl:
-        pcbnew.ZONE_FILLER(b).Fill(zl)
-    per_layer(refills)
-    return zones, fills, refills
+    uuids = sorted([it.m_Uuid.AsString() for it in b.GetTracks()]
+                   + [z.m_Uuid.AsString() for z in b.Zones()])
+    fills = fill_facts(b)
+    norm = path[:-len('.kicad_pcb')] + '.ksaved.kicad_pcb'
+    pcbnew.SaveBoard(norm, b, aSkipSettings=True)
+    pro = path[:-len('.kicad_pcb')] + '.kicad_pro'
+    if os.path.isfile(pro):
+        shutil.copyfile(pro, norm[:-len('.kicad_pcb')] + '.kicad_pro')
+    refills = refill(pcbnew.LoadBoard(norm))
+    return zones, fills, refills, uuids
 
 
 def project_rules(board):
@@ -220,10 +239,21 @@ def terminal_states(evs):
             if tok == 'AUTOROUTE_STEP' and p['state'] != 'running'}
 
 
-def compare_saved(board, cli_out, gui_out):
-    """Save the live BOARD as KiCad saves it (project included) to GUI_OUT and
-    grade it against the CLI's CLI_OUT: project floors, check_connected,
-    check_drc, zones, poses, tracks and vias."""
+def compare_saved(board, cli_out, gui_out, own_result=None):
+    """Save the live BOARD as KiCad saves it (project included) to GUI_OUT.
+
+    Against the CLI's own run, CLI_OUT: the project floors, check_connected,
+    check_drc, the zones and their fill as saved, the poses, tracks and vias,
+    to the nanometre.
+
+    Against OWN_RESULT, the result file this Apply applied (the tab's own
+    run's output; CLI_OUT itself for --apply-check): the same track, via and
+    zone uuids, the live board holding its tracks in that file's order, and
+    the same fill after a KiCad save and a refill. Two separate runs cannot
+    meet these three: every run of the router gives its new copper fresh
+    random uuids, KiCad saves tracks sorted by uuid, and its zone filler is
+    not order-free at the nanometre. So across the two runs the refill is
+    printed with its difference, and asserted only on one file."""
     import pcbnew
     os.makedirs(os.path.dirname(gui_out), exist_ok=True)
     pcbnew.SaveBoard(gui_out, board)        # as KiCad saves: project too
@@ -250,13 +280,6 @@ def compare_saved(board, cli_out, gui_out):
           cf['fills'] == gf['fills'],
           f"cli {[(k, v[0]) for k, v in cf['fills'].items()]} "
           f"gui {[(k, v[0]) for k, v in gf['fills'].items()]}")
-    check("the same zone fill after a refill, per net and layer (area nm^2 and vertices)",
-          cf['refills'] == gf['refills'] and any(v[0] for v in cf['refills'].values()),
-          f"cli {[(k, v[0]) for k, v in cf['refills'].items()]} "
-          f"gui {[(k, v[0]) for k, v in gf['refills'].items()]}")
-    PARITY.update({'zones': sum(cf['zones'].values()),
-                   'fill_saved_mm2': round(sum(v[0] for v in cf['fills'].values()) / 1e12, 3),
-                   'fill_refilled_mm2': round(sum(v[0] for v in cf['refills'].values()) / 1e12, 3)})
     moved = [k for k in cf['poses'] if cf['poses'][k] != gf['poses'].get(k)]
     check("the same footprint poses, to the nm", not moved and len(cf['poses']) == len(gf['poses']),
           f"{len(moved)} differ: " + "; ".join(f"{k} cli {cf['poses'][k]} gui {gf['poses'].get(k)}"
@@ -267,7 +290,34 @@ def compare_saved(board, cli_out, gui_out):
           f"{sum((gf['tracks'] - cf['tracks']).values())} only in the GUI's")
     check("the same vias, to the nm", cf['vias'] == gf['vias'],
           f"cli {sum(cf['vias'].values())} gui {sum(gf['vias'].values())}")
-    PARITY.update({'issues': (cli_g[0], gui_g[0]), 'drc': (cli_g[2], gui_g[2]),
+    cli_refill = sum(v[0] for v in cf['refills'].values())
+    gui_refill = sum(v[0] for v in gf['refills'].values())
+    print(f"  refill after a KiCad save, CLI run vs this Apply: {cli_refill} vs "
+          f"{gui_refill} nm^2 (difference {gui_refill - cli_refill})", flush=True)
+
+    own = own_result or cli_out
+    of = cf if own == cli_out else board_facts(own)
+    only_own = sorted(set(of['uuids']) - set(gf['uuids']))
+    check("the same track, via and zone uuids as the applied result",
+          of['uuids'] == gf['uuids'],
+          f"{len(only_own)} only in the result, "
+          f"{len(set(gf['uuids']) - set(of['uuids']))} only in the applied board")
+    opened = pcbnew.LoadBoard(own)
+    live_seq = [it.m_Uuid.AsString() for it in board.GetTracks()]
+    own_seq = [it.m_Uuid.AsString() for it in opened.GetTracks()]
+    first = next((i for i, (x, y) in enumerate(zip(live_seq, own_seq)) if x != y), None)
+    check("the live board holds its tracks and vias in the result file's order",
+          live_seq == own_seq, f"{len(live_seq)} vs {len(own_seq)}, first difference at {first}")
+    check("the same fill as the applied result after a KiCad save and a refill, per "
+          "net and layer (area nm^2 and vertices)",
+          of['refills'] == gf['refills'] and any(v[0] for v in of['refills'].values()),
+          f"result {[(k, v[0]) for k, v in of['refills'].items()]} "
+          f"applied {[(k, v[0]) for k, v in gf['refills'].items()]}")
+    PARITY.update({'zones': sum(cf['zones'].values()),
+                   'fill_saved_mm2': round(sum(v[0] for v in cf['fills'].values()) / 1e12, 3),
+                   'refill_cli_nm2': cli_refill, 'refill_gui_nm2': gui_refill,
+                   'refill_vs_own_result_equal': of['refills'] == gf['refills'],
+                   'issues': (cli_g[0], gui_g[0]), 'drc': (cli_g[2], gui_g[2]),
                    'tracks': (sum(cf['tracks'].values()), sum(gf['tracks'].values())),
                    'vias': (sum(cf['vias'].values()), sum(gf['vias'].values())),
                    'poses_compared': len(cf['poses'])})
@@ -329,6 +379,8 @@ def run(keep, board_file=BOARD, require_moves=False):
     if r.returncode != 0 or not os.path.isfile(cli_out):
         raise AssertionError(f"BROKEN TEST: the CLI run failed (rc={r.returncode}):\n"
                              f"{r.stdout[-2000:]}{r.stderr[-2000:]}")
+    with open(os.path.join(os.path.dirname(cli_out), "autoroute_stdout.log"), "w") as fh:
+        fh.write(r.stdout)
     cli_ev = events(r.stdout)
     cli_summary = [p for tok, p in cli_ev if tok == 'AUTOROUTE_SUMMARY'][-1]
 
@@ -436,7 +488,8 @@ def run(keep, board_file=BOARD, require_moves=False):
         check("Apply asked first, naming the zones and copper",
               asked and 'Zones:' in asked[-1] and 'Tracks and vias:' in asked[-1],
               asked[-1][:300] if asked else 'not asked')
-        compare_saved(board, cli_out, os.path.join(tmp, 'gui', 'routed.kicad_pcb'))
+        compare_saved(board, cli_out, os.path.join(tmp, 'gui', 'routed.kicad_pcb'),
+                      own_result=s['output'])
         before = board_facts(src)['poses']
         after = board_facts(cli_out)['poses']
         moved_by_run = sorted(k for k in after if after[k] != before.get(k))
