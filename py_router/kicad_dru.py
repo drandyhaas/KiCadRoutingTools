@@ -390,11 +390,22 @@ def read_board_unmodelled_clearance_rules(board_path: str, copper_layers: List[s
 #: (`check_drc.hole_rule_grade`) and names a rule whose condition it cannot
 #: read. `physical_clearance` and `physical_hole_clearance` bind silkscreen
 #: and footprint graphics too (kicad-cli 10.0.6), which check_drc does not
-#: grade against copper or holes.
+#: grade against copper or holes. A `courtyard_clearance` rule of min 0 or
+#: below is read as relaxing only (`_relaxes_only`) and left out.
 UNGRADED_KINDS = frozenset({
     'assertion', 'courtyard_clearance', 'creepage',
     'physical_clearance', 'physical_hole_clearance', 'track_segment_length',
 })
+
+
+def _relaxes_only(kind: str, constraint: dict) -> bool:
+    """True for a `courtyard_clearance` constraint whose `min` is 0 or below
+    (absent reads as 0): kicad-cli 10.0.6 then reports the default
+    courtyards_overlap rows (min 0) or none of them (min < 0, the pair is not
+    tested even where the courtyards overlap by more than |min|), so the rule
+    can raise no error KiCad's own courtyard check would not."""
+    return (kind == 'courtyard_clearance'
+            and (constraint.get('min') or 0.0) <= 0.0)
 
 
 def read_board_ungraded_kind_rules(board_path: str, kinds=UNGRADED_KINDS
@@ -403,7 +414,9 @@ def read_board_ungraded_kind_rules(board_path: str, kinds=UNGRADED_KINDS
     (`kinds`, `UNGRADED_KINDS` by default): `[(name, kind)]` in file order,
     [] without a rules file. A rule whose own severity is warning, ignore or
     exclusion is left out: KiCad reports no error for it, and check_drc
-    counts none (#1626)."""
+    counts none (#1626). So is a `courtyard_clearance` rule of min 0 or
+    below (`_relaxes_only`): it can only relax KiCad's courtyard check,
+    which nothing here grades with or without the rule."""
     dru = os.path.splitext(board_path)[0] + ".kicad_dru" if board_path else ""
     if not dru or not os.path.isfile(dru):
         return []
@@ -415,7 +428,8 @@ def read_board_ungraded_kind_rules(board_path: str, kinds=UNGRADED_KINDS
         return []
     return [(r.name, kind) for r in rules
             if r.severity not in ('warning', 'ignore', 'exclusion')
-            for kind in sorted(r.constraints) if kind in kinds]
+            for kind in sorted(r.constraints)
+            if kind in kinds and not _relaxes_only(kind, r.constraints[kind])]
 
 
 def parse_dru_layer_clearances(text: str, copper_layers: List[str]
