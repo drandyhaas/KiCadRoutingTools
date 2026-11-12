@@ -386,18 +386,24 @@ def read_board_unmodelled_clearance_rules(board_path: str, copper_layers: List[s
 #: one unconditional rule on a routed board: KiCad error rows naming the
 #: rule, check_drc silent). The kinds that change a fill and report nothing
 #: (`zone_connection`, `thermal_relief_gap`, `thermal_spoke_width`) are not
-#: among them.
+#: among them. `hole_clearance` is not either: check_drc grades it
+#: (`check_drc.hole_rule_grade`) and names a rule whose condition it cannot
+#: read. `physical_clearance` and `physical_hole_clearance` bind silkscreen
+#: and footprint graphics too (kicad-cli 10.0.6), which check_drc does not
+#: grade against copper or holes.
 UNGRADED_KINDS = frozenset({
-    'assertion', 'courtyard_clearance', 'creepage', 'hole_clearance',
+    'assertion', 'courtyard_clearance', 'creepage',
     'physical_clearance', 'physical_hole_clearance', 'track_segment_length',
 })
 
 
-def read_board_ungraded_kind_rules(board_path: str) -> List[Tuple[str, str]]:
+def read_board_ungraded_kind_rules(board_path: str, kinds=UNGRADED_KINDS
+                                   ) -> List[Tuple[str, str]]:
     """The sibling .kicad_dru's rules of a kind check_drc has no pass for
-    (`UNGRADED_KINDS`): `[(name, kind)]` in file order, [] without a rules
-    file. A rule whose own severity is warning, ignore or exclusion is left
-    out: KiCad reports no error for it, and check_drc counts none (#1626)."""
+    (`kinds`, `UNGRADED_KINDS` by default): `[(name, kind)]` in file order,
+    [] without a rules file. A rule whose own severity is warning, ignore or
+    exclusion is left out: KiCad reports no error for it, and check_drc
+    counts none (#1626)."""
     dru = os.path.splitext(board_path)[0] + ".kicad_dru" if board_path else ""
     if not dru or not os.path.isfile(dru):
         return []
@@ -409,7 +415,7 @@ def read_board_ungraded_kind_rules(board_path: str) -> List[Tuple[str, str]]:
         return []
     return [(r.name, kind) for r in rules
             if r.severity not in ('warning', 'ignore', 'exclusion')
-            for kind in sorted(r.constraints) if kind in UNGRADED_KINDS]
+            for kind in sorted(r.constraints) if kind in kinds]
 
 
 def parse_dru_layer_clearances(text: str, copper_layers: List[str]

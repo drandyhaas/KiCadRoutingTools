@@ -10,9 +10,10 @@ Every NOT GRADED line now carries its kind, board_score reads EVERY kind into
 names the rule with its kind and reads INCOMPLETE.
 
 A rule of a constraint KIND check_drc has no pass for (physical_clearance,
-hole_clearance, courtyard_clearance, an assertion, ...) printed no line at
-all, whatever its condition, so nothing listed it either. Each is now named
-`NOT GRADED (<kind>)` and reaches the verdict the same way (row 5).
+courtyard_clearance, an assertion, ...) printed no line at all, whatever its
+condition, so nothing listed it either. Each is now named `NOT GRADED
+(<kind>)` and reaches the verdict the same way (row 5). A `hole_clearance`
+rule is graded instead, and named only when its condition is not read.
 
 No KiCad and no routing needed: the rule is named before anything is measured.
 
@@ -65,7 +66,6 @@ def stage(td, sub, name, constraint, cond):
 #: 10.0.7 reports error rows naming each on the routed cap_chain board.
 NO_PASS = (('physical_clearance', '(min 5mm)'),
            ('physical_hole_clearance', '(min 5mm)'),
-           ('hole_clearance', '(min 5mm)'),
            ('courtyard_clearance', '(min 50mm)'),
            ('creepage', '(min 50mm)'),
            ('track_segment_length', '(min 50mm)'),
@@ -188,6 +188,25 @@ def main():
               drc.get('ungraded_rule_kinds') == {f'r {k}': [k] for k, _v in NO_PASS}
               and 'drc.dru_rules' in (s.get('ungraded') or []),
               json.dumps(drc.get('ungraded_rule_kinds')))
+        # a hole_clearance rule is graded: rows naming it, nothing listed
+        b = stage_rules(td, 'hole', '(rule "r hole" (constraint hole_clearance (min 5mm)))\n')
+        r = run_utils.check(PY + [os.path.join('py_router', 'check_drc.py'), b],
+                            refuse='PAD-HOLE violations', code=1)
+        check("check_drc: a hole_clearance rule is graded, its rows name it, "
+              "and it is not NOT GRADED",
+              "(rule 'r hole'; global" in r.stdout and 'NOT GRADED' not in r.stdout,
+              r.stdout[-600:])
+        s, drc = score(b)
+        check('board_score: a graded hole_clearance rule is not listed',
+              not drc.get('ungraded_rules'), json.dumps(drc)[:400])
+        # ...and named, and blocking, where its condition is not read
+        b = stage(td, 'hole_unread', 'hole probe', 'hole_clearance (min 5mm)', UNREAD)
+        r = run([os.path.join('py_router', 'check_drc.py'), b])
+        check('check_drc: NOT GRADED (hole_clearance) for an unread condition',
+              "NOT GRADED (hole_clearance): rule 'hole probe'" in r.stdout, r.stdout[-600:])
+        run_utils.check(PY + complete(b), refuse="nothing grades: 'hole probe' (hole_clearance)",
+                        code=4)
+        check('check_complete: INCOMPLETE naming the unread hole_clearance rule', True)
         b = stage_rules(td, 'physical', '(rule "probe" (constraint physical_clearance (min 5mm)))\n')
         try:
             run_utils.check(PY + complete(b),
