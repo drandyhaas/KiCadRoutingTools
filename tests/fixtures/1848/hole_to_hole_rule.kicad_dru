@@ -1,0 +1,6 @@
+(version 1)
+(rule "drill to drill"
+  (constraint hole_to_hole (min 0.4mm)))
+(rule "laser micro via drill to drill"
+  (constraint hole_to_hole (min 0.2mm))
+  (condition "A.Via_Type == 'Micro' || B.Via_Type == 'Micro'"))
