@@ -160,6 +160,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
             still stamped). Only for a caller that measures every pad itself,
             exactly: qfn_fanout's stub test. Routing maps keep the default.
     """
+    # #1842: under a via span this reads the board as the span sees it
+    # (via_span.obstacle_board), at every call -- the run's first build and
+    # each rebuild after a rip or a route alike.
+    if getattr(config, 'via_span', None):
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     if net_clearances is None:
         net_clearances = {}
     coord = GridCoord(config.grid_step)
@@ -2800,6 +2806,9 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
     ``_shapes`` (internal): this net's #1181 filled graphic shapes, handed to
     the #1226 rung re-run so it does not rescan the board for them."""
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
     # Cross-class clearance (PR392): price this net's stub copper at its own KiCad
@@ -3022,6 +3031,9 @@ def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
                                extra_clearance: float = 0.0):
     """Add a net's pads as obstacles to the map."""
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
 
@@ -3075,6 +3087,9 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         diagonal_margin: Extra margin (in grid units) for track blocking to catch diagonal
                         segments that pass between grid points. Use 0.25 for single-ended routing.
     """
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
 

@@ -37,6 +37,7 @@ import json
 from typing import List, Optional, Tuple, Dict, Set, Sequence
 
 from kicad_parser import parse_kicad_pcb, PCBData, Pad, pour_zones
+from via_span import via_span_summary
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr, generate_gr_text_sexpr,
     swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content,
@@ -2973,6 +2974,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if _span_type1842 is None:
             _span1842 = None                      # the whole stack: through vias
         else:
+            # a file older than KiCad 10's format has no `buried` word
+            from via_span import file_via_type
+            _word1842 = file_via_type(_span_type1842,
+                                      getattr(pcb_data, 'kicad_version', 0) or 0)
+            if _word1842 != _span_type1842:
+                print(f"Via span (#1842): this board's file format "
+                      f"({pcb_data.kicad_version}) predates KiCad 10, which has no "
+                      f"'{_span_type1842}' via; its vias are written '{_word1842}' "
+                      f"(KiCad 9's blind/buried type), on the same layer pair")
+                _span_type1842 = _word1842
             _in_span = [l for l in layers if l in _span1842]
             if layer_costs and len(layer_costs) == len(layers):
                 layer_costs = [c for l, c in zip(layers, layer_costs) if l in _span1842]
@@ -7217,6 +7228,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _sense = _sense_entries(pcb_data)
     if _sense:
         summary['sense_branches'] = _sense
+    # #1842: the step's via span, and that its plane finalize does not run
+    # (its taps are through vias) -- a key, so a chain reader need not grep
+    # the console line, which is printed only on a board with zones
+    _span_summary1842 = via_span_summary(config, pcb_data)
+    if _span_summary1842:
+        summary['via_span'] = _span_summary1842
     try:                       # #653: env knobs into the machine-readable
         import env_knobs as _ek653   # summary, so a harness can detect a
         summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
@@ -7619,7 +7636,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # #1842: the plane finalize lays THROUGH taps, at the step's via size. A
     # step on a partial span draws a micro, blind or buried via of that size,
     # so it does not run the finalize; the plane step does.
-    _span_no_finalize = bool(config.via_span) and config.via_span_type != 'through'
+    _span_no_finalize = bool(via_span_summary(config, pcb_data))
     if (_span_no_finalize and final_reconcile and not quick
             and (getattr(pcb_data, 'zones', None) or [])):
         print(f"\n  Plane finalize not run: this step lays {config.via_span_type} vias "
@@ -9793,6 +9810,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # #1260: likewise the pour-cut audit of the shipped board.
             if _merged is not None and _pour_cuts:
                 _merged['pour_cuts'] = _pour_cuts
+            # #1842: the step's via span, whatever summary came last
+            _vs1842 = via_span_summary(config, pcb_data)
+            if _merged is not None and _vs1842:
+                _merged['via_span'] = _vs1842
             # #1680/#1681: likewise the pad contacts and grazes it ships.
             if _merged is not None and _pad_contacts_left:
                 _merged['pad_contacts'] = _pad_contacts_left
@@ -10787,14 +10808,18 @@ For differential pair routing, use route_diff.py:
     # floor's via sizes are a mechanical drill's and do not pin it.
     _micro_span = False
     if getattr(args, 'via_span', None):
-        from via_span import file_copper_layers, resolve_via_span, default_micro_via
+        from via_span import (file_copper_layers, resolve_via_span, default_micro_via,
+                              laser_drilled)
+        _file_copper = file_copper_layers(args.input_file)
         try:
             _span_layers, _span_type = resolve_via_span(
-                file_copper_layers(args.input_file), args.via_span[0], args.via_span[1],
+                _file_copper, args.via_span[0], args.via_span[1],
                 getattr(args, 'via_span_type', None))
         except ValueError as _e:
             parser.error(f"--via-span: {_e}")
-        _micro_span = _span_type == 'micro'
+        # the GUI's via size / drill controls read the same predicate
+        _micro_span = laser_drilled(_file_copper, args.via_span,
+                                    getattr(args, 'via_span_type', None))
         if _micro_span:
             _mdia, _mdrill = default_micro_via(args.input_file)
             for _pname, _val in (('via_size', _mdia), ('via_drill', _mdrill)):
