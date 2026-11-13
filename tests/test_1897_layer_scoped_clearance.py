@@ -36,7 +36,13 @@ Checks:
   4. wall_tight with a layer-only 0.1 mm rule for In1.Cu after the scoped
      rule: routed on In1.Cu;
   5. the run names the rule with its layer, and the map's reference counts
-     balance (KICAD_OBSTACLE_AUDIT).
+     balance (KICAD_OBSTACLE_AUDIT);
+  6. the "keep pairs apart" shape, `... && !A.isCoupledDiffPair()`, between
+     two nets of the class (kicad-cli: A1 against A2 on both layers with no
+     clause, on In1.Cu alone with one, and nothing once the two nets are one
+     pair's P and N): graded the same, with or without a layer clause;
+  7. and routed to: the wall drawn in a net of the class keeps A1 out of the
+     slot on the layer the rule names.
 """
 import json
 import os
@@ -64,6 +70,26 @@ def scoped(mm, clause='"In1.Cu"'):
 
 def layer_only(mm):
     return f'(rule "in1"\n  (layer "In1.Cu")\n  (constraint clearance (min {mm}mm)))\n'
+
+
+APART = "A.hasNetclass('BUS') && B.hasNetclass('BUS') && !A.isCoupledDiffPair()"
+
+
+def apart(mm, clause=None):
+    lay = f'  (layer {clause})\n' if clause else ''
+    return (f'(rule "bus in"\n{lay}  (condition "{APART}")\n'
+            f'  (constraint clearance (min {mm}mm)))\n')
+
+
+def rename(board, pairs):
+    """Rewrite net names in a staged board."""
+    with open(board, encoding='utf-8') as fh:
+        text = fh.read()
+    for a, b in pairs:
+        text = text.replace(f'(net "{a}")', f'(net "{b}")')
+    with open(board, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+    return board
 
 
 def ok(cond, msg):
@@ -126,9 +152,44 @@ def grade(td):
         ok('NOT GRADED (clearance)' not in text, f"{tag}: nothing is listed as not graded")
 
 
+def grade_apart(td):
+    print('6. the "keep pairs apart" shape is graded as KiCad grades it')
+    for tag, dru, layers in (('no layer clause', apart(0.3), ['In1.Cu', 'F.Cu']),
+                             ('on In1.Cu', apart(0.3, '"In1.Cu"'), ['In1.Cu'])):
+        board = stage(os.path.join(td, 'a_' + tag.replace(' ', '_')), 'pairs',
+                      dru='(version 1)\n' + dru)
+        text = drc(board, flagged=True)
+        ok(f'FOUND {len(layers)} DRC VIOLATIONS' in text
+           and f'SEGMENT-SEGMENT violations ({len(layers)})' in text
+           and all(f'Layer: {l}' in text for l in layers)
+           and 'A1 <-> A2' in text,
+           f"{tag}: A1 against A2 on {' and '.join(layers)}, and nothing else")
+        ok('NOT GRADED (clearance)' not in text, f"{tag}: nothing is listed as not graded")
+        board = rename(stage(os.path.join(td, 'p_' + tag.replace(' ', '_')), 'pairs',
+                             dru='(version 1)\n' + dru),
+                       (('A1', 'AD_P'), ('A2', 'AD_N')))
+        ok('NO DRC VIOLATIONS FOUND' in drc(board),
+           f"{tag}: clean once the two nets are one pair's P and N")
+
+
+def route_apart(td):
+    print('7. and routed to')
+    sub = os.path.join(td, 'apart')
+    board = rename(stage(sub, 'wall_tight', dru='(version 1)\n' + apart(0.3, '"In1.Cu"')),
+                   (('X', 'A9'),))
+    _o, routed, failed, _log = route(sub, board, 'in1', 'In1.Cu')
+    ok(routed == [] and failed == ['A1'],
+       f"a wall of the class closes the slot on In1.Cu: {routed} / {failed}")
+    out, routed, failed, _log = route(sub, board, 'f', 'F.Cu')
+    ok(routed == ['A1'], f"and leaves it open on F.Cu: {routed} / {failed}")
+    ok('NO DRC VIOLATIONS FOUND' in drc(out), "check_drc is clean")
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         grade(td)
+        grade_apart(td)
+        route_apart(td)
 
         print("2. a rule that tightens In1.Cu")
         sub = os.path.join(td, 'tight')
