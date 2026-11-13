@@ -21,7 +21,12 @@ Checks:
      check_connected clean;
   4. the output project keeps the board's via and drilled-hole minimums (a
      micro via says nothing about them);
-  5. --via-span refuses a layer the board does not have, by name.
+  5. --via-span refuses a layer the board does not have, by name;
+  6. `--via-span-escape only` lays a micro via beside every pad of the
+     selected nets, joined by a short track, and routes nothing; a second
+     step, `--via-span In1.Cu In6.Cu`, then routes the nets on the inner
+     layers from those landings with buried vias In1.Cu-In6.Cu, and laid
+     copper is clean in check_drc after each step.
 """
 import contextlib
 import io
@@ -148,11 +153,64 @@ def refusal(td, board):
     ok(True, "--via-span F.Cu In9.Cu is refused by name (exit 2)")
 
 
+def escapes(td, board):
+    print("6. --via-span-escape only, then the inner sub-stack")
+    route = os.path.join(REPO, 'py_router', 'route.py')
+    step1 = os.path.join(td, 'escaped.kicad_pcb')
+    r = check(PY + [route, board, step1, '--nets', 'S*', '--via-span', 'F.Cu', 'In1.Cu',
+                    '--via-span-escape', 'only'], accept=True, timeout=1800)
+    ok('72 micro via(s) F.Cu-In1.Cu placed at surface pads, 0 declined' in r.stdout
+       and 'nothing is routed' in r.stdout,
+       "the run reports 72 escapes placed, none declined, nothing routed")
+    pcb = load(evidence(step1, 'the escaped board'))
+    by_net = {}
+    for v in pcb.vias:
+        by_net.setdefault(v.net_id, []).append(v)
+    ok(len(pcb.vias) == 72 and all(len(vs) == 2 for vs in by_net.values())
+       and {(v.via_type, tuple(v.layers)) for v in pcb.vias} == {('micro', ('F.Cu', 'In1.Cu'))},
+       f"{len(pcb.vias)} micro vias F.Cu-In1.Cu, two on each of {len(by_net)} nets")
+    ok(len(pcb.segments) == 72 and {s.layer for s in pcb.segments} == {'F.Cu'},
+       f"{len(pcb.segments)} short tracks on F.Cu join each via to its pad")
+    beside = 0
+    for nid, vs in by_net.items():
+        for pad in pcb.pads_by_net[nid]:
+            gap = min(((v.x - pad.global_x) ** 2 + (v.y - pad.global_y) ** 2) ** 0.5
+                      for v in vs)
+            beside += 0.1 < gap <= 1.5
+    ok(beside == 72, f"every pad has its via beside it, not in it: {beside} of 72")
+    check(PY + [os.path.join(REPO, 'py_router', 'check_drc.py'), step1, '--quiet'],
+          accept=True)
+
+    step2 = os.path.join(td, 'inner.kicad_pcb')
+    summary = os.path.join(td, 'inner.json')
+    r = check(PY + [route, step1, step2, '--nets', 'S*', '--via-span', 'In1.Cu', 'In6.Cu',
+                    '--json-out', summary], accept=True, timeout=1800)
+    with open(evidence(summary, 'the inner step summary'), encoding='utf-8') as fh:
+        doc = json.load(fh)
+    n = len(doc.get('routed_single') or [])
+    ok('buried vias In1.Cu-In6.Cu' in r.stdout and n >= 30,
+       f"the inner step routes from the landings: {n} of 36 nets")
+    pcb = load(evidence(step2, 'the inner-routed board'))
+    buried = [v for v in pcb.vias if v.via_type == 'buried']
+    ok(len(buried) > 0 and {tuple(v.layers) for v in buried} == {('In1.Cu', 'In6.Cu')}
+       and {v.via_type for v in pcb.vias} == {'micro', 'buried'},
+       f"{len(buried)} buried vias In1.Cu-In6.Cu beside the micro vias, no through via")
+    inner = {s.layer for s in pcb.segments} - {'F.Cu'}
+    ok(inner and inner <= {'In1.Cu', 'In2.Cu', 'In3.Cu', 'In4.Cu', 'In5.Cu', 'In6.Cu'}
+       and len(inner) > 1,
+       f"its tracks are on the inner layers: {sorted(inner)}")
+    check(PY + [os.path.join(REPO, 'py_router', 'check_drc.py'), step2, '--quiet'],
+          accept=True)
+    ok(True, "check_drc is clean after each step")
+
+
 def main():
     spans()
     view()
     with tempfile.TemporaryDirectory() as td:
-        refusal(td, routed(td))
+        board = routed(td)
+        refusal(td, board)
+        escapes(td, board)
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1

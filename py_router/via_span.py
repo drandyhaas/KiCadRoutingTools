@@ -84,6 +84,10 @@ class SpanView:
                             for nid, pads in base.pads_by_net.items()}
 
     def __getattr__(self, name):
+        # a copy of the view is built attribute by attribute, before `_base`
+        # is there to ask
+        if name == '_base' or name.startswith('__'):
+            raise AttributeError(name)
         return getattr(self._base, name)
 
 
@@ -157,3 +161,109 @@ def apply_span(vias, config) -> int:
             v.layers, v.via_type = list(pair), kind
             changed += 1
     return changed
+
+
+#: how far from its pad an escape via may be placed, mm
+ESCAPE_RADIUS_MM = 1.5
+#: an escape via stands BESIDE its pad, at least this far from the pad's
+#: copper, joined by a short track. A via in the pad would leave the net's
+#: end on the pad's own layer, which the next sub-stack's step does not
+#: route on; the track's far end is what that step starts from.
+ESCAPE_PAD_GAP_MM = 0.05
+
+
+def escape_pads(pcb_data, config, net_ids, all_swap_vias, all_swap_segments,
+                verbose: bool = False) -> dict:
+    """Lay an ESCAPE at each surface pad of ``net_ids`` (a list of (name,
+    id)) for a via-span step: a via of the span beside the pad
+    (`ESCAPE_PAD_GAP_MM`) and the short track that joins them, so the pad has
+    a landing on the span's other layers. That landing is what a later step
+    on the next sub-stack routes from.
+
+    A pad is escaped when its copper is on one of the span's END layers and
+    nowhere else in the span, it is not drilled, and its net has no copper on
+    the span's other layers within reach of it already. The site is found by
+    `plane_pad_tap.tap_pad_with_escalation` on the board read through
+    `SpanView`, each escape seeing the ones laid before it.
+
+    The copper is committed the way `global_plan.apply_plan_escape_fanout`
+    commits its own: appended to ``pcb_data`` (every later map sees it) and
+    to ``all_swap_vias`` / ``all_swap_segments`` (the writer reads those).
+
+    Returns {'placed', 'declined': [(net, pad ref)], 'served', 'drilled'}."""
+    span = list(getattr(config, 'via_span', None) or ())
+    out = {'placed': 0, 'declined': [], 'served': 0, 'drilled': 0}
+    if not span:
+        return out
+    from check_drc import pad_copper_layers
+    from kicad_parser import Segment, Via
+    from plane_pad_tap import tap_pad_with_escalation
+    copper = list(pcb_data.board_info.copper_layers)
+    ends, inner = {span[0], span[-1]}, set(span)
+    pair, kind = via_layer_pair(config), via_kind(config)
+    snpc = max(float(getattr(config, 'same_net_pad_clearance', -1.0) or 0.0),
+               ESCAPE_PAD_GAP_MM)
+    laid_vias, laid_segs = [], []
+
+    def has_landing(nid, pad, pad_layer):
+        other = inner - {pad_layer}
+        for s in pcb_data.segments:
+            if s.net_id == nid and s.layer in other and min(
+                    abs(s.start_x - pad.global_x) + abs(s.start_y - pad.global_y),
+                    abs(s.end_x - pad.global_x) + abs(s.end_y - pad.global_y)) < ESCAPE_RADIUS_MM:
+                return True
+        for v in pcb_data.vias:
+            if (v.net_id == nid and abs(v.x - pad.global_x) < ESCAPE_RADIUS_MM
+                    and abs(v.y - pad.global_y) < ESCAPE_RADIUS_MM):
+                from geometry_utils import via_copper_layers
+                if other & set(via_copper_layers(v, copper)):
+                    return True
+        return False
+
+    for name, nid in net_ids:
+        for pad in list((getattr(pcb_data, 'pads_by_net', None) or {}).get(nid) or ()):
+            if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+                continue
+            on = set(pad_copper_layers(pad, copper)) & inner
+            if (getattr(pad, 'drill', 0) or 0) > 0:
+                out['drilled'] += 1          # its barrel already joins the span
+                continue
+            if len(on) != 1 or not (on & ends):
+                continue
+            pad_layer = next(iter(on))
+            if has_landing(nid, pad, pad_layer):
+                out['served'] += 1
+                continue
+            res = tap_pad_with_escalation(
+                pad, pad_layer, nid, SpanView(pcb_data, span), config,
+                max_search_radius=ESCAPE_RADIUS_MM,
+                via_size=config.via_size, via_drill=config.via_drill,
+                same_net_pad_clearance=snpc,
+                extra_vias=laid_vias, extra_segments=laid_segs,
+                verbose=verbose, fine_for_all=True, disable_reuse=True)
+            ref = f"{pad.component_ref}.{pad.pad_number}"
+            if not res.success or res.via is None:
+                out['declined'].append((name, ref))
+                continue
+            v = res.via
+            via_obj = Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                          layers=list(pair), net_id=nid, via_type=kind)
+            pcb_data.vias.append(via_obj)
+            all_swap_vias.append(via_obj)
+            laid_vias.append(dict(v, net_id=nid))
+            for s in res.segments:
+                seg_obj = Segment(start_x=s['start'][0], start_y=s['start'][1],
+                                  end_x=s['end'][0], end_y=s['end'][1],
+                                  width=s['width'], layer=s['layer'], net_id=nid)
+                pcb_data.segments.append(seg_obj)
+                all_swap_segments.append(seg_obj)
+                laid_segs.append(dict(s, net_id=nid))
+            out['placed'] += 1
+    print(f"Via span escapes (#1842): {out['placed']} {kind} via(s) {pair[0]}-{pair[1]} "
+          f"placed at surface pads, {len(out['declined'])} declined, {out['served']} "
+          f"pad(s) already had a landing, {out['drilled']} drilled pad(s)")
+    for name, ref in out['declined'][:12]:
+        print(f"  no escape found for {ref} ({name})")
+    if len(out['declined']) > 12:
+        print(f"  ... {len(out['declined']) - 12} more")
+    return out

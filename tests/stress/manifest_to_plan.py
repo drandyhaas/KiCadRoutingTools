@@ -423,6 +423,7 @@ BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone',
     # #1842: the via type written for --via-span (the span itself is a LIST flag)
     '--via-span-type': 'via_span_type',
+    '--via-span-escape': 'via_span_escape',
     # #489 section 9: now on every step that writes pad/via copper (route,
     # route_diff, route_planes, route_disconnected_planes, bga/qfn fanout).
     '--add-teardrops': 'add_teardrops',

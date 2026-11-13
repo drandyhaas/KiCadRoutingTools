@@ -2477,6 +2477,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # (via_span.resolve_via_span). None -> through vias.
                 via_span: Optional[Sequence[str]] = None,
                 via_span_type: Optional[str] = None,
+                # 'route': lay an escape via at each surface pad of the
+                # selected nets first, then route; 'only': lay the escapes
+                # and route nothing (via_span.escape_pads). None -> off.
+                via_span_escape: Optional[str] = None,
                 # #1260: the pour islands this run may not cut
                 # (GridRouteConfig.pour_barriers). None (both fronts) ->
                 # computed from this call's scope; a list is the OUTER run's,
@@ -2973,13 +2977,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"Via span (#1842): {_span_type1842} vias {_span1842[0]}-{_span1842[-1]}; "
                   f"routing on {', '.join(layers)} only, and only copper on "
                   f"{', '.join(_span1842)} (and drilled pads) blocks a via site")
-            if _span_type1842 == 'micro' and disable_bga_zones is None:
-                # a micro via between the balls is how a dense part escapes;
-                # the through-via rule "no new via in a BGA field" is the
-                # fan-out step's and does not apply to it
+            if disable_bga_zones is None:
+                # "no new via in a BGA's pad field" is a rule for through
+                # vias, which the fan-out step lays there. A via of a span
+                # between the balls, or under them on layers the part has no
+                # copper on, is how a dense part escapes.
                 disable_bga_zones = []
-                print("  micro via span: vias are allowed inside BGA pad fields "
-                      "(--no-bga-zones)")
+                print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
+                      f"fields (--no-bga-zones)")
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # One cost per requested layer, or the full-stack append below puts its
@@ -4031,6 +4036,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         apply_plan_escape_fanout(pcb_data, config, _gplan,
                                  single_ended_nets, all_swap_vias,
                                  all_swap_segments, verbose=verbose)
+
+    # #1842: a via-span step's escapes -- a via of the span at each surface
+    # pad -- laid BEFORE the base map build, like the plan's, so every later
+    # map sees the copper
+    _escape1842 = None
+    if config.via_span and via_span_escape in ('route', 'only'):
+        from via_span import escape_pads as _escape_pads1842
+        _escape1842 = _escape_pads1842(pcb_data, config, list(single_ended_nets),
+                                       all_swap_vias, all_swap_segments, verbose=verbose)
+        if via_span_escape == 'only':
+            print("  --via-span-escape only: the escapes are laid and nothing is routed")
+            del net_ids[:]
+            del single_ended_nets[:]
 
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
@@ -10287,6 +10305,12 @@ For differential pair routing, use route_diff.py:
                              "an 8-layer board: buried vias), and route on those layers "
                              "only. Only copper on those layers, and drilled pads, "
                              "blocks a via site. Default: through vias (#1842)")
+    parser.add_argument("--via-span-escape", choices=("route", "only"), default=None,
+                        help="With --via-span: first lay an escape -- a via of the span "
+                             "and a short track -- at each surface pad of the selected "
+                             "nets, then route ('route'), or lay the escapes and route "
+                             "nothing ('only'), leaving the nets for the next "
+                             "sub-stack's step")
     parser.add_argument("--via-span-type", choices=("micro", "blind", "buried"),
                         default=None,
                         help="The via type written for --via-span (default: micro for "
@@ -11244,6 +11268,7 @@ For differential pair routing, use route_diff.py:
                 board_edge_clearance=args.board_edge_clearance,
                 same_net_pad_clearance=args.same_net_pad_clearance,
                 via_span=args.via_span, via_span_type=args.via_span_type,
+                via_span_escape=args.via_span_escape,
                 vertical_attraction_radius=args.vertical_attraction_radius,
                 vertical_attraction_cost=args.vertical_attraction_cost,
                 ripped_route_avoidance_radius=args.ripped_route_avoidance_radius,

@@ -1544,6 +1544,10 @@ class RoutingDialog(wx.Dialog):
         self.via_span_type.SetSelection(0)
         self.via_span_type.SetToolTip("The via type written for the span: auto reads it off the span (micro for two neighbouring layers one of which is an outer layer, blind for a longer span reaching one outer layer, buried otherwise).")
         span_sizer.Add(self.via_span_type, 0, wx.LEFT, 5)
+        self.via_span_escape = wx.Choice(options_scroll, choices=['off', 'route', 'only'])
+        self.via_span_escape.SetSelection(0)
+        self.via_span_escape.SetToolTip("Escapes for a via span: 'route' first lays a via of the span and a short track at each surface pad of the selected nets, then routes; 'only' lays the escapes and routes nothing, leaving the nets for the next sub-stack's step. 'off' (default) lays none.")
+        span_sizer.Add(self.via_span_escape, 0, wx.LEFT, 5)
         options_inner.Add(span_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
         # Rip pre-existing nets (issue #103): make tracks committed by a
@@ -2966,6 +2970,7 @@ class RoutingDialog(wx.Dialog):
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
         self.via_span.SetValue("")  # empty == CLI default (None: through vias)
         self.via_span_type.SetSelection(0)
+        self.via_span_escape.SetSelection(0)
         self.rip_existing_nets_ctrl.SetValue("")
         self.force_reroute.SetValue(False)  # match creation default + CLI (store_true)
         self.layer_costs_ctrl.SetValue("")
@@ -3498,6 +3503,8 @@ class RoutingDialog(wx.Dialog):
         config['via_span'] = _span_names or None
         _span_type = self.via_span_type.GetStringSelection()
         config['via_span_type'] = _span_type if _span_type in ('micro', 'blind', 'buried') else None
+        _span_escape = self.via_span_escape.GetStringSelection()
+        config['via_span_escape'] = _span_escape if _span_escape in ('route', 'only') else None
         # A micro via span draws the Default class's MICRO via where the via
         # overrides are unticked, on every net -- as route.py does when
         # --via-size / --via-drill are omitted. (A span the board cannot have
@@ -4026,6 +4033,7 @@ class RoutingDialog(wx.Dialog):
                     disable_bga_zones=config.get('no_bga_zones'),
                     via_span=config.get('via_span'),
                     via_span_type=config.get('via_span_type'),
+                    via_span_escape=config.get('via_span_escape'),
                     rip_existing_nets=config.get('rip_existing_nets'),
                     force_reroute=config.get('force_reroute', False),
                     # RAW patterns (pre-expansion), like the CLI main: the #521

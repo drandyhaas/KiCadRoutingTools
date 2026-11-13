@@ -174,6 +174,7 @@ python3 py_router/route_diff.py in.kicad_pcb out.kicad_pcb --nets "/DQS_P" "/DQS
 | `--via-drill` | Default net-class drill (else 0.3) | Via drill diameter in mm; per-net exactly like `--via-size` |
 | `--via-span TOP BOTTOM` | none (through vias) | `route.py`: lay vias that join only this run of neighbouring copper layers, and route on those layers only. See [Via span](#via-span) |
 | `--via-span-type` | read off the span | The via type written for `--via-span`: `micro`, `blind` or `buried` |
+| `--via-span-escape` | off | With `--via-span`: `route` first lays an escape (a via of the span beside each surface pad of the selected nets, and the short track to it), then routes; `only` lays the escapes and routes nothing |
 | `--grid-step` | 0.1 | Grid resolution in mm |
 | `--same-net-pad-clearance` | the project's recorded value, else -1 | Edge-to-edge clearance (mm) between every via the run places and same-net pads (#581). `> 0` keeps vias off same-net SMD pads and off the net's solder-paste openings (#962), i.e. no via-in-pad, and is recorded in the sibling `.kicad_pro` so later chain steps inherit it; `-1` allows via-in-pad. On every routing CLI (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`) |
 
@@ -351,15 +352,36 @@ span allows. The whole stack is no span: through vias, as without the flag.
   `--no-bga-zones` does: a micro via between the balls is how a dense part
   escapes. Give `--no-bga-zones` with references to keep the rest.
 - **One span per step.** A board with several via types is routed as one step
-  per sub-stack; a single search does not choose between via types. A net whose
-  pads are on layers outside the span has nothing to route to in that step.
-- The GUI route tab has the same two controls (**Via Span**, and the type
-  beside it). The fan-out, diff-pair and plane steps lay through vias only.
+  per sub-stack; a single search does not choose between via types.
+- **Escapes (`--via-span-escape`).** A step on an inner sub-stack routes from
+  the copper a net already has there, so a pad on an outer layer needs a
+  landing first. `--via-span-escape only` lays one at each surface pad of the
+  selected nets -- a via of the span beside the pad
+  (`via_span.ESCAPE_PAD_GAP_MM`, never in it: a via in the pad would leave the
+  net's end on the pad's own layer, which the next step does not route on) and
+  the short track joining them, found by the pad-tap search on the same view
+  of the board -- and routes nothing. `route` lays the escapes and then routes
+  within the span. A pad whose net already has copper on the span's other
+  layers nearby is left alone, as is a drilled pad.
+
+  ```bash
+  # micro-via escapes at every pad, then the inner layers with buried vias
+  python3 py_router/route.py board.kicad_pcb escaped.kicad_pcb --nets "S*" \
+      --via-span F.Cu In1.Cu --via-span-escape only
+  python3 py_router/route.py escaped.kicad_pcb routed.kicad_pcb --nets "S*" \
+      --via-span In1.Cu In6.Cu
+  ```
+- The GUI route tab has the same three controls (**Via Span**, the type and
+  the escape mode beside it). The fan-out, diff-pair and plane steps lay
+  through vias only.
 
 On an 8-layer board with a 0.8 mm BGA over a field of bottom-side pads
 (`tests/fixtures/1842`), a bare route completes 25 of 36 nets with through
 vias; `--via-span F.Cu In1.Cu` completes all 36 with micro vias, clean in
 `check_drc`, `check_connected` and KiCad's DRC against the board's own rules.
+The two-step form above lays 72 micro-via escapes and then routes 34 of the 36
+on the inner layers with buried vias, both steps clean in `check_drc` and
+KiCad's DRC.
 
 **Via rules (#1676).** A step given no explicit via (`--via-size` omitted, the
 GUI's Via Size override unticked) starts from a via that meets the

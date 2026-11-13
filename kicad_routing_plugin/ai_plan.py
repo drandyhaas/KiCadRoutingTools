@@ -336,7 +336,7 @@ _PARAM_CONTROL_ALIASES = {
 _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
                   # #1842: --via-span's two layer names -> one text field,
                   # --via-span-type -> the choice beside it
-                  'via_span', 'via_span_type',
+                  'via_span', 'via_span_type', 'via_span_escape',
                   # #530: --clearance-ceiling -> Min Clearance + the ceiling box
                   'clearance_ceiling',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
@@ -601,11 +601,11 @@ def apply_step_params(step, dialog):
             ctl.SetValue(' '.join(str(v) for v in value)
                          if isinstance(value, (list, tuple)) else str(value or ''))
             return True
-        if name == 'via_span_type':
-            ctl = getattr(dialog, 'via_span_type', None)
+        if name in ('via_span_type', 'via_span_escape'):
+            ctl = getattr(dialog, name, None)
             if ctl is None:
                 return False
-            _i = ctl.FindString(str(value or 'auto'))
+            _i = ctl.FindString(str(value or ('auto' if name == 'via_span_type' else 'off')))
             if _i < 0:
                 return False
             ctl.SetSelection(_i)
