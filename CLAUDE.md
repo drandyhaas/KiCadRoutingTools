@@ -834,6 +834,13 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `pcb.board_info.board_bounds` - (min_x, min_y, max_x, max_y) or None. Copper
   and poses are laid out from it, so it keeps its coarser reading of an arc
   (`BOUNDS_CHORD_EPS`, #1700) and a ring can stand up to 5 um past it
+- `pcb.board_info.board_thickness` - mm a through via is drilled through: the
+  stackup summed, else `(general (thickness ...))`, else None (#502; never a
+  1.6 default). More than 10% past the thickness a rung's drill is legal at
+  (1.76 mm for the stock rungs: a fab holds thickness to +-10%) `fab_tiers`
+  raises that drill to thickness / ratio (8:1 standard, 10.67:1 advanced);
+  past 3.2 mm, the thickest standard board, the declaration is taken for an
+  unset stackup and nothing is raised, with a warning
 - `pcb.board_info.stackup` - List[StackupLayer], ordered top to bottom
   (NOT `pcb.stackup`). Empty list if the board has no stackup section.
 - StackupLayer fields: `name`, `layer_type` ('copper', 'core', 'prepreg', ...),

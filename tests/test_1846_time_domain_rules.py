@@ -16,15 +16,20 @@ for P and Q (measured, read off a `length (min 1000ps)` rule's rows):
   * a layer entry's delay is attoseconds per mm;
   * a via adds the via delay times its barrel length (1.54 mm here);
   * a track on a layer the profile has no entry for adds nothing;
-  * a class that names no profile, or a profile with time-domain tuning
-    off, measures 0 ps.
+  * a class that names no profile measures 0 ps, a pad-to-die delay
+    included;
+  * a profile with time-domain tuning off gives no track or via delay, but a
+    pad's pad-to-die delay still counts.
+The two pad-to-die rows (a 10 ps `die_delay` on one of Q's pads) were
+measured on kicad-cli 10.0.6, which also gives every other row's values.
 
 Checks (no routing):
   1. the fixture: one violation, P 6.00 ps earlier than Q against 5 ps, the
      length window met, and no NOT GRADED line;
   2. each row's delays are KiCad's, through check_drc's own length rows;
   3. the readers: a time bound is a 'ps' rule only for a reader that asks,
-     and `DelayModel` says why a net measures 0 ps.
+     `DelayModel` says why a net measures 0 ps, and a project that cannot
+     be parsed gives no profiles with a warning rather than silently.
 """
 import contextlib
 import copy
@@ -94,16 +99,24 @@ def _off(proj):
     _profile(proj)['enable_time_domain_tuning'] = False
 
 
-#: name -> (Q rerouted through vias, project edit, KiCad's (P ps, Q ps))
+#: name -> (Q rerouted through vias, project edit, KiCad's (P ps, Q ps),
+#: a 10 ps pad-to-die delay on one of Q's pads)
 ROWS = {
-    'as drawn': (False, None, (120.00, 126.00)),
-    'F.Cu at 7.5 ps/mm': (False, _faster, (150.00, 157.50)),
-    'Q through two vias, B.Cu at 7 ps/mm': (True, _bcu, (120.00, 151.48)),
-    'and the via delay at 20 ps/mm': (True, _bcu_slow_via, (120.00, 194.60)),
-    'Q through two vias, no B.Cu entry': (True, None, (120.00, 102.48)),
-    'the class names no profile': (False, _no_profile, (0.00, 0.00)),
-    'time-domain tuning off': (False, _off, (0.00, 0.00)),
+    'as drawn': (False, None, (120.00, 126.00), False),
+    'F.Cu at 7.5 ps/mm': (False, _faster, (150.00, 157.50), False),
+    'Q through two vias, B.Cu at 7 ps/mm': (True, _bcu, (120.00, 151.48), False),
+    'and the via delay at 20 ps/mm': (True, _bcu_slow_via, (120.00, 194.60), False),
+    'Q through two vias, no B.Cu entry': (True, None, (120.00, 102.48), False),
+    'the class names no profile': (False, _no_profile, (0.00, 0.00), False),
+    'time-domain tuning off': (False, _off, (0.00, 0.00), False),
+    'a 10 ps pad-to-die delay on Q': (False, None, (120.00, 136.00), True),
+    'and time-domain tuning off: the pad-to-die delay alone': (
+        False, _off, (0.00, 10.00), True),
+    'and the class names no profile: 0 ps': (False, _no_profile, (0.00, 0.00), True),
 }
+
+#: one of Q's pads, as the fixture writes it
+Q_PAD = '(layers "F.Cu" "F.Mask")\n\t\t\t(net "Q")'
 
 FAILS = []
 
@@ -114,9 +127,12 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
-def stage(td, name, dru=None, vias=False, edit=None):
+def stage(td, name, dru=None, vias=False, edit=None, die=False):
     with open(evidence(BOARD + '.kicad_pcb'), encoding='utf-8') as fh:
         t = fh.read()
+    if die:
+        assert t.count(Q_PAD) == 2, "the fixture has Q's two pads"
+        t = t.replace(Q_PAD, '(die_delay 10)\n\t\t\t' + Q_PAD, 1)
     if vias:
         t, n = re.subn(r'\t\(segment\s*\(start 3 6\).*?\n\t\)\n', lambda m: VIAS, t,
                        flags=re.S)
@@ -169,15 +185,16 @@ def fixture(td):
 
 def rows(td):
     print("2. each net's delay is KiCad's")
-    for i, (name, (vias, edit, want)) in enumerate(ROWS.items()):
-        doc, text = grade(stage(td, f'r{i}', FLOOR, vias, edit))
+    for i, (name, (vias, edit, want, die)) in enumerate(ROWS.items()):
+        doc, text = grade(stage(td, f'r{i}', FLOOR, vias, edit, die))
         got = {v['net1']: v.get('delay_ps') for v in doc['items']
                if v['type'] == 'length-out-of-range'}
         ok((got.get('P'), got.get('Q')) == want,
            f"{name}: P {got.get('P')} ps, Q {got.get('Q')} ps"
            + ('' if (got.get('P'), got.get('Q')) == want else f" want {want}"))
-        if want == (0.0, 0.0):
-            ok('measure 0 ps, as in KiCad' in text, "   and the run says why they are 0 ps")
+        if edit in (_no_profile, _off):
+            ok('get no track or via delay, as in KiCad' in text,
+               "   and the run says why they get no track or via delay")
 
 
 def readers(td):
@@ -207,6 +224,21 @@ def readers(td):
     nid = next(i for i, n in pcb.nets.items() if n.name == 'P')
     ps, why = DelayModel(path, pcb).net_delay(nid)
     ok(ps == 0.0 and 'no tuning profile' in why, f"no profile: 0 ps, {why!r}")
+    bad = os.path.join(td, 'bad.kicad_pcb')
+    with open(bad, 'w', encoding='utf-8') as fh:
+        fh.write('')
+    with open(os.path.join(td, 'bad.kicad_pro'), 'w', encoding='utf-8') as fh:
+        fh.write('{"tuning_profiles": ')
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        got = read_tuning_profiles(bad)
+    ok(got == ({}, []) and 'could not read' in err.getvalue()
+       and 'tuning profiles are not read' in err.getvalue(),
+       f"a project that cannot be parsed gives no profiles and says so: {err.getvalue()!r}")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        got = read_tuning_profiles(os.path.join(td, 'none.kicad_pcb'))
+    ok(got == ({}, []) and not err.getvalue(), "no project: no profiles, no warning")
 
 
 def main():

@@ -13,16 +13,30 @@ Measured on kicad-cli 10.0.8 (tests/test_1846_time_domain_rules.py):
     via's barrel length (as the length DRC charges it) times the via delay,
     plus its pads' pad-to-die delays;
   * a track on a layer the profile has no entry for adds nothing;
-  * a net whose class names no profile, or a profile with
-    `enable_time_domain_tuning` off, has a delay of 0 ps.
+  * a net whose class names no profile has a delay of 0 ps, its pads'
+    pad-to-die delays included;
+  * a net whose profile has `enable_time_domain_tuning` off gets no track or
+    via delay, but its pads' pad-to-die delays still count (measured on
+    kicad-cli 10.0.6: a 10 ps `die_delay` reads 10.00 ps).
 """
 import json
 import os
+import sys
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 #: profile delays are stored in attoseconds per mm
 _AS_PER_PS = 1e6
 _DEFAULT_PRIORITY = 2147483647
+_WARNED: set = set()
+
+
+def _warn_once(key: str, text: str) -> None:
+    """One warning per project per process: the profiles are read once per
+    board, but a run may build several readers on one project."""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    print(f"WARNING (tuning profiles, #1846): {text}", file=sys.stderr)
 
 
 class TuningProfile(NamedTuple):
@@ -37,12 +51,22 @@ def read_tuning_profiles(board_path: str
                          ) -> Tuple[Dict[str, TuningProfile], List[Tuple[int, str, str]]]:
     """(profiles by name, [(priority, class name, profile name)]) from the
     board's sibling `.kicad_pro`; ({}, []) when there is no project or it
-    declares none."""
+    declares none. A project that exists but cannot be read or parsed also
+    gives ({}, []), with a warning, so a ps rule or a time-matched net is not
+    silently given no profile."""
     pro = os.path.splitext(board_path)[0] + '.kicad_pro' if board_path else ''
+    if not pro or not os.path.isfile(pro):
+        return {}, []
     try:
         with open(pro, encoding='utf-8') as fh:
             proj = json.load(fh)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        _warn_once(pro, f"could not read {pro} ({e}); its tuning profiles are "
+                        f"not read, so no net is timed with one")
+        return {}, []
+    if not isinstance(proj, dict):
+        _warn_once(pro, f"{pro} is not a JSON object; its tuning profiles are "
+                        f"not read, so no net is timed with one")
         return {}, []
     profiles: Dict[str, TuningProfile] = {}
     block = proj.get('tuning_profiles') or {}
@@ -61,7 +85,8 @@ def read_tuning_profiles(board_path: str
             float(via) / _AS_PER_PS if isinstance(via, (int, float)) else 0.0,
             len(p.get('via_overrides') or []))
     classes = []
-    for c in ((proj.get('net_settings') or {}).get('classes') or []):
+    settings = proj.get('net_settings')
+    for c in ((settings if isinstance(settings, dict) else {}).get('classes') or []):
         if isinstance(c, dict) and c.get('tuning_profile'):
             name = str(c.get('name', 'Default'))
             prio = c.get('priority')
@@ -96,8 +121,10 @@ class DelayModel:
 
         (None, why) when it cannot be measured: its pads are not joined by
         track copper (as `net_queries.net_match_length`), or its profile
-        carries via overrides, which are not modelled. (0.0, why) when KiCad
-        itself measures 0 ps: no profile, or time-domain tuning off."""
+        carries via overrides, which are not modelled. (ps, why) when KiCad
+        gives the net no track or via delay: no profile (0 ps), or time-domain
+        tuning off (its pads' pad-to-die delays alone, as kicad-cli 10.0.6
+        measures it)."""
         from net_queries import (kicad_net_length_parts_nm, net_pads_joined,
                                  net_match_pad_to_die, _NM_PER_MM)
         pcb = self.pcb_data
@@ -107,7 +134,9 @@ class DelayModel:
         if prof is None:
             return 0.0, "its net class names no tuning profile"
         if not prof.time_domain:
-            return 0.0, f"tuning profile '{prof.name}' has time-domain tuning off"
+            return (net_match_pad_to_die(pcb, net_id, 'total', attr='die_delay'),
+                    f"tuning profile '{prof.name}' has time-domain tuning off "
+                    f"(only pad-to-die delays count)")
         if prof.via_overrides:
             return None, f"tuning profile '{prof.name}' has via overrides (not modelled)"
         segs = [s for s in pcb.segments if s.net_id == net_id]
