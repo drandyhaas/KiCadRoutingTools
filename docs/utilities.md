@@ -3066,7 +3066,12 @@ Read-only scan for **weird copper** a routed board should not have. One
 category each:
 
 - `dangling-end` -- trace ends and tails anchored on no same-net pad, via,
-  T-junction or zone outline;
+  T-junction or zone outline. A track that runs on past a tee or a via on its
+  body is named once no anchor's copper touches its end (half the track's
+  width plus half the anchor's), where KiCad's DRC reports `track_dangling`
+  (#1870; it used to be allowed 3 track widths). `--tolerance` still drops
+  a tail shorter than it, so on a track under 0.1 mm wide the default hides
+  a tail KiCad reports;
 - `soft-joint` -- near-open joints: same-net segments that overlap by their end
   caps instead of meeting endpoint-to-endpoint, and meet nowhere else (two stubs
   leaving one vertex are not one, #984);
