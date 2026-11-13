@@ -1069,6 +1069,7 @@ own, with interactive demos:
 | [**frame**](#the-frame-whole_framepy) | the trunk, the rings round the destination, the two orders, each lane's reference path | read off the board, with the ends model's far-face cut |
 | [**solve**](#the-solve-whole_solvepy) | every crossing and every layer change, all lanes at once | CP-SAT, proved optimal in vias |
 | [**geometry**](#the-geometry-whole_geopy) | each lane's offset along the trunk and the rings | one joint LP (HiGHS) |
+| [**geometry in board xy**](#the-geometry-in-board-xy-whole_embedpy) | each lane's line and each via's place in the board's own x and y, the solve's layers and order kept | an LP a round over each layer's free space, cut into cells; a stage of its own, in the loop only with `GEO_EMBED=1` |
 | [**polish**](#the-polish-whole_polishpy) | the audit's measures, met in board xy | small vertex moves, an LP per round |
 | [**snap**](#the-snap-whole_snappy) | octilinear paths on the router's grid, the pairs first | a grid search per lane |
 | [**audit, gate, lint**](#the-audit-the-gate-and-the-lint) | whether the router can lay it | every `plan_audit` check, nothing waived |
@@ -1694,6 +1695,12 @@ inside the board and off the pad boxes. A second pass holds each lane to one
 side of every island near it. What the LP had to pay for goes back to the
 solve as **cuts**.
 
+It is one-dimensional: a lane is an offset across its frame at each column,
+and a via stands at the place along the route where the solve put its change.
+It can move a lane sideways and nothing along the route.
+[The geometry in board xy](#the-geometry-in-board-xy-whole_embedpy), below,
+starts from its layout where that stage is run.
+
 <details>
 <summary>Details</summary>
 
@@ -1807,6 +1814,165 @@ solve as **cuts**.
   from its multipliers; the interior point is capped at 500 iterations, past
   which the dual simplex solves it. `detmath`'s tie-break makes the optimum
   one point.
+
+</details>
+
+#### The geometry in board xy (`whole_embed.py`)
+
+The same plan -- the solve's layers, the order of the lanes that share a
+layer, each via's side of every other lane -- fitted into the board's free
+space in x and y, **with the vias free**. The geometry above can only move a
+lane sideways: a via the solve put where the board has no room for it is a
+via cut, and a solve again. Here a via is a point on the board like any
+other, and may move along its lane to where there is room.
+
+It is a stage of its own, run on a geometry of the same solve, and it writes
+what `whole_geo.py` writes, so the polish, the audit and the snap read it as
+they read that (the bench from `BENCH`, `NETS` and `DEST`, as
+[every stage reads it](#running-it)):
+
+```bash
+python3 whole_geo.py SOLVE.json GEO.json                                   # the layout it starts from
+python3 whole_embed.py SOLVE.json EMBED.json --ref=GEO.json --draw=EMBED.png
+```
+
+The loop runs it only with `GEO_EMBED=1`, between the geometry and the
+polish; off by default. What it still lacks is in the
+[TODO](#next-the-whole-route-whole_py).
+
+<details>
+<summary>Details</summary>
+
+- **Cells.** A layer's **free space** is where a lane's centreline may
+  stand on it: inside the board, a lane's bar (half a track, the clearance
+  and half a grid step) off every piece of fixed copper on that layer -- off
+  an array's own box half a track, its teeth and berths standing on that
+  line. It is cut into triangles on the fixed copper's own corners, the
+  **cells**: no corner of a cell stands in open space, so the cells a lane
+  passes through say only which side of each piece of copper it passes. The
+  vias have a free space and cells of their own, a via's bar off every
+  layer's copper. The fixed copper is the arrays, every other part's pads
+  each on its own (a lane passes between two pads wherever the cells between
+  them are free), other nets' tracks and vias (a via at the router's ring
+  about it, `pairs.svia_reach`, as the geometry and the audit take it), and
+  the stubs and stub vias that end on the arrays' box lines. The stage works
+  in a window 4 mm round the layout it starts from.
+- **Runs and their own points.** A **run** is a lane's stretch on one layer,
+  between two of its ends or vias. It crosses a chain of cells and carries
+  its own points: one where it crosses each cell edge -- one number, its
+  place along the edge -- and free points between them (where the layout it
+  starts from bends, and every three and a half pitches of a straight
+  stretch), each moving **across** its lane, inside its cell. Two points in
+  turn stand in one cell, and a cell is free space, so a run never leaves
+  the free space. A via is a free point too, inside a cell of the vias' space
+  and the end cells of its two runs.
+- **Lane ends.** A lane leaves its tooth, and reaches its berth, straight
+  along its stub: through its own stub's bar to the first free point of the
+  layer, the stub's **mouth**, where its run begins. The straight piece
+  between is the lane's own, written with it, and the lane's points next to
+  a mouth are held ahead of it along the stub's way, so the two meet with no
+  fold. A stub that ends in a via, or has nothing free straight ahead of it
+  within three bars, has no mouth: its run is read from the nearest free
+  point.
+- **A pair's via** is what the later stages lay there: two barrels either
+  side of the pair's line, across **one router heading** through the via,
+  and the pair router's straight run along that heading either side. The
+  heading is read off the pair's lane (the router's nearest; the next either
+  side where the via fits that way and not the nearest). The via stands in a
+  cell of its **own** free space: the places where both barrels stand a
+  via's bar off every layer's copper and both straight runs lie in their
+  layers' free space. Its two runs end at the ends of the straight run,
+  points that move with the via, and every other lane keeps off each barrel,
+  and off each of the cells the pair router tests for the dive, by that
+  one's own bar. A via whose straight run cannot be laid yet (its lane turns
+  at it, or it stands too near its lane's end) is tried again after each
+  round; one its lane has come to fold at is taken up and its heading read
+  again. The sizes are the polish's own, each from the same rule of
+  `pairs.py`, so what the polish lays there stands as laid.
+- **One LP a round** (HiGHS, the interior point first) places every via and
+  every lane's points together: the shortest and straightest lanes -- length
+  as the snap will lay it, on the router's eight headings, and a price on a
+  point off the line through its neighbours -- with every two lanes of a
+  layer a pitch apart, every lane a via's room from every other lane's via
+  on the solve's side of it, and vias their own distance apart. Each rule is
+  a **separating line** read off the layout as it stands: a lane's point
+  against the nearest stretch of each lane beside it, held apart along the
+  line between the two. Every point moves at most its **trust** a round
+  (0.65 of a pitch; halved where a point swings to and fro, or a via
+  wanders), so the lines the round was read off still hold where it ends.
+- **Priced in steps, and nothing passes through anything.** A rule may fall
+  short, at a price: first the comfortable pitch (soft), then a slack of a
+  tenth of the bar (a grid step at least), then the bar itself, dear. Lanes
+  and vias keep a grid step more off fixed copper too, wherever there is
+  room for it. But every shortfall is capped: two lanes of a layer, a lane
+  and a via, two vias keep the sides they stand on; two lanes on one cell
+  edge keep their order; and a via is never further out of its cells, toward
+  the fixed copper, than it stands. A round whose LP has no answer inside
+  those caps is solved again with the dear rules' caps lifted, and the log
+  says which rules went past a cap and by how much; the stage never stops on
+  a round.
+- **Into the next cell.** A point pressed on an edge of its cell with free
+  space beyond goes on into the next cell: a lane pushed aside bulges into
+  it, crossing that edge and back. A via pressed on an edge of one of its
+  cells does the same, its runs' ends with it. A point changes cell three
+  times at most, a via twelve: one that has gone to and fro stays on the
+  edge.
+- **Pulled straight.** A run that doubles back on itself -- a stretch half
+  as long again as the straight line between its two ends, with no fixed
+  copper, no other run of its layer and no via in between -- is that
+  straight line, where the line stands no nearer anything than its bar, or
+  than the stretch it replaces did. A via that has moved drags its run
+  behind it along its own way, and a lane that bulged into a cell and came
+  back keeps the bulge: both are loops with nothing in them. A pull is
+  another way through the cells, or takes free points with it: a stretch
+  that only crosses the same cell edges in the same order is left alone,
+  because where it crosses each is the LP's own unknown.
+- **Only what moved.** A round's LP holds the points and vias that stand
+  near where the round before moved; the rest are fixed points to it. The
+  rounds end when nothing moves: 40 at most, and 20 more after each slide of
+  vias (below). A layout still moving then is written all the same, and the
+  log says so.
+- **A via slid along its lane.** A via the rounds leave short of its room,
+  or inside a bar of fixed copper, is slid along its own lane, either way and
+  up to twelve pitches, to the most open place: the farthest from any fixed
+  copper's bar, over the layers, and at least half a pitch more open than
+  where it stands. The stretch of the lane between the old place and the new
+  changes layer with it, which it may wherever that stretch lies in the
+  other layer's free space and crosses no run of that layer. The rounds then
+  run again from there, and a via still short after them that has not been
+  slid is slid then: two such passes at most, each via once. The LP cannot
+  make this move: inside a corridor too narrow for a via and the lane that
+  must pass it, no small step along the corridor gains anything. The lanes
+  that share a layer keep their order and the plan its vias; only where
+  along its lane that change stands is new, and the solve's sides of a slid
+  via are no longer held.
+- **Where the layout it starts from cannot stand.** Inside a bar of fixed
+  copper its line is read out to the free space, the runs kept in the order
+  that line has them and put a pitch apart. Where it crosses fixed copper
+  that no free cells of the layer lead round -- the two sides are separate
+  pieces of that layer's free space -- the run is read as it stands, with a
+  **breach**: two fixed points either side of the copper. No geometry can
+  lay that lane on that layer there, and it is a finding for the solve.
+- **Written clean.** The written lines are cleared of folds and notches by
+  the audit's own measures (a turn of more than 100 degrees; two opposite
+  turns of 60 degrees or more nearer than a track and a grid step): a point
+  at one is left out where the triangle it makes with its two neighbours
+  holds no fixed copper, no other run of the layer and no via, and the
+  straight line stands no nearer anything than its bar, or than the line
+  did. A stub's mouth is never left out.
+- **Findings for the solve**, in the geometry's own form: a via cut for
+  each via that stands short of its room by more than half a grid step, or
+  inside a bar of fixed copper; a layer cut for each breach, with the
+  copper's names. Every place the slack had to be given up is listed with
+  the plan (`tight`).
+- **No millimetre of its own.** But for the window, every length the stage
+  chooses -- a point's trust, the spacing of a lane's points, how far a via
+  may slide -- is a multiple of the board's own pitch, track width or grid
+  step.
+- **Looking at it:** `--draw=PNG` the layout after the rounds and
+  `--draw0=PNG` as it starts, exact geometry; `--view=X0,Y0,X1,Y1` a window
+  of it, `--draw-cells` the cells, `--draw-points` each lane's own points,
+  `--draw-ref` the starting layout's lines over it.
 
 </details>
 
@@ -2060,6 +2226,12 @@ only the fanout can move.
 - **Flips and cuts together:** the solve with the cuts, then the geometry
   with the flips. An island cut is dropped only where its flip was already
   given to the geometry that made it.
+- **The geometry in board xy** (`GEO_EMBED=1`, off by default): each round's
+  geometry is fitted again by
+  [`whole_embed.py`](#the-geometry-in-board-xy-whole_embedpy), from that
+  geometry's layout (the round's `eN.json` and `eN.log`). The polish, the
+  audit and the snap then read its lanes, and its via cuts and its breaches'
+  layer cuts are the round's.
 - **The stage cache** (`stage_cache.py`): a stage whose script, arguments,
   environment and every file it read are unchanged is restored, not run. Off
   by default; on in `whole_route.py` (`STAGE_CACHE=1`, as `TAUT_MEMO=1`; `=0`
@@ -2565,6 +2737,7 @@ With nothing supplied, as on the benches:
 | `whole_ends.py`, `ends_kernel.py`, `whole_frame.py`, `whole_feedback.py` | the choice of ends (the fanout's `PLAN_JUDGE=ends`; every plane ball kept a way down: `tests/test_622_walled_balls.py`; its estimate scored in Rust); the frame of a bench (a part on a ring's stack: `tests/test_622_ring_room.py`); what goes back to the fanout (`tests/test_622_ends_fixes.py`, `test_622_exit_front.py`, `test_622_feedback_rounds.py`; an item for a lane the round's ends have no option for keys nothing: `fb_tables`) |
 | `ends_nudge.py`, `ends_reescape.py` | a crowded end repaired on the round's fanout bench (`whole_route.repair_ends`): a lane's via or tooth, or another net's via, nudged the smallest step clear of a finding; a ball escaped again from its menu, its first stretch clear of every other net's copper, laid alone by `source_realize.realize` |
 | `whole_solve.py`, `whole_geo.py`, `whole_polish.py`, `whole_snap.py` | the crossing and layer solve, the geometry LP (a part seen from several frames: `tests/test_622_part_frames.py`; islands made of pads: `tests/test_622_pad_islands.py`), the polish, the snap onto the router's grid |
+| `whole_embed.py` | the geometry in board xy, a stage of its own: a geometry of a solve fitted again in each layer's free space, the vias free; drawn with its cells and each lane's own points (`--draw`, `--draw-cells`, `--draw-points`); in the loop with `GEO_EMBED=1` |
 | `whole_audit.py`, `whole_gate.py`, `whole_lint.py`, `whole_render.py`, `whole_ctx.py` | a plan installed and audited, gated, linted, drawn; the bench they share, read as the ends model reads it (`tests/test_622_candidate_ctx.py`: an all-pair bus's plan sidecar read by the pairs' legs) |
 | `whole_ladder.py` | the ladders on this machine: rungs side by side, each stopped at a cap with every stage it started, one grade line each |
 | `route_layers.py`, `relayer.py` | the routing layers (`ROUTE_LAYERS`), the escapes' layers and `ESCAPE_VIAS`; a via end's run moved onto the layer the solve chose, its via dropped where it is left on its pad's layer |
@@ -2757,6 +2930,34 @@ channels first, and the other escapes leave round it.
 
 ### Next, the whole route (`whole_*.py`)
 
+- **The geometry in board xy, finished.**
+  [`whole_embed.py`](#the-geometry-in-board-xy-whole_embedpy) is a stage of
+  its own, and the loop runs it only with `GEO_EMBED=1`. The solve still
+  places every crossing and change along the route with no knowledge of the
+  board's free space in x and y, and this stage still starts from the
+  geometry's one-dimensional layout. To try:
+  - **the solve told what the cells know:** which pieces of a layer's free
+    space are cut off from each other -- an end in one cannot reach another
+    on that layer -- as facts the solve holds before it plans, so a breach is
+    not planned at all; today a breach is found after the solve, by this
+    stage, and goes back as a layer cut;
+  - **a starting layout of its own:** drawn from the frame and the solve
+    alone, with no LP, so a round does not pay for the geometry's LP first
+    and a lane's side of each piece of copper is not the side that layout
+    happened to take; then the stage in the loop in the geometry's place;
+  - **a lane's side of a piece of copper chosen here:** no move takes a lane
+    to the other side of a pad; a side chosen by counting the lanes that fit
+    each way round it;
+  - **rounds that always settle:** on many buses points are still moving
+    when the rounds reach their limit;
+  - **no crossing left standing:** each rule's cap holds two things on their
+    sides along that rule's own line, which does not rule out two lanes of a
+    layer ending crossed: that is seen during the rounds on plans whose
+    starting layout has breaches. The stage counts such crossings in its log
+    each round and sends none back; a crossing that stands after the rounds
+    as a finding for the solve;
+  - **the default:** judged in the loop over both ladders, the generated
+    buses and real boards' bus steps (see "Probes to judge").
 - **The source's far face, further** (the lead-ins of [the frame](#the-frame-whole_framepy)
   route its teeth today). On sdi_mipi_conv's SDI bus (U11 to U15, `route_bus
   --escape`, all eight of the board's copper layers, two rounds) the first
@@ -3101,7 +3302,10 @@ channels first, and the other escapes leave round it.
     ring's stack, for the passive regions; `SOLVE_ROOM_TIE=1`: after the
     search, each change moved to where its column has the most room, nothing
     the plan pays allowed to grow;
-  - the geometry, the frame and the loop -- `GEO_SHARED_SLACK=1`: one slack
+  - the geometry, the frame and the loop -- `GEO_EMBED=1`: each loop round's
+    geometry fitted again in board xy, the vias free
+    ([above](#the-geometry-in-board-xy-whole_embedpy)), its lanes and cuts
+    the round's; `GEO_SHARED_SLACK=1`: one slack
     per pitch or via rule, not one per copy of it; `GEO_ROOM_CUTS=1`: a
     layer's shortfall sent to the solve as a capacity cut, a lane over it
     `SOLVE_ROOM_W` vias (10); `FRAME_HK_FLOOR=1`: a ring's start no earlier
