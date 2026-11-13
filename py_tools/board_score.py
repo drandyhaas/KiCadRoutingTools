@@ -1282,7 +1282,42 @@ def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
 #: The keys a `--length-groups` group may carry (#1812); any other is named
 #: in the group's detail as `unknown_keys`.
 LENGTH_GROUP_KEYS = frozenset({'nets', 'chains', 'tolerance_mm', 'min_mm',
-                               'max_mm', 'mode'})
+                               'max_mm', 'mode', 'pads'})
+
+
+def _length_group_pads(pcb, by_name, spec, mode):
+    """A group's `"pads"` (#1866): {net: ["REF.PAD", "REF.PAD"]}, the two pads
+    `"mode": "pin_pair"` measures that net between.
+
+    -> ({net: (pad_a, pad_b)}, None), or (None, why) when the key cannot be
+    read as that: a finding about the spec, which fails the group. A net of
+    the group that the board lacks is left to the group's own
+    `missing_nets`. A `chains` group checks that each named net is in one of
+    its chains itself (`_length_group_chains`), once it knows them."""
+    from net_queries import pin_pair_pads
+    given = spec.get('pads')
+    if given is None:
+        return {}, None
+    if mode != 'pin_pair':
+        return None, ('"pads" names the two pads a "mode": "pin_pair" group '
+                      'measures a net between; this group measures total copper')
+    if not isinstance(given, dict) or not all(
+            isinstance(v, list) and len(v) == 2
+            and all(isinstance(x, str) for x in v) for v in given.values()):
+        return None, '"pads" must be {net: ["REF.PAD", "REF.PAD"]}'
+    members = (None if spec.get('chains') is not None
+               else set(spec.get('nets') or ()))
+    out = {}
+    for net, pair in sorted(given.items()):
+        if members is not None and net not in members:
+            return None, f'"pads" names {net!r}, which is not a net of this group'
+        if net not in by_name:
+            continue
+        try:
+            out[net] = pin_pair_pads(pcb, by_name[net], pair)
+        except ValueError as exc:
+            return None, f'"pads": {exc}'
+    return out, None
 
 
 def _length_bounds(lengths: dict, lo, hi) -> list:
@@ -1321,7 +1356,8 @@ def _auto_chains(pcb) -> list:
     return chains
 
 
-def _length_group_chains(pcb, chains, mode, tol, lo, hi) -> dict:
+def _length_group_chains(pcb, chains, mode, tol, lo, hi, pads=None,
+                         pad_nets=()) -> dict:
     """One `--length-groups` group whose members are CHAINS (#1812): lanes
     through series parts, each a list of nets in order, measured end to end
     by `chain_length.measure_chain` -- the sum of its nets' lengths, each
@@ -1329,7 +1365,11 @@ def _length_group_chains(pcb, chains, mode, tol, lo, hi) -> dict:
     `tolerance_mm` is the spread across chains; `min_mm` / `max_mm` bound
     each chain. A joint no 2-pad part bridges, or a net the board lacks, is
     a finding about the spec (the group fails); a chain with a net not yet
-    joined by track copper leaves the group unmeasured (`unmeasured` True)."""
+    joined by track copper leaves the group unmeasured (`unmeasured` True).
+    In `pin_pair` mode `pads` is the group's named pad pairs and each chain
+    carries `measured_pads`, the pair each of its nets was measured between
+    (#1866); `pad_nets` is every net the group's `"pads"` names, and one that
+    is in none of the chains fails the group."""
     from chain_length import measure_chain, chain_label
     if chains == 'auto':
         try:
@@ -1346,10 +1386,16 @@ def _length_group_chains(pcb, chains, mode, tol, lo, hi) -> dict:
             for c in chains):
         return {'skipped': '"chains" must be "auto" or a list of lists of net '
                            'names', 'pass': False}
-    measured = {chain_label(c): measure_chain(pcb, c, mode=mode) for c in chains}
+    stray = sorted(set(pad_nets) - {n for c in chains for n in c})
+    if stray:
+        return {'skipped': f'"pads" names {stray[0]!r}, which is not a net of '
+                           f'this group', 'pass': False}
+    measured = {chain_label(c): measure_chain(pcb, c, mode=mode, pads=pads)
+                for c in chains}
     out = {'chains': {k: {'nets': m['nets'], 'track_mm': m['track_mm'],
                           'net_mm': m['net_mm'], 'series_parts': m['joints'],
-                          'series_span_mm': m['span_mm']}
+                          'series_span_mm': m['span_mm'],
+                          **({'measured_pads': m['pads']} if 'pads' in m else {})}
                       for k, m in measured.items()},
            'tolerance_mm': tol}
     if lo is not None or hi is not None:
@@ -1410,9 +1456,15 @@ def score_length(board: str, groups_file: str) -> dict:
          "USB":   {"nets": ["/USB_DP", "/USB_DM"], "tolerance_mm": 0.05,
                    "mode": "pin_pair"}}
 
-    `mode: "pin_pair"` measures the driver->receiver PATH instead of total net
-    copper. Use it for any multipoint or stubbed net: total copper sums every
-    branch and matches no real signal path.
+    `mode: "pin_pair"` measures the PATH between two pads of each net instead
+    of total net copper. Use it for any multipoint or stubbed net: total copper
+    sums every branch and matches no real signal path. `"pads"` (#1866) names
+    the two pads, `{"/USB_DP": ["U3.6", "J1.A6"], ...}`; a net it does not
+    name is measured between its first two pads in the order the board file
+    lists its footprints, which need not be the lane's ends. Either way the
+    group's `measured_pads` names the pair each net was measured between. A
+    `"pads"` entry that is not two copper pads of a net of the group fails the
+    group and says why.
 
     `min_mm` / `max_mm` (#1812) bound each member's length; a member outside
     fails the group and is named in `out_of_bounds`. With a bound, one net is
@@ -1449,7 +1501,8 @@ def score_length(board: str, groups_file: str) -> dict:
     if not os.path.isfile(groups_file):
         return skipped(f'length-groups file not found: {groups_file}')
     from kicad_parser import parse_kicad_pcb
-    from net_queries import net_match_length, net_match_pad_to_die
+    from net_queries import (net_match_length, net_match_pad_to_die, pad_label,
+                             pin_pair_pads)
 
     with open(groups_file, encoding='utf-8') as f:
         groups = json.load(f)
@@ -1465,8 +1518,17 @@ def score_length(board: str, groups_file: str) -> dict:
         lo = None if lo is None else float(lo)
         hi = None if hi is None else float(hi)
         mode = 'pin_pair' if spec.get('mode') == 'pin_pair' else 'total'
+        pads_of, bad_pads = _length_group_pads(pcb, by_name, spec, mode)
+        if bad_pads:
+            detail[gname] = {'skipped': bad_pads, 'pass': False}
+            if unknown:
+                detail[gname]['unknown_keys'] = unknown
+            failures += 1          # a finding about the spec, not a pass
+            continue
         if spec.get('chains') is not None:
-            res = _length_group_chains(pcb, spec['chains'], mode, tol, lo, hi)
+            res = _length_group_chains(pcb, spec['chains'], mode, tol, lo, hi,
+                                       pads=pads_of,
+                                       pad_nets=sorted(spec.get('pads') or ()))
             if unknown:
                 res['unknown_keys'] = unknown
             detail[gname] = res
@@ -1487,11 +1549,15 @@ def score_length(board: str, groups_file: str) -> dict:
                 detail[gname]['unknown_keys'] = unknown
             failures += 1          # a group naming nets that do not exist is a
             continue               # finding about the spec, not a pass
-        lengths, unjoined = {}, []
+        lengths, unjoined, measured_pads = {}, [], {}
         for n in names:
             if n not in by_name:
                 continue
-            L = net_match_length(pcb, by_name[n], mode=mode)
+            L = net_match_length(pcb, by_name[n], mode=mode, pads=pads_of.get(n))
+            if mode == 'pin_pair':
+                pair = pin_pair_pads(pcb, by_name[n], pads_of.get(n))
+                if pair:
+                    measured_pads[n] = [pad_label(p) for p in pair]
             if L is None:
                 unjoined.append(n)
             else:
@@ -1507,6 +1573,8 @@ def score_length(board: str, groups_file: str) -> dict:
                                         f'(unrouted, stub-only, broken or '
                                         f'plane-only)',
                              'unjoined_nets': unjoined, 'missing_nets': missing}
+            if mode == 'pin_pair':
+                detail[gname]['measured_pads'] = measured_pads
             if unknown:
                 detail[gname]['unknown_keys'] = unknown
             unmeasured += 1
@@ -1518,6 +1586,10 @@ def score_length(board: str, groups_file: str) -> dict:
         detail[gname] = {'spread_mm': round(spread, 4), 'tolerance_mm': tol,
                          'pass': ok, 'missing_nets': missing,
                          'worst': max(lengths, key=lengths.get)}
+        if mode == 'pin_pair':
+            # #1866: the pair each net was measured between -- the named one,
+            # else its first two pads in file order, which a reader can now see
+            detail[gname]['measured_pads'] = measured_pads
         if lo is not None or hi is not None:
             detail[gname].update(min_mm=lo, max_mm=hi, out_of_bounds=bounds,
                                  lengths_mm={n: round(v, 4)
@@ -1527,7 +1599,8 @@ def score_length(board: str, groups_file: str) -> dict:
         # #1248: the lengths include each member's pad-to-die term, as KiCad's
         # DRC does. Disclosed only where a pad declares one, so a grade moved
         # by a term no copper shows says which term moved it.
-        die = {n: net_match_pad_to_die(pcb, by_name[n], mode) for n in lengths}
+        die = {n: net_match_pad_to_die(pcb, by_name[n], mode,
+                                       pads=pads_of.get(n)) for n in lengths}
         if any(die.values()):
             detail[gname]['pad_to_die_mm'] = {n: round(v, 4)
                                               for n, v in die.items() if v}
@@ -1961,7 +2034,10 @@ def build_parser():
     p.add_argument('--length-groups', metavar='JSON',
                    help='JSON FILE of {"group": {"nets": [...], '
                         '"tolerance_mm": 0.1, "mode": "pin_pair", "min_mm": .., '
-                        '"max_mm": ..}} -- or "chains": [[net, net, ...], ...] '
+                        '"max_mm": ..}} ("pads": {net: ["REF.PAD", "REF.PAD"]} '
+                        'names the two pads pin_pair measures a net between; '
+                        'unnamed, its first two in file order) '
+                        '-- or "chains": [[net, net, ...], ...] '
                         'in place of "nets" for lanes through series parts '
                         '(a chain is its nets summed; "chains": "auto" takes '
                         'the AC-coupled pairs). A per-net limit KiCad grades '

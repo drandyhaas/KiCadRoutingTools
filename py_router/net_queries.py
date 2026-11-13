@@ -1420,9 +1420,53 @@ def net_pad_to_die_delay(pcb_data: PCBData, net_id: int) -> float:
     return pad_to_die_delay((getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id))
 
 
+def pad_label(pad: Pad) -> str:
+    """A pad as a grade names it: `REF.PAD`."""
+    return f'{pad.component_ref}.{pad.pad_number}'
+
+
+def pin_pair_pads(pcb_data: PCBData, net_id: int, pads=None):
+    """The two pads `mode='pin_pair'` measures a net between (#1866).
+
+    `pads` names them: two of the net's pads, each a Pad or its `REF.PAD`
+    label. Without it they are the net's first two pads in the order the
+    board lists its footprints, which is a property of the file, not of the
+    lane -- so every grade that reads this mode names the pair it measured
+    (`pad_label`), and a spec that means one lane states its two pads.
+
+    -> (pad_a, pad_b), or None when the net has fewer than two pads. Raises
+    ValueError, with the reason, when `pads` is not two different copper
+    pads of the net, each named once."""
+    if pads is None:
+        own = pcb_data.pads_by_net.get(net_id) or []
+        return (own[0], own[1]) if len(own) >= 2 else None
+    name = getattr(pcb_data.nets.get(net_id), 'name', None) or str(net_id)
+    pads = list(pads)
+    if len(pads) != 2:
+        raise ValueError(f'net {name}: {len(pads)} pad(s) given, a pin pair is two')
+    own = _copper_pads(pcb_data, net_id)
+    out = []
+    for want in pads:
+        if isinstance(want, str):
+            hits = [p for p in own if pad_label(p) == want]
+            if len(hits) != 1:
+                raise ValueError(
+                    f'net {name}: {want} names {len(hits)} of its copper pads '
+                    f'({", ".join(sorted(pad_label(p) for p in own)) or "none"})')
+            want = hits[0]
+        elif not any(want is p for p in own):
+            raise ValueError(f'net {name}: {pad_label(want)} is not one of its '
+                             f'copper pads')
+        out.append(want)
+    if out[0] is out[1]:
+        raise ValueError(f'net {name}: {pad_label(out[0])} is named twice')
+    return out[0], out[1]
+
+
 def net_match_length(pcb_data: PCBData, net_id: int, mode: str = 'total',
                      tolerance: float = 0.02,
-                     include_pad_to_die: bool = True) -> Optional[float]:
+                     include_pad_to_die: bool = True,
+                     pads=None) -> Optional[float]:
     """The length a length-match group grades ONE net at, or None when it cannot be measured (#1246).
 
     One definition for every grader (`board_score --length-groups`, the
@@ -1434,10 +1478,13 @@ def net_match_length(pcb_data: PCBData, net_id: int, mode: str = 'total',
                        the net is joined by track copper (`net_pads_joined`),
                        plus every pad's pad-to-die length -- KiCad's
                        length/skew DRC.
-      mode 'pin_pair'  the copper path between the net's first two pads
+      mode 'pin_pair'  the copper path between two pads of the net
                        (`pin_pair_path_length`) plus those two pads'
                        pad-to-die lengths -- KiCad's tuner, which adds its
-                       start and end pads'.
+                       start and end pads'. The two pads are `pads` (#1866,
+                       `pin_pair_pads`: two Pads or `REF.PAD` labels; a
+                       ValueError when they are not two pads of the net),
+                       else the net's first two in board-file order.
 
     `include_pad_to_die=False` leaves the pad-to-die term out (copper only).
     Without it a board carrying `(die_length ...)` grades a spread KiCad does
@@ -1448,15 +1495,18 @@ def net_match_length(pcb_data: PCBData, net_id: int, mode: str = 'total',
     those are not the length of a signal, and grading them passed a copper-free
     group and failed a stub-only one.
     """
-    die = (net_match_pad_to_die(pcb_data, net_id, mode)
-           if include_pad_to_die else 0.0)
     if mode == 'pin_pair':
-        pads = pcb_data.pads_by_net.get(net_id) or []
-        if len(pads) < 2:
+        pair = pin_pair_pads(pcb_data, net_id, pads)
+        if pair is None:
             return None
-        path = pin_pair_path_length(pcb_data, net_id, pads[0], pads[1],
+        # the pair as resolved: the default one may hold a pad with no copper
+        # (an NPTH hole on the net), which reads None below, as it always did
+        die = pad_to_die_length(pair) if include_pad_to_die else 0.0
+        path = pin_pair_path_length(pcb_data, net_id, pair[0], pair[1],
                                     tolerance=tolerance)
         return None if path is None else path + die
+    die = (net_match_pad_to_die(pcb_data, net_id, mode)
+           if include_pad_to_die else 0.0)
     if not net_pads_joined(pcb_data, net_id, tolerance=tolerance):
         return None
     return net_copper_length(pcb_data, net_id) + die
@@ -1682,17 +1732,20 @@ def _pad_pair_walk(adjacency, infos, pad_nodes, pad_a, pad_b, nodes=None):
 
 
 def net_match_pad_to_die(pcb_data: PCBData, net_id: int,
-                         mode: str = 'total', attr: str = 'die_length') -> float:
+                         mode: str = 'total', attr: str = 'die_length',
+                         pads=None) -> float:
     """The pad-to-die term `net_match_length` adds in `mode` (#1248), in mm:
-    every pad of the net for 'total' (KiCad's DRC), the first two pads for
-    'pin_pair' (the pads that path joins; KiCad's tuner adds its start and end
-    pads').
+    every pad of the net for 'total' (KiCad's DRC), the measured pad pair for
+    'pin_pair' (`pin_pair_pads(pcb_data, net_id, pads)`, the pads that path
+    joins; KiCad's tuner adds its start and end pads').
 
     `attr='die_delay'` sums the same pads' delays instead, in ps -- the time
     twin over the same pad choice, never a converted length."""
     _sum = pad_to_die_delay if attr == 'die_delay' else pad_to_die_length
     if mode == 'pin_pair':
-        return _sum((pcb_data.pads_by_net.get(net_id) or [])[:2])
+        if pads is None:
+            return _sum((pcb_data.pads_by_net.get(net_id) or [])[:2])
+        return _sum(pin_pair_pads(pcb_data, net_id, pads))
     if mode != 'total':
         raise ValueError(f"net_match_length: unknown mode {mode!r} "
                          f"(expected 'total' or 'pin_pair')")

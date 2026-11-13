@@ -43,7 +43,8 @@ def series_part_between(pcb_data, net_a: int, net_b: int) -> Optional[dict]:
     return None
 
 
-def measure_chain(pcb_data, nets: Sequence, mode: str = 'total') -> dict:
+def measure_chain(pcb_data, nets: Sequence, mode: str = 'total',
+                  pads: Optional[dict] = None) -> dict:
     """Measure one chain of nets (names or ids, in lane order).
 
     Returns {'nets': [names], 'missing_nets': [names not on the board],
@@ -52,8 +53,11 @@ def measure_chain(pcb_data, nets: Sequence, mode: str = 'total') -> dict:
     None, 'span_mm': float or None}], 'unbridged': ['a -> b', ...],
     'track_mm': the sum, or None unless every net was measured,
     'span_mm': the series parts' spans summed, or None when a joint has no
-    part}. `mode` is net_match_length's ('total' or 'pin_pair')."""
-    from net_queries import net_match_length
+    part}. `mode` is net_match_length's ('total' or 'pin_pair'). In
+    'pin_pair' mode `pads` may name the two pads a net is measured between
+    ({net name: (pad, pad)}, #1866), and the result carries 'pads': {name:
+    [REF.PAD, REF.PAD]}, the pair each net was measured between."""
+    from net_queries import net_match_length, pad_label, pin_pair_pads
     id_of = {n.name: nid for nid, n in pcb_data.nets.items() if n.name}
     name_of = {nid: n.name for nid, n in pcb_data.nets.items()}
     names, ids, missing = [], [], []
@@ -67,10 +71,16 @@ def measure_chain(pcb_data, nets: Sequence, mode: str = 'total') -> dict:
         if nid is None:
             missing.append(names[-1])
     raw: Dict[str, Optional[float]] = {}
+    measured_pads: Dict[str, List[str]] = {}
     for nm, nid in zip(names, ids):
         if nid is None:
             continue
-        raw[nm] = net_match_length(pcb_data, nid, mode=mode)
+        given = (pads or {}).get(nm)
+        raw[nm] = net_match_length(pcb_data, nid, mode=mode, pads=given)
+        if mode == 'pin_pair':
+            pair = pin_pair_pads(pcb_data, nid, given)
+            if pair:
+                measured_pads[nm] = [pad_label(p) for p in pair]
     net_mm = {nm: None if L is None else round(L, 4) for nm, L in raw.items()}
     unjoined = [nm for nm, L in net_mm.items() if L is None]
     joints, unbridged, spans = [], [], []
@@ -86,11 +96,14 @@ def measure_chain(pcb_data, nets: Sequence, mode: str = 'total') -> dict:
         else:
             spans.append(part['span_mm'])
     measured = not missing and not unjoined
-    return {'nets': names, 'missing_nets': missing, 'net_mm': net_mm,
-            'unjoined_nets': unjoined, 'joints': joints, 'unbridged': unbridged,
-            'track_mm': (round(math.fsum(raw.values()), 4)
-                         if measured else None),
-            'span_mm': (round(math.fsum(spans), 4) if not unbridged else None)}
+    out = {'nets': names, 'missing_nets': missing, 'net_mm': net_mm,
+           'unjoined_nets': unjoined, 'joints': joints, 'unbridged': unbridged,
+           'track_mm': (round(math.fsum(raw.values()), 4)
+                        if measured else None),
+           'span_mm': (round(math.fsum(spans), 4) if not unbridged else None)}
+    if mode == 'pin_pair':
+        out['pads'] = measured_pads
+    return out
 
 
 def chain_label(names: List[str]) -> str:

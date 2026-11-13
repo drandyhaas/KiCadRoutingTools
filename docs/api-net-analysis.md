@@ -396,8 +396,19 @@ not traversed)?
 `net_match_length` is the one measurement every length-match grader uses
 (`board_score.py --length-groups`, the review-routed-board recipe): total net
 copper (`mode='total'`) only once `net_pads_joined` holds, or the path between
-the net's first two pads (`mode='pin_pair'`). `None` in either mode means "not
+two pads of the net (`mode='pin_pair'`). `None` in either mode means "not
 routed yet" (unrouted, stub-only, broken or plane-only), never `0.0`.
+
+Which two pads `'pin_pair'` measures is `pin_pair_pads(pcb, net_id, pads)`
+(#1866): `pads` when given -- two of the net's copper pads, each a `Pad` or
+its `REF.PAD` label, a `ValueError` saying why when they are not -- else the
+net's first two pads in the order the board file lists its footprints. That
+default is a property of the file, not of the lane: on a net with three pads
+it can be a connector's own two contacts. So `net_match_length`,
+`net_match_pad_to_die` and `measure_chain` take `pads`, and
+`board_score --length-groups` reads a group's `"pads": {net: ["REF.PAD",
+"REF.PAD"]}` and names the pair each net was measured between in
+`measured_pads`.
 
 A lane that runs through a **series part** (an AC-coupling capacitor, a series
 resistor) is two or more nets, and every per-net grade measures each alone.
