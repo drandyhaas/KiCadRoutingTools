@@ -23,7 +23,11 @@ Rows:
      moves out of range is in the WARNING and in --json-out's
      `skew_moved_by_cleanup`;
   5. ...and the GUI leg (batch_route in memory) carries the same row;
-  6. control: `--keep-input-copper` prints neither late-pass line.
+  6. control: `--keep-input-copper` prints neither late-pass line;
+  7. the same stub with the pair's record taken off the board and a
+     `.kicad_dru` length rule binding its net: check_weird and the all-nets
+     step keep it and check_drc grades the net inside its window. With the
+     rule on another net the stub is removable, as on any ungraded net.
 
     python3 tests/test_1798_late_collapse_skew.py
 """
@@ -97,6 +101,30 @@ def centre_stubs(path):
             if d[0] < 1e-6 and abs(d[1] - v.size / 2) < 1e-3:
                 out.append((p.nets[s.net_id].name, s))
     return out
+
+
+def length_rule_board(src, dst, rule_net, measured_net):
+    """Copy `src`, take the recorded pair tolerances off the copy's project
+    (so no skew rule grades its nets) and write a .kicad_dru length rule that
+    binds `rule_net`, with a window 0.1 mm either side of `measured_net`'s
+    length as check_drc measures it. Returns that length."""
+    from kicad_parser import parse_kicad_pcb
+    from net_queries import net_match_length
+    py(tool('copy_board.py'), src, dst)
+    pro = dst[:-len('.kicad_pcb')] + '.kicad_pro'
+    with open(evidence(pro, 'project copy'), encoding='utf-8') as fh:
+        doc = json.load(fh)
+    doc['kicad_routing_tools'].pop('intra_pair_tolerance')
+    with open(pro, 'w', encoding='utf-8') as fh:
+        json.dump(doc, fh, indent=2)
+    p = parse_kicad_pcb(dst)
+    nid = next(k for k, n in p.nets.items() if n.name == measured_net)
+    length = net_match_length(p, nid, 'total')
+    with open(dst[:-len('.kicad_pcb')] + '.kicad_dru', 'w', encoding='utf-8') as fh:
+        fh.write('(version 1)\n(rule "stub len" (condition "A.NetName == \'%s\'")'
+                 ' (constraint length (min %.4fmm) (max %.4fmm)))\n'
+                 % (rule_net, length - 0.1, length + 0.1))
+    return length
 
 
 def add_detour(src, dst):
@@ -251,6 +279,44 @@ def main():
         log = r.stdout + r.stderr
         check("neither late-pass line is printed",
               'Strict collapse' not in log and 'Dangling vias' not in log)
+
+        print("7. a net a .kicad_dru length rule binds keeps the stub")
+        lb, lc, ob, oc = (os.path.join(tmp, f'{t}.kicad_pcb')
+                          for t in ('lb', 'lc', 'ob', 'oc'))
+        other = next(n for n in ('CSI_D0_P', 'CSI_CLK_P') if n != name)
+        want = length_rule_board(b, lb, name, name)
+        length_rule_board(b, ob, other, other)
+        for path in (lb, ob):
+            if _skew_bound_net_ids(parse_kicad_pcb(path)):
+                print("  [BROKEN TEST] a skew rule still grades a net of "
+                      f"{os.path.basename(path)}: the record was not removed")
+                return 1
+        out = graded(tool('check_drc.py'), evidence(lb, 'length-rule board'),
+                     '-c', '0.1')
+        if '1 net(s) graded, 0 out of range' not in out:
+            print("  [BROKEN TEST] the length rule does not grade its net "
+                  "inside the window on the input:\n" + out[-800:])
+            return 1
+        w = graded(tool('check_weird.py'), lb)
+        check("check_weird does not list the stub removable", tag not in w, tag)
+        r = py(tool('route.py'), lb, lc, '--nets', '*')
+        after = net_len_mm(evidence(lc, 'routed board'), name)
+        check(f"{name}'s KiCad length is unchanged by the all-nets step",
+              abs(after - before) < 1e-6, f"{before:.4f} -> {after:.4f} mm")
+        out = graded(tool('check_drc.py'), lc, '-c', '0.1')
+        check("check_drc grades the net inside its length window",
+              '1 net(s) graded, 0 out of range' in out,
+              (re.search(r'Length rules[^\n]*', out) or [''])[0]
+              + f'  (window {want - 0.1:.4f}..{want + 0.1:.4f})')
+        # The rule on another net: this stub is on a net no grade reads.
+        w = graded(tool('check_weird.py'), evidence(ob, 'control board'))
+        check(f"with the rule on {other}, check_weird lists the stub removable",
+              tag in w, tag)
+        r = py(tool('route.py'), ob, oc, '--nets', '*')
+        after = net_len_mm(evidence(oc, 'control routed board'), name)
+        check("...and the all-nets step's collapse removes it",
+              'Strict collapse (#1063, end of run)' in r.stdout + r.stderr
+              and after < before - 0.1, f"{before:.4f} -> {after:.4f} mm")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print('FAILED: ' + ', '.join(FAILS) if FAILS else 'ALL OK')

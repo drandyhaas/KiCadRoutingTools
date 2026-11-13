@@ -1297,32 +1297,39 @@ def _print_skew_moved(rows, what):
               + " -- route.py does not re-match it (#1759)")
 
 
+def _skew_row_key(row):
+    """A skew row's group by NAME (rule, nets): the CLI measures the shipped
+    board on a re-parse of the written file, whose net ids need not be the
+    ones the run's pcb_data carries."""
+    return (row['rule'], tuple(sorted(row['nets'])))
+
+
+def _skew_by_name(snap):
+    """A check_drc.skew_group_snapshot keyed by _skew_row_key, its measured
+    groups only (a group either side cannot measure is never compared)."""
+    return {_skew_row_key(r): r for r in (snap or {}).values() if r}
+
+
 def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
-                            write_model, skew_path, scope_names, before=None):
+                            write_model, skew_path, scope_names):
     """#1798: the #1759 skew measurement, on the board the end-of-run passes
     (_late_strict_collapse1063 and the rest) read and change -- the written
     file on the CLI, the write model on the GUI, pcb_data itself on the
-    "nothing to route" return. Those passes run after the in-run cleanup's
-    before/after measurement, so a group they moved out of its tolerance
-    shipped unnamed.
-
-    With `before` None: the snapshot ({} when no skew rule binds a net in
-    `scope_names`, which costs no parse). With `before`: the rows of the
-    groups moved out of range since (check_drc.skew_moved_out_of_range)."""
+    "nothing to route" return -- keyed by name (_skew_by_name), for the
+    groups with a member in `scope_names`. {} when no skew rule binds a net
+    in scope, which costs no parse, and when the measurement fails, which is
+    said on the console."""
     import copy as _copy
     try:
         from check_drc import (skew_rule_groups, skew_group_snapshot,
-                               skew_moved_out_of_range, recorded_chain_groups)
-        if before is None:
-            groups, _u = skew_rule_groups(skew_path, pcb_data)
-            groups = list(groups) + [(None, p + n) for _c, p, n in
-                                     recorded_chain_groups(skew_path, pcb_data)]
-            names = set(scope_names)
-            if not any(pcb_data.nets[m].name in names for _r, ms in groups
-                       for m in ms if m in pcb_data.nets):
-                return {}
-        elif not before:
-            return []
+                               recorded_chain_groups)
+        groups, _u = skew_rule_groups(skew_path, pcb_data)
+        groups = list(groups) + [(None, p + n) for _c, p, n in
+                                 recorded_chain_groups(skew_path, pcb_data)]
+        names = set(scope_names)
+        if not any(pcb_data.nets[m].name in names for _r, ms in groups
+                   for m in ms if m in pcb_data.nets):
+            return {}
         if return_results:
             board = _copy.copy(pcb_data)
             if write_model is not None:
@@ -1336,17 +1343,53 @@ def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
             from kicad_parser import parse_kicad_pcb as _pk1798
             board = _pk1798(output_file)
         else:
-            return {} if before is None else []
-        if before is None:
-            ids = {nid for nid, n in board.nets.items() if n.name in names}
-            return skew_group_snapshot(board, skew_path, ids)
-        ids = {m for (_r, ms) in before for m in ms}
-        return skew_moved_out_of_range(
-            before, skew_group_snapshot(board, skew_path, ids))
+            return {}
+        ids = {nid for nid, n in board.nets.items() if n.name in names}
+        return _skew_by_name(skew_group_snapshot(board, skew_path, ids))
     except Exception as _e:                                     # noqa: BLE001
         print(f"  (#1798 end-of-run skew measurement failed: "
               f"{type(_e).__name__}: {_e})")
-        return {} if before is None else []
+        return {}
+
+
+def _shipped_skew_rows1798(in_run_rows, at_input, shipped):
+    """#1798: the step's skew_moved_by_cleanup rows, read on the board it
+    ships. ONE comparison, from `at_input` (the #1759 snapshot taken before
+    the post-route cleanup) to `shipped` (_late_skew_snapshot1798 after the
+    end-of-run passes), so every pass between them is in it. The post-route
+    cleanup's own rows (`in_run_rows`, printed as it ran) describe a board
+    that need not ship: a late pass can take back copper the cleanup laid
+    (a pair was named at 0.39 mm and shipped at 0.0878 mm) or move the group
+    again. The rows returned replace them.
+
+    A row is printed unless the post-route line already gave it at the skew
+    it ships at. A group that line named and that ships no further out than
+    it came in gets no row and one closing line. A group that line named
+    and that the shipped board cannot measure keeps its in-run row."""
+    from check_drc import skew_moved_out_of_range
+    rows = skew_moved_out_of_range(_skew_by_name(at_input), shipped)
+    said = {_skew_row_key(r): r for r in in_run_rows or ()}
+    _print_skew_moved(
+        [r for r in rows if _skew_row_key(r) not in said
+         or abs(said[_skew_row_key(r)]['skew_after_mm']
+                - r['skew_after_mm']) > 1e-4],
+        "the post-route and end-of-run cleanups (#1798)")
+    for k in sorted(said.keys() - {_skew_row_key(r) for r in rows}):
+        a = shipped.get(k)
+        if a is None:
+            rows.append(said[k])
+            continue
+        within = a['excess_mm'] <= 1e-4
+        _lim = ' / '.join(f"{_k[:3]} {a[_k]:g}" for _k in ('min_mm', 'max_mm')
+                          if a[_k] is not None)
+        print(f"  {' / '.join(a['nets'])} ships "
+              + ("within" if within else "no further out of")
+              + f" its skew rule '{a['rule']}' ({_lim} mm)"
+              + ("" if within else " than it came in")
+              + f": skew {a['skew_mm']:.4f} mm after the end-of-run cleanup "
+              f"(#1798), not the {said[k]['skew_after_mm']:.4f} mm the "
+              f"post-route cleanup's WARNING gave")
+    return rows
 
 
 def _late_strict_collapse1063(pcb_data, output_file, return_results, results_data,
@@ -2293,6 +2336,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 guide_corridor_layer: str = "User.1",
                 guide_corridor_spacing: float = 0.0,
                 keepout_enabled: bool = False,
+                mask_keepouts: bool = defaults.MASK_KEEPOUTS,
                 keepout_layer: str = "User.2",
                 proximity_heuristic_factor: float = defaults.PROXIMITY_HEURISTIC_FACTOR,
                 stub_proximity_radius: float = 2.0,
@@ -2651,6 +2695,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                    keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
+    # Mask artwork keeps new copper out unless the run opts out. An in-memory
+    # board handed to a nested sub-run keeps what its parent run chose.
+    if not _pcb_in_memory or pcb_data.board_info.mask_keepouts is None:
+        pcb_data.board_info.mask_keepouts = bool(mask_keepouts)
     # #1279: the board's `sense:<REF>.<PAD>` groups -- protected, or why not.
     from sense_branch import report as _sense_report
     _sense_report(pcb_data)
@@ -3640,9 +3688,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                       _scope1166, keep_input_copper)
             _late_orphan_sweep659(pcb_data, output_file, as_gui, rd,
                                   None, keep_input_copper, skip_routing)
-            _moved = _late_skew_snapshot1798(
-                pcb_data, output_file, as_gui, rd, None, _skew_path1798,
-                _scope1166, before=_sk)
+            _moved = []
+            if _sk:
+                from check_drc import skew_moved_out_of_range as _smo1798
+                _moved = _smo1798(_sk, _late_skew_snapshot1798(
+                    pcb_data, output_file, as_gui, rd, None, _skew_path1798,
+                    _scope1166))
             _print_skew_moved(_moved, "the end-of-run cleanup (#1798)")
             return _moved
         if return_results:
@@ -9069,17 +9120,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # before the sweep, the #962 via stamp and the #1069 re-grade, so all of
     # them read the collapsed board. Outermost run only, both fronts.
     _finished1525 = set()
-    # #1798: the #1759 measurement around these passes too -- the in-run
-    # cleanup's before/after closed before them, so a group they moved out
-    # of its tolerance shipped unnamed.
-    _late_skew1798 = []
-    _skew_before1798 = {}
-    if final_reconcile and not skip_routing and not _ckpt_stop and quick < 2:
-        _skew_before1798 = _late_skew_snapshot1798(
-            pcb_data, output_file, return_results, locals().get('results_data'),
-            _gui_write_model, input_file or getattr(pcb_data, 'source_path', '')
-            or '', {pcb_data.nets[_n].name for _n in sweep_scope_ids
-                    if _n in pcb_data.nets})
     if final_reconcile and not skip_routing and not _ckpt_stop and quick < 2:
         # #1217: split the tracks KiCad-dangling joints land on FIRST, so the
         # collapse grades each piece: a host's stretch past its joint can be
@@ -9141,15 +9181,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
              if _n not in pcb_data.nets
              or pcb_data.nets[_n].name not in _finished1525},
             keep_input_copper, skip_routing)
-    if _skew_before1798:
-        _late_skew1798 = _late_skew_snapshot1798(
-            pcb_data, output_file, return_results, locals().get('results_data'),
-            _gui_write_model, input_file or getattr(pcb_data, 'source_path', '')
-            or '', (), before=_skew_before1798)
-        _print_skew_moved(_late_skew1798, "the end-of-run cleanup (#1798)")
+    # #1798: the skew-graded groups, measured on the board that ships, from
+    # the #1759 snapshot taken before the post-route cleanup -- the end-of-run
+    # passes above can move a group again, or take back what the cleanup did
+    # to it. These rows replace the cleanup's in --json-out and results_data.
+    _late_skew1798 = None
+    if (_skew_before1759 and final_reconcile and not skip_routing
+            and not _ckpt_stop and quick < 2):
+        _late_skew1798 = _shipped_skew_rows1798(
+            skew_moved_by_cleanup, _skew_before1759,
+            _late_skew_snapshot1798(
+                pcb_data, output_file, return_results,
+                locals().get('results_data'), _gui_write_model, _skew_path1759,
+                {m for r in _skew_before1759.values() if r for m in r['nets']}))
         if return_results and locals().get('results_data') is not None:
-            results_data.setdefault('skew_moved_by_cleanup', []).extend(
-                _late_skew1798)
+            results_data['skew_moved_by_cleanup'] = _late_skew1798
 
     # #962: declare Type VII on every via this run put in a pad or a paste
     # opening. It runs HERE because this is after the last pass that adds or
@@ -9588,13 +9634,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     print(f"\n{RED}  {_ra_line}{RESET}" if _ra_shipped else f"  {_ra_line}")
                     if return_results and _rd_ra is not None:
                         _rd_ra['rule_area_keepouts'] = _ra_shipped
-                    # the --json-out document carries the shipped reading;
-                    # a reader of the log alone takes it from this line
-                    print('JSON_SHIPPED_AUDIT: '
-                          + json.dumps({'rule_area_keepouts': _ra_shipped}))
         except Exception as _rae:                               # noqa: BLE001
             print(f"  WARNING: rule-area keep-out audit skipped "
                   f"({type(_rae).__name__}: {_rae})")
+    # the --json-out document carries both shipped readings; a reader of the
+    # log alone takes them from this line
+    _shipped_audit = {k: v for k, v in (('net_keepouts', _nk_shipped),
+                                        ('rule_area_keepouts', _ra_shipped))
+                      if v is not None}
+    if _shipped_audit:
+        print('JSON_SHIPPED_AUDIT: ' + json.dumps(_shipped_audit))
 
     # #1680/#1681: copper on or inside the clearance of another net's pad, on
     # the board this run ships: a short whose net was outside this step or
@@ -9632,10 +9681,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # predates the finalize, so it cannot carry this.
             if _merged is not None and _via_in_pad962 is not None:
                 _merged['via_in_pad'] = _via_in_pad962
-            # #1798: likewise the groups the end-of-run passes moved.
-            if _merged is not None and _late_skew1798:
-                _merged['skew_moved_by_cleanup'] = list(
-                    _merged.get('skew_moved_by_cleanup') or []) + _late_skew1798
+            # #1798: likewise the skew rows, read on the shipped board.
+            if _merged is not None and _late_skew1798 is not None:
+                if _late_skew1798:
+                    _merged['skew_moved_by_cleanup'] = _late_skew1798
+                else:
+                    _merged.pop('skew_moved_by_cleanup', None)
             # #1146: likewise the keep-away reading of the shipped board.
             if _merged is not None and _ka_shipped is not None:
                 _merged['keep_away'] = _ka_shipped
@@ -10012,7 +10063,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             try:
                 from improvement_gate import (lap_entry, lap_history,
                                               rip_cycle, format_rip_cycle,
-                                              note_lap_history, LAP_HISTORY)
+                                              note_lap_history,
+                                              trim_lap_history)
                 from protected_nets import _pcb_data_namespace as _ns1807
                 _att1807: Dict[str, List[str]] = {}
                 for _sm in list(_SUMMARY_SINK) + [summary]:
@@ -10027,7 +10079,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _gate_report['rip_cycle'] = _cyc1807
                     print(RED + format_rip_cycle(_cyc1807) + RESET)
                 _ent1807 = lap_entry(_cmp, _verdict, _att1807)
-                note_lap_history((_hist1807 + [_ent1807])[-LAP_HISTORY:]
+                note_lap_history(trim_lap_history(_hist1807 + [_ent1807])
                                  if _ent1807 else None)
             except Exception as _e1807:     # noqa: BLE001 -- a report
                 print(f"  (rip-cycle record skipped: {_e1807})")
@@ -10343,6 +10395,12 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--guide-corridor-spacing", type=float, default=defaults.GUIDE_CORRIDOR_SPACING,
                         help=f"Max mm between waypoints; 0 = use only the drawn segment endpoints, "
                              f">0 subdivides long segments to follow curves more tightly (default: {defaults.GUIDE_CORRIDOR_SPACING})")
+    parser.add_argument("--mask-keepouts", action=argparse.BooleanOptionalAction,
+                        default=defaults.MASK_KEEPOUTS,
+                        help="Keep new copper out from under F.Mask/B.Mask artwork and footprint "
+                             "mask shapes on the same side (pad openings excepted); "
+                             "--no-mask-keepouts routes through it "
+                             f"(default: {'on' if defaults.MASK_KEEPOUTS else 'off'})")
     parser.add_argument("--keepout", action="store_true",
                         help="Keep routed tracks out of one or more polygons drawn on a User layer (issue #27)")
     parser.add_argument("--keepout-layer", type=str, default=defaults.KEEPOUT_LAYER,
@@ -11089,6 +11147,7 @@ For differential pair routing, use route_diff.py:
                 guide_corridor_layer=args.guide_corridor_layer,
                 guide_corridor_spacing=args.guide_corridor_spacing,
                 keepout_enabled=args.keepout,
+                mask_keepouts=args.mask_keepouts,
                 keepout_layer=args.keepout_layer,
                 proximity_heuristic_factor=args.proximity_heuristic_factor,
                 stub_proximity_radius=args.stub_proximity_radius,

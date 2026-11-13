@@ -320,7 +320,11 @@ def _part_main(args, pcb, tier=None, overrides=None):
                  if f.cut_refs else '')
               + (" -- its own pads: at this track and via no path leaves "
                  "them, so narrower geometry (a finer class, smaller vias) "
-                 "is the other answer" if f.cut_refs == (f.ref,) else ''))
+                 "is the other answer" if f.cut_refs == (f.ref,)
+                 else " -- no lattice cell is saturated: their copper closes "
+                 "the stranded nets in where they start (in front of a pad, "
+                 "or on another layer where its via would land)"
+                 if f.cut_refs and not f.cut_cells else ''))
     else:
         print("  not proven short: the lattice over-states capacity, so this "
               "is no promise the router finds every exit")

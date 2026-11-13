@@ -54,8 +54,11 @@ class ReturnViaModel:
         # an AGND via is not a signal via needing a return path.
         self.ground_ids = set(self.domains) or {self.gnd_net_id}
         self.ground_ids.add(self.gnd_net_id)
-        self.power_ids = set(power_net_evidence(pcb_data, zones)) \
-            - self.ground_ids
+        # {net_id: why it reads as power}, the ground nets left out.
+        self.power_why = {nid: why for nid, why
+                          in power_net_evidence(pcb_data, zones).items()
+                          if nid not in self.ground_ids}
+        self.power_ids = set(self.power_why)
         # Existing return copper, per ground net: a via only counts as having
         # a return if the ground copper is in the SAME domain (#489 §5).
         self.existing_by_net: Dict[int, List] = {}
@@ -105,10 +108,13 @@ def return_via_coverage(pcb_data, distance: float, net_ids=None,
     return point of its own ground domain within DISTANCE mm.
 
     {'distance_mm', 'gnd_net', 'signal_vias', 'uncovered', 'power_vias',
+     'power_nets': {name: {'vias', 'why'}},
      'by_net': {name: {'signal_vias', 'uncovered'}},
      'uncovered_vias': [{'net', 'x', 'y', 'return_net', 'nearest_mm'}]}
     `uncovered` is None, with a `reason`, when the board has no ground net.
-    `power_vias` counts the vias left out as power (on NET_IDS when given)."""
+    `power_vias` counts the vias left out as power (on NET_IDS when given),
+    and `power_nets` names their nets, each with its via count and why it
+    reads as power (`list_nets.power_net_evidence`)."""
     model = ReturnViaModel(pcb_data, gnd_net_name)
     nets = pcb_data.nets
     want = None if net_ids is None else set(net_ids)
@@ -116,12 +122,17 @@ def return_via_coverage(pcb_data, distance: float, net_ids=None,
     def name(nid):
         n = nets.get(nid)
         return n.name if n and n.name else str(nid)
-    power = sum(1 for v in pcb_data.vias if v.net_id in model.power_ids
-                and (want is None or v.net_id in want))
+    power_nets: Dict[str, dict] = {}
+    for v in pcb_data.vias:
+        if v.net_id in model.power_ids and (want is None or v.net_id in want):
+            power_nets.setdefault(name(v.net_id), {
+                'vias': 0, 'why': model.power_why[v.net_id]})['vias'] += 1
     sig = model.signal_vias(want)
     out = {'distance_mm': distance,
            'gnd_net': name(model.gnd_net_id) if model.found else None,
-           'signal_vias': len(sig), 'power_vias': power}
+           'signal_vias': len(sig),
+           'power_vias': sum(r['vias'] for r in power_nets.values()),
+           'power_nets': dict(sorted(power_nets.items()))}
     if not model.found:
         target = model.explicit_name or 'GND family'
         return {**out, 'uncovered': None, 'by_net': {}, 'uncovered_vias': [],

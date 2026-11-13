@@ -357,7 +357,8 @@ is also listed NOT honoured at the start of every step that reads the rules,
 whatever the vias are (#1490), since an explicit via and a descent need not hold
 it. `list_nets.py --design-rules` lists the rules that set a minimum below the
 Board Setup one, with the condition each binds, and then the nets each via-size
-rule binds (#1805). A rule scoped by a courtyard term (`A.insideCourtyard('U1')`)
+rule binds (#1805): the nets its condition names, its `(layer ...)` clause read
+as below (a clause that binds no via names no net). A rule scoped by a courtyard term (`A.insideCourtyard('U1')`)
 is listed "bound by POSITION": KiCad applies it to a via whose disc overlaps that
 part's courtyard and to no other via of the same net, so its nets are an upper
 bound (the nets with a pad on the part). `check_drc.py` grades a via under such a
@@ -371,9 +372,29 @@ matter), a pad by its copper (one straddling the edge binds), and a clearance
 pair under the last matching rule in file order, its condition tried both ways,
 so `A.insideCourtyard('U1')` binds a pair one of whose items is inside -- each
 measured on kicad-cli 10.0.6. Such a rule is then not NOT GRADED. A rule whose
-condition is not read otherwise is listed as one that MAY relax. No routing step
+condition is not read otherwise, or whose courtyard terms do not confine it to
+the part (`!A.insideCourtyard('U1')` binds a via outside that part,
+`A.insideCourtyard('U1') || A.NetName == 'X'` X's via anywhere), is listed as one
+that MAY relax, with the nets its other terms do not rule out. No routing step
 applies a courtyard-scoped rule: the router routes that copper at the class
 value.
+
+**A via rule's `(layer ...)` clause (#1805).** Every reader of a via's size
+reads it as kicad-cli does for a via, of any type (through, blind, buried,
+micro): `check_drc.py`, the routing steps' via floors (`design_rules.via_floors`,
+the per-net via size, the escalation rungs), the end-of-step via grades and
+`list_nets.py --design-rules`. An `annular_width` rule's clause is tested
+against F.Cu whatever layers the via spans: `(layer "F.Cu")` and `(layer outer)`
+bind the vias the condition names, `(layer "B.Cu")`, an inner layer and
+`(layer inner)` bind none. A `hole_size` rule's clause is not tested: the rule
+binds under any. A `via_diameter` rule's clause is tested as an `annular_width`
+one's from kicad-cli 10.0.7, and not at all on 10.0.6 (measured on 10.0.6 and
+10.0.7 only). The graders (`check_drc.py`, `list_nets.py`) follow the
+installed kicad-cli (the newest reading without one), as the length measure
+does. The routing steps do not, since copper may not depend on the machine
+(`DesignRules.resolve_for_copper`): they take the strictest of the two
+readings, so a via they size passes on either release -- a tightening rule
+binds where either release binds it, a relaxing one only where both do.
 
 **Via count rules (#1707).** A `(constraint via_count (min N) (max M))` rule is
 not honoured by any routing step: a net is routed with the vias it needs
@@ -697,6 +718,29 @@ Notes:
   route_diff.py report what the routed board still has inside a forbidding rule
   area as `rule_area_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (rows of
   area, net, tracks, vias; `[]` = clean; absent when the board has no such area).
+
+### Solder-Mask Artwork
+
+A graphic on `F.Mask` or `B.Mask` (a logo, a label, a window over an antenna or a shield frame)
+is a mask OPENING: copper under it ships bare. Routing keeps new tracks and vias of that side's
+copper out from under it, by default, with no setup: the board's own mask graphics and every
+footprint's mask shapes are read from the board file and stamped as keep-outs on `F.Cu` / `B.Cu`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--mask-keepouts` / `--no-mask-keepouts` | on | Keep new copper out from under mask artwork (route.py; GUI: "Keep out of mask artwork") |
+
+Notes:
+- A pad's own opening is exempt: every netted pad whose copper meets the artwork is cut out of
+  it, grown by 0.5 mm, so a mask-defined pad, a test point or an edge-connector finger stays
+  reachable.
+- The artwork is not copper, so copper keeps only 0.05 mm (mask registration) from it, not the
+  copper clearance.
+- Copper already on the board is left where it is; only the copper a run lays is kept out.
+- It reaches every engine that builds its map with the shared keep-out stamper: single-ended and
+  differential-pair routing and the plane steps. The BGA/QFN fanouts do not read it.
+  `--no-mask-keepouts` is on route.py only; use it on a board whose mask art is MEANT to show
+  the copper routed under it.
 - It's a non-copper User layer, so the polygon never affects manufacturing — it only steers the
   router.
 - **Don't draw a zone over a pad you need to route.** Cells inside the polygon are blocked

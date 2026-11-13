@@ -428,7 +428,7 @@ check('the B.Cu walls are what is named',
 
 print('--- a `*.Cu` pad forms the throat, so it must be NAMED as one ---')
 # Blocker 3 through a second door. The naming walk had its own layer test
-# (`set(p.layers) & lay`) instead of `_pad_on_layer`, the predicate the FIELD
+# (`set(p.layers) & lay`) instead of `pad_on_layer`, the predicate the FIELD
 # stamps with. A pad declared on `*.Cu` is stamped, forms the throat, and was
 # then refused by the naming walk: same CAGED verdict, near=[] refs=[] again.
 _star = {}

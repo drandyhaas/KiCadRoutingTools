@@ -1245,7 +1245,8 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     items_not_allowed; found reviewing #1278). Where it differs by layer (the
     member half-pitch, #1729) each layer's track band takes its own.
     """
-    keepouts = getattr(pcb_data.board_info, 'keepouts', None)
+    from mask_artwork import routing_keepouts
+    keepouts = routing_keepouts(pcb_data)
     if not keepouts:
         return
 
@@ -1254,7 +1255,6 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     layer_map = build_layer_map(layer_list)
     track_clear_of = {_ex: config.clearance + config.track_width / 2 + _ex
                       for _ex in extra_layer_groups(extra_clearance, layer_list)}
-    track_clear_max = max(track_clear_of.values())
     via_clear = config.clearance + config.via_size / 2 + extra_clearance
     # Restrict rasterization to the map's extent: on a local-window build a
     # whole-board ring keep-out would otherwise rasterize the entire board per
@@ -1295,16 +1295,26 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         if not (block_tracks or block_vias):
             continue
 
+        # A keep-out may carry its own clearance: mask artwork is no copper,
+        # so its copper keeps only the mask registration margin.
+        ko_clr = ko.get('clearance')
+        if ko_clr is None:
+            ko_track_of, ko_via = track_clear_of, via_clear
+        else:
+            ko_track_of = {_ex: ko_clr + config.track_width / 2 + _ex
+                           for _ex in track_clear_of}
+            ko_via = ko_clr + config.via_size / 2 + extra_clearance
+
         # The keep-out's track layers by the track band each takes: one entry
         # unless the extra clearance differs by layer.
         track_groups: Dict[float, List[int]] = {}
         for _li in (layer_idxs if block_tracks else ()):
-            _tc = track_clear_of[extra_on_layer(extra_clearance, layer_list[_li])]
+            _tc = ko_track_of[extra_on_layer(extra_clearance, layer_list[_li])]
             track_groups.setdefault(_tc, []).append(_li)
 
         # Bounding box gets a clearance margin so we also catch cells just outside
         # the polygon whose track/via copper would still intrude past the boundary.
-        margin = max(track_clear_max, via_clear) + coord.grid_step
+        margin = max(max(ko_track_of.values()), ko_via) + coord.grid_step
         o_gx_lo, o_gy_lo, o_nx, o_ny, inside, edge_dist = _rasterize_polygon_box(
             poly, coord, margin, clip_bounds=clip)
         if inside is None:
@@ -1317,7 +1327,7 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # for one rectangle at clearance 0.2 on a 0.1 grid).
         track_masks = {_tc: inside | (edge_dist < _tc - GRID_TIE_EPS)
                        for _tc in track_groups}
-        via_mask = inside | (edge_dist < via_clear - GRID_TIE_EPS)
+        via_mask = inside | (edge_dist < ko_via - GRID_TIE_EPS)
 
         # Holes: the keep-out is the outer polygon MINUS its holes (a ring).
         # Cells deep inside a hole (>= the relevant clearance from the hole
@@ -1338,7 +1348,7 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
             for hole in holes:
                 if len(hole) < 3:
                     continue
-                h_margin = max(track_clear_max, via_clear)
+                h_margin = max(max(ko_track_of.values()), ko_via)
                 h_gx_lo, h_gy_lo, h_nx, h_ny, h_inside, h_edge = _rasterize_polygon_box(
                     hole, coord, h_margin, clip_bounds=clip)
                 if h_inside is None:
@@ -1355,7 +1365,7 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
                 # epsilon or a ring cell could be both blocked and unblocked.
                 for _tc, track_mask in track_masks.items():
                     track_mask[idx[h_sel_edge >= _tc - GRID_TIE_EPS]] = False
-                via_mask[idx[h_sel_edge >= via_clear - GRID_TIE_EPS]] = False
+                via_mask[idx[h_sel_edge >= ko_via - GRID_TIE_EPS]] = False
 
         for _tc, _idxs in track_groups.items():
             track_mask = track_masks[_tc]
