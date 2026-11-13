@@ -350,6 +350,16 @@ through the barrel (#1314; before, the pad met only track ends and such a net
 read as not joined). Two of the pads whose copper touches on a shared layer
 join each other (#1629: a module's two overlapping same-number pads).
 
+When no track path joins the two pads, the net's other copper pads are
+attached as well (#1867), so a path that runs **through** one is walked: a
+lane that enters an in-line part's pad (an ESD device, a test point) at one
+point and leaves it at another, with no track between the two. A pad the
+path only passes is charged in its plane as a via is, from where the walk
+meets its copper straight to its centre and out again (changing layer in a
+drilled pad's barrel costs nothing, as in an end pad); the two end pads stay
+free. Before, such a path read `None` on a connected net. A length the track
+copper alone gives is unchanged: the other pads are not attached for it.
+
 Returns `None` when no track path joins the two pads: an unrouted or broken
 net, or one whose pads meet only through a **zone** (pours are not traversed).
 `0.0` means the pads' copper touches directly.

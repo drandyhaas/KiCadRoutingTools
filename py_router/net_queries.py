@@ -1284,12 +1284,38 @@ def pin_pair_path_length(pcb_data: PCBData, net_id: int,
     via whose copper overlaps theirs, and each other where their copper
     touches (#1629).
 
+    When no track path joins the two pads, the net's other copper pads are
+    attached too (#1867), so a path that runs THROUGH one -- a lane that
+    enters an in-line part's pad at one point and leaves it at another, with
+    no track between the two -- is walked. Such a pad is charged in its
+    plane as a via is: from where the walk meets its copper straight to its
+    centre, and out again (changing layer in a drilled pad's barrel costs
+    nothing, as in an end pad). The two end pads stay free. A length the
+    track copper alone gives is returned as it was: the other pads are not
+    attached then, so a pad's centre is never a short cut for it.
+
     Returns None when the two pads are not joined by copper (an unrouted or
     broken net) -- distinguish that from 0.0, which means pad-to-pad direct
     contact. Zone/pour connections are NOT traversed: a net that reaches its
     pads only through a plane has no track path and returns None.
     """
-    graph = _net_track_graph(pcb_data, net_id, (pad_a, pad_b), tolerance)
+    length = _pin_pair_walk(pcb_data, net_id, pad_a, pad_b, (), tolerance)
+    if length is not None:
+        return length
+    passed = [p for p in _copper_pads(pcb_data, net_id)
+              if p is not pad_a and p is not pad_b]
+    if not passed:
+        return None
+    return _pin_pair_walk(pcb_data, net_id, pad_a, pad_b, passed, tolerance)
+
+
+def _pin_pair_walk(pcb_data: PCBData, net_id: int, pad_a: Pad, pad_b: Pad,
+                   passed, tolerance: float) -> Optional[float]:
+    """The shortest walk from `pad_a` to `pad_b` over `_net_track_graph`,
+    with the pads in `passed` attached as pads a walk only passes; None when
+    nothing joins the two."""
+    graph = _net_track_graph(pcb_data, net_id, [pad_a, pad_b] + list(passed),
+                             tolerance, through=frozenset(id(p) for p in passed))
     if graph is None:
         return None
     adjacency, pad_nodes = graph
@@ -1727,7 +1753,8 @@ def _segment_crossings(segments) -> Dict[int, List[Tuple[float, float]]]:
 
 
 def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
-                     tolerance: float = 0.02, detail: Optional[dict] = None):
+                     tolerance: float = 0.02, detail: Optional[dict] = None,
+                     through=frozenset()):
     """(adjacency, pad_nodes) over ONE net's track copper, with `pads` attached.
 
     The weighted graph `pin_pair_path_length` walks (see its docstring for the
@@ -1739,6 +1766,10 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     exact outline, a via joins a pad its copper overlaps, two of `pads`
     whose copper touches on a shared layer join each other, and two tracks
     of a layer whose centrelines cross meet at the crossing (#1705).
+
+    `through` is the ids of the `pads` a walk only PASSES (#1867): each of
+    their joins is charged the distance to the pad's centre, as a via's is,
+    where a pad a walk starts or ends on joins at no cost.
 
     `detail`, when given, is filled with what each edge IS, for a measure
     that reads the copper a walk selected (`_selected_copper_mm`):
@@ -1951,7 +1982,8 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                                  ('via_join', obj, node))
                         joined = True
                 elif hit(nx, ny, half_w.get(node, 0.0)):
-                    add_edge(hub, node, 0.0, ('pad', obj))
+                    add_edge(hub, node, math.hypot(nx - cx, ny - cy)
+                             if id(obj) in through else 0.0, ('pad', obj))
                     hub_joins.setdefault(hub, []).append(node)
                     joined = True
             if joined or kind == 'pad' \
@@ -1993,12 +2025,18 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
         vh, ph = hubs_by_obj.get(id(via), {}), hubs_by_obj.get(id(pad), {})
         for layer in common:
             if layer in vh and layer in ph:
-                add_edge(vh[layer], ph[layer], 0.0, ('via_pad', via))
+                add_edge(vh[layer], ph[layer],
+                         math.hypot(via.x - pad.global_x, via.y - pad.global_y)
+                         if id(pad) in through else 0.0, ('via_pad', via))
     for pa, pb, common in pad_pad_contacts:
         ha, hb = hubs_by_obj.get(id(pa), {}), hubs_by_obj.get(id(pb), {})
         for layer in common:
             if layer in ha and layer in hb:
-                add_edge(ha[layer], hb[layer], 0.0, ('pad_pad',))
+                add_edge(ha[layer], hb[layer],
+                         math.hypot(pa.global_x - pb.global_x,
+                                    pa.global_y - pb.global_y)
+                         if id(pa) in through or id(pb) in through else 0.0,
+                         ('pad_pad',))
 
     if detail is not None:
         detail.update(edges=edge_infos, node_xy=_node_xy, hub_joins=hub_joins,
