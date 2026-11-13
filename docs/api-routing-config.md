@@ -761,7 +761,8 @@ partner at `pair_clearance(P, N, layer)`.
 
 The one exception is a pair a **coupled-pair rule** grades (#1293): a `.kicad_dru`
 clearance rule whose condition ANDs in `AB.isCoupledDiffPair()`, such as
-`AB.isCoupledDiffPair() && A.hasNetclass('USB')`, which is how KiCad lets a pair couple
+`AB.isCoupledDiffPair() && A.hasNetclass('USB')` (the predicate reads the pair, so `A.` and
+`B.isCoupledDiffPair()` are the same term, #1874), which is how KiCad lets a pair couple
 tighter than the clearance everything else keeps. Where that rule is the one KiCad
 grades the pair's P against its N at on every layer the pair may route on
 (`DesignRules.coupled_pair_clearance`: the last matching rule, conditions tried in both

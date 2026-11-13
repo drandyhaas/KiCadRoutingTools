@@ -1187,6 +1187,16 @@ def kicad_net_length_nm(pcb_data, segments, vias, pads,
     KiCad `release` (default `length_measure_release()`) measures it (#1313,
     #1432): see the block comment above. `segments`, `vias` and `pads` are
     the net's. Pad-to-die is added by the caller."""
+    by_layer, via_nm = kicad_net_length_parts_nm(pcb_data, segments, vias, pads, release)
+    return sum(by_layer.values()) + via_nm
+
+
+def kicad_net_length_parts_nm(pcb_data, segments, vias, pads,
+                              release: Optional[str] = None
+                              ) -> Tuple[Dict[str, int], int]:
+    """`kicad_net_length_nm` in its parts (#1846): ({copper layer: track nm},
+    via barrel nm). What a time-domain delay is summed from -- each layer's
+    track length and the via length carry their own delay."""
     key = _release_key(length_measure_release(release))
     copper = _copper_stack(pcb_data)
     segments = _tracks(segments)
@@ -1196,7 +1206,10 @@ def kicad_net_length_nm(pcb_data, segments, vias, pads,
     if key >= (10, 0, 4):
         _clip_runs_at_vias(runs, vias)
     _clip_runs_in_pads(runs, pads, copper)
-    return sum(_chain_len(run.pts) for run in runs) + via_nm
+    by_layer: Dict[str, int] = {}
+    for run in runs:
+        by_layer[run.layer] = by_layer.get(run.layer, 0) + _chain_len(run.pts)
+    return by_layer, via_nm
 
 
 def kicad_via_length(via: Via, segments, pads, pcb_data,

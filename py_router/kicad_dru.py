@@ -526,7 +526,19 @@ def read_board_track_clearances(board_path: str) -> Tuple[List[TrackRule], List[
 _LEN_TERM = re.compile(
     r"^A\s*\.\s*(?:(NetClass|NetName)\s*==\s*['\"]([^'\"]*)['\"]"
     r"|(hasNetclass|inDiffPair)\s*\(\s*['\"]([^'\"]*)['\"]\s*\))$")
-_TIME_VAL = re.compile(r"^-?[0-9.]+\s*(fs|ps|ns|us|s)$")
+_TIME_VAL = re.compile(r"^(-?[0-9.]+)\s*(fs|ps|ns|us|s)$")
+_UNIT_PS = {'fs': 1e-3, 'ps': 1.0, 'ns': 1e3, 'us': 1e6, 's': 1e12}
+
+
+def _to_ps(tok: str) -> Optional[float]:
+    """A time-valued bound in ps, or None for a value that is not a time."""
+    m = _TIME_VAL.match(str(tok).strip())
+    if not m:
+        return None
+    try:
+        return float(m.group(1)) * _UNIT_PS[m.group(2)]
+    except ValueError:
+        return None
 #: The constraint kinds this channel reads.
 LENGTH_KINDS = ('length', 'skew', 'diff_pair_uncoupled')
 
@@ -538,7 +550,12 @@ class LengthRule(NamedTuple):
     None when the scope is outside the honoured subset, with the reason in
     `unsupported`. Bounds are mm; a missing bound is None.
     `within_diff_pairs` is the skew option: grade each pair's P against its
-    own N instead of every bound net against the longest."""
+    own N instead of every bound net against the longest.
+    `unit` is 'mm', or 'ps' for a time-domain rule (#1846): its three bounds
+    are then delays in ps, in the same fields, graded against the delay the
+    project's tuning profiles give (`tuning_profiles.DelayModel`). Only a
+    reader that asks for them (`time_domain=True`) gets a 'ps' rule; every
+    other one sees it unsupported, as before."""
     name: str
     min_mm: Optional[float]
     opt_mm: Optional[float]
@@ -548,6 +565,7 @@ class LengthRule(NamedTuple):
     severity: str = 'error'
     kind: str = 'length'
     within_diff_pairs: bool = False
+    unit: str = 'mm'
 
 
 def _parse_length_condition(expr: Optional[str]):
@@ -577,7 +595,7 @@ _KIND_NOUN = {'length': 'length window', 'skew': 'skew window',
               'diff_pair_uncoupled': 'max uncoupled length'}
 
 
-def parse_dru_length_rules(text: str, kinds=('length',)
+def parse_dru_length_rules(text: str, kinds=('length',), time_domain: bool = False
                            ) -> Tuple[List[LengthRule], List[str]]:
     """Every constraint of `kinds` (default `length` alone, #1313) in
     .kicad_dru text, in FILE order, and notes. A rule carrying several of the
@@ -604,35 +622,46 @@ def parse_dru_length_rules(text: str, kinds=('length',)
             elif item[0] == "layer":
                 layer_clause = item[1] if len(item) >= 2 else ''
             elif item[0] == "constraint" and len(item) >= 2 and item[1] in kinds:
-                bounds, within, timed = {}, False, False
+                bounds, within, timed, times = {}, False, False, {}
                 for sub in item[2:]:
                     if isinstance(sub, list) and len(sub) >= 2 \
                             and sub[0] in ('min', 'opt', 'max'):
                         bounds[sub[0]] = _to_mm(sub[1])
-                        timed = timed or bool(_TIME_VAL.match(str(sub[1]).strip()))
+                        times[sub[0]] = _to_ps(sub[1])
+                        timed = timed or times[sub[0]] is not None
                     elif isinstance(sub, list) and sub and sub[0] == 'within_diff_pairs':
                         within = True
-                found.append((item[1], bounds, within, timed))
+                found.append((item[1], bounds, within, timed, times))
         if not found:
             continue
         if severity == 'ignore':
-            for kind, _b, _w, _t in found:
+            for kind, _b, _w, _t, _ts in found:
                 notes.append(f"rule '{name}': {_KIND_NOUN.get(kind, kind)}, "
                              f"severity ignore -- skipped")
             continue
         terms, why = _parse_length_condition(condition)
         if layer_clause is not None and terms is not None:
             terms, why = None, f"a (layer {layer_clause}) clause is not modelled"
-        for kind, bounds, within, timed in found:
+        for kind, bounds, within, timed, times in found:
             t, w = terms, why
+            unit = 'mm'
             if timed and t is not None:
-                t, w = None, "a time-domain bound (ps/ns) is not modelled"
+                if not time_domain:
+                    t, w = None, "a time-domain bound (ps/ns) is not modelled"
+                elif kind == 'diff_pair_uncoupled':
+                    t, w = None, "an uncoupled length in time units is not modelled"
+                elif any(v is None for v in times.values()):
+                    t, w = None, "its bounds mix time and length units"
+                else:
+                    bounds, unit = times, 'ps'
             rules.append(LengthRule(str(name), bounds.get('min'), bounds.get('opt'),
-                                    bounds.get('max'), t, w, severity, kind, within))
+                                    bounds.get('max'), t, w, severity, kind, within,
+                                    unit))
     return rules, notes
 
 
-def read_board_length_rules(board_path: str, kinds=('length',)
+def read_board_length_rules(board_path: str, kinds=('length',),
+                            time_domain: bool = False
                             ) -> Tuple[List[LengthRule], List[str]]:
     """Auto-read the sibling ``<board>.kicad_dru`` length windows (#1313) --
     or, by `kinds`, its skew / diff_pair_uncoupled rules (#1303).
@@ -644,7 +673,7 @@ def read_board_length_rules(board_path: str, kinds=('length',)
         text = open(dru, encoding="utf-8").read()
     except OSError as e:
         return [], [f"could not read {dru}: {e}"]
-    return parse_dru_length_rules(text, kinds)
+    return parse_dru_length_rules(text, kinds, time_domain)
 
 
 #: the name a recorded intra-pair tolerance grades under (#1503)
@@ -717,12 +746,14 @@ def recorded_ac_chains(board_path: str) -> List[dict]:
     return out
 
 
-def board_skew_rules(board_path: str, kinds=('skew', 'diff_pair_uncoupled')
+def board_skew_rules(board_path: str, kinds=('skew', 'diff_pair_uncoupled'),
+                     time_domain: bool = False
                      ) -> Tuple[List[LengthRule], List[str]]:
     """The skew-family rules a grader reads (#1503): the board's recorded
     intra-pair tolerances, then the .kicad_dru's own (which win where both
     bind a net, as KiCad's last-match does)."""
-    rules, notes = read_board_length_rules(board_path, kinds=kinds)
+    rules, notes = read_board_length_rules(board_path, kinds=kinds,
+                                           time_domain=time_domain)
     if 'skew' in kinds:
         rules = recorded_intra_pair_rules(board_path) + rules
     return rules, notes
