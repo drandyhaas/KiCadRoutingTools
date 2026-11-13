@@ -3569,6 +3569,13 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
                 config.edge_floors, pcb_data)
         except Exception as e:                                 # noqa: BLE001
             rules.notes.append(f"per-net edge bands not derived ({e})")
+    if net_keepouts and pcb_data is not None:
+        # #1116: no via in an edge connector's contact finger
+        try:
+            from net_keepouts import derive_contact_fingers
+            rules.net_keepouts = list(rules.net_keepouts) + derive_contact_fingers(pcb_data)
+        except Exception as e:                                 # noqa: BLE001
+            rules.notes.append(f"contact-finger via keep-outs not derived ({e})")
     key = (os.path.abspath(rules.source) if rules.source else '',
            tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
                  for r in rules.rules))
