@@ -437,6 +437,31 @@ itself inside it (check_drc accepts it as `edge-exempt-pad`; KiCad flags both). 
 rule stays in the rule file: the output project's `min_copper_edge_clearance`
 records what the step resolved before it.
 
+**Hole clearance rules (#1853).** A `.kicad_dru` `hole_clearance` rule holds the
+route step's copper off the HOLES of other nets, on both fronts, with no flag or
+control, and `check_drc.py` grades the same pairs (`hole_rule_grade`). KiCad
+measures it from the hole's wall, so it binds wherever it is wider than the ring or
+pad around the hole plus the copper clearance:
+
+- a routed track is kept the rule's distance from the hole of another net's via,
+  plated pad and unplated pad, on each layer the rule names;
+- a via the step adds keeps its own hole that far from other nets' tracks, vias
+  and pads, and its copper that far from their holes;
+- a via placed off the obstacle map (the rescue's pad escape, a layer-swap or
+  stub-switch via) is refused by `check_drc.hole_rule_refusal`, which runs the
+  grader over the board near it.
+
+The value is the last rule in the file whose condition and `(layer ...)` clause
+match the pair, read either way round, as KiCad decides it; a hole's own net is
+exempt. One obstacle map serves every net a step routes, so a hole is held at the
+largest value the rules give any other net against it. A rule of severity `ignore`
+binds nothing, and a rule whose condition the tools do not read is named `NOT
+honoured` and left to the grade. The step prints `.kicad_dru rule 'x':
+hole_clearance min 0.254 mm: routed tracks and vias are kept that far from the
+holes of other nets' vias and pads`. The fan-out and plane steps place their vias
+on maps of their own that do not read these rules yet; `check_drc.py` grades their
+copper at the rule all the same.
+
 **A rule file KiCad refuses.** One thing KiCad cannot load in a `.kicad_dru` makes
 it enforce NONE of the file's rules, with exit 0 and nothing printed (measured on
 kicad-cli 10.0.6). A condition does it with a function or property KiCad does not

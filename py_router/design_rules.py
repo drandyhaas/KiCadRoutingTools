@@ -3857,6 +3857,16 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
             rules.net_keepouts = list(rules.net_keepouts) + derive_contact_fingers(pcb_data)
         except Exception as e:                                 # noqa: BLE001
             rules.notes.append(f"contact-finger via keep-outs not derived ({e})")
+    if net_keepouts and pcb_data is not None:
+        # #1853: the hole_clearance rules the route steps read
+        from hole_rule_routing import mark_honoured as _mark_holes
+        _mark_holes(rules, pcb_data)
+    try:
+        from hole_rule_routing import install as _install_holes
+        _install_holes(config, pcb_data)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  ERROR: hole_clearance rules not installed ({e}); this run routes "
+              f"WITHOUT them")
     key = (os.path.abspath(rules.source) if rules.source else '',
            tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
                  for r in rules.rules))

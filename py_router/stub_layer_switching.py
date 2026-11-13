@@ -907,12 +907,13 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
     # A keep-out rule area forbidding vias, as check_drc grades it, and the
     # interior of a filled graphic (#1683): the track loop above measures to
     # its strokes only, and a graphic never moves with a swap partner.
-    from check_drc import filled_graphic_refusal, keepout_refusal
+    from check_drc import filled_graphic_refusal, hole_rule_refusal, keepout_refusal
     probe = [Via(x=pad_x, y=pad_y, size=2 * via_r, drill=config.via_drill,
                  layers=['F.Cu', 'B.Cu'], net_id=net_id)]
-    why = keepout_refusal(pcb_data, vias=probe) or filled_graphic_refusal(
+    why = (keepout_refusal(pcb_data, vias=probe) or filled_graphic_refusal(
         pcb_data, vias=probe,
         clearance=lambda sh: config.pair_clearance(net_id, sh.net_id, sh.layer))
+        or hole_rule_refusal(pcb_data, getattr(config, 'rules', None), vias=probe))
     if why:
         return False, f"pad via at ({pad_x:.2f},{pad_y:.2f}): {why}"
     return True, ""
