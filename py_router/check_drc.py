@@ -320,6 +320,15 @@ class PairRuleChannels:
                                               if layer is None else None))
             if v != eff:
                 eff, src = v, 'layer rule'
+                # #1897: a scoped rule with a (layer ...) clause, by name
+                named = getattr(lm, 'names', None)
+                if named:
+                    at = ([layer] if layer is not None else
+                          sorted(set(layers_a) & set(layers_b if layers_b is not None
+                                                     else layers_a)))
+                    hit = [named[l] for l in at if l in named and lm.get(l) == v]
+                    if hit:
+                        src = f"rule '{hit[0]}'"
         if type_a is not None and type_b is not None:
             c = self.coupled_rule(net_a, net_b, type_a, type_b,
                                   (layer,) if layer is not None else layers_a)
