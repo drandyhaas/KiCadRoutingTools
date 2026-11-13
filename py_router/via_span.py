@@ -235,7 +235,7 @@ def via_span_summary(config, pcb_data=None) -> Optional[dict]:
     if not span:
         return None
     zones = list(getattr(pcb_data, 'zones', None) or ())
-    return {'layers': [span[0], span[-1]],
+    return {'layers': via_layer_pair(config),
             'type': getattr(config, 'via_span_type', None),
             'plane_finalize': 'span',
             'zones': len(zones),
