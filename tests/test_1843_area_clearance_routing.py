@@ -181,7 +181,7 @@ def main():
         ok(routed == ['ROOM_NET'] and failed == ['OPEN_NET'],
            f"the net in the room routes, the other does not: {routed} / {failed}")
         ok(drc_clean(out), "check_drc is clean at KiCad's tolerance")
-        ok("rule 'room': clearance min 0.1 mm in rule area 'ROOM': tracks and vias "
+        ok("rule 'room': in rule area 'ROOM', clearance min 0.1 mm: tracks and vias "
            "are routed to it there" in log, "the run names the rule as routed to")
         ok('NOT honoured' not in log, "and no longer as not honoured")
 

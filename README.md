@@ -943,7 +943,7 @@ One-line summaries below (all of these modules live in `py_router/`); the
 | `obstacle_costs.py` | Stub and track proximity cost calculations |
 | `sense_branch.py` | Protected Kelvin sense branches (#1279), declared by a KiCad group named `sense:<REF>.<PAD>` (the join pad): the member copper and its sense pads are foreign to their own net except on the join pad, so new copper joins the branch only there |
 | `net_keepouts.py` | Net-filtered copper keep-outs from the board's `.kicad_dru` (`disallow` rules on a named rule area): the regions, stamped into the obstacle map only while a net a rule binds routes, and the audit of bound-net copper the shipped board has inside one |
-| `area_clearance.py` | Clearance rules scoped by a rule area (`A.insideArea('ROOM')`), routed to as KiCad binds them, per item: the regions, the composition of every keep-out stamp over them (class values outside an area, the rule's value inside), the pair reading the post-route passes share, and the split of a track where it leaves a tightened area |
+| `area_clearance.py` | Clearance and track-width rules scoped by a rule area (`A.insideArea('ROOM')`), routed to as KiCad binds them, per item: the regions, the composition of every keep-out stamp over them (class values outside an area, the rule's value inside), the pair reading the post-route passes share, the split of a track where it leaves a tightened area, and the necking of a track where it needs a room's width |
 | `keep_away.py` | Pairwise keep-away between net groups (#1146): the per-net band cost and the in-band report; the design brief's `keep_away` rules, read for the router and the placement grade alike (#1253) |
 | `bresenham_utils.py` | Bresenham line-walking utilities for grid-based segment operations |
 | `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, UnionFind) |
@@ -1102,7 +1102,7 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 - No push-and-shove (routes around obstacles, doesn't move them)
 - No blind or buried vias
 - No coarse grid assignment before detailed routing to plan overall topology
-- Area-scoped design rules in part: a `.kicad_dru` rule conditioned on a rule area is honoured as a (net-filtered) `disallow` keep-out, and a clearance rule whose condition is one area predicate, or an OR of them, is routed to inside the area (see [Configuration](docs/configuration.md)); an area-scoped width rule, and a clearance rule with further condition terms, are not routed to (the run reports it), and a diff pair that has to pass an area raising the clearance above its gap is built at the area's value for the run (disclosed per pair; one that need not pass it is kept out of it); `check_drc.py` grades them by where each track, via and pad stands
+- Area-scoped design rules in part: a `.kicad_dru` rule conditioned on a rule area is honoured as a (net-filtered) `disallow` keep-out, and a clearance or track-width rule whose condition is one area predicate, or an OR of them, is routed to inside the area (see [Configuration](docs/configuration.md)); a rule with further condition terms is not routed to (the run reports it), and a diff pair that has to pass an area raising the clearance above its gap is built at the area's value for the run (disclosed per pair; one that need not pass it is kept out of it); `check_drc.py` grades them by where each track, via and pad stands
 
 ## Contributing
 

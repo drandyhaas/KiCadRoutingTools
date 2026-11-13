@@ -2923,6 +2923,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             narrowed=getattr(state, 'narrowed_pairs', None))
     except Exception as _cpe:                                   # noqa: BLE001
         print(f"  (coupled pair width disclosure skipped: {_cpe})")
+    # #1843: every neck to a rule area's track width this run ships
+    _area1843 = getattr(config, 'area_clearance', None)
+    if _area1843 is not None:
+        from area_clearance import neck_census, neck_lines
+        _nm1843 = {_n: _nn.name for _n, _nn in pcb_data.nets.items()}
+        _necks1843 = neck_census(pcb_data.segments, _area1843,
+                                 lambda _n: _nm1843.get(_n, f"Net {_n}"),
+                                 _input_seg_keys1679)
+        for _ln in neck_lines(_necks1843):
+            print(_ln)
+        if _necks1843:
+            summary['area_necks'] = _necks1843
     # #857: what this run delivered below a requested size (route.py's
     # key), when it delivered anything there.
     from fab_tiers import narrowed_summary
@@ -2986,6 +2998,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # #1760/#1761: JSON_SUMMARY['rule_area_keepouts'] (None without
             # a forbidding rule area, [] when the copper is clean).
             'rule_area_keepouts': summary.get('rule_area_keepouts'),
+            # #1843: JSON_SUMMARY['area_necks'] (absent without a neck)
+            'area_necks': summary.get('area_necks'),
             # successful/failed only count pairs that were coupled-routed or
             # outright failed -- pairs deferred to the single-ended pass
             # (electrically short, or coupled route failed), and pairs

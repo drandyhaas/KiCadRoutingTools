@@ -20,7 +20,13 @@ shipped copper inside a tightened room. This test makes such a path LOUD:
      to every pass whose signature takes it;
   3. the fold itself: a track and a via measured against foreign copper in
      a tight area, and in a relaxing one, read the area's value, and a
-     track that only crosses the area's split zone is split there.
+     track that only crosses the area's split zone is split there;
+  4. a room's track width: every function that builds a `min_track_width`
+     from tracks reads the room's rule (KiCad grades a track it binds at the
+     rule, not at Board Setup's minimum), and every census of shipped track
+     widths leaves a room neck out of its shortfall (the neck is the board's
+     own rule, disclosed as `area_necks`) -- or is in WIDTH_REGISTRY with the
+     reason it needs neither.
 """
 import ast
 import glob
@@ -360,10 +366,89 @@ def fold():
     ok(not split_run_copper(relax, [s]), "a relaxing area splits nothing")
 
 
+# module:qualname -> why it needs no room reading
+WIDTH_REGISTRY = {
+    'fix_kicad_drc_settings.py:copper_minima':
+        "the copper a placement step laid or moved (#1578); placement lays no track",
+    'repair_planes.py:main':
+        "the standalone CLI's power census counts a neck as a shortfall: it says "
+        "more than it must, never less",
+}
+#: a call to one of these reads the room's track_width rule
+ROOM_READERS = ('_board_track_widths', 'room_width_test', 'live_room_width_test',
+                'track_item', 'is_room_neck')
+CENSUSES = ('new_copper_width_shortfall', 'power_width_report')
+
+
+def width_paths():
+    print("4. every track-width scan and census reads a room's width")
+    files = (glob.glob(os.path.join(REPO, 'py_router', '*.py'))
+             + glob.glob(os.path.join(REPO, 'kicad_routing_plugin', '*.py')))
+    found, blind = set(), []
+    for path in files:
+        tree = ast.parse(open(path, encoding='utf-8').read())
+        mod = os.path.basename(path)
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            # the function's own body (nested defs are visited on their own)
+            nodes, todo = [], list(fn.body)
+            while todo:
+                n = todo.pop()
+                nodes.append(n)
+                for c in ast.iter_child_nodes(n):
+                    if not isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        todo.append(c)
+            called, alias = set(), {}
+            for n in nodes:
+                if isinstance(n, ast.Call):
+                    f = n.func
+                    called.add(f.attr if isinstance(f, ast.Attribute) else getattr(f, 'id', None))
+                elif isinstance(n, ast.ImportFrom):
+                    for al in n.names:
+                        if al.asname:
+                            alias[al.asname] = al.name
+            called |= {alias[c] for c in called if c in alias}
+            # it reads tracks: a board's segments, or the live board's tracks
+            tracks = any((isinstance(n, ast.Attribute) and n.attr == 'segments')
+                         or (isinstance(n, ast.Name) and n.id == 'segments')
+                         or (isinstance(n, ast.Call) and getattr(n.func, 'attr', None)
+                             == 'GetTracks') for n in nodes)
+            scans = tracks and any(
+                (isinstance(n, ast.Dict) and any(isinstance(k, ast.Constant)
+                                                 and k.value == 'min_track_width'
+                                                 for k in n.keys))
+                or (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)
+                    and isinstance(n.slice, ast.Constant)
+                    and n.slice.value == 'min_track_width')
+                for n in nodes)
+            census = bool(called & set(CENSUSES))
+            if not (scans or census) or fn.name in ROOM_READERS:
+                continue
+            key = f"{mod}:{fn.name}"
+            found.add(key)
+            if key in WIDTH_REGISTRY or called & set(ROOM_READERS):
+                continue
+            blind.append(key)
+    ok(not blind, "every function that scans a track minimum or censuses track "
+                  "widths reads the room" + (f": {sorted(blind)}" if blind else ""))
+    stale = sorted(set(WIDTH_REGISTRY) - found)
+    ok(not stale, "and WIDTH_REGISTRY names only live sites"
+       + (f": {stale}" if stale else ""))
+    ok({'fix_kicad_drc_settings.py:board_size_values',
+        'fix_kicad_drc_settings.py:size_values_below_authored',
+        'gui_utils.py:board_minima_from_live',
+        'gui_utils.py:update_live_drc_floors',
+        'diff_pair_custody.py:disclose_pair_widths'} <= found,
+       "the scan finds the writeback, the authored grade, the GUI's live scans "
+       "and the pair-width census")
+
+
 def main():
     stamp_paths()
     pass_calls()
     fold()
+    width_paths()
     print()
     if FAILS:
         print(f"FAILED: {len(FAILS)}")

@@ -31,6 +31,7 @@ from connectivity import (
 from obstacle_map import get_same_net_through_hole_positions, same_net_partial_via_spans
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
+from area_clearance import narrow_tracks as _area_narrow_tracks
 
 # Import Rust router
 import sys
@@ -1606,7 +1607,8 @@ def terminal_graze(segments, term_pts, pcb_data, net_id, config):
     return worst
 
 
-def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=None):
+def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=None,
+                          area_neck=True):
     """Neck a TERMINAL-connection segment that grazes foreign copper, down to `floor`.
 
     A route's terminal connects to an off-grid pad / fanout escape: the
@@ -1636,13 +1638,21 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     that merely violates clearance (which stays a visible DRC flag).
 
     `floor` defaults to the board's fab track-width minimum (issue #176): necking
-    to the grid step (0.05 mm) used to emit sub-fab-floor copper."""
+    to the grid step (0.05 mm) used to emit sub-fab-floor copper.
+
+    ``area_neck`` (#1843) first necks ``segments`` to a rule area's track
+    width (`area_clearance.narrow_tracks`), which SPLITS tracks and rewrites
+    the list: pass False when ``segments`` is a subset of the route's list
+    (the pieces would land in the subset only), after necking the whole."""
     if floor is None:
         # #530: the fab floor raised to this net's own rule / board minimum.
         floor = config.track_floor(net_id, None, _fab_track_floor(pcb_data)) \
             if hasattr(config, 'track_floor') else _fab_track_floor(pcb_data)
     necked = 0
     hard = []
+    # #1843: the width passes before this one rebuild every width
+    if area_neck:
+        _area_narrow_tracks(segments, config, net_id, pcb_data)
     for s in segments:
         if not _touches_terminal(s, term_pts):
             continue
@@ -7775,6 +7785,7 @@ def _path_to_segments_vias(
         # the authoritative short gate.
         _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config)
 
+    _area_narrow_tracks(segments, config, net_id, pcb_data)   # #1843: a room's track width
     return segments, vias
 
 

@@ -4969,7 +4969,8 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
             _area = getattr(config, 'area_clearance', None) if config is not None else None
             _own = -1
             if _area is not None:
-                _cmax = max([_cmax] + [r.value for r in _area.regions])
+                _cmax = max([_cmax] + [r.value for r in _area.regions
+                                       if r.value is not None])
                 _own = _area.own_index(s.start_x, s.start_y, s.end_x, s.end_y, s.layer)
             cx0 = int(slo_x // _CELL) - 1; cx1 = int(shi_x // _CELL) + 1
             cy0 = int(slo_y // _CELL) - 1; cy1 = int(shi_y // _CELL) + 1
@@ -6899,7 +6900,8 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
     _area = getattr(config, 'area_clearance', None) if config is not None else None
     if _area is not None:
         # #1843: an area rule above `clearance` must stay in the window
-        R += max([0.0] + [r.value - clearance for r in _area.regions])
+        R += max([0.0] + [r.value - clearance for r in _area.regions
+                         if r.value is not None])
     best = None  # (shortfall, t, qx, qy)
 
     def consider(dist, i, qx, qy, req=required):
