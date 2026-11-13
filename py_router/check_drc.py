@@ -4814,7 +4814,7 @@ def _keepout_area_layers(ko, routing_layers):
 
 
 def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
-                   segments=None, vias=None):
+                   segments=None, vias=None, areas=None):
     """Copper inside a keep-out RULE AREA (`(zone ... (keepout ...))`).
 
     For every area in `pcb_data.board_info.keepouts` (board-level and
@@ -4831,7 +4831,9 @@ def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
     back from a keep-out by construction; pad and footprint rules are not
     modelled). `net_ids` (None = every net) restricts the items graded.
     `segments` / `vias` grade those items instead of the board's -- copper a
-    generator is about to lay (`keepout_refusal`).
+    generator is about to lay (`keepout_refusal`). `areas` grades those
+    regions, in the same form, instead of the board's rule areas (the
+    contact fingers, `contact_finger_areas`).
 
     One row per (item, area): `type` 'keepout', `item` 'track'/'via',
     `area` (the area's name, '' when it has none), `area_in_footprint`,
@@ -4846,7 +4848,9 @@ def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
     copper's box meets, and the distances are one vectorized shapely call per
     area.
     """
-    kos = [ko for ko in (getattr(pcb_data.board_info, 'keepouts', None) or [])
+    if areas is None:
+        areas = getattr(pcb_data.board_info, 'keepouts', None) or []
+    kos = [ko for ko in areas
            if len(ko.get('polygon') or ()) >= 3
            and (not ko.get('tracks_allowed', True)
                 or not ko.get('vias_allowed', True))]
@@ -5110,12 +5114,27 @@ def _keepout_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
     for a track through a tracks-not-allowed rule area when we measured it
     (10.0.3 and 10.0.7 report one row per track inside, #1591), so
     kicad_drc_compare keeps these on a labelled channel of their own."""
+    _finger_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
+                 violations, accepted, tol, quiet)
     rows = keepout_census(pcb_data, routing_layers, tol=tol,
                           net_ids=matching_net_ids)
     inherited = set()
     if rows and baseline_pd is not None:
         inherited = {_keepout_key(r) for r in keepout_census(
             baseline_pd, routing_layers, tol=tol)}
+    n_viol, n_inh = _accept_inherited(rows, inherited, violations, accepted)
+    if quiet or not rows:
+        return
+    print("Copper in keep-out rule areas: %d (violations), %d inherited from "
+          "--baseline (accepted)%s" % (
+              n_viol, n_inh,
+              '; pass --baseline <input board> to accept the copper the board '
+              'already had there' if n_viol and baseline_pd is None else ''))
+
+
+def _accept_inherited(rows, inherited, violations, accepted):
+    """File each keep-out row as a violation, or as `inherited-keepout` when
+    its `_keepout_key` is in `inherited`. Returns (violations, inherited)."""
     n_viol = n_inh = 0
     for r in rows:
         if _keepout_key(r) in inherited:
@@ -5125,12 +5144,48 @@ def _keepout_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
         else:
             violations.append(r)
             n_viol += 1
+    return n_viol, n_inh
+
+
+def contact_finger_areas(pcb_data):
+    """The via-only regions over an edge connector's contact fingers
+    (#1116), as `keepout_census` reads an area: the regions the router keeps
+    vias out of (`net_keepouts.derive_contact_fingers`), so the router and
+    this grade cannot disagree about which pad is a finger. [] when the board
+    has none."""
+    from net_keepouts import derive_contact_fingers
+    return [dict(ko, in_footprint=True, contact_finger=True)
+            for ko in derive_contact_fingers(pcb_data)]
+
+
+def _finger_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
+                 violations, accepted, tol, quiet):
+    """#1116: a via whose copper reaches into an edge connector's contact
+    finger, as a `keepout` row (`contact_finger` True) -- a drilled hole in
+    the plating the socket wipes against. No net is exempt, its own
+    included: KiCad sees a same-net via in a same-net pad as legal copper,
+    so this is check_drc's own finding, on kicad_drc_compare's keep-out
+    channel. A via the `--baseline` board already had there is accepted
+    `inherited-keepout`."""
+    areas = contact_finger_areas(pcb_data)
+    if not areas:
+        return
+    rows = keepout_census(pcb_data, routing_layers, tol=tol,
+                          net_ids=matching_net_ids, areas=areas)
+    for r in rows:
+        r['contact_finger'] = True
+    inherited = set()
+    if rows and baseline_pd is not None:
+        inherited = {_keepout_key(r) for r in keepout_census(
+            baseline_pd, routing_layers, tol=tol,
+            areas=contact_finger_areas(baseline_pd))}
+    n_viol, n_inh = _accept_inherited(rows, inherited, violations, accepted)
     if quiet or not rows:
         return
-    print("Copper in keep-out rule areas: %d (violations), %d inherited from "
-          "--baseline (accepted)%s" % (
+    print("Vias in an edge connector's contact fingers: %d (violations), "
+          "%d inherited from --baseline (accepted)%s" % (
               n_viol, n_inh,
-              '; pass --baseline <input board> to accept the copper the board '
+              '; pass --baseline <input board> to accept the vias the board '
               'already had there' if n_viol and baseline_pd is None else ''))
 
 
@@ -9052,6 +9107,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                                   f"past the area edge, {v['inside_mm']:.3f}mm of "
                                   f"centreline inside, at ({v['loc'][0]:.2f},{v['loc'][1]:.2f})")
                             print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                        elif v.get('contact_finger'):
+                            print(f"  Via:{v['net1']} in {v['area']} "
+                                  f"(no via in an edge connector's mating copper)")
                         else:
                             print(f"  Via:{v['net1']} in keep-out rule area {_an} "
                                   f"(vias not allowed)")
@@ -9664,7 +9722,10 @@ if __name__ == "__main__":
             'keepout': dict(
                 violations=sum(1 for v in _real if v.get('type') == 'keepout'),
                 inherited=sum(1 for v in violations
-                              if v.get('accepted') == 'inherited-keepout')),
+                              if v.get('accepted') == 'inherited-keepout'),
+                # #1116: of the violations, vias in a contact finger
+                contact_finger=sum(1 for v in _real if v.get('type') == 'keepout'
+                                   and v.get('contact_finger'))),
             # `short`: copper of two nets in contact (SHORT_TYPES), never a
             # drill, hole or edge item whatever its overlap (#1558). A
             # crossing has no overlap to grade: it is contact (#1563).

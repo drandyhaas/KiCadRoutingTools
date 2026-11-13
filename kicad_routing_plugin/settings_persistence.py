@@ -158,6 +158,7 @@ def get_dialog_settings(dialog):
         # Keepout zone (issue #27)
         'keepout_check': dialog.keepout_check.GetValue(),
         'keepout_layer': dialog.keepout_layer_ctrl.GetValue(),
+        'mask_keepouts': dialog.mask_keepouts.GetValue(),
 
         # Clear User-layer graphics after a successful route
         'clear_guide_layer_check': dialog.clear_guide_layer_check.GetValue(),
@@ -572,6 +573,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.keepout_check.SetValue(settings['keepout_check'])
     if 'keepout_layer' in settings:
         dialog.keepout_layer_ctrl.SetValue(settings['keepout_layer'])
+    if 'mask_keepouts' in settings:
+        dialog.mask_keepouts.SetValue(settings['mask_keepouts'])
     if 'clear_guide_layer_check' in settings:
         dialog.clear_guide_layer_check.SetValue(settings['clear_guide_layer_check'])
     if 'clear_keepout_layer_check' in settings:

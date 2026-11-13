@@ -363,7 +363,7 @@ def _tap_spatial_index(pcb_data: PCBData):
     # happen to sum the same.
     segs, vias = pcb_data.segments, pcb_data.vias
     sig = (len(segs), len(vias),
-           sum(len(v) for v in pcb_data.pads_by_net.values()),
+           sum(map(len, pcb_data.pads_by_net.values())),
            id(segs), id(vias),
            sum(map(id, segs)), sum(map(id, vias)))
     cached = getattr(pcb_data, '_tap_spatial_index_cache', None)
