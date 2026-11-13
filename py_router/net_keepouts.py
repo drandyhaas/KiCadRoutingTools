@@ -400,19 +400,41 @@ def derive_edge_bands(floors, pcb_data) -> List[dict]:
             for (track, via), names in sorted(groups.items(), key=lambda kv: repr(kv[0]))]
 
 
+#: A contact finger is a strip the socket's spring wipes along: over the
+#: human corpus every mating edge's pads have a median long/short ratio of at
+#: least 3.45 (most 4-7), while every pogo, touch, solder-pad or SMD-header
+#: footprint the plug predicates also accept is at most 2.0 (a Tag-Connect
+#: pad is round, 1.0).
+FINGER_MIN_ASPECT = 3.0
+
+
+def _elongated_fingers(fp) -> bool:
+    """Whether a footprint's netted copper pads are strips: their median
+    long/short side ratio is at least FINGER_MIN_ASPECT."""
+    from paste_apertures import pad_has_copper
+    ar = sorted(max(p.size_x, p.size_y) / min(p.size_x, p.size_y)
+                for p in fp.pads if p.net_id and pad_has_copper(p)
+                and p.size_x > 0 and p.size_y > 0)
+    return bool(ar) and ar[len(ar) // 2] >= FINGER_MIN_ASPECT
+
+
 def derive_contact_fingers(pcb_data) -> List[dict]:
     """One via-only region per copper pad of a mating-contact footprint
     (#1116): a PCB-edge plug (`floorplan.is_board_copper_plug`, #1098) or
     card-edge fingers (`part_class.is_card_fingers`) whose fingers stand at
-    the outline (`floorplan.fingers_at_outline`). A drilled hole in a
+    the outline (`floorplan.fingers_at_outline`) and are strips
+    (`_elongated_fingers`). A drilled hole in a
     contact finger damages the plating the socket wipes against, so no net's
     via may touch the pad's copper; tracks stay allowed, since they must
     leave the finger. [] when the board has no such footprint.
 
-    The outline test is what separates a mating edge from the other
-    unassembled pad footprints the two predicates accept -- a Tag-Connect or
-    pogo-pin target, touch pads, solder pads -- which sit inside the board,
-    and where human boards do drop vias."""
+    The outline and shape tests are what separate a mating edge from the
+    other unassembled pad footprints the two predicates accept -- a
+    Tag-Connect or pogo-pin target, touch pads, solder pads, an SMD header --
+    where human boards do drop vias. Distance alone cannot: over the corpus
+    a real edge's fingers stand up to 1.0 mm from the outline (Zorro3) and a
+    Tag-Connect at the edge stands 1.0 mm from it too. A finger is a strip
+    (`_elongated_fingers`), a pogo target a dot."""
     import _placer_path  # noqa: F401  (placement lives in py_placer/)
     from placement.floorplan import is_board_copper_plug, fingers_at_outline
     from placement.legality import BoardOutlineGate
@@ -428,7 +450,7 @@ def derive_contact_fingers(pcb_data) -> List[dict]:
             continue
         if gate is None:
             gate = BoardOutlineGate(pcb_data.board_info, 0.0)
-        if not fingers_at_outline(fp, gate):
+        if not (fingers_at_outline(fp, gate) and _elongated_fingers(fp)):
             continue
         for p in fp.pads:
             if not pad_has_copper(p) or p.size_x <= 0 or p.size_y <= 0:

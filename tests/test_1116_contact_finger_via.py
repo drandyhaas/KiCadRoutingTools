@@ -21,7 +21,8 @@ via in the finger.
      covering its pad; tracks allowed;
   2. control: the same footprint WITH a 3D model and SMD pads (an assembled
      part) derives nothing, and nor does the plug moved inside the board
-     (fingers away from the outline: a pogo or test-pad target);
+     (fingers away from the outline: a pogo or test-pad target), nor round
+     pads at the edge (a pogo target: a finger is a strip);
   3. stamped while a net routes, a region reaches the #568 small via rung
      only on a map that populates it: a rescue clone carries no small rung,
      and one holding the region ALONE would hide every other via block from
@@ -178,6 +179,16 @@ def derive(tmp):
     print('2b. control: the same plug inside the board (a pogo or test-pad target)')
     pcb = parse(write_board(os.path.join(tmp, 'inside.kicad_pcb'), plug_at=(15.0, 9.0)))
     ok('derives nothing', derive_contact_fingers(pcb) == [])
+    print('2c. control: round pads at the edge (a pogo-pin target, not fingers)')
+    # 0.25 mm from the bottom edge: fingers_at_outline accepts it, the shape does not
+    path = write_board(os.path.join(tmp, 'round.kicad_pcb'), plug_at=(PLUG_AT[0], 19.0))
+    with open(path, encoding='utf-8') as fh:
+        text = fh.read()
+    with open(path, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(text.replace('roundrect\n', 'circle\n').replace('(size 6 1.5)', '(size 1.5 1.5)'))
+    pcb = parse(run_utils.evidence(path, 'round-pad plug'))
+    ok('derives nothing', derive_contact_fingers(pcb) == [],
+       repr([(p.shape, p.size_x, p.size_y) for p in pcb.footprints['J1'].pads]))
 
 
 def rungs(tmp):
