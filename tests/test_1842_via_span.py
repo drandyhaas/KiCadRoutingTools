@@ -32,7 +32,10 @@ Checks:
      too, while its own routes are still ripped and retried;
   7. a board whose micro vias are IN the pads is routed from them the same
      way, and the inner step lays nothing on a layer outside its span (its
-     in-pad rescue used to put a stub on F.Cu).
+     in-pad rescue used to put a stub on F.Cu);
+  8. on a board with a copper pour, a step on a partial span does not run
+     the plane finalize (its taps are through vias at the step's via size),
+     says so, and still lays only vias of the span.
 """
 import contextlib
 import io
@@ -256,6 +259,53 @@ def in_pad(td, board):
           accept=True)
 
 
+ZONE = '''\t(zone
+\t\t(net "S01")
+\t\t(net_name "S01")
+\t\t(layer "B.Cu")
+\t\t(uuid "00000000-0000-4000-8000-000000001842")
+\t\t(hatch edge 0.5)
+\t\t(connect_pads
+\t\t\t(clearance 0.2)
+\t\t)
+\t\t(min_thickness 0.2)
+\t\t(filled_areas_thickness no)
+\t\t(fill
+\t\t\t(thermal_gap 0.3)
+\t\t\t(thermal_bridge_width 0.3)
+\t\t)
+\t\t(polygon
+\t\t\t(pts
+\t\t\t\t(xy 0.5 0.5) (xy 2.5 0.5) (xy 2.5 2.5) (xy 0.5 2.5)
+\t\t\t)
+\t\t)
+\t)
+'''
+
+
+def no_finalize(td, board):
+    print("8. a partial span and the plane finalize")
+    with open(board, encoding='utf-8') as fh:
+        t = fh.read()
+    k = t.rindex('\t(embedded_fonts')
+    staged = os.path.join(td, 'pour.kicad_pcb')
+    with open(staged, 'w', encoding='utf-8') as fh:
+        fh.write(t[:k] + ZONE + t[k:])
+    with open(os.path.splitext(board)[0] + '.kicad_pro', encoding='utf-8') as fh, \
+            open(os.path.splitext(staged)[0] + '.kicad_pro', 'w', encoding='utf-8') as oh:
+        oh.write(fh.read())
+    ok(len(load(staged).zones) == 1, "the staged board carries a pour")
+    out = os.path.join(td, 'pour_routed.kicad_pcb')
+    r = check(PY + [os.path.join(REPO, 'py_router', 'route.py'), evidence(staged), out,
+                    '--nets', 'S*', '--via-span', 'F.Cu', 'In1.Cu'],
+              accept=True, timeout=1800)
+    log = (r.stdout or '') + (r.stderr or '')
+    ok('Plane finalize not run: this step lays micro vias on F.Cu-In1.Cu' in log,
+       "the run says the plane finalize was not run")
+    kinds = sorted({(v.via_type, tuple(v.layers)) for v in load(evidence(out)).vias})
+    ok(kinds == [('micro', ('F.Cu', 'In1.Cu'))], f"every via is the span's: {kinds}")
+
+
 def main():
     spans()
     view()
@@ -264,6 +314,7 @@ def main():
         refusal(td, board)
         escapes(td, board)
         in_pad(td, board)
+        no_finalize(td, board)
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1

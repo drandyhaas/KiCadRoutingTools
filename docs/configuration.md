@@ -363,6 +363,10 @@ span allows. The whole stack is no span: through vias, as without the flag.
   via as well.) `route` lays the escapes and then routes
   within the span. A pad whose net already has copper on the span's other
   layers nearby is left alone, as is a drilled pad.
+- **A step on a partial span does not run the plane finalize.** The
+  finalize's taps are through vias at the step's via size, which under a
+  micro, blind or buried span is not a through via's; the run says so, and
+  the plane step connects the plane nets.
 - **Copper outside the span is held in place.** A via-span step lays copper on
   the span only, so it could not lay an escape's stub and via again: every
   existing track on another layer, and every via with copper on a layer the

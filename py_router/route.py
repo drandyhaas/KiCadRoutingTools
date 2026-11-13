@@ -5683,6 +5683,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if config.via_span:
         from via_span import apply_span as _apply_span1842
         _retyped1842 = sum(_apply_span1842(_r.get('new_vias'), config) for _r in results)
+        # ... and the stub layer-swap vias, which are in no result
+        _retyped1842 += _apply_span1842(all_swap_vias, config)
         if _retyped1842:
             print(f"  Via span: {_retyped1842} via(s) laid by a through-via site "
                   f"written as {config.via_span_type} {config.via_span[0]}-"
@@ -7614,8 +7616,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"KICAD_FINALIZE_ONLY=1 + --skip-routing)")
         except Exception as _e9c:
             print(f"  (pre-finalize checkpoint failed: {_e9c})")
+    # #1842: the plane finalize lays THROUGH taps, at the step's via size. A
+    # step on a partial span draws a micro, blind or buried via of that size,
+    # so it does not run the finalize; the plane step does.
+    _span_no_finalize = bool(config.via_span) and config.via_span_type != 'through'
+    if (_span_no_finalize and final_reconcile and not quick
+            and (getattr(pcb_data, 'zones', None) or [])):
+        print(f"\n  Plane finalize not run: this step lays {config.via_span_type} vias "
+              f"on {config.via_span[0]}-{config.via_span[-1]}, and a plane tap is a "
+              f"through via. Run the plane step for the plane nets.")
     if (final_reconcile and (not skip_routing or _fin_only)
             and not _ckpt_stop and not quick
+            and not _span_no_finalize
             and (output_file or return_results)
             and not _plane_finalize_active()
             and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
