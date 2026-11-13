@@ -388,9 +388,23 @@ span allows. The whole stack is no span: through vias, as without the flag.
   `--layers` the pairs route on the span's layers. GND return vias are laid
   only when a pour of the ground net is on a layer the span has (a return
   via that stops short of its plane is not laid, and the run says so).
+- **The fan-out steps take the span too.** `bga_fanout.py --via-span TOP
+  BOTTOM` escapes the part on that run of layers, with its vias (in the pad
+  or beside it, whichever the engine picks) joining exactly it;
+  `qfn_fanout.py --via-span` does the same for its via drops. The part's
+  layer must be one end of the span. The fan-out engines measure each via
+  site off the board themselves, so for the call the board carries only the
+  copper the span has (`via_span.only_span_copper`: pads and tracks on other
+  layers are set aside and put back, drilled pads stay), and a pad on the
+  far side of the board under a ball no longer blocks that ball's via. With
+  no `--layers` the escape uses the span's layers, and a micro span with no
+  via size draws the Default class's micro via. Measured on a top-side
+  BGA. Not separately measured: a back-side part, and the QFN via drops,
+  which go through the same mechanism. A plane-ball drop is a via of the
+  span like any other, so it reaches a plane only on a layer the span has.
 - The GUI route tab has the same three controls (**Via Span**, the type and
-  the escape mode beside it), and the differential tab reads the span from
-  them. The fan-out and plane steps lay through vias only.
+  the escape mode beside it), and the differential and fan-out tabs read the
+  span from them. The plane steps lay through vias only.
 
 On an 8-layer board with a 0.8 mm BGA over a field of bottom-side pads
 (`tests/fixtures/1842`), a bare route completes 25 of 36 nets with through

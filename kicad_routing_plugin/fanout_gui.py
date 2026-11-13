@@ -1955,7 +1955,15 @@ class FanoutTab(wx.Panel):
         clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
-        if shared.get('via_from_class'):
+        # #1842: under a micro via span, a via nobody asked for is the Default
+        # class's MICRO via (the CLI's `via_span.resolve_cli`)
+        from via_span import micro_via_for_span
+        _micro1842 = (micro_via_for_span(self.pcb_data, shared.get('via_span'),
+                                         shared.get('via_span_type'), self.board_filename)
+                      if shared.get('via_from_class') else None)
+        if _micro1842:
+            via_size, via_drill = _micro1842
+        elif shared.get('via_from_class'):
             # #1676: a via nobody asked for starts at the board's .kicad_dru rules
             from design_rules import run_via_for_rules
             via_size, via_drill = run_via_for_rules(None, self.pcb_data, via_size, via_drill)
@@ -2019,6 +2027,8 @@ class FanoutTab(wx.Panel):
             # run dog-bone). bga_fanout's --same-net-pad-clearance; lost from
             # this dict when #621 moved the call onto the worker thread.
             same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
+            # #1842: the route tab's Via Span
+            via_span=shared.get('via_span'), via_span_type=shared.get('via_span_type'),
             check_for_previous=config['check_for_previous'],
             no_inner_top_layer=config['no_inner_top_layer'],
             escape_method=config.get('escape_method', 'auto'),
@@ -2146,7 +2156,15 @@ class FanoutTab(wx.Panel):
         allow_via_in_pad = config.get('allow_via_in_pad', False)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
-        if shared.get('via_from_class'):
+        # #1842: under a micro via span, a via nobody asked for is the Default
+        # class's MICRO via (the CLI's `via_span.resolve_cli`)
+        from via_span import micro_via_for_span
+        _micro1842 = (micro_via_for_span(self.pcb_data, shared.get('via_span'),
+                                         shared.get('via_span_type'), self.board_filename)
+                      if shared.get('via_from_class') else None)
+        if _micro1842:
+            via_size, via_drill = _micro1842
+        elif shared.get('via_from_class'):
             # #1676: a via nobody asked for starts at the board's .kicad_dru rules
             from design_rules import run_via_for_rules
             via_size, via_drill = run_via_for_rules(None, self.pcb_data, via_size, via_drill)
@@ -2178,6 +2196,8 @@ class FanoutTab(wx.Panel):
             board_edge_clearance=shared.get('board_edge_clearance', 0.0),
             # #581: the Basic tab's via-in-pad policy, as the BGA path.
             same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
+            # #1842: the route tab's Via Span
+            via_span=shared.get('via_span'), via_span_type=shared.get('via_span_type'),
             # #1318: the route tab's power nets (qfn_fanout.py --power-nets).
             power_nets=shared.get('power_nets'),
             power_nets_widths=shared.get('power_nets_widths'),

@@ -5250,7 +5250,45 @@ def _resolve_classes(pcb_data, net_clearances, ceiling):
     return nc
 
 
-def generate_bga_fanout(footprint: Footprint,
+def generate_bga_fanout(footprint: Footprint, pcb_data: PCBData, *args,
+                        via_span: Optional[List[str]] = None,
+                        via_span_type: Optional[str] = None, **kwargs):
+    """`_generate_bga_fanout_all`, on a via span when one is given (#1842):
+    ``via_span`` (top and bottom layer) makes the fan-out escape on that run
+    of neighbouring copper layers, with vias that join exactly it. The part's
+    own layer must be one end of the span. Every engine measures its via
+    sites off the board, so for the call the board carries only the copper
+    the span has (`via_span.only_span_copper`): a pad or track on another
+    layer blocks no site, drilled pads still do."""
+    if not via_span:
+        return _generate_bga_fanout_all(footprint, pcb_data, *args, **kwargs)
+    import inspect
+    from types import SimpleNamespace
+    from via_span import apply_span, cut_layers_to_span, only_span_copper
+    bound = inspect.signature(_generate_bga_fanout_all).bind(
+        footprint, pcb_data, *args, **kwargs)
+    asked = bound.arguments.get('layers') or ['F.Cu', 'B.Cu']
+    span, kind, layers, costs = cut_layers_to_span(
+        pcb_data, list(asked), bound.arguments.get('layer_costs'), via_span, via_span_type)
+    if not span:
+        return _generate_bga_fanout_all(footprint, pcb_data, *args, **kwargs)
+    if footprint.layer not in (span[0], span[-1]):
+        from via_span import SpanError
+        raise SpanError(f"--via-span {span[0]} {span[-1]}: {footprint.reference} is on "
+                         f"{footprint.layer}, which is not an end of the span")
+    # the part's layer first: the engines read layers[0] as the ball layer
+    layers = [footprint.layer] + [l for l in layers if l != footprint.layer]
+    bound.arguments['layers'] = layers
+    if 'layer_costs' in bound.arguments:
+        bound.arguments['layer_costs'] = None if costs is None else costs
+    with only_span_copper(pcb_data, span):
+        result = _generate_bga_fanout_all(*bound.args, **bound.kwargs)
+    n = apply_span(result[1], SimpleNamespace(via_span=list(span), via_span_type=kind))
+    print(f"  Via span: {n} fan-out via(s) written as {kind} {span[0]}-{span[-1]}")
+    return result
+
+
+def _generate_bga_fanout_all(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
                         diff_pair_patterns: Optional[List[str]] = None,
@@ -5706,6 +5744,7 @@ def main():
                              f'--width is an alias)')
     parser.add_argument('--clearance', type=float, default=defaults.BGA_CLEARANCE,
                         help=f'Track clearance in mm (default: {defaults.BGA_CLEARANCE})')
+    __import__('via_span').add_cli_flags(parser, "Escape the part")
     parser.add_argument('--via-size', type=float, default=None,
                         help="Via outer diameter in mm (default: the board's Default "
                              f"net-class via, else {defaults.BGA_VIA_SIZE})")
@@ -5819,6 +5858,10 @@ def main():
     __import__('fab_tiers').apply_clearance_ceiling(args, 'bga_fanout')
     # #1795: a via nobody asked for starts at the board's Default net-class via,
     # as on route.py and the GUI's BGA panel; #1676: raised to its .kicad_dru rules
+    # #1842: --via-span against the board's own stack; a micro span draws the
+    # class's micro via, which the mechanical fab floor does not pin
+    _span_layers, _span_type, _micro_span = __import__('via_span').resolve_cli(
+        parser, args, args.pcb)
     _vs_explicit = args.via_size is not None or args.via_drill is not None
     from list_nets import board_default_netclass_param
     for _pname, _nckey, _fallback in (('via_size', 'via_diameter', defaults.BGA_VIA_SIZE),
@@ -5844,8 +5887,8 @@ def main():
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
-        via_size=getattr(args, 'via_size', None),
-        via_drill=getattr(args, 'via_drill', None),
+        via_size=None if _micro_span else getattr(args, 'via_size', None),
+        via_drill=None if _micro_span else getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps
     # (#513 item 1: discarding this dict shipped sub-floor vias after the warning).
@@ -5919,7 +5962,22 @@ def main():
     # the GUI's (its Cancel button / the plan executor's Stop); a CLI-side
     # wall-clock budget was removed deliberately -- no result this tool produces
     # may depend on timing, or the same command stops producing the same board.
-    tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
+    try:
+        from via_span import SpanError as _SpanError
+        _fan1842 = generate_bga_fanout
+        if args.via_span:
+            # a part on neither end of the span is refused before any work
+            import functools
+            _fan1842 = functools.partial(generate_bga_fanout, via_span=args.via_span,
+                                         via_span_type=args.via_span_type)
+            if _span_layers and footprint.layer not in (_span_layers[0], _span_layers[-1]):
+                raise _SpanError(
+                    f"--via-span {args.via_span[0]} {args.via_span[1]}: {args.component} "
+                    f"is on {footprint.layer}, which is not an end of the span")
+    except _SpanError as exc:
+        print(f"Error: {exc}")
+        return 1
+    tracks, vias_to_add, vias_to_remove, _failed_nets = _fan1842(
         footprint,
         pcb_data,
         same_net_pad_clearance=args.same_net_pad_clearance,  # #581
@@ -6037,8 +6095,10 @@ def main():
                 **fanout_fix_kwargs('bga', None, None,
                                     clearance=eff_clearance,
                                     track_width=args.track_width,
-                                    via_size=getattr(args, 'via_size', None),
-                                    via_drill=getattr(args, 'via_drill', None),
+                                    # #1842: a micro via's size is no statement
+                                    # about the board's via minimums
+                                    via_size=None if _micro_span else getattr(args, 'via_size', None),
+                                    via_drill=None if _micro_span else getattr(args, 'via_drill', None),
                                     clearance_ceiling=getattr(args, 'clearance_ceiling',
                                                               None),
                                     # #1568: the copper-to-hole floor this step

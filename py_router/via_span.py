@@ -15,6 +15,7 @@ DRILLED pad (its barrel passes through the span, whatever layers its copper
 is on). What does not: tracks, pours and undrilled pads on other layers, and
 vias that have no copper on the span's layers.
 """
+from contextlib import contextmanager as _contextmanager
 from dataclasses import replace
 from typing import List, Optional, Sequence, Tuple
 
@@ -203,6 +204,120 @@ def cut_layers_to_span(pcb_data, layers, layer_costs, via_span, via_span_type):
           f"{', '.join(layers)} only, and only copper on {', '.join(span)} "
           f"(and drilled pads) blocks a via site")
     return span, kind, layers, layer_costs
+
+
+class SpanError(ValueError):
+    """A via span a step cannot work on (the part is on neither end of it)."""
+
+
+@_contextmanager
+def only_span_copper(pcb_data, span):
+    """For a step that measures its own via sites off the board (the fan-out
+    engines): the board with the copper outside ``span`` set aside for the
+    duration -- tracks and pours on other layers, vias with no copper on the
+    span's layers, undrilled pads with none -- and put back on exit, in
+    place, with whatever the step added. Drilled pads stay. This is
+    `SpanView` for an engine that adds and removes copper on the board as it
+    works, where a snapshot would go stale."""
+    from geometry_utils import via_copper_layers
+    from check_drc import pad_copper_layers
+    keep = set(span)
+    copper = list(pcb_data.board_info.copper_layers)
+
+    def shown(pad):
+        return ((getattr(pad, 'drill', 0) or 0) > 0
+                or bool(keep & set(pad_copper_layers(pad, copper))))
+    held_segs = [s for s in pcb_data.segments if s.layer not in keep]
+    held_vias = [v for v in pcb_data.vias if not keep & set(via_copper_layers(v, copper))]
+    zones = getattr(pcb_data, 'zones', None)
+    held_zones = [z for z in (zones or []) if z.layer not in keep]
+    fp_pads = {ref: list(fp.pads) for ref, fp in pcb_data.footprints.items()}
+    net_pads = {nid: list(pads) for nid, pads in pcb_data.pads_by_net.items()}
+    gone_s, gone_v, gone_z = ({id(x) for x in held_segs}, {id(x) for x in held_vias},
+                              {id(x) for x in held_zones})
+    pcb_data.segments[:] = [s for s in pcb_data.segments if id(s) not in gone_s]
+    pcb_data.vias[:] = [v for v in pcb_data.vias if id(v) not in gone_v]
+    if zones is not None:
+        zones[:] = [z for z in zones if id(z) not in gone_z]
+    for ref, fp in pcb_data.footprints.items():
+        fp.pads[:] = [p for p in fp_pads[ref] if shown(p)]
+    for nid, pads in pcb_data.pads_by_net.items():
+        pads[:] = [p for p in net_pads[nid] if shown(p)]
+    try:
+        yield
+    finally:
+        pcb_data.segments[:] = held_segs + list(pcb_data.segments)
+        pcb_data.vias[:] = held_vias + list(pcb_data.vias)
+        if zones is not None:
+            zones[:] = held_zones + list(zones)
+        for ref, fp in pcb_data.footprints.items():
+            if ref in fp_pads:
+                fp.pads[:] = fp_pads[ref]
+        for nid, pads in pcb_data.pads_by_net.items():
+            if nid in net_pads:
+                pads[:] = net_pads[nid]
+
+
+def add_cli_flags(parser, what: str) -> None:
+    """`--via-span` / `--via-span-type` for a step's CLI (``what``: what the
+    step lays on the span)."""
+    parser.add_argument("--via-span", nargs=2, default=None, metavar=("TOP", "BOTTOM"),
+                        help=f"{what} on this run of neighbouring copper layers only, "
+                             "with vias that join exactly it (e.g. F.Cu In1.Cu: micro "
+                             "vias), as route.py's --via-span does. Default: through "
+                             "vias (#1842)")
+    parser.add_argument("--via-span-type", choices=("micro", "blind", "buried"),
+                        default=None,
+                        help="The via type written for --via-span (default: from where "
+                             "the span sits in the stack)")
+
+
+def resolve_cli(parser, args, pcb_path: str, argv=None):
+    """A step's `--via-span` checked against the board's own stack:
+    ``(span layers, type, micro)``, all falsy without a span or for one that
+    is the whole stack. With no `--layers` the step works on the span's
+    layers, and a micro span with no via size draws the Default class's
+    micro via."""
+    import sys
+    if not getattr(args, 'via_span', None):
+        return None, None, False
+    try:
+        layers, kind = resolve_via_span(file_copper_layers(pcb_path), args.via_span[0],
+                                        args.via_span[1], getattr(args, 'via_span_type', None))
+    except ValueError as e:
+        parser.error(f"--via-span: {e}")
+    if kind is None:
+        return None, None, False
+    given = sys.argv[1:] if argv is None else argv
+    if hasattr(args, 'layers') and not any(a in ('--layers', '-l') for a in given):
+        args.layers = list(layers)
+    if kind == 'micro':
+        dia, drill = default_micro_via(pcb_path)
+        for name, val in (('via_size', dia), ('via_drill', drill)):
+            if getattr(args, name, None) is None and val:
+                setattr(args, name, val)
+                print(f"--{name.replace('_', '-')} not given; using the board Default "
+                      f"net-class micro via {val}mm (--via-span).")
+    return list(layers), kind, kind == 'micro'
+
+
+def micro_via_for_span(pcb_data, via_span, via_span_type, pcb_path: str = ''):
+    """``(diameter, drill)`` of the Default class's micro via when ``via_span``
+    is a micro span on this board, else None -- for a front that sizes the
+    via itself (no size asked for) and must draw a micro via, not the
+    class's through via."""
+    if not via_span:
+        return None
+    try:
+        _span, kind = resolve_via_span(
+            list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
+            via_span[0], via_span[-1], via_span_type)
+    except ValueError:
+        return None
+    if kind != 'micro':
+        return None
+    dia, drill = default_micro_via(pcb_path or getattr(pcb_data, 'source_path', '') or '')
+    return (dia, drill) if dia and drill else None
 
 
 def apply_span(vias, config) -> int:
