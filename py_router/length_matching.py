@@ -2839,6 +2839,20 @@ def apply_time_matching_to_group(
               for n, r in group_results.items()}
     target_time = max(net_times[n] + die_ps[n] for n in net_times)
     print(f"  Time matching group: {len(group_results)} nets ({diff_pair_count} diff pairs, {single_count} single-ended), target={target_time:.2f}ps")
+    # #1846: a profiled member is timed with its tuning profile, the rest
+    # from the stackup -- two measures the target compares as one
+    from tuning_profiles import net_time_profile
+    _timed = {n: net_time_profile(pcb_data, r.get('p_net_id') if r.get('p_net_id') is not None
+                                  else next((getattr(s, 'net_id', None)
+                                             for s in (r.get('new_segments') or [])), None))
+                 is not None
+              for n, r in group_results.items()}
+    if any(_timed.values()) and not all(_timed.values()):
+        print(f"    WARNING: the group mixes nets timed with a tuning profile "
+              f"({', '.join(sorted(n for n, t in _timed.items() if t))}) and nets "
+              f"timed from the stackup "
+              f"({', '.join(sorted(n for n, t in _timed.items() if not t))}): "
+              f"the target compares profile ps with stackup ps")
     if any(die_ps.values()):
         print(f"  Pad-to-die delay included (#1248): "
               + _pad_to_die_note(die_ps, group_results, pcb_data, 'ps'))

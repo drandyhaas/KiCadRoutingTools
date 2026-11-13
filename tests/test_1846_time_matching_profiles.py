@@ -17,7 +17,10 @@ Checks:
      that net (0 for a layer it has no entry for), the stackup's without one;
   3. `route.py --time-matching` on the fixture with its two tracks removed:
      the group's target is 126.00 ps and P is given 6.00 ps, and the routed
-     board meets the fixture's own ps rule in check_drc.
+     board meets the fixture's own ps rule in check_drc;
+  4. a group that mixes a net with a profile and one without is named, since
+     its target compares profile ps with stackup ps (and an all-profile
+     group is not).
 """
 import contextlib
 import copy
@@ -161,10 +164,36 @@ def routed(td):
        "the routed board meets the 5 ps skew and the 100-140 ps window in check_drc")
 
 
+def _only_p(proj):
+    proj['net_settings']['netclass_patterns'] = [
+        p for p in proj['net_settings']['netclass_patterns'] if p['pattern'] != 'Q']
+
+
+def mixed(td):
+    print("4. a group that mixes profile and stackup timing")
+    board = stage(td, 'mix', strip=True, edit=_only_p)
+    r = check(PY + [os.path.join(REPO, 'py_router', 'route.py'), board,
+                    os.path.join(td, 'mix_out.kicad_pcb'),
+                    '--nets', 'P', 'Q', '--length-match-group', 'P', 'Q',
+                    '--time-matching', '--time-match-tolerance', '1.0'],
+              accept=True, timeout=1800)
+    ok('the group mixes nets timed with a tuning profile (P) and nets timed from '
+       'the stackup (Q)' in r.stdout, "P (profile) and Q (stackup) are named")
+    board = stage(td, 'same', strip=True)
+    r = check(PY + [os.path.join(REPO, 'py_router', 'route.py'), board,
+                    os.path.join(td, 'same_out.kicad_pcb'),
+                    '--nets', 'P', 'Q', '--length-match-group', 'P', 'Q',
+                    '--time-matching', '--time-match-tolerance', '1.0'],
+              accept=True, timeout=1800)
+    ok('target=' in r.stdout and 'the group mixes' not in r.stdout,
+       "a group timed all with its profile is not")
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         delays(td)
         routed(td)
+        mixed(td)
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1
