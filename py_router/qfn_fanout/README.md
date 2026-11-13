@@ -110,6 +110,13 @@ laid below a Board Setup minimum is named in a `WARNING` line and in `JSON_SUMMA
 (`rule`, `min`, `vias`, `below`, `smallest_ring` / `smallest`). bga_fanout.py does the same, from the
 same class via (0.5/0.3 when the board declares none).
 
+A class via can be too large for the part's pitch (KiCad's stock Default class via is 0.6/0.3, against a
+0.5 mm pitch QFN). So when the underpad via-drop still drops pads at every rung of its clearance ladder
+(#1328) and the via was sized by the run, it steps the via down the fab via rungs, re-running the clearance
+ladder at each, and keeps the run that drops fewest (`Via escalation (#1795)` on the console; every via laid
+below the class via is a `via_diameter` row of `JSON_SUMMARY.design_rules`). An asked-for `--via-size` (or
+the GUI's ticked via override) is drawn as asked. Nothing steps under `--escalation off`.
+
 ## Options
 
 | Option | Description | Default |
