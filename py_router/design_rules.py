@@ -1086,7 +1086,10 @@ class _Parser:
                     else:
                         raise Unsupported(f"argument {av!r} to {name}()")
                 self.take('op', ')')
-                if item_u == 'AB' and lname == 'iscoupleddiffpair' and not args:
+                if lname == 'iscoupleddiffpair' and not args:
+                    # KiCad's isCoupledDiffPairFunc reads the PAIR whichever
+                    # item it is called on: A., B. and AB. are one predicate
+                    # (measured on kicad-cli 10.0.8)
                     return ('coupled',)
                 if self.areas and lname in _AREA_FUNCS:
                     if len(args) != 1:
