@@ -3294,8 +3294,9 @@ what each load draws (pads as `REF.PAD`, currents in A):
 
 - A track segment is `rho * length / (width * thickness)`, at its layer's own
   copper weight from the stackup (1 oz without one). A via is a barrel
-  between the layers it is joined on, `rho * height / (pi * (drill - wall) *
-  wall)`, its height from the stackup (1.6 mm of board without one).
+  between the layers it is joined on, `rho * height / (pi * (drill + wall) *
+  wall)` -- the drill is the finished hole, the wall the plating around it --
+  its height from the stackup (1.6 mm of board without one).
 - Copper joins wherever it overlaps, as KiCad connects it: a track end
   within its half-width of a pad's copper, a track passing over a pad, a via
   whose disc meets a track or a pad, two track ends whose copper overlaps
@@ -3312,8 +3313,8 @@ what each load draws (pads as `REF.PAD`, currents in A):
 - `--via-plating-um` — the barrel wall, default 25. It is an ASSUMPTION about
   the fab, and the report says so until the flag states it.
 - `--temp-rise` — the rise the ratings are read at, default 10 °C: IPC-2152
-  for a track (`plane_resistance.calculate_max_current_ipc2152`), IPC-2221 on
-  the barrel's plated cross-section for a via.
+  (`plane_resistance.calculate_max_current_ipc2152`) for both, on a track's
+  cross-section and on a via barrel's plated one.
 
 Per net it prints the current solved and the worst drop, each load's drop,
 each via's current against its rating, and the track segments carrying the

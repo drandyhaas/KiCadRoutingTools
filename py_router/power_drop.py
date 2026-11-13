@@ -9,7 +9,9 @@ This module builds the net's copper into a resistor network and solves it:
   * a track segment is a resistor, rho * length / (width * thickness), its
     thickness the layer's own copper weight (`stackup_copper_oz`);
   * a via is a barrel resistor between each pair of neighbouring layers it is
-    joined on, rho * height / (pi * (drill + plating) * plating);
+    joined on, rho * height / (pi * (drill + plating) * plating) -- the drill
+    is the finished hole, the plating the wall around it -- rated on the
+    same IPC-2152 basis as a track of that cross-section;
   * a pad is a junction: every track, via and pad whose copper meets its
     copper joins there.
 
@@ -38,8 +40,7 @@ import math
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from plane_resistance import (COPPER_RESISTIVITY, OZ_TO_METERS, stackup_copper_oz,
-                              calculate_max_current_ipc2152,
-                              calculate_max_current_ipc2221)
+                              calculate_max_current_ipc2152)
 
 #: plated barrel wall of a via, mm (IPC-6012 class 2 asks an average of 20 um;
 #: fabs quote 18-25). A stated assumption: `via_plating_mm` overrides it.
@@ -58,6 +59,14 @@ _GRID_MM = 2.0
 
 def pad_ref(pad) -> str:
     return f"{pad.component_ref}.{pad.pad_number}"
+
+
+def via_barrel_area_mm2(drill_mm: float, plating_mm: float) -> float:
+    """Cross-section of a via's plated barrel, mm^2. The drill is the
+    finished hole and the plating its wall, so the copper is the ring between
+    diameters drill and drill + 2 * plating: pi * (drill + plating) * plating."""
+    plating_mm = max(plating_mm, 1e-6)
+    return math.pi * (max(drill_mm, 0.0) + plating_mm) * plating_mm
 
 
 def _layer_heights(pcb_data) -> Dict[str, float]:
@@ -322,8 +331,7 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
                         index=i, part_mm=length * (t1 - t0))
     for k, (v, nodes) in enumerate(zip(vias, via_nodes)):
         on = [layer for layer in copper if layer in nodes]
-        wall = max(min(via_plating_mm, v.drill / 2.0), 1e-6)
-        area_mm2 = math.pi * (v.drill - wall) * wall if v.drill > wall else math.pi * wall * wall
+        area_mm2 = via_barrel_area_mm2(v.drill, via_plating_mm)
         for la, lb in zip(on, on[1:]):
             h = abs(heights.get(lb, 0.0) - heights.get(la, 0.0))
             ohms = COPPER_RESISTIVITY * (h * 1e-3) / (area_mm2 * 1e-6) if h > 0 else 0.0
@@ -526,10 +534,10 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
             'over': bool(amps > rating + 1e-9)})
     for k, amps in sorted(via_amps.items()):
         v = vias[k]
-        wall = max(min(via_plating_mm, v.drill / 2.0), 1e-6)
-        area_mm2 = math.pi * (v.drill - wall) * wall if v.drill > wall else math.pi * wall * wall
-        # the barrel as a conductor of that cross-section inside the board
-        rating = calculate_max_current_ipc2221(area_mm2 / (OZ_TO_METERS * 1e3), 1.0,
+        area_mm2 = via_barrel_area_mm2(v.drill, via_plating_mm)
+        # the barrel as a conductor of that cross-section, rated on the same
+        # IPC-2152 basis as a track: the width of 1 oz copper of that area
+        rating = calculate_max_current_ipc2152(area_mm2 / (OZ_TO_METERS * 1e3), 1.0,
                                                temp_rise_c, True)
         result['vias'].append({
             'at': (v.x, v.y), 'size_mm': v.size, 'drill_mm': v.drill,

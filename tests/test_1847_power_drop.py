@@ -63,7 +63,13 @@ def r_track(length_mm, width_mm):
 
 
 def r_via(drill_mm=0.2, height_mm=1.6):
-    return RHO * height_mm * 1e-3 / (math.pi * (drill_mm - WALL) * WALL * 1e-6)
+    # the drill is the finished hole: the wall is the ring outside it
+    return RHO * height_mm * 1e-3 / (math.pi * (drill_mm + WALL) * WALL * 1e-6)
+
+
+def ipc2152(area_mm2, rise=10.0):
+    """IPC-2152's external fit, I = 0.048 dT^0.44 A^0.725, A in mils^2."""
+    return 0.048 * rise ** 0.44 * (area_mm2 / 0.0254 ** 2) ** 0.725
 
 
 BRANCH = math.hypot(3, 2)
@@ -135,9 +141,16 @@ def fixture(td):
        f"track currents by width: {amps}")
     over = sorted((s['width_mm'], round(s['current_a'], 3)) for s in res['segments']
                   if s['over'])
+    # by hand: 0.10 mm track 0.45 A, 0.15 mm 0.60 A, and the 0.2 mm via's
+    # barrel (pi * 0.225 * 0.025 mm^2) 1.45 A, on one IPC-2152 basis
+    via_rating = ipc2152(math.pi * (0.2 + WALL) * WALL)
     ok(over == [(0.1, 0.5), (0.15, 0.8), (0.15, 0.8)]
-       and all(v['over'] for v in res['vias']) and res['over'] == 5,
-       f"over their rating: tracks {over} and both vias; the 0.3 A branch is not")
+       and not any(v['over'] for v in res['vias']) and res['over'] == 3
+       and all(near(v['rating_a'], via_rating, 1e-3) for v in res['vias'])
+       and all(near(s['rating_a'], ipc2152(s['width_mm'] * 0.035), 1e-3)
+               for s in res['segments']),
+       f"over their rating: tracks {over}; the 0.3 A branch and the vias, rated "
+       f"{res['vias'][0]['rating_a']} A (by hand {via_rating:.4f}), are not")
     ok(not res['not_modelled'] and not res['errors'], "nothing is left out of this solve")
 
 
@@ -308,7 +321,7 @@ def command(td):
     loads = evidence(BOARD + '.loads.json')
     r = check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', loads, '--json', out],
               accept=True)
-    ok('worst drop 60.4 mV' in r.stdout and 'U1.1: 0.5 A, drop 60.4 mV' in r.stdout
+    ok('worst drop 59.7 mV' in r.stdout and 'U1.1: 0.5 A, drop 59.7 mV' in r.stdout
        and 'OVER' in r.stdout and '(assumed)' in r.stdout,
        "the report gives the drops, flags what is over, and says the plating is assumed")
     with open(evidence(out, 'the JSON report'), encoding='utf-8') as fh:
@@ -320,7 +333,7 @@ def command(td):
     r = check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', loads, '--via-plating-um', '18'],
               accept=True)
     ok('18 um plating' in r.stdout and '(assumed)' not in r.stdout
-       and 'worst drop 60.4 mV' not in r.stdout,
+       and 'worst drop 59.7 mV' not in r.stdout,
        "a stated plating is used and no longer called assumed")
     check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', os.path.join(td, 'none.json')],
           refuse='loads file not found', code=3)
