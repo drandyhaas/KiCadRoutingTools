@@ -118,7 +118,8 @@ def main():
         doc = json.load(open(evidence(jo, 'check_drc JSON'), encoding='utf-8'))
         check('1. ...and the JSON counts it (by_type and the keepout block)',
               doc['by_type'].get('keepout') == 1
-              and doc['keepout'] == {'violations': 1, 'inherited': 0}, str(doc.get('keepout')))
+              and doc['keepout'] == {'violations': 1, 'inherited': 0, 'contact_finger': 0},
+              str(doc.get('keepout')))
 
         # 2
         b2 = board(work, 'outside', segs=[(5, 5, 25, 5, '/SIG', 'F.Cu')])
