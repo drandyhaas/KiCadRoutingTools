@@ -31,7 +31,6 @@ from connectivity import (
 from obstacle_map import get_same_net_through_hole_positions, same_net_partial_via_spans
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
-from area_clearance import config_for_segment as _area_config_for_segment
 
 # Import Rust router
 import sys
@@ -186,7 +185,7 @@ def _foreign_pad_arrays(pcb_data, layer):
 
 
 def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
-                         net_clearances=None):
+                         net_clearances=None, area=None):
     """Exact min edge distance from sample points to the CUSTOM pads of other
     nets (check_drc.point_to_pad_distance -- the model kicad-cli agrees with to
     ~0.1um). Windowed by each pad's bbox + _FOREIGN_PAD_WINDOW; same
@@ -204,6 +203,17 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
     if not custom:
         return 1e9
     from check_drc import point_to_pad_distance, _polys_edge_arrays
+
+    def _area_adj(pad, adj):
+        # #1843: `area` = (AreaClearance, the moving copper's region, layer)
+        if area is None or base_clearance is None:
+            return adj
+        a, own, layer = area
+        ex_ = a.pair_excess(own, np.array([a.pad_index(pad, layer)]), base_clearance, layer)[0]
+        if math.isnan(ex_):
+            return adj
+        lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+        return lc - base_clearance if lc > 0 else ex_
     R = _FOREIGN_PAD_WINDOW
     best = 1e9
     if len(pts) <= 2:
@@ -218,6 +228,7 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
                 if net_clearances:
                     adj = max(adj, net_clearances.get(nid, base_clearance)
                               - base_clearance)
+                adj = _area_adj(pad, adj)
             for (px, py) in pts:
                 if abs(px - pad.global_x) > R + ex or abs(py - pad.global_y) > R + ey:
                     continue
@@ -237,6 +248,7 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
             if net_clearances:
                 adj = max(adj, net_clearances.get(nid, base_clearance)
                           - base_clearance)
+            adj = _area_adj(pad, adj)
         if PX is None:
             P = np.asarray(pts, dtype=float).reshape(-1, 2)
             PX, PY = P[:, 0], P[:, 1]
@@ -308,7 +320,8 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
     best_custom = _custom_pad_min_dist(custom, net_id, ((x, y),), base_clearance,
-                                       net_clearances)
+                                       net_clearances,
+                                       area=_custom_area_ctx(config, x, y, x, y, layer))
     if cx.size == 0:
         return best_custom
     R = _FOREIGN_PAD_WINDOW
@@ -336,6 +349,8 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
             excess = np.maximum(excess, fcls)
         excess = _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids,
                                          plc, excess, base_clearance, own_type)
+        excess = _fold_area_pad_excess(config, pcb_data, net_id, x, y, x, y, layer,
+                                       near, plc, excess, base_clearance, own_type)
         d = d - excess
     return min(float(np.min(d)), best_custom)
 
@@ -362,7 +377,7 @@ def _foreign_pad_types(pcb_data, layer):
 
 
 def _scoped_excess(config, net_id, nids, foreign_type, base_clearance, layer=None,
-                   pad_types=None, own_type='track'):
+                   pad_types=None, own_type='track', orders=None):
     """#1491: per foreign item of `foreign_type` ('track', 'via' or 'pad',
     with `pad_types` per row for pads), the scoped rule's requirement for the
     moving net's `own_type` item against it, minus `base_clearance` (negative
@@ -385,7 +400,43 @@ def _scoped_excess(config, net_id, nids, foreign_type, base_clearance, layer=Non
         if layer is not None and layer in s.sc.layer_rules_after(lmap, got[2]):
             continue
         out[i] = max(got[0], s.fab_floor) - base_clearance
+        if orders is not None:
+            orders[i] = got[2]
     return out
+
+
+def _area_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, kind, arrays,
+                 near, base_clearance, foreign_type, own_type='track',
+                 pad_types=None, plc=None):
+    """#1843: per `near` row of one of the cached foreign arrays (`kind`
+    'seg', 'pad' or 'via', see `AreaClearance.rows_index`), the clearance a
+    rule area binds the pair at minus `base_clearance` -- the moving copper
+    (x1,y1)-(x2,y2) on `layer` or the row standing in the area -- else NaN.
+    A class/type-scoped rule LATER in the file than the area's still binds
+    its own pairs (NaN there, so its fold stands), and a pad's own override
+    outranks every rule (`plc`). None without an area rule or when none
+    binds, so callers stay on their own path."""
+    area = getattr(config, 'area_clearance', None) if config is not None else None
+    if area is None or base_clearance is None:
+        return None
+    own = area.own_index(x1, y1, x2, y2, layer)
+    rows = area.rows_index(kind, layer, arrays)[near]
+    if own < 0 and not (rows >= 0).any():
+        return None
+    ax = area.pair_excess(own, rows, base_clearance, layer)
+    bound = ~np.isnan(ax)
+    if not bound.any():
+        return None
+    if getattr(config, 'scoped_clearance', None) is not None:
+        nids = np.asarray(arrays[0])[near]
+        orders = np.full(len(nids), -1, dtype=np.int64)
+        _scoped_excess(config, net_id, nids, foreign_type, base_clearance, layer,
+                       pad_types=pad_types, own_type=own_type, orders=orders)
+        pair = np.maximum(rows, own)
+        ax = np.where(orders > area.order_of(pair), np.nan, ax)
+    if plc is not None:
+        ax = np.where(bound & (plc > 0), plc - base_clearance, ax)
+    return ax
 
 
 def _coupled_excess(config, net_id, nids, kind, base_clearance, layer=None):
@@ -442,6 +493,31 @@ def _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids, plc,
     return np.where(bound, scoped_x, excess)
 
 
+def _fold_area_pad_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, near,
+                          plc, excess, base_clearance, own_type='track'):
+    """#1843: `_area_excess` over the foreign pads (`near` rows of the pad
+    arrays), folded into `excess`: the area's value replaces the class term
+    where it binds. `excess` unchanged without an area rule."""
+    if config is None or getattr(config, 'area_clearance', None) is None:
+        return excess
+    types = None
+    if getattr(config, 'scoped_clearance', None) is not None:
+        types = np.asarray(_foreign_pad_types(pcb_data, layer), dtype=object)[near]
+    ax = _area_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, 'pad',
+                      _foreign_pad_arrays(pcb_data, layer), near, base_clearance, 'pad',
+                      own_type=own_type, pad_types=types, plc=plc[near])
+    return excess if ax is None else _fold_scoped_excess(excess, ax)
+
+
+def _custom_area_ctx(config, x1, y1, x2, y2, layer):
+    """#1843: what `_custom_pad_min_dist` needs to hold a custom pad to a
+    rule area's value: (the area, the moving copper's region, layer)."""
+    area = getattr(config, 'area_clearance', None) if config is not None else None
+    if area is None:
+        return None
+    return (area, area.own_index(x1, y1, x2, y2, layer), layer)
+
+
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           base_clearance=None, net_clearances=None, config=None,
                           own_type='track', need=None):
@@ -464,7 +540,8 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     sx = x1 + (x2 - x1) * _t
     sy = y1 + (y2 - y1) * _t
     best_custom = _custom_pad_min_dist(
-        custom, net_id, list(zip(sx, sy)), base_clearance, net_clearances)
+        custom, net_id, list(zip(sx, sy)), base_clearance, net_clearances,
+        area=_custom_area_ctx(config, x1, y1, x2, y2, layer))
     if cx.size == 0:
         return best_custom
     R = _FOREIGN_PAD_WINDOW
@@ -485,6 +562,8 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
             excess = np.maximum(excess, fcls)
         excess = _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids,
                                          plc, excess, base_clearance, own_type)
+        excess = _fold_area_pad_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer,
+                                       near, plc, excess, base_clearance, own_type)
         # #1630: the partner's pad at the rule binding the pair; a pad's own
         # override still outranks it
         cx_ = _coupled_excess(config, net_id, nids[near], 'pad', base_clearance, layer)
@@ -887,6 +966,13 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                 sx_, np.array([track_clearances.get(int(f), -math.inf)
                                for f in fnid], dtype=float) - base_clearance))
         excess = _fold_scoped_excess(excess, sx_)
+    if config is not None and getattr(config, 'area_clearance', None) is not None:
+        # #1843: a rule area binding the moving track or the foreign copper
+        _ax = _area_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, 'seg',
+                           (nid, fax, fay, fbx, fby, fhw), near, base_clearance,
+                           'track', own_type=own_type)
+        if _ax is not None:
+            excess = _fold_scoped_excess(excess, _ax)
     if config is not None and getattr(config, 'coupled_pair_clearances', None):
         # #1630: the pair's own partner at the rule binding the pair
         excess = _fold_scoped_excess(excess, _coupled_excess(
@@ -1028,6 +1114,13 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     if config is not None and getattr(config, 'scoped_clearance', None) is not None:
         excess = _fold_scoped_excess(excess, _scoped_excess(
             config, net_id, nids[near], 'via', base_clearance, layer, own_type=own_type))
+    if config is not None and getattr(config, 'area_clearance', None) is not None:
+        # #1843: a rule area binding the moving copper or the foreign via
+        _ax = _area_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, 'via',
+                           (nids, cx, cy, rad), near, base_clearance, 'via',
+                           own_type=own_type)
+        if _ax is not None:
+            excess = _fold_scoped_excess(excess, _ax)
     if config is not None and getattr(config, 'coupled_pair_clearances', None):
         # #1630: the partner's via at the rule binding the pair
         excess = _fold_scoped_excess(excess, _coupled_excess(
@@ -1469,6 +1562,28 @@ def _terminal_room(s, term_pts, pcb_data, net_id, config):
     return own_l, d, d_edge - edge_clr, sense_d
 
 
+def _terminal_short_by(s, term_pts, pcb_data, net_id, config):
+    """(short_by, own_l, d, edge_room, sense_d) of terminal segment `s`, the
+    worst over the pieces it ships as (#1843: a track that leaves a tightened
+    rule area is split at its edge, and each piece is the item KiCad grades;
+    the distance helpers fold the area per piece). One piece, `s` itself,
+    without such an area."""
+    area = getattr(config, 'area_clearance', None)
+    pieces = [s]
+    if area is not None:
+        from area_clearance import split_run_copper
+        got = split_run_copper(area, [s])
+        if got:
+            pieces = got[0][1]
+    worst = None
+    for p in pieces:
+        own_l, d, edge_room, sense_d = _terminal_room(p, term_pts, pcb_data, net_id, config)
+        short_by = max(own_l - (d - s.width / 2.0), s.width / 2.0 - edge_room)
+        if worst is None or short_by > worst[0]:
+            worst = (short_by, own_l, d, edge_room, sense_d)
+    return worst
+
+
 def terminal_graze(segments, term_pts, pcb_data, net_id, config):
     """The worst clearance graze a route's terminal copper still has, AFTER
     its neck: ``(short_by mm, segment)``, or None when every terminal segment
@@ -1485,9 +1600,7 @@ def terminal_graze(segments, term_pts, pcb_data, net_id, config):
     for s in segments:
         if not _touches_terminal(s, term_pts):
             continue
-        own_l, d, edge_room, _sd = _terminal_room(s, term_pts, pcb_data,
-                                                  net_id, config)
-        short_by = max(own_l - (d - s.width / 2.0), s.width / 2.0 - edge_room)
+        short_by = _terminal_short_by(s, term_pts, pcb_data, net_id, config)[0]
         if short_by > NECK_GRAZE_TOL and (worst is None or short_by > worst[0]):
             worst = (short_by, s)
     return worst
@@ -1533,14 +1646,14 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     for s in segments:
         if not _touches_terminal(s, term_pts):
             continue
-        # #1843: a terminal inside a rule area is held to the area's rule
-        own_l, d, edge_room, _sense_d = _terminal_room(
-            s, term_pts, pcb_data, net_id, _area_config_for_segment(config, s))
+        # #1843: a terminal in a rule area is held to the area's rule, per
+        # piece it ships as (the helpers fold the area)
+        short_by, own_l, d, edge_room, _sense_d = _terminal_short_by(
+            s, term_pts, pcb_data, net_id, config)
         # #1159: a graze is an edge gap BELOW the rule. Copper exactly at the
         # rule is legal (the writer emits 1 nm coordinates, so 1 nm is the
         # only tolerance the test needs); the 1e-4 margin belongs to the neck
         # TARGET, once a real graze exists, and never to the trigger.
-        short_by = max(own_l - (d - s.width / 2.0), s.width / 2.0 - edge_room)
         if short_by > NECK_GRAZE_TOL:
             # 1e-4: stay just inside the rule
             allowed_half = min(d - own_l, edge_room) - 1e-4

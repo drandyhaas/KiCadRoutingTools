@@ -2417,8 +2417,17 @@ class DesignRules:
         copper stands in, so those rules resolve by position. A rule naming
         an area the board does not draw as a rule area is left unread (its
         `area_scoped_condition` is cleared). Returns the index, or None when
-        no rule is left to read that way."""
+        no rule is left to read that way. Built once per board: asked again
+        for the same board (and the same rule areas), it returns the index
+        it holds and keeps the resolved items it has cached."""
+        board = getattr(pcb_data, 'board_info', None)
+        sig = (id(pcb_data), id(getattr(board, 'keepouts', None)),
+               len(getattr(board, 'keepouts', None) or ()))
+        held = getattr(self, '_area_index_of', None)
+        if held is not None and held[0] == sig and held[1] is pcb_data:
+            return self._area_index
         idx = AreaIndex(self, pcb_data)
+        self._area_index_of = (sig, pcb_data)
         self._area_index = idx if idx.names else None
         self._cache.clear()
         return self._area_index

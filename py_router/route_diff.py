@@ -2410,6 +2410,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         label='Diff-pair ', snap=False, phantom=False, neck=False,
         keep_input_copper=keep_input_copper,
         progress_callback=progress_callback)
+    # #1843: a coupled pair is laid at one gap, so a tightened rule area it
+    # passes through is not honoured between P and N: said so, per pair.
+    from area_clearance import pair_gaps_below
+    for _pg in pair_gaps_below(getattr(config, 'area_clearance', None), pcb_data,
+                               diff_pair_ids_to_route):
+        print(f"  WARNING: diff pair {_pg['pair']}: its P-to-N gap "
+              f"({_pg['gap']:g} mm) is below rule '{_pg['rule']}' "
+              f"({_pg['value']:g} mm) in rule area '{_pg['area']}'; KiCad grades the "
+              f"pair there at the area's value and a coupled pair is not widened "
+              f"inside it (#1843)")
     cleanup_input_strip = _dp_cleanup.input_strip_segments
     if force_stale_segs:
         cleanup_input_strip = list(cleanup_input_strip or []) + force_stale_segs

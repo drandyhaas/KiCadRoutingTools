@@ -793,9 +793,19 @@ def _compose_area_cache(area, pcb_data, net_id, config, extra_clearance,
     from area_clearance import compose_rows
     data = _precompute_net_obstacles(pcb_data, net_id, area.outside_config(config),
                                      extra_clearance, diagonal_margin, _small_pass)
+    near = area.regions_near(area.net_bounds(pcb_data, net_id),
+                             area.stamp_reach(config, extra_clearance))
+    if not near:
+        # no row of this net can reach an area: the class-value rows are
+        # the composition (every row is outside, no region keeps any)
+        return data
     inner = [_precompute_net_obstacles(pcb_data, net_id, area.region_config(config, i),
                                        extra_clearance, diagonal_margin, _small_pass)
+             if i in near else None
              for i in range(len(area.regions))]
+    from types import SimpleNamespace
+    inner = [d if d is not None else SimpleNamespace(blocked_vias_rungs={})
+             for d in inner]
     # the #568 small rung is the SAME array as blocked_vias_small
     _alias = data.blocked_vias_rungs.get(1) is data.blocked_vias_small
     for name, kind in (('blocked_cells', 'cells'), ('blocked_vias', 'vias'),
@@ -1504,6 +1514,35 @@ class ViaPlacementObstacleData:
 
 
 def precompute_via_placement_obstacles(
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig,
+    all_copper_layers: List[str],
+    exclude_net_id: Optional[int] = None,
+) -> ViaPlacementObstacleData:
+    """`_precompute_via_placement_obstacles`, composed over the board's area
+    clearance rules (#1843) exactly as the builders it mirrors compose their
+    stamps (`area_clearance.composed_builder`), so a net's removal from a
+    shared map takes what its add stamped."""
+    _area = getattr(config, 'area_clearance', None)
+    if _area is None:
+        return _precompute_via_placement_obstacles(pcb_data, net_id, config,
+                                                    all_copper_layers, exclude_net_id)
+    from area_clearance import compose_via_placement
+    outer = _precompute_via_placement_obstacles(pcb_data, net_id, _area.outside_config(config),
+                                                all_copper_layers, exclude_net_id)
+    near = _area.regions_near(_area.net_bounds(pcb_data, net_id),
+                              _area.stamp_reach(config))
+    if not near:
+        return outer
+    inner = [_precompute_via_placement_obstacles(pcb_data, net_id,
+                                                 _area.region_config(config, i),
+                                                 all_copper_layers, exclude_net_id)
+             if i in near else None for i in range(len(_area.regions))]
+    return compose_via_placement(_area, config, all_copper_layers, outer, inner)
+
+
+def _precompute_via_placement_obstacles(
     pcb_data: PCBData,
     net_id: int,
     config: GridRouteConfig,
