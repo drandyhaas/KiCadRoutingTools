@@ -1713,9 +1713,14 @@ def achievability_note(pcb: PCBData, layer_name: str, target_z0: float, *,
     return text, detail
 
 
-def get_layer_ps_per_mm(pcb: PCBData, layer_name: str) -> float:
+def get_layer_ps_per_mm(pcb: PCBData, layer_name: str, net_id=None) -> float:
     """
     Get propagation delay in picoseconds per millimeter for a layer.
+
+    With ``net_id``, and a time-domain tuning profile on that net's class
+    (#1846, `tuning_profiles.net_time_profile`), the profile's delay for the
+    layer -- what KiCad's DRC times the net with; 0.0 for a layer the profile
+    has no entry for. Otherwise the stackup's:
 
     Uses the layer's effective dielectric constant to calculate signal velocity:
     v = c / sqrt(epsilon_eff)
@@ -1728,6 +1733,11 @@ def get_layer_ps_per_mm(pcb: PCBData, layer_name: str) -> float:
     Returns:
         Propagation delay in ps/mm
     """
+    if net_id is not None:
+        from tuning_profiles import net_time_profile
+        prof = net_time_profile(pcb, net_id)
+        if prof is not None:
+            return prof.layer_ps_per_mm.get(layer_name, 0.0)
     eps_eff = get_layer_epsilon_eff(pcb, layer_name)
     speed_mm_per_ns = SPEED_OF_LIGHT_MM_PER_NS / math.sqrt(eps_eff)
     # Convert ns/mm to ps/mm (1 ns = 1000 ps)
@@ -1810,6 +1820,15 @@ def calculate_route_propagation_time_ps(
         # Default FR4 microstrip: eps_eff = (4.3 + 1) / 2 = 2.65
         default_ps_per_mm = 1000.0 / (SPEED_OF_LIGHT_MM_PER_NS / math.sqrt(2.65))
         return length * default_ps_per_mm
+
+    # #1846: copper of ONE net whose class has a time-domain tuning profile is
+    # timed with the profile, as KiCad's DRC times it
+    _nets = {getattr(x, 'net_id', None) for x in list(segments or ()) + list(vias or ())}
+    if len(_nets) == 1:
+        from tuning_profiles import net_time_profile, route_delay_ps
+        _prof = net_time_profile(pcb_data, next(iter(_nets)))
+        if _prof is not None:
+            return route_delay_ps(pcb_data, _prof, segments, vias)
 
     total_time_ps = 0.0
 

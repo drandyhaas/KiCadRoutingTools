@@ -430,6 +430,70 @@ print(f"{net_copper_length(pcb, nid):.2f} mm of copper, "
 # -> fanout stubs only: the net is not routed, so it has no length to match.
 ```
 
+### Time domain: tuning profiles (#1846)
+
+```python
+# net_queries
+kicad_net_length_parts_nm(pcb_data, segments, vias, pads, release=None)
+    -> Tuple[Dict[str, int], int]     # ({copper layer: track nm}, via nm)
+# tuning_profiles
+read_tuning_profiles(board_path) -> (Dict[str, TuningProfile],
+                                     List[(priority, class, profile)])
+DelayModel(board_path, pcb_data, memberships=None)
+DelayModel.profile_of(net_id) -> Optional[TuningProfile]
+DelayModel.net_delay(net_id) -> (Optional[float] ps, str why)
+net_time_profile(pcb_data, net_id) -> Optional[TuningProfile]
+route_delay_ps(pcb_data, prof, segments, vias) -> float
+```
+
+KiCad 10 times a net with the tuning profile its net class names
+(`.kicad_pro`: `tuning_profiles.tuning_profiles_impedance_geometric[]`, and
+`net_settings.classes[].tuning_profile`): a delay per signal layer and one
+per mm of via, each stored in attoseconds per mm. `read_tuning_profiles`
+reads them as a `TuningProfile` (`name`, `time_domain`, `layer_ps_per_mm`,
+`via_ps_per_mm`, `via_overrides`, the count of overrides, which are not
+modelled), with the classes that name each profile. A missing project gives
+none; one that cannot be parsed gives none with a warning.
+
+`kicad_net_length_parts_nm` is `kicad_net_length_nm` (above) in its parts:
+each layer's track length and the via length, measured the same way, so a
+delay can be summed per layer. `DelayModel.net_delay` is the delay check_drc
+grades a `ps` length or skew rule against, as kicad-cli measures it: each
+layer's track times its delay, the via length times the via delay, plus the
+pads' pad-to-die delays. A layer the profile has no entry for adds nothing.
+A net whose class names no profile measures 0 ps; one whose profile has
+time-domain tuning off gets only its pads' pad-to-die delays. The `why`
+string says which. It is None for a net whose pads are not joined by track
+copper, or whose profile has via overrides.
+
+`net_time_profile` is the router's side (`--time-matching`): the profile of
+the net when the router can time it as KiCad does (time-domain tuning on, no
+via overrides), else None and the stackup is used. The board's model is
+built once and kept on `pcb_data`, from `pcb_data.source_path`'s project --
+on the GUI front, the project file next to the board as last saved.
+`route_delay_ps` times one net's copper with a profile, without pad-to-die.
+
+```python
+from kicad_parser import parse_kicad_pcb
+from net_queries import kicad_net_length_parts_nm
+from tuning_profiles import DelayModel, net_time_profile, route_delay_ps
+
+board = 'tests/fixtures/1846/time_rule.kicad_pcb'
+pcb = parse_kicad_pcb(board)
+nid = next(i for i, n in pcb.nets.items() if n.name == 'Q')
+segs = [s for s in pcb.segments if s.net_id == nid]
+vias = [v for v in pcb.vias if v.net_id == nid]
+print(kicad_net_length_parts_nm(pcb, segs, vias, pcb.pads_by_net.get(nid, [])))
+prof = net_time_profile(pcb, nid)
+print(prof.name, prof.layer_ps_per_mm, prof.via_ps_per_mm)
+print(f"{route_delay_ps(pcb, prof, segs, vias):.2f} ps")
+print(DelayModel(board, pcb).net_delay(nid))
+# ({'F.Cu': 21000000}, 0)
+# PROF6 {'F.Cu': 6.0} 6.0
+# 126.00 ps
+# (126.0, '')
+```
+
 ### Differential-pair copper: coupling and skew (#1303)
 
 ```python
