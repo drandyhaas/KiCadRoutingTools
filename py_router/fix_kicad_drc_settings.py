@@ -1416,7 +1416,8 @@ def size_values_below_authored(pcb_path: str, floors: dict, rules_from: str) -> 
             elif val < f - _FLOOR_EPS:
                 held += 1
                 names.add(c.min_rule)
-        out[key] = {"below": below, "held_by_rule": held, "rules": sorted(names)}
+        out[key] = {"below": below, "held_by_rule": held, "rules": sorted(names),
+                    "smallest": min(v for v, _i, _l in objs[key])}
     return out
 
 

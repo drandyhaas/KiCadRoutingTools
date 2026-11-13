@@ -137,6 +137,18 @@ def routed():
         ok(tw.get('below') == [] and tw.get('held_by_rule', 0) >= 1
            and tw.get('rules') == ['room'],
            f"the authored grade holds the neck at the room's rule: {tw}")
+        cj = os.path.join(td, 'complete.json')
+        check(PY + [os.path.join(REPO, 'check_complete.py'), out, '--authored-from', board,
+                    '--json', cj], refuse='INCOMPLETE', code=4)   # OPEN_NET cannot route
+        with open(evidence(cj, "check_complete's report"), encoding='utf-8') as fh:
+            ff = json.load(fh).get('fab_floors') or {}
+        kept = [r for r in ff.get('measured_kept') or [] if r.get('key') == 'min_track_width']
+        elsewhere = [r for k in ('relaxed', 'vacuous', 'reference_too')
+                     for r in ff.get(k) or [] if r.get('key') == 'min_track_width']
+        ok(len(kept) == 1 and kept[0].get('rules') == ['room'] and kept[0].get('on_board') == 0.1
+           and not elsewhere,
+           f"and check_complete reads the track floor as kept by the room's rule: "
+           f"{kept} / {elsewhere}")
 
 
 def wider_gap():
