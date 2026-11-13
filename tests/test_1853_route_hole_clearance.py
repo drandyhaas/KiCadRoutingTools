@@ -202,8 +202,8 @@ def tight(td, name, one_layer):
     _out, routed, failed, log = route(sub, stage(sub, name), 'with', one_layer)
     ok(routed == [] and failed == ['SIG'], f"with the rule SIG is not routed: {routed} / {failed}")
     if not one_layer:
-        ok('declined' in log and 'hole_clearance 0.254mm' in log,
-           "and the rescue's escape via is declined by the rule, by name")
+        ok(('declined' in log or 'refused:' in log) and 'hole_clearance 0.254mm' in log,
+           "and the rescue's escape via is refused by the rule, by name")
     sub2 = os.path.join(td, name + '_norule')
     out, routed, failed, _log = route(sub2, stage(sub2, name, dru=NO_RULES), 'without',
                                       one_layer)
