@@ -2039,6 +2039,107 @@ def _late_kicad_dangling_split1217(pcb_data, output_file, return_results,
         return 0
 
 
+def _late_area_edge_split1843(pcb_data, output_file, return_results,
+                              results_data, write_model, input_signature,
+                              scope_names, config):
+    """#1843: split the run's tracks where they leave a tightened rule area's
+    split zone, on the board this run SHIPS, after every pass that lays or
+    joins copper. KiCad binds a track whose copper touches the area along its
+    WHOLE length; the piece outside the zone is then an item of its own that
+    the area does not bind, which is the copper the router routed. Copper is
+    unchanged (the pieces cover the track's capsule, meeting at one point).
+
+    Same plumbing as _late_kicad_dangling_split1217 (the written file on the
+    CLI, the write model on the GUI; the run's nets). Input copper -- told
+    from the run's by VALUE -- stays whole (KiCad grades it as the board drew
+    it, and the router held it so), and so does locked or sense-held copper.
+    Returns the number of tracks split; 0 without a tightened area."""
+    import copy as _copy
+    from collections import Counter
+    from improvement_gate import copper_item_key
+    from kicad_parser import is_immutable_copper
+    from area_clearance import split_run_copper
+    area = getattr(config, 'area_clearance', None)
+    if area is None or not area.split_zones():
+        return 0
+    try:
+        rd = None
+        if return_results:
+            rd = results_data if results_data is not None else {}
+            board = _copy.copy(pcb_data)
+            if write_model is not None:
+                segs_by_net, vias_by_net = write_model(rd)
+                board.segments = [x for _l in segs_by_net.values() for x in _l]
+                board.vias = [x for _l in vias_by_net.values() for x in _l]
+            else:
+                board.segments = list(pcb_data.segments)
+                board.vias = list(pcb_data.vias)
+        elif output_file and os.path.isfile(output_file):
+            from kicad_parser import parse_kicad_pcb as _pk1843
+            board = _pk1843(output_file)
+        else:
+            return 0
+        name_of = {nid: n.name for nid, n in board.nets.items()}
+        left = {n: Counter(c) for n, c in (input_signature or {}).items()}
+        readonly = set()
+        for s in board.segments:
+            c = left.get(name_of.get(s.net_id))
+            k = copper_item_key(s)
+            if c and c[k] > 0:
+                c[k] -= 1
+                readonly.add(id(s))
+        names = set(scope_names)
+        pairs = split_run_copper(
+            area, [s for s in board.segments if name_of.get(s.net_id) in names],
+            skip=lambda s: id(s) in readonly or is_immutable_copper(s))
+        if not pairs:
+            return 0
+        if return_results:
+            pieces = {id(h): ps for h, ps in pairs}
+
+            def _swap(lst):
+                return [p for x in lst for p in pieces.get(id(x), [x])]
+            for r in rd.get('results') or []:
+                if r.get('new_segments'):
+                    r['new_segments'] = _swap(r['new_segments'])
+            if rd.get('all_swap_segments'):
+                rd['all_swap_segments'] = _swap(rd['all_swap_segments'])
+            pcb_data.segments = _swap(pcb_data.segments)
+            bump_copper_epoch(pcb_data)
+            n = len(pairs)
+        else:
+            from kicad_parser import board_uses_name_nets
+            from kicad_writer import generate_segment_sexpr
+            unmatched = []
+            _strip_written_copper(output_file, [h for h, _ps in pairs], [],
+                                  name_of, match_width=True,
+                                  unmatched_out=unmatched)
+            missed = {id(h) for h in unmatched}
+            with open(output_file, 'r', encoding='utf-8') as _f:
+                content = _f.read()
+            v10 = board_uses_name_nets(content)
+            sexprs = [generate_segment_sexpr(
+                (p.start_x, p.start_y), (p.end_x, p.end_y), p.width, p.layer,
+                p.net_id, name_of.get(p.net_id) if v10 else None)
+                for h, ps in pairs if id(h) not in missed for p in ps]
+            if sexprs:
+                lp = content.rfind(')')
+                content = content[:lp] + '\n'.join(sexprs) + '\n' + content[lp:]
+                with open(output_file, 'w', encoding='utf-8') as _f:
+                    _f.write(content)
+            n = len(pairs) - len(missed)
+            if missed:
+                print(f"  WARNING: rule-area edge split (#1843): chose "
+                      f"{len(pairs)} track(s), found {n} in the written file")
+        print(f"  Rule-area edges (#1843, end of run): split {n} track(s) where "
+              f"they leave a tightened area; copper unchanged")
+        return n
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  (end-of-run rule-area edge split skipped: "
+              f"{type(_e).__name__}: {_e})")
+        return 0
+
+
 def _unfinished_net_ids(routed_results, single_ended_nets, terminal_restores=None):
     """Nets that still carry unfinished pads when the cleanup pipeline runs
     (#473): they keep ALL their copper through its subtractive passes, because
@@ -3645,7 +3746,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _pc_done, _pg_done = ([], [])
         if final_reconcile:
             from pad_contact import audit_shipped
-            _pc_done, _pg_done = audit_shipped(pcb_data, clearance=clearance)
+            _pc_done, _pg_done = audit_shipped(pcb_data, clearance=clearance,
+                                               area=getattr(config, 'area_clearance', None))
             _emit_summary_min(status='already_connected', pad_contacts=_pc_done,
                               pad_grazes=_pg_done)
         _extra1499 = {
@@ -9171,6 +9273,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             {pcb_data.nets[_n].name for _n in sweep_scope_ids
              if _n in pcb_data.nets},
             keep_input_copper)
+        # #1843: after every pass that lays or joins copper, the run's
+        # tracks split where they leave a tightened rule area (inert without).
+        _late_area_edge_split1843(
+            pcb_data, output_file, return_results, locals().get('results_data'),
+            _gui_write_model, _input_sig1069,
+            {pcb_data.nets[_n].name for _n in sweep_scope_ids
+             if _n in pcb_data.nets},
+            config)
 
     if quick < 2:
         _late_orphan_sweep659(
@@ -9659,13 +9769,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _pcl_s, _pcl_v = _gui_write_model(_rd_pcl)
             _pad_contacts_left, _pad_grazes_left = audit_shipped(
                 pcb_data, [s for _l in _pcl_s.values() for s in _l],
-                [v for _l in _pcl_v.values() for v in _l], _pcl_floor)
+                [v for _l in _pcl_v.values() for v in _l], _pcl_floor,
+                area=getattr(config, 'area_clearance', None))
             _rd_pcl['pad_contacts'] = _pad_contacts_left
             _rd_pcl['pad_grazes'] = _pad_grazes_left
         elif output_file and os.path.isfile(output_file):
             from kicad_parser import parse_kicad_pcb as _pk_pcl
             _pad_contacts_left, _pad_grazes_left = audit_shipped(
-                _pk_pcl(output_file), clearance=_pcl_floor)
+                _pk_pcl(output_file), clearance=_pcl_floor,
+                area=getattr(config, 'area_clearance', None))
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,

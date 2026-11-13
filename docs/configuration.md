@@ -305,6 +305,63 @@ post-route pass, or already in the input) is printed and reported as
 `net_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (`[]` =
 clean; absent when the board has no such rule).
 
+**Clearance in a rule area.** A `.kicad_dru` clearance rule whose condition
+is one rule-area predicate or an OR of them, e.g.
+`(rule "room" (constraint clearance (min 0.09mm)) (condition "A.insideArea('ROOM')"))`
+or `"A.insideArea('SOC_ROOM') || A.insideArea('RAM_ROOM')"`
+on named rule areas, is routed to (no flag, no GUI control;
+`area_clearance.py`). KiCad binds a pair when either ITEM's copper meets the
+area on the layer the pair is on (kicad-cli 10.0.6, probe boards): a track
+partly in the area is bound along its whole length, a track that stops short
+of it, round cap included, is not, and a via in an area drawn on F.Cu only is
+bound against F.Cu copper only. The router reads it the same way:
+
+- every keep-out is stamped twice and composed, the class values outside the
+  areas and the rule's value inside (a track cell is inside on the layers the
+  area is drawn on, a via cell where the area covers every copper layer), in
+  the base obstacle map, the per-net keep-outs, the stamp functions, and the
+  plane steps' via and connection maps (pour taps, the in-run plane
+  finalize, plane repair), so rip-up and retry see the same picture;
+- around an area whose rule is ABOVE the run's clearance (a tightened area),
+  a ring keeps the larger of the two stamps, and laid copper that touches the
+  area (a pad, an input track, a via) is held at the rule's value along its
+  whole extent. The ring is as wide as the rule's value plus a track width
+  and half the largest via or track, so copper that does not touch the area
+  is also held at the rule's value that close to it -- a route that needs the
+  class value there is refused;
+- the run's tracks are SPLIT where they leave a tightened area, half the
+  widest track plus 0.01 mm past its edge, so the piece outside is an item
+  KiCad does not bind -- at the start and end of the cleanup pipeline and on
+  the board the route step ships, copper unchanged, input copper left whole;
+  no via of the run straddles a tightened area's edge;
+- every post-route pass that prices a pair (graze prune, detour weld,
+  octolinear re-bend, micro-shift, via nudge, smoothing, stub-gap snap,
+  soft-joint bridges, width neck), the terminal check and the end-of-run pad
+  audit price it at the area's value where the area binds either item.
+
+The rule's value is raised to the fab floor every other rule channel uses
+(`fab_tiers.rule_fab_floors`: the tier's floor, or `--fab-overrides`), so a
+room routes as the same value in a layer or class rule would, and the run
+says when it was. The run names the rule as routed to, and the DRC writeback
+keeps `rules.min_clearance` at or below it. The rule is read in KiCad's
+order, the last matching rule winning: in the room it replaces the class
+values and every rule BEFORE it in the file, while a per-layer rule or a
+class-, type- or net-scoped rule that comes AFTER it still binds its own
+pairs there. Not routed to, and said so: a condition with more than
+rule-area predicates (`A.insideArea('ROOM') && A.NetClass == 'HS'`) and
+`enclosedByArea()`; a `track_width` rule in an area is graded by
+`check_drc.py` only; a rule with another constraint beside the clearance is
+applied whole or not at all, by the reader of that constraint. Inside a
+tightened area KiCad grades a diff pair's P against its N at the area's
+value (the custom rule outranks the pair's implicit gap rule), and a coupled
+pair is laid at one gap, so a pair built below the area's value either keeps
+out of the area at its own gap (the area does not lie on the span of its
+pads: a net-filtered keep-out takes away only a detour through it) or, where
+the area lies on that span, is built at the area's value for the run -- its
+impedance changes, said per pair on the console and in
+`JSON_SUMMARY.area_pair_gaps` (`how` `around` / `widened`, `built_gap`,
+`routed`). The run still warns on a pair whose shipped gap is below the area.
+
 **Track bans.** A `disallow track` rule scoped without a rule area -- the usual
 way to keep a class on some layers, e.g.
 `(rule "hs_layers" (constraint disallow track) (condition "A.NetClass == 'HS' && A.Layer != 'F.Cu'"))`
