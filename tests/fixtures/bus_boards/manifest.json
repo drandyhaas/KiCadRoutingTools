@@ -41,6 +41,12 @@
       "args": ["--bus", "U3:U4:plain:F.Cu,B.Cu,In1.Cu,In2.Cu,In3.Cu,In4.Cu",
                "--clearance-ceiling", "0.0889", "--track-width", "0.0762", "--fanout-track-width", "0.0762",
                "--via-size", "0.25", "--via-drill", "0.15"]
+    },
+    "h3": {
+      "board": "h3.kicad_pcb.gz",
+      "args": ["--bus", "U1:DU1:whole-array:F.Cu,B.Cu",
+               "--clearance-ceiling", "0.1", "--track-width", "0.1", "--fanout-track-width", "0.1",
+               "--via-size", "0.25", "--via-drill", "0.15"]
     }
   }
 }

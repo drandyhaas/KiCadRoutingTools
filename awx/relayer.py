@@ -50,13 +50,14 @@ def run_to_via(pcb, nid, end_pt, layer, with_via=False):
     return None
 
 
-def clashes(pcb, runs, layers, clear):
+def clashes(pcb, runs, layers, clear, why=None):
     """what a via end's run would stand beside on another layer. `runs` {key: (its nets' ids, its segments)} -- each
     end's runs to its vias (run_to_via), a pair's both legs. Returns (ban {key: the layers whose copper -- another net's
     segment outside every run, or its pad there -- comes within the rule, `clear` past both half widths, of the run},
     sep [(key, key): two runs within the rule of each other, so on different layers wherever they end]). Each run
     segment is held off every net's copper but its own -- a pair's partner leg's too: its ball on the surface, where
-    the run moved was the relayer's, shorted the zynq LVDS bus's TX_D5_P onto TX_D5_N's ball, U1.Y14"""
+    the run moved was the relayer's, shorted the zynq LVDS bus's TX_D5_P onto TX_D5_N's ball, U1.Y14. `why`, a dict:
+    filled with {(key, layer): the copper that bans it -- 'segment NET' or 'pad REF.PAD NET', the first found}"""
     import numpy as np
     from pack import seg_seg_dist
     moving = {id(s) for _nids, segs in runs.values() for s in segs}
@@ -77,8 +78,17 @@ def clashes(pcb, runs, layers, clear):
             oth = [s for s in fixed if not (len(nids) == 1 and s.net_id in nids)]
             b0, b1, bh = arr(oth)
             foreign = an[:, None] != np.array([s.net_id for s in oth])[None, :]
-            hit = bool(len(oth)) and bool(((seg_seg_dist(a0, a1, b0, b1) < ah[:, None] + bh[None, :] + clear - SLACK)
-                                           & foreign).any())
+            close_ = ((seg_seg_dist(a0, a1, b0, b1) < ah[:, None] + bh[None, :] + clear - SLACK) & foreign) \
+                if len(oth) else None
+            hit = close_ is not None and bool(close_.any())
+            if hit and why is not None:
+                i_, j_ = (int(v_) for v_ in np.argwhere(close_)[0])
+                o_ = oth[j_]
+                g_ = float(seg_seg_dist(a0[i_:i_ + 1], a1[i_:i_ + 1], b0[j_:j_ + 1], b1[j_:j_ + 1])[0][0])
+                why[(k, L)] = (f'segment {getattr(pcb.nets.get(o_.net_id), "name", None) or o_.net_id} '
+                               f'({o_.start_x:.2f},{o_.start_y:.2f})-({o_.end_x:.2f},{o_.end_y:.2f}) w {o_.width:.3f}; '
+                               f'run ({a0[i_][0]:.2f},{a0[i_][1]:.2f})-({a1[i_][0]:.2f},{a1[i_][1]:.2f}); centre gap '
+                               f'{g_:.3f} < {ah[i_] + bh[j_] + clear - SLACK:.3f}')
             for p in pads:
                 if hit:
                     break
@@ -96,6 +106,10 @@ def clashes(pcb, runs, layers, clear):
                 inside = ((np.abs(r0[:, 0]) <= hx) & (np.abs(r0[:, 1]) <= hy) & ~own).any()
                 hit = bool(inside or ((seg_seg_dist(r0, r1, e0, e1) < ah[:, None] + clear - SLACK).any(axis=1)
                                       & ~own).any())
+                if hit and why is not None:
+                    why[(k, L)] = (f'pad {p.component_ref}.{p.pad_number} {p.net_name or ""}'.rstrip()
+                                   + f' at ({p.global_x:.2f},{p.global_y:.2f}) {p.size_x:.2f}x{p.size_y:.2f}'
+                                   + ('; the run ends inside it' if inside else ''))
             if hit:
                 ban.setdefault(k, set()).add(L)
     ks = sorted(runs)

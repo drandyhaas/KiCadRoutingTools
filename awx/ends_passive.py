@@ -28,7 +28,8 @@ import pairs as _pairs  # noqa: E402
 import rules as _rules  # noqa: E402
 
 NEAR_MARGIN = 3.0           # mm: a part beside an array this near its ball field is one the cap step may move
-MOVE_MAX = 1.5              # mm: the farthest the part moves (within a decap's reach of the balls it serves)
+MOVE_MAX = 0.9              # mm: the farthest the part moves -- a small step off the lane, under a millimetre (Andy):
+#                             a decap is where it is for the balls it serves
 TOL = 1e-3
 ALSO_MAX = 2                # the other passives the stamp grazes, moved with the one the finding names, at most
 

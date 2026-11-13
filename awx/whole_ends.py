@@ -222,6 +222,14 @@ FB_RADIUS = 0.76          # ... falling to nothing this far beyond the place ...
 FB_ESCALATE = 2.0         # ... and this many times more each later round it is named again
 BIG = 100000.0            # a conflict, a split pair or a refused end: never taken
 TIE_MM = 0.005            # exits nearer than this round a box are ONE exit, whose lanes cross no one there (whole_frame's)
+# A SHARED SOURCE's far-face cut stands this far (mm) past the face's very middle: a tooth AT the middle -- the middle
+# channel of an array of an even count of rows, the middle row of an odd one -- then rounds the source by ONE side to
+# every reader: the group's crossings between buses (group_ends.between_rows: the way round from the bus's own face
+# against the clock, the north of the bus's frame), a bus's own crossings (perim_s here) and the frame the plan's cut
+# is handed to (whole_frame: `y <= scut`, a bus planned turned over mirroring both). At the middle itself the frame's
+# side was the last bit of a float's: of two lanes at one such exit one was laid round the north and one round the
+# south, and the one laid against the model's reading rode its layer past every exit of the other buses on it
+SRC_TIE = 0.001
 FRONT_REACH = 1.2         # a single lane's exit: its straight run out, this far along its escape (as a pair's,
 #                           fanout_from_plan.PAIR_EXIT_REACH), against copper outside the run on its layer (exit_front) --
 FRONT_VIA = 1.0           # ... blocked, with room for a via before the block: the lane changes layer there ...
@@ -928,7 +936,8 @@ class Ends:
         import whole_frame
         lanes = [l_ for l_, _lg in self.lanes]
         SB = whole_frame.grown(self.sbox, [self.T[l_][state[l_][0]][1] for l_ in lanes])
-        lkey = {l_: (whole_frame.perim_s(self.T[l_][state[l_][0]][1], SB, None), i) for i, l_ in enumerate(lanes)}
+        scut = self.shared_scut() if self.src_shared else None
+        lkey = {l_: (whole_frame.perim_s(self.T[l_][state[l_][0]][1], SB, scut), i) for i, l_ in enumerate(lanes)}
         idx, opts = {}, {}
         for l_ in lanes:
             b0 = self.B[l_][state[l_][1]]
@@ -965,6 +974,11 @@ class Ends:
             AWAY_FACE * (self.away.get(lane) or {}).get(i, 0)
 
     # ---- the objective
+    def shared_scut(self):
+        """a SHARED source's far-face cut (the bus's own frame): the face's middle and SRC_TIE -- the one every reader of
+        a far-face tooth's side takes (SRC_TIE)"""
+        return (self.sbox[1] + self.sbox[3]) / 2 + SRC_TIE
+
     def score(self, state, exact=False):
         """(objective, parts) of a state {lane: (tooth option index, berth option index)}: each state's objective kept
         (objective), its parts for the last _PARTS_KEEP states asked -- an older state's computed again, the same (the
@@ -1893,7 +1907,7 @@ def joint_descent(E, s0, boxes, cut, learned=None, dear=None):
     cut_ = float(cut[1]) if isinstance(cut, (tuple, list)) and cut[0] == 'E' else cut
     # (the source's far-face cut: the start's, as the model reads it -- a far-face tooth's side round the source; a
     # shared source's none, as the model's own -- _joint_model)
-    scut = None if E.src_shared else E.score(s0)[1].get('scut')
+    scut = E.shared_scut() if E.src_shared else E.score(s0)[1].get('scut')
     PT = {l_: np.array([Q(whole_frame.perim_s(o[1], SB, scut)) for o in E.T[l_]]) for l_ in lanes}
     PB = {l_: np.array([Q(_place_b(E, o, DB, cut_)) for o in E.B[l_]]) for l_ in lanes}
     lin = {}
@@ -2149,6 +2163,9 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
         if lits_:
             m.AddBoolOr(lits_)
     cost = []
+    # (each term of `cost` TAGGED, in step with it: (its family, its lanes, its parts) -- what a trace splits the
+    # objective by (group_ends' checks.jsonl); the objective itself is `cost` alone, as ever)
+    cost_tag = []
     # a lane's layer chosen at its ends: a leg changing layer between them ranked before everything else the model
     # prices (lexicographic, below) -- a via at an escape stands in the array's via grid, a change in the channel needs
     # room beside it there (the human's bus: 51 of 54 nets two escape vias and one layer between)
@@ -2167,6 +2184,7 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
             if (k_, a, b) in soft:
                 gate = m.NewBoolVar('')             # (its conflicts held, else BIG paid)
                 cost.append(Q(BIG) * gate.Not())
+                cost_tag.append(('soft_conflict', (a, b), None))
             elif core:
                 gate = held[(k_, a, b)] = m.NewBoolVar('')
             for side, c, others in st_:
@@ -2219,6 +2237,7 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
                     es.append(e_)
                 m.Add(d_ <= sum(es))
                 cost.append(-Q(1.0) * npair[l_] * d_)
+                cost_tag.append(('neck_drop', (l_,), None))
     # a change where the two ends' layers differ: a leg each, ranked first (below)
     chg = {}
     for l_ in lanes:
@@ -2286,7 +2305,7 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
     # the crossings: places round the two boxes (whole_frame's perimeters), order-encoded
     # (the source's far-face cut, the hint's: whole_frame.src_cut -- the shared source's, where the hint's teeth are
     # no state of the model's own, the face's middle: each far-face lane round its nearer side)
-    scut = None if E.src_shared else E.score(hint)[1].get('scut')
+    scut = E.shared_scut() if E.src_shared else E.score(hint)[1].get('scut')
     pos = {(0, l_, i): Q(whole_frame.perim_s(E.T[l_][i][1], SB, scut)) for l_ in lanes for i in OT[l_]}
     pos.update({(1, l_, j): Q(_place_b(E, E.B[l_][j], DB, cut)) for l_ in lanes for j in OB[l_]})
     pv = {(k_, l_): sorted({pos[(k_, l_, i)] for i in O_[k_][l_]}) for k_ in (0, 1) for l_ in lanes}
@@ -2407,6 +2426,8 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
                     continue
                 m.AddBoolOr([xv] + [neg(e_) for e_ in t_ if not isinstance(e_, int)])
             cost.append(w_ * xv)
+            cost_tag.append(('crossing', (a, b), {'crossing': Q(JOINT_X),
+                                                  'learned': w_ - Q(JOINT_X)}))
             if frozenset((a, b)) in getattr(E, '_nocross', ()):
                 m.Add(xv == 0)                     # (a crossing whose window the check could not hold: not again)
         X[(a, b)] = xv
@@ -2423,6 +2444,10 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
                     c_ += Q(E.tooth_price(l_, i))
                 if c_:
                     cost.append(c_ * v)
+                    cost_tag.append(('option', (l_,), {'end': k_, 'opt': i, 'fanout_vias': Q(1.0) * o[3],
+                                                       'front': Q(fr.get(i, 0.0)),
+                                                       'fb_avoid': Q(FB_AVOID * fb.get(i, 0.0)),
+                                                       'tooth': Q(E.tooth_price(l_, i)) if k_ == 0 else 0}))
     for a_, b_, k_, ia, ib in E.fb_pairs:
         for i, wa in ia.items():
             for j, wb in ib.items():
@@ -2430,6 +2455,7 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
                     z_ = m.NewBoolVar('')
                     m.Add(z_ >= xs[k_][a_][i] + xs[k_][b_][j] - 1)
                     cost.append(Q(FB_PAIR * wa * wb) * z_)
+                    cost_tag.append(('fb_pair', (a_, b_), {'end': k_, 'opts': (i, j)}))
     # a plane ball of the arrays its ends leave no way down (walled_balls): every drop killed, and every strap killed or
     # to a ball with none left
     walls_ = []
@@ -2457,8 +2483,10 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
             wl_ = m.NewBoolVar('')
             m.AddBoolOr([alive[b_], wl_] + outs)
             walls_.append(wl_)
+    assert len(cost_tag) == len(cost), f'{len(cost_tag)} cost tags for {len(cost)} cost terms'
     return types.SimpleNamespace(m=m, lanes=lanes, LG=LG, npair=npair, idx=idx, OT=OT, OB=OB, O_=O_, xs=xs, y=y, chg=chg,
-                                 cost=cost, chg_cost=chg_cost, walls=walls_, const=const, X=X, held=held, dom=dom, pos=pos,
+                                 cost=cost, cost_tag=cost_tag, chg_cost=chg_cost, walls=walls_, const=const, X=X,
+                                 held=held, dom=dom, pos=pos,
                                  NL=NL, SB=SB, DB=DB, cut=cut, t0=t0, cutvar=CV)
 
 
@@ -3395,7 +3423,7 @@ def _front(pcb, nid, m, kids):
     layers = list(getattr(pcb.board_info, 'copper_layers', None) or ('F.Cu', 'B.Cu'))
     t_bar, v_bar = _bd.CLEAR + _bd.TRACK / 2, _bd.VIA_SIZE / 2 + _bd.CLEAR
     cnr = {L: _corner_blocked(pcb, nid, L, pts, t_bar) for L in layers}
-    track = _bd.build_obstacles(pcb, nid, kids, L0)
+    track =_bd.build_obstacles(pcb, nid, kids, L0)
     blocked = lambda o, L, k: o.point_violation(at(k)) or cnr[L][k]
     hits = [k for k in range(1, n + 1) if blocked(track, L0, k)]
     import route_layers

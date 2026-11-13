@@ -51,6 +51,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -576,6 +577,130 @@ def give_back(out, board, path, log=print):
     return give
 
 
+GROUP_SET = {'GROUP_LAYERS': 'free', 'GROUP_CUT': 'model'}     # the group's ends, as its buses' runs take them
+
+
+def _capture_all(jobs, files, log):
+    """`jobs` (_bus_job's: each bus by itself, ENDS_ONLY, ENDS_CAPTURE) run at the same time, each STOPPED as soon as
+    its capture stands (`files` {name: its path}): whole_ends.choose writes a bus's ends model -- its plan state, its
+    menus, its run's settings -- before it searches the bus's own ends, and the group's model takes it from there.
+    {name: whether its capture stands}"""
+    procs, t0, got = {}, time.time(), {}
+    stop = (lambda p: os.killpg(p.pid, signal.SIGTERM)) if hasattr(os, 'killpg') else (lambda p: p.terminate())
+    try:
+        for name, argv, env, lp in jobs:
+            f = open(lp, 'w', encoding='utf-8')
+            procs[name] = (subprocess.Popen(argv, cwd=HERE, env=env, stdout=f, stderr=subprocess.STDOUT,
+                                            start_new_session=hasattr(os, 'killpg')), f)
+        left = set(procs)
+        while left:
+            for name in sorted(left):
+                p = procs[name][0]
+                if not os.path.isfile(files[name]) and p.poll() is None:
+                    continue
+                got[name] = os.path.isfile(files[name])
+                left.discard(name)
+                log(f'  {name}: its ends model ' + ('captured' if got[name] else f'NOT captured (exit {p.returncode})')
+                    + f' after {int(time.time() - t0)} s')
+            if left:
+                time.sleep(POLL)
+        return got
+    finally:
+        for p, f in procs.values():
+            if p.poll() is None:
+                try:
+                    stop(p)
+                    p.wait(timeout=30)
+                except (OSError, subprocess.TimeoutExpired):
+                    p.kill()
+            f.close()
+
+
+def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None, feedback_rounds=0,
+                  t0=None, **sizes):
+    """The buses off one array routed from THE GROUP'S ENDS (GROUP_FLOW=1; awx/group_ends.py): each bus's ends model
+    captured by itself on `board` (work/caps, _capture_all), every bus's ends chosen in ONE model and the arrays
+    fanned out once as chosen (work/group, its log work/group.log), then every bus routed negotiated on that field
+    with no fanout and no end of its own (route_on_field, GROUP_ENDS), each a plain bus there, one round of its own.
+    `rounds` are THE GROUP'S: a round that leaves the board short of clean (a net open, a violation, a ball walled in)
+    sends what its buses' steps found at their ends to the model (group_ends --from --feedback: work/groupN), which
+    answers them from the state it had, and the buses are routed again on that field (work/roundN.kicad_pcb); the
+    board with the fewest nets open, then the fewest violations, then the fewest balls walled in, is `out`. No
+    fallback: a bus with no capture, or a first model that ends with no state or no plan, is the step's result,
+    named. Returns (exit code, grade lines)"""
+    from copy_board import copy_board
+    work = out[:-len('.kicad_pcb')] + '.bus'
+    caps = os.path.join(work, 'caps')
+    shutil.rmtree(caps, ignore_errors=True)
+    os.makedirs(caps)
+    t0 = time.time() if t0 is None else t0
+    name_of = lambda d_: ''.join(c if c.isalnum() or c in '_.-' else '_' for c in d_)     # noqa: E731  (whole_ends.choose's)
+    log(f'route_bus: {len(buses)} bus{"" if len(buses) == 1 else "es"} off {buses[0][0]} from the group\'s ends -- '
+        + ', '.join(f'{b[1]} ({b[2]})' for b in buses))
+    got = _capture_all([_bus_job(work, 'capture', b, board, {**_env0(), 'ENDS_ONLY': '1', 'ENDS_CAPTURE': caps},
+                                 k, 1, inproc, feedback_rounds, sizes) for b in buses],
+                       {b[1]: os.path.join(caps, name_of(b[1]) + '.ends.pkl') for b in buses}, log)
+    if not all(got.values()):
+        log('route_bus: the group\'s ends: no capture of ' + ', '.join(sorted(n_ for n_, ok_ in got.items() if not ok_))
+            + ' -- nothing routed')
+        return 1, []
+    plain = [(b[0], b[1], 'plain', b[3]) for b in buses]
+    R = max(1, int(rounds or 1))
+    best, done, prev = None, [], None            # prev: (the round before's group, its buses' work)
+    for r in range(1, R + 1):
+        t_r = time.time()
+        group = os.path.join(work, 'group' if r == 1 else f'group{r}')
+        shutil.rmtree(group, ignore_errors=True)
+        glog = group + '.log'
+        with open(glog, 'w', encoding='utf-8') as f:
+            rc = subprocess.run([sys.executable, '-u', '-X', 'utf8', os.path.join(HERE, 'group_ends.py'), caps, group,
+                                 '--board=' + board] + ([f'--from={prev[0]}', f'--feedback={prev[1]}'] if prev else []),
+                                cwd=HERE, env={**_env0(), **GROUP_SET}, stdout=f, stderr=subprocess.STDOUT).returncode
+        for ln in open(glog, encoding='utf-8', errors='replace'):
+            if re.match(r'group ends: |  check \d+: |  the field as laid|  \S+: its step\'s findings', ln):
+                log('  ' + ln.rstrip()[:300])
+        if rc:
+            log(f'route_bus: the group\'s ends: the model ended {rc} ({os.path.relpath(glog, work)})'
+                + (' -- nothing routed' if r == 1 else f' -- round {best[1]}\'s board stands'))
+            if r == 1:
+                return 1, []
+            break
+        log(f'  the group\'s ends in {int(time.time() - t_r)} s' + (f' (round {r})' if R > 1 else ''))
+        # (one round alone: straight to `out`; more: each round's board in the work dir, the best one copied out)
+        r_out = out if R == 1 else os.path.join(work, f'round{r}.kicad_pcb')
+        r_json = json_out if R == 1 else os.path.join(work, f'round{r}.summary.json')
+        code, grades = route_on_field(board, os.path.join(group, 'shared_field.kicad_pcb'), r_out, plain, k, 1, inproc,
+                                      log, r_json, feedback_rounds, t0=t0, settings={'GROUP_ENDS': group}, **sizes)
+        if R == 1:
+            return code, grades
+        try:
+            g_ = json.load(open(r_json)).get('grade') or None
+        except (OSError, ValueError):
+            g_ = None
+        key = (len(g_['open']), g_['drc']['n'] if g_['drc']['n'] is not None else 10 ** 9,
+               len(g_['walled']['walled'])) if g_ else (10 ** 9, 10 ** 9, 10 ** 9)
+        done.append(dict(round=r, open=key[0], drc=key[1], walled=key[2], secs=int(time.time() - t_r)))
+        log(f'  round {r}: ' + (f'{key[0]} open, drc {key[1]}, {key[2]} walled' if g_ else 'no grade')
+            + f' in {int(time.time() - t_r)} s')
+        if best is None or key < best[0]:
+            best = (key, r, r_out, r_json, code, grades)
+        if key == (0, 0, 0):
+            break
+        prev = (group, r_out[:-len('.kicad_pcb')] + '.bus')
+    key, r, r_out, r_json, code, grades = best
+    with contextlib.redirect_stdout(io.StringIO()):
+        copy_board(r_out, out)
+    try:
+        j_ = json.load(open(r_json))
+    except (OSError, ValueError):
+        j_ = {}
+    j_.update(out=out, rounds=done, round=r, secs=int(time.time() - t0))
+    with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:
+        json.dump(j_, f, indent=1)
+    log(f'route_bus: the group\'s round {r} of {len(done)} routed is the board -- {os.path.basename(out)}')
+    return code, grades
+
+
 def route_negotiated(board, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None, feedback_rounds=0,
                      solo=None, **sizes):
     """The buses `buses` [(src, dest, mode, layers)], their modes resolved, routed negotiated on `board` (the module's
@@ -593,6 +718,8 @@ def route_negotiated(board, out, buses, k=None, rounds=4, inproc=False, log=prin
     os.makedirs(work, exist_ok=True)
     src, dests, modes = buses[0][0], [b[1] for b in buses], [b[2] for b in buses]
     t0 = time.time()
+    if solo is None and awx_settings.get('GROUP_FLOW') == '1':
+        return route_grouped(board, out, buses, k, rounds, inproc, log, json_out, feedback_rounds, t0=t0, **sizes)
 
     # 1. each bus's solo run -- or its run already made (`solo`)
     log(f'route_bus: {len(buses)} buses off {src} negotiated -- {", ".join(f"{d} ({m})" for d, m in zip(dests, modes))}'
@@ -616,9 +743,10 @@ def route_negotiated(board, out, buses, k=None, rounds=4, inproc=False, log=prin
 
 def _env0():
     """the environment a bus's process takes: the run's, but none of a meeting's (a JOINT_DIR left over would have a
-    solo run wait for buses that never come)"""
+    solo run wait for buses that never come) and not GROUP_FLOW (a bus's process is that bus's own step: the group's
+    flow is the step that started it, and one bus alone would start a group of its own there)"""
     return {k_: v_ for k_, v_ in awx_settings.environ().items()
-            if not k_.startswith('JOINT_') and k_ not in ('SOURCE_SHARED', 'ENDS_ONLY')}
+            if not k_.startswith('JOINT_') and k_ not in ('SOURCE_SHARED', 'ENDS_ONLY', 'GROUP_FLOW')}
 
 
 def _bus_job(work, phase, bus, inp, env, k, rounds, inproc, feedback_rounds, sizes):
@@ -647,7 +775,8 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
                    feedback_rounds=0, field_plan=None, t0=None, settings=None, **sizes):
     """Steps 3 and 4: the buses `buses` routed negotiated on the shared field `field` (lay_field's, from `board`), and
     merged to `out`. `settings`: more for every bus's process (GROUP_ENDS: `field` a group's, every end on it the
-    group's model's -- group_ends.py). Returns (exit code, grade lines)"""
+    group's model's -- group_ends.py). ONE bus (a group's field for a bus alone on its array): routed by itself on
+    the field, nothing to negotiate, graded and summed up the same way. Returns (exit code, grade lines)"""
     from copy_board import copy_board
     board, field, out = os.path.abspath(board), os.path.abspath(field), os.path.abspath(out)
     work = out[:-len('.kicad_pcb')] + '.bus'
@@ -657,7 +786,10 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     jd = os.path.join(work, 'negotiation')
     shutil.rmtree(jd, ignore_errors=True)
     os.makedirs(jd)
-    log(f'  every bus on the shared field, negotiated (meeting in {os.path.relpath(jd, os.path.dirname(out))})')
+    one = len(buses) == 1
+    phase = 'solo' if one else 'neg'
+    log(f'  {buses[0][1]} on the field, by itself' if one else
+        f'  every bus on the shared field, negotiated (meeting in {os.path.relpath(jd, os.path.dirname(out))})')
     # (a whole-array bus keeps the escapes the shared field laid it there too, as a plain bus does: the field planned
     # them with every other bus's. Fanned again round the others' escapes, a memory bus's comb sent an address ball out
     # by the face another bus's lanes leave by, among their exits, and split a strobe pair across two layers)
@@ -666,15 +798,15 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     # its solo run, which its solo teeth came of, was an escape bus's. Turned away, an escape bus off an array with
     # three other buses was routed sequentially with them, and the two routed after it found their faces taken by its
     # lanes)
-    jobs = [_bus_job(work, 'neg', (b[0], b[1], 'plain' if b[2] == 'escape' else b[2], b[3]), field,
-                     {**_env0(), 'SOURCE_SHARED': src,
-                      'JOINT_DIR': jd, 'JOINT_PEERS': ','.join(dests), **(settings or {})},
+    jobs = [_bus_job(work, phase, (b[0], b[1], 'plain' if b[2] == 'escape' else b[2], b[3]), field,
+                     {**_env0(), **({} if one else {'SOURCE_SHARED': src, 'JOINT_DIR': jd,
+                                                    'JOINT_PEERS': ','.join(dests)}), **(settings or {})},
                      k, rounds, inproc, feedback_rounds, sizes)
             for b in buses]
     codes = _run_all(jobs, log, ended=lambda d: open(os.path.join(jd, f'{d}.finished'), 'w').close())
 
     # 4. merged
-    boards = [_bus_out(work, 'neg', b) for b in buses]
+    boards = [_bus_out(work, phase, b) for b in buses]
     have = [x for x in boards if x]
     n_conf, given = None, []
     if have:
@@ -705,7 +837,7 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
         # (the step's own status is its summary's: the process exits 0 whenever it wrote OUT, #1738)
         ex = j.get('exit', codes.get(b[1])) if x else codes.get(b[1])
         runs.append(dict(src=b[0], dest=b[1], mode=b[2], exit=ex, routed=len(j.get('routed') or []),
-                         grade=_grade_line(os.path.join(work, 'neg', b[1], 'bus.log')), summary=x[1] if x else None))
+                         grade=_grade_line(os.path.join(work, phase, b[1], 'bus.log')), summary=x[1] if x else None))
     code = max([1 if r['exit'] is None else r['exit'] for r in runs] + [0 if n_conf == 0 else 1])
     with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:
         json.dump(dict(board=board, out=out, negotiated=True, src=src, field=field,
@@ -713,7 +845,8 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
                                    if isinstance(v_, (int, float, str))},
                        buses=runs, conflicts=n_conf, given_back=given, grade=grade_, secs=int(time.time() - t0),
                        exit=code), f, indent=1)
-    log(f'route_bus: negotiated, {sum(r["routed"] for r in runs)} nets routed by {len(runs)} buses, '
+    log(f'route_bus: {"on the field" if one else "negotiated"}, {sum(r["routed"] for r in runs)} nets routed by '
+        f'{len(runs)} bus{"" if one else "es"}, '
         f'{"no" if n_conf == 0 else n_conf if n_conf is not None else "ungraded"} cross-bus conflict(s), '
         f'{int(time.time() - t0)} s -- {os.path.basename(out)}')
     return code, [r['grade'] for r in runs]

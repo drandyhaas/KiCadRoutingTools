@@ -361,13 +361,20 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
                 if os.path.isfile(q_):
                     os.remove(q_)
 
+    import awx_settings
     for bus in resolved:
         s, d = bus[0], bus[1]
-        if s in negotiated:
+        # (GROUP_FLOW=1: a bus alone on its array takes its ends from the group's model too, a group of one
+        # (negotiated_buses.route_grouped) -- unless an earlier step was handed on through one of its arrays, whose
+        # copper there its own step plans round)
+        alone = s not in negotiated and awx_settings.get('GROUP_FLOW') == '1' \
+            and not any(r_ in through for r_ in [s] + _ff_dest_refs(d))
+        if s in negotiated or alone:
             if s in done:
                 continue
-            done.add(s)
-            grp = negotiated[s]
+            if not alone:
+                done.add(s)
+            grp = [bus] if alone else negotiated[s]
             # NEGOTIATED, and nothing before or after it: the group's one step. Routed in turn first, each bus again
             # alone where it left nets open, and negotiated only then, every bus of a group of four was routed three
             # times over -- nearly four hours, where the negotiation is the one of the three that routes every bus in
@@ -379,20 +386,22 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
             step_json = os.path.join(work, f'{name}.summary.json')
             _fresh(step_out, step_json)
             inputs.append(cur)
-            code, _g = negotiated_buses.route_negotiated(cur, step_out, grp, k, rounds, inproc, log, step_json,
-                                                         feedback_rounds, **sizes)
+            code, _g = (negotiated_buses.route_grouped if alone else negotiated_buses.route_negotiated)(
+                cur, step_out, grp, k, rounds, inproc, log, step_json, feedback_rounds, **sizes)
             try:
                 sj_ = json.load(open(step_json))
             except (OSError, ValueError):
                 sj_ = {}
             got, neg_g = sj_.get('buses'), sj_.get('grade')
             # (a grade whose check_drc gave no verdict -- a crash -- said so)
-            log('route_bus: the negotiation left '
+            log('route_bus: ' + ("the group's ends" if alone else 'the negotiation') + ' left '
                 + ('no grade' if not neg_g else
                    f'{len(neg_g["open"])} open, '
                    + (f'drc {neg_g["drc"]["n"]}' if neg_g['drc']['n'] is not None
                       else 'NO DRC VERDICT (check_drc gave none)')
-                   + f', {len(neg_g["walled"]["walled"])} walled') + ' on the board')
+                   + f', {len(neg_g["walled"]["walled"])} walled'
+                   + (f', {len((neg_g.get("plane_balls") or {}).get("off") or [])} plane ball(s) on no pour'
+                      if (neg_g.get('plane_balls') or {}).get('off') else '')) + ' on the board')
             codes.append(code)
             for r_ in got or [dict(src=s, dest=g_[1], mode=g_[2], exit=None, grade=None, summary=None) for g_ in grp]:
                 ex_ = 1 if r_['exit'] is None else r_['exit']
@@ -434,6 +443,8 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         out += '.kicad_pcb'
     work = out[:-len('.kicad_pcb')] + '.bus'
     os.makedirs(work, exist_ok=True)
+    import run_trace
+    run_trace.provenance(work, {'stage': 'route_bus', 'board': board, 'out': out, 'src': src, 'dest': dest})
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(board)
     keys = net_keys(pcb)
@@ -850,6 +861,13 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         log('route_bus: the turn into the flow frame failed: ' + '; '.join(bad[:6]))
         return 2, None
     log(f'  turned into the flow frame: {q} quarter turn(s) about ({ff._fmt(cx)}, {ff._fmt(cy)})')
+    # (the turn ON FILE, for whoever reads the run's frame coordinates on the board -- bus_trace.py: every file under
+    # work/run is in the flow frame, a plan of pair chirality -1 also turned over about the board's mirror axis)
+    with open(os.path.join(work, 'frame.json'), 'w', encoding='utf-8') as f_:
+        json.dump({'q': q, 'cx': cx, 'cy': cy,
+                   'to_board': 'board = (cx, cy) + flow_frame._q(fx - cx, fy - cy, (4 - q) % 4)',
+                   'plan_mirror': 'a plan of chirality -1 (fo.plan.json chi): its y -> 2 CY - y first, CY = '
+                                  'bga_fanout.flip_frame.mirror_axis(the flow-frame board)'}, f_, indent=1)
     if escape and fanned_e:
         frame_e = os.path.join(work, 'ends_frame.kicad_pcb')
         bad = ff.turn_file(fanned_e, frame_e, q, cx, cy)
@@ -1248,7 +1266,8 @@ def board_grade(board, routed, buses, work, log=print, tag='board'):
     its own bus's parts one piece of copper there (check_connected's test, zones credited; a net's pads elsewhere -- a
     termination's, a test point's -- are the chain's later steps': `open`, full names), no DRC violation the step made
     (check_drc at the project's floor, margin 0.1: the bus nets' own and the board's past those it came with -- `drc`),
-    and no ball of the buses' arrays walled in (walled_grade -- `walled`). A step's own grade reads its own board
+    no ball of the buses' arrays walled in (walled_grade -- `walled`), and every plane ball of theirs joined to a pour
+    of its net (plane_balls_grade -- `plane_balls`, where KiCad is there to pour). A step's own grade reads its own board
     alone; buses routed together (negotiated_buses' merge, the bus boards check) are graded here on the board they hand
     on. {open, nets, drc: {bus, board, input, n}, walled, ok}; its files in `work`, prefixed `tag`"""
     import awx_settings
@@ -1306,10 +1325,27 @@ def board_grade(board, routed, buses, work, log=print, tag='board'):
     n_drc = None if None in (d_bus, d_out, d_in) else max(d_bus, d_out - d_in, 0)
     walled = walled_grade(board, routed, refs, names, log)
     plane_balls = plane_balls_grade(routed, refs, log)
-    ok = not open_ and n_drc == 0 and not walled['walled']
+    # (a ball JOINED TO A POUR of its net is served: it needs no way out, and is not walled in -- the walls' grade
+    # asks for a track from the ball out of its window, and named a plane ball whose drop stood among a bus's lanes,
+    # on its pour all the while)
+    if walled.get('walled') and plane_balls.get('islands') is not None:
+        nets_ = {f'{r}.{p_.pad_number}': p_.net_name for r in refs if r in pcb.footprints
+                 for p_ in pcb.footprints[r].pads}
+        off_p = set(plane_balls.get('off') or [])
+        on_pour = [k_ for k_ in walled['walled'] if nets_.get(k_) in plane_balls['islands']
+                   and f'{k_} ({nets_.get(k_)})' not in off_p]
+        if on_pour:
+            walled = dict(walled, walled=[k_ for k_ in walled['walled'] if k_ not in on_pour], on_pour=on_pour)
+            log(f'  not walled in, joined to a pour of their net: {", ".join(on_pour)}')
+    # (...and every plane ball of the arrays on a pour of its net, poured for real: a run on a plane's layer is the
+    # step's to lay only where it cuts no ball off its pour -- measured where KiCad is there to pour, part of the
+    # verdict there)
+    off_ = plane_balls.get('off') or []
+    ok = not open_ and n_drc == 0 and not walled['walled'] and not off_
     log(f'  on the board: {len(open_)} bus net(s) open of {len(names)}'
         + (f' ({", ".join(keys.get(n, n) for n in open_[:8])})' if open_ else '')
         + f', drc {n_drc} (bus {d_bus}, board {d_out} vs {d_in} in), walled {len(walled["walled"])}'
+        + (f', {len(off_)} plane ball(s) on no pour of their net' if off_ else '')
         + (' -- clean' if ok else ''))
     return dict(open=open_, nets=len(names), drc=dict(bus=d_bus, board=d_out, input=d_in, n=n_drc), walled=walled,
                 plane_balls=plane_balls, ok=ok)

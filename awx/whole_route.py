@@ -717,7 +717,7 @@ def round_lanes(cuts, audit):
     return {x for x in out if not re.match(r'^[-+]?[\d.]+$', x) and not x.startswith('(') and not x.endswith('(s)')}
 
 
-def loop(solve, out, rounds, env, log):
+def loop(solve, out, rounds, env, log, try_lay=None):
     """whole_loop.sh SOLVE OUTDIR ROUNDS, its lines to LOG: 0 with OUTDIR/plan.json the snapped plan that passed, 1 when
     no round got there, 3 when it stopped not converging, 4 when it stopped at crowded ends"""
     env = dict(env)
@@ -922,11 +922,27 @@ def loop(solve, out, rounds, env, log):
                 # solve run again, 210 s each, to break it once more)
                 known_ = firm_known(O('firm_whole.json'))
                 brk_ = firm_keys(s2) if rc_h == 0 and os.path.isfile(s2) else None
-                if rc_h == 0 and os.path.isfile(s2) and (not any(broke_) or (brk_ and brk_ <= known_)):
+                # (...nor a repair whose other broken firm cuts are all against ANOTHER BUS's lanes (negotiated buses,
+                # JOINT_DIR: the island one of the lanes a peer published): that crossing is the two buses' to settle,
+                # and the COUPLED re-solve that follows every re-solve here (took: joint_loop_sync) reads both buses'
+                # lanes and chooses either one's layers and changes -- the peer has its own cut of it besides. Answered
+                # by this bus's WHOLE re-solve instead, a memory bus's round-1 repair that broke one lane's cuts against
+                # five of another bus's lanes moved all 45 of its lanes, broke the same five cuts again, and its next
+                # audit had 44 findings against that bus where the first had 7: each bus's loop going on alone made the
+                # two buses' meetings more, round by round, and neither loop converged)
+                peers_ = peer_lanes(env) if env.get('JOINT_DIR') and brk_ else set()
+                theirs_ = {k_ for k_ in (brk_ or ()) if peer_island(k_, peers_)}
+                if rc_h == 0 and os.path.isfile(s2) and (not any(broke_) or (brk_ and brk_ <= known_ | theirs_)):
                     for ln in grep(s2[:-5] + '.held.log', r'whole_solve|held:|firm cuts'):
                         log('  ' + ln)
-                    log(f"  the round's repair: {len(free_)} lane(s) solved again, the rest held"
-                        + (' -- the firm cuts it breaks the whole solve broke before' if any(broke_) else ''))
+                    why_ = ''
+                    if any(broke_) and brk_ <= known_:
+                        why_ = ' -- the firm cuts it breaks the whole solve broke before'
+                    elif any(broke_):
+                        why_ = (f" -- {len(theirs_)} firm cut(s) it breaks against other buses' lanes, the coupled "
+                                f"re-solve's to settle" + (', the rest the whole solve broke before'
+                                                           if brk_ - theirs_ else ''))
+                    log(f"  the round's repair: {len(free_)} lane(s) solved again, the rest held{why_}")
                     took(s2, i)
                     return None
                 if os.path.isfile(s2):
@@ -1286,6 +1302,19 @@ def loop(solve, out, rounds, env, log):
         if gate(plan, O('plan.audit'))[0] == 0 and lint == 'LINT clean':
             log(f"=== the plan passes: {plan}")
             return 0
+        # (`try_lay`; LOOP_TRY_LAY=0: not) a snapped plan with EVERY lane laid, short at its audit: LAID as it stands
+        # first -- the lay and its checks are the judge the audit stands in for, and a plan laid with no net open and no
+        # violation passes. A memory bus's first plan passed its smooth audit, snapped all 45 lanes and was 0.02 mm
+        # short at two places of its snapped audit; three re-solves later it had 12 to 14 findings, the other bus had
+        # moved to meet those, and the first plan, held and laid at the end, no longer fitted four lanes
+        if try_lay is not None and not grep(sl, r'FAILED'):
+            tr_ = try_lay(O(f'plan{i}.json'), i)
+            if tr_ is not None:
+                log(f"  snapped: laid as it stands -- open {tr_['open']}, drc {tr_['drc']}")
+                if tr_['open'] == 0 and tr_['drc'] == 0:
+                    log(f"=== round {i}: the snapped plan laid with no net open and no violation -- the plan passes: "
+                        f"{plan}")
+                    return 0
         # the snapped plan is short: where goes to the solve as history -- the audit's places and the lint's (a lane
         # folded at its end: the end it folds at), a finding with no place stops
         folded = sum(1 for ln in lines_of(O('plan.lint')) if re.search(r'^LINT \S+ \S+ ', ln)
@@ -1415,6 +1444,36 @@ def firm_keys(plan):
         return {json.dumps(x_, sort_keys=True) for x_ in (json.load(open(plan)).get('firm_broken') or [])}
     except (OSError, ValueError):
         return set()
+
+
+def peer_lanes(env):
+    """(JOINT_DIR) the names of the lanes the OTHER buses of the negotiation last published (DIR/lanes/PEER.json, each
+    piece's lane): {name} -- empty with no negotiation"""
+    jd, bus = env.get('JOINT_DIR'), env.get('JOINT_BUS')
+    d = os.path.join(jd, 'lanes') if jd else None
+    out = set()
+    if not d or not os.path.isdir(d):
+        return out
+    for f in os.listdir(d):
+        if f.endswith('.json') and f[:-len('.json')] != bus:
+            try:
+                out |= {str(r_[5]) for r_ in (json.load(open(os.path.join(d, f))).get('pieces') or []) if len(r_) > 5}
+            except (OSError, ValueError):
+                pass
+    return out
+
+
+def peer_island(key, peers):
+    """is a broken firm cut (firm_keys' key: [kind, lane, island, ...]) one against another bus's lane -- its island a
+    channel of one of `peers` (peer_lanes), named as the lane or as 'bus PEER:LANE', a pair's leg by its lane"""
+    try:
+        x_ = json.loads(key)
+    except ValueError:
+        return False
+    isl_ = str(x_[2]) if len(x_) > 2 else ''
+    isl_ = isl_[len('chan '):] if isl_.startswith('chan ') else isl_
+    isl_ = isl_.split(':', 1)[1] if isl_.startswith('bus ') and ':' in isl_ else isl_
+    return isl_ in peers or (isl_[-2:] in ('_P', '_N') and isl_[:-2] in peers)
 
 
 def firm_known(path, add=()):
@@ -3036,8 +3095,14 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 u = J.get('unproved') or {}
                 say(f"  the solve's plan is UNPROVED ({u.get('over')} over two vias against a bound of "
                     f"{u.get('bound_over')}): laid all the same; its nets over two to the ends: {J.get('over_nets')}")
+            tried = {}
+
+            def try_lay_(plan_i, i_):
+                tried['res'] = lay(r, d, plan_i, plan_bench(loopd, plan_i, bench), sub, tag=f'try{i_}', quiet=True)
+                return tried['res']
+            tl_ = try_lay_ if (awx_settings.get('LOOP_TRY_LAY') or '1') == '1' else None
             with open(os.path.join(d, 'loop.log'), 'w') as lf:
-                rc = loop(solve, loopd, loop_rounds(), lenv(), Log(lf))
+                rc = loop(solve, loopd, loop_rounds(), lenv(), Log(lf), try_lay=tl_)
             for ln in grep(os.path.join(d, 'loop.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
                 say(ln[:170])
             say(f"  loop exit {rc} at {secs()} s")
@@ -3058,8 +3123,10 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 say(f"  the loop again on the repaired ends from {os.path.basename(solve_)}, its "
                     f"{len([c_ for c_ in seeds_['SEED_CUTS'].split(',') if c_])} cut file(s) held")
                 with open(os.path.join(d, 'loop_ends.log'), 'w') as lf:
+                    tried.clear()
                     rc = loop(solve_, loopd, loop_rounds(),
-                              {**lenv(), **seeds_, **({'JOINT_LOOP': '2'} if env.get('JOINT_DIR') else {})}, Log(lf))
+                              {**lenv(), **seeds_, **({'JOINT_LOOP': '2'} if env.get('JOINT_DIR') else {})}, Log(lf),
+                              try_lay=tl_)
                 for ln in grep(os.path.join(d, 'loop_ends.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
                     say(ln[:170])
                 say(f"  the loop again on the repaired ends: exit {rc} at {secs()} s")
@@ -3075,7 +3142,19 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 say(f"  the loop did not pass -- laid from the plan it held: "
                     f"{os.path.relpath(plan, d) if plan else 'none'}")
             try_ = rc != 0 and plan is not None and lay_tries() != 1
-            res = lay(r, d, plan, plan_bench(loopd, plan, bench), sub, quiet=try_) if plan else None
+            tr_ = tried.get('res') if rc == 0 else None
+            if tr_ is not None and tr_['open'] == 0 and tr_['drc'] == 0:
+                # (the loop passed BY its plan's lay, LOOP_TRY_LAY: that lay is the round's -- said and published as
+                # an unquiet lay says and publishes itself)
+                for nm in ('seq.kicad_pcb', 'seq.kicad_pro', 'route_seq.log', 'conn.log', 'drc.log'):
+                    b_, e_ = os.path.splitext(nm)
+                    if os.path.isfile(os.path.join(d, f"{b_}{tr_['tag']}{e_}")):
+                        shutil.copyfile(os.path.join(d, f"{b_}{tr_['tag']}{e_}"), os.path.join(d, nm))
+                res = dict(tr_, board=os.path.join(d, 'seq.kicad_pcb'))
+                say(res['grade'])
+                joint_publish(env, None, f'round {r} laid', board=res['board'], nets=nets_all)
+            else:
+                res = lay(r, d, plan, plan_bench(loopd, plan, bench), sub, quiet=try_) if plan else None
             if try_:
                 res = lay_rounds(loopd, d, env, res, lambda hp, tag: lay(r, d, hp, plan_bench(loopd, hp, bench), sub,
                                                                           tag=tag, quiet=True), say, plan=plan)

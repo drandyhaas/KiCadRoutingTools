@@ -2,7 +2,8 @@
 crowded, for the fanout to choose again (fanout_from_plan: FEEDBACK=OUT.json; whole_ends prices them).
 whole_feedback.py --repeat SIDECAR.plan.json HOT_BEFORE.json HOT_NOW.json -- exit 0 (and name them) when a finding at
 the ends -- its kind, its lanes, its end -- stands in both rounds' audits: the solve had its round and did not move it,
-and only the fanout can (whole_loop stops there).
+and only the fanout can (whole_loop stops there) -- but not while the round has a finding of the solve's own that the
+round before had not: the solve answers that first.
 whole_feedback.py --refused SIDECAR.plan.json OUT.json REFUSED.json -- the FANOUT AUDIT's findings on a board the fanout
 refused (fanout_from_plan: a pair split by other lanes' ends between its tips): each split pair's end and each such
 lane's end there, a PAIR of ends not to be chosen together again; a tooth on the source's far face, an end to AVOID --
@@ -138,12 +139,36 @@ if NOW:
     sys.exit(0 if fanouts else 1)
 if REPEAT:
     both = at_ends(out) & at_ends(hots[0])            # (here `out` is the earlier round's hot file)
+    # ...and NOT while the round has a finding of the SOLVE's that the round before had not (a dive anywhere, anything
+    # out between the arrays): the solve is still answering what its rounds turn up, and the finding at the ends
+    # stands beside that, not in place of it. Stopped there, a loop whose first round's three findings were down to a
+    # berth 0.07 mm from a capacitor's pad and one new dive beside another bus's lane handed on a plan the snap laid a
+    # lane short at that dive -- the dive one more round's via cut away, the berth laid round the pad with no violation
+    def solves(fn):
+        """the findings of a hot file that are the solve's to move, {(kind, lanes)}: all but a pitch or a static
+        clearance at the ends"""
+        got = set()
+        for x, y, kind, *rest in json.load(open(fn)).get('hot', []):
+            x, y = board_xy(x, y)
+            lanes = tuple(sorted(lanes_named(rest[0] if rest else [])))
+            if not (kind in ('PITCH', 'STATIC') and any(near(k, x, y) for k in (0, 1))):
+                got.add((kind, lanes))
+        return got
+    fresh = sorted(solves(hots[0]) - solves(out)) if both else []
+    if fresh:
+        print(f'  {len(both)} finding(s) at the ends in both rounds, and {len(fresh)} of the solve\'s this round the '
+              f'round before had not -- the solve\'s to answer first: '
+              + ', '.join(f'{kind} {"/".join(lanes)}' for kind, lanes in fresh))
+        sys.exit(1)
     for kind, lanes, k in sorted(both):
         print(f'  {kind} {"/".join(lanes)} at the {"teeth" if k == 0 else "berths"}, both rounds')
     sys.exit(0 if both else 1)
 
 fb = json.load(open(out)) if os.path.exists(out) else {'pairs': [], 'avoid': []}
 ROUND = awx_settings.get('FB_ROUND')                 # the whole route's round naming ends now
+import run_trace                                     # noqa: E402
+TRF = run_trace.Trace(out[:-len('.json')] + '.trace.jsonl' if out.endswith('.json') else out + '.trace.jsonl',
+                      fresh=False)                   # (each call adds to OUT; its trace too)
 
 
 def _akey(it):
@@ -317,7 +342,9 @@ if NAME:
     named, why = lanes_named(hots), 'open'
     if named:
         # the open lanes, each at the end where its trouble is -- an end named in an earlier round raised
-        added = sum(put_avoid(e) for ln in named for e in (end_of(ln, k) for k in failing_ends(ln)) if e)
+        fe_ = {ln: failing_ends(ln) for ln in named}
+        added = sum(put_avoid(e) for ln in named for e in (end_of(ln, k) for k in fe_[ln]) if e)
+        TRF.rec('name', round=ROUND, why=why, lanes={ln: [('tooth', 'berth')[k] for k in ks] for ln, ks in fe_.items()})
     else:
         tiers = [('over two vias', sorted((ln for ln in ov if ov[ln] > 0), key=lambda ln: (-ov[ln], -ld.get(ln, 0), ln))),
                  ('loaded on the trunk', sorted((ln for ln in ld if ld[ln] > LOAD_OK), key=lambda ln: (-ld[ln], ln))),
@@ -327,6 +354,7 @@ if NAME:
             if named:
                 break
         added = sum(put_avoid(e) for ln in named for e in fresh(ln))
+        TRF.rec('name', round=ROUND, why=why, lanes={ln: ['tooth', 'berth'] for ln in named})
     fb['named'] = list(dict.fromkeys(list(fb.get('named') or []) + named))
     json.dump(fb, open(out, 'w'), indent=1)
     print(f'whole_feedback: {added} new, the lanes named: ' +
@@ -335,24 +363,59 @@ if NAME:
     sys.exit(0)
 seen = {json.dumps(x, sort_keys=True) for x in fb['pairs']}
 added = 0
+DIRK = {0: dict(S.get('tooth_dir') or {}), 1: dict(S.get('stub_dir') or {})}   # each net's end's escape direction:
+#                                                                                 its FACE (none given: every end one
+#                                                                                 face, near_own then near's own test)
+_FACE_BOXES = {}
+
+
+def near_own(lane, k, x, y):
+    """is (x, y) at lane's OWN end k: at the ends of its face -- the ends k leaving the array the way its own does --
+    as `near` tests the array's (ends_near). Near the array's ends alone, a lane passing in front of one face on its
+    way to a berth on another was named at that berth, 12 mm from the finding"""
+    lg = legs_of(lane)
+    f = tuple(DIRK[k].get(lg[0]) or ()) if lg else ()
+    if (k, f) not in _FACE_BOXES:
+        sub = {n: e for n, e in ends.items() if tuple(DIRK[k].get(n) or ()) == f}
+        _FACE_BOXES[(k, f)] = (sub, ends_near.boxes(sub, S.get('dest_of') or {}) if sub else None)
+    sub, bxs = _FACE_BOXES[(k, f)]
+    return bool(sub) and ends_near.near(sub, bxs, k, x, y, FRONT, bd.LANE_MIN)
+
+
 for fn in hots:
     for x, y, kind, *rest in json.load(open(fn)).get('hot', []):
         x, y = board_xy(x, y)
         lanes = lanes_named(rest[0] if rest else [])
+        items = []
         for k in (0, 1):
             if not near(k, x, y):
                 continue
-            es = [e for e in (end_of(ln, k) for ln in lanes) if e]
-            items = ([('pairs', sorted([a, b], key=lambda e: e['lane'])) for a, b in itertools.combinations(es, 2)]
-                     if len(es) >= 2 else [('avoid', es[0])] if es else [])
-            for kind_, it in items:
-                if kind_ == 'avoid':
-                    added += put_avoid(it)
-                    continue
-                key = json.dumps(it, sort_keys=True)
-                if key not in seen:
-                    seen.add(key)
-                    fb[kind_].append(it)
-                    added += 1
+            # (the lanes it names at their OWN end there -- near_own; a lane only passing that face is not named there)
+            es = [e for e in (end_of(ln, k) for ln in lanes if near_own(ln, k, x, y)) if e]
+            items += ([('pairs', sorted([a, b], key=lambda e: e['lane'])) for a, b in itertools.combinations(es, 2)]
+                      if len(es) >= 2 else [('avoid', es[0])] if es else [])
+        acts = []
+        for kind_, it in items:
+            if kind_ == 'avoid':
+                a1_ = put_avoid(it)
+                added += a1_
+                acts.append('added or raised' if a1_ else 'named already this round')
+                continue
+            key = json.dumps(it, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                fb[kind_].append(it)
+                added += 1
+                acts.append('added')
+            else:
+                acts.append('named already')
+        # (THE CREDIT, a trace's: the finding, which rule named which ends, how far each end is from it, and what was
+        # done -- OUT.trace.jsonl beside OUT)
+        TRF.rec('finding', src=os.path.basename(fn), round=ROUND, kind=kind, lanes=lanes, xy=[x, y],
+                near=[k for k in (0, 1) if near(k, x, y)],
+                credited=[{'as': kind_, 'act': act_, 'ends': [
+                    {'lane': e['lane'], 'end': ('tooth', 'berth')[e['end']], 'layer': e['layer'],
+                     'dist_mm': round(min(math.hypot(p[0] - x, p[1] - y) for p in e['points']), 2)}
+                    for e in (it if kind_ == 'pairs' else [it])]} for (kind_, it), act_ in zip(items, acts)])
 json.dump(fb, open(out, 'w'), indent=1)
 print(f'whole_feedback: {added} new, {len(fb["pairs"])} pairs and {len(fb["avoid"])} ends to avoid in {out}')

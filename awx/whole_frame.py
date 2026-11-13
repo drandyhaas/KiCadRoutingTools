@@ -210,9 +210,12 @@ def cut_gaps(pts, DB, avoid=()):
         m = ((stops[j] + stops[j + 1]) / 2) % P
         # (back to a face: unrolled from the north-east corner, north face west, facing face south, south face east,
         # far face north)
-        if m < W_:
+        # (...a middle AT a corner of the facing face is the facing face's: read to the micron it stands on that
+        # face's own end, where no cut may -- a gap whose middle fell on the north-west corner was offered as a cut
+        # on the north face and refused as one on the facing face, and the model stopped)
+        if m < W_ - 1e-3:
             out.append(('N', x1 - m))
-        elif m < W_ + H_:
+        elif m <= W_ + H_ + 1e-3:
             continue                    # (the facing face: its berths are the trunk's)
         elif m < 2 * W_ + H_:
             out.append(('S', x0 + (m - W_ - H_)))

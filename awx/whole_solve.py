@@ -70,6 +70,7 @@ SUBSOLVERS = ['default_lp', 'max_lp', 'core', 'objective_lb_search']
 # the proof from their plan (the finders alone found K51-on-the-human's-fanout's plan and left its bound where it was)
 FALLBACK = ['quick_restart', 'no_lp', 'core']
 FACE_ROOM = 2 * VNEED                 # the band along the source's near face: a change's room along its lane
+NEAR_X_MM = 8.0                       # a crossing this far past the source's near face or more is free of the face's price
 SOLVE_STALL = 3                        # the search's model reductions in a row with no progress: stalled
 WARM_WORK = 30.0                       # deterministic work to lay a re-solve's warm start out whole (one worker)
 WINDOW_LANES = 8                       # (SOLVE_WINDOWS) a window: this many lanes, neighbours in their entry order
@@ -334,6 +335,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     # within the rule of each other (crossing, laid on two layers) end on different layers (the ns3_rev synth: two
     # berths' runs crossing on In2.Cu and B.Cu, both moved onto In2.Cu, shorted)
     VBAN, VSEP = {}, []
+    VWHY = {}               # (lane, end, layer) -> what bans that via end's run from the layer (the verdict's vban_why)
     if VEND:
         import rules as _rules
         runs_ = {}
@@ -351,7 +353,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 segs_ += _relayer.run_to_via(ctx.pcb, nid, pt_, L0_) or []
             if segs_:
                 runs_[(n, k_)] = (nids_, segs_)
-        VBAN, VSEP = _relayer.clashes(ctx.pcb, runs_, LAYN, _rules.active().fan_clear)
+        VWHY_ = {}
+        VBAN, VSEP = _relayer.clashes(ctx.pcb, runs_, LAYN, _rules.active().fan_clear, why=VWHY_)
+        VWHY.update({(k_[0], k_[1], L_): f'its run beside {w_}' for (k_, L_), w_ in VWHY_.items()})
         # ...and THE LAYERS THE END HAS ROOM ON, where a group's model read them (the plan's `end_layers`, each leg's:
         # the layers its exit's front is clear on -- a pair's, both legs'): every other layer banned. The runs' test
         # above reads the copper beside a run INSIDE its array; what stands in front of the exit, past the array's
@@ -369,6 +373,8 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                 ban_ = {L_ for L_ in LAYN if L_ not in ok_}
                 if ban_ - (VBAN.get((n, k_)) or set()):
                     n_el += 1
+                for L_ in ban_ - (VBAN.get((n, k_)) or set()):
+                    VWHY[(n, k_, L_)] = 'no room in front of its exit (the model\'s end_layers)'
                 VBAN[(n, k_)] = (VBAN.get((n, k_)) or set()) | ban_
         if n_el:
             print(f'   via ends\' fronts: {n_el} end(s) kept off the layers their exits have no room on (the group\'s ends)')
@@ -389,14 +395,18 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
                     start_x=g_[0], start_y=g_[1], end_x=b_[0], end_y=b_[1], width=TRK, net_id=ctx.byname[n][0],
                     layer=ctx.dest_layer[n])])
         if legs_r:
-            lb_, _ls = _relayer.clashes(ctx.pcb, legs_r, LAYN, _rules.active().fan_clear)
+            lw_ = {}
+            lb_, _ls = _relayer.clashes(ctx.pcb, legs_r, LAYN, _rules.active().fan_clear, why=lw_)
             for k_, v_ in lb_.items():
+                for L_ in set(v_) - (VBAN.get(k_) or set()):
+                    VWHY[(k_[0], k_[1], L_)] = f'its pocket leg beside {lw_.get((k_, L_), "copper")}'
                 VBAN[k_] = (VBAN.get(k_) or set()) | set(v_)
         # ...and a layer the relayer found its run to WALL IN a ball on (whole_route.relay_ends, VBAN_WALLS)
         if awx_settings.get('VBAN_WALLS') and os.path.isfile(awx_settings.req('VBAN_WALLS')):
             nw_ = 0
             for lane_, k_, L_ in json.load(open(awx_settings.req('VBAN_WALLS'))):
                 if (lane_, k_) in VEND and L_ in LAYN:
+                    VWHY.setdefault((lane_, k_, L_), 'its run walled a ball in (the relayer)')
                     VBAN[(lane_, k_)] = (VBAN.get((lane_, k_)) or set()) | {L_}
                     nw_ += 1
             if nw_:
@@ -2082,6 +2092,24 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
     if HFILES:
         print(f'   history: {len(HFILES)} audit(s), {len(HOT)} hot bin(s) (hottest {max(HOT.values(), default=0)})'
               + (f' in {len(runs)} run(s)' if len(runs) != len(HOT) else '') + f', {nh_x} crossing and {nh_v} change terms')
+    # ---- A CROSSING CLOSE TO THE SOURCE, priced by how close (NEAR_X_MM; SOLVE_NEAR_X=0: unpriced): on more layers than two a
+    # crossing may fall a clearance past its lanes' teeth (BAND_X 0), and nothing says where along its window it
+    # falls -- a lane last in the berths' order crossed twelve of its bus's lanes at its tooth, and was laid along the
+    # source's face past another bus's teeth on its own layer, which no change of layer could settle. Each crossing
+    # pays a unit a grid step it falls short of the near face's line and this reach: below a via and a net over two,
+    # with the history's terms -- it moves a crossing out along the trunk where its window lets it, never adds a via
+    NEAR_X = float(awx_settings.get('SOLVE_NEAR_X') or NEAR_X_MM)
+    if NEAR_X > 0 and not check:
+        top_, n_nx = Q(S_FACE + NEAR_X), 0
+        for key, (lo, hi) in sorted(win.items()):
+            if Q(lo) >= top_ or hi <= lo + G:
+                continue
+            c_ = m.NewIntVar(0, top_ - Q(lo), '')
+            m.Add(c_ >= top_ - t[key])
+            cost.append(c_)
+            n_nx += 1
+        print(f'   crossings near the source: {n_nx} of {len(win)} priced by how far short of {NEAR_X:g} mm past the '
+              f'near face they fall')
     if hint:
         Hj = json.load(open(hint))
         nh = 0
@@ -2371,6 +2399,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         if NL > 2:
             out_['vend'] = sorted([n_, k_] for (n_, k_) in VEND)
             out_['vban'] = sorted([n_, k_, sorted(v_)] for (n_, k_), v_ in VBAN.items() if v_)
+            # (...each banned layer's reason, and the pairs of runs held on different layers -- a check's trace)
+            out_['vban_why'] = sorted([n_, k_, L_, VWHY.get((n_, k_, L_), '?')] for (n_, k_), v_ in VBAN.items()
+                                      for L_ in v_)
+            out_['vsep'] = sorted([list(a_), list(b_)] for a_, b_ in VSEP)
         # (...and, with a plan on more layers than two, the layer it gives each lane's two ENDS -- a via end's is the
         # solve's to choose: the group's ends take them, group_ends.py)
         if STATUS['plan'] and NL > 2:
