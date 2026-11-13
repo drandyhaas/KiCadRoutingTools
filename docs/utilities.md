@@ -2369,8 +2369,10 @@ Options:
   --layers, -l        Routing layers (default: F.Cu B.Cu)
   --track-width, --width, -w  Track width in mm (default: 0.3)
   --clearance         Track clearance in mm (default: 0.25)
-  --via-size          Via outer diameter in mm (default: 0.5)
-  --via-drill         Via drill size in mm (default: 0.3)
+  --via-size          Via outer diameter in mm (default: the board's Default
+                      net-class via, else 0.5)
+  --via-drill         Via drill size in mm (default: the board's Default
+                      net-class drill, else 0.3)
   --nets, -n          Net patterns to include
   --diff-pairs, -d    Differential pair patterns (e.g., "*lvds*")
   --diff-pair-gap     Gap between P/N traces in mm (default: 0.1)
@@ -2527,8 +2529,10 @@ Options:
                       either method via-drops the interior (under-body) pads the
                       filter selects (stub: after its fan, #1717); unscoped runs
                       never via-drop the exposed/thermal pad (issue #410)
-  --via-size          Underpad escape via outer diameter in mm (default: 0.45)
-  --via-drill         Underpad escape via drill diameter in mm (default: 0.25)
+  --via-size          Underpad escape via outer diameter in mm (default: the
+                      board's Default net-class via, else 0.45)
+  --via-drill         Underpad escape via drill diameter in mm (default: the
+                      board's Default net-class drill, else 0.25)
   --board-edge-clearance  Min clearance from stub/via copper to the Edge.Cuts
                       outline in mm (default 0 = use --clearance)
   --allow-via-in-pad  Underpad escape: let the escape via overlap its OWN pad

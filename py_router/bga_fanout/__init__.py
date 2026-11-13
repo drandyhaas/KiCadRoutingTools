@@ -5707,9 +5707,11 @@ def main():
     parser.add_argument('--clearance', type=float, default=defaults.BGA_CLEARANCE,
                         help=f'Track clearance in mm (default: {defaults.BGA_CLEARANCE})')
     parser.add_argument('--via-size', type=float, default=None,
-                        help=f'Via outer diameter in mm (default: {defaults.BGA_VIA_SIZE})')
+                        help="Via outer diameter in mm (default: the board's Default "
+                             f"net-class via, else {defaults.BGA_VIA_SIZE})")
     parser.add_argument('--via-drill', type=float, default=None,
-                        help=f'Via drill size in mm (default: {defaults.BGA_VIA_DRILL})')
+                        help="Via drill size in mm (default: the board's Default "
+                             f"net-class drill, else {defaults.BGA_VIA_DRILL})")
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
     parser.add_argument('--diff-pairs', '-d', nargs='*',
@@ -5815,10 +5817,18 @@ def main():
     # number nothing routed to. This front registers --clearance-ceiling and
     # used to ignore it.
     __import__('fab_tiers').apply_clearance_ceiling(args, 'bga_fanout')
-    # #1676: a via nobody asked for starts at the board's own .kicad_dru rules
+    # #1795: a via nobody asked for starts at the board's Default net-class via,
+    # as on route.py and the GUI's BGA panel; #1676: raised to its .kicad_dru rules
     _vs_explicit = args.via_size is not None or args.via_drill is not None
-    args.via_size = defaults.BGA_VIA_SIZE if args.via_size is None else args.via_size
-    args.via_drill = defaults.BGA_VIA_DRILL if args.via_drill is None else args.via_drill
+    from list_nets import board_default_netclass_param
+    for _pname, _nckey, _fallback in (('via_size', 'via_diameter', defaults.BGA_VIA_SIZE),
+                                      ('via_drill', 'via_drill', defaults.BGA_VIA_DRILL)):
+        if getattr(args, _pname) is None:
+            _v = board_default_netclass_param(args.pcb, _nckey)
+            setattr(args, _pname, _v if _v else _fallback)
+            print(f"--{_pname.replace('_', '-')} not given; using "
+                  f"{'the board Default net-class' if _v else 'the fallback'} "
+                  f"{getattr(args, _pname)}mm.")
     if not _vs_explicit:
         from design_rules import run_via_for_rules
         args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,
