@@ -95,7 +95,43 @@ def obstacle_board(pcb_data, config):
     """The board the obstacle builders of this step read: ``pcb_data``, or
     its `SpanView` when the step lays vias of a span."""
     span = getattr(config, 'via_span', None)
-    return SpanView(pcb_data, span) if span else pcb_data
+    if not span or isinstance(pcb_data, SpanView):
+        return pcb_data
+    # One view per state of the board: a step stamps from it many times
+    # between the commits that change the copper.
+    segs, vias = pcb_data.segments, pcb_data.vias
+    key = (tuple(span), len(segs), len(vias),
+           id(segs[-1]) if segs else 0, id(vias[-1]) if vias else 0)
+    memo = getattr(pcb_data, '_span_view_memo', None)
+    if memo is None or memo[0] != key:
+        memo = (key, SpanView(pcb_data, span))
+        try:
+            pcb_data._span_view_memo = memo
+        except Exception:                                       # noqa: BLE001
+            pass
+    return memo[1]
+
+
+def reads_span_board(fn):
+    """A stamp of a net's copper (it takes ``pcb_data`` and ``config``): under
+    a via span it reads the board as the span sees it, so copper outside the
+    span blocks nothing, whichever step calls it."""
+    import functools
+    import inspect
+    names = list(inspect.signature(fn).parameters)
+    at_pcb, at_cfg = names.index('pcb_data'), names.index('config')
+
+    @functools.wraps(fn)
+    def stamp(*args, **kwargs):
+        config = kwargs.get('config', args[at_cfg] if len(args) > at_cfg else None)
+        if not getattr(config, 'via_span', None):
+            return fn(*args, **kwargs)
+        if 'pcb_data' in kwargs:
+            kwargs['pcb_data'] = obstacle_board(kwargs['pcb_data'], config)
+        elif len(args) > at_pcb:
+            args = (*args[:at_pcb], obstacle_board(args[at_pcb], config), *args[at_pcb + 1:])
+        return fn(*args, **kwargs)
+    return stamp
 
 
 def via_layer_pair(config) -> List[str]:
@@ -142,6 +178,31 @@ def default_micro_via(pcb_path: str) -> Tuple[Optional[float], Optional[float]]:
             return (float(dia) if isinstance(dia, (int, float)) and dia > 0 else None,
                     float(drill) if isinstance(drill, (int, float)) and drill > 0 else None)
     return None, None
+
+
+def cut_layers_to_span(pcb_data, layers, layer_costs, via_span, via_span_type):
+    """A step's routing layers under a via span: ``(span, type, layers,
+    layer_costs)``, the layers cut down to the span (the span's own where
+    none of the asked layers is in it) and the costs with them. ``span`` and
+    ``type`` are None for no span and for one that covers the whole stack
+    (through vias: the step is unchanged)."""
+    if not via_span:
+        return None, None, layers, layer_costs
+    span, kind = resolve_via_span(
+        list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
+        via_span[0], via_span[-1], via_span_type)
+    if kind is None:
+        return None, None, layers, layer_costs
+    inside = [l for l in layers if l in span]
+    if layer_costs and len(layer_costs) == len(layers):
+        layer_costs = [c for l, c in zip(layers, layer_costs) if l in span]
+        if not inside:
+            layer_costs = None
+    layers = inside or list(span)
+    print(f"Via span (#1842): {kind} vias {span[0]}-{span[-1]}; routing on "
+          f"{', '.join(layers)} only, and only copper on {', '.join(span)} "
+          f"(and drilled pads) blocks a via site")
+    return span, kind, layers, layer_costs
 
 
 def apply_span(vias, config) -> int:

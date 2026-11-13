@@ -23,6 +23,7 @@ from obstacle_map import check_line_clearance
 from geometry_utils import simplify_path, segments_intersect_tuple
 from net_queries import resolve_gnd_net_id, resolve_return_net_id
 from net_keepouts import stamping as _nk_stamping
+from via_span import via_layer_pair as _via_layer_pair, via_kind as _via_kind
 # Note: Layer switching is now done upfront in route.py, not during routing
 
 # Import Rust router
@@ -1602,9 +1603,10 @@ def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gn
                     x=gx, y=gy,
                     size=config.via_size,
                     drill=config.via_drill,
-                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    layers=_via_layer_pair(config),   # through, or the step's span (#1842)
                     net_id=gnd_net_id,
-                    free=True
+                    free=True,
+                    via_type=_via_kind(config)
                 ))
 
     return gnd_vias
@@ -1938,8 +1940,9 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                 x=x1, y=y1,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=["F.Cu", "B.Cu"],  # Always through-hole
-                net_id=net_id
+                layers=_via_layer_pair(config),   # through, or the step's span (#1842)
+                net_id=net_id,
+                via_type=_via_kind(config)
             ))
         elif abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
             # Always use actual layer for segment

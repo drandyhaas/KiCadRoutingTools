@@ -615,6 +615,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 net_name_patterns: Optional[List[str]] = None,
                 return_results: bool = False,
                 pcb_data=None,
+                # #1842: the step's sub-stack, as route.py's --via-span has
+                # it: the pairs route on that contiguous run of copper
+                # layers and every via the step lays joins exactly it.
+                via_span: Optional[List[str]] = None,
+                via_span_type: Optional[str] = None,
                 # #1421: write the run's JSON_SUMMARY to this file (route.py's
                 # --json-out). The GUI passes nothing: it reads results_data.
                 json_out: Optional[str] = None,
@@ -825,6 +830,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
         layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']  # Default 4-layer signal stack
+    # #1842: a via span is the step's sub-stack
+    from via_span import cut_layers_to_span as _cut1842
+    _span1842, _span_type1842, layers, layer_costs = _cut1842(
+        pcb_data, layers, layer_costs, via_span, via_span_type)
+    if _span1842:
+        # copper the step could not lay again stays where it is
+        from via_span import hold_outside_copper as _hold1842
+        _held1842 = _hold1842(pcb_data, _span1842)
+        if _held1842:
+            print(f"  {_held1842} existing track(s) and via(s) with copper outside the "
+                  f"span are held in place for this step")
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # One cost per requested layer, or the full-stack append below puts its
@@ -1285,6 +1301,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         except Exception as _dre:                          # noqa: BLE001
             print(f"  Warning: design-rule layer widths unavailable ({_dre}).")
 
+    if _span1842 and disable_bga_zones is None:
+        # #1842: "no new via in a BGA's pad field" is a rule for through
+        # vias. A via of a span between the balls, or under them on layers
+        # the part has no copper on, is how a pair leaves a dense part.
+        disable_bga_zones = []
+        print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
+              f"fields (--no-bga-zones)")
     # Auto-detect BGA exclusion zones if not specified
     _sel_ids = [nid for _nm, nid in _targets]
     bga_exclusion_zones = setup_bga_exclusion_zones(
@@ -1292,7 +1315,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         selected_net_ids=_sel_ids)
 
     # #1676: a via this run sizes itself starts at the board's own via rules
-    if via_from_class:
+    if via_from_class and _span_type1842 == 'micro':
+        # #1842: ... and under a micro via span, at the Default class's MICRO
+        # via (a class's via_diameter is its through via's), on both fronts
+        from via_span import default_micro_via
+        _mdia, _mdrill = default_micro_via(
+            input_file or getattr(pcb_data, 'source_path', '') or '')
+        via_size, via_drill = _mdia or via_size, _mdrill or via_drill
+        print(f"  micro via span: drawing the board Default net-class micro via "
+              f"{via_size}/{via_drill} mm")
+    elif via_from_class:
         from design_rules import run_via_for_rules
         via_size, via_drill = run_via_for_rules(input_file, pcb_data, via_size, via_drill)
     # Build config kwargs from common parameters plus diff-pair specific options
@@ -1380,8 +1412,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         config_kwargs['same_net_pad_clearance'] = _snpc581
         print(f"Same-net pad via clearance {_snpc581:g}mm (from {_snpc_src}, "
               f"#581): vias stay off same-net pads")
+    if _span1842:
+        config_kwargs['via_span'] = list(_span1842)
+        config_kwargs['via_span_type'] = _span_type1842
     config = GridRouteConfig(**config_kwargs)
     config.quick = int(quick or 0)
+    # #1842: the board as the span sees it, for every obstacle map this step
+    # builds (the board itself without a span)
+    from via_span import obstacle_board as _obs_board1842
+    _obs_pcb = _obs_board1842(pcb_data, config)
     # #1293: every P<->N pricing site (the #318 neck, via spacing, the
     # self-checks) reads the coupled-pair rule through pair_clearance.
     config.coupled_pair_clearances = _coupled_map
@@ -1721,7 +1760,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         if progress_callback:
             progress_callback(0, 0, "Building layer-swap probe obstacle map...")
         swap_probe_obstacles = build_base_obstacle_map(
-            pcb_data, config, [nid for _, nid in net_ids], _swap_probe_clearance,
+            _obs_pcb, config, [nid for _, nid in net_ids], _swap_probe_clearance,
             net_clearances=net_clearances, progress_callback=progress_callback)
         total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer = apply_diff_pair_layer_swaps(
             pcb_data, config, diff_pair_ids_to_route_set, diff_pairs,
@@ -1819,7 +1858,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     all_net_ids_to_route = [nid for _, nid in net_ids]
     print("Building base obstacle map...")
     base_start = time.time()
-    base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route,
+    base_obstacles = build_base_obstacle_map(_obs_pcb, config, all_net_ids_to_route,
                                              net_clearances=net_clearances,
                                              progress_callback=progress_callback)
     base_elapsed = time.time() - base_start
@@ -1858,7 +1897,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if progress_callback:
         progress_callback(0, 0, "Building diff-pair obstacle map...")
     dp_base_start = time.time()
-    diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route,
+    diff_pair_base_obstacles = build_base_obstacle_map(_obs_pcb, config, all_net_ids_to_route,
                                                        diff_pair_extra_clearance,
                                                        net_clearances=net_clearances,
                                                        progress_callback=progress_callback)
@@ -1921,7 +1960,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                             0, 0, f"Building diff-pair obstacle map "
                                   f"(width {geom[0]} / gap {geom[1]})...")
                     diff_pair_base_obstacles_by_geom[geom] = build_base_obstacle_map(
-                        pcb_data, replace(config, track_width=geom[0], diff_pair_gap=geom[1]),
+                        _obs_pcb, replace(config, track_width=geom[0], diff_pair_gap=geom[1]),
                         all_net_ids_to_route, _ec, net_clearances=net_clearances,
                         progress_callback=progress_callback)
             if len(set(pair_diff_geom.values())) > 1:
@@ -1990,7 +2029,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             as its geometry's map is -- stamped at the narrowed widths, with
             the same connector regions blocked."""
             dp_map = build_base_obstacle_map(
-                pcb_data, narrow_config, all_net_ids_to_route,
+                _obs_pcb, narrow_config, all_net_ids_to_route,
                 _cec1729(narrow_config), net_clearances=net_clearances)
             _block_connector_regions(only_geom=geom, dp_map=dp_map)
             return dp_map
@@ -2014,6 +2053,22 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     gnd_net_id = None
     if config.gnd_via_enabled:
         gnd_net_id, gnd_net_name = resolve_gnd_net_id(pcb_data)
+        _gnd_off_span = False
+        if gnd_net_id and config.via_span:
+            # #1842: a return via must reach the pair's reference plane. Under
+            # a span it is laid only when a pour of the GND net is on a layer
+            # the span has; a via that stops short of its plane is not laid.
+            _gnd_on = sorted({l for z in (getattr(pcb_data, 'zones', None) or [])
+                              if z.net_id == gnd_net_id
+                              for l in ([z.layer] if getattr(z, 'layer', None) else [])}
+                             & set(config.via_span))
+            if not _gnd_on:
+                print(f"GND return vias NOT placed: no '{gnd_net_name}' pour is on a "
+                      f"layer of the via span {config.via_span[0]}-{config.via_span[-1]}, "
+                      f"so a {config.via_span_type} via would not reach the plane")
+                config.gnd_via_enabled = False
+                gnd_net_id = None
+                _gnd_off_span = True
         if gnd_net_id:
             print(f"GND net: '{gnd_net_name}' (id {gnd_net_id}) "
                   f"(GND vias will be added as obstacles)")
@@ -2023,7 +2078,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             _dom_note = describe_ground_domains(pcb_data)
             if _dom_note:
                 print(_dom_note)
-        else:
+        elif not _gnd_off_span:
             cands = gnd_candidate_names(pcb_data)
             hint = f" Candidate nets: {', '.join(cands)}." if cands else ""
             print(f"WARNING: --gnd-vias is enabled but no GND net was found; "
@@ -2033,7 +2088,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     print("Pre-computing net obstacle cache...")
     cache_start = time.time()
     net_obstacles_cache = precompute_all_net_obstacles(
-        pcb_data, list(all_unrouted_net_ids), config,
+        _obs_pcb, list(all_unrouted_net_ids), config,
         extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
     )
     cache_time = time.time() - cache_start
@@ -2336,6 +2391,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 'p_nets': [pcb_data.nets[i].name for i in _xn.p_net_ids],
                 'n_nets': [pcb_data.nets[i].name for i in _xn.n_net_ids],
             })
+
+    # #1842: every via a via-span step laid joins the span, whichever site
+    # built it (the map each was placed on was the span's)
+    if config.via_span:
+        from via_span import apply_span as _apply_span1842
+        _retyped1842 = (sum(_apply_span1842(_r.get('new_vias'), config)
+                            for _r in results if isinstance(_r, dict))
+                        + _apply_span1842(all_swap_vias, config))
+        if _retyped1842:
+            print(f"  Via span: {_retyped1842} via(s) laid by a through-via site "
+                  f"written as {config.via_span_type} {config.via_span[0]}-"
+                  f"{config.via_span[-1]}")
 
     # Sync pcb_data with length-matched segments
     # Stub layer-swap vias ride all_swap_vias, not any result's new_vias, and
@@ -3200,6 +3267,15 @@ Examples:
                              "in-run obstacle of a different class is priced at max(routing floor, "
                              "that obstacle net's own clearance) = KiCad's cross-class max(A,B). The "
                              "GUI derives the same map from the board's live net classes.")
+    parser.add_argument("--via-span", nargs=2, default=None, metavar=("TOP", "BOTTOM"),
+                        help="Lay vias that join only this run of neighbouring copper "
+                             "layers (e.g. F.Cu In1.Cu: micro vias), and route the pairs "
+                             "on those layers only, as route.py's --via-span does. "
+                             "Default: through vias (#1842)")
+    parser.add_argument("--via-span-type", choices=("micro", "blind", "buried"),
+                        default=None,
+                        help="The via type written for --via-span (default: from where "
+                             "the span sits in the stack)")
     parser.add_argument("--via-size", type=float, default=None,
                         help="Via outer diameter in mm (default: the board Default net-class via, else 0.5)")
     parser.add_argument("--via-drill", type=float, default=None,
@@ -3502,6 +3578,30 @@ Examples:
     # via_size / via_drill: when omitted, default to the board's OWN Default
     # net-class value (else the routing_defaults constant).
     _vs_explicit = args.via_size is not None or args.via_drill is not None
+    # #1842: --via-span is checked against the board's own stack, and a micro
+    # via span draws the Default class's MICRO via where no size is given.
+    # The fab floor's via sizes are a mechanical drill's and do not pin it.
+    _micro_span = False
+    if getattr(args, 'via_span', None):
+        from via_span import file_copper_layers, resolve_via_span, default_micro_via
+        try:
+            _span_layers, _span_type = resolve_via_span(
+                file_copper_layers(args.input_file), args.via_span[0], args.via_span[1],
+                getattr(args, 'via_span_type', None))
+        except ValueError as _e:
+            parser.error(f"--via-span: {_e}")
+        _micro_span = _span_type == 'micro'
+        if _span_type and not any(a in ('--layers', '-l') for a in sys.argv[1:]):
+            # no layers were asked for: the pairs route on the span's
+            args.layers = list(_span_layers)
+        if _micro_span:
+            _mdia, _mdrill = default_micro_via(args.input_file)
+            for _pname, _val in (('via_size', _mdia), ('via_drill', _mdrill)):
+                if getattr(args, _pname, None) is None and _val:
+                    setattr(args, _pname, _val)
+                    print(f"--{_pname.replace('_', '-')} not given; using the board "
+                          f"Default net-class micro via {_val}mm (--via-span).")
+            _vs_explicit = True
     for _pname, _nckey, _fallback in (('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
         if getattr(args, _pname) is None:
@@ -3572,8 +3672,8 @@ Examples:
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
-        via_size=getattr(args, 'via_size', None),
-        via_drill=getattr(args, 'via_drill', None),
+        via_size=None if _micro_span else getattr(args, 'via_size', None),
+        via_drill=None if _micro_span else getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
         board_edge_clearance=getattr(args, 'board_edge_clearance', None),
         # The diff-pair P/N gap is copper-to-copper spacing; floor it at the fab
@@ -3694,6 +3794,7 @@ Examples:
                 clearance=args.clearance,
                 via_size=args.via_size,
                 via_drill=args.via_drill,
+                via_span=args.via_span, via_span_type=args.via_span_type,
                 via_from_class=not _vs_explicit,
                 grid_step=args.grid_step,
                 via_cost=args.via_cost,
@@ -3794,7 +3895,10 @@ Examples:
                 clearance=eff_clearance, hole_clearance=_hole_clr,
                 hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
-                via_diameter=args.via_size, via_drill=args.via_drill,
+                # #1842: a micro via span's size is a micro via's; it is no
+                # statement about the board's via or drilled-hole minimums
+                via_diameter=None if _micro_span else args.via_size,
+                via_drill=None if _micro_span else args.via_drill,
                 diff_pair_gap=args.diff_pair_gap, diff_pair_width=args.track_width,
                 **drc_fix_kwargs(args))
         except Exception as e:

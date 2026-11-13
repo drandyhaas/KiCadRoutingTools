@@ -381,9 +381,16 @@ span allows. The whole stack is no span: through vias, as without the flag.
   python3 py_router/route.py escaped.kicad_pcb routed.kicad_pcb --nets "S*" \
       --via-span In1.Cu In6.Cu
   ```
+- **The diff-pair step takes the span too.** `route_diff.py --via-span TOP
+  BOTTOM` (and `--via-span-type`) has the same meaning: the pairs route on
+  that run of layers, their layer-change vias join exactly it, and only
+  copper on those layers and drilled pads blocks a via site. With no
+  `--layers` the pairs route on the span's layers. GND return vias are laid
+  only when a pour of the ground net is on a layer the span has (a return
+  via that stops short of its plane is not laid, and the run says so).
 - The GUI route tab has the same three controls (**Via Span**, the type and
-  the escape mode beside it). The fan-out, diff-pair and plane steps lay
-  through vias only.
+  the escape mode beside it), and the differential tab reads the span from
+  them. The fan-out and plane steps lay through vias only.
 
 On an 8-layer board with a 0.8 mm BGA over a field of bottom-side pads
 (`tests/fixtures/1842`), a bare route completes 25 of 36 nets with through

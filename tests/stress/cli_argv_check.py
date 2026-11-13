@@ -368,6 +368,7 @@ REFUSAL_SITES = {
         'call:load_net_clearances': ('file', '_net_clearances_unreadable'),
     },
     'route_diff.py': {
+        '--via-span: ': ('board', "the board's copper layers"),
         '--force-reroute requires an explicit net':
             ('argv', '_diff_force_reroute_unscoped'),
         '--keep-away: ': ('argv', '_keep_away'),
