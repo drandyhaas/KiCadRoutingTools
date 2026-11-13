@@ -738,6 +738,12 @@ def stage_run(args, sets, stress, plan):
         n_lines, n_boards = strip_flag_census(spec["manifest_sed"], sets, stress)
         print(f"  --strip-flag {' '.join(args.strip_flag)}: {n_lines} recorded "
               f"step(s) on {n_boards} board(s) rewritten in the containers' copies")
+    if getattr(args, "autoroute", False):
+        # Each container swaps the recorded chain for ONE autoroute.py run on
+        # the same input (sweep_lib.autoroute_manifest); the kept manifest is
+        # that one-line chain, so a later regrade reads what actually ran.
+        spec["autoroute"] = True
+        spec["note"] = "cloud autoroute: autoroute.py on each recorded input"
     if spec.get("env") or spec.get("defaults") or spec.get("manifest_sed"):
         spec["note"] = (f"cloud replay; env={spec.get('env')} defaults={spec.get('defaults')}"
                         + (f" strip={args.strip_flag}" if spec.get("manifest_sed") else ""))
@@ -1165,6 +1171,11 @@ def main():
                          "then runs that tool's default. Applied to each container's copy "
                          "of the manifest, never to the shared corpus volume; the label "
                          "gains a -strip<hash> suffix. Strip the SAME flags on both arms.")
+    ap.add_argument("--autoroute", action="store_true",
+                    help="the AUTOROUTER arm: each board runs ONE autoroute.py on its "
+                         "recorded input instead of replaying the recorded chain, graded "
+                         "the same way. Its chains differ from every replay arm, so "
+                         "compare it with pair_arms.py --any-final, and pass --no-baseline.")
     ap.add_argument("--jobs", type=int, default=6,
                     help="sets re-graded in parallel during the baseline stage (default 6)")
     ap.add_argument("--workdir", default="", help="scratch for the generated arms file")

@@ -95,7 +95,12 @@ finalize, so its vias and copper differ from the full route's by a few percent
 (measured -2% to +8% in copper per seed) and its blocking is decided by a
 single open net when every seed routes. When the best seeds lie within that
 spread -- the same placement defects, blocking within `CLOSE_BLOCKING` net of
-the best and copper within `CLOSE_COPPER` of it -- the run NOTEs them, and
+the best and copper within `CLOSE_COPPER` of it -- the run NOTEs them. Where
+the best leaves many nets blocked at level 2 (the chain does not route the
+board at that level), the band grows to `CLOSE_FRACTION` of the best's
+blocking, joins_needed is compared the same way and copper is not, and the
+run says that every judged seed leaves N-M nets blocked there and names the
+seeds it cannot separate (`not_separable` in JSON_SUMMARY, #1826). Then
 `--confirm close` (or `--confirm K` for the K best) routes those seeds again
 at full level (`--quick` taken off every route step) into `s<S>_full_route/`,
 `s<S>_full.kicad_pcb` and `s<S>_full.score.json`, and names the best of the
@@ -152,6 +157,13 @@ SHELL_ONLY = ('cd', 'export', 'set', 'source', '.', 'pushd', 'popd', 'unset')
 #: the full route per seed, so a gap inside that cannot rank them (#1383).
 CLOSE_BLOCKING = 1
 CLOSE_COPPER = 0.10
+#: #1826: where the best seed leaves many nets blocked at level 2, a gap of a
+#: few nets is the level's own spread, not the placements' (tigard: 60 and 62
+#: at level 2, 2 and 1 in the full route, the order reversed). The blocking
+#: band grows to this fraction of the best's blocking (`close_band`), and
+#: inside a band so widened joins_needed is compared the same way and copper
+#: not at all: two boards tens of nets short are not compared by copper.
+CLOSE_FRACTION = 0.15
 #: `--confirm close` full-routes at most this many seeds (the best ones); the
 #: ones it leaves out are named, with the options that confirm them (#1473).
 CONFIRM_MAX = 4
@@ -370,32 +382,82 @@ def judge_seed(run, s, steps, intent, lock, baseline=None, full=False):
     return res
 
 
+def close_band(best):
+    """The blocking (or joins_needed) band within which a seed is close to
+    the best's count `best` (#1826): `CLOSE_BLOCKING`, or `CLOSE_FRACTION` of
+    `best` rounded up where that is wider."""
+    import math
+    if not isinstance(best, (int, float)) or best <= 0:
+        return CLOSE_BLOCKING
+    return max(CLOSE_BLOCKING, math.ceil(round(CLOSE_FRACTION * best, 9)))
+
+
+def level2_close(entries):
+    """`(close, widened)` over `entries`, the ranked seeds best first, each
+    `{'seed', 'defects', 'blocking', 'joins', 'copper'}` (None where a score
+    does not say): `close` the seeds (best first) whose level-2 scores lie
+    within the quick/full spread of the best's -- the same placement defects
+    (floorplan errors plus assembly count) and blocking at most
+    `close_band(best blocking)` above; then, at the 1-net band, copper at most
+    `CLOSE_COPPER` above, and in a WIDENED band (`widened`: the best leaves
+    enough nets blocked that the band grew past `CLOSE_BLOCKING`, #1826)
+    joins_needed at most `close_band(best joins)` above instead. Shared by
+    `close_seeds` and the GUI's candidates table."""
+    if not entries:
+        return [], False
+    e0 = entries[0]
+    b0 = e0['blocking']
+    band = close_band(b0)
+    widened = band > CLOSE_BLOCKING
+    out = [e0['seed']]
+    for e in entries[1:]:
+        b = e['blocking']
+        if e['defects'] != e0['defects'] or b is None or b0 is None or b > b0 + band:
+            continue
+        if widened:
+            j0, j = e0['joins'], e['joins']
+            if j0 is not None and j is not None and j > j0 + close_band(j0):
+                continue
+        elif (e0['copper'] is not None and e['copper'] is not None
+              and e['copper'] > e0['copper'] * (1.0 + CLOSE_COPPER)):
+            continue
+        out.append(e['seed'])
+    return out, widened
+
+
+def _entry(r):
+    """A ranked result with a `score` as a `level2_close` entry."""
+    sc = r['score']
+    by = sc.get('blocking_by') if isinstance(sc.get('blocking_by'), dict) else {}
+    q = sc.get('quality') if isinstance(sc.get('quality'), dict) else {}
+    blk, cu, jn = sc.get('blocking'), q.get('copper_mm'), sc.get('joins_needed')
+    num = (int, float)
+    return {'seed': r['seed'],
+            'defects': (by.get('floorplan') or 0) + (by.get('assembly') or 0),
+            'blocking': blk if isinstance(blk, num) else None,
+            'joins': jn if isinstance(jn, num) else None,
+            'copper': cu if isinstance(cu, num) else None}
+
+
 def close_seeds(scored):
     """The seeds (best first) whose level-2 scores lie within the quick/full
-    spread of the best's: the same placement defects (floorplan errors plus
-    assembly count), blocking at most `CLOSE_BLOCKING` above, copper at most
-    `CLOSE_COPPER` above. `scored` is the ranked results with a `score`;
-    the best is always first. [] when nothing is scored."""
-    if not scored:
-        return []
-    def parts(r):
-        sc = r['score']
-        by = sc.get('blocking_by') if isinstance(sc.get('blocking_by'), dict) else {}
-        q = sc.get('quality') if isinstance(sc.get('quality'), dict) else {}
-        blk, cu = sc.get('blocking'), q.get('copper_mm')
-        return ((by.get('floorplan') or 0) + (by.get('assembly') or 0),
-                blk if isinstance(blk, (int, float)) else None,
-                cu if isinstance(cu, (int, float)) else None)
-    d0, b0, c0 = parts(scored[0])
-    out = [scored[0]['seed']]
-    for r in scored[1:]:
-        d, b, c = parts(r)
-        if d != d0 or b is None or b0 is None or b > b0 + CLOSE_BLOCKING:
-            continue
-        if c0 is not None and c is not None and c > c0 * (1.0 + CLOSE_COPPER):
-            continue
-        out.append(r['seed'])
-    return out
+    spread of the best's (`level2_close`). `scored` is the ranked results
+    with a `score`; the best is always first. [] when nothing is scored."""
+    return level2_close([_entry(r) for r in scored])[0]
+
+
+def not_separable(scored):
+    """`(seeds, blocked)`: the seeds level 2 cannot separate because every
+    judged seed leaves many nets blocked there (#1826) -- the close seeds of
+    a widened band, when there are two or more, else [] -- and the
+    (fewest, most) nets blocked among `scored` when the band is widened,
+    else None."""
+    entries = [_entry(r) for r in scored]
+    close, widened = level2_close(entries)
+    if not widened:
+        return [], None
+    blk = [e['blocking'] for e in entries if e['blocking'] is not None]
+    return (close if len(close) > 1 else []), (min(blk), max(blk))
 
 
 def confirm_all(close, ranking):
@@ -440,6 +502,10 @@ def _line(res):
 
 
 def main(argv=None):
+    # each line reaches a pipe or a log when it is printed, not with the
+    # next seed's result (#1825)
+    import cli_banner
+    cli_banner.line_buffer_streams()
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('judge', help="place_simple's judge.json; the seeds' boards are beside it")
     ap.add_argument('--chain', required=True,
@@ -562,20 +628,34 @@ def main(argv=None):
     from quick_score import judge_key
     scored = sorted((r for r in results if 'score' in r), key=lambda r: judge_key(r['score']))
     failed = [r for r in results if 'failed' in r]
+    # the quick/full spread is level 2's: a full route has none to settle
+    close = [] if a.full else close_seeds(scored)
+    # #1826: and where every seed leaves many nets blocked at level 2, the
+    # seeds inside the widened band are not separable by it
+    apart, blocked = ([], None) if a.full else not_separable(scored)
+    ranking = [r['seed'] for r in scored]
     if scored:
         print('judge_seeds: ranked by quick_score.judge_key (floorplan errors + assembly, '
               'blocking, joins_needed, vias, copper_mm, segments)'
               + (', full route' if a.full else '') + ':')
         for r in scored:
             print(f"  seed {r['seed']}: {_line(r)}")
+        if blocked is not None:
+            lo, hi = blocked
+            print(f"judge_seeds: every judged seed leaves {lo}"
+                  + (f"-{hi}" if hi != lo else '') + " nets blocked at level 2: the chain "
+                  "does not route this board at that level, so a gap within "
+                  f"{close_band(_entry(scored[0])['blocking'])} net(s) of the best is its spread, not the placements'; "
+                  + (f"not separable: seeds {', '.join(map(str, apart))}"
+                     + ('' if a.confirm is not None else ' (run --confirm close)')
+                     if apart else "no other seed lies that close to the best"))
         b = scored[0]['seed']
         print(f"judge_seeds: best seed {b}"
               + (f" by the full route: keep its placement s{b}.kicad_pcb; its routed board is "
                  f"s{b}_full.kicad_pcb" if a.full else
-                 f": keep its placement s{b}.kicad_pcb (never the --quick board)"))
-    # the quick/full spread is level 2's: a full route has none to settle
-    close = [] if a.full else close_seeds(scored)
-    ranking = [r['seed'] for r in scored]
+                 f": keep its placement s{b}.kicad_pcb (never the --quick board)"
+                 + (f"; level 2 does not separate it from seed(s) "
+                    f"{', '.join(map(str, apart[1:]))}" if apart else '')))
     # the close seeds `--confirm close` leaves out, past its cap
     left = close[CONFIRM_MAX:] if a.confirm in (None, 'close') else []
     capped = (f"--confirm close takes at most {CONFIRM_MAX}, the {CONFIRM_MAX} best of the "
@@ -610,10 +690,13 @@ def main(argv=None):
                 if capped:
                     print(f"  NOTE: best of the confirmed seeds only: {capped}")
     elif len(close) > 1:
+        s0 = _entry(scored[0])
+        band = (f"blocking within {close_band(s0['blocking'])}, joins_needed within "
+                f"{close_band(s0['joins'])}" if blocked is not None else
+                f"blocking within {CLOSE_BLOCKING}, copper within {CLOSE_COPPER:.0%}")
         print(f"  NOTE: seeds {', '.join(map(str, close))} lie within the quick/full spread of "
-              f"the best (same defects, blocking within {CLOSE_BLOCKING}, copper within "
-              f"{CLOSE_COPPER:.0%}): level 2 cannot rank them. Re-run with --confirm close "
-              f"to route them at the full level"
+              f"the best (same defects, {band}): level 2 cannot rank them. Re-run with "
+              f"--confirm close to route them at the full level"
               + (f": {capped}" if capped else ''))
     for r in failed:
         print(f"  WARNING: seed {r['seed']} "
@@ -630,6 +713,9 @@ def main(argv=None):
         'level': 'full' if a.full else 2,
         'ranking': [r['seed'] for r in scored],
         'close': close,
+        # #1826: the seeds a widened band holds, every one of them many nets
+        # blocked at level 2 ([] at the 1-net band or with one seed in it)
+        'not_separable': apart,
         'confirmed': [r['seed'] for r in confirmed],
         'best': best}))
     return 4 if failed else 0

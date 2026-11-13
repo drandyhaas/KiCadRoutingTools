@@ -45,12 +45,12 @@ Open Claude Code in the repository and point the planning skill at your board:
 The skill analyzes the board (fanout needs, differential pairs, power nets,
 plane candidates), proposes a step-by-step plan, runs the commands, and
 verifies the result. The same flow is available inside KiCad on the plugin's
-**AI Drive** tab (*Routing*: *Plan Routing* → *Run Selected Steps*) — see
+**Auto** tab (*AI Routing*: *Plan Routing* → *Run Selected Steps*) — see
 [docs/claude-skills.md](docs/claude-skills.md).
 
 Parts not placed yet, or piled off the board? `/plan-pcb-placement full
 path/to/your_board.kicad_pcb` places them by function and then routes the
-board (*AI Drive* → *Placement* → **Place + Route (AI)** in the plugin).
+board (*Auto* → *AI Placement* → **Place + Route (AI)** in the plugin).
 Placement findings are welcome too: a part left off the outline, overlapping
 courtyards, or a placement that cannot be routed.
 
@@ -105,7 +105,7 @@ A reproducible issue gets fixed ten times faster. Include:
    repro, is the next best thing. Issues without a board are still welcome,
    just slower to act on.
 2. **The exact commands you ran**, in order, with all flags (copy-paste from
-   your shell history), or the plan the AI Drive tab executed. Routing output
+   your shell history), or the plan the Auto tab executed. Routing output
    depends heavily on the parameter chain, and re-running the same board at
    different clearances is a different experiment.
 3. **The full output** — the router's summary plus `check_drc.py` /

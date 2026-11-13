@@ -46,8 +46,10 @@ UNMODELLED = '''(version 1)
    (layer outer)
    (constraint track_width (min 0.2mm))
    (constraint clearance (min 0.1mm))
-   (condition "A.insideCourtyard('U1')"))
+   (condition "A.getField('x') == 'y'"))
 '''
+# (the issue's rule was scoped by A.insideCourtyard('U1'), which check_drc
+# reads by position since #1832; getField() is a term nothing reads)
 MODELLED = '''(version 1)
 (rule "wide power"
    (constraint track_width (min 0.2mm))

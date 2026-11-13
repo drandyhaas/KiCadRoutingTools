@@ -50,6 +50,7 @@ the rule stays the authority.
 from __future__ import annotations
 
 import contextlib
+import os
 from itertools import combinations
 from types import SimpleNamespace
 from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
@@ -293,6 +294,58 @@ def derive_layer_bans(rules, pcb_data) -> List[dict]:
                          f"net(s) route no track on "
                          f"{', '.join(layers_hit) or 'any layer'}")
         rule.router_unhonoured = disallow_router_reason(tokens, {'track'})
+    return out
+
+
+def planar_nets(pcb_data, board_path: Optional[str] = None) -> Dict[int, dict]:
+    """#1818: the nets the board's `.kicad_dru` keeps on ONE copper layer with
+    no via, read as the routing steps read them: the track bans
+    `derive_layer_bans` derives leave the net one permitted layer, and a
+    rule forbids its through via (`disallow via` / `through_via`) or allows
+    it none (`via_count (max 0)`). The via ban is the one check_drc grades
+    (`DesignRules.via_disallow_rule`): a through via has copper on every
+    layer, so a rule a `(layer ...)` clause scopes to one of them forbids it
+    (`(layer "F.Cu") ... (constraint disallow track via)` is the whole
+    declaration in one rule), and the rule named is the one that bans it. `{net_id: {'name', 'layer', 'rules'}}`,
+    {} on a board with no rules file or no such net. Such a net reaches a
+    pad only on that layer: a via cannot carry it to a pad's other face."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path or not os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
+        return {}
+    import io
+    from design_rules import DesignRules
+    with contextlib.redirect_stdout(io.StringIO()):
+        dr = DesignRules.from_project(pcb_data, path)
+    if not any('disallow' in r.constraints or 'via_count' in r.constraints
+               for r in dr.rules):
+        return {}
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None)
+                  or dr.copper_layers or [])
+    banned: Dict[str, set] = {}
+    ban_rules: Dict[str, set] = {}
+    for ko in derive_layer_bans(dr, pcb_data):
+        for name in ko['nets']:
+            banned.setdefault(name, set()).update(ko['layers'])
+            ban_rules.setdefault(name, set()).add(ko['rule'])
+    out: Dict[int, dict] = {}
+    for nid, net in pcb_data.nets.items():
+        name = getattr(net, 'name', '')
+        if not nid or not name or name not in banned:
+            continue
+        left = [l for l in copper if l not in banned[name]]
+        if len(left) != 1:
+            continue
+        ban = dr.via_disallow_rule(nid, 'through', copper)
+        vc = dr.resolve('via_count', dr.item_for_net(nid, 'via', via_type='through'),
+                        None, None)
+        if ban is not None:
+            why = ban.name
+        elif vc.max is not None and vc.max <= 0:
+            why = vc.source.replace('rule ', '').strip('"')
+        else:
+            continue
+        rules = sorted(ban_rules[name]) + [why]
+        out[nid] = {'name': name, 'layer': left[0], 'rules': sorted(set(rules))}
     return out
 
 

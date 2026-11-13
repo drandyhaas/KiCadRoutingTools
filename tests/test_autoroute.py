@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""autoplan.py: the plan it reads off a board, how it picks a board, and a run.
+"""autoroute.py: the plan it reads off a board, how it picks a board, and a run.
 
 1. `_glob` gives every net a pattern that selects that net alone through the
    selectors the chain's tools use -- `expand_net_patterns` (route.py
@@ -20,8 +20,18 @@
 5. --effort-factor refuses a non-finite or negative value.
 6. Real runs on splitflap_driver: end to end, --finish, and --finish on a
    board inside the output's own work directory with a stale sibling at the
-   output -- graded by check_connected, not by autoplan's own summary.
+   output -- graded by check_connected, not by autoroute's own summary.
+7. The event lines (AUTOROUTE_PLAN / _STEP / _DECISION / _SUMMARY): a step
+   run in process with a stand-in tool that fails, and one that succeeds,
+   emits one `running` and one ending each, the failure with its exit code
+   and its log's tail; on the real run every planned row ends in exactly one
+   terminal state (a skipped one with its reason), the route pass carries
+   its grade, and the summary names the step that shipped; a run whose
+   every step fails (KRT_AUTOROUTE_FAIL_STEPS) exits 1 with a summary that
+   says so.
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -32,13 +42,13 @@ from types import SimpleNamespace
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 sys.path.insert(0, os.path.join(ROOT, 'tests'))
-import autoplan as AP                                        # noqa: E402
+import autoroute as AP                                        # noqa: E402
 from net_queries import (expand_net_patterns, identify_power_nets,  # noqa: E402
                          matches_net_filter)
 from run_utils import check, evidence                        # noqa: E402
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
-SCRIPT = os.path.join(ROOT, 'py_router', 'autoplan.py')
+SCRIPT = os.path.join(ROOT, 'py_router', 'autoroute.py')
 FAILS = []
 
 
@@ -247,7 +257,7 @@ def test_analyze():
            f"glasgow: IO bank supplies no pattern names are rails by their power pins ({c['power_nets']})")
 
 
-class ScriptedChain:
+class ScriptedChain(AP.ChainEvents):
     """Chain.run and Chain.grade replaced by a script: per pass
     (grade or None, iterations or None); `input` grades the starting board."""
 
@@ -264,7 +274,7 @@ class ScriptedChain:
             return self.input_grade
         return self.passes[int(board[3:]) - 1][0]
 
-    def run(self, kind, args, tag):
+    def run(self, kind, args, tag, **kw):
         self.runs += 1
         self.last_iterations = self.passes[self.runs - 1][1]
         self.steps.append({'tag': tag, 'ok': True})
@@ -329,6 +339,102 @@ def test_passes():
            "an input that cannot be graded runs no pass")
 
 
+def _events(text):
+    """[(token, payload)] for the AUTOROUTE_* JSON lines of TEXT, in order."""
+    out = []
+    for line in text.splitlines():
+        for tok in ('AUTOROUTE_PLAN', 'AUTOROUTE_STEP', 'AUTOROUTE_DECISION',
+                    'AUTOROUTE_SUMMARY'):
+            if line.startswith(tok + ': '):
+                out.append((tok, json.loads(line[len(tok) + 2:])))
+    return out
+
+
+def test_skip_reasons():
+    print("route_passes: why a pass did not run")
+    a = dict(clearance=0.1, track=0.1, via=0.45, drill=0.2, grid=0.1,
+             power_nets=[], congested=False, globs={})
+    for script, want in (([(G(0), 100)] * 3, {'route_p2': 'no open net left'}),
+                         ([(G(5), 100), (G(5), 50)], {'route_p3': 'was not kept'}),
+                         ([(G(5), 100), (G(3), 120)], {'route_p3': 'effort budget'})):
+        ch = ScriptedChain(script)
+        with contextlib.redirect_stdout(io.StringIO()):
+            AP.route_passes(ch, a, ['F.Cu', 'B.Cu'], ['1', '1.5'], 2.0)
+        for tag, why in want.items():
+            expect(why in ch.skipped.get(tag, ''),
+                   f"{tag} skipped because {why!r} ({ch.skipped})")
+
+
+def test_step_events():
+    print("Chain.run events, with stand-in tools")
+    with tempfile.TemporaryDirectory() as tmp:
+        bad = os.path.join(tmp, 'bad_tool.py')
+        with open(bad, 'w') as fh:
+            fh.write("import sys\nprint('reading the board')\n"
+                     "print('ERROR: the stand-in tool gave up', file=sys.stderr)\n"
+                     "sys.exit(4)\n")
+        good = os.path.join(tmp, 'good_tool.py')
+        with open(good, 'w') as fh:
+            fh.write("import sys\nopen(sys.argv[2], 'w').write('x')\n"
+                     "print('JSON_SUMMARY: {\"plane_zones\": [{\"net\": \"GND\", "
+                     "\"layer\": \"B.Cu\"}], \"status\": \"ok\"}')\n")
+        src = os.path.join(tmp, 'in.kicad_pcb')
+        open(src, 'w').write('x')
+        saved = dict(AP.TOOLS)
+        AP.TOOLS['planes'], AP.TOOLS['decap'] = good, bad
+        buf = io.StringIO()
+        try:
+            ch = AP.Chain(src, tmp)
+            with contextlib.redirect_stdout(buf):
+                ok_out, _, _ = ch.run('planes', ['{IN}', '{OUT}'], 'planes')
+                bad_out, _, _ = ch.run('decap', ['{IN}', '{OUT}'], 'decap')
+        finally:
+            AP.TOOLS.clear()
+            AP.TOOLS.update(saved)
+        ev = [p for tok, p in _events(buf.getvalue()) if tok == 'AUTOROUTE_STEP']
+        expect([(e['tag'], e['state']) for e in ev] == [
+            ('planes', 'running'), ('planes', 'done'), ('decap', 'running'),
+            ('decap', 'failed')], f"one running and one ending per step ({[(e['tag'], e['state']) for e in ev]})")
+        done, failed = ev[1], ev[3]
+        expect(ok_out and done['board'] == ok_out and done['result'] == 'poured GND on B.Cu'
+               and done['rc'] == 0 and isinstance(done['seconds'], float),
+               f"a done step carries its board, result, rc and seconds ({done})")
+        expect(bad_out is None and failed['rc'] == 4 and failed['board'] is None,
+               f"a failed step carries its exit code and no board ({failed})")
+        expect(any('the stand-in tool gave up' in ln for ln in failed.get('error_tail') or ()),
+               f"a failed step carries its log's tail ({failed.get('error_tail')})")
+        expect('exit code 4' in failed['result'], f"its result says why ({failed['result']})")
+        expect(failed['cmd'][0] == 'bad_tool.py' and failed['cmd'][1:] == [src, os.path.join(
+            tmp, 'step02_decap.kicad_pcb')], f"its command line is the tool's ({failed['cmd']})")
+        expect(os.path.isfile(failed['log']), "its log path is a file")
+
+
+def test_failed_run():
+    print("a run whose every step fails")
+    env = dict(os.environ, KRT_AUTOROUTE_FAIL_STEPS='planes,route')
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, 'routed.kicad_pcb')
+        r = subprocess.run([sys.executable, '-X', 'utf8', SCRIPT, BOARD, out],
+                           capture_output=True, text=True, timeout=600, env=env)
+        expect('Traceback' not in r.stdout + r.stderr, "no traceback")
+        expect(r.returncode == 1, f"exit 1 (rc={r.returncode})")
+        ev = _events(r.stdout)
+        steps = [p for tok, p in ev if tok == 'AUTOROUTE_STEP']
+        ends = {p['tag']: p for p in steps if p['state'] != 'running'}
+        expect(ends.get('planes', {}).get('state') == 'failed'
+               and ends.get('route', {}).get('state') == 'failed',
+               f"planes and route fail ({[(p['tag'], p['state']) for p in steps]})")
+        expect(any(AP.FAIL_STEP_MESSAGE in ln
+                   for ln in ends.get('route', {}).get('error_tail') or ()),
+               "the failed step's tail carries its error")
+        expect('failed' in ends.get('route_p2', {}).get('reason', ''),
+               f"the later passes are skipped because the route failed ({ends.get('route_p2')})")
+        summ = [p for tok, p in ev if tok == 'AUTOROUTE_SUMMARY']
+        expect(len(summ) == 1 and summ[0].get('error') and summ[0]['final_step'] is None,
+               f"the summary says no board shipped ({summ})")
+        expect(not os.path.exists(out), "no output board")
+
+
 def test_plane_layers():
     print("plane_layers")
     for n, want in ((2, []), (4, [1, 2]), (6, [1, 4]), (8, [1, 3, 6]), (10, [1, 2, 5, 8])):
@@ -359,7 +465,7 @@ def _connected(board):
     return r.returncode, r.stdout + r.stderr
 
 
-def _autoplan(*argv):
+def _autoroute(*argv):
     return subprocess.run([sys.executable, '-X', 'utf8', SCRIPT, *argv],
                           capture_output=True, text=True, timeout=1800)
 
@@ -368,15 +474,39 @@ def test_run():
     print("end to end on splitflap_driver")
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, 'routed.kicad_pcb')
-        r = _autoplan(BOARD, out)
-        expect(r.returncode == 0, f"autoplan exits 0 (rc={r.returncode})")
+        r = _autoroute(BOARD, out)
+        expect(r.returncode == 0, f"autoroute exits 0 (rc={r.returncode})")
         if r.returncode:
             print(r.stdout[-3000:], r.stderr[-3000:])
             return
         evidence(out, 'routed board')
         expect(os.path.exists(out[:-len('.kicad_pcb')] + '.kicad_pro'),
                "the routed board ships with its .kicad_pro")
-        plan = json.load(open(out + '.autoplan/plan.json'))
+        ev = _events(r.stdout)
+        toks = [tok for tok, _ in ev]
+        expect(toks and toks[0] == 'AUTOROUTE_PLAN' and toks[-1] == 'AUTOROUTE_SUMMARY',
+               f"the plan comes first and the summary last ({toks[:2]} ... {toks[-1:]})")
+        plan = ev[0][1]
+        expect([s['tag'] for s in plan['steps']] == ['planes', 'route', 'route_p2', 'route_p3'],
+               f"the plan lists planes, route and the optional passes ({plan['steps']})")
+        expect(plan['rules']['clearance'] > 0 and plan['rules_why'],
+               "the plan carries the design rules and where they came from")
+        steps = [p for tok, p in ev if tok == 'AUTOROUTE_STEP']
+        for row in plan['steps']:
+            mine = [p['state'] for p in steps if p['tag'] == row['tag']]
+            ended = [s for s in mine if s != 'running']
+            expect(len(ended) == 1 and mine.count('running') == (0 if ended == ['skipped'] else 1),
+                   f"{row['tag']}: one terminal state ({mine})")
+        route = next(p for p in steps if p['tag'] == 'route' and p['state'] == 'done')
+        expect(route.get('grade', {}).get('open') == 0 and route.get('kept') is True,
+               f"the route pass carries its grade and that it was kept ({route.get('grade')})")
+        skipped = [p for p in steps if p['state'] == 'skipped']
+        expect(skipped and all(p.get('reason') for p in skipped),
+               f"a skipped row says why ({skipped})")
+        summ = ev[-1][1]
+        expect(summ['final_tag'] == 'route' and summ['output'] == out,
+               f"the summary names the shipped step and the output ({summ})")
+        plan = json.load(open(out + '.autoroute/plan.json'))
         tags = [s['tag'] for s in plan['steps']]
         expect(tags[0] == 'planes' and tags[1] == 'route',
                f"planes first, then route ({tags})")
@@ -388,13 +518,13 @@ def test_run():
             print(text[-2000:])
 
         fin = os.path.join(tmp, 'finished.kicad_pcb')
-        r = _autoplan(out, fin, '--finish')
+        r = _autoroute(out, fin, '--finish')
         expect(r.returncode == 0, f"--finish exits 0 (rc={r.returncode})")
         if r.returncode:
             print(r.stdout[-3000:], r.stderr[-3000:])
             return
         evidence(fin, 'finished board')
-        fplan = json.load(open(fin + '.autoplan/plan.json'))
+        fplan = json.load(open(fin + '.autoroute/plan.json'))
         expect([s['tag'] for s in fplan['steps']] == ['input'],
                "--finish on a fully connected board grades it and runs no pass")
         expect(('GND', 'B.Cu') in [tuple(p) for p in fplan['analysis']['planes']],
@@ -403,13 +533,13 @@ def test_run():
 
         print("input inside the output's work directory, stale sibling at the output")
         inner = [s for s in plan['steps'] if s['tag'] == 'route'][0]['log']
-        inner = os.path.join(out + '.autoplan', inner[:-len('.log')] + '.kicad_pcb')
+        inner = os.path.join(out + '.autoroute', inner[:-len('.log')] + '.kicad_pcb')
         evidence(inner, 'step board inside the work directory')
         stale = out[:-len('.kicad_pcb')] + '.kicad_dru'
         open(stale, 'w').write('(version 1)\n(rule stale (constraint clearance (min 5mm)))\n')
-        r = _autoplan(inner, out, '--finish')
+        r = _autoroute(inner, out, '--finish')
         expect(r.returncode == 0 and 'Traceback' not in r.stdout + r.stderr,
-               f"a board inside <output>.autoplan/ is staged before the directory is cleared (rc={r.returncode})")
+               f"a board inside <output>.autoroute/ is staged before the directory is cleared (rc={r.returncode})")
         if r.returncode:
             print(r.stdout[-3000:], r.stderr[-3000:])
             return
@@ -424,11 +554,14 @@ def main():
     test_passes()
     test_plane_layers()
     test_effort_factor()
+    test_skip_reasons()
+    test_step_events()
+    test_failed_run()
     test_run()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s)")
         return 1
-    print("PASS: autoplan")
+    print("PASS: autoroute")
     return 0
 
 

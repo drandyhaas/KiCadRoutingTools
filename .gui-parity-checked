@@ -1,3 +1,53 @@
+33c52e0a22be4ff4f63b33f7eb839ee934f021b0 2026-11-12 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 4f7f512f..33c52e0a: the #1828-#1838 issue round, the Autorouter
+GUI tab and the autoplan -> autoroute rename (28 commits), macOS, KiCad 10.0.6.
+(A) Flags: no routing CLI flag added or removed; the only argparse change is
+  autoroute.py --effort-factor reading its default from EFFORT_FACTOR. No
+  signature of batch_route, batch_route_diff_pairs, create_plane,
+  repair_planes or the fanout entry points changed. autoplan.py is renamed
+  autoroute.py with no alias, in manifest_to_plan and lineage_scope too.
+(B) Post-passes and results data: #1828's re-sync after a late re-match is
+  inside batch_route (both fronts); #1834's stub_pads ledger reaches the
+  fanout tab (test_1834_fanout_stub_rerun_gui); the rest of the round is in
+  the shared engines or the graders. New GUI: the Auto > Autorouter tab runs
+  the CLI autoroute.py itself on a snapshot, and its Apply
+  (result_apply.py, shared with AI Placement's Place + Route) is gated to
+  the nanometre against the CLI output (test_autoroute_tab_gui,
+  test_placement_apply_zones_gui); Beautify Labels moved to the Labels tab
+  (test_labels_tab_gui). Settings round trip covers the renamed pages and
+  the legacy page index and label keys. #1827 and the smoother follow-up
+  were dropped before this audit (not on main).
+GATES: tests/gui_parity/run_gui_parity.py on 33c52e0a, 85 passed, 0 failed,
+0 declared SKIP. Modal suite on 33c52e0a 1328 passed / 0 failed (+26
+self-skipped). Corpus A/B sets 1-28 on 33c52e0a vs 4f7f512f: 399 of 400 boards
+ship identical copper (open nets 288 -> 287, real DRC 11 -> 11, CPU +1.4%);
+the one mover, set6/ulx5m_gatemate 5 -> 4 open, is its manifest rebuilt to
+start from the clean input. KiCad DRC moved by 1-2 on five boards whose files
+are identical but for uuids (the baseline subtraction under kicad-cli's
+199-per-type cap).
+
+4f7f512f081573041edf245aec28cb6544f76c25 2026-11-11 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 772003a6..4f7f512f, the #1797-#1826 issue round (36 commits), macOS,
+KiCad 10.0.6.
+(A) Flags: the argparse diff adds flags only to checkers (check_complete
+  --kicad-rules, check_join, check_reachability --margin default, the new
+  check_return_vias); no routing CLI flag and no dialog control is added or
+  removed. No signature of batch_route, batch_route_diff_pairs, create_plane,
+  repair_planes or the fanout entry points changed.
+(B) Post-passes and results data: the CLI-side additions have their GUI
+  halves in the same commits: #1807's persisted lap record (swig_gui,
+  placement_run, ai_plan), #1804's per-pad via-drop ledger (fanout_gui,
+  gui_utils), #1826's 'not separable' seed status (placement_gui,
+  placement_run). Everything else (#1798 collapse scoping, #1808 joins gate,
+  #1802/#1803/#1812 and the rest) is inside the shared engines.
+GATES: tests/gui_parity/run_gui_parity.py on 62ac94fe, 81 passed, 0 failed,
+0 declared SKIP. The three later commits (aa9d438c, bd87f988, 4f7f512f)
+touch engine internals and tests only, no flag, control or results key.
+Modal suite on 62ac94fe 1313 passed / 5 failed, all fixed by aa9d438c and
+bd87f988 (filtered re-run green); filtered suite on 4f7f512f 38 passed, 0
+failed (test_1376's kicad-cli leg passed locally). Corpus A/B sets 1-28 on
+4f7f512f vs v0.23.9: 400/400 tied.
+
 e6bc31e2291a91327217cd668885e065a487ec92 2026-11-09 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Release v0.23.9 check at e6bc31e2. The commits after the f4d871d8 audit below
 (2f92162a, e6bc31e2) touch only this file, so the audit carries over

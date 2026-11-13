@@ -514,11 +514,12 @@ def _regrade_pour_fill(board, output_file: str,
 
 def _exact_pour_states(board, board_file: Optional[str], names,
                        project_from: Optional[str] = None
-                       ) -> Optional[Dict[str, Tuple[bool, int]]]:
-    """{net name: (connected, disconnected pad count)} for the pour nets
-    `names`, graded on KiCad's exact fill of `board_file` (`board` is its
-    parse): the pads outside the largest exact cluster are the disconnected
-    ones, as the improvement gate counts them. None when no refill can be had
+                       ) -> Optional[Dict[str, Tuple[bool, int, int]]]:
+    """{net name: (connected, disconnected pad count, joins needed)} for the
+    pour nets `names`, graded on KiCad's exact fill of `board_file` (`board`
+    is its parse): the pads outside the largest exact cluster are the
+    disconnected ones and the clusters past the first the joins needed, as
+    the improvement gate counts them (#1808). None when no refill can be had
     (no KiCad python, a failed refill) or the board has several outlines,
     where a cluster split may be a board boundary -- the caller keeps its
     raster grade then."""
@@ -542,10 +543,11 @@ def _exact_pour_states(board, board_file: Optional[str], names,
                if n == name for poly in polys]
         pcl = [c for c in _kef.exact_clusters(board, nid, isl) if c['pads']]
         if len(pcl) <= 1:
-            out[name] = (True, 0)
+            out[name] = (True, 0, 0)
             continue
         keep = max(pcl, key=lambda c: len(c['pads']))
-        out[name] = (False, sum(len(c['pads']) for c in pcl if c is not keep))
+        out[name] = (False, sum(len(c['pads']) for c in pcl if c is not keep),
+                     len(pcl) - 1)
     return out
 
 
@@ -1279,6 +1281,115 @@ def _verified_pour_reaudit(snap, scope, custody, pcb_data, output_file,
           f"pour(s) {cut} and the weld could not mend them; {tally} -- KEPT"
           + (f" ({rec['why']})" if rec.get('why') else '') + f"{RESET}")
     return rec
+
+
+def _print_skew_moved(rows, what):
+    """The #1759 WARNING, one line per group `what` moved out of its skew
+    rule (check_drc.skew_moved_out_of_range rows)."""
+    for _sm in rows:
+        _lim = ' / '.join(f"{_k[:3]} {_sm[_k]:g}" for _k in ('min_mm', 'max_mm')
+                          if _sm[_k] is not None)
+        print(f"  {RED}WARNING{RESET}: {what} moved "
+              f"{' / '.join(_sm['nets'])} out of its skew rule "
+              f"'{_sm['rule']}' ({_lim} mm): skew {_sm['skew_before_mm']:.4f} "
+              f"-> {_sm['skew_after_mm']:.4f} mm"
+              + ("" if _sm['was_within'] else " (already out, now further)")
+              + " -- route.py does not re-match it (#1759)")
+
+
+def _skew_row_key(row):
+    """A skew row's group by NAME (rule, nets): the CLI measures the shipped
+    board on a re-parse of the written file, whose net ids need not be the
+    ones the run's pcb_data carries."""
+    return (row['rule'], tuple(sorted(row['nets'])))
+
+
+def _skew_by_name(snap):
+    """A check_drc.skew_group_snapshot keyed by _skew_row_key, its measured
+    groups only (a group either side cannot measure is never compared)."""
+    return {_skew_row_key(r): r for r in (snap or {}).values() if r}
+
+
+def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
+                            write_model, skew_path, scope_names):
+    """#1798: the #1759 skew measurement, on the board the end-of-run passes
+    (_late_strict_collapse1063 and the rest) read and change -- the written
+    file on the CLI, the write model on the GUI, pcb_data itself on the
+    "nothing to route" return -- keyed by name (_skew_by_name), for the
+    groups with a member in `scope_names`. {} when no skew rule binds a net
+    in scope, which costs no parse, and when the measurement fails, which is
+    said on the console."""
+    import copy as _copy
+    try:
+        from check_drc import (skew_rule_groups, skew_group_snapshot,
+                               recorded_chain_groups)
+        groups, _u = skew_rule_groups(skew_path, pcb_data)
+        groups = list(groups) + [(None, p + n) for _c, p, n in
+                                 recorded_chain_groups(skew_path, pcb_data)]
+        names = set(scope_names)
+        if not any(pcb_data.nets[m].name in names for _r, ms in groups
+                   for m in ms if m in pcb_data.nets):
+            return {}
+        if return_results:
+            board = _copy.copy(pcb_data)
+            if write_model is not None:
+                segs_by_net, vias_by_net = write_model(results_data or {})
+                board.segments = [x for _l in segs_by_net.values() for x in _l]
+                board.vias = [x for _l in vias_by_net.values() for x in _l]
+            else:
+                board.segments = list(pcb_data.segments)
+                board.vias = list(pcb_data.vias)
+        elif output_file and os.path.isfile(output_file):
+            from kicad_parser import parse_kicad_pcb as _pk1798
+            board = _pk1798(output_file)
+        else:
+            return {}
+        ids = {nid for nid, n in board.nets.items() if n.name in names}
+        return _skew_by_name(skew_group_snapshot(board, skew_path, ids))
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  (#1798 end-of-run skew measurement failed: "
+              f"{type(_e).__name__}: {_e})")
+        return {}
+
+
+def _shipped_skew_rows1798(in_run_rows, at_input, shipped):
+    """#1798: the step's skew_moved_by_cleanup rows, read on the board it
+    ships. ONE comparison, from `at_input` (the #1759 snapshot taken before
+    the post-route cleanup) to `shipped` (_late_skew_snapshot1798 after the
+    end-of-run passes), so every pass between them is in it. The post-route
+    cleanup's own rows (`in_run_rows`, printed as it ran) describe a board
+    that need not ship: a late pass can take back copper the cleanup laid
+    (a pair was named at 0.39 mm and shipped at 0.0878 mm) or move the group
+    again. The rows returned replace them.
+
+    A row is printed unless the post-route line already gave it at the skew
+    it ships at. A group that line named and that ships no further out than
+    it came in gets no row and one closing line. A group that line named
+    and that the shipped board cannot measure keeps its in-run row."""
+    from check_drc import skew_moved_out_of_range
+    rows = skew_moved_out_of_range(_skew_by_name(at_input), shipped)
+    said = {_skew_row_key(r): r for r in in_run_rows or ()}
+    _print_skew_moved(
+        [r for r in rows if _skew_row_key(r) not in said
+         or abs(said[_skew_row_key(r)]['skew_after_mm']
+                - r['skew_after_mm']) > 1e-4],
+        "the post-route and end-of-run cleanups (#1798)")
+    for k in sorted(said.keys() - {_skew_row_key(r) for r in rows}):
+        a = shipped.get(k)
+        if a is None:
+            rows.append(said[k])
+            continue
+        within = a['excess_mm'] <= 1e-4
+        _lim = ' / '.join(f"{_k[:3]} {a[_k]:g}" for _k in ('min_mm', 'max_mm')
+                          if a[_k] is not None)
+        print(f"  {' / '.join(a['nets'])} ships "
+              + ("within" if within else "no further out of")
+              + f" its skew rule '{a['rule']}' ({_lim} mm)"
+              + ("" if within else " than it came in")
+              + f": skew {a['skew_mm']:.4f} mm after the end-of-run cleanup "
+              f"(#1798), not the {said[k]['skew_after_mm']:.4f} mm the "
+              f"post-route cleanup's WARNING gave")
+    return rows
 
 
 def _late_strict_collapse1063(pcb_data, output_file, return_results, results_data,
@@ -2484,6 +2595,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if json_out or final_reconcile:
         from route_summary import reset_run_state as _reset_run1069
         _reset_run1069()
+    if final_reconcile:
+        # #1807: no earlier run's gate record may be persisted as this one's.
+        from improvement_gate import note_lap_history as _nlh1807
+        _nlh1807(None)
     if not _SUMMARY_SINK:
         # First (outermost) entry of this process's run: start the
         # protected-net refusal record clean. The nested sub-runs re-enter
@@ -3528,10 +3643,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _pc_done, _pg_done = audit_shipped(pcb_data, clearance=clearance)
             _emit_summary_min(status='already_connected', pad_contacts=_pc_done,
                               pad_grazes=_pg_done)
-        _write_summary_min_file(json_out, 'already_connected', {
+        _extra1499 = {
             **({'keep_away': _ka_done} if _ka_done else {}),
             **({'pad_contacts': _pc_done} if _pc_done else {}),
-            **({'pad_grazes': _pg_done} if _pg_done else {})} or None)
+            **({'pad_grazes': _pg_done} if _pg_done else {})}
         # The sweep runs HERE too (#659). The fragment gate diverts a net whose
         # extra fragments are all pad-less to this sweep instead of the router,
         # so a step whose WHOLE scope is diverted lands on this early return --
@@ -3543,6 +3658,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # "nothing to route" and shipped its dead via-to-via branch.
         _scope1166 = {pcb_data.nets[_n].name for _n in sweep_scope_ids
                       if _n in pcb_data.nets}
+        _skew_path1798 = input_file or getattr(pcb_data, 'source_path', '') or ''
 
         def _late_cleanups1499(as_gui, rd):
             # #1499: the end of a run's cleanups, in its order, so re-running
@@ -3551,8 +3667,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # again; --force-reroute was the only repair, and it rips the net.
             # The via sweep ran here at every --quick level before (#1166);
             # the rest run where the end of a run runs them (quick < 2).
+            # Returns the skew-graded groups they moved out of range (#1798).
             if not (final_reconcile and not skip_routing):
-                return
+                _late_orphan_sweep659(pcb_data, output_file, as_gui, rd,
+                                      None, keep_input_copper, skip_routing)
+                return []
+            _sk = _late_skew_snapshot1798(pcb_data, output_file, as_gui, rd,
+                                          None, _skew_path1798, _scope1166)
             full = quick < 2
             for _pass in ((_late_kicad_dangling_split1217, _late_strict_collapse1063)
                           if full else ()) + (_late_dangling_via_sweep1166,) + (
@@ -3560,19 +3681,32 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if full else ()):
                 _pass(pcb_data, output_file, as_gui, rd, None, _input_sig1069,
                       _scope1166, keep_input_copper)
+            _late_orphan_sweep659(pcb_data, output_file, as_gui, rd,
+                                  None, keep_input_copper, skip_routing)
+            _moved = []
+            if _sk:
+                from check_drc import skew_moved_out_of_range as _smo1798
+                _moved = _smo1798(_sk, _late_skew_snapshot1798(
+                    pcb_data, output_file, as_gui, rd, None, _skew_path1798,
+                    _scope1166))
+            _print_skew_moved(_moved, "the end-of-run cleanup (#1798)")
+            return _moved
         if return_results:
             _rd659 = _empty_results_data()
             _rd659['keep_away'] = keep_away_entries(_ka_done)
             _rd659['pad_contacts'] = _pc_done
             _rd659['pad_grazes'] = _pg_done
-            _late_cleanups1499(True, _rd659)
-            _late_orphan_sweep659(pcb_data, output_file, True, _rd659,
-                                  None, keep_input_copper, skip_routing)
+            _rd659['skew_moved_by_cleanup'] = _late_cleanups1499(True, _rd659)
+            if _rd659['skew_moved_by_cleanup']:
+                _extra1499['skew_moved_by_cleanup'] = _rd659['skew_moved_by_cleanup']
+            _write_summary_min_file(json_out, 'already_connected',
+                                    _extra1499 or None)
             return 0, 0, 0.0, _rd659
         _write_passthrough_output(input_file, output_file)
-        _late_cleanups1499(False, None)
-        _late_orphan_sweep659(pcb_data, output_file, False, None,
-                              None, keep_input_copper, skip_routing)
+        _moved1798 = _late_cleanups1499(False, None)
+        if _moved1798:
+            _extra1499['skew_moved_by_cleanup'] = _moved1798
+        _write_summary_min_file(json_out, 'already_connected', _extra1499 or None)
         return 0, 0, 0.0
 
     # Track all segment layer modifications for file output
@@ -4535,6 +4669,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         run_length_matching(routed_results, length_match_groups, config, pcb_data,
                             scope_net_ids=_length_match_scope_ids,
                             report=_length_match_report)
+    # #1801: which phase first gives a net a result after this pass; the
+    # group members they route are graded after the terminal escalation.
+    _lm_phase1801 = {}
+
+    def _lm_mark1801(phase, _have=set(routed_results)):
+        for _nid in list(routed_results):
+            if _nid not in _have:
+                _have.add(_nid)
+                if _nid in pcb_data.nets:
+                    _lm_phase1801[pcb_data.nets[_nid].name] = phase
 
     # Sync pcb_data with length-matched segments before Phase 3
     # This ensures tap routes see meanders from other nets as obstacles
@@ -4738,16 +4882,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # its own clearance is honoured routes at full width. Inert when every
     # routed net shares one requirement. Engine-side, so the GUI inherits it.
     from net_rescue import own_requirement_retry
+    _lm_mark1801('a pass between matching and the rescues')
     own_requirement_summary = None if (_ckpt_stop or quick) else \
         own_requirement_retry(
             state, single_ended_nets, net_clearances=net_clearances,
             progress_callback=progress_callback, cancel_check=cancel_check)
+    _lm_mark1801('the own-requirement retry')
     if progress_callback:
         progress_callback(0, 0, "Rescuing failed nets...")
     from net_rescue import rescue_failed_nets
     rescue_summary = None if (_ckpt_stop or quick) else rescue_failed_nets(
         state, single_ended_nets, net_clearances=net_clearances,
         progress_callback=progress_callback, cancel_check=cancel_check)
+    _lm_mark1801('the rescue')
 
     # Terminal geometry escalation ("better than shipping opens",
     # 2026-08-05): whole-net retry with track width + via size marching down
@@ -4772,6 +4919,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         terminal_geometry_escalation(
             state, _esc_scope, net_clearances=net_clearances,
             progress_callback=progress_callback, cancel_check=cancel_check)
+    _lm_mark1801('the terminal escalation')
+    if length_match_groups and not _ckpt_stop and _lm_phase1801:
+        from routing_common import regrade_late_group_members
+        _lm_late = regrade_late_group_members(
+            _length_match_report, length_match_groups, routed_results, config,
+            pcb_data, scope_net_ids=_length_match_scope_ids,
+            recovered_by=_lm_phase1801)
+        if any(_g.get('rematched') for _g in _lm_late):
+            # #1828: a late member was meandered; pcb_data and the working
+            # map must carry the copper the writer will ship.
+            sync_pcb_data_segments(
+                pcb_data, routed_results, original_segment_ids, state, config,
+                original_via_ids=(original_via_ids
+                                  | {id(v) for v in all_swap_vias}))
 
     # Main-pass pre-existing rips (0805): pull every RIPPED pre-existing net
     # into the stale-strip scope -- a rerouted victim's ORIGINAL input copper
@@ -4781,6 +4942,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # never disturbed.
     _pe_ripped_reg = getattr(pcb_data, '_preexisting_rips', None) or {}
     _pe_outcomes: Dict[str, str] = {}
+    _pe_attackers: Dict[str, List[str]] = {}
     _victim_retry_names: List[str] = []
     if _pe_ripped_reg:
         sweep_scope_ids |= set(_pe_ripped_reg)
@@ -4894,11 +5056,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         for _rid in sorted(_pe_ripped_reg):
             _rname = _pe_ripped_reg[_rid]
             _blocked_for = None
-            for _ev in reversed(state.net_history.get(_rid, []) or []):
+            # #1807: every net this victim was ripped for, in order (the
+            # outcome text names the last one only).
+            for _ev in state.net_history.get(_rid, []) or []:
                 if _ev.get('event') == 'ripped_by':
                     _blocked_for = (_ev.get('details')
                                     or {}).get('ripping_net_name')
-                    break
+                    if _blocked_for and _blocked_for not in \
+                            _pe_attackers.setdefault(_rname, []):
+                        _pe_attackers[_rname].append(_blocked_for)
             _r_pe = routed_results.get(_rid)
             if _r_pe is None:
                 _out_pe = ('NOT RECOVERED (still open; see '
@@ -5224,15 +5390,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _sgs1759(pcb_data, _skew_path1759, _ids1759))
         except Exception as _e1759:
             print(f"  (#1759 skew comparison failed: {_e1759})")
-    for _sm in skew_moved_by_cleanup:
-        _lim = ' / '.join(f"{_k[:3]} {_sm[_k]:g}" for _k in ('min_mm', 'max_mm')
-                          if _sm[_k] is not None)
-        print(f"  {RED}WARNING{RESET}: the post-route cleanup moved "
-              f"{' / '.join(_sm['nets'])} out of its skew rule "
-              f"'{_sm['rule']}' ({_lim} mm): skew {_sm['skew_before_mm']:.4f} "
-              f"-> {_sm['skew_after_mm']:.4f} mm"
-              + ("" if _sm['was_within'] else " (already out, now further)")
-              + " -- route.py does not re-match it (#1759)")
+    _print_skew_moved(skew_moved_by_cleanup, "the post-route cleanup")
     # The cleanup pipeline MOVES and STRIPS copper -- nudge_grazing_octolinear /
     # _microshift / _vias re-bend and shift it, the prunes, sweeps and the #536
     # smoother delete and replace it -- all by mutating pcb_data directly. None
@@ -6378,6 +6536,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Main-pass pre-existing rips (0805): {victim net: outcome}. Key
         # absent when no pre-existing net was ripped.
         summary['preexisting_rips'] = _pe_outcomes
+    if _pe_attackers:
+        # #1807: {victim net: [the nets it was ripped for, in order]} -- the
+        # structured twin of preexisting_rips' "[was blocking ...]" text,
+        # which names only the last.
+        summary['rip_attackers'] = {n: a for n, a in _pe_attackers.items()
+                                    if a}
     if casualty_summary and casualty_summary.get('attempted'):
         # T5 custody: casualties-only reconcile tally (additive; key absent
         # when no rip casualty occurred -- the common case).
@@ -9012,6 +9176,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
              if _n not in pcb_data.nets
              or pcb_data.nets[_n].name not in _finished1525},
             keep_input_copper, skip_routing)
+    # #1798: the skew-graded groups, measured on the board that ships, from
+    # the #1759 snapshot taken before the post-route cleanup -- the end-of-run
+    # passes above can move a group again, or take back what the cleanup did
+    # to it. These rows replace the cleanup's in --json-out and results_data.
+    _late_skew1798 = None
+    if (_skew_before1759 and final_reconcile and not skip_routing
+            and not _ckpt_stop and quick < 2):
+        _late_skew1798 = _shipped_skew_rows1798(
+            skew_moved_by_cleanup, _skew_before1759,
+            _late_skew_snapshot1798(
+                pcb_data, output_file, return_results,
+                locals().get('results_data'), _gui_write_model, _skew_path1759,
+                {m for r in _skew_before1759.values() if r for m in r['nets']}))
+        if return_results and locals().get('results_data') is not None:
+            results_data['skew_moved_by_cleanup'] = _late_skew1798
 
     # #962: declare Type VII on every via this run put in a pad or a paste
     # opening. It runs HERE because this is after the last pass that adds or
@@ -9494,6 +9673,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # predates the finalize, so it cannot carry this.
             if _merged is not None and _via_in_pad962 is not None:
                 _merged['via_in_pad'] = _via_in_pad962
+            # #1798: likewise the skew rows, read on the shipped board.
+            if _merged is not None and _late_skew1798 is not None:
+                if _late_skew1798:
+                    _merged['skew_moved_by_cleanup'] = _late_skew1798
+                else:
+                    _merged.pop('skew_moved_by_cleanup', None)
             # #1146: likewise the keep-away reading of the shipped board.
             if _merged is not None and _ka_shipped is not None:
                 _merged['keep_away'] = _ka_shipped
@@ -9676,7 +9861,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         try:
             from improvement_gate import (net_connectivity_map,
                                           compare_connectivity, gate_verdict,
-                                          format_report,
+                                          format_report, entry_joins,
                                           excluded_plane_attribution)
             if return_results:
                 # The board the GUI applier will produce (_gui_write_model):
@@ -9730,6 +9915,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 {_name_of(i) for i in _zone_ids600
                  if i in _before_map and i in _after_map
                  and (_after_map[i][1] > _before_map[i][1]
+                      or (entry_joins(_after_map[i]) or 0)
+                      > (entry_joins(_before_map[i]) or 0)
                       or (_before_map[i][0] and not _after_map[i][0]))})
             # The same error the other way round (#1619, #1620): a pour net
             # the run's final re-grade read OPEN on KiCad's fill (or on the
@@ -9778,7 +9965,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for _nm600 in _taken600:
                     _after_map[_id600[_nm600]] = (
                         False, max(1, _rg_pads600.get(_nm600) or 0,
-                                   _after_map[_id600[_nm600]][1]))
+                                   _after_map[_id600[_nm600]][1]),
+                        max(1, entry_joins(_after_map[_id600[_nm600]]) or 0))
                 if _taken600:
                     print(f"  Improvement gate: pour net(s) "
                           f"{', '.join(_taken600)} graded as the final "
@@ -9859,6 +10047,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if _cmp['lost'] or _verdict == 'reject':
                 print("\n" + RED + format_report(_cmp, _verdict, _action)
                       + RESET)
+            # #1807: this step's trade against the earlier steps' recorded
+            # ones -- a retry that breaks what the step before it connected
+            # (or runs a trade already rejected) is a RIP CYCLE -- and the
+            # new record for the step boundary to persist, a rejected step's
+            # too: its board reverts, but what it tried is news to the next.
+            try:
+                from improvement_gate import (lap_entry, lap_history,
+                                              rip_cycle, format_rip_cycle,
+                                              note_lap_history,
+                                              trim_lap_history)
+                from protected_nets import _pcb_data_namespace as _ns1807
+                _att1807: Dict[str, List[str]] = {}
+                for _sm in list(_SUMMARY_SINK) + [summary]:
+                    for _vn, _an in ((_sm or {}).get('rip_attackers')
+                                     or {}).items():
+                        for _x in _an or ():
+                            if _x not in _att1807.setdefault(_vn, []):
+                                _att1807[_vn].append(_x)
+                _hist1807 = lap_history(_ns1807(pcb_data, input_file))
+                _cyc1807 = rip_cycle(_hist1807, _cmp, _att1807)
+                if _cyc1807:
+                    _gate_report['rip_cycle'] = _cyc1807
+                    print(RED + format_rip_cycle(_cyc1807) + RESET)
+                _ent1807 = lap_entry(_cmp, _verdict, _att1807)
+                note_lap_history(trim_lap_history(_hist1807 + [_ent1807])
+                                 if _ent1807 else None)
+            except Exception as _e1807:     # noqa: BLE001 -- a report
+                print(f"  (rip-cycle record skipped: {_e1807})")
             print(f"JSON_IMPROVEMENT_GATE: {json.dumps(_gate_report)}")
             if return_results:
                 results_data['improvement_gate'] = _gate_report
@@ -11075,6 +11291,18 @@ For differential pair routing, use route_diff.py:
                 persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
+    # #1807: the improvement gate's record of this step's trade, for the next
+    # step's gate -- written after a REVERT too (the board and its rules are
+    # the input's; only this record is added to the project), because what a
+    # rejected step tried is what the next step must not run again unseen.
+    if args.output_file and os.path.isfile(args.output_file):
+        try:
+            from improvement_gate import consume_lap_history
+            from protected_nets import persist_lap_history, pro_path_for_board
+            persist_lap_history(pro_path_for_board(args.output_file),
+                                consume_lap_history())
+        except Exception as e:
+            print(f"  (skipped route-step trade record: {e})")
     # #910: OPT-IN delivery fill. Last, because it is the only step that wants
     # the board AND its .kicad_pro already final -- the fill is graded against
     # the project's real netclasses, and the floor writeback above is what

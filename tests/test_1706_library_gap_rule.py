@@ -20,7 +20,12 @@ kicad-cli 10.0.6, and re-measured here when it is installed):
   court   insideCourtyard rule clears the first part, 0.10    2
   later   that rule, then a later pad-pad rule at 0.16     4
   ignore  a (severity ignore) insideCourtyard rule         2
-  front   insideFrontCourtyard (a term not read here)      2, published as up to 4
+  front   insideFrontCourtyard                             2
+
+Since #1832 a courtyard term is read by where each pad stands, so the
+`court` and `front` rules price U1's pairs before the census sees them
+(`front` was published as "up to 4" while the term was not read). The
+walk below still decides a `(severity ignore)` rule.
 
     python3 tests/test_1706_library_gap_rule.py
 """
@@ -56,7 +61,7 @@ ARMS = {
 #: arm -> (pairs published, of them tagged, the refs published, KiCad's count)
 EXPECT = {'none': (4, 0, {'U1', 'U2'}, 4), 'court': (2, 0, {'U2'}, 2),
           'later': (4, 0, {'U1', 'U2'}, 4), 'ignore': (2, 0, {'U2'}, 2),
-          'front': (4, 4, {'U1', 'U2'}, 2)}
+          'front': (2, 0, {'U2'}, 2)}
 
 
 def ok(name, cond, detail=''):
@@ -164,15 +169,16 @@ def main():
                     if tagged else 'KiCad will report %d pair(s)' % n)
             ok(f'{arm}: board_score says "{said}"', said in s,
                [l for l in s.splitlines() if 'LIBRARY PAD GAPS' in l])
-            if arm in ('court', 'ignore'):
-                rname = 'U1 pads' if arm == 'court' else 'U1 quiet'
+            if arm == 'ignore':
                 ok(f'{arm}: check_drc names the rule and the pairs it clears',
-                   f"2 of those pair(s) are cleared by a .kicad_dru rule KiCad applies "
-                   f"to them ('{rname}' 2" in out, out[-1500:])
-            if arm == 'front':
-                ok('front: WARNINGS say "up to"',
-                   "(up to 4: 4 may be cleared by a .kicad_dru rule" in out
-                   and "(may be cleared by rule 'U1 front')" in out, out[-1500:])
+                   "2 of those pair(s) are cleared by a .kicad_dru rule KiCad applies "
+                   "to them ('U1 quiet' 2" in out, out[-1500:])
+            if arm in ('court', 'front'):
+                # #1832: the courtyard rule prices the pairs by where the pads
+                # stand, so the ones it clears are no gap at all
+                ok(f'{arm}: the rule is graded by position, not asked afterwards',
+                   'cleared by a .kicad_dru rule' not in out
+                   and 'Courtyard-scoped clearance rules' in out, out[-1500:])
             if cli:
                 kd = os.path.join(tmp, arm + '_kicad')
                 os.makedirs(kd, exist_ok=True)

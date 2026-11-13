@@ -232,9 +232,12 @@ def hints(doc, state, movable, args, intent=None):
         a, b = ([r for r in names if any(fnmatch.fnmatchcase(r, p) for p in ln[k])]
                 for k in ('a', 'b'))
         if a and b and any(r in mov for r in a + b):
+            # `pads` (#1819): a named part is measured from those pads
+            pads = {r: tuple(v) for r, v in (ln.get('pads') or {}).items() if r in a + b}
             out.append({'key': f"link:{ln['name']}", 'kind': 'within', 'a': a, 'b': b,
                         'edge': None, 'weight': LINK_WEIGHT,
-                        'max_mm': float(ln['max_mm']), 'link': ln['name']})
+                        'max_mm': float(ln['max_mm']), 'link': ln['name'],
+                        **({'pads': pads} if pads else {})})
     return out
 
 
@@ -581,6 +584,11 @@ def illegal_reason(st, model, r):
         if st.edge_gate.rect_outside_amount(
                 rects[0], skip_rings=st._owned_rings(r)) > BOARD_TOL:
             return 'its courtyard is off the board'
+        from placement.seeder import cover_holes_past
+        holes = cover_holes_past(st, r, *pose)
+        if holes:       # #1823
+            return '; '.join(f"its cover's hole {k + 1} is {mm:.3f} mm past the outline"
+                             for k, mm in holes)
         ko = st.keepout_blockers(r, rects)
         if ko:
             return 'inside keep-out ' + ', '.join(repr(k) for k in ko)
@@ -890,10 +898,52 @@ def _illegal_every_seed(seeds, summaries):
             for r in sorted(common)}
 
 
+def placement_grade(summary):
+    """'defect' when a seed's summary carries floorplan errors or an
+    assembly blocking count above 0 (the seeds judge_seeds skips unless
+    --seeds names them, #1645), 'clean' when both are graded 0, else
+    'ungraded'. A report written before the assembly grade existed counts
+    0 there, as `judge_order` counts it."""
+    e = (summary.get('floorplan') or {}).get('errors')
+    asm = summary.get('assembly')
+    b = 0 if asm is None else asm.get('blocking')
+    if e or b:
+        return 'defect'
+    return 'clean' if e == 0 and b == 0 else 'ungraded'
+
+
+def judged_counts_text(k, judge, n_legal, grade):
+    """The parenthesis of place_simple's `judge seeds` line, built from the
+    run's own counts (#1824): how many seeds are named of how many are legal
+    (`--judge` k at most) and how many of them graded buildable and
+    floorplan-clean. When none did, it says judge_seeds routes none of them
+    unless --seeds names them."""
+    if not judge:
+        return f"no legal seed to judge, --judge {k}"
+    n = {g: sum(1 for s in judge if grade[s] == g) for g in ('clean', 'defect', 'ungraded')}
+    head = f"{len(judge)} of {n_legal} legal seed(s), --judge {k}"
+    if n['clean'] == len(judge):
+        return f"{head}; each graded buildable and floorplan-clean, lowest cost first"
+    if n['defect'] == len(judge):
+        return (f"{head}; NONE graded buildable and floorplan-clean, so judge_seeds "
+                f"routes none of them unless --seeds names them; fewest defects first, "
+                f"then lowest cost")
+    parts = [f"{n['clean']} graded buildable and floorplan-clean"]
+    if n['defect']:
+        parts.append(f"{n['defect']} with a placement defect, which judge_seeds skips "
+                     f"unless --seeds names it")
+    if n['ungraded']:
+        parts.append(f"{n['ungraded']} not graded")
+    return (f"{head}; " + ', '.join(parts)
+            + "; graded before not graded, fewest defects first, then lowest cost")
+
+
 def _name_judged(a, seeds, summaries):
     """A run of several seeds' last step: the `--judge` legal seeds to judge
     (`judge_order`), printed and written to `judge.json` beside the seeds'
-    boards (`judge` in judging order; `scattered`, `clustered`, `anchored` and
+    boards (`judge` in judging order; `clean` the judged seeds graded
+    buildable and floorplan-clean, which the printed line counts (#1824);
+    `scattered`, `clustered`, `anchored` and
     `illegal` list the seeds by start and verdict, `illegal_why` each illegal
     seed's parts with the check each fails and `illegal_every_seed` the parts
     illegal in every seed, WARNED once (#1540), `refused` and
@@ -909,8 +959,15 @@ def _name_judged(a, seeds, summaries):
     #1632), and
     `baseline` the board the seeds were placed from, which judge_seeds hands
     quick_score so the fast route's score grades assembly the same way)."""
-    judge = judge_order({s: summaries[s] for s in seeds if s in summaries})[:a.judge]
+    legal = judge_order({s: summaries[s] for s in seeds if s in summaries})
+    judge = legal[:a.judge]
+    grade = {s: placement_grade(summaries[s]) for s in legal}
+    clean_legal = [s for s in legal if grade[s] == 'clean']
     doc = {'judge': judge,
+           # the judged seeds graded buildable and floorplan-clean, both
+           # counts 0 (#1824); judge_seeds skips a judged seed with either
+           # count above 0 unless --seeds names it
+           'clean': [s for s in judge if grade[s] == 'clean'],
            'scattered': [s for s in seeds if summaries.get(s, {}).get('start')
                          not in ('clustered', 'anchored')],
            'clustered': [s for s in seeds if summaries.get(s, {}).get('start') == 'clustered'],
@@ -966,13 +1023,13 @@ def _name_judged(a, seeds, summaries):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(doc, f, indent=1)
     print(f"place_simple: judge seeds {', '.join(map(str, judge)) or 'none'} "
-          f"(the {a.judge} legal seeds of lowest cost, buildable and floorplan-clean "
-          f"first) -> {path}")
+          f"({judged_counts_text(a.judge, judge, len(legal), grade)}) -> {path}")
+    of_legal = f"{len(clean_legal)} of {len(legal)} legal seed(s)"
     for s in judge:
         asm = summaries[s].get('assembly') or {}
         if asm.get('blocking'):
             print(f"  WARNING: seed {s} is judged {_asm_text(asm)}: it cannot be DONE as "
-                  f"placed (fewer than {a.judge} legal seeds are buildable and clean); "
+                  f"placed ({of_legal} buildable and floorplan-clean); "
                   f"judge_seeds skips it unless --seeds names it")
         elif asm and asm.get('blocking') is None:
             print(f"  WARNING: seed {s} is judged with its {_asm_text(asm)}: grade it with "
@@ -980,7 +1037,7 @@ def _name_judged(a, seeds, summaries):
         fp = summaries[s].get('floorplan') or {}
         if fp.get('errors'):
             print(f"  WARNING: seed {s} is judged with {_fp_text(fp)}: it cannot be DONE "
-                  f"as placed (fewer than {a.judge} legal seeds grade clean); judge_seeds "
+                  f"as placed ({of_legal} buildable and floorplan-clean); judge_seeds "
                   f"skips it unless --seeds names it")
         elif fp and fp.get('errors') is None:
             print(f"  WARNING: seed {s} is judged with its {_fp_text(fp)}: grade it with "
@@ -1282,6 +1339,9 @@ def _pass_counts(passes):
 
 
 def main(argv=None):
+    # each line reaches a pipe or a log when it is printed, not at exit (#1825)
+    import cli_banner
+    cli_banner.line_buffer_streams()
     ap = build_parser()
     a = ap.parse_args(argv)
     if not a.plan_checked and not a.preview:
@@ -1830,16 +1890,33 @@ def main(argv=None):
     # `template` WARN, which does not move the judge: say so here (#1387)
     off = [d for d in drift if d['tolerance_mm'] is not None
            and d['worst_mm'] > d['tolerance_mm'] + 1e-6]
-    if off:
+    # ...and one past TEMPLATE_BROKEN_FACTOR x is `template_broken`, an
+    # ERROR unless the intent demotes it, which the judge does rank (#1821)
+    broken = [d for d in off
+              if d['worst_mm'] > floorplan.TEMPLATE_BROKEN_FACTOR * d['tolerance_mm'] + 1e-6]
+    drifted = [d for d in off if d not in broken]
+    if broken:
+        demoted = intent.severity_of('template_broken', floorplan.ERROR) != floorplan.ERROR
+        print("  WARNING: pulled off its datasheet template, past "
+              f"{floorplan.TEMPLATE_BROKEN_FACTOR:g} x the tolerance: " + ', '.join(
+                  f"{d['ref']} ({d['anchor']}) {d['worst_mm']:.2f} mm > "
+                  f"{floorplan.TEMPLATE_BROKEN_FACTOR * d['tolerance_mm']:g}"
+                  for d in broken)
+              + ("; the intent demotes `template_broken` to a WARN, so the judge ranks "
+                 "the seed no lower for it" if demoted else
+                 "; check_floorplan grades this `template_broken`, an ERROR, so the "
+                 "judge ranks the seed below every seed that grades clean"))
+    if drifted:
         print("  WARNING: off its datasheet template past the tolerance: " + ', '.join(
             f"{d['ref']} ({d['anchor']}) {d['worst_mm']:.2f} mm > {d['tolerance_mm']:g}"
-            for d in off) + "; check_floorplan grades this a WARN (unless the intent's "
+            for d in drifted) + "; check_floorplan grades this a WARN (unless the intent's "
             "`severity` promotes `template`), so the judge ranks the seed no lower for it")
     # a keep-out that binds a template member but not its chip forbids the
-    # template pose where the chip stands (#1387)
+    # template pose where the chip stands (#1387), as does a declared cover
+    # too low for the member (#1821)
     tk = [f for f in floorplan.template_keepout_findings(
         intent, state.parts, lambda r: (state.parts[r].x, state.parts[r].y, state.parts[r].rot),
-        state.heights.height)
+        state.heights.height, state.heights)
         if f['forced']]
     for f in tk:
         print(f"  WARNING: {floorplan.template_keepout_text(f)}")
@@ -1865,6 +1942,9 @@ def main(argv=None):
             # and so whether the judge reads it (#1632)
             links.append({'link': h['link'], 'gap_mm': round(gap, 3), 'max_mm': h['max_mm'],
                           'past': past,
+                          # the pads a part is measured from (#1819); else courtyards
+                          **({'pads': {r: list(v) for r, v in h['pads'].items()}}
+                             if h.get('pads') else {}),
                           'severity': intent.severity_of('link', floorplan.WARN)})
             if past:
                 print(f"  link {h['link']}: {gap:.2f} mm, past its {h['max_mm']:g} mm")

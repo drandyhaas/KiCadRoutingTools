@@ -6,7 +6,7 @@ This document describes the net ordering strategies available in the KiCad Grid 
 
 The order in which nets are routed significantly affects success rate. Nets routed early have more freedom, while later nets must work around existing routes.
 
-Four ordering strategies are available on `route.py` (`--ordering`, `-o`; the GUI's "Ordering Strategy" on the Advanced options tab):
+Four ordering strategies are available on `route.py` (`--ordering`, `-o`; the GUI's "Ordering Strategy" on the Advanced tab):
 
 | Strategy | Flag | Best For |
 |----------|------|----------|

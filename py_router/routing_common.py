@@ -992,6 +992,123 @@ def run_length_matching(
     return net_name_to_result
 
 
+def regrade_late_group_members(
+    report: Dict,
+    length_match_groups: List[List[str]],
+    routed_results: Dict[int, Dict],
+    config: GridRouteConfig,
+    pcb_data: PCBData,
+    scope_net_ids: Optional[Set[int]] = None,
+    recovered_by: Optional[Dict[str, str]] = None,
+) -> List[Dict]:
+    """#1801: route.py matches its length groups ONCE, before the phases that
+    recover nets its main loop failed (own-requirement retry, rescue,
+    terminal escalation). A member one of them routed was not routed when
+    the groups formed, so it was in no group, unmatched and unnamed.
+
+    Form every configured group again from the run's results now -- the same
+    inputs as `run_length_matching` (a pattern group's matches among routed
+    and board-copper nets, the `auto` grouper over the call's scope) -- and
+    for each group that gained a member whose copper now connects its pads,
+    match it when that is safe (#1828, `rematch_late_member`: one late 2-pad
+    member, and no member the first pass finished is lengthened -- the
+    record then carries `rematched`, and the caller must sync pcb_data with
+    the meandered results); otherwise grade every member from the board
+    (`grade_late_group_members`), changing no copper and noting no
+    protection, and record why in `not_rematched`. Either way the late ones join `members`, and one line names
+    them, the phase that routed each (`recovered_by`, name -> phase) and the
+    verdict. Updates `report['groups']` in place; returns the records it
+    changed."""
+    from length_matching import (grade_late_group_members, _board_net_connected,
+                                 rematch_late_member, LATE_MEMBER_REASON)
+    records = report.get('groups')
+    if records is None:
+        return []
+    recovered_by = recovered_by or {}
+    nets = pcb_data.nets
+    names_now = [nets[nid].name for nid in routed_results
+                 if nid in nets and nets[nid].name]
+    have = set(names_now)
+    with_copper = ({s.net_id for s in pcb_data.segments}
+                   | {v.net_id for v in pcb_data.vias})
+    board_names = sorted(nets[nid].name for nid in with_copper
+                         if nid in nets and nets[nid].name
+                         and nets[nid].name not in have)
+    nid_of = {n.name: i for i, n in nets.items() if n.name}
+
+    def routed_now(name):
+        nid = nid_of.get(name)
+        r = routed_results.get(nid)
+        if r is None or r.get('failed') or r.get('is_existing_route'):
+            return False
+        return _board_net_connected(
+            pcb_data, nid, [s for s in pcb_data.segments if s.net_id == nid],
+            [v for v in pcb_data.vias if v.net_id == nid])
+
+    current = []          # (name, source, patterns, members now)
+    for group in length_match_groups:
+        if len(group) == 1 and group[0].lower() == 'auto':
+            auto_in = [nets[nid].name for nid, r in routed_results.items()
+                       if nid in nets and nets[nid].name
+                       and (nid in scope_net_ids if scope_net_ids is not None
+                            else not (r and r.get('is_existing_route')))]
+            _rep: Dict = {}
+            auto_group_ddr4_nets(auto_in, context_names=[
+                n.name for n in nets.values() if n.name], report=_rep)
+            for key, members in _rep.get('groups', {}).items():
+                current.append((key, 'auto', None, set(members)))
+        else:
+            current.append((' '.join(group), 'patterns', list(group),
+                            set(find_nets_matching_patterns(
+                                names_now + board_names, group))))
+    by_name = {(g['name'], g['source']): g for g in records}
+    changed = []
+    laid: List = []       # meanders re-matched groups lay before the sync
+    for name, source, patterns, members in current:
+        rec = by_name.get((name, source))
+        before = set(rec['members']) if rec else set()
+        late = {m: recovered_by.get(m, 'a late phase')
+                for m in sorted(members - before) if routed_now(m)}
+        if not late:
+            continue
+        if rec is None:
+            rec = {'name': name, 'source': source, 'members': []}
+            if patterns is not None:
+                rec['patterns'] = patterns
+            records.append(rec)
+        # #1828: one late 2-pad member the group takes without lengthening a
+        # member the first pass finished is matched now; anything else is
+        # graded and named as it stands (#1801).
+        why_not = rematch_late_member(rec, late, routed_results, config,
+                                      pcb_data, laid=laid)
+        if not why_not:
+            changed.append(rec)
+            ms = rec['member_status']
+            ok = all((ms.get(m) or {}).get('status') == 'matched'
+                     for m in rec['members'])
+            print(f"  Length match group '{name}': "
+                  + ', '.join(f"{m} {ms[m]['length_mm']:.2f}mm"
+                              for m in rec['members'] if m in ms)
+                  + (" -- all within tolerance" if ok else " -- NOT matched"))
+            continue
+        ok = grade_late_group_members(rec, late, config, pcb_data)
+        rec['not_rematched'] = why_not
+        changed.append(rec)
+        ms = rec.get('member_status') or {}
+        lens = ', '.join(f"{m} {ms[m]['length_mm']:.2f}mm" for m in rec['members']
+                         if m in ms and 'length_mm' in ms[m])
+        tgt = next((r['target_mm'] for r in ms.values() if 'target_mm' in r), None)
+        print(f"  Length match group '{name}': "
+              + ', '.join(f"{m} (routed by {p})" for m, p in late.items())
+              + f" joined it after matching ran, so it was not matched (#1801; "
+              + f"{why_not}). "
+              + (f"Graded from the board against target {tgt:.2f}mm: " if tgt
+                 is not None else "Lengths: ")
+              + lens + (" -- all within tolerance" if ok else
+                        f" -- NOT matched ({LATE_MEMBER_REASON})"))
+    return changed
+
+
 def sync_pcb_data_segments(
     pcb_data: PCBData,
     routed_results: Dict[int, Dict],

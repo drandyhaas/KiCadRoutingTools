@@ -4,7 +4,7 @@ is held in a re-fan of that BGA.
 
 The fanout lays vias and escapes on an unlocked 2-pad C/R/FB part, because
 place_fanout_clearance moves such a part afterwards. Where it cannot, the
-part ships shorted. autoplan then fans the BGA out again holding the part
+part ships shorted. autoroute then fans the BGA out again holding the part
 (bga_fanout --immovable-refs), replays the later fanouts and runs the
 clearance step again, keeping the board with fewer shorts, then fewer
 dropped escapes.
@@ -16,9 +16,9 @@ dropped escapes.
    - held: no foreign via or track comes within the clearance of them, and
      every ball is either escaped or reported failed;
    - the held set is the call's own: a later call without it fans as before.
-2. autoplan.held_parts: a short counts only when it is unaccepted, on a
+2. autoroute.held_parts: a short counts only when it is unaccepted, on a
    movable passive, and its copper is on a net of a fanned BGA's balls.
-3. autoplan.refan with a scripted chain: no shorts left runs nothing (the
+3. autoroute.refan with a scripted chain: no shorts left runs nothing (the
    control); shorts left re-fan the BGA from its own input with the part
    held, replay a later fanout at its accepted rung only, run the clearance
    step again, and keep the better board; a worse re-fan is not kept.
@@ -39,7 +39,7 @@ import kicad_parser  # noqa: E402
 from kicad_parser import BoardInfo, Footprint, Segment, Via  # noqa: E402
 from bga_fanout import generate_bga_fanout  # noqa: E402
 from check_drc import check_pad_segment_overlap, check_pad_via_overlap  # noqa: E402
-import autoplan as AP  # noqa: E402
+import autoroute as AP  # noqa: E402
 from synth import make_pad, make_net, make_pcb  # noqa: E402
 
 RUN_ALL_TIMEOUT = 300
@@ -185,7 +185,7 @@ FANS = [{'ref': 'U1', 'tool': 'bga', 'input': 'u1_in',
 
 
 def test_held_parts():
-    print("autoplan.held_parts: which shorts name a part to hold")
+    print("autoroute.held_parts: which shorts name a part to hold")
     pcb = fixture()
     d = {'items': [_item('C1.1', 'N15'),                      # held
                    _item('C1.2', 'N16', accepted=True),       # accepted: not
@@ -202,7 +202,7 @@ def test_held_parts():
     check("a locked part is never held (the fanout already clears it)", got == {}, got)
 
 
-class ScriptedChain:
+class ScriptedChain(AP.ChainEvents):
     """Chain.run and Chain.check_drc scripted: each board's report is
     REPORTS[board]; a fanout run reports FAILED[tag] dropped escapes."""
 
@@ -213,7 +213,7 @@ class ScriptedChain:
         self.runs = []
         self.steps = []
 
-    def run(self, kind, args, tag):
+    def run(self, kind, args, tag, **kw):
         out = f'{tag}.out'
         self.runs.append((kind, tag, args, self.cur))
         n = self.failed.get(tag, 0)
@@ -228,7 +228,7 @@ class ScriptedChain:
 
 
 def test_refan():
-    print("autoplan.refan: re-fan, replay, clearance step again, keep the better")
+    print("autoroute.refan: re-fan, replay, clearance step again, keep the better")
     pcb = fixture()
     short = {'violations': 1, 'items': [_item('C1.1', 'N15')]}
     clean = {'violations': 0, 'items': []}

@@ -2,6 +2,8 @@
 
 This document describes the internal architecture of the KiCad Grid Router, including module structure, what one route step does from start to finish, obstacle maps, and the A* pathfinding algorithm.
 
+To route a whole board, run [`autoroute.py`](utilities.md#deterministic-plan-router-autoroutepy), which plans and runs the chain of route steps described here, or the [`/plan-pcb-routing`](claude-skills.md#plan-pcb-routing) skill, where an agent plans it.
+
 For per-module API references (function signatures, dataclass fields, usage examples) see the [Python API documentation](python-api.md).
 
 ## Module Structure

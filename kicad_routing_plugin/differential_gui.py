@@ -1321,6 +1321,14 @@ class DifferentialTab(wx.Panel):
         if _intra_bad:
             msg += (f"Intra-pair skew NOT matched on the board: "
                     f"{', '.join(_intra_bad)}\n")
+        # #1799: a chain's member pairs read `skipped` above (the chain is
+        # matched end to end instead), so the chain's own verdict is named
+        # here, worded as the engine's "AC-coupled chain NOT matched" line.
+        from length_matching import ac_chains_not_matched
+        _chain_bad = ac_chains_not_matched(results_data.get('ac_coupled_xnets'))
+        if _chain_bad:
+            msg += (f"AC-coupled chain NOT matched end to end: "
+                    f"{', '.join(_chain_bad)}\n")
         msg += f"Time: {wall_time:.1f}s\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"

@@ -52,6 +52,13 @@ POWER_WIDTHS_KEY = "power_widths"
 #: | 'dru' | 'default'} -- what the graders hold a pair to when no
 #: .kicad_dru skew rule binds it (`kicad_dru.recorded_intra_pair_rules`).
 INTRA_KEY = "intra_pair_tolerance"
+#: #1799: the same map carries each AC-coupled chain a route_diff step
+#: matched end to end, keyed AC_CHAIN_PREFIX + its pairs joined by '+':
+#: {'p_nets': [...], 'n_nets': [...] (each side's nets in lane order),
+#: 'bridges': [refs], 'tolerance_mm', 'source'} -- graded end to end
+#: (`kicad_dru.recorded_ac_chains`, check_drc). No 'n' key, so the pair
+#: reader passes over it.
+AC_CHAIN_PREFIX = "ac-chain:"
 
 _GLOB_CHARS = set('*?[')
 
@@ -253,6 +260,50 @@ def _persist_map(pro_path: str, key: str, mapping: Dict[str, object],
     except Exception as e:
         if verbose:
             print(f"  (skipped {label} record: {e})")
+        return False
+
+
+def persist_lap_history(pro_path: str, history: Optional[list],
+                        verbose: bool = True, board=None) -> bool:
+    """#1807: store the improvement gate's record of the recent route steps'
+    trades (improvement_gate.LAP_KEY), REPLACING the previous list -- the
+    gate built it from that list plus this step's entry. FILE (``board``
+    None) into the project, LIVE into the live board's records, as
+    _persist_map. None (the step traded nothing, or no gate ran) is a
+    no-op."""
+    if not history:
+        return False
+    from improvement_gate import LAP_KEY
+    value = json.loads(json.dumps(history))
+    try:
+        if board is not None:
+            def _apply(ns):
+                if ns.get(LAP_KEY) == value:
+                    return False
+                ns[LAP_KEY] = value
+                return True
+            changed = tool_records.update_live_namespace(board, _apply)
+        else:
+            if not pro_path or not os.path.isfile(pro_path):
+                return False
+            proj = tool_records.load_project(pro_path)
+            ns = proj.setdefault(PRO_NAMESPACE, {})
+            if ns.get(LAP_KEY) == value:
+                return False
+            ns[LAP_KEY] = value
+            tool_records.stamp_revision(proj)
+            with open(pro_path, 'w', encoding='utf-8') as f:
+                json.dump(proj, f, indent=2)
+            changed = True
+        if changed and verbose:
+            last = value[-1]
+            print(f"  Route-step trade recorded for the next step's gate: "
+                  f"lost {len(last['lost'])}, gained {len(last['gained'])} "
+                  f"({last.get('verdict')})")
+        return changed
+    except Exception as e:
+        if verbose:
+            print(f"  (skipped route-step trade record: {e})")
         return False
 
 

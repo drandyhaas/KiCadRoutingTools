@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#1522: autoplan routes every step at the fab floor, not at the net class.
+"""#1522: autoroute routes every step at the fab floor, not at the net class.
 
 A finished board meets the fab clearance floor everywhere; a Default net class
 declared above it is aspirational. So:
@@ -17,7 +17,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
-import autoplan as AP                                        # noqa: E402
+import autoroute as AP                                        # noqa: E402
 from list_nets import (board_default_netclass_clearance,     # noqa: E402
                        effective_floors, read_design_rules)
 
@@ -43,7 +43,7 @@ def test_analyze():
            f"clearance {a['clearance']} is the fab floor {floor}, not the class {declared}")
 
 
-class RecordingChain:
+class RecordingChain(AP.ChainEvents):
     """Chain.run recorded; every fanout rung reports a dropped escape, so the
     whole ladder runs."""
 
@@ -53,7 +53,7 @@ class RecordingChain:
         self.steps = []
         self.last_iterations = 100
 
-    def run(self, kind, args, tag):
+    def run(self, kind, args, tag, **kw):
         self.runs.append((kind, tag, list(args)))
         self.steps.append({'tag': tag, 'ok': True})
         s ={'escaped': 1, 'failed': 1} if kind in ('bga', 'qfn') else {}
@@ -141,7 +141,7 @@ def main():
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s)")
         return 1
-    print("PASS: #1522 autoplan at the fab floor")
+    print("PASS: #1522 autoroute at the fab floor")
     return 0
 
 

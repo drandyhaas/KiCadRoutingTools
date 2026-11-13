@@ -3,7 +3,14 @@
 validation was scored: a board counts when its chain completed in BOTH arms
 with the same final board; totals, direction, and every non-zero delta.
 
-    python3 tests/stress/pair_arms.py <baseline wave dir> <new wave dir>
+    python3 tests/stress/pair_arms.py <baseline wave dir> <new wave dir> [--any-final]
+
+--any-final pairs boards whose two arms ran DIFFERENT chains (the autorouter
+arm against a replay arm): the board and its grader are the same, the final
+board's name is not. nets_total is NOT a pairing key there: check_connected
+counts a net only when it carries a track or via or is unrouted, so a net a
+pour alone joins drops out, and two chains that pour differently grade
+different totals of one input. The boards whose totals differ are listed.
 
 rank_arms.py needs a control arm inside ONE sweep and cannot score a single-arm
 wave; this reads the harvested rows directly. Reproduces the recorded
@@ -14,6 +21,7 @@ def rows(d):
     for f in glob.glob(os.path.join(d, '_raw', '*', 'set*__*.json')):
         r = json.load(open(f)); out[(r['set'], r['board'])] = r
     return out
+ANY_FINAL = '--any-final' in sys.argv[3:]
 base, new = rows(sys.argv[1]), rows(sys.argv[2])
 keys = sorted(set(base) & set(new))
 comp, skipped = [], []
@@ -21,9 +29,15 @@ for k in keys:
     b, n = base[k], new[k]
     if not (b.get('chain_complete') and n.get('chain_complete')):
         skipped.append((k, 'chain incomplete', b.get('chain_complete'), n.get('chain_complete'))); continue
-    if b.get('final') != n.get('final'):
+    if not ANY_FINAL and b.get('final') != n.get('final'):
         skipped.append((k, 'final differs', b.get('final'), n.get('final'))); continue
     comp.append((k, b, n))
+if ANY_FINAL:
+    _nt = [(k, b.get('nets_total'), n.get('nets_total')) for k, b, n in comp
+           if b.get('nets_total') != n.get('nets_total')]
+    print(f"nets_total differs on {len(_nt)} paired board(s) (pours counted differently):")
+    for k, a, c in _nt:
+        print(f"  {k[0]}/{k[1]}: {a} vs {c}")
 def tot(field, which): return sum((r[which].get(field) or 0) for r in comp)
 print(f"boards in both arms: {len(keys)}; comparable: {len(comp)}; skipped: {len(skipped)}")
 for k, why, a, b in skipped: print(f"  skip {k[0]}/{k[1]}: {why} ({a} vs {b})")

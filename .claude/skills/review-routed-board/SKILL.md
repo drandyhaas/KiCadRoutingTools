@@ -172,6 +172,13 @@ total copper can fail on path length. Pads joined only through a zone return
 
 For time-matched groups use `calculate_route_propagation_time_ps()` from `impedance.py` instead, plus each pad's `die_delay` (`net_pad_to_die_delay`, ps), and compare against the ps tolerance. Lengths include via barrels from the stackup and, in `net_match_length`, every pad's pad-to-die length (`(die_length ...)`, #1248) -- the terms KiCad's length/skew DRC adds. A board that declares pad-to-die is graded wrong by raw copper: KiCad sees the difference as skew.
 
+A limit stated for a **lane through a series part** (an AC-coupling cap, a
+series resistor) is two nets end to end: write it as a `chains` group,
+`{"LANE": {"chains": [["/A_P", "/B_P"]], "max_mm": 12}}` (or `"chains":
+"auto"` for the board's AC-coupled pairs). A chain's length is its nets
+summed, the series part's own span reported apart; `min_mm` / `max_mm` bound
+each member, nets or chains (#1812).
+
 Report per group: the spread, the tolerance, and the worst offender net.
 
 ## Step 2b: Meander Arm-Spacing Audit (#501)
@@ -217,23 +224,27 @@ was routed by this tool below the recommendation — the
 
 ## Step 3: GND Return Via Coverage
 
-For high-speed nets (use `/find-high-speed-nets` results if available, else the name-pattern tiers from `/plan-pcb-routing`), check each signal via has a GND via nearby:
+For high-speed nets (use `/find-high-speed-nets` results if available, else the name-pattern tiers from `/plan-pcb-routing`), check each signal via has a GND via nearby. Run `check_return_vias.py` once per speed tier, with that tier's nets and distance:
 
-```python
-from kicad_parser import pad_is_plated_through
-gnd_ids = {n.net_id for n in pcb.nets.values() if n.name and 'GND' in n.name.upper()}
-# GND vias, and plated through-hole GND pads, are return paths
-gnd_pts = [(v.x, v.y) for v in pcb.vias if v.net_id in gnd_ids]
-gnd_pts += [(p.global_x, p.global_y) for fp in pcb.footprints.values()
-            for p in fp.pads if p.net_id in gnd_ids and pad_is_plated_through(p)]
-for via in pcb.vias:
-    if via.net_id in high_speed_net_ids:
-        nearest = min((((x-via.x)**2 + (y-via.y)**2)**0.5 for x, y in gnd_pts),
-                      default=float('inf'))
-        # Flag if nearest > recommended distance for the net's speed tier
-        # (ultra-high: the 3 x (via_size + clearance) floor, 2.25mm at the
-        # default 0.5 via / 0.25 clearance; high: 3.0mm; medium: 5.0mm)
+```bash
+# ultra-high: the 3 x (via_size + clearance) floor, 2.25mm at the default 0.5 via / 0.25 clearance
+python3 py_tools/check_return_vias.py board.kicad_pcb --nets <ultra-high nets> --distance 2.25 --json rv_ultra.json
+# high: 3.0mm
+python3 py_tools/check_return_vias.py board.kicad_pcb --nets <high nets> --distance 3.0 --json rv_high.json
+# medium: 5.0mm
+python3 py_tools/check_return_vias.py board.kicad_pcb --nets <medium nets> --distance 5.0 --json rv_medium.json
 ```
+
+It counts a via or drilled pad of the signal's OWN ground domain as a return
+path, leaves power-rail vias out, and is the same test `route_planes.py
+--add-gnd-vias` places return vias by. Report `uncovered` of `signal_vias` per
+tier, and the worst nets from `by_net`. It exits 0 whatever it counts, so read
+the numbers. Exit 2 is a `--nets` pattern that names no net of the board
+(`patterns_matching_no_net`): correct the tier's list and run it again, never
+report that run's count. Report every net in `power_nets` too: those vias were
+left out as power and not examined, each with the reason, and a signal net
+whose name reads as a rail is among them. A count inside a BGA field, or at a
+layer change between two layers that share one reference plane, over-reads.
 
 The medium distance grades coverage only: `/plan-pcb-routing` runs no via step
 at that tier (its Step 10 rule 10), so a medium-tier miss is a note, not a

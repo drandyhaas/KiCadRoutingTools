@@ -15,6 +15,9 @@ to print two verdict lines the log just above contradicted:
 Now the ladder lists each candidate with the reason it failed (the rejection
 it printed), `no opposite-side option` only when neither end can flip, and the
 loop's line is keyed on `polarity_swap_denied` and names what runs next.
+Since #1802 the no-swap candidate runs under either policy and a denied swap
+is probed; on this pair the probe fails as the allowed swap does, so neither
+arm is `polarity_swap_denied`.
 
     1. `_ladder_failure_text` maps each failed route result to its cause
     2. glasgow_revC /IO_Banks/Z0 (both flips fail), swaps allowed and denied
@@ -115,12 +118,13 @@ def ladder(td):
         text = '\n'.join(lines)
         names = [n for n, _ in verdict]
         denied = arm == 'denied'
-        check(f'{arm}: JSON polarity_swap_denied_pairs is '
-              f'{[PAIR] if denied else []}',
-              doc.get('polarity_swap_denied_pairs') == ([PAIR] if denied else []),
+        # #1802: the denied swap, probed, fails like the allowed one, so the
+        # swap is not what is missing and the pair is not listed as denied
+        check(f'{arm}: JSON polarity_swap_denied_pairs is []',
+              doc.get('polarity_swap_denied_pairs') == [],
               f"{doc.get('polarity_swap_denied_pairs')}")
-        want = (['pad swap', 'flipped source', 'flipped target'] if denied
-                else ['no swap', 'pad swap', 'flipped source', 'flipped target'])
+        # #1802: the no-swap candidate runs whatever the policy
+        want = ['no swap', 'pad swap', 'flipped source', 'flipped target']
         check(f'{arm}: the verdict names every candidate: {want}', names == want,
               f'{verdict}')
         tried = [l for l in lines[:start] if 'trying' in l and 'opposite side' in l]
@@ -130,6 +134,10 @@ def ladder(td):
         check(f'{arm}: the pad swap reads "not allowed" exactly when the policy '
               f'denies it', (why.get('pad swap', '').startswith('not allowed')) == denied,
               f"{why.get('pad swap')}")
+        if denied:
+            check('denied: the pad swap row says the probe failed too (#1802)',
+                  'probed, the swap fails too: intra-pair clearance'
+                  in why.get('pad swap', ''), f"{why.get('pad swap')}")
         # every intra-pair cause is the rejection the ladder printed above it
         warned = set(re.findall(r'intra-pair clearance: P and N would sit '
                                 r'([0-9.]+)mm apart', '\n'.join(lines[:start])))
@@ -138,10 +146,12 @@ def ladder(td):
         check(f'{arm}: each intra-pair cause matches a rejection printed above',
               cited and set(cited) <= warned, f'cited {cited}, warned {sorted(warned)}')
         tail = next((l for l in lines[start:] if 'COUPLED ROUTE FAILED' in l), '')
+        # keyed on whether the swap is what is missing (#1802): here it is
+        # not, under either policy
         check(f'{arm}: the last line says the coupled route failed and the '
-              f'hybrid is next, keyed on the policy',
+              f'hybrid is next, as a polarity mismatch',
               'trying the hybrid escape' in tail
-              and ('not allowed' in tail) == denied
+              and 'polarity mismatch, and no candidate routed clean' in tail
               and not any('SKIPPED - polarity' in l for l in lines), tail)
         rep = next((p for p in doc.get('pair_reports', []) if p.get('pair') == PAIR), {})
         check(f'{arm}: ...and the hybrid does route it, coupled',

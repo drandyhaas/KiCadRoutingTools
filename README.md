@@ -26,7 +26,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - [Support](#support) — donate via Ko-fi, GitHub Sponsors or PayPal
 - [Features](#features)
 - [Quick Start](#quick-start)
-- [KiCad Plugin](#kicad-plugin) — GUI, the **AI Drive** tab (routing and placement), installation
+- [KiCad Plugin](#kicad-plugin) — GUI, the **Auto** tab (the Autorouter, AI routing and placement, labels), installation
 - [Command-Line Interface](#command-line-interface) — routing, planes, verification
 - [Documentation](#documentation) — full guide for every feature
 - [Project Structure](#project-structure) & [Module Overview](#module-overview)
@@ -99,7 +99,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 
 **Interfaces**
 - Full [KiCad plugin GUI](#kicad-plugin) (KiCad 9 & 10) and a scriptable [CLI](#command-line-interface)
-- [AI assistance](docs/claude-skills.md) — an **AI Drive** tab that plans an entire routing workflow or places a board by function, per-field "Ask AI" helpers, and datasheet-driven power / high-speed / diff-pair analysis
+- [AI assistance](docs/claude-skills.md) — an **Auto** tab that runs the Autorouter, plans an entire routing workflow or places a board by function, per-field "Ask AI" helpers, and datasheet-driven power / high-speed / diff-pair analysis
 - [Board rendering](docs/utilities.md#board-renderer-route_renderpy) — fast geometry PNG renderer (`route_render.py`), placement stills (`render_placement.py`), a board's power components (`render_power.py`), and movies of a routing run (`route_movie.py`, made for every stress run) and of a placement, or the placement skill's whole flow through to the full route (`place_movie.py`)
 - [Routing plans as files](docs/claude-skills.md#plans-from-the-command-line) — save/load a whole routing chain as JSON: build one from a recorded command chain (`make_plan.py`), run it headless through the real plugin (`run_plan.py`), or load it in the GUI
 
@@ -157,6 +157,15 @@ python3 build_router.py --clean           # remove all build artifacts
 
 ### 3. Choose Your Interface
 
+**To route a whole board automatically, use one of two ways** -- and an AI assistant
+asked to route a board with this package should do the same:
+
+- `python3 py_router/autoroute.py board.kicad_pcb routed.kicad_pcb` (Option C): no
+  agent; it plans the chain from the board's own rules, footprints and nets and runs it.
+  The plugin's **Auto › Autorouter** tab runs the same script.
+- the `/plan-pcb-routing` skill (Option B): an agent analyzes the board, plans the
+  chain step by step with you, and runs it.
+
 **Option A: KiCad Plugin (Recommended for interactive use)**
 
 ```bash
@@ -196,9 +205,31 @@ Other useful skills:
 
 See [Claude Skills](docs/claude-skills.md) for what each skill does and how they fit together.
 
-All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-ai-drive-tab) below. The plugin can run the analysis and routing skills through [opencode](https://opencode.ai) instead of Claude Code (issue #503) - a Backend dropdown on the AI Drive tab selects the agent CLI, and opencode's `provider/model` strings open the door to other model providers. The placement runs need Claude Code, because they write files and opencode's analysis agent may not. The skills' output contracts are tuned on Claude models; smaller models may follow them less reliably.
+All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-auto-tab) below. The plugin can run the analysis and routing skills through [opencode](https://opencode.ai) instead of Claude Code (issue #503) - a Backend dropdown on the Auto tab selects the agent CLI, and opencode's `provider/model` strings open the door to other model providers. The placement runs need Claude Code, because they write files and opencode's analysis agent may not. The skills' output contracts are tuned on Claude models; smaller models may follow them less reliably.
 
-**Option C: Manual Command Line (For scripting and automation)**
+**Option C: Command Line -- route a whole board with `autoroute.py`**
+
+```bash
+# Route the whole board: planes, fanouts, decap clearance, diff pairs and route
+# passes, chosen from the board's own rules, footprints and nets
+python3 py_router/autoroute.py my_board.kicad_pcb routed.kicad_pcb
+
+# See its plan first, without running anything
+python3 py_router/autoroute.py my_board.kicad_pcb routed.kicad_pcb --dry-run
+```
+
+Every step it ran, with its log and board, is in `routed.kicad_pcb.autoroute/`
+(`plan.json` there records the chain and each pass's grade), and its last line,
+`AUTOROUTE_SUMMARY`, names the shipped step with its open nets and DRC. See
+[`autoroute.py`](docs/utilities.md#deterministic-plan-router-autoroutepy). The
+plugin's **Auto › Autorouter** tab runs the same script on the open board.
+
+**Option D: A hand-built chain (the manual / expert path)**
+
+When a board needs steps `autoroute.py` does not take -- impedance control, length
+matching, keep-away rules, buses, a particular plane map, or a net class that is a
+real requirement rather than aspirational -- run the tools yourself, the kind of chain
+`/plan-pcb-routing` plans:
 
 ```bash
 # Optionally place the board first, by its functional groups (see py_placer/placement/README.md)
@@ -231,13 +262,13 @@ The plugin provides a full graphical interface for all routing features, running
   <img src="kicad_routing_plugin/gui.png" alt="KiCad Plugin GUI" width="600">
 </p>
 
-### AI assistance (AI Drive tab)
+### AI assistance (Auto tab)
 
 <p align="center">
   <img src="docs/claude_tab.png" alt="AI tab: planned steps, controls, and live transcript" width="700">
 </p>
 
-With [Claude Code](https://claude.ai/claude-code) or [opencode](https://opencode.ai) installed, the routing dialog gains AI assistance throughout (the plugin spawns the selected agent CLI headless, streams a live transcript, and fills GUI controls from the results). The **Backend** dropdown on the AI Drive tab picks the CLI: Claude Code runs Anthropic models; opencode takes `provider/model` strings for many providers (including its built-in free tier), with `opencode auth login` adding provider accounts. Both discover the same `.claude/skills/`; opencode runs them under a read-only `pcb-analysis` agent defined in `opencode.json` (the equivalent of the Claude run's read-only tool allowlist). Neither grants a dedicated write tool, though both grant `Bash`, so neither is a sandbox — the allowlist states intent, and `--allowedTools` auto-approves rather than restricts. Both can dispatch a subagent, so an analysis skill can hand its close-out to an independent verifier (#552): the Claude allowlist grants the dispatch tool per run, and the `pcb-analysis` agent grants opencode's `task` tool in `opencode.json`. A caller asking opencode for a tool set naming `Write`/`Edit` is refused rather than silently downgraded.
+With [Claude Code](https://claude.ai/claude-code) or [opencode](https://opencode.ai) installed, the routing dialog gains AI assistance throughout (the plugin spawns the selected agent CLI headless, streams a live transcript, and fills GUI controls from the results). The **Backend** dropdown on the Auto tab picks the CLI: Claude Code runs Anthropic models; opencode takes `provider/model` strings for many providers (including its built-in free tier), with `opencode auth login` adding provider accounts. Both discover the same `.claude/skills/`; opencode runs them under a read-only `pcb-analysis` agent defined in `opencode.json` (the equivalent of the Claude run's read-only tool allowlist). Neither grants a dedicated write tool, though both grant `Bash`, so neither is a sandbox — the allowlist states intent, and `--allowedTools` auto-approves rather than restricts. Both can dispatch a subagent, so an analysis skill can hand its close-out to an independent verifier (#552): the Claude allowlist grants the dispatch tool per run, and the `pcb-analysis` agent grants opencode's `task` tool in `opencode.json`. A caller asking opencode for a tool set naming `Write`/`Edit` is refused rather than silently downgraded.
 
 The tab has two sub-tabs:
 
@@ -313,10 +344,34 @@ python3 package_pcm.py --binary-dir ./path/to/release/artifacts
    **Select → All Tracks in Net**. Any nets you have selected are automatically
    pre-checked for routing when the plugin opens.
 4. Go to **Tools → External Plugins → KiCadRoutingTools**
-5. Configure routing parameters and select (or adjust) the nets to route
-6. Click **Route** to run the router
+5. To route the whole board hands-off: **Auto › Autorouter ›
+   Run Autorouter**, review its steps, then **Apply Result to Board**
+6. Or, by hand: configure routing parameters, select (or adjust) the nets to route,
+   and click **Route** on the Route tab
 
 ### Plugin Tabs
+
+**Auto Tab** (the first tab; a fresh dialog opens on it, a reopened one on the page it was closed on):
+- *Autorouter* sub-tab: route the whole board with no agent. **Run Autorouter** runs
+  [`autoroute.py`](docs/utilities.md#deterministic-plan-router-autoroutepy) as a
+  subprocess on a snapshot of the open board (with its `.kicad_pro` / `.kicad_dru`),
+  in a temp work folder. Its **Plan** pane shows what it read off the board -- the
+  design rules and where they came from, the planes, the parts it fans out and the
+  ones it does not, with why, the diff pairs and power nets -- and its **Steps**
+  checklist one row per step, pending / running (time ticking) / done / FAILED /
+  skipped, with each step's result (escapes and grazes, caps moved, pairs routed,
+  each route pass's open nets and DRC, which pass shipped, why a pass did not run);
+  the rows the run adds (a fanout's next rung, a re-fan) appear as they start.
+  Selecting a row shows its command line, decisions, summary and log tail (a failed
+  one its exit code and error). Options: *Finish only* (`--finish`), *Effort factor*
+  (`--effort-factor`), *Plane layer cost* (`--plane-layer-cost`). **Stop** kills the
+  run and its steps. **Apply Result to Board** makes the open board match the shipped
+  result -- footprint poses (the decap step moves caps), tracks and vias (live copper
+  the result does not have is removed), the zones with their fills (not refilled), and
+  the design rules the result was graded against -- after listing every change.
+- *AI Routing* sub-tab: plan a routing chain with `/plan-pcb-routing` and run its steps; review and diagnose; save/load plans (see [AI assistance](#ai-assistance-auto-tab) above)
+- *AI Placement* sub-tab: place (and route) the board with `/plan-pcb-placement`
+- *Labels* sub-tab: Beautify Labels -- uniform, non-overlapping reference-designator silkscreen, the CLI's `py_placer/beautify_labels.py`
 
 **Route Tab:**
 - Net selection with filtering and component filtering
@@ -329,7 +384,7 @@ python3 package_pcm.py --binary-dir ./path/to/release/artifacts
 - **Keepout zones** - draw one or more closed polygons on a User layer (e.g. `User.2`) and tick "Keep out of User-layer polygon(s)" to keep routed tracks out of those areas (hard keepout, all routed nets)
 - **Clear guide/keepout layers** - optional "Clear guide layer after routing" / "Clear keepout layer after routing" checkboxes (unchecked by default) delete the drawn guide/keepout graphics from their User layer after a successful route, so you can draw fresh ones for the next run
 
-**Advanced options Tab:**
+**Advanced Tab:**
 - Swappable nets configuration for target swap optimization
 - Routing parameters: iterations, heuristic weight, rip-up, probe iterations
 - MPS ordering options, direction control, length matching
@@ -355,10 +410,6 @@ every route, and the route step welds plane pads into the pour):
 - Create the pours (plus thermal via arrays under exposed pads, optional thermal-relief connections)
 - Area via stitching, a board-edge via fence, and GND return via placement near signal vias
 - Via size/drill, zone clearance configuration
-
-**AI Drive Tab** — see [AI assistance](#ai-assistance-ai-drive-tab) above:
-- *Routing* sub-tab: plan a routing chain with `/plan-pcb-routing` and run its steps; review and diagnose; save/load plans
-- *Placement* sub-tab: place (and route) the board with `/plan-pcb-placement`; Beautify Labels
 
 **Log Tab:**
 - Real-time routing output display
@@ -396,6 +447,19 @@ All `--nets` options support fnmatch-style wildcards and exclusion patterns:
 - Order matters: include patterns add nets, exclude patterns remove them
 - Nets starting with "unconnected-" are automatically excluded
 - Use quotes around patterns with special characters
+
+### Route a Whole Board
+
+`autoroute.py` routes a whole board with no agent (the other way is the
+`/plan-pcb-routing` skill): it reads the board's rules, footprints and nets, plans the
+chain (planes, fanouts, decap clearance, diff pairs, route passes) and runs it, each
+step as its own process. The commands below are the tools it runs, for a hand-built
+chain.
+
+```bash
+python3 py_router/autoroute.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
+python3 py_router/autoroute.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --dry-run
+```
 
 ### Route Nets
 
@@ -455,11 +519,6 @@ python3 py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_
 # Typical workflow: create GND plane first, then route all signals
 python3 py_router/route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu
 python3 py_router/route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite
-
-# No agent: build the whole chain (planes, fanouts, decaps, diff pairs, route)
-# from the board's own rules and footprints, and run it; --dry-run prints the plan
-python3 py_router/autoplan.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
-python3 py_router/autoplan.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --dry-run
 ```
 
 ### Create Power/Ground Planes
@@ -709,7 +768,7 @@ KiCadRoutingTools/
 │   ├── route_movie.py            # Movie of a routing run, step by step (route_trace.py records the router's events)
 │   ├── make_plan.py              # Recorded command chain -> GUI routing plan (plan.json)
 │   ├── run_plan.py               # Run a GUI routing plan headless, through the real plugin dialog
-│   ├── autoplan.py               # Build a routing chain from the board itself and run it, no agent
+│   ├── autoroute.py              # Build a routing chain from the board itself and run it, no agent
 │   ├── add_rule_area.py          # Write a copper keep-out rule area onto a board
 │   ├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
 │   ├── plane_obstacle_builder.py # Obstacle map building for plane via placement
@@ -816,13 +875,17 @@ KiCadRoutingTools/
 ├── rust_router/              # Rust A* implementation
 ├── kicad_routing_plugin/     # KiCad ActionPlugin
 │   ├── action_plugin.py      # ActionPlugin entry point
-│   ├── swig_gui.py           # Main routing dialog (Route/Advanced options tabs)
+│   ├── swig_gui.py           # Main routing dialog (Route/Advanced tabs)
 │   ├── differential_gui.py   # Differential pair routing tab
 │   ├── fanout_gui.py         # BGA/QFN fanout tab and net selection panel
 │   ├── planes_gui.py         # Power/ground planes tab
-│   ├── ai_gui.py             # AI Drive tab, Routing sub-tab (spawns the agent CLI headless, streams transcript)
+│   ├── tab_names.py          # The dialog's page and sub-tab names, in order
+│   ├── autoroute_gui.py      # Auto tab, Autorouter sub-tab (runs autoroute.py on a snapshot, shows its steps)
+│   ├── result_apply.py       # Apply Result to Board: poses, tracks/vias, zones, rules from a result file
+│   ├── ai_gui.py             # Auto tab, AI Routing sub-tab (spawns the agent CLI headless, streams transcript)
 │   ├── ai_plan.py            # Routing plans: parse, fill the tabs, run the steps (PlanExecutor)
-│   ├── placement_gui.py      # AI Drive tab, Placement sub-tab (+ Beautify Labels)
+│   ├── placement_gui.py      # Auto tab, AI Placement sub-tab
+│   ├── labels_gui.py         # Auto tab, Labels sub-tab (Beautify Labels)
 │   ├── placement_run.py      # Placement run folders, prompts and progress (krt_placement/)
 │   ├── ai_backend.py         # Agent CLI backend selection (Claude Code / opencode)
 │   ├── board_swaps.py        # Shared board pad/net swap helpers
@@ -1001,7 +1064,7 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 | `route_movie.py` / `place_movie.py` | Movie of a routing run / of a placement, step by step | [Utilities](docs/utilities.md#routing-movie-route_moviepy) |
 | `render_power.py` | A board's power components over its rails | [Utilities](docs/utilities.md#power-view-render_powerpy) |
 | `make_plan.py` / `run_plan.py` | Build a GUI routing plan from a recorded chain / run one headless | [Plans from the CLI](docs/claude-skills.md#plans-from-the-command-line) |
-| `autoplan.py` | Route a board end to end with no agent: a plane, fanout, decap, diff-pair and route chain built from the board itself | [Utilities](docs/utilities.md#deterministic-plan-router-autoplanpy) |
+| `autoroute.py` | Route a board end to end with no agent: a plane, fanout, decap, diff-pair and route chain built from the board itself | [Utilities](docs/utilities.md#deterministic-plan-router-autoroutepy) |
 
 ```bash
 # Full option list for any tool

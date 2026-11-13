@@ -120,14 +120,42 @@ def _skew_bound_net_ids(pcb_data):
     intra-pair tolerances and its .kicad_dru skew rules. The graze passes
     that change copper LENGTH leave these nets' INPUT copper alone: a pair an
     earlier step matched has no re-match in a later route.py step, so a
-    re-bend that straightened its meander shipped it out of tolerance."""
+    re-bend that straightened its meander shipped it out of tolerance.
+    A recorded AC-coupled chain's nets (#1799) are skew-graded too."""
     try:
-        from check_drc import skew_rule_groups
-        groups, _undecided = skew_rule_groups(
-            getattr(pcb_data, 'source_path', '') or '', pcb_data)
-    except Exception:
+        from check_drc import skew_rule_groups, recorded_chain_groups
+        path = getattr(pcb_data, 'source_path', '') or ''
+        groups, _undecided = skew_rule_groups(path, pcb_data)
+        chains = recorded_chain_groups(path, pcb_data)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  (#1759 skew-graded nets unread, none held: "
+              f"{type(e).__name__}: {e})")
         return set()
-    return {m for _rule, members in groups for m in members}
+    return ({m for _rule, members in groups for m in members}
+            | {m for _ch, p, n in chains for m in p + n})
+
+
+def _centre_stub_net_ids(pcb_data):
+    """Nets the strict collapse and check_weird keep via-centre stubs on
+    (#1798, StrictRemovalModel's keep_centre_stubs): the nets whose length,
+    as KiCad measures it, a grade reads. Those are the skew-graded nets
+    (_skew_bound_net_ids) and every net a .kicad_dru `length` rule binds,
+    which check_drc's length pass (#1313) and KiCad (length_out_of_range)
+    both grade: a later step's collapse took the stub off a net held to a
+    length window, and the net left the window by a via radius.
+
+    The length-rule nets are the ones check_drc's length pass grades
+    (check_drc.length_rule_nets). The graze passes' read-only set (#1759)
+    stays _skew_bound_net_ids."""
+    ids = set(_skew_bound_net_ids(pcb_data))
+    try:
+        from check_drc import length_rule_nets
+        ids |= set(length_rule_nets(getattr(pcb_data, 'source_path', '') or '',
+                                    pcb_data).bound)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  (#1798 .kicad_dru length-rule nets unread, their via-centre "
+              f"stubs not held: {type(e).__name__}: {e})")
+    return ids
 
 
 @dataclass

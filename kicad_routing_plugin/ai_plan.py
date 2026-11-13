@@ -1489,7 +1489,7 @@ class PlanExecutor:
         me = threading.current_thread()
         owners = [self.dialog]
         for attr in ('differential_tab', 'planes_tab', 'fanout_tab',
-                     'placement_tab'):
+                     'labels_tab'):
             owner = getattr(self.dialog, attr, None)
             if owner is not None:
                 owners.append(owner)
@@ -1805,6 +1805,10 @@ class PlanExecutor:
                 # #678: the plan's fanout steps' pour-served balls.
                 persist_pour_served_pads(_pro, consume_pour_served_pads(),
                                          board=_live)
+                # #1807: the improvement gate's record of the last trade.
+                from improvement_gate import consume_lap_history
+                from protected_nets import persist_lap_history
+                persist_lap_history(_pro, consume_lap_history(), board=_live)
             except Exception as _pe:
                 self.log(f"AI plan: protected-nets record skipped: {_pe}")
             if board_file and os.path.isfile(board_file):

@@ -48,6 +48,7 @@ except ImportError:  # pragma: no cover - stale checkout
 from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector, board_minima_from_live, note_for_the_log
 from .settings_persistence import get_dialog_settings, restore_dialog_settings
+from .tab_names import AUTO_PAGE, AUTO_SUBTABS, page_index
 
 
 def _build_layer_mappings():
@@ -365,34 +366,38 @@ class RoutingDialog(wx.Dialog):
         # Create notebook for tabs
         self.notebook = wx.Notebook(main_panel)
 
-        # Tab 1: Route (the basic routing parameters)
+        # Tab 1: Auto -- the hands-off front door, first so a fresh dialog
+        # opens on it. A nested notebook: "Autorouter" (autoroute.py on a
+        # snapshot of the board), "AI Routing" (the route-only AI assistant,
+        # issue #40), "AI Placement" (Claude-driven placement runs, issue
+        # #481) and "Labels" (Beautify Labels). self.ai_tab /
+        # self.placement_tab / self.labels_tab / self.autoroute_tab point at
+        # the PANELS inside the nested notebook, so every consumer (settings
+        # persistence, _ai_params, resets) reaches them by attribute, never
+        # by page index; the page added here is the container.
+        ai_container = self._create_ai_tab()
+        self.notebook.AddPage(ai_container, AUTO_PAGE)
+
+        # Tab 2: Route (the basic routing parameters)
         config_panel = self._create_config_tab()
+        self.route_page = config_panel
         self.notebook.AddPage(config_panel, "Route")
 
-        # Tab 2: Advanced options (swappable nets + advanced parameters + options)
+        # Tab 3: Advanced (swappable nets + advanced parameters + options)
         advanced_panel = self._create_advanced_tab()
-        self.notebook.AddPage(advanced_panel, "Advanced options")
+        self.notebook.AddPage(advanced_panel, "Advanced")
 
-        # Tab 3: Differential
+        # Tab 4: Differential
         differential_panel = self._create_differential_tab()
         self.notebook.AddPage(differential_panel, "Differential")
 
-        # Tab 4: Fanout
+        # Tab 5: Fanout
         self.fanout_tab = self._create_fanout_tab()
         self.notebook.AddPage(self.fanout_tab, "Fanout")
 
-        # Tab 5: Planes
+        # Tab 6: Planes
         self.planes_tab = self._create_planes_tab()
         self.notebook.AddPage(self.planes_tab, "Planes")
-
-        # Tab 6: AI (AI skills, issue #40) - a nested notebook: "Routing"
-        # (the original route-only assistant) + "Placement" (Claude-driven
-        # placement runs, issue #481). self.ai_tab keeps pointing at the
-        # AITab PANEL inside the nested notebook, so every existing consumer
-        # (settings persistence, _ai_params, resets) is unaffected; the page
-        # added here is the container.
-        ai_container = self._create_ai_tab()
-        self.notebook.AddPage(ai_container, "AI Drive")
 
         # Tab 7: Log
         log_panel = self._create_log_tab()
@@ -455,10 +460,9 @@ class RoutingDialog(wx.Dialog):
         self._append_log("=== Validation Complete ===\n\n")
 
         # Switch to log tab to show results
-        for i in range(self.notebook.GetPageCount()):
-            if self.notebook.GetPageText(i) == "Log":
-                self.notebook.SetSelection(i)
-                break
+        i = page_index(self.notebook, "Log")
+        if i is not None:
+            self.notebook.SetSelection(i)
 
     def _on_transparency_changed(self, value):
         """Handle transparency slider change from About tab."""
@@ -2157,23 +2161,36 @@ class RoutingDialog(wx.Dialog):
         )
 
     def _create_ai_tab(self):
-        """Create the AI tab: a nested notebook hosting "Routing" (the
-        original AI-skills tab, issue #40 - route-only by design) and
-        "Placement" (Claude-driven placement runs). Returns the container
-        panel; sets self.ai_tab / self.placement_tab / self.ai_notebook."""
+        """Create the Auto tab: a nested notebook hosting, left to right,
+        "Autorouter" (autoroute.py run on a snapshot of the board), "AI
+        Routing" (the AI-skills tab, issue #40 - route-only by design), "AI
+        Placement" (Claude-driven placement runs) and "Labels" (Beautify
+        Labels). Returns the container panel; sets self.autoroute_tab /
+        self.ai_tab / self.placement_tab / self.labels_tab / self.ai_notebook."""
         from .ai_gui import AITab
         from .placement_gui import PlacementTab
+        from .labels_gui import LabelsTab
+        from .autoroute_gui import AutorouteTab
 
         container = wx.Panel(self.notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.ai_notebook = wx.Notebook(container)
+        self.autoroute_tab = AutorouteTab(
+            self.ai_notebook,
+            self.board_filename,
+            on_complete=self._on_tab_operation_complete,
+            append_log=self._append_log,
+            sync_pcb_data_callback=self._sync_pcb_data_from_board,
+            get_fix_drc=lambda: self.fix_drc_check.GetValue(),
+        )
+        self.ai_notebook.AddPage(self.autoroute_tab, AUTO_SUBTABS[0])
         self.ai_tab = AITab(
             self.ai_notebook,
             self.board_filename,
             log_callback=self._append_log,
             routing_dialog=self,
         )
-        self.ai_notebook.AddPage(self.ai_tab, "Routing")
+        self.ai_notebook.AddPage(self.ai_tab, AUTO_SUBTABS[1])
         self.placement_tab = PlacementTab(
             self.ai_notebook,
             self.pcb_data,
@@ -2181,8 +2198,18 @@ class RoutingDialog(wx.Dialog):
             on_complete=self._on_tab_operation_complete,
             append_log=self._append_log,
             sync_pcb_data_callback=self._sync_pcb_data_from_board,
+            get_fix_drc=lambda: self.fix_drc_check.GetValue(),
         )
-        self.ai_notebook.AddPage(self.placement_tab, "Placement")
+        self.ai_notebook.AddPage(self.placement_tab, AUTO_SUBTABS[2])
+        self.labels_tab = LabelsTab(
+            self.ai_notebook,
+            self.pcb_data,
+            self.board_filename,
+            on_complete=self._on_tab_operation_complete,
+            append_log=self._append_log,
+            sync_pcb_data_callback=self._sync_pcb_data_from_board,
+        )
+        self.ai_notebook.AddPage(self.labels_tab, AUTO_SUBTABS[3])
         sizer.Add(self.ai_notebook, 1, wx.EXPAND)
         container.SetSizer(sizer)
         return container
@@ -2361,9 +2388,13 @@ class RoutingDialog(wx.Dialog):
         """Handle main notebook tab change - validate settings when switching tabs."""
         event.Skip()  # Allow normal tab switching
 
-        # Switching to the Basic tab (index 0): refresh the net list so short
-        # (deferred) pairs reflect the current Differential-tab params/toggle.
-        if event.GetSelection() == 0 and getattr(self, 'differential_tab', None):
+        # Switching to the Route tab: refresh the net list so short (deferred)
+        # pairs reflect the current Differential-tab params/toggle. By page,
+        # never by index: the Auto tab sits before it.
+        sel = event.GetSelection()
+        if (getattr(self, 'route_page', None) is not None and sel >= 0
+                and self.notebook.GetPage(sel) is self.route_page
+                and getattr(self, 'differential_tab', None)):
             self.net_panel.refresh()
 
         # (Planes tab needs no cross-validation since #562: its repair
@@ -2788,7 +2819,11 @@ class RoutingDialog(wx.Dialog):
         except Exception:
             pass
         try:
-            self.placement_tab.labels_options.reset_to_defaults()
+            self.labels_tab.labels_options.reset_to_defaults()
+        except Exception:
+            pass
+        try:
+            self.autoroute_tab.reset_to_defaults()
         except Exception:
             pass
         try:
@@ -4462,6 +4497,11 @@ class RoutingDialog(wx.Dialog):
                                         persist_intra_pair_tolerances)
             persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances(),
                                           board=board)
+            # #1807: the improvement gate's record of this step's trade, for
+            # the next step's gate (a rejected step's too).
+            from improvement_gate import consume_lap_history
+            from protected_nets import persist_lap_history
+            persist_lap_history(_pro, consume_lap_history(), board=board)
         except Exception:
             pass
 

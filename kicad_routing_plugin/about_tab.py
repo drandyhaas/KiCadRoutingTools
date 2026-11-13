@@ -24,6 +24,15 @@ DONATE_URL = "https://ko-fi.com/drandyhaas"
 SPONSORS_URL = "https://github.com/sponsors/drandyhaas"
 PAYPAL_URL = "https://www.paypal.me/DrAndyHaas"
 
+DONATE_TOOLTIP = (
+    "Support KiCadRoutingTools.\n\n"
+    "Donations go to what it costs to build this: about $500/month of\n"
+    "cloud computing and AI-assisted development. The compute\n"
+    "regression-tests the router against a corpus of real\n"
+    "open-source boards.\n\n"
+    + DONATE_URL
+)
+
 # The heart from docs/donate_button.svg, in that path's own 24-unit box.
 _HEART = [
     ('M', 12, 21.35), ('L', 10.55, 20.03),
@@ -266,6 +275,20 @@ class ShimmerButton(wx.Control):
         gc.DrawText(self._label, x + size + gap, cy - 0.62 * ascent)
 
 
+def donate_button(parent, size, point_boost):
+    """The Donate button: the shimmering pill, its tooltip, and a click that
+    opens DONATE_URL. SIZE is in DIPs; POINT_BOOST enlarges the bold label.
+    The About tab shows it large; the Autorouter tab's column a smaller one."""
+    btn = ShimmerButton(parent, label="Donate", size=size)
+    font = btn.GetFont()
+    font.SetPointSize(font.GetPointSize() + point_boost)
+    font.SetWeight(wx.FONTWEIGHT_BOLD)
+    btn.SetFont(font)
+    btn.SetToolTip(DONATE_TOOLTIP)
+    btn.Bind(wx.EVT_BUTTON, lambda e: wx.LaunchDefaultBrowser(DONATE_URL))
+    return btn
+
+
 class AboutTab(wx.Panel):
     """About tab panel with version info, author, and links."""
 
@@ -365,20 +388,7 @@ class AboutTab(wx.Panel):
         about_sizer.Add(github_link, 0, wx.ALIGN_CENTER | wx.ALL, 10)
 
         # Donate button: the README's shimmering button, drawn in wx.
-        donate_btn = ShimmerButton(self, label="Donate", size=(260, 60))
-        donate_font = donate_btn.GetFont()
-        donate_font.SetPointSize(donate_font.GetPointSize() + 8)
-        donate_font.SetWeight(wx.FONTWEIGHT_BOLD)
-        donate_btn.SetFont(donate_font)
-        donate_btn.SetToolTip(
-            "Support KiCadRoutingTools.\n\n"
-            "Donations go to what it costs to build this: about $500/month of\n"
-            "cloud computing and AI-assisted development. The compute\n"
-            "regression-tests the router against a corpus of real\n"
-            "open-source boards.\n\n"
-            + DONATE_URL
-        )
-        donate_btn.Bind(wx.EVT_BUTTON, self._on_donate)
+        donate_btn = donate_button(self, size=(260, 60), point_boost=8)
         about_sizer.Add(donate_btn, 0, wx.ALIGN_CENTER | wx.TOP, 10)
 
         donate_hint = wx.StaticText(
@@ -440,10 +450,6 @@ class AboutTab(wx.Panel):
         about_sizer.Add(reset_btn, 0, wx.ALIGN_CENTER | wx.ALL, 20)
 
         self.SetSizer(about_sizer)
-
-    def _on_donate(self, event):
-        """Open the donation page in the user's default browser."""
-        wx.LaunchDefaultBrowser(DONATE_URL)
 
     def _on_validate_pcb_data(self, event):
         """Handle validate PCB data button click."""

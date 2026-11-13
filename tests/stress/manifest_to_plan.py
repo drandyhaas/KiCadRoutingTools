@@ -132,11 +132,11 @@ REFUSED_TOOLS = {
         'that it verified, and the chain continues from that board; the plan '
         'format has no hand-join step. Run it on the CLI and start the plan '
         'from its output'),
-    'autoplan.py': (
+    'autoroute.py': (
         'builds its OWN chain of plane, fanout, decap, diff-pair and route '
         'steps from the board and runs it; the plan format has no step that '
         're-derives a chain. Run it on the CLI and start the plan from its '
-        'output (the steps it ran are in <output>.autoplan/plan.json)'),
+        'output (the steps it ran are in <output>.autoroute/plan.json)'),
     # Every board-writing KRT_TOOL (krt_registry `kind` actor or conditional)
     # is mapped, refused here, or in NOOP_TOOLS below: the parity gate reads
     # the registry and fails on one that is none of the three (#937).

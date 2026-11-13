@@ -862,6 +862,7 @@ def composed_pair_rows(pcb_data, state, found, name_to_id):
     from kicad_parser import non_aperture_pads
     from routing_config import DiffPairNet
     from placement.pair_order import composed_pair_metrics
+    from placement.pair_series import Junction, junction_geometry, split_reasons
     from placement.part_class import classify_part
 
     fps = pcb_data.footprints or {}
@@ -937,6 +938,19 @@ def composed_pair_rows(pcb_data, state, found, name_to_id):
                'series': series, 'inversions': None, 'lis': None, 'ties': 0,
                'span_mm': None, 'span_basis': COMPOSED_SPAN_BASIS,
                'legs_mm': None, 'leg_skew_mm': None}
+        # #1820: how each junction's two series parts sit against each
+        # other, and what departs from a matched pair
+        poses = []
+        for i in range(len(order) - 1):
+            jn = junction[frozenset((order[i], order[i + 1]))]
+            ks = tuple(sorted((order[i], order[i + 1])))
+            g = junction_geometry(pcb_data, Junction(
+                ks, jn['P']['ref'], jn['N']['ref'],
+                tuple((dp[k].p_net_id, dp[k].n_net_id) for k in ks)))
+            if g is not None:
+                poses.append({'p': jn['P']['ref'], 'n': jn['N']['ref'], **g,
+                              'split': split_reasons(g)})
+        row['series_pose'] = poses
         if not all(len(e) == 1 for e in ends):
             bad = [(k, e) for k, e in zip((order[0], order[-1]), ends)
                    if len(e) != 1]
@@ -1281,7 +1295,19 @@ def format_md(doc) -> str:
                          f"{legs.get('P', '-')} | {legs.get('N', '-')} | "
                          f"{r.get('leg_skew_mm', '-')} | "
                          f"{r.get('note') or ''} |")
-    unmeasured = (po.get('pairs') or {}).get('not_measured') or []
+            # #1820: a junction whose two series parts do not sit as a pair
+            split = [(r, s) for r in composed for s in r.get('series_pose') or ()
+                     if s.get('split')]
+            if split:
+                L.append('')
+                L.append('Series parts that do not sit as a matched pair (one '
+                         'face, pad axes parallel, side by side; '
+                         '`placement.pair_series`): '
+                         + '; '.join(f"{s['p']} / {s['n']} "
+                                     f"{', '.join(s['split'])}"
+                                     for _r, s in split)
+                         + '. route_diff may route such a side single-ended.')
+    unmeasured =(po.get('pairs') or {}).get('not_measured') or []
     if unmeasured:
         L.append('')
         L.append('Differential pairs no row measures: '

@@ -14,6 +14,10 @@ from bga_fanout import main
 if __name__ == '__main__':
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
+    # each line reaches a pipe or a log when it is printed, not at exit
+    # (#1829); these fronts print no CMD/EXIT banner (#653 below)
+    import cli_banner
+    cli_banner.line_buffer_streams()
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
     # #653: the other routing mains get this from cli_banner.install(); the

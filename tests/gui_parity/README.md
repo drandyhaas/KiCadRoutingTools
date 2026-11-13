@@ -103,6 +103,11 @@ Fanout tab and cap placement:
 - `test_1641_fanout_filter_misses_gui.py` — a selected net with no pad to fan
   out (an interior pad, stub escape) is named in the completion message, and
   a net named with a bus index (`D[3]`) is fanned out by its name.
+- `test_1804_fanout_underpad_rerun_gui.py` — the QFN via-drop run again on the
+  CLI's own output lays nothing and names every pad served, as the CLI does.
+- `test_1834_fanout_stub_rerun_gui.py` — the same for the QFN stub escape: no
+  second stub on a pad that has its surface escape, and the count in the
+  completion message.
 - `test_581_fanout_via_in_pad_gui.py`, `test_1195_qfn_floors_gui.py`,
   `test_fanout_floor_parity_gui.py` — described below.
 - `test_666_cap_move_gui.py` — a scoped cap move is applied, re-welded and
@@ -150,10 +155,25 @@ openings and graphic copper), `test_967_pad_geometry_coverage.py`,
 (the placement writer's layer flip against pcbnew's own `Flip`; the flip's
 acceptance gate, which exits 2 rather than skipping without pcbnew).
 
-Placement tab: `test_placement_apply_locks.py` (below),
+Auto tab, Autorouter sub-tab: `test_autoroute_tab_gui.py` -- the dialog's page
+and sub-tab order, then the REAL tab runs autoroute.py on splitflap_driver and
+its checklist must end in the CLI's own step states and shipped grade; after
+Apply the live board, saved as KiCad saves it, must grade as the CLI's output
+(check_connected issues, check_drc violations) with the same zones, poses,
+tracks and vias; a step made to fail (`KRT_AUTOROUTE_FAIL_STEPS`) must show in
+its row and the detail pane, a run that fails outright must say FAILED, and
+Stop must end a run mid-route. About two minutes.
+
+AI Placement tab: `test_placement_apply_locks.py` (below),
 `test_placement_apply_graphics.py` (Apply lays tracks, never the result's
-copper graphics), `test_placement_fake_run.py` (the whole runner against a
+copper graphics), `test_placement_apply_zones_gui.py` (a Place + Route Apply
+lands the run's poured zones and grades as the result file, through
+result_apply), `test_placement_fake_run.py` (the whole runner against a
 fake claude CLI, `fixtures/fake_claude.py`).
+
+Labels tab: `test_labels_tab_gui.py` -- the REAL Beautify Labels button on a
+live board against `py_placer/beautify_labels.py`: every Reference label's
+position, angle, size and thickness the same.
 
 Tools, not gates: `diff_engine_kwargs.py` (below), `probe_effective_floors.py`
 (the one-off probe behind the splitflap track-width measurement below), and

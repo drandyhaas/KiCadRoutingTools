@@ -43,31 +43,32 @@ The skills' RESULT/plan output contracts are tuned on Claude models; smaller mod
 Nine of the ten skills are reachable from the plugin's routing dialog (all but
 `/stress-test-router`; the GUI spawns
 the selected agent CLI - Claude Code or opencode, per the **Backend**
-dropdown on the **AI Drive** tab; the placement runs need Claude Code - headless
+dropdown on the **Auto** tab; the placement runs need Claude Code - headless
 with the working directory set to the plugin root, streams a
 live transcript, and parses a machine-readable `RESULT=` last line back into
 controls):
 
 | Where | Button | Skill | What it fills / shows |
 |-------|--------|-------|------------------------|
-| AI Drive › Routing | **Plan Routing** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process |
-| AI Drive › Routing | **Review Routed Board** | `/review-routed-board` | QA report in the transcript with a PASS/FAIL verdict |
-| AI Drive › Routing | **Diagnose Routing Failures** | `/diagnose-routing-failures` | Root-cause report from the board + the Log tab content |
-| AI Drive › Placement | **Place (AI)** / **Place + Route (AI)** | `/plan-pcb-placement place` / `full` | A headless run into a `krt_placement/` folder beside the board: the seed candidates with a preview, progress from the milestone ledger, then the final board and REPORT.md; **Apply Result to Board** brings it onto the open board |
+| Auto › Autorouter | **Run Autorouter** | none: `autoroute.py`, no agent | The plan it reads off the board, a checklist of its steps with each one's result, then **Apply Result to Board** (see the README's Plugin Tabs) |
+| Auto › AI Routing | **Plan Routing** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process |
+| Auto › AI Routing | **Review Routed Board** | `/review-routed-board` | QA report in the transcript with a PASS/FAIL verdict |
+| Auto › AI Routing | **Diagnose Routing Failures** | `/diagnose-routing-failures` | Root-cause report from the board + the Log tab content |
+| Auto › AI Placement | **Place (AI)** / **Place + Route (AI)** | `/plan-pcb-placement place` / `full` | A headless run into a `krt_placement/` folder beside the board: the seed candidates with a preview, progress from the milestone ledger, then the final board and REPORT.md; **Apply Result to Board** brings it onto the open board |
 | Route tab (Layers) | **Check Stackup (AI)** | `/recommend-stackup` | Stackup report; recommended layer count logged |
 | Route tab (Options) | **Ask AI** (Power Nets) | `/analyze-power-nets` | Fills the Power Nets / Power Widths fields |
 | Differential tab | **Ask AI** | `/identify-diff-pairs` | Checks confirmed pairs, unchecks name-matching false positives; unconventional pairs reported in the log |
 | Planes tab | **Ask AI** (assignments) | `/recommend-plane-mappings` | Fills the net → layer assignment list (replace/merge prompt) |
 | Planes tab | **Ask AI** (GND vias) | `/find-high-speed-nets` | Fills the GND via Max Distance field |
 
-The Routing sub-tab's **Backend**, **Model**, and **Effort** selectors apply to every button
+The AI Routing sub-tab's **Backend**, **Model**, and **Effort** selectors apply to every button
 above except the two placement buttons, which have their own on the Placement
 sub-tab (Claude Code only), and all of them persist with the other dialog settings (model/effort are remembered per
 backend; opencode models are `provider/model` strings, its effort maps to
 `--variant`). Claude Code runs show a startup header (version, model, discovered
 skills) so you can confirm what actually ran.
 
-**Saving and replaying a plan.** Next to the step list the Routing sub-tab has **Save…**
+**Saving and replaying a plan.** Next to the step list the AI Routing sub-tab has **Save…**
 and **Load…** buttons. **Save…** writes the current plan steps (actions, nets/pairs/
 assignments, and per-step parameters) to a JSON file; **Load…** reads one back into the
 step list so **Run Selected Steps** replays the exact same routing chain **without another
@@ -97,7 +98,7 @@ python3 py_router/make_plan.py .                              # -> plan JSON for
 The conversion prunes superseded retries and dead-end branches (the same file
 dependency chain a replay runs), drops check/grade commands, and carries every
 recognized `--flag` into the step's parameters — so the GUI routes the way the
-recorded commands did. Load the result with the Routing sub-tab's **Load…** button.
+recorded commands did. Load the result with the AI Routing sub-tab's **Load…** button.
 
 ### Running a plan headless
 

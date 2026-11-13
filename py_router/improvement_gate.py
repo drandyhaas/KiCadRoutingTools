@@ -55,6 +55,15 @@ breaks one ships, provided the pad count did not rise: the recovered pads
 outnumber the lost ones, which is exactly the case where discarding the run
 would throw away more than it saves.
 
+The pad count has a blind spot of its own (#1808): it counts the pads outside
+a net's LARGEST piece, so cutting an already-open net's stray piece into more
+pieces moves nothing. Two such boards -- one open net in 2 pieces, then in 6,
+the same 5 pads stranded -- graded as no change while board_score's `broken`
+rose by 4. So the gate also counts the JOINS each net still needs (its pad
+pieces minus one, outline-aware, the unit board_score's `broken` and
+`joins_needed` use) and rejects a run that raises their sum: a third axis
+beside the other two, which no axis outvotes either.
+
 An exact draw on both axes ships, and is reported loudly with both net lists.
 `bms_sensor`'s retry reproduced today closes the three nets it was asked to
 close, breaks three others, and leaves the pad count unchanged at 3 -- a
@@ -78,8 +87,16 @@ def net_connectivity_map(pcb_data, tolerance: float = 0.02,
                          segs_by_net: Optional[Dict[int, list]] = None,
                          vias_by_net: Optional[Dict[int, list]] = None,
                          zones_by_net: Optional[Dict[int, list]] = None
-                         ) -> Dict[int, Tuple[bool, int]]:
-    """{net_id: (fully_connected, disconnected_pad_count)} per multi-pad net.
+                         ) -> Dict[int, Tuple[bool, int, int]]:
+    """{net_id: (fully_connected, disconnected_pad_count, joins_needed)} per
+    multi-pad net.
+
+    `joins_needed` is the net's pad pieces minus one (#1808), counted within
+    each board outline as the #409 pad-pair tally counts them: 0 exactly when
+    the net is connected, and the unit board_score's `broken` /
+    `joins_needed` use. Readers that index [0] and [1] are unaffected; a
+    2-tuple entry (a grade from elsewhere that has no piece count) is still
+    accepted everywhere below, its joins unknown.
 
     Copper defaults to the board's own segments/vias/zones; pass the
     *_by_net overrides to measure a WRITE MODEL (the copper a run is about
@@ -87,16 +104,23 @@ def net_connectivity_map(pcb_data, tolerance: float = 0.02,
     """
     segs_by_net, vias_by_net, zones_by_net = _copper_by_net(
         pcb_data, segs_by_net, vias_by_net, zones_by_net)
-    out: Dict[int, Tuple[bool, int]] = {}
+    out: Dict[int, Tuple[bool, int, int]] = {}
     for net_id, pads in (pcb_data.pads_by_net or {}).items():
         if not net_id or len(pads or []) < 2:
             continue          # net 0 pseudo-net / trivially connected
-        broken, dis_pads, _pairs = _grade_net(
+        broken, dis_pads, pairs = _grade_net(
             pcb_data, net_id, pads, segs_by_net.get(net_id, []),
             vias_by_net.get(net_id, []), zones_by_net.get(net_id, []),
             tolerance)
-        out[net_id] = (not broken, len(dis_pads) if broken else 0)
+        joins = max(1, pairs[0] - pairs[1]) if broken else 0
+        out[net_id] = (not broken, len(dis_pads) if broken else 0, joins)
     return out
+
+
+def entry_joins(entry) -> Optional[int]:
+    """The joins a map entry says its net still needs, or None when the
+    entry carries no piece count (a 2-tuple grade)."""
+    return entry[2] if len(entry) > 2 and entry[2] is not None else None
 
 
 def copper_signature(segments, vias, net_name) -> Dict[str, object]:
@@ -220,6 +244,14 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
     `zone_net_ids` (the nets that own a pour) adds `lost_zone` /
     `gained_zone`, the pour nets among `lost` / `gained`, which
     gate_verdict's tie rule reads.
+
+    `joins_needed_before` / `joins_needed_after` (#1808) sum the joins the
+    compared nets still need, over the nets whose entry carries a piece count
+    on BOTH sides (`joins_compared` of them); `fragmented` lists every net
+    open on both sides whose pieces rose, as (name, pieces before, pieces
+    after) -- a cut the pad count cannot see when the pads it strands were
+    already outside the net's largest piece. It may share a net with
+    `worsened`.
     """
     zone_ids = set(zone_net_ids or ())
     lost: List[str] = []
@@ -227,15 +259,27 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
     lost_zone: List[str] = []
     gained_zone: List[str] = []
     worsened: List[Tuple[str, int, int]] = []
+    fragmented: List[Tuple[str, int, int]] = []
     pads_before = pads_after = 0
+    joins_before = joins_after = 0
+    joins_compared = 0
     compared = 0
-    for net_id, (conn_b, dis_b) in before.items():
+    for net_id, entry_b in before.items():
         if net_id not in after:
             continue
-        conn_a, dis_a = after[net_id]
+        entry_a = after[net_id]
+        conn_b, dis_b = entry_b[0], entry_b[1]
+        conn_a, dis_a = entry_a[0], entry_a[1]
         compared += 1
         pads_before += dis_b
         pads_after += dis_a
+        j_b, j_a = entry_joins(entry_b), entry_joins(entry_a)
+        if j_b is not None and j_a is not None:
+            joins_compared += 1
+            joins_before += j_b
+            joins_after += j_a
+            if not conn_b and not conn_a and j_a > j_b:
+                fragmented.append((net_name(net_id), j_b + 1, j_a + 1))
         if conn_b and not conn_a:
             lost.append(net_name(net_id))
             if net_id in zone_ids:
@@ -252,8 +296,12 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
         'lost_zone': sorted(lost_zone),
         'gained_zone': sorted(gained_zone),
         'worsened': sorted(worsened),
+        'fragmented': sorted(fragmented),
         'disconnected_pads_before': pads_before,
         'disconnected_pads_after': pads_after,
+        'joins_needed_before': joins_before,
+        'joins_needed_after': joins_after,
+        'joins_compared': joins_compared,
         'nets_compared': compared,
     }
 
@@ -270,13 +318,14 @@ def pour_trade(cmp: Dict) -> bool:
 
 
 def gate_verdict(cmp: Dict) -> str:
-    """'reject' when the run left the board worse on EITHER axis.
+    """'reject' when the run left the board worse on ANY axis.
 
     Worse = more nets broken than connected, OR more disconnected pads than it
-    started with. Neither axis may outvote the other: spartan6_4layer gained 7
-    on the net count while DOUBLING its open pads (83 -> 154), because the nets
-    it broke were much larger than the ones it closed. See the module
-    docstring.
+    started with, OR more joins needed than it started with (#1808: an open
+    net cut into more pieces, its stranded pads unchanged). No axis may
+    outvote another: spartan6_4layer gained 7 on the net count while DOUBLING
+    its open pads (83 -> 154), because the nets it broke were much larger than
+    the ones it closed. See the module docstring.
 
     An exact draw on both axes ships -- unless it is a POUR TRADE
     (pour_trade): it broke a net that owns a pour to connect one that does
@@ -291,7 +340,9 @@ def gate_verdict(cmp: Dict) -> str:
     """
     net_delta = len(cmp['lost']) - len(cmp['gained'])
     pad_delta = cmp['disconnected_pads_after'] - cmp['disconnected_pads_before']
-    if net_delta > 0 or pad_delta > 0 or pour_trade(cmp):
+    join_delta = (cmp.get('joins_needed_after', 0)
+                  - cmp.get('joins_needed_before', 0))
+    if net_delta > 0 or pad_delta > 0 or join_delta > 0 or pour_trade(cmp):
         return 'reject'
     return 'accept'
 
@@ -349,13 +400,167 @@ def excluded_plane_attribution(before: Dict[int, Tuple[bool, int]],
         return {'nets': [], 'alone': False}
     ids = {nid for nid in before if net_name(nid) in excluded}
     hit = sorted(net_name(nid) for nid in ids if nid in after
-                 and after[nid][1] > before[nid][1])
+                 and (after[nid][1] > before[nid][1]
+                      or (entry_joins(before[nid]) is not None
+                          and entry_joins(after[nid]) is not None
+                          and entry_joins(after[nid])
+                          > entry_joins(before[nid]))))
     if not hit:
         return {'nets': [], 'alone': False}
     rest = compare_connectivity(
         {k: v for k, v in before.items() if k not in ids},
         {k: v for k, v in after.items() if k not in ids}, net_name)
     return {'nets': hit, 'alone': gate_verdict(rest) == 'accept'}
+
+
+# ---- the record of earlier steps' trades (#1807) ------------------------------
+# Each route.py step is its own process, and a retry step that breaks what the
+# step before it connected could not tell: the gate's lists were printed and
+# forgotten. Every gated step that traded nets (lost or gained something)
+# appends its lists to the board's records (`kicad_routing_tools`, through
+# tool_records like every other record, so the GUI's records survive KiCad's
+# project save), and the next step's gate compares its own trade with them.
+
+#: The records key: a list of the last LAP_HISTORY gated trades, oldest first,
+#: each {'lost', 'gained', 'verdict', 'attackers'} -- `attackers` maps a lost
+#: net to the nets the run ripped it for, in order. The newest ACCEPTED trade
+#: is always one of them (`trim_lap_history`).
+LAP_KEY = 'route_laps'
+LAP_HISTORY = 4
+
+# Process-local, like protected_nets' notes: the gate notes the new history,
+# the step boundary that knows the output's records persists it.
+_lap_note: List[Optional[list]] = [None]
+
+
+def lap_entry(cmp: Dict, verdict: str, attackers=None) -> Optional[Dict]:
+    """This step's record, or None when it traded nothing (no net lost or
+    gained): a step that changed no net's state leaves the earlier trade the
+    one the board carries."""
+    if not cmp.get('lost') and not cmp.get('gained'):
+        return None
+    att = attackers or {}
+    return {'lost': sorted(cmp['lost']), 'gained': sorted(cmp['gained']),
+            'verdict': verdict,
+            'attackers': {n: list(att[n]) for n in sorted(cmp['lost'])
+                          if att.get(n)}}
+
+
+def lap_history(ns) -> List[Dict]:
+    """The recorded trades in a records namespace, oldest first ([] when
+    none or malformed)."""
+    h = (ns or {}).get(LAP_KEY)
+    if not isinstance(h, list):
+        return []
+    return [e for e in h if isinstance(e, dict)
+            and isinstance(e.get('lost'), list)
+            and isinstance(e.get('gained'), list)]
+
+
+def trim_lap_history(history: List[Dict]) -> List[Dict]:
+    """The LAP_HISTORY records a step leaves: the last ones, and always the
+    newest ACCEPTED one -- the step that made the board every retry after it
+    ran on, which `rip_cycle` compares with. Rejected retries leave the board
+    as it was, so they push each other out of the record, never that step."""
+    h = list(history or [])
+    kept = h[-LAP_HISTORY:]
+    if any(e.get('verdict') == 'accept' for e in kept):
+        return kept
+    acc = next((e for e in reversed(h) if e.get('verdict') == 'accept'), None)
+    return [acc] + h[-(LAP_HISTORY - 1):] if acc else kept
+
+
+def rip_cycle(history: List[Dict], cmp: Dict, attackers=None
+              ) -> Optional[Dict]:
+    """A RIP CYCLE: this step's trade against the trade that made its input
+    board -- the newest ACCEPTED record (a rejected step's board was
+    discarded, so its trade is not on the board).
+
+    - `undone`: nets this step broke that that step connected;
+    - `redone`: nets this step connected that that step broke -- a cycle
+      only when this step broke something to do it (otherwise a repair);
+    - `repeats_rejected`: an identical trade (same lost, same gained) was
+      already REJECTED since that step: the retry is running it again.
+
+    Returns None when none holds, else {'undone', 'redone', 'contested'
+    (every net of this step's trade, `undone` and `redone` included),
+    'previous' (that step's lost / gained / verdict), 'repeats_rejected',
+    'attackers' ({lost net: [nets it was ripped for]}, both steps')}."""
+    lost, gained = set(cmp.get('lost') or ()), set(cmp.get('gained') or ())
+    if not lost and not gained:
+        return None
+    acc = None
+    rejected_since = []
+    for e in reversed(history or []):
+        if e.get('verdict') == 'accept':
+            acc = e
+            break
+        rejected_since.append(e)
+    undone = sorted(lost & set(acc['gained'])) if acc else []
+    redone = sorted(gained & set(acc['lost'])) if (acc and lost) else []
+    repeats = any(set(e['lost']) == lost and set(e['gained']) == gained
+                  for e in rejected_since)
+    if not undone and not redone and not repeats:
+        return None
+    contested = set(lost) | gained
+    att: Dict[str, List[str]] = {}
+
+    def _add(n, names):
+        for x in names or ():
+            if x not in att.setdefault(n, []):
+                att[n].append(x)
+    if undone or redone:
+        for n, a in (acc.get('attackers') or {}).items():
+            if n in contested:
+                _add(n, a)
+    for n in sorted(lost):
+        _add(n, (attackers or {}).get(n))
+    att = {n: a for n, a in att.items() if a}
+    return {'undone': undone, 'redone': redone,
+            'contested': sorted(contested),
+            'previous': ({'lost': list(acc['lost']),
+                          'gained': list(acc['gained']),
+                          'verdict': acc['verdict']} if acc else None),
+            'repeats_rejected': repeats,
+            'attackers': att}
+
+
+def format_rip_cycle(cyc: Dict) -> str:
+    """The one console line (and its advice) for a rip_cycle()."""
+    parts = []
+    if cyc['undone']:
+        parts.append(f"this run broke {', '.join(cyc['undone'])}, which the "
+                     f"route step that made its input board connected")
+    if cyc['redone']:
+        parts.append(f"this run connected {', '.join(cyc['redone'])}, which "
+                     f"the route step that made its input board broke, by "
+                     f"breaking others")
+    if cyc['repeats_rejected']:
+        parts.append("an earlier step tried this exact trade and was "
+                     "REJECTED")
+    att = cyc.get('attackers') or {}
+    line = ("RIP CYCLE: " + "; ".join(parts)
+            + f". Contested set: {', '.join(cyc['contested'])}")
+    if att:
+        line += " (ripped for: " + "; ".join(
+            f"{n} by {', '.join(a)}" for n, a in sorted(att.items())) + ")"
+    return (line + ". These nets compete for the same room: a retry of one "
+            "at a time trades them back and forth. Route the contested set "
+            "together in one step's --nets, with a changed approach (finer "
+            "grid, thinner track, other layers), rather than repeating this "
+            "retry.")
+
+
+def note_lap_history(history: Optional[list]) -> None:
+    """The gate's new history for this step, for the step boundary to
+    persist (None: nothing to record)."""
+    _lap_note[0] = history
+
+
+def consume_lap_history() -> Optional[list]:
+    h = _lap_note[0]
+    _lap_note[0] = None
+    return h
 
 
 def format_report(cmp: Dict, verdict: str, action: str) -> str:
@@ -381,22 +586,32 @@ def format_report(cmp: Dict, verdict: str, action: str) -> str:
             shown += f", +{len(items) - cap} more"
         return f" [{shown}]" if items else ""
 
+    frag = list(cmp.get('fragmented') or [])
     head = ("IMPROVEMENT GATE: this run broke "
             f"{len(lost)} previously-connected net(s){_capped(lost)}, "
             f"worsened {len(wors)}"
             f"{_capped([f'{n} {b}->{a}' for n, b, a in wors])}, "
-            f"connected {len(cmp['gained'])}")
+            + (f"cut {len(frag)} open net(s) into more pieces"
+               f"{_capped([f'{n} {b}->{a}' for n, b, a in frag])}, "
+               if frag else "")
+            + f"connected {len(cmp['gained'])}")
     lines.append(head + f" -- {verdict.upper()}ED")
     if cmp['lost']:
         lines.append(f"  broken by this run: {', '.join(cmp['lost'])}")
     if worsened:
         lines.append("  more disconnected pads: " + ', '.join(
             f"{n} {b}->{a}" for n, b, a in worsened))
+    if frag:
+        lines.append("  more pieces (still open): " + ', '.join(
+            f"{n} {b}->{a}" for n, b, a in frag))
     if cmp['gained']:
         lines.append(f"  connected by this run: {', '.join(cmp['gained'])}")
     lines.append(f"  disconnected pads: {cmp['disconnected_pads_before']} "
                  f"-> {cmp['disconnected_pads_after']} "
                  f"over {cmp['nets_compared']} multi-pad net(s)")
+    if cmp.get('joins_compared'):
+        lines.append(f"  joins needed: {cmp['joins_needed_before']} -> "
+                     f"{cmp['joins_needed_after']}")
     if pour_trade(cmp):
         lines.append(f"  a draw that breaks pour net(s) "
                      f"{', '.join(cmp['lost_zone'])} to connect signal(s): "

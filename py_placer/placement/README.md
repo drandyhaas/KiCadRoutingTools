@@ -10,7 +10,7 @@ placements that route from the ones that do not. Parts the board locks stay
 where they are.
 
 The `plan-pcb-placement` skill (`.claude/skills/plan-pcb-placement/`) runs the
-whole loop, and the KiCad plugin's **AI Drive › Placement** tab runs the skill.
+whole loop, and the KiCad plugin's **Auto › AI Placement** tab runs the skill.
 
 ![tigard: the pile, and seed 0 placed](../../docs/placement-tigard-placed.png)
 
@@ -364,7 +364,7 @@ of it; `check_floorplan --intent` grades all of it.
 | `arrays[]` | not read: `place_simple` warns that the rows are graded only | yes (`array_formation`, `array_conflict`) |
 | `keep_away[]` | not read | yes (pad edge to pad edge, WARN unless its severity is raised); `route.py` reads the design brief's `keep_away` itself |
 | `replicate[]` | not read (`place_pose replicate --intent` applies it) | yes |
-| `templates[]` | applied and priced: each member seated at its template pose round its chip at the start, carried with every move of the chip, its drift priced (`--template-weight`, default 100 per mm); it joins the chip's group and is not priced as a decap | yes (`template`, WARN) |
+| `templates[]` | applied and priced: each member seated at its template pose round its chip at the start, carried with every move of the chip, its drift priced (`--template-weight`, default 100 per mm); it joins the chip's group and is not priced as a decap | yes (`template`, WARN; `template_broken`, ERROR, past 5 x the tolerance) |
 
 ## Datasheet layouts: templates
 
@@ -486,7 +486,7 @@ and routed in full ([Utilities](../../docs/utilities.md#placement-movie-place_mo
 
 ## The GUI tab
 
-The KiCad plugin's **AI Drive › Placement** tab runs the same skill on the open
+The KiCad plugin's **Auto › AI Placement** tab runs the same skill on the open
 board, laid out like the routing tab: the AI column sets the backend (Claude
 Code), model, effort and extra instructions, and **Place (AI)** runs
 `/plan-pcb-placement place`, **Place + Route (AI)** runs `full`, headless on a
@@ -500,7 +500,7 @@ placement back (after Place + Route, its tracks and vias too). **Beautify
 Labels** tidies reference designators without AI (the CLI is
 `py_placer/beautify_labels.py`).
 
-![the AI Drive › Placement tab](../../docs/placement-ai-tab.png)
+![the Auto › AI Placement tab](../../docs/placement-ai-tab.png)
 
 ## Decap clearance after fanout: place_fanout_clearance
 
@@ -661,6 +661,14 @@ contract.
   can is solid: on thunderscope, where the human board puts 354 parts under
   four cans and a heatsink, the placer ended with 6 and 16 parts illegal, and
   placed cleanly only with the cans removed.
+- **The order of one-layer, no-via nets.** `check_floorplan`'s `planar_nets`
+  finds a pad such a net cannot reach on its layer (#1818), but not two such
+  nets that must cross between the parts they join, for example two
+  connectors whose pins come in opposite orders. A check could take the
+  pair's order inversions (`pair_order.pair_inversions`), route one net on
+  its layer, stamp it, and ask whether the other still reaches its pads
+  (`reachability.pad_reachability` on that one layer), in both orders, naming
+  the part a track passes behind when only one order completes.
 - **Rows formed after placement.** A declared `arrays[]` row is graded only.
   A pass after the anneal could line a row's members up inside the space
   they already took, keeping their order, pitch and one rotation, and keep

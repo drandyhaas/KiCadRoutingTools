@@ -1503,6 +1503,10 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
                   for s in list(c.get('standoffs') or ()) + list(c.get('holes') or ()))
            for c in fragment.get('covers') or ()):
         need_reader = max(need_reader, fp.BEHIND_READER)
+    # #1833: a hole that screws into the enclosure
+    if any(h.get('mount') is not None for c in fragment.get('covers') or ()
+           for h in c.get('holes') or ()):
+        need_reader = max(need_reader, fp.HOLE_MOUNT_READER)
     if any('opens' in c for c in fragment.get('edge_connectors') or ()):
         need_reader = max(need_reader, fp.OPENS_READER)
     if need_reader:

@@ -4,7 +4,7 @@
     python3 -X utf8 check_complete.py BOARD [--authored-from ORIGINAL] \
         [--intent J] [--impedance-nets G...] [--length-groups J] \
         [--net-min-widths J] [--min-track-width MM] [--min-via-diameter MM] \
-        [--clearance MM] [--json PATH]
+        [--clearance MM] [--kicad-rules] [--json PATH]
 
 `board_score` is the authority on `blocking`, and it is honest about being
 incomplete -- but read alone it says "done" too easily, three separate ways:
@@ -142,6 +142,236 @@ _FLOOR_OBJECT = {
 _MIN_TOL = 1e-4
 
 
+def _kicad_drc_report(board, timeout=3600, project_edit=None, rules_edit=None):
+    """kicad-cli's DRC report (the parsed JSON) of a STAGED copy of ``board``
+    and its siblings, on the fill as shipped (#1370), or ``{'error': why}``
+    when kicad-cli is missing, times out or writes no report. Never raises.
+    ``project_edit(proj)`` may change the staged project's JSON first, and
+    ``rules_edit(text) -> text`` the staged `.kicad_dru`."""
+    import tempfile
+    from copy_board import copy_board
+    try:
+        from kicad_oracle import find_kicad_cli
+        cli = find_kicad_cli(warn=False)
+    except Exception as exc:                                    # noqa: BLE001
+        return {'error': f'no kicad-cli lookup: {exc}'}
+    if not cli:
+        return {'error': 'kicad-cli not found (set KICAD_CLI)'}
+    tmp = tempfile.mkdtemp(prefix='check_complete_drc.')
+    try:
+        dst = os.path.join(tmp, 'b.kicad_pcb')
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            copy_board(board, dst)
+        if project_edit is not None:
+            pro = os.path.join(tmp, 'b.kicad_pro')
+            proj = {}
+            if os.path.isfile(pro):
+                with open(pro, encoding='utf-8') as fh:
+                    proj = json.load(fh)
+            project_edit(proj)
+            with open(pro, 'w', encoding='utf-8') as fh:
+                json.dump(proj, fh, indent=2)
+        if rules_edit is not None:
+            dru = os.path.join(tmp, 'b.kicad_dru')
+            if not os.path.isfile(dru):
+                return {'error': 'the board has no .kicad_dru beside it'}
+            with open(dru, encoding='utf-8') as fh:
+                text = fh.read()
+            with open(dru, 'w', encoding='utf-8') as fh:
+                fh.write(rules_edit(text))
+        out = os.path.join(tmp, 'drc.json')
+        try:
+            r = subprocess.run([cli, 'pcb', 'drc', '--format', 'json',
+                                '--units', 'mm', '--severity-all',
+                                '--output', out, dst],
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return {'error': f'kicad-cli timed out after {timeout:g} s'}
+        if not os.path.isfile(out) or os.path.getsize(out) == 0:
+            return {'error': f'kicad-cli produced no report (rc={r.returncode}: '
+                             f'{r.stderr.strip()[:200]})'}
+        with open(out, encoding='utf-8') as fh:
+            return json.load(fh)
+    except Exception as exc:                                    # noqa: BLE001
+        return {'error': f'{type(exc).__name__}: {exc}'}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+#: kicad-cli lists at most this many violations of one type, so a type that
+#: reaches it may have dropped a row naming any rule.
+_KICAD_TYPE_CAP = 199
+
+
+#: The rule `kicad_rule_grade` appends to the STAGED rules file to learn
+#: whether KiCad loaded that file (#1810).
+_LOAD_PROBE = 'check_complete load probe'
+
+
+def _load_probe(board, taken=()):
+    """A `.kicad_dru` rule that KiCad reports once on ``board`` whenever it
+    loads the rules file the rule stands in, and never when it drops the
+    file: an `assertion`, at warning severity, that one footprint -- named by
+    a reference no other footprint has -- does not carry that reference.
+    ``taken`` is the rule names the file already declares.
+
+    -> ``(name, rule text)``, or ``(None, why)`` when the board has no such
+    footprint. It can neither add a finding nor hide one: a warning row is
+    never counted, the grader leaves its name out of the per-rule counts, and
+    KiCad reports every assertion rule that binds an item, so the probe takes
+    nothing from an assertion of the file's own on the same footprint
+    (measured on kicad-cli 10.0.6 and 10.0.7: the report with the probe is the
+    report without it plus the probe's one row, also on a project whose
+    `rule_severities` ignores `assertion_failure`).
+
+    The references are read off the board's text by the parser's own block
+    scan (`kicad_parser.iter_footprint_blocks`), not a full parse: the probe
+    needs a name, and a large board's full parse costs seconds."""
+    import collections
+    import re
+    try:
+        from kicad_parser import iter_footprint_blocks
+        with open(board, encoding='utf-8') as fh:
+            refs = [raw for _s, _e, _t, raw, _k in iter_footprint_blocks(fh.read())]
+    except Exception as exc:                                    # noqa: BLE001
+        return None, (f'the board could not be read for a footprint to probe '
+                      f'the rules file with: {type(exc).__name__}: {exc}')
+    count = collections.Counter(refs)
+    ref = next((r for r in refs
+                if count[r] == 1 and re.fullmatch(r'[A-Za-z0-9_]+', r or '')), None)
+    if ref is None:
+        return None, ('the board has no footprint with a plain reference of '
+                      'its own to probe the rules file with, so whether KiCad '
+                      'loaded the .kicad_dru is not known')
+    name, n = _LOAD_PROBE, 1
+    while name in taken:
+        n += 1
+        name = f'{_LOAD_PROBE} {n}'
+    return name, (f'(rule "{name}" (severity warning)\n'
+                  f'  (constraint assertion "A.Reference != \'{ref}\'")\n'
+                  f'  (condition "A.Type == \'Footprint\'"))')
+
+
+def kicad_rule_grade(board, timeout=3600):
+    """KiCad's own grade of the board's `.kicad_dru` rules (#1810): one
+    kicad-cli DRC of the board as shipped, its error-severity violations
+    counted per rule KiCad names in them (``(rule 'NAME' ...``).
+
+    -> ``{'kicad_version': str, 'errors_by_rule': {name: N}, 'capped_types':
+    [type, ...]}``, or ``{'error': why}`` when KiCad cannot be asked: no
+    kicad-cli, a timeout, no report, or a rules file KiCad does not load
+    (#1690 -- KiCad then enforces none of its rules and says nothing, so its
+    silence about a rule is no grade of it). A warning-severity row counts 0,
+    as check_drc does not count it (#1626). Never raises.
+
+    Whether KiCad loaded the file is KiCad's answer: the staged copy's rules
+    file gets one more rule, `_load_probe`, and a report with no row naming
+    it, or any rule of the file, is a file KiCad dropped. The refusal model
+    (`read_board_kicad_refusals`, which every tool that does not ask KiCad
+    reads) only says WHY, when it knows: beside a file KiCad did not load,
+    or in place of KiCad's answer when KiCad cannot be asked."""
+    import re
+    try:
+        from design_rules import read_board_kicad_refusals
+        refused = read_board_kicad_refusals(board)
+    except Exception as exc:                                    # noqa: BLE001
+        refused = [{'rule': '', 'reason': f'the rules file could not be read: '
+                                          f'{type(exc).__name__}: {exc}'}]
+    known = ('KiCad enforces no rule of the .kicad_dru ('
+             + '; '.join(((f"rule '{r['rule']}': " if r['rule'] else '')
+                          + r['reason']) for r in refused) + ')') if refused else ''
+    try:
+        taken = _dru_rule_names(board)
+    except Exception:                                           # noqa: BLE001
+        taken = []
+    probe, rule = _load_probe(board, taken)
+    if probe is None:
+        return {'error': known or rule}
+    report = _kicad_drc_report(
+        board, timeout,
+        rules_edit=lambda text: text.rstrip('\n') + '\n' + rule + '\n')
+    if 'error' in report:
+        return {'error': known} if known else report
+    by_rule, by_type, loaded = {}, {}, False
+    for v in report.get('violations') or ():
+        # the probe's row counts toward its type's 199 rows: it took one
+        by_type[v.get('type')] = by_type.get(v.get('type'), 0) + 1
+        m = re.search(r"\(rule '([^']*)'", v.get('description') or '')
+        if m and m.group(1) == probe:
+            loaded = True
+            continue
+        if m and m.group(1) in taken:
+            # a row naming a rule of the file is the same proof, and the one
+            # left when the probe's own row is past its type's 199
+            loaded = True
+        if m and v.get('severity') == 'error':
+            by_rule[m.group(1)] = by_rule.get(m.group(1), 0) + 1
+    if not loaded:
+        return {'error': 'KiCad did not load the .kicad_dru: a probe rule '
+                         'appended to the staged copy of it did not fire, so '
+                         'KiCad enforces none of the file\'s rules and its '
+                         'silence about a rule is no grade of it'
+                         + (f' ({known})' if known else '')}
+    return {'kicad_version': str(report.get('kicad_version') or 'unknown'),
+            'errors_by_rule': by_rule,
+            'capped_types': sorted(t for t, n in by_type.items()
+                                   if n >= _KICAD_TYPE_CAP)}
+
+
+def judge_rules(names, grade, dru_names):
+    """Each rule in ``names`` (the ones nothing here grades) judged by KiCad's
+    ``grade`` (`kicad_rule_grade`), FAILING CLOSED (#1810). ``dru_names`` is
+    every rule name the board's `.kicad_dru` declares, in file order.
+
+    -> {name: {'verdict': 'met' | 'broken' | 'unknown', 'kicad_errors': N or
+    None, 'why': str}}. A rule is `met` only when KiCad was asked, named
+    exactly one rule of that name, and its report of 0 violations naming it
+    cannot have been cut short; anything else it cannot attribute is
+    `unknown`, which blocks as an ungraded rule does."""
+    out = {}
+    for nm in names:
+        if 'error' in grade:
+            out[nm] = {'verdict': 'unknown', 'kicad_errors': None,
+                       'why': f"KiCad could not grade it: {grade['error']}"}
+            continue
+        n = dru_names.count(nm)
+        quoted = sorted(x for x in set(dru_names) if "'" in x)
+        if n != 1 or quoted:
+            out[nm] = {'verdict': 'unknown', 'kicad_errors': None,
+                       'why': ("KiCad's rows cannot be attributed to it: "
+                               + (f"the rules file names {n} rule(s) "
+                                  f"{nm!r}" if n != 1 else
+                                  f"a rule name in the file contains a quote "
+                                  f"({', '.join(repr(x) for x in quoted)})"))}
+            continue
+        k = grade['errors_by_rule'].get(nm, 0)
+        if k:
+            out[nm] = {'verdict': 'broken', 'kicad_errors': k,
+                       'why': f"{k} KiCad violation{'' if k == 1 else 's'}"}
+        elif grade['capped_types']:
+            out[nm] = {'verdict': 'unknown', 'kicad_errors': 0,
+                       'why': (f"KiCad's report is cut at {_KICAD_TYPE_CAP} rows "
+                               f"of {', '.join(grade['capped_types'])}, so its "
+                               f"0 rows naming it may be a dropped row")}
+        else:
+            out[nm] = {'verdict': 'met', 'kicad_errors': 0,
+                       'why': '0 KiCad violations'}
+    return out
+
+
+def _dru_rule_names(board):
+    """Every rule name the `.kicad_dru` beside ``board`` declares, in file
+    order (duplicates kept); [] without one."""
+    dru = os.path.splitext(board)[0] + '.kicad_dru'
+    if not os.path.isfile(dru):
+        return []
+    from design_rules import parse_dru
+    with open(dru, encoding='utf-8') as fh:
+        return [r.name for r in parse_dru(fh.read())[0]]
+
+
 def kicad_hole_clearance(board, value, timeout=3600):
     """KiCad's own copper-to-hole grade of ``board`` at ``value`` mm (#1198).
 
@@ -160,49 +390,14 @@ def kicad_hole_clearance(board, value, timeout=3600):
     boards); or ``{'error': why}`` when kicad-cli is missing or
     produced no report. Never raises."""
     import re
-    import tempfile
-    from copy_board import copy_board
-    try:
-        from kicad_oracle import find_kicad_cli
-        cli = find_kicad_cli(warn=False)
-    except Exception as exc:                                    # noqa: BLE001
-        return {'error': f'no kicad-cli lookup: {exc}'}
-    if not cli:
-        return {'error': 'kicad-cli not found (set KICAD_CLI)'}
-    tmp = tempfile.mkdtemp(prefix='check_complete_hole.')
-    try:
-        dst = os.path.join(tmp, 'b.kicad_pcb')
-        import contextlib
-        import io
-        with contextlib.redirect_stdout(io.StringIO()):
-            copy_board(board, dst)
-        pro = os.path.join(tmp, 'b.kicad_pro')
-        proj = {}
-        if os.path.isfile(pro):
-            with open(pro, encoding='utf-8') as fh:
-                proj = json.load(fh)
+
+    def _at_value(proj):
         ds = proj.setdefault('board', {}).setdefault('design_settings', {})
         ds.setdefault('rules', {})['min_hole_clearance'] = float(value)
         ds.setdefault('rule_severities', {})['hole_clearance'] = 'error'
-        with open(pro, 'w', encoding='utf-8') as fh:
-            json.dump(proj, fh, indent=2)
-        out = os.path.join(tmp, 'drc.json')
-        try:
-            r = subprocess.run([cli, 'pcb', 'drc', '--format', 'json',
-                                '--units', 'mm', '--severity-all',
-                                '--output', out, dst],
-                               capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return {'error': f'kicad-cli timed out after {timeout:g} s'}
-        if not os.path.isfile(out) or os.path.getsize(out) == 0:
-            return {'error': f'kicad-cli produced no report (rc={r.returncode}: '
-                             f'{r.stderr.strip()[:200]})'}
-        with open(out, encoding='utf-8') as fh:
-            report = json.load(fh)
-    except Exception as exc:                                    # noqa: BLE001
-        return {'error': f'{type(exc).__name__}: {exc}'}
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    report = _kicad_drc_report(board, timeout, project_edit=_at_value)
+    if 'error' in report:
+        return report
     actual = []
     count = 0
     items = []
@@ -686,26 +881,67 @@ def _grade(a, doc):
     # verdict -- disclosed, not a blocker.
     notes = []
     _comps = (score.get('components') or {}) if isinstance(score, dict) else {}
-    for _name in ungraded:
-        if _name == 'undersized.dru_rules':
-            # #1390: a .kicad_dru size rule check_drc cannot model.
+    # #1390 / #1490 / #1813: a .kicad_dru rule check_drc cannot model -- a
+    # size rule (`undersized`), or a clearance, disallow, via_count, length,
+    # skew or diff_pair_uncoupled rule, or one of a kind check_drc has no
+    # pass for (`kicad_dru.UNGRADED_KINDS`) (`drc`). It blocks: nothing here
+    # graded it. With --kicad-rules (#1810) KiCad's own DRC grades it: a rule
+    # KiCad finds met is disclosed and stops blocking, one it finds broken
+    # blocks with its count, and one it cannot attribute blocks as before.
+    _dru = {}
+    _label = {'undersized.dru_rules': '.kicad_dru size rule(s)',
+              'drc.dru_rules': '.kicad_dru rule(s)'}
+    for _name in _label:
+        if _name in ungraded:
+            _c = _comps.get(_name.split('.')[0]) or {}
+            _kinds = _c.get('ungraded_rule_kinds') or {}
+            _dru[_name] = [(r, tuple(_kinds.get(r) or ()))
+                           for r in _c.get('ungraded_rules') or ()]
+    judged = {}
+    if a.kicad_rules and any(_dru.values()):
+        try:
+            grade = kicad_rule_grade(a.board, timeout=a.timeout)
+            dru_names = _dru_rule_names(a.board)
+        except Exception as exc:                                # noqa: BLE001
+            grade, dru_names = {'error': f'{type(exc).__name__}: {exc}'}, []
+        judged = judge_rules(sorted({r for v in _dru.values() for r, _k in v}),
+                             grade, dru_names)
+        doc['kicad_rules'] = {'measured_by': 'kicad-cli',
+                              'kicad_version': grade.get('kicad_version'),
+                              'error': grade.get('error'),
+                              'capped_types': grade.get('capped_types'),
+                              'rules': judged}
+    _ver = (doc.get('kicad_rules') or {}).get('kicad_version')
+
+    def _named(rows):
+        return ', '.join(repr(r) + (f" ({'/'.join(k)})" if k else '')
+                         + (f": {judged[r]['why']}" if r in judged else '')
+                         for r, k in rows)
+
+    judged_all = set()      # entries KiCad graded every rule of
+    for _name, rows in _dru.items():
+        met = [(r, k) for r, k in rows
+               if (judged.get(r) or {}).get('verdict') == 'met']
+        broken = [(r, k) for r, k in rows
+                  if (judged.get(r) or {}).get('verdict') == 'broken']
+        rest = [(r, k) for r, k in rows if (r, k) not in met + broken]
+        if met:
+            notes.append(f'{_label[_name]} check_drc cannot model, judged by '
+                         f'KiCad {_ver}: ' + _named(met))
+        if broken:
+            reasons.append(f'{_label[_name]} check_drc cannot model and KiCad '
+                           f'{_ver} finds BROKEN: ' + _named(broken))
+        if rest or not rows:
             reasons.append(
-                '.kicad_dru size rule(s) nothing grades: '
-                + ', '.join(repr(r) for r in
-                            (_comps.get('undersized') or {}).get('ungraded_rules', ()))
-                + ' -- the copper they bind is unchecked here and KiCad still '
-                  'enforces it')
-            continue
-        if _name == 'drc.dru_rules':
-            # #1490: a .kicad_dru clearance rule check_drc does not model;
-            # #1527: or a `disallow` rule (token) it does not grade; #1707:
-            # or a `via_count` rule whose condition it does not read.
-            reasons.append(
-                '.kicad_dru clearance, via_count or disallow rule(s) nothing grades: '
-                + ', '.join(repr(r) for r in
-                            (_comps.get('drc') or {}).get('ungraded_rules', ()))
+                f'{_label[_name]} nothing grades: ' + _named(rest)
                 + ' -- the copper they bind is not graded at the rule here and '
-                  'KiCad still enforces them')
+                  'KiCad still enforces them'
+                + ('' if a.kicad_rules else
+                   ' (--kicad-rules asks KiCad\'s own DRC to grade them)'))
+        else:
+            judged_all.add(_name)
+    for _name in ungraded:
+        if _name in _dru:
             continue
         if _name == 'diff_pairs.unjoined_pairs':
             # #1629: connected pairs whose skew nothing here measured.
@@ -839,6 +1075,9 @@ def _grade(a, doc):
         why += ('. DECLARED, AND BROKEN BY THE REFERENCE TOO, at least as '
                 'badly (reported, not counted against this board): '
                 + ', '.join(_ref(r) for r in floors['reference_too']))
+    # #1810: a rule set KiCad graded is examined (met, or broken and a
+    # reason above), not unexamined
+    ungraded = [u for u in ungraded if u not in judged_all]
     if not floors.get('ran'):
         # #1368: a floor check that did not run examined nothing. It cannot
         # block (a board nothing ever wrote back has no earlier declaration,
@@ -886,6 +1125,14 @@ def build_parser():
                          'NOTE this empties `components`, so the document is '
                          'then weaker than the board_score it wraps -- a gate '
                          'reading it should say so')
+    ap.add_argument('--kicad-rules', action='store_true',
+                    help='a .kicad_dru rule check_drc cannot model is graded by '
+                         'KiCad\'s own DRC (one kicad-cli run of the board as '
+                         'shipped): 0 error rows naming it reads it met, any '
+                         'reads it broken, with the count. Without kicad-cli, '
+                         'or when its rows cannot be attributed to the rule, '
+                         'the rule stays ungraded (#1810). The verdict then '
+                         'depends on the installed KiCad')
     ap.add_argument('--timeout', type=float, default=3600, metavar='S',
                     help='per-instrument wall clock (default 3600). A timeout '
                          'is recorded as exit 124, never raised')
