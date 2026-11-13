@@ -360,19 +360,36 @@ to what the fab can physically make:
 `(rule "room" (constraint track_width (min 0.09mm)) (condition "A.insideArea('ROOM')"))`.
 Where it is narrower than the run's track, the keep-outs in the room reserve
 the narrower track, and a net routed no wider than the run's width may NECK
-to the room's width there: its track is drawn at the room's width only on
-the stretches where its own width would not keep the room's clearance (with
-half a grid step to spare), and at its own width everywhere else, so a
-controlled-width net is narrow between the balls it squeezes past and not
-for its whole run through the room. A neck starts at most 1.5 grid steps
-outside the room's edge, so the narrow piece is one KiCad holds to the rule.
-A net routed wider (a power width, an impedance width) keeps its width and
-gets the search margin that fits the room's reserve. Rules on one area are
-read together, so one room can set both a clearance and a width; a room's
-width is not routed to when a later `track_width` rule asks for a wider
-track. A necked track is graded at the rule and not at Board Setup's
-`min_track_width` (measured on kicad-cli 10.0.8), so the DRC writeback
-leaves that minimum alone, on both fronts.
+to the room's width there. Its track is split where it enters and leaves the
+room grown by 1.5 grid steps (the split helpers the tightened-area split
+uses), each piece whose copper meets the room is drawn at the room's width,
+and then every grid step of it where the net's own width keeps the clearance
+KiCad holds that copper to (the room's value where the room binds it or its
+neighbour, the class value elsewhere, and the board's copper-to-hole floor
+against holes) is put back to the net's width. So a controlled-width net is
+narrow between the balls it squeezes past and not for its whole run through
+the room. A net routed wider (a power width, an impedance width) keeps its
+width; its search margin is computed against the room's reserve as well,
+and since the router takes one margin per layer, that larger margin holds on
+the whole of every layer the room is drawn on, not only inside the room.
+Rules on one area are read together, so one room can set both a clearance
+and a width; a room's width is not routed to when a later `track_width` rule
+asks for a wider track.
+
+A neck is the board's own rule, so it is allowed under every
+`--escalation` policy (`off` included) and is not a narrowing below a
+request: the shipped-width reports (power widths, impedance and class widths,
+pair widths) leave it out and `--strict-sizes` does not fail on it. Every
+neck the run ships is said instead, on the console (`Rule-area necks: ...`)
+and in `JSON_SUMMARY` / `--json-out` / the GUI's results as `area_necks`,
+one row per net, room and layer with the width and the necked length. A
+track a room's `track_width` rule binds -- by KiCad's reading, its copper
+meets the room -- is graded at the rule and not at Board Setup's
+`min_track_width` (kicad-cli 10.0.6), so the DRC writeback leaves that
+minimum alone on both fronts and `check_complete.py --authored-from` grades
+such a track at the rule; a room rule that cannot be read is an ERROR on the
+console, and the writeback then measures no track rather than lowering the
+minimum to a width it could not judge.
 
 **Track bans.** A `disallow track` rule scoped without a rule area -- the usual
 way to keep a class on some layers, e.g.

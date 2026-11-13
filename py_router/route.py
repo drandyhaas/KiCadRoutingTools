@@ -9352,6 +9352,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if _board1033 is not None:
                 _ids1033 = {_nn.name: _ni
                             for _ni, _nn in _board1033.nets.items()}
+                # #1843: a neck to a rule area's track width is the board's
+                # own rule, disclosed as area_necks, not a width shortfall
+                from area_clearance import is_room_neck as _neck1843
+                _segs1033 = [_s for _s in _segs1033 if not _neck1843(
+                    getattr(config, 'area_clearance', None), _s)]
                 _pw1033 = power_width_report(
                     _segs1033,
                     {_ids1033[_nm]: _w for _nm, _w in _req1033.items()
@@ -9493,6 +9498,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _names1282 = {_n: _nn.name
                                   for _n, _nn in _b1282.nets.items()}
                 if _segs1282 is not None:
+                    # #1843: as for the power nets above
+                    from area_clearance import is_room_neck as _neck1282
+                    _segs1282 = [_s for _s in _segs1282 if not _neck1282(
+                        getattr(config, 'area_clearance', None), _s)]
                     _short1282 = new_copper_width_shortfall(
                         _segs1282,
                         lambda _n: _names1282.get(_n, f"Net {_n}"),
@@ -9519,6 +9528,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             _sm['design_rules'] = dict(_dr1282, **_keep)
         except Exception as _wwe:                               # noqa: BLE001
             print(f"  (wide-net width disclosure skipped: {_wwe})")
+
+    # #1843: every neck to a rule area's track width this run ships, measured
+    # on the board it ships (the write model on the GUI, the written board on
+    # the CLI), new copper only. The room's width is the board's own rule, so
+    # a neck is allowed under every escalation policy and does not count as
+    # narrowed below a request (--strict-sizes); this key and the console
+    # line are where it is said. Outermost run only, both fronts.
+    _area1843 = getattr(config, 'area_clearance', None)
+    if (final_reconcile and not _ckpt_stop and _area1843 is not None
+            and any(_r.width is not None for _r in _area1843.regions)):
+        from area_clearance import neck_census, neck_lines
+        _segs1843 = None
+        if return_results:
+            _as1843, _ = _gui_write_model(results_data)
+            _segs1843 = [s for _l in _as1843.values() for s in _l]
+            _names1843 = {_n: _nn.name for _n, _nn in pcb_data.nets.items()}
+        elif output_file and os.path.isfile(output_file):
+            from kicad_parser import parse_kicad_pcb as _pk1843
+            _b1843 = _pk1843(output_file)
+            _segs1843 = _b1843.segments
+            _names1843 = {_n: _nn.name for _n, _nn in _b1843.nets.items()}
+        if _segs1843 is not None:
+            _necks1843 = neck_census(_segs1843, _area1843,
+                                     lambda _n: _names1843.get(_n, f"Net {_n}"),
+                                     _orig_seg_keys1282)
+            for _ln in neck_lines(_necks1843):
+                print(_ln)
+            if _necks1843:
+                summary['area_necks'] = _necks1843
+                if return_results:
+                    results_data['area_necks'] = _necks1843
 
     # #1371: the via rows of the design_rules ledger describe the vias that
     # SHIP. They were recorded per placement ATTEMPT -- a last-resort via the

@@ -1225,12 +1225,16 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
                 # same exclusion `scan_board_minima` makes below. Counting a
                 # filled fp_poly's stroke here told the reader that N tracks
                 # sit under the original floor when none of them is a track.
-                "min_track_width": _board_track_widths(pcb),
+                "min_track_width": [s.width for s in pcb.segments
+                                    if s.width and not getattr(s, 'graphic', False)],
                 "min_via_diameter": [v.size for v in pcb.vias if v.size],
                 "min_via_drill": [v.drill for v in pcb.vias if v.drill],
                 "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
                                           if v.size and v.drill and v.size > v.drill],
             }
+            # #1843: and a track a rule area's track_width rule binds is graded
+            # at that rule, as `board_size_values` reads it
+            objects["min_track_width"] = _board_track_widths(pcb)
         for key, _label, was, _now, _mv in relaxed:
             objs = list(objects.get(key) or [])
             if objs:
@@ -1268,11 +1272,20 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
 
 def _board_track_widths(pcb) -> list:
     """The width of every track Board Setup's ``min_track_width`` is a
-    statement about: not graphic copper, and not (#1843) a track in a rule
-    area whose `.kicad_dru` track_width rule allows its width -- KiCad grades
-    that one at the rule."""
+    statement about: not graphic copper, and not (#1843) a track bound by a
+    `.kicad_dru` track_width rule conditioned on a rule area -- KiCad grades
+    that one at the rule (`area_clearance.room_width_test`). When the board
+    has such a rule that cannot be read, the run says so and measures no
+    track at all, so the writeback never lowers the minimum to a width it
+    could not judge (the GUI's live scan does the same)."""
     from area_clearance import room_width_test
-    held = room_width_test(pcb)
+    try:
+        held = room_width_test(pcb)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  ERROR: the board's rule-area track_width rules could not be read "
+              f"({type(e).__name__}: {e}); min_track_width is not measured on this "
+              f"board", file=sys.stderr)
+        return []
     return [s.width for s in pcb.segments
             if s.width and s.width > 0 and not getattr(s, 'graphic', False)
             and not (held is not None and held(s.start_x, s.start_y, s.end_x,
@@ -1298,14 +1311,20 @@ def board_size_values(pcb) -> dict:
         for pad in fp.pads:
             if getattr(pad, "drill", 0):
                 hole.append(pad.drill)
-    return {
-        "min_track_width": _board_track_widths(pcb),
+    values = {
+        "min_track_width": [s.width for s in pcb.segments
+                            if s.width and s.width > 0
+                            and not getattr(s, 'graphic', False)],
         "min_via_diameter": [v.size for v in pcb.vias if v.size],
         "min_via_drill": via_drills,
         "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
                                   if v.size and v.drill and v.size > v.drill],
         "min_through_hole_diameter": hole,
     }
+    # #1843: a track a rule area's track_width rule binds is graded at that
+    # rule and says nothing about Board Setup's minimum
+    values["min_track_width"] = _board_track_widths(pcb)
+    return values
 
 
 def count_below_floors(pcb_path: str, floors: dict) -> dict:
@@ -1355,6 +1374,9 @@ def size_values_below_authored(pcb_path: str, floors: dict, rules_from: str) -> 
         from design_rules import DesignRules
         pcb = parse_kicad_pcb(pcb_path)
         dr = DesignRules.from_project(pcb, rules_from)
+        # #1843: a track_width rule conditioned on a rule area binds a track
+        # by where it stands, as check_drc resolves it
+        dr.area_index(pcb)
     except Exception as e:  # pragma: no cover - parser is robust, but stay safe
         print(f"warning: could not resolve authored size floors ({e})", file=sys.stderr)
         return {}
@@ -1376,6 +1398,11 @@ def size_values_below_authored(pcb_path: str, floors: dict, rules_from: str) -> 
             if getattr(pad, "drill", 0):
                 holes.append((pad.drill, dr.item_for_pad(pad), None))
     objs["min_through_hole_diameter"] = holes
+    # #1843: each track as itself, so a track_width rule conditioned on a
+    # rule area binds it by where it stands, as check_drc resolves it
+    objs["min_track_width"] = [(s.width, dr.track_item(s), s.layer)
+                               for s in pcb.segments if s.width and s.width > 0
+                               and not getattr(s, "graphic", False)]
     out = {}
     for key, f in floors.items():
         if key not in objs or not objs[key] or not isinstance(f, (int, float)):

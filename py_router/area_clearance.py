@@ -1314,210 +1314,288 @@ def _derive_key(rules, pcb_data, config):
             tuple(getattr(config, 'layers', None) or ()))
 
 
-class _RulesOnly:
-    """The rule list of a `.kicad_dru`, as `eligible` reads a DesignRules."""
-
-    def __init__(self, rules, copper_layers=()):
-        self.rules = rules
-        # what `AreaIndex` reads off a DesignRules besides the rules
-        self.copper_layers = list(copper_layers)
-
-    def area_index(self, pcb_data):
-        from design_rules import AreaIndex
-        return AreaIndex(self, pcb_data)
+def _width_rule_areas(rules) -> set:
+    """The rule-area names a `track_width` rule of ``rules`` binds by (its
+    condition is rule-area predicates alone, `_area_names`)."""
+    out = set()
+    for r in rules:
+        ast = getattr(r, 'area_scoped_condition', None)
+        if ast is None or 'track_width' not in (r.constraints or {}):
+            continue
+        out |= set(_area_names(ast) or ())
+    return out
 
 
 def room_width_test(pcb_data=None, *, board_path=None, copper=None):
     """`held(x1, y1, x2, y2, layer, width)`: is this track bound by a
-    room's track_width rule that allows its width? Such a track is graded at
-    the rule, not at Board Setup's minimum (measured on kicad-cli 10.0.8),
-    so it says nothing about the board's `min_track_width`. None when the
-    board has no such rule.
+    `.kicad_dru` track_width rule conditioned on a rule area? KiCad grades
+    such a track at the rule and not at Board Setup's `min_track_width`
+    (kicad-cli 10.0.6: a 0.1 mm track bound by a rule of min 0.1 on a board
+    whose minimum is 0.2 is clean), so it says nothing about the board's
+    minimum, whatever its width. The binding is KiCad's: the track's copper
+    meets the area on a layer the area is drawn on (`AreaIndex.of_track`,
+    what check_drc grades by). None when the board has no such rule.
 
     Read from the rules file and the board's rule areas alone -- from
     ``pcb_data``, or (the GUI's live scan, which must not parse a board)
-    from the text of ``board_path`` with the board's ``copper`` layers."""
-    try:
-        import os
-        from types import SimpleNamespace
-        from design_rules import parse_dru
-        path = board_path or getattr(pcb_data, 'source_path', '') or ''
-        dru = os.path.splitext(path)[0] + '.kicad_dru' if path else ''
-        if not dru or not os.path.isfile(dru):
-            return None
-        with open(dru, encoding='utf-8') as fh:
-            text = fh.read()
-        if 'track_width' not in text or 'Area(' not in text:
-            return None
-        if pcb_data is None:
-            from kicad_parser import extract_keepouts
-            with open(path, encoding='utf-8') as fh:
-                pcb_data = SimpleNamespace(board_info=SimpleNamespace(
-                    keepouts=extract_keepouts(fh.read()), copper_layers=list(copper or [])))
-        copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or copper or [])
-        if not copper:
-            return None
-        rules, _notes = parse_dru(text)
-        area = derive(_RulesOnly(rules, copper), pcb_data, SimpleNamespace(
-            clearance=0.0, layer_clearances={}, track_width=0.0, via_size=0.0,
-            grid_step=0.1, layers=copper))
-    except Exception:                                           # noqa: BLE001
+    from the text of ``board_path`` with the board's ``copper`` layers.
+    A board that has such a rule and cannot be read RAISES: a test that
+    quietly said "no rule" would let the DRC writeback lower the board's
+    minimum to the rule's width."""
+    import os
+    from types import SimpleNamespace
+    from design_rules import DesignRules, parse_dru
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    dru = os.path.splitext(path)[0] + '.kicad_dru' if path else ''
+    if not dru or not os.path.isfile(dru):
         return None
-    rooms = [r for r in (area.regions if area is not None else []) if r.width is not None]
-    if not rooms:
+    with open(dru, encoding='utf-8') as fh:
+        text = fh.read()
+    if 'track_width' not in text or 'Area(' not in text:
         return None
-    from shapely.geometry import LineString, Point
+    rules, _notes = parse_dru(text)
+    if not _width_rule_areas(rules):
+        return None
+    if pcb_data is None:
+        from kicad_parser import extract_keepouts
+        with open(path, encoding='utf-8') as fh:
+            pcb_data = SimpleNamespace(board_info=SimpleNamespace(
+                keepouts=extract_keepouts(fh.read()), copper_layers=list(copper or [])))
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or copper or [])
+    if not copper:
+        raise ValueError(f"{path}: no copper layers to read its rule areas on")
+    dr = DesignRules()
+    dr.rules = rules
+    dr.copper_layers = copper
+    index = dr.area_index(pcb_data)
+    names = _width_rule_areas(dr.rules)       # a rule naming no drawn area is cleared
+    if index is None or not names:
+        return None
 
     def held(x1, y1, x2, y2, layer, width) -> bool:
-        geom = Point(x1, y1) if (x1, y1) == (x2, y2) else LineString([(x1, y1), (x2, y2)])
-        return any(layer in r.layers and width >= r.width - 1e-9
-                   and r.polygon.intersects(geom) for r in rooms)
+        over, _inside = index.of_track(SimpleNamespace(
+            start_x=x1, start_y=y1, end_x=x2, end_y=y2, width=width, layer=layer))
+        return any(name in names for name, _l in over)
     return held
+
+
+#: how far past a room's edge a neck may start, in grid steps: the narrow
+#: piece reaches a little outside the room, so the gap a track squeezes
+#: through at the room's edge is inside the narrow piece
+NECK_REACH_STEPS = 1.5
+#: the spare a stretch must keep at full width to be put back to it -- the
+#: 1e-4 mm `_neck_terminal_grazes` aims inside a rule by (the writer emits
+#: 1 nm coordinates; every later pass that moves copper re-checks it at its
+#: own width, so no grid-sized spare is needed)
+WIDEN_SPARE = 1e-4
+
+
+def room_width_of(area, seg) -> Optional[float]:
+    """The track width of the last room (in file order) whose track_width
+    rule binds ``seg`` by KiCad's reading (its copper meets the room), or
+    None."""
+    i = area.region_of_segment(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                               seg.layer, float(seg.width or 0.0), kind='width')
+    return None if i is None else area.regions[i].width
+
+
+def is_room_neck(area, seg) -> bool:
+    """``seg`` is drawn at the width of the room whose rule binds it: copper
+    delivered at the board's own rule, not narrowed below a request."""
+    if area is None or getattr(seg, 'graphic', False):
+        return False
+    w = room_width_of(area, seg)
+    return w is not None and abs(float(seg.width) - w) <= 1e-6
+
+
+def neck_census(segments, area, name_of, input_keys=None) -> List[dict]:
+    """#1843: every neck the run ships, one row per (net, room): ``{net,
+    rule, area, layer, width_mm, length_mm}``, from the shipped copper
+    (``segments``; a segment whose `routing_common.segment_identity` is in
+    ``input_keys`` was on the input board and is not this run's). A neck is a
+    track drawn at the width of the room whose track_width rule binds it
+    (`is_room_neck`): the board's own rule, so the shipped-width censuses
+    (power, impedance / class width, pair widths) do not count it as narrowed
+    below a request, and this row is where it is disclosed. [] without a
+    room width."""
+    if area is None or not any(r.width is not None for r in area.regions):
+        return []
+    import math
+    from routing_common import segment_identity
+    rows = {}
+    for s in segments:
+        if not s.net_id or not is_room_neck(area, s):
+            continue
+        name = name_of(s.net_id)
+        if input_keys and segment_identity(s, name) in input_keys:
+            continue
+        i = area.region_of_segment(s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
+                                   float(s.width), kind='width')
+        r = area.regions[i]
+        row = rows.setdefault((name, r.rule, r.area, s.layer), {
+            'net': name, 'rule': r.rule, 'area': r.area, 'layer': s.layer,
+            'width_mm': round(float(r.width), 4), 'length_mm': 0.0})
+        row['length_mm'] += math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+    out = sorted(rows.values(), key=lambda r: (r['net'], r['area'], r['layer']))
+    for r in out:
+        r['length_mm'] = round(r['length_mm'], 3)
+    return out
+
+
+def neck_lines(rows) -> List[str]:
+    """The console lines of `neck_census` rows (both engines print them)."""
+    if not rows:
+        return []
+    return ["Rule-area necks: " + "; ".join(
+        f"{r['net']} {r['length_mm']:g} mm at {r['width_mm']:g} mm on {r['layer']} "
+        f"in '{r['area']}' (rule '{r['rule']}')" for r in rows)
+        + " -- JSON_SUMMARY area_necks"]
+
+
+def _neck_zone(area, layer, width, reach):
+    """{rooms narrower than ``width`` on ``layer``} grown by ``reach``, as
+    one shape (cached), or None."""
+    key = ('neck', layer, round(float(width), 9), round(float(reach), 9))
+    memo = area.__dict__.setdefault('_neck_zones', {})
+    if key not in memo:
+        from shapely.ops import unary_union
+        gs = [r.polygon.buffer(reach) for r in area.regions
+              if r.width is not None and layer in r.layers and r.width < width - 1e-9]
+        memo[key] = unary_union(gs) if gs else None
+    return memo[key]
 
 
 def narrow_tracks(segments, config, net_id, pcb_data=None) -> int:
     """Neck each of ``segments`` to a room's track width where it needs it
-    (in place; a segment is split where its width changes). The part of a
-    track inside a room is drawn at the room's width, and then, given the
-    board (``pcb_data``), every stretch of it where the net's own width
-    keeps the room's clearance is put back to that width -- so a track is
-    narrow between the balls it squeezes past and full width elsewhere.
-    A net routed wider than the run's reserve width keeps its width
-    throughout: its search margin covers it in the room too. Returns the
-    pieces left narrow. Safe to call again on its own output."""
+    (in place: ``segments`` is rewritten with the pieces, so pass the list
+    that holds the route, never a subset of it). A track is split where it
+    enters and leaves the room grown by `NECK_REACH_STEPS` grid steps
+    (`split_points` / `split_segment`, the helpers the tightened-area split
+    uses), and each piece whose copper meets a room is drawn at the width of
+    the last such room's rule; every other piece keeps the track's own width.
+    Then, given the board (``pcb_data``), every stretch of a narrow piece
+    where the net's own width keeps the clearance KiCad would hold it to is
+    put back to that width -- so a track is narrow between the balls it
+    squeezes past and full width elsewhere. A net routed wider than the
+    run's reserve width keeps its width throughout: its search margin covers
+    it in the room too. Locked and sense-held copper stays as drawn. Returns
+    the pieces left narrow. Safe to call again on its own output."""
     area = getattr(config, 'area_clearance', None)
     if area is None or not segments:
         return 0
-    rooms = [r for r in area.regions if r.width is not None]
-    if not rooms:
+    if not any(r.width is not None for r in area.regions):
         return 0
-    import copy
-    from shapely.geometry import LineString, Point
-    reach = 1.5 * config.grid_step
+    from kicad_parser import is_immutable_copper
+    reach = NECK_REACH_STEPS * config.grid_step
     out, n = [], 0
     for seg in segments:
-        todo = [seg]
-        if not getattr(seg, 'graphic', False) and (
+        zone = None
+        if not getattr(seg, 'graphic', False) and not is_immutable_copper(seg) and (
                 config.get_net_track_width(net_id, seg.layer)
                 <= config.route_reserve_width(seg.layer) + 1e-9):
-            for r in rooms:
-                if seg.layer not in r.layers:
-                    continue
-                nxt = []
-                for s in todo:
-                    if s.width <= r.width + 1e-9:
-                        nxt.append(s)
-                        continue
-                    a, b = (s.start_x, s.start_y), (s.end_x, s.end_y)
-                    length = ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
-                    if length < 1e-6:
-                        if r.polygon.intersects(Point(a)):
-                            s.width = r.width
-                            n += 1
-                        nxt.append(s)
-                        continue
-                    line = LineString([a, b])
-                    cut = line.intersection(r.polygon.buffer(reach))
-                    parts = [g for g in getattr(cut, 'geoms', [cut])
-                             if g.geom_type == 'LineString' and g.length > 1e-6
-                             and g.intersects(r.polygon)]
-                    spans = sorted((line.project(Point(g.coords[0])),
-                                    line.project(Point(g.coords[-1]))) for g in parts)
-                    spans = [(min(t0, t1), max(t0, t1)) for t0, t1 in spans]
-                    if not spans:
-                        nxt.append(s)
-                        continue
-                    marks, t = [], 0.0
-                    for t0, t1 in spans:
-                        if t0 - t > 1e-6:
-                            marks.append((t, t0, False))
-                        marks.append((max(t, t0), t1, True))
-                        t = t1
-                    if length - t > 1e-6:
-                        marks.append((t, length, False))
-                    for k, (t0, t1, narrow) in enumerate(marks):
-                        piece = s if k == 0 else copy.copy(s)
-                        if k and hasattr(piece, 'uuid'):
-                            piece.uuid = ''
-                        p0 = a if t0 <= 1e-9 else (
-                            round(a[0] + (b[0] - a[0]) * t0 / length, 6),
-                            round(a[1] + (b[1] - a[1]) * t0 / length, 6))
-                        p1 = b if length - t1 <= 1e-9 else (
-                            round(a[0] + (b[0] - a[0]) * t1 / length, 6),
-                            round(a[1] + (b[1] - a[1]) * t1 / length, 6))
-                        piece.start_x, piece.start_y = p0
-                        piece.end_x, piece.end_y = p1
-                        if narrow:
-                            piece.width = r.width
-                            n += 1
-                        nxt.append(piece)
-                todo = nxt
-        out.extend(todo)
+            zone = _neck_zone(area, seg.layer, seg.width, reach)
+        if zone is None:
+            out.append(seg)
+            continue
+        ts = split_points(seg.start_x, seg.start_y, seg.end_x, seg.end_y, zone)
+        for piece in (split_segment(seg, ts) if ts else [seg]):
+            w = room_width_of(area, _probe(piece, 0.0))
+            if w is not None and w < piece.width - 1e-9:
+                piece.width = w
+                n += 1
+            out.append(piece)
     segments[:] = out
     if pcb_data is not None:
         return _widen_where_fits(segments, config, net_id, pcb_data, area)
     return n
 
 
+def _probe(seg, width):
+    """A copy of ``seg`` at ``width``."""
+    p = _copy.copy(seg)
+    p.width = width
+    return p
+
+
+def _hole_room(pcb_data, net_id, seg, hole: float) -> float:
+    """The edge gap of track ``seg`` to the nearest hole it must keep the
+    board's copper-to-hole floor ``hole`` from (a foreign via's or plated
+    pad's drill, any non-plated drill), minus that floor; 1e9 without one."""
+    if hole <= 0.0:
+        return 1e9
+    from geometry_utils import point_to_segment_distance
+    x0, x1 = sorted((seg.start_x, seg.end_x))
+    y0, y1 = sorted((seg.start_y, seg.end_y))
+    reach = hole + seg.width / 2.0 + 2.0
+    best = 1e9
+    holes = [(v.x, v.y, v.drill) for v in getattr(pcb_data, 'vias', None) or ()
+             if v.net_id != net_id and getattr(v, 'drill', 0)]
+    for pads in (getattr(pcb_data, 'pads_by_net', None) or {}).values():
+        for p in pads:
+            d = float(getattr(p, 'drill', 0) or 0.0)
+            if d and (p.net_id != net_id or getattr(p, 'pad_type', '') == 'np_thru_hole'):
+                hx = p.hole_x if getattr(p, 'hole_x', None) is not None else p.global_x
+                hy = p.hole_y if getattr(p, 'hole_y', None) is not None else p.global_y
+                holes.append((hx, hy, d))
+    for hx, hy, d in holes:
+        if hx < x0 - reach - d or hx > x1 + reach + d or hy < y0 - reach - d or hy > y1 + reach + d:
+            continue
+        g = (point_to_segment_distance(hx, hy, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
+             - d / 2.0 - seg.width / 2.0 - hole)
+        best = min(best, g)
+    return best
+
+
 def _widen_where_fits(segments, config, net_id, pcb_data, area) -> int:
     """Put the narrow pieces of a room back to the net's width wherever
-    that width keeps the room's clearance to every neighbour, with half a
-    grid step to spare (and the board's copper-to-hole floor where it is
-    the larger). Returns the pieces still narrow."""
-    import copy
+    that width keeps, by `WIDEN_SPARE`, the clearance KiCad holds the piece
+    to there, judged one grid step of track at a time -- priced per item through ``config`` (the room's value where
+    the room binds the piece or its neighbour, the class value elsewhere),
+    and the board's copper-to-hole floor against holes. Returns the pieces
+    still narrow."""
     import math
     from single_ended_routing import _terminal_room
-    try:
-        from obstacle_map import resolve_hole_clearance
-        hole = float(resolve_hole_clearance(pcb_data, config) or 0.0)
-    except Exception:                                           # noqa: BLE001
-        hole = 0.0
-    step = max(4.0 * config.grid_step, 0.2)
+    from obstacle_map import resolve_hole_clearance
+    hole = float(resolve_hole_clearance(pcb_data, config) or 0.0)
+    # one grid step: the router's own resolution, so a neck ends within a
+    # step of where the full width stops fitting
+    step = config.grid_step
     out, narrow = [], 0
     for seg in segments:
         full = config.get_net_track_width(net_id, seg.layer)
-        room = None
-        if not getattr(seg, 'graphic', False) and seg.width < full - 1e-9:
-            for i, r in enumerate(area.regions):
-                if (r.width is not None and seg.layer in r.layers
-                        and abs(seg.width - r.width) < 1e-9
-                        and area.region_of_segment(seg.start_x, seg.start_y, seg.end_x,
-                                                   seg.end_y, seg.layer) is not None):
-                    room = i
         a, b = (seg.start_x, seg.start_y), (seg.end_x, seg.end_y)
         length = math.hypot(b[0] - a[0], b[1] - a[1])
-        if room is None or length < 1e-6:
-            narrow += int(room is not None)
+        if (getattr(seg, 'graphic', False) or seg.width >= full - 1e-9
+                or not is_room_neck(area, seg)):
             out.append(seg)
             continue
-        cfg = area.region_config(config, room)
+        if length < 1e-6:
+            narrow += 1
+            out.append(seg)
+            continue
         k = max(1, int(math.ceil(length / step)))
-        pts = [a] + [(round(a[0] + (b[0] - a[0]) * j / k, 6),
-                      round(a[1] + (b[1] - a[1]) * j / k, 6)) for j in range(1, k)] + [b]
-        pieces = []
-        for j in range(k):
-            probe = copy.copy(seg)
-            probe.start_x, probe.start_y = pts[j]
-            probe.end_x, probe.end_y = pts[j + 1]
-            probe.width = full
-            try:
-                own, d, edge_room, _sd = _terminal_room(probe, (), pcb_data, net_id, cfg)
-                slack = config.grid_step / 2.0 + max(0.0, hole - own)
-                fits = (d - full / 2.0 >= own + slack
-                        and edge_room - full / 2.0 >= slack)
-            except Exception:                                   # noqa: BLE001
-                fits = False
-            w = full if fits else seg.width
-            if pieces and abs(pieces[-1][2] - w) < 1e-9:
-                pieces[-1] = (pieces[-1][0], pts[j + 1], w)
+        ts = [j / k for j in range(1, k)]
+        chunks = split_segment(seg, ts) if ts else [_copy.copy(seg)]
+        widths = []
+        for c in chunks:
+            probe = _probe(c, full)
+            own, d, edge_room, _sd = _terminal_room(probe, (), pcb_data, net_id, config)
+            fits = (d - full / 2.0 >= own + WIDEN_SPARE
+                    and edge_room - full / 2.0 >= WIDEN_SPARE
+                    and _hole_room(pcb_data, net_id, probe, hole) >= WIDEN_SPARE)
+            widths.append(full if fits else seg.width)
+        # merge runs of one width back into one piece
+        runs, t0 = [], 0.0
+        for j, w in enumerate(widths):
+            t1 = 1.0 if j == k - 1 else ts[j]
+            if runs and abs(runs[-1][2] - w) < 1e-9:
+                runs[-1] = (runs[-1][0], t1, w)
             else:
-                pieces.append((pts[j], pts[j + 1], w))
-        for j, (p0, p1, w) in enumerate(pieces):
-            piece = seg if j == 0 else copy.copy(seg)
-            if j and hasattr(piece, 'uuid'):
-                piece.uuid = ''
-            piece.start_x, piece.start_y = p0
-            piece.end_x, piece.end_y = p1
+                runs.append((t0, t1, w))
+            t0 = t1
+        cuts = [r[1] for r in runs[:-1]]
+        pieces = split_segment(seg, cuts) if cuts else [seg]
+        for piece, (_t0, _t1, w) in zip(pieces, runs):
             piece.width = w
             narrow += int(w < full - 1e-9)
             out.append(piece)
