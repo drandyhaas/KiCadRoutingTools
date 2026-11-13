@@ -72,9 +72,32 @@ def test_prune_matches_full_sweep(monkeypatch):
             assert abs(got - want) < 1e-9, (trial, got, want)
 
 
+def test_need_decides_like_full_sweep(monkeypatch):
+    """need= (what the graze and smoothing passes pass): `< need` decides as the
+    full sweep does, and a value below need is the full sweep's exactly."""
+    rnd = random.Random(13)
+    for trial in range(80):
+        arr = pads(rnd, rnd.randint(1, 50))
+        monkeypatch.setattr(ser, '_foreign_pad_arrays', lambda pcb, layer, _a=arr: _a)
+        nc = {k: rnd.choice([0.1, 0.15, 0.3]) for k in range(1, 7)} if trial % 2 else None
+        bc = None if trial % 3 == 0 else 0.1
+        for _ in range(8):
+            x1, y1 = rnd.uniform(1, 9), rnd.uniform(1, 9)
+            x2, y2 = (x1, y1) if rnd.random() < 0.1 else (x1 + rnd.uniform(-3, 3), y1 + rnd.uniform(-3, 3))
+            net = rnd.randint(1, 6)
+            want = min(brute(arr, net, x1, y1, x2, y2, bc, nc), 1e9)
+            for need in (want - 0.05, want - 1e-6, want + 1e-6, want + 0.05, rnd.uniform(-0.2, 1.0)):
+                got = ser._seg_foreign_pad_dist(None, net, x1, y1, x2, y2, 'F.Cu', base_clearance=bc,
+                                                net_clearances=nc, need=need)
+                assert (got < need) == (want < need), (trial, need, got, want)
+                if want < need:
+                    assert abs(got - want) < 1e-9, (trial, need, got, want)
+
+
 if __name__ == '__main__':
     class _MP:
         def setattr(self, o, n, v):
             setattr(o, n, v)
     test_prune_matches_full_sweep(_MP())
+    test_need_decides_like_full_sweep(_MP())
     print('PASS')

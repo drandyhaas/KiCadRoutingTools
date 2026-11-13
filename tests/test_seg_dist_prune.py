@@ -59,6 +59,38 @@ def test_prune_matches_full_sweep():
             assert abs(got - want) < 1e-9, (trial, got, want)
 
 
+def test_need_decides_like_full_sweep():
+    """need= (what the graze and smoothing passes pass): `< need` decides as the
+    full sweep does, and a value below need is the full sweep's exactly."""
+    rnd = random.Random(11)
+    for trial in range(60):
+        segs = []
+        for _ in range(rnd.randint(5, 60)):
+            x, y = rnd.uniform(0, 10), rnd.uniform(0, 10)
+            a = rnd.choice([0, 45, 90, 135]) * math.pi / 180
+            ln = rnd.uniform(0, 4)
+            segs.append(NS(start_x=x, start_y=y, end_x=x + ln * math.cos(a), end_y=y + ln * math.sin(a),
+                           layer=rnd.choice(['F.Cu', 'B.Cu']), width=rnd.choice([0.1, 0.13, 0.25]),
+                           net_id=rnd.randint(1, 6)))
+        vias = [NS(x=rnd.uniform(0, 10), y=rnd.uniform(0, 10), size=0.45, drill=0.2, net_id=rnd.randint(1, 6),
+                   layers=['F.Cu', 'B.Cu']) for _ in range(rnd.randint(0, 10))]
+        pcb = NS(segments=segs, vias=vias, footprints=None)
+        nc = {k: rnd.choice([0.1, 0.15, 0.2]) for k in range(1, 7)} if trial % 2 else None
+        for _ in range(10):
+            x1, y1 = rnd.uniform(1, 9), rnd.uniform(1, 9)
+            x2, y2 = x1 + rnd.uniform(-3, 3), y1 + rnd.uniform(-3, 3)
+            net = rnd.randint(1, 6)
+            ex = (lambda f: max(0.0, nc.get(f, 0.1) - 0.1)) if nc else None
+            want = brute(segs, vias, net, x1, y1, x2, y2, 'F.Cu', ex)
+            for need in (want - 0.05, want - 1e-6, want + 1e-6, want + 0.05, rnd.uniform(-0.2, 1.0)):
+                got = ser._seg_foreign_seg_dist(pcb, net, x1, y1, x2, y2, 'F.Cu', net_clearances=nc,
+                                                base_clearance=0.1, need=need)
+                assert (got < need) == (want < need), (trial, need, got, want)
+                if want < need:
+                    assert abs(got - want) < 1e-9, (trial, need, got, want)
+
+
 if __name__ == '__main__':
     test_prune_matches_full_sweep()
+    test_need_decides_like_full_sweep()
     print('PASS')

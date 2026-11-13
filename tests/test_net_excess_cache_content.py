@@ -19,32 +19,27 @@ def _pcb():
     return NS(segments=[seg], vias=[], footprints=None)
 
 
-def _dist(pcb, nc=None, tc=None, numpy_only=False):
-    f = ser._seg_foreign_seg_dist_numpy if numpy_only else None
-    if f:
-        return f(pcb, 1, 0.0, 0.0, 1.0, 0.0, 'F.Cu', nc, 0.1, tc, None)
+def _dist(pcb, nc=None, tc=None):
     return ser._seg_foreign_seg_dist(pcb, 1, 0.0, 0.0, 1.0, 0.0, 'F.Cu', net_clearances=nc,
                                      base_clearance=0.1, track_clearances=tc)
 
 
 def test_net_clearances_edited_in_place():
-    for numpy_only in (False,):
-        pcb = _pcb()
-        nc = {2: 0.1}
-        a = _dist(pcb, nc=nc, numpy_only=numpy_only)
-        nc[2] = 0.4                       # same object, same length
-        b = _dist(pcb, nc=nc, numpy_only=numpy_only)
-        assert abs(a - 0.9) < 1e-9 and abs(b - 0.6) < 1e-9, (numpy_only, a, b)
+    pcb = _pcb()
+    nc = {2: 0.1}
+    a = _dist(pcb, nc=nc)
+    nc[2] = 0.4                       # same object, same length
+    b = _dist(pcb, nc=nc)
+    assert abs(a - 0.9) < 1e-9 and abs(b - 0.6) < 1e-9, (a, b)
 
 
 def test_track_clearances_edited_in_place():
-    for numpy_only in (False,):
-        pcb = _pcb()
-        tc = {2: 0.1}
-        a = _dist(pcb, tc=tc, numpy_only=numpy_only)
-        tc[2] = 0.4
-        b = _dist(pcb, tc=tc, numpy_only=numpy_only)
-        assert abs(a - 0.9) < 1e-9 and abs(b - 0.6) < 1e-9, (numpy_only, a, b)
+    pcb = _pcb()
+    tc = {2: 0.1}
+    a = _dist(pcb, tc=tc)
+    tc[2] = 0.4
+    b = _dist(pcb, tc=tc)
+    assert abs(a - 0.9) < 1e-9 and abs(b - 0.6) < 1e-9, (a, b)
 
 
 def test_tables_follow_content():
