@@ -3640,7 +3640,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _pc_done, _pg_done = ([], [])
         if final_reconcile:
             from pad_contact import audit_shipped
-            _pc_done, _pg_done = audit_shipped(pcb_data, clearance=clearance)
+            _pc_done, _pg_done = audit_shipped(pcb_data, clearance=clearance,
+                                               area=getattr(config, 'area_clearance', None))
             _emit_summary_min(status='already_connected', pad_contacts=_pc_done,
                               pad_grazes=_pg_done)
         _extra1499 = {
@@ -9651,13 +9652,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _pcl_s, _pcl_v = _gui_write_model(_rd_pcl)
             _pad_contacts_left, _pad_grazes_left = audit_shipped(
                 pcb_data, [s for _l in _pcl_s.values() for s in _l],
-                [v for _l in _pcl_v.values() for v in _l], _pcl_floor)
+                [v for _l in _pcl_v.values() for v in _l], _pcl_floor,
+                area=getattr(config, 'area_clearance', None))
             _rd_pcl['pad_contacts'] = _pad_contacts_left
             _rd_pcl['pad_grazes'] = _pad_grazes_left
         elif output_file and os.path.isfile(output_file):
             from kicad_parser import parse_kicad_pcb as _pk_pcl
             _pad_contacts_left, _pad_grazes_left = audit_shipped(
-                _pk_pcl(output_file), clearance=_pcl_floor)
+                _pk_pcl(output_file), clearance=_pcl_floor,
+                area=getattr(config, 'area_clearance', None))
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,

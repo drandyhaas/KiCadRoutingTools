@@ -497,6 +497,12 @@ class GridRouteConfig:
     # The legacy per-channel maps above are being migrated onto it; consumers
     # that resolve through it must treat None as "no rules declared".
     rules: Optional[object] = None
+    # #1843: the board's clearance rules scoped by a rule area
+    # (area_clearance.AreaClearance), installed with `rules`. The base map,
+    # the per-net caches and the stamp functions compose every keep-out over
+    # it: class values outside the areas, the rule's value inside. None (no
+    # such rule) leaves every stamp as it was. No CLI flag, no GUI control.
+    area_clearance: Optional[object] = None
     # #530 decision 4: per-net VIA geometry {net_id: (diameter, drill)} for
     # nets whose resolved draw size differs from via_size/via_drill (their
     # net class or a .kicad_dru via_diameter/hole_size rule). Filled by

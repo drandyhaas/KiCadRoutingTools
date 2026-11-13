@@ -776,6 +776,51 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                               extra_clearance: float = 0.0,
                               diagonal_margin: float = defaults.DIAGONAL_MARGIN,
                               _small_pass: bool = False) -> NetObstacleData:
+    _area = getattr(config, 'area_clearance', None)
+    if _area is not None:
+        return _compose_area_cache(_area, pcb_data, net_id, config, extra_clearance,
+                                   diagonal_margin, _small_pass)
+    return _precompute_net_obstacles(pcb_data, net_id, config, extra_clearance,
+                                     diagonal_margin, _small_pass)
+
+
+def _compose_area_cache(area, pcb_data, net_id, config, extra_clearance,
+                        diagonal_margin, _small_pass) -> NetObstacleData:
+    """#1843: a net's keep-out on a board with a clearance rule scoped by a
+    rule area -- the rows at the class values outside the areas and the rows
+    at each area's value inside it, as ONE entry, so every add and remove of
+    it balances."""
+    from area_clearance import compose_rows
+    data = _precompute_net_obstacles(pcb_data, net_id, area.outside_config(config),
+                                     extra_clearance, diagonal_margin, _small_pass)
+    inner = [_precompute_net_obstacles(pcb_data, net_id, area.region_config(config, i),
+                                       extra_clearance, diagonal_margin, _small_pass)
+             for i in range(len(area.regions))]
+    # the #568 small rung is the SAME array as blocked_vias_small
+    _alias = data.blocked_vias_rungs.get(1) is data.blocked_vias_small
+    for name, kind in (('blocked_cells', 'cells'), ('blocked_vias', 'vias'),
+                       ('blocked_vias_small', 'vias'),
+                       ('blocked_cell_spans', 'cell_spans'),
+                       ('blocked_via_spans', 'via_spans')):
+        rows = compose_rows(area, config, kind, getattr(data, name, None),
+                            [getattr(d, name, None) for d in inner])
+        if kind in ('cells', 'vias') and len(rows):
+            rows = _unique_rows(rows)
+        setattr(data, name, rows)
+    for r in list(data.blocked_vias_rungs):
+        if r == 1 and _alias:
+            data.blocked_vias_rungs[r] = data.blocked_vias_small
+            continue
+        rows = compose_rows(area, config, 'vias', data.blocked_vias_rungs[r],
+                            [d.blocked_vias_rungs.get(r) for d in inner])
+        data.blocked_vias_rungs[r] = _unique_rows(rows) if len(rows) else rows
+    return data
+
+
+def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                              extra_clearance: float = 0.0,
+                              diagonal_margin: float = defaults.DIAGONAL_MARGIN,
+                              _small_pass: bool = False) -> NetObstacleData:
     """Pre-compute obstacle cells for a single net.
 
     Returns cached data that can be quickly added to obstacle maps via batch operations.

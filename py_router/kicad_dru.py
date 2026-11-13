@@ -354,9 +354,14 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
                              f"net class / item type / net name -- handled by the "
                              f"scoped channel (#1491)")
                 continue
-            notes.append(f"rule '{name}': clearance {clearance_mm}mm has a "
-                         f"non-layer scope (netclass/area/... condition) -- "
-                         f"skipped, KiCad will still enforce it")
+            if 'Area(' in str(condition):
+                # #1843: read by position (area_clearance, design_rules.AreaIndex)
+                notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
+                             f"a rule area -- handled by position (#1843)")
+            else:
+                notes.append(f"rule '{name}': clearance {clearance_mm}mm has a "
+                             f"non-layer scope (netclass/area/... condition) -- "
+                             f"skipped, KiCad will still enforce it")
             skipped.append((str(name), clearance_mm, condition))
             continue
         for l in layers:
@@ -1717,6 +1722,18 @@ def _install_rules_quietly(config, input_file, pcb_data, net_keepouts=False):
         print(f"  WARNING: design rules not installed ({e})")
 
 
+def _install_area_clearance(config, pcb_data) -> None:
+    """#1843: the clearance rules scoped by a rule area, read off
+    ``config.rules`` at the chokepoint that installs it."""
+    if pcb_data is None:
+        return
+    try:
+        from area_clearance import install
+        install(config, pcb_data)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  WARNING: area clearance rules not installed ({e})")
+
+
 def board_layer_clearance_map(pcb_data) -> Dict[str, float]:
     """Fab-pinned #498 layer-clearance map for a PCBData, discovered via its
     ``source_path`` sibling .kicad_dru. Quiet ({} when there is none) -- for
@@ -1760,6 +1777,11 @@ def min_rule_clearance(board_path: str) -> Optional[float]:
                 rules, _ = parse_dru(fh.read())
             vals += [r.constraints["clearance"]["min"] for r in rules
                      if r.coupled and not r.unsupported
+                     and "min" in r.constraints.get("clearance", {})]
+            # #1843: and a rule scoped by a rule area, which copper inside
+            # the area is routed to
+            vals += [r.constraints["clearance"]["min"] for r in rules
+                     if r.area_scoped_condition is not None
                      and "min" in r.constraints.get("clearance", {})]
         except Exception:                                       # noqa: BLE001
             pass
@@ -1857,6 +1879,7 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
         config.layer_clearances = dict(layer_clearances)
         _install_rules_quietly(config, input_file, pcb_data, net_keepouts)
         _record_board_copper(config, pcb_data)
+        _install_area_clearance(config, pcb_data)
         return
     if not input_file:
         # Engines whose signatures carry no input path (planes, fanout, oracle
@@ -1880,3 +1903,4 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
             print(f"Per-layer clearance rules from the board's .kicad_dru (#498, "
                   f"replace net/class values on their layers): {vals}")
     config.layer_clearances = lmap
+    _install_area_clearance(config, pcb_data)

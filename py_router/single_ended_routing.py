@@ -31,6 +31,7 @@ from connectivity import (
 from obstacle_map import get_same_net_through_hole_positions, same_net_partial_via_spans
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
+from area_clearance import config_for_segment as _area_config_for_segment
 
 # Import Rust router
 import sys
@@ -1310,8 +1311,9 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     for s in segments:
         if not _touches_terminal(s, term_pts):
             continue
-        own_l, d, edge_room, _sense_d = _terminal_room(s, term_pts, pcb_data,
-                                                       net_id, config)
+        # #1843: a terminal inside a rule area is held to the area's rule
+        own_l, d, edge_room, _sense_d = _terminal_room(
+            s, term_pts, pcb_data, net_id, _area_config_for_segment(config, s))
         # #1159: a graze is an edge gap BELOW the rule. Copper exactly at the
         # rule is legal (the writer emits 1 nm coordinates, so 1 nm is the
         # only tolerance the test needs); the 1e-4 margin belongs to the neck

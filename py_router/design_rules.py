@@ -3738,6 +3738,10 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
                 config.edge_floors, pcb_data)
         except Exception as e:                                 # noqa: BLE001
             rules.notes.append(f"per-net edge bands not derived ({e})")
+    if net_keepouts and pcb_data is not None:
+        # #1843: and the clearance rules scoped by a rule area
+        from area_clearance import mark_honoured
+        mark_honoured(rules, pcb_data)
     key = (os.path.abspath(rules.source) if rules.source else '',
            tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
                  for r in rules.rules))
