@@ -2045,9 +2045,11 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
         # clearance. Neck such a segment where it does, the same way.
         wide = [s for s in segs if s.width > config.track_width + 1e-9]
         if wide and getattr(config, 'layer_widths', None):
+            # (a subset of segs, already necked to a rule area's width by
+            # the call above: the area neck splits, so it runs on segs only)
             _neck_terminal_grazes(
                 wide, [p for s in wide for p in ((s.start_x, s.start_y), (s.end_x, s.end_y))],
-                pcb_data, net_id, config)
+                pcb_data, net_id, config, area_neck=False)
 
     return segs, vias, connector_lines
 

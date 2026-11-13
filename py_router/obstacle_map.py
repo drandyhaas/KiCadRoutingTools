@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from geometry_utils import via_span_layer_indices
 from via_span import reads_span_board as _reads_span_board
+from area_clearance import composed as _area_composed
 
 try:
     from grid_router import GridObstacleMap
@@ -143,7 +144,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             static_base: bool = False,
                             progress_callback=None,
                             _rung_pass: bool = False,
-                            stamp_pads: bool = True) -> GridObstacleMap:
+                            stamp_pads: bool = True,
+                            _area_pass=None) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
 
     Excludes all nets that will be routed (nets_to_route) - their stubs will be added
@@ -161,6 +163,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
             still stamped). Only for a caller that measures every pad itself,
             exactly: qfn_fanout's stub test. Routing maps keep the default.
     """
+    # #1842: under a via span this reads the board as the span sees it
+    # (via_span.obstacle_board), at every call -- the run's first build and
+    # each rebuild after a rip or a route alike.
+    if getattr(config, 'via_span', None):
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     if net_clearances is None:
         net_clearances = {}
     coord = GridCoord(config.grid_step)
@@ -190,6 +198,15 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         return config.scoped_stamp(
             net_id, (getattr(pad, 'pad_type', None) or 'smd') if pad is not None else None, v)
 
+    # #1843: a board with a clearance rule scoped by a rule area is stamped
+    # twice -- this build at the class values, kept outside the areas, and
+    # one sub-build per area at its rule's value, kept inside it
+    # (`_area_pass` = (the area clearance, the region, the parent's stamp
+    # target, the parent's config)). Both write the SAME map.
+    _area = getattr(config, 'area_clearance', None) if _area_pass is None else None
+    _area_config = config
+    if _area is not None:
+        config = _area.outside_config(config)
     _real_obstacles = GridObstacleMap(num_layers)
     # #422: when static_base, stamp every base blocked cell/via into the permanent
     # static bitmap (they are all immutable for the run) via a transparent proxy,
@@ -201,6 +218,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                  else _real_obstacles)
     if _rung_pass:
         obstacles = _RungPassStampProxy(_real_obstacles)
+    _stamp_target = obstacles
+    if _area_pass is not None:
+        obstacles = _area_pass[0].inside(_area_pass[2], _area_pass[3], _area_pass[1],
+                                         other=_real_obstacles)
+    elif _area is not None:
+        obstacles = _area.outside(obstacles, _area_config)
 
     # Set BGA proximity radius for is_in_bga_proximity() checks -- armed only
     # when the COST knob is on, so --bga-proximity-cost 0 is a real off-switch.
@@ -603,6 +626,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     pcb_data._graphic_own_pad_via_lift = {
         _nid: np.ascontiguousarray(np.concatenate(_rws))
         for _nid, _rws in _own_pad_via_rows.items() if _rws}
+    if _area is not None:
+        _compose_area_passes(_area, _area_config, _stamp_target, pcb_data,
+                             nets_to_route, extra_clearance, stamp_pads)
+        # #1843: no via of the run straddles a tight area's edge
+        _band = _area.via_band_cells(config.grid_step)
+        if len(_band):
+            _stamp_target.add_blocked_vias_batch(_band)
     # Add board edge clearance
     _report("board edge", 0, 0, force=True)
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance,
@@ -637,7 +667,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # via of THAT size may not sit on) and the result copied into rung r of
     # this map. Rung 0 stays this map's own blocked_vias / static bitmap; the
     # search consults rung r when routing a net at that size.
-    if not _rung_pass:
+    if not _rung_pass and _area_pass is None:
+        if _area is not None:
+            config = _area_config    # each rung's sub-build composes the areas itself
         # The sub-builds below are handed THIS pcb_data, and every build
         # rebinds the per-build lift records on the board object it is given
         # -- so a sub-build's answer, computed at ITS via geometry, would be
@@ -675,6 +707,44 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
             for _k, _v in _build_records.items():
                 setattr(pcb_data, _k, _v)
     return _real_obstacles
+
+
+_LIFT_RECORDS = (('_net_tie_lift', 'cells'), ('_graphic_own_pad_lift', 'cell_spans'),
+                 ('_graphic_own_pad_via_lift', 'via_spans'))
+
+
+def _compose_area_passes(area, config, target, pcb_data, nets_to_route,
+                         extra_clearance, stamp_pads) -> None:
+    """#1843: stamp ``target`` inside each rule area at the area's
+    clearance, and compose the lift records the same way -- a record names
+    the rows a map holds for one piece of copper, so it is cut exactly as
+    the rows were."""
+    from area_clearance import compose_rows
+    outer = {k: getattr(pcb_data, k, None) or {} for k, _ in _LIFT_RECORDS}
+    inner = []
+    try:
+        for i in range(len(area.regions)):
+            build_base_obstacle_map(
+                pcb_data, area.region_config(config, i), nets_to_route,
+                extra_clearance, {}, stamp_pads=stamp_pads,
+                _area_pass=(area, i, target, config))
+            inner.append({k: getattr(pcb_data, k, None) or {} for k, _ in _LIFT_RECORDS})
+    finally:
+        for key, kind in _LIFT_RECORDS:
+            merged = {}
+            for nid in set(outer[key]).union(*[set(d[key]) for d in inner]):
+                if key == '_net_tie_lift':
+                    def _cat(rows):
+                        rows = [r for r in (rows or []) if len(r)]
+                        return np.concatenate(rows) if rows else None
+                    merged[nid] = [compose_rows(
+                        area, config, kind, _cat(outer[key].get(nid)),
+                        [_cat(d[key].get(nid)) for d in inner])]
+                else:
+                    merged[nid] = compose_rows(
+                        area, config, kind, outer[key].get(nid),
+                        [d[key].get(nid) for d in inner])
+            setattr(pcb_data, key, merged)
 
 
 # Cap the size of the (points, edges) float64 broadcast temporaries used by the
@@ -2795,6 +2865,7 @@ def via_floor_npth_holes(pcb_data: PCBData, routed_net_ids) -> list:
 
 
 @_reads_span_board
+@_area_composed
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 net_id: int, config: GridRouteConfig,
                                 extra_clearance: float = 0.0, _shapes=None):
@@ -2802,6 +2873,9 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
     ``_shapes`` (internal): this net's #1181 filled graphic shapes, handed to
     the #1226 rung re-run so it does not rescan the board for them."""
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
     # Cross-class clearance (PR392): price this net's stub copper at its own KiCad
@@ -2873,6 +2947,7 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 
 
 @_reads_span_board
+@_area_composed
 def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                           p_net_id: int, n_net_id: int,
                                           config: GridRouteConfig,
@@ -2935,6 +3010,7 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
 
 
 @_reads_span_board
+@_area_composed
 def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                          p_net_id: int, n_net_id: int,
                                          config: GridRouteConfig,
@@ -3023,10 +3099,14 @@ def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord:
 
 
 @_reads_span_board
+@_area_composed
 def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
                                extra_clearance: float = 0.0):
     """Add a net's pads as obstacles to the map."""
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
 
@@ -3071,6 +3151,7 @@ def _via_h2h_cells(via, config: GridRouteConfig, coord: GridCoord):
 
 
 @_reads_span_board
+@_area_composed
 def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
                                extra_clearance: float = 0.0,
@@ -3081,6 +3162,9 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         diagonal_margin: Extra margin (in grid units) for track blocking to catch diagonal
                         segments that pass between grid points. Use 0.25 for single-ended routing.
     """
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
 
@@ -3389,6 +3473,7 @@ def _via_raw_block_cells(via, config, coord, num_layers, extra_clearance,
     return out
 
 
+@_area_composed
 def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
                                 config: GridRouteConfig,
                                 extra_clearance: float = 0.0,
@@ -3450,6 +3535,7 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
     _ledger_close(obstacles, _pre, "add_vias_list")
 
 
+@_area_composed
 def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
                                     config: GridRouteConfig,
                                     extra_clearance: float = 0.0):
@@ -3527,6 +3613,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     _ledger_close(obstacles, _pre, "add_segments_list")
 
 
+@_area_composed
 def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: list,
                                          config: GridRouteConfig,
                                          extra_clearance: float = 0.0):
@@ -3600,6 +3687,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
     _ledger_close(obstacles, _pre, "remove_segments_list")
 
 
+@_area_composed
 def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
                                      config: GridRouteConfig,
                                      extra_clearance: float = 0.0,
@@ -4906,6 +4994,7 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
                                    off_x, off_y, rotation_deg=pad.rect_rotation)
 
 
+@_area_composed
 def add_pads_via_keepout(obstacles: GridObstacleMap, pads: list,
                          config: GridRouteConfig, extra_clearance: float = 0.0):
     """Stamp a VIA-ONLY keep-out (no track keep-out) around each pad, so the
@@ -4924,6 +5013,7 @@ def add_pads_via_keepout(obstacles: GridObstacleMap, pads: list,
             obstacles.add_blocked_vias_batch(np.ascontiguousarray(cells.astype(np.int32)))
 
 
+@_area_composed
 def remove_pads_via_keepout(obstacles: GridObstacleMap, pads: list,
                             config: GridRouteConfig, extra_clearance: float = 0.0):
     """Undo add_pads_via_keepout (decrements the ref-counted via keep-out)."""

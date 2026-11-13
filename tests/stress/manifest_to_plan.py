@@ -352,6 +352,10 @@ FLAG_PARAMS = {
     # omitted-flag default). The fallthrough spelled it after the flag, which
     # no control matched, so a replay ran at the auto setback.
     '--diff-pair-centerline-setback': 'centerline_setback',
+    # #1842: the via type written for --via-span and its escape mode, each a
+    # word (the span itself is a LIST flag). Choices beside the span field.
+    '--via-span-type': 'via_span_type',
+    '--via-span-escape': 'via_span_escape',
     # (#856's --relax-drc-severities is a store_true switch and lives in
     # BOOL_FLAGS. It used to sit here, where the value branch consumed the
     # NEXT token as its value: `--relax-drc-severities --clearance 0.1`
@@ -423,9 +427,6 @@ BOOL_FLAGS = {
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
     '--no-bga-zone': 'no_bga_zone',
     '--no-bga-zones': 'no_bga_zone',
-    # #1842: the via type written for --via-span (the span itself is a LIST flag)
-    '--via-span-type': 'via_span_type',
-    '--via-span-escape': 'via_span_escape',
     # #489 section 9: now on every step that writes pad/via copper (route,
     # route_diff, route_planes, route_disconnected_planes, bga/qfn fanout).
     '--add-teardrops': 'add_teardrops',
