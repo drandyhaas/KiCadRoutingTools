@@ -3294,6 +3294,12 @@ what each load draws (pads as `REF.PAD`, currents in A):
   copper weight from the stackup (1 oz without one). A via is a barrel
   between the layers it is joined on, `rho * height / (pi * (drill - wall) *
   wall)`, its height from the stackup (1.6 mm of board without one).
+- Copper joins wherever it overlaps, as KiCad connects it: a track end
+  within its half-width of a pad's copper, a track passing over a pad, a via
+  whose disc meets a track or a pad, two track ends whose copper overlaps
+  without meeting, a tee within the trunk's half-width, two same-net tracks
+  that cross, two overlapping pads. A contact part-way along a track cuts the
+  track there.
 - A copper pour is a sheet of `rho / thickness` ohms per square: its fill is
   read from the fill model (`plane_fill_model.get_fill_models`, the copper the
   pour lays around foreign items) and solved on a square mesh, each cell

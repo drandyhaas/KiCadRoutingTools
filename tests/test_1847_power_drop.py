@@ -18,6 +18,9 @@ width and thickness, not read back from the solver):
      0.5 / 0.3 A in the branches, and the items over their IPC rating;
   2. two vias in parallel share the current, a track that ends on the middle
      of another joins it there, and a second source pad lowers the drop;
+     copper joins wherever it overlaps: a track end short of a pad by less
+     than its half-width, a track passing over a pad, two track ends that
+     overlap without meeting, a tee off the trunk's centreline;
   3. a copper pour is solved as a sheet: a strip of pour between two pads
      that span it reads rho * L / (W * t), and a pour in parallel with a
      track lowers the drop;
@@ -169,6 +172,45 @@ def networks(td):
        f"a second source in parallel lowers the drop: {drops(two)['U1.1']} mV")
 
 
+def overlaps(td):
+    print("2b. copper joins where it overlaps, as KiCad connects it")
+    trunk = r_track(12, 0.15) + r_track(7, 0.15) + 2 * r_via()
+    # U1's branch ends 0.04 mm short of its 0.4 mm pad: the 0.1 mm track's
+    # copper still overlaps the pad's
+    pcb, nid, _ = load(td, 'o1', _seg(22, 6, 25, 4.24, w=0.1), drop=(('22 6', '25 4'),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    want = (0.8 * trunk + 0.5 * r_track(math.hypot(3, 1.76), 0.1)) * 1e3
+    ok(near(drops(res)['U1.1'], want),
+       f"a track ending within its half-width of a pad joins it: "
+       f"{drops(res)['U1.1']} mV (by hand {want:.4f})")
+    # U1's branch runs on past the pad's centre, with no end on the pad
+    pcb, nid, _ = load(td, 'o2', _seg(22, 6, 26.5, 3, w=0.1), drop=(('22 6', '25 4'),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    want = (0.8 * trunk + 0.5 * r_track(BRANCH, 0.1)) * 1e3
+    ok(near(drops(res)['U1.1'], want),
+       f"a track passing over a pad is cut there and joins it: "
+       f"{drops(res)['U1.1']} mV (by hand {want:.4f})")
+    # the B.Cu trunk as two tracks whose ends overlap 0.05 mm without meeting
+    pcb, nid, _ = load(td, 'o3', _seg(15, 6, 18.5, 6, 'B.Cu') + _seg(18.6, 6, 22, 6, 'B.Cu'),
+                       drop=(('15 6', '22 6'),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    want = (0.8 * (trunk - r_track(0.1, 0.15)) + 0.5 * r_track(BRANCH, 0.1)) * 1e3
+    ok(near(drops(res)['U1.1'], want),
+       f"two track ends whose copper overlaps join: {drops(res)['U1.1']} mV "
+       f"(by hand {want:.4f})")
+    # a spur ending 0.06 mm off the F.Cu trunk's centreline, inside its copper
+    pad = ('\t(footprint "L"\n\t\t(layer "F.Cu")\n\t\t(at 9 9)\n'
+           '\t\t(property "Reference" "U3"\n\t\t\t(at 0 0 0)\n\t\t\t(layer "F.SilkS")\n\t\t)\n'
+           '\t\t(pad "1" smd circle\n\t\t\t(at 0 0)\n\t\t\t(size 0.4 0.4)\n'
+           '\t\t\t(layers "F.Cu")\n\t\t\t(net "+3V3")\n\t\t)\n\t)\n')
+    pcb, nid, _ = load(td, 'o4', pad + _seg(9, 6.06, 9, 9))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], {'U3.1': 0.2})
+    want = 0.2 * (r_track(6, 0.15) + r_track(2.94, 0.15)) * 1e3
+    ok(near(drops(res)['U3.1'], want),
+       f"a tee ending within the trunk's half-width joins it: {drops(res)['U3.1']} mV "
+       f"(by hand {want:.4f})")
+
+
 def _pad_b(ref, x, y):
     return (f'\t(footprint "P"\n\t\t(layer "F.Cu")\n\t\t(at {x} {y})\n'
             f'\t\t(property "Reference" "{ref}"\n\t\t\t(at 0 0 0)\n'
@@ -271,6 +313,7 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         fixture(td)
         networks(td)
+        overlaps(td)
         pours(td)
         disclosed(td)
         command(td)
