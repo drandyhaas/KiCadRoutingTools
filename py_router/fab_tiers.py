@@ -136,6 +136,25 @@ _FAB_FLOORS = {
     },
 }
 
+#: #502: the drill aspect ratio (board thickness / finished hole) each tier's
+#: through via is plated at: the tier's own floor drill at the 1.6 mm board a
+#: fab quotes its minimum drill for (1.6 / 0.20, 1.6 / 0.15). It raises
+#: nothing on a board up to 1.6 mm thick; on a thicker one a rung's smallest
+#: hole is thickness / ratio (:func:`min_drill_for_thickness`).
+ASPECT_REFERENCE_THICKNESS = 1.6
+MAX_ASPECT_RATIO = {'standard': 8.0, 'advanced': 10.67}
+#: A fab holds a board's finished thickness to +-10%, so a board is drilled as
+#: the nominal it is within 10% of: a drill legal at a thickness T stays legal
+#: up to T * 1.1 (a 1.6 mm board whose stackup sums to 1.63 is a 1.6 mm board,
+#: and its 0.15 drill is the one a fab quotes for it). Past that the drill is
+#: raised to the full thickness / ratio.
+ASPECT_THICKNESS_TOLERANCE = 0.10
+#: The thickest standard fab board (mm). A declared thickness past it is taken
+#: for a stackup that was never set (KiCad gives every dielectric a layer adds
+#: 1.51 mm, so a 4-layer board left at its 2-layer stackup reads 4.67 mm), not
+#: for the board the fab drills: the aspect floor stays inert and the run warns.
+MAX_STANDARD_THICKNESS = 3.2
+
 TIERS = ('standard', 'advanced', 'auto')
 ESCALATION_POLICIES = ('off', 'board', 'fab')
 # The defaults live in routing_defaults (ONE place, read by the CLIs and the
@@ -203,6 +222,12 @@ _BOARD_RULE_CLEARANCE = None
 # Setup minimum the writeback will not lower ships graded against it.
 _WRITEBACK = True
 
+# #502: the board's thickness in mm (``BoardInfo.board_thickness``), set per
+# run the same way; None = unknown, and the aspect-ratio floor is inert.
+_BOARD_THICKNESS = None
+# "the installed thickness", for the functions that also take one explicitly
+_INSTALLED = object()
+
 #: The key :func:`floor_board_clearance_at_class` carries that floor under in
 #: the floors dict it returns; :func:`set_escalation_policy` reads it off.
 RULE_CLEARANCE_KEY = 'rule_clearance'
@@ -245,6 +270,33 @@ def set_escalation_policy(policy, board_floors=None, writeback=True):
     rc = (board_floors or {}).get(RULE_CLEARANCE_KEY)
     _BOARD_RULE_CLEARANCE = float(rc) if rc is not None else None
     reset_ledger()
+
+
+def set_board_thickness(thickness):
+    """Install this run's board thickness in mm (#502), or None for unknown.
+    A thickness past :data:`MAX_STANDARD_THICKNESS` is installed (it is what
+    the board declares) but raises nothing, and is warned about here."""
+    global _BOARD_THICKNESS
+    _BOARD_THICKNESS = float(thickness) if thickness and float(thickness) > 0 else None
+    warning = aspect_inert_warning(_BOARD_THICKNESS)
+    if warning:
+        print(f"WARNING: {warning}")
+
+
+def aspect_inert_warning(thickness):
+    """#502: why the drill aspect-ratio floor is not applied to a board
+    ``thickness`` mm thick, or None when it is (or the thickness is unknown)."""
+    if not thickness or thickness <= MAX_STANDARD_THICKNESS + 1e-9:
+        return None
+    return (f"the board declares a {thickness:g} mm thickness, past the "
+            f"{MAX_STANDARD_THICKNESS:g} mm thickest standard board: the drill "
+            f"aspect-ratio floor is not applied. Check the Board Setup stackup "
+            f"(a dielectric left at KiCad's 1.51 mm default reads this way) and "
+            f"set the thickness the board is made at (#502).")
+
+
+def get_board_thickness():
+    return _BOARD_THICKNESS
 
 
 def get_escalation_policy():
@@ -588,8 +640,70 @@ def fab_floor_bucket(copper_layer_count):
                      fine_via_rung=len(fab_floor_ladder(n, 'auto', {})) > 2)
 
 
-def _tier_rungs(copper_layer_count, tier, overrides):
-    """The tier's rungs BEFORE the escalation policy is applied."""
+def aspect_ratio_for_drill(drill, copper_layer_count):
+    """The aspect ratio a rung of via ``drill`` is held to (#502): the
+    advanced tier's for a drill at or below the advanced floor drill, else the
+    standard's -- or, for a smaller drill a ``--fab-overrides`` file declares,
+    the ratio that drill makes at the reference thickness, so an override
+    never raises a drill on a board up to 1.6 mm thick either."""
+    import math
+    adv = _layer_floors(copper_layer_count)['advanced']['via_drill']
+    tier = MAX_ASPECT_RATIO['advanced' if drill <= adv + 1e-9 else 'standard']
+    return max(tier, math.ceil(ASPECT_REFERENCE_THICKNESS / drill * 100 - 1e-6) / 100)
+
+
+def min_drill_for_thickness(thickness, ratio):
+    """The smallest through hole (mm) a board ``thickness`` mm thick can be
+    plated at ``ratio``:1, rounded UP to the micron (#502)."""
+    import math
+    return math.ceil(round(thickness / ratio, 6) * 1000.0 - 1e-6) / 1000.0
+
+
+def aspect_raised_drill(drill, copper_layer_count, thickness):
+    """The drill (mm) a rung of ``drill`` is raised to on a board
+    ``thickness`` mm thick (#502), or None when it stays: the thickness is
+    unknown, past :data:`MAX_STANDARD_THICKNESS`, or within
+    :data:`ASPECT_THICKNESS_TOLERANCE` of the thickness ``drill`` is legal at."""
+    if (not drill or not thickness
+            or thickness > MAX_STANDARD_THICKNESS + 1e-9):
+        return None
+    ratio = aspect_ratio_for_drill(drill, copper_layer_count)
+    if thickness <= drill * ratio * (1.0 + ASPECT_THICKNESS_TOLERANCE) + 1e-9:
+        return None
+    need = min_drill_for_thickness(thickness, ratio)
+    return need if need > drill + 1e-9 else None
+
+
+def _aspect_raised(rungs, copper_layer_count, thickness):
+    """``rungs`` with each via drill raised to the board thickness's aspect
+    floor (#502, :func:`aspect_raised_drill`), the diameter grown to keep the
+    rung's own annular ring (:func:`_via_holding_ring`). Unchanged when no
+    rung's drill is raised."""
+    if not thickness:
+        return rungs
+    out = []
+    for r in rungs:
+        d = r.get('via_drill')
+        if d:
+            need = aspect_raised_drill(d, copper_layer_count, thickness)
+            if need:
+                r = dict(r, via_drill=need, via_diameter=_via_holding_ring(
+                    r['via_diameter'], need, (r['via_diameter'] - d) / 2.0))
+        out.append(r)
+    return out
+
+
+def _tier_rungs(copper_layer_count, tier, overrides, thickness=_INSTALLED):
+    """The tier's rungs BEFORE the escalation policy is applied, each via
+    drill raised to the board thickness's aspect floor (#502; ``thickness``
+    in mm, else the installed one, :func:`set_board_thickness`)."""
+    return _aspect_raised(_table_rungs(copper_layer_count, tier, overrides),
+                          copper_layer_count,
+                          _BOARD_THICKNESS if thickness is _INSTALLED else thickness)
+
+
+def _table_rungs(copper_layer_count, tier, overrides):
+    """The tier's rungs as the floor table states them."""
     base = _layer_floors(copper_layer_count)
     if tier not in TIERS:
         raise ValueError(f"unknown fab tier {tier!r} (expected one of {TIERS})")
@@ -860,7 +974,7 @@ _PARAM_FLOOR_KEY = {
 }
 
 
-def physical_fab_floor(copper_layer_count, overrides=None):
+def physical_fab_floor(copper_layer_count, overrides=None, thickness=_INSTALLED):
     """The smallest geometry the fab can PHYSICALLY make, whatever tier is
     selected: the override file when one is given (it states the user's exact
     limits), else the advanced rung. The TIER bounds what the router may
@@ -869,15 +983,17 @@ def physical_fab_floor(copper_layer_count, overrides=None):
     tier is accepted as asked (and announced as below the tier), not pinned up
     to 0.45 -- the request is the operator declaring their fab can do it, the
     same reading the stale-board-minimum rule gives a request below a stock
-    Board Setup minimum. Grading (check_drc) uses the same floor."""
+    Board Setup minimum. Grading (check_drc) uses the same floor. Its via
+    drill is held to the board thickness's aspect floor (#502)."""
     if overrides is None:
         overrides = _DEFAULT_OVERRIDES
     if overrides:
-        return _tier_rungs(copper_layer_count, 'standard', overrides)[0]
-    return _tier_rungs(copper_layer_count, 'advanced', None)[0]
+        return _tier_rungs(copper_layer_count, 'standard', overrides, thickness)[0]
+    return _tier_rungs(copper_layer_count, 'advanced', None, thickness)[0]
 
 
-def fab_floor_for_param(param_name, copper_layer_count, tier=None, overrides=None):
+def fab_floor_for_param(param_name, copper_layer_count, tier=None, overrides=None,
+                        thickness=_INSTALLED):
     """The PHYSICAL fab floor for a routing parameter (physical_fab_floor), or
     None if the parameter has no fab floor. Deliberately neither the tier's
     nor the board-raised floor: a board's declared minimum bounds automatic
@@ -888,7 +1004,7 @@ def fab_floor_for_param(param_name, copper_layer_count, tier=None, overrides=Non
         return None
     if overrides is None and tier is None:
         overrides = _DEFAULT_OVERRIDES
-    return physical_fab_floor(copper_layer_count, overrides).get(key)
+    return physical_fab_floor(copper_layer_count, overrides, thickness).get(key)
 
 
 def count_copper_layers_in_file(pcb_path):
@@ -1311,13 +1427,40 @@ def escalation_summary():
         'fab_tier_target': escalation_target(),
         **({'ceiling_lowered_classes': ceiling_lowered_classes()}
            if _LEDGER['ceiling_lowered'] else {}),
+        **({'aspect_floor': aspect_floor_summary()}
+           if aspect_floor_summary() else {}),
     }
+
+
+def aspect_floor_summary():
+    """#502: what this run's board thickness raised, or None: the thickness
+    and, per raised rung of the active tier, its aspect ratio, the via drill
+    floor it makes and the table's drill it replaced. A thickness past the
+    standard range raises nothing and says so (``not_applied``)."""
+    if not _BOARD_THICKNESS:
+        return None
+    if aspect_inert_warning(_BOARD_THICKNESS):
+        return {'board_thickness_mm': _BOARD_THICKNESS, 'rungs': [],
+                'not_applied': 'thicker_than_standard',
+                'max_standard_thickness_mm': MAX_STANDARD_THICKNESS}
+    rows = []
+    # The multilayer bucket carries every rung; both buckets' drills agree.
+    for r in _table_rungs(4, _DEFAULT_TIER, _DEFAULT_OVERRIDES):
+        d = r.get('via_drill')
+        if not d or any(x['table_via_drill'] == d for x in rows):
+            continue
+        need = aspect_raised_drill(d, 4, _BOARD_THICKNESS)
+        if need:
+            rows.append({'max_aspect_ratio': aspect_ratio_for_drill(d, 4),
+                         'via_drill': need, 'table_via_drill': d})
+    return ({'board_thickness_mm': _BOARD_THICKNESS, 'rungs': rows}
+            if rows else None)
 
 
 def escalation_report_line():
     """The ONE end-of-run line a reader can act on, or '' when nothing moved."""
     s = escalation_summary()
-    if not s['count'] and not s['fab_tier_escalations']:
+    if not s['count'] and not s['fab_tier_escalations'] and not s.get('aspect_floor'):
         return ''
     parts = []
     # A row with no net is run-wide (#1210: the run's clearance below the
@@ -1341,6 +1484,19 @@ def escalation_report_line():
         _where = ("the board's own declared floors"
                   if s['fab_tier_target'] == 'board_floors' else 'advanced')
         parts.append(f"{s['fab_tier_escalations']} fab-tier escalation(s) to {_where}")
+    if s.get('aspect_floor', {}).get('not_applied'):
+        a = s['aspect_floor']
+        parts.append(f"drill aspect ratio not applied: the declared "
+                     f"{a['board_thickness_mm']:g} mm thickness is past the "
+                     f"{a['max_standard_thickness_mm']:g} mm thickest standard "
+                     f"board (check the stackup)")
+    elif s.get('aspect_floor'):
+        a = s['aspect_floor']
+        raised = ', '.join(f"{r['via_drill']:g} mm at {r['max_aspect_ratio']:g}:1"
+                           for r in a['rungs'])
+        table = ', '.join(f"{r['table_via_drill']:g}" for r in a['rungs'])
+        parts.append(f"via drill floor {raised} drill aspect ratio on this "
+                     f"{a['board_thickness_mm']:g} mm thick board (was {table} mm)")
     return (f"Design rules [--escalation {s['escalation_policy']}, --fab-tier "
             f"{s['fab_tier']}]: " + '; '.join(parts) +
             ". Details: JSON_SUMMARY design_rules.")
@@ -1353,7 +1509,8 @@ def narrowed_summary():
     in it, so a run that narrowed nothing prints what it always printed."""
     s = escalation_summary()
     return (s if (s['count'] or s['fab_tier_escalations']
-                  or s.get('ceiling_lowered_classes')) else None)
+                  or s.get('ceiling_lowered_classes') or s.get('aspect_floor'))
+            else None)
 
 
 def finish_design_rules(args, rc=0, *, print_line=True):
@@ -1374,7 +1531,10 @@ def finish_design_rules(args, rc=0, *, print_line=True):
     line = escalation_report_line()
     if line and print_line:
         print(f"  {line}")
-    if line and not rc and getattr(args, 'strict_sizes', False):
+    s = escalation_summary()
+    # #502: an aspect-ratio floor raises sizes; it narrows nothing
+    narrowed = s['count'] or s['fab_tier_escalations']
+    if narrowed and not rc and getattr(args, 'strict_sizes', False):
         print(f"  --strict-sizes: {line}")
         return 3
     return rc
@@ -1580,6 +1740,8 @@ def set_fab_tier_from_config(config):
         except OSError as exc:
             print(f"WARNING: could not read fab overrides {path}: {exc}")
     set_default_fab_tier(tier, overrides)
+    # #502: the live board's thickness (BoardInfo.board_thickness)
+    set_board_thickness(config.get('board_thickness'))
     policy = config.get('escalation') or DEFAULT_ESCALATION
     declared = config.get('board_floors') or {}
     requested = {k: config.get(k) for k in ('track_width', 'clearance', 'via_size',
@@ -1708,7 +1870,23 @@ def set_policy_from_args(args, pcb_path=None):
                        if pcb_path and policy == 'board' and not writeback
                        else None))
     set_escalation_policy(policy, floors, writeback=writeback)
+    set_board_thickness(board_thickness_of_file(pcb_path))      # #502
     return floors
+
+
+def board_thickness_of_file(pcb_path):
+    """#502: ``BoardInfo.board_thickness`` of the board at ``pcb_path``,
+    read with the parser's own helpers (imported here: this module stays
+    stdlib-only at import), or None when it cannot be read."""
+    if not pcb_path:
+        return None
+    try:
+        from kicad_parser import board_thickness_mm, extract_stackup, general_thickness
+        with open(pcb_path, encoding='utf-8') as f:
+            content = f.read()
+        return board_thickness_mm(extract_stackup(content), general_thickness(content))
+    except Exception:                                           # noqa: BLE001
+        return None
 
 
 def board_policy_floors(policy, floors, requested, graded_clearance,

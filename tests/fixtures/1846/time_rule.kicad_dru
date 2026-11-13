@@ -1,0 +1,5 @@
+(version 1)
+(rule "PQ timing"
+  (constraint length (min 100ps) (max 140ps))
+  (constraint skew (max 5ps))
+  (condition "A.hasNetclass('TIMED')"))
