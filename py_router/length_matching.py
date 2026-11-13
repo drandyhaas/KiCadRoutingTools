@@ -2890,10 +2890,20 @@ def apply_time_matching_to_group(
             continue
 
         primary_layer = net_primary_layers[net_name]
-        ps_per_mm = get_layer_ps_per_mm(pcb_data, primary_layer)
+        # #1846: at the tuning profile's delay where the net has one, so the
+        # length added is the delay KiCad's DRC will read
+        _tune_net = next((getattr(_s, 'net_id', None)
+                          for _s in (result.get('new_segments') or [])), None)
+        ps_per_mm = get_layer_ps_per_mm(pcb_data, primary_layer, _tune_net)
+        suffix = " (diff pair)" if result.get('is_diff_pair') else ""
+        if ps_per_mm <= 0:
+            print(f"    WARNING: {net_name}{suffix} is {delta_time:.2f}ps short of the group "
+                  f"target and cannot be tuned on {primary_layer}: its tuning profile has "
+                  f"no delay entry for that layer, so track added there adds no delay "
+                  f"-- the group is NOT fully matched")
+            continue
         extra_length = delta_time / ps_per_mm
 
-        suffix = " (diff pair)" if result.get('is_diff_pair') else ""
         print(f"    {net_name}{suffix}: {current_time:.2f}ps -> adding {delta_time:.2f}ps ({extra_length:.3f}mm on {primary_layer})")
 
         # Create metric functions that capture pcb_data

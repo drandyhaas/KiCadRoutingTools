@@ -119,3 +119,46 @@ class DelayModel:
         ps += via_nm / _NM_PER_MM * prof.via_ps_per_mm
         ps += net_match_pad_to_die(pcb, net_id, 'total', attr='die_delay')
         return ps, ''
+
+
+_MODEL_ATTR = '_tuning_delay_model'
+
+
+def net_time_profile(pcb_data, net_id) -> Optional[TuningProfile]:
+    """The tuning profile KiCad times ``net_id`` with, when the router can
+    time the net the same way: its class names a profile, the profile has
+    time-domain tuning on, and it carries no via overrides. None otherwise
+    (the caller then times the net from the stackup, as before).
+
+    The board's `DelayModel` is built once and kept on ``pcb_data``; a board
+    with no file behind it, or no project, has no profiles."""
+    model = getattr(pcb_data, _MODEL_ATTR, None)
+    if model is None:
+        path = getattr(pcb_data, 'source_path', '') or ''
+        try:
+            model = DelayModel(path, pcb_data) if path else False
+        except Exception:                                      # noqa: BLE001
+            model = False
+        try:
+            setattr(pcb_data, _MODEL_ATTR, model)
+        except Exception:                                      # noqa: BLE001
+            pass
+    if not model or not model.profiles or net_id is None:
+        return None
+    prof = model.profile_of(net_id)
+    if prof is None or not prof.time_domain or prof.via_overrides:
+        return None
+    return prof
+
+
+def route_delay_ps(pcb_data, prof: TuningProfile, segments, vias) -> float:
+    """The delay ``prof`` gives one net's copper: each layer's track length
+    times its delay, plus the via barrel length times the via delay, measured
+    as the length DRC measures them (`kicad_net_length_parts_nm`, so the
+    router's number is the checker's). Pad-to-die delays are the caller's."""
+    from net_queries import kicad_net_length_parts_nm, _NM_PER_MM
+    by_layer, via_nm = kicad_net_length_parts_nm(pcb_data, list(segments or ()),
+                                                 list(vias or ()), [])
+    return (sum(nm / _NM_PER_MM * prof.layer_ps_per_mm.get(layer, 0.0)
+                for layer, nm in by_layer.items())
+            + via_nm / _NM_PER_MM * prof.via_ps_per_mm)
