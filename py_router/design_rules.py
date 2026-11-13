@@ -527,7 +527,9 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
             if not (lc in ('outer', 'inner', '*.Cu', '*') or lc.endswith('.Cu')):
                 rule.unsupported = rule.unsupported or f"layer clause {lc!r} (non-copper)"
                 rule.courtyard_condition = None
-                rule.area_scoped_condition = None
+        # An area rule (#1843) keeps its condition under a non-copper layer
+        # clause: `layers_for` is then empty, so it binds no copper, which is
+        # how kicad-cli 10.0.6 grades a clearance rule on F.SilkS.
         rule.unconsumed_kinds = sorted(k for k in rule.constraints
                                        if k not in CONSUMED_KINDS)
         if 'clearance' in rule.constraints and rule.unsupported is None:

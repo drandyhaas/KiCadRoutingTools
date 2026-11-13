@@ -220,6 +220,11 @@ def engine(td):
        "a rule on an area the board lacks binds nothing")
     ok("NOT GRADED (clearance): rule 'tight room'" in text,
        "and is still named NOT GRADED")
+    silk = ('(version 1)\n(rule "tight room"\n  (layer "F.SilkS")\n'
+            '  (constraint clearance (min 0.09mm))\n  (condition "A.insideArea(\'TIGHT\')"))\n')
+    doc, _ = grade(stage(td, 's', silk))
+    ok(pairs(doc) == {('IN_A', 'IN_B'), ('OUT_A', 'OUT_B')},
+       "a rule on a non-copper layer binds no copper (kicad-cli 10.0.6)")
 
 
 def main():
