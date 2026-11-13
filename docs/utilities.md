@@ -3299,8 +3299,11 @@ feed and an exposed pad split into several pads of one number all draw.
 - A track segment is `rho * length / (width * thickness)`, at its layer's own
   copper weight from the stackup (1 oz without one). A via is a barrel
   between the layers it is joined on, `rho * height / (pi * (drill + wall) *
-  wall)` -- the drill is the finished hole, the wall the plating around it --
-  its height from the stackup (1.6 mm of board without one).
+  wall)` -- the drill is the finished hole, the wall the plating around it.
+  Its height is the span between the layers it joins: from the stackup's
+  copper and dielectrics, else the board's declared thickness with the
+  copper layers spread evenly through it, else 1.6 mm, which the report then
+  names as assumed (`via_height_from` in `--json`).
 - Copper joins wherever it overlaps, as KiCad connects it: a track end
   within its half-width of a pad's copper, a track passing over a pad, a via
   whose disc meets a track or a pad, two track ends whose copper overlaps

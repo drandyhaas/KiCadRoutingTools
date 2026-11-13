@@ -46,7 +46,8 @@ from plane_resistance import (COPPER_RESISTIVITY, OZ_TO_METERS, stackup_copper_o
 #: plated barrel wall of a via, mm (IPC-6012 class 2 asks an average of 20 um;
 #: fabs quote 18-25). A stated assumption: `via_plating_mm` overrides it.
 DEFAULT_VIA_PLATING_MM = 0.025
-#: board thickness assumed for a via's height when the board has no stackup
+#: board thickness assumed for a via's height when the board declares neither
+#: a stackup nor a thickness (said so in the result)
 DEFAULT_BOARD_THICKNESS_MM = 1.6
 #: side of a pour's mesh cell, mm: fine enough that a 0.5 mm neck is two cells
 DEFAULT_POUR_MESH_MM = 0.25
@@ -70,22 +71,34 @@ def via_barrel_area_mm2(drill_mm: float, plating_mm: float) -> float:
     return math.pi * (max(drill_mm, 0.0) + plating_mm) * plating_mm
 
 
-def _layer_heights(pcb_data) -> Dict[str, float]:
-    """{copper layer: depth of its centre below the top copper, mm}."""
-    copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
-    stackup = getattr(pcb_data.board_info, 'stackup', None) or []
-    depth, out, started = 0.0, {}, False
+def layer_heights(pcb_data) -> Tuple[Dict[str, float], str]:
+    """({copper layer: depth of its centre below the top copper's, mm}, where
+    the depths come from). A via's barrel between two layers is the span
+    between their depths. From the stackup's own copper and dielectrics when
+    it lists every copper layer ('stackup'); else the board's declared
+    thickness (`board_info.board_thickness`), the copper layers spread evenly
+    through it ('board thickness'); else DEFAULT_BOARD_THICKNESS_MM
+    ('assumed')."""
+    info = pcb_data.board_info
+    copper = list(getattr(info, 'copper_layers', None) or [])
+    stackup = getattr(info, 'stackup', None) or []
+    depth, out, top = 0.0, {}, None
     for entry in stackup:
         t = float(getattr(entry, 'thickness', 0.0) or 0.0)
         if entry.layer_type == 'copper':
-            out[entry.name] = depth + t / 2.0
-            started = True
-        if started:
+            if top is None:
+                top = t / 2.0
+            out[entry.name] = depth + t / 2.0 - top
+        if top is not None:
             depth += t
-    if len(out) >= len(copper) and copper:
-        return out
+    if copper and all(layer in out for layer in copper):
+        return {layer: out[layer] for layer in copper}, 'stackup'
+    thickness = getattr(info, 'board_thickness', None)
+    source = 'board thickness'
+    if not thickness or thickness <= 0:
+        thickness, source = DEFAULT_BOARD_THICKNESS_MM, 'assumed'
     n = max(len(copper) - 1, 1)
-    return {layer: i * DEFAULT_BOARD_THICKNESS_MM / n for i, layer in enumerate(copper)}
+    return {layer: i * thickness / n for i, layer in enumerate(copper)}, source
 
 
 class _SegGrid:
@@ -180,7 +193,7 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
     import numpy as np
 
     copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
-    heights = _layer_heights(pcb_data)
+    heights, heights_from = layer_heights(pcb_data)
     net = pcb_data.nets.get(net_id)
     net_name = net.name if net else f"net_{net_id}"
     pads = [p for p in (getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id, [])
@@ -197,7 +210,12 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
     result = {'net': net_name, 'loads': [], 'vias': [], 'segments': [], 'pours': [],
               'errors': [], 'not_modelled': [], 'via_plating_mm': via_plating_mm,
               'temp_rise_c': temp_rise_c, 'resistivity_ohm_m': COPPER_RESISTIVITY,
-              'stated_current_a': round(sum(float(a) for a in loads.values()), 6)}
+              'stated_current_a': round(sum(float(a) for a in loads.values()), 6),
+              'via_height_from': heights_from}
+    if vias and heights_from == 'assumed':
+        result['not_modelled'].append(
+            f"via height: the board declares neither a stackup nor a thickness, so "
+            f"each barrel spans {DEFAULT_BOARD_THICKNESS_MM:g} mm of assumed board")
     for ref in list(sources) + list(loads):
         if ref not in by_ref:
             result['errors'].append(f"{ref} is not a pad of {net_name}")

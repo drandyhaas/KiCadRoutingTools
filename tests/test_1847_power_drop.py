@@ -20,7 +20,10 @@ width and thickness, not read back from the solver):
      of another joins it there, and a second source pad lowers the drop;
      copper joins wherever it overlaps: a track end short of a pad by less
      than its half-width, a track passing over a pad, two track ends that
-     overlap without meeting, a tee off the trunk's centreline;
+     overlap without meeting, a tee off the trunk's centreline; pads of one
+     part sharing a number are one terminal; a via's barrel spans the board
+     between its layers, from the stackup, else the board's thickness, else
+     an assumed 1.6 mm that the result names;
   3. a copper pour is solved as a sheet: a strip of pour between two pads
      that span it reads rho * L / (W * t), and a pour in parallel with a
      track lowers the drop;
@@ -96,12 +99,16 @@ def _via(x, y, net='+3V3'):
             f'\t\t(layers "F.Cu" "B.Cu")\n\t\t(net "{net}")\n\t)\n')
 
 
-def load(td, name, add='', drop=()):
-    """The fixture, with ``add`` appended and each (x1 y1) track start in
-    ``drop`` -- as (start, end) texts -- removed, parsed."""
+def load(td, name, add='', drop=(), sub=()):
+    """The fixture, with each (old, new) text of ``sub`` replaced once,
+    ``add`` appended and each (x1 y1) track start in ``drop`` -- as (start,
+    end) texts -- removed, parsed."""
     import re
     with open(evidence(BOARD + '.kicad_pcb'), encoding='utf-8') as fh:
         t = fh.read()
+    for old, new in sub:
+        assert t.count(old) == 1, f'the fixture carries {old!r} once'
+        t = t.replace(old, new)
     for start, end in drop:
         t, n = re.subn(r'\t\(segment\s*\(start %s\)\s*\(end %s\).*?\n\t\)\n'
                        % (re.escape(start), re.escape(end)), '', t, flags=re.S)
@@ -214,6 +221,42 @@ def shared_numbers(td):
     ok(near(drops(res)['U4.1'], half) and amps == [0.5, 0.5],
        f"a load draws through both pads of its number: {drops(res)['U4.1']} mV, "
        f"track currents {amps}")
+
+
+_STACKUP = ('\t(setup\n\t\t(stackup\n'
+            '\t\t\t(layer "F.Cu"\n\t\t\t\t(type "copper")\n\t\t\t\t(thickness 0.035)\n\t\t\t)\n'
+            '\t\t\t(layer "dielectric 1"\n\t\t\t\t(type "core")\n\t\t\t\t(thickness 0.8)\n\t\t\t)\n'
+            '\t\t\t(layer "B.Cu"\n\t\t\t\t(type "copper")\n\t\t\t\t(thickness 0.035)\n\t\t\t)\n'
+            '\t\t)\n')
+
+
+def via_heights(td):
+    print("2d. a via's barrel spans the board between the layers it joins")
+    branch = r_track(BRANCH, 0.1)
+
+    def u1(height):
+        trunk = r_track(12, 0.15) + r_track(7, 0.15) + 2 * r_via(height_mm=height)
+        return (0.8 * trunk + 0.5 * branch) * 1e3
+    # a stackup: F.Cu's centre to B.Cu's, 0.0175 + 0.8 + 0.0175 mm
+    pcb, nid, _ = load(td, 'h1', sub=(('\t(setup\n', _STACKUP),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    ok(near(drops(res)['U1.1'], u1(0.835)) and res['via_height_from'] == 'stackup'
+       and not res['not_modelled'],
+       f"from the stackup, 0.835 mm: {drops(res)['U1.1']} mV (by hand {u1(0.835):.4f})")
+    # no stackup: the board's declared thickness
+    pcb, nid, _ = load(td, 'h2', sub=(('(thickness 1.6)', '(thickness 1.0)'),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    ok(near(drops(res)['U1.1'], u1(1.0)) and res['via_height_from'] == 'board thickness'
+       and not res['not_modelled'],
+       f"from the board's thickness, 1.0 mm: {drops(res)['U1.1']} mV "
+       f"(by hand {u1(1.0):.4f})")
+    # neither: 1.6 mm, and the result says it was assumed
+    pcb, nid, _ = load(td, 'h3', sub=(('\t\t(thickness 1.6)\n', ''),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    ok(near(drops(res)['U1.1'], u1(1.6)) and res['via_height_from'] == 'assumed'
+       and any('via height' in n and '1.6 mm' in n for n in res['not_modelled']),
+       f"neither: 1.6 mm assumed and said so: {drops(res)['U1.1']} mV, "
+       f"{res['not_modelled']}")
 
 
 def overlaps(td):
@@ -386,6 +429,7 @@ def main():
         networks(td)
         overlaps(td)
         shared_numbers(td)
+        via_heights(td)
         pours(td)
         disclosed(td)
         command(td)
