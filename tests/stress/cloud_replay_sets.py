@@ -1185,10 +1185,11 @@ def main():
                          "(one listing per set; a stale manifest is re-uploaded)")
     ap.add_argument("--dry-run", action="store_true",
                     help="plan only, and make `upload` report sizes without pushing")
-    ap.add_argument("--limit", type=int, default=-3,
+    ap.add_argument("--limit", type=int, default=-5,
                     help="N > 0 keeps only the N cheapest boards (smoke); N < 0 drops the "
                          "|N| slowest, by each board's newest harvested replay time "
-                         "(default -3: the three slowest set an A/B's wall clock); "
+                         "(default -5: the five slowest set an A/B's wall clock, the rest finish "
+                         "inside an hour); "
                          "0 runs every board. A negative N does nothing with --boards.")
     ap.add_argument("--boards", default="", help="restrict to these board names (smoke)")
     ap.add_argument("--exclude", default="",

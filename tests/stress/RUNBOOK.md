@@ -832,8 +832,9 @@ boards" and "which commit broke connectivity".
   prints `kicad/kicad:10.0.0` on its `image :` line whatever the container runs
   and leaves the tag out of the arm name.
 
-  **The three slowest boards are left out by default** (`--limit -3`): they
-  set an A/B's wall clock, hours past every other board. "Slowest" is each
+  **The five slowest boards are left out by default** (`--limit -5`): they
+  set an A/B's wall clock, hours past every other board, and without them a
+  sets 1-28 arm finishes inside an hour. "Slowest" is each
   board's NEWEST harvested cloud replay time (`sweep_lib.load_cost_table`
   reads `cloud_*/_raw/`), so it follows the code's own speed; a board with no
   replay yet falls back to its original stress run's agent-session time and is

@@ -2,7 +2,7 @@
 """A corpus replay leaves out its slowest boards, ranked by their newest replay.
 
 The three slowest boards set a corpus A/B's wall clock, hours past every other
-board, so `cloud_replay_sets.py` drops them by default (`--limit -3`; a
+board, so `cloud_replay_sets.py` drops them by default (`--limit -5`; a
 negative limit drops the |N| slowest, a positive one keeps the N cheapest).
 "Slowest" is read from `sweep_lib.load_cost_table`, which used to hold only
 each board's ORIGINAL stress run timed as a whole agent session: a board
@@ -15,7 +15,7 @@ Rows:
     an empty (half-harvested) row is skipped, not fatal;
   - drop_slowest drops the N slowest, never a board with no recorded cost,
     and nothing at N = 0;
-  - cloud_replay_sets defaults --limit to -3 and hands it to modal_app as ONE
+  - cloud_replay_sets defaults --limit to -5 and hands it to modal_app as ONE
     token, and hands --exclude through as --exclude (an explicit --boards
     list would switch the default drop off).
 
@@ -92,8 +92,8 @@ def main():
         check("N = 0 drops nothing", kept == bl and not dropped)
 
     src = (ROOT / 'tests' / 'stress' / 'cloud_replay_sets.py').read_text()
-    check("cloud_replay_sets defaults --limit to -3",
-          re.search(r'"--limit", type=int, default=-3', src) is not None)
+    check("cloud_replay_sets defaults --limit to -5",
+          re.search(r'"--limit", type=int, default=-5', src) is not None)
     check("the limit reaches modal_app as one token",
           'cmd += [f"--limit={args.limit}"]' in src)
     check("--exclude reaches modal_app as --exclude, not as a --boards list",
