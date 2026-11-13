@@ -880,6 +880,13 @@ class BoardInfo:
     # inside the panel frame -- dropping it outright let the router lay copper
     # straight across the milled gap between the two keyboard halves (85 items).
     board_edge_contours: List[List[Tuple[float, float]]] = field(default_factory=list)
+    # F.Mask/B.Mask artwork (mask openings) as keep-out dicts of the same
+    # shape, kept apart from the rule areas: read on first use by a router
+    # (mask_artwork.board_mask_artwork); None = not read yet.
+    mask_artwork: Optional[List[dict]] = None
+    # Whether routing keeps new copper out of mask_artwork (route.py
+    # --no-mask-keepouts opts out); None = routing_defaults.MASK_KEEPOUTS.
+    mask_keepouts: Optional[bool] = None
     keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed, pads_allowed, footprints_allowed, owner, name}
     # Smallest copper clearance any routing step actually used on this board this
     # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.

@@ -65,23 +65,41 @@ _GATE_EXEMPT_WHY = {
 }
 
 
+def _pair_sources(q, sources, default='') -> tuple:
+    """(a's, b's) graded source on the pair's own side (#1822), from
+    `grade_body_overlap`'s `courtyard_sources` ({ref: {side: source}}): a
+    through-hole member of a pair on its FAR side was graded there on the
+    boxes of its drilled pads (`legality.FAR_SOURCE_PADS`), whatever its own
+    side draws."""
+    return tuple((sources.get(r) or {}).get(q.side, default)
+                 for r in (q.a, q.b))
+
+
 def _undrawn_courtyard_note(q, sources) -> str:
     """#1822: '(J3: pad_bbox; no drawn courtyard)' for a courtyard-channel
-    pair with a member graded on a stand-in (`GradedPart.source` other than
-    'courtyard'), else ''. Such a pair is this tool's estimate: KiCad
-    reports no courtyards_overlap for it (`courtyard_error_pairs`)."""
-    undrawn = [f"{r}: {sources[r]}" for r in (q.a, q.b)
-               if sources.get(r, 'courtyard') != 'courtyard']
-    return f"({', '.join(undrawn)}; no drawn courtyard)" if undrawn else ''
+    pair with a member graded on a stand-in (a source other than 'courtyard'
+    on the pair's side, `_pair_sources`), else ''. Such a pair is this
+    tool's estimate: KiCad reports no courtyards_overlap for it
+    (`courtyard_error_pairs`). A member graded on its far side reads
+    'J1: drilled_pads on its far side', and the note then names the side
+    that draws none, since the member may draw a courtyard on its own."""
+    from placement.legality import FAR_SOURCE_PADS
+    srcs = _pair_sources(q, sources, 'courtyard')
+    undrawn = [f"{r}: {s}" + (' on its far side' if s == FAR_SOURCE_PADS else '')
+               for r, s in zip((q.a, q.b), srcs) if s != 'courtyard']
+    if not undrawn:
+        return ''
+    where = f" on side {q.side}" if FAR_SOURCE_PADS in srcs else ''
+    return f"({', '.join(undrawn)}; no drawn courtyard{where})"
 
 
 def _courtyard_pair_dict(q, sources) -> dict:
     """A courtyard-channel pair for --json, with each member's graded
-    source (#1822) beside the pair's own fields."""
+    source on the pair's side (#1822, `_pair_sources`) beside the pair's
+    own fields."""
     d = q._asdict()
     if q.kind == 'courtyard':
-        d['a_source'] = sources.get(q.a, '')
-        d['b_source'] = sources.get(q.b, '')
+        d['a_source'], d['b_source'] = _pair_sources(q, sources)
     return d
 
 
@@ -1316,7 +1334,9 @@ def main():
                                        if moved_refs is not None
                                        else 'no-baseline: report-only'),
             # #1822: each with `a_source` / `b_source`, what its members
-            # were graded on -- a member that is not `courtyard` draws none.
+            # were graded on, on the pair's side -- a member that is not
+            # `courtyard` draws none there (`drilled_pads`: the far side of
+            # a through-hole part).
             'courtyard_pairs': [_courtyard_pair_dict(q, _cy_src)
                                 for q in g['pairs'] if q.kind == 'courtyard'],
             # #1443: the heights the grade read, and the parts under a raised

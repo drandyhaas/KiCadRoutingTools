@@ -1103,8 +1103,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
     from fix_kicad_drc_settings import connection_width_floor
     min_track_w = connection_width_floor(pcb_data)
     # #1798: the nets the removal pass keeps via-centre stubs on.
-    from cleanup_pipeline import _skew_bound_net_ids
-    skew_ids = _skew_bound_net_ids(pcb_data)
+    from cleanup_pipeline import _centre_stub_net_ids
+    stub_ids = _centre_stub_net_ids(pcb_data)
 
     net_ids = set(segs_by_net) | set(vias_by_net)
     check_ids = []
@@ -1138,7 +1138,7 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
         removable = _strict_removable(net_id, name, net_segs, net_vias,
                                       net_pads, has_zone, copper_layers,
                                       thorough, skipped_nets, min_track_w,
-                                      keep_centre_stubs=net_id in skew_ids)
+                                      keep_centre_stubs=net_id in stub_ids)
         _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
                       findings, removable)
         _check_removable(net_id, name, net_segs, removable, findings)

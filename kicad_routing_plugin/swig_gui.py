@@ -1457,6 +1457,15 @@ class RoutingDialog(wx.Dialog):
             "can draw new ones. Only acts when 'Follow User-layer guide path' is enabled.")
         options_inner.Add(self.clear_guide_layer_check, 0, wx.ALL, 3)
 
+        # Mask artwork keep-outs (route.py --mask-keepouts)
+        self.mask_keepouts = wx.CheckBox(options_scroll, label="Keep out of mask artwork")
+        self.mask_keepouts.SetValue(defaults.MASK_KEEPOUTS)
+        self.mask_keepouts.SetToolTip(
+            "Keep new copper out from under F.Mask/B.Mask graphics and footprint mask "
+            "shapes on the same side (pad openings excepted). On by default; the artwork "
+            "is read from the saved board file.")
+        options_inner.Add(self.mask_keepouts, 0, wx.ALL, 3)
+
         # Keepout zone: keep tracks out of a user-drawn polygon (issue #27)
         self.keepout_check = wx.CheckBox(options_scroll, label="Keep out of User-layer polygon(s)")
         self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
@@ -3045,6 +3054,7 @@ class RoutingDialog(wx.Dialog):
         self.guide_corridor_spacing_ctrl.SetValue(str(defaults.GUIDE_CORRIDOR_SPACING))
         self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
         self.keepout_layer_ctrl.SetValue(defaults.KEEPOUT_LAYER)
+        self.mask_keepouts.SetValue(defaults.MASK_KEEPOUTS)
         # "Fix DRC settings after routing" (#160/#693), ticked as the
         # constructor ticks it. A plan replays route.py's per-step semantics:
         # a step without --no-fix-drc-settings writes the DRC floors back, a
@@ -3412,6 +3422,7 @@ class RoutingDialog(wx.Dialog):
             'guide_corridor_spacing': self._safe_float(self.guide_corridor_spacing_ctrl.GetValue(), defaults.GUIDE_CORRIDOR_SPACING),
             # Keepout zone (issue #27)
             'keepout_enabled': self.keepout_check.GetValue(),
+            'mask_keepouts': self.mask_keepouts.GetValue(),
             'keepout_layer': self.keepout_layer_ctrl.GetValue().strip() or defaults.KEEPOUT_LAYER,
             # Clear User-layer graphics after a successful route (plugin-only)
             'clear_guide_layer': self.clear_guide_layer_check.GetValue(),
@@ -3978,6 +3989,7 @@ class RoutingDialog(wx.Dialog):
                     guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
                     guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
                     keepout_enabled=config.get('keepout_enabled', False),
+                    mask_keepouts=config.get('mask_keepouts', defaults.MASK_KEEPOUTS),
                     keepout_layer=config.get('keepout_layer', 'User.2'),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),

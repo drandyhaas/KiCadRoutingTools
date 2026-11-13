@@ -2386,15 +2386,16 @@ class StrictRemovalModel:
         for the other end. Removing one leg of a loop left that leg's last
         short track lying in the surviving track's copper so; the loop now
         loses another branch instead;
-      * on a net a skew rule grades (``keep_centre_stubs``), no kept via
-        that a track on a layer reached AT ITS CENTRE is left reached there
-        only by track ends off it (#1798: _centre_lost_vias). A rim-to-centre
-        stub (the via-centre bridge close_soft_joints lays, #1235) is what
-        KiCad's length DRC measures the run into the via by; without it the
-        track ends on the rim, the net measures a via radius shorter and the
-        barrel may go uncharged -- a matched pair failed its recorded skew
-        after an all-nets step collapsed one. On any other net the stub is
-        copper no grade reads, and it stays removable.
+      * on a net a skew rule grades or a .kicad_dru length rule binds
+        (``keep_centre_stubs``, cleanup_pipeline._centre_stub_net_ids), no
+        kept via that a track on a layer reached AT ITS CENTRE is left
+        reached there only by track ends off it (#1798: _centre_lost_vias).
+        A rim-to-centre stub (the via-centre bridge close_soft_joints lays,
+        #1235) is what KiCad's length DRC measures the run into the via by;
+        without it the track ends on the rim, the net measures a via radius
+        shorter and the barrel may go uncharged -- a matched pair failed its
+        recorded skew after an all-nets step collapsed one. On any other net
+        the stub is copper no grade reads, and it stays removable.
 
     Candidates are unlocked, non-graphic track segments outside
     ``readonly_ids``. They are tried in UNITS: every single segment, and every
@@ -2480,18 +2481,26 @@ class StrictRemovalModel:
             self._via_by_layer.append(dict(by_layer))
         # #1798: per via, per layer, the segments with an end ON the via's
         # centre (connectivity.VIA_CENTRE_TOL, #1235's definition of 'on').
-        # See _centre_lost_vias.
+        # See _centre_lost_vias. _centre_far: (via, segment) -> for a centred
+        # segment whose OTHER end also lies on the via's copper (a stub from
+        # the centre out to the rim), which of its two ends (its index in
+        # _seg_nodes) that is.
         from connectivity import VIA_CENTRE_TOL
         self._via_centred = []
+        self._centre_far = {}
         for j, v in enumerate(self.vias):
+            reach = (getattr(v, 'size', 0.6) or 0.6) / 2.0
             centred = defaultdict(set)
             for L, ss in self._via_by_layer[j].items():
                 for i in ss:
                     s = self.segs[i]
-                    if min(math.hypot(s.start_x - v.x, s.start_y - v.y),
-                           math.hypot(s.end_x - v.x, s.end_y - v.y)) \
-                            <= VIA_CENTRE_TOL:
+                    d0 = math.hypot(s.start_x - v.x, s.start_y - v.y)
+                    d1 = math.hypot(s.end_x - v.x, s.end_y - v.y)
+                    if min(d0, d1) <= VIA_CENTRE_TOL:
                         centred[L].add(i)
+                        if VIA_CENTRE_TOL < max(d0, d1) < \
+                                reach + s.width / 2 - 1e-6:
+                            self._centre_far[(j, i)] = 0 if d0 > d1 else 1
             self._via_centred.append(dict(centred))
 
         # --- endpoint nodes: degree, dangle guard, unit chaining --------------
@@ -2549,7 +2558,19 @@ class StrictRemovalModel:
         track ending on the rim, so removing the stub keeps connectivity but
         shortens the net by a via radius and can drop the barrel from the
         length. Such a removal is refused. Removing every track the via has
-        on that layer is not this case (the via grading above owns it)."""
+        on that layer is not this case (the via grading above owns it).
+
+        Another track end staying at the centre does not make up for a
+        removed stub. A fanned-out part's pad-to-via track ends at the centre
+        of its via, and a pair leaving that via on the same layer joins it
+        there through a stub of its own: removing that stub left the pad's
+        track at the centre and the pair's track ending on the rim, a via
+        radius shorter. So a removal is also refused when it newly takes such
+        a stub -- a centred segment whose far end lies on the via's copper --
+        while a kept track still ends at that far end and no kept segment
+        runs from there to the centre. A centred track whose far end lies
+        off the via is not a stub: removing it takes no track's way into
+        the centre."""
         touched = set()
         for i in E:
             if i not in prev_E:
@@ -2562,6 +2583,14 @@ class StrictRemovalModel:
                         not all(i in prev_E for i in centred) and \
                         any(i not in E for i in self._via_by_layer[j].get(L, ())):
                     return True
+                for i in centred:
+                    far = self._centre_far.get((j, i))
+                    if far is None or i not in E or i in prev_E:
+                        continue
+                    mates = [k for k in self._node_ends[self._seg_nodes[i][far]]
+                             if k != i and k not in E]
+                    if mates and not any(k in centred for k in mates):
+                        return True
         return False
 
     # ---- anchoring: check_weird's dangling-end definition -------------------
@@ -3254,8 +3283,8 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
     from fix_kicad_drc_settings import connection_width_floor
     web_floor = connection_width_floor(pcb_data, shipped=True)
     # #1798: the nets whose via-centre stubs a length grade reads.
-    from cleanup_pipeline import _skew_bound_net_ids
-    skew_ids = _skew_bound_net_ids(pcb_data)
+    from cleanup_pipeline import _centre_stub_net_ids
+    stub_ids = _centre_stub_net_ids(pcb_data)
 
     removed_ids = set()
     dropped_via_ids = set()
@@ -3282,7 +3311,7 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
                                    copper_layers, readonly_ids=readonly,
                                    droppable_via_ids=droppable,
                                    web_floor=web_floor,
-                                   keep_centre_stubs=net_id in skew_ids)
+                                   keep_centre_stubs=net_id in stub_ids)
         if not model.valid:
             continue
         _dbg = None
@@ -4873,14 +4902,13 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     def grazes(s):
         eff = _eff(s.net_id)
         thr = eff + s.width / 2.0 - 1e-4
-        if (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+        if (_seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                   s.end_x, s.end_y, s.layer,
                                   base_clearance=eff, net_clearances=net_clearances,
                                   config=config) < thr or
-                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                _seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer,
-                                      base_clearance=eff, net_clearances=net_clearances,
-                                      config=config) < thr):
+                                      base_clearance=eff, net_clearances=net_clearances, config=config, need=thr) < thr):
             return True
         if check_foreign_segments:
             slo_x, shi_x = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
@@ -5329,12 +5357,12 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     def grazes(s):
         eff = eff_clr(s.net_id)
         thr = eff + s.width / 2.0 - 1e-4
-        return (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+        return (_seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer,
                                       base_clearance=eff, net_clearances=net_clearances) < thr or
-                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                _seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer,
-                                      base_clearance=eff, net_clearances=net_clearances) < thr)
+                                      base_clearance=eff, net_clearances=net_clearances, need=thr) < thr)
 
     # A re-bent jog must also respect the board edge: the octolinear candidates
     # only clear FOREIGN COPPER, so a bend could otherwise be pushed off-board /
@@ -5377,22 +5405,22 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         # omitting them here let a re-bend that fixed a pad graze land within
         # clearance of (or onto) a foreign via (#254 neo6502 /GPIO1 vs /GPIO2).
         eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
-        # `config`: the scoped .kicad_dru rules (#1491) a bend must hold (#1561)
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=eff, net_clearances=net_clearances,
-                                      config=config),
+        # `config`: the class/type-scoped .kicad_dru rules (#1491, #1561, #1630) the router held
+        # every copper distance >= need: cheapest test first, stop at the first failure; the pad and segment
+        # helpers sweep only the copper that can decide it (decision bit-identical)
+        need = eff + w / 2.0 - 1e-4
+        if (_seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                  net_clearances=net_clearances, base_clearance=eff, config=config) < need or
+                _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      base_clearance=eff, net_clearances=net_clearances, config=config, need=need) < need or
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff,
-                                      config=config),
-                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff,
-                                      config=config))
+                                      net_clearances=net_clearances, base_clearance=eff, config=config, need=need) < need):
+            return False
         # NPTH drill holes at the higher NPTH-to-track floor (#370 B2): the
         # copper terms above never see a copper-less hole, so a re-bend could
         # land the jog across a mounting hole.
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
-        return (d >= eff + w / 2.0 - 1e-4 and
-                hd >= npth_clr + w / 2.0 - 1e-4 and
+        return (hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
 
     def vk(x, y):
@@ -5739,7 +5767,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     # layers). Margin mirrors add_rule_area_keepout_obstacles: copper AND
     # clearance stay out (centreline >= clearance + w/2 from the boundary).
     _keepout_areas = []          # (rings, bbox, layer_tokens_or_None)
-    for _ko in (getattr(pcb_data.board_info, 'keepouts', None) or []):
+    from mask_artwork import routing_keepouts
+    for _ko in routing_keepouts(pcb_data):
         if _ko.get('tracks_allowed', True):
             continue
         _poly = _ko.get('polygon') or []
@@ -5749,8 +5778,10 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         _kxs = [p[0] for r in _rings for p in r]
         _kys = [p[1] for r in _rings for p in r]
         _kls = _ko.get('layers') or set()
+        # a keep-out may carry its own clearance (mask artwork: MASK_REGISTRATION, only the
+        # copper stays out from under it); None = the run's clearance
         _keepout_areas.append((_rings, (min(_kxs), min(_kys), max(_kxs), max(_kys)),
-                               set(_kls) if _kls else None, None))
+                               set(_kls) if _kls else None, None, _ko.get('clearance')))
     # Net-filtered keep-outs (net_keepouts.py) bind only some nets; the route
     # detoured around them for those nets, so a shortcut must not undo it.
     for _ko in (getattr(pcb_data, '_net_keepouts', None) or []):
@@ -5761,7 +5792,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         _keepout_areas.append(([_poly] + [h for h in (_ko.get('holes') or []) if len(h) >= 3],
                                (min(p[0] for p in _poly), min(p[1] for p in _poly),
                                 max(p[0] for p in _poly), max(p[1] for p in _poly)),
-                               set(_ko.get('layers') or ()) or None, _ko))
+                               set(_ko.get('layers') or ()) or None, _ko, None))
     if getattr(config, 'keepout_enabled', False):
         for _kz in (getattr(pcb_data, 'keepout_zones', None) or []):
             if len(_kz.points) >= 3:
@@ -5769,7 +5800,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                 _kys = [p[1] for p in _kz.points]
                 _keepout_areas.append(([list(_kz.points)],
                                        (min(_kxs), min(_kys), max(_kxs), max(_kys)),
-                                       None, None))
+                                       None, None, None))
 
     def _ko_on_layer(kls, layer):
         if kls is None:
@@ -5782,11 +5813,11 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
             return True
         from obstacle_map import point_in_polygon, point_to_polygon_edge_distance
         from net_keepouts import binds as _nk_binds
-        margin = clearance + w / 2.0
         _nname = getattr(pcb_data.nets.get(net_id), 'name', '') if net_id is not None else ''
-        for rings, (kx0, ky0, kx1, ky1), kls, nko in _keepout_areas:
+        for rings, (kx0, ky0, kx1, ky1), kls, nko, kclr in _keepout_areas:
             if not _ko_on_layer(kls, layer):
                 continue
+            margin = (clearance if kclr is None else kclr) + w / 2.0
             if nko is not None and not (_nname and _nk_binds(nko, _nname)):
                 continue
             if (max(x1, x2) < kx0 - margin or min(x1, x2) > kx1 + margin or
@@ -5812,25 +5843,26 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = pair_base(net_id, layer)
-        # `config`: the class/type-scoped .kicad_dru rules (#1491) the router
-        # held, which a shortcut must not hand back (#1561)
-        pd = _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                   base_clearance=eff, net_clearances=net_clearances,
-                                   config=config)
-        d = min(pd,
-                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff,
-                                      track_clearances=_trk_clr,  # dru track rules
-                                      config=config),
-                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff,
-                                      config=config))
+        # `config`: the class/type-scoped .kicad_dru rules (#1491, #1561, #1630) the router held
+        # every copper distance >= need, the hole floor, the edge and the keepouts: cheapest test first, stop at
+        # the first failure; the pad and segment helpers sweep only the copper that can decide `>= need` (value
+        # exact below need). The decision is the old one bit for bit.
+        need = eff + w / 2.0 - 1e-4
+        if _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                 net_clearances=net_clearances, base_clearance=eff, config=config) < need:
+            return False
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
                                     base_clearance=npth_clr)  # #1038, per-hole #760
-        ok = (d >= eff + w / 2.0 - 1e-4 and
-              hd >= npth_clr + w / 2.0 - 1e-4 and
-              edge_clears(x1, y1, x2, y2, w) and
-              keepout_clears(x1, y1, x2, y2, layer, w, net_id))
+        if hd < npth_clr + w / 2.0 - 1e-4:
+            return False
+        pd = _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                   base_clearance=eff, net_clearances=net_clearances,
+                                   config=config, need=None if _665trace else need)
+        if pd < need or _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                              net_clearances=net_clearances, base_clearance=eff,
+                                              track_clearances=_trk_clr, config=config, need=need) < need:  # dru track rules
+            return False
+        ok = edge_clears(x1, y1, x2, y2, w) and keepout_clears(x1, y1, x2, y2, layer, w, net_id)
         if _665trace and ok:
             # #665 forensics: re-check the pad distance with a FRESH pad
             # array (cache detached); a disagreement = a stale/poisoned
@@ -6938,6 +6970,28 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
     return (shortfall, t, (px - qx) / norm, (py - qy) / norm)
 
 
+def _trusted_foreign_seg_cache(fn):
+    """Run a graze pass with the foreign-segment cache TRUSTED (see _foreign_seg_arrays): the pass edits
+    copper only by splicing pcb_data.segments (a new list) or moving a via in place, and drops
+    _foreign_seg_arr_cache after every such edit, so the per-query O(segments) digest only re-proves a cache
+    that cannot be stale (on a dense board grazes() and copper_flagged() spent most of their time on that
+    digest). The flag and the cache are reset on every exit path."""
+    import functools
+
+    @functools.wraps(fn)
+    def run(results, pcb_data, *args, **kwargs):
+        prev = getattr(pcb_data, '_foreign_seg_arr_trust', False)
+        pcb_data._foreign_seg_arr_cache = None
+        pcb_data._foreign_seg_arr_trust = True
+        try:
+            return fn(results, pcb_data, *args, **kwargs)
+        finally:
+            pcb_data._foreign_seg_arr_trust = prev
+            pcb_data._foreign_seg_arr_cache = None
+    return run
+
+
+@_trusted_foreign_seg_cache
 def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                              clearance: float = 0.1,
                              max_shift: float = 0.025,
@@ -7083,20 +7137,20 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
-        # `config`: the scoped .kicad_dru rules (#1491) a shift must hold (#1561)
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=eff, net_clearances=net_clearances,
-                                      config=config),
+        # `config`: the class/type-scoped .kicad_dru rules (#1491, #1561, #1630) the router held
+        # every copper distance >= need: cheapest test first, stop at the first failure; the pad and segment
+        # helpers sweep only the copper that can decide it (decision bit-identical)
+        need = eff + w / 2.0 - 1e-4
+        if (_seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                  net_clearances=net_clearances, base_clearance=eff, config=config) < need or
+                _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      base_clearance=eff, net_clearances=net_clearances, config=config, need=need) < need or
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff,
-                                      config=config),
-                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff,
-                                      config=config))
+                                      net_clearances=net_clearances, base_clearance=eff, config=config, need=need) < need):
+            return False
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
                                     base_clearance=npth_clr)  # #760
-        return (d >= eff + w / 2.0 - 1e-4 and
-                hd >= npth_clr + w / 2.0 - 1e-4 and
+        return (hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
 
     def vk(x, y):
@@ -7131,20 +7185,18 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # only on the handful that fail this.
         eff = eff_clr(s.net_id)  # #436 own floor; foreign class excess folded in
         thr = eff + s.width / 2.0 - 1e-4
-        # #1630: `config` too, as clears() reads it -- a scoped rule or a rule
-        # binding a pair's P against its N sets that clearance, and measured
-        # at the class the pair was moved off the gap the rule allows.
-        if min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer,
-                                     base_clearance=eff, config=config),
-               _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer,
-                                     net_clearances=net_clearances, base_clearance=eff,
-                                     config=config),
-               _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer,
-                                     net_clearances=net_clearances, base_clearance=eff,
-                                     config=config)) < thr:
+        # `config`: the class/type-scoped .kicad_dru rules (#1491, #1561, #1630) the router held
+        # any copper distance < thr, cheapest first; pad and seg sweep only what can decide it (need=thr,
+        # decision bit-identical)
+        if (_seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                  s.end_x, s.end_y, s.layer,
+                                  net_clearances=net_clearances, base_clearance=eff, config=config) < thr or
+                _seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                      s.end_x, s.end_y, s.layer,
+                                      base_clearance=eff, config=config, need=thr) < thr or
+                _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                      s.end_x, s.end_y, s.layer,
+                                      net_clearances=net_clearances, base_clearance=eff, config=config, need=thr) < thr):
             return True
         # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308),
         # with each hole's own override folded into the distance (#760).
@@ -7357,6 +7409,7 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
             nets_changed, original_to_remove, added_segments)
 
 
+@_trusted_foreign_seg_cache
 def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                        clearance: float = 0.1, hole_to_hole: float = 0.20,
                        max_shift: float = 0.025,

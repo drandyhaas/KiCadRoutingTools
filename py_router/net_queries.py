@@ -188,6 +188,43 @@ def board_net_names(pcb_data) -> Set[str]:
     return names
 
 
+def account_net_patterns(patterns, pcb_data):
+    """Each INCLUSION pattern of PATTERNS on its own, against the board's
+    nets (#1815): (patterns naming no net of the board, {pattern: the nets it
+    names}). An exclusion selects nothing by itself, so it is not accounted.
+    Matched with `net_pattern_matches`, as `matches_net_filter` matches an
+    inclusion, so a pattern counted here selects the same nets there."""
+    names = sorted(board_net_names(pcb_data))
+    known = set(names)
+    no_net, matched = [], {}
+    for p in patterns:
+        inc = split_net_patterns([p], known)[0]
+        if not inc:
+            continue
+        hit = [n for n in names if net_pattern_matches(n, inc[0])]
+        if hit:
+            matched[p] = hit
+        else:
+            no_net.append(p)
+    return no_net, matched
+
+
+def no_net_patterns_note(no_net, flag: str, commas: bool = False) -> str:
+    """The line naming the NO_NET patterns of FLAG (`account_net_patterns`'
+    first answer), with the accepted spellings when one holds whitespace: it
+    was read as ONE pattern, since a net name may hold a space (#1553).
+    COMMAS says whether FLAG also splits a token at its commas."""
+    note = (f"{flag} pattern(s) matching no net of the board: "
+            + ', '.join(repr(p) for p in no_net))
+    spaced = [p for p in no_net if any(ch.isspace() for ch in p)]
+    if spaced:
+        note += (f" ({', '.join(repr(p) for p in spaced)} was read as one "
+                 f"pattern holding whitespace: give each pattern its own "
+                 f"argument" + (", or join them with commas" if commas else "")
+                 + ")")
+    return note
+
+
 def literal_net_patterns(patterns: Optional[List[str]],
                          known_net_names) -> Optional[List[str]]:
     """PATTERNS with each one that spells a board net verbatim made literal.
@@ -3438,6 +3475,20 @@ def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[
     # and `unique` is a set of STRINGS, whose order CPython randomizes per
     # process. Layer order feeds pad expansion and per-layer passes.
     return sorted(unique, key=lambda l: (layer_order.get(l, len(routing_layers)), l))
+
+
+def pad_on_layer(pad, layer: str) -> bool:
+    """True when PAD stands on copper LAYER as an obstacle: a drilled pad (a
+    plated barrel, or an NPTH hole) on every layer, any other pad on the
+    copper layers its `layers` names, the wildcards read as
+    `expand_pad_layers` reads them (``*.Cu`` every layer, ``F&B.Cu`` front
+    and back). Cheap enough for a per-pad, per-candidate loop."""
+    if (getattr(pad, 'drill', 0) or 0) > 0:
+        return True
+    layers = getattr(pad, 'layers', None) or ()
+    return (layer in layers or '*.Cu' in layers
+            or (layer in ('F.Cu', 'B.Cu')
+                and ('F&B.Cu' in layers or 'F&B' in layers)))
 
 
 def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:

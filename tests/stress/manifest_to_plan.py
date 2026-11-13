@@ -401,6 +401,8 @@ BOOL_FLAGS = {
     # (--no-smoothing is in INVERTED_BOOL_FLAGS below: it used to be here as
     # `no_smoothing`, a name no control or alias matched.)
     '--add-gnd-vias': 'add_gnd_vias',
+    # route.py's mask-artwork keep-outs (a checkbox of the same name).
+    '--mask-keepouts': 'mask_keepouts',
     # #1630: route.py / route_diff.py record the --impedance target without
     # solving widths (a checkbox of the same name on each tab). A switch, so
     # here and not in FLAG_PARAMS, which would consume the next argument.
@@ -490,6 +492,8 @@ INVERTED_BOOL_FLAGS = {
     # writes back -- the CLI's per-step semantics, since reset_params_to_
     # defaults re-ticks the box before every step.
     '--no-fix-drc-settings': 'fix_drc_check',
+    # route.py's mask-artwork keep-outs, on by default (a checkbox).
+    '--no-mask-keepouts': 'mask_keepouts',
 }
 # Repeatable nargs='+' flags (argparse action='append'): each OCCURRENCE is one
 # group, so the plan param is a list of lists. route.py's --length-match-group
