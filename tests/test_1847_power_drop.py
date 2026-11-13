@@ -188,6 +188,34 @@ def networks(td):
        f"a second source in parallel lowers the drop: {drops(two)['U1.1']} mV")
 
 
+def _part(ref, x, y, pads):
+    """A footprint at (x, y) with 0.4 mm round F.Cu pads ``(number, dx, dy)``."""
+    body = ''.join(f'\t\t(pad "{num}" smd circle\n\t\t\t(at {dx} {dy})\n\t\t\t(size 0.4 0.4)\n'
+                   f'\t\t\t(layers "F.Cu")\n\t\t\t(net "+3V3")\n\t\t)\n'
+                   for num, dx, dy in pads)
+    return (f'\t(footprint "P"\n\t\t(layer "F.Cu")\n\t\t(at {x} {y})\n'
+            f'\t\t(property "Reference" "{ref}"\n\t\t\t(at 0 0 0)\n'
+            f'\t\t\t(layer "F.SilkS")\n\t\t)\n{body}\t)\n')
+
+
+def shared_numbers(td):
+    print("2c. pads of one part that share a number are one pin")
+    # U4 has two pads numbered 1, 4 mm apart; each runs its own track to U5.1
+    twin = (_part('U4', 30, 8, [('1', 0, -2), ('1', 0, 2)]) + _part('U5', 40, 8, [('1', 0, 0)])
+            + _seg(30, 6, 40, 8) + _seg(30, 10, 40, 8))
+    pcb, nid, _ = load(td, 'n', twin)
+    half = r_track(math.hypot(10, 2), 0.15) / 2.0 * 1e3
+    res = power_drop.solve_net(pcb, nid, ['U4.1'], {'U5.1': 1.0})
+    ok(near(drops(res)['U5.1'], half) and res['complete'],
+       f"a source names both pads of its number, so the two tracks share the current: "
+       f"{drops(res)['U5.1']} mV (by hand {half:.4f}, one track alone {2 * half:.4f})")
+    res = power_drop.solve_net(pcb, nid, ['U5.1'], {'U4.1': 1.0})
+    amps = sorted(round(s['current_a'], 6) for s in res['segments'] if s['start'][0] == 30)
+    ok(near(drops(res)['U4.1'], half) and amps == [0.5, 0.5],
+       f"a load draws through both pads of its number: {drops(res)['U4.1']} mV, "
+       f"track currents {amps}")
+
+
 def overlaps(td):
     print("2b. copper joins where it overlaps, as KiCad connects it")
     trunk = r_track(12, 0.15) + r_track(7, 0.15) + 2 * r_via()
@@ -357,6 +385,7 @@ def main():
         fixture(td)
         networks(td)
         overlaps(td)
+        shared_numbers(td)
         pours(td)
         disclosed(td)
         command(td)

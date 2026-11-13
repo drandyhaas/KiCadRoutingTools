@@ -20,7 +20,8 @@ The loads file states what a board file cannot:
     {"nets": {"+3V3": {"sources": ["J1.1"],
                        "loads": {"U1.1": 0.5, "U2.1": 0.3}}}}
 
-(pad references as REF.PAD, currents in A). A pour is solved as a mesh of
+(pad references as REF.PAD, every pad of that part and number as one
+terminal; currents in A). A pour is solved as a mesh of
 its fill (--pour-mesh-mm). What the solve leaves out is in the report:
 thermal-relief spokes (a pad's contact with a pour is taken as solid), a
 pour with no fill model, and footprint graphic copper. A via's resistance

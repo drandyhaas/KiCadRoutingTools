@@ -3292,6 +3292,10 @@ what each load draws (pads as `REF.PAD`, currents in A):
                    "loads": {"U1.1": 0.5, "U2.1": 0.3}}}}
 ```
 
+Pads of one part that share a number are one pin: `J1.1` names every pad of
+`J1` numbered `1`, joined as one terminal, so a connector's two pads `1` both
+feed and an exposed pad split into several pads of one number all draw.
+
 - A track segment is `rho * length / (width * thickness)`, at its layer's own
   copper weight from the stackup (1 oz without one). A via is a barrel
   between the layers it is joined on, `rho * height / (pi * (drill + wall) *

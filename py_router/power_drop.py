@@ -13,7 +13,8 @@ This module builds the net's copper into a resistor network and solves it:
     is the finished hole, the plating the wall around it -- rated on the
     same IPC-2152 basis as a track of that cross-section;
   * a pad is a junction: every track, via and pad whose copper meets its
-    copper joins there.
+    copper joins there. Pads of one part that share a number are one pin,
+    joined as one terminal: a source or a load named REF.PAD is all of them.
 
 Copper joins where it OVERLAPS, as KiCad connects it: a track meets a pad,
 a via, or another track wherever their copper touches -- a track end short
@@ -160,7 +161,8 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
               temp_rise_c: float = 10.0,
               pour_mesh_mm: float = DEFAULT_POUR_MESH_MM) -> dict:
     """Solve one net. ``sources`` are pad references ("J1.1") held at 0 V of
-    drop; ``loads`` maps a pad reference to the current it draws, in A.
+    drop; ``loads`` maps a pad reference to the current it draws, in A. A
+    reference names every pad of that part with that number, as one terminal.
 
     Returns a dict: `loads` (each with `drop_mv`, or `unreached` when no
     copper path joins it to a source), `vias` and `segments` (each
@@ -183,7 +185,11 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
     net_name = net.name if net else f"net_{net_id}"
     pads = [p for p in (getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id, [])
             if getattr(p, 'pad_type', '') != 'np_thru_hole']
-    by_ref = {pad_ref(p): p for p in pads}
+    # pads of one part that share a number are one pin: a source or a load
+    # names every one of them, joined as one terminal
+    by_ref: Dict[str, List[int]] = {}
+    for k, p in enumerate(pads):
+        by_ref.setdefault(pad_ref(p), []).append(k)
     segs = [s for s in pcb_data.segments if s.net_id == net_id
             and not getattr(s, 'graphic', False) and s.width and s.width > 0
             and s.layer in copper]
@@ -211,6 +217,10 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
         for other in ids[1:]:
             nw.join(ids[0], other)
         pad_nodes.append(nodes)
+    for members in by_ref.values():
+        firsts = [next(iter(pad_nodes[k].values())) for k in members if pad_nodes[k]]
+        for other in firsts[1:]:
+            nw.join(firsts[0], other)
     via_nodes: List[Dict[str, int]] = []
     for v in vias:
         via_nodes.append({layer: nw.node() for layer in via_copper_layers(v, copper)})
@@ -448,8 +458,11 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
         return idx[nw.find(node)]
 
     def pad_node(ref):
-        nodes = pad_nodes[pads.index(by_ref[ref])]
-        return nid(next(iter(nodes.values()))) if nodes else None
+        """The terminal of ``ref``: every pad of that part and number."""
+        for k in by_ref[ref]:
+            if pad_nodes[k]:
+                return nid(next(iter(pad_nodes[k].values())))
+        return None
 
     src = {pad_node(r) for r in sources} - {None}
     adj: Dict[int, set] = {i: set() for i in range(n)}
