@@ -28,7 +28,8 @@ Checks (no routing):
      length window met, and no NOT GRADED line;
   2. each row's delays are KiCad's, through check_drc's own length rows;
   3. the readers: a time bound is a 'ps' rule only for a reader that asks,
-     and `DelayModel` says why a net measures 0 ps.
+     `DelayModel` says why a net measures 0 ps, and a project that cannot
+     be parsed gives no profiles with a warning rather than silently.
 """
 import contextlib
 import copy
@@ -223,6 +224,21 @@ def readers(td):
     nid = next(i for i, n in pcb.nets.items() if n.name == 'P')
     ps, why = DelayModel(path, pcb).net_delay(nid)
     ok(ps == 0.0 and 'no tuning profile' in why, f"no profile: 0 ps, {why!r}")
+    bad = os.path.join(td, 'bad.kicad_pcb')
+    with open(bad, 'w', encoding='utf-8') as fh:
+        fh.write('')
+    with open(os.path.join(td, 'bad.kicad_pro'), 'w', encoding='utf-8') as fh:
+        fh.write('{"tuning_profiles": ')
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        got = read_tuning_profiles(bad)
+    ok(got == ({}, []) and 'could not read' in err.getvalue()
+       and 'tuning profiles are not read' in err.getvalue(),
+       f"a project that cannot be parsed gives no profiles and says so: {err.getvalue()!r}")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        got = read_tuning_profiles(os.path.join(td, 'none.kicad_pcb'))
+    ok(got == ({}, []) and not err.getvalue(), "no project: no profiles, no warning")
 
 
 def main():

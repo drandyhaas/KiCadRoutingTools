@@ -21,11 +21,22 @@ Measured on kicad-cli 10.0.8 (tests/test_1846_time_domain_rules.py):
 """
 import json
 import os
+import sys
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 #: profile delays are stored in attoseconds per mm
 _AS_PER_PS = 1e6
 _DEFAULT_PRIORITY = 2147483647
+_WARNED: set = set()
+
+
+def _warn_once(key: str, text: str) -> None:
+    """One warning per project per process: the profiles are read once per
+    board, but a run may build several readers on one project."""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    print(f"WARNING (tuning profiles, #1846): {text}", file=sys.stderr)
 
 
 class TuningProfile(NamedTuple):
@@ -40,12 +51,22 @@ def read_tuning_profiles(board_path: str
                          ) -> Tuple[Dict[str, TuningProfile], List[Tuple[int, str, str]]]:
     """(profiles by name, [(priority, class name, profile name)]) from the
     board's sibling `.kicad_pro`; ({}, []) when there is no project or it
-    declares none."""
+    declares none. A project that exists but cannot be read or parsed also
+    gives ({}, []), with a warning, so a ps rule or a time-matched net is not
+    silently given no profile."""
     pro = os.path.splitext(board_path)[0] + '.kicad_pro' if board_path else ''
+    if not pro or not os.path.isfile(pro):
+        return {}, []
     try:
         with open(pro, encoding='utf-8') as fh:
             proj = json.load(fh)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        _warn_once(pro, f"could not read {pro} ({e}); its tuning profiles are "
+                        f"not read, so no net is timed with one")
+        return {}, []
+    if not isinstance(proj, dict):
+        _warn_once(pro, f"{pro} is not a JSON object; its tuning profiles are "
+                        f"not read, so no net is timed with one")
         return {}, []
     profiles: Dict[str, TuningProfile] = {}
     block = proj.get('tuning_profiles') or {}
@@ -64,7 +85,8 @@ def read_tuning_profiles(board_path: str
             float(via) / _AS_PER_PS if isinstance(via, (int, float)) else 0.0,
             len(p.get('via_overrides') or []))
     classes = []
-    for c in ((proj.get('net_settings') or {}).get('classes') or []):
+    settings = proj.get('net_settings')
+    for c in ((settings if isinstance(settings, dict) else {}).get('classes') or []):
         if isinstance(c, dict) and c.get('tuning_profile'):
             name = str(c.get('name', 'Default'))
             prio = c.get('priority')
