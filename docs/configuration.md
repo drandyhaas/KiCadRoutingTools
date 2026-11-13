@@ -349,10 +349,18 @@ values and every rule BEFORE it in the file, while a per-layer rule or a
 class-, type- or net-scoped rule that comes AFTER it still binds its own
 pairs there. Not routed to, and said so: a condition with more than
 rule-area predicates (`A.insideArea('ROOM') && A.NetClass == 'HS'`) and
-`enclosedByArea()`. A coupled diff pair is laid at one gap, so inside a
-tightened area KiCad grades its P against its N at the area's value (the
-custom rule outranks the pair's implicit gap rule) and the run warns per pair
-when its gap is below it.
+`enclosedByArea()`; a rule with another constraint beside its clearance and
+track width (a `disallow`) is applied whole or not at all, by the reader of
+that constraint. Inside a
+tightened area KiCad grades a diff pair's P against its N at the area's
+value (the custom rule outranks the pair's implicit gap rule), and a coupled
+pair is laid at one gap, so a pair built below the area's value either keeps
+out of the area at its own gap (the area does not lie on the span of its
+pads: a net-filtered keep-out takes away only a detour through it) or, where
+the area lies on that span, is built at the area's value for the run -- its
+impedance changes, said per pair on the console and in
+`JSON_SUMMARY.area_pair_gaps` (`how` `around` / `widened`, `built_gap`,
+`routed`). The run still warns on a pair whose shipped gap is below the area.
 
 **Track width in a rule area.** A `track_width` rule with the same kind of
 condition gives the room a width, its `opt` value or else its `min`, raised
