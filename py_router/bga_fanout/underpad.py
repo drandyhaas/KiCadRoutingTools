@@ -1401,6 +1401,8 @@ def generate_underpad_escape(footprint: Footprint,
                 _s.width / 2 + track_width / 2 + clearance + _cx(_s.net_id)),
                 frozenset({_s.net_id}))
     filled_gate = FilledCopperGate(pcb_data)
+    from check_drc import HoleRuleGate
+    hole_gate = HoleRuleGate(pcb_data)         # #1853
 
     def _filled_cl(sh):
         return clearance + _cx(sh.net_id)
@@ -1767,6 +1769,8 @@ def generate_underpad_escape(footprint: Footprint,
             return "via vs the board edge"
         if filled_gate.via_hit(x, y, 2 * vr, net_id, _filled_cl) is not None:
             return "via in a foreign filled graphic"
+        if hole_gate and hole_gate.via_why(x, y, 2 * vr, 2 * vdr, net_id):
+            return "via vs a hole_clearance rule"
         for (ox, oy, orr, odr, onid) in ctx['vias']:
             d = math.hypot(ox - x, oy - y)
             if d < vdr + odr + _h2h - 1e-6:

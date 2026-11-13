@@ -637,9 +637,14 @@ largest value the rules give any other net against it. A rule of severity `ignor
 binds nothing, and a rule whose condition the tools do not read is named `NOT
 honoured` and left to the grade. The step prints `.kicad_dru rule 'x':
 hole_clearance min 0.254 mm: routed tracks and vias are kept that far from the
-holes of other nets' vias and pads`. The fan-out and plane steps place their vias
-on maps of their own that do not read these rules yet; `check_drc.py` grades their
-copper at the rule all the same.
+holes of other nets' vias and pads`. The generators that test a via site by
+their own means ask the same grader: `bga_fanout.py` (dogbone and under-pad),
+`qfn_fanout.py`, `route_planes.py --add-gnd-vias` and the plane taps each refuse a
+site through `check_drc.HoleRuleGate` (the board's copper and holes indexed once)
+or `hole_rule_refusal`. The gate reads the board as it stood when the step began:
+two vias the same step lays are kept apart by the step's own tests, at the copper
+clearance and the hole-to-hole minimum, and `check_drc.py` grades the result at
+the rule.
 
 **A rule file KiCad refuses.** One thing KiCad cannot load in a `.kicad_dru` makes
 it enforce NONE of the file's rules, with exit 0 and nothing printed (measured on

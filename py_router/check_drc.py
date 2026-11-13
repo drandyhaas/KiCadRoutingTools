@@ -3078,12 +3078,9 @@ def hole_rule_refusal(pcb_data, dr, segments=(), vias=()):
     segments, vias = list(segments), list(vias)
     if dr is None or not (segments or vias):
         return ''
-    mins = [(r.constraints['hole_clearance'].get('min') or 0.0) for r in dr.rules
-            if 'hole_clearance' in r.constraints
-            and r.severity not in ('ignore', 'exclusion')]
-    if not mins or max(mins) <= 0.0:
+    reach = _hole_rule_reach(dr)
+    if reach <= 0.0:
         return ''
-    reach = max(mins)
     xs, ys = [], []
     for s in segments:
         hw = (s.width or 0.0) / 2.0
@@ -3115,9 +3112,24 @@ def hole_rule_refusal(pcb_data, dr, segments=(), vias=()):
         if pads:
             fps[key] = _HoleGatePads(pads)
     board = _HoleGateBoard(pcb_data.nets, near_vias + vias, near_segs + segments, fps)
+    return _hole_gate_verdict(board, pcb_data, dr, segments, vias)
+
+
+def _hole_rule_reach(dr) -> float:
+    """The widest hole_clearance a reporting rule of `dr` asks, 0.0 with none."""
+    if dr is None:
+        return 0.0
+    return max([(r.constraints['hole_clearance'].get('min') or 0.0) for r in dr.rules
+                if 'hole_clearance' in r.constraints
+                and r.severity not in ('ignore', 'exclusion')] or [0.0])
+
+
+def _hole_gate_verdict(board, pcb_data, dr, segments, vias) -> str:
+    """`hole_rule_grade` over `board` (the copper near the candidates, and the
+    candidates), read for the first row a candidate is in."""
     copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
                   or dr.copper_layers)
-    nets = {getattr(i, 'net_id', 0) for i in segments + vias}
+    nets = {getattr(i, 'net_id', 0) for i in list(segments) + list(vias)}
     rows, _unread, _drop = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets)
     via_at = {(round(v.x, 6), round(v.y, 6)) for v in vias}
     seg_at = {(round(s.start_x, 6), round(s.start_y, 6), round(s.end_x, 6),
@@ -3137,6 +3149,97 @@ def hole_rule_refusal(pcb_data, dr, segments=(), vias=()):
                     f"from the hole of {r['hole_ref']} ({r['net1']}), inside "
                     f"hole_clearance {r['required_mm']:g}mm ({r['required_source']})")
     return ''
+
+
+class HoleRuleGate:
+    """`hole_rule_refusal` for a generator that asks about many via sites on
+    one board (#1853): the fan-out engines, the GND vias, the plane taps. The
+    board's copper and holes are indexed once, on a 1 mm grid, as they stand
+    when the gate is built; copper the generator lays afterwards is its own to
+    keep apart. False (and free) on a board with no hole_clearance rule.
+
+    ``dr``: the board's `design_rules.DesignRules`; read from the board's
+    sibling project and rule file when None."""
+
+    CELL = 1.0
+
+    def __init__(self, pcb_data, dr=None, board_path=None):
+        self.pcb_data = pcb_data
+        if dr is None:
+            path = board_path or getattr(pcb_data, 'source_path', '') or ''
+            if path and os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
+                try:
+                    from design_rules import DesignRules
+                    dr = DesignRules.from_project(
+                        pcb_data, path, copper_layers=list(
+                            getattr(getattr(pcb_data, 'board_info', None),
+                                    'copper_layers', None) or []) or None)
+                except Exception:                                # noqa: BLE001
+                    dr = None
+        self.dr = dr
+        self.reach = _hole_rule_reach(dr)
+        self._grid: Dict[Tuple[int, int], list] = defaultdict(list)
+        self._memo: Dict[tuple, str] = {}
+        if self.reach <= 0.0:
+            return
+        for v in pcb_data.vias:
+            hs = v.size / 2.0
+            self._put(('via', v, None), v.x - hs, v.y - hs, v.x + hs, v.y + hs)
+        for sg in pcb_data.segments:
+            hw = (sg.width or 0.0) / 2.0
+            self._put(('seg', sg, None), min(sg.start_x, sg.end_x) - hw,
+                      min(sg.start_y, sg.end_y) - hw, max(sg.start_x, sg.end_x) + hw,
+                      max(sg.start_y, sg.end_y) + hw)
+        for key, fp in pcb_data.footprints.items():
+            for p in fp.pads:
+                pr = max(math.hypot(p.size_x, p.size_y), 2.0 * (p.drill or 0.0)) / 2.0
+                self._put(('pad', p, key), p.global_x - pr, p.global_y - pr,
+                          p.global_x + pr, p.global_y + pr)
+
+    def __bool__(self):
+        return self.reach > 0.0
+
+    def _put(self, entry, x0, y0, x1, y1):
+        c = self.CELL
+        for gx in range(int(math.floor(x0 / c)), int(math.floor(x1 / c)) + 1):
+            for gy in range(int(math.floor(y0 / c)), int(math.floor(y1 / c)) + 1):
+                self._grid[(gx, gy)].append(entry)
+
+    def via_why(self, x, y, size, drill, net_id, layers=('F.Cu', 'B.Cu'),
+                via_type=None) -> str:
+        """Why a via of `net_id` at (x, y) may not be laid under the board's
+        hole_clearance rules ('' when it may)."""
+        if self.reach <= 0.0:
+            return ''
+        key = (round(x, 6), round(y, 6), round(size, 6), round(drill or 0.0, 6),
+               int(net_id or 0), tuple(layers), via_type)
+        hit = self._memo.get(key)
+        if hit is not None:
+            return hit
+        from kicad_parser import Via
+        cand = Via(x=x, y=y, size=size, drill=drill, layers=list(layers),
+                   net_id=int(net_id or 0))
+        if via_type:
+            cand.via_type = via_type
+        r = size / 2.0 + self.reach
+        c = self.CELL
+        seen, vias, segs, pads = set(), [], [], {}
+        for gx in range(int(math.floor((x - r) / c)), int(math.floor((x + r) / c)) + 1):
+            for gy in range(int(math.floor((y - r) / c)), int(math.floor((y + r) / c)) + 1):
+                for kind, obj, key_fp in self._grid.get((gx, gy), ()):
+                    if id(obj) in seen:
+                        continue
+                    seen.add(id(obj))
+                    if kind == 'via':
+                        vias.append(obj)
+                    elif kind == 'seg':
+                        segs.append(obj)
+                    else:
+                        pads.setdefault(key_fp, []).append(obj)
+        board = _HoleGateBoard(self.pcb_data.nets, vias + [cand], segs,
+                               {k: _HoleGatePads(v) for k, v in pads.items()})
+        out = self._memo[key] = _hole_gate_verdict(board, self.pcb_data, self.dr, [], [cand])
+        return out
 
 
 def hole_row_key(v: dict):

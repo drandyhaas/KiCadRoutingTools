@@ -947,6 +947,8 @@ def manage_vias(
                            laid_copper_edge_clearance)
     _edge_gate = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
     _filled_gate = FilledCopperGate(pcb_data)
+    from check_drc import HoleRuleGate
+    _hole_gate = HoleRuleGate(pcb_data)        # #1853
 
     def via_in_pad_conflict(x, y, v_size, v_drill, net_id):
         """Reason a via physically cannot go at (x, y), or None (#370 B4):
@@ -980,6 +982,8 @@ def manage_vias(
             return "via ring vs the board edge"
         if _filled_gate.via_hit(x, y, v_size, net_id, clearance) is not None:
             return "via in a foreign filled graphic"
+        if _hole_gate and _hole_gate.via_why(x, y, v_size, v_drill or 0.0, net_id):
+            return "via vs a hole_clearance rule"
         for s in pcb_data.segments:
             if s.net_id == net_id:
                 continue

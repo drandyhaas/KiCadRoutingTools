@@ -1312,8 +1312,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from check_drc import _point_on_board as _pt_on_board
     # #1682: a filled graphic's interior, on the nets this run erases from its
     # map too (a fanned net's shape is foreign to the part's other pins).
-    from check_drc import FilledCopperGate
+    from check_drc import FilledCopperGate, HoleRuleGate
     _filled_gate = FilledCopperGate(pcb_data)
+    _hole_gate = HoleRuleGate(pcb_data)        # #1853
 
     # #1568: each pad with the radius about its centre that holds all its
     # copper, so `via_clears` calls the grader only on a pad the via's
@@ -1377,6 +1378,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
         if _filled_gate and _filled_gate.via_hit(
                 vx, vy, via_size, net_id, lambda sh: _pc(net_id, sh.net_id)) is not None:
+            return False
+        if _hole_gate and _hole_gate.via_why(vx, vy, via_size, via_drill, net_id):
             return False
         for fx, fy, fs, fn, fd in foreign_vias:
             # The DRILLS are an obstacle whatever the net: hole-to-hole is
