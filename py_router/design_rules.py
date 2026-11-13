@@ -3184,7 +3184,8 @@ class AreaIndex:
         for r in rules.rules:
             if r.area_scoped_condition is not None:
                 wanted |= _ast_area_names(r.area_scoped_condition, set())
-        self.areas: List[tuple] = []          # (name, layers, polygon, bounds)
+        # (name, layers, polygon, bounds, polygon grown by 1e-9 for `contains`)
+        self.areas: List[tuple] = []
         board = getattr(pcb_data, 'board_info', None)
         copper = list(rules.copper_layers or getattr(board, 'copper_layers', None) or ())
         for ko in (getattr(board, 'keepouts', None) or []) if wanted else []:
@@ -3201,7 +3202,7 @@ class AreaIndex:
             if g.is_empty:
                 continue
             self.areas.append((name, _area_copper_layers(ko.get('layers'), copper),
-                               g, g.bounds))
+                               g, g.bounds, g.buffer(1e-9)))
         self.names = frozenset(a[0] for a in self.areas)
         for r in rules.rules:
             if r.area_scoped_condition is not None and not (
@@ -3216,7 +3217,7 @@ class AreaIndex:
         layers = set(layers)
         gx0, gy0, gx1, gy1 = geom.bounds
         shape = None
-        for name, alayers, g, (x0, y0, x1, y1) in self.areas:
+        for name, alayers, g, (x0, y0, x1, y1), grown in self.areas:
             on = layers & alayers
             if not on or gx1 + r < x0 or gx0 - r > x1 or gy1 + r < y0 or gy0 - r > y1:
                 continue
@@ -3229,7 +3230,7 @@ class AreaIndex:
                 over.add((name, layer))
             if shape is None:
                 shape = geom.buffer(r) if r > 0 else geom
-            if g.buffer(1e-9).contains(shape):
+            if grown.contains(shape):
                 for layer in on:
                     inside.add((name, layer))
         return frozenset(over), frozenset(inside)
