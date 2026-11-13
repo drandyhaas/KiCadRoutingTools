@@ -400,6 +400,68 @@ def derive_edge_bands(floors, pcb_data) -> List[dict]:
             for (track, via), names in sorted(groups.items(), key=lambda kv: repr(kv[0]))]
 
 
+#: A contact finger is a strip the socket's spring wipes along: over the
+#: human corpus every mating edge's pads have a median long/short ratio of at
+#: least 3.45 (most 4-7), while every pogo, touch, solder-pad or SMD-header
+#: footprint the plug predicates also accept is at most 2.0 (a Tag-Connect
+#: pad is round, 1.0).
+FINGER_MIN_ASPECT = 3.0
+
+
+def _elongated_fingers(fp) -> bool:
+    """Whether a footprint's netted copper pads are strips: their median
+    long/short side ratio is at least FINGER_MIN_ASPECT."""
+    from paste_apertures import pad_has_copper
+    ar = sorted(max(p.size_x, p.size_y) / min(p.size_x, p.size_y)
+                for p in fp.pads if p.net_id and pad_has_copper(p)
+                and p.size_x > 0 and p.size_y > 0)
+    return bool(ar) and ar[len(ar) // 2] >= FINGER_MIN_ASPECT
+
+
+def derive_contact_fingers(pcb_data) -> List[dict]:
+    """One via-only region per copper pad of a mating-contact footprint
+    (#1116): a PCB-edge plug (`floorplan.is_board_copper_plug`, #1098) or
+    card-edge fingers (`part_class.is_card_fingers`) whose fingers stand at
+    the outline (`floorplan.fingers_at_outline`) and are strips
+    (`_elongated_fingers`). A drilled hole in a
+    contact finger damages the plating the socket wipes against, so no net's
+    via may touch the pad's copper; tracks stay allowed, since they must
+    leave the finger. [] when the board has no such footprint.
+
+    The outline and shape tests are what separate a mating edge from the
+    other unassembled pad footprints the two predicates accept -- a
+    Tag-Connect or pogo-pin target, touch pads, solder pads, an SMD header --
+    where human boards do drop vias. Distance alone cannot: over the corpus
+    a real edge's fingers stand up to 1.0 mm from the outline (Zorro3) and a
+    Tag-Connect at the edge stands 1.0 mm from it too. A finger is a strip
+    (`_elongated_fingers`), a pogo target a dot."""
+    import _placer_path  # noqa: F401  (placement lives in py_placer/)
+    from placement.floorplan import is_board_copper_plug, fingers_at_outline
+    from placement.legality import BoardOutlineGate
+    from placement.part_class import is_card_fingers
+    from check_pads import pad_outline_polygon
+    from paste_apertures import pad_has_copper
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    names = frozenset(n.name for nid, n in pcb_data.nets.items() if nid and n.name)
+    out: List[dict] = []
+    gate = None
+    for ref, fp in sorted((getattr(pcb_data, 'footprints', None) or {}).items()):
+        if not (is_board_copper_plug(fp) or is_card_fingers(fp)):
+            continue
+        if gate is None:
+            gate = BoardOutlineGate(pcb_data.board_info, 0.0)
+        if not (fingers_at_outline(fp, gate) and _elongated_fingers(fp)):
+            continue
+        for p in fp.pads:
+            if not pad_has_copper(p) or p.size_x <= 0 or p.size_y <= 0:
+                continue
+            out.append({'name': f"contact finger {ref}.{p.pad_number}", 'rule': None,
+                        'polygon': pad_outline_polygon(p), 'holes': [],
+                        'layers': {l for l in p.layers if l in copper} or set(copper),
+                        'tracks_allowed': True, 'vias_allowed': False, 'nets': names})
+    return out
+
+
 def binds(ko: dict, net_name: str) -> bool:
     """True when keep-out `ko` forbids its items to net `net_name`."""
     return net_name in ko.get('nets', ())
@@ -544,7 +606,7 @@ def block(obstacles, pcb_data, net_ids: Iterable[int], config):
 
     Via cells reach every via map the list twins (add/remove_vias_list) do:
     rung 0 at the run's via, the #568 small rung at the run's via (a superset
-    for the smaller fab via), and each #530 per-net rung at its OWN via
+    for the smaller fab via) when the map populates it, and each #530 per-net rung at its OWN via
     (#1226 `_stamp_rungs_at_own_via`, whose remove twin re-derives the same
     rows), so a search at any rung sees the region."""
     if obstacles is None or not getattr(pcb_data, '_net_keepouts', None):
@@ -553,8 +615,12 @@ def block(obstacles, pcb_data, net_ids: Iterable[int], config):
     if not idx:
         return lambda: None
     cells, vias = _cells_for(pcb_data, idx, config)
-    from obstacle_map import _rung_small_armed, _stamp_rungs_at_own_via
-    small = _rung_small_armed() and hasattr(obstacles, 'add_blocked_vias_small_batch')
+    from obstacle_map import (_rung_small_armed, _stamp_rungs_at_own_via,
+                              populated_via_rungs)
+    # #1070: an unpopulated small rung falls back to rung 0, which sees the
+    # region; stamped, it would hold the region ALONE (a rescue clone map)
+    small = (_rung_small_armed() and hasattr(obstacles, 'add_blocked_vias_small_batch')
+             and 1 in populated_via_rungs(obstacles))
     rungs = len(vias) and hasattr(obstacles, 'rung_count')
     if len(cells):
         obstacles.add_blocked_cells_batch(cells)
