@@ -2977,6 +2977,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"Via span (#1842): {_span_type1842} vias {_span1842[0]}-{_span1842[-1]}; "
                   f"routing on {', '.join(layers)} only, and only copper on "
                   f"{', '.join(_span1842)} (and drilled pads) blocks a via site")
+            # copper the step could not lay again stays where it is
+            from via_span import hold_outside_copper as _hold1842
+            _held1842 = _hold1842(pcb_data, _span1842)
+            if _held1842:
+                print(f"  {_held1842} existing track(s) and via(s) with copper outside the "
+                      f"span are held in place for this step")
             if _span_type1842 == 'micro' and via_from_class:
                 # no via size was asked for: a micro via span draws the
                 # Default class's MICRO via on every net (a class's

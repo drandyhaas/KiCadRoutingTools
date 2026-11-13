@@ -26,7 +26,13 @@ Checks:
      selected nets, joined by a short track, and routes nothing; a second
      step, `--via-span In1.Cu In6.Cu`, then routes the nets on the inner
      layers from those landings with buried vias In1.Cu-In6.Cu, and laid
-     copper is clean in check_drc after each step.
+     copper is clean in check_drc after each step. That step holds the
+     copper it could not lay again -- the escapes -- in place: every micro
+     via and stub is still there afterwards, on the nets it did not complete
+     too, while its own routes are still ripped and retried;
+  7. a board whose micro vias are IN the pads is routed from them the same
+     way, and the inner step lays nothing on a layer outside its span (its
+     in-pad rescue used to put a stub on F.Cu).
 """
 import contextlib
 import io
@@ -192,6 +198,13 @@ def escapes(td, board):
        f"the inner step routes from the landings: {n} of 36 nets")
     pcb = load(evidence(step2, 'the inner-routed board'))
     buried = [v for v in pcb.vias if v.via_type == 'buried']
+    micro = [v for v in pcb.vias if v.via_type == 'micro']
+    stubs = [s for s in pcb.segments if s.layer == 'F.Cu']
+    ok('existing track(s) and via(s) with copper outside the span are held in place'
+       in r.stdout and len(micro) == 72 and len(stubs) == 72,
+       f"the step keeps every escape: {len(micro)} micro vias and {len(stubs)} stubs "
+       f"of 72, though {36 - n} net(s) did not complete")
+    ok('Ripping' in r.stdout, "and it still rips and retries its own routes")
     ok(len(buried) > 0 and {tuple(v.layers) for v in buried} == {('In1.Cu', 'In6.Cu')}
        and {v.via_type for v in pcb.vias} == {'micro', 'buried'},
        f"{len(buried)} buried vias In1.Cu-In6.Cu beside the micro vias, no through via")
@@ -204,6 +217,45 @@ def escapes(td, board):
     ok(True, "check_drc is clean after each step")
 
 
+def in_pad(td, board):
+    print("7. the inner sub-stack from micro vias in the pads")
+    pcb = load(board)
+    add = ''
+    for nid, pads in sorted(pcb.pads_by_net.items()):
+        name = pcb.nets[nid].name if nid in pcb.nets else ''
+        if not name.startswith('S'):
+            continue
+        for p in pads:
+            add += (f'\t(via micro\n\t\t(at {p.global_x} {p.global_y})\n\t\t(size 0.25)\n'
+                    f'\t\t(drill 0.1)\n\t\t(layers "F.Cu" "In1.Cu")\n'
+                    f'\t\t(net "{name}")\n\t)\n')
+    with open(board, encoding='utf-8') as fh:
+        t = fh.read()
+    k = t.rindex('(embedded_fonts')
+    k = t.rindex('\n', 0, k) + 1
+    staged = os.path.join(td, 'inpad.kicad_pcb')
+    with open(staged, 'w', encoding='utf-8') as fh:
+        fh.write(t[:k] + add + t[k:])
+    with open(os.path.splitext(board)[0] + '.kicad_pro', encoding='utf-8') as fh, \
+            open(os.path.splitext(staged)[0] + '.kicad_pro', 'w', encoding='utf-8') as oh:
+        oh.write(fh.read())
+    out = os.path.join(td, 'inpad_routed.kicad_pcb')
+    summary = os.path.join(td, 'inpad.json')
+    check(PY + [os.path.join(REPO, 'py_router', 'route.py'), evidence(staged), out,
+                '--nets', 'S*', '--via-span', 'In1.Cu', 'In6.Cu', '--json-out', summary],
+          accept=True, timeout=1800)
+    with open(evidence(summary, 'the summary'), encoding='utf-8') as fh:
+        n = len(json.load(fh).get('routed_single') or [])
+    pcb = load(evidence(out, 'the routed board'))
+    micro = [v for v in pcb.vias if v.via_type == 'micro']
+    ok(n >= 28, f"the step routes from the in-pad vias: {n} of 36 nets")
+    ok(len(micro) == 72, f"every in-pad micro via is kept: {len(micro)} of 72")
+    outside = sorted({s.layer for s in pcb.segments} - set(STACK[1:7]))
+    ok(not outside, f"no track on a layer outside In1.Cu-In6.Cu: {outside}")
+    check(PY + [os.path.join(REPO, 'py_router', 'check_drc.py'), out, '--quiet'],
+          accept=True)
+
+
 def main():
     spans()
     view()
@@ -211,6 +263,7 @@ def main():
         board = routed(td)
         refusal(td, board)
         escapes(td, board)
+        in_pad(td, board)
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1

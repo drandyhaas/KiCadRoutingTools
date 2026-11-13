@@ -357,12 +357,18 @@ span allows. The whole stack is no span: through vias, as without the flag.
   the copper a net already has there, so a pad on an outer layer needs a
   landing first. `--via-span-escape only` lays one at each surface pad of the
   selected nets -- a via of the span beside the pad
-  (`via_span.ESCAPE_PAD_GAP_MM`, never in it: a via in the pad would leave the
-  net's end on the pad's own layer, which the next step does not route on) and
-  the short track joining them, found by the pad-tap search on the same view
-  of the board -- and routes nothing. `route` lays the escapes and then routes
+  (`via_span.ESCAPE_PAD_GAP_MM`) and the short track joining them, found by
+  the pad-tap search on the same view of the board -- and routes nothing. (A
+  board that already carries a via of the span IN a pad is routed from that
+  via as well.) `route` lays the escapes and then routes
   within the span. A pad whose net already has copper on the span's other
   layers nearby is left alone, as is a drilled pad.
+- **Copper outside the span is held in place.** A via-span step lays copper on
+  the span only, so it could not lay an escape's stub and via again: every
+  existing track on another layer, and every via with copper on a layer the
+  span lacks, is immutable for the step (`via_span.hold_outside_copper`). The
+  step still rips and retries its own routes, so a net it cannot complete
+  keeps its landings for a later step.
 
   ```bash
   # micro-via escapes at every pad, then the inner layers with buried vias

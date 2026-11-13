@@ -166,9 +166,7 @@ def apply_span(vias, config) -> int:
 #: how far from its pad an escape via may be placed, mm
 ESCAPE_RADIUS_MM = 1.5
 #: an escape via stands BESIDE its pad, at least this far from the pad's
-#: copper, joined by a short track. A via in the pad would leave the net's
-#: end on the pad's own layer, which the next sub-stack's step does not
-#: route on; the track's far end is what that step starts from.
+#: copper, joined by a short track.
 ESCAPE_PAD_GAP_MM = 0.05
 
 
@@ -267,3 +265,35 @@ def escape_pads(pcb_data, config, net_ids, all_swap_vias, all_swap_segments,
     if len(out['declined']) > 12:
         print(f"  ... {len(out['declined']) - 12} more")
     return out
+
+
+#: `held_by` of copper a via-span step holds in place (`hold_outside_copper`)
+HELD_OUTSIDE_SPAN = 'via-span: copper outside the span'
+
+
+def hold_outside_copper(pcb_data, span) -> int:
+    """Mark the board's copper that lies wholly or partly OUTSIDE ``span`` as
+    held for this step (`held_by`, so `kicad_parser.is_immutable_copper` is
+    true of it): tracks on other layers, and vias with copper on a layer the
+    span does not have. A via-span step lays copper on the span only, so it
+    could not lay such copper again -- an escape's stub and micro via, ripped
+    to let another net by, left its own net with no way back to its pad. The
+    hold is in memory, for the step; nothing is written to the board.
+    Copper already locked or held is left as it is. Returns how many items
+    were marked."""
+    from geometry_utils import via_copper_layers
+    keep = set(span)
+    copper = list(pcb_data.board_info.copper_layers)
+    n = 0
+    for s in pcb_data.segments:
+        if (s.layer in copper and s.layer not in keep
+                and not getattr(s, 'graphic', False)
+                and not getattr(s, 'locked', False) and not getattr(s, 'held_by', '')):
+            s.held_by = HELD_OUTSIDE_SPAN
+            n += 1
+    for v in pcb_data.vias:
+        if (set(via_copper_layers(v, copper)) - keep
+                and not getattr(v, 'locked', False) and not getattr(v, 'held_by', '')):
+            v.held_by = HELD_OUTSIDE_SPAN
+            n += 1
+    return n
