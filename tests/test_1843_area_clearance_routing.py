@@ -40,6 +40,14 @@ Checks:
      report line and the routing cannot disagree. (The area index gained a
      field on main once; the setup failed with a warning while the report
      still said "routed to".)
+  8. a track that LEAVES a tightened room: room_tight with the room moved
+     onto OPEN_NET's first pad (x 15-18), so its straight route starts in
+     the room and passes the wall's gap 1.5 mm outside it. KiCad binds a
+     track whose copper meets the area along its whole length, so the
+     unsplit track grades 0.225 mm against the wall where the room asks 0.3
+     (kicad-cli 10.0.6: 1 violation). The run splits it half a width plus
+     SPLIT_MARGIN past the edge, the piece outside is not in the room, and
+     the board is clean.
 """
 import json
 import os
@@ -222,6 +230,28 @@ def main():
             out, routed, _failed, _log = route(sub, board, tag)
             ok(routed == want, f"{why}: routed {routed}")
             ok(drc_clean(out), "  and check_drc is clean")
+        print("8. a track that leaves a tightened room is split at its edge")
+        sub = os.path.join(td, 'leave')
+        os.mkdir(sub)
+        board = stage(sub, 'room_tight')
+        with open(board, encoding='utf-8') as fh:
+            text = fh.read()
+        moved = text.replace('(xy 8 4) (xy 12 4) (xy 12 8) (xy 8 8)',
+                             '(xy 15 4) (xy 18 4) (xy 18 8) (xy 15 8)')
+        ok(moved != text, "  the room is moved onto OPEN_NET's first pad")
+        with open(board, 'w', encoding='utf-8') as fh:
+            fh.write(moved)
+        out, routed, failed, log = route(sub, board, 'leave')
+        ok(routed == ['OPEN_NET', 'ROOM_NET'], f"both nets route: {routed} / {failed}")
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(evidence(out, 'the routed board'))
+        nid = {n.name: i for i, n in pcb.nets.items()}
+        open_segs = sorted((round(x.start_x, 4), round(x.end_x, 4)) for x in pcb.segments
+                           if x.net_id == nid['OPEN_NET'])
+        ok(open_segs == [(17.0, 18.085), (18.085, 23.0)],
+           f"OPEN_NET ships as two pieces meeting 0.085 mm past the edge: {open_segs}")
+        ok('Rule-area edges' in log, "and the run says it split it")
+        ok(drc_clean(out), "check_drc is clean")
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1

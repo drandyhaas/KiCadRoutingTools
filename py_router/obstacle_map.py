@@ -622,6 +622,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     if _area is not None:
         _compose_area_passes(_area, _area_config, _stamp_target, pcb_data,
                              nets_to_route, extra_clearance, stamp_pads)
+        # #1843: no via of the run straddles a tight area's edge
+        _band = _area.via_band_cells(config.grid_step)
+        if len(_band):
+            _stamp_target.add_blocked_vias_batch(_band)
     # Add board edge clearance
     _report("board edge", 0, 0, force=True)
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance,

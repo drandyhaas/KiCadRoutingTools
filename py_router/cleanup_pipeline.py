@@ -253,6 +253,10 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                                   into the track instead. It must run last to
                                   catch the joints close, smooth and the cycle
                                   prune each leave behind.
+     (#1843) area_clearance.split_results, after ``freeze_hook`` and again
+        after step 11: the run's tracks split where they leave an area whose
+        clearance rule is above the run's (copper unchanged), so every pass
+        reads each piece as the item KiCad grades. Inert without such a rule.
 
     ``label`` prefixes the progress prints (e.g. "Diff-pair "). The pass
     switches exist for front parity, not taste:
@@ -362,6 +366,17 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if freeze_hook is not None:
         freeze_hook()
 
+    # #1843: the run's tracks split where they leave a tight rule area's
+    # split zone, so every pass below reads each piece as the item KiCad
+    # will (the piece outside is not bound by the area). Again at the end,
+    # after the passes that join or re-lay copper. Inert without such a rule.
+    from area_clearance import split_results as _area_split
+    _as_n = _area_split(results, pcb_data, config, scope_net_ids)
+    counts['area_edge_splits'] = _as_n
+    if _as_n:
+        print(f"{label}Rule-area edges: split {_as_n} track(s) where they leave "
+              f"a tightened area (#1843)")
+
     # #436/#438: cross-class + board-edge floors, threaded into every copper-
     # MOVING cleanup pass so a re-bend / micro-shift / via-nudge / connector-snap
     # honors each foreign net's class clearance and the board edge rule (not the
@@ -418,7 +433,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         # coincident (picodvi DVI_CK terminal-leg jog).
         _wd_segs, _wd_nets, _wd_strip = _graze_pass(
             weld_redundant_grazing_detours, scope_net_ids,
-            clearance=config.clearance, net_clearances=_nc)
+            clearance=config.clearance, net_clearances=_nc,
+            config=config)  # #1843: area clearance rules
         counts['detours_welded'] = _wd_segs
         _trace('weld_detour')
         strip.extend(_wd_strip)
@@ -704,6 +720,13 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _mc_n:
             print(f"{label}Merged {_mc_stats.get('joints', 0)} collinear joint(s) "
                   f"on {_mc_nets} net(s): -{_mc_n} redundant segment(s) (#811)")
+
+    # #1843: the collinear merge (and smoothing) can join a split back
+    _as_n = _area_split(results, pcb_data, config, scope_net_ids)
+    counts['area_edge_splits'] += _as_n
+    if _as_n:
+        print(f"{label}Rule-area edges: split {_as_n} track(s) the passes above "
+              f"joined across a tightened area's edge (#1843)")
 
     # The passes above edit pcb_data's copper in place; anything cached
     # against the old copper must not answer for the new.

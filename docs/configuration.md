@@ -309,28 +309,50 @@ clean; absent when the board has no such rule).
 is one rule-area predicate or an OR of them, e.g.
 `(rule "room" (constraint clearance (min 0.09mm)) (condition "A.insideArea('ROOM')"))`
 or `"A.insideArea('SOC_ROOM') || A.insideArea('RAM_ROOM')"`
-on named rule areas, is routed to by position (no flag, no GUI
-control; `area_clearance.py`): a track inside the area, on a layer the area
-is drawn on, is held to the rule's value in place of the class value against
-everything, and so is a via where the area covers every copper layer of the
-board. Outside the area the class values apply as before; around an area
-whose rule is ABOVE the run's clearance, a ring one rule value plus half a
-track wide keeps the larger of the two. The base obstacle map, the per-net
-keep-outs and the stamp functions all compose the two stamps, so rip-up and
-retry see the same picture, and the terminal check and the end-of-run pad
-audit hold a track in the area to the area's value. The rule's value is raised to what the fab can physically
-make (the advanced rung, or `--fab-overrides`), as an explicit `--clearance`
-is, and the run says when it was. The run names the rule
-as routed to, and the DRC writeback keeps `rules.min_clearance` at or below
-it. The rule is read in KiCad's order, the last matching rule winning: in
-the room it replaces the class values and every rule BEFORE it in the file,
-while a per-layer rule or a class-, type- or net-scoped rule that comes
-AFTER it still binds its own pairs there. Not routed to, and said so: a
-condition with more than rule-area predicates
-(`A.insideArea('ROOM') && A.NetClass == 'HS'`) and `enclosedByArea()`. One limit of
-a rule that tightens: a long track that crosses the area's edge is bound by
-the rule along its whole length in KiCad, and only the part near the area is
-held to it here, so grade such a board with `check_drc.py`.
+on named rule areas, is routed to (no flag, no GUI control;
+`area_clearance.py`). KiCad binds a pair when either ITEM's copper meets the
+area on the layer the pair is on (kicad-cli 10.0.6, probe boards): a track
+partly in the area is bound along its whole length, a track that stops short
+of it, round cap included, is not, and a via in an area drawn on F.Cu only is
+bound against F.Cu copper only. The router reads it the same way:
+
+- every keep-out is stamped twice and composed, the class values outside the
+  areas and the rule's value inside (a track cell is inside on the layers the
+  area is drawn on, a via cell where the area covers every copper layer), in
+  the base obstacle map, the per-net keep-outs, the stamp functions, and the
+  plane steps' via and connection maps (pour taps, the in-run plane
+  finalize, plane repair), so rip-up and retry see the same picture;
+- around an area whose rule is ABOVE the run's clearance (a tightened area),
+  a ring keeps the larger of the two stamps, and laid copper that touches the
+  area (a pad, an input track, a via) is held at the rule's value along its
+  whole extent. The ring is as wide as the rule's value plus a track width
+  and half the largest via or track, so copper that does not touch the area
+  is also held at the rule's value that close to it -- a route that needs the
+  class value there is refused;
+- the run's tracks are SPLIT where they leave a tightened area, half the
+  widest track plus 0.01 mm past its edge, so the piece outside is an item
+  KiCad does not bind -- at the start and end of the cleanup pipeline and on
+  the board the route step ships, copper unchanged, input copper left whole;
+  no via of the run straddles a tightened area's edge;
+- every post-route pass that prices a pair (graze prune, detour weld,
+  octolinear re-bend, micro-shift, via nudge, smoothing, stub-gap snap,
+  soft-joint bridges, width neck), the terminal check and the end-of-run pad
+  audit price it at the area's value where the area binds either item.
+
+The rule's value is raised to the fab floor every other rule channel uses
+(`fab_tiers.rule_fab_floors`: the tier's floor, or `--fab-overrides`), so a
+room routes as the same value in a layer or class rule would, and the run
+says when it was. The run names the rule as routed to, and the DRC writeback
+keeps `rules.min_clearance` at or below it. The rule is read in KiCad's
+order, the last matching rule winning: in the room it replaces the class
+values and every rule BEFORE it in the file, while a per-layer rule or a
+class-, type- or net-scoped rule that comes AFTER it still binds its own
+pairs there. Not routed to, and said so: a condition with more than
+rule-area predicates (`A.insideArea('ROOM') && A.NetClass == 'HS'`) and
+`enclosedByArea()`. A coupled diff pair is laid at one gap, so inside a
+tightened area KiCad grades its P against its N at the area's value (the
+custom rule outranks the pair's implicit gap rule) and the run warns per pair
+when its gap is below it.
 
 **Track width in a rule area.** A `track_width` rule with the same kind of
 condition gives the room a width, its `opt` value or else its `min`, raised
