@@ -3148,8 +3148,23 @@ def _ast_area_names(node, out: set) -> set:
     return out
 
 
+def _area_copper_layers(tokens, copper: List[str]) -> FrozenSet[str]:
+    """A rule area's `(layers ...)` tokens as the board's copper layers: the
+    composite tokens KiCad reads on a zone (`*.Cu`, `F&B.Cu`, `*In.Cu`)
+    expanded as the keep-out reader expands them (`net_keepouts`), so an area
+    spelled with one holds items on every layer it stands for. The tokens as
+    written are kept too: an item's layer is never a composite name."""
+    from net_keepouts import _expand_layers
+    toks = set(tokens or ())
+    if not toks:
+        return frozenset()
+    if '*In.Cu' in toks:
+        toks |= {l for l in copper if l not in ('F.Cu', 'B.Cu')}
+    return frozenset(_expand_layers(toks, copper)) | frozenset(toks)
+
+
 class AreaIndex:
-    """#1843: which of the board's named rule areas an item's copper stands
+    """#1843:which of the board's named rule areas an item's copper stands
     in, for the rules that bind by one (`Rule.area_scoped_condition`), as
     kicad-cli 10.0.8 reads the area predicates (measured on probe boards):
     an item partly inside an area is in it (`insideArea()` is
@@ -3169,6 +3184,7 @@ class AreaIndex:
                 wanted |= _ast_area_names(r.area_scoped_condition, set())
         self.areas: List[tuple] = []          # (name, layers, polygon, bounds)
         board = getattr(pcb_data, 'board_info', None)
+        copper = list(rules.copper_layers or getattr(board, 'copper_layers', None) or ())
         for ko in (getattr(board, 'keepouts', None) or []) if wanted else []:
             name = ko.get('name')
             pts = ko.get('polygon') or []
@@ -3182,7 +3198,8 @@ class AreaIndex:
                 continue
             if g.is_empty:
                 continue
-            self.areas.append((name, frozenset(ko.get('layers') or ()), g, g.bounds))
+            self.areas.append((name, _area_copper_layers(ko.get('layers'), copper),
+                               g, g.bounds))
         self.names = frozenset(a[0] for a in self.areas)
         for r in rules.rules:
             if r.area_scoped_condition is not None and not (

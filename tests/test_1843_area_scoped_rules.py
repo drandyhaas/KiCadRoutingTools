@@ -33,7 +33,9 @@ Checks (no routing):
      the rule is not listed NOT GRADED;
   2. each row's check_drc pairs and narrow tracks are KiCad's;
   3. `DesignRules.area_index` reads the rule by position, and a rule naming
-     an area the board does not draw stays unread and is named NOT GRADED.
+     an area the board does not draw stays unread and is named NOT GRADED;
+  4. an area drawn on `*.Cu`, `F&B.Cu` or `*In.Cu` holds items on every
+     copper layer the token stands for, as kicad-cli 10.0.6 reads it.
 """
 import contextlib
 import io
@@ -84,6 +86,19 @@ ROWS = {
         {('B1', 'B2'), ('C1', 'C2'), ('OUT_A', 'OUT_B')}),
 }
 
+#: the same rows with the area drawn on every copper layer, spelled with the
+#: composite tokens KiCad reads (`*.Cu`; `F&B.Cu`, which here is F.Cu and
+#: B.Cu): the B.Cu pairs and vias are now in the area too (kicad-cli 10.0.6)
+ALL_LAYERS = {
+    "A.insideArea('TIGHT')": {('OUT_A', 'OUT_B')},
+    "A.intersectsArea('TIGHT')": {('OUT_A', 'OUT_B')},
+    "A.insideArea('TIGHT') && B.insideArea('TIGHT')": {('A1', 'A2'), ('OUT_A', 'OUT_B')},
+    "A.enclosedByArea('TIGHT')": {('B1', 'B2'), ('OUT_A', 'OUT_B')},
+}
+#: an area on `*In.Cu` holds two inner-layer tracks 0.09 mm apart, and not
+#: the F.Cu pair (kicad-cli 10.0.6)
+INNER = _seg(3, 4, 8, 4, 'I1', 'In1.Cu') + _seg(3, 4.19, 8, 4.19, 'I2', 'In1.Cu')
+
 FAILS = []
 
 
@@ -102,9 +117,14 @@ def dru(clearance_cond, width_cond=None):
     return text
 
 
-def stage(td, name, rules=None, extra=''):
+def stage(td, name, rules=None, extra='', layers=None):
     with open(evidence(BOARD + '.kicad_pcb'), encoding='utf-8') as fh:
         t = fh.read()
+    if layers:
+        zone = '\t(zone\n\t\t(layer "F.Cu")'
+        if zone not in t:
+            raise AssertionError("BROKEN TEST: the fixture's area is not drawn on F.Cu")
+        t = t.replace(zone, f'\t(zone\n\t\t(layers "{layers}")')
     if extra:
         k = t.index('\t(zone')
         t = t[:k] + extra + t[k:]
@@ -162,6 +182,23 @@ def rows(td):
         ok(narrow == ['W1'], f"   narrow tracks: {narrow} (W2 is inside the area)")
 
 
+def layer_tokens(td):
+    print("4. an area drawn with a composite layer token")
+    for tok in ('*.Cu', 'F&B.Cu'):
+        for i, (cond, want) in enumerate(ALL_LAYERS.items()):
+            doc, _ = grade(stage(td, f't{tok[0]}{i}', dru(cond, ROWS[cond][0]), EXTRA,
+                                 layers=tok))
+            got = pairs(doc)
+            ok(got == want, f"({tok}) {cond}: {sorted(got)}"
+               + ('' if got == want else f" want {sorted(want)}"))
+            narrow = sorted(v['net1'] for v in doc['items'] if v['type'] == 'track-width')
+            ok(narrow == ['W1'], f"   narrow tracks: {narrow}")
+    doc, _ = grade(stage(td, 'ti', extra=INNER, layers='*In.Cu'))
+    got = pairs(doc)
+    want = {('IN_A', 'IN_B'), ('OUT_A', 'OUT_B')}
+    ok(got == want, f"(*In.Cu) the inner pair is in the area, the F.Cu pair is not: {sorted(got)}")
+
+
 def engine(td):
     print("3. the resolver, and an area the board does not have")
     path = stage(td, 'e', dru("A.insideArea('TIGHT')"), EXTRA)
@@ -190,6 +227,7 @@ def main():
         fixture(td)
         rows(td)
         engine(td)
+        layer_tokens(td)
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1
