@@ -557,7 +557,9 @@ def derive(rules, pcb_data, config) -> Optional[AreaClearance]:
             continue
         on = r.layers_for(copper)
         value = max(float(_rule_value(r, kind)), _fab_floor(copper, kind))
-        for k, (aname, alayers, poly, _b) in enumerate(index.areas):
+        for k, entry in enumerate(index.areas):
+            # (name, layers, polygon, ...): the index may carry more per area
+            aname, alayers, poly = entry[0], entry[1], entry[2]
             if aname not in names:
                 continue
             layers = frozenset(alayers if on is None else set(alayers) & set(on))
@@ -580,8 +582,10 @@ def derive(rules, pcb_data, config) -> Optional[AreaClearance]:
 class _RulesOnly:
     """The rule list of a `.kicad_dru`, as `eligible` reads a DesignRules."""
 
-    def __init__(self, rules):
+    def __init__(self, rules, copper_layers=()):
         self.rules = rules
+        # what `AreaIndex` reads off a DesignRules besides the rules
+        self.copper_layers = list(copper_layers)
 
     def area_index(self, pcb_data):
         from design_rules import AreaIndex
@@ -619,7 +623,7 @@ def room_width_test(pcb_data=None, *, board_path=None, copper=None):
         if not copper:
             return None
         rules, _notes = parse_dru(text)
-        area = derive(_RulesOnly(rules), pcb_data, SimpleNamespace(
+        area = derive(_RulesOnly(rules, copper), pcb_data, SimpleNamespace(
             clearance=0.0, layer_clearances={}, track_width=0.0, via_size=0.0,
             grid_step=0.1, layers=copper))
     except Exception:                                           # noqa: BLE001
