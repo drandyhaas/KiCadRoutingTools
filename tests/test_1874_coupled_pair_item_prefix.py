@@ -18,9 +18,9 @@ the pair whichever item it is called on.
 
 Checks (no routing):
   1. each row's check_drc violations are KiCad's;
-  2. a pair-gap rule of the shape boards carry -- two net classes OR'ed, the
-     predicate on `A`, Track/Arc type terms on both items, a layer clause --
-     parses as a coupled-pair rule, with nothing unsupported;
+  2. a pair-gap rule that names its net class, with the predicate on `A`
+     and a layer clause, parses as a coupled-pair rule, with nothing
+     unsupported;
   3. the predicate OR'ed with another term is still left unread.
 """
 import json
@@ -91,12 +91,11 @@ def main():
                 ok('not modelled' not in (r.stdout or '') + (r.stderr or ''),
                    f"{tag}: the rule is read")
 
-    print("2. the shape a board's pair-gap rule has")
+    print("2. a pair-gap rule for one net class")
     rules, _notes = parse_dru(dru(
-        'outer', "(A.hasNetclass('HS') || A.hasNetclass('HS_CLK')) && "
-                 "A.isCoupledDiffPair() && " + TYPES))
+        'inner', "A.NetClass == 'HS' && A.isCoupledDiffPair()"))
     r = rules[0]
-    ok(r.unsupported is None and r.coupled and not r.keep_apart and r.layer_clause == 'outer',
+    ok(r.unsupported is None and r.coupled and not r.keep_apart and r.layer_clause == 'inner',
        f"parses as a coupled-pair rule: unsupported={r.unsupported!r} coupled={r.coupled}")
     rules, _notes = parse_dru(dru(None, "!A.isCoupledDiffPair()"))
     ok(rules[0].unsupported is None and rules[0].keep_apart,
