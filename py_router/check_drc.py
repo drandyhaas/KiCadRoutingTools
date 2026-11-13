@@ -5899,7 +5899,7 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
         return val < c.kicad_min - 1e-9, c.min_rule
 
     from fab_tiers import physical_fab_floor
-    _fab = physical_fab_floor(len(board_copper) or 2)
+    _fab = physical_fab_floor(len(board_copper) or 2, thickness=None)
     _fab_gap = {'clearance': _fab.get('clearance'),
                 'shorting_items': _fab.get('clearance'),
                 'tracks_crossing': _fab.get('clearance'),
@@ -5910,7 +5910,11 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
     # smallest via implies)
     _fab_size = {'track-width': _fab.get('track_width') or 0.0,
                  'via-size': _fab.get('via_diameter') or 0.0,
-                 'via-drill-size': _fab.get('via_drill') or 0.0,
+                 # #502: held to the board thickness's aspect-ratio floor
+                 'via-drill-size': physical_fab_floor(
+                     len(board_copper) or 2, thickness=getattr(getattr(
+                         pcb_data, 'board_info', None), 'board_thickness', None)
+                 ).get('via_drill') or 0.0,
                  'via-annular': max(0.0, ((_fab.get('via_diameter') or 0.0)
                                           - (_fab.get('via_drill') or 0.0)) / 2.0)}
 
@@ -6756,8 +6760,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # minimums (below) are what KiCad grades. Only `--fab-overrides` moves
         # this floor; physical_fab_floor ignores the tier, so `--fab-tier`
         # changes nothing here.
-        from fab_tiers import physical_fab_floor
-        fab = physical_fab_floor(copper_count)
+        from fab_tiers import physical_fab_floor, aspect_ratio_for_drill
+        # #502: a through via's drill is held to the board thickness's
+        # aspect-ratio floor; a via drilled through less of the board is not
+        # (the drill alone: the diameter and ring floors stay the fab's)
+        _thick = getattr(pcb_data.board_info, 'board_thickness', None)
+        fab = physical_fab_floor(copper_count, thickness=None)
+        _drill_flat = fab['via_drill']
+        fab = dict(fab, via_drill=physical_fab_floor(copper_count, thickness=_thick)['via_drill'])
+        _aspect = (aspect_ratio_for_drill(_drill_flat, copper_count)
+                   if fab['via_drill'] > _drill_flat + 1e-9 else None)
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
         eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
         eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
@@ -6765,7 +6777,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # number route.py's enforce_fab_floors pins an explicit via up to.
         # Diameter and drill pass one at a time, so without this a via whose
         # drill is wider than its pad graded clean.
-        eff_min_via_ring = max(0.0, (fab['via_diameter'] - fab['via_drill']) / 2.0)
+        eff_min_via_ring = max(0.0, (fab['via_diameter'] - _drill_flat) / 2.0)
         # #530: the board's OWN size minimums -- Board Setup rules.min_* and
         # every .kicad_dru track_width / via_diameter / hole_size rule, resolved
         # per net and layer in KiCad's order, raised to the fab floor -- are
@@ -6812,6 +6824,18 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             return max(eff_min_via_ring, v) if v is not None else eff_min_via_ring
 
         def _via_floors(via):
+            d, h = _via_size_floors(via)
+            if (_aspect and min_via_drill is None
+                    and getattr(via, 'via_type', 'through') != 'through'):
+                if _size_rules is None:
+                    h = _drill_flat
+                else:
+                    c = _size_rules.resolve('hole_size', _size_rules.via_item(
+                        via, _courtyards), None, None)
+                    h = max(_drill_flat, (c.kicad_min if c.fab_bound else c.min) or 0.0)
+            return d, h
+
+        def _via_size_floors(via):
             if _size_rules is None:
                 return eff_min_via_dia, eff_min_via_drill
             _vi = _size_rules.via_item(via, _courtyards)
@@ -6828,12 +6852,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
                   f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm"
-                  + ("; per-net board/rule minimums applied (#530)" if _size_rules else ""))
+                  + ("; per-net board/rule minimums applied (#530)" if _size_rules else "")
+                  + (f"; through-via drill held to {_aspect:g}:1 on this {_thick:g} mm "
+                     f"board (#502)" if _aspect else ""))
             if _size_rules is not None and any(
                     getattr(v, 'via_type', None) == 'micro' for v in pcb_data.vias):
                 print("  micro vias: graded at the board's micro via minimums "
                       "(Board Setup drill, net class diameter, .kicad_dru rules), "
                       "not the fab floor's mechanical via sizes")
+            from fab_tiers import aspect_inert_warning
+            if aspect_inert_warning(_thick):
+                print(f"WARNING: {aspect_inert_warning(_thick)}")
         # #1390: a .kicad_dru size rule whose condition is not modelled
         # (A.insideCourtyard(), ...) binds copper the minimums above
         # know nothing about, and used to vanish: the clearance half got
@@ -8616,6 +8645,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'via_loc': (via.x, via.y),
                         **({'via_type': 'micro'}
                            if getattr(via, 'via_type', None) == 'micro' else {}),
+                        # #502: the drill against the board it is plated through
+                        **({'aspect_ratio': round(_thick / via.drill, 2),
+                            'max_aspect_ratio': _aspect, 'board_thickness_mm': _thick}
+                           if _aspect and via.drill > 0
+                           and getattr(via, 'via_type', 'through') == 'through' else {}),
                     })
 
     _via_in_paste_pass(pcb_data, matching_via_nets, _baseline_pd, violations,
@@ -9193,6 +9227,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"  Via:{v['net1']} drill hole too small for fab")
                         print(f"    Drill: {v['drill']:.4f}mm < min {v['min_drill']:.4f}mm "
                               f"(short {v['shortfall_mm']:.4f}mm)")
+                        if v.get('aspect_ratio'):
+                            print(f"    Aspect ratio: {v['aspect_ratio']:g}:1 through the "
+                                  f"{v['board_thickness_mm']:g} mm board, over "
+                                  f"{v['max_aspect_ratio']:g}:1")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     elif vtype == 'via-annular':
                         print(f"  Via:{v['net1']} annular ring too small "

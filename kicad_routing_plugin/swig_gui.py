@@ -773,6 +773,12 @@ class RoutingDialog(wx.Dialog):
             return defaults.ESCALATION
         return ctrl.GetString(ctrl.GetSelection()) or defaults.ESCALATION
 
+    def _board_thickness(self):
+        """The live board's thickness in mm (BoardInfo.board_thickness), for
+        the drill aspect-ratio floor (#502); None when unknown."""
+        return getattr(getattr(getattr(self, 'pcb_data', None), 'board_info', None),
+                       'board_thickness', None)
+
     def _board_floor_dict(self):
         """The live board's Board Setup minimums in fab_tiers FLOOR_KEYS
         vocabulary (only keys declared > 0), for --escalation board."""
@@ -1328,7 +1334,8 @@ class RoutingDialog(wx.Dialog):
             tier = self.fab_tier.GetString(self.fab_tier.GetSelection())
             path = self.fab_overrides_path.GetValue().strip()
             ovr = parse_fab_overrides(path) if path and os.path.isfile(path) else {}
-            return fab_floor_for_param(ctrl_name, ncu, tier, ovr)
+            return fab_floor_for_param(ctrl_name, ncu, tier, ovr,
+                                       thickness=self._board_thickness())
         except Exception:
             return None
 
@@ -2017,6 +2024,7 @@ class RoutingDialog(wx.Dialog):
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
+                'board_thickness': self._board_thickness(),  # #502
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -2148,6 +2156,7 @@ class RoutingDialog(wx.Dialog):
                 'net_clearances_path': self.net_clearances_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
+                'board_thickness': self._board_thickness(),  # #502
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -3401,6 +3410,7 @@ class RoutingDialog(wx.Dialog):
             'net_clearances_path': self.net_clearances_path.GetValue().strip(),
             'escalation': self._escalation_policy(),
             'board_floors': self._board_floor_dict(),
+            'board_thickness': self._board_thickness(),  # #502
             # #1262: what KiCad grades a Default net at when the DRC
             # settings writeback is off (fix_drc_settings False).
             'default_class_clearance': self._default_class_clearance(),
