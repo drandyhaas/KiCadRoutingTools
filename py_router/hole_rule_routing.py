@@ -16,7 +16,6 @@ severity ignore binds nothing; a rule whose condition is not read binds
 nothing here and is named.
 """
 
-import fnmatch
 import re
 from dataclasses import replace
 from typing import Dict, Optional
@@ -33,7 +32,7 @@ class RoutedHoleRules:
     off its own net and a condition may compare the two items' net names."""
 
     def __init__(self, dr, pcb_data):
-        from design_rules import parse_condition_maybe
+        from design_rules import netname_matches, parse_condition_maybe
         self.dr = dr
         self.walk = []
         for r in dr.rules:
@@ -55,10 +54,11 @@ class RoutedHoleRules:
             name = getattr(net, 'name', None)
             if not nid or not name:
                 continue
-            low = name.lower()
+            # KiCad's own string match, with and without its wildcards
             key = (dr.memberships.get(nid, frozenset()), dr.effective_class(nid),
-                   tuple(i for i, q in enumerate(quoted)
-                         if q == low or fnmatch.fnmatchcase(low, q)))
+                   tuple((i, netname_matches(name, q), netname_matches(name, q, False))
+                         for i, q in enumerate(quoted)
+                         if netname_matches(name, q) or netname_matches(name, q, False)))
             self._net_key[int(nid)] = key
             g = groups.setdefault(key, [])
             if len(g) < 2:
