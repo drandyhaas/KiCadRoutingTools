@@ -25,7 +25,17 @@ Checks (no routing):
   3. `DesignRules.via_item` gives a micro via its type and its own layers;
   4. a micro via's drill finding is governed by KiCad's own severity key for
      it, `microvia_drill_out_of_range`, not the through-hole
-     `drill_out_of_range` (both measured on kicad-cli 10.0.8).
+     `drill_out_of_range` (both measured on kicad-cli 10.0.8);
+  5. a via typed micro whose span is more than two adjacent layers is a
+     mechanically drilled hole: KiCad grades it at the micro via minimums
+     (and reports nothing on `MECHANICAL`, measured on kicad-cli 10.0.6), and
+     the fab floor's drill binds it too;
+  6. a board with no project file grades a micro via's drill at KiCad's
+     built-in 0.1 mm (kicad-cli 10.0.6);
+  7. the drill minimum names Board Setup as its source, the diameter minimum
+     the net class.
+Every ROWS row, the 2.4 mm one included, was re-measured on kicad-cli 10.0.6
+with the same result.
 """
 import contextlib
 import io
@@ -71,6 +81,19 @@ ROWS = {
         {'via-size': 0.17, 'via-drill-size': 0.1, 'via-annular': 0.07}),
     'typed blind': (
         {'type': 'blind'}, {}, {'via-size': 0.4, 'via-drill-size': 0.15}),
+    # the through via's thickness aspect floor (#502) does not reach it
+    'on a 2.4 mm board': ({'thickness': 2.4}, {}, {}),
+}
+
+#: name -> (edits to the board text, check_drc's size findings on UV). A via
+#: typed micro whose span is more than two adjacent layers: kicad-cli 10.0.6
+#: reports no size violation on either (its micro via minimums hold), but the
+#: hole is mechanically drilled, so the fab floor's 0.15 mm drill binds it.
+MECHANICAL = {
+    'typed micro, F.Cu to B.Cu': (
+        {'uv': (0.3, 0.12), 'layers': ('F.Cu', 'B.Cu')}, {'via-drill-size': 0.15}),
+    'typed micro, F.Cu to In2.Cu': (
+        {'uv': (0.3, 0.12), 'layers': ('F.Cu', 'In2.Cu')}, {'via-drill-size': 0.15}),
 }
 
 FAILS = []
@@ -93,9 +116,19 @@ def stage(td, name, board_edits, project_edits):
     if 'type' in board_edits:
         assert t.count('(via micro') == 1
         t = t.replace('(via micro', f"(via {board_edits['type']}")
+    if 'layers' in board_edits:
+        old = '(layers "F.Cu" "In1.Cu")\n\t\t(net "UV")'
+        assert t.count(old) == 1, 'the fixture has one F.Cu-In1.Cu micro via'
+        t = t.replace(old, '(layers {})\n\t\t(net "UV")'.format(
+            ' '.join(f'"{la}"' for la in board_edits['layers'])))
+    if 'thickness' in board_edits:
+        assert t.count('(thickness 1.6)') == 1
+        t = t.replace('(thickness 1.6)', f"(thickness {board_edits['thickness']})")
     b = os.path.join(td, name + '.kicad_pcb')
     with open(b, 'w', encoding='utf-8') as fh:
         fh.write(t)
+    if project_edits.get('no_project'):
+        return evidence(b, 'the staged board')
     with open(evidence(os.path.join(FIX, 'via_type_rule.kicad_pro')), encoding='utf-8') as fh:
         proj = json.load(fh)
     rules = proj['board']['design_settings']['rules']
@@ -185,12 +218,60 @@ def severity(td):
                "and the run names the severity that dropped it")
 
 
+def _uv_sizes(items):
+    return {v['type']: round(v.get('min_size') or v.get('min_drill') or v.get('min_ring'), 4)
+            for v in items if v['type'] in SIZE_TYPES and v.get('net1') == 'UV'
+            and not v.get('accepted')}
+
+
+def mechanical(td):
+    print("5. a via typed micro over more than two adjacent layers keeps the fab floor")
+    for i, (name, (bed, want)) in enumerate(MECHANICAL.items()):
+        items, text = grade(stage(td, f'm{i}', bed, {}))
+        got = _uv_sizes(items)
+        ok(got == want, f"{name}: {got}" + ('' if got == want else f" want {want}"))
+        ok('1 typed micro but spanning more than two adjacent layers' in text,
+           "   and the header counts it")
+
+
+def no_project(td):
+    print("6. with no project file, a micro via's drill minimum is KiCad's 0.1 mm")
+    # kicad-cli 10.0.6: "Micro via hole size out of range (board setup
+    # constraints min hole 0.1000 mm; actual 0.0800 mm)"
+    items, _ = grade(stage(td, 'np8', {'uv': (0.25, 0.08)}, {'no_project': True}))
+    got = _uv_sizes(items).get('via-drill-size')
+    ok(got == 0.1, f"0.08 mm drill: graded at {got}")
+    items, _ = grade(stage(td, 'np10', {}, {'no_project': True}))
+    got = _uv_sizes(items).get('via-drill-size')
+    ok(got is None, f"0.1 mm drill: {'not flagged' if got is None else f'graded at {got}'}")
+
+
+def sources(td):
+    print("7. a micro via's minimums name where they came from")
+    for name, ped, want in (('Board Setup', {}, 'board minimum'),
+                            ('no project', {'no_project': True},
+                             'board minimum (KiCad default)')):
+        path = stage(td, 'src_' + name.replace(' ', '_'), {}, ped)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            pcb = parse_kicad_pcb(path)
+            dr = DesignRules.from_project(pcb, path)
+        uv = next(dr.via_item(v) for v in pcb.vias if pcb.nets[v.net_id].name == 'UV')
+        got = dr.resolve('hole_size', uv).source
+        ok(got == want, f"{name}: the drill minimum's source is {got!r}")
+        if not ped:
+            got = dr.resolve('via_diameter', uv).source
+            ok(got == 'netclass Default', f"   and the diameter minimum's is {got!r}")
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         rows(td)
         through(td)
         item(td)
         severity(td)
+        mechanical(td)
+        no_project(td)
+        sources(td)
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1
