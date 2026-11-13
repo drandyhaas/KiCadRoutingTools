@@ -130,7 +130,7 @@ def _foreign_pad_arrays(pcb_data, layer):
     # the iteration boards). Mirror the seg/via caches: signature tuple +
     # setattr REBIND on mismatch, so each pcb_data view owns its arrays.
     _sig = (id(pcb_data.pads_by_net),
-            sum(len(v) for v in pcb_data.pads_by_net.values()))
+            sum(map(len, pcb_data.pads_by_net.values())))
     cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
     if cache is None or not isinstance(cache, tuple) or cache[0] != _sig:
         cache = (_sig, {})
@@ -191,12 +191,41 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
     nets (check_drc.point_to_pad_distance -- the model kicad-cli agrees with to
     ~0.1um). Windowed by each pad's bbox + _FOREIGN_PAD_WINDOW; same
     base_clearance local-override and #436 net-class excess adjustments as
-    the vectorized kernels."""
+    the vectorized kernels.
+
+    Vectorised per pad: every windowed sample point against every
+    polygon edge in one broadcast (the scalar point_to_segment_distance's
+    formula, so the value is the walk's), the even-odd inside test the same
+    way, so the answer is the per-point walk's minimum without visiting the
+    points one by one (the per-sample loop dominated the smoothing pass on a
+    board with custom pads: 20k calls, 8.4M abs() and 20k polygon walks for
+    eight custom pads). A single point (the point
+    callers) keeps the scalar path: numpy set-up costs more than one walk."""
     if not custom:
         return 1e9
-    from check_drc import point_to_pad_distance
+    from check_drc import point_to_pad_distance, _polys_edge_arrays
     R = _FOREIGN_PAD_WINDOW
     best = 1e9
+    if len(pts) <= 2:
+        for nid, pad in custom:
+            if nid == net_id:
+                continue
+            ex = pad.size_x / 2.0
+            ey = pad.size_y / 2.0
+            adj = 0.0
+            if base_clearance is not None:
+                adj = max((getattr(pad, 'local_clearance', 0.0) or 0.0) - base_clearance, 0.0)
+                if net_clearances:
+                    adj = max(adj, net_clearances.get(nid, base_clearance)
+                              - base_clearance)
+            for (px, py) in pts:
+                if abs(px - pad.global_x) > R + ex or abs(py - pad.global_y) > R + ey:
+                    continue
+                d = point_to_pad_distance(px, py, pad) - adj
+                if d < best:
+                    best = d
+        return best
+    PX = PY = None
     for nid, pad in custom:
         if nid == net_id:
             continue
@@ -208,42 +237,49 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
             if net_clearances:
                 adj = max(adj, net_clearances.get(nid, base_clearance)
                           - base_clearance)
-        # Branch-and-bound prune (exact-result-preserving): the polygons are
-        # stored in GLOBAL coordinates, so the distance from a sample point to
-        # the polygon's bounding BOX is a valid lower bound on its edge
-        # distance (a bbox is tighter than a bounding radius on the elongated
-        # connector/thermal polygons that dominate real boards). Points are
-        # visited lowest-bound first; once the bound can no longer beat
-        # `best`, no later point can either. Cuts the exact polygon walk from
-        # every windowed sample point (the 5mm window is generous) to the few
-        # that matter -- it dominated the #536 smoothing pass.
-        bb = getattr(pad, '_poly_bbox', None)
-        if bb is None:
-            vs = [v for poly in (getattr(pad, 'polygons', None) or ()) for v in poly]
-            if vs:
-                bb = (min(v[0] for v in vs), min(v[1] for v in vs),
-                      max(v[0] for v in vs), max(v[1] for v in vs))
-            else:
-                bb = (pad.global_x - ex, pad.global_y - ey,
-                      pad.global_x + ex, pad.global_y + ey)
-            try:
-                pad._poly_bbox = bb
-            except Exception:
-                pass
-        cand = []
-        for (px, py) in pts:
-            if abs(px - pad.global_x) > R + ex or abs(py - pad.global_y) > R + ey:
+        if PX is None:
+            P = np.asarray(pts, dtype=float).reshape(-1, 2)
+            PX, PY = P[:, 0], P[:, 1]
+        near = (np.abs(PX - pad.global_x) <= R + ex) & (np.abs(PY - pad.global_y) <= R + ey)
+        if not near.any():
+            continue
+        qx, qy = PX[near], PY[near]
+        polys = getattr(pad, 'polygons', None)
+        arrays = _polys_edge_arrays(polys) if polys else None
+        if arrays is None:
+            for px, py in zip(qx, qy):
+                d = point_to_pad_distance(float(px), float(py), pad) - adj
+                if d < best:
+                    best = d
+            continue
+        ex1, ey1, edx, edy, el2 = arrays
+        qx2, qy2 = qx[:, None], qy[:, None]
+        degenerate = (el2 < 1e-10)[None, :]
+        safe = np.where(degenerate, 1.0, el2[None, :])
+        t = ((qx2 - ex1[None, :]) * edx[None, :] + (qy2 - ey1[None, :]) * edy[None, :]) / safe
+        t = np.where(degenerate, 0.0, np.clip(t, 0.0, 1.0))
+        ddx = qx2 - (ex1[None, :] + t * edx[None, :])
+        ddy = qy2 - (ey1[None, :] + t * edy[None, :])
+        d = np.sqrt(ddx * ddx + ddy * ddy).min(axis=1)
+        for poly in polys:
+            if len(poly) == 1:  # the walk measures a one-vertex polygon as a point; the edge arrays skip it
+                d = np.minimum(d, np.sqrt((qx - poly[0][0]) ** 2 + (qy - poly[0][1]) ** 2))
+        # inside any polygon = 0 (check_drc._point_in_poly's even-odd test over the vertex pairs (i, i-1))
+        inside = np.zeros(qx.shape[0], dtype=bool)
+        for poly in polys:
+            Pp = np.asarray(poly, dtype=float)
+            if len(Pp) < 2:
                 continue
-            lo = math.hypot(max(bb[0] - px, px - bb[2], 0.0),
-                            max(bb[1] - py, py - bb[3], 0.0))
-            cand.append((lo, px, py))
-        cand.sort()
-        for lo, px, py in cand:
-            if lo - adj >= best:
-                break
-            d = point_to_pad_distance(px, py, pad) - adj
-            if d < best:
-                best = d
+            xi, yi = Pp[:, 0][None, :], Pp[:, 1][None, :]
+            xj, yj = np.roll(Pp[:, 0], 1)[None, :], np.roll(Pp[:, 1], 1)[None, :]
+            cond = (yi > qy2) != (yj > qy2)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                xint = (xj - xi) * (qy2 - yi) / (yj - yi) + xi
+            inside |= (np.count_nonzero(cond & (qx2 < xint), axis=1) & 1).astype(bool)
+        d = np.where(inside, 0.0, d) - adj
+        m = float(d.min())
+        if m < best:
+            best = m
     return best
 
 
@@ -296,8 +332,7 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
     if base_clearance is not None:
         excess = np.maximum(plc[near] - base_clearance, 0.0)
         if net_clearances:
-            fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
-                             for f in nids[near]], dtype=float)
+            fcls = _net_excess(nids[near], net_clearances, None, base_clearance)
             excess = np.maximum(excess, fcls)
         excess = _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids,
                                          plc, excess, base_clearance, own_type)
@@ -409,7 +444,7 @@ def _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids, plc,
 
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           base_clearance=None, net_clearances=None, config=None,
-                          own_type='track'):
+                          own_type='track', need=None):
     """Min foreign-pad edge distance sampled along a (short, terminal) segment.
     Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
@@ -446,8 +481,7 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     if base_clearance is not None:
         excess = np.maximum(plc[near] - base_clearance, 0.0)
         if net_clearances:
-            fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
-                             for f in nids[near]], dtype=float)
+            fcls = _net_excess(nids[near], net_clearances, None, base_clearance)
             excess = np.maximum(excess, fcls)
         excess = _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids,
                                          plc, excess, base_clearance, own_type)
@@ -456,6 +490,60 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         cx_ = _coupled_excess(config, net_id, nids[near], 'pad', base_clearance, layer)
         excess = _fold_scoped_excess(
             excess, np.where(plc[near] > 0, np.nan, cx_))
+    if need is not None:
+        # A caller that only compares with `need` (see _seg_dist_need): a pad whose exact lower bound (the bound of
+        # the prune below) is need + 1e-9 or more cannot take the minimum below need, so only the others are swept;
+        # below need the value is bit-identical to the full sweep's.
+        vx, vy = x2 - x1, y2 - y1
+        L2 = vx * vx + vy * vy
+        if L2 > 0.0:
+            t = np.clip(((fcx - x1) * vx + (fcy - y1) * vy) / L2, 0.0, 1.0)
+            lb = np.hypot(fcx - (x1 + t * vx), fcy - (y1 + t * vy))
+        else:
+            lb = np.hypot(fcx - x1, fcy - y1)
+        lb = lb - (np.hypot(np.maximum(fhx - fcr, 0.0), np.maximum(fhy - fcr, 0.0)) + fcr)
+        if excess is not None:
+            lb = lb - excess
+        keep = lb < need + 1e-9
+        if not keep.any():
+            return min(float(np.min(lb)), best_custom)
+        fcx, fcy, fhx, fhy, fcr = fcx[keep], fcy[keep], fhx[keep], fhy[keep], fcr[keep]
+        frc, frs = frc[keep], frs[keep]
+        if excess is not None:
+            excess = excess[keep]
+    elif fcx.size > 4 and sx.size > 4:
+        # Exact prune: a
+        # pad's rounded rect lies within hypot(hx-r, hy-r) + r of its centre
+        # (inner extents floored at 0), so the segment-to-centre distance
+        # minus that radius (minus its excess) is
+        # a lower bound on every sampled distance to it. Evaluate the pad of
+        # least bound in full; a pad whose bound exceeds that pad's sampled
+        # minimum cannot hold the minimum, so the result is unchanged.
+        vx, vy = x2 - x1, y2 - y1
+        L2 = vx * vx + vy * vy
+        if L2 > 0.0:
+            t = np.clip(((fcx - x1) * vx + (fcy - y1) * vy) / L2, 0.0, 1.0)
+            lb = np.hypot(fcx - (x1 + t * vx), fcy - (y1 + t * vy))
+        else:
+            lb = np.hypot(fcx - x1, fcy - y1)
+        lb = lb - (np.hypot(np.maximum(fhx - fcr, 0.0), np.maximum(fhy - fcr, 0.0)) + fcr)
+        if excess is not None:
+            lb = lb - excess
+        j = int(np.argmin(lb))
+        ddx = sx - fcx[j]
+        ddy = sy - fcy[j]
+        lx = np.abs(ddx * frc[j] + ddy * frs[j])
+        ly = np.abs(-ddx * frs[j] + ddy * frc[j])
+        dj = np.hypot(np.maximum(lx - (fhx[j] - fcr[j]), 0.0),
+                      np.maximum(ly - (fhy[j] - fcr[j]), 0.0)) - fcr[j]
+        if excess is not None:
+            dj = dj - excess[j]
+        keep = lb <= float(np.min(dj)) + 1e-9
+        keep[j] = True
+        fcx, fcy, fhx, fhy, fcr = fcx[keep], fcy[keep], fhx[keep], fhy[keep], fcr[keep]
+        frc, frs = frc[keep], frs[keep]
+        if excess is not None:
+            excess = excess[keep]
     # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
     # rotated by R(-rot); identity for axis-aligned pads): shrink the
     # half-extents by the corner radius, take the outside distance to that
@@ -526,38 +614,61 @@ def _foreign_seg_arrays(pcb_data, layer):
     per_layer = cache[1]
     arr = per_layer.get(layer)
     if arr is None:
-        nid, ax, ay, bx, by, hw = [], [], [], [], [], []
-        _row_segs = []
-        _own_pad_nets = _cached_own_pad_nets(pcb_data)
-        for s in pcb_data.segments:
-            if s.layer == layer:
-                _row_segs.append(s)
-                nid.append(s.net_id); ax.append(s.start_x); ay.append(s.start_y)
-                bx.append(s.end_x); by.append(s.end_y)
-                hw.append((s.width if s.width > 0 else 0.0) / 2.0)
-        # A via spans its drilled layers; treat every via as present on this copper
-        # layer (a conservative over-approximation -- it only ever necks MORE).
-        for v in pcb_data.vias:
-            r = (v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0
-            nid.append(v.net_id); ax.append(v.x); ay.append(v.y)
-            bx.append(v.x); by.append(v.y); hw.append(r)
-        # #908: which rows are a FOOTPRINT'S OWN copper, and which nets that
-        # copper is the intended conductor for. A net tie's bridge is net 0, so
-        # the plain `nid != net_id` test below calls it foreign to the very
-        # nets it exists to join -- and the terminal SHORT gate then rejects
-        # every rescue that lands on the tie pad ("terminal copper would
-        # OVERLAP a foreign track/via"). Recorded here so the mask is built
-        # once per (layer, net) and dies with these arrays.
-        _g_rows, _g_nets = [], []
-        for _i, _s in enumerate(_row_segs):
-            if getattr(_s, 'graphic', False):
-                _lift = _own_pad_nets.get(id(_s))
-                if _lift:
-                    _g_rows.append(_i); _g_nets.append(_lift)
+        # One pass over the copper per cache drop, every layer's rows at once:
+        # the smoothing pass drops the cache at every splice and
+        # then asks for the layers of the chain it moved one by one, so each
+        # splice paid one full Python pass over the segments PER LAYER (777
+        # rebuilds, 6.4M list appends, about a third of a dense board's
+        # smoothing pass). The rows of a layer are its segments in list
+        # order, then every via, exactly as before.
+        snap = per_layer.get('_all')
+        if snap is None:
+            segs = pcb_data.segments
+            lay = np.asarray([s.layer for s in segs], dtype=object)
+            s_nid = np.asarray([s.net_id for s in segs], dtype=np.int64)
+            s_ax = np.asarray([s.start_x for s in segs], dtype=float)
+            s_ay = np.asarray([s.start_y for s in segs], dtype=float)
+            s_bx = np.asarray([s.end_x for s in segs], dtype=float)
+            s_by = np.asarray([s.end_y for s in segs], dtype=float)
+            s_hw = np.asarray([(s.width if s.width > 0 else 0.0) / 2.0 for s in segs], dtype=float)
+            vias = pcb_data.vias
+            v_nid = np.asarray([v.net_id for v in vias], dtype=np.int64)
+            v_x = np.asarray([v.x for v in vias], dtype=float)
+            v_y = np.asarray([v.y for v in vias], dtype=float)
+            # A via spans its drilled layers; treat every via as present on every copper
+            # layer (a conservative over-approximation -- it only ever necks MORE).
+            v_hw = np.asarray([(v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0
+                               for v in vias], dtype=float)
+            # #908: which rows are a FOOTPRINT'S OWN copper, and which nets that
+            # copper is the intended conductor for. A net tie's bridge is net 0, so
+            # the plain `nid != net_id` test below calls it foreign to the very
+            # nets it exists to join -- and the terminal SHORT gate then rejects
+            # every rescue that lands on the tie pad ("terminal copper would
+            # OVERLAP a foreign track/via"). Recorded per layer as the row
+            # indices of the lifted graphic segments, and dies with these arrays.
+            g_idx = [i for i, s in enumerate(segs) if getattr(s, 'graphic', False)]
+            g_lift = []
+            if g_idx:
+                _own_pad_nets = _cached_own_pad_nets(pcb_data, (id(segs), id(getattr(pcb_data, 'footprints', None)),
+                                                                len(g_idx), sum(id(segs[i]) for i in g_idx)))
+                for i in g_idx:
+                    _lift = _own_pad_nets.get(id(segs[i]))
+                    if _lift:
+                        g_lift.append((i, _lift))
+            snap = (lay, s_nid, s_ax, s_ay, s_bx, s_by, s_hw, v_nid, v_x, v_y, v_hw, g_lift)
+            per_layer['_all'] = snap
+        lay, s_nid, s_ax, s_ay, s_bx, s_by, s_hw, v_nid, v_x, v_y, v_hw, g_lift = snap
+        mask = (lay == layer) if lay.size else np.zeros(0, dtype=bool)
+        if g_lift:
+            pos = np.cumsum(mask) - 1
+            _g_rows = [int(pos[i]) for i, _ in g_lift if mask[i]]
+            _g_nets = [_lift for i, _lift in g_lift if mask[i]]
+        else:
+            _g_rows, _g_nets = [], []
         per_layer[(layer, 'giftrows')] = (_g_rows, _g_nets)
-        arr = (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
-               np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
-               np.asarray(by, dtype=float), np.asarray(hw, dtype=float))
+        arr = (np.concatenate((s_nid[mask], v_nid)), np.concatenate((s_ax[mask], v_x)),
+               np.concatenate((s_ay[mask], v_y)), np.concatenate((s_bx[mask], v_x)),
+               np.concatenate((s_by[mask], v_y)), np.concatenate((s_hw[mask], v_hw)))
         per_layer[layer] = arr
         # the per-item bounding boxes _seg_foreign_seg_dist windows on,
         # once per rebuild instead of four array ops per query (23.6k
@@ -570,10 +681,13 @@ def _foreign_seg_arrays(pcb_data, layer):
     return arr
 
 
-def _cached_own_pad_nets(pcb_data):
-    """`graphic_own_pad_nets` memoised on pcb_data, keyed with the segment
-    cache signature so it dies exactly when that does."""
-    sig = getattr(pcb_data, '_foreign_seg_arr_cache', (None,))[0]
+def _cached_own_pad_nets(pcb_data, sig):
+    """`graphic_own_pad_nets` memoised on pcb_data, keyed on the graphic
+    segments and the footprints it reads (`sig`: the segment list's identity,
+    the footprints' identity, the graphic segments' count and the sum of
+    their ids). Routing never adds, removes or moves a footprint's own copper,
+    so the lift survives the splices that drop the segment arrays (it was
+    keyed on their signature and recomputed after every splice)."""
     hit = getattr(pcb_data, '_gopn_cache', None)
     if hit is not None and hit[0] == sig:
         return hit[1]
@@ -625,10 +739,88 @@ def _foreign_seg_bboxes(pcb_data, layer, validated=False):
     return pcb_data._foreign_seg_arr_cache[1][(layer, 'bbox')]
 
 
+_NET_EXCESS_CACHE = {}
+
+
+def _net_excess(fnid, net_clearances, track_clearances, base_clearance):
+    """Per-row #436/#735 excess max(0, max(nc.get(f, base), tc.get(f, 0)) - base) for the foreign net ids fnid.
+    The values are the per-row Python expression, evaluated once per net id and looked up (the per-row
+    list was a hot spot of the smoothing pass). An entry holds copies of the two maps it was built from and is
+    used only while both maps still equal them, so a map edited in place (same object, same length, new value)
+    rebuilds the table instead of returning the old one."""
+    _nc = net_clearances or {}
+    _tc = track_clearances or {}
+    if fnid.size == 0 or int(fnid.min()) < 0:
+        return np.array([max(0.0, max(_nc.get(int(f), base_clearance), _tc.get(int(f), 0.0)) - base_clearance)
+                         for f in fnid], dtype=float)
+    key = (id(_nc), len(_nc), id(_tc), len(_tc), base_clearance)
+    hit = _NET_EXCESS_CACHE.get(key)
+    top = int(fnid.max())
+    if hit is None or hit[0] != _nc or hit[1] != _tc or hit[2].size <= top:
+        try:
+            size = max(top + 1, max((int(k) for k in _nc), default=0) + 1, max((int(k) for k in _tc), default=0) + 1)
+        except (TypeError, ValueError):     # a non-integer key: the per-row expression
+            return np.array([max(0.0, max(_nc.get(int(f), base_clearance), _tc.get(int(f), 0.0)) - base_clearance)
+                             for f in fnid], dtype=float)
+        arr = np.array([max(0.0, max(_nc.get(f, base_clearance), _tc.get(f, 0.0)) - base_clearance)
+                        for f in range(size)], dtype=float)
+        if len(_NET_EXCESS_CACHE) > 256:
+            _NET_EXCESS_CACHE.clear()
+        hit = _NET_EXCESS_CACHE[key] = (dict(_nc), dict(_tc), arr)
+    return hit[2][fnid]
+
+
+def _seg_dist_need(x1, y1, x2, y2, sx, sy, ax, ay, bx, by, abx, aby, L2, safe_L2, hw, excess, need):
+    """_seg_foreign_seg_dist's sampled sweep for a caller that only compares the result with `need`: the value is
+    exact whenever it is below need, and some value >= need otherwise. A column whose exact segment-to-segment lower
+    bound (every sample lies on the moving segment, so no sampled distance is below it) is need + 1e-9 or more
+    cannot take the minimum below need, so only the other columns are swept, each computed as in the full sweep:
+    `result < need` and the value below need are bit-identical to the full sweep's."""
+    pax_ = x1 - ax; pay_ = y1 - ay
+    tt_ = np.where(L2 > 0, np.clip((pax_ * abx + pay_ * aby) / safe_L2, 0.0, 1.0), 0.0)
+    lb = np.hypot(x1 - (ax + tt_ * abx), y1 - (ay + tt_ * aby))
+    pax_ = x2 - ax; pay_ = y2 - ay
+    tt_ = np.where(L2 > 0, np.clip((pax_ * abx + pay_ * aby) / safe_L2, 0.0, 1.0), 0.0)
+    lb = np.minimum(lb, np.hypot(x2 - (ax + tt_ * abx), y2 - (ay + tt_ * aby)))
+    ux, uy = x2 - x1, y2 - y1
+    UL2 = ux * ux + uy * uy
+    if UL2 > 0:
+        for qx, qy in ((ax, ay), (bx, by)):
+            tt_ = np.clip(((qx - x1) * ux + (qy - y1) * uy) / UL2, 0.0, 1.0)
+            lb = np.minimum(lb, np.hypot(qx - (x1 + tt_ * ux), qy - (y1 + tt_ * uy)))
+        c1 = ux * (ay - y1) - uy * (ax - x1)
+        c2 = ux * (by - y1) - uy * (bx - x1)
+        c3 = abx * (y1 - ay) - aby * (x1 - ax)
+        c4 = abx * (y2 - ay) - aby * (x2 - ax)
+        lb = np.where((c1 * c2 < 0) & (c3 * c4 < 0), 0.0, lb)
+    lb = lb - hw - (excess if excess is not None else 0.0)
+    keep = lb < need + 1e-9
+    if not keep.any():
+        return float(np.min(lb))
+    ax, ay, abx, aby, L2, safe_L2, hw = ax[keep], ay[keep], abx[keep], aby[keep], L2[keep], safe_L2[keep], hw[keep]
+    if excess is not None:
+        excess = excess[keep]
+    rows = max(1, _SWEEP_CHUNK // ax.size)
+    best = math.inf
+    for r0 in range(0, sx.size, rows):
+        sxc, syc = sx[r0:r0 + rows], sy[r0:r0 + rows]
+        pax = sxc[:, None] - ax[None, :]
+        pay = syc[:, None] - ay[None, :]
+        tt = (pax * abx[None, :] + pay * aby[None, :]) / safe_L2[None, :]
+        tt = np.where(L2[None, :] > 0, np.clip(tt, 0.0, 1.0), 0.0)
+        projx = ax[None, :] + tt * abx[None, :]
+        projy = ay[None, :] + tt * aby[None, :]
+        dist = np.hypot(sxc[:, None] - projx, syc[:, None] - projy) - hw[None, :]
+        if excess is not None:
+            dist = dist - excess[None, :]
+        best = min(best, float(np.min(dist)))
+    return best
+
+
 def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           net_clearances=None, base_clearance=0.0,
                           track_clearances=None, exact=None, config=None,
-                          own_type='track'):
+                          own_type='track', need=None):
     """Min edge distance from a (short, terminal) segment to any OTHER-net segment or
     via on `layer` -- the segment analogue of _seg_foreign_pad_dist. Distance is from
     the terminal centreline to the foreign copper EDGE (point-to-segment distance to
@@ -683,13 +875,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     if net_clearances or track_clearances:
         # #436: fold each foreign net's class-excess into its distance.
         # The track-rule value raises the same per-foreign requirement (#735).
-        fnid = nid[near]
-        _nc = net_clearances or {}
-        _tc = track_clearances or {}
-        excess = np.array([max(0.0,
-                               max(_nc.get(int(f), base_clearance),
-                                   _tc.get(int(f), 0.0)) - base_clearance)
-                           for f in fnid], dtype=float)
+        excess = _net_excess(nid[near], net_clearances, track_clearances, base_clearance)
     if config is not None and getattr(config, 'scoped_clearance', None) is not None:
         # #1491/#1561: a class/type-scoped rule REPLACES the class term for
         # the foreign tracks it binds; a track rule (#735) still raises it.
@@ -705,6 +891,8 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         # #1630: the pair's own partner at the rule binding the pair
         excess = _fold_scoped_excess(excess, _coupled_excess(
             config, net_id, nid[near], 'track', base_clearance, layer))
+    if need is not None and not exact:
+        return _seg_dist_need(x1, y1, x2, y2, sx, sy, ax, ay, bx, by, abx, aby, L2, safe_L2, hw, excess, need)
     if exact:
         # The exact segment-to-segment distance (2026-09-11): the minimum
         # between two segments is attained at an endpoint of one of them
@@ -734,6 +922,41 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         if excess is not None:
             dist = dist - excess
         return float(np.min(dist))
+    if ax.size > 4 and sx.size > 4:
+        # Prune, value-identical: a column's sampled minimum is never below the exact
+        # segment-to-segment distance (every sample lies on the moving segment), so a column whose exact lower
+        # bound exceeds one column's sampled value cannot hold the minimum. Columns are computed independently,
+        # so the kept ones give bit-identical values.
+        def _p2ab_lb(px, py):
+            pax_ = px - ax; pay_ = py - ay
+            tt_ = np.where(L2 > 0, np.clip((pax_ * abx + pay_ * aby) / safe_L2, 0.0, 1.0), 0.0)
+            return np.hypot(px - (ax + tt_ * abx), py - (ay + tt_ * aby))
+        lb = np.minimum(_p2ab_lb(x1, y1), _p2ab_lb(x2, y2))
+        ux, uy = x2 - x1, y2 - y1
+        UL2 = ux * ux + uy * uy
+        if UL2 > 0:
+            for qx, qy in ((ax, ay), (bx, by)):
+                tt_ = np.clip(((qx - x1) * ux + (qy - y1) * uy) / UL2, 0.0, 1.0)
+                lb = np.minimum(lb, np.hypot(qx - (x1 + tt_ * ux), qy - (y1 + tt_ * uy)))
+            c1 = ux * (ay - y1) - uy * (ax - x1)
+            c2 = ux * (by - y1) - uy * (bx - x1)
+            c3 = abx * (y1 - ay) - aby * (x1 - ax)
+            c4 = abx * (y2 - ay) - aby * (x2 - ax)
+            lb = np.where((c1 * c2 < 0) & (c3 * c4 < 0), 0.0, lb)
+        lb = lb - hw - (excess if excess is not None else 0.0)
+        j = int(np.argmin(lb))
+        tj = (((sx - ax[j]) * abx[j] + (sy - ay[j]) * aby[j]) / safe_L2[j])
+        tj = np.clip(tj, 0.0, 1.0) if L2[j] > 0 else np.zeros_like(tj)
+        dj = np.hypot(sx - (ax[j] + tj * abx[j]), sy - (ay[j] + tj * aby[j])) - hw[j]
+        if excess is not None:
+            dj = dj - excess[j]
+        keep = lb <= float(np.min(dj)) + 1e-9
+        keep[j] = True
+        if not keep.all():
+            ax, ay, abx, aby, L2, safe_L2, hw = (ax[keep], ay[keep], abx[keep], aby[keep], L2[keep],
+                                                 safe_L2[keep], hw[keep])
+            if excess is not None:
+                excess = excess[keep]
     rows = max(1, _SWEEP_CHUNK // ax.size)      # see _SWEEP_CHUNK
     best = math.inf
     for r0 in range(0, sx.size, rows):
@@ -801,8 +1024,7 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     excess = None
     if net_clearances:
         fnid = nids[near]
-        excess = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
-                           for f in fnid], dtype=float)
+        excess = _net_excess(fnid, net_clearances, None, base_clearance)
     if config is not None and getattr(config, 'scoped_clearance', None) is not None:
         excess = _fold_scoped_excess(excess, _scoped_excess(
             config, net_id, nids[near], 'via', base_clearance, layer, own_type=own_type))
@@ -855,7 +1077,7 @@ def _foreign_hole_capsules(pcb_data):
     the 0.0 that every other corpus NPTH pad carries."""
     from check_drc import _pad_has_no_copper
     from kicad_parser import pad_drill_capsule
-    sig = sum(len(p) for p in pcb_data.pads_by_net.values())
+    sig = sum(map(len, pcb_data.pads_by_net.values()))
     cache = getattr(pcb_data, '_foreign_hole_cap_cache', None)
     if cache is None or cache[0] != sig:
         nid, ax, ay, bx, by, r, lc = [], [], [], [], [], [], []

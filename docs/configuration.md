@@ -746,6 +746,29 @@ Notes:
   route_diff.py report what the routed board still has inside a forbidding rule
   area as `rule_area_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (rows of
   area, net, tracks, vias; `[]` = clean; absent when the board has no such area).
+
+### Solder-Mask Artwork
+
+A graphic on `F.Mask` or `B.Mask` (a logo, a label, a window over an antenna or a shield frame)
+is a mask OPENING: copper under it ships bare. Routing keeps new tracks and vias of that side's
+copper out from under it, by default, with no setup: the board's own mask graphics and every
+footprint's mask shapes are read from the board file and stamped as keep-outs on `F.Cu` / `B.Cu`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--mask-keepouts` / `--no-mask-keepouts` | on | Keep new copper out from under mask artwork (route.py; GUI: "Keep out of mask artwork") |
+
+Notes:
+- A pad's own opening is exempt: every netted pad whose copper meets the artwork is cut out of
+  it, grown by 0.5 mm, so a mask-defined pad, a test point or an edge-connector finger stays
+  reachable.
+- The artwork is not copper, so copper keeps only 0.05 mm (mask registration) from it, not the
+  copper clearance.
+- Copper already on the board is left where it is; only the copper a run lays is kept out.
+- It reaches every engine that builds its map with the shared keep-out stamper: single-ended and
+  differential-pair routing and the plane steps. The BGA/QFN fanouts do not read it.
+  `--no-mask-keepouts` is on route.py only; use it on a board whose mask art is MEANT to show
+  the copper routed under it.
 - It's a non-copper User layer, so the polygon never affects manufacturing — it only steers the
   router.
 - **Don't draw a zone over a pad you need to route.** Cells inside the polygon are blocked
