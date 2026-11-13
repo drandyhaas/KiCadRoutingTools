@@ -496,17 +496,35 @@ def eligible(rules, pcb_data):
     return index, out
 
 
-def mark_honoured(rules, pcb_data) -> None:
+def mark_honoured(rules, pcb_data, config=None) -> None:
     """Name, for the rules report, the area rules a routing step routes to
-    (`Rule.honoured`)."""
+    (`Rule.honoured`). A rule is named only when its region was actually
+    built: the report must not say "routed to" for a setup that failed, so
+    the regions are derived here, as `install` derives them, and a failure
+    names nothing (the report then reads NOT honoured, which is what the run
+    will do)."""
+    from types import SimpleNamespace
+    probe = config if config is not None else SimpleNamespace(
+        clearance=0.0, layer_clearances={}, track_width=0.0, via_size=0.0,
+        grid_step=0.1, layers=list(getattr(getattr(pcb_data, 'board_info', None),
+                                           'copper_layers', None) or []))
     try:
         _index, picked = eligible(rules, pcb_data)
-    except Exception:                                           # noqa: BLE001
+        built = derive(rules, pcb_data, probe)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  ERROR: the board's area rules could not be set up "
+              f"({type(e).__name__}: {e}); this run routes WITHOUT them")
         return
+    regions = built.regions if built is not None else []
     copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None) or [])
     said = {}
     for r, kind, names, _why in picked:
         if names is None:
+            continue
+        # the region of one of the rule's areas carries this kind's value
+        if not any(reg.area in names
+                   and (reg.value if kind == 'clearance' else reg.width) is not None
+                   for reg in regions):
             continue
         v = float(_rule_value(r, kind))
         floor = _fab_floor(copper, kind)
@@ -793,11 +811,21 @@ def _widen_where_fits(segments, config, net_id, pcb_data, area) -> int:
 def install(config, pcb_data) -> None:
     """Read the board's area clearance rules onto ``config`` (both fronts,
     from `kicad_dru.install_layer_clearances`). Never raises into an engine."""
+    rules = getattr(config, 'rules', None)
     try:
-        area = derive(getattr(config, 'rules', None), pcb_data, config)
+        area = derive(rules, pcb_data, config)
     except Exception as e:                                      # noqa: BLE001
-        print(f"  WARNING: area clearance rules not read ({e})")
+        print(f"  ERROR: the board's area clearance rules could not be set up "
+              f"({type(e).__name__}: {e}); this run routes WITHOUT them")
         area = None
+    # every rule the report named as routed to must have its region here
+    named = {r.name for r in (getattr(rules, 'rules', None) or [])
+             if 'tracks and vias are routed to it there' in (r.honoured or '')}
+    missing = sorted(named) if not (area and area.regions) else []
+    if missing:
+        print(f"  ERROR: area clearance rule(s) {', '.join(repr(n) for n in missing)} "
+              f"were reported as routed to but have no region in this step; it "
+              f"routes WITHOUT them")
     if area is not None:
         key = (getattr(pcb_data, 'source_path', '') or '', tuple(area.skipped))
         if area.skipped and key not in _ANNOUNCED:
