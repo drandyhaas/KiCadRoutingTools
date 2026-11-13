@@ -2040,6 +2040,29 @@ def courtyard_pair(a: GradedPart, b: GradedPart
         overlap_rect=tuple(round(v, 4) for v in ix))
 
 
+#: #1822: what a through-hole part is graded on in a courtyard pair on its
+#: FAR side, where it draws no courtyard: the boxes of its drilled pads
+#: (`rect_on`, `far_side_local`). Beside `body.SOURCES`, which name what its
+#: own side was graded on.
+FAR_SOURCE_PADS = 'drilled_pads'
+
+
+def courtyard_source_on(part: GradedPart, side: str,
+                        far_drawn: bool = False) -> str:
+    """What `part` is graded on in a courtyard-channel pair on `side`
+    (#1822): its occupancy `source` on its own side, where `rect_on` hands
+    out its courtyard or the stand-in for one; on the far side of a
+    through-hole part the boxes of its drilled pads (`FAR_SOURCE_PADS`),
+    which is no courtyard KiCad tests whatever the part draws on its own
+    side. `far_drawn`: the footprint draws that face too
+    (`far_courtyard_of`), so its far side is that courtyard with the pads
+    outside it (`far_side_local`) and stays `courtyard`."""
+    if side == part.side:
+        return part.source
+    from placement.body import SOURCE_COURTYARD
+    return SOURCE_COURTYARD if far_drawn else FAR_SOURCE_PADS
+
+
 class LocalBounds(NamedTuple):
     """One part's UNROTATED local geometry, before any pose is applied.
 
@@ -3862,12 +3885,20 @@ def grade_body_overlap(pcb_data, clearance: float,
             # so a reader can tell a housing outline from a fab outline
             # rather than being told only that something was judged.
             'body_sources': dict(body_sources),
-            # #1822. The courtyard channel's own: what each part's occupancy
-            # was graded on (`GradedPart.source`). A pair with a member that
-            # is not `courtyard` was graded on a stand-in (.Fab body, silk,
-            # pad box) and is not a KiCad courtyards_overlap finding.
-            'courtyard_sources': {r: gp.source
-                                  for r, gp in _cg.parts.items()},
+            # #1822. The courtyard channel's own: what each part was graded
+            # on, by the side of the pair (`courtyard_source_on`) --
+            # `GradedPart.source` on its own side and, for a through-hole
+            # part, the boxes of its drilled pads on the far one. A pair with
+            # a member that is not `courtyard` on the pair's side was graded
+            # on a stand-in (.Fab body, silk, pad box, drilled pads) and is
+            # not a KiCad courtyards_overlap finding.
+            'courtyard_sources': {
+                r: {s: courtyard_source_on(
+                        gp, s, getattr(_census.bodies.get(r),
+                                       'far_court_local', None) is not None)
+                    for s in sorted(gp.sides)
+                    if s == gp.side or gp.tht_rect is not None}
+                for r, gp in _cg.parts.items()},
             'fab_rejected_refs': fab_rejected_refs,
             # #896. The tightest DRAWN-body seam on the board, signed
             # (negative = overlap). `body_overlap_pairs` reports a depth only

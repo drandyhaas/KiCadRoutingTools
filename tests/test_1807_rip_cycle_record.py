@@ -12,7 +12,8 @@ rejected since), prints `RIP CYCLE:` naming the contested set, and adds
 `rip_cycle` to `JSON_IMPROVEMENT_GATE`. The summary's `rip_attackers` is the
 structured twin of `preexisting_rips`' "[was blocking ...]" text.
 
-A. the comparison on hand-built records.
+A. the comparison on hand-built records, and which records a step keeps:
+   the newest accepted one always, however many rejected retries follow it.
 B. the record's file round trip (replaced, not merged).
 C. a chain of F.Cu-only laps on an in-repo board, each retry naming the nets
    still open, where the third step breaks two nets the second connected.
@@ -30,7 +31,8 @@ sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 sys.path.insert(0, HERE)
 
 from improvement_gate import (rip_cycle, lap_entry, lap_history,  # noqa: E402
-                              format_rip_cycle, LAP_KEY)
+                              format_rip_cycle, LAP_KEY, LAP_HISTORY,
+                              trim_lap_history)
 from run_utils import check as run_check, evidence  # noqa: E402
 
 failures = []
@@ -76,6 +78,25 @@ check("a step that traded nothing records nothing",
       lap_entry(cmp([], []), 'accept') is None)
 check("malformed records are ignored",
       lap_history({LAP_KEY: [{'lost': 'x'}, 3, lap2]}) == [lap2])
+# rejected retries never push the step that made the board out of the record
+made = lap_entry(cmp([], ['A', 'B']), 'accept')
+hist, named = [made], []
+for k in range(1, 8):
+    trade = cmp(['A'], [f'X{k}'])            # each retry a different trade
+    named.append((rip_cycle(hist, trade) or {}).get('undone'))
+    hist = trim_lap_history(hist + [lap_entry(trade, 'reject')])
+check("seven rejected retries, each a different trade breaking the same net: "
+      "every one is named a cycle", named == [['A']] * 7, str(named))
+check("...and the record is the accepted step and the last three rejected ones",
+      len(hist) == LAP_HISTORY and hist[0] == made
+      and [e['gained'] for e in hist[1:]] == [['X5'], ['X6'], ['X7']], str(hist))
+five = [lap_entry(cmp([f'L{k}'], [f'G{k}']), v)
+        for k, v in enumerate(['accept', 'reject', 'accept', 'reject', 'reject'])]
+check("control: an accepted step among the last four, the last four are kept",
+      trim_lap_history(five) == five[-LAP_HISTORY:])
+rejs = [lap_entry(cmp([f'L{k}'], [f'G{k}']), 'reject') for k in range(6)]
+check("control: no accepted step at all, the last four are kept",
+      trim_lap_history(rejs) == rejs[-LAP_HISTORY:])
 
 print("B. the record's file round trip")
 from protected_nets import persist_lap_history  # noqa: E402
@@ -159,6 +180,27 @@ try:
     check("the rejected lap 3 records its trade beside the reverted board",
           bool(rec3) and rec3[-1]['verdict'] == 'reject'
           and rec3[-1]['lost'] == gates[3]['lost'], str(rec3[-1:]))
+    # Lap 4 retries the reverted board with three more rejected trades on
+    # record: the step it leaves must still hold lap 2, which made the board.
+    others = [lap_entry(cmp(gates[3]['lost'], [f'/other{k}']), 'reject')
+              for k in range(3)]
+    persist_lap_history(os.path.splitext(b[3])[0] + '.kicad_pro',
+                        [rec2[-1]] + others, verbose=False)
+    b4 = os.path.join(tmp, 'lap4.kicad_pcb')
+    r = run_check(route + [b[3], b4, '--nets'] + open_nets(b[3])
+                  + ['--layers', 'F.Cu'], accept=True, timeout=1200)
+    g4 = gate(r.stdout) or {}
+    check("lap 4, the fourth rejected step on record, is rejected and named a "
+          "cycle", g4.get('verdict') == 'reject'
+          and (g4.get('rip_cycle') or {}).get('undone') == undone, str(g4))
+    rec4 = lap_history(tool_records.effective_namespace(b4))
+    check("after it the record still holds lap 2, the step that made the board",
+          len(rec4) == LAP_HISTORY and rec4[0] == rec2[-1]
+          and [e['verdict'] for e in rec4[1:]] == ['reject'] * 3,
+          str([(e['verdict'], e['gained']) for e in rec4]))
+    nxt = rip_cycle(rec4, cmp(gates[3]['lost'], ['/another']))
+    check("...so a fifth, different, trade that breaks the same nets is still "
+          "a cycle", (nxt or {}).get('undone') == undone, str(nxt))
     # rip_attackers agrees with the text of preexisting_rips (its last entry)
     ok, seen = True, 0
     for out in logs.values():

@@ -41,6 +41,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from kicad_parser import (PCBData, Segment, find_components_by_type,
                           is_immutable_copper)
 import routing_defaults as defaults
+from net_queries import pad_on_layer
 from bga_fanout.grid import analyze_bga_grid
 from placement.parser import extract_courtyard_bboxes, extract_locked_refs
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
@@ -5339,7 +5340,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         for p, pfl, has_cu, _cap in board_pads:
             if p.net_id == net_id:
                 continue
-            if not _pad_on_layer(p, layer):
+            if not pad_on_layer(p, layer):
                 continue
             if not has_cu:
                 continue  # NPTH: no copper; the hole check above covers it
@@ -5623,6 +5624,3 @@ def _drill_gap_at(pcb_data, via, x, y) -> float:
     return min(gaps, default=float('nan'))
 
 
-def _pad_on_layer(pad, layer):
-    layers = getattr(pad, 'layers', None) or []
-    return layer in layers or '*.Cu' in layers
