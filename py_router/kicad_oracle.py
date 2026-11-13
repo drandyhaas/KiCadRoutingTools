@@ -2009,6 +2009,18 @@ def _stitch_via_clear(pcb_data, net_id, x, y, config, h2h) -> bool:
     return True
 
 
+def _same_net_pad_via_blocked(config, base_obstacles, x, y) -> bool:
+    """True when a positive same-net pad clearance forbids a via at (x, y)
+    on `base_obstacles` (build_base_obstacles stamps the routed nets' own
+    SMD pad/paste keep-out as blocked vias). The stitching via bypasses A*,
+    so it asks the same map."""
+    if not (getattr(config, 'same_net_pad_clearance', -1.0) > 0):
+        return False
+    from routing_config import GridCoord
+    return bool(base_obstacles.is_via_blocked(
+        *GridCoord(config.grid_step).to_grid(x, y)))
+
+
 STITCH_SITE_RADII = (0.0, 0.3, 0.6, 1.0, 1.5, 2.0, 3.0)
 
 
@@ -3365,8 +3377,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                     except Exception:
                         pass
                     _h2h = getattr(config, 'hole_to_hole_clearance', 0.2)
-                    _ok649 = _stitch_via_clear(pcb_data, net_id, _vx, _vy,
-                                               config, _h2h)
+                    # Direct stitching bypasses A*: retain the same pad/paste
+                    # keep-out as the region router (same-net pad clearance).
+                    _ok649 = (_stitch_via_clear(pcb_data, net_id, _vx, _vy,
+                                                config, _h2h)
+                              and not _same_net_pad_via_blocked(
+                                  config, base_obstacles, _vx, _vy))
                     if _ok649:
                         # the spot the search fell back to (none found, or
                         # the search failed) is judged the same way

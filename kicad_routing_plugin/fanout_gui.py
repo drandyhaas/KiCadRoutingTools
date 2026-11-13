@@ -2185,6 +2185,9 @@ class FanoutTab(wx.Panel):
             # ceiling (qfn_fanout.py reads the file's, under --clearance-ceiling).
             net_clearances=live_net_clearances(self.pcb_data),
             clearance_ceiling=shared.get('clearance_ceiling'),
+            # #1795: the via override unticked -- the class via may step
+            # down the underpad ladder (qfn_fanout.py with no --via-size).
+            via_from_class=bool(shared.get('via_from_class')),
             # See the BGA path: safe from the worker via ui_thread_status.
             # Only the counted x/N lines reach the status feed -- the
             # uncounted phase chatter (gridding, staging, ...) is log-only.
