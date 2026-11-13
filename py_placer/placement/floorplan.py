@@ -3411,6 +3411,25 @@ def _copper_pads(fp):
     return [p for p in (fp.pads or ()) if pad_has_copper(p)]
 
 
+def fingers_at_outline(fp, gate) -> bool:
+    """Whether a part's fingers stand at the outline the way a mating edge's
+    do (#1098, #1116): no pad copper past it (`pad_copper_overrun_mm`, the
+    measure #1096's gate reports) and >= 2 netted pads within
+    `MATING_FINGER_EDGE_MM` of it. `gate` is a `legality.BoardOutlineGate`.
+    Geometry only, and the half of `_plug_seat_rect` that needs no
+    courtyard."""
+    pads = _copper_pads(fp)
+    if legality.pad_copper_overrun_mm(pads, gate) > legality.EPS:
+        return False
+    near = 0
+    for p in pads:
+        if p.net_id and gate.edge_clearance(legality.pad_rect(p)) <= MATING_FINGER_EDGE_MM:
+            near += 1
+            if near >= 2:
+                return True
+    return False
+
+
 def _plug_seat_rect(ref, fp, crt, gate):
     """The board rect of `ref`'s courtyard while the part is SEATED at the
     outline the way a plug is, else None (#1098).
@@ -3424,17 +3443,7 @@ def _plug_seat_rect(ref, fp, crt, gate):
     names it."""
     from .parser import courtyard_for_side
     from .part_class import SEAT_TOL_MM
-    pads = _copper_pads(fp)
-    if legality.pad_copper_overrun_mm(pads, gate) > legality.EPS:
-        return None
-    near = 0
-    for p in pads:
-        if not p.net_id:
-            continue
-        pr = legality.pad_rect(p)
-        if gate.edge_clearance(pr) <= MATING_FINGER_EDGE_MM:
-            near += 1
-    if near < 2:
+    if not fingers_at_outline(fp, gate):
         return None
     loc = courtyard_for_side((crt or {}).get(ref), legality.footprint_side(fp))
     if loc is None:

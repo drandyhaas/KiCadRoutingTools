@@ -120,7 +120,8 @@ AREA_GRADED_KINDS = ('clearance', 'track_width')
 # rule no step honours is named by `Rule.router_unhonoured`, #1527). A rule
 # built only on the other kinds listed here is reported neither "NOT
 # honoured" nor "not consumed", except a ROUTER_UNHONOURED_KINDS kind
-# (`annular_width`, `via_count`), which `unsupported()` names NOT honoured.
+# (`annular_width`, `via_count`, `hole_clearance`), which `unsupported()`
+# names NOT honoured.
 CONSUMED_KINDS = CLEARANCE_KINDS | SIZE_KINDS | {'disallow', 'via_count'}
 # Kinds no routing step honours but a grader does: check_drc grades every
 # `length` window (kicad_dru.read_board_length_rules, #1313) and every
@@ -134,8 +135,11 @@ GRADED_ONLY_KINDS = frozenset({'length', 'skew', 'diff_pair_uncoupled'})
 # route.py's `design_rules.unsupported_rules` -- rather than passing as consumed.
 # `via_count` (#1707) likewise: no step counts a net's vias against it -- a
 # net is routed with the vias it needs, completion first -- and check_drc
-# grades it as KiCad's too_many_vias does.
-ROUTER_UNHONOURED_KINDS = frozenset({'annular_width', 'via_count'})
+# grades it as KiCad's too_many_vias does. `hole_clearance` too: no step
+# reads a rule of it (`obstacle_map.resolve_hole_clearance` holds the board's
+# min_hole_clearance or the fab floor), and check_drc grades it
+# (`check_drc.hole_rule_grade`).
+ROUTER_UNHONOURED_KINDS = frozenset({'annular_width', 'via_count', 'hole_clearance'})
 #: why each ROUTER_UNHONOURED_KINDS kind is not honoured, as `unsupported()` says it
 _ROUTER_UNHONOURED_WHY = {
     'annular_width': ("a via a step sizes itself holds it, an explicit via size and a "
@@ -145,6 +149,10 @@ _ROUTER_UNHONOURED_WHY = {
     'via_count': ("no routing step counts a net's vias against it (a net is routed "
                   "with the vias it needs, completion first); check_drc grades the "
                   "board's vias per net against it, as KiCad's too_many_vias does"),
+    'hole_clearance': ("no routing step reads this rule: copper is kept off another "
+                       "net's NPTH holes at the board's min_hole_clearance (or the fab "
+                       "floor) and off plated holes at the copper clearance, not at this "
+                       "rule's value; check_drc grades the board against it"),
 }
 # `disallow` item tokens (#1527). The router lays tracks and THROUGH vias
 # only, so a rule forbidding only blind, buried or micro vias asks nothing of
@@ -3738,6 +3746,13 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
                 config.edge_floors, pcb_data)
         except Exception as e:                                 # noqa: BLE001
             rules.notes.append(f"per-net edge bands not derived ({e})")
+    if net_keepouts and pcb_data is not None:
+        # #1116: no via in an edge connector's contact finger
+        try:
+            from net_keepouts import derive_contact_fingers
+            rules.net_keepouts = list(rules.net_keepouts) + derive_contact_fingers(pcb_data)
+        except Exception as e:                                 # noqa: BLE001
+            rules.notes.append(f"contact-finger via keep-outs not derived ({e})")
     key = (os.path.abspath(rules.source) if rules.source else '',
            tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
                  for r in rules.rules))
