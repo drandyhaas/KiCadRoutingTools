@@ -3505,27 +3505,6 @@ class RoutingDialog(wx.Dialog):
         config['via_span_type'] = _span_type if _span_type in ('micro', 'blind', 'buried') else None
         _span_escape = self.via_span_escape.GetStringSelection()
         config['via_span_escape'] = _span_escape if _span_escape in ('route', 'only') else None
-        # A micro via span draws the Default class's MICRO via where the via
-        # overrides are unticked, on every net -- as route.py does when
-        # --via-size / --via-drill are omitted. (A span the board cannot have
-        # is refused by the engine, by name.)
-        if config['via_span'] and config.get('via_from_class'):
-            try:
-                from via_span import resolve_via_span, default_micro_via
-                _resolved_type = resolve_via_span(
-                    list(self.pcb_data.board_info.copper_layers),
-                    config['via_span'][0], config['via_span'][-1],
-                    config['via_span_type'])[1]
-            except ValueError:
-                _resolved_type = None
-            if _resolved_type == 'micro':
-                _mdia, _mdrill = default_micro_via(
-                    getattr(self.pcb_data, 'source_path', None) or '')
-                if _mdia:
-                    config['via_size'] = _mdia
-                if _mdrill:
-                    config['via_drill'] = _mdrill
-                config['via_from_class'] = False
 
         # Parse rip-pre-existing-nets (issue #103): empty -> None (keep
         # pre-existing tracks fixed), ALL -> ["*"], else fnmatch patterns.

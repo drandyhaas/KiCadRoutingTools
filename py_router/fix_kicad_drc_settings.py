@@ -1359,15 +1359,18 @@ def size_values_below_authored(pcb_path: str, floors: dict, rules_from: str) -> 
         "min_track_width": [(s.width, dr.item_for_net(s.net_id, "track", s.layer), s.layer)
                             for s in pcb.segments if s.width and s.width > 0
                             and not getattr(s, "graphic", False)],
-        "min_via_diameter": [(v.size, dr.item_for_net(v.net_id, "via"), None)
+        # #1842: each via as itself, so a micro via is held to the micro via
+        # minimums (#1844) and not counted under the through via's
+        "min_via_diameter": [(v.size, dr.via_item(v), None)
                              for v in pcb.vias if v.size],
-        "min_via_drill": [(v.drill, dr.item_for_net(v.net_id, "via"), None)
+        "min_via_drill": [(v.drill, dr.via_item(v), None)
                           for v in pcb.vias if v.drill],
         "min_via_annular_width": [((v.size - v.drill) / 2.0, dr.item_for_net(v.net_id, "via"),
                                    None) for v in pcb.vias
                                   if v.size and v.drill and v.size > v.drill],
     }
-    holes = [(v.drill, dr.item_for_net(v.net_id, "via"), None) for v in pcb.vias if v.drill]
+    holes = [(v.drill, dr.item_for_net(v.net_id, "via"), None) for v in pcb.vias
+             if v.drill and getattr(v, 'via_type', None) != 'micro']
     for fp in pcb.footprints.values():
         for pad in fp.pads:
             if getattr(pad, "drill", 0):
@@ -1443,8 +1446,11 @@ def copper_minima(segments=(), vias=()):
     if widths:
         out["min_track_width"] = min(widths)
     vs = [(_get(v, 'size') or 0.0, _get(v, 'drill') or 0.0) for v in vias or ()]
-    sizes = [s for s, _d in vs if s]
-    drills = [d for _s, d in vs if d]
+    # #1842: a micro via is no statement about the via or hole minimums
+    drilled = [(_get(v, 'size') or 0.0, _get(v, 'drill') or 0.0) for v in vias or ()
+               if _get(v, 'via_type') != 'micro']
+    sizes = [s for s, _d in drilled if s]
+    drills = [d for _s, d in drilled if d]
     if sizes:
         out["min_via_diameter"] = min(sizes)
     if drills:

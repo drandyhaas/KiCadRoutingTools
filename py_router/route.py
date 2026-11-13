@@ -2977,6 +2977,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"Via span (#1842): {_span_type1842} vias {_span1842[0]}-{_span1842[-1]}; "
                   f"routing on {', '.join(layers)} only, and only copper on "
                   f"{', '.join(_span1842)} (and drilled pads) blocks a via site")
+            if _span_type1842 == 'micro' and via_from_class:
+                # no via size was asked for: a micro via span draws the
+                # Default class's MICRO via on every net (a class's
+                # via_diameter is its through via's), on both fronts
+                from via_span import default_micro_via
+                _mdia, _mdrill = default_micro_via(
+                    input_file or getattr(pcb_data, 'source_path', '') or '')
+                if _mdia:
+                    via_size = _mdia
+                if _mdrill:
+                    via_drill = _mdrill
+                if _mdia or _mdrill:
+                    print(f"  micro via span: drawing the board Default net-class micro "
+                          f"via {via_size}/{via_drill} mm on every net")
+                via_from_class = False
             if disable_bga_zones is None:
                 # "no new via in a BGA's pad field" is a rule for through
                 # vias, which the fan-out step lays there. A via of a span
