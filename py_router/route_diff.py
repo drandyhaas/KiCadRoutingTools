@@ -1540,10 +1540,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                     force_ripped.pop(_mine, None)
         if force_ripped:
             from pcb_modification import bump_copper_epoch
-            pcb_data.segments = [s for s in pcb_data.segments
-                                 if s.net_id not in force_ripped]
-            pcb_data.vias = [v for v in pcb_data.vias
-                             if v.net_id not in force_ripped]
+            # exactly the copper selected (held copper is not, #1842)
+            _strip = {id(x) for _s, _v in force_ripped.values() for x in list(_s) + list(_v)}
+            pcb_data.segments = [s for s in pcb_data.segments if id(s) not in _strip]
+            pcb_data.vias = [v for v in pcb_data.vias if id(v) not in _strip]
             bump_copper_epoch(pcb_data)
             print(f"--force-reroute: stripped "
                   f"{sum(len(a) for a, _ in force_ripped.values())} segment(s) / "

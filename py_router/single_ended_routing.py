@@ -20,6 +20,7 @@ from dataclasses import replace
 from kicad_parser import (PCBData, Segment, Via, pad_is_plated_through,
                           plated_drill_exposed, flush_drill_peg)
 from routing_config import GridRouteConfig, GridCoord
+from via_span import via_layer_pair, via_kind
 from routing_utils import build_layer_map, pad_rect_halfspan
 from connectivity import (
     get_net_endpoints,
@@ -3299,7 +3300,8 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
                     x=_vx, y=_vy,
                     size=_vsz,
                     drill=_vdr,
-                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    layers=via_layer_pair(config),  # #1842: the step's span
+                    via_type=via_kind(config),
                     net_id=net_id
                 )
                 new_vias.append(via)
@@ -3856,6 +3858,16 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
     placement legality WITHOUT an epoch bump, so a failure under inflight
     state must not be trusted later. Likewise when the caller hands
     ``pending_vias`` (this net's own uncommitted vias, see the impl)."""
+    # #1842: a via-span step lays copper on its span only. This via and its
+    # stub start on the PAD's layer, so a pad with copper outside the span
+    # (an F.Cu ball in an In1-In6 step) is not this step's to escape.
+    _span = getattr(config, 'via_span', None)
+    if _span:
+        from check_drc import pad_copper_layers
+        _on = set(pad_copper_layers(pad_obj, list(pcb_data.board_info.copper_layers)))
+        if not _on <= set(_span):
+            return None
+
     from plane_pad_tap import inflight_copper_dicts
     _iv, _isg = inflight_copper_dicts(pcb_data)
     _inflight = bool(_iv) or bool(_isg) or bool(pending_vias)
@@ -7715,7 +7727,8 @@ def _path_to_segments_vias(
                         x=vx, y=vy,
                         size=_vsz,
                         drill=_vdr,
-                        layers=["F.Cu", "B.Cu"],  # Always through-hole
+                        layers=via_layer_pair(config),  # #1842: the step's span
+                    via_type=via_kind(config),
                         net_id=net_id
                     )
                     vias.append(via)

@@ -1100,7 +1100,7 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 ## Limitations
 
 - No push-and-shove (routes around obstacles, doesn't move them)
-- No blind or buried vias
+- Micro, blind and buried vias one span per route step: `route.py --via-span TOP BOTTOM` lays vias that join only that run of copper layers and routes on those layers ([Configuration](docs/configuration.md#via-span)); one search does not choose between via types, and the fan-out, diff-pair and plane steps lay through vias only
 - No coarse grid assignment before detailed routing to plan overall topology
 - Area-scoped design rules in part: a `.kicad_dru` rule conditioned on a rule area is honoured as a (net-filtered) `disallow` keep-out, and a clearance or track-width rule whose condition is one area predicate, or an OR of them, is routed to inside the area (see [Configuration](docs/configuration.md)); a rule with further condition terms is not routed to (the run reports it), and a diff pair that has to pass an area raising the clearance above its gap is built at the area's value for the run (disclosed per pair; one that need not pass it is kept out of it); `check_drc.py` grades them by where each track, via and pad stands
 

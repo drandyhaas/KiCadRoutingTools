@@ -13,6 +13,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 from kicad_parser import PCBData, Segment, Via, is_immutable_copper
 from routing_utils import pos_key, POSITION_DECIMALS, into_pad_frame_point
 from geometry_utils import point_to_segment_distance, segments_intersect
+from via_span import HELD_OUTSIDE_SPAN
 
 # Read once at import: both are checked inside per-segment cleanup loops (hot).
 _COLLAPSE_DEBUG = os.environ.get('KICAD_COLLAPSE_DEBUG')
@@ -553,8 +554,14 @@ def _sense_copper(item) -> bool:
     board holds (`held_by`). Same-net copper is invisible to their clearance
     gates, so a via parked legally at clearance beside a sense pad, or a
     dead end at clearance from the sense trace, read as a soft joint and was
-    bridged onto it: load current on the sense copper, off the join pad."""
-    return bool(getattr(item, 'sense', '') or getattr(item, 'held_by', ''))
+    bridged onto it: load current on the sense copper, off the join pad.
+
+    #1842: a via-span step's hold on the copper outside its span
+    (`via_span.HELD_OUTSIDE_SPAN`) keeps that copper from being ripped; it
+    carries no sense current, so a route ending at an earlier step's escape
+    via or stub is bridged onto it like onto any other copper of its net."""
+    held = getattr(item, 'held_by', '')
+    return bool(getattr(item, 'sense', '') or (held and held != HELD_OUTSIDE_SPAN))
 
 
 def length_graded_net_ids(pcb_data: PCBData, config) -> set:

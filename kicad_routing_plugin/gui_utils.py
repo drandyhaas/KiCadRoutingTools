@@ -400,6 +400,17 @@ def apply_via_protection(pcb_via, tenting_attrs):
     return applied
 
 
+def live_via_is_micro(via) -> bool:
+    """A pcbnew PCB_VIA typed micro (#1842): the project writeback leaves it
+    out of the via diameter, via drill and smallest-hole minimums, as the
+    file-side `fix_kicad_drc_settings.board_size_values` does."""
+    try:
+        from kicad_parser import pcbnew_via_type
+        return pcbnew_via_type(via) == 'micro'
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 def set_via_layers(pcb_via, top_id, bottom_id, via_type=None):
     """Give a PCB_VIA its type, THEN its layer pair -- in that order.
 
@@ -820,9 +831,12 @@ def board_minima_from_live(board):
                     except Exception:
                         w = pcbnew.ToMM(t.GetWidth())
                     d = pcbnew.ToMM(t.GetDrillValue())
-                    if w:
+                    # #1842: a micro via is graded at the micro via minimums;
+                    # only its ring is a statement about the board's
+                    _micro = live_via_is_micro(t)
+                    if w and not _micro:
                         via_sizes.append(w)
-                    if d:
+                    if d and not _micro:
                         via_drills.append(d)
                         holes.append(d)
                     if w and d and w > d:
@@ -1137,12 +1151,17 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                     except Exception:
                         w = t.GetWidth()
                     d = t.GetDrillValue()
-                    min_via = w if min_via is None else min(min_via, w)
-                    min_drill = d if min_drill is None else min(min_drill, d)
+                    # #1842: a micro via is no statement about the board's via
+                    # or drilled-hole minimums; its ring still is
+                    _micro = live_via_is_micro(t)
+                    if not _micro:
+                        min_via = w if min_via is None else min(min_via, w)
+                        min_drill = d if min_drill is None else min(min_drill, d)
                     ann = (w - d) // 2
                     min_ann = ann if min_ann is None else min(min_ann, ann)
-                    _objs['min_via_diameter'].append(w / 1e6)
-                    if d:
+                    if not _micro:
+                        _objs['min_via_diameter'].append(w / 1e6)
+                    if d and not _micro:
                         _objs['min_via_drill'].append(d / 1e6)
                     if w > d:
                         _objs['min_via_annular_width'].append((w - d) / 2e6)

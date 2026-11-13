@@ -845,6 +845,12 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
     Returns:
         NetObstacleData with blocked_cells and blocked_vias lists
     """
+    # #1842: under a via span this reads the board as the span sees it
+    # (via_span.obstacle_board), at every call -- the run's first build and
+    # each rebuild after a rip or a route alike.
+    if getattr(config, 'via_span', None):
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
     layer_map = build_layer_map(config.layers)
@@ -1343,6 +1349,9 @@ def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: 
     Returns:
         Dict mapping net_id to NetObstacleData
     """
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     cache: Dict[int, NetObstacleData] = {}
     for net_id in net_ids:
         cache[net_id] = precompute_net_obstacles(pcb_data, net_id, config,
