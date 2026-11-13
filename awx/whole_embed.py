@@ -12,6 +12,14 @@ lane leaves its tooth, and reaches its berth, straight along its stub: through i
 point (the stub's MOUTH), where its run begins. A via is a free point too, inside a cell of the vias' space and the
 end cells of its two runs.
 
+A PAIR's via is what the later stages lay there: two barrels either side of the pair's line, across ONE router
+heading through the via, and the pair router's straight run along that heading either side. Its heading is read off
+its lane (the router's nearest; the next either side where the via fits that way and not the nearest); it stands in
+a cell of its OWN free space -- the places where both barrels stand a via's bar off every layer's copper and both
+straight runs lie in their layers' free space; its two runs end at the ends of the straight run, points rigid with
+the via; and every other lane keeps off each barrel, and off each of the cells the pair router tests for the dive,
+by that one's own bar (--no-dives: a pair's via one point with a wider room).
+
 One LP a round places every via and every lane's points together: the shortest and straightest lanes, with every
 two lanes of a layer a pitch apart, every lane a via's room from every other lane's via on the braid's side of it,
 vias their own distance apart -- each rule held as a separating line read off the layout as it stands, every point
@@ -20,8 +28,9 @@ margin more wherever there is room for it (soft). A rule may fall short, at a pr
 ANYTHING: two lanes of a layer, a lane and a via, two vias keep the sides they stand on, two lanes on one cell edge
 their order, and a via never leaves its cells for the fixed copper's bar. A point pressed on an edge of its cell
 with free space beyond goes on into the next cell (a lane pushed aside bulges into it), a via likewise; a run that
-doubles back on itself with nothing in between is pulled straight. A round's LP holds only what stands near where
-the round before moved, and the rounds end when nothing moves.
+doubles back on itself with nothing in between is pulled straight -- by another way through the cells, never by
+moving the places it crosses the same cell edges at: those are the LP's own. A round's LP holds only what stands
+near where the round before moved, and the rounds end when nothing moves.
 
 --ref=GEO.json: the layout it starts from and reads each run's cells off (a whole_geo.py geometry of the same solve).
 Where that layout stands inside a bar of fixed copper its line is read out to the free space, the runs kept in the
@@ -32,9 +41,10 @@ that lane on that layer there.
 OUT.json is written as whole_geo writes a geometry -- the polish, the audit and the snap read it as they read that.
 Its findings for the solve: a via cut for each via that stands short of its room, or inside a bar of fixed copper;
 a layer cut for each breach (also under 'breach', with the copper's names); under 'tight' every place the slack had
-to be given up. Every length the stage chooses is a multiple of the board's own pitch, track width or grid step. A
-stage run on its own from a recorded round (replay_stage.py); the loop does not call it. The bench from BENCH / NETS
-/ DEST (whole_ctx).
+to be given up. Every length the stage chooses is a multiple of the board's own pitch, track width or grid step.
+The loop (whole_route.py) runs it after whole_geo.py when GEO_EMBED=1 is set -- its lanes the round's geometry, its
+findings the round's cuts -- and not otherwise; on its own it runs from a recorded round (replay_stage.py). The bench
+from BENCH / NETS / DEST (whole_ctx).
 
   --draw=PNG / --draw0=PNG   the layout after the rounds / as it starts, exact geometry; --view=X0,Y0,X1,Y1 a window
                              of it, --names the runs' names, --draw-ref the reference's lines over it, --draw-cells
@@ -46,8 +56,14 @@ stage run on its own from a recorded round (replay_stage.py); the loop does not 
   --show-paid --show-standing --show-hot --show-kinks
                              each round's largest paid rows by name; the layout's largest shortfalls with their
                              places; where the round moved; where the layout's wiggles are
+  --show-why                 every place the round moved, by its cause: a point of a run the LP moved (how far, its
+                             trust), a point's or a via's cell change, a pull (the run, the stretch pulled)
   --watch=LANE.k,LANE.k      two runs followed round by round: their points, how near they stand, the rows
-                             between them and each pull of either"""
+                             between them and each pull of either; with --show-rows, the LP's rows that hold each of
+                             their points, by kind, with the price each puts on the point's move
+  --probe=X,Y,R              the fixed copper and the cells' corners within R of a point (and the rules' sizes)
+  --draw-thin                the lanes drawn as thin lines (a close view: each point's kind shows -- white a free
+                             point, yellow one on a cell edge)"""
 import sys, json, math, collections, heapq, time
 import awx_settings
 import numpy as np
@@ -184,7 +200,20 @@ ARRAY = ('src ', 'dest ')                              # an array's own box: its
 # piece -- a lane passes between two pads wherever the cells between them are free, so no part needs deciding whole
 # (the census boxes a part's pads together as one island, for the frames' columns)
 _isl = {lab_ for (lab_, _ls) in CEN.islands}
-FIXED = [o for o in CEN.obs if o[5] not in _isl]
+
+
+def _ringed(o):
+    """a census piece that is another net's VIA, at its reach for a lane: the router's ring about the grid point the
+    via rounds to (pairs.svia_reach, as whole_geo and the audit take it), not the via's own radius alone"""
+    if not o[5].startswith('via '):
+        return o
+    cx, cy, r = (o[0] + o[2]) / 2, (o[1] + o[3]) / 2, (o[2] - o[0]) / 2
+    r2 = max(r, _pairs.svia_reach(ctx.cfg, cx, cy, 2 * r))
+    return (cx - r2, cy - r2, cx + r2, cy + r2) + tuple(o[4:])
+
+
+_havec = {(round((o[0] + o[2]) / 2, 4), round((o[1] + o[3]) / 2, 4)) for o in CEN.obs if o[5].startswith('via ')}
+FIXED = [_ringed(o) for o in CEN.obs if o[5] not in _isl]
 import board_rules
 for ref_, fp_ in ctx.pcb.footprints.items():
     if ref_ == Fr.src or ref_ in Fr.dests:
@@ -207,8 +236,8 @@ for ref_, fp_ in ctx.pcb.footprints.items():
 _BOXES = [Fr.SB] + [Fr.DBs[r_] for r_ in Fr.dests]
 _near = lambda x, y, g: any((min(abs(x - b[0]), abs(x - b[2])) < g and b[1] - g <= y <= b[3] + g) or
                             (min(abs(y - b[1]), abs(y - b[3])) < g and b[0] - g <= x <= b[2] + g) for b in _BOXES)
-_have = {(round(o[0], 4), round(o[1], 4), round(o[2], 4), round(o[3], 4)) for o in FIXED}
 NSTUB = 0
+FIXNET = {}                                            # a stub's or its via's piece (its place in FIXED) -> its net
 for s_ in ctx.base_segments:
     if s_.layer not in LI:
         continue
@@ -221,13 +250,14 @@ for s_ in ctx.base_segments:
         cx, cy, r_ = ax + (bx - ax) * f_, ay + (by - ay) * f_, s_.width / 2
         FIXED.append((min(ax, cx) - r_, min(ay, cy) - r_, max(ax, cx) + r_, max(ay, cy) + r_,
                       frozenset([LI[s_.layer]]), 'stub ' + whole_ctx.copper_name(ctx, s_)))
+        FIXNET[len(FIXED) - 1] = s_.net_id
         NSTUB += 1
 for v_ in ctx.base_vias:
     r_ = max(v_.size / 2, _pairs.svia_reach(ctx.cfg, v_.x, v_.y, v_.size))
-    k_ = (round(v_.x - v_.size / 2, 4), round(v_.y - v_.size / 2, 4), round(v_.x + v_.size / 2, 4), round(v_.y + v_.size / 2, 4))
-    if k_ not in _have and _near(v_.x, v_.y, VIA_ST + bd.VIA_NEED):
+    if (round(v_.x, 4), round(v_.y, 4)) not in _havec and _near(v_.x, v_.y, VIA_ST + bd.VIA_NEED):
         FIXED.append((v_.x - r_, v_.y - r_, v_.x + r_, v_.y + r_, frozenset(range(NL)),
                       'svia ' + whole_ctx.copper_name(ctx, v_)))
+        FIXNET[len(FIXED) - 1] = v_.net_id
         NSTUB += 1
 
 
@@ -373,6 +403,226 @@ class Mesh:
 
 MESH = [Mesh(f_) for f_ in FREE]
 VMESH = Mesh(VFREE)
+# (each layer's bars as a tree of boxes, a hair inside each: whether a shape lies WHOLLY in the layer's free space is
+# asked of it -- of the one large polygon the free space is, the same question took a minute a round on a layer of
+# four thousand cells)
+BARS, BARPIECE = [], []                                # (BARPIECE: each box's piece, its place in FIXED)
+for L_ in range(NL):
+    bs_, ix_ = [], []
+    for i_, (x0, y0, x1, y1, ls, lab) in enumerate(FIXED):
+        if L_ in ls:
+            g = (TW / 2 if lab.startswith(ARRAY) else LANE_ST) - 1e-6
+            if not (x1 + g < WX0 or x0 - g > WX1 or y1 + g < WY0 or y0 - g > WY1):
+                bs_.append(_box(x0 - g, y0 - g, x1 + g, y1 + g))
+                ix_.append(i_)
+    BARS.append(shapely.STRtree(bs_) if bs_ else None)
+    BARPIECE.append(ix_)
+
+
+def in_free(L_, geom):
+    """geom wholly in layer L_'s free space"""
+    return WINB.covers(geom) and (BARS[L_] is None or len(BARS[L_].query(geom, predicate='intersects')) == 0)
+
+
+OWN_IDS = {n: {ctx.byname[n][0]} | {ctx.byname[leg][0] for leg in prs.get(n, ()) if leg in ctx.byname} for n in M}
+_own_corner = {}
+
+
+def own_corner(n, L_, vi):
+    """the cells' corner vi of layer L_ stands on the bar of lane n's OWN copper alone -- its stubs' ends, the vias
+    they end in (every lane's stub is a piece of the fixed copper, its own too: its run begins where it leaves that
+    bar) -- and on no other piece's, nor on the board's edge"""
+    got = _own_corner.get((n, L_, vi))
+    if got is None:
+        hit = BARS[L_].query(Point(MESH[L_].V[vi]), predicate='dwithin', distance=4e-6) if BARS[L_] is not None else ()
+        got = _own_corner[(n, L_, vi)] = bool(len(hit)) and all(FIXNET.get(BARPIECE[L_][q_]) in OWN_IDS[n] for q_ in hit)
+    return got
+
+
+if '--probe' in OPT:                               # (debugging: the fixed copper near a point, and then stop)
+    px_, py_, pr_ = (float(v) for v in OPT['--probe'].split(','))
+    for (x0, y0, x1, y1, ls, lab) in FIXED:
+        if x0 - pr_ <= px_ <= x1 + pr_ and y0 - pr_ <= py_ <= y1 + pr_:
+            log(f'   probe: {lab:28s} box ({x0:.3f}, {y0:.3f}) - ({x1:.3f}, {y1:.3f}) layers {sorted(LNAME[l_] for l_ in ls)}')
+    for L_ in range(NL):
+        vs_ = [tuple(round(float(c_), 3) for c_ in v_) for v_ in MESH[L_].V if abs(v_[0] - px_) < pr_ and abs(v_[1] - py_) < pr_]
+        log(f'   probe: {LNAME[L_]} mesh corners near: {vs_}')
+    log(f'   probe: LANE_ST {LANE_ST:.4f} VIA_ST {VIA_ST:.4f} VIA_R {VIA_R:.4f} VIA_VV {VIA_VV:.4f} P_MIN {P_MIN:.4f} PP {PP:.4f} hw {max(hw.values()):.4f} GS {GS} TW {TW} CL {CL} via {bd.VIA_SIZE}')
+    log(f'   probe: a single\'s via off a pair\'s line {VIA_R + PP / 2:.4f}')
+# ---------------------------------------------------------------- a pair's via: two barrels and a straight run
+# What the later stages lay at a pair's via, and ask of it (whole_polish: pair_dive_straights, barrels, pose_cells and
+# its rows 'via-lane', 'via-via', 'via-static', 'dive-lane', 'dive-via'; plan_audit.check_dives): ONE router heading
+# through the via, the lane straight along it for the pair router's straight run (pairs.via_straight) and a grid
+# step either side; a BARREL pairs.dive_offset either side of that line, across the heading; and the three CELLS the
+# pair router tests for the dive -- the via's place, and pairs.pose_via_cells grid steps either way along the
+# heading's integer perpendicular. Each barrel stands a via's bar off the fixed copper, a via's ring off every other
+# lane's line and a via's distance off every other barrel; each cell the pair's own bar off every other lane's line,
+# a via and the clearance off every other via's place. The sizes below are the polish's own, each read from the same
+# rule of pairs.py: the place this stage leaves a pair's via in is one where what the polish lays stands as laid.
+# (As ONE point with a wider room -- what it was here -- a pair's via stood where its barrels did not fit: beside a
+# pad, a barrel inside the pad's bar; the polish then moved the other lanes off its cells into bars of their own.)
+_cfg = ctx.cfg
+_R2 = math.sqrt(0.5)
+OCT8 = [(1.0, 0.0), (_R2, _R2), (0.0, 1.0), (-_R2, _R2), (-1.0, 0.0), (-_R2, -_R2), (0.0, -1.0), (_R2, -_R2)]
+OCT8I = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]      # ...as the router's integer steps
+DIVES = bool(prs) and '--no-dives' not in OPT
+HALF = PP / 2
+OFF = _pairs.dive_offset(_cfg, HALF) if prs else 0.0                 # a barrel off the pair's line
+_goff = lambda v: abs(v - round(v / GS) * GS)
+# (how far off its grid point a barrel can stand once the snap lays the dive on the grid, the worst of the headings,
+# twice: the router rings the point it rounds to)
+VX_OFF = 2 * max(math.hypot(_goff(OFF * -dy / math.hypot(dx, dy)), _goff(OFF * dx / math.hypot(dx, dy)))
+                 for dx, dy in OCT8I[:4]) if prs else 0.0
+RING, RING_PAIR = _pairs.via_ring(_cfg), _pairs.via_ring(_cfg, HALF)     # a via's reach into a track's grid cells
+DIVE_RUN = _pairs.via_straight(_cfg, OCT8[1]) + GS       # the straight run either side of the via: the longer
+#                                                          (diagonal) heading's -- the stretch the polish reads
+#                                                          the dive's heading over, whatever the heading
+SPC = _pairs.pose_via_cells(_cfg, HALF) if prs else 0    # the cells the pair router tests: this many steps across
+R_LINE = _cfg.via_size / 2 + _cfg.track_width / 2 + _cfg.clearance + HALF     # ...each this off another lane's line
+R_VIA = _cfg.via_size + _cfg.clearance                                          # ...and this off another via's place
+if DIVES:
+    for n_ in prs:       # (a single's via off a PAIR's line: the router's ring for a pair's centreline and a grid step,
+        if n_ in VS:     # as the polish asks it -- its ring and half the pitch can fall a part of a grid step short of that)
+            VS[n_] = max(VS[n_], RING_PAIR + 2 * GRID2)
+VH = {}              # a pair's via -> its router heading (0..7, OCT8)
+VXOV = set()         # ...those that are CROSSOVERS: a crossed pair's first dive, where its legs swap sides
+VLAID = set()        # ...those whose straight run is laid: the ends of its two runs stand rigid with the via
+_shape, _space = {}, {}
+
+
+def dive_shape(h, xo):
+    """a pair's dive on router heading h: {'barrels': each barrel's offset from the via's place, 'cells': each
+    tested cell's (the first the via's own place), 'runs': the straight run (before the via, after it)}. A CROSSOVER
+    (xo; pairs.crossover_shape): its two barrels stand on ONE side of the pair, staggered along the heading, and the
+    side is chosen later, by the room -- both sides' barrels are kept clear here -- and its runs are its own"""
+    got = _shape.get((h, xo))
+    if got is None:
+        u, (ix, iy) = OCT8[h], OCT8I[h]
+        px, py = -u[1], u[0]
+        cells = [(0.0, 0.0), (-iy * SPC * GS, ix * SPC * GS), (iy * SPC * GS, -ix * SPC * GS)]
+        barrels, runs = [(px * OFF, py * OFF), (-px * OFF, -py * OFF)], (DIVE_RUN, DIVE_RUN)
+        shs = [s_ for s_ in (_pairs.crossover_shape(_cfg, u, side) for side in (1, -1)) if s_ is not None] if xo else []
+        if shs:
+            barrels = [(a_ * u[0] + c_ * px, a_ * u[1] + c_ * py) for s_ in shs for a_, c_ in s_[0]]
+            runs = (max(DIVE_RUN, max(s_[1] for s_ in shs) + GS), max(DIVE_RUN, max(s_[2] for s_ in shs) + GS))
+        got = _shape[(h, xo)] = {'barrels': barrels, 'cells': cells, 'runs': runs}
+    return got
+
+
+def dive_space(h, xo, Lin, Lout):
+    """the places a pair's via may stand with heading h, its run arriving on layer Lin and leaving on Lout -- its OWN
+    free space, cut into cells as the vias' is: every place where each barrel stands a via's bar (and its reach off
+    the grid) off every layer's fixed copper, and the straight run either side lies the pair's own bar off the copper
+    of its layer. The fixed copper is boxes: a barrel's offset moves a box back by it, a straight run sweeps the box
+    back along it"""
+    got = _space.get((h, xo, Lin, Lout))
+    if got is None:
+        sh, u = dive_shape(h, xo), OCT8[h]
+        gv, reach = VIA_ST + VX_OFF, max(sh['runs']) + OFF + VIA_ST + VX_OFF + max(hw.values())
+        ps = []
+        for (x0, y0, x1, y1, ls, lab) in FIXED:
+            if x1 + reach < WX0 or x0 - reach > WX1 or y1 + reach < WY0 or y0 - reach > WY1:
+                continue
+            for (ox, oy) in sh['barrels']:
+                ps.append(_box(x0 - gv - ox, y0 - gv - oy, x1 + gv - ox, y1 + gv - oy))
+            for (L_, run, sg) in ((Lin, sh['runs'][0], -1.0), (Lout, sh['runs'][1], 1.0)):
+                if L_ in ls:
+                    g = (TW / 2 if lab.startswith(ARRAY) else LANE_ST) + max(hw.values())
+                    dx, dy = -sg * u[0] * run, -sg * u[1] * run
+                    ps.append(shapely.MultiPoint([(x0 - g, y0 - g), (x1 + g, y0 - g), (x1 + g, y1 + g), (x0 - g, y1 + g),
+                                                  (x0 - g + dx, y0 - g + dy), (x1 + g + dx, y0 - g + dy),
+                                                  (x1 + g + dx, y1 + g + dy), (x0 - g + dx, y1 + g + dy)]).convex_hull)
+        got = _space[(h, xo, Lin, Lout)] = Mesh(WINB.difference(unary_union(ps)) if ps else WINB)
+    return got
+
+
+def vmesh(vk):
+    """the cells via vk stands in: the vias' free space -- a pair's via its own (dive_space)"""
+    if vk in VH:
+        return dive_space(VH[vk], vk in VXOV, RUN[vk]['L'], RUN[(vk[0], vk[1] + 1)]['L'])
+    return VMESH
+
+
+def via_discs(vk):
+    """what via vk is to the lanes and the vias round it: [(a disc's offset from the via's place, its kind)] -- a
+    single's via one disc ('s', the via); a pair's its barrels ('b') and its cells ('c': the first the via's place)"""
+    if vk not in VH:
+        return [((0.0, 0.0), 's')]
+    sh = dive_shape(VH[vk], vk in VXOV)
+    return [(o, 'b') for o in sh['barrels']] + [(o, 'c') for o in sh['cells']]
+
+
+def disc_room(vk, kind, lane):
+    """a disc's bar off lane's line: a single's via its room; a barrel the router's ring (a pair's line by the
+    pair's ring), its reach off the grid and a grid step (the snap's share of the gap holds a row); a cell the
+    pair's own bar, the lane's half width where it is a pair, and three half steps (the polish's own)"""
+    if kind == 's':
+        return VS[lane] + VXO[vk[0]]
+    if kind == 'b':
+        return (RING_PAIR if lane in prs else RING) + VX_OFF + GS
+    return R_LINE + hw[lane] + 3 * GRID2
+
+
+def via_rooms(v1, v2):
+    """what two vias keep between them: [(a disc's offset from v1's place, one's from v2's, their distance at
+    least)] -- barrel to barrel (a single's via its own one) a via's distance, and what a pair's barrels stand
+    off the grid; a pair's cells a via and the clearance, and three half steps, off the other via's place"""
+    if v1 not in VH and v2 not in VH:
+        return [((0.0, 0.0), (0.0, 0.0), VIA_VV + VXO[v1[0]] + VXO[v2[0]])]
+    d1, d2 = via_discs(v1), via_discs(v2)
+    need = VIA_VV + (VX_OFF + GRID2 if (v1 in VH and v2 in VH) else max(VX_OFF, GRID2))
+    out = [(o1, o2, need) for o1, k1 in d1 if k1 != 'c' for o2, k2 in d2 if k2 != 'c']
+    out += [(o1, (0.0, 0.0), R_VIA + 3 * GRID2) for o1, k1 in d1 if k1 == 'c']
+    out += [((0.0, 0.0), o2, R_VIA + 3 * GRID2) for o2, k2 in d2 if k2 == 'c']
+    return out
+
+
+def via_short(vk, lane, geom):
+    """how far short of its room via vk stands off lane's line geom: the most over its discs (negative: clear)"""
+    V = VIA[vk]
+    return max(disc_room(vk, k_, lane) - Point(V[0] + o[0], V[1] + o[1]).distance(geom) for o, k_ in via_discs(vk))
+
+
+def _walk(pts, d):
+    """the point d along the line pts from its first point (its last where the line is shorter)"""
+    for a, b in zip(pts, pts[1:]):
+        ln = math.hypot(b[0] - a[0], b[1] - a[1])
+        if ln >= d and ln > 1e-12:
+            return (a[0] + (b[0] - a[0]) * d / ln, a[1] + (b[1] - a[1]) * d / ln)
+        d -= ln
+    return tuple(pts[-1])
+
+
+def dive_headings(back, fwd):
+    """the router headings by how near they are the way a lane runs through its via -- the chord from DIVE_RUN back
+    along the line `back` (from the via, against the lane) to DIVE_RUN on along `fwd`, as the polish reads a dive's
+    heading -- the nearest first"""
+    a, b = _walk(back, DIVE_RUN), _walk(fwd, DIVE_RUN)
+    c = (b[0] - a[0], b[1] - a[1])
+    return sorted(range(8), key=lambda h: -(OCT8[h][0] * c[0] + OCT8[h][1] * c[1]))
+
+
+def fit_dive(vk, V, hs):
+    """via vk's heading and place: of the headings hs (the nearest its lane's own way first) the first the via fits
+    with where it stands, V -- its barrels and its straight run clear of the fixed copper -- or, where none does,
+    the one whose space is nearest (the nearer heading unless another's is half a grid step nearer), and the nearest
+    place of it. -> (heading, place) or None"""
+    n, kv = vk
+    best = None
+    for h in hs:
+        m = dive_space(h, vk in VXOV, RUN[vk]['L'], RUN[(n, kv + 1)]['L'])
+        if not len(m.T):
+            continue
+        if m.locate([V])[0] >= 0:
+            return h, V
+        q = shapely.ops.nearest_points(m.free, Point(V))[0]
+        c = m.cen[int(m._tree.nearest(q))]
+        d = math.hypot(q.x - V[0], q.y - V[1])
+        if best is None or d < best[0] - GRID2:
+            best = (d, h, (float(q.x + (c[0] - q.x) * 1e-3), float(q.y + (c[1] - q.y) * 1e-3)))
+    return None if best is None else (best[1], best[2])
+
+
 log(f'fixed copper: {len(FIXED)} piece(s), {NSTUB} of them stubs and vias on the arrays\' box lines; cells: '
     + ', '.join(f'{LNAME[L_]} {len(MESH[L_].T)}' for L_ in range(NL)) + f', vias {len(VMESH.T)}  ({time.time() - T0:.1f} s)')
 
@@ -396,12 +646,23 @@ for n in M:
 KEYS, VKEYS = sorted(RUN), sorted(VIA)
 VIA_REF = dict(VIA)
 TV = {}              # each via's cell of the vias' space
+if DIVES:
+    # a pair's via: a crossover where it is a crossed pair's first; its heading the router's nearest the reference's
+    # own way through it -- or the next either side, where the via as it stands is nearer fitting that way
+    for vk in VKEYS:
+        if vk[0] in prs:
+            if vk[1] == 0 and vk[0] in getattr(ctx, 'pair_ends', {}) and _pairs.opposite_hands(ctx, vk[0]):
+                VXOV.add(vk)
+            got = fit_dive(vk, VIA[vk], dive_headings(RUN[vk]['ref'][::-1], RUN[(vk[0], vk[1] + 1)]['ref'])[:3])
+            if got is not None:
+                VH[vk], VIA[vk] = got
 for vk in VKEYS:
-    t = int(VMESH.locate([VIA[vk]])[0])
+    vm_ = vmesh(vk)
+    t = int(vm_.locate([VIA[vk]])[0])
     if t < 0:
-        q = shapely.ops.nearest_points(VFREE, Point(VIA[vk]))[0]
-        t = int(VMESH._tree.nearest(q))
-        c = VMESH.cen[t]
+        q = shapely.ops.nearest_points(vm_.free, Point(VIA[vk]))[0]
+        t = int(vm_._tree.nearest(q))
+        c = vm_.cen[t]
         VIA[vk] = (float(q.x + (c[0] - q.x) * 1e-3), float(q.y + (c[1] - q.y) * 1e-3))
     TV[vk] = t
 NVIA_MOVED = sum(1 for k in VKEYS if VIA[k] != VIA_REF[k])
@@ -600,7 +861,9 @@ def run_xy(key):
     m = MESH[r['L']]
     pts = [VIA[(n, k - 1)] if k else r['ref'][0]]
     for p in r['pts']:
-        if p['k'] != 'P':
+        if p['k'] == 'D':                     # a dive's end: rigid with its via
+            pts.append((VIA[p['vk']][0] + p['o'][0], VIA[p['vk']][1] + p['o'][1]))
+        elif p['k'] != 'P':
             pts.append(p['xy'])
         else:
             A, B = m.V[p['a']], m.V[p['b']]
@@ -699,23 +962,29 @@ def draw(path, title='', view=None, marks=()):
             if RUN[key]['L'] == L_:
                 own = ([RUN[key]['lead']] if RUN[key].get('lead') else []) + list(PL[key]) + \
                     ([RUN[key]['tail']] if RUN[key].get('tail') else [])
-                dr.line([Pt(*p) for p in own], fill=col[L_ % len(col)], width=max(1, int(round(TW * sc))))
+                dr.line([Pt(*p) for p in own], fill=col[L_ % len(col)],
+                        width=2 if '--draw-thin' in OPT else max(1, int(round(TW * sc))))
                 if '--draw-points' in OPT:
-                    for p in PL[key][1:-1]:
+                    for p, it_ in zip(PL[key][1:-1], RUN[key]['pts']):
                         cx, cy = Pt(*p)
-                        dr.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=(255, 255, 255))
+                        rr_ = 4 if it_['k'] == 'F' else 3
+                        dr.ellipse([cx - rr_, cy - rr_, cx + rr_, cy + rr_],
+                                   fill=(255, 255, 255) if it_['k'] == 'F' else (255, 220, 0) if it_['k'] == 'P' else (0, 255, 255))
     r_ = bd.VIA_SIZE / 2 * sc
     for vk, (x, y) in VIA.items():
-        cx, cy = Pt(x, y)
-        dr.ellipse([cx - r_, cy - r_, cx + r_, cy + r_], outline=(255, 255, 255), width=max(1, int(sc * 0.02)))
+        for (ox_, oy_) in (dive_shape(VH[vk], vk in VXOV)['barrels'] if vk in VH else [(0.0, 0.0)]):     # (a pair's barrels)
+            cx, cy = Pt(x + ox_, y + oy_)
+            dr.ellipse([cx - r_, cy - r_, cx + r_, cy + r_], outline=(255, 255, 255), width=max(1, int(sc * 0.02)))
     if '--draw-ref' in OPT:
         for key in KEYS:
             c_ = tuple(min(255, v + 110) for v in col[RUN[key]['L'] % len(col)])
             dr.line([Pt(*p) for p in RUN[key]['ref']], fill=c_, width=1)
     if '--names' in OPT:
         for key in KEYS:
-            p = PL[key][len(PL[key]) // 2]
-            if x0 <= p[0] <= x1 and y0 <= p[1] <= y1:
+            # (the name at the run's middle point in the window)
+            inw = [p for p in PL[key] if x0 <= p[0] <= x1 and y0 <= p[1] <= y1]
+            if inw:
+                p = inw[len(inw) // 2]
                 dr.text(Pt(*p), f'{key[0]}.{key[1]}', fill=(255, 255, 255))
     for (x, y) in marks:
         cx, cy = Pt(x, y)
@@ -839,8 +1108,13 @@ W_ORDER = 100 * W_HARD                        # ...and two lanes on one cell edg
 DIRS = [(c_ * sx, s_ * sy) for (c_, s_) in ((1.0, math.sqrt(2) - 1), (math.sqrt(2) - 1, 1.0)) for sx in (1, -1) for sy in (1, -1)]
 ORD = 1e-3                                    # two lanes on one cell edge: this far apart along it at least (their order)
 slk = lambda need: need + max(need * SLACK, ctx.cfg.grid_step)       # a bar with its slack
+# (VREACH: the farthest a via's room reaches from its place -- a pair's barrels and cells stand off it, on any heading)
+VREACH = VIA_R + PP + max(VXO.values())
+for h_, xo_ in {(h_, vk_ in VXOV) for vk_ in VH for h_ in range(8)}:
+    VREACH = max([VREACH] + [math.hypot(*o_) + RING_PAIR + VX_OFF + GS for o_ in dive_shape(h_, xo_)['barrels']]
+                 + [math.hypot(*o_) + R_LINE + max(hw.values()) + 3 * GRID2 for o_ in dive_shape(h_, xo_)['cells']])
 if REACH <= 0:
-    REACH = max(P_COMF + 2 * max(hw.values()) + TRUST, slk(VIA_R + PP + max(VXO.values())) + 3 * TRUST)
+    REACH = max(P_COMF + 2 * max(hw.values()) + TRUST, slk(VREACH) + 3 * TRUST)
 
 
 class LP:
@@ -852,6 +1126,7 @@ class LP:
         self.c, self.lo, self.hi = [], [], []
         self.I, self.Jc, self.A, self.b = [], [], [], []
         self.slack = []                      # (slack variable, kind, what)
+        self.kind, self.rk = '', []          # (debugging: each row's kind)
 
     def var(self, cost=0.0, lo=None, hi=None):
         self.c.append(cost); self.lo.append(lo); self.hi.append(hi)
@@ -862,6 +1137,14 @@ class LP:
         self.slack.append((sl, kind, what))
         return sl
 
+    def _run(self, A):
+        res = None
+        for meth in ('highs-ipm', 'highs-ds'):   # (interior point: a third of the dual simplex's time on the largest)
+            res = linprog(self.c, A_ub=A, b_ub=self.b if self.b else None, bounds=list(zip(self.lo, self.hi)), method=meth)
+            if res.status == 0:
+                break
+        return res
+
     def le(self, terms, rhs, sl=None):
         r = len(self.b)
         for v, a in terms:
@@ -871,24 +1154,40 @@ class LP:
             for s_ in (sl if isinstance(sl, (list, tuple)) else (sl,)):
                 self.I.append(r); self.Jc.append(s_); self.A.append(-1.0)
         self.b.append(rhs)
+        self.rk.append(self.kind)
         return r
 
     def ge(self, terms, rhs, sl=None):
         return self.le([(v, -a) for v, a in terms], -rhs, sl)
 
     def solve(self):
+        """the LP solved: True. The stage never stops on a round: where the capped rows leave no answer (a layout
+        that already stands past a cap in a way the caps did not allow for), the round is solved with the caps
+        LIFTED and what went past them is said (`over`: {kind: how many, the most}); where even that has none,
+        False, and the layout stands as it is"""
         A = coo_matrix((self.A, (self.I, self.Jc)), shape=(len(self.b), len(self.c))).tocsr() if self.b else None
-        res = None
-        for meth in ('highs-ipm', 'highs-ds'):   # (interior point: a third of the dual simplex's time on the largest)
-            res = linprog(self.c, A_ub=A, b_ub=self.b if self.b else None, bounds=list(zip(self.lo, self.hi)), method=meth)
-            if res.status == 0:
-                break
+        self.over = {}
+        res = self._run(A)
         if res.status != 0:
-            raise SystemExit(f'whole_embed: the LP has no answer ({res.message})')
+            # (the HARD rules' caps alone: a soft margin keeps its own, or the cheap one would take up everything
+            # and what could not be held would not show)
+            caps = {sl: self.hi[sl] for (sl, _k, _w) in self.slack if self.hi[sl] is not None and self.c[sl] >= W_HARD}
+            for sl in caps:
+                self.hi[sl] = None
+            res = self._run(A)
+            if res.status != 0:
+                log(f'      the round\'s LP has no answer, its caps lifted too ({res.message.strip()[:80]}): the layout stands')
+                return False
+            for (sl, kind, _w) in self.slack:
+                if sl in caps and res.x[sl] > caps[sl] + 1e-7:
+                    n_, m_ = self.over.get(kind, (0, 0.0))
+                    self.over[kind] = (n_ + 1, max(m_, float(res.x[sl] - caps[sl])))
+            log('      the round\'s LP has no answer inside its caps: solved with them lifted; past a cap: '
+                + (', '.join(f'{k_} {n_} (most {m_:.3f})' for k_, (n_, m_) in sorted(self.over.items())) or 'none'))
         self.x = res.x
         self.marg = res.ineqlin.marginals if self.b else np.zeros(0)
         self.lom, self.him = res.lower.marginals, res.upper.marginals
-        return res
+        return True
 
 
 # a point as an affine form of the LP's variables: (x0, y0, [(variable, dx, dy)])
@@ -943,24 +1242,26 @@ def shortfalls(PL):
             out['slack-lane'][w] = max(out['slack-lane'].get(w, 0.0), slk(gap) - float(d_))
     for vk in VKEYS:
         pv = Point(VIA[vk])
-        for b_ in tr.query(pv, predicate='dwithin', distance=slk(VIA_R + PP + max(VXO.values()))):
+        discs = [(Point(VIA[vk][0] + o_[0], VIA[vk][1] + o_[1]), k_) for o_, k_ in via_discs(vk)]
+        for b_ in tr.query(pv, predicate='dwithin', distance=slk(VREACH)):
             kb = sg[b_][0]
             if kb[0] == vk[0]:
                 continue
-            room = VS[kb[0]] + VXO[vk[0]]
-            d_ = pv.distance(sg[b_][1])
-            if d_ < room - 2e-4:
-                out['via'][(vk, kb)] = max(out['via'].get((vk, kb), 0.0), room - d_)
-            elif d_ < slk(room) - 2e-4:
-                out['slack-via'][(vk, kb)] = max(out['slack-via'].get((vk, kb), 0.0), slk(room) - d_)
+            for pd_, k_ in discs:                   # (a pair's via: each of its barrels and its cells)
+                room = disc_room(vk, k_, kb[0])
+                d_ = pd_.distance(sg[b_][1])
+                if d_ < room - 2e-4:
+                    out['via'][(vk, kb)] = max(out['via'].get((vk, kb), 0.0), room - d_)
+                elif d_ < slk(room) - 2e-4:
+                    out['slack-via'][(vk, kb)] = max(out['slack-via'].get((vk, kb), 0.0), slk(room) - d_)
     for i, v1 in enumerate(VKEYS):
         for v2 in VKEYS[i + 1:]:
-            need = VIA_VV + VXO[v1[0]] + VXO[v2[0]]
-            d_ = math.hypot(VIA[v2][0] - VIA[v1][0], VIA[v2][1] - VIA[v1][1])
-            if d_ < need - 2e-4:
-                out['viavia'][(v1, v2)] = need - d_
-            elif d_ < slk(need) - 2e-4:
-                out['slack-via'][(v1, v2)] = slk(need) - d_
+            for o1, o2, need in via_rooms(v1, v2):
+                d_ = math.hypot(VIA[v2][0] + o2[0] - VIA[v1][0] - o1[0], VIA[v2][1] + o2[1] - VIA[v1][1] - o1[1])
+                if d_ < need - 2e-4:
+                    out['viavia'][(v1, v2)] = max(out['viavia'].get((v1, v2), 0.0), need - d_)
+                elif d_ < slk(need) - 2e-4:
+                    out['slack-via'][(v1, v2)] = max(out['slack-via'].get((v1, v2), 0.0), slk(need) - d_)
     return {k_: sorted(((round(v_, 4), w_) for w_, v_ in d_.items()), key=lambda q_: -q_[0]) for k_, d_ in out.items()}
 
 
@@ -1017,6 +1318,229 @@ def chord_items(m, a, ta, b, tb):
     return out
 
 
+def dive_ends(vk):
+    """where via vk's two runs end, from the via's place: (the arriving run's end, the leaving run's start) -- the
+    ends of a laid dive's straight run, else the via itself"""
+    if vk not in VLAID:
+        return (0.0, 0.0), (0.0, 0.0)
+    return RUN[vk]['pts'][-1]['o'], RUN[(vk[0], vk[1] + 1)]['pts'][0]['o']
+
+
+def stands_clear(n, L_, new, old, lines):
+    """a new line for a stretch of lane n on layer L_ stands no nearer anything than its bar, or than the line it
+    replaces did: every other lane's run of that layer (`lines`: each run's line), every other lane's via"""
+    for k2, g2 in lines.items():
+        if k2[0] != n and RUN[k2]['L'] == L_:
+            d1 = new.distance(g2)
+            if d1 < P_MIN + hw[n] + hw[k2[0]] and d1 < old.distance(g2) - 1e-9:
+                return False
+    for v2 in VKEYS:
+        if v2[0] != n and Point(VIA[v2]).distance(new) < VREACH:
+            s1 = via_short(v2, n, new)
+            if s1 > 0 and s1 > via_short(v2, n, old) + 1e-9:
+                return False
+    return True
+
+
+def lay_dive(vk, lines):
+    """a pair's dive LAID: each of its two runs ends, and begins, at the end of the via's straight run -- a point
+    rigid with the via ('D': the via's place and a fixed offset along its heading), so the two runs stand straight
+    and in line through the via whatever the LP moves. Each run is cut where it comes on to that end, and goes
+    straight to it from there -- by a new line no nearer any other lane or via than its bar, or than the run's own
+    line there was, where there is one (`lines`: each run's line as it stands). -> '' (laid), or why not: an end
+    falls outside its layer's free space, or no point of the run comes on to it with a straight way to it"""
+    n, kv = vk
+    u = OCT8[VH[vk]]
+    V = VIA[vk]
+    new = {}
+    for key, run, sg in (((n, kv), dive_shape(VH[vk], vk in VXOV)['runs'][0], -1.0),
+                         ((n, kv + 1), dive_shape(VH[vk], vk in VXOV)['runs'][1], 1.0)):
+        r = RUN[key]
+        m = MESH[r['L']]
+        o = (sg * u[0] * run, sg * u[1] * run)
+        E = (V[0] + o[0], V[1] + o[1])
+        tE = int(m.locate([E])[0])
+        if tE < 0:
+            return f'the end of its straight run {("before", "after")[sg > 0]} it, ({E[0]:.2f}, {E[1]:.2f}), outside its layer\'s free space'
+        xy = run_xy(key)
+        got = None
+        # the run's first point, from the via outward, that comes on to the straight run's end within 45 degrees of
+        # the heading (a router's turn); where none does -- the lane turns at its via -- the first beyond the end
+        # along the heading and a straight run's length from it (the lane then turns at the end, by less than a
+        # right angle, and the bend's price draws the points after it into line). Of those, the first whose new
+        # line stands clear of the other lanes and vias; where none does, the first all the same -- the dive is
+        # what the later stages lay there whatever stands near it, and the LP's rows then make it its room
+        for near, clear in ((True, True), (False, True), (True, False), (False, False)):
+            for j in (range(len(xy) - 2, -1, -1) if sg < 0 else range(1, len(xy))):
+                # (never past a breach, nor another dive's end: the run's far end may be one)
+                gone = r['pts'][j:] if sg < 0 else r['pts'][:j - 1]
+                if any(p['k'] in ('X', 'D') for p in gone):
+                    break
+                al = sg * (u[0] * (xy[j][0] - E[0]) + u[1] * (xy[j][1] - E[1]))       # beyond the end, along the dive
+                ac = abs(u[0] * (xy[j][1] - E[1]) - u[1] * (xy[j][0] - E[0]))         # ...and off its line
+                if al < GS or (ac > al if near else math.hypot(al, ac) < run):
+                    continue
+                items = chord_items(m, xy[j], _cell_after(r, j - 1), E, tE) if sg < 0 else \
+                    chord_items(m, E, tE, xy[j], _cell_before(r, j - 1))
+                if items is not None and (not clear or stands_clear(
+                        n, r['L'], LineString([xy[j], E, V]), LineString(xy[j:] if sg < 0 else xy[:j + 1]), lines)):
+                    got = (j, items)
+                    break
+            if got is not None:
+                break
+        if got is None:
+            return f'its run {("before", "after")[sg > 0]} it comes on to no straight run\'s end'
+        j, items = got
+        d = {'k': 'D', 'vk': vk, 'o': o, 'tri': tE, 'v': None}
+        new[key] = (r['pts'][:j] + items + [d], None, tE) if sg < 0 else ([d] + items + r['pts'][j - 1:], tE, None)
+    for key, (pts, first, last) in new.items():
+        RUN[key]['pts'] = pts
+        if first is not None:
+            RUN[key]['first'] = first
+        if last is not None:
+            RUN[key]['last'] = last
+    VLAID.add(vk)
+    return ''
+
+
+def unlay_dive(vk):
+    """a laid dive's two runs ordinary runs again, each ending at the via: straight from the point it was cut at
+    (the straight run's own shape is not kept: the lane's way through the via is read again off what is left) --
+    or, where that straight way leaves the cells, through a free point where the straight run's end stood"""
+    n, kv = vk
+    V = VIA[vk]
+    for key, at_end in (((n, kv), True), ((n, kv + 1), False)):
+        r = RUN[key]
+        m = MESH[r['L']]
+        d = r['pts'][-1] if at_end else r['pts'][0]
+        E = (V[0] + d['o'][0], V[1] + d['o'][1])
+        tV = int(m.locate([V])[0])
+        xy = run_xy(key)
+        # (the point it was cut at: the first from the dive's end that is no crossing of a cell edge, else the
+        # run's far end)
+        order = range(len(r['pts']) - 2, -1, -1) if at_end else range(1, len(r['pts']))
+        c = next((i for i in order if r['pts'][i]['k'] != 'P'), None)
+        j = (0 if at_end else len(xy) - 1) if c is None else c + 1          # ...its place in the run's line
+        its = None
+        if tV >= 0 and not (c is not None and r['pts'][c]['k'] in ('X', 'D')):     # (a breach's point, or another
+            #                                                                         dive's end: the way below)
+            its = chord_items(m, xy[j], _cell_after(r, j - 1), V, tV) if at_end else \
+                chord_items(m, V, tV, xy[j], _cell_before(r, j - 1))
+        if its is not None:
+            if at_end:
+                r['pts'][j:] = its
+                r['last'] = tV
+            else:
+                r['pts'][:j - 1] = its
+                r['first'] = tV
+            continue
+        its = (chord_items(m, E, d['tri'], V, tV) if at_end else chord_items(m, V, tV, E, d['tri'])) if tV >= 0 else None
+        f = {'k': 'F', 'xy': E, 'tri': d['tri']}
+        if at_end:
+            r['pts'][-1:] = [f] + (its or [])
+            r['last'] = tV if its is not None else d['tri']
+        else:
+            r['pts'][:1] = (its or []) + [f]
+            r['first'] = tV if its is not None else d['tri']
+    VLAID.discard(vk)
+
+
+def dive_turned(vk):
+    """a laid dive's lane no longer runs its way: the lane comes on to the straight run, and goes on from it, both
+    along ONE other router heading -- each read over a straight run's length outside the dive, the router heading
+    nearest it. Laid on that heading the lane runs straight through; as it is, it jogs at both ends of the straight
+    run. (A lane that comes on along one heading and goes on along another turns AT its via: the dive stays on the
+    heading it has.) -> that heading, or None"""
+    n, kv = vk
+    back, on = run_xy(vk)[:-1][::-1], run_xy((n, kv + 1))[1:]         # the two runs from the straight run's ends, outward
+    a, b = _walk(back, DIVE_RUN), _walk(on, DIVE_RUN)
+    hs = [max(range(8), key=lambda h: OCT8[h][0] * c[0] + OCT8[h][1] * c[1])
+          for c in ((back[0][0] - a[0], back[0][1] - a[1]), (b[0] - on[0][0], b[1] - on[0][1]))]
+    return hs[0] if hs[0] == hs[1] != VH[vk] else None
+
+
+def relay_turned(hot):
+    """each laid dive whose lane's way has turned (dive_turned) taken up and laid again, on the heading its lane now
+    runs where the via fits with that -- once the layout round it stands still (none of the round's moves, `hot`,
+    within the LP's reach of it: its lane's way is then read where it has come to rest, and the rounds that settle
+    the rest of the layout settle this too) -> the places changed"""
+    places = []
+    kd = cKDTree(np.array(hot)) if hot else None
+    for vk in sorted(VLAID):
+        if RELAID.get(vk, 0) >= FLIPS or (kd is not None and kd.query(VIA[vk], distance_upper_bound=REACH)[0] < math.inf):
+            continue
+        h = dive_turned(vk)
+        if h is not None:
+            was = VH[vk]
+            RELAID[vk] = RELAID.get(vk, 0) + 1
+            unlay_dive(vk)
+            LAYTRY.pop(vk, None)
+            ok = try_lay(vk, say=True, first=h)
+            places.append(VIA[vk])
+            log(f'      {vk[0]}\'s via {vk[1]}: its lane\'s way has turned off its heading ({45 * was} deg): '
+                + (f'laid again, heading {45 * VH[vk]} deg' if ok else 'taken up'))
+    return places
+
+
+def dive_folds(vk):
+    """a laid dive's lane comes on to an end of its straight run from AHEAD of that end -- measured at the lane's
+    own scale (a track and a clearance along the run from the end, as the audit reads a turn), the run stands on
+    the via's side of the end, along the heading: a fold where lane and straight run meet (a run pulled straight, a
+    via slid, and the lane's way through the via is no longer the one the dive was laid on)"""
+    n, kv = vk
+    u = OCT8[VH[vk]]
+    for key, sg in (((n, kv), -1.0), ((n, kv + 1), 1.0)):
+        xy = run_xy(key)
+        out = xy[:-1][::-1] if sg < 0 else xy[1:]            # the run from the straight run's end outward
+        q = _walk(out, TW + CL)
+        if sg * (u[0] * (q[0] - out[0][0]) + u[1] * (q[1] - out[0][1])) < 0:
+            return True
+    return False
+
+
+LAYTRY = {}            # an un-laid dive -> its two runs' lines as they stood when it was last tried
+RELAID = {}            # a dive -> how often it was taken up for a fold and laid again (FLIPS times at most)
+
+
+def try_lay(vk, say=False, first=None):
+    """a pair's dive laid where it can be: its heading read off its lane as it stands -- the nearest of the three
+    router headings nearest the lane's way through the via that the via fits with, where it stands (`first`: a
+    heading tried before those) -- and its straight run laid on it, unless that makes two runs of a layer cross.
+    Tried again only once its lane has moved. -> laid?"""
+    n, kv = vk
+    kb = (n, kv + 1)
+    sig = hash(tuple(round(c_, 4) for k_ in (vk, kb) for q_ in run_xy(k_) for c_ in q_))
+    if LAYTRY.get(vk) == sig:
+        return False
+    LAYTRY[vk] = sig
+    was, whys = (VH[vk], TV[vk]), []
+    hs = dive_headings(run_xy(vk)[::-1], run_xy(kb))[:3]
+    for h in ([first] + [h_ for h_ in hs if h_ != first]) if first is not None else hs:
+        t = int(dive_space(h, vk in VXOV, RUN[vk]['L'], RUN[kb]['L']).locate([VIA[vk]])[0])
+        if t < 0:
+            whys.append(f'{45 * h} deg: its barrels or its straight run do not fit where it stands')
+            continue
+        VH[vk], TV[vk] = h, t
+        keep = {k_: (list(RUN[k_]['pts']), RUN[k_]['first'], RUN[k_]['last']) for k_ in (vk, kb)}
+        PL = layout()
+        x0 = len(same_layer_crossings(PL))
+        why = lay_dive(vk, {k_: LineString(PL[k_]) for k_ in KEYS})
+        if not why and len(same_layer_crossings(layout())) > x0:
+            for k_, (pts_, f_, l_) in keep.items():
+                RUN[k_]['pts'], RUN[k_]['first'], RUN[k_]['last'] = pts_, f_, l_
+            VLAID.discard(vk)
+            why = 'laid, two runs of a layer cross'
+        if not why:
+            LAYTRY.pop(vk, None)
+            return True
+        whys.append(f'{45 * h} deg: {why}')
+    VH[vk], TV[vk] = was
+    if say:
+        log(f'   {n}\'s via {kv} at ({VIA[vk][0]:.2f}, {VIA[vk][1]:.2f}): its straight run not laid -- ' + '; '.join(whys))
+    return False
+
+
+PULLED = {}            # each run's line as it stood when nothing of it was to pull
 PULL_MIN = P_MIN / 2   # a stretch of a run is pulled straight where that saves half a pitch, and half its chord
 SPUR_MIN = TW / 4      # ...a spur where it saves a quarter of a track's width
 
@@ -1049,6 +1573,9 @@ def pull_runs():
             n = len(xy)
             if n < 4:
                 break
+            sig = hash(tuple(round(c_, 4) for q_ in xy for c_ in q_))
+            if PULLED.get(key) == sig:               # (looked at as it stands, and nothing of it to pull)
+                break
             cum = [0.0]
             for a, b in zip(xy, xy[1:]):
                 cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
@@ -1061,12 +1588,12 @@ def pull_runs():
                     if not ((way - chord >= PULL_MIN and way >= 1.5 * chord) or
                             (way - chord >= SPUR_MIN and way >= 3 * chord)):
                         continue
-                    if any(p['k'] == 'X' for p in r['pts'][i:j - 1]):
+                    if any(p['k'] in ('X', 'D') for p in r['pts'][i:j - 1]):     # (never a breach, nor a dive's end)
                         continue
                     hull = shapely.MultiPoint(xy[i:j + 1]).convex_hull
                     if hull.geom_type != 'Polygon':
                         hull = hull.buffer(1e-4)
-                    if not m.free.covers(hull):
+                    if not in_free(L_, hull):
                         continue
                     if any(segs[L_][q_][0] != key for q_ in trees[L_].query(hull, predicate='intersects')):
                         continue
@@ -1083,9 +1610,15 @@ def pull_runs():
                                 bad = True
                                 break
                     if not bad and vtree is not None:
-                        for q_ in vtree.query(ch, predicate='dwithin', distance=VIA_R + PP + max(VXO.values())):
+                        for q_ in vtree.query(ch, predicate='dwithin', distance=VREACH):
                             vk = VKEYS[q_]
                             if vk[0] == key[0]:
+                                continue
+                            if vk in VH:                     # (a pair's via: by its barrels and its cells)
+                                s1 = via_short(vk, key[0], ch)
+                                if s1 > 0 and s1 > via_short(vk, key[0], old) + 1e-9:
+                                    bad = True
+                                    break
                                 continue
                             d1 = ch.distance(vpts[q_])
                             if d1 < VS[key[0]] + VXO[vk[0]] and d1 < old.distance(vpts[q_]) - 1e-9:
@@ -1096,11 +1629,20 @@ def pull_runs():
                     items = chord_items(m, xy[i], _cell_after(r, i - 1), xy[j], _cell_before(r, j - 1))
                     if items is None:
                         continue
+                    # ...and only where the straight line is another way through the cells, or free points go with
+                    # it. A stretch that is crossings alone, the straight line through those very edges in that
+                    # order, differs from it only in WHERE it crosses each -- and those places are the LP's own
+                    # unknowns, put where its rules have them: pulled, the next LP puts them back, every round
+                    was = r['pts'][i:j - 1]
+                    if all(p['k'] == 'P' for p in was) and \
+                            [(p['from'], p['to']) for p in was] == [(p['from'], p['to']) for p in items]:
+                        continue
                     found = (i, j, items)
                     break
                 if found:
                     break
             if not found:
+                PULLED[key] = sig
                 break
             i, j, items = found
             if WATCH and key in WATCH:
@@ -1110,6 +1652,159 @@ def pull_runs():
                     f'runs: {sorted({segs[L_][q_][0] for q_ in trees[L_].query(hull, predicate="intersects")})}')
             r['pts'][i:j - 1] = items
             places += [xy[i], xy[j]]
+            if '--show-why' in OPT:
+                log(f'      pulled {key[0]}.{key[1]} [{i}..{j}] of {n}: ' + ' '.join(f'({q_[0]:.3f},{q_[1]:.3f})' for q_ in xy[i:j + 1]) + f' -> {len(items)} edge(s)')
+    return places
+
+
+SLID = set()         # the vias slid along their lanes: the braid's sides of them no longer read
+SLIDE_MAX = 12 * P_MIN        # how far along its lane a via may be slid (twelve pitches)
+
+
+def _open(q):
+    """how OPEN the board is at q: its distance to the nearest bar of fixed copper, the least over the layers"""
+    pq = Point(q)
+    out = math.inf
+    for L_ in range(NL):
+        if BARS[L_] is not None:
+            out = min(out, float(pq.distance(BARS[L_].geometries[BARS[L_].nearest(pq)])))
+    return out
+
+
+def slide_vias(short):
+    """each via of `short` -- one the rounds leave short of its room, or inside a bar -- SLID ALONG ITS OWN LANE to
+    the most open place within reach: the stretch of its lane between the old place and the new one changes layer
+    with it, which it may wherever that stretch lies in the other layer's free space and crosses no run of that
+    layer (the order of the lanes that share a layer stands; lanes of other layers it passes under or over). The
+    LP cannot make this move: inside a corridor too narrow for a via and the lane that must pass it, no small step
+    along the corridor gains anything. -> the places changed"""
+    PL = layout()
+    segs = [[] for _ in range(NL)]
+    for key in KEYS:
+        pts = PL[key]
+        for i in range(len(pts) - 1):
+            if pts[i] != pts[i + 1]:
+                segs[RUN[key]['L']].append((key, LineString([pts[i], pts[i + 1]])))
+    trees = [shapely.STRtree([g_ for _, g_ in sg]) if sg else None for sg in segs]
+    places = []
+    # (a pair's laid dive is taken up for the slide: put back as it was where its via does not slide, laid again
+    # -- its heading read off its lane where it now stands -- where it does)
+    relay, slid = {}, set()
+    for vk in short:
+        if vk in VLAID:
+            ks_ = (vk, (vk[0], vk[1] + 1))
+            was_ = {k_: (list(RUN[k_]['pts']), RUN[k_]['first'], RUN[k_]['last']) for k_ in ks_}
+            unlay_dive(vk)
+            relay[vk] = (was_, {k_: list(RUN[k_]['pts']) for k_ in ks_})
+    for vk in short:
+        n, kv = vk
+        ka, kb = (n, kv), (n, kv + 1)
+        ra, rb = RUN[ka], RUN[kb]
+        V = VIA[vk]
+        here = _open(V)
+        best = None
+        for fwd in (True, False):
+            mine, other = (kb, ka) if fwd else (ka, kb)          # the run the via slides along; the one that grows
+            xy = run_xy(mine) if fwd else run_xy(mine)[::-1]
+            Lo = RUN[other]['L']
+            items = RUN[mine]['pts'] if fwd else RUN[mine]['pts'][::-1]
+            way, S = 0.0, [V]
+            for j in range(len(xy) - 1):
+                if j < len(items) and items[j]['k'] in ('X', 'D'):      # (never past a breach, nor another dive's end)
+                    break
+                a, b = xy[j], xy[j + 1]
+                ln = math.hypot(b[0] - a[0], b[1] - a[1])
+                nn = max(1, int(math.ceil(ln / (P_MIN / 2))))
+                stop = False
+                for i_ in range(1, nn + 1):
+                    if j == len(xy) - 2 and i_ == nn:
+                        stop = True                             # (never onto the run's other end)
+                        break
+                    q = (a[0] + (b[0] - a[0]) * i_ / nn, a[1] + (b[1] - a[1]) * i_ / nn)
+                    if way + ln * i_ / nn > SLIDE_MAX:
+                        stop = True
+                        break
+                    Sq = S + [q]
+                    line = LineString(Sq)
+                    if not in_free(Lo, line):
+                        stop = True
+                        break
+                    if trees[Lo] is not None and any(segs[Lo][q_][0] != other
+                                                     for q_ in trees[Lo].query(line, predicate='intersects')):
+                        stop = True
+                        break
+                    hq = None
+                    if vk in VH:                # (a pair's via: where it fits with a heading near its lane's way there)
+                        w_ = (b[0] - a[0], b[1] - a[1]) if fwd else (a[0] - b[0], a[1] - b[1])
+                        hq = next((h_ for h_ in sorted(range(8), key=lambda h_: -(OCT8[h_][0] * w_[0] + OCT8[h_][1] * w_[1]))[:3]
+                                   if dive_space(h_, vk in VXOV, ra['L'], rb['L']).locate([q])[0] >= 0), None)
+                    if hq is not None if vk in VH else VMESH.locate([q])[0] >= 0:
+                        o_ = _open(q)
+                        if best is None or o_ > best[0]:
+                            best = (o_, fwd, j, q, list(Sq), hq)
+                if stop:
+                    break
+                way += ln
+                S.append(b)
+        if best is None or best[0] < here + P_MIN / 2:
+            continue
+        o_, fwd, j, q, Sq, hq = best
+        mine, other = (kb, ka) if fwd else (ka, kb)
+        rm, ro = RUN[mine], RUN[other]
+        mo = MESH[ro['L']]
+        # the growing run's new points, from the old place to the new one (all found before anything is changed)
+        cells = [int(c_) for c_ in mo.locate(np.array(Sq[1:]))]
+        if min(cells) < 0:
+            continue
+        new, prev, cprev, ok = [], Sq[0], (ro['last'] if fwd else ro['first']), True
+        for p_, c_ in zip(Sq[1:], cells):
+            its = chord_items(mo, prev, cprev, p_, c_)
+            if its is None:
+                ok = False
+                break
+            new += its
+            if p_ is not Sq[-1]:
+                new.append({'k': 'F', 'xy': (float(p_[0]), float(p_[1])), 'tri': c_})
+            prev, cprev = p_, c_
+        if not ok:
+            continue
+        if fwd:                                     # run b loses its first j points; run a gains the stretch
+            cb = _cell_after(rm, j - 1)
+            del rm['pts'][:j]
+            rm['first'] = cb
+            ro['pts'] += new
+            ro['last'] = cprev
+        else:                                       # run a loses its last j points; run b gains the stretch, turned
+            nn_ = len(rm['pts'])
+            ca = _cell_before(rm, nn_ - j)
+            del rm['pts'][nn_ - j:]
+            rm['last'] = ca
+            back = []
+            for it in reversed(new):
+                if it['k'] == 'P':
+                    it = dict(it, a=it['b'], b=it['a'], t=it['len'] - it['t'], raw=it['len'] - it['t'])
+                    it['from'], it['to'] = it['to'], it['from']
+                back.append(it)
+            ro['pts'] = back + ro['pts']
+            ro['first'] = cprev
+        VIA[vk] = (float(q[0]), float(q[1]))
+        if vk in VH:
+            VH[vk] = hq
+        TV[vk] = int(vmesh(vk).locate([q])[0])
+        SLID.add(vk)
+        slid.add(vk)
+        VTR.pop(vk, None); VHIST.pop(vk, None); VHOPS.pop(vk, None)
+        places += [V, VIA[vk]]
+        log(f'   {n}\'s via {kv} slid {"on" if fwd else "back"} along its lane from ({V[0]:.2f}, {V[1]:.2f}) to '
+            f'({q[0]:.2f}, {q[1]:.2f}): {here:.3f} -> {o_:.3f} off the nearest fixed copper\'s bar')
+    for vk, (was_, mid_) in relay.items():
+        if vk not in slid and all(RUN[k_]['pts'] == mid_[k_] for k_ in mid_):
+            for k_, (pts_, f_, l_) in was_.items():
+                RUN[k_]['pts'], RUN[k_]['first'], RUN[k_]['last'] = pts_, f_, l_
+            VLAID.add(vk)
+        else:
+            LAYTRY.pop(vk, None)
+            try_lay(vk, say=True)
     return places
 
 
@@ -1158,6 +1853,7 @@ def round_of(it):
     # ---- variables: a via's xy; a run's place along each cell edge it crosses; each of its free points' place ACROSS
     # the lane (along the normal of the line through its neighbours: a point slid along its lane changes nothing)
     vaff, vrows, vvar = {}, {}, {}
+    lp.kind = 'vcell'
     for vk in VKEYS:
         x, y = VIA[vk]
         if not vlive[vk]:
@@ -1168,18 +1864,22 @@ def round_of(it):
         vvar[vk] = (vx, vy)
         vaff[vk] = (0.0, 0.0, [(vx, 1.0, 0.0), (vy, 0.0, 1.0)])
         n, kv = vk
-        cells = [('v', VMESH, TV[vk]), ('a', MESH[RUN[(n, kv)]['L']], RUN[(n, kv)]['last']),
-                 ('b', MESH[RUN[(n, kv + 1)]['L']], RUN[(n, kv + 1)]['first'])]
+        # (a pair's via stands in a cell of its own space; where its dive is laid, its two runs end at the ends of
+        # its straight run, each the via's place and a fixed offset: that end stands inside the run's end cell)
+        ea_, eb_ = dive_ends(vk)
+        cells = [('v', vmesh(vk), TV[vk], (0.0, 0.0)), ('a', MESH[RUN[(n, kv)]['L']], RUN[(n, kv)]['last'], ea_),
+                 ('b', MESH[RUN[(n, kv + 1)]['L']], RUN[(n, kv + 1)]['first'], eb_)]
         vrows[vk] = {}
-        for tag, m, t in cells:
+        for tag, m, t, (ox_, oy_) in cells:
             # (hard: a via stands inside its cells, or no further out of one than it stands now -- every other rule
             # gives before a via goes into fixed copper)
-            rws = m.rows_inside(t)
+            rws = [(nx, ny, c - (nx * ox_ + ny * oy_)) for (nx, ny, c) in m.rows_inside(t)]
             out_ = max([0.0] + [c - 1e-7 - (nx * x + ny * y) for (nx, ny, c) in rws])
             sl = lp.paying('vcell', vk, W_HARD, out_ + 1e-9)
             vrows[vk][tag] = [lp.ge([(vx, nx), (vy, ny)], c - 1e-7, sl) for (nx, ny, c) in rws]
     aff, nlive = {}, 0
     for key in KEYS:
+        lp.kind = 'pt'
         n, k = key
         r = RUN[key]
         m = MESH[r['L']]
@@ -1188,6 +1888,10 @@ def round_of(it):
         for j, p in enumerate(r['pts'], start=1):
             x, y = cp[j]
             p['v'] = None
+            if p['k'] == 'D':                                 # a dive's end: its via's place and a fixed offset
+                va_ = vaff[p['vk']]
+                pts.append((va_[0] + p['o'][0], va_[1] + p['o'][1], va_[2]))
+                continue
             if p['k'] == 'X' or not lm[j]:                    # a breach's point, or one out of the round's reach: fixed
                 pts.append((x, y, []))
                 continue
@@ -1197,15 +1901,20 @@ def round_of(it):
                 A, B = m.V[p['a']], m.V[p['b']]
                 p['v'] = lp.var(0.0, max(0.0, p['t'] - tr_), min(p['len'], p['t'] + tr_))
                 pts.append((float(A[0]), float(A[1]), [(p['v'], float((B[0] - A[0]) / p['len']), float((B[1] - A[1]) / p['len']))]))
-                lo, hi = hw[n], p['len'] - hw[n]
+                # (the edge's two ends are corners of the fixed copper's bars: a pair keeps its half width off them,
+                # every lane its slack -- but not off a corner of its OWN stubs' bar: its run begins on that bar's
+                # line, nearer those corners than either, and held off them it left its mouth sideways and came
+                # back -- a hook the pull pass straightened and the next LP made again, every round)
+                own_ = (own_corner(n, r['L'], p['a']), own_corner(n, r['L'], p['b']))
+                lo, hi = (0.0 if own_[0] else hw[n]), p['len'] - (0.0 if own_[1] else hw[n])
                 if hi < lo:
                     lo = hi = p['len'] / 2
                 if hw[n] > 0:                                 # a pair's half width off the edge's two ends
                     sl = lp.paying('edge', key, W_HARD)
                     lp.ge([(p['v'], 1.0)], lo, sl)
                     lp.le([(p['v'], 1.0)], hi, sl)
-                for (sgn, ref_) in ((1.0, lo), (-1.0, -hi)):  # its slack off them (fixed copper's corners)
-                    if sgn * p['t'] - tr_ < ref_ + gs:
+                for (sgn, ref_, mine) in ((1.0, lo, own_[0]), (-1.0, -hi, own_[1])):  # its slack off them
+                    if not mine and sgn * p['t'] - tr_ < ref_ + gs:
                         lp.ge([(p['v'], sgn)], ref_ + gs, lp.paying('slack-copper', key, W_SLACK))
                 continue
             tx, ty = cp[j + 1][0] - cp[j - 1][0], cp[j + 1][1] - cp[j - 1][1]
@@ -1226,7 +1935,8 @@ def round_of(it):
                 elif g < -1e-9:
                     if h / g < thi:
                         thi, ehi = h / g, i
-                if m.N[p['tri'], i] < 0 and abs(g) > 1e-9:
+                # (a wall: an edge with fixed copper's bar beyond it -- but for the line of its own stubs' bar)
+                if m.N[p['tri'], i] < 0 and abs(g) > 1e-9 and not all(own_corner(n, r['L'], v_) for v_ in m.edge(p['tri'], i)):
                     walls.append((g, h))
             if tlo > thi:
                 lo = hi = 0.0
@@ -1234,9 +1944,19 @@ def round_of(it):
             else:
                 lo, hi = min(max(tlo, -tr_), tr_), min(max(thi, -tr_), tr_)
                 elo, ehi = (elo if tlo > -tr_ else None), (ehi if thi < tr_ else None)
+            # (a point that stands OUTSIDE its cell is not forced back by its bounds: every capped rule is capped at
+            # the layout as it stands, and a forced move can leave the round's LP no answer. It may stay where it
+            # is, and pays the cell's own hard price for it -- so it comes back as the other rules let it)
+            back = None
+            if lo > 0.0:
+                back, lo = (1.0, lo), 0.0
+            elif hi < 0.0:
+                back, hi = (-1.0, -hi), 0.0
             p['v'] = lp.var(0.0, lo, hi)
             p['n'], p['lim'] = (nx_, ny_), (elo, ehi)
             pts.append((x, y, [(p['v'], nx_, ny_)]))
+            if back is not None:
+                lp.ge([(p['v'], back[0])], back[1], lp.paying('cell', key, W_HARD))
             sl = None
             for (g, h) in walls:                              # its slack off the fixed copper's bar (a wall of the cell)
                 b_ = (h + gs) / g
@@ -1246,6 +1966,7 @@ def round_of(it):
                     lp.ge([(p['v'], g)], h + gs, sl)
         pts.append(vaff[(n, k)] if (n, k) in VIA else (cp[-1][0], cp[-1][1], []))
         aff[key] = pts
+        lp.kind = 'len'
         for a_, b_, pa, pb in zip(pts, pts[1:], cp, cp[1:]):  # its length (the directions a round's move can reach)
             if not a_[2] and not b_[2]:
                 continue
@@ -1258,8 +1979,52 @@ def round_of(it):
                 cq, tq = P_dot(o, b_)
                 c0_, tp = P_dot(o, a_)
                 lp.le(tq + [(v, -a) for v, a in tp] + [(lv, -1.0)], -(cq - c0_))
+    # ---- a lane leaves its stub's mouth, and comes to it, on the stub's own side of it: its points within the
+    # lane's own scale of the mouth stand ahead of it along the stub's way (no fold where lane and stub meet)
+    lp.kind = 'join'
+    for key in KEYS:
+        r = RUN[key]
+        for e_, lead in ((0, r.get('lead') if key[1] == 0 else None),
+                         (1, r.get('tail') if key[1] == len(RUNL[key[0]]) - 1 else None)):
+            if not lead:
+                continue
+            cp = cur[key]
+            mth = cp[0] if e_ == 0 else cp[-1]
+            ul = math.hypot(mth[0] - lead[0], mth[1] - lead[1])
+            if ul < 1e-9:
+                continue
+            u = ((mth[0] - lead[0]) / ul, (mth[1] - lead[1]) / ul)
+            idx = range(1, len(cp) - 1) if e_ == 0 else range(len(cp) - 2, 0, -1)
+            way, prev = 0.0, mth
+            for j in idx:
+                way += math.hypot(cp[j][0] - prev[0], cp[j][1] - prev[1])
+                prev = cp[j]
+                if way > 2 * (TW + CL):
+                    break
+                if not aff[key][j][2]:
+                    continue
+                c_, t_ = P_dot(u, aff[key][j])
+                now = u[0] * (cp[j][0] - mth[0]) + u[1] * (cp[j][1] - mth[1])
+                lp.ge(t_, (u[0] * mth[0] + u[1] * mth[1]) - c_, lp.paying('join', key, W_HARD, max(0.0, -now) + 1e-9))
+    # ...and likewise where a lane meets the end of a laid dive's straight run: its points within that scale of the
+    # end stand beyond it, along the dive's heading away from the via
+    for vk in sorted(VLAID):
+        for key, sg in ((vk, -1.0), ((vk[0], vk[1] + 1), 1.0)):
+            cp = cur[key]
+            ie = len(cp) - 2 if sg < 0 else 1
+            u = (sg * OCT8[VH[vk]][0], sg * OCT8[VH[vk]][1])
+            way, prev = 0.0, cp[ie]
+            for j in (range(ie - 1, 0, -1) if sg < 0 else range(ie + 1, len(cp) - 1)):
+                way += math.hypot(cp[j][0] - prev[0], cp[j][1] - prev[1])
+                prev = cp[j]
+                if way > 2 * (TW + CL):
+                    break
+                if aff[key][j][2] or aff[key][ie][2]:
+                    now = u[0] * (cp[j][0] - cp[ie][0]) + u[1] * (cp[j][1] - cp[ie][1])
+                    sep(lp, u, aff[key][ie], aff[key][j], 0.0, lp.paying('join', key, W_HARD, max(0.0, -now) + 1e-9))
     # ---- the price of a bend: each point of a lane off the straight line through the points before and after it
     # (across the lane; a via both ways)
+    lp.kind = 'bend'
     if W_BEND > 0:
         for n in M:
             la, lc = lane_line(n, aff), lane_line(n, cur)
@@ -1282,6 +2047,7 @@ def round_of(it):
                     lp.le(terms + [(bv, -1.0)], -cst)
                     lp.le([(v, -a) for v, a in terms] + [(bv, -1.0)], cst)
     # ---- rows: on a cell edge the lanes of a layer keep the order they stand in
+    lp.kind = 'order'
     for (L_, a, b), lst in edge_lists().items():
         if len(lst) < 2:
             continue
@@ -1307,6 +2073,7 @@ def round_of(it):
     # slack's, then the pitch itself (W_HARD) -- and never to nothing: the two stay SIDE apart along that line, on
     # the sides they stand, so no lane passes through another
     tA = time.time()
+    lp.kind = 'lane'
     segs = [[] for _ in range(NL)]
     allseg = []
     for key in KEYS:
@@ -1387,6 +2154,7 @@ def round_of(it):
             sls = [lp.paying('comfort', None, W_COMF, comf - slk(gap)),
                    lp.paying('slack-lane', (ka, kb), W_SLACK, slk(gap) - gap),
                    lp.paying('pitch', (ka, kb), W_HARD, gap - min(SIDE, dd))]
+            lp.kind = f'lane:{ka[0]}.{ka[1]}[{j}]~{kb[0]}.{kb[1]}[{i}] d{dd:.3f}'
             lp.ge(terms + [(s_, 1.0) for s_ in sls], comf - ((1 - lam) * c0 + lam * c1 - cp_))
             npair += 1
     tB = time.time()
@@ -1397,11 +2165,12 @@ def round_of(it):
     for vk in (VKEYS if allseg else ()):
         V = VIA[vk]
         a_ = vk[0]
-        for ib in tree.query(Point(V), predicate='dwithin', distance=slk(VIA_R + PP + VXO[a_]) + 3 * TRUST):
+        for ib in tree.query(Point(V), predicate='dwithin',
+                             distance=slk(VREACH if vk in VH else VIA_R + PP + VXO[a_]) + 3 * TRUST):
             key, j, sg = allseg[ib]
             if key[0] == a_ or not (vaff[vk][2] or aff[key][j][2] or aff[key][j + 1][2]):
                 continue
-            room = VS[key[0]] + VXO[a_]
+            flip = False
             P_, Q_ = cur[key][j], cur[key][j + 1]
             hx, hy = Q_[0] - P_[0], Q_[1] - P_[1]
             hl = math.hypot(hx, hy)
@@ -1411,44 +2180,106 @@ def round_of(it):
             dl = math.hypot(C_[0] - V[0], C_[1] - V[1])
             nv = ((C_[0] - V[0]) / dl, (C_[1] - V[1]) / dl) if dl > 1e-6 else None
             if 0.0 < w < hl and hl >= 2 * GS:      # beside it: the braid says which side the lane passes
-                side = via_bit(a_, vk[1], key[0], key[1])
+                side = 0 if vk in SLID else via_bit(a_, vk[1], key[0], key[1])
                 if side:
                     said += 1
                     geo = 1 if (nrm[0] * (P_[0] - V[0]) + nrm[1] * (P_[1] - V[1])) > 0 else -1
                     if side != geo or nv is None:
                         wrong += 1
+                        flip = True
                         nv = (nrm[0] * side, nrm[1] * side)
             if nv is None:
                 nv = nrm
-            now = min(nv[0] * (q[0] - V[0]) + nv[1] * (q[1] - V[1]) for q in (P_, Q_))
-            sls = [lp.paying('slack-via', (vk, key), W_SLACK, slk(room) - room),
-                   lp.paying('via', (vk, key), W_HARD, room - min(SIDE, now))]
-            for q in (aff[key][j], aff[key][j + 1]):
-                sep(lp, nv, vaff[vk], q, slk(room), sls)
+            # (a single's via is one disc, the via; a pair's its barrels and its cells, each held its own bar off
+            # the lane along its own line to it -- and every one on the side of the lane the via's place stands:
+            # the lane passes the whole of it on one side)
+            for (ox_, oy_), kd_ in via_discs(vk):
+                room = disc_room(vk, kd_, key[0])
+                if kd_ == 's':
+                    D_, nd_, va_ = V, nv, vaff[vk]
+                else:
+                    D_ = (V[0] + ox_, V[1] + oy_)
+                    wd = ((D_[0] - P_[0]) * hx + (D_[1] - P_[1]) * hy) / hl
+                    Cd = P_ if wd <= 0.0 else Q_ if wd >= hl else (P_[0] + hx * wd / hl, P_[1] + hy * wd / hl)
+                    dd_ = math.hypot(Cd[0] - D_[0], Cd[1] - D_[1])
+                    if dd_ > slk(room) + 3 * TRUST:
+                        continue
+                    gv_ = 1.0 if (nrm[0] * (P_[0] - V[0]) + nrm[1] * (P_[1] - V[1])) > 0 else -1.0
+                    gd_ = 1.0 if (nrm[0] * (P_[0] - D_[0]) + nrm[1] * (P_[1] - D_[1])) > 0 else -1.0
+                    if flip:
+                        nd_ = nv
+                    elif dd_ <= 1e-6 or (0.0 < wd < hl and gd_ != gv_):
+                        nd_ = (nrm[0] * gv_, nrm[1] * gv_)
+                    else:
+                        nd_ = ((Cd[0] - D_[0]) / dd_, (Cd[1] - D_[1]) / dd_)
+                    va_ = (vaff[vk][0] + ox_, vaff[vk][1] + oy_, vaff[vk][2])
+                now = min(nd_[0] * (q[0] - D_[0]) + nd_[1] * (q[1] - D_[1]) for q in (P_, Q_))
+                sls = [lp.paying('slack-via', (vk, key), W_SLACK, slk(room) - room),
+                       lp.paying('via', (vk, key), W_HARD, room - min(SIDE, now))]
+                lp.kind = f'via:{vk[0]}.{vk[1]}{kd_}~{key[0]}.{key[1]}[{j}]'
+                for q in (aff[key][j], aff[key][j + 1]):
+                    sep(lp, nd_, va_, q, slk(room), sls)
     # ---- rows: two vias their own distance apart, along the line between them as they stand
+    lp.kind = 'viavia'
     for i, v1 in enumerate(VKEYS):
         for v2 in VKEYS[i + 1:]:
             if not (vlive[v1] or vlive[v2]):
                 continue
-            dx, dy = VIA[v2][0] - VIA[v1][0], VIA[v2][1] - VIA[v1][1]
-            dl = math.hypot(dx, dy)
-            need = VIA_VV + VXO[v1[0]] + VXO[v2[0]]
-            if dl > slk(need) + 4 * TRUST:
+            if math.hypot(VIA[v2][0] - VIA[v1][0], VIA[v2][1] - VIA[v1][1]) > 2 * VREACH + 4 * TRUST:
                 continue
-            nv = (dx / dl, dy / dl) if dl > 1e-9 else (1.0, 0.0)
-            sep(lp, nv, vaff[v1], vaff[v2], slk(need), [lp.paying('slack-via', (v1, v2), W_SLACK, slk(need) - need),
-                                                       lp.paying('viavia', (v1, v2), W_HARD, need - min(SIDE, dl))])
+            # (two singles' vias: the one distance between them; a pair's barrels and cells each their own)
+            for o1, o2, need in via_rooms(v1, v2):
+                dx, dy = VIA[v2][0] + o2[0] - VIA[v1][0] - o1[0], VIA[v2][1] + o2[1] - VIA[v1][1] - o1[1]
+                dl = math.hypot(dx, dy)
+                if dl > slk(need) + 4 * TRUST:
+                    continue
+                nv = (dx / dl, dy / dl) if dl > 1e-9 else (1.0, 0.0)
+                sep(lp, nv, (vaff[v1][0] + o1[0], vaff[v1][1] + o1[1], vaff[v1][2]),
+                    (vaff[v2][0] + o2[0], vaff[v2][1] + o2[1], vaff[v2][2]), slk(need),
+                    [lp.paying('slack-via', (v1, v2), W_SLACK, slk(need) - need),
+                     lp.paying('viavia', (v1, v2), W_HARD, need - min(SIDE, dl))])
+    # ---- rows: a pair's via stands off its lane's two ends by the pair's end run and two straight runs: nearer, the
+    # polish joins the dive to the end run and moves the via onto that line (a via never nearer than it stands)
+    lp.kind = 'ends'
+    for vk, (vx, vy) in vvar.items():
+        for T_, need in (DIVE_END.get(vk[0], ()) if vk in VH else ()):
+            dx, dy = VIA[vk][0] - T_[0], VIA[vk][1] - T_[1]
+            dl = math.hypot(dx, dy)
+            if 1e-9 < dl < need + 3 * TRUST:
+                sep(lp, (dx / dl, dy / dl), (T_[0], T_[1], []), vaff[vk], need,
+                    lp.paying('ends', vk, W_HARD, max(0.0, need - dl) + 1e-9))
     # ---- a via's slack off the walls of the vias' space
+    lp.kind = 'vslack'
     for vk, (vx, vy) in vvar.items():
         sl = None
-        for i, (nx, ny, c) in enumerate(VMESH.rows_inside(TV[vk])):
-            if VMESH.N[TV[vk], i] < 0:
+        vm_ = vmesh(vk)
+        for i, (nx, ny, c) in enumerate(vm_.rows_inside(TV[vk])):
+            if vm_.N[TV[vk], i] < 0:
                 sl = sl if sl is not None else lp.paying('slack-copper', vk, W_SLACK)
                 lp.ge([(vx, nx), (vy, ny)], c + gs, sl)
     t1 = time.time()
-    lp.solve()
+    if not lp.solve():                              # (no answer at all: nothing moves, and the rounds end here)
+        HOT = []
+        return {}, 0.0, 0
     t2_ = time.time()
     sol = lp.x
+    if WATCH and '--show-rows' in OPT:
+        Acsc = coo_matrix((lp.A, (lp.I, lp.Jc)), shape=(len(lp.b), len(lp.c))).tocsc()
+        for key in WATCH:
+            for idx, p in enumerate(RUN[key]['pts']):
+                if p.get('v') is None:
+                    continue
+                col_ = Acsc.getcol(p['v'])
+                got = collections.defaultdict(float)
+                names = []
+                for r_, a_ in zip(col_.indices, col_.data):
+                    if abs(lp.marg[r_]) > 1e-7:
+                        got[lp.rk[r_].split(':')[0]] += lp.marg[r_] * a_
+                        if ':' in lp.rk[r_]:
+                            names.append(f'{lp.rk[r_]}({lp.marg[r_] * a_:+.2f})')
+                d_ = float(sol[p['v']]) - (p['t'] if p['k'] == 'P' else 0.0)
+                log(f'         rows {key[0]}.{key[1]}[{idx}]{p["k"]} at ({cur[key][idx + 1][0]:.3f},{cur[key][idx + 1][1]:.3f}) d {d_:+.4f}: '
+                    + ', '.join(f'{k_} {v_:+.2f}' for k_, v_ in sorted(got.items())) + ' | ' + ' '.join(names[:6]))
     paid = collections.defaultdict(list)
     for (sl, kind, what) in lp.slack:
         if kind != 'comfort' and sol[sl] > 1e-6:
@@ -1459,6 +2290,7 @@ def round_of(it):
                 log(f'      paid {k_} {v_:.3f}: {what}')
     # ---- the layout moved to the answer
     move, hot, nexc = 0.0, [], 0
+    WHY = []
     for key in KEYS:
         r = RUN[key]
         m = MESH[r['L']]
@@ -1495,23 +2327,22 @@ def round_of(it):
             move = max(move, mv)
             if mv > TOL:
                 hot.append(q)
-        # such a point goes on into the cell beyond: the run's crossing of that edge moved past it where it has one
-        # beside it, else the run crosses the edge there and back (a lane pushed aside bulges into the next cell)
+                WHY.append(('lp', key, idx, p['k'], q, round(mv, 4), round(p.get('tr', TRUST), 4)))
+        # such a point goes on into the cell beyond: the run crosses that edge AT the point, and back (a lane pushed
+        # aside bulges into the next cell). Where the run's own crossing of that edge is the point beside it, the two
+        # crossings between them -- back, and over again -- are dropped just below, and the run crosses where the
+        # point went through. (The crossing beside it was once moved past the point where it stood: with the
+        # crossing far along the edge the run then went out to it and back, the pull pass straightened that, and
+        # the next round pressed the same points on the same edge again -- every round)
         for idx, t2 in reversed(over):
             p = r['pts'][idx]
             t = p['tri']
-            nxt = r['pts'][idx + 1] if idx + 1 < len(r['pts']) else None
-            prv = r['pts'][idx - 1] if idx > 0 else None
-            if nxt is not None and nxt['k'] == 'P' and nxt['from'] == t and nxt['to'] == t2:
-                r['pts'][idx], r['pts'][idx + 1] = nxt, p
-            elif prv is not None and prv['k'] == 'P' and prv['from'] == t2 and prv['to'] == t:
-                r['pts'][idx - 1], r['pts'][idx] = p, prv
-            else:
-                r['pts'][idx:idx + 1] = [portal(m, t, t2, p['xy']), p, portal(m, t2, t, p['xy'])]
+            r['pts'][idx:idx + 1] = [portal(m, t, t2, p['xy']), p, portal(m, t2, t, p['xy'])]
             c = m.cen[t2]
             p['tri'] = t2
             p['xy'] = (float(p['xy'][0] + (c[0] - p['xy'][0]) * 1e-4), float(p['xy'][1] + (c[1] - p['xy'][1]) * 1e-4))
             hot.append(p['xy'])
+            WHY.append(('cell', key, idx, 'F', p['xy'], 0.0, p.get('flips', 0)))
             nexc += 1
         i = 0
         while i + 1 < len(r['pts']):                # an edge crossed and crossed straight back, nothing between: neither
@@ -1554,10 +2385,14 @@ def round_of(it):
             if best is not None:
                 VHOPS[vk] = VHOPS.get(vk, 0) + 1
             return None if best is None else best[1]
-        t2 = pressed('v', VMESH, TV[vk])
+        t2 = pressed('v', vmesh(vk), TV[vk])
         if t2 is not None:
             TV[vk] = t2
             hops += 1
+        # (a laid dive: each run's end is its straight run's -- the run's last point, or its first, the crossing
+        # beside it)
+        la_ = 1 if vk in VLAID else 0
+        ea_, eb_ = dive_ends(vk)
         ra, rb = RUN[(n, kv)], RUN[(n, kv + 1)]
         ma, mb = MESH[ra['L']], MESH[rb['L']]
         t2 = pressed('a', ma, ra['last'])
@@ -1565,26 +2400,33 @@ def round_of(it):
         # the point next to the via, that one less. Points of the run between the via and a crossing farther along
         # stay: the lane's line does not move, only the cell its end is in)
         if t2 is not None:                          # the run that ends at it
-            e_ = ra['pts'][-1] if ra['pts'] else None
+            k_ = len(ra['pts']) - la_
+            e_ = ra['pts'][k_ - 1] if k_ > 0 else None
             if e_ is not None and e_['k'] == 'P' and e_['from'] == t2 and e_['to'] == ra['last']:
-                del ra['pts'][-1]
+                del ra['pts'][k_ - 1]
             else:
-                ra['pts'].append(portal(ma, ra['last'], t2, q))
+                ra['pts'].insert(k_, portal(ma, ra['last'], t2, (q[0] + ea_[0], q[1] + ea_[1])))
             ra['last'] = t2
+            if la_:
+                ra['pts'][-1]['tri'] = t2
             hops += 1
         t2 = pressed('b', mb, rb['first'])
         if t2 is not None:                          # the run that starts at it
-            e_ = rb['pts'][0] if rb['pts'] else None
+            e_ = rb['pts'][la_] if len(rb['pts']) > la_ else None
             if e_ is not None and e_['k'] == 'P' and e_['from'] == rb['first'] and e_['to'] == t2:
-                del rb['pts'][0]
+                del rb['pts'][la_]
             else:
-                rb['pts'].insert(0, portal(mb, t2, rb['first'], q))
+                rb['pts'].insert(la_, portal(mb, t2, rb['first'], (q[0] + eb_[0], q[1] + eb_[1])))
             rb['first'] = t2
+            if la_:
+                rb['pts'][0]['tri'] = t2
             hops += 1
         if mv > TOL or hops > h0:
             hot.append(q)
+            WHY.append(('via' if hops == h0 else 'viahop', vk, 0, 'V', q, round(mv, 4), tuple(round(t__, 4) for t__ in VTR[vk])))
     npull = pull_runs()
     hot += npull
+    WHY.extend(('pull', None, 0, '-', q_, 0.0, 0.0) for q_ in npull)
     # ---- each lane's own points kept HPT apart: a long stretch gets a point, two points on top of each other lose
     # one (never the one point a run has in a cell)
     for key in KEYS:
@@ -1597,7 +2439,7 @@ def round_of(it):
             lone = (not new or new[-1]['k'] != 'F') and (ip + 1 >= len(old) or old[ip + 1]['k'] != 'F')
             if p['k'] == 'F' and d < 0.25 * HPT and not lone:
                 continue
-            if d > 1.6 * HPT and not jump:
+            if d > 1.6 * HPT and not jump and not (ip == 0 and p['k'] == 'D'):       # (none inside a dive's run)
                 nn = int(math.ceil(d / HPT))
                 new += [{'k': 'F', 'xy': (prev[0] + (q[0] - prev[0]) * i_ / nn, prev[1] + (q[1] - prev[1]) * i_ / nn),
                          'tri': cell} for i_ in range(1, nn)]
@@ -1609,7 +2451,7 @@ def round_of(it):
             elif p['k'] == 'X':
                 cell = p['tri']
         d = math.hypot(xy[-1][0] - prev[0], xy[-1][1] - prev[1])
-        if d > 1.6 * HPT:
+        if d > 1.6 * HPT and not (old and old[-1]['k'] == 'D'):
             nn = int(math.ceil(d / HPT))
             new += [{'k': 'F', 'xy': (prev[0] + (xy[-1][0] - prev[0]) * i_ / nn, prev[1] + (xy[-1][1] - prev[1]) * i_ / nn),
                      'tri': cell} for i_ in range(1, nn)]
@@ -1639,6 +2481,9 @@ def round_of(it):
     if '--show-hot' in OPT and hot:                # where the round's moves were, binned to a millimetre
         bins = collections.Counter((round(q_[0]), round(q_[1])) for q_ in hot)
         log('      moving: ' + ', '.join(f'({x_}, {y_}) x{c_}' for (x_, y_), c_ in bins.most_common(14)))
+    if '--show-why' in OPT:
+        for w_ in WHY:
+            log(f'      why {w_[0]:6s} {(w_[1][0] + "." + str(w_[1][1])) if w_[1] else "":12s} [{w_[2]}]{w_[3]} at ({w_[4][0]:.3f}, {w_[4][1]:.3f}) moved {w_[5]:.4f} tr {w_[6]}')
     return paid, move, hops + nexc
 
 
@@ -1705,14 +2550,59 @@ def kinks(tag):
     return nw, nf
 
 
+# ---------------------------------------------------------------- the pairs' dives laid
+# each pair's via given its straight run where it can be (one that cannot yet -- its lane turns at it, it stands too
+# near its lane's end -- is tried again after each round, once its lane has moved), and how far it stands off its
+# lane's two ends at least: the pair's end run (pairs.end_run: the polish lays and holds it) and two straight runs
+# -- nearer, the polish joins the dive to the end run and moves the via onto that line
+DIVE_END = {}
+for vk in sorted(VH):
+    n_ = vk[0]
+    try_lay(vk, say=True)
+    if n_ not in DIVE_END and n_ in getattr(ctx, 'pair_ends', {}):
+        st_ = 2 * max(dive_shape(1, (n_, 0) in VXOV)['runs'])
+        e0_, e1_ = RUN[(n_, 0)], RUN[(n_, len(RUNL[n_]) - 1)]
+        DIVE_END[n_] = [(e0_.get('lead') or e0_['ref'][0], _pairs.end_run(_cfg, ctx.pair_ends[n_][0]) + st_),
+                        (e1_.get('tail') or e1_['ref'][-1], _pairs.end_run(_cfg, ctx.pair_ends[n_][1]) + st_)]
+if VH:
+    log(f'pairs\' vias: {len(VH)}, each two barrels {OFF:.3f} either side of its line and a straight run of '
+        f'{DIVE_RUN:.3f} either side of it ({len(VXOV)} a crossover); {len(VLAID)} laid straight: '
+        + ', '.join(f'{vk[0]}.{vk[1]} {45 * VH[vk]} deg' + ('' if vk in VLAID else ' NOT LAID')
+                    + (f', moved {math.hypot(VIA[vk][0] - VIA_REF[vk][0], VIA[vk][1] - VIA_REF[vk][1]):.3f}'
+                       if VIA[vk] != VIA_REF[vk] else '') for vk in sorted(VH)))
 kinks('in the layout it starts from')
 if '--watch' in OPT:
     watch(OPT['--watch'], layout())
-for it in range(1, ROUNDS + 1):
-    paid, move, hops = round_of(it)
-    if not HOT:                                   # nothing moved, no cell changed: the layout has settled
+it = 0
+for phase in range(3):
+    for _ in range(ROUNDS if phase == 0 else ROUNDS // 2):
+        it += 1
+        paid, move, hops = round_of(it)
+        for vk in sorted(VLAID):                  # (a laid dive its lane now folds at: taken up, its heading read again)
+            if dive_folds(vk) and RELAID.get(vk, 0) < FLIPS:
+                RELAID[vk] = RELAID.get(vk, 0) + 1
+                unlay_dive(vk)
+                LAYTRY.pop(vk, None)
+                HOT.append(VIA[vk])
+                log(f'      {vk[0]}\'s via {vk[1]}: its lane folds at an end of its straight run (heading {45 * VH[vk]} deg): taken up')
+        HOT += relay_turned(HOT)                  # (...one its lane's way has turned off, where the layout round it stands still)
+        for vk in sorted(VH):                     # (a pair's dive not yet laid: again, where its lane has moved)
+            if vk not in VLAID and try_lay(vk, say='--show-why' in OPT):
+                HOT.append(VIA[vk])
+                log(f'      {vk[0]}\'s via {vk[1]}: its straight run laid, heading {45 * VH[vk]} deg')
+        if not HOT:                               # nothing moved, no cell changed: the layout has settled
+            break
+    # the vias the rounds leave short of their room, or inside a bar: each slid along its lane to where the board is
+    # most open, and the rounds again from there
+    sf_ = shortfalls(layout())
+    short_ = sorted({w_[0] for v_, w_ in sf_.get('via', []) if v_ > GRID2} |
+                    {vk for vk in VKEYS if vmesh(vk).locate([VIA[vk]])[0] < 0})
+    slid_ = slide_vias([vk for vk in short_ if vk not in SLID]) if phase < 2 else []
+    if not slid_:
         break
-log(f'whole_embed: {it} round(s)' + ('' if not HOT else ' -- NOT settled') + f', {time.time() - T0:.1f} s')
+    HOT = (HOT or []) + slid_
+log(f'whole_embed: {it} round(s)' + ('' if not HOT else ' -- NOT settled') + f', {len(SLID)} via(s) slid along '
+    f'their lanes, {time.time() - T0:.1f} s')
 kinks('after the rounds')
 if '--draw' in OPT:
     draw(OPT['--draw'], f'whole_embed: after {it} round(s)', VIEW, [c[2] for c in same_layer_crossings(layout())])
@@ -1731,21 +2621,147 @@ def sampled(pts):
     return out
 
 
+W_SHAPE = ctx.cfg.track_width + ctx.cfg.clearance      # the lane's own scale, as the audit reads a turn over it
+NOTCH = ctx.cfg.track_width + ctx.cfg.grid_step        # ...and a step or a dip shorter than this a notch
+
+
+def _deg(a, b, c):
+    h1, h2 = math.atan2(b[1] - a[1], b[0] - a[0]), math.atan2(c[1] - b[1], c[0] - b[0])
+    return math.degrees((h2 - h1 + math.pi) % (2 * math.pi) - math.pi)
+
+
+def shape_faults(pts):
+    """the points of a written line (their indices) at a shape no router lays, by the audit's own measures
+    (plan_audit.check_shape): a FOLD -- a turn of more than 100 degrees at a point, or over the lane's scale either
+    side of it -- and a NOTCH, two opposite turns of 60 degrees or more nearer than a track and a grid step"""
+    keep = [0]                                      # (as the audit reads a line: its collinear points merged)
+    for i in range(1, len(pts) - 1):
+        a, b, c = pts[keep[-1]], pts[i], pts[i + 1]
+        if abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) < 1e-7 and \
+                (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]) > 0:
+            continue
+        keep.append(i)
+    keep.append(len(pts) - 1)
+    q = [pts[i] for i in keep]
+    n = len(q)
+    if n < 3:
+        return []
+    t = [0.0] + [_deg(q[i - 1], q[i], q[i + 1]) for i in range(1, n - 1)] + [0.0]
+    bad = {i for i in range(1, n - 1) if abs(t[i]) > 100}
+    for i in range(1, n - 2):
+        if abs(t[i]) > 60 and abs(t[i + 1]) > 60 and t[i] * t[i + 1] < 0 and \
+                math.hypot(q[i + 1][0] - q[i][0], q[i + 1][1] - q[i][1]) < NOTCH:
+            bad |= {i, i + 1}
+    sm = [0.0]
+    for a, b in zip(q, q[1:]):
+        sm.append(sm[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+
+    def at(u):
+        u = min(max(u, 0.0), sm[-1])
+        k = 1
+        while k < n - 1 and sm[k] < u:
+            k += 1
+        f = 0.0 if sm[k] - sm[k - 1] < 1e-12 else (u - sm[k - 1]) / (sm[k] - sm[k - 1])
+        return (q[k - 1][0] + (q[k][0] - q[k - 1][0]) * f, q[k - 1][1] + (q[k][1] - q[k - 1][1]) * f)
+    for i in range(1, n - 1):
+        a, c = at(sm[i] - W_SHAPE), at(sm[i] + W_SHAPE)
+        if math.hypot(q[i][0] - a[0], q[i][1] - a[1]) >= 1e-3 and math.hypot(c[0] - q[i][0], c[1] - q[i][1]) >= 1e-3 \
+                and abs(_deg(a, q[i], c)) > 100:
+            bad.add(i)
+    return sorted(keep[i] for i in bad)
+
+
+def shape_pass(OWN):
+    """the written lines cleared of folds and notches where that is SAFE: a point at one is left out -- the line
+    goes straight between its neighbours -- where the triangle the three make holds no fixed copper, no other run
+    of the layer and no via, and the straight line stands no nearer anything than its bar, or than the line it
+    replaces did. -> the points left out, the faults that stay"""
+    lines = {key: LineString(OWN[key]) for key in KEYS}
+    byL = [[key for key in KEYS if RUN[key]['L'] == L_] for L_ in range(NL)]
+    trees = [shapely.STRtree([lines[k_] for k_ in ks]) if ks else None for ks in byL]
+    vpts = [Point(VIA[vk]) for vk in VKEYS]
+    vtree = shapely.STRtree(vpts) if vpts else None
+    hwm = 2 * max(hw.values())
+    nout = nleft = 0
+    for key in KEYS:
+        L_ = RUN[key]['L']
+        pts = OWN[key]
+        # (a stub's mouth stays, and the end of a laid dive's straight run)
+        lo = 2 if ((RUN[key].get('lead') and key[1] == 0) or (key[0], key[1] - 1) in VLAID) else 1
+        back = 2 if ((RUN[key].get('tail') and key[1] == len(RUNL[key[0]]) - 1) or key in VLAID) else 1
+        for _ in range(80):
+            bad = shape_faults(pts)
+            if not bad:
+                break
+            done = False
+            for i in sorted({j for b_ in bad for j in (b_, b_ - 1, b_ + 1)}, key=lambda j: (j not in bad, j)):
+                if not (lo <= i <= len(pts) - 1 - back):
+                    continue
+                a, v, b = pts[i - 1], pts[i], pts[i + 1]
+                ch, old = LineString([a, b]), LineString([a, v, b])
+                tri = shapely.Polygon([a, v, b])
+                tri = tri if tri.area > 1e-12 else ch
+                if not in_free(L_, tri):
+                    continue
+                ok = True
+                for q_ in trees[L_].query(ch, predicate='dwithin', distance=P_MIN + hwm):
+                    k2 = byL[L_][q_]
+                    if k2 == key:
+                        continue
+                    d1 = ch.distance(lines[k2])
+                    if lines[k2].intersects(tri) or (d1 < P_MIN + hw[key[0]] + hw[k2[0]] and d1 < old.distance(lines[k2]) - 1e-9):
+                        ok = False
+                        break
+                if ok and vtree is not None:
+                    for q_ in vtree.query(ch, predicate='dwithin', distance=VREACH):
+                        vk = VKEYS[q_]
+                        if vk[0] == key[0]:
+                            continue
+                        if vk in VH:                         # (a pair's via: by its barrels and its cells)
+                            s1 = via_short(vk, key[0], ch)
+                            if tri.contains(vpts[q_]) or (s1 > 0 and s1 > via_short(vk, key[0], old) + 1e-9):
+                                ok = False
+                                break
+                            continue
+                        d1 = ch.distance(vpts[q_])
+                        if tri.contains(vpts[q_]) or (d1 < VS[key[0]] + VXO[vk[0]] and d1 < old.distance(vpts[q_]) - 1e-9):
+                            ok = False
+                            break
+                if ok:
+                    del pts[i]
+                    lines[key] = LineString(pts)
+                    nout += 1
+                    done = True
+                    break
+            if not done:
+                nleft += len(bad)
+                break
+    return nout, nleft
+
+
 PL = layout()
+OWN = {}
+for key in KEYS:
+    own_ = list(PL[key])
+    if RUN[key].get('lead') and key[1] == 0:                  # the straight piece from its tooth to its stub's mouth
+        own_ = [RUN[key]['lead']] + own_
+    if RUN[key].get('tail') and key[1] == len(RUNL[key[0]]) - 1:
+        own_ = own_ + [RUN[key]['tail']]
+    # (points within 0.4 of a grid step of each other -- a run's places on the edges of sliver cells at a copper
+    # corner -- one point: a jog that small is no shape of the lane's)
+    # (...but never the end of a laid dive's straight run: the run's second point, or its last but one)
+    hold_ = ({1} if (key[0], key[1] - 1) in VLAID else set()) | ({len(own_) - 2} if key in VLAID else set())
+    OWN[key] = [own_[0]] + [q_ for i_, q_ in enumerate(own_[1:-1], 1)
+                            if i_ in hold_ or math.hypot(q_[0] - own_[i_ - 1][0], q_[1] - own_[i_ - 1][1]) > 0.4 * GS] + [own_[-1]]
+_f0 = sum(len(shape_faults(OWN[k_])) for k_ in KEYS)
+_nout, _nleft = shape_pass(OWN)
+log(f'the written lines: {_f0} point(s) at a fold or notch by the audit\'s measures; {_nout} point(s) left out where '
+    f'that is safe, {_nleft} stay')
 res = {'lanes': {}, 'vias': [], 'cuts': [], 'lcuts': [], 'vcuts': []}
 for n in M:
     xy, pieces = [], []
     for k in range(len(RUNL[n])):
-        own = list(PL[(n, k)])
-        if RUN[(n, k)].get('lead') and k == 0:                # the straight piece from its tooth to its stub's mouth
-            own = [RUN[(n, k)]['lead']] + own
-        if RUN[(n, k)].get('tail') and k == len(RUNL[n]) - 1:
-            own = own + [RUN[(n, k)]['tail']]
-        # (points within a hundredth of a millimetre of each other -- a run's places on the edges of sliver cells
-        # at a copper corner -- one point: a jog that small is no shape of the lane's)
-        own = [own[0]] + [q_ for i_, q_ in enumerate(own[1:-1], 1)
-                          if math.hypot(q_[0] - own[i_ - 1][0], q_[1] - own[i_ - 1][1]) > 0.4 * GS] + [own[-1]]
-        pts = sampled(own)
+        pts = sampled(OWN[(n, k)])
         Ln = LNAME[RUN[(n, k)]['L']]
         pieces += [(p[0], p[1], q[0], q[1], Ln) for p, q in zip(pts, pts[1:])]
         xy += pts if not xy else pts[1:]
@@ -1762,7 +2778,7 @@ for v_, what in SF.get('via', []):
     if v_ > GRID2 and c_ not in res['vcuts']:
         res['vcuts'].append(c_)
 # ...and a via that stands outside the vias' free space (inside a bar of fixed copper), the same
-_vout = [vk for vk in VKEYS if VMESH.locate([VIA[vk]])[0] < 0 and Point(VIA[vk]).distance(VFREE) > GRID2]
+_vout = [vk for vk in VKEYS if vmesh(vk).locate([VIA[vk]])[0] < 0 and Point(VIA[vk]).distance(vmesh(vk).free) > GRID2]
 for (a_, kv_) in _vout:
     c_ = {'lane': a_, 'u': chg[a_][kv_], 'w': VS[a_]}
     if c_ not in res['vcuts']:

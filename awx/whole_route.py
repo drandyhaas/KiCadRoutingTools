@@ -1093,6 +1093,13 @@ def loop(solve, out, rounds, env, log, try_lay=None):
             g, p = O(f'g{i}.json'), O(f'p{i}.json')
             if stage([g], 'whole_geo.py', [st['solve'], g], O(f'g{i}.log'), GEO_FLIPS_FROM=flips) != 0:
                 return failed(O(f'g{i}.log'))
+            if (awx_settings.get('GEO_EMBED') or '0') == '1':
+                # (probe GEO_EMBED=1: the round's geometry fitted in board xy with the vias free -- whole_embed.py, from
+                # the frame geometry's layout; its lanes the round's, and its findings the round's cuts)
+                e = O(f'e{i}.json')
+                if stage([e], 'whole_embed.py', [st['solve'], e, '--ref=' + g], O(f'e{i}.log')) != 0:
+                    return failed(O(f'e{i}.log'))
+                g = e
             if stage([p], 'whole_polish.py', [g, p], O(f'p{i}.log')) != 0:
                 return failed(O(f'p{i}.log'))
             joint_publish(env, p, f'polish {i}')
