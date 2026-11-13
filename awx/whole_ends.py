@@ -1114,6 +1114,17 @@ class Ends:
         moves = opt[0]
         if not moves or any(getattr(m, 'kind', 'surface') == 'surface' for m in moves):
             return (self.RL.index(opt[2]) if opt[2] in self.RL else 0), None, None
+        # (an end the GROUP lays -- a shared array's, group_ends -- with a via move whose run has ONE layer (the routing
+        # layers two, its run on the other): FIXED there, as a run on RUN is held to its `runs_on`, which never hold its
+        # neck's layer. The group lays that run and its via whatever this model chose, and its rule of one lane a point a
+        # layer counts the run on its own layer; free on the neck's layer here, the via "dropped" was laid all the same,
+        # the lane was handed on on the neck's layer from the very point a neighbour's run ended on it -- two ends
+        # 0.000 mm apart, the check's findings on them weighed at the other layer's price and never ruled out)
+        import joint_escape as je
+        lays_ = {getattr(m, 'layer', None) for m in moves}
+        if (self.src_shared, self.dst_shared)[k_] and len(lays_) == 1 and je.RUN not in lays_ and \
+                next(iter(lays_)) in self.RL:
+            return self.RL.index(next(iter(lays_))), None, None
         necks = set()
         for leg in lg:
             pad = self.st['src_pad' if k_ == 0 else 'dst_pad'].get(leg)
