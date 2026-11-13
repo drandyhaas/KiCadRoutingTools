@@ -160,18 +160,23 @@ def net_time_profile(pcb_data, net_id) -> Optional[TuningProfile]:
     (the caller then times the net from the stackup, as before).
 
     The board's `DelayModel` is built once and kept on ``pcb_data``; a board
-    with no file behind it, or no project, has no profiles."""
+    with no file behind it, or no project, has no profiles. A project that
+    cannot be read gives none either, with a warning (`read_tuning_profiles`);
+    any other error is a bug and is raised, not turned into the stackup."""
     model = getattr(pcb_data, _MODEL_ATTR, None)
     if model is None:
         path = getattr(pcb_data, 'source_path', '') or ''
         try:
             model = DelayModel(path, pcb_data) if path else False
-        except Exception:                                      # noqa: BLE001
+        except (OSError, ValueError) as e:
+            # the net-class memberships' own read of the project
+            _warn_once(path, f"could not read the net classes of {path} ({e}); "
+                             f"--time-matching times every net from the stackup")
             model = False
         try:
             setattr(pcb_data, _MODEL_ATTR, model)
-        except Exception:                                      # noqa: BLE001
-            pass
+        except AttributeError:
+            pass        # an object that takes no attributes: rebuilt per call
     if not model or not model.profiles or net_id is None:
         return None
     prof = model.profile_of(net_id)
