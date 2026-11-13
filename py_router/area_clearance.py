@@ -511,7 +511,9 @@ def derive(rules, pcb_data, config) -> Optional[AreaClearance]:
             continue
         on = r.layers_for(copper)
         value = max(float(r.constraints['clearance']['min']), floor)
-        for aname, alayers, poly, _b in index.areas:
+        for entry in index.areas:
+            # (name, layers, polygon, ...): the index may carry more per area
+            aname, alayers, poly = entry[0], entry[1], entry[2]
             if aname not in names:
                 continue
             layers = frozenset(alayers if on is None else set(alayers) & set(on))
