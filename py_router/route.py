@@ -3587,10 +3587,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             net_name_patterns if net_name_patterns is not None else net_names,
             input_file)
         if force_ripped:
-            pcb_data.segments = [s for s in pcb_data.segments
-                                 if s.net_id not in force_ripped]
-            pcb_data.vias = [v for v in pcb_data.vias
-                             if v.net_id not in force_ripped]
+            # exactly the copper selected (held copper is not, #1842)
+            _strip = {id(x) for _s, _v in force_ripped.values() for x in list(_s) + list(_v)}
+            pcb_data.segments = [s for s in pcb_data.segments if id(s) not in _strip]
+            pcb_data.vias = [v for v in pcb_data.vias if id(v) not in _strip]
             bump_copper_epoch(pcb_data)
             sweep_scope_ids |= set(force_ripped)
             print(f"--force-reroute: stripped "
@@ -4685,15 +4685,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _reg_segs: Dict[int, list] = {}
     _reg_vias: Dict[int, list] = {}
     if existing_rippable:
+        from kicad_parser import is_immutable_copper as _immutable_reg
         _reg_set = set(existing_rippable)
         for _s in pcb_data.segments:
             # A net-tagged copper graphic is not this net's route: nothing
             # re-lays it and the writer keeps it, so a rip that took it
             # off the board left later routes free to cross copper that ships.
-            if _s.net_id in _reg_set and not getattr(_s, 'graphic', False):
+            # Nor is held copper (#1842: a via-span step's hold on an earlier
+            # step's escape): the net stays rippable, its held items stay.
+            if (_s.net_id in _reg_set and not getattr(_s, 'graphic', False)
+                    and not _immutable_reg(_s)):
                 _reg_segs.setdefault(_s.net_id, []).append(_s)
         for _v in pcb_data.vias:
-            if _v.net_id in _reg_set:
+            if _v.net_id in _reg_set and not _immutable_reg(_v):
                 _reg_vias.setdefault(_v.net_id, []).append(_v)
     # #734: remember WHICH nets are mere rip candidates -- the audit gate
     # below must not depend on the is_existing_route flag surviving in
