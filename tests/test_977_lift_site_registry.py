@@ -87,6 +87,11 @@ REGISTRY = {
     ('py_router/obstacle_map.py', 'build_base_obstacle_map'): (
         NOT_ROUTED, 'the per-net via-rung sub-build: only its blocked-via '
                     'cells are read back, the map itself is dropped'),
+    ('py_router/obstacle_map.py', '_compose_area_passes'): (
+        NOT_ROUTED, 'the #1843 sub-build of a rule area: its rows are written '
+                    "into the parent's map as it stamps, its own map is "
+                    'dropped, and its lift records are composed with the '
+                    "parent's so the lifters above read rows the map holds"),
     ('py_router/obstacle_cache.py', 'run_obstacle_audit'): (
         NOT_ROUTED, 'audit clone, measured not routed'),
     ('py_router/obstacle_cache.py', 'run_obstacle_content_audit'): (

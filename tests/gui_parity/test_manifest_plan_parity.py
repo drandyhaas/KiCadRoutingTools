@@ -1281,6 +1281,67 @@ def tool_flags(tool):
     return caps.script_flags(caps._tool_path(caps.ROOT, tool))
 
 
+def converter_arity(tool, flag):
+    """How `manifest_to_plan.parse_command` reads `flag` of `tool`, in its own
+    branch order: 'switch' (no token), 'value' (exactly one), 'list' (every
+    token up to the next flag), 'ignored', or None (the unknown-flag
+    fallthrough, which takes whatever tokens follow and is the coverage
+    check's business, not this one's)."""
+    a = m2p.TOOL_FLAG_ALIASES.get(tool, {}).get(flag, flag)
+    if (a in m2p.TOOL_OPTIONAL_LIST_FLAGS.get(tool, {})
+            or a in m2p.TOOL_LIST_FLAGS.get(tool, {})):
+        return 'list'
+    if a in m2p.IGNORE_FLAGS:
+        return 'ignored'
+    if a in m2p.BOOL_FLAGS or a in m2p.INVERTED_BOOL_FLAGS:
+        return 'switch'
+    if a in m2p.GROUP_LIST_FLAGS:
+        return 'list'
+    if a in m2p.TOOL_FLAG_PARAMS.get(tool, {}) or a in m2p.FLAG_PARAMS:
+        return 'value'
+    if a in m2p.LIST_FLAGS:
+        return 'list'
+    return None
+
+
+def check_flag_arity(tool, arity=None):
+    """[(flag, why)] for every flag of `tool` the converter files with a
+    different arity from the tool's REAL parser (cli_argv_check.option_arity):
+    a switch the parser gives a value (the value is read as True, its token
+    as a stray positional -- `--via-span-type micro` became `True`, which no
+    choice matches, so a recorded step's type was dropped), a value flag the
+    parser takes none for (the next flag is eaten as its value -- #856), or a
+    one-value reading of a flag that takes several. General, so a flag
+    mis-filed in any table is caught, not just the ones a fixture names.
+    `arity` overrides the parser's table (the negative controls)."""
+    from cli_argv_check import option_arity
+    table = option_arity(tool) if arity is None else arity
+    if not table:
+        return [('<%s>' % tool, "its parser could not be built here, so no "
+                 "flag's arity was checked")]
+    bad = []
+    for flag, nargs in sorted(table.items()):
+        how = converter_arity(tool, flag)
+        if how in (None, 'ignored'):
+            continue
+        if how == 'switch' and nargs not in (0, '?', '*'):
+            bad.append((flag, "the converter reads it as a switch (True), but "
+                        "%s takes %s; the value would be lost" % (tool, _takes(nargs))))
+        elif how == 'value' and nargs != None:   # noqa: E711 (argparse's one)
+            bad.append((flag, "the converter reads exactly one value, but %s "
+                        "takes %s" % (tool, _takes(nargs))))
+        elif how == 'list' and nargs == 0:
+            bad.append((flag, "the converter reads a list of values, but %s "
+                        "takes none: it would eat the arguments after it" % tool))
+    return bad
+
+
+def _takes(nargs):
+    return {0: 'no value', None: 'one value', '?': 'an optional value',
+            '*': 'any number of values', '+': 'one or more values'}.get(
+                nargs, '%s values' % (nargs,))
+
+
 def check_flag_coverage(tool):
     """Return (bad, rows): [(flag, why)] and {flag: (disposition, detail)}.
 
@@ -2200,6 +2261,24 @@ def main():
         for f, why in bad_t:
             print(f"    {f}: {why}")
         flag_bad += bad_t
+
+    # Each flag's ARITY as the converter reads it against the real parser.
+    # The negative controls prove the check can fail: a value flag filed as a
+    # switch, a switch filed as a value.
+    for tool in FLAG_COVERAGE:
+        ar_bad = check_flag_arity(tool)
+        print(f"Flag arity, {tool}: {'OK' if not ar_bad else 'FAILED'}.")
+        for f, why in ar_bad:
+            print(f"    {f}: {why}")
+        flag_bad += ar_bad
+    _ctl_value = check_flag_arity('route.py', {'--add-teardrops': None})
+    _ctl_switch = check_flag_arity('route.py', {'--clearance': 0})
+    if not (_ctl_value and _ctl_switch):
+        flag_bad.append(('<arity negative controls>',
+                         'a value flag read as a switch, or a switch read as a value, '
+                         'was not caught: %r %r' % (_ctl_value, _ctl_switch)))
+    print(f"Flag arity negative controls: "
+          f"{'OK' if _ctl_value and _ctl_switch else 'FAILED'}.")
 
     # #459 placement-block flags (self-contained, no corpus needed).
     grp_bad = check_group_flags()
