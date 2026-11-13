@@ -63,11 +63,12 @@ _ANNOUNCED = set()
 
 class Region:
     """One area rule the router honours."""
-    __slots__ = ('rule', 'area', 'value', 'polygon', 'layers', 'ring')
+    __slots__ = ('rule', 'area', 'value', 'polygon', 'layers', 'ring', 'order')
 
-    def __init__(self, rule, area, value, polygon, layers, ring):
+    def __init__(self, rule, area, value, polygon, layers, ring, order=0):
         self.rule, self.area, self.value = rule, area, value
         self.polygon, self.layers, self.ring = polygon, layers, ring
+        self.order = order        # the rule's position in the file
 
 
 class AreaClearance:
@@ -75,11 +76,15 @@ class AreaClearance:
     them. ``regions`` are in file order: where two overlap, the later one
     owns the cell, as KiCad's last matching rule does."""
 
-    def __init__(self, regions: List[Region], copper_layers, skipped=()):
+    def __init__(self, regions: List[Region], copper_layers, skipped=(),
+                 layer_orders=None):
         self.regions = list(regions)
         self.copper = list(copper_layers)
         self.skipped = list(skipped)
+        #: {layer: file position of the rule its layer clearance comes from}
+        self.layer_orders = dict(layer_orders or {})
         self._masks = {}
+        self._later = {}
 
     # ------------------------------------------------------------- masks
     def _region_masks(self, step: float):
@@ -203,12 +208,40 @@ class AreaClearance:
 
     def region_config(self, config, want: int):
         """``config`` as the stamp inside region ``want`` reads it: the
-        rule's value in place of every class and layer value."""
-        return replace(config, area_clearance=None,
-                       clearance=self.regions[want].value,
+        rule's value in place of every class value and of every rule BEFORE
+        it in the file. KiCad's last matching rule wins, so a layer rule or a
+        class/net-scoped rule that comes after the area's still replaces it
+        for what it binds; the track-to-track raises stay as they are (they
+        only widen)."""
+        r = self.regions[want]
+        layers = {l: v for l, v in (config.layer_clearances or {}).items()
+                  if self.layer_orders.get(l, -1) > r.order}
+        return replace(config, area_clearance=None, clearance=r.value,
                        net_clearances={}, net_clearance_floor=None,
-                       layer_clearances={}, track_clearances={},
-                       track_partner_clearances={}, scoped_clearance=None)
+                       layer_clearances=layers,
+                       scoped_clearance=self._scoped_after(config, r.order))
+
+    def _scoped_after(self, config, order: int):
+        """The scoped channel of ``config`` cut down to the rules after file
+        position ``order``, or None when none is."""
+        inst = getattr(config, 'scoped_clearance', None)
+        if inst is None:
+            return None
+        got = self._later.get((id(inst), order))
+        if got is not None and got[0] is inst:
+            return got[1]
+        later = None
+        try:
+            from kicad_dru import ScopedClearanceInstall, ScopedClearanceRules
+            rules = [x for x in inst.sc.rules if x.order > order]
+            if rules:
+                later = ScopedClearanceInstall(
+                    ScopedClearanceRules(inst.sc.dr, rules, inst.sc.layer_orders),
+                    inst.reps, {}, inst.fab_floor)
+        except Exception:                                       # noqa: BLE001
+            later = inst      # unreadable: keep every scoped rule (the wider side)
+        self._later[(id(inst), order)] = (inst, later)
+        return later
 
     def region_of_segment(self, x1, y1, x2, y2, layer, width=0.0) -> Optional[int]:
         """The region whose rule binds a track (KiCad: a track partly in an
@@ -369,17 +402,39 @@ def _lookup(mask, gx, gy):
     return out
 
 
-def _single_area(ast):
-    """The area a condition names when it is ONE insideArea / intersectsArea
-    predicate, else None."""
-    if (isinstance(ast, tuple) and len(ast) == 4 and ast[0] == 'area'
+def _area_names(ast):
+    """The areas a condition names when it is one insideArea /
+    intersectsArea predicate or an OR of them, else None."""
+    if not isinstance(ast, tuple) or not ast:
+        return None
+    if (len(ast) == 4 and ast[0] == 'area'
             and ast[2] in ('insidearea', 'intersectsarea')):
-        return ast[3]
+        return [ast[3]]
+    if ast[0] == 'or':
+        out = []
+        for part in ast[1:]:
+            got = _area_names(part)
+            if got is None:
+                return None
+            out += [n for n in got if n not in out]
+        return out or None
     return None
 
 
+def _fab_floor(copper, key: str) -> float:
+    """The floor an area rule's value is raised to: what the fab can
+    physically make (the advanced rung, or `--fab-overrides`). The rule is
+    the board's own statement for that area, so it is held as an explicit
+    request is, not at the tier automatic descents stop at."""
+    try:
+        from fab_tiers import physical_fab_floor
+        return float(physical_fab_floor(len(copper) or 2).get(key) or 0.0)
+    except Exception:                                           # noqa: BLE001
+        return 0.0
+
+
 def eligible(rules, pcb_data):
-    """(the board's area index, [(rule, area name, None) | (rule, None,
+    """(the board's area index, [(rule, area names, None) | (rule, None,
     why it is not routed to)]) for the clearance rules scoped by a rule area
     the board has."""
     cands = [r for r in rules.rules
@@ -395,17 +450,11 @@ def eligible(rules, pcb_data):
         ast = r.area_scoped_condition
         if ast is None:            # names an area the board does not have
             continue
-        name = _single_area(ast)
-        if name is None:
-            out.append((r, None, 'its condition is more than one area predicate'))
+        names = _area_names(ast)
+        if names is None:
+            out.append((r, None, 'its condition is more than rule-area predicates'))
             continue
-        later = [o.name for o in rules.rules
-                 if o.order > r.order and 'clearance' in o.constraints
-                 and o.unsupported is None]
-        if later:
-            out.append((r, None, f"clearance rule '{later[0]}' follows it in the file"))
-            continue
-        out.append((r, name, None))
+        out.append((r, names, None))
     return index, out
 
 
@@ -416,10 +465,31 @@ def mark_honoured(rules, pcb_data) -> None:
         _index, picked = eligible(rules, pcb_data)
     except Exception:                                           # noqa: BLE001
         return
-    for r, name, _why in picked:
-        if name is not None and not r.honoured:
-            r.honoured = (f"clearance min {r.constraints['clearance']['min']:g} mm in "
-                          f"rule area '{name}': tracks and vias are routed to it there")
+    copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None) or [])
+    floor = _fab_floor(copper, 'clearance')
+    for r, names, _why in picked:
+        if names is not None and not r.honoured:
+            where = ', '.join(f"'{n}'" for n in names)
+            v = float(r.constraints['clearance']['min'])
+            pinned = (f" (below the fab floor: routed at {floor:g} mm; --fab-overrides "
+                      f"declares a smaller one)" if v < floor - 1e-9 else '')
+            r.honoured = (f"clearance min {v:g} mm in rule area {where}: tracks and "
+                          f"vias are routed to it there{pinned}")
+
+
+def _layer_orders(rules, copper) -> dict:
+    """{layer: file position of the rule its layer clearance comes from}."""
+    try:
+        import os
+        from kicad_dru import _parse_dru_full
+        src = getattr(rules, 'source', '') or ''
+        dru = os.path.splitext(src)[0] + '.kicad_dru' if src else ''
+        if dru and os.path.isfile(dru):
+            with open(dru, encoding='utf-8') as fh:
+                return dict(_parse_dru_full(fh.read(), list(copper))[4])
+    except Exception:                                           # noqa: BLE001
+        pass
+    return {}
 
 
 def derive(rules, pcb_data, config) -> Optional[AreaClearance]:
@@ -431,31 +501,27 @@ def derive(rules, pcb_data, config) -> Optional[AreaClearance]:
     if not picked:
         return None
     copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or config.layers)
-    try:
-        from fab_tiers import fab_floors
-        floor = fab_floors(len(copper)).get('clearance') or 0.0
-    except Exception:                                           # noqa: BLE001
-        floor = 0.0
+    floor = _fab_floor(copper, 'clearance')
     base = min([config.clearance] + list((config.layer_clearances or {}).values()))
     reach = max(float(config.track_width or 0.0), float(config.via_size or 0.0)) / 2.0
     regions, skipped = [], []
-    for r, name, why in picked:
-        if name is None:
+    for r, names, why in picked:
+        if names is None:
             skipped.append((r.name, why))
             continue
         on = r.layers_for(copper)
         value = max(float(r.constraints['clearance']['min']), floor)
         for aname, alayers, poly, _b in index.areas:
-            if aname != name:
+            if aname not in names:
                 continue
             layers = frozenset(alayers if on is None else set(alayers) & set(on))
             if not layers:
                 continue
             ring = (value + reach + config.grid_step) if value > base + 1e-9 else 0.0
-            regions.append(Region(r.name, name, value, poly, layers, ring))
+            regions.append(Region(r.name, aname, value, poly, layers, ring, r.order))
     if not regions and not skipped:
         return None
-    return AreaClearance(regions, copper, skipped)
+    return AreaClearance(regions, copper, skipped, _layer_orders(rules, copper))
 
 
 def install(config, pcb_data) -> None:

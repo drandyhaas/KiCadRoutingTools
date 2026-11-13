@@ -30,8 +30,12 @@ Checks:
      KiCad's tolerance, and the rule is reported as routed to;
   3. room_tight: OPEN_NET routes, ROOM_NET does not, check_drc is clean;
   4. the map's reference counts balance (KICAD_OBSTACLE_AUDIT);
-  5. a rule whose condition is more than the area predicate is not routed
-     to, and the run says so.
+  5. a rule whose condition is more than rule-area predicates is not
+     routed to, and the run says so;
+  6. the rule reads as KiCad orders it: an OR of area predicates names every
+     area; a class- or net-scoped clearance rule LATER in the file still
+     binds its own pairs inside the room (and leaves the others at the
+     room's value), and one EARLIER in the file gives way to the room.
 """
 import json
 import os
@@ -156,6 +160,27 @@ def main():
            f"is not routed to: {routed} / {failed}")
         ok("rule 'room': its area clearance is NOT routed to" in log,
            "and the run says so")
+        print("6. rule order, and an OR of areas")
+        room = ('(rule "room"\n  (constraint clearance (min 0.1mm))\n'
+                "  (condition \"A.insideArea('ROOM') || A.intersectsArea('ROOM')\"))\n")
+
+        def scoped(net):
+            return (f'(rule "wide"\n  (constraint clearance (min 0.3mm))\n'
+                    f"  (condition \"A.NetName == '{net}'\"))\n")
+        for tag, dru, want, why in (
+                ('or', room, ['ROOM_NET'], "an OR of two predicates is routed to"),
+                ('later_other', room + scoped('OPEN_NET'), ['ROOM_NET'],
+                 "a later rule on another net leaves the room open"),
+                ('later_own', room + scoped('ROOM_NET'), [],
+                 "a later rule on the net itself closes the gap again"),
+                ('earlier_own', scoped('ROOM_NET') + room, ['ROOM_NET'],
+                 "an earlier rule on the net gives way to the room")):
+            sub = os.path.join(td, tag)
+            os.mkdir(sub)
+            board = stage(sub, 'room_relax', dru='(version 1)\n' + dru)
+            out, routed, _failed, _log = route(sub, board, tag)
+            ok(routed == want, f"{why}: routed {routed}")
+            ok(drc_clean(out), "  and check_drc is clean")
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1

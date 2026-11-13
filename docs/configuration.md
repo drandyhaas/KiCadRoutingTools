@@ -306,9 +306,10 @@ post-route pass, or already in the input) is printed and reported as
 clean; absent when the board has no such rule).
 
 **Clearance in a rule area.** A `.kicad_dru` clearance rule whose condition
-is one rule-area predicate, e.g.
+is one rule-area predicate or an OR of them, e.g.
 `(rule "room" (constraint clearance (min 0.09mm)) (condition "A.insideArea('ROOM')"))`
-on a named rule area `ROOM`, is routed to by position (no flag, no GUI
+or `"A.insideArea('SOC_ROOM') || A.insideArea('RAM_ROOM')"`
+on named rule areas, is routed to by position (no flag, no GUI
 control; `area_clearance.py`): a track inside the area, on a layer the area
 is drawn on, is held to the rule's value in place of the class value against
 everything, and so is a via where the area covers every copper layer of the
@@ -317,11 +318,16 @@ whose rule is ABOVE the run's clearance, a ring one rule value plus half a
 track wide keeps the larger of the two. The base obstacle map, the per-net
 keep-outs and the stamp functions all compose the two stamps, so rip-up and
 retry see the same picture, and the terminal check and the end-of-run pad
-audit hold a track in the area to the area's value. The run names the rule
+audit hold a track in the area to the area's value. The rule's value is raised to what the fab can physically
+make (the advanced rung, or `--fab-overrides`), as an explicit `--clearance`
+is, and the run says when it was. The run names the rule
 as routed to, and the DRC writeback keeps `rules.min_clearance` at or below
-it. Not routed to, and said so: a condition with more than the one predicate
-(`A.insideArea('ROOM') && A.NetClass == 'HS'`), `enclosedByArea()`, and a
-rule followed in the file by another clearance rule the router reads; a
+it. The rule is read in KiCad's order, the last matching rule winning: in
+the room it replaces the class values and every rule BEFORE it in the file,
+while a per-layer rule or a class-, type- or net-scoped rule that comes
+AFTER it still binds its own pairs there. Not routed to, and said so: a
+condition with more than rule-area predicates
+(`A.insideArea('ROOM') && A.NetClass == 'HS'`) and `enclosedByArea()`; a
 `track_width` rule in an area is graded by `check_drc.py` only. One limit of
 a rule that tightens: a long track that crosses the area's edge is bound by
 the rule along its whole length in KiCad, and only the part near the area is

@@ -1102,7 +1102,7 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 - No push-and-shove (routes around obstacles, doesn't move them)
 - No blind or buried vias
 - No coarse grid assignment before detailed routing to plan overall topology
-- Area-scoped design rules in part: a `.kicad_dru` rule conditioned on a rule area is honoured as a (net-filtered) `disallow` keep-out, and a clearance rule whose condition is one area predicate is routed to inside the area (see [Configuration](docs/configuration.md)); an area-scoped width rule, and a clearance rule with further condition terms, are not routed to (the run reports it); `check_drc.py` grades them by where each track, via and pad stands
+- Area-scoped design rules in part: a `.kicad_dru` rule conditioned on a rule area is honoured as a (net-filtered) `disallow` keep-out, and a clearance rule whose condition is one area predicate, or an OR of them, is routed to inside the area (see [Configuration](docs/configuration.md)); an area-scoped width rule, and a clearance rule with further condition terms, are not routed to (the run reports it); `check_drc.py` grades them by where each track, via and pad stands
 
 ## Contributing
 
