@@ -370,8 +370,10 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # split zone, so every pass below reads each piece as the item KiCad
     # will (the piece outside is not bound by the area). Again at the end,
     # after the passes that join or re-lay copper. Inert without such a rule.
+    # The split moves no copper, so it takes every track of the run, not only
+    # the cleanup's scope (a pair kept out of it still ships its pieces).
     from area_clearance import split_results as _area_split
-    _as_n = _area_split(results, pcb_data, config, scope_net_ids)
+    _as_n = _area_split(results, pcb_data, config, None)
     counts['area_edge_splits'] = _as_n
     if _as_n:
         print(f"{label}Rule-area edges: split {_as_n} track(s) where they leave "
@@ -722,7 +724,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                   f"on {_mc_nets} net(s): -{_mc_n} redundant segment(s) (#811)")
 
     # #1843: the collinear merge (and smoothing) can join a split back
-    _as_n = _area_split(results, pcb_data, config, scope_net_ids)
+    _as_n = _area_split(results, pcb_data, config, None)
     counts['area_edge_splits'] += _as_n
     if _as_n:
         print(f"{label}Rule-area edges: split {_as_n} track(s) the passes above "

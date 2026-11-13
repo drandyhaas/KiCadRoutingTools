@@ -350,10 +350,17 @@ class-, type- or net-scoped rule that comes AFTER it still binds its own
 pairs there. Not routed to, and said so: a condition with more than
 rule-area predicates (`A.insideArea('ROOM') && A.NetClass == 'HS'`) and
 `enclosedByArea()`; a `track_width` rule in an area is graded by
-`check_drc.py` only. A coupled diff pair is laid at one gap, so inside a
-tightened area KiCad grades its P against its N at the area's value (the
-custom rule outranks the pair's implicit gap rule) and the run warns per pair
-when its gap is below it.
+`check_drc.py` only; a rule with another constraint beside the clearance is
+applied whole or not at all, by the reader of that constraint. Inside a
+tightened area KiCad grades a diff pair's P against its N at the area's
+value (the custom rule outranks the pair's implicit gap rule), and a coupled
+pair is laid at one gap, so a pair built below the area's value either keeps
+out of the area at its own gap (the area does not lie on the span of its
+pads: a net-filtered keep-out takes away only a detour through it) or, where
+the area lies on that span, is built at the area's value for the run -- its
+impedance changes, said per pair on the console and in
+`JSON_SUMMARY.area_pair_gaps` (`how` `around` / `widened`, `built_gap`,
+`routed`). The run still warns on a pair whose shipped gap is below the area.
 
 **Track bans.** A `disallow track` rule scoped without a rule area -- the usual
 way to keep a class on some layers, e.g.

@@ -1000,8 +1000,23 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # a width, a stored 0 put every pair at the fab floor.
         return class_diff_pair_geometry(_c, _classes.get('Default'))
 
+    # #1843: {P net id: the tightened rule area value a pair that has to
+    # pass the area is built at} (`area_clearance.pair_gap_plan`)
+    _area_gap_raise = {}
+
     def _pair_build_gap(_pair, _pn, call_gap, run_clr, announce=True,
                         floor_only=False):
+        _eg = _pair_build_gap0(_pair, _pn, call_gap, run_clr, announce, floor_only)
+        _ar = _area_gap_raise.get(_pair.p_net_id)
+        if _ar is not None and _ar > _eg + 1e-9:
+            if announce:
+                print(f"  #1843: {_pn}: coupling gap {_eg:.4g} mm raised to {_ar:.4g} mm, "
+                      f"the clearance of a tightened rule area it has to pass.")
+            _eg = _ar
+        return _eg
+
+    def _pair_build_gap0(_pair, _pn, call_gap, run_clr, announce=True,
+                         floor_only=False):
         """The gap the pair is built at, from the call's gap `call_gap` and
         clearance `run_clr`: its class gap when the flag was omitted, floored
         at the rule binding P against N where one does (#1293/#1526/#1542),
@@ -1706,6 +1721,33 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # GUI's Differential tab hands each run the same PCBData.
     from net_keepouts import attach as _nk_attach
     _nk_attach(pcb_data, getattr(getattr(config, 'rules', None), 'net_keepouts', None))
+    # #1843: a pair built at a gap below a tightened rule area's clearance
+    # would break it between P and N (KiCad's rule outranks the pair's gap
+    # rule there): it routes around the area, or, where the area lies on its
+    # pads' span, at the area's value. Inert without such an area.
+    from area_clearance import pair_gap_plan, keepouts_for
+    _area_cfg1843 = getattr(config, 'area_clearance', None)
+    _area_plan = pair_gap_plan(
+        _area_cfg1843, pcb_data, diff_pair_ids_to_route_set,
+        lambda _p: (_pair_build_gap(_p, _p.p_net_name, config.diff_pair_gap,
+                                    config.clearance, announce=False)
+                    if _per_pair_geometry else config.diff_pair_gap))
+    if _area_plan:
+        _extra_ko = keepouts_for(_area_cfg1843, pcb_data, _area_plan)
+        if _extra_ko:
+            _nk_attach(pcb_data, list(getattr(pcb_data, '_net_keepouts', None) or [])
+                       + _extra_ko)
+        for _row in _area_plan:
+            if _row['how'] == 'widened':
+                _area_gap_raise[_row['p_net_id']] = max(
+                    _row['value'], _area_gap_raise.get(_row['p_net_id'], 0.0))
+                _per_pair_geometry = True
+            print(f"  #1843: diff pair {_row['pair']}: gap {_row['gap']:g} mm is below "
+                  f"rule '{_row['rule']}' ({_row['value']:g} mm) in rule area "
+                  f"'{_row['area']}' -- "
+                  + ("kept out of the area, at its own gap" if _row['how'] == 'around'
+                     else f"the area lies on its pads' span, so it is built at "
+                          f"{_row['value']:g} mm for the run (its impedance changes)"))
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
@@ -2816,6 +2858,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         summary['net_keepouts'] = _nk_found
         print(f"{RED}{_nk_format(_nk_found, 'the routed board')}{RESET}"
               if _nk_found else _nk_format(_nk_found, 'the routed board'))
+    # #1843: each pair a tightened rule area made route around it or wider,
+    # and whether it routed (absent without such a pair)
+    if _area_plan:
+        _done = set(routed_diff_pairs or [])
+        summary['area_pair_gaps'] = []
+        for _row in _area_plan:
+            _e = {k: _row[k] for k in ('pair', 'rule', 'area', 'value', 'gap', 'how')}
+            _e['built_gap'] = _row['value'] if _row['how'] == 'widened' else _row['gap']
+            _e['routed'] = _row['pair'] in _done
+            summary['area_pair_gaps'].append(_e)
     # #1760/#1761: likewise the copper inside a board keep-out RULE AREA that
     # forbids it (absent on a board with none; route.py reports the same key).
     from check_drc import rule_area_audit, format_rule_area_audit

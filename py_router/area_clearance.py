@@ -923,6 +923,72 @@ def compose_via_placement(area, config, layers, outer, inner):
     return outer
 
 
+def pair_gap_plan(area, pcb_data, pairs, gap_of) -> List[dict]:
+    """#1843: how each coupled pair keeps a tightened rule area it would
+    otherwise break. KiCad's custom rule outranks the pair's implicit gap
+    rule inside the area, so a pair built at a gap below the area's value
+    violates P against N wherever it runs there. A coupled pair is laid at
+    one gap, so per pair and area:
+
+      * 'widened': the area meets the hull of the pair's pads (a pad in it,
+        or the area between them), so the pair has to pass it: it is built
+        at the area's value for the run (its impedance changes, which the
+        run discloses);
+      * 'around': otherwise the pair's two nets are kept out of the area (a
+        net-filtered keep-out, `keepouts_for`), which only takes a detour
+        through it away, so the gap the designer set -- its impedance --
+        holds wherever the pair runs.
+
+    ``pairs`` is `[(name, pair)]`, ``gap_of(pair)`` the gap it is built at.
+    Rows {pair, p_net_id, n_net_id, region, rule, area, value, gap, how}."""
+    if area is None or not any(r.tight for r in area.regions):
+        return []
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+    out = []
+    for name, pair in pairs:
+        g = float(gap_of(pair))
+        hull = None
+        for i, r in enumerate(area.regions):
+            if not r.tight or g >= r.value - 1e-9:
+                continue
+            if hull is None:
+                shapes = []
+                for nid in (pair.p_net_id, pair.n_net_id):
+                    for pad in (getattr(pcb_data, 'pads_by_net', None) or {}).get(nid, ()):
+                        hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
+                        if getattr(pad, 'rect_rotation', 0.0):
+                            hx = hy = math.hypot(hx, hy)
+                        shapes.append(box(pad.global_x - hx, pad.global_y - hy,
+                                          pad.global_x + hx, pad.global_y + hy))
+                hull = unary_union(shapes).convex_hull if shapes else None
+            crosses = hull is not None and r.polygon.intersects(hull)
+            out.append({'pair': name, 'p_net_id': pair.p_net_id, 'n_net_id': pair.n_net_id,
+                        'region': i, 'rule': r.rule, 'area': r.area, 'value': r.value,
+                        'gap': round(g, 4), 'how': 'widened' if crosses else 'around'})
+    return out
+
+
+def keepouts_for(area, pcb_data, plan) -> List[dict]:
+    """The net-filtered keep-outs (`net_keepouts` region dicts) that keep the
+    'around' pairs of a `pair_gap_plan` out of their areas."""
+    out = []
+    for row in plan:
+        if row['how'] != 'around':
+            continue
+        r = area.regions[row['region']]
+        nets = {getattr(pcb_data.nets.get(n), 'name', '') for n in
+                (row['p_net_id'], row['n_net_id'])}
+        polys = getattr(r.polygon, 'geoms', [r.polygon])
+        for g in polys:
+            out.append({'name': r.area, 'rule': f"{r.rule} (pair gap {row['gap']:g} mm)",
+                        'polygon': [tuple(c) for c in g.exterior.coords][:-1],
+                        'holes': [[tuple(c) for c in h.coords][:-1] for h in g.interiors],
+                        'layers': set(r.layers), 'tracks_allowed': False,
+                        'vias_allowed': False, 'nets': nets, 'area_pair_gap': True})
+    return out
+
+
 def pair_gaps_below(area, pcb_data, pairs) -> List[dict]:
     """#1843: the routed diff pairs whose OWN P-to-N gap is below a tightened
     rule area's value where either member's copper is in the area. KiCad's
@@ -1041,9 +1107,12 @@ def eligible(rules, pcb_data):
     """(the board's area index, [(rule, area names, None) | (rule, None,
     why it is not routed to)]) for the clearance rules scoped by a rule area
     the board has."""
+    # a rule with another constraint beside the clearance is applied whole or
+    # not at all: it stays with the reader of that constraint
     cands = [r for r in rules.rules
              if getattr(r, 'area_scoped_condition', None) is not None
-             and 'min' in (r.constraints.get('clearance') or {})]
+             and 'min' in (r.constraints.get('clearance') or {})
+             and set(r.constraints) == {'clearance'}]
     if not cands:
         return None, []
     index = rules.area_index(pcb_data)
