@@ -1225,8 +1225,7 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
                 # same exclusion `scan_board_minima` makes below. Counting a
                 # filled fp_poly's stroke here told the reader that N tracks
                 # sit under the original floor when none of them is a track.
-                "min_track_width": [s.width for s in pcb.segments
-                                    if s.width and not getattr(s, 'graphic', False)],
+                "min_track_width": _board_track_widths(pcb),
                 "min_via_diameter": [v.size for v in pcb.vias if v.size],
                 "min_via_drill": [v.drill for v in pcb.vias if v.drill],
                 "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
@@ -1267,6 +1266,19 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
     return lines
 
 
+def _board_track_widths(pcb) -> list:
+    """The width of every track Board Setup's ``min_track_width`` is a
+    statement about: not graphic copper, and not (#1843) a track in a rule
+    area whose `.kicad_dru` track_width rule allows its width -- KiCad grades
+    that one at the rule."""
+    from area_clearance import room_width_test
+    held = room_width_test(pcb)
+    return [s.width for s in pcb.segments
+            if s.width and s.width > 0 and not getattr(s, 'graphic', False)
+            and not (held is not None and held(s.start_x, s.start_y, s.end_x,
+                                               s.end_y, s.layer, s.width))]
+
+
 def board_size_values(pcb) -> dict:
     """Every size a measurable fab floor is a statement about, per
     :data:`FAB_FLOOR_KEYS_MEASURABLE` key: ``{key: [mm, ...]}``, one value per
@@ -1287,9 +1299,7 @@ def board_size_values(pcb) -> dict:
             if getattr(pad, "drill", 0):
                 hole.append(pad.drill)
     return {
-        "min_track_width": [s.width for s in pcb.segments
-                            if s.width and s.width > 0
-                            and not getattr(s, 'graphic', False)],
+        "min_track_width": _board_track_widths(pcb),
         "min_via_diameter": [v.size for v in pcb.vias if v.size],
         "min_via_drill": via_drills,
         "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias

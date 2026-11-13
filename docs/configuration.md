@@ -327,11 +327,30 @@ the room it replaces the class values and every rule BEFORE it in the file,
 while a per-layer rule or a class-, type- or net-scoped rule that comes
 AFTER it still binds its own pairs there. Not routed to, and said so: a
 condition with more than rule-area predicates
-(`A.insideArea('ROOM') && A.NetClass == 'HS'`) and `enclosedByArea()`; a
-`track_width` rule in an area is graded by `check_drc.py` only. One limit of
+(`A.insideArea('ROOM') && A.NetClass == 'HS'`) and `enclosedByArea()`. One limit of
 a rule that tightens: a long track that crosses the area's edge is bound by
 the rule along its whole length in KiCad, and only the part near the area is
 held to it here, so grade such a board with `check_drc.py`.
+
+**Track width in a rule area.** A `track_width` rule with the same kind of
+condition gives the room a width, its `opt` value or else its `min`, raised
+to what the fab can physically make:
+`(rule "room" (constraint track_width (min 0.09mm)) (condition "A.insideArea('ROOM')"))`.
+Where it is narrower than the run's track, the keep-outs in the room reserve
+the narrower track, and a net routed no wider than the run's width may NECK
+to the room's width there: its track is drawn at the room's width only on
+the stretches where its own width would not keep the room's clearance (with
+half a grid step to spare), and at its own width everywhere else, so a
+controlled-width net is narrow between the balls it squeezes past and not
+for its whole run through the room. A neck starts at most 1.5 grid steps
+outside the room's edge, so the narrow piece is one KiCad holds to the rule.
+A net routed wider (a power width, an impedance width) keeps its width and
+gets the search margin that fits the room's reserve. Rules on one area are
+read together, so one room can set both a clearance and a width; a room's
+width is not routed to when a later `track_width` rule asks for a wider
+track. A necked track is graded at the rule and not at Board Setup's
+`min_track_width` (measured on kicad-cli 10.0.8), so the DRC writeback
+leaves that minimum alone, on both fronts.
 
 **Track bans.** A `disallow track` rule scoped without a rule area -- the usual
 way to keep a class on some layers, e.g.

@@ -1006,6 +1006,19 @@ class GridRouteConfig:
         3.0). Correctness wins there; an undershoot is a clearance violation,
         an overshoot only costs some routability."""
         reserve = self.route_reserve_width(layer)
+        margin = self._margin_over_reserve(layer, net_width, reserve)
+        # #1843: a room that narrows the track reserves its own width in its
+        # keep-outs. A net wider than the run's reserve keeps its width in
+        # the room, so its margin must cover the room's reserve as well.
+        area = self.area_clearance
+        if margin > 0.0 and area is not None:
+            room = area.min_width(layer)
+            if room is not None and room < reserve:
+                margin = max(margin, self._margin_over_reserve(layer, net_width, room))
+        return margin
+
+    def _margin_over_reserve(self, layer: str, net_width: float, reserve: float) -> float:
+        """`_phase_exact_margin` against stamps that reserve ``reserve``."""
         e = (net_width - reserve) / 2.0 / self.grid_step
         if e <= 1e-9:
             return 0.0

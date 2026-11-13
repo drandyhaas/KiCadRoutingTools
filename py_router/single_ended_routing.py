@@ -32,6 +32,7 @@ from obstacle_map import get_same_net_through_hole_positions, same_net_partial_v
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
 from area_clearance import config_for_segment as _area_config_for_segment
+from area_clearance import narrow_tracks as _area_narrow_tracks
 
 # Import Rust router
 import sys
@@ -1308,6 +1309,8 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
             if hasattr(config, 'track_floor') else _fab_track_floor(pcb_data)
     necked = 0
     hard = []
+    # #1843: the width passes before this one rebuild every width
+    _area_narrow_tracks(segments, config, net_id, pcb_data)
     for s in segments:
         if not _touches_terminal(s, term_pts):
             continue
@@ -7440,6 +7443,7 @@ def _path_to_segments_vias(
         # the authoritative short gate.
         _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config)
 
+    _area_narrow_tracks(segments, config, net_id, pcb_data)   # #1843: a room's track width
     return segments, vias
 
 

@@ -776,6 +776,17 @@ def board_minima_from_live(board):
     try:
         import pcbnew
         widths, via_sizes, via_drills, annular, holes = [], [], [], [], []
+        # #1843: a track a rule area's track_width rule allows is graded at
+        # that rule, as fix_kicad_drc_settings._board_track_widths has it.
+        _held = None
+        try:
+            from area_clearance import room_width_test
+            _held = room_width_test(
+                board_path=board.GetFileName() or '',
+                copper=[board.GetLayerName(l) for l in board.GetEnabledLayers().Seq()
+                        if pcbnew.IsCopperLayer(l)])
+        except Exception:
+            _held = None
         for t in board.GetTracks():
             try:
                 if t.Type() == pcbnew.PCB_VIA_T:
@@ -796,6 +807,11 @@ def board_minima_from_live(board):
                         annular.append((w - d) / 2.0)
                 else:
                     w = pcbnew.ToMM(t.GetWidth())
+                    if w and _held is not None:
+                        _a, _b = t.GetStart(), t.GetEnd()
+                        if _held(pcbnew.ToMM(_a.x), pcbnew.ToMM(_a.y), pcbnew.ToMM(_b.x),
+                                 pcbnew.ToMM(_b.y), board.GetLayerName(t.GetLayer()), w):
+                            continue
                     if w:
                         widths.append(w)
             except Exception:
