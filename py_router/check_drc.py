@@ -5655,6 +5655,8 @@ def severity_key(v: dict, clearance: float) -> Optional[str]:
     the clearance family is KiCad's `shorting_items`."""
     t = v.get('type')
     key = KICAD_SEVERITY_KEY.get(t)
+    if t == 'via-drill-size' and v.get('via_type') == 'micro':
+        return 'microvia_drill_out_of_range'     # #1844: KiCad's own key for it
     if key == 'clearance':
         req = v.get('required_mm')
         req = req if isinstance(req, (int, float)) else clearance
@@ -5875,18 +5877,21 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
         nid = _nid(v.get('net1')) or 0
         layer = v.get('layer') if typ == 'track' else None
         item = size_rules.item_for_net(nid, typ, layer)
-        if courtyards is not None:
-            # #1805 / #1832: a courtyard rule binds by where the item stands
+        if typ == 'via' and v.get('via_loc') and (
+                courtyards is not None or v.get('via_type')):
+            # #1805: a courtyard rule binds by where the via stands; #1844: a
+            # micro via resolves at its own minimums
+            if not vias_at:
+                vias_at.update(((round(w.x, 6), round(w.y, 6)), w) for w in pcb_data.vias)
+            w = vias_at.get((round(v['via_loc'][0], 6), round(v['via_loc'][1], 6)))
+            if w is not None:
+                item = size_rules.via_item(w, courtyards)
+        elif courtyards is not None:
+            # #1832: a courtyard rule binds by where the track stands
             if typ == 'track' and v.get('seg_loc') and isinstance(v.get('width'), (int, float)):
                 from dataclasses import replace as _dc_replace
                 item = _dc_replace(item, courtyards=courtyards.of_capsule(
                     *v['seg_loc'], v['width'] / 2.0))
-            elif typ == 'via' and v.get('via_loc'):
-                if not vias_at:
-                    vias_at.update(((round(w.x, 6), round(w.y, 6)), w) for w in pcb_data.vias)
-                w = vias_at.get((round(v['via_loc'][0], 6), round(v['via_loc'][1], 6)))
-                if w is not None:
-                    item = size_rules.via_item(w, courtyards)
         c = size_rules.resolve(kind, item, None, layer)
         val = v.get(field)
         if c.kicad_min is None or not isinstance(val, (int, float)):
@@ -5938,7 +5943,11 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
         if v['type'] in _size_kinds:
             reports, rule = _size_rule(v)
             _val = v.get(_size_kinds[v['type']][2])
-            if not reports or (isinstance(_val, (int, float))
+            # #1844: the fab floor's via sizes do not bind a laser-drilled
+            # micro via (one joining two adjacent layers)
+            _fab_binds = not (v.get('laser_drilled')
+                              and v['type'] in ('via-size', 'via-drill-size'))
+            if not reports or (_fab_binds and isinstance(_val, (int, float))
                                and _val < _fab_size[v['type']] - 1e-9):
                 kept.append(v)                   # the fab floor's, not KiCad's
                 continue
@@ -6782,7 +6791,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             _CY_SIZE = VIA_SIZE_KINDS + ('track_width',)
             _size_rules = _DR.from_project(pcb_data, pcb_file, fab_floor=fab,
                                            copper_layers=copper_layers)
-            if not (_size_rules.board_min or _size_rules.rules):
+            # #1844: a micro via is graded at KiCad's micro via minimums even
+            # on a board that declares none (its drill at KiCad's 0.1 mm)
+            if not (_size_rules.board_min or _size_rules.rules or any(
+                    getattr(v, 'via_type', None) == 'micro' for v in pcb_data.vias)):
                 _size_rules = None
         except Exception as _dre:                              # noqa: BLE001
             if not quiet:
@@ -6818,7 +6830,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         def _via_floors(via):
             d, h = _via_size_floors(via)
             if (_aspect and min_via_drill is None
-                    and getattr(via, 'via_type', 'through') != 'through'):
+                    and getattr(via, 'via_type', 'through') != 'through'
+                    and not (_size_rules is not None
+                             and _size_rules.via_laser_drilled(via))):
                 if _size_rules is None:
                     h = _drill_flat
                 else:
@@ -6831,12 +6845,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if _size_rules is None:
                 return eff_min_via_dia, eff_min_via_drill
             _vi = _size_rules.via_item(via, _courtyards)
+            # #1844: a micro via is graded at the board's micro via minimums;
+            # the fab floor's via numbers are for a mechanical drill, so they
+            # bind every via but a laser-drilled one (two adjacent layers)
+            _laser = _size_rules.via_laser_drilled(via)
             d = (eff_min_via_dia if min_via_diameter is not None
                  else (_size_rules.resolve('via_diameter', _vi, None, None).min
-                       or eff_min_via_dia))
+                       or (0.0 if _laser else eff_min_via_dia)))
             h = (eff_min_via_drill if min_via_drill is not None
                  else (_size_rules.resolve('hole_size', _vi, None, None).min
-                       or eff_min_via_drill))
+                       or (0.0 if _laser else eff_min_via_drill)))
             return d, h
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
@@ -6844,6 +6862,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                   + ("; per-net board/rule minimums applied (#530)" if _size_rules else "")
                   + (f"; through-via drill held to {_aspect:g}:1 on this {_thick:g} mm "
                      f"board (#502)" if _aspect else ""))
+            _n_micro = sum(1 for v in pcb_data.vias
+                           if getattr(v, 'via_type', None) == 'micro')
+            if _size_rules is not None and _n_micro:
+                _n_mech = _n_micro - sum(1 for v in pcb_data.vias
+                                         if _size_rules.via_laser_drilled(v))
+                print("  micro vias: graded at the board's micro via minimums "
+                      "(Board Setup drill, net class diameter, .kicad_dru rules), "
+                      "not the fab floor's mechanical via sizes"
+                      + (f"; {_n_mech} typed micro but spanning more than two "
+                         f"adjacent layers keep the fab floor (a mechanical drill)"
+                         if _n_mech else ""))
             from fab_tiers import aspect_inert_warning
             if aspect_inert_warning(_thick):
                 print(f"WARNING: {aspect_inert_warning(_thick)}")
@@ -8616,6 +8645,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'min_size': _vd,
                         'shortfall_mm': dia_short,
                         'via_loc': (via.x, via.y),
+                        **({'via_type': 'micro'}
+                           if getattr(via, 'via_type', None) == 'micro' else {}),
+                        **({'laser_drilled': True} if _size_rules is not None
+                           and _size_rules.via_laser_drilled(via) else {}),
                     })
                 if drill_bad:
                     violations.append({
@@ -8625,6 +8658,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'min_drill': _vh,
                         'shortfall_mm': drill_short,
                         'via_loc': (via.x, via.y),
+                        **({'via_type': 'micro'}
+                           if getattr(via, 'via_type', None) == 'micro' else {}),
+                        **({'laser_drilled': True} if _size_rules is not None
+                           and _size_rules.via_laser_drilled(via) else {}),
                         # #502: the drill against the board it is plated through
                         **({'aspect_ratio': round(_thick / via.drill, 2),
                             'max_aspect_ratio': _aspect, 'board_thickness_mm': _thick}

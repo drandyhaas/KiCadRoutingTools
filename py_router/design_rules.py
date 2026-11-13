@@ -201,6 +201,34 @@ BOARD_MIN_KEYS = {
     'edge_clearance': 'min_copper_edge_clearance',
     'connection_width': 'min_connection',
 }
+# #1844: kind -> the Board Setup key KiCad's "board setup micro-via constraints"
+# rule reads for a via typed micro, in place of the through-via key above.
+MICROVIA_BOARD_MIN_KEYS = {
+    'via_diameter': 'min_microvia_diameter',
+    'hole_size': 'min_microvia_drill',
+}
+# kind -> the net-class field of a micro via (KiCad's "netclass (uvia)" rule).
+MICROVIA_NETCLASS_KEYS = {
+    'via_diameter': 'microvia_diameter',
+    'hole_size': 'microvia_drill',
+}
+# Board Setup's micro via drill minimum when the project does not carry the
+# key, or when there is no project at all (KiCad's built-in value; measured on
+# kicad-cli 10.0.6 and 10.0.8).
+KICAD_DEFAULT_MIN_MICROVIA_DRILL = 0.1
+
+
+def laser_drilled_span(via_type: Optional[str], span: Iterable[str],
+                       copper_layers: Sequence[str]) -> bool:
+    """A via typed micro whose copper ``span`` is two adjacent layers of a
+    board with more than two: a laser drill, which the fab profile's via
+    floor (a mechanical-drill number) does not bind. A via typed micro that
+    spans more than that, or the whole stack, is a mechanically drilled hole
+    whatever its type word, and keeps the physical floor (KiCad still grades
+    it at the micro via minimums)."""
+    span = list(span)
+    return (via_type == 'micro' and len(span) == 2
+            and len(copper_layers) > 2 and set(span) <= set(copper_layers))
 # kind -> the net-class field KiCad loads as SetOpt (a draw default).
 NETCLASS_OPT_KEYS = {
     'track_width': 'track_width',
@@ -1704,6 +1732,10 @@ def project_class_membership(net_settings) -> Tuple[Dict[str, List[str]],
 @dataclass
 class DesignRules:
     board_min: Dict[str, float] = field(default_factory=dict)      # rules.min_* (only >0)
+    # #1844: neither the project file nor a live board carries
+    # rules.min_microvia_drill (or there is no project), so KiCad grades a
+    # micro via's drill at its built-in value
+    microvia_drill_undeclared: bool = True
     classes: Dict[str, dict] = field(default_factory=dict)        # name -> {clearance, track_width, ..., priority}
     memberships: Dict[int, FrozenSet[str]] = field(default_factory=dict)  # net_id -> classes
     # footprint key -> (its reference as the file spells it, its library id)
@@ -1790,6 +1822,8 @@ class DesignRules:
                           ('min_track_width', 'm_TrackMinWidth'),
                           ('min_via_diameter', 'm_ViasMinSize'),
                           ('min_through_hole_diameter', 'm_MinThroughDrill'),
+                          ('min_microvia_diameter', 'm_MicroViasMinSize'),
+                          ('min_microvia_drill', 'm_MicroViasMinDrill'),
                           ('min_via_annular_width', 'm_ViasMinAnnularWidth'),
                           ('min_hole_to_hole', 'm_HoleToHoleMin'),
                           ('min_hole_clearance', 'm_HoleClearance'),
@@ -1800,6 +1834,8 @@ class DesignRules:
                 live_min[key] = v / 1e6           # divide, never multiply (#493)
         if live_min:
             dr.board_min = live_min
+        # a live board always carries its micro via drill minimum
+        dr.microvia_drill_undeclared = False
         # Net classes live: default + non-default (KiCad 10's GetNetclasses
         # omits Default, #782).
         try:
@@ -1860,6 +1896,7 @@ class DesignRules:
             for k, v in rules.items():
                 if k.startswith('min_') and isinstance(v, (int, float)) and v > 0:
                     self.board_min[k] = float(v)
+            self.microvia_drill_undeclared = 'min_microvia_drill' not in rules
             self.rule_severities = {str(k): str(v) for k, v in
                                     (ds.get('rule_severities') or {}).items()}
         if not self.classes:
@@ -2035,9 +2072,19 @@ class DesignRules:
 
         # 2a. board minimum -- the first rule in KiCad's vector.
         bkey = BOARD_MIN_KEYS.get(kind)
+        # #1844: a via typed micro is graded at the micro via minimums (KiCad's
+        # "board setup micro-via constraints" rule); a blind or buried via
+        # keeps the through-via ones
+        micro = (a.type == 'via' and a.via_type == 'micro'
+                 and kind in MICROVIA_BOARD_MIN_KEYS)
+        if micro:
+            bkey = MICROVIA_BOARD_MIN_KEYS[kind]
         if bkey and self.board_min.get(bkey):
             cur['min'] = self.board_min[bkey]
             source = 'board minimum'
+        elif micro and kind == 'hole_size' and self.microvia_drill_undeclared:
+            cur['min'] = KICAD_DEFAULT_MIN_MICROVIA_DRILL
+            source = 'board minimum (KiCad default)'
 
         # 2b. net-class implicit rules.
         implicit_rule = None
@@ -2053,6 +2100,18 @@ class DesignRules:
             if dp is not None:
                 cur['min'], implicit_rule = dp
                 source = implicit_rule
+        elif micro:
+            # measured on kicad-cli 10.0.8: a micro via's diameter minimum is
+            # its net class's microvia_diameter, which REPLACES Board Setup's
+            # (above or below it); the class drill is a draw default only
+            v = self.class_value(a.net_id, MICROVIA_NETCLASS_KEYS[kind])
+            if v is not None:
+                cur['opt'] = v
+                if kind == 'via_diameter':
+                    # the source names what set the minimum: for the drill
+                    # that stays Board Setup
+                    cur['min'] = v
+                    source = f'netclass {self.effective_class(a.net_id)}'
         elif kind in NETCLASS_OPT_KEYS:
             v = self.class_value(a.net_id, NETCLASS_OPT_KEYS[kind])
             # KiCad's "netclass (diff pair)" implicit rule, conditioned on
@@ -2133,6 +2192,10 @@ class DesignRules:
         c = Constraint(kind, min=cur['min'], opt=cur['opt'], max=cur['max'],
                        source=source, kicad_min=cur['min'],
                        min_rule=rule_name, min_rule_coupled=rule_coupled)
+        if micro and laser_drilled_span(a.via_type, a.other_layers, self.copper_layers):
+            # the fab profile's via floor is a mechanical-drill number; a via
+            # typed micro over more than two adjacent layers is drilled so
+            return c
         return self._fab(kind, c)
 
     def pair_gap_clearance(self, a: Optional[RuleItem], b: Optional[RuleItem]
@@ -2307,11 +2370,27 @@ class DesignRules:
         """The RuleItem of one via of the board; with ``courtyards``, the
         courtyards its disc overlaps measured (#1805), so a rule bound by a
         courtyard term resolves for it."""
-        item = self.item_for_net(int(getattr(via, 'net_id', 0) or 0), 'via')
+        vt = getattr(via, 'via_type', None) or 'through'
+        facts = {'via_type': vt}
+        if vt != 'through':
+            # #1844: a partial-span via is on the layers it joins only
+            from geometry_utils import via_copper_layers
+            facts['other_layers'] = frozenset(
+                via_copper_layers(via, self.copper_layers))
+        item = self.item_for_net(int(getattr(via, 'net_id', 0) or 0), 'via', **facts)
         if courtyards is None:
             return item
         return replace(item, courtyards=courtyards.of_disc(
             float(via.x), float(via.y), float(via.size) / 2.0))
+
+    def via_laser_drilled(self, via) -> bool:
+        """#1844: the via is typed micro and joins two adjacent copper
+        layers (`laser_drilled_span`)."""
+        if (getattr(via, 'via_type', None) or 'through') != 'micro':
+            return False
+        from geometry_utils import via_copper_layers
+        return laser_drilled_span('micro', via_copper_layers(via, self.copper_layers),
+                                  self.copper_layers)
 
     def track_item(self, seg, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
         """#1832: `via_item`'s twin for a track segment on its own layer
@@ -3438,6 +3517,8 @@ def _netclass_dict(nc) -> dict:
          'track_width': g('GetTrackWidth', 'HasTrackWidth'),
          'via_diameter': g('GetViaDiameter', 'HasViaDiameter'),
          'via_drill': g('GetViaDrill', 'HasViaDrill'),
+         'microvia_diameter': g('GetuViaDiameter', 'HasuViaDiameter'),
+         'microvia_drill': g('GetuViaDrill', 'HasuViaDrill'),
          'diff_pair_width': g('GetDiffPairWidth', 'HasDiffPairWidth'),
          'diff_pair_gap': g('GetDiffPairGap', 'HasDiffPairGap')}
     try:
