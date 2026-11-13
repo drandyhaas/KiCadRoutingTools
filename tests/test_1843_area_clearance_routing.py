@@ -35,7 +35,11 @@ Checks:
   6. the rule reads as KiCad orders it: an OR of area predicates names every
      area; a class- or net-scoped clearance rule LATER in the file still
      binds its own pairs inside the room (and leaves the others at the
-     room's value), and one EARLIER in the file gives way to the room.
+     room's value), and one EARLIER in the file gives way to the room;
+  7. a room setup that fails says so and names no rule as routed to: the
+     report line and the routing cannot disagree. (The area index gained a
+     field on main once; the setup failed with a warning while the report
+     still said "routed to".)
 """
 import json
 import os
@@ -94,6 +98,42 @@ def composition():
        f"and is inside one drawn on both: {len(vo)} outside + {len(vi)} inside")
 
 
+def failed_setup():
+    print("7. a room setup that fails")
+    import contextlib
+    import io
+    import area_clearance
+    from design_rules import parse_dru
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(os.path.join(FIX, 'room_relax.kicad_pcb'))
+    with open(os.path.join(FIX, 'room_relax.kicad_dru'), encoding='utf-8') as fh:
+        rules, _notes = parse_dru(fh.read())
+
+    class Broken:
+        def __init__(self, rules):
+            self.rules = rules
+
+        def area_index(self, pcb_data):
+            raise RuntimeError("index changed shape")
+
+    class Working(Broken):
+        copper_layers = list(pcb.board_info.copper_layers)
+
+        def area_index(self, pcb_data):
+            from design_rules import AreaIndex
+            return AreaIndex(self, pcb_data)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        area_clearance.mark_honoured(Broken(rules), pcb)
+    ok(not any(r.honoured for r in rules), "no rule is named as routed to")
+    ok('could not be set up' in out.getvalue() and 'routes WITHOUT them' in out.getvalue(),
+       "and the run says it routes without the rooms")
+    with contextlib.redirect_stdout(io.StringIO()):
+        area_clearance.mark_honoured(Working(rules), pcb)
+    ok(any('routed to it there' in (r.honoured or '') for r in rules),
+       "a setup that works names the rule")
+
+
 def stage(td, name, dru=None):
     for ext in ('.kicad_pcb', '.kicad_pro', '.kicad_dru'):
         shutil.copy(evidence(os.path.join(FIX, name + ext), 'the fixture'),
@@ -126,6 +166,7 @@ def drc_clean(board):
 
 def main():
     composition()
+    failed_setup()
     with tempfile.TemporaryDirectory() as td:
         print("2. a room that relaxes the clearance")
         out, routed, failed, log = route(td, stage(td, 'room_relax'), 'relax')
