@@ -2033,9 +2033,12 @@ An orphan stub is a trace endpoint that:
 1. Has only one connected segment (degree-1 node in the connectivity graph)
 2. Does not overlap same-net copper with its end cap: a via, a pad (by its
    real outline), another track's body, or a same-net zone outline
-3. Is NOT a reverse T: no other same-net track vertex or via lands on the
-   stub's own body within 3 track widths of the free end (check_weird's
-   mid-body-anchor rule, #1167)
+
+A track that runs on past a tee or a via on its own body (a reverse T, #1167)
+is judged by rule 2 alone: its end is no orphan while that tee's or via's
+copper still overlaps its end cap. A nib of up to 3 track widths past the
+anchor used to be excused as well; KiCad's DRC reports such an end
+`track_dangling`, and check_weird names it (#1870).
 
 These represent traces that end without a proper electrical connection.
 

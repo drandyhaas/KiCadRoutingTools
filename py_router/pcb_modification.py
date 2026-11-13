@@ -3784,6 +3784,7 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
     ``results`` as cleanup copper). Returns (n_trimmed, originals_to_strip).
     """
     from collections import defaultdict
+    from connectivity import end_touches
     if tol is None:
         from connectivity import COINCIDENCE_TOL
         tol = COINCIDENCE_TOL
@@ -3883,7 +3884,8 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                 # end and at least the minimum tail from the free end.
                 seg_len = math.sqrt(L2)
                 lo_d = max(tol, 0.05)
-                cands = []  # t values
+                # (t, the free end's distance to the anchor, its width)
+                cands = []
                 for vx, vy, vsize in via_pts:
                     t = ((vx - s.start_x) * dx + (vy - s.start_y) * dy) / L2
                     d_from_start = t * seg_len
@@ -3892,10 +3894,12 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                         continue
                     cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                     if math.hypot(vx - cx_, vy - cy_) < (vsize + s.width) / 2 - 1e-6:
-                        cands.append(t)
+                        cands.append((t, math.hypot(vx - fx, vy - fy), vsize))
                 for o in all_net_segs:
                     if o is s or o.layer != s.layer:
                         continue
+                    o_dist = _pt_seg_dist(fx, fy, o.start_x, o.start_y,
+                                          o.end_x, o.end_y)
                     for ox, oy in ((o.start_x, o.start_y), (o.end_x, o.end_y)):
                         t = ((ox - s.start_x) * dx + (oy - s.start_y) * dy) / L2
                         d_from_start = t * seg_len
@@ -3904,20 +3908,26 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
                             continue
                         cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                         if math.hypot(ox - cx_, oy - cy_) < (o.width + s.width) / 2 - 1e-6:
-                            cands.append(t)
+                            cands.append((t, o_dist, o.width))
                     # #1732: and where another same-net track of the layer
                     # CROSSES the body (an X, neither end on the other):
                     # joined there, as check_connected and KiCad have it
                     t = _x_crossing(s, o)
                     if t is not None and lo_d < t * seg_len < seg_len - lo_d:
-                        cands.append(t)
+                        cands.append((t, o_dist, o.width))
                 if not cands:
                     continue
-                t_anchor = min(cands) if free_is_start else max(cands)
+                t_anchor = (min if free_is_start else max)(c[0] for c in cands)
                 nx, ny = s.start_x + t_anchor * dx, s.start_y + t_anchor * dy
                 tail_len = math.hypot(fx - nx, fy - ny)
-                if tail_len <= max(tol, 3 * s.width):
-                    continue  # sub-visible nib; not worth churn
+                # #1870: a nib is a tail whose end an anchor's copper still
+                # touches (KiCad's test, `connectivity.end_touches`); past
+                # that KiCad's DRC reports the end `track_dangling` and
+                # check_weird names it, so it is trimmed. A flat 3 track
+                # widths was left here.
+                if tail_len <= tol or any(end_touches(d, s.width, w)
+                                          for _t, d, w in cands):
+                    continue
                 # Connectivity gate (parity with every other subtractive
                 # pass): the trim must not strand a pad under the
                 # authoritative model INCLUDING zones. The anchor heuristics
