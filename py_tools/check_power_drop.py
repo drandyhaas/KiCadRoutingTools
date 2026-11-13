@@ -6,8 +6,14 @@ For each net of the loads file, the net's tracks, vias and copper pours are
 solved as one resistor network with every load drawing at once
 (`power_drop.solve_net`):
 the millivolts each load pin loses, and the current in each via and track
-segment against its IPC rating. Read-only, and report-only: it exits 0
-whatever it finds.
+segment against its IPC rating. Read-only, and report-only: what it finds,
+items over their rating included, never changes the exit code.
+
+Exit codes: 0 the report is complete; 1 the report is INCOMPLETE -- a stated
+load has no copper path to a source or is not a pad of its net, a net has no
+source, or a net is not on the board (the other loads are solved as if the
+left-out ones drew nothing, so their drops read low); 2 the loads file cannot
+be read; 3 the board or the loads file is missing.
 
 The loads file states what a board file cannot:
 
@@ -96,13 +102,23 @@ def main(argv=None) -> int:
           f"via barrels at {plating * 1000:g} um plating"
           f"{' (assumed)' if a.via_plating_um is None else ''}, ratings at "
           f"{a.temp_rise:g} C rise")
+    rep['complete'] = (not rep['unknown_nets']
+                       and all(r['complete'] for r in rep['nets']))
     for name in rep['unknown_nets']:
-        print(f"  {name}: not a net of this board -- not solved")
+        print(f"  {name}: INCOMPLETE -- not a net of this board, not solved")
     for r in rep['nets']:
-        print(f"  {r['net']}: {r['total_current_a']:g} A solved"
-              + (f", worst drop {r['max_drop_mv']:.1f} mV" if r['max_drop_mv'] is not None
+        worst = (f", worst drop {r['max_drop_mv']:.1f} mV" if r['max_drop_mv'] is not None
                  else '')
-              + (f", {r['over']} item(s) over their rating" if r['over'] else ''))
+        if r['complete']:
+            head = f"  {r['net']}: {r['total_current_a']:g} A solved{worst}"
+        else:
+            head = (f"  {r['net']}: INCOMPLETE -- {r['total_current_a']:g} of "
+                    f"{r['stated_current_a']:g} A solved{worst}"
+                    + (" over the solved loads alone, so it reads low"
+                       if worst else ''))
+        print(head + (f", {r['over']} item(s) over their rating" if r['over'] else ''))
+        for why in r['incomplete']:
+            print(f"    INCOMPLETE: {why}")
         for e in r['errors']:
             print(f"    ERROR: {e}")
         for row in r['loads']:
@@ -129,10 +145,13 @@ def main(argv=None) -> int:
                   f"{pour['mesh_mm']:g} mm, {pour['sheet_mohm_per_sq']:g} mOhm/sq")
         for note in r['not_modelled']:
             print(f"    NOT IN THE SOLVE: {note}")
+    if not rep['complete']:
+        print("REPORT INCOMPLETE: a stated load or net was left out of the solve "
+              "(exit 1)")
     if a.json:
         with open(a.json, 'w', encoding='utf-8') as f:
             json.dump(rep, f, indent=2)
-    return 0
+    return 0 if rep['complete'] else 1
 
 
 if __name__ == '__main__':

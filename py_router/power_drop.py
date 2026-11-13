@@ -156,9 +156,13 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
     Returns a dict: `loads` (each with `drop_mv`, or `unreached` when no
     copper path joins it to a source), `vias` and `segments` (each
     with `current_a`, `rating_a`, `over`), `total_current_a`,
-    `max_drop_mv`, `pours` (each pour solved: layer, cells, mesh),
-    `not_modelled` (what was left out of the solve) and `errors`
-    (references that are not pads of the net)."""
+    `stated_current_a`, `max_drop_mv`, `pours` (each pour solved: layer,
+    cells, mesh), `not_modelled` (what was left out of the solve), `errors`
+    (references that are not pads of the net), and `complete` with
+    `incomplete` (why not). A solve is INCOMPLETE when a stated load is left
+    out -- no copper path to a source, or not a pad of the net -- or the net
+    has no source: the other loads are then solved as if it drew nothing, so
+    `max_drop_mv` and every current read low."""
     from check_drc import (point_to_pad_distance, pad_copper_layers, pad_copper_gap,
                            segment_pad_gap)
     from geometry_utils import via_copper_layers, point_to_segment_distance
@@ -177,7 +181,8 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
     vias = [v for v in pcb_data.vias if v.net_id == net_id]
     result = {'net': net_name, 'loads': [], 'vias': [], 'segments': [], 'pours': [],
               'errors': [], 'not_modelled': [], 'via_plating_mm': via_plating_mm,
-              'temp_rise_c': temp_rise_c, 'resistivity_ohm_m': COPPER_RESISTIVITY}
+              'temp_rise_c': temp_rise_c, 'resistivity_ohm_m': COPPER_RESISTIVITY,
+              'stated_current_a': round(sum(float(a) for a in loads.values()), 6)}
     for ref in list(sources) + list(loads):
         if ref not in by_ref:
             result['errors'].append(f"{ref} is not a pad of {net_name}")
@@ -536,6 +541,11 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
     result['max_drop_mv'] = max(drops) if drops else None
     result['over'] = (sum(1 for r in result['segments'] if r['over'])
                       + sum(1 for r in result['vias'] if r['over']))
+    unreached = [r['pad'] for r in result['loads'] if r.get('unreached')]
+    result['incomplete'] = (
+        [f"{len(unreached)} load(s) with no copper path to a source: "
+         + ', '.join(unreached)] if unreached else []) + list(result['errors'])
+    result['complete'] = not result['incomplete']
     return result
 
 

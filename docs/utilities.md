@@ -3274,8 +3274,10 @@ How many millivolts does each load lose, and how much current does each via
 carry, with every load drawing at once (#1847)? The "Power trace ampacity"
 line a route step prints names a net's narrowest segment and its rating; it
 does not know the loads. This solves each net of a loads file as one resistor
-network of its tracks, vias and copper pours. Read-only, report-only (exit 0 whatever it
-finds; 3 for a missing board or loads file, 2 for a loads file it cannot read).
+network of its tracks, vias and copper pours. Read-only and report-only: an
+item over its rating never changes the exit code. Exit 0 when the report is
+complete, 1 when it is INCOMPLETE (below), 2 for a loads file it cannot read,
+3 for a missing board or loads file.
 
 ```bash
 python3 py_tools/check_power_drop.py routed.kicad_pcb --loads loads.json \
@@ -3320,11 +3322,16 @@ vias in parallel share the current by their resistances, so a rail that
 needs two vias and has one shows that via over its rating.
 
 What is not in the solve is named, never guessed: a load with no copper path
-to a source is `NOT SOLVED` and gets no number; **thermal-relief spokes are
+to a source is `NOT SOLVED` and gets no number, and its net's line, the
+`INCOMPLETE:` lines under it and the closing `REPORT INCOMPLETE` say so. The
+other loads are then solved as if it drew nothing, so their drops and the
+worst drop read low. The same holds for a reference that is not a pad of its
+net, a net with no source, and a net the board lacks. In `--json` each net
+carries `complete` and `incomplete` (the reasons), `stated_current_a` next to
+`total_current_a`, and the report a top-level `complete`. **Thermal-relief spokes are
 not modelled** (a pad's contact with a pour is taken as solid, so its drop
 reads low by the spokes' resistance); a pour with no fill model is left out
-and the drop is then an upper bound; footprint graphic copper is left out; a
-pad reference that is not on the net is an error on that net. The pour is
+and the drop is then an upper bound; footprint graphic copper is left out. The pour is
 read from this tool's fill model of the zone, not from KiCad's stored fill.
 The engine is `power_drop.solve_net`.
 

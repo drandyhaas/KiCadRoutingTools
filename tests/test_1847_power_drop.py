@@ -25,9 +25,12 @@ width and thickness, not read back from the solver):
      that span it reads rho * L / (W * t), and a pour in parallel with a
      track lowers the drop;
   4. what is not solved is said: a load with no path to a source, a pad
-     reference that is not on the net, thermal spokes;
-  5. the command prints the report, writes it as JSON, exits 0, and refuses
-     a missing or malformed loads file by name.
+     reference that is not on the net, thermal spokes; a solve that leaves a
+     load out is INCOMPLETE, its worst drop the other loads' alone, and the
+     command says so in text and JSON and exits 1;
+  5. the command prints the report, writes it as JSON, exits 0 when the
+     report is complete, and refuses a missing or malformed loads file by
+     name.
 """
 import contextlib
 import io
@@ -261,7 +264,7 @@ def pours(td):
 
 def disclosed(td):
     print("4. what is not solved is said")
-    pcb, nid, _ = load(td, 'u', drop=(('22 6', '25 4'),))        # U1's branch
+    pcb, nid, cut_path = load(td, 'u', drop=(('22 6', '25 4'),))        # U1's branch
     res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
     rows = {r['pad']: r for r in res['loads']}
     cut = [p for p, r in rows.items() if r.get('unreached')]
@@ -269,11 +272,34 @@ def disclosed(td):
        and any('no copper path' in n for n in res['not_modelled'])
        and res['total_current_a'] == 0.3 and 'drop_mv' in rows['U2.1'],
        f"a load cut off from the source is unreached, with no number: {cut}")
+    # U2 alone on the trunk reads 0.3 A of drop, not the 0.8 A it shares
+    alone = (0.3 * (r_track(12, 0.15) + r_track(7, 0.15) + 2 * r_via())
+             + 0.3 * r_track(BRANCH, 0.1)) * 1e3
+    ok(res['complete'] is False and res['stated_current_a'] == 0.8
+       and any('U1.1' in w for w in res['incomplete'])
+       and near(res['max_drop_mv'], alone),
+       f"the solve is INCOMPLETE and its worst drop is U2's alone, {res['max_drop_mv']} "
+       f"mV (by hand {alone:.4f}): {res['incomplete']}")
+    whole = power_drop.solve_net(*load(td, 'w')[:2], ['J1.1'], LOADS)
+    ok(whole['complete'] is True and whole['incomplete'] == [],
+       "the whole fixture's solve is complete")
     res = power_drop.solve_net(pcb, nid, ['J9.1'], {'U1.1': 0.5, 'R7.2': 0.1})
     ok(any('J9.1 is not a pad' in e for e in res['errors'])
        and any('R7.2 is not a pad' in e for e in res['errors'])
-       and any('no source pad' in e for e in res['errors']),
-       f"references that are not pads of the net are errors: {res['errors']}")
+       and any('no source pad' in e for e in res['errors'])
+       and res['complete'] is False,
+       f"references that are not pads of the net are errors, and incomplete: "
+       f"{res['errors']}")
+    out = os.path.join(td, 'cut.json')
+    r = check(PY + [TOOL, cut_path, '--loads', evidence(BOARD + '.loads.json'),
+                    '--json', out], refuse='REPORT INCOMPLETE', code=1)
+    with open(evidence(out, 'the JSON report'), encoding='utf-8') as fh:
+        doc = json.load(fh)
+    ok('+3V3: INCOMPLETE -- 0.3 of 0.8 A solved' in r.stdout
+       and 'reads low' in r.stdout and 'INCOMPLETE: 1 load(s)' in r.stdout
+       and doc['complete'] is False and doc['nets'][0]['complete'] is False,
+       "the command marks the net and the report INCOMPLETE, in text and JSON, "
+       "and exits 1")
 
 
 def command(td):
@@ -288,7 +314,9 @@ def command(td):
     with open(evidence(out, 'the JSON report'), encoding='utf-8') as fh:
         doc = json.load(fh)
     ok(doc['nets'][0]['net'] == '+3V3' and len(doc['nets'][0]['vias']) == 2
-       and doc['via_plating_assumed'] is True, "the JSON carries the same solve")
+       and doc['via_plating_assumed'] is True and doc['complete'] is True
+       and 'INCOMPLETE' not in r.stdout,
+       "the JSON carries the same solve, complete, and the command exits 0")
     r = check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', loads, '--via-plating-um', '18'],
               accept=True)
     ok('18 um plating' in r.stdout and '(assumed)' not in r.stdout
@@ -305,8 +333,10 @@ def command(td):
     other = os.path.join(td, 'other.json')
     with open(other, 'w', encoding='utf-8') as fh:
         fh.write('{"nets": {"+9V": {"sources": ["J1.1"], "loads": {"U1.1": 1}}}}')
-    r = check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', other], accept=True)
-    ok('+9V: not a net of this board' in r.stdout, "a net the board lacks is named")
+    r = check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', other],
+              refuse='REPORT INCOMPLETE', code=1)
+    ok('+9V: INCOMPLETE -- not a net of this board' in r.stdout,
+       "a net the board lacks is named, and the report is incomplete")
 
 
 def main():
