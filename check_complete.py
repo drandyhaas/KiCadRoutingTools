@@ -584,7 +584,11 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
                             'why': 'declared 0: nothing can sit below it'})
             continue
         if key in FAB_FLOOR_KEYS_MEASURABLE:
-            if not isinstance(is_, (int, float)):
+            # #1843: the measured scan leaves out a track a rule area's
+            # track_width rule binds (KiCad grades it at the rule), so a board
+            # whose every track is in such a room has no measured minimum; the
+            # per-object grade below still sees those tracks
+            if not isinstance(is_, (int, float)) and key not in per_obj:
                 # scan_board_minima emits a key only when the board has that
                 # kind of object, so a missing one is a floor held vacuously:
                 # a 0-via board breaks no via floor (#1198).
@@ -599,7 +603,7 @@ def fab_floor_integrity(board, authored_from, hole_grader=None, timeout=3600):
                     if po['held_by_rule']:
                         measured_kept.append({
                             'key': key, 'label': label, 'authored': was,
-                            'on_board': is_,
+                            'on_board': is_ if is_ is not None else po.get('smallest'),
                             'measured_by': 'authored .kicad_dru rules',
                             'violations': 0,
                             'held_by_rule': po['held_by_rule'],

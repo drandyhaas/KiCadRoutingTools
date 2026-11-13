@@ -37,6 +37,7 @@ import json
 from typing import List, Optional, Tuple, Dict, Set, Sequence
 
 from kicad_parser import parse_kicad_pcb, PCBData, Pad, pour_zones
+from via_span import via_span_summary
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr, generate_gr_text_sexpr,
     swap_segment_nets_at_positions, swap_via_nets_at_positions, swap_pad_nets_in_content,
@@ -2039,6 +2040,107 @@ def _late_kicad_dangling_split1217(pcb_data, output_file, return_results,
         return 0
 
 
+def _late_area_edge_split1843(pcb_data, output_file, return_results,
+                              results_data, write_model, input_signature,
+                              scope_names, config):
+    """#1843: split the run's tracks where they leave a tightened rule area's
+    split zone, on the board this run SHIPS, after every pass that lays or
+    joins copper. KiCad binds a track whose copper touches the area along its
+    WHOLE length; the piece outside the zone is then an item of its own that
+    the area does not bind, which is the copper the router routed. Copper is
+    unchanged (the pieces cover the track's capsule, meeting at one point).
+
+    Same plumbing as _late_kicad_dangling_split1217 (the written file on the
+    CLI, the write model on the GUI; the run's nets). Input copper -- told
+    from the run's by VALUE -- stays whole (KiCad grades it as the board drew
+    it, and the router held it so), and so does locked or sense-held copper.
+    Returns the number of tracks split; 0 without a tightened area."""
+    import copy as _copy
+    from collections import Counter
+    from improvement_gate import copper_item_key
+    from kicad_parser import is_immutable_copper
+    from area_clearance import split_run_copper
+    area = getattr(config, 'area_clearance', None)
+    if area is None or not area.split_zones():
+        return 0
+    try:
+        rd = None
+        if return_results:
+            rd = results_data if results_data is not None else {}
+            board = _copy.copy(pcb_data)
+            if write_model is not None:
+                segs_by_net, vias_by_net = write_model(rd)
+                board.segments = [x for _l in segs_by_net.values() for x in _l]
+                board.vias = [x for _l in vias_by_net.values() for x in _l]
+            else:
+                board.segments = list(pcb_data.segments)
+                board.vias = list(pcb_data.vias)
+        elif output_file and os.path.isfile(output_file):
+            from kicad_parser import parse_kicad_pcb as _pk1843
+            board = _pk1843(output_file)
+        else:
+            return 0
+        name_of = {nid: n.name for nid, n in board.nets.items()}
+        left = {n: Counter(c) for n, c in (input_signature or {}).items()}
+        readonly = set()
+        for s in board.segments:
+            c = left.get(name_of.get(s.net_id))
+            k = copper_item_key(s)
+            if c and c[k] > 0:
+                c[k] -= 1
+                readonly.add(id(s))
+        names = set(scope_names)
+        pairs = split_run_copper(
+            area, [s for s in board.segments if name_of.get(s.net_id) in names],
+            skip=lambda s: id(s) in readonly or is_immutable_copper(s))
+        if not pairs:
+            return 0
+        if return_results:
+            pieces = {id(h): ps for h, ps in pairs}
+
+            def _swap(lst):
+                return [p for x in lst for p in pieces.get(id(x), [x])]
+            for r in rd.get('results') or []:
+                if r.get('new_segments'):
+                    r['new_segments'] = _swap(r['new_segments'])
+            if rd.get('all_swap_segments'):
+                rd['all_swap_segments'] = _swap(rd['all_swap_segments'])
+            pcb_data.segments = _swap(pcb_data.segments)
+            bump_copper_epoch(pcb_data)
+            n = len(pairs)
+        else:
+            from kicad_parser import board_uses_name_nets
+            from kicad_writer import generate_segment_sexpr
+            unmatched = []
+            _strip_written_copper(output_file, [h for h, _ps in pairs], [],
+                                  name_of, match_width=True,
+                                  unmatched_out=unmatched)
+            missed = {id(h) for h in unmatched}
+            with open(output_file, 'r', encoding='utf-8') as _f:
+                content = _f.read()
+            v10 = board_uses_name_nets(content)
+            sexprs = [generate_segment_sexpr(
+                (p.start_x, p.start_y), (p.end_x, p.end_y), p.width, p.layer,
+                p.net_id, name_of.get(p.net_id) if v10 else None)
+                for h, ps in pairs if id(h) not in missed for p in ps]
+            if sexprs:
+                lp = content.rfind(')')
+                content = content[:lp] + '\n'.join(sexprs) + '\n' + content[lp:]
+                with open(output_file, 'w', encoding='utf-8') as _f:
+                    _f.write(content)
+            n = len(pairs) - len(missed)
+            if missed:
+                print(f"  WARNING: rule-area edge split (#1843): chose "
+                      f"{len(pairs)} track(s), found {n} in the written file")
+        print(f"  Rule-area edges (#1843, end of run): split {n} track(s) where "
+              f"they leave a tightened area; copper unchanged")
+        return n
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  (end-of-run rule-area edge split skipped: "
+              f"{type(_e).__name__}: {_e})")
+        return 0
+
+
 def _unfinished_net_ids(routed_results, single_ended_nets, terminal_restores=None):
     """Nets that still carry unfinished pads when the cleanup pipeline runs
     (#473): they keep ALL their copper through its subtractive passes, because
@@ -2973,6 +3075,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if _span_type1842 is None:
             _span1842 = None                      # the whole stack: through vias
         else:
+            # a file older than KiCad 10's format has no `buried` word
+            from via_span import file_via_type
+            _word1842 = file_via_type(_span_type1842,
+                                      getattr(pcb_data, 'kicad_version', 0) or 0)
+            if _word1842 != _span_type1842:
+                print(f"Via span (#1842): this board's file format "
+                      f"({pcb_data.kicad_version}) predates KiCad 10, which has no "
+                      f"'{_span_type1842}' via; its vias are written '{_word1842}' "
+                      f"(KiCad 9's blind/buried type), on the same layer pair")
+                _span_type1842 = _word1842
             _in_span = [l for l in layers if l in _span1842]
             if layer_costs and len(layer_costs) == len(layers):
                 layer_costs = [c for l, c in zip(layers, layer_costs) if l in _span1842]
@@ -3576,10 +3688,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             net_name_patterns if net_name_patterns is not None else net_names,
             input_file)
         if force_ripped:
-            pcb_data.segments = [s for s in pcb_data.segments
-                                 if s.net_id not in force_ripped]
-            pcb_data.vias = [v for v in pcb_data.vias
-                             if v.net_id not in force_ripped]
+            # exactly the copper selected (held copper is not, #1842)
+            _strip = {id(x) for _s, _v in force_ripped.values() for x in list(_s) + list(_v)}
+            pcb_data.segments = [s for s in pcb_data.segments if id(s) not in _strip]
+            pcb_data.vias = [v for v in pcb_data.vias if id(v) not in _strip]
             bump_copper_epoch(pcb_data)
             sweep_scope_ids |= set(force_ripped)
             print(f"--force-reroute: stripped "
@@ -3706,7 +3818,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _pc_done, _pg_done = ([], [])
         if final_reconcile:
             from pad_contact import audit_shipped
-            _pc_done, _pg_done = audit_shipped(pcb_data, clearance=clearance)
+            _pc_done, _pg_done = audit_shipped(pcb_data, clearance=clearance,
+                                               area=getattr(config, 'area_clearance', None))
             _emit_summary_min(status='already_connected', pad_contacts=_pc_done,
                               pad_grazes=_pg_done)
         _extra1499 = {
@@ -4674,15 +4787,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _reg_segs: Dict[int, list] = {}
     _reg_vias: Dict[int, list] = {}
     if existing_rippable:
+        from kicad_parser import is_immutable_copper as _immutable_reg
         _reg_set = set(existing_rippable)
         for _s in pcb_data.segments:
             # A net-tagged copper graphic is not this net's route: nothing
             # re-lays it and the writer keeps it, so a rip that took it
             # off the board left later routes free to cross copper that ships.
-            if _s.net_id in _reg_set and not getattr(_s, 'graphic', False):
+            # Nor is held copper (#1842: a via-span step's hold on an earlier
+            # step's escape): the net stays rippable, its held items stay.
+            if (_s.net_id in _reg_set and not getattr(_s, 'graphic', False)
+                    and not _immutable_reg(_s)):
                 _reg_segs.setdefault(_s.net_id, []).append(_s)
         for _v in pcb_data.vias:
-            if _v.net_id in _reg_set:
+            if _v.net_id in _reg_set and not _immutable_reg(_v):
                 _reg_vias.setdefault(_v.net_id, []).append(_v)
     # #734: remember WHICH nets are mere rip candidates -- the audit gate
     # below must not depend on the is_existing_route flag surviving in
@@ -7217,6 +7334,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _sense = _sense_entries(pcb_data)
     if _sense:
         summary['sense_branches'] = _sense
+    # #1842: the step's via span, and that its plane finalize does not run
+    # (its taps are through vias) -- a key, so a chain reader need not grep
+    # the console line, which is printed only on a board with zones
+    _span_summary1842 = via_span_summary(config, pcb_data)
+    if _span_summary1842:
+        summary['via_span'] = _span_summary1842
     try:                       # #653: env knobs into the machine-readable
         import env_knobs as _ek653   # summary, so a harness can detect a
         summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
@@ -7619,7 +7742,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # #1842: the plane finalize lays THROUGH taps, at the step's via size. A
     # step on a partial span draws a micro, blind or buried via of that size,
     # so it does not run the finalize; the plane step does.
-    _span_no_finalize = bool(config.via_span) and config.via_span_type != 'through'
+    _span_no_finalize = bool(via_span_summary(config, pcb_data))
     if (_span_no_finalize and final_reconcile and not quick
             and (getattr(pcb_data, 'zones', None) or [])):
         print(f"\n  Plane finalize not run: this step lays {config.via_span_type} vias "
@@ -9271,6 +9394,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             {pcb_data.nets[_n].name for _n in sweep_scope_ids
              if _n in pcb_data.nets},
             keep_input_copper)
+        # #1843: after every pass that lays or joins copper, the run's
+        # tracks split where they leave a tightened rule area (inert without).
+        _late_area_edge_split1843(
+            pcb_data, output_file, return_results, locals().get('results_data'),
+            _gui_write_model, _input_sig1069,
+            {pcb_data.nets[_n].name for _n in sweep_scope_ids
+             if _n in pcb_data.nets},
+            config)
 
     if quick < 2:
         _late_orphan_sweep659(
@@ -9342,6 +9473,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if _board1033 is not None:
                 _ids1033 = {_nn.name: _ni
                             for _ni, _nn in _board1033.nets.items()}
+                # #1843: a neck to a rule area's track width is the board's
+                # own rule, disclosed as area_necks, not a width shortfall
+                from area_clearance import is_room_neck as _neck1843
+                _segs1033 = [_s for _s in _segs1033 if not _neck1843(
+                    getattr(config, 'area_clearance', None), _s)]
                 _pw1033 = power_width_report(
                     _segs1033,
                     {_ids1033[_nm]: _w for _nm, _w in _req1033.items()
@@ -9483,6 +9619,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _names1282 = {_n: _nn.name
                                   for _n, _nn in _b1282.nets.items()}
                 if _segs1282 is not None:
+                    # #1843: as for the power nets above
+                    from area_clearance import is_room_neck as _neck1282
+                    _segs1282 = [_s for _s in _segs1282 if not _neck1282(
+                        getattr(config, 'area_clearance', None), _s)]
                     _short1282 = new_copper_width_shortfall(
                         _segs1282,
                         lambda _n: _names1282.get(_n, f"Net {_n}"),
@@ -9509,6 +9649,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             _sm['design_rules'] = dict(_dr1282, **_keep)
         except Exception as _wwe:                               # noqa: BLE001
             print(f"  (wide-net width disclosure skipped: {_wwe})")
+
+    # #1843: every neck to a rule area's track width this run ships, measured
+    # on the board it ships (the write model on the GUI, the written board on
+    # the CLI), new copper only. The room's width is the board's own rule, so
+    # a neck is allowed under every escalation policy and does not count as
+    # narrowed below a request (--strict-sizes); this key and the console
+    # line are where it is said. Outermost run only, both fronts.
+    _area1843 = getattr(config, 'area_clearance', None)
+    if (final_reconcile and not _ckpt_stop and _area1843 is not None
+            and any(_r.width is not None for _r in _area1843.regions)):
+        from area_clearance import neck_census, neck_lines
+        _segs1843 = None
+        if return_results:
+            _as1843, _ = _gui_write_model(results_data)
+            _segs1843 = [s for _l in _as1843.values() for s in _l]
+            _names1843 = {_n: _nn.name for _n, _nn in pcb_data.nets.items()}
+        elif output_file and os.path.isfile(output_file):
+            from kicad_parser import parse_kicad_pcb as _pk1843
+            _b1843 = _pk1843(output_file)
+            _segs1843 = _b1843.segments
+            _names1843 = {_n: _nn.name for _n, _nn in _b1843.nets.items()}
+        if _segs1843 is not None:
+            _necks1843 = neck_census(_segs1843, _area1843,
+                                     lambda _n: _names1843.get(_n, f"Net {_n}"),
+                                     _orig_seg_keys1282)
+            for _ln in neck_lines(_necks1843):
+                print(_ln)
+            if _necks1843:
+                summary['area_necks'] = _necks1843
+                if return_results:
+                    results_data['area_necks'] = _necks1843
 
     # #1371: the via rows of the design_rules ledger describe the vias that
     # SHIP. They were recorded per placement ATTEMPT -- a last-resort via the
@@ -9759,13 +9930,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _pcl_s, _pcl_v = _gui_write_model(_rd_pcl)
             _pad_contacts_left, _pad_grazes_left = audit_shipped(
                 pcb_data, [s for _l in _pcl_s.values() for s in _l],
-                [v for _l in _pcl_v.values() for v in _l], _pcl_floor)
+                [v for _l in _pcl_v.values() for v in _l], _pcl_floor,
+                area=getattr(config, 'area_clearance', None))
             _rd_pcl['pad_contacts'] = _pad_contacts_left
             _rd_pcl['pad_grazes'] = _pad_grazes_left
         elif output_file and os.path.isfile(output_file):
             from kicad_parser import parse_kicad_pcb as _pk_pcl
             _pad_contacts_left, _pad_grazes_left = audit_shipped(
-                _pk_pcl(output_file), clearance=_pcl_floor)
+                _pk_pcl(output_file), clearance=_pcl_floor,
+                area=getattr(config, 'area_clearance', None))
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
@@ -9793,6 +9966,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # #1260: likewise the pour-cut audit of the shipped board.
             if _merged is not None and _pour_cuts:
                 _merged['pour_cuts'] = _pour_cuts
+            # #1842: the step's via span, whatever summary came last
+            _vs1842 = via_span_summary(config, pcb_data)
+            if _merged is not None and _vs1842:
+                _merged['via_span'] = _vs1842
             # #1680/#1681: likewise the pad contacts and grazes it ships.
             if _merged is not None and _pad_contacts_left:
                 _merged['pad_contacts'] = _pad_contacts_left
@@ -10787,14 +10964,18 @@ For differential pair routing, use route_diff.py:
     # floor's via sizes are a mechanical drill's and do not pin it.
     _micro_span = False
     if getattr(args, 'via_span', None):
-        from via_span import file_copper_layers, resolve_via_span, default_micro_via
+        from via_span import (file_copper_layers, resolve_via_span, default_micro_via,
+                              laser_drilled)
+        _file_copper = file_copper_layers(args.input_file)
         try:
             _span_layers, _span_type = resolve_via_span(
-                file_copper_layers(args.input_file), args.via_span[0], args.via_span[1],
+                _file_copper, args.via_span[0], args.via_span[1],
                 getattr(args, 'via_span_type', None))
         except ValueError as _e:
             parser.error(f"--via-span: {_e}")
-        _micro_span = _span_type == 'micro'
+        # the GUI's via size / drill controls read the same predicate
+        _micro_span = laser_drilled(_file_copper, args.via_span,
+                                    getattr(args, 'via_span_type', None))
         if _micro_span:
             _mdia, _mdrill = default_micro_via(args.input_file)
             for _pname, _val in (('via_size', _mdia), ('via_drill', _mdrill)):

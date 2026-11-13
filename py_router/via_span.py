@@ -31,6 +31,12 @@ def resolve_via_span(copper_layers: Sequence[str], top: str, bottom: str,
     for two neighbouring layers one of which is an outer layer, 'blind' for a
     longer span that reaches one outer layer, 'buried' otherwise).
 
+    A micro via is KiCad's laser-drilled via: it joins an outer layer and the
+    layer next to it, and nothing longer (`design_rules.laser_drilled_span`,
+    which the fab floor and check_drc read too). A longer span reaching one
+    outer layer is a blind via, mechanically drilled, so `micro` is refused
+    there rather than drawn at the micro via's size.
+
     Raises ValueError naming what is wrong: a layer the board does not have,
     one layer given twice, or a type the span cannot be."""
     copper = list(copper_layers)
@@ -57,46 +63,129 @@ def resolve_via_span(copper_layers: Sequence[str], top: str, bottom: str,
     if (via_type == 'buried') != (outer == 0):
         raise ValueError(f"a {via_type} via cannot span {span[0]}-{span[-1]}: a buried "
                          f"via reaches no outer layer, a blind or micro via reaches one")
+    if via_type == 'micro' and len(span) != 2:
+        raise ValueError(f"a micro via cannot span {span[0]}-{span[-1]} ({len(span)} "
+                         f"layers): a micro via is laser drilled from an outer layer to "
+                         f"the layer next to it; a longer span is a blind via")
     return span, via_type
+
+
+def laser_drilled(copper_layers: Sequence[str], via_span: Optional[Sequence[str]],
+                  via_type: Optional[str] = None) -> bool:
+    """Is a via of the step's ``via_span`` (its two end layers, or None) a
+    laser-drilled micro via on a board whose copper layers are
+    ``copper_layers``? Then the fab floor's via sizes, which are a mechanical
+    drill's, do not pin it (`design_rules.laser_drilled_span`). The ONE
+    reading both fronts take of an asked span: route.py's main and the GUI's
+    via size and drill controls. False for no span and for a span the board
+    does not have (the engine refuses that by name)."""
+    if not via_span or len(via_span) < 2:
+        return False
+    from design_rules import laser_drilled_span
+    copper = list(copper_layers or ())
+    try:
+        span, kind = resolve_via_span(copper, via_span[0], via_span[-1], via_type)
+    except ValueError:
+        return False
+    return laser_drilled_span(kind, span, copper)
+
+
+def file_via_type(via_type: Optional[str], kicad_version: int) -> Optional[str]:
+    """The type word a via of ``via_type`` is written with in a board file of
+    format ``kicad_version`` (its `(version ...)`, 0 when unknown). KiCad 10
+    split KiCad 9's one BLIND_BURIED type into `blind` and `buried`; a 9.x
+    file names both `blind` (its layer pair says which), and KiCad 9's parser
+    has no `buried` keyword. So `buried` becomes `blind` in a file older than
+    KiCad 10's format. An unknown version (a live board, where the running
+    pcbnew picks its own constant) is left as asked."""
+    from kicad_parser import KICAD_10_MIN_VERSION
+    if via_type == 'buried' and 0 < int(kicad_version or 0) < KICAD_10_MIN_VERSION:
+        return 'blind'
+    return via_type
+
+
+#: per-build obstacle records `build_base_obstacle_map` binds on the board
+#: it is handed, and `routing_context.prepare_obstacles_inplace` (and the
+#: other lift sites) read off the REAL board. A view writes them through.
+LIFT_RECORDS = ('_net_tie_lift', '_graphic_own_pad_lift', '_graphic_own_pad_via_lift')
 
 
 class SpanView:
     """`base` (a PCBData) with the copper outside ``span`` hidden, for the
     obstacle builders of a via-span step: tracks and pours on other layers,
     vias with no copper on the span's layers, and undrilled pads with none.
-    Drilled pads stay whole. Everything else is the base board's."""
+    Drilled pads stay whole. Everything else is the base board's.
+
+    Each filtered list is read off the base when first asked for, so a view
+    built for one net's cache costs only what that build reads. A view is a
+    snapshot: build a new one after the board changes.
+
+    The per-build lift records (`LIFT_RECORDS`) are written THROUGH to the
+    base: the map built from the view is the one the router lifts them off,
+    and every lift site reads them from the run's own board (#977: the
+    record a map is read with must be that map's own). A shallow COPY of a
+    view (the pad-tap search builds its window map on one) keeps its own
+    records, as a copy of the board does: its map is not the run's."""
+
+    _FILTERED = ('segments', 'vias', 'zones', 'footprints', 'pads_by_net')
 
     def __init__(self, base, span: Sequence[str]):
+        object.__setattr__(self, '_base', base)
+        object.__setattr__(self, '_span', tuple(span))
+
+    def __setattr__(self, name, value):
+        if name in LIFT_RECORDS and not self.__dict__.get('_detached'):
+            setattr(self._base, name, value)
+        else:
+            object.__setattr__(self, name, value)
+
+    def __copy__(self):
+        new = object.__new__(SpanView)
+        new.__dict__.update(self.__dict__)
+        new.__dict__['_detached'] = True
+        return new
+
+    def _filtered(self, name):
         from geometry_utils import via_copper_layers
         from check_drc import pad_copper_layers
-        self._base = base
-        keep = set(span)
+        base, keep = self._base, set(self._span)
         copper = list(base.board_info.copper_layers)
-        self.segments = [s for s in base.segments if s.layer in keep]
-        self.vias = [v for v in base.vias if keep & set(via_copper_layers(v, copper))]
-        self.zones = [z for z in (getattr(base, 'zones', None) or []) if z.layer in keep]
 
         def shown(pad):
             return ((getattr(pad, 'drill', 0) or 0) > 0
                     or bool(keep & set(pad_copper_layers(pad, copper))))
-        self.footprints = {ref: replace(fp, pads=[p for p in fp.pads if shown(p)])
-                           for ref, fp in base.footprints.items()}
-        self.pads_by_net = {nid: [p for p in pads if shown(p)]
-                            for nid, pads in base.pads_by_net.items()}
+        if name == 'segments':
+            return [s for s in base.segments if s.layer in keep]
+        if name == 'vias':
+            return [v for v in base.vias if keep & set(via_copper_layers(v, copper))]
+        if name == 'zones':
+            return [z for z in (getattr(base, 'zones', None) or []) if z.layer in keep]
+        if name == 'footprints':
+            return {ref: replace(fp, pads=[p for p in fp.pads if shown(p)])
+                    for ref, fp in base.footprints.items()}
+        return {nid: [p for p in pads if shown(p)]
+                for nid, pads in base.pads_by_net.items()}
 
     def __getattr__(self, name):
         # a copy of the view is built attribute by attribute, before `_base`
         # is there to ask
-        if name == '_base' or name.startswith('__'):
+        if name in ('_base', '_span') or name.startswith('__'):
             raise AttributeError(name)
+        if name in SpanView._FILTERED:
+            value = self._filtered(name)
+            object.__setattr__(self, name, value)
+            return value
         return getattr(self._base, name)
 
 
 def obstacle_board(pcb_data, config):
     """The board the obstacle builders of this step read: ``pcb_data``, or
-    its `SpanView` when the step lays vias of a span."""
+    its `SpanView` when the step lays vias of a span. A view of the step's
+    span is returned as it is, so builders that call each other apply it
+    once."""
     span = getattr(config, 'via_span', None)
-    if not span or isinstance(pcb_data, SpanView):
+    if not span or (isinstance(pcb_data, SpanView)
+                    and pcb_data._span == tuple(span)):
         return pcb_data
     # One view per state of the board: a step stamps from it many times
     # between the commits that change the copper.
@@ -133,6 +222,21 @@ def reads_span_board(fn):
             args = (*args[:at_pcb], obstacle_board(args[at_pcb], config), *args[at_pcb + 1:])
         return fn(*args, **kwargs)
     return stamp
+
+
+def via_span_summary(config, pcb_data=None) -> Optional[dict]:
+    """JSON_SUMMARY['via_span'] of a via-span step, None without a span: its
+    end layers, the via type it writes, and `plane_finalize` -- 'not run',
+    always, since a plane tap is a through via (the plane step connects the
+    plane nets) -- with the board's zone count, so a reader can tell a skip
+    that left plane nets to connect from one on a board with none."""
+    span = getattr(config, 'via_span', None)
+    if not span:
+        return None
+    return {'layers': [span[0], span[-1]],
+            'type': getattr(config, 'via_span_type', None),
+            'plane_finalize': 'not run',
+            'zones': len(getattr(pcb_data, 'zones', None) or ())}
 
 
 def via_layer_pair(config) -> List[str]:

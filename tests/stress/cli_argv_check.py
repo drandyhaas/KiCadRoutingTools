@@ -129,6 +129,17 @@ for line in sys.stdin:
         out.write('##R ' + json.dumps({'ok': True, 'options': table}) + '\n')
         out.flush()
         continue
+    if req.get('arity'):
+        # option_arity(): each long option -> its action's nargs (0 for a
+        # switch, None for one value, an int, '?', '*' or '+').
+        table = {}
+        for act in p._actions:
+            for o in act.option_strings:
+                if o.startswith('--'):
+                    table[o] = act.nargs
+        out.write('##R ' + json.dumps({'ok': True, 'arity': table}) + '\n')
+        out.flush()
+        continue
     args, cwd = req['args'], req.get('cwd')
     err = io.StringIO()
     try:
@@ -598,6 +609,28 @@ def option_spellings(tool):
                     break
         _spellings[tool] = table
     return _spellings[tool]
+
+
+_arities = {}
+
+
+def option_arity(tool):
+    """{long option: its argparse nargs} from `tool`'s real parser -- 0 for a
+    switch, None for exactly one value, an int, '?', '*' or '+' -- or {} when
+    its parser cannot be built here. What a reader of a recorded command line
+    must agree with on how many tokens each flag takes."""
+    if tool not in _arities:
+        proc = _child(tool)
+        table = {}
+        if proc is not None:
+            proc.stdin.write(json.dumps({'arity': True}) + '\n')
+            proc.stdin.flush()
+            for line in proc.stdout:
+                if line.startswith('##R '):
+                    table = dict(json.loads(line[4:]).get('arity', {}))
+                    break
+        _arities[tool] = table
+    return _arities[tool]
 
 
 #: argparse's own test for a negative number, which it reads as a value.
