@@ -66,13 +66,11 @@ ROWS = [
    "    R = max(required, hole_required) + 0.2"),
   ('octolinear-acquires-the-term', PCM,
    "        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)\n"
-   "        return (d >= eff + w / 2.0 - 1e-4 and\n"
-   "                hd >= npth_clr + w / 2.0 - 1e-4 and\n"
+   "        return (hd >= npth_clr + w / 2.0 - 1e-4 and\n"
    "                edge_clears(x1, y1, x2, y2, w))",
    "        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,\n"
    "                                    base_clearance=npth_clr)\n"
-   "        return (d >= eff + w / 2.0 - 1e-4 and\n"
-   "                hd >= npth_clr + w / 2.0 - 1e-4 and\n"
+   "        return (hd >= npth_clr + w / 2.0 - 1e-4 and\n"
    "                edge_clears(x1, y1, x2, y2, w))"),
 ]
 
