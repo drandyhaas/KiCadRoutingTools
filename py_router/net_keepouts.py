@@ -557,9 +557,12 @@ def _stamper(pcb_data, idx: Tuple[int, ...]):
     from obstacle_map import add_rule_area_keepout_obstacles
     from routing_config import extra_past_scalar
     kos = pcb_data._net_keepouts
+    # mask_keepouts=False: the board's own map stamps the mask artwork; this
+    # pass adds only the net-filtered keep-outs
     shim = SimpleNamespace(board_info=SimpleNamespace(
         keepouts=[kos[i] for i in idx if not kos[i].get('edge_band')],
-        board_bounds=getattr(pcb_data.board_info, 'board_bounds', None)))
+        board_bounds=getattr(pcb_data.board_info, 'board_bounds', None),
+        mask_keepouts=False))
     bands = [kos[i] for i in idx if kos[i].get('edge_band')]
 
     def stamp_into(sink, cfg):

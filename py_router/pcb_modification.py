@@ -5767,7 +5767,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     # layers). Margin mirrors add_rule_area_keepout_obstacles: copper AND
     # clearance stay out (centreline >= clearance + w/2 from the boundary).
     _keepout_areas = []          # (rings, bbox, layer_tokens_or_None)
-    for _ko in (getattr(pcb_data.board_info, 'keepouts', None) or []):
+    from mask_artwork import routing_keepouts
+    for _ko in routing_keepouts(pcb_data):
         if _ko.get('tracks_allowed', True):
             continue
         _poly = _ko.get('polygon') or []
@@ -5777,8 +5778,10 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         _kxs = [p[0] for r in _rings for p in r]
         _kys = [p[1] for r in _rings for p in r]
         _kls = _ko.get('layers') or set()
+        # a keep-out may carry its own clearance (mask artwork: MASK_REGISTRATION, only the
+        # copper stays out from under it); None = the run's clearance
         _keepout_areas.append((_rings, (min(_kxs), min(_kys), max(_kxs), max(_kys)),
-                               set(_kls) if _kls else None, None))
+                               set(_kls) if _kls else None, None, _ko.get('clearance')))
     # Net-filtered keep-outs (net_keepouts.py) bind only some nets; the route
     # detoured around them for those nets, so a shortcut must not undo it.
     for _ko in (getattr(pcb_data, '_net_keepouts', None) or []):
@@ -5789,7 +5792,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         _keepout_areas.append(([_poly] + [h for h in (_ko.get('holes') or []) if len(h) >= 3],
                                (min(p[0] for p in _poly), min(p[1] for p in _poly),
                                 max(p[0] for p in _poly), max(p[1] for p in _poly)),
-                               set(_ko.get('layers') or ()) or None, _ko))
+                               set(_ko.get('layers') or ()) or None, _ko, None))
     if getattr(config, 'keepout_enabled', False):
         for _kz in (getattr(pcb_data, 'keepout_zones', None) or []):
             if len(_kz.points) >= 3:
@@ -5797,7 +5800,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                 _kys = [p[1] for p in _kz.points]
                 _keepout_areas.append(([list(_kz.points)],
                                        (min(_kxs), min(_kys), max(_kxs), max(_kys)),
-                                       None, None))
+                                       None, None, None))
 
     def _ko_on_layer(kls, layer):
         if kls is None:
@@ -5810,11 +5813,11 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
             return True
         from obstacle_map import point_in_polygon, point_to_polygon_edge_distance
         from net_keepouts import binds as _nk_binds
-        margin = clearance + w / 2.0
         _nname = getattr(pcb_data.nets.get(net_id), 'name', '') if net_id is not None else ''
-        for rings, (kx0, ky0, kx1, ky1), kls, nko in _keepout_areas:
+        for rings, (kx0, ky0, kx1, ky1), kls, nko, kclr in _keepout_areas:
             if not _ko_on_layer(kls, layer):
                 continue
+            margin = (clearance if kclr is None else kclr) + w / 2.0
             if nko is not None and not (_nname and _nk_binds(nko, _nname)):
                 continue
             if (max(x1, x2) < kx0 - margin or min(x1, x2) > kx1 + margin or
