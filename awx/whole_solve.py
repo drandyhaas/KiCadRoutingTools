@@ -588,6 +588,29 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         print(f'   keep-outs and areas to keep out of: {len(_kos)} on the board, {len(_areas)} the round\'s; '
               f'{sum(1 for c_ in _under if str(c_["island"]).startswith("keepout "))} and '
               f'{sum(1 for c_ in _under if str(c_["island"]).startswith("area "))} lane(s) held off them')
+    # ...and the LAYER WALLS (SOLVE_LAYER_WALLS, off by default; whole_cells.walls): each layer's free space -- off
+    # every pad, and every track and via of another net: an earlier bus's most of all -- falls into PIECES with no way
+    # between them, and where a lane's reference line passes from one to another with no piece on both sides the lane
+    # cannot be on that layer: an end shut in on a layer by the copper there, a layer shut across the lane's way. The
+    # lane is held off it there, firm -- known before any plan, where the loop's cuts are found a geometry later.
+    # `1`: the pieces of the lane's own band, its line and the bus's own width either side (all its lanes side by side:
+    # no way round farther off its line than that is the lane's); `board`: the whole board's, and a wall is exact.
+    # Each end the lane's line starts or ends AT (not a far-face tooth's lead-in, a pair's end run across the trunk, a
+    # group lane's landing), on every layer -- a via end's layer is the plan's, and a laid end may change at its stub.
+    # The round's own solves only: a candidate's check (the ends model's, `front` given) is not told them -- the
+    # pieces are cut again for every solve, and an ends search asks dozens
+    _lw = awx_settings.get('SOLVE_LAYER_WALLS') or '0'
+    if _lw != '0' and front is None:
+        import whole_cells
+        import whole_passages as _wpw
+        _ends_w = [(n_, 0) for n_ in M if n_ not in FAR and Fr.start[n_] == Fr.tooth[n_]] + \
+                  [(n_, 1) for n_ in M if Fr.land[n_] == Fr.bend[n_]]
+        _band = None if _lw == 'board' else sum(PITCH + (_pairs.pitch(TRK) if n_ in prs else 0.0) for n_ in M)
+        _walls = whole_cells.walls(ctx, Fr, LAYN, _wpw.references(ctx, Fr, G, rs, end, PITCH, TRK, CLR), entry, end,
+                                   _ends_w, TRK, CLR, VIA, PITCH, band=_band)
+        _under += _walls
+        print(f'   layer walls: {len(_walls)} on {len({c_["lane"] for c_ in _walls})} lane(s) -- the pieces of each '
+              f'layer\'s free space ' + ('on the whole board' if _band is None else f'within {_band:.2f} mm of a lane\'s line'))
     for fn_ in [None] + list(cuts) + list(soft_cuts):
         for c_ in (_under if fn_ is None else json.load(open(fn_)).get('lcuts', [])):
             k_lc = (c_['lane'], c_['island'], int(c_['layer']), tuple(round(float(v_), 6) for v_ in c_['box']),

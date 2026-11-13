@@ -1571,6 +1571,17 @@ once, proved optimal in its vias.
   none before the island (or after it, at a trunk lane's berth), from its
   stub's end, its end room, the face band and the stagger waived there as at
   a planned end.
+- **Layer walls** (`SOLVE_LAYER_WALLS=1`, off by default; `whole_cells.py`):
+  the same cuts, known before any plan. Each layer's free space -- a lane's
+  bar off every pad and every other net's track and via -- falls into
+  **pieces** with no way between them on that layer. Where a lane's reference
+  line passes from one piece to another, and no piece stands on both sides
+  of that place, the lane cannot be on that layer there: it is held off it,
+  firm, in the round's own solves. The pieces are those of the lane's own
+  band, its line and the bus's own width either side, so a way round farther
+  off than that counts as none (`=board`: the whole board's pieces, where a
+  wall is exact and a layer shut only near the lane is not found). Without
+  it the loop learns each such place from a geometry, a round later.
 - Soft cuts are priced `W_SOFT`, **three whole vias** -- above a dive's two,
   below a net over two -- as the search's proof reads them: at two and a
   half, a plan breaking a cut floored to the same whole number as one holding
@@ -2737,6 +2748,7 @@ With nothing supplied, as on the benches:
 | `whole_ends.py`, `ends_kernel.py`, `whole_frame.py`, `whole_feedback.py` | the choice of ends (the fanout's `PLAN_JUDGE=ends`; every plane ball kept a way down: `tests/test_622_walled_balls.py`; its estimate scored in Rust); the frame of a bench (a part on a ring's stack: `tests/test_622_ring_room.py`); what goes back to the fanout (`tests/test_622_ends_fixes.py`, `test_622_exit_front.py`, `test_622_feedback_rounds.py`; an item for a lane the round's ends have no option for keys nothing: `fb_tables`) |
 | `ends_nudge.py`, `ends_reescape.py` | a crowded end repaired on the round's fanout bench (`whole_route.repair_ends`): a lane's via or tooth, or another net's via, nudged the smallest step clear of a finding; a ball escaped again from its menu, its first stretch clear of every other net's copper, laid alone by `source_realize.realize` |
 | `whole_solve.py`, `whole_geo.py`, `whole_polish.py`, `whole_snap.py` | the crossing and layer solve, the geometry LP (a part seen from several frames: `tests/test_622_part_frames.py`; islands made of pads: `tests/test_622_pad_islands.py`), the polish, the snap onto the router's grid |
+| `whole_cells.py` | each layer's free space cut into its pieces, and the layer walls they give a bus's lanes before any plan (`SOLVE_LAYER_WALLS`) |
 | `whole_embed.py` | the geometry in board xy, a stage of its own: a geometry of a solve fitted again in each layer's free space, the vias free; drawn with its cells and each lane's own points (`--draw`, `--draw-cells`, `--draw-points`); in the loop with `GEO_EMBED=1` |
 | `whole_audit.py`, `whole_gate.py`, `whole_lint.py`, `whole_render.py`, `whole_ctx.py` | a plan installed and audited, gated, linted, drawn; the bench they share, read as the ends model reads it (`tests/test_622_candidate_ctx.py`: an all-pair bus's plan sidecar read by the pairs' legs) |
 | `whole_ladder.py` | the ladders on this machine: rungs side by side, each stopped at a cap with every stage it started, one grade line each |
@@ -2936,11 +2948,14 @@ channels first, and the other escapes leave round it.
   places every crossing and change along the route with no knowledge of the
   board's free space in x and y, and this stage still starts from the
   geometry's one-dimensional layout. To try:
-  - **the solve told what the cells know:** which pieces of a layer's free
-    space are cut off from each other -- an end in one cannot reach another
-    on that layer -- as facts the solve holds before it plans, so a breach is
-    not planned at all; today a breach is found after the solve, by this
-    stage, and goes back as a layer cut;
+  - **the solve told what the cells know, further:** `SOLVE_LAYER_WALLS=1`
+    ([the solve](#the-solve-whole_solvepy)) tells the round's solves which
+    layers are shut across a lane's way before they plan. Left: a pair whose
+    end is laid on a shut layer has no change at its tooth, so its wall can
+    only be broken -- the ends are what must hear of it; the ends model's
+    own checks of a candidate are not told; the band a wall is read in is a
+    judgement; and `whole_cells.py` and `whole_embed.py` each read the fixed
+    copper for themselves, where one reading should serve both;
   - **a starting layout of its own:** drawn from the frame and the solve
     alone, with no LP, so a round does not pay for the geometry's LP first
     and a lane's side of each piece of copper is not the side that layout
@@ -3301,7 +3316,10 @@ channels first, and the other escapes leave round it.
     `SOLVE_RING_STACK_REF=1`: a ring lane's reference at its place in the
     ring's stack, for the passive regions; `SOLVE_ROOM_TIE=1`: after the
     search, each change moved to where its column has the most room, nothing
-    the plan pays allowed to grow;
+    the plan pays allowed to grow; `SOLVE_LAYER_WALLS=1`: the layers shut
+    across a lane's way, read off the pieces of each layer's free space,
+    held as firm layer cuts before any plan (`=board`: the whole board's
+    pieces);
   - the geometry, the frame and the loop -- `GEO_EMBED=1`: each loop round's
     geometry fitted again in board xy, the vias free
     ([above](#the-geometry-in-board-xy-whole_embedpy)), its lanes and cuts
