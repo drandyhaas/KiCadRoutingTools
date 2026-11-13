@@ -2336,7 +2336,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 guide_corridor_layer: str = "User.1",
                 guide_corridor_spacing: float = 0.0,
                 keepout_enabled: bool = False,
-                mask_keepouts: bool = False,
+                mask_keepouts: bool = defaults.MASK_KEEPOUTS,
                 keepout_layer: str = "User.2",
                 proximity_heuristic_factor: float = defaults.PROXIMITY_HEURISTIC_FACTOR,
                 stub_proximity_radius: float = 2.0,
@@ -2695,9 +2695,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                    keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
-    # Mask artwork keeps new copper out only on request. An in-memory board
-    # handed to a nested sub-run keeps what its parent run chose.
-    if mask_keepouts or not _pcb_in_memory:
+    # Mask artwork keeps new copper out unless the run opts out. An in-memory
+    # board handed to a nested sub-run keeps what its parent run chose.
+    if not _pcb_in_memory or pcb_data.board_info.mask_keepouts is None:
         pcb_data.board_info.mask_keepouts = bool(mask_keepouts)
     # #1279: the board's `sense:<REF>.<PAD>` groups -- protected, or why not.
     from sense_branch import report as _sense_report
@@ -10395,9 +10395,12 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--guide-corridor-spacing", type=float, default=defaults.GUIDE_CORRIDOR_SPACING,
                         help=f"Max mm between waypoints; 0 = use only the drawn segment endpoints, "
                              f">0 subdivides long segments to follow curves more tightly (default: {defaults.GUIDE_CORRIDOR_SPACING})")
-    parser.add_argument("--mask-keepouts", action="store_true",
-                        help="Keep new copper out of F.Mask/B.Mask artwork and footprint mask "
-                             "shapes on the same side (pad openings excepted). Off by default")
+    parser.add_argument("--mask-keepouts", action=argparse.BooleanOptionalAction,
+                        default=defaults.MASK_KEEPOUTS,
+                        help="Keep new copper out from under F.Mask/B.Mask artwork and footprint "
+                             "mask shapes on the same side (pad openings excepted); "
+                             "--no-mask-keepouts routes through it "
+                             f"(default: {'on' if defaults.MASK_KEEPOUTS else 'off'})")
     parser.add_argument("--keepout", action="store_true",
                         help="Keep routed tracks out of one or more polygons drawn on a User layer (issue #27)")
     parser.add_argument("--keepout-layer", type=str, default=defaults.KEEPOUT_LAYER,

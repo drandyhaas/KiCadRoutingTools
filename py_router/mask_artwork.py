@@ -5,49 +5,59 @@ under it ships bare. A logo, a label or an exposed-copper window drawn there
 must therefore not get a track or a via of that side's copper routed through
 it -- the router had no notion of the mask layers and routed straight across.
 
-`extract_mask_artwork` turns every such graphic into a keep-out dict of the
-same shape `kicad_parser.extract_keepouts` returns (tracks and vias not
+`extract_mask_artwork` turns the artwork of each side into keep-out dicts of
+the shape `kicad_parser.extract_keepouts` returns (tracks and vias not
 allowed, on F.Cu for F.Mask and B.Cu for B.Mask), so the one native keep-out
-rasteriser (`obstacle_map.add_rule_area_keepout_obstacles`) stamps it. They
-live in their own list, `board_info.mask_artwork`, NOT in
-`board_info.keepouts` (which stays the board's KiCad rule areas, as DRC,
-the census and the rule-area audit read it). `routing_keepouts` joins the
-two for the consumers that keep NEW copper out: the stamper and the
-octolinear smoother's shortcut check.
+rasteriser (`obstacle_map.add_rule_area_keepout_obstacles`) stamps it. Every
+graphic of a side is one geometry and the side is their union, so a logo of
+thousands of strokes is a handful of polygons. They are kept apart from
+`board_info.keepouts` (the board's KiCad rule areas, which DRC, the census
+and the rule-area audit read): `routing_keepouts` joins the two for the
+consumers that keep NEW copper out, the stamper and the octolinear
+smoother's shortcut check. On by default (routing_defaults.MASK_KEEPOUTS);
+route.py --no-mask-keepouts opts a run out.
+
+The artwork is read LAZILY, from the board file the first time a router asks
+(`board_mask_artwork`), and kept on board_info.mask_artwork: a parse that
+never routes pays nothing. The scan starts from each mask `(layer ...)`
+token, not from a walk over every footprint. A footprint graphic follows its
+footprint's pose in pcb_data, so a part moved in memory carries its artwork.
+
+The artwork is not copper, so the copper keeps MASK_REGISTRATION from it,
+not a copper clearance (each entry's `clearance`).
 
 Covered: gr_/fp_ rect, poly, circle, line, arc and text. A filled shape keeps
 copper out of its area, an unfilled one out of its stroke. Every emitted
-polygon CONTAINS its true shape: circles are circumscribed polygons (their
-holes inscribed), arc strokes are chord bands widened by the chord's sagitta,
-and text is a generous bounding box (KiCad's stroke font: at most
-_TEXT_EM_PER_CHAR em per character, 1.6 em line pitch, plus stroke and an
-italic slant allowance).
+polygon CONTAINS its true shape: a stroke is buffered with mitred joins and
+square caps, circles are circumscribed polygons (their holes inscribed), arc
+strokes are chord paths widened by the chord's sagitta, and text is a
+generous bounding box (KiCad's stroke font: at most _TEXT_EM_PER_CHAR em per
+character, 1.6 em line pitch, plus stroke and an italic slant allowance).
 
-Pad openings (ownership rule): a graphic that meets the copper of a pad with a
-net on the same side (its real, possibly rotated rectangle) is that pad's
-opening only where it lies within OWN_MARGIN of the pad. A graphic wholly
-inside the pad grown by OWN_MARGIN is the pad's own opening (a mask-defined
-pad, a test point) and keeps nothing out; anything larger keeps its area
-minus each touching pad grown by OWN_MARGIN, so a broad opening still keeps
-copper out everywhere but next to its pads. A pad that is merely near a
-graphic exempts nothing.
+Pad openings: every netted pad on the side whose copper (its real, possibly
+rotated rectangle) meets the artwork is cut out of it grown by OWN_MARGIN, so
+a mask-defined pad or a test point keeps nothing out and a broad opening keeps
+copper out everywhere but next to its pads. A pad that is merely near the
+artwork exempts nothing.
 
 Scope: the keep-outs reach the consumers that read `routing_keepouts` (the
-obstacle stamper and the octolinear smoother). Other copper writers (bridge
-and cleanup passes, copper_keepout_gate) read the rule areas only, and the
-GUI reads the artwork from the saved board file, not the live board.
+obstacle stamper, hence every engine that builds a map with it, and the
+octolinear smoother). The bridges and welds laid after the search
+(copper_keepout_gate) read the rule areas only, and the GUI reads the artwork
+from the saved board file.
 """
 import math
+import os
 import re
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 Point = Tuple[float, float]
 
 _MASK_TO_CU = {'F.Mask': 'F.Cu', 'B.Mask': 'B.Cu'}
-# Pads use `(layers ...)`; only a graphic carries a singular mask `(layer ..)`.
-_MASK_LAYER_RE = re.compile(r'\(layer\s+"([FB]\.Mask)"')
-_GR_RE = re.compile(r'\((gr_(?:rect|poly|circle|line|arc|text))\s')
-_FP_RE = re.compile(r'\((fp_(?:rect|poly|circle|line|arc|text))\s')
+# Pads use `(layers ...)`; only a graphic carries a singular mask `(layer ..)`
+# (quoted since KiCad 6, bare before).
+_MASK_LAYER_RE = re.compile(r'\(layer\s+"?([FB]\.Mask)"?[\s)]')
+_GRAPHIC_RE = re.compile(r'\((gr|fp)_(rect|poly|circle|line|arc|text)\s')
 _NUM = r'(-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)'
 _XY_RE = {k: re.compile(r'\(' + k + r'\s+' + _NUM + r'\s+' + _NUM)
           for k in ('start', 'end', 'center', 'mid')}
@@ -63,6 +73,10 @@ _ARC_SEGS = 16
 # A graphic within this distance of a netted pad's copper belongs to that pad's
 # opening (KiCad's mask expansions and mask-defined pads stay well inside it).
 OWN_MARGIN = 0.5
+# How far new copper stays from mask artwork: the artwork is no copper, so no
+# copper clearance applies, only the mask's registration on the fab (a flush
+# edge can come out exposed); typical fab mask registration is +-0.05 mm.
+MASK_REGISTRATION = 0.05
 # Widest stroke-font glyph advance (W, M) in em, generous.
 _TEXT_EM_PER_CHAR = 1.3
 
@@ -89,18 +103,6 @@ def _rot(p: Point, deg: float) -> Point:
     a = math.radians(deg)
     c, s = math.cos(a), math.sin(a)
     return (p[0] * c + p[1] * s, -p[0] * s + p[1] * c)
-
-
-def _band(a: Point, b: Point, half: float) -> List[Point]:
-    """The stroke of segment a-b, square caps: a rectangle `2*half` wide."""
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    n = math.hypot(dx, dy)
-    if n == 0:
-        return [(a[0] - half, a[1] - half), (a[0] + half, a[1] - half),
-                (a[0] + half, a[1] + half), (a[0] - half, a[1] + half)]
-    ux, uy = dx / n * half, dy / n * half
-    return [(a[0] - ux - uy, a[1] - uy + ux), (b[0] + ux - uy, b[1] + uy + ux),
-            (b[0] + ux + uy, b[1] + uy - ux), (a[0] - ux + uy, a[1] - uy - ux)]
 
 
 def _rect(x1, y1, x2, y2) -> List[Point]:
@@ -168,51 +170,68 @@ def _text_box(block: str) -> Tuple[Optional[Point], float, List[Point]]:
             float(at.group(3) or 0.0), box)
 
 
-def _shapes(kind: str, block: str) -> List[Tuple[List[Point], List[List[Point]]]]:
-    """[(outline, holes)] in the block's own coordinates, text excepted."""
+def _geoms(kind: str, block: str, xform) -> list:
+    """The shapely geometries (board coordinates) a mask graphic covers, text
+    excepted: ONE per graphic, each containing the true shape. A stroke is the
+    centre line buffered by half its width with mitred joins and square caps
+    (both contain KiCad's round ones); a filled shape is its outline grown by
+    the same half width; an arc is its chord path, widened by the chord's
+    sagitta. `xform` maps the block's own coordinates to the board's."""
+    from shapely.geometry import LineString, Polygon
     from kicad_parser import find_matching_paren, kicad_poly_shape_points
     half = _stroke(block) / 2.0
     filled = _filled(block)
-    out = []
+
+    def stroke(pts, closed=False):
+        if half <= 0 or len(pts) < 2:
+            return None
+        line = LineString(list(pts) + ([pts[0]] if closed else []))
+        return line.buffer(half, cap_style='square', join_style='mitre')
+
+    def area(pts):
+        g = Polygon(pts)
+        if not g.is_valid:
+            g = g.buffer(0)
+        return g.buffer(half, join_style='mitre') if half > 0 else g
+
     if kind == 'rect':
         a, b = _xy(block, 'start'), _xy(block, 'end')
         if not a or not b:
             return []
-        x1, x2 = sorted((a[0], b[0]))
-        y1, y2 = sorted((a[1], b[1]))
-        outer = _rect(x1 - half, y1 - half, x2 + half, y2 + half)
-        inner = ([] if filled or x2 - x1 <= 2 * half or y2 - y1 <= 2 * half
-                 else [_rect(x1 + half, y1 + half, x2 - half, y2 - half)])
-        out.append((outer, inner))
-    elif kind == 'circle':
+        pts = xform(_rect(a[0], a[1], b[0], b[1]))
+        g = area(pts) if filled else stroke(pts, closed=True)
+        return [g] if g is not None else []
+    if kind == 'circle':
         c, e = _xy(block, 'center'), _xy(block, 'end')
         if not c or not e:
             return []
         r = math.hypot(e[0] - c[0], e[1] - c[1])
-        inner = [] if filled or r <= half else [_circle(c, r - half, outside=False)]
-        out.append((_circle(c, r + half), inner))
-    elif kind == 'poly':
+        cc = xform([c])[0]
+        if filled or r <= half:
+            return [Polygon(_circle(cc, r + half))]
+        if half <= 0:
+            return []
+        return [Polygon(_circle(cc, r + half), [_circle(cc, r - half, outside=False)])]
+    if kind == 'poly':
         p = block.find('(pts')
         if p < 0:
             return []
-        pts = kicad_poly_shape_points(block[p:find_matching_paren(block, p)])
-        if len(pts) < 2:
-            return []
+        pts = xform(kicad_poly_shape_points(block[p:find_matching_paren(block, p)]))
         if filled and len(pts) >= 3:
-            out.append((pts, []))
-        if half > 0:
-            ring = list(pts) + ([pts[0]] if len(pts) >= 3 else [])
-            out += [(_band(a, b, half), []) for a, b in zip(ring, ring[1:])]
-    elif kind == 'line':
+            return [area(pts)]
+        g = stroke(pts, closed=len(pts) >= 3)
+        return [g] if g is not None else []
+    if kind == 'line':
         a, b = _xy(block, 'start'), _xy(block, 'end')
-        if a and b and half > 0:
-            out.append((_band(a, b, half), []))
-    elif kind == 'arc':
+        g = stroke(xform([a, b])) if a and b else None
+        return [g] if g is not None else []
+    if kind == 'arc':
         a, m, b = _xy(block, 'start'), _xy(block, 'mid'), _xy(block, 'end')
-        if a and m and b and half > 0:
-            pts, sag = _arc_points(a, m, b)
-            out += [(_band(p, q, half + sag), []) for p, q in zip(pts, pts[1:])]
-    return out
+        if not (a and m and b) or half <= 0:
+            return []
+        pts, sag = _arc_points(*xform([a, m, b]))
+        return [LineString(pts).buffer(half + sag, cap_style='square', join_style='mitre')]
+    return []
 
 
 def _point_in(p: Point, poly: Sequence[Point]) -> bool:
@@ -228,19 +247,12 @@ def _point_in(p: Point, poly: Sequence[Point]) -> bool:
     return inside
 
 
-def _seg_dist(p: Point, a: Point, b: Point) -> float:
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    n = dx * dx + dy * dy
-    t = 0.0 if n == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / n))
-    return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
-
-
-def _pad_shapes(footprints) -> Dict[str, list]:
-    """{copper layer: [shapely polygon of the pad's copper rectangle]} of every
-    pad with a net (its real size and tilt; round and rounded pads by their
-    enclosing rectangle)."""
+def _pad_trees(footprints) -> Dict[str, tuple]:
+    """{copper side: (STRtree, [pad copper rectangle])} of every pad with a net
+    (its real size and tilt; round and rounded pads by their enclosing
+    rectangle)."""
+    from shapely import STRtree, affinity
     from shapely.geometry import box
-    from shapely import affinity
     shapes: Dict[str, list] = {'F.Cu': [], 'B.Cu': []}
     for fp in (footprints or {}).values():
         for pad in getattr(fp, 'pads', ()) or ():
@@ -256,7 +268,7 @@ def _pad_shapes(footprints) -> Dict[str, list]:
             for cu in ('F.Cu', 'B.Cu'):
                 if cu in lays or '*.Cu' in lays or 'F&B.Cu' in lays:
                     shapes[cu].append(g)
-    return shapes
+    return {cu: (STRtree(gs), gs) for cu, gs in shapes.items() if gs}
 
 
 def _rings(geom):
@@ -271,94 +283,144 @@ def _rings(geom):
     return out
 
 
-def _unowned(poly, holes, pads) -> list:
-    """The parts of a mask graphic that are no pad's opening (module doc)."""
-    from shapely.geometry import Polygon
-    g = Polygon(poly, holes)
-    if not g.is_valid:
-        g = g.buffer(0)
-    touching = [p for p in pads if p.intersects(g)]
-    if not touching:
-        return [(poly, holes)]
-    grown = [p.buffer(OWN_MARGIN, join_style=2) for p in touching]
-    if any(g.within(z) for z in grown):
-        return []
-    rest = g
-    for z in grown:
-        rest = rest.difference(z)
-    return _rings(rest)
+def _unowned(geom, pads):
+    """The artwork of one side that is no pad's opening (module doc): every
+    netted pad whose copper meets it, grown by OWN_MARGIN, is cut out."""
+    if pads is None or geom.is_empty:
+        return geom
+    from shapely import union_all
+    tree, shapes = pads
+    hit = tree.query(geom, predicate='intersects')
+    if len(hit) == 0:
+        return geom
+    grown = union_all([shapes[i].buffer(OWN_MARGIN, join_style='mitre') for i in hit])
+    return geom.difference(grown)
 
 
-def routing_keepouts(board_info) -> List[dict]:
-    """Rule-area keep-outs, plus mask artwork when the run opted in
-    (board_info.mask_keepouts, set by batch_route's mask_keepouts)."""
-    keepouts = list(getattr(board_info, 'keepouts', None) or [])
-    if getattr(board_info, 'mask_keepouts', False):
-        keepouts += list(getattr(board_info, 'mask_artwork', None) or [])
+def board_mask_artwork(pcb_data) -> List[dict]:
+    """The board's mask artwork keep-outs, read once from the board file
+    (pcb_data.source_path) the first time a router asks and kept on
+    board_info.mask_artwork (None = not read yet), so a parse that never
+    routes pays nothing. Footprint artwork takes the footprint's pose from
+    pcb_data, so a part moved in memory carries its artwork along."""
+    bi = pcb_data.board_info
+    art = getattr(bi, 'mask_artwork', None)
+    if art is None:
+        art = []
+        path = getattr(pcb_data, 'source_path', '') or ''
+        if path and os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                art = extract_mask_artwork(f.read(), getattr(pcb_data, 'footprints', None))
+        bi.mask_artwork = art
+    return art
+
+
+def routing_keepouts(pcb_data) -> List[dict]:
+    """Rule-area keep-outs, plus mask artwork unless the run opted out
+    (board_info.mask_keepouts, set by batch_route's mask_keepouts; None, as
+    every other engine leaves it, is routing_defaults.MASK_KEEPOUTS)."""
+    bi = pcb_data.board_info
+    keepouts = list(getattr(bi, 'keepouts', None) or [])
+    on = getattr(bi, 'mask_keepouts', None)
+    if on is None:
+        import routing_defaults
+        on = routing_defaults.MASK_KEEPOUTS
+    if on:
+        keepouts += board_mask_artwork(pcb_data)
     return keepouts
 
 
-def _entry(poly, holes, cu, owner, mask):
+def _entry(poly, holes, cu, mask):
     return {'polygon': poly, 'holes': holes, 'layers': {cu},
             'tracks_allowed': False, 'vias_allowed': False,
             'copper_pour_allowed': True, 'pads_allowed': True,
-            'footprints_allowed': True, 'in_footprint': bool(owner),
-            'owner': owner, 'name': mask + ' artwork', 'mask_artwork': True}
+            'footprints_allowed': True, 'in_footprint': False,
+            'owner': '', 'name': mask + ' artwork', 'mask_artwork': True,
+            # not copper: the copper stays MASK_REGISTRATION clear of it, not
+            # a copper clearance (the stamper and the smoother read this)
+            'clearance': MASK_REGISTRATION}
 
 
-def _graphics(text: str, regex, xform, owner: str):
-    """(polygon, holes, mask layer, owner) per mask graphic in `text`."""
-    from kicad_parser import find_matching_paren
-    for m in regex.finditer(text):
-        end = find_matching_paren(text, m.start())
-        block = text[m.start():end]
-        lm = _MASK_LAYER_RE.search(block)
-        if not lm:
+def _graphics(content: str, footprints):
+    """(shapely geometry, mask layer) per mask graphic, found from its mask
+    `(layer ...)` token (a whole-file walk per footprint cost more than the
+    artwork itself). A footprint graphic is placed by its footprint's pose."""
+    from bisect import bisect_right
+    from kicad_parser import (find_matching_paren, footprint_at_match,
+                              _footprint_blocks_by_key, local_to_global)
+    from shapely.geometry import Polygon
+    spans = None
+    poses = {}
+    seen = set()
+    for lm in _MASK_LAYER_RE.finditer(content):
+        pos = lm.start()
+        start = max(content.rfind('(gr_', 0, pos), content.rfind('(fp_', 0, pos))
+        if start < 0 or start in seen:
             continue
-        kind = m.group(1).split('_', 1)[1]
-        if kind == 'text':
+        m = _GRAPHIC_RE.match(content, start)
+        if not m:
+            continue
+        end = find_matching_paren(content, start)
+        if end <= pos:
+            continue          # the layer token is not this graphic's
+        seen.add(start)
+        block = content[start:end]
+        if m.group(1) == 'gr':
+            xform = list
+        else:
+            if spans is None:
+                spans = list(_footprint_blocks_by_key(content))
+                starts = [sp[0] for sp in spans]
+            i = bisect_right(starts, start) - 1
+            if i < 0 or spans[i][1] <= start:
+                continue
+            fs, fe, key = spans[i]
+            if fs not in poses:
+                fp = (footprints or {}).get(key)
+                if fp is not None:
+                    poses[fs] = (fp.x, fp.y, fp.rotation or 0.0)
+                else:
+                    at = footprint_at_match(content[fs:fe])
+                    poses[fs] = ((float(at.group(1)), float(at.group(2)),
+                                  float(at.group(3) or 0.0)) if at else (0.0, 0.0, 0.0))
+            fx, fy, fr = poses[fs]
+
+            def xform(pts, fx=fx, fy=fy, fr=fr):
+                return [local_to_global(fx, fy, fr, x, y) for x, y in pts]
+        if m.group(2) == 'text':
             anchor, ang, box = _text_box(block)
             if anchor is None:
                 continue
             # The text's own angle is absolute in the file (KiCad 6+), so only
             # its anchor follows the footprint pose.
             ax, ay = xform([anchor])[0]
-            shapes = [([(ax + x, ay + y) for x, y in (_rot(p, ang) for p in box)], [])]
+            geoms = [Polygon([(ax + x, ay + y) for x, y in (_rot(p, ang) for p in box)])]
         else:
-            shapes = [(xform(o), [xform(h) for h in hs]) for o, hs in _shapes(kind, block)]
-        for poly, holes in shapes:
-            if len(poly) >= 3:
-                yield poly, holes, lm.group(1), owner
+            geoms = _geoms(m.group(2), block, xform)
+        for g in geoms:
+            if not g.is_empty:
+                yield g, lm.group(1)
 
 
 def extract_mask_artwork(content: str, footprints=None) -> List[dict]:
     """Keep-out dicts for the F.Mask / B.Mask artwork of a board (see module
-    doc). `footprints` (parse_kicad_pcb's) supply the pads whose own mask
-    openings are exempt; None exempts nothing."""
-    if not _MASK_LAYER_RE.search(content):
+    doc): the union of every graphic on a side, minus the pads' own openings,
+    so a logo of many strokes is a few polygons rather than one per stroke.
+    `footprints` (parse_kicad_pcb's) supply the pads whose own mask openings
+    are exempt, and the footprints' poses; None exempts nothing."""
+    from shapely import union_all
+    found = {'F.Mask': [], 'B.Mask': []}
+    for g, mask in _graphics(content, footprints):
+        found[mask].append(g)
+    if not any(found.values()):
         return []
-    from kicad_parser import (footprint_at_match, iter_footprint_blocks,
-                              _mask_footprint_blocks, local_to_global)
-
-    def board(pts):
-        return list(pts)
-
-    found = list(_graphics(_mask_footprint_blocks(content), _GR_RE, board, ''))
-    for _s, _e, fp_text, _raw, key in iter_footprint_blocks(content):
-        if not _MASK_LAYER_RE.search(fp_text):
-            continue
-        at = footprint_at_match(fp_text)
-        fx, fy, fr = ((float(at.group(1)), float(at.group(2)), float(at.group(3) or 0.0))
-                      if at else (0.0, 0.0, 0.0))
-
-        def fp_xform(pts, fx=fx, fy=fy, fr=fr):
-            return [local_to_global(fx, fy, fr, x, y) for x, y in pts]
-        found += list(_graphics(fp_text, _FP_RE, fp_xform, key))
-
-    pads = _pad_shapes(footprints)
+    pads = _pad_trees(footprints)
     out = []
-    for poly, holes, mask, owner in found:
+    for mask, geoms in found.items():
+        if not geoms:
+            continue
         cu = _MASK_TO_CU[mask]
-        for keep, keep_holes in _unowned(poly, holes, pads[cu]):
-            out.append(_entry(keep, keep_holes, cu, owner, mask))
+        rest = _unowned(union_all(geoms), pads.get(cu))
+        for keep, keep_holes in _rings(rest):
+            out.append(_entry(keep, keep_holes, cu, mask))
     return out

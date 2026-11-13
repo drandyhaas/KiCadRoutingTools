@@ -44,27 +44,14 @@ LOGO = ('  (footprint "synth:LOGO" (layer "F.Cu") (uuid "logo-fp") (at 20 12 90)
 
 
 def _seg_hits_box(x1, y1, x2, y2, half, box):
-    """Does a segment widened by `half` overlap the axis-aligned box?"""
-    bx1, by1, bx2, by2 = box[0] - half, box[1] - half, box[2] + half, box[3] + half
-    # Liang-Barsky clip of the centre line against the inflated box.
-    t0, t1 = 0.0, 1.0
-    dx, dy = x2 - x1, y2 - y1
-    for p, q in ((-dx, x1 - bx1), (dx, bx2 - x1), (-dy, y1 - by1), (dy, by2 - y1)):
-        if p == 0:
-            if q < 0:
-                return False
-            continue
-        t = q / p
-        if p < 0:
-            t0 = max(t0, t)
-        else:
-            t1 = min(t1, t)
-        if t0 > t1:
-            return False
-    return True
+    """Does copper of half-width `half` along x1,y1-x2,y2 reach into the box
+    (exact distance; a square-inflated box flags a diagonal passing a corner)?"""
+    from shapely.geometry import LineString, Point, box as sbox
+    g = Point(x1, y1) if (x1, y1) == (x2, y2) else LineString([(x1, y1), (x2, y2)])
+    return g.distance(sbox(*box)) < half - 1e-9
 
 
-def _route(text, extra=('--mask-keepouts',)):
+def _route(text, extra=()):
     tmp = tempfile.mkdtemp(prefix='maskart_')
     try:
         inp = os.path.join(tmp, 'in.kicad_pcb')
@@ -213,15 +200,33 @@ def test_arc_stroke_covers_its_true_band():
         assert _covered(got, pt), (k, pt)
 
 
-def test_mask_keepouts_are_opt_in():
-    """Without --mask-keepouts the artwork is extracted but routing ignores it."""
+def test_mask_keepouts_default_on_and_opt_out():
+    """Routing keeps copper out of mask artwork by default, reading it from the
+    board file on first use; mask_keepouts=False (--no-mask-keepouts) drops it."""
     from mask_artwork import routing_keepouts
-    pcb = _parse_text(_board(BOARD_RECT))
-    assert pcb.board_info.mask_artwork, 'no mask artwork extracted'
-    assert routing_keepouts(pcb.board_info) == list(pcb.board_info.keepouts)
-    pcb.board_info.mask_keepouts = True
-    assert len(routing_keepouts(pcb.board_info)) == (
-        len(pcb.board_info.keepouts) + len(pcb.board_info.mask_artwork))
+    tmp = tempfile.mkdtemp(prefix='maskart_')
+    try:
+        path = os.path.join(tmp, 'b.kicad_pcb')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(_board(BOARD_RECT))
+        pcb = parse_kicad_pcb(path)
+        assert pcb.board_info.mask_artwork is None, 'extracted at parse time'
+        rules = list(pcb.board_info.keepouts)
+        on = routing_keepouts(pcb)
+        assert pcb.board_info.mask_artwork, 'no mask artwork extracted'
+        assert len(on) == len(rules) + len(pcb.board_info.mask_artwork)
+        pcb.board_info.mask_keepouts = False
+        assert routing_keepouts(pcb) == rules
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_opt_out_routes_through_the_artwork():
+    """--no-mask-keepouts: the straight routes cross the opening as before."""
+    pcb = _route(_board(BOARD_RECT), extra=('--no-mask-keepouts',))
+    crossing = [s for s in pcb.segments if s.layer == 'F.Cu' and _seg_hits_box(
+        s.start_x, s.start_y, s.end_x, s.end_y, s.width / 2.0, BOX)]
+    assert crossing, 'opted out, yet no track crosses the opening'
 
 
 def test_text_is_a_bounding_box():
@@ -251,7 +256,8 @@ if __name__ == '__main__':
     test_circle_is_circumscribed_and_its_hole_inscribed()
     test_arc_stroke_covers_its_true_band()
     test_b_mask_keeps_b_cu_only()
-    test_mask_keepouts_are_opt_in()
+    test_mask_keepouts_default_on_and_opt_out()
+    test_opt_out_routes_through_the_artwork()
     test_text_is_a_bounding_box()
     test_board_mask_rect_keeps_copper_out()
     test_logo_footprint_mask_poly_keeps_copper_out()

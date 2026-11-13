@@ -1461,8 +1461,9 @@ class RoutingDialog(wx.Dialog):
         self.mask_keepouts = wx.CheckBox(options_scroll, label="Keep out of mask artwork")
         self.mask_keepouts.SetValue(defaults.MASK_KEEPOUTS)
         self.mask_keepouts.SetToolTip(
-            "Keep new copper out of F.Mask/B.Mask graphics and footprint mask shapes on "
-            "the same side (pad openings excepted). The board is read from its saved file.")
+            "Keep new copper out from under F.Mask/B.Mask graphics and footprint mask "
+            "shapes on the same side (pad openings excepted). On by default; the artwork "
+            "is read from the saved board file.")
         options_inner.Add(self.mask_keepouts, 0, wx.ALL, 3)
 
         # Keepout zone: keep tracks out of a user-drawn polygon (issue #27)
@@ -3988,7 +3989,7 @@ class RoutingDialog(wx.Dialog):
                     guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
                     guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
                     keepout_enabled=config.get('keepout_enabled', False),
-                    mask_keepouts=config.get('mask_keepouts', False),
+                    mask_keepouts=config.get('mask_keepouts', defaults.MASK_KEEPOUTS),
                     keepout_layer=config.get('keepout_layer', 'User.2'),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),

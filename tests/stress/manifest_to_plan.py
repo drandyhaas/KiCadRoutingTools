@@ -492,6 +492,8 @@ INVERTED_BOOL_FLAGS = {
     # writes back -- the CLI's per-step semantics, since reset_params_to_
     # defaults re-ticks the box before every step.
     '--no-fix-drc-settings': 'fix_drc_check',
+    # route.py's mask-artwork keep-outs, on by default (a checkbox).
+    '--no-mask-keepouts': 'mask_keepouts',
 }
 # Repeatable nargs='+' flags (argparse action='append'): each OCCURRENCE is one
 # group, so the plan param is a list of lists. route.py's --length-match-group
