@@ -333,7 +333,12 @@ layers only. The via type is read off the span: `micro` for two neighbouring
 layers one of which is an outer layer (`F.Cu In1.Cu`), `blind` for a longer span
 that reaches one outer layer, `buried` for a span that reaches neither
 (`In1.Cu In6.Cu` on an 8-layer board); `--via-span-type` overrides it where the
-span allows. The whole stack is no span: through vias, as without the flag.
+span allows. A micro via is laser drilled from an outer layer to the layer next
+to it, so `micro` is refused on a longer span (that is a blind via,
+mechanically drilled). The whole stack is no span: through vias, as without the
+flag. On a board whose file format predates KiCad 10, which has no `buried`
+word, a buried span's vias are written `blind` (KiCad 9's one blind/buried
+type) on the same layer pair, and the run says so.
 
 - **What blocks a via of the span** is the copper on the span's layers, and
   every drilled pad (its barrel passes through the span). Tracks, pours and
@@ -344,7 +349,8 @@ span allows. The whole stack is no span: through vias, as without the flag.
 - **Size.** With no `--via-size` / `--via-drill`, a micro via span draws the
   board's Default net-class micro via (`microvia_diameter` / `microvia_drill`)
   on every net. The fab floor's via sizes are a mechanical drill's and are not
-  applied to it, and its size is not written into the output project's via or
+  applied to it, whether the size is the class's or given (the GUI's via
+  controls read the same `via_span.laser_drilled`), and its size is not written into the output project's via or
   drilled-hole minimums (`check_drc` grades a micro via at the micro via
   minimums, #1844). A blind or buried span uses the run's via as a through via
   step does.
@@ -366,13 +372,22 @@ span allows. The whole stack is no span: through vias, as without the flag.
 - **A step on a partial span does not run the plane finalize.** The
   finalize's taps are through vias at the step's via size, which under a
   micro, blind or buried span is not a through via's; the run says so, and
-  the plane step connects the plane nets.
+  the plane step connects the plane nets. `JSON_SUMMARY` and `--json-out`
+  carry `via_span`: `{"layers": [top, bottom], "type": ..., "plane_finalize":
+  "not run", "zones": N}`, on every via-span step.
 - **Copper outside the span is held in place.** A via-span step lays copper on
   the span only, so it could not lay an escape's stub and via again: every
   existing track on another layer, and every via with copper on a layer the
   span lacks, is immutable for the step (`via_span.hold_outside_copper`). The
-  step still rips and retries its own routes, so a net it cannot complete
-  keeps its landings for a later step.
+  step still rips and retries its own routes (a rip, a pre-existing net's rip
+  and `--force-reroute` take the net's other copper and leave the held items),
+  so a net it cannot complete keeps its landings for a later step. The hold is
+  no sense hold: a route end beside a held escape is bridged onto it as onto
+  any copper of its net.
+- **The step's maps are the span's throughout.** The base map, each net's
+  cache and every rebuild after a rip or a route read the board through the
+  same view, so a routed net's pad outside the span blocks no via site after a
+  rip either.
 
   ```bash
   # micro-via escapes at every pad, then the inner layers with buried vias
@@ -389,7 +404,7 @@ On an 8-layer board with a 0.8 mm BGA over a field of bottom-side pads
 (`tests/fixtures/1842`), a bare route completes 25 of 36 nets with through
 vias; `--via-span F.Cu In1.Cu` completes all 36 with micro vias, clean in
 `check_drc`, `check_connected` and KiCad's DRC against the board's own rules.
-The two-step form above lays 72 micro-via escapes and then routes 34 of the 36
+The two-step form above lays 72 micro-via escapes and then routes 35 of the 36
 on the inner layers with buried vias, both steps clean in `check_drc` and
 KiCad's DRC.
 
