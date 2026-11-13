@@ -352,13 +352,20 @@ def _graphics(content: str, footprints):
     spans = None
     poses = {}
     seen = set()
+    # every graphic start in one linear pass; a mask token belongs to the
+    # nearest graphic before it (an rfind per token is quadratic on a board
+    # of tens of thousands of mask graphics)
+    gstarts, gmatch = [], []
+    for m in _GRAPHIC_RE.finditer(content):
+        gstarts.append(m.start())
+        gmatch.append(m)
     for lm in _MASK_LAYER_RE.finditer(content):
         pos = lm.start()
-        start = max(content.rfind('(gr_', 0, pos), content.rfind('(fp_', 0, pos))
-        if start < 0 or start in seen:
+        gi = bisect_right(gstarts, pos) - 1
+        if gi < 0:
             continue
-        m = _GRAPHIC_RE.match(content, start)
-        if not m:
+        start, m = gstarts[gi], gmatch[gi]
+        if start in seen:
             continue
         end = find_matching_paren(content, start)
         if end <= pos:
