@@ -637,7 +637,9 @@ with no special case.
 
 Built (#502) with the ratio at each tier's floor drill over the 1.6 mm reference
 (8 standard, 10.67 advanced, `fab_tiers.MAX_ASPECT_RATIO`), applied where the
-tier's rungs are built (`fab_tiers._tier_rungs`), so it raises nothing up to 1.6 mm.
+tier's rungs are built (`fab_tiers._tier_rungs`), with the fab's +-10% thickness
+tolerance (`ASPECT_THICKNESS_TOLERANCE`), so it raises nothing up to 1.76 mm, and
+inert past the 3.2 mm thickest standard board (`MAX_STANDARD_THICKNESS`).
 
 ---
 

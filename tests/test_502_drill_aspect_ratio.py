@@ -25,6 +25,13 @@ So:
      terms; `--strict-sizes` does not count it, since it narrows nothing.
   6. a smaller drill a `--fab-overrides` file declares raises nothing on a
      1.6 mm board either.
+  7. a fab holds the thickness to +-10%, so a drill stays legal up to 10% past
+     the thickness it is legal at: a 63 mil (1.6002 mm) board or one whose
+     stackup sums to 1.63 is a 1.6 mm board, and nothing moves up to 1.76 mm;
+     past it the drill is the full thickness / ratio.
+  8. a declared thickness past the 3.2 mm thickest standard board (a stackup
+     left at KiCad's 1.51 mm-per-dielectric default reads 4.67 mm) raises
+     nothing, and the run, check_drc and the Design rules line warn.
 
     python3 tests/test_502_drill_aspect_ratio.py
 """
@@ -59,6 +66,19 @@ STACKUP_2MM = """
 				(epsilon_r 4.5) (loss_tangent 0.02))
 			(layer "B.Cu" (type "copper") (thickness 0.035))
 			(layer "B.Mask" (type "Bottom Solder Mask") (thickness 0.01))
+		)"""
+
+
+#: A 4-layer stackup KiCad left at 1.51 mm per dielectric: it sums to 4.67 mm.
+STACKUP_UNSET = """
+		(stackup
+			(layer "F.Cu" (type "copper") (thickness 0.035))
+			(layer "dielectric 1" (type "core") (thickness 1.51))
+			(layer "In1.Cu" (type "copper") (thickness 0.035))
+			(layer "dielectric 2" (type "prepreg") (thickness 1.51))
+			(layer "In2.Cu" (type "copper") (thickness 0.035))
+			(layer "dielectric 3" (type "core") (thickness 1.51))
+			(layer "B.Cu" (type "copper") (thickness 0.035))
 		)"""
 
 
@@ -104,11 +124,17 @@ def vias(rungs):
     return [(round(r['via_diameter'], 4), round(r['via_drill'], 4)) for r in rungs]
 
 
-def drill_rows(path):
+def drill_rows(path, out=None):
     from check_drc import run_drc
-    with redirect_stdout(io.StringIO()):
-        viols = run_drc(path, clearance=0.1, quiet=True, print_summary=False)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        viols = run_drc(path, clearance=0.1, quiet=out is None, print_summary=False)
+    if out is not None:
+        out.append(buf.getvalue())
     return [v for v in viols if v['type'] == 'via-drill-size']
+
+
+UNCHANGED = [(0.45, 0.2), (0.3, 0.15), (0.25, 0.15)]
 
 
 def main():
@@ -207,6 +233,57 @@ def main():
         install(thick, overrides={'via_drill': 0.1, 'via_diameter': 0.2})
         assert vias(fab_tiers.escalation_rungs(4)) == [(0.225, 0.125)], \
             vias(fab_tiers.escalation_rungs(4))
+        print('   PASS')
+
+        print('7. within 10% of the thickness a drill is legal at, nothing moves')
+        fab_tiers.set_default_fab_tier('auto', {})
+        for t in (1.6002, 1.626, 1.64, 1.76):
+            fab_tiers.set_board_thickness(t)
+            assert vias(fab_tiers.escalation_rungs(4)) == UNCHANGED, (t, vias(fab_tiers.escalation_rungs(4)))
+            assert fab_tiers.physical_fab_floor(4)['via_drill'] == 0.15, t
+            assert fab_tiers.aspect_floor_summary() is None, (t, fab_tiers.aspect_floor_summary())
+        fab_tiers.set_board_thickness(1.77)
+        assert vias(fab_tiers.escalation_rungs(4)) == \
+            [(0.472, 0.222), (0.316, 0.166), (0.266, 0.166)], vias(fab_tiers.escalation_rungs(4))
+        nominal = write(tmp, 'nominal.kicad_pcb', board(1.6458, STACKUP_2MM.replace(
+            '(thickness 0.43)', '(thickness 0.0558)')))
+        from kicad_parser import parse_kicad_pcb as _parse
+        assert abs(_parse(nominal).board_info.board_thickness - 1.6258) < 1e-9
+        assert drill_rows(nominal) == [], 'a 1.63 mm board grades its 0.15 drill as a 1.6 mm one'
+        install(nominal)
+        assert fab_tiers.escalation_report_line() == '', fab_tiers.escalation_report_line()
+        with redirect_stdout(io.StringIO()):
+            assert fab_tiers.enforce_fab_floors(4, via_size=0.25, via_drill=0.15) == {}
+        print('   PASS')
+
+        print('8. past the 3.2 mm thickest standard board: inert, and every reader warns')
+        unset = write(tmp, 'unset.kicad_pcb', board(4.69, STACKUP_UNSET))
+        assert _parse(unset).board_info.board_thickness == 4.67
+        fab_tiers.set_default_fab_tier('auto', {})
+        with redirect_stdout(io.StringIO()) as out:
+            fab_tiers.set_policy_from_args(SimpleNamespace(escalation='fab'), unset)
+        assert 'WARNING' in out.getvalue() and '4.67 mm' in out.getvalue() \
+            and 'not applied' in out.getvalue(), out.getvalue()
+        assert vias(fab_tiers.escalation_rungs(4)) == UNCHANGED
+        assert fab_tiers.physical_fab_floor(4)['via_drill'] == 0.15
+        with redirect_stdout(io.StringIO()):
+            assert fab_tiers.enforce_fab_floors(4, via_size=0.25, via_drill=0.15) == {}
+        a = fab_tiers.escalation_summary()['aspect_floor']
+        assert a == {'board_thickness_mm': 4.67, 'rungs': [],
+                     'not_applied': 'thicker_than_standard',
+                     'max_standard_thickness_mm': 3.2}, a
+        line = fab_tiers.escalation_report_line()
+        assert 'drill aspect ratio not applied' in line and '4.67 mm' in line, line
+        with redirect_stdout(io.StringIO()):
+            assert fab_tiers.finish_design_rules(SimpleNamespace(strict_sizes=True)) == 0
+        fab_tiers.set_board_thickness(None)
+        logs = []
+        assert drill_rows(unset, logs) == [], 'a 4.67 mm declaration grades the drill as before'
+        assert 'WARNING' in logs[0] and 'not applied' in logs[0], logs[0][-2000:]
+        with redirect_stdout(io.StringIO()) as out:
+            fab_tiers.set_board_thickness(3.2)
+        assert 'WARNING' not in out.getvalue()
+        assert fab_tiers.physical_fab_floor(4)['via_drill'] == 0.3, '3.2 mm is standard'
         print('   PASS')
     finally:
         fab_tiers.set_default_fab_tier('auto', {})

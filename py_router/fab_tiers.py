@@ -143,6 +143,17 @@ _FAB_FLOORS = {
 #: hole is thickness / ratio (:func:`min_drill_for_thickness`).
 ASPECT_REFERENCE_THICKNESS = 1.6
 MAX_ASPECT_RATIO = {'standard': 8.0, 'advanced': 10.67}
+#: A fab holds a board's finished thickness to +-10%, so a board is drilled as
+#: the nominal it is within 10% of: a drill legal at a thickness T stays legal
+#: up to T * 1.1 (a 1.6 mm board whose stackup sums to 1.63 is a 1.6 mm board,
+#: and its 0.15 drill is the one a fab quotes for it). Past that the drill is
+#: raised to the full thickness / ratio.
+ASPECT_THICKNESS_TOLERANCE = 0.10
+#: The thickest standard fab board (mm). A declared thickness past it is taken
+#: for a stackup that was never set (KiCad gives every dielectric a layer adds
+#: 1.51 mm, so a 4-layer board left at its 2-layer stackup reads 4.67 mm), not
+#: for the board the fab drills: the aspect floor stays inert and the run warns.
+MAX_STANDARD_THICKNESS = 3.2
 
 TIERS = ('standard', 'advanced', 'auto')
 ESCALATION_POLICIES = ('off', 'board', 'fab')
@@ -262,9 +273,26 @@ def set_escalation_policy(policy, board_floors=None, writeback=True):
 
 
 def set_board_thickness(thickness):
-    """Install this run's board thickness in mm (#502), or None for unknown."""
+    """Install this run's board thickness in mm (#502), or None for unknown.
+    A thickness past :data:`MAX_STANDARD_THICKNESS` is installed (it is what
+    the board declares) but raises nothing, and is warned about here."""
     global _BOARD_THICKNESS
     _BOARD_THICKNESS = float(thickness) if thickness and float(thickness) > 0 else None
+    warning = aspect_inert_warning(_BOARD_THICKNESS)
+    if warning:
+        print(f"WARNING: {warning}")
+
+
+def aspect_inert_warning(thickness):
+    """#502: why the drill aspect-ratio floor is not applied to a board
+    ``thickness`` mm thick, or None when it is (or the thickness is unknown)."""
+    if not thickness or thickness <= MAX_STANDARD_THICKNESS + 1e-9:
+        return None
+    return (f"the board declares a {thickness:g} mm thickness, past the "
+            f"{MAX_STANDARD_THICKNESS:g} mm thickest standard board: the drill "
+            f"aspect-ratio floor is not applied. Check the Board Setup stackup "
+            f"(a dielectric left at KiCad's 1.51 mm default reads this way) and "
+            f"set the thickness the board is made at (#502).")
 
 
 def get_board_thickness():
@@ -631,20 +659,34 @@ def min_drill_for_thickness(thickness, ratio):
     return math.ceil(round(thickness / ratio, 6) * 1000.0 - 1e-6) / 1000.0
 
 
+def aspect_raised_drill(drill, copper_layer_count, thickness):
+    """The drill (mm) a rung of ``drill`` is raised to on a board
+    ``thickness`` mm thick (#502), or None when it stays: the thickness is
+    unknown, past :data:`MAX_STANDARD_THICKNESS`, or within
+    :data:`ASPECT_THICKNESS_TOLERANCE` of the thickness ``drill`` is legal at."""
+    if (not drill or not thickness
+            or thickness > MAX_STANDARD_THICKNESS + 1e-9):
+        return None
+    ratio = aspect_ratio_for_drill(drill, copper_layer_count)
+    if thickness <= drill * ratio * (1.0 + ASPECT_THICKNESS_TOLERANCE) + 1e-9:
+        return None
+    need = min_drill_for_thickness(thickness, ratio)
+    return need if need > drill + 1e-9 else None
+
+
 def _aspect_raised(rungs, copper_layer_count, thickness):
     """``rungs`` with each via drill raised to the board thickness's aspect
-    floor (#502), the diameter grown to keep the rung's own annular ring
-    (:func:`_via_holding_ring`). Unchanged when the thickness is unknown or
-    no rung's drill is under its floor."""
+    floor (#502, :func:`aspect_raised_drill`), the diameter grown to keep the
+    rung's own annular ring (:func:`_via_holding_ring`). Unchanged when no
+    rung's drill is raised."""
     if not thickness:
         return rungs
     out = []
     for r in rungs:
         d = r.get('via_drill')
         if d:
-            need = min_drill_for_thickness(
-                thickness, aspect_ratio_for_drill(d, copper_layer_count))
-            if need > d + 1e-9:
+            need = aspect_raised_drill(d, copper_layer_count, thickness)
+            if need:
                 r = dict(r, via_drill=need, via_diameter=_via_holding_ring(
                     r['via_diameter'], need, (r['via_diameter'] - d) / 2.0))
         out.append(r)
@@ -1393,20 +1435,24 @@ def escalation_summary():
 def aspect_floor_summary():
     """#502: what this run's board thickness raised, or None: the thickness
     and, per raised rung of the active tier, its aspect ratio, the via drill
-    floor it makes and the table's drill it replaced."""
+    floor it makes and the table's drill it replaced. A thickness past the
+    standard range raises nothing and says so (``not_applied``)."""
     if not _BOARD_THICKNESS:
         return None
+    if aspect_inert_warning(_BOARD_THICKNESS):
+        return {'board_thickness_mm': _BOARD_THICKNESS, 'rungs': [],
+                'not_applied': 'thicker_than_standard',
+                'max_standard_thickness_mm': MAX_STANDARD_THICKNESS}
     rows = []
     # The multilayer bucket carries every rung; both buckets' drills agree.
     for r in _table_rungs(4, _DEFAULT_TIER, _DEFAULT_OVERRIDES):
         d = r.get('via_drill')
         if not d or any(x['table_via_drill'] == d for x in rows):
             continue
-        ratio = aspect_ratio_for_drill(d, 4)
-        need = min_drill_for_thickness(_BOARD_THICKNESS, ratio)
-        if need > d + 1e-9:
-            rows.append({'max_aspect_ratio': ratio, 'via_drill': need,
-                         'table_via_drill': d})
+        need = aspect_raised_drill(d, 4, _BOARD_THICKNESS)
+        if need:
+            rows.append({'max_aspect_ratio': aspect_ratio_for_drill(d, 4),
+                         'via_drill': need, 'table_via_drill': d})
     return ({'board_thickness_mm': _BOARD_THICKNESS, 'rungs': rows}
             if rows else None)
 
@@ -1438,7 +1484,13 @@ def escalation_report_line():
         _where = ("the board's own declared floors"
                   if s['fab_tier_target'] == 'board_floors' else 'advanced')
         parts.append(f"{s['fab_tier_escalations']} fab-tier escalation(s) to {_where}")
-    if s.get('aspect_floor'):
+    if s.get('aspect_floor', {}).get('not_applied'):
+        a = s['aspect_floor']
+        parts.append(f"drill aspect ratio not applied: the declared "
+                     f"{a['board_thickness_mm']:g} mm thickness is past the "
+                     f"{a['max_standard_thickness_mm']:g} mm thickest standard "
+                     f"board (check the stackup)")
+    elif s.get('aspect_floor'):
         a = s['aspect_floor']
         raised = ', '.join(f"{r['via_drill']:g} mm at {r['max_aspect_ratio']:g}:1"
                            for r in a['rungs'])

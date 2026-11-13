@@ -6844,6 +6844,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                   + ("; per-net board/rule minimums applied (#530)" if _size_rules else "")
                   + (f"; through-via drill held to {_aspect:g}:1 on this {_thick:g} mm "
                      f"board (#502)" if _aspect else ""))
+            from fab_tiers import aspect_inert_warning
+            if aspect_inert_warning(_thick):
+                print(f"WARNING: {aspect_inert_warning(_thick)}")
         # #1390: a .kicad_dru size rule whose condition is not modelled
         # (A.insideCourtyard(), ...) binds copper the minimums above
         # know nothing about, and used to vanish: the clearance half got
