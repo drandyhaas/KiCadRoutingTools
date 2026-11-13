@@ -33,9 +33,9 @@ Checks:
   7. a board whose micro vias are IN the pads is routed from them the same
      way, and the inner step lays nothing on a layer outside its span (its
      in-pad rescue used to put a stub on F.Cu);
-  8. on a board with a copper pour, a step on a partial span does not run
-     the plane finalize (its taps are through vias at the step's via size),
-     says so, and still lays only vias of the span.
+  8. on a board with a copper pour on a layer outside the span, the step's
+     plane finalize runs, says that pour is not its to tap (a via of the
+     span cannot reach it), and the step still lays only vias of the span.
 """
 import contextlib
 import io
@@ -300,8 +300,9 @@ def no_finalize(td, board):
                     '--nets', 'S*', '--via-span', 'F.Cu', 'In1.Cu'],
               accept=True, timeout=1800)
     log = (r.stdout or '') + (r.stderr or '')
-    ok('Plane finalize not run: this step lays micro vias on F.Cu-In1.Cu' in log,
-       "the run says the plane finalize was not run")
+    ok('pour(s) outside the via span F.Cu-In1.Cu are not tapped by this step' in log
+       and 'S01 on B.Cu' in log,
+       "the run says the pour outside the span is not tapped")
     kinds = sorted({(v.via_type, tuple(v.layers)) for v in load(evidence(out)).vias})
     ok(kinds == [('micro', ('F.Cu', 'In1.Cu'))], f"every via is the span's: {kinds}")
 

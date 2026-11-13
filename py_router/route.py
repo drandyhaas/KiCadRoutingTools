@@ -320,6 +320,9 @@ _FINALIZE_ROUTE_KNOBS = (
     # #1260: the step's pour barriers, so a casualty reconnect cannot cut
     # the out-of-scope pours the step itself was kept out of.
     'pour_barriers',
+    # #1842: the step's via span, so the finalize's taps, joins and
+    # reconnects are vias of the span too (repair_planes reads it here)
+    'via_span', 'via_span_type',
 )
 
 
@@ -7616,18 +7619,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"KICAD_FINALIZE_ONLY=1 + --skip-routing)")
         except Exception as _e9c:
             print(f"  (pre-finalize checkpoint failed: {_e9c})")
-    # #1842: the plane finalize lays THROUGH taps, at the step's via size. A
-    # step on a partial span draws a micro, blind or buried via of that size,
-    # so it does not run the finalize; the plane step does.
-    _span_no_finalize = bool(config.via_span) and config.via_span_type != 'through'
-    if (_span_no_finalize and final_reconcile and not quick
-            and (getattr(pcb_data, 'zones', None) or [])):
-        print(f"\n  Plane finalize not run: this step lays {config.via_span_type} vias "
-              f"on {config.via_span[0]}-{config.via_span[-1]}, and a plane tap is a "
-              f"through via. Run the plane step for the plane nets.")
     if (final_reconcile and (not skip_routing or _fin_only)
             and not _ckpt_stop and not quick
-            and not _span_no_finalize
             and (output_file or return_results)
             and not _plane_finalize_active()
             and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
@@ -7697,6 +7690,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # OVER-credits (castor-class gaps only KiCad's exact fill
             # sees), and the oracle is the model-independent verifier --
             # on a healthy board it costs one refill and exits at round 0.
+            if config.via_span and config.via_span_type != 'through':
+                # #1842: a via of the span reaches a plane only on a layer the
+                # span has; the others are not this step's to tap
+                _off1842 = sorted({f"{n} on {l}" for n, l in _zpairs
+                                   if l not in config.via_span})
+                if _off1842:
+                    print(f"\n  Plane finalize: {len(_off1842)} pour(s) outside the via "
+                          f"span {config.via_span[0]}-{config.via_span[-1]} are not "
+                          f"tapped by this step: {', '.join(_off1842[:6])}"
+                          f"{' ...' if len(_off1842) > 6 else ''}")
+                _zpairs = [(n, l) for n, l in _zpairs if l in config.via_span]
             _zpairs_all = list(_zpairs)
             _ship_scope678 = sorted({n for n, _l in _zpairs_all})
             if _zpairs:
