@@ -763,6 +763,38 @@ def move_copper_graphics_to_silkscreen_board(board):
     return moved
 
 
+def live_room_width_test(board):
+    """#1843: ``(held, unread)`` for the live board's track scans, the GUI
+    twin of `fix_kicad_drc_settings._board_track_widths`: ``held`` is
+    `area_clearance.room_width_test` (None without a rule-area track_width
+    rule) and ``unread`` True when the board has such a rule that could not
+    be read -- said on the console, and the caller then measures no track,
+    so it never lowers the board's minimum to a width it could not judge."""
+    try:
+        import pcbnew
+        from area_clearance import room_width_test
+        return room_width_test(
+            board_path=board.GetFileName() or '',
+            copper=[board.GetLayerName(l) for l in board.GetEnabledLayers().Seq()
+                    if pcbnew.IsCopperLayer(l)]), False
+    except Exception as e:
+        print(f"  ERROR: the board's rule-area track_width rules could not be "
+              f"read ({type(e).__name__}: {e}); min_track_width is not measured "
+              f"on this board")
+        return None, True
+
+
+def live_track_held(board, track, held) -> bool:
+    """`live_room_width_test`'s ``held`` for one live track."""
+    if held is None:
+        return False
+    import pcbnew
+    a, b = track.GetStart(), track.GetEnd()
+    return bool(held(pcbnew.ToMM(a.x), pcbnew.ToMM(a.y), pcbnew.ToMM(b.x),
+                     pcbnew.ToMM(b.y), board.GetLayerName(track.GetLayer()),
+                     pcbnew.ToMM(track.GetWidth())))
+
+
 def board_minima_from_live(board):
     """The GUI twin of fix_kicad_drc_settings.scan_board_minima(), read from the
     LIVE pcbnew board instead of re-parsing the board file.
@@ -787,6 +819,7 @@ def board_minima_from_live(board):
     try:
         import pcbnew
         widths, via_sizes, via_drills, annular, holes = [], [], [], [], []
+        _held, _widths_unread = live_room_width_test(board)
         for t in board.GetTracks():
             try:
                 if t.Type() == pcbnew.PCB_VIA_T:
@@ -810,6 +843,8 @@ def board_minima_from_live(board):
                         annular.append((w - d) / 2.0)
                 else:
                     w = pcbnew.ToMM(t.GetWidth())
+                    if w and live_track_held(board, t, _held):
+                        continue
                     if w:
                         widths.append(w)
             except Exception:
@@ -854,7 +889,7 @@ def board_minima_from_live(board):
         out = {}
         if ovr:
             out['min_pad_clearance_override'] = min(ovr)
-        if widths:
+        if widths and not _widths_unread:
             out['min_track_width'] = min(widths)
         if via_sizes:
             out['min_via_diameter'] = min(via_sizes)
@@ -1095,7 +1130,9 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                  'min_via_annular_width': [],
                  'min_via_drill': []}   # mm, for the disclosure census
 
-        # Actual board minima (copper tracks/vias only).
+        # Actual board minima (copper tracks/vias only). #1843: a track a
+        # rule area's track_width rule binds is graded at the rule
+        _held1843, _unread1843 = live_room_width_test(board)
         min_w = min_via = min_drill = min_ann = None
         for t in board.GetTracks():
             try:
@@ -1130,6 +1167,8 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                         _objs['min_via_annular_width'].append((w - d) / 2e6)
                 else:
                     w = t.GetWidth()
+                    if _unread1843 or live_track_held(board, t, _held1843):
+                        continue
                     min_w = w if min_w is None else min(min_w, w)
                     _objs['min_track_width'].append(w / 1e6)
             except Exception:

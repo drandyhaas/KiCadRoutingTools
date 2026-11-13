@@ -851,12 +851,13 @@ class RoutingDialog(wx.Dialog):
         if event is not None:
             event.Skip()
 
-    def _fab_floored(self, ctrl_name, val):
+    def _fab_floored(self, ctrl_name, val, laser=False):
         """Pin ``val`` UP to the physical fab floor for ``ctrl_name`` (the fab
         can't make sub-floor geometry) -- parity with the CLI's enforce_fab_floors:
         the advanced rung, or the fab-overrides file. Idempotent for a control
-        value that was already fab-floored interactively."""
-        floor = self._fab_floor_for_ctrl(ctrl_name)
+        value that was already fab-floored interactively. ``laser``: the value
+        is a laser-drilled micro via's (#1842), which that floor does not bind."""
+        floor = self._fab_floor_for_ctrl(ctrl_name, laser=laser)
         if floor is not None and val is not None and val < floor:
             return floor
         return val
@@ -894,7 +895,7 @@ class RoutingDialog(wx.Dialog):
         return self._fab_floored('board_edge_clearance', val)
 
 
-    def _effective_geometry_floor(self, name):
+    def _effective_geometry_floor(self, name, laser=False):
         """Geometry floor to route/grade with (#439 parity with the CLI):
         the dedicated control when its override checkbox is checked; otherwise
         the board's own value -- Default net-class for track/clearance/via,
@@ -940,7 +941,7 @@ class RoutingDialog(wx.Dialog):
             if board_val is not None and board_val <= 0:
                 board_val = None
             val = board_val if board_val is not None else getattr(self, name).GetValue()
-        return self._fab_floored(name, val)
+        return self._fab_floored(name, val, laser=laser)
 
     def _board_clearance(self):
         """The clearance a run naming none starts from, as the routing CLIs
@@ -963,15 +964,19 @@ class RoutingDialog(wx.Dialog):
             return -1.0
         return self.same_net_pad_clearance.GetValue()
 
-    def _effective_via_size(self):
+    def _effective_via_size(self, laser=False):
         """Pinned up so the via keeps the fab floor's annular ring around the
         effective drill (#1433) -- parity with the CLI's enforce_fab_floors,
         through the same fab_tiers.via_size_for_annular_ring. Like the CLI,
         which pins only when --via-size AND --via-drill are both given, this
         pins only when both override checkboxes are checked; a board-derived
-        value is the board's own and is left as it is."""
-        val = self._effective_geometry_floor('via_size')
-        if not (self.via_size_check.GetValue() and self.via_drill_check.GetValue()):
+        value is the board's own and is left as it is. ``laser`` (the route
+        tab's via span is a laser-drilled micro via's, `_via_span_laser`):
+        neither the floor nor the ring pins it, as route.py's main passes
+        enforce_fab_floors no via for one (#1842)."""
+        val = self._effective_geometry_floor('via_size', laser=laser)
+        if laser or not (self.via_size_check.GetValue()
+                         and self.via_drill_check.GetValue()):
             return val
         from fab_tiers import via_size_for_annular_ring, parse_fab_overrides
         ncu = len(self.pcb_data.board_info.copper_layers) or 2
@@ -981,8 +986,22 @@ class RoutingDialog(wx.Dialog):
         return via_size_for_annular_ring(val, self._effective_via_drill(),
                                          ncu, tier, ovr)
 
-    def _effective_via_drill(self):
-        return self._effective_geometry_floor('via_drill')
+    def _effective_via_drill(self, laser=False):
+        return self._effective_geometry_floor('via_drill', laser=laser)
+
+    def _via_span_laser(self):
+        """Is the route tab's Via Span a laser-drilled micro via's (#1842)?
+        The same `via_span.laser_drilled` route.py's main reads for
+        --via-span / --via-span-type, so both fronts leave the same via
+        unpinned by the mechanical fab floor."""
+        try:
+            from via_span import laser_drilled
+            names = self.via_span.GetValue().replace(',', ' ').split()
+            kind = self.via_span_type.GetStringSelection()
+            return laser_drilled(self.pcb_data.board_info.copper_layers, names or None,
+                                 kind if kind in ('micro', 'blind', 'buried') else None)
+        except Exception:                                      # noqa: BLE001
+            return False
 
     def _effective_hole_to_hole_clearance(self):
         return self._effective_geometry_floor('hole_to_hole_clearance')
@@ -1324,10 +1343,16 @@ class RoutingDialog(wx.Dialog):
         self.fab_overrides_path.SetValue(path)
         self._revalidate_fab_floors()
 
-    def _fab_floor_for_ctrl(self, ctrl_name):
+    def _fab_floor_for_ctrl(self, ctrl_name, laser=None):
         """Physical fab floor (mm) for a Basic-tab spin control (fab_floor_for_param:
         the advanced rung, or the override file -- the selected tier does not move
-        it), or None if the control has no fab floor / no board loaded."""
+        it), or None if the control has no fab floor / no board loaded.
+        ``laser``: the via controls hold a laser-drilled micro via (#1842), which
+        that floor does not bind -- None reads it off the route tab's Via Span,
+        so the controls can hold the micro via route.py would take."""
+        if ctrl_name in ('via_size', 'via_drill') and (
+                self._via_span_laser() if laser is None else laser):
+            return None
         try:
             from fab_tiers import fab_floor_for_param, parse_fab_overrides
             ncu = len(self.pcb_data.board_info.copper_layers) or 2
@@ -3383,10 +3408,11 @@ class RoutingDialog(wx.Dialog):
             'clearance': self._effective_clearance(),
             # #581: via-in-pad policy (Basic tab; -1 = allowed)
             'same_net_pad_clearance': self._same_net_pad_clearance_value(),
-            'via_size': self._effective_via_size(),
+            # #1842: a laser-drilled micro via span is not pinned to the fab floor
+            'via_size': self._effective_via_size(laser=self._via_span_laser()),
             'via_from_class': not (self.via_size_check.GetValue()
                                     or self.via_drill_check.GetValue()),
-            'via_drill': self._effective_via_drill(),
+            'via_drill': self._effective_via_drill(laser=self._via_span_laser()),
             'grid_step': self.grid_step.GetValue(),
             'via_cost': self.via_cost.GetValue(),
             'move_copper_text': self.move_text_check.GetValue(),
