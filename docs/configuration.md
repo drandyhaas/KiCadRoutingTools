@@ -513,6 +513,15 @@ python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overri
 floor (the standard tier with the `--fab-overrides` file overlaid when one is given,
 else the advanced rung: 0.25/0.15 via, track/clearance 0.10/0.10 on 2-layer and
 0.0762/0.09 on 4+) and **pinned** up to it with a warning when set below.
+**Drill aspect ratio (#502).** On a board thicker than 1.6 mm every fab floor's via
+drill is raised to `thickness / ratio`, the ratio being the tier's own floor drill at
+the 1.6 mm reference a fab quotes it for (standard 8:1 = 1.6 / 0.20, advanced
+10.67:1 = 1.6 / 0.15), and the via grows to keep its ring: on a 2.0 mm board the
+rungs are 0.50/0.25, 0.338/0.188 and 0.288/0.188. The thickness is
+`BoardInfo.board_thickness`; up to 1.6 mm, or unknown, nothing moves. It holds the
+descents, the physical floor an explicit `--via-drill` is pinned to, and the drill
+`check_drc` grades a through via at, and the `Design rules [...]` line and
+`JSON_SUMMARY.design_rules.aspect_floor` state it. No flag or control.
 The selected tier and the board's own minimums bound what the router may descend to
 on its own, never an explicit request: `--via-size 0.3` under the hard `standard` tier
 is routed at 0.3 as asked (no automatic descent below it), exactly as a request below a

@@ -635,7 +635,9 @@ stackup thickness `kicad_parser` already sums. It is a floor like any other, so 
 via clamp, the escalation ladder and `check_drc` all honour it through the same path
 with no special case.
 
-(Not built: #502 has no aspect-ratio floor yet.)
+Built (#502) with the ratio at each tier's floor drill over the 1.6 mm reference
+(8 standard, 10.67 advanced, `fab_tiers.MAX_ASPECT_RATIO`), applied where the
+tier's rungs are built (`fab_tiers._tier_rungs`), so it raises nothing up to 1.6 mm.
 
 ---
 
