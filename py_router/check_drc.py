@@ -3886,7 +3886,7 @@ class _TimeDomain:
         self._args = (path, pcb_data, member)
         self._names = names
         self._model = None
-        self._zero: Dict[str, List[str]] = {}     # KiCad's own 0 ps, by reason
+        self._zero: Dict[str, List[str]] = {}     # no track/via delay, by reason
         self._unmodelled: set = set()
         self.used = False
 
@@ -3917,7 +3917,8 @@ class _TimeDomain:
               f"tuning profiles: each layer's delay, the via delay and the "
               f"pad-to-die delays (#1846)")
         for why, nets in sorted(self._zero.items()):
-            print(f"  ({kind}) {len(nets)} net(s) measure 0 ps, as in KiCad: {why} "
+            print(f"  ({kind}) {len(nets)} net(s) get no track or via delay, as in "
+                  f"KiCad: {why} "
                   f"({', '.join(sorted(nets)[:6])}{' ...' if len(nets) > 6 else ''})")
 
 

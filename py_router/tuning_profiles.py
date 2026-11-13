@@ -13,8 +13,11 @@ Measured on kicad-cli 10.0.8 (tests/test_1846_time_domain_rules.py):
     via's barrel length (as the length DRC charges it) times the via delay,
     plus its pads' pad-to-die delays;
   * a track on a layer the profile has no entry for adds nothing;
-  * a net whose class names no profile, or a profile with
-    `enable_time_domain_tuning` off, has a delay of 0 ps.
+  * a net whose class names no profile has a delay of 0 ps, its pads'
+    pad-to-die delays included;
+  * a net whose profile has `enable_time_domain_tuning` off gets no track or
+    via delay, but its pads' pad-to-die delays still count (measured on
+    kicad-cli 10.0.6: a 10 ps `die_delay` reads 10.00 ps).
 """
 import json
 import os
@@ -96,8 +99,10 @@ class DelayModel:
 
         (None, why) when it cannot be measured: its pads are not joined by
         track copper (as `net_queries.net_match_length`), or its profile
-        carries via overrides, which are not modelled. (0.0, why) when KiCad
-        itself measures 0 ps: no profile, or time-domain tuning off."""
+        carries via overrides, which are not modelled. (ps, why) when KiCad
+        gives the net no track or via delay: no profile (0 ps), or time-domain
+        tuning off (its pads' pad-to-die delays alone, as kicad-cli 10.0.6
+        measures it)."""
         from net_queries import (kicad_net_length_parts_nm, net_pads_joined,
                                  net_match_pad_to_die, _NM_PER_MM)
         pcb = self.pcb_data
@@ -107,7 +112,9 @@ class DelayModel:
         if prof is None:
             return 0.0, "its net class names no tuning profile"
         if not prof.time_domain:
-            return 0.0, f"tuning profile '{prof.name}' has time-domain tuning off"
+            return (net_match_pad_to_die(pcb, net_id, 'total', attr='die_delay'),
+                    f"tuning profile '{prof.name}' has time-domain tuning off "
+                    f"(only pad-to-die delays count)")
         if prof.via_overrides:
             return None, f"tuning profile '{prof.name}' has via overrides (not modelled)"
         segs = [s for s in pcb.segments if s.net_id == net_id]
