@@ -20,6 +20,7 @@ from dataclasses import replace
 from kicad_parser import (PCBData, Segment, Via, pad_is_plated_through,
                           plated_drill_exposed, flush_drill_peg)
 from routing_config import GridRouteConfig, GridCoord
+from via_span import via_layer_pair, via_kind
 from routing_utils import build_layer_map, pad_rect_halfspan
 from connectivity import (
     get_net_endpoints,
@@ -2952,7 +2953,8 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
                     x=_vx, y=_vy,
                     size=_vsz,
                     drill=_vdr,
-                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    layers=via_layer_pair(config),  # #1842: the step's span
+                    via_type=via_kind(config),
                     net_id=net_id
                 )
                 new_vias.append(via)
@@ -7368,7 +7370,8 @@ def _path_to_segments_vias(
                         x=vx, y=vy,
                         size=_vsz,
                         drill=_vdr,
-                        layers=["F.Cu", "B.Cu"],  # Always through-hole
+                        layers=via_layer_pair(config),  # #1842: the step's span
+                    via_type=via_kind(config),
                         net_id=net_id
                     )
                     vias.append(via)

@@ -77,6 +77,8 @@ def get_dialog_settings(dialog):
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
+        'via_span': dialog.via_span.GetValue(),
+        'via_span_type': dialog.via_span_type.GetStringSelection(),
         'rip_existing_nets': dialog.rip_existing_nets_ctrl.GetValue(),
         'layer_costs': dialog.layer_costs_ctrl.GetValue(),
 
@@ -414,6 +416,11 @@ def restore_dialog_settings(dialog, settings):
         dialog.power_widths_ctrl.SetValue(settings['power_widths'])
     if 'no_bga_zones' in settings:
         dialog.no_bga_zones_ctrl.SetValue(settings['no_bga_zones'])
+    if 'via_span' in settings:
+        dialog.via_span.SetValue(settings['via_span'])
+    if 'via_span_type' in settings:
+        _i = dialog.via_span_type.FindString(str(settings['via_span_type']))
+        dialog.via_span_type.SetSelection(_i if _i >= 0 else 0)
     if 'rip_existing_nets' in settings:
         dialog.rip_existing_nets_ctrl.SetValue(settings['rip_existing_nets'])
     if 'layer_costs' in settings:

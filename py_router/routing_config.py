@@ -312,6 +312,15 @@ class GridRouteConfig:
     # against the run's via, so a rung-1 retry from that clone must ship the
     # pair the map was stamped at, not one derived from the net's own via.
     run_via: Optional[Tuple[float, float]] = None
+    # #1842: the copper layers, top to bottom, that every via this step lays
+    # joins -- a contiguous run of the board's stack, and the only layers the
+    # step routes on. None = through vias over the whole stack. The obstacle
+    # builders then read the board through `via_span.SpanView`, so only
+    # copper on these layers (and drilled pads) blocks a via site.
+    via_span: Optional[Tuple[str, ...]] = None
+    # `Via.via_type` of those vias: 'micro', 'blind' or 'buried'
+    # (`via_span.resolve_via_span`).
+    via_span_type: Optional[str] = None
     neckdown_length: float = 2.5  # mm pad-entry zone (pad-capped width where it fits, #1318)
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias

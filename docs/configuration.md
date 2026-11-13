@@ -172,6 +172,8 @@ python3 py_router/route_diff.py in.kicad_pcb out.kicad_pcb --nets "/DQS_P" "/DQS
 | `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). **This is the flag for a chained run**: on a project an earlier step already lowered, the run stays at that lower floor instead of routing wider, which is what the recorded corpus chains and the routing skills use. GUI: the **Clearance ceiling** checkbox next to Min Clearance. A ceiling below the physical fab floor is pinned up to it with a WARNING, as `--clearance` is, so no class is lowered below that floor (#1691); a class the board itself declares below it stays as declared. A non-Default class the ceiling lowers by more than 2x (a 0.6 mm high-voltage class under 0.1) is named with a WARNING on the console and in `JSON_SUMMARY.design_rules.ceiling_lowered_classes` (class, clearance, capped value, nets); a clearance that must hold belongs in a `.kicad_dru` rule, which the ceiling never lowers (#1561) |
 | `--via-size` | Default net-class via (else 0.5) | Via outer diameter in mm. **Given** → every net's vias are this size. **Omitted** → each net's vias are drawn at its **own** net class / `.kicad_dru` `via_diameter` (#530 decision 4): the router carries one via-legality map per distinct via geometry on the board (`grid_router` 0.22.0+; an older binary routes every net at the Default class size and says so) |
 | `--via-drill` | Default net-class drill (else 0.3) | Via drill diameter in mm; per-net exactly like `--via-size` |
+| `--via-span TOP BOTTOM` | none (through vias) | `route.py`: lay vias that join only this run of neighbouring copper layers, and route on those layers only. See [Via span](#via-span) |
+| `--via-span-type` | read off the span | The via type written for `--via-span`: `micro`, `blind` or `buried` |
 | `--grid-step` | 0.1 | Grid resolution in mm |
 | `--same-net-pad-clearance` | the project's recorded value, else -1 | Edge-to-edge clearance (mm) between every via the run places and same-net pads (#581). `> 0` keeps vias off same-net SMD pads and off the net's solder-paste openings (#962), i.e. no via-in-pad, and is recorded in the sibling `.kicad_pro` so later chain steps inherit it; `-1` allows via-in-pad. On every routing CLI (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`) |
 
@@ -320,8 +322,44 @@ that cannot reach its pads within its allowed layers fails, as it would by
 hand. A `disallow via` (or `through_via`) rule is not honoured by any routing
 step and is listed NOT honoured in `design_rules.unsupported_rules`, as is any
 other token (`pad`, `zone`, `hole`, ...); a `micro_via`, `blind_via` or
-`buried_via` ban asks nothing of the router, which lays through vias only.
+`buried_via` ban asks nothing of a step that lays through vias, which is every step but a `route.py --via-span` one ([Via span](#via-span)); a `--via-span` step does not read such a ban either.
 check_drc grades every track and via token (`items-not-allowed`).
+
+<a id="via-span"></a>
+**Via span (#1842).** `route.py --via-span TOP BOTTOM` makes one route step lay
+vias that join only that run of neighbouring copper layers, and route on those
+layers only. The via type is read off the span: `micro` for two neighbouring
+layers one of which is an outer layer (`F.Cu In1.Cu`), `blind` for a longer span
+that reaches one outer layer, `buried` for a span that reaches neither
+(`In1.Cu In6.Cu` on an 8-layer board); `--via-span-type` overrides it where the
+span allows. The whole stack is no span: through vias, as without the flag.
+
+- **What blocks a via of the span** is the copper on the span's layers, and
+  every drilled pad (its barrel passes through the span). Tracks, pours and
+  undrilled pads on other layers, and vias with no copper on the span's layers,
+  do not: the step's obstacle maps are built from the board without them
+  (`via_span.SpanView`). So a pad on B.Cu no longer closes a micro via site on
+  F.Cu-In1.Cu.
+- **Size.** With no `--via-size` / `--via-drill`, a micro via span draws the
+  board's Default net-class micro via (`microvia_diameter` / `microvia_drill`)
+  on every net. The fab floor's via sizes are a mechanical drill's and are not
+  applied to it, and its size is not written into the output project's via or
+  drilled-hole minimums (`check_drc` grades a micro via at the micro via
+  minimums, #1844). A blind or buried span uses the run's via as a through via
+  step does.
+- **BGA fields.** A micro via span allows vias inside a BGA's pad field, as
+  `--no-bga-zones` does: a micro via between the balls is how a dense part
+  escapes. Give `--no-bga-zones` with references to keep the rest.
+- **One span per step.** A board with several via types is routed as one step
+  per sub-stack; a single search does not choose between via types. A net whose
+  pads are on layers outside the span has nothing to route to in that step.
+- The GUI route tab has the same two controls (**Via Span**, and the type
+  beside it). The fan-out, diff-pair and plane steps lay through vias only.
+
+On an 8-layer board with a 0.8 mm BGA over a field of bottom-side pads
+(`tests/fixtures/1842`), a bare route completes 25 of 36 nets with through
+vias; `--via-span F.Cu In1.Cu` completes all 36 with micro vias, clean in
+`check_drc`, `check_connected` and KiCad's DRC against the board's own rules.
 
 **Via rules (#1676).** A step given no explicit via (`--via-size` omitted, the
 GUI's Via Size override unticked) starts from a via that meets the

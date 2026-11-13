@@ -334,6 +334,9 @@ _PARAM_CONTROL_ALIASES = {
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
 _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
+                  # #1842: --via-span's two layer names -> one text field,
+                  # --via-span-type -> the choice beside it
+                  'via_span', 'via_span_type',
                   # #530: --clearance-ceiling -> Min Clearance + the ceiling box
                   'clearance_ceiling',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
@@ -590,6 +593,22 @@ def apply_step_params(step, dialog):
                 ctl.SetValue(' '.join(str(v) for v in value) or 'ALL')
             else:
                 ctl.SetValue('ALL' if value else '')
+            return True
+        if name == 'via_span':
+            ctl = getattr(dialog, 'via_span', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(' '.join(str(v) for v in value)
+                         if isinstance(value, (list, tuple)) else str(value or ''))
+            return True
+        if name == 'via_span_type':
+            ctl = getattr(dialog, 'via_span_type', None)
+            if ctl is None:
+                return False
+            _i = ctl.FindString(str(value or 'auto'))
+            if _i < 0:
+                return False
+            ctl.SetSelection(_i)
             return True
         if name == 'power_nets' and isinstance(value, (list, tuple)):
             ctl = getattr(dialog, 'power_nets_ctrl', None)

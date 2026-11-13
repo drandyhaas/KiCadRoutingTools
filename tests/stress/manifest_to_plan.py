@@ -360,6 +360,8 @@ FLAG_PARAMS = {
 }
 LIST_FLAGS = {
     '--layers': 'layers',
+    # #1842: route.py's via span (nargs=2: the top and bottom layer)
+    '--via-span': 'via_span',
     '--power-nets': 'power_nets',
     '--power-nets-widths': 'power_nets_widths',
     '--layer-costs': 'layer_costs',
@@ -419,6 +421,8 @@ BOOL_FLAGS = {
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
     '--no-bga-zone': 'no_bga_zone',
     '--no-bga-zones': 'no_bga_zone',
+    # #1842: the via type written for --via-span (the span itself is a LIST flag)
+    '--via-span-type': 'via_span_type',
     # #489 section 9: now on every step that writes pad/via copper (route,
     # route_diff, route_planes, route_disconnected_planes, bga/qfn fanout).
     '--add-teardrops': 'add_teardrops',
@@ -850,7 +854,7 @@ def parse_command(argv, cwd=None):
     # LIST_FLAGS row's own comment says a converted plan used to drop it, and
     # it still did (26 kept bga_fanout steps on 18 corpus boards).
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers', '--polarity-swap-nets', '--coplanar-nets',
+              '--layers', '--via-span', '--polarity-swap-nets', '--coplanar-nets',
               '--rip-existing-nets', '--plane-net-layers', '--keep-away'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]

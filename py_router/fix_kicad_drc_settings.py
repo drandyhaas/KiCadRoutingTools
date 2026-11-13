@@ -1227,8 +1227,10 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
                 # sit under the original floor when none of them is a track.
                 "min_track_width": [s.width for s in pcb.segments
                                     if s.width and not getattr(s, 'graphic', False)],
-                "min_via_diameter": [v.size for v in pcb.vias if v.size],
-                "min_via_drill": [v.drill for v in pcb.vias if v.drill],
+                "min_via_diameter": [v.size for v in pcb.vias if v.size
+                                     and getattr(v, 'via_type', None) != 'micro'],
+                "min_via_drill": [v.drill for v in pcb.vias if v.drill
+                                  and getattr(v, 'via_type', None) != 'micro'],
                 "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
                                           if v.size and v.drill and v.size > v.drill],
             }
@@ -1279,7 +1281,12 @@ def board_size_values(pcb) -> dict:
     # `rules.min_track_width 0.15 -> 0.1` on every step of a chain whose
     # only 0.1 mm "track" was a SOT-89 tab outline, and made check_complete
     # read that board as UNSOUND (run 26, esp_prog).
-    via_drills = [v.drill for v in pcb.vias if v.drill]
+    # #1842: a micro via is graded at the micro via minimums (#1844), so it
+    # says nothing about the board's via diameter, via drill or smallest
+    # drilled hole. Its ring does count: KiCad holds a micro via to
+    # min_via_annular_width.
+    drilled = [v for v in pcb.vias if getattr(v, 'via_type', None) != 'micro']
+    via_drills = [v.drill for v in drilled if v.drill]
     # Through-hole pad / via drills set the smallest hole diameter on the board.
     hole = list(via_drills)
     for fp in pcb.footprints.values():
@@ -1290,7 +1297,7 @@ def board_size_values(pcb) -> dict:
         "min_track_width": [s.width for s in pcb.segments
                             if s.width and s.width > 0
                             and not getattr(s, 'graphic', False)],
-        "min_via_diameter": [v.size for v in pcb.vias if v.size],
+        "min_via_diameter": [v.size for v in drilled if v.size],
         "min_via_drill": via_drills,
         "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
                                   if v.size and v.drill and v.size > v.drill],

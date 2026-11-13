@@ -336,6 +336,7 @@ REFUSAL_SITES = {
     'route.py': {
         'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
         'specify the output path once: positional': ('argv', '_output_twice'),
+        '--via-span: ': ('board', "the board's copper layers"),
         'except GroupError from parse_sources':
             ('never a step', 'under --list-groups, which is refused'),
         'if args.group is not None and (not args.group.strip())':
