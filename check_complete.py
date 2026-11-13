@@ -201,8 +201,52 @@ def _kicad_drc_report(board, timeout=3600, project_edit=None, rules_edit=None):
 
 
 #: kicad-cli lists at most this many violations of one type, so a type that
-#: reaches it may have dropped a row naming any rule.
+#: reaches it may have dropped a row naming a rule that reports under it.
 _KICAD_TYPE_CAP = 199
+#: ... except `clearance`, which it lists up to 499 of (#1865; KiCad's
+#: `drc_engine.cpp`, `EXTENDED_ERROR_LIMIT`, the same from KiCad 7 to 10): 483
+#: `clearance` rows are a whole report, not one cut at 199. (Its other 499
+#: type, `unconnected_items`, is listed in an array of its own, which this
+#: grade does not read.) A KiCad before 10.0.7 can list a few rows past a
+#: limit, so a count is compared with `>=`.
+_KICAD_TYPE_CAPS = {'clearance': 499}
+
+#: The violation type(s) KiCad reports a row NAMING a rule under, by the
+#: rule's constraint (#1865): a type that was cut can have dropped a row of a
+#: rule only when the rule reports under it. Each entry is every type KiCad's
+#: DRC test providers create with the rule's name in the description, read
+#: off its sources; kicad-cli 10.0.7 reported all of them on a probe board
+#: but `microvia_drill_out_of_range` and `silk_edge_clearance`
+#: (`tests/test_1865_capped_type_scope.py` asks it again). A kind that is
+#: not listed is one nobody measured: `judge_rules` then counts every cut
+#: type against the rule, as it did for all of them before.
+_KICAD_ROW_TYPES = {
+    'clearance': ('clearance',),
+    'physical_clearance': ('clearance',),
+    'hole_clearance': ('hole_clearance',),
+    'physical_hole_clearance': ('hole_clearance',),
+    'edge_clearance': ('copper_edge_clearance',),
+    'hole_to_hole': ('hole_to_hole',),
+    'hole_size': ('drill_out_of_range', 'microvia_drill_out_of_range'),
+    'track_width': ('track_width',),
+    'track_segment_length': ('track_segment_length',),
+    'via_diameter': ('via_diameter',),
+    'annular_width': ('annular_width',),
+    'courtyard_clearance': ('courtyards_overlap',),
+    'silk_clearance': ('silk_overlap', 'silk_over_copper', 'silk_edge_clearance'),
+    'text_height': ('text_height',),
+    'text_thickness': ('text_thickness',),
+    'length': ('length_out_of_range',),
+    'skew': ('skew_out_of_range',),
+    'via_count': ('too_many_vias',),
+    'disallow': ('items_not_allowed',),
+    'assertion': ('assertion_failure',),
+}
+
+
+def _type_cap(kind):
+    """The number of rows of violation type ``kind`` KiCad's report stops at."""
+    return _KICAD_TYPE_CAPS.get(kind, _KICAD_TYPE_CAP)
 
 
 #: The rule `kicad_rule_grade` appends to the STAGED rules file to learn
@@ -317,19 +361,25 @@ def kicad_rule_grade(board, timeout=3600):
     return {'kicad_version': str(report.get('kicad_version') or 'unknown'),
             'errors_by_rule': by_rule,
             'capped_types': sorted(t for t, n in by_type.items()
-                                   if n >= _KICAD_TYPE_CAP)}
+                                   if n >= _type_cap(t))}
 
 
-def judge_rules(names, grade, dru_names):
+def judge_rules(names, grade, dru_names, kinds=None):
     """Each rule in ``names`` (the ones nothing here grades) judged by KiCad's
     ``grade`` (`kicad_rule_grade`), FAILING CLOSED (#1810). ``dru_names`` is
-    every rule name the board's `.kicad_dru` declares, in file order.
+    every rule name the board's `.kicad_dru` declares, in file order, and
+    ``kinds`` each rule's constraint kinds (`_dru_rule_kinds`).
 
     -> {name: {'verdict': 'met' | 'broken' | 'unknown', 'kicad_errors': N or
     None, 'why': str}}. A rule is `met` only when KiCad was asked, named
     exactly one rule of that name, and its report of 0 violations naming it
     cannot have been cut short; anything else it cannot attribute is
-    `unknown`, which blocks as an ungraded rule does."""
+    `unknown`, which blocks as an ungraded rule does.
+
+    A report is cut short FOR A RULE only in a violation type the rule
+    reports under (#1865, `_KICAD_ROW_TYPES`): 199 `track_width` rows drop no
+    row of a `hole_clearance` rule. A rule with a constraint kind the table
+    does not list, or one ``kinds`` does not name, is held by every cut type."""
     out = {}
     for nm in names:
         if 'error' in grade:
@@ -350,15 +400,42 @@ def judge_rules(names, grade, dru_names):
         if k:
             out[nm] = {'verdict': 'broken', 'kicad_errors': k,
                        'why': f"{k} KiCad violation{'' if k == 1 else 's'}"}
-        elif grade['capped_types']:
+            continue
+        mine = sorted(set((kinds or {}).get(nm) or ()))
+        unlisted = [c for c in mine if c not in _KICAD_ROW_TYPES]
+        under = {t for c in mine for t in _KICAD_ROW_TYPES.get(c, ())}
+        cut = [t for t in grade['capped_types']
+               if not mine or unlisted or t in under]
+        if cut:
+            how = ('' if mine and not unlisted else
+                   (f" (which type a {', '.join(unlisted)} rule reports under "
+                    f"is not known here)" if mine else
+                    ' (its constraint kinds were not read)'))
             out[nm] = {'verdict': 'unknown', 'kicad_errors': 0,
-                       'why': (f"KiCad's report is cut at {_KICAD_TYPE_CAP} rows "
-                               f"of {', '.join(grade['capped_types'])}, so its "
-                               f"0 rows naming it may be a dropped row")}
+                       'why': ("KiCad's report is cut at "
+                               + ', '.join(f'{_type_cap(t)} rows of {t}'
+                                           for t in cut)
+                               + f"{how}, so its 0 rows naming it may be a "
+                                 f"dropped row")}
         else:
             out[nm] = {'verdict': 'met', 'kicad_errors': 0,
                        'why': '0 KiCad violations'}
     return out
+
+
+def _dru_rule_kinds(board):
+    """{rule name: its constraint kinds} for every rule the `.kicad_dru`
+    beside ``board`` declares once; {} without one. A name declared twice has
+    no entry: `judge_rules` cannot attribute a row to it anyway."""
+    dru = os.path.splitext(board)[0] + '.kicad_dru'
+    if not os.path.isfile(dru):
+        return {}
+    from design_rules import parse_dru
+    with open(dru, encoding='utf-8') as fh:
+        rules = parse_dru(fh.read())[0]
+    names = [r.name for r in rules]
+    return {r.name: sorted(r.constraints) for r in rules
+            if names.count(r.name) == 1}
 
 
 def _dru_rule_names(board):
@@ -902,10 +979,12 @@ def _grade(a, doc):
         try:
             grade = kicad_rule_grade(a.board, timeout=a.timeout)
             dru_names = _dru_rule_names(a.board)
+            dru_kinds = _dru_rule_kinds(a.board)
         except Exception as exc:                                # noqa: BLE001
             grade, dru_names = {'error': f'{type(exc).__name__}: {exc}'}, []
+            dru_kinds = {}
         judged = judge_rules(sorted({r for v in _dru.values() for r, _k in v}),
-                             grade, dru_names)
+                             grade, dru_names, dru_kinds)
         doc['kicad_rules'] = {'measured_by': 'kicad-cli',
                               'kicad_version': grade.get('kicad_version'),
                               'error': grade.get('error'),

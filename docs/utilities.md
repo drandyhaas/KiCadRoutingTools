@@ -1293,7 +1293,9 @@ by KiCad <version>`) and stops blocking; one with N blocks, named with its
 count; one KiCad's report cannot be attributed to stays as before, saying why
 (no kicad-cli, a timeout, a rules file KiCad does not load (#1690), a rule
 name the file declares twice or one containing a quote, or a violation type
-kicad-cli cut at 199 rows). Whether KiCad loaded the file is asked of KiCad:
+the rule reports under that kicad-cli cut short: it lists 199 rows of a type,
+499 of `clearance`, and a type the rule's constraint cannot report under
+holds nothing (#1865)). Whether KiCad loaded the file is asked of KiCad:
 the staged copy's rules file gets one probe rule that KiCad reports once, at
 warning severity, and a report with no row naming it or any rule of the file
 is a file KiCad dropped, whatever the reason; the refusal model check_drc and
