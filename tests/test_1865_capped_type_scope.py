@@ -284,7 +284,7 @@ def part2_limits(cli, td):
         fh.write('(version 1)\n(rule "gap" (constraint clearance (min 0.4mm)))\n'
                  '(rule "wide" (constraint track_width (min 1mm)))\n')
     got = collections.Counter(v['type'] for v in kicad_rows(cli, board))
-    # KiCad 10.0.7 stops exactly at a limit; an earlier one checks it without
+    # KiCad 10.0 stops exactly at a limit; one before 10.0 checks it without
     # a lock and can list a few rows more, so the rows are held to a band.
     check('1600 tracks under a width rule: the track_width rows stop at 199',
           check_complete._type_cap('track_width') == 199
@@ -309,7 +309,10 @@ def part2_board(td):
     kr = doc.get('kicad_rules') or {}
     cut = kr.get('capped_types') or []
     check('some other type is cut on it (track_width)', 'track_width' in cut, str(cut))
-    check('its 483 clearance rows are not read as cut', 'clearance' not in cut, str(cut))
+    # Not asserted here: that its clearance rows are not cut. kicad-cli 10.0.6
+    # lists a different number of clearance rows on this board from run to run
+    # (414 to 499), so some runs reach 499 and are rightly read as cut. That a
+    # report below 499 is whole is pinned by part 1's rows.
     check('the hole_clearance rule KiCad has 0 rows of is met',
           (kr.get('rules') or {}).get('far_corner') ==
           {'verdict': 'met', 'kicad_errors': 0, 'why': '0 KiCad violations'},

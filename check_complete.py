@@ -207,8 +207,8 @@ _KICAD_TYPE_CAP = 199
 #: `drc_engine.cpp`, `EXTENDED_ERROR_LIMIT`, the same from KiCad 7 to 10): 483
 #: `clearance` rows are a whole report, not one cut at 199. (Its other 499
 #: type, `unconnected_items`, is listed in an array of its own, which this
-#: grade does not read.) A KiCad before 10.0.7 can list a few rows past a
-#: limit, so a count is compared with `>=`.
+#: grade does not read.) A KiCad before 10.0 checks the limit without a
+#: lock and can list a few rows past it, so a count is compared with `>=`.
 _KICAD_TYPE_CAPS = {'clearance': 499}
 
 #: The violation type(s) KiCad reports a row NAMING a rule under, by the
