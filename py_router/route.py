@@ -2578,9 +2578,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # the persisted .kicad_pro record; > 0 activates (and is
                 # persisted for later chain steps); 0 / -1 explicitly OFF.
                 same_net_pad_clearance: Optional[float] = None,
-                # #1896: at most this many pads on one plane tap via of the
-                # finalize (repair_planes); None: no limit
-                tap_via_share: Optional[int] = None,
                 # #1842: (top layer, bottom layer) of the vias this step lays,
                 # and `via_span_type` to override the type read off the span
                 # (via_span.resolve_via_span). None -> through vias.
@@ -7724,13 +7721,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"KICAD_FINALIZE_ONLY=1 + --skip-routing)")
         except Exception as _e9c:
             print(f"  (pre-finalize checkpoint failed: {_e9c})")
-    # #1896: how the finalize's pad taps share vias, for the merged summary.
-    # Cleared here so a step whose finalize does not run reports none.
-    try:
-        import repair_planes as _rp1896
-        _rp1896.LAST_TAP_VIAS = None
-    except Exception:                                           # noqa: BLE001
-        _rp1896 = None
+    # #1896: the zone nets this step's plane finalize served, whose pads the
+    # end of the run counts per tap via on the board it ships (None: no
+    # finalize ran).
+    _tap_nets1896 = None
     if (final_reconcile and (not skip_routing or _fin_only)
             and not _ckpt_stop and not quick
             and (output_file or return_results)
@@ -7794,6 +7788,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # reference, so `--json-out`, the returned dict and the
                     # JSON_SUMMARY_MIN line (printed last) do.
                     summary['finalize_excluded_nets'] = _excluded9
+            _tap_nets1896 = sorted({n for n, _l in _zpairs})
             # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
             # cleanup): run them only for zone nets the fill-aware checker
             # says are incomplete on THIS run's board (pcb_data == file
@@ -7949,8 +7944,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # custody-restores casualties; KICAD_FINALIZE_RIP=0
                         # reverts for A/B.
                         rip_blocker_nets=_finalize_rip9,
-                        # #1896: the opt-in limit on pads per tap via
-                        tap_via_share=tap_via_share,
                         # #1621: never a net this step's --nets negates
                         hands_off_nets=sorted(_hands_off9(pcb_data)),
                         power_nets=power_nets,
@@ -8043,8 +8036,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if config.same_net_pad_clearance > 0 else None),
                         # Same rip-authority restoration as the GUI leg above.
                         rip_blocker_nets=_finalize_rip9,
-                        # #1896: the opt-in limit on pads per tap via
-                        tap_via_share=tap_via_share,
                         # #1621: the board below may be a fresh parse, which
                         # carries no stash -- hand the set over explicitly
                         hands_off_nets=sorted(_hands_off9(pcb_data)),
@@ -9913,20 +9904,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _rae:                               # noqa: BLE001
             print(f"  WARNING: rule-area keep-out audit skipped "
                   f"({type(_rae).__name__}: {_rae})")
-    # the --json-out document carries both shipped readings; a reader of the
-    # log alone takes them from this line
-    _shipped_audit = {k: v for k, v in (('net_keepouts', _nk_shipped),
-                                        ('rule_area_keepouts', _ra_shipped))
-                      if v is not None}
-    if _shipped_audit:
-        print('JSON_SHIPPED_AUDIT: ' + json.dumps(_shipped_audit))
 
     # #1680/#1681: copper on or inside the clearance of another net's pad, on
     # the board this run ships: a short whose net was outside this step or
     # could not be ripped, a part the clearance step could not clear, or what a
     # pass laid after the rip. Measured at the floor the writeback stores.
     # Report-only; keys absent when there is none.
-    _pad_contacts_left = _pad_grazes_left = None
+    _pad_contacts_left = _pad_grazes_left = _shipped_pcl = None
     if final_reconcile and not _ckpt_stop:
         from pad_contact import audit_shipped
         _rd_pcl = locals().get('results_data')
@@ -9941,9 +9925,44 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _rd_pcl['pad_grazes'] = _pad_grazes_left
         elif output_file and os.path.isfile(output_file):
             from kicad_parser import parse_kicad_pcb as _pk_pcl
+            _shipped_pcl = _pk_pcl(output_file)
             _pad_contacts_left, _pad_grazes_left = audit_shipped(
-                _pk_pcl(output_file), clearance=_pcl_floor,
+                _shipped_pcl, clearance=_pcl_floor,
                 area=getattr(config, 'area_clearance', None))
+
+    # #1896: how many plane-net pads each tap via serves, on the board this
+    # run ships -- every via a pad of a net the plane finalize served reaches
+    # through surface copper (the fan-out's dogbones, the finalize's taps,
+    # straps and joins, the oracle's reconnect), the same reading on both
+    # fronts. Report-only.
+    _tap_vias1896 = None
+    if final_reconcile and not _ckpt_stop and _tap_nets1896:
+        try:
+            from tap_via_census import tap_via_census, tap_via_line
+            _rd_tv = locals().get('results_data')
+            if return_results and _rd_tv is not None:
+                _tv_s, _tv_v = _gui_write_model(_rd_tv)
+                _tap_vias1896 = tap_via_census(
+                    pcb_data, _tap_nets1896,
+                    [s for _l in _tv_s.values() for s in _l],
+                    [v for _l in _tv_v.values() for v in _l])
+                _rd_tv['tap_vias'] = _tap_vias1896
+            elif _shipped_pcl is not None:
+                _tap_vias1896 = tap_via_census(_shipped_pcl, _tap_nets1896)
+            _tvl1896 = tap_via_line(_tap_vias1896)
+            if _tvl1896:
+                print(f"  {_tvl1896}")
+        except Exception as _tve:                               # noqa: BLE001
+            print(f"  (tap-via census skipped: {type(_tve).__name__}: {_tve})")
+
+    # the --json-out document carries these shipped readings; a reader of the
+    # log alone takes them from this line
+    _shipped_audit = {k: v for k, v in (('net_keepouts', _nk_shipped),
+                                        ('rule_area_keepouts', _ra_shipped),
+                                        ('tap_vias', _tap_vias1896))
+                      if v is not None}
+    if _shipped_audit:
+        print('JSON_SHIPPED_AUDIT: ' + json.dumps(_shipped_audit))
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
@@ -9959,10 +9978,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # predates the finalize, so it cannot carry this.
             if _merged is not None and _via_in_pad962 is not None:
                 _merged['via_in_pad'] = _via_in_pad962
-            # #1896: the plane finalize's tap vias and how they are shared
-            if (_merged is not None and _rp1896 is not None
-                    and (_rp1896.LAST_TAP_VIAS or {}).get('vias')):
-                _merged['tap_vias'] = _rp1896.LAST_TAP_VIAS
+            # #1896: likewise the tap vias of the shipped board
+            if _merged is not None and _tap_vias1896 is not None:
+                _merged['tap_vias'] = _tap_vias1896
             # #1798: likewise the skew rows, read on the shipped board.
             if _merged is not None and _late_skew1798 is not None:
                 if _late_skew1798:
@@ -10859,8 +10877,6 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--board-edge-clearance", type=float, default=None,
                         help="Clearance from board edge in mm. Default: the board's own "
                              f"min_copper_edge_clearance constraint, else {defaults.BOARD_EDGE_CLEARANCE}.")
-    parser.add_argument("--tap-via-share", type=int, default=None, metavar="N",
-                        help="The plane finalize's taps: At most N pads on one plane tap via (#1896): a pad whose tap would reuse a neighbour's via that already serves N pads gets a via of its own where a legal site exists, else keeps the shared tap and is named. 1 = a via per pad. Default: no limit.")
     parser.add_argument("--same-net-pad-clearance", type=float, default=None,
                         help="Edge-to-edge clearance (mm) between EVERY placed via and "
                              "same-net pads (#581). > 0 keeps vias off same-net SMD pads "
@@ -11507,7 +11523,6 @@ For differential pair routing, use route_diff.py:
                 hole_to_hole_clearance=args.hole_to_hole_clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 same_net_pad_clearance=args.same_net_pad_clearance,
-                tap_via_share=args.tap_via_share,
                 via_span=args.via_span, via_span_type=args.via_span_type,
                 via_span_escape=args.via_span_escape,
                 vertical_attraction_radius=args.vertical_attraction_radius,

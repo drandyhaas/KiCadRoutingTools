@@ -728,7 +728,6 @@ python3 py_router/repair_planes.py input.kicad_pcb --max-iterations 500000
 | `--max-search-radius` | 10.0 | Max radius to search for a via position during pad repair (mm) |
 | `--rip-blocker-nets` | off | Connect a pad that can't reach its plane by tracing to a nearby same-net pad, ripping the signal net(s) blocking that trace (see below) |
 | `--max-rip-nets` | 3 | Maximum blocker nets to rip per pad |
-| `--tap-via-share` | - | At most N pads on one tap via (#1896): a pad whose tap would reuse a neighbour's via that already serves N pads gets a via of its own where a legal site exists, else keeps the shared tap and is named (`tap_vias.over_limit`). `1` = a via per pad. With or without it the repair's `JSON_SUMMARY.tap_vias` counts the tap vias, the ones serving more than one pad and the most pads on one (`vias`, `shared_vias`, `max_pads_per_via`, `pads_on_shared_vias`), and prints a `Tap vias:` line when any is shared. Also `route.py --tap-via-share N` for the route step's plane finalize, and the route tab's **Tap Via Share** (0 = no limit) |
 | `--reroute-ripped-nets` | off | **Deprecated no-op** (issue #141 reverted): ripped blocker nets are now reconnected in-run (restore-first, an end-of-run reconnect pass, and custody restore on failure), so no separate `route.py` pass is needed. Accepted for compatibility |
 | `--power-nets` | — | Power net names needing wider tracks when re-routing ripped nets |
 | `--power-nets-widths` | — | Track width (mm) per `--power-nets` entry, for re-routing ripped nets |
@@ -776,6 +775,22 @@ re-grade), and its `JSON_SUMMARY` says what is left: `status:
 `multipoint_pads_connected`, and `unconnected_pads` (`"REF.PAD (NET)"`). A
 shortfall still exits 0, as on `route.py`; exit 4 means rip casualties ship
 open.
+
+**Pads per tap via (#1896).** A pad may reach its plane through a
+neighbour's via, joined by a surface track, rather than through a via of its
+own. On the board a step ships, every SMD pad of a plane net is followed
+through the copper on its own layer (tracks, pads, vias; no zone fill) to the
+vias it reaches that have copper on a layer the net is poured on, whoever laid
+them: a fan-out dogbone, a via in the pad, a repair tap, a strap to another
+pad, the join gate's track, the oracle's reconnect. `JSON_SUMMARY.tap_vias`
+counts them: `pads` (pads that reach a tap via), `vias`, `shared_vias` (vias
+reached by more than one pad), `max_pads_per_via`, `pads_on_shared_vias` and
+`shared` (`{net, at, pads}` per shared via, most pads first), and a
+`Tap vias:` line says the same. `repair_planes.py` measures the plane nets it
+processed on the board it wrote, after the oracle's reconnect; the route step
+measures the zone nets its plane finalize served on the board it ships, in
+`--json-out` and the GUI's `results_data` (`tap_via_census.py`). Report-only:
+nothing limits sharing.
 
 **`route_planes.py` taps nothing** (#562, see the note at the top),
 so it is the ROUTE step's in-run plane finalize that runs this repair —

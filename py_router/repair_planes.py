@@ -77,27 +77,6 @@ LAST_RIPPED_RECONNECT: Optional[Dict] = None
 # consumed two nets was caught only because a later board_score happened to be
 # read by a human. Names here, and an exit code from main().
 LAST_RIPPED_STILL_OPEN: List[str] = []
-# #1896: how the last repair's pad taps share vias -- `tap_via_summary`'s
-# record, read by main() and by route.py's finalize for their JSON_SUMMARY.
-# None = no pad repair ran.
-LAST_TAP_VIAS: Optional[dict] = None
-
-
-def _tap_key(x: float, y: float):
-    return (round(float(x), 3), round(float(y), 3))
-
-
-def tap_via_summary(tap_pads: dict, limit, over_limit) -> dict:
-    """#1896: JSON_SUMMARY['tap_vias'] from {via position: [pads tapped to
-    it this step]}: how many tap vias there are, how many serve more than
-    one pad, the most pads on one, the pads on shared vias, the opt-in limit
-    (`tap_via_share`, None without one) and the pads that had to share past
-    it (`over_limit`)."""
-    shared = {k: v for k, v in tap_pads.items() if len(v) > 1}
-    return {'vias': len(tap_pads), 'shared_vias': len(shared),
-            'max_pads_per_via': max((len(v) for v in tap_pads.values()), default=0),
-            'pads_on_shared_vias': sum(len(v) for v in shared.values()),
-            'limit': limit, 'over_limit': list(over_limit)}
 LAST_RIPPED_CUSTODY: Optional[Dict] = None
 
 # The class map the last repair_planes() run resolved (after its
@@ -943,11 +922,6 @@ def _repair_planes_all(
     # clearance. None (default) auto-reads the persisted .kicad_pro record;
     # explicit values win (the #562 finalize forwards its resolved value).
     same_net_pad_clearance: Optional[float] = None,
-    # #1896: at most this many pads on one tap via; a pad whose tap would
-    # reuse a via already serving that many gets a via of its own where a
-    # legal site exists, else keeps the shared tap and is named. None: no
-    # limit (a pad reuses a neighbour's tap whenever that is cheaper).
-    tap_via_share: Optional[int] = None,
     # #1135: the .kicad_dru track-to-track rules ({obstacle_net_id: mm}).
     # None (default) auto-reads the board's own; an explicit map wins -- the
     # #562 finalize forwards its run's, as it does layer_clearances, because
@@ -1382,12 +1356,6 @@ def _repair_planes_all(
     _tapped_pads = []
     total_pads_repaired = 0
     failed_repair_pads: List[str] = []
-    # #1896: {tap via position: [pads this step tapped to it]}, and the pads
-    # that share a via past the opt-in limit
-    _tap_pads1896: dict = {}
-    _over1896: List[str] = []
-    global LAST_TAP_VIAS
-    LAST_TAP_VIAS = None
 
     # Extract per-zone clearances and min_thickness from PCB file
     zone_props = extract_zone_properties(pcb_data)
@@ -1857,28 +1825,6 @@ def _repair_planes_all(
                             write_lists=(all_new_segments, all_new_vias))
                         if rr is not None:
                             result = rr
-                    _pname1896 = f"{pad.component_ref}.{pad.pad_number}"
-                    if (result.success and tap_via_share and result.via is None
-                            and result.reused_via_pos is not None
-                            and len(_tap_pads1896.get(
-                                _tap_key(*result.reused_via_pos), ()))
-                            >= int(tap_via_share)):
-                        # #1896: that via already serves its share of pads --
-                        # a via of this pad's own, where a legal site exists
-                        _own1896 = tap_pad_with_escalation(
-                            pad, pad_layer, net_id, pcb_data, tap_config,
-                            max_search_radius=max_search_radius,
-                            via_size=via_size, via_drill=via_drill,
-                            verbose=verbose, fine_for_all=True,
-                            distant_trace_radius=0.0, disable_reuse=True,
-                            shared_via_maps=shared_maps,
-                            plane_oracle=plane_oracle,
-                            corridor_ghosts=corridor_ghosts,
-                            plane_tap=True)
-                        if _own1896.success and _own1896.via is not None:
-                            result = _own1896
-                        else:
-                            _over1896.append(f"{_pname1896} ({net_name})")
                     if result.success:
                         total_pads_repaired += 1
                         params_note = " [fine params]" if result.params_label == 'fine' else ""
@@ -1894,15 +1840,9 @@ def _repair_planes_all(
                             ))
                             pcb_data.vias.append(new_via_objs[0])
                             where = f"placed via at ({result.via['x']:.2f}, {result.via['y']:.2f})"
-                            _tap_pads1896.setdefault(
-                                _tap_key(result.via['x'], result.via['y']),
-                                []).append(_pname1896)
                         else:
                             where = (f"reused via at ({result.reused_via_pos[0]:.2f}, "
                                      f"{result.reused_via_pos[1]:.2f})")
-                            if result.reused_via_pos is not None:
-                                _tap_pads1896.setdefault(
-                                    _tap_key(*result.reused_via_pos), []).append(_pname1896)
                         for s in result.segments:
                             all_new_segments.append(s)
                             seg_obj = Segment(
@@ -3221,8 +3161,6 @@ def _repair_planes_all(
                     _cur_dp = _dp_after   # accepted: advance the baseline
                     all_new_vias.append(result.via)
                     total_vias += 1
-                    _tap_pads1896.setdefault(
-                        _tap_key(result.via['x'], result.via['y']), []).append(name)
                     for s in result.segments:
                         all_new_segments.append(s)
                     shared_maps.note_pass_copper([new_via_obj], new_seg_objs)
@@ -3374,20 +3312,6 @@ def _repair_planes_all(
         print(f"  Total vias added: {total_vias}")
     if repair_pads:
         print(f"  Pad repair: {total_pads_repaired}/{total_pads_unconnected} unconnected pad(s) reconnected")
-        # #1896: how the taps share vias
-        LAST_TAP_VIAS = tap_via_summary(_tap_pads1896, tap_via_share, _over1896)
-        if LAST_TAP_VIAS['shared_vias'] or _over1896:
-            print(f"  Tap vias: {LAST_TAP_VIAS['vias']} tap via(s), "
-                  f"{LAST_TAP_VIAS['shared_vias']} serving more than one pad "
-                  f"({LAST_TAP_VIAS['pads_on_shared_vias']} pad(s), up to "
-                  f"{LAST_TAP_VIAS['max_pads_per_via']} on one via)"
-                  + (f"; limit {tap_via_share} pad(s) per via" if tap_via_share else
-                     " -- --tap-via-share N limits the pads on one via"))
-        if _over1896:
-            print(f"  {YELLOW}Tap vias: {len(_over1896)} pad(s) share a via past the "
-                  f"limit of {tap_via_share} (no legal site for a via of their own): "
-                  + ', '.join(_over1896[:8]) + (' ...' if len(_over1896) > 8 else '')
-                  + RESET)
         if failed_repair_pads:
             # Run-6 fix: failed_repair_pads is a historical accumulator graded
             # by the KRT fill model, which under-credits narrow real fill
@@ -3901,8 +3825,6 @@ Examples:
     parser.add_argument("--rip-blocker-nets", action="store_true",
                         help="When a plane-net pad cannot be connected, trace to a nearby same-net "
                              "pad, ripping the signal net(s) blocking it, then re-route the ripped nets.")
-    parser.add_argument("--tap-via-share", type=int, default=None, metavar="N",
-                        help="At most N pads on one plane tap via (#1896): a pad whose tap would reuse a neighbour's via that already serves N pads gets a via of its own where a legal site exists, else keeps the shared tap and is named. 1 = a via per pad. Default: no limit.")
     parser.add_argument("--max-rip-nets", type=int, default=defaults.PLANE_MAX_RIP_NETS,
                         help="Maximum number of blocker nets to rip per pad (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
@@ -4106,7 +4028,6 @@ Examples:
             max_search_radius=args.max_search_radius,
             rip_blocker_nets=args.rip_blocker_nets,
             max_rip_nets=args.max_rip_nets,
-            tap_via_share=args.tap_via_share,
             reroute_ripped_nets=args.reroute_ripped_nets,
             power_nets=args.power_nets,
             power_nets_widths=args.power_nets_widths,
@@ -4306,9 +4227,6 @@ Examples:
     # A10: nets this step ripped and could neither reconnect nor restore. They
     # ship OPEN, so they belong in the summary by name and in the exit code.
     _summary["ripped_still_open"] = list(LAST_RIPPED_STILL_OPEN)
-    # #1896: how the pad taps share vias (None: no pad repair ran)
-    if LAST_TAP_VIAS is not None:
-        _summary["tap_vias"] = LAST_TAP_VIAS
     # What this run leaves unconnected, graded on the board it wrote, after
     # the oracle reconnect above (the last pass that lays copper). Without it
     # the summary said `status: ok` over open plane pads. A shortfall is
@@ -4334,6 +4252,18 @@ Examples:
                 _summary["sense_branches"] = _sense
         except Exception as _se:                                # noqa: BLE001
             print(f"  (sense-branch summary skipped: {type(_se).__name__}: {_se})")
+        # #1896: the pads each tap via serves, on the board this step wrote
+        # (after the oracle's reconnect) -- every via a plane-net pad reaches
+        # through surface copper, whoever laid it.
+        try:
+            from tap_via_census import tap_via_census, tap_via_line
+            _tv = tap_via_census(parse_kicad_pcb(args.output_file), net_names)
+            _summary["tap_vias"] = _tv
+            _tvl = tap_via_line(_tv)
+            if _tvl:
+                print(f"  {_tvl}")
+        except Exception as _tve:                               # noqa: BLE001
+            print(f"  (tap-via census skipped: {type(_tve).__name__}: {_tve})")
     # `complete` keeps its route_summary meaning: the run FINISHED (it is never
     # a partial tally -- the CLI has no cancel source, so it finished or
     # raised). Whether the plane pads are connected is `status` and the

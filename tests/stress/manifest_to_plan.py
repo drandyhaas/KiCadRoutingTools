@@ -262,9 +262,6 @@ FLAG_PARAMS = {
     '--grid-step': 'grid_step',
     '--max-iterations': 'max_iterations',
     '--max-ripup': 'max_ripup',
-    # #1896: the plane finalize's limit on pads per tap via (route.py and the
-    # standalone repair_planes.py)
-    '--tap-via-share': 'tap_via_share',
     '--ripup-abandon-metric': 'ripup_abandon_metric',
     '--ripup-blocker-select': 'ripup_blocker_select',
     # route.py spells the strategy flag --ordering; the GUI control (and the
