@@ -196,8 +196,7 @@ def via_span_summary(config, pcb_data=None) -> Optional[dict]:
     step's plane finalize has run on a pour of the span (its taps and joins
     are vias of the span; route.py marks it, `PLANE_FINALIZE_ATTR`), else
     'not run' (no finalize, or no pour on the span's layers) -- the board's
-    zone count, and
-    how many of those zones lie on a layer outside the span
+    zone count, and how many of those zones lie on a layer outside the span
     (`zones_off_span`), which this step does not tap and the plane step
     connects. The JSON_SUMMARY line route.py prints predates the finalize,
     so it reads 'not run'; `--json-out` and the returned summary carry the
