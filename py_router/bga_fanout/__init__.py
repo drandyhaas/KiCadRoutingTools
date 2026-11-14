@@ -5527,7 +5527,11 @@ def _generate_bga_fanout_all(footprint: Footprint,
         same_net_pad_clearance=same_net_pad_clearance,
         hole_to_hole_clearance=hole_to_hole_clearance,
         bus=bus, net_clearances=net_clearances)
-    tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(**_core_kw)
+    # the footprint and board go positionally, as they always have (tests
+    # wrap the core and read them as a[0], a[1])
+    tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
+        footprint, pcb_data, **{k: v for k, v in _core_kw.items()
+                                if k not in ('footprint', 'pcb_data')})
 
     # #621 partial ledger, computed ONLY when a cancel actually fired (so an
     # ordinary run does not even build the sets). A candidate ball that carries

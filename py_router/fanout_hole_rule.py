@@ -160,7 +160,7 @@ def hole_reescape(core, args, result, dr):
             kw = dict(args, clearance=f, _pad_filter=keys, _ignore_prefanned=True,
                       check_for_previous=True, _clearance_floor=f, bus=None,
                       escape_dir_hints=None)
-            t2, v2, _vr2, _f2 = core(**kw)
+            t2, v2, _vr2, _f2 = core(kw.pop('footprint'), kw.pop('pcb_data'), **kw)
         finally:
             del pcb.segments[n_seg0:]
             del pcb.vias[n_via0:]
