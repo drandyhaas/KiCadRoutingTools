@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""#1873 (the disclosure): two shapes `net_self_overlap` missed, and a
-member it did not search.
+"""#1873 (the disclosure), three cases it missed and one place it did not
+reach.
 
 `net_queries.net_self_overlap` asked that two passes stay within a track
 width over the WHOLE length they run side by side, and compared their centre
@@ -12,9 +12,13 @@ lines with the NARROWER track's width. So:
   * a member over the segment limit, or one the search raised on, left no
     key in the pair's record, which reads the same as "none found".
 
+And the record that says `matched` (`intra_pair_matching[]`) did not carry
+the figure; only the pair's copper record did.
+
 Now the stretch counted is where the two pieces' copper overlaps (centre
-lines closer than half the two widths together), and a member not searched
-is named (`self_overlap_not_searched`, `self_overlap_error`).
+lines closer than half the two widths together), a member not searched is
+named (`self_overlap_not_searched`, `self_overlap_error`), and the
+intra-pair record carries the same keys beside its status.
 
 Rows (in memory, F.Cu):
   1. converging passes: counted over the stretch where their copper meets;
@@ -25,7 +29,10 @@ Rows (in memory, F.Cu):
      test_1873_self_overlap_disclosed.py, and two passes a width apart;
   4. the pair's copper record: a member over the limit, and a search that
      raises, are said; beside a partner that has some, the member not
-     searched reads None, not 0.
+     searched reads None, not 0;
+  5. the intra-pair record: `regrade_intra_pair_reports` copies the figure
+     beside `status`, and the two "not searched" keys with it; a clean
+     pair's record has none of them.
 
     python3 tests/test_1873_self_overlap_edges.py
 """
@@ -185,9 +192,39 @@ def record_rows(hairpin):
     return rec
 
 
+def intra_rows(rec):
+    print("5. the intra-pair record carries it beside the status")
+    from length_matching import regrade_intra_pair_reports
+
+    def regraded(copper):
+        reports = [{'pair': 'X', 'status': 'matched', 'delta_mm': 0.0,
+                    'tolerance_mm': 5.0}]
+        # the in-memory pair has no pads, so its record has no skew of its own
+        regrade_intra_pair_reports(reports, {'X': dict(copper, skew_mm=0.0006)},
+                                   None, [], 5.0)
+        return reports[0]
+
+    x = regraded(rec)
+    ok(x['status'] == 'matched' and x.get('self_overlap_mm') == {'p': 0.85, 'n': 0.0},
+       f"matched, with the 0.85 mm its skew counts twice: {x.get('self_overlap_mm')}")
+    x = regraded({'self_overlap_mm': {'p': None, 'n': 0.85},
+                  'self_overlap_not_searched': ['p']})
+    ok(x.get('self_overlap_not_searched') == ['p']
+       and x.get('self_overlap_mm') == {'p': None, 'n': 0.85},
+       f"a member not searched is named there too: {x.get('self_overlap_not_searched')}")
+    x = regraded({'self_overlap_error': 'RuntimeError: probe'})
+    ok(x.get('self_overlap_error') == 'RuntimeError: probe' and 'self_overlap_mm' not in x,
+       f"and a search that failed: {x.get('self_overlap_error')}")
+    y = regraded({})
+    ok(y['status'] == 'matched'
+       and not [k for k in y if k.startswith('self_overlap')],
+       "a clean pair's record has none of the three keys")
+
+
 def main():
     hairpin = measure_rows()
-    record_rows(hairpin)
+    rec = record_rows(hairpin)
+    intra_rows(rec)
     if FAILS:
         print(f"\nFAILED ({len(FAILS)}):")
         for f in FAILS:
