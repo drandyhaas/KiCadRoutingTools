@@ -3387,6 +3387,81 @@ class HoleRuleGate:
         return out
 
 
+def hole_rule_step_rows(pcb_data, dr, segments=(), vias=()):
+    """`hole_rule_grade` over the board with a step's own copper (``segments``
+    / ``vias``: Segments / Vias or the engines' dicts) in it, read for the
+    rows that copper is in, as (row, copper index, hole index): an index is
+    ('t', i) / ('v', i) into the lists given, None for the board's own item.
+    A step's copper already on the board (an engine appends its vias as it
+    goes) is counted once. [] with no hole_clearance rule (#1853)."""
+    segments, vias = list(segments), list(vias)
+    if _hole_rule_reach(dr) <= 0.0 or not (segments or vias):
+        return []
+    segs = [HoleRuleGate.as_segment(s) for s in segments]
+    vs = [HoleRuleGate.as_via(v) for v in vias]
+
+    def _kv(x, y, net):
+        return (round(x, 6), round(y, 6), int(net or 0))
+
+    def _ks(ax, ay, bx, by, layer, net):
+        return (round(ax, 6), round(ay, 6), round(bx, 6), round(by, 6), layer, int(net or 0))
+    seg_at = {_ks(s.start_x, s.start_y, s.end_x, s.end_y, s.layer, s.net_id): i
+              for i, s in enumerate(segs)}
+    via_at = {_kv(v.x, v.y, v.net_id): i for i, v in enumerate(vs)}
+    board_vias = [v for v in pcb_data.vias if _kv(v.x, v.y, v.net_id) not in via_at]
+    board_segs = [s for s in pcb_data.segments
+                  if _ks(s.start_x, s.start_y, s.end_x, s.end_y, s.layer, s.net_id)
+                  not in seg_at]
+    board = _HoleGateBoard(pcb_data.nets, board_vias + vs, board_segs + segs,
+                           {k: _HoleGatePads(fp.pads) for k, fp in pcb_data.footprints.items()})
+    copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
+                  or dr.copper_layers)
+    nets = {s.net_id for s in segs} | {v.net_id for v in vs}
+    rows, _unread, _drop = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets)
+    name_to_id = {n.name: nid for nid, n in pcb_data.nets.items() if n.name}
+    out = []
+    for r in rows:
+        cnet = name_to_id.get(r.get('net2'), 0)
+        hnet = name_to_id.get(r.get('net1'), 0)
+        cref = href = None
+        if r.get('seg_loc') is not None:
+            i = seg_at.get(_ks(*r['seg_loc'], r.get('layer'), cnet))
+            cref = ('t', i) if i is not None else None
+        elif r.get('via_loc') is not None:
+            i = via_at.get(_kv(*r['via_loc'], cnet))
+            cref = ('v', i) if i is not None else None
+        if r.get('hole_ref') == 'via':
+            i = via_at.get(_kv(*r['hole_loc'], hnet))
+            href = ('v', i) if i is not None else None
+        if cref is not None or href is not None:
+            out.append((r, cref, href))
+    return out
+
+
+def hole_rule_step_grade(pcb_data, dr, segments=(), vias=()):
+    """The hole_clearance rules a step's own copper breaks, per rule (#1853):
+    [{rule, min, rows, worst_mm (the least copper-to-hole distance), nets
+    (the step's nets in a row)}]. [] when it breaks none."""
+    by: Dict[str, dict] = {}
+    for r, _c, _h in hole_rule_step_rows(pcb_data, dr, segments, vias):
+        g = by.setdefault(r.get('rule') or '?', {
+            'rule': r.get('rule') or '?', 'min': r['required_mm'], 'rows': 0,
+            'worst_mm': r['required_mm'], 'nets': set()})
+        g['rows'] += 1
+        g['worst_mm'] = min(g['worst_mm'], round(r['required_mm'] - r['overlap_mm'], 4))
+        g['nets'].update(n for n in (r.get('net1'), r.get('net2')) if n)
+    return [dict(g, nets=sorted(g['nets'])) for _k, g in sorted(by.items())]
+
+
+def hole_rule_grade_lines(grade):
+    """One console line per rule of `hole_rule_step_grade`."""
+    return [f".kicad_dru rule '{g['rule']}' (hole_clearance min {g['min']:g} mm): "
+            f"{g['rows']} row(s) of this step's copper stand inside it, the nearest "
+            f"{g['worst_mm']:g} mm from a hole; nets {', '.join(g['nets'][:12])}"
+            + (f" and {len(g['nets']) - 12} more" if len(g['nets']) > 12 else '')
+            for g in grade]
+
+
 def hole_row_key(v: dict):
     """The `hole_rule_grade` pair key of a copper-to-hole row, or None."""
     t = v.get('type')

@@ -107,6 +107,11 @@ LAST_SKIPPED_INTERIOR: List[str] = []
 # EMPTY when every via meets them. The CLI's JSON_SUMMARY `board_setup_vias`
 # and the fanout tab's completion message read it.
 LAST_BOARD_SETUP_VIAS: List[Dict] = []
+# #1853: the .kicad_dru hole_clearance rules the last generate_qfn_fanout
+# call's copper breaks, per rule (`check_drc.hole_rule_step_grade`), the
+# escape kept and disclosed. JSON_SUMMARY `design_rules.hole_rules` and the
+# fanout tab read it.
+LAST_HOLE_RULES: List[Dict] = []
 
 
 def pad_has_via_escape(pad, segments, vias, escape_layer, copper_layers) -> bool:
@@ -2108,12 +2113,12 @@ def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
 
 def _hole_rule_pass(footprint, pcb_data, result):
     """#1853: the fan-out's own tracks and vias graded against the board's
-    .kicad_dru hole_clearance rules, against the board and each other; a
-    pad whose escape falls short has it taken off and its net reported
-    unescaped (fanout_hole_rule.hole_takeoff). Free without such a rule."""
-    from fanout_hole_rule import hole_takeoff
-    tracks, vias, failed = result
-    return hole_takeoff(footprint, pcb_data, tracks, vias, failed)
+    .kicad_dru hole_clearance rules, against the board and each other; what
+    they break is named per rule and kept in LAST_HOLE_RULES, the escape
+    kept (fanout_hole_rule.hole_disclose). Free without such a rule."""
+    from fanout_hole_rule import hole_disclose
+    LAST_HOLE_RULES[:] = hole_disclose(pcb_data, result[0], result[1])
+    return result
 
 
 def _generate_qfn_fanout_all(footprint: Footprint,
@@ -2222,6 +2227,7 @@ def _generate_qfn_fanout_all(footprint: Footprint,
     LAST_STUB_REPORT.clear()        # #1834: nor one with no surface fan
     LAST_POWER_STUBS_AT_WIDTH.clear()   # #1743
     LAST_BOARD_SETUP_VIAS.clear()   # #1775
+    LAST_HOLE_RULES.clear()         # #1853
     _RULES_SAID.clear()             # #1565: said once per call
     # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
     # returns early on several paths that never reach `_underpad_via_escape`
@@ -3682,6 +3688,8 @@ def main():
     _dr857 = narrowed_summary()
     if _dr857 is not None:
         summary['design_rules'] = _dr857
+    if LAST_HOLE_RULES:        # #1853: copper kept below its hole_clearance rule
+        summary.setdefault('design_rules', {})['hole_rules'] = list(LAST_HOLE_RULES)
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
     return finish_design_rules(args, 0)
 

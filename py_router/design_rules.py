@@ -3036,7 +3036,8 @@ def edge_rule_grade_lines(rows) -> List[str]:
 def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = None) -> dict:
     """The rule grades of one routing step's own copper, printed per rule and
     returned as `JSON_SUMMARY.design_rules` keys: `annular_rules` (#1649),
-    `via_rules` (#1676), `edge_rules` (#1678) and `board_setup_vias` (#1775,
+    `via_rules` (#1676), `edge_rules` (#1678), `hole_rules` (#1853) and
+    `board_setup_vias` (#1775,
     the vias below a Board Setup minimum the writeback will not lower). A rule broken by a descent is
     named here whatever the policy that allowed the descent. A disclosure only:
     it changes no copper. Both routing engines call it, so both fronts get it."""
@@ -3052,7 +3053,12 @@ def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = No
     eg = edge_rule_grade(pcb_data, segs, vias, board_path or rules.source or None)
     if eg:
         out['edge_rules'] = eg
-    for line in annular_grade_lines(ag) + via_size_grade_lines(vg) + edge_rule_grade_lines(eg):
+    from check_drc import hole_rule_step_grade, hole_rule_grade_lines
+    hg = hole_rule_step_grade(pcb_data, rules, segs, vias)     # #1853
+    if hg:
+        out['hole_rules'] = hg
+    for line in (annular_grade_lines(ag) + via_size_grade_lines(vg)
+                 + edge_rule_grade_lines(eg) + hole_rule_grade_lines(hg)):
         print(f"  {line}")
     bs = disclose_board_setup_vias(pcb_data, vias, board_path or rules.source or None, rules)
     if bs:

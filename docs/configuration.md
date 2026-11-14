@@ -726,10 +726,13 @@ own vias and tracks too) or `hole_rule_refusal`, reading the rules a step's
 `config.rules` holds (`check_drc.board_design_rules` for an engine with no
 config). Once the BGA and QFN engines are done, every track and via the call laid
 is graded with the grader, against the board and each other
-(`fanout_hole_rule`): the BGA escape takes off each ball whose escape falls short
-and escapes it again at the copper clearance that holds the rule at its via's
-ring, then takes off what still falls short; the QFN fan-out takes the escape
-off. A ball or pad left so is reported unescaped, for the route step to connect.
+(`fanout_hole_rule`). Completion first, disclosed: the BGA escape escapes each
+ball that falls short again at the copper clearance that holds the rule at its
+via's ring, and a ball that rung leaves bare keeps its first escape, below the
+rule, as the last rung; the QFN fan-out keeps its escapes. What the copper still
+breaks is named per rule on the console and in `JSON_SUMMARY.design_rules.hole_rules`
+(the fanout tab lists it too) -- the key `design_rules.disclose_step_rules` gives a
+route step's own copper.
 
 **A rule file KiCad refuses.** One thing KiCad cannot load in a `.kicad_dru` makes
 it enforce NONE of the file's rules, with exit 0 and nothing printed (measured on

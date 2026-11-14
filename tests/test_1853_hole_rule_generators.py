@@ -26,13 +26,14 @@ Checks:
      it and allowed once it is taken back; a trial's own via passed for one
      question refuses the same way; a track 0.25 mm from a via's hole is
      refused at a 0.254 rule and one 0.26 mm from it allowed.
-  F. the call's copper is graded once the engines are done: a track of a
-     fan-out 0.250 mm from another net's via hole (0.254 needed) is taken
-     off with its pad's escape and the net reported unescaped
-     (`fanout_hole_rule.hole_takeoff`, the QFN fan-out's pass), one 0.27 mm
-     from it is kept; and the BGA channel engine on the 6x6 part with a
-     0.25 mm rule, whose escapes stood inside it, re-escapes those balls and
-     returns copper the grader finds no row in.
+  F. the call's copper is graded once the engines are done, completion
+     first: a fan-out track 0.250 mm from another net's via hole (0.254
+     needed) is kept and named against the rule (`hole_disclose`, the QFN
+     fan-out's pass), one 0.27 mm from it is not named; and the BGA channel
+     engine on the 6x6 part with a 0.25 mm rule, whose escapes stood inside
+     it, re-escapes those balls at the rule, leaves no ball it had escaped
+     bare (the first escape is the last rung), and names in LAST_HOLE_RULES
+     exactly the rows its copper still has.
   The gate and the passes read the board's rules through the routing
   chokepoint (`check_drc.board_design_rules`), the table a step's
   `config.rules` holds.
@@ -179,13 +180,12 @@ def own_copper(td):
 
 def passes(td):
     print("F. the call's copper, graded once the engines are done")
-    from fanout_hole_rule import hole_takeoff, hole_violations
-    from check_drc import board_design_rules
+    from fanout_hole_rule import hole_disclose
+    from check_drc import board_design_rules, hole_rule_step_grade
     from kicad_parser import parse_kicad_pcb
     pcb = parse_kicad_pcb(stage(os.path.join(td, 'f_track'), 'track_fits'))
     sig = next(n for n in pcb.nets.values() if n.name == 'SIG').net_id
-    fp = pcb.footprints['P1']
-    for y, gone in ((6.45, True), (6.47, False)):
+    for y, named in ((6.45, True), (6.47, False)):
         tracks = [{'start': (9.0, 6.45), 'end': (12.0, 6.45), 'width': 0.1, 'layer': 'F.Cu',
                    'net_id': sig},
                   {'start': (12.0, 6.45), 'end': (12.0, y), 'width': 0.1, 'layer': 'F.Cu',
@@ -194,38 +194,47 @@ def passes(td):
                    'net_id': sig}]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            t, v, failed = hole_takeoff(fp, pcb, tracks, [], [])
-        if gone:
-            ok(t == [] and failed == ['SIG'] and 'hole_clearance (#1853)' in buf.getvalue(),
-               f"a track 0.250 mm from the hole: its escape is taken off, SIG unescaped "
-               f"({len(t)} track(s) left, failed {failed})")
+            grade = hole_disclose(pcb, tracks, [])
+        if named:
+            ok(len(grade) == 1 and grade[0]['rule'] == 'holes' and grade[0]['rows'] == 1
+               and "'holes' (hole_clearance min 0.254 mm): 1 row(s)" in buf.getvalue(),
+               f"a track 0.250 mm from the hole is kept and named: {grade}")
         else:
-            ok(len(t) == 3 and failed == [], f"0.270 mm from it: kept ({len(t)} tracks)")
+            ok(grade == [] and buf.getvalue() == '', "0.270 mm from it: nothing named")
 
+    import bga_fanout
     import test_fanout_through_via_layers as bgafix
     from bga_fanout import generate_bga_fanout
-    sub = os.path.join(td, 'f_bga')
-    os.makedirs(sub)
-    pcb = bgafix.fixture('F')
-    pcb.source_path = os.path.join(sub, 'b.kicad_pcb')
-    with open(pcb.source_path, 'w', encoding='utf-8') as fh:
-        fh.write('(kicad_pcb)\n')
-    with open(os.path.join(sub, 'b.kicad_dru'), 'w', encoding='utf-8') as fh:
-        fh.write('(version 1)\n(rule "holes"\n  (constraint hole_clearance (min 0.25mm)))\n')
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        t, v, _rm, _failed = generate_bga_fanout(
-            pcb.footprints['U1'], pcb, net_filter=[n.name for n in pcb.nets.values()],
-            layers=list(bgafix.CU), track_width=0.1, clearance=0.1, via_size=0.25,
-            via_drill=0.15, exit_margin=0.5, escape_method='channel', plane_drop='off')
+    got = {}
+    for tag, rule in (('none', None), ('rule', 0.25)):
+        sub = os.path.join(td, 'f_bga_' + tag)
+        os.makedirs(sub)
+        pcb = bgafix.fixture('F')
+        pcb.source_path = os.path.join(sub, 'b.kicad_pcb')
+        with open(pcb.source_path, 'w', encoding='utf-8') as fh:
+            fh.write('(kicad_pcb)\n')
+        if rule:
+            with open(os.path.join(sub, 'b.kicad_dru'), 'w', encoding='utf-8') as fh:
+                fh.write(f'(version 1)\n(rule "holes"\n  (constraint hole_clearance '
+                         f'(min {rule}mm)))\n')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            t, v, _rm, failed = generate_bga_fanout(
+                pcb.footprints['U1'], pcb, net_filter=[n.name for n in pcb.nets.values()],
+                layers=list(bgafix.CU), track_width=0.1, clearance=0.1, via_size=0.25,
+                via_drill=0.15, exit_margin=0.5, escape_method='channel', plane_drop='off')
+        got[tag] = (pcb, t, v, set(failed), buf.getvalue(), list(bga_fanout.LAST_HOLE_RULES))
     import re
-    m = re.search(r"hole_clearance \(#1853\): (\d+) row\(s\) of this escape", buf.getvalue())
+    pcb, t, v, failed, log, disclosed = got['rule']
+    m = re.search(r"hole_clearance \(#1853\): (\d+) row\(s\) of this escape", log)
     ok(m is not None and int(m.group(1)) > 0,
        f"the channel escape stood inside the rule and was re-escaped: "
        f"{m.group(0) if m else 'no #1853 line'}")
-    rest = hole_violations(pcb, board_design_rules(pcb), t, v)
-    ok(len(t) > 0 and rest == [], f"its copper ({len(t)} tracks, {len(v)} vias) carries no "
-                                  f"row: {rest[:4]}")
+    ok(failed <= got['none'][3], f"no ball the rule-free escape served is left bare: "
+                                 f"{sorted(failed - got['none'][3])}")
+    still = hole_rule_step_grade(pcb, board_design_rules(pcb), t, v)
+    ok(disclosed == still, f"LAST_HOLE_RULES names exactly the rows left: {disclosed}")
+    ok(got['none'][5] == [], "and nothing with no rule")
 
 
 def main():

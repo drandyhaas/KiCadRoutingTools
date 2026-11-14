@@ -4922,6 +4922,12 @@ LAST_ESCAPE_BUDGET: Dict = {}
 # JSON_SUMMARY `board_setup_vias` and the fanout tab read it.
 LAST_BOARD_SETUP_VIAS: List[Dict] = []
 
+# #1853: the .kicad_dru hole_clearance rules the last generate_bga_fanout
+# call's copper breaks, per rule (`check_drc.hole_rule_step_grade`): an
+# escape kept below its rule as the last rung. EMPTY when it breaks none.
+# JSON_SUMMARY `design_rules.hole_rules` and the fanout tab read it.
+LAST_HOLE_RULES: List[Dict] = []
+
 
 def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
                           net_filter: Optional[List[str]] = None,
@@ -5482,6 +5488,7 @@ def _generate_bga_fanout_all(footprint: Footprint,
     # member 'D[3]' fans out itself rather than 'D3' in every pass below.
     LAST_ESCAPE_BUDGET.clear()
     LAST_BOARD_SETUP_VIAS.clear()   # #1775
+    LAST_HOLE_RULES.clear()         # #1853
     LAST_FILTER_MISSES.clear()
     LAST_FILTER_MISSES.extend(net_filter_misses(footprint, pcb_data, net_filter))
     for _line in filter_miss_lines(LAST_FILTER_MISSES):
@@ -5691,17 +5698,19 @@ def _generate_bga_fanout_all(footprint: Footprint,
         LAST_PLANE_DROP_REPORT.update(rep)
     # #1853: a .kicad_dru hole_clearance rule. The engines ask the via gate
     # before they drill; the tracks they lay, and every via, are graded here
-    # with the grader against the board and each other, and a ball whose
-    # escape falls short is escaped again at a copper clearance that holds
-    # the rule (fanout_hole_rule). Free without such a rule.
+    # with the grader against the board and each other. A ball whose escape
+    # falls short is escaped again at a copper clearance that holds the rule,
+    # and keeps its first escape, disclosed, where that does not escape it
+    # (fanout_hole_rule). Free without such a rule.
     if _pad_filter is None and not _single_pass and not _fired[0]:
         from check_drc import board_design_rules, _hole_rule_reach
         _dr1853 = board_design_rules(pcb_data)
         if _hole_rule_reach(_dr1853) > 0.0:
             from fanout_hole_rule import hole_reescape
-            tracks, vias_to_add, vias_to_remove, failed_nets = hole_reescape(
+            tracks, vias_to_add, vias_to_remove, failed_nets, _hg1853 = hole_reescape(
                 _generate_bga_fanout_core, _core_kw,
                 (tracks, vias_to_add, vias_to_remove, failed_nets), _dr1853)
+            LAST_HOLE_RULES[:] = _hg1853
     if _pw is not None and _pw['threads']:
         from fab_tiers import note_narrowing
         note_narrowing(None, 'via_diameter', _pw['asked'], _pw['via'],
@@ -6223,6 +6232,8 @@ def main():
     _dr857 = narrowed_summary()
     if _dr857 is not None:
         summary['design_rules'] = _dr857
+    if LAST_HOLE_RULES:        # #1853: an escape kept below its hole_clearance rule
+        summary.setdefault('design_rules', {})['hole_rules'] = list(LAST_HOLE_RULES)
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
     return finish_design_rules(args, 0)
 
