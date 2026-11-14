@@ -42,7 +42,10 @@ Checks:
      clause, on In1.Cu alone with one, and nothing once the two nets are one
      pair's P and N): graded the same, with or without a layer clause;
   7. and routed to: the wall drawn in a net of the class keeps A1 out of the
-     slot on the layer the rule names.
+     slot on the layer the rule names;
+  8. a pad against a via, on a board whose only per-layer rule is the scoped
+     one: graded as kicad-cli 10.0.6 grades it, a through-hole pad on the
+     rule's inner layer and an SMD pad on F.Cu (check_drc used to crash).
 """
 import json
 import os
@@ -89,6 +92,35 @@ def rename(board, pairs):
         text = text.replace(f'(net "{a}")', f'(net "{b}")')
     with open(board, 'w', encoding='utf-8') as fh:
         fh.write(text)
+    return board
+
+
+def _fp(ref, x, y, pad):
+    return (f'\t(footprint "fixture:{ref}"\n\t\t(layer "F.Cu")\n\t\t(at {x} {y})\n'
+            f'\t\t(property "Reference" "{ref}"\n\t\t\t(at 0 0 0)\n\t\t\t(layer "F.SilkS")\n'
+            f'\t\t\t(hide yes)\n\t\t\t(effects\n\t\t\t\t(font\n\t\t\t\t\t(size 1 1)\n'
+            f'\t\t\t\t\t(thickness 0.15)\n\t\t\t\t)\n\t\t\t)\n\t\t)\n{pad}\t)\n')
+
+
+def _via(x, y, net):
+    return (f'\t(via\n\t\t(at {x} {y})\n\t\t(size 0.5)\n\t\t(drill 0.25)\n'
+            f'\t\t(layers "F.Cu" "B.Cu")\n\t\t(net "{net}")\n\t)\n')
+
+
+def with_pads(board):
+    """Add two pads of net X, each 0.2 mm from an A1 via: a through-hole pad
+    (copper on In1.Cu too) and an F.Cu SMD pad."""
+    tht = ('\t\t(pad "1" thru_hole circle\n\t\t\t(at 0 0)\n\t\t\t(size 0.6 0.6)\n'
+           '\t\t\t(drill 0.3)\n\t\t\t(layers "*.Cu" "*.Mask")\n'
+           '\t\t\t(remove_unused_layers no)\n\t\t\t(net "X")\n\t\t)\n')
+    smd = ('\t\t(pad "1" smd rect\n\t\t\t(at 0 0)\n\t\t\t(size 0.6 0.6)\n'
+           '\t\t\t(layers "F.Cu" "F.Mask")\n\t\t\t(net "X")\n\t\t)\n')
+    add = (_fp('P1', 22, 17.5, tht) + _via(22.75, 17.5, 'A1')
+           + _fp('P2', 30, 17.5, smd) + _via(30.75, 17.5, 'A1'))
+    with open(board, encoding='utf-8') as fh:
+        text = fh.read()
+    with open(board, 'w', encoding='utf-8') as fh:
+        fh.write(text.replace('\t(embedded_fonts no)', add + '\t(embedded_fonts no)'))
     return board
 
 
@@ -152,6 +184,22 @@ def grade(td):
         ok('NOT GRADED (clearance)' not in text, f"{tag}: nothing is listed as not graded")
 
 
+def grade_pads(td):
+    print("8. a pad against a via, where the layered rule is the board's only layer rule")
+    # kicad-cli 10.0.6 on `with_pads`: on In1.Cu the through-hole pad is
+    # flagged against the A1 via and the F.Cu SMD pad is not; on F.Cu both.
+    # check_drc used to crash on the first pad pair it priced (a pad's
+    # layers were not passed when the board had no #498 layer rule).
+    for tag, dru, rows, pad_via in (('on In1.Cu', scoped(0.3), 4, 1),
+                                    ('on F.Cu', scoped(0.3, '"F.Cu"'), 5, 2)):
+        board = with_pads(stage(os.path.join(td, 'pad_' + tag.replace(' ', '_').replace('.', '')),
+                                'pairs', dru='(version 1)\n' + dru))
+        text = drc(board, flagged=True)
+        ok(f'FOUND {rows} DRC VIOLATIONS' in text
+           and f'PAD-VIA violations ({pad_via})' in text,
+           f"{tag}: {rows} rows, {pad_via} of them pad against via")
+
+
 def grade_apart(td):
     print('6. the "keep pairs apart" shape is graded as KiCad grades it')
     for tag, dru, layers in (('no layer clause', apart(0.3), ['In1.Cu', 'F.Cu']),
@@ -188,6 +236,7 @@ def route_apart(td):
 def main():
     with tempfile.TemporaryDirectory() as td:
         grade(td)
+        grade_pads(td)
         grade_apart(td)
         route_apart(td)
 

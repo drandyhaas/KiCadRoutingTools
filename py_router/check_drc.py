@@ -6816,7 +6816,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                       f"grade for this constraint) -- the items it binds are "
                       f"not graded here; KiCad still enforces it")
     _coupled_cl = _chan.coupled
-    _chan_layers = bool(_lcl) or _coupled_dr is not None
+    # A pad's copper layers are what the pair is judged on wherever a layer
+    # map can reach it: the #498 layer rules, a coupled rule, and a scoped
+    # rule with a (layer ...) clause (#1897), which joins the pair's map even
+    # on a board with no layer rule of its own.
+    _chan_layers = (bool(_lcl) or _coupled_dr is not None
+                    or bool(getattr(_chan.scoped, 'layered_layers', None)))
 
     def _pad_pair_cl(pad, other_net: int, layer: str = None, other_pad=None,
                      other_type: str = None, other=None, want_rule: bool = False):
