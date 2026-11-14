@@ -7,11 +7,12 @@ pairs route on that run of neighbouring copper layers, every via the step
 lays joins exactly it, and only copper on those layers (and drilled pads)
 blocks a via site.
 
-The fixture (tests/fixtures/1842/diff_pair) is synthetic: the 8-layer board
-of the route step's fixture, one pair `/D0_P` + `/D0_N` with its pads either
-side of a wall of F.Cu copper the full height of the board, and a field of
-bottom-side pads under everything, 0.34 mm apart -- no through via fits
-between them. The pair has to change layer to pass the wall.
+The fixture (written by tests/fixtures/1842/diff_pair.py) is synthetic: the
+8-layer board of the route step's fixture, one pair `/D0_P` + `/D0_N` with
+its pads either side of a wall of F.Cu copper the full height of the board,
+and a field of bottom-side pads under everything, 0.34 mm apart -- no
+through via fits between them. The pair has to change layer to pass the
+wall.
 
 Checks:
   1. with through vias (route_diff.py on F.Cu + In1.Cu) the pair does not
@@ -31,7 +32,6 @@ Checks:
 """
 import json
 import os
-import shutil
 import sys
 import tempfile
 
@@ -39,11 +39,13 @@ TESTS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, 'py_router'))
 sys.path.insert(0, TESTS)
+sys.path.insert(0, os.path.join(TESTS, 'fixtures', '1842'))
 from run_utils import check, evidence  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402
+import diff_pair  # noqa: E402
 
 PY = [sys.executable, '-X', 'utf8']
-FIX = os.path.join(TESTS, 'fixtures', '1842', 'diff_pair')
+PRO = os.path.splitext(diff_pair.BASE)[0] + '.kicad_pro'
 KEYS = ('min_via_diameter', 'min_through_hole_diameter', 'min_microvia_diameter',
         'min_microvia_drill')
 FAILS = []
@@ -56,10 +58,8 @@ def ok(cond, msg):
 
 
 def route(td, tag, *extra, accept=True, **kw):
-    board = os.path.join(td, tag + '_in.kicad_pcb')
-    for ext in ('.kicad_pcb', '.kicad_pro'):
-        shutil.copy(evidence(FIX + ext, 'the fixture'),
-                    os.path.splitext(board)[0] + ext)
+    board = evidence(diff_pair.write(os.path.join(td, tag + '_in.kicad_pcb')),
+                     'the fixture')
     out = os.path.join(td, tag + '.kicad_pcb')
     summary = os.path.join(td, tag + '.json')
     r = check(PY + [os.path.join(REPO, 'py_router', 'route_diff.py'), board, out,
@@ -76,7 +76,8 @@ def own_pad_via_site():
     from obstacle_map import add_diff_pair_own_pads_as_obstacles
     from routing_config import GridRouteConfig, GridCoord
     from grid_router import GridObstacleMap
-    pcb = parse_kicad_pcb(FIX + '.kicad_pcb')
+    with tempfile.TemporaryDirectory() as td:
+        pcb = parse_kicad_pcb(diff_pair.write(os.path.join(td, 'own.kicad_pcb')))
     ids = {n.name: nid for nid, n in pcb.nets.items()}
     p, n = ids['/D0_P'], ids['/D0_N']
     pad = replace(pcb.pads_by_net[p][0], layers=['B.Cu'], drill=0)
@@ -95,7 +96,7 @@ def own_pad_via_site():
 
 
 def main():
-    with open(FIX + '.kicad_pro', encoding='utf-8') as fh:
+    with open(PRO, encoding='utf-8') as fh:
         own = json.load(fh)['board']['design_settings']['rules']
     with tempfile.TemporaryDirectory() as td:
         print("1. through vias")
