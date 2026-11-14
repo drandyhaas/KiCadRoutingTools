@@ -520,8 +520,13 @@ def held_net_reasons(pcb_data) -> Dict[str, str]:
     """{net name: `sense:<REF>.<PAD>`} for nets carrying copper a `sense:`
     group holds (#1279, Segment.held_by). Read straight from the board."""
     out: Dict[str, str] = {}
+    from via_span import HELD_OUTSIDE_SPAN
     for it in list(pcb_data.segments) + list(pcb_data.vias):
         held = getattr(it, 'held_by', '')
+        if held == HELD_OUTSIDE_SPAN:
+            # #1842: a via-span step holds the COPPER it could not lay again;
+            # the net's routes on the span stay rippable
+            continue
         net = pcb_data.nets.get(it.net_id) if held and it.net_id else None
         if net is not None and net.name:
             out.setdefault(net.name, held)

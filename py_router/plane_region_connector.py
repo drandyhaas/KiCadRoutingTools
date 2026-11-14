@@ -38,6 +38,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from grid_router import GridObstacleMap, GridRouter
 from single_ended_routing import _track_margin_for_width
+from area_clearance import (composed_builder as _area_composed_builder,
+                            compose_route_stamp as _area_compose_route_stamp)
 import routing_defaults as defaults
 
 
@@ -3469,6 +3471,7 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
     return True
 
 
+@_area_composed_builder(layers_of=lambda a: list(a['routing_layers']), via_band=True)
 def build_base_obstacles(
     exclude_net_ids: Set[int],
     routing_layers: List[str],
@@ -3478,7 +3481,8 @@ def build_base_obstacles(
     track_via_clearance: float,
     hole_to_hole_clearance: float = 0.3,
     proximity_radius: float = 3.0,
-    proximity_cost: float = 2.0
+    proximity_cost: float = 2.0,
+    _into=None,
 ) -> Tuple[GridObstacleMap, Dict[str, int]]:
     """
     Build base obstacle map with all static obstacles, excluding specified nets.
@@ -3508,7 +3512,8 @@ def build_base_obstacles(
     num_layers = len(routing_layers)
     layer_map = {layer: idx for idx, layer in enumerate(routing_layers)}
 
-    obstacles = GridObstacleMap(num_layers)
+    # #1843: `_into` is the composition's filtered view of the real map
+    obstacles = _into if _into is not None else GridObstacleMap(num_layers)
 
     # Block other nets' vias (issue #173 parity with route.py): a foreign via
     # blocks TRACK routing within foreign_via_radius + our_track_half + clearance
@@ -3795,6 +3800,15 @@ def add_route_to_obstacles(
     hole_to_hole_clearance: float = 0.3
 ):
     """Add a completed route (segments and vias) to the obstacle map for subsequent routes to avoid."""
+    if getattr(config, 'area_clearance', None) is not None:
+        # #1843: `clearance` outside the rule areas, each area's value inside
+        return _area_compose_route_stamp(
+            add_route_to_obstacles, obstacles, config,
+            sorted(layer_map, key=layer_map.get), clearance,
+            route_points=route_points, via_positions=via_positions,
+            layer_map=layer_map, track_width=track_width,
+            via_clearance=via_clearance,
+            hole_to_hole_clearance=hole_to_hole_clearance)
     coord = GridCoord(config.grid_step)
     num_layers = len(layer_map)
     cushion = config.grid_step / 2  # half-cell discretization margin (issue #173)

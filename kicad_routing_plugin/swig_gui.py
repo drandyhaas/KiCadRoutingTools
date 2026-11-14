@@ -851,12 +851,13 @@ class RoutingDialog(wx.Dialog):
         if event is not None:
             event.Skip()
 
-    def _fab_floored(self, ctrl_name, val):
+    def _fab_floored(self, ctrl_name, val, laser=False):
         """Pin ``val`` UP to the physical fab floor for ``ctrl_name`` (the fab
         can't make sub-floor geometry) -- parity with the CLI's enforce_fab_floors:
         the advanced rung, or the fab-overrides file. Idempotent for a control
-        value that was already fab-floored interactively."""
-        floor = self._fab_floor_for_ctrl(ctrl_name)
+        value that was already fab-floored interactively. ``laser``: the value
+        is a laser-drilled micro via's (#1842), which that floor does not bind."""
+        floor = self._fab_floor_for_ctrl(ctrl_name, laser=laser)
         if floor is not None and val is not None and val < floor:
             return floor
         return val
@@ -894,7 +895,7 @@ class RoutingDialog(wx.Dialog):
         return self._fab_floored('board_edge_clearance', val)
 
 
-    def _effective_geometry_floor(self, name):
+    def _effective_geometry_floor(self, name, laser=False):
         """Geometry floor to route/grade with (#439 parity with the CLI):
         the dedicated control when its override checkbox is checked; otherwise
         the board's own value -- Default net-class for track/clearance/via,
@@ -940,7 +941,7 @@ class RoutingDialog(wx.Dialog):
             if board_val is not None and board_val <= 0:
                 board_val = None
             val = board_val if board_val is not None else getattr(self, name).GetValue()
-        return self._fab_floored(name, val)
+        return self._fab_floored(name, val, laser=laser)
 
     def _board_clearance(self):
         """The clearance a run naming none starts from, as the routing CLIs
@@ -963,15 +964,19 @@ class RoutingDialog(wx.Dialog):
             return -1.0
         return self.same_net_pad_clearance.GetValue()
 
-    def _effective_via_size(self):
+    def _effective_via_size(self, laser=False):
         """Pinned up so the via keeps the fab floor's annular ring around the
         effective drill (#1433) -- parity with the CLI's enforce_fab_floors,
         through the same fab_tiers.via_size_for_annular_ring. Like the CLI,
         which pins only when --via-size AND --via-drill are both given, this
         pins only when both override checkboxes are checked; a board-derived
-        value is the board's own and is left as it is."""
-        val = self._effective_geometry_floor('via_size')
-        if not (self.via_size_check.GetValue() and self.via_drill_check.GetValue()):
+        value is the board's own and is left as it is. ``laser`` (the route
+        tab's via span is a laser-drilled micro via's, `_via_span_laser`):
+        neither the floor nor the ring pins it, as route.py's main passes
+        enforce_fab_floors no via for one (#1842)."""
+        val = self._effective_geometry_floor('via_size', laser=laser)
+        if laser or not (self.via_size_check.GetValue()
+                         and self.via_drill_check.GetValue()):
             return val
         from fab_tiers import via_size_for_annular_ring, parse_fab_overrides
         ncu = len(self.pcb_data.board_info.copper_layers) or 2
@@ -981,8 +986,22 @@ class RoutingDialog(wx.Dialog):
         return via_size_for_annular_ring(val, self._effective_via_drill(),
                                          ncu, tier, ovr)
 
-    def _effective_via_drill(self):
-        return self._effective_geometry_floor('via_drill')
+    def _effective_via_drill(self, laser=False):
+        return self._effective_geometry_floor('via_drill', laser=laser)
+
+    def _via_span_laser(self):
+        """Is the route tab's Via Span a laser-drilled micro via's (#1842)?
+        The same `via_span.laser_drilled` route.py's main reads for
+        --via-span / --via-span-type, so both fronts leave the same via
+        unpinned by the mechanical fab floor."""
+        try:
+            from via_span import laser_drilled
+            names = self.via_span.GetValue().replace(',', ' ').split()
+            kind = self.via_span_type.GetStringSelection()
+            return laser_drilled(self.pcb_data.board_info.copper_layers, names or None,
+                                 kind if kind in ('micro', 'blind', 'buried') else None)
+        except Exception:                                      # noqa: BLE001
+            return False
 
     def _effective_hole_to_hole_clearance(self):
         return self._effective_geometry_floor('hole_to_hole_clearance')
@@ -1324,10 +1343,16 @@ class RoutingDialog(wx.Dialog):
         self.fab_overrides_path.SetValue(path)
         self._revalidate_fab_floors()
 
-    def _fab_floor_for_ctrl(self, ctrl_name):
+    def _fab_floor_for_ctrl(self, ctrl_name, laser=None):
         """Physical fab floor (mm) for a Basic-tab spin control (fab_floor_for_param:
         the advanced rung, or the override file -- the selected tier does not move
-        it), or None if the control has no fab floor / no board loaded."""
+        it), or None if the control has no fab floor / no board loaded.
+        ``laser``: the via controls hold a laser-drilled micro via (#1842), which
+        that floor does not bind -- None reads it off the route tab's Via Span,
+        so the controls can hold the micro via route.py would take."""
+        if ctrl_name in ('via_size', 'via_drill') and (
+                self._via_span_laser() if laser is None else laser):
+            return None
         try:
             from fab_tiers import fab_floor_for_param, parse_fab_overrides
             ncu = len(self.pcb_data.board_info.copper_layers) or 2
@@ -1548,6 +1573,23 @@ class RoutingDialog(wx.Dialog):
         self.no_bga_zones_ctrl.SetToolTip("Disable BGA exclusion zones: component refs (e.g., U1 U3), ALL, or leave empty (default) to keep all BGA zones")
         bga_sizer.Add(self.no_bga_zones_ctrl, 1, wx.EXPAND)
         options_inner.Add(bga_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Via span (#1842): empty == CLI route.py's --via-span default (None:
+        # through vias). Two layer names == the CLI's two values.
+        span_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        span_sizer.Add(wx.StaticText(options_scroll, label="Via Span:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.via_span = wx.TextCtrl(options_scroll, value="")
+        self.via_span.SetToolTip("Lay vias that join only this run of copper layers and route on those layers only: the top and bottom layer, e.g. 'F.Cu In1.Cu' (micro vias) or 'In1.Cu In6.Cu' (buried vias). Leave empty (default) for through vias.")
+        span_sizer.Add(self.via_span, 1, wx.EXPAND)
+        self.via_span_type = wx.Choice(options_scroll, choices=['auto', 'micro', 'blind', 'buried'])
+        self.via_span_type.SetSelection(0)
+        self.via_span_type.SetToolTip("The via type written for the span: auto reads it off the span (micro for two neighbouring layers one of which is an outer layer, blind for a longer span reaching one outer layer, buried otherwise).")
+        span_sizer.Add(self.via_span_type, 0, wx.LEFT, 5)
+        self.via_span_escape = wx.Choice(options_scroll, choices=['off', 'route', 'only'])
+        self.via_span_escape.SetSelection(0)
+        self.via_span_escape.SetToolTip("Escapes for a via span: 'route' first lays a via of the span and a short track at each surface pad of the selected nets, then routes; 'only' lays the escapes and routes nothing, leaving the nets for the next sub-stack's step. 'off' (default) lays none.")
+        span_sizer.Add(self.via_span_escape, 0, wx.LEFT, 5)
+        options_inner.Add(span_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
         # Rip pre-existing nets (issue #103): make tracks committed by a
         # previous run eligible for rip-up during retry. Mirrors the CLI
@@ -2969,6 +3011,9 @@ class RoutingDialog(wx.Dialog):
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
+        self.via_span.SetValue("")  # empty == CLI default (None: through vias)
+        self.via_span_type.SetSelection(0)
+        self.via_span_escape.SetSelection(0)
         self.rip_existing_nets_ctrl.SetValue("")
         self.force_reroute.SetValue(False)  # match creation default + CLI (store_true)
         self.layer_costs_ctrl.SetValue("")
@@ -3357,10 +3402,11 @@ class RoutingDialog(wx.Dialog):
             'clearance': self._effective_clearance(),
             # #581: via-in-pad policy (Basic tab; -1 = allowed)
             'same_net_pad_clearance': self._same_net_pad_clearance_value(),
-            'via_size': self._effective_via_size(),
+            # #1842: a laser-drilled micro via span is not pinned to the fab floor
+            'via_size': self._effective_via_size(laser=self._via_span_laser()),
             'via_from_class': not (self.via_size_check.GetValue()
                                     or self.via_drill_check.GetValue()),
-            'via_drill': self._effective_via_drill(),
+            'via_drill': self._effective_via_drill(laser=self._via_span_laser()),
             'grid_step': self.grid_step.GetValue(),
             'via_cost': self.via_cost.GetValue(),
             'move_copper_text': self.move_text_check.GetValue(),
@@ -3498,6 +3544,14 @@ class RoutingDialog(wx.Dialog):
             config['no_bga_zones'] = _split_net_list(no_bga_text)
         else:
             config['no_bga_zones'] = None  # None means use BGA zones
+
+        # #1842: the via span, as route.py's --via-span / --via-span-type
+        _span_names = self.via_span.GetValue().replace(',', ' ').split()
+        config['via_span'] = _span_names or None
+        _span_type = self.via_span_type.GetStringSelection()
+        config['via_span_type'] = _span_type if _span_type in ('micro', 'blind', 'buried') else None
+        _span_escape = self.via_span_escape.GetStringSelection()
+        config['via_span_escape'] = _span_escape if _span_escape in ('route', 'only') else None
 
         # Parse rip-pre-existing-nets (issue #103): empty -> None (keep
         # pre-existing tracks fixed), ALL -> ["*"], else fnmatch patterns.
@@ -4004,6 +4058,9 @@ class RoutingDialog(wx.Dialog):
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
+                    via_span=config.get('via_span'),
+                    via_span_type=config.get('via_span_type'),
+                    via_span_escape=config.get('via_span_escape'),
                     rip_existing_nets=config.get('rip_existing_nets'),
                     force_reroute=config.get('force_reroute', False),
                     # RAW patterns (pre-expansion), like the CLI main: the #521

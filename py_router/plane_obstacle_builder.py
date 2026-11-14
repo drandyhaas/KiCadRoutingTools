@@ -13,6 +13,7 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 
 from kicad_parser import PCBData, Pad, Segment
+from area_clearance import composed_builder as _area_composed_builder
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells, pad_blocked_cells_array, \
     segment_blocked_cells_array, segment_blocked_spans
@@ -439,12 +440,14 @@ def _foreign_filled_graphic_interiors(pcb_data: PCBData, coord: GridCoord,
     return out
 
 
+@_area_composed_builder(via_band=True)
 def build_via_obstacle_map(
     pcb_data: PCBData,
     config: GridRouteConfig,
     exclude_net_id: int,
     verbose: bool = True,
     same_net_pad_clearance: float = -1.0,
+    _into=None,
 ) -> GridObstacleMap:
     """
     Build obstacle map for via placement.
@@ -489,7 +492,8 @@ def build_via_obstacle_map(
         if verbose:
             print(f"  Grid: {grid_w} x {grid_h} = {grid_w * grid_h:,} cells (grid_step={config.grid_step}mm)")
 
-    obstacles = GridObstacleMap(num_layers)
+    # #1843: `_into` is the composition's filtered view of the real map
+    obstacles = _into if _into is not None else GridObstacleMap(num_layers)
 
     # Half grid step cushion to account for grid discretization.
     grid_cushion = config.grid_step / 2
@@ -1204,13 +1208,15 @@ def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,
     block_circle(obstacles, gx, gy, radius_sq, via_mode=True)
 
 
+@_area_composed_builder(layers_of=lambda a: [a['route_layer']])
 def build_routing_obstacle_map(
     pcb_data: PCBData,
     config: GridRouteConfig,
     exclude_net_id: int,
     route_layer: str,
     skip_pad_blocking: bool = False,
-    verbose: bool = True
+    verbose: bool = True,
+    _into=None,
 ) -> GridObstacleMap:
     """
     Build obstacle map for A* routing on a specific layer.
@@ -1245,7 +1251,7 @@ def build_routing_obstacle_map(
         grid_h = int((max_y - min_y) / config.grid_step)
         print(f"  Routing grid ({route_layer}): {grid_w} x {grid_h} = {grid_w * grid_h:,} cells")
 
-    obstacles = GridObstacleMap(num_layers)
+    obstacles = (_into if _into is not None else GridObstacleMap(num_layers))
 
     # Add pads on this layer as obstacles (excluding target net)
     # Skip this entirely for plane connections where we're more lenient
