@@ -16,9 +16,11 @@ parameter, absent without. (`run_plan.py -o` writes a board that carries no
 `kicad_routing_tools` record at all, lane or not, so the GUI leg cannot be
 read off the output's records.)
 
-Needs KiCad's python (pcbnew + wx): exit 77 without it.
+Needs KiCad's python (pcbnew + wx). Run under any python, it re-execs into
+the first KiCad interpreter `kicad_locate.kicad_python_candidates` finds
+that imports both; exit 77 only when there is none.
 
-    <KiCad python> tests/gui_parity/test_1869_intra_pair_lane_gui.py
+    python3 tests/gui_parity/test_1869_intra_pair_lane_gui.py
 """
 import json
 import os
@@ -60,13 +62,29 @@ def lane(board):
     return {'p': sorted(got['/DATA+']), 'n': sorted(got.get('/DATA-') or [])}
 
 
+def _reexec_into_kicad(why):
+    """Run this gate under KiCad's python, as the other gates do; 77 when no
+    interpreter on this machine has pcbnew and wx."""
+    from kicad_locate import kicad_python_candidates
+    here = os.path.realpath(sys.executable)
+    for cand in kicad_python_candidates():
+        if not os.path.exists(cand) or os.path.realpath(cand) == here:
+            continue
+        if subprocess.run([cand, '-c', 'import pcbnew, wx'],
+                          capture_output=True).returncode == 0:
+            print(f"(re-running under KiCad's python: {cand})", flush=True)
+            return subprocess.run([cand, os.path.abspath(__file__)]
+                                  + sys.argv[1:]).returncode
+    print(f"SKIP: needs KiCad's python (pcbnew + wx), and none was found: {why}")
+    return 77
+
+
 def main():
     try:
         import pcbnew  # noqa: F401
         import wx      # noqa: F401
     except Exception as e:                                     # noqa: BLE001
-        print(f"SKIP: needs KiCad's python (pcbnew + wx): {e}")
-        return 77
+        return _reexec_into_kicad(e)
     py = [sys.executable, '-X', 'utf8']
     want = {'p': ['IC4.10', 'J1.5'], 'n': ['IC4.9', 'J1.4']}
     with tempfile.TemporaryDirectory() as td:
