@@ -709,6 +709,16 @@ pad around the hole plus the copper clearance:
   via with the rule folded in (`single_ended_routing._hole_via_excess`), so they
   cannot move copper back inside the distance the router held.
 
+Completion first, disclosed: a net that every rung holding the rule leaves open
+gets one more terminal-escalation rung, at the most permissive size the ladder
+reached and the copper clearance alone (`net_rescue._escalation_ladder`). It runs
+only in the run's last recovery tier (the final reconciliation, so a net a later
+lap joins within the rule is not joined below it first) and only under
+`--escalation fab`, the default; `board` and `off` hold the rule and ship the net
+open. The net's `terminal_escalations` entry says `below the hole_clearance
+rule(s)`, and the rows its copper stands inside are named per rule on the console
+and in that step's `JSON_SUMMARY.design_rules.hole_rules`.
+
 The value is the last rule in the file whose condition and `(layer ...)` clause
 match the pair, read either way round, as KiCad decides it, for the copper as it
 is (a track, a new via, a pad); a hole's own net is exempt. One obstacle map serves
