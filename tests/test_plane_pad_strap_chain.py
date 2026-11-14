@@ -86,6 +86,40 @@ def run():
           r2.success and r2.via is None and len(r2.segments) > 0,
           f"via={r2.via}")
 
+    # The budget is checked on the strap as ROUTED, not the straight line: a
+    # neighbour 0.6 mm away whose own track to the plane is 0.6 mm fits the
+    # 1.5 mm radius on the straight line, but a strap that detours to 1.2 mm
+    # does not, and the target is dropped (the stub router offers it first).
+    from plane_pad_tap import _try_trace_to_plane_connected
+    pad_a, pad_b, pad_c = _pad("1", 10.0), _pad("2", 10.6), _pad("3", 11.2)
+    via_a = Via(x=10.0, y=10.0, size=0.4, drill=0.2, layers=["F.Cu", "B.Cu"], net_id=1)
+    seg_ba = Segment(start_x=10.6, start_y=10.0, end_x=10.0, end_y=10.0,
+                     width=0.127, layer="B.Cu", net_id=1)
+    bi = BoardInfo(layers={0: "F.Cu", 31: "B.Cu"}, copper_layers=["F.Cu", "B.Cu"])
+    pcb3 = PCBData(board_info=bi, nets={}, footprints={}, vias=[via_a],
+                   segments=[seg_ba], pads_by_net={1: [pad_a, pad_b, pad_c]})
+    asked = []
+
+    def detour_router(length):
+        def route(positions, pad, layer, net_id, obs, config, verbose=False):
+            asked.append(list(positions))
+            if (10.6, 10.0) not in [tuple(p) for p in positions]:
+                return [], None
+            half = length / 2.0
+            return ([Segment(start_x=11.2, start_y=10.0, end_x=10.9, end_y=10.0 + half,
+                             width=0.127, layer="B.Cu", net_id=1),
+                     Segment(start_x=10.9, start_y=10.0 + half, end_x=10.6, end_y=10.0,
+                             width=0.127, layer="B.Cu", net_id=1)], (10.6, 10.0))
+        return route
+
+    for detour, want in ((0.0, True), (1.0, False)):
+        asked.clear()
+        res = _try_trace_to_plane_connected(pad_c, "B.Cu", 1, pcb3, None, _config(),
+                                            detour_router(detour), 1.5)
+        check(f"routed strap {'fits' if want else 'past the radius is refused'}",
+              (res is not None and res.success) == want,
+              f"connected={bool(res and res.success)} asks={len(asked)}")
+
     print()
     if fails:
         print(f"FAIL: {len(fails)} check(s): {fails}")

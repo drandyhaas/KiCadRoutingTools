@@ -956,6 +956,9 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
         return None
     px, py = pad.global_x, pad.global_y
     cands: List[Tuple[float, Tuple[float, float]]] = []
+    # escaped SMD neighbours reached through their own track: position -> that
+    # track's length to the plane (#1915)
+    chained = {}
     for v in local.vias:
         if v.net_id == net_id:
             # T6 island guard: "always plane-connected" only holds for a via
@@ -985,12 +988,14 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
         # link: an escaped SMD neighbour counts only when its own track to a
         # plane via plus this strap fits in it. Otherwise each new strap makes
         # the next pad's target, and a row of same-net pads chains into one web
-        # several mm from its only via (ulx3s U1.W16: 5.6 mm through 7 pads).
+        # several mm from its only via (a BGA's ground balls: 5.6 mm through 7
+        # pads). The straight-line distance only screens here; the strap as
+        # ROUTED is checked against the same budget below.
         d_opad = math.hypot(opad.global_x - px, opad.global_y - py)
-        escaped = (same_layer and d_opad <= radius
-                   and _pad_has_same_net_copper(opad, net_id, local)
-                   and _track_to_plane(opad, net_id, local, radius - d_opad,
-                                       plane_oracle) is not None)
+        d_plane = None
+        if same_layer and d_opad <= radius and _pad_has_same_net_copper(opad, net_id, local):
+            d_plane = _track_to_plane(opad, net_id, local, radius - d_opad, plane_oracle)
+        escaped = d_plane is not None
         if pad_is_plated_through(opad) or escaped:
             # T6 island guard: the "already escaped" proxy above only proves
             # the pad has copper ON it, not that the copper reaches the plane
@@ -1001,15 +1006,30 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
             d = math.hypot(opad.global_x - px, opad.global_y - py)
             if 1e-6 < d <= radius:
                 cands.append((d, (opad.global_x, opad.global_y)))
+                if d_plane and not pad_is_plated_through(opad):
+                    chained[(opad.global_x, opad.global_y)] = d_plane
     if not cands:
         return None
     # One multi-source A* over all existing-copper candidates (issue #259): route
     # the pad to whichever same-net copper is shortest-routable, building the trace
     # directly from the winning path.
     positions = [pos for _d, pos in cands]
-    segs, pos = route_multi_fn(positions, pad, pad_layer, net_id, routing_obs,
-                               config, verbose=False)
-    if segs:  # non-empty trace: the pad now reaches the existing plane copper
+    while positions:
+        segs, pos = route_multi_fn(positions, pad, pad_layer, net_id, routing_obs,
+                                   config, verbose=False)
+        if not segs:
+            return None
+        # #1915: a strap to a neighbour that reaches the plane through its own
+        # track must keep the whole path inside the radius as ROUTED; one that
+        # detoured past it drops that target and the rest are tried again.
+        beyond = chained.get(tuple(pos) if pos is not None else None)
+        if beyond is not None:
+            strap = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                        for s in segs)
+            if strap + beyond > radius + 1e-6:
+                positions = [p for p in positions if tuple(p) != tuple(pos)]
+                continue
+        # non-empty trace: the pad now reaches the existing plane copper
         return TapResult(success=True, via=None, segments=segs, reused_via_pos=pos)
     return None
 
