@@ -4241,13 +4241,14 @@ def _channel_notes(notes, channels):
     coupled = (frozenset(r.name for r in cdr.rules if r.coupled and not r.unsupported)
                if cdr is not None else frozenset())
     out = []
+    # the parser's "handled" tail, with or without a layer clause's issue
+    # number: "(#1491)" or "(#1491, #1897)"
+    handled = re.compile(r"handled by the scoped channel \(#1491[^)]*\)$")
     for n in notes:
         m = re.match(r"\.kicad_dru: rule '(.*?)': clearance ([0-9.eE+-]+)mm ", n)
-        if m and n.endswith('handled by the scoped channel (#1491)') \
-                and m.group(1) not in scoped:
-            n = n.replace('handled by the scoped channel (#1491)',
-                          'NOT priced here (the scoped channel did not read it); '
-                          'KiCad will still enforce it')
+        if m and handled.search(n) and m.group(1) not in scoped:
+            n = handled.sub('NOT priced here (the scoped channel did not read it); '
+                            'KiCad will still enforce it', n)
         elif m and m.group(1) in coupled and n.endswith('skipped, KiCad will still enforce it'):
             n = (".kicad_dru: rule '%s': clearance %smm between a diff pair's P "
                  "and its N -- handled by the coupled-pair channel (#1293)"
