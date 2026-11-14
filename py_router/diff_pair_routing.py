@@ -4779,7 +4779,7 @@ def _fold_legs_onto_middle(mid_segs, leg_segs, own_vias, net_ids):
     A leg is routed to the END of its net's coupled middle. When the terminal
     lies beside the middle short of that end, the cheapest path runs beside
     the middle, on the same layer and inside its copper, up to the end: one
-    strip of copper laid twice (glasgow_revC /IO_Banks/Z9_N, 0.85 mm, 0.05 mm
+    strip of copper laid twice (measured: 0.85 mm of an N member, 0.05 mm
     off a 0.2 mm track). The net's length counts that stretch twice, so the
     pair's skew reads matched while the signal's path is that much shorter.
 
