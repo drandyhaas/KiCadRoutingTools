@@ -7033,11 +7033,20 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # global floor. All zero-cost when the board has neither netclasses nor
     # overrides: _pair_cl returns the global scalar unchanged.
     _ncl_by_id: Dict[int, float] = {}
+    # A net class BELOW the grade clearance (the Default class's): KiCad grades
+    # two nets at the larger of their OWN classes' values, so two nets of a
+    # 0.09 mm class on a board whose Default class is 0.10 are legal at 0.09
+    # (kicad-cli 10.0.8, measured). The Default class is the value of the nets
+    # in it, not a floor under every pair. `_ncl_low` holds those nets; a
+    # board with none grades exactly as before.
+    _ncl_low: Dict[int, float] = {}
     if net_clearances:
         for nid, net in pcb_data.nets.items():
             c = net_clearances.get(net.name, 0.0)
             if c > clearance:
                 _ncl_by_id[nid] = c
+            elif 0.0 < c < clearance - 1e-9:
+                _ncl_low[nid] = c
 
     # #498: per-layer clearance rules from the board's own sibling .kicad_dru,
     # auto-read exactly like netclasses. A rule REPLACES the net/class-resolved
@@ -7133,6 +7142,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         return v[1]
 
     def _pair_base(net_a: int, net_b: int) -> float:
+        if _ncl_low and net_a in _ncl_low and net_b in _ncl_low:
+            # both nets' classes stand below the Default class's value
+            return max(_ncl_low[net_a], _ncl_low[net_b])
         return clearance if not _ncl_by_id else \
             max(clearance, _ncl_by_id.get(net_a, 0.0), _ncl_by_id.get(net_b, 0.0))
 
