@@ -300,6 +300,13 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
     track_rules: List[TrackRule] = []
     notes: List[str] = []
     skipped: List[Tuple[str, float, Optional[str]]] = []
+    _coupled_memo: List[frozenset] = []
+
+    def _coupled_orders() -> frozenset:
+        # parsed once, and only for a file with a rule that reaches the test
+        if not _coupled_memo:
+            _coupled_memo.append(_coupled_graded_orders(text))
+        return _coupled_memo[0]
     for order, node in enumerate(_parse_nodes(_tokenize(text))):
         if not isinstance(node, list) or not node or node[0] != "rule":
             continue
@@ -347,6 +354,13 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
                          f"{f' on {layer_clause}' if layer_clause else ''}"
                          f" -- handled by the track channel")
             continue
+        if (has_layer_clause and copper_clause and condition
+                and _condition_is_scoped(condition)):
+            # #1897: a scoped rule on the layers its clause names
+            notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
+                         f"net class / item type / net name on {layer_clause} -- "
+                         f"handled by the scoped channel (#1491, #1897)")
+            continue
         layers = _rule_layers(node, copper_layers, notes)
         if layers is None:
             if not has_layer_clause and condition and _condition_is_scoped(condition):
@@ -358,6 +372,13 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
                 # #1843: read by position (area_clearance, design_rules.AreaIndex)
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
                              f"a rule area -- handled by position (#1843)")
+            elif order in _coupled_orders():
+                # #1293: read, but not here -- it binds a pair's P against
+                # its own N, which the pair step and check_drc resolve
+                notes.append(f"rule '{name}': clearance {clearance_mm}mm between a "
+                             f"coupled pair's P and N -- handled by the coupled-pair "
+                             f"channel (#1293): route_diff.py builds the pair at it "
+                             f"and check_drc grades it")
             else:
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm has a "
                              f"non-layer scope (netclass/area/... condition) -- "
@@ -713,6 +734,34 @@ def recorded_intra_pair_rules(board_path: str) -> List[LengthRule]:
         out.append(LengthRule(RECORDED_INTRA_RULE, None, None, tol,
                               (('netname', p), ('netname', n)), '', 'error',
                               'skew', True))
+    return out
+
+
+def recorded_intra_pair_lanes(board_path: str) -> Dict[str, List[str]]:
+    """{net name: [pad, pad]} for both members of every recorded intra-pair
+    tolerance that carries a lane (#1869): the two pads the pair step matched
+    the member between, which is the path the recorded tolerance is graded
+    on. {} when no record has one."""
+    if not board_path:
+        return {}
+    try:
+        from protected_nets import (AC_CHAIN_PREFIX, pro_path_for_board,
+                                    read_intra_pair_tolerances)
+        rec = read_intra_pair_tolerances(pro_path_for_board(board_path))
+    except Exception:
+        return {}
+    out: Dict[str, List[str]] = {}
+    for p, r in rec.items():
+        if p.startswith(AC_CHAIN_PREFIX) or not isinstance(r, dict):
+            continue
+        lane = r.get('lane')
+        n = str(r.get('n') or '')
+        if not isinstance(lane, dict) or not n:
+            continue
+        lp, ln = lane.get('p'), lane.get('n')
+        if (isinstance(lp, list) and isinstance(ln, list)
+                and len(lp) == 2 and len(ln) == 2):
+            out[p], out[n] = [str(x) for x in lp], [str(x) for x in ln]
     return out
 
 
@@ -1158,25 +1207,74 @@ def _scoped_node_ok(node) -> bool:
     return False
 
 
+def strip_keep_apart(node):
+    """A "keep pairs apart" condition without its `!AB.isCoupledDiffPair()`
+    term (#1897): what the rule reads of the two items' classes, types and
+    names. None when nothing else is left."""
+    if node == ('not', ('coupled',)):
+        return None
+    if isinstance(node, tuple) and node and node[0] == 'and':
+        kept = [k for k in (strip_keep_apart(c) for c in node[1:]) if k is not None]
+        if not kept:
+            return None
+        out = kept[0]
+        for k in kept[1:]:
+            out = ('and', out, k)
+        return out
+    return node
+
+
+def _coupled_graded_orders(text: str) -> frozenset:
+    """The file positions of the rules check_drc's coupled-pair channel
+    grades (#1293): parsed as `design_rules.parse_dru` parses them, and kept
+    by check_drc's own test, `r.coupled and not r.unsupported` -- so a rule
+    with a (severity exclusion) or a non-copper (layer ...) clause is not
+    one, whatever its condition says."""
+    try:
+        from design_rules import parse_dru
+        return frozenset(r.order for r in parse_dru(text)[0]
+                         if r.coupled and not r.unsupported)
+    except Exception:                                            # noqa: BLE001
+        return frozenset()
+
+
 def _condition_is_scoped(src: str) -> bool:
     """Does a condition string parse into the scoped channel's subset, and
-    stay out of the track channel's and the coupled rules'?"""
+    stay out of the track channel's and the coupled rules'? A "keep pairs
+    apart" condition (#1897) is read without its coupled term."""
     try:
         from design_rules import parse_condition, _coupled_terms
         node = parse_condition(src)
     except Exception:                                            # noqa: BLE001
         return False
-    if _coupled_terms(node) != (False, False):
+    terms = _coupled_terms(node)
+    if terms == (False, True):
+        node = strip_keep_apart(node)
+    elif terms != (False, False):
         return False
-    return _scoped_node_ok(node) and _parse_track_condition(src) is None
+    return (node is not None and _scoped_node_ok(node)
+            and _parse_track_condition(src) is None)
+
+
+def _copper_layer_clause(clause) -> bool:
+    """A `(layer ...)` clause naming copper: one layer, outer, inner or all."""
+    return isinstance(clause, str) and (clause in ('outer', 'inner', '*.Cu', '*')
+                                        or clause.endswith('.Cu'))
 
 
 def is_scoped_clearance_rule(rule) -> bool:
-    """A `design_rules.Rule` the scoped channel honours (#1491)."""
+    """A `design_rules.Rule` the scoped channel honours (#1491), on every
+    layer or, with a copper `(layer ...)` clause, on the layers it names
+    (#1897)."""
     spec = rule.constraints.get('clearance') or {}
-    return ('min' in spec and not rule.unsupported and not rule.coupled
-            and not rule.keep_apart and rule.layer_clause is None
-            and rule.condition is not None and _scoped_node_ok(rule.condition)
+    # #1897: a "keep pairs apart" rule is read without its coupled term, and
+    # binds every pair that reads so except a pair's own partner
+    cond = (strip_keep_apart(rule.condition) if rule.keep_apart is True
+            else rule.condition)
+    return ('min' in spec and not rule.unsupported and rule.coupled is False
+            and rule.keep_apart in (False, True)
+            and (rule.layer_clause is None or _copper_layer_clause(rule.layer_clause))
+            and cond is not None and _scoped_node_ok(cond)
             and _parse_track_condition(rule.condition_src or '') is None)
 
 
@@ -1223,6 +1321,18 @@ class ScopedClearanceRules:
             _netname_literals(r.condition, lits)
         self._name_lits = tuple(sorted(lits))
         self._name_sig: Dict[int, tuple] = {}
+        # #1897: the copper layers a rule with a (layer ...) clause names.
+        # Such a rule binds nothing when asked without a layer (`pair_value`),
+        # and joins the pair's layer map in `resolve_pair_with_rule`.
+        self.layered_layers = frozenset(
+            l for r in self.rules if r.layer_clause is not None
+            for l in (r.layers_for(dr.copper_layers) or ()))
+        self._layer_pair_memo: Dict[tuple, Optional[Tuple[float, str, int]]] = {}
+        self._ruled_memo: Dict[tuple, tuple] = {}
+        # #1897: the "keep pairs apart" rules, read without their coupled term
+        self._apart = {id(r): strip_keep_apart(r.condition)
+                       for r in self.rules if r.keep_apart}
+        self._partner_memo: Dict[tuple, bool] = {}
 
     @classmethod
     def for_board(cls, pcb_data, board_path: Optional[str] = None,
@@ -1293,25 +1403,75 @@ class ScopedClearanceRules:
         return (self.dr.memberships.get(nid, frozenset()), self.dr.effective_class(nid),
                 names)
 
+    def partners(self, net_a: int, net_b: int) -> bool:
+        """Are the two nets one diff pair's P and N (KiCad's MatchDpSuffix)?"""
+        if not self._apart:
+            return False
+        key = (int(net_a or 0), int(net_b or 0))
+        got = self._partner_memo.get(key)
+        if got is None:
+            from design_rules import match_dp_suffix
+            na = self.dr.net_names.get(key[0], '')
+            nb = self.dr.net_names.get(key[1], '')
+            got = self._partner_memo[key] = bool(
+                na and nb and na != nb and match_dp_suffix(na)[1] == nb)
+        return got
+
+    def _binds(self, r, a, b, layer, exempt: bool) -> bool:
+        """Does rule `r` bind the two items on `layer`? A "keep pairs apart"
+        rule binds what its condition reads without the coupled term, except
+        a pair's own partner (`exempt`)."""
+        from design_rules import _rule_matches
+        ctx = ('clearance', frozenset())
+        if r.keep_apart:
+            return (not exempt and _rule_matches(r, a, b, layer, self.dr.copper_layers,
+                                                 ctx, condition=self._apart[id(r)]))
+        return _rule_matches(r, a, b, layer, self.dr.copper_layers, ctx)
+
     def pair_value(self, net_a: int, type_a: str, net_b: int, type_b: str,
-                   pad_type_a: Optional[str] = None, pad_type_b: Optional[str] = None
-                   ) -> Optional[Tuple[float, str, int]]:
+                   pad_type_a: Optional[str] = None, pad_type_b: Optional[str] = None,
+                   stamp: bool = False) -> Optional[Tuple[float, str, int]]:
         """(the clearance, the rule's name, its file position) the last
         matching scoped rule sets for an item of `net_a` / `type_a` against
         one of `net_b` / `type_b`, or None when no scoped rule binds the
-        pair."""
-        key = (self._sig(net_a), type_a, pad_type_a, self._sig(net_b), type_b, pad_type_b)
+        pair. ``stamp``: the answer for a shared obstacle stamp, where
+        `net_a` stands for a group of routed nets -- a "keep pairs apart"
+        rule then exempts no partner (the stamp serves the nets that are
+        not)."""
+        exempt = not stamp and self.partners(net_a, net_b)
+        key = (self._sig(net_a), type_a, pad_type_a, self._sig(net_b), type_b,
+               pad_type_b, exempt)
         if key in self._memo:
             return self._memo[key]
-        from design_rules import _rule_matches
         a = self._item(net_a, type_a, pad_type_a)
         b = self._item(net_b, type_b, pad_type_b)
-        ctx = ('clearance', frozenset())
         got = None
         for r in self.rules:
-            if _rule_matches(r, a, b, None, self.dr.copper_layers, ctx):
+            if self._binds(r, a, b, None, exempt):
                 got = (float(r.constraints['clearance']['min']), r.name, r.order)
         self._memo[key] = got
+        return got
+
+    def layer_pair_value(self, net_a: int, type_a: str, net_b: int, type_b: str,
+                         pad_type_a: Optional[str], pad_type_b: Optional[str],
+                         layer: str, stamp: bool = False
+                         ) -> Optional[Tuple[float, str, int]]:
+        """`pair_value` among the rules with a `(layer ...)` clause that
+        names `layer` (#1897): the last one binding the pair there, or None."""
+        if layer not in self.layered_layers:
+            return None
+        exempt = not stamp and self.partners(net_a, net_b)
+        key = (self._sig(net_a), type_a, pad_type_a, self._sig(net_b), type_b,
+               pad_type_b, layer, exempt)
+        if key in self._layer_pair_memo:
+            return self._layer_pair_memo[key]
+        a = self._item(net_a, type_a, pad_type_a)
+        b = self._item(net_b, type_b, pad_type_b)
+        got = None
+        for r in self.rules:
+            if r.layer_clause is not None and self._binds(r, a, b, layer, exempt):
+                got = (float(r.constraints['clearance']['min']), r.name, r.order)
+        self._layer_pair_memo[key] = got
         return got
 
     def layer_rules_after(self, layer_map: Dict[str, float], order: int
@@ -1332,7 +1492,8 @@ class ScopedClearanceRules:
     def resolve_pair(self, net_a: int, type_a: str, net_b: int, type_b: str,
                      pad_type_a: Optional[str], pad_type_b: Optional[str],
                      class_value: float, layer_map: Dict[str, float],
-                     floor: float = 0.0) -> Tuple[float, Dict[str, float]]:
+                     floor: float = 0.0, stamp: bool = False
+                     ) -> Tuple[float, Dict[str, float]]:
         """KiCad's order between this channel and the layer channel for one
         pair of items: `(value before the layer rules, the layer rules that
         still replace it)`. With no scoped rule binding the pair that is the
@@ -1341,20 +1502,58 @@ class ScopedClearanceRules:
         `apply_layer_rules`."""
         return self.resolve_pair_with_rule(net_a, type_a, net_b, type_b,
                                            pad_type_a, pad_type_b, class_value,
-                                           layer_map, floor)[:2]
+                                           layer_map, floor, stamp)[:2]
 
     def resolve_pair_with_rule(self, net_a: int, type_a: str, net_b: int, type_b: str,
                                pad_type_a: Optional[str], pad_type_b: Optional[str],
                                class_value: float, layer_map: Dict[str, float],
-                               floor: float = 0.0
+                               floor: float = 0.0, stamp: bool = False
                                ) -> Tuple[float, Dict[str, float], Optional[str]]:
         """`resolve_pair`, plus the name of the scoped rule that set the
         value (None when none binds the pair) -- for a grader that names the
         source of a requirement (check_drc.PairRuleChannels, #1575)."""
-        got = self.pair_value(net_a, type_a, net_b, type_b, pad_type_a, pad_type_b)
+        got = self.pair_value(net_a, type_a, net_b, type_b, pad_type_a, pad_type_b,
+                              stamp)
         if got is None:
-            return class_value, layer_map, None
-        return max(got[0], floor), self.layer_rules_after(layer_map, got[2]), got[1]
+            value, lm, name, order = class_value, layer_map, None, -1
+        else:
+            value, lm, name, order = (max(got[0], floor),
+                                      self.layer_rules_after(layer_map, got[2]),
+                                      got[1], got[2])
+        if not self.layered_layers:
+            return value, lm, name
+        # #1897: a scoped rule with a (layer ...) clause is one more entry of
+        # the pair's layer map, where it is the last match on that layer: after
+        # the scoped rule with no clause, and after the layer's own rule.
+        key = (self._sig(net_a), type_a, pad_type_a, self._sig(net_b), type_b,
+               pad_type_b, id(lm), floor,
+               not stamp and self.partners(net_a, net_b))
+        hit = self._ruled_memo.get(key)
+        if hit is None or hit[0] is not lm:
+            ruled = None
+            for layer in self.layered_layers:
+                lv = self.layer_pair_value(net_a, type_a, net_b, type_b,
+                                           pad_type_a, pad_type_b, layer, stamp)
+                if lv is None or lv[2] < order:
+                    continue
+                if layer in lm and self.layer_orders.get(layer, -1) > lv[2]:
+                    continue
+                if ruled is None:
+                    ruled = RuledLayers(lm)
+                ruled[layer] = max(lv[0], floor)
+                ruled.names[layer] = lv[1]
+            # the entry holds the map it was built from, so its id cannot be reused
+            hit = self._ruled_memo[key] = (lm, lm if ruled is None else ruled)
+        return value, hit[1], name
+
+
+class RuledLayers(dict):
+    """A pair's layer map with the scoped rules that set an entry (#1897):
+    `names` maps a layer to the rule whose `(layer ...)` clause put it there."""
+
+    def __init__(self, base=()):
+        super().__init__(base)
+        self.names: Dict[str, str] = dict(getattr(base, 'names', None) or {})
 
 
 def apply_layer_rules(value: float, layer_map: Dict[str, float], *,
@@ -1377,6 +1576,10 @@ def apply_layer_rules(value: float, layer_map: Dict[str, float], *,
         return pads_shared_layer_clearance(value, layer_map, *pad_layers)
     return value
 
+
+#: the layer map of a config with no layer rule: ONE object, never mutated,
+#: so a memo keyed on a layer map's identity hits on such a board as well
+_NO_LAYER_RULES: Dict[str, float] = {}
 
 #: the item types a routed net lays (tracks and vias), and the obstacle types
 #: a track / via stamp stands for
@@ -1402,6 +1605,7 @@ class ScopedClearanceInstall:
         self.reps = sorted(groups.values())
         self._memo: Dict[tuple, Optional[tuple]] = {}
         self._layer_memo: Dict[tuple, Optional[float]] = {}
+        self._layered_memo: Dict[tuple, tuple] = {}
         #: relaxing rules a routed net held up: {(rule, obstacle key)}
         self._held = set()
 
@@ -1416,7 +1620,8 @@ class ScopedClearanceInstall:
             for rt in _ROUTED_TYPES:
                 for t in types:
                     got = self.sc.pair_value(r, rt, net_id, t, None,
-                                             pad_type if t == 'pad' else None)
+                                             pad_type if t == 'pad' else None,
+                                             stamp=True)
                     if got is None:
                         hit_all = False
                         continue
@@ -1467,6 +1672,45 @@ class ScopedClearanceInstall:
             out[name] = out.get(name, 0) + 1
         return out
 
+    @property
+    def layered_layers(self):
+        """The copper layers a scoped rule with a (layer ...) clause names."""
+        return self.sc.layered_layers
+
+    def stamp_layered(self, net_id: int, pad_type: Optional[str], layer: str,
+                      config) -> Optional[float]:
+        """#1897: the stamp on `layer` for an obstacle a scoped rule with a
+        `(layer ...)` clause binds there against a routed net: per routed
+        group KiCad's last match among that rule, a scoped rule with no
+        clause, the layer's own rule and the class value; maxed over the
+        routed set. None when no such rule binds the obstacle on the layer, so
+        the caller keeps the value it had."""
+        if layer not in self.sc.layered_layers:
+            return None
+        clr = config.clearance
+        nc = config.net_clearances or {}
+        lmap = config.layer_clearances or _NO_LAYER_RULES
+        key = (self.sc._sig(net_id), pad_type, layer, id(lmap), clr,
+               nc.get(int(net_id or 0)))
+        hit = self._layered_memo.get(key)
+        if hit is not None and hit[0] is lmap:
+            return hit[1]
+        types = _ROUTED_TYPES if pad_type is None else ('pad',)
+        bound, vals = False, []
+        for r in self.reps:
+            cp = max(clr, nc.get(int(net_id or 0), clr), nc.get(r, clr))
+            for rt in _ROUTED_TYPES:
+                for t in types:
+                    base, lm = self.sc.resolve_pair(
+                        r, rt, net_id, t, None, pad_type if t == 'pad' else None,
+                        cp, lmap, self.fab_floor, stamp=True)
+                    if layer in getattr(lm, 'names', ()):
+                        bound = True
+                    vals.append(apply_layer_rules(base, lm, layer=layer))
+        out = max(vals) if bound and vals else None
+        self._layered_memo[key] = (lmap, out)
+        return out
+
     def stamp_on_layer(self, net_id: int, pad_type: Optional[str], layer: str,
                        layer_value: float) -> Optional[float]:
         """The stamp on a layer the layer channel rules at `layer_value`: a
@@ -1485,7 +1729,8 @@ class ScopedClearanceInstall:
             for rt in _ROUTED_TYPES:
                 for t in types:
                     got = self.sc.pair_value(r, rt, net_id, t, None,
-                                             pad_type if t == 'pad' else None)
+                                             pad_type if t == 'pad' else None,
+                                             stamp=True)
                     if got is not None and got[2] > lo:
                         later = True
                         vals.append(max(got[0], self.fab_floor))
@@ -1566,7 +1811,9 @@ def install_scoped_clearances(config, input_file, pcb_data, routed_net_ids=None,
         for r in sc.rules:
             print(f"Class/type-scoped clearance rule from the board's .kicad_dru "
                   f"(#1491): '{r.name}' {r.constraints['clearance']['min']:g}mm "
-                  f"when {r.condition_src!r} -- replaces the class value; "
+                  f"when {r.condition_src!r}"
+                  f"{f' on {r.layer_clause}' if r.layer_clause else ''}"
+                  f" -- replaces the class value; "
                   f"a relaxing one only as far as every routed net allows")
 
 

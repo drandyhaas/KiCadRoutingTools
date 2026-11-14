@@ -2,15 +2,18 @@
 """check_reference_plane.py -- where signal tracks leave their reference plane (#595).
 
 Reports, per signal net, the track length that runs over NO pour copper on
-its adjacent plane layer(s), how many times a track crosses such a void, and
-how many times the pour under it changes net -- as text and JSON. Read-only:
-it measures a routed board (`reference_plane.reference_plane_report`) and
+its adjacent plane layer(s), how many times a track crosses such a void (and,
+for a track between two reference layers, a void in one of them), how many
+times the pour under it changes net, and apart from those the passes over a
+single via's, hole's or pad's clearance -- as text and JSON. Read-only: it
+measures a routed board (`reference_plane.reference_plane_report`) and
 changes nothing.
 
 A reference layer is a copper layer next to the track's in the stack that
 carries a pour. The copper under a point is the zone's FILL (zone clearance
-around foreign tracks, vias and pads included), so a slot a track or a row of
-vias cuts in a plane counts like a split between two pours.
+around foreign tracks, vias and pads included, and around a higher-priority
+zone of another net on the same layer), so a slot a track or a row of vias
+cuts in a plane counts like a split between two pours.
 
 A signal net is one that is neither ground nor power
 (`list_nets.power_net_evidence`). Track on a layer with no poured neighbour
@@ -79,17 +82,25 @@ def main(argv=None) -> int:
               "to measure")
     else:
         print(f"Reference planes: {t['crossings']} void crossing(s), "
+              f"{t['partial_crossings']} on one of two reference layers, "
               f"{t['reference_changes']} reference change(s), {t['void_mm']:.3f} mm "
               f"of {t['length_mm']:.3f} mm of referenced signal track over no pour "
-              f"copper" + (f"; {t['unreferenced_mm']:.3f} mm on layers with no poured "
-                           f"neighbour" if t['unreferenced_mm'] else ''))
+              f"copper; {t['hole_crossings']} pass(es) over one via's, hole's or "
+              f"pad's clearance ({t['hole_mm']:.3f} mm), not counted as voids"
+              + (f"; {t['unreferenced_mm']:.3f} mm on layers with no poured "
+                 f"neighbour" if t['unreferenced_mm'] else ''))
         rows = sorted(((n, r) for n, r in rep['by_net'].items()
-                       if r['crossings'] or r['reference_changes'] or r['void_mm']),
-                      key=lambda kv: (-kv[1]['crossings'], -kv[1]['reference_changes'],
-                                      -kv[1]['void_mm'], kv[0]))
+                       if r['crossings'] or r['partial_crossings']
+                       or r['reference_changes'] or r['void_mm']),
+                      key=lambda kv: (-kv[1]['crossings'], -kv[1]['partial_crossings'],
+                                      -kv[1]['reference_changes'], -kv[1]['void_mm'],
+                                      kv[0]))
         for name, r in rows[:LIST_CAP]:
-            print(f"  {name}: {r['crossings']} crossing(s), {r['reference_changes']} "
-                  f"change(s), {r['void_mm']:.3f} mm over no copper")
+            print(f"  {name}: {r['crossings']} crossing(s), "
+                  + (f"{r['partial_crossings']} on one reference layer, "
+                     if r['partial_crossings'] else '')
+                  + f"{r['reference_changes']} change(s), {r['void_mm']:.3f} mm over "
+                  f"no copper")
         if len(rows) > LIST_CAP:
             print(f"  ... {len(rows) - LIST_CAP} more net(s)"
                   + (" (every one in --json)" if a.json else " (--json lists every one)"))

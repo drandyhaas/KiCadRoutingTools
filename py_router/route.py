@@ -365,6 +365,7 @@ def _empty_results_data() -> dict:
         'keep_away': [],
         'length_match_groups': [],
         'skew_moved_by_cleanup': [],
+        'length_moved_by_cleanup': [],
     }
 
 
@@ -1301,6 +1302,68 @@ def _print_skew_moved(rows, what):
               + " -- route.py does not re-match it (#1759)")
 
 
+def _print_length_moved(rows, what):
+    """The #1851 WARNING, one line per net `what` moved out of its
+    `.kicad_dru` length window (check_drc.length_moved_out_of_window rows)."""
+    for _lm in rows:
+        _u = _lm['unit']
+        _lim = ' / '.join(f"{_k} {_lm[_k]:g}" for _k in ('min', 'max')
+                          if _lm[_k] is not None)
+        print(f"  {RED}WARNING{RESET}: {what} moved {_lm['net']} out of its "
+              f"length rule '{_lm['rule']}' ({_lim} {_u}): "
+              f"{_lm['length_before']:.4f} -> {_lm['length_after']:.4f} {_u}"
+              + ("" if _lm['was_within'] else " (already out, now further)")
+              + " -- route.py does not re-tune it (#1851)")
+
+
+def _late_board1798(pcb_data, output_file, return_results, results_data,
+                    write_model):
+    """The board the end-of-run passes read and change, for the #1798 skew
+    and #1851 length measurements: the written file on the CLI (a re-parse),
+    the write model on the GUI, pcb_data itself on the "nothing to route"
+    return. None when there is no such board (no file written)."""
+    import copy as _copy
+    if return_results:
+        board = _copy.copy(pcb_data)
+        if write_model is not None:
+            segs_by_net, vias_by_net = write_model(results_data or {})
+            board.segments = [x for _l in segs_by_net.values() for x in _l]
+            board.vias = [x for _l in vias_by_net.values() for x in _l]
+        else:
+            board.segments = list(pcb_data.segments)
+            board.vias = list(pcb_data.vias)
+        return board
+    if output_file and os.path.isfile(output_file):
+        from kicad_parser import parse_kicad_pcb as _pk1798
+        return _pk1798(output_file)
+    return None
+
+
+def _late_length_snapshot1851(pcb_data, output_file, return_results, results_data,
+                              write_model, rule_path, scope_names):
+    """#1851: check_drc.length_window_snapshot on the board the end-of-run
+    passes read and change (_late_board1798), for the nets in `scope_names`.
+    {} when no length rule binds one, which costs no parse, and when the
+    measurement fails, which is said on the console."""
+    try:
+        from check_drc import length_rule_nets, length_window_snapshot
+        names = set(scope_names)
+        bound = length_rule_nets(rule_path, pcb_data).bound
+        if not any(pcb_data.nets[m].name in names for m in bound
+                   if m in pcb_data.nets):
+            return {}
+        board = _late_board1798(pcb_data, output_file, return_results,
+                                results_data, write_model)
+        if board is None:
+            return {}
+        ids = {nid for nid, n in board.nets.items() if n.name in names}
+        return length_window_snapshot(board, rule_path, ids)
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  (#1851 end-of-run length measurement failed: "
+              f"{type(_e).__name__}: {_e})")
+        return {}
+
+
 def _skew_row_key(row):
     """A skew row's group by NAME (rule, nets): the CLI measures the shipped
     board on a re-parse of the written file, whose net ids need not be the
@@ -1317,13 +1380,11 @@ def _skew_by_name(snap):
 def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
                             write_model, skew_path, scope_names):
     """#1798: the #1759 skew measurement, on the board the end-of-run passes
-    (_late_strict_collapse1063 and the rest) read and change -- the written
-    file on the CLI, the write model on the GUI, pcb_data itself on the
-    "nothing to route" return -- keyed by name (_skew_by_name), for the
-    groups with a member in `scope_names`. {} when no skew rule binds a net
-    in scope, which costs no parse, and when the measurement fails, which is
-    said on the console."""
-    import copy as _copy
+    (_late_strict_collapse1063 and the rest) read and change
+    (_late_board1798), keyed by name (_skew_by_name), for the groups with a
+    member in `scope_names`. {} when no skew rule binds a net in scope, which
+    costs no parse, and when the measurement fails, which is said on the
+    console."""
     try:
         from check_drc import (skew_rule_groups, skew_group_snapshot,
                                recorded_chain_groups)
@@ -1334,19 +1395,9 @@ def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
         if not any(pcb_data.nets[m].name in names for _r, ms in groups
                    for m in ms if m in pcb_data.nets):
             return {}
-        if return_results:
-            board = _copy.copy(pcb_data)
-            if write_model is not None:
-                segs_by_net, vias_by_net = write_model(results_data or {})
-                board.segments = [x for _l in segs_by_net.values() for x in _l]
-                board.vias = [x for _l in vias_by_net.values() for x in _l]
-            else:
-                board.segments = list(pcb_data.segments)
-                board.vias = list(pcb_data.vias)
-        elif output_file and os.path.isfile(output_file):
-            from kicad_parser import parse_kicad_pcb as _pk1798
-            board = _pk1798(output_file)
-        else:
+        board = _late_board1798(pcb_data, output_file, return_results,
+                                results_data, write_model)
+        if board is None:
             return {}
         ids = {nid for nid, n in board.nets.items() if n.name in names}
         return _skew_by_name(skew_group_snapshot(board, skew_path, ids))
@@ -3834,6 +3885,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 return []
             _sk = _late_skew_snapshot1798(pcb_data, output_file, as_gui, rd,
                                           None, _skew_path1798, _scope1166)
+            _lw = _late_length_snapshot1851(pcb_data, output_file, as_gui, rd,
+                                            None, _skew_path1798, _scope1166)
             full = quick < 2
             for _pass in ((_late_kicad_dangling_split1217, _late_strict_collapse1063)
                           if full else ()) + (_late_dangling_via_sweep1166,) + (
@@ -3850,6 +3903,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     pcb_data, output_file, as_gui, rd, None, _skew_path1798,
                     _scope1166))
             _print_skew_moved(_moved, "the end-of-run cleanup (#1798)")
+            if _lw:
+                # #1851: and the nets a length rule holds to a window
+                from check_drc import length_moved_out_of_window as _lmo1851
+                _lmoved = _lmo1851(_lw, _late_length_snapshot1851(
+                    pcb_data, output_file, as_gui, rd, None, _skew_path1798,
+                    _scope1166))
+                _print_length_moved(_lmoved, "the end-of-run cleanup")
+                if _lmoved:
+                    _extra1499['length_moved_by_cleanup'] = _lmoved
+                    if rd is not None:
+                        rd['length_moved_by_cleanup'] = _lmoved
             return _moved
         if return_results:
             _rd659 = _empty_results_data()
@@ -5529,6 +5593,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                         sweep_scope_ids)
         except Exception as _e1759:
             print(f"  (#1759 skew snapshot failed: {_e1759})")
+    # #1851: likewise the nets a .kicad_dru length rule holds to a window
+    _len_before1851 = {}
+    if not (_ckpt_stop and not _ckpt_cleanup):
+        try:
+            from check_drc import length_window_snapshot as _lws1851
+            _len_before1851 = _lws1851(pcb_data, _skew_path1759, sweep_scope_ids)
+        except Exception as _e1851:
+            print(f"  (#1851 length snapshot failed: {_e1851})")
     _cleanup = None if (_ckpt_stop and not _ckpt_cleanup) else run_post_route_cleanup(
         results, pcb_data, sweep_scope_ids, config,
         protect_net_ids=_protect_unfinished,
@@ -7378,6 +7450,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'length_match_groups': summary.get('length_match_groups', []),
             # #1759: same data as JSON_SUMMARY['skew_moved_by_cleanup'].
             'skew_moved_by_cleanup': summary.get('skew_moved_by_cleanup', []),
+            # #1851: the length-window rows, set once the board that ships
+            # has been measured (below); [] until then and with no such rule
+            'length_moved_by_cleanup': [],
         }
         # #666 sequence point 1, GUI front: the CLI applies the main pass's
         # moves to the file it is about to write, mirrors them and re-welds
@@ -7729,6 +7804,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"KICAD_FINALIZE_ONLY=1 + --skip-routing)")
         except Exception as _e9c:
             print(f"  (pre-finalize checkpoint failed: {_e9c})")
+    # #1896: the zone nets this step's plane finalize served, whose pads the
+    # end of the run counts per tap via on the board it ships (None: no
+    # finalize ran).
+    _tap_nets1896 = None
     if (final_reconcile and (not skip_routing or _fin_only)
             and not _ckpt_stop and not quick
             and (output_file or return_results)
@@ -7792,6 +7871,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # reference, so `--json-out`, the returned dict and the
                     # JSON_SUMMARY_MIN line (printed last) do.
                     summary['finalize_excluded_nets'] = _excluded9
+            _tap_nets1896 = sorted({n for n, _l in _zpairs})
             # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
             # cleanup): run them only for zone nets the fill-aware checker
             # says are incomplete on THIS run's board (pcb_data == file
@@ -9426,6 +9506,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 {m for r in _skew_before1759.values() if r for m in r['nets']}))
         if return_results and locals().get('results_data') is not None:
             results_data['skew_moved_by_cleanup'] = _late_skew1798
+    # #1851: the nets a length rule holds to a window, in ONE comparison from
+    # before the post-route cleanup to the board that ships.
+    _late_len1851 = None
+    if (_len_before1851 and final_reconcile and not skip_routing
+            and not _ckpt_stop and quick < 2):
+        from check_drc import length_moved_out_of_window as _lmo1851
+        _late_len1851 = _lmo1851(_len_before1851, _late_length_snapshot1851(
+            pcb_data, output_file, return_results, locals().get('results_data'),
+            _gui_write_model, _skew_path1759,
+            {n for n, r in _len_before1851.items() if r}))
+        _print_length_moved(_late_len1851,
+                            "the post-route and end-of-run cleanups")
+        if return_results and locals().get('results_data') is not None:
+            results_data['length_moved_by_cleanup'] = _late_len1851
 
     # #962: declare Type VII on every via this run put in a pad or a paste
     # opening. It runs HERE because this is after the last pass that adds or
@@ -9907,20 +10001,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _rae:                               # noqa: BLE001
             print(f"  WARNING: rule-area keep-out audit skipped "
                   f"({type(_rae).__name__}: {_rae})")
-    # the --json-out document carries both shipped readings; a reader of the
-    # log alone takes them from this line
-    _shipped_audit = {k: v for k, v in (('net_keepouts', _nk_shipped),
-                                        ('rule_area_keepouts', _ra_shipped))
-                      if v is not None}
-    if _shipped_audit:
-        print('JSON_SHIPPED_AUDIT: ' + json.dumps(_shipped_audit))
 
     # #1680/#1681: copper on or inside the clearance of another net's pad, on
     # the board this run ships: a short whose net was outside this step or
     # could not be ripped, a part the clearance step could not clear, or what a
     # pass laid after the rip. Measured at the floor the writeback stores.
     # Report-only; keys absent when there is none.
-    _pad_contacts_left = _pad_grazes_left = None
+    _pad_contacts_left = _pad_grazes_left = _shipped_pcl = None
     if final_reconcile and not _ckpt_stop:
         from pad_contact import audit_shipped
         _rd_pcl = locals().get('results_data')
@@ -9935,9 +10022,44 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _rd_pcl['pad_grazes'] = _pad_grazes_left
         elif output_file and os.path.isfile(output_file):
             from kicad_parser import parse_kicad_pcb as _pk_pcl
+            _shipped_pcl = _pk_pcl(output_file)
             _pad_contacts_left, _pad_grazes_left = audit_shipped(
-                _pk_pcl(output_file), clearance=_pcl_floor,
+                _shipped_pcl, clearance=_pcl_floor,
                 area=getattr(config, 'area_clearance', None))
+
+    # #1896: how many plane-net pads each tap via serves, on the board this
+    # run ships -- every via a pad of a net the plane finalize served reaches
+    # through surface copper (the fan-out's dogbones, the finalize's taps,
+    # straps and joins, the oracle's reconnect), the same reading on both
+    # fronts. Report-only.
+    _tap_vias1896 = None
+    if final_reconcile and not _ckpt_stop and _tap_nets1896:
+        try:
+            from tap_via_census import tap_via_census, tap_via_line
+            _rd_tv = locals().get('results_data')
+            if return_results and _rd_tv is not None:
+                _tv_s, _tv_v = _gui_write_model(_rd_tv)
+                _tap_vias1896 = tap_via_census(
+                    pcb_data, _tap_nets1896,
+                    [s for _l in _tv_s.values() for s in _l],
+                    [v for _l in _tv_v.values() for v in _l])
+                _rd_tv['tap_vias'] = _tap_vias1896
+            elif _shipped_pcl is not None:
+                _tap_vias1896 = tap_via_census(_shipped_pcl, _tap_nets1896)
+            _tvl1896 = tap_via_line(_tap_vias1896)
+            if _tvl1896:
+                print(f"  {_tvl1896}")
+        except Exception as _tve:                               # noqa: BLE001
+            print(f"  (tap-via census skipped: {type(_tve).__name__}: {_tve})")
+
+    # the --json-out document carries these shipped readings; a reader of the
+    # log alone takes them from this line
+    _shipped_audit = {k: v for k, v in (('net_keepouts', _nk_shipped),
+                                        ('rule_area_keepouts', _ra_shipped),
+                                        ('tap_vias', _tap_vias1896))
+                      if v is not None}
+    if _shipped_audit:
+        print('JSON_SHIPPED_AUDIT: ' + json.dumps(_shipped_audit))
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
@@ -9953,12 +10075,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # predates the finalize, so it cannot carry this.
             if _merged is not None and _via_in_pad962 is not None:
                 _merged['via_in_pad'] = _via_in_pad962
+            # #1896: likewise the tap vias of the shipped board
+            if _merged is not None and _tap_vias1896 is not None:
+                _merged['tap_vias'] = _tap_vias1896
             # #1798: likewise the skew rows, read on the shipped board.
             if _merged is not None and _late_skew1798 is not None:
                 if _late_skew1798:
                     _merged['skew_moved_by_cleanup'] = _late_skew1798
                 else:
                     _merged.pop('skew_moved_by_cleanup', None)
+            # #1851: and the length-window rows
+            if _merged is not None and _late_len1851:
+                _merged['length_moved_by_cleanup'] = _late_len1851
             # #1146: likewise the keep-away reading of the shipped board.
             if _merged is not None and _ka_shipped is not None:
                 _merged['keep_away'] = _ka_shipped

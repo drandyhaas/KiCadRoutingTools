@@ -136,6 +136,8 @@ GROUP_FLAGS = {
 LIST_FLAGS = {
     '--rip-existing-nets': 'rip_existing_nets',
     '--polarity-swap-nets': 'polarity_swap_nets',
+    # #1869: route_diff's intra-pair lane ('auto' or P_NET=REF.PAD:REF.PAD ...)
+    '--diff-pair-intra-lane': 'diff_pair_intra_lane',
     '--coplanar-nets': 'coplanar_nets',
     # bga_fanout's future-pour declaration: collected by the converter and
     # then never copied into the step (26 kept corpus steps on 18 boards).

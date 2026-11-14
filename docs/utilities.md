@@ -3261,17 +3261,32 @@ python3 py_tools/check_reference_plane.py routed.kicad_pcb [--nets GLOB ...] \
   (`unreferenced_mm`).
 - The copper under a point is the zone's FILL (`plane_fill_model`: the zone
   clearance around foreign tracks, vias and pads included), so a slot a track or
-  a row of vias cuts in a plane counts like a split between two pours.
-- A `crossing` is a track that leaves the copper and comes back over copper
-  within one segment; a `reference_change` is the pour under the track changing
-  net, across a void or not; `void_mm` is the length over no copper on any
-  reference layer. Tracks are sampled every `--step` mm (default 0.1), so a
-  void's length is good to one step.
+  a row of vias cuts in a plane counts like a split between two pours. On a
+  split plane -- a board-wide pour under higher-priority pours of other nets on
+  the same layer -- a zone also gives way to each higher-priority zone of another
+  net, at the larger of the two zones' clearances, as KiCad's filler does, so the
+  gap around a power island reads as a gap and not as the pour beneath it. This
+  reading is the tool's own; the routing engine's fill model does not keep one
+  pour clear of another (#483).
+- Tracks are followed as chains: a net's segments on a layer, joined where
+  exactly two of them meet. A `crossing` is a void the track enters and leaves
+  over copper (a track ending in a void does not cross it); `void_mm` is the
+  length over no copper on any reference layer; a `partial_crossing` is a track
+  with two reference layers crossing a void in one while the other stays under
+  it; a `reference_change` is the pour under the track changing net on a
+  reference layer, across a void or not, counted on each reference layer.
+- A void that lies inside the clearance of ONE via, drilled hole or pad on the
+  reference layer is a clearance hole, not a split: it is counted apart
+  (`hole_crossings`, `hole_mm`) and in none of the counts above. That includes
+  the clearance around the track's own via at its end.
+- Tracks are sampled every `--step` mm (default 0.1), so a void's length is good
+  to one step.
 - A signal net is one that is neither ground nor power
   (`list_nets.power_net_evidence`), as in the return-via check.
 
-The JSON carries `reference_layers`, `totals`, `by_net` and `rows` (each crossing
-and change with its position). The measure is `reference_plane.
+The JSON carries `reference_layers`, `totals`, `by_net` and `rows` (each crossing,
+clearance hole and change with its position; `reference_layer` names the layer of
+a partial crossing or a change). The measure is `reference_plane.
 reference_plane_report`. It prices and routes nothing: it is the instrument a
 routing cost for this would be judged by.
 

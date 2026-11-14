@@ -4550,7 +4550,12 @@ def apply_intra_pair_length_matching(
     _board = None
     if pcb_data is not None:
         from net_queries import net_match_length, net_signal_length
-        if shipped:
+        from intra_pair_lane import member_lengths as _lane_lengths
+        _lane = _lane_lengths(config, pcb_data, p_net_id, n_net_id)
+        if _lane is not None:
+            # #1869: the pair's lane, the path between its two named pads
+            _bp, _bn = _lane[0], _lane[1]
+        elif shipped:
             _bp = net_match_length(pcb_data, p_net_id, 'total')
             _bn = net_match_length(pcb_data, n_net_id, 'total')
         else:
@@ -4780,7 +4785,7 @@ def intra_pair_config(config, p_net_id, tolerance, pair_geom=None):
 
 
 def regrade_intra_pair_reports(reports, pair_copper, pcb_data, diff_pair_ids,
-                               tolerance):
+                               tolerance, config=None):
     """Decide each intra-pair record's status from the SHIPPED copper (#1303).
 
     `run_intra_pair_matching` reports what the matcher believed: its own
@@ -4804,21 +4809,36 @@ def regrade_intra_pair_reports(reports, pair_copper, pcb_data, diff_pair_ids,
 
     `delta_before_mm` stays the matcher's estimate before it meandered: the
     shipped copper before the meander no longer exists to measure.
+    `self_overlap_mm` (#1873) is copied from the pair's copper record where
+    a member has copper laid along itself: `delta_mm` counts that stretch
+    twice, so a `matched` beside it is a match of two sums, one of which
+    holds that copper two times. `self_overlap_not_searched` and
+    `self_overlap_error` are copied with it: a member that was not searched.
     `pair_copper` is `diff_pair_custody.measure_pair_copper`'s records; a
     pair without one (no coupled result) is measured here."""
-    from net_queries import diff_pair_skew
+    from intra_pair_lane import pair_skew as _pair_skew, lane_pins as _lane_pins
     by_name = dict(diff_pair_ids)
     for rec in reports:
         cop = (pair_copper or {}).get(rec['pair'])
-        if cop is not None:
+        pair = by_name.get(rec['pair'])
+        if pair is not None and _lane_pins(config, pcb_data, pair.p_net_id):
+            # #1869: a pair with a lane is graded on it
+            skew = _pair_skew(config, pcb_data, pair.p_net_id, pair.n_net_id)
+        elif cop is not None:
             skew = cop.get('skew_mm')
         else:
-            pair = by_name.get(rec['pair'])
-            skew = (diff_pair_skew(pcb_data, pair.p_net_id, pair.n_net_id)['skew_mm']
+            skew = (_pair_skew(config, pcb_data, pair.p_net_id, pair.n_net_id)
                     if pair is not None else None)
         rec['matcher_status'] = rec.get('status')
         rec['matcher_delta_mm'] = rec.get('delta_mm')
         rec['delta_mm'] = None if skew is None else round(skew, 4)
+        # #1873: `delta_mm` counts all of a member's copper, so copper a
+        # member lays along itself is in it twice. The record that says
+        # `matched` carries that length beside the status.
+        for _key in ('self_overlap_mm', 'self_overlap_not_searched',
+                     'self_overlap_error'):
+            if cop is not None and cop.get(_key):
+                rec[_key] = cop[_key]
         st = rec.get('status')
         if st in ('not-matchable', 'skipped'):
             continue
@@ -4902,7 +4922,7 @@ def rematch_intra_pairs_on_shipped_copper(reports, diff_pair_ids, routed_results
     the matcher's (the regrade then decides it from the copper). Changes
     `routed_results` and `pcb_data.segments` in place. Returns the number of
     pairs whose re-match was kept."""
-    from net_queries import diff_pair_skew
+    from intra_pair_lane import pair_skew as _pair_skew1869
     by_name = dict(diff_pair_ids)
     tried = []
     for rec in reports:
@@ -4917,7 +4937,7 @@ def rematch_intra_pairs_on_shipped_copper(reports, diff_pair_ids, routed_results
         tol = rec.get('tolerance_mm')
         if tol is None:
             tol = config.length_match_tolerance
-        before = diff_pair_skew(pcb_data, pair.p_net_id, pair.n_net_id)['skew_mm']
+        before = _pair_skew1869(config, pcb_data, pair.p_net_id, pair.n_net_id)
         if before is None or before <= tol + 1e-9:
             continue
         tried.append((rec, pair, result, tol, before))
@@ -4951,7 +4971,7 @@ def rematch_intra_pairs_on_shipped_copper(reports, diff_pair_ids, routed_results
                                   if id(s) not in old_ids - new_ids]
                                  + [s for s in new_segments if id(s) not in old_ids])
             bump_copper_epoch(pcb_data)
-            after = diff_pair_skew(pcb_data, pair.p_net_id, pair.n_net_id)['skew_mm']
+            after = _pair_skew1869(config, pcb_data, pair.p_net_id, pair.n_net_id)
             if after is None or after >= before - 1e-9:
                 # no better on the copper KiCad grades: put it all back
                 pcb_data.segments = board_before

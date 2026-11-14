@@ -1,0 +1,5 @@
+(version 1)
+(rule "bus out"
+  (layer "In1.Cu")
+  (condition "A.hasNetclass('BUS') && !B.hasNetclass('BUS')")
+  (constraint clearance (min 0.1mm)))

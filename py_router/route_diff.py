@@ -120,6 +120,134 @@ from grid_router import GridObstacleMap, GridRouter
 _NO_PAIRS_MATCHED = False
 
 
+def pair_pn_shortfall(pcb_data, pair, config) -> int:
+    """#1871: how many items of the pair's SHIPPED copper -- a track or a via
+    of either member -- stand below the pair's clearance to the partner's
+    copper, priced as check_drc grades the pair: a track against the
+    partner's tracks at the #735 track rule (`pair_clearance`, kind
+    'track'), a via against the partner's tracks on a shared layer (kind
+    'layer') and vias (kind 'stack'), and a track or via against the
+    partner's PADS (`pad_pair_clearance`, with the pad's own override).
+    The pair's pads against each other are the placement's, not counted.
+    0: the pair ships no P/N shortfall."""
+    import math
+    from diff_pair_routing import _seg_to_seglist_min_edge
+    from geometry_utils import point_to_segment_distance, via_on_layer
+    from check_drc import pad_copper_layers, segment_pad_gap
+    p_id, n_id = pair.p_net_id, pair.n_net_id
+    board_cu = list(getattr(getattr(pcb_data, 'board_info', None),
+                            'copper_layers', None) or config.layers)
+    segs = {nid: [s for s in pcb_data.segments
+                  if s.net_id == nid and not getattr(s, 'graphic', False)]
+            for nid in (p_id, n_id)}
+    vias = {nid: [v for v in pcb_data.vias if v.net_id == nid] for nid in (p_id, n_id)}
+    pads = {nid: [(q, pad_copper_layers(q, board_cu))
+                  for q in (pcb_data.pads_by_net.get(nid) or [])
+                  if getattr(q, 'pad_type', '') != 'np_thru_hole']
+            for nid in (p_id, n_id)}
+    eps = 1e-6
+    count = 0
+    for a, b in ((p_id, n_id), (n_id, p_id)):
+        for s in segs[a]:
+            w = s.width or 0.0
+            short = (_seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x,
+                                              s.end_y, w, s.layer, segs[b])
+                     < config.pair_clearance(a, b, s.layer, kind='track') - eps)
+            if not short:
+                for v in vias[b]:
+                    if via_on_layer(v, s.layer) and (
+                            point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
+                                                      s.end_x, s.end_y)
+                            - v.size / 2.0 - w / 2.0
+                            < config.pair_clearance(a, b, s.layer) - eps):
+                        short = True
+                        break
+            if not short:
+                for q, q_cu in pads[b]:
+                    if s.layer in q_cu and (
+                            segment_pad_gap(s.start_x, s.start_y, s.end_x, s.end_y, q)
+                            - w / 2.0
+                            < config.pad_pair_clearance(q, a, s.layer,
+                                                        other_type='track') - eps):
+                        short = True
+                        break
+            count += 1 if short else 0
+        for v in vias[a]:
+            short = False
+            for s in segs[b]:
+                if via_on_layer(v, s.layer) and (
+                        point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
+                                                  s.end_x, s.end_y)
+                        - v.size / 2.0 - (s.width or 0.0) / 2.0
+                        < config.pair_clearance(a, b, s.layer) - eps):
+                    short = True
+                    break
+            if not short:
+                for u in vias[b]:
+                    if (math.hypot(v.x - u.x, v.y - u.y) - v.size / 2.0 - u.size / 2.0
+                            < config.pair_clearance(a, b, kind='stack') - eps):
+                        short = True
+                        break
+            if not short:
+                for q, q_cu in pads[b]:
+                    if any(via_on_layer(v, L) for L in q_cu) and (
+                            segment_pad_gap(v.x, v.y, v.x, v.y, q) - v.size / 2.0
+                            < config.pad_pair_clearance(q, a, other_type='via') - eps):
+                        short = True
+                        break
+            count += 1 if short else 0
+    return count
+
+
+def judge_selfgraze_on_copper(routed_results, pcb_data, config, pairs) -> dict:
+    """#1871: decide the self-graze exclusion on the copper that SHIPS.
+
+    The hybrid's self-graze fallback stamps `selfgraze` with the coupled
+    middle's P/N count as built, before the #318 neck and the post-route
+    cleanup, and `protection_candidates` kept every such pair out of the
+    protected nets. A fallback whose shipped copper has no P/N shortfall is a
+    routed pair like any other hybrid: its results get `selfgraze_cleared`,
+    which `protection_candidates` reads. Returns {pair name: shortfall} for
+    the fallback pairs that still ship one (they stay out)."""
+    still = {}
+    for name, pair in pairs or ():
+        results = [(routed_results or {}).get(n) for n in (pair.p_net_id, pair.n_net_id)]
+        if not any(r and r.get('selfgraze') for r in results):
+            continue
+        short = pair_pn_shortfall(pcb_data, pair, config)
+        if short:
+            still[name] = short
+            continue
+        for r in results:
+            if r:
+                r['selfgraze_cleared'] = True
+    return still
+
+
+def unprotected_pair_rows(pairs, protected, routed_results, pair_copper, member_audit,
+                          selfgraze_short, routed_names) -> list:
+    """#1871: every ROUTED pair the protected-nets record leaves out, with
+    why: [{'pair', 'reason', 'pn_shortfall_items'}] -- a self-graze
+    fallback that still ships a P/N shortfall, split copper
+    (`coupled_protection_pairs`), or a member with no pair-produced result."""
+    kept = {n for n, _p in coupled_protection_pairs(pairs, pair_copper, member_audit)}
+    rows = []
+    for name, pair in pairs or ():
+        if name not in routed_names:
+            continue
+        if pair.p_net_name in protected and pair.n_net_name in protected:
+            continue
+        if name in selfgraze_short:
+            reason = 'self-graze fallback'
+        elif name not in kept:
+            reason = 'split copper'
+        else:
+            reason = 'a member has no pair-routed result'
+        rows.append({'pair': name, 'reason': reason,
+                     'pn_shortfall_items': int(selfgraze_short.get(name, 0))})
+    return rows
+
+
 def protection_candidates(routed_results, pcb_data, pairs=None):
     """{net name -> 'diff-pair'} for every pair member this run really routed.
 
@@ -169,7 +297,10 @@ def protection_candidates(routed_results, pcb_data, pairs=None):
     """
     def _admitted(_nid):
         _res = (routed_results or {}).get(_nid)
-        if not _res or _res.get('failed') or _res.get('selfgraze'):
+        # #1871: a self-graze fallback whose SHIPPED copper has no P/N
+        # shortfall left is admitted (`judge_selfgraze_on_copper`)
+        if (not _res or _res.get('failed')
+                or (_res.get('selfgraze') and not _res.get('selfgraze_cleared'))):
             return False
         return bool(_res.get('is_diff_pair') or _res.get('hybrid_escape'))
 
@@ -595,6 +726,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 time_match_tolerance: float = defaults.TIME_MATCH_TOLERANCE,
                 diff_chamfer_extra: float = defaults.DIFF_PAIR_CHAMFER_EXTRA,
                 diff_pair_intra_match: bool = False,
+                diff_pair_intra_lane=None,
                 intra_pair_tolerance: Optional[float] = None,
                 ac_couple_match: bool = False,
                 debug_memory: bool = False,
@@ -661,6 +793,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         gnd_via_enabled: Add GND vias near diff pair signal vias (default: True)
         diff_chamfer_extra: Chamfer multiplier for diff pair meanders (default: 1.5)
         diff_pair_intra_match: Enable intra-pair P/N length matching (default: False)
+        diff_pair_intra_lane: #1869 -- match, record and grade each intra-matched
+            pair on its LANE, the copper path between two pads, instead of
+            total copper: 'auto' (the two terminals the pair step routes the
+            pair between) or a list of 'P_NET=REF.PAD:REF.PAD'. None: total
+            copper, KiCad's measure. Only a pair the step intra-matches and no
+            .kicad_dru skew rule binds takes a lane (the step says why
+            another does not). A lane naming pads its nets lack raises
+            ValueError (the CLI prints it and exits 2).
         intra_pair_tolerance: the P/N skew every intra-matched pair is matched
             to, over a .kicad_dru rule's (#1503: the CLI's explicit
             --length-match-tolerance, the GUI's ticked override). None: a pair a
@@ -1867,6 +2007,35 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # P/N skew rule's, the explicit override, else the default
     config.intra_pair_tolerances, _intra_src = resolve_intra_pair_tolerances(
         diff_pair_ids_to_route, config, pcb_data, input_file, intra_pair_tolerance)
+    # #1869: the lane each matched pair is measured on, when one is asked for
+    try:
+        from intra_pair_lane import resolve as _resolve_lanes, settle as _settle_lanes
+        config.intra_pair_lanes = _resolve_lanes(diff_pair_intra_lane,
+                                                 diff_pair_ids_to_route, pcb_data)
+    except ValueError as _lane_err:
+        if return_results:
+            raise
+        print(f"Error: {_lane_err}", file=sys.stderr)
+        sys.exit(2)
+    # ...on a pair the step matches P to N and no .kicad_dru skew rule binds:
+    # KiCad grades such a rule on total copper, so the pair is matched on it
+    config.intra_pair_lanes, _lane_ignored, _lane_unmatched = _settle_lanes(
+        config.intra_pair_lanes, diff_pair_ids_to_route,
+        config.intra_pair_tolerances, _intra_src)
+    _pair_name_by_p = {p.p_net_id: n for n, p in diff_pair_ids_to_route}
+    for _pid, _why in _lane_ignored.items():
+        print(f"Intra-pair lane (#1869): {_pair_name_by_p.get(_pid)} is matched on "
+              f"total copper, not on its lane: {_why}")
+    if _lane_unmatched:
+        print(f"Intra-pair lane (#1869): unused for {len(_lane_unmatched)} pair(s) "
+              f"this step does not intra-match ({', '.join(_lane_unmatched[:6])}"
+              f"{' ...' if len(_lane_unmatched) > 6 else ''}); a lane takes "
+              f"--diff-pair-intra-match")
+    if config.intra_pair_lanes:
+        print(f"Intra-pair lane (#1869): {len(config.intra_pair_lanes) // 2} pair(s) "
+              f"are matched, recorded and graded on the path between two pads "
+              f"({'auto: the two terminals the pair step routes' if 'auto' in config.intra_pair_lanes.values() else 'named'}), "
+              f"not on total copper")
     config.skew_graded_net_ids = frozenset(
         nid for _n, p in diff_pair_ids_to_route
         if p.p_net_id in (config.intra_pair_tolerances or {})
@@ -2393,6 +2562,23 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                             scope_net_ids=_length_match_scope_ids,
                             report=_length_match_report)
 
+    # #1869: an `auto` lane is the two terminals the pair step routed
+    if config.intra_pair_lanes:
+        from intra_pair_lane import AUTO as _AUTO1869, resolve_auto as _resolve_auto_lanes
+        _was_auto = {_p for _p, _v in config.intra_pair_lanes.items() if _v == _AUTO1869}
+        config.intra_pair_lanes, _lane_unset = _resolve_auto_lanes(
+            config.intra_pair_lanes, diff_pair_ids_to_route, routed_results, pcb_data)
+        for _pid, _why in _lane_unset.items():
+            _lane_ignored[_pid] = _why
+            print(f"Intra-pair lane (#1869): {_pair_name_by_p.get(_pid)} is matched "
+                  f"on total copper: {_why}")
+        for _n, _p in diff_pair_ids_to_route:
+            _lp = (config.intra_pair_lanes or {}).get(_p.p_net_id)
+            _ln = (config.intra_pair_lanes or {}).get(_p.n_net_id)
+            if _p.p_net_id in _was_auto and _lp and _ln:
+                print(f"Intra-pair lane (#1869): {_n} auto lane {_lp[0]} - {_lp[1]} "
+                      f"and {_ln[0]} - {_ln[1]}, the terminals the pair step routed")
+
     # Apply intra-pair P/N length matching if configured
     intra_pair_reports = []
     if config.intra_pair_tolerances:
@@ -2577,6 +2763,19 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         pcb_data, diff_pair_ids_to_route, routed_results,
         lambda _pr: _geom1303.get(_pr.p_net_id,
                                   (config.track_width, config.diff_pair_gap)))
+    # #1873: a member whose copper runs back along itself (every overlap is
+    # in the record; the line names one longer than twice its track width)
+    from diff_pair_custody import self_overlap_line as _so_line1873
+    for _pn1873, _rec1873 in sorted(pair_copper.items()):
+        _l1873 = _so_line1873(_pn1873, _rec1873)
+        if _l1873:
+            print(f"  {YELLOW}{_l1873}{RESET}")
+        if _rec1873.get('self_overlap_not_searched'):
+            from net_queries import SELF_OVERLAP_MAX_SEGMENTS
+            print(f"  {YELLOW}Self-overlap: {_pn1873} was not searched for copper "
+                  f"laid along itself ("
+                  + ', '.join(k.upper() for k in _rec1873['self_overlap_not_searched'])
+                  + f": more than {SELF_OVERLAP_MAX_SEGMENTS} segments){RESET}")
     pair_reports = build_pair_reports(state, diff_pair_ids_to_route,
                                       member_audit,
                                       skipped_fanout=skipped_fanout_info,
@@ -2661,12 +2860,26 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # noting; the writeback next to the DRC-floor persistence records it in
     # the sibling .kicad_pro.
     from protected_nets import note_protection_candidates
+    # #1871: the self-graze marker is the middle's count as built; the
+    # exclusion is decided on the copper that ships
+    _sg_short = judge_selfgraze_on_copper(routed_results, pcb_data, config,
+                                          diff_pair_ids_to_route)
     _prot = protection_candidates(
         routed_results, pcb_data,
         pairs=coupled_protection_pairs(diff_pair_ids_to_route, pair_copper,
                                        member_audit))
     if _prot:
         note_protection_candidates(_prot)
+    # #1871: every routed pair the record leaves out, and why
+    unprotected_pairs = unprotected_pair_rows(
+        diff_pair_ids_to_route, _prot, routed_results, pair_copper, member_audit,
+        _sg_short, set(routed_diff_pairs) | set(uncoupled_diff_pairs))
+    for _u in unprotected_pairs:
+        print(f"  {YELLOW}Not protected: {_u['pair']} is routed but left out of the "
+              f"protected nets ({_u['reason']}"
+              + (f", {_u['pn_shortfall_items']} P/N item(s) under the pair "
+                 f"clearance" if _u['pn_shortfall_items'] else "")
+              + f"); a later step may rip it{RESET}")
     # #1361: an uncoupled pair's report says whether it is protected anyway.
     for _r in pair_reports:
         if _r.get('outcome') == 'uncoupled':
@@ -2680,7 +2893,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         from length_matching import regrade_intra_pair_reports
         regrade_intra_pair_reports(intra_pair_reports, pair_copper, pcb_data,
                                    diff_pair_ids_to_route,
-                                   config.length_match_tolerance)
+                                   config.length_match_tolerance, config=config)
         # 'skipped' pairs are matched end-to-end by the AC-couple pass, so they
         # belong in neither column -- counting them either way misreports.
         _isk = [r for r in intra_pair_reports if r['status'] == 'skipped']
@@ -2693,11 +2906,31 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # #1503: what each pair is graded to from now on, where no .kicad_dru
         # rule binds it -- recorded on the board by the writeback
         from protected_nets import note_intra_pair_tolerances
+        from intra_pair_lane import lane_pins as _lane_pins1869
+        _by_p1869 = {p.p_net_name: p for _n, p in diff_pair_ids_to_route}
+
+        def _lane_record(p_name):
+            # #1869: the pads the tolerance is graded between, with it
+            pair = _by_p1869.get(p_name)
+            if pair is None:
+                return {}
+            lp = _lane_pins1869(config, pcb_data, pair.p_net_id)
+            ln = _lane_pins1869(config, pcb_data, pair.n_net_id)
+            if lp and ln:
+                return {'lane': {'p': lp, 'n': ln}}
+            # a lane asked for and not applied says why (#1869 review)
+            return ({'lane_ignored': _lane_ignored[pair.p_net_id]}
+                    if pair.p_net_id in _lane_ignored else {})
+        for _r in intra_pair_reports:
+            _lr = _lane_record(_r.get('p_net'))
+            if _lr:
+                _r.update(_lr)
         note_intra_pair_tolerances({
             r['p_net']: {'n': r['n_net'], 'tolerance_mm': r['tolerance_mm'],
                          'source': _intra_src.get(next(
                              (p.p_net_id for _n, p in diff_pair_ids_to_route
-                              if p.p_net_name == r['p_net']), None), ('default', None))[0]}
+                              if p.p_net_name == r['p_net']), None), ('default', None))[0],
+                         **_lane_record(r['p_net'])}
             for r in intra_pair_reports_to_record(intra_pair_reports, pair_reports)})
         print(f"\n  Intra-pair (shipped copper, #1303): {len(_im)}/{len(_im) + len(_iu)} "
               f"pair(s) within {'/'.join(f'{t:g}' for t in _tols) or config.length_match_tolerance}mm"
@@ -2846,6 +3079,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     from target_swap import summarize_target_swaps  # cycle-safe swap list (#380)
     summary = {
         'routed_diff_pairs': routed_diff_pairs,
+        # #1871: routed pairs the protected-nets record leaves out, with why
+        'unprotected_pairs': unprotected_pairs,
         'failed_diff_pairs': failed_diff_pairs,
         'partial_diff_pairs': sorted(partial_diff_pairs),
         # #602: every pair the member audit found with a disconnected member
@@ -3100,6 +3335,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # #1303: same data as JSON_SUMMARY['uncoupled_diff_pairs'] --
             # routed, but the copper shipped is not coupled.
             'uncoupled_diff_pairs': sorted(uncoupled_diff_pairs),
+            # #1871: same data as JSON_SUMMARY['unprotected_pairs']
+            'unprotected_pairs': unprotected_pairs,
             # #1303: the intra-pair status, re-read off the shipped copper
             # (JSON_SUMMARY['intra_pair_matching']); [] without the flag.
             'intra_pair_matching': intra_pair_reports,
@@ -3527,6 +3764,17 @@ Examples:
                         help="Chamfer multiplier for diff pair meanders (default: 1.5, >1 avoids P/N crossings)")
     parser.add_argument("--diff-pair-intra-match", action="store_true",
                         help="Enable intra-pair P/N length matching (add meanders to shorter track of each diff pair)")
+    parser.add_argument("--diff-pair-intra-lane", nargs='+', default=None,
+                        metavar="LANE",
+                        help="Match, record and grade each intra-matched pair on its "
+                             "lane -- the copper path between two pads -- instead of "
+                             "total copper, so a branch to a third pad counts as a stub "
+                             "(#1869): 'auto' (the two terminals the pair step routes "
+                             "the pair between) or one or more P_NET=REF.PAD:REF.PAD (the "
+                             "N member's pads are its pads on the same two parts). Takes "
+                             "--diff-pair-intra-match; a pair a .kicad_dru skew rule binds "
+                             "is matched on total copper, as KiCad grades the rule. "
+                             "Default: total copper, as KiCad's skew DRC measures.")
     parser.add_argument("--ac-couple-match", action="store_true",
                         help="End-to-end length-match AC-coupled differential pairs split by series DC-blocking "
                              "caps (#196): auto-detect the cap chain, match the concatenated P path vs the N path, "
@@ -3962,6 +4210,7 @@ Examples:
                 time_match_tolerance=args.time_match_tolerance,
                 diff_chamfer_extra=args.diff_chamfer_extra,
                 diff_pair_intra_match=args.diff_pair_intra_match,
+                diff_pair_intra_lane=args.diff_pair_intra_lane,
                 ac_couple_match=args.ac_couple_match,
                 debug_memory=args.debug_memory,
                 mps_reverse_rounds=args.mps_reverse_rounds,
