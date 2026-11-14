@@ -7461,6 +7461,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'length_match_groups': summary.get('length_match_groups', []),
             # #1759: same data as JSON_SUMMARY['skew_moved_by_cleanup'].
             'skew_moved_by_cleanup': summary.get('skew_moved_by_cleanup', []),
+            # #1851: the length-window rows, set once the board that ships
+            # has been measured (below); [] until then and with no such rule
+            'length_moved_by_cleanup': [],
         }
         # #666 sequence point 1, GUI front: the CLI applies the main pass's
         # moves to the file it is about to write, mirrors them and re-welds
