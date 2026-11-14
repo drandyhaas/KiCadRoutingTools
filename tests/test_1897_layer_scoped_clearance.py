@@ -45,7 +45,10 @@ Checks:
      slot on the layer the rule names;
   8. a pad against a via, on a board whose only per-layer rule is the scoped
      one: graded as kicad-cli 10.0.6 grades it, a through-hole pad on the
-     rule's inner layer and an SMD pad on F.Cu (check_drc used to crash).
+     rule's inner layer and an SMD pad on F.Cu (check_drc used to crash);
+  9. route_diff.coupled_pair_floors takes such a rule binding a pair's P
+     against its N on the layer it names, and floors the gap at it only when
+     the pair routes on that layer alone.
 """
 import json
 import os
@@ -200,6 +203,30 @@ def grade_pads(td):
            f"{tag}: {rows} rows, {pad_via} of them pad against via")
 
 
+def pair_floor(td):
+    print("9. route_diff reads a layered scoped rule binding a pair's P against its N")
+    from types import SimpleNamespace
+    from kicad_parser import parse_kicad_pcb
+    from route_diff import coupled_pair_floors
+    dru = ('(version 1)\n(rule "pn in1"\n  (layer "In1.Cu")\n'
+           "  (condition \"A.hasNetclass('BUS') && B.hasNetclass('BUS')\")\n"
+           '  (constraint clearance (min 0.15mm)))\n')
+    board = rename(stage(os.path.join(td, 'pn'), 'pairs', dru=dru),
+                   (('A1', 'AD_P'), ('A2', 'AD_N')))
+    pcb = parse_kicad_pcb(board)
+    ids = {n.name: i for i, n in pcb.nets.items()}
+    pair = SimpleNamespace(p_net_id=ids['AD_P'], n_net_id=ids['AD_N'])
+    key = frozenset((ids['AD_P'], ids['AD_N']))
+    floors, cmap = coupled_pair_floors(pcb, board, [pair], ['In1.Cu'])
+    got = cmap.get(key) or {}
+    ok(got.get('track') == {'In1.Cu': 0.15} and got.get('stack') is None,
+       f"P<->N governed on In1.Cu alone, at the rule: {got}")
+    ok(floors.get(ids['AD_P'], (None,))[:2] == (0.15, ['pn in1']),
+       f"routed on In1.Cu only, the pair's gap is floored at the rule: {floors}")
+    floors, _c = coupled_pair_floors(pcb, board, [pair], ['F.Cu', 'In1.Cu'])
+    ok(floors == {}, f"routed on F.Cu too, no one gap floor (the rule does not bind F.Cu): {floors}")
+
+
 def grade_apart(td):
     print('6. the "keep pairs apart" shape is graded as KiCad grades it')
     for tag, dru, layers in (('no layer clause', apart(0.3), ['In1.Cu', 'F.Cu']),
@@ -239,6 +266,7 @@ def main():
         grade_pads(td)
         grade_apart(td)
         route_apart(td)
+        pair_floor(td)
 
         print("2. a rule that tightens In1.Cu")
         sub = os.path.join(td, 'tight')

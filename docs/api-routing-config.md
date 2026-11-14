@@ -815,7 +815,22 @@ partner too and ignores the layer clause (it over-blocks, never under-blocks); t
 pair-exact readers -- `check_drc`, `placement/fanout_clearance`'s connector gate, #1145's
 `pair_gap_rule_floor`, and `pair_clearance(P, N, kind='track')` through
 `track_partner_clearances` -- apply both. A nested sub-run handed its parent's map has no
-partner map and prices P<->N at the per-net value. `A.inDiffPair('pattern')` is
+partner map and prices P<->N at the per-net value.
+
+The same negation on a rule the scoped channel reads (#1897), e.g.
+`A.hasNetclass('BUS') && B.hasNetclass('BUS') && !A.isCoupledDiffPair()`, with or
+without a `(layer ...)` clause, binds every item kind: it is read without the coupled
+term and binds every pair of items that reads so except a pair's own P and N (named by
+`MatchDpSuffix`). Every verdict about two nets applies it pair-exact
+(`ScopedClearanceRules.partners`: `check_drc`, the placement model, the fan-out
+verdicts); a shared obstacle stamp exempts no partner, since it serves the routed nets
+that are not partners, so a pair routed single-ended is held off its own partner at the
+rule (conservative, never under-blocks). KiCad's documented example of the shape,
+`A.inDiffPair('*') && !AB.isCoupledDiffPair()`, is in neither channel -- `inDiffPair`
+is outside the scoped subset -- so no step routes to it and `check_drc` lists it
+`NOT GRADED`.
+
+`A.inDiffPair('pattern')` is
 evaluated by the resolver as KiCad's `inDiffPairFunc`, so a layer-scoped `track_width`
 rule conditioned on it sets the pair's per-layer width; no consumer reads a
 `.kicad_dru` `diff_pair_gap` rule yet, whatever its condition.
