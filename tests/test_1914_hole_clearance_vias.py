@@ -44,6 +44,13 @@ ships below the ring is named in the design_rules ledger. Unit checks:
   * set_policy_from_args and the GUI's PCBData resolve the same value
     (board_hole_clearance): the rules value, the fab_floor_origin when larger,
     KiCad's factory 0.25 when nothing is declared, 0 when 0 is declared;
+  * down a CHAIN (the writeback writes min_hole_clearance at the clearance a
+    step routed): a board that declared nothing still reads 0.25 at step 2
+    and after a later writeback lowers the rule again, through the
+    writeback's via_ring_hole_clearance record -- the mid-run writer's
+    included, and the board file's newer copy of it; a rule the user edits
+    between steps is honoured and stays so; a declared 0 records nothing;
+    the obstacle map and check_drc (7b, ring_record) still read the rule;
   * the swap shrink loop ships (0.5, 0.2) with the pair installed where that
     fits, (0.5, 0.3) without it, and falls back to (0.45, 0.3) where no
     ring-holding via fits (completion first) -- never to the advanced 0.15
@@ -228,9 +235,13 @@ def checker(tmp):
     # Case 4's track (0.225 off the drill) on a board whose chain wrote 0.1
     # over a declared 0.25: KiCad grades the project's 0.1, so the via drill
     # is clean, though the NPTH arms still read the 0.25 origin.
+    # 'ring_record': the writeback's ring record (the ladder preferred 0.25
+    # on a board that declared nothing) is the router's alone -- the grade,
+    # NPTH arms included, stays at the project's 0.1.
     for name, rules, origin, want_rows in (
             ('origin_only', {'min_hole_clearance': 0.1}, 0.25, 0),
-            ('project_declares', {'min_hole_clearance': 0.25}, None, 1)):
+            ('project_declares', {'min_hole_clearance': 0.25}, None, 1),
+            ('ring_record', {'min_hole_clearance': 0.1}, None, 0)):
         pcb = _stage(tmp, 'via_drill_' + name, _board(
             vias=[(20, 20, 0.45, 0.2, 1)],
             segs=[(15, 20.425, 25, 20.425, 0.2, 2)]))
@@ -238,6 +249,9 @@ def checker(tmp):
         if origin is not None:
             proj['kicad_routing_tools'] = {
                 'fab_floor_origin': {'min_hole_clearance': origin}}
+        if name == 'ring_record':
+            proj['kicad_routing_tools'] = {'via_ring_hole_clearance': {
+                'rule': 0.1, 'hole_clearance': 0.25}}
         with open(os.path.splitext(pcb)[0] + '.kicad_pro', 'w', encoding='utf-8') as f:
             json.dump(proj, f)
         doc, _r = _grade(pcb, tmp, 'via_drill_' + name, bool(want_rows),
@@ -249,6 +263,13 @@ def checker(tmp):
         ok(f'{name}: the report names the via-drill value',
            abs((doc.get('graded_at', {}).get('hole_clearance_via_drill') or 0)
                - rules['min_hole_clearance']) < 1e-9, doc.get('graded_at'))
+        if name == 'ring_record':
+            g = doc.get('graded_at', {})
+            ok('ring_record: the NPTH arms grade the project\'s 0.1 too (vias '
+               'at it, tracks at the 0.2 fab floor), not the record\'s 0.25',
+               abs((g.get('hole_clearance_via') or 0) - 0.1) < 1e-9
+               and abs((g.get('hole_clearance') or 0) - 0.2) < 1e-9
+               and g.get('hole_clearance_source') == 'fab floor', g)
 
 
 def router_units(tmp):
@@ -359,6 +380,131 @@ def router_units(tmp):
         data.live_rules_provider = lambda: {'min_hole_clearance': 0.3}
         ok('a live board\'s declared rule is read first',
            abs(fab_tiers.board_hole_clearance(data) - 0.3) < 1e-9)
+    finally:
+        fab_tiers.set_via_hole_clearance(None, None)
+        fab_tiers.set_escalation_policy(saved_esc, {})
+
+    print('9b. every step of a chain resolves the hole clearance step 1 did')
+    import contextlib
+    import io
+    import shutil
+    import tool_records
+    from copy_board import copy_board
+    from fix_kicad_drc_settings import apply_routed_floors, fix_project_for_output
+    from obstacle_map import declared_hole_clearance
+
+    def _rules(pcb):
+        with open(os.path.splitext(pcb)[0] + '.kicad_pro', encoding='utf-8') as f:
+            return json.load(f)['board']['design_settings']['rules']
+
+    def _rec(pcb):
+        return tool_records.effective_namespace(pcb).get(
+            fab_tiers.HOLE_RING_RECORD_KEY)
+
+    def _write(pcb, src, clearance):
+        with contextlib.redirect_stdout(io.StringIO()):
+            fix_project_for_output(pcb, input_pcb=src, clearance=clearance)
+
+    def _step(src, name, clearance):
+        d = os.path.join(tmp, 'chain_' + name)
+        os.makedirs(d)
+        dst = os.path.join(d, 'b.kicad_pcb')
+        with contextlib.redirect_stdout(io.StringIO()):
+            copy_board(src, dst)
+        _write(dst, src, clearance)
+        return dst
+
+    def _cli(pcb):
+        fab_tiers.set_policy_from_args(_args(), pcb)
+        return fab_tiers.get_via_hole_clearance()
+    try:
+        bare = _stage(tmp, 'chain_in', _board())          # no project at all
+        s1 = _step(bare, 's1', 0.1)
+        ok('step 1 on a board declaring nothing writes the rule at its clearance',
+           abs(_rules(s1).get('min_hole_clearance', -1) - 0.1) < 1e-9, _rules(s1))
+        ok('and records that the ladder preferred the factory 0.25 over it',
+           _rec(s1) == {'rule': 0.1, 'hole_clearance': 0.25}, _rec(s1))
+        cli, gui = _cli(s1), fab_tiers.board_hole_clearance(parse_kicad_pcb(s1))
+        ok('step 2 on its output: the CLI installs (0.25, 0.1) and the PCBData '
+           'resolver reads 0.25 -- the ring step 1 preferred',
+           cli is not None and abs(cli[0] - 0.25) < 1e-9 and abs(gui - 0.25) < 1e-9,
+           (cli, gui))
+        ok('the record is the ladder\'s alone: the obstacle map reads the '
+           'project\'s 0.1', declared_hole_clearance(None, s1) == (0.1, 'project'),
+           declared_hole_clearance(None, s1))
+        s2 = _step(s1, 's2', 0.09)
+        ok('a later step writing a lower rule keeps the preference',
+           _rec(s2) == {'rule': 0.09, 'hole_clearance': 0.25}
+           and abs(fab_tiers.board_hole_clearance(pcb_file=s2) - 0.25) < 1e-9,
+           (_rec(s2), fab_tiers.board_hole_clearance(pcb_file=s2)))
+
+        # The user sets the rule between steps: a value no writeback wrote.
+        pro = os.path.splitext(s2)[0] + '.kicad_pro'
+        with open(pro, encoding='utf-8') as f:
+            proj = json.load(f)
+        proj['board']['design_settings']['rules']['min_hole_clearance'] = 0.15
+        with open(pro, 'w', encoding='utf-8') as f:
+            json.dump(proj, f)
+        ok('a rule the user edited between steps is honoured (0.15)',
+           abs(fab_tiers.board_hole_clearance(pcb_file=s2) - 0.15) < 1e-9,
+           fab_tiers.board_hole_clearance(pcb_file=s2))
+        s3 = _step(s2, 's3', 0.1)
+        ok('and stays honoured after the next writeback lowers it again',
+           _rec(s3) == {'rule': 0.1, 'hole_clearance': 0.15}
+           and abs(fab_tiers.board_hole_clearance(pcb_file=s3) - 0.15) < 1e-9,
+           (_rec(s3), fab_tiers.board_hole_clearance(pcb_file=s3)))
+
+        zero = _pro(tmp, 'chain_zero', {'min_hole_clearance': 0})
+        z1 = _step(zero, 'z1', 0.1)
+        ok('a declared 0 stays "no check" down the chain: no record, ring 0',
+           _rec(z1) is None and fab_tiers.board_hole_clearance(pcb_file=z1) == 0.0,
+           (_rec(z1), _rules(z1).get('min_hole_clearance')))
+        decl = _pro(tmp, 'chain_decl', {'min_hole_clearance': 0.25})
+        d1 = _step(decl, 'd1', 0.1)
+        ok('a declared 0.25 lowered by the writeback still reads 0.25',
+           abs(fab_tiers.board_hole_clearance(pcb_file=d1) - 0.25) < 1e-9
+           and _rec(d1) == {'rule': 0.1, 'hole_clearance': 0.25},
+           (_rec(d1), fab_tiers.board_hole_clearance(pcb_file=d1)))
+        tight = _pro(tmp, 'chain_tight', {'min_hole_clearance': 0.1})
+        t1 = _step(tight, 't1', 0.1)
+        ok('a declared rule the writeback leaves where it was: no record',
+           _rec(t1) is None and abs(fab_tiers.board_hole_clearance(pcb_file=t1)
+                                    - 0.1) < 1e-9, _rec(t1))
+
+        # The mid-run writer (#650) runs first and lowers the rule before the
+        # step's writeback: the record must not be lost between the two.
+        mid = os.path.join(tmp, 'chain_mid', 'b.kicad_pcb')
+        os.makedirs(os.path.dirname(mid))
+        shutil.copyfile(bare, mid)
+        with open(os.path.splitext(mid)[0] + '.kicad_pro', 'w', encoding='utf-8') as f:
+            json.dump({'board': {'design_settings': {'rules': {}}}}, f)
+        with contextlib.redirect_stdout(io.StringIO()):
+            apply_routed_floors(mid, clearance=0.1, verbose=False)
+        _write(mid, mid, 0.1)
+        ok('the mid-run writer records it, and the step\'s writeback keeps it',
+           _rec(mid) == {'rule': 0.1, 'hole_clearance': 0.25}
+           and abs(fab_tiers.board_hole_clearance(pcb_file=mid) - 0.25) < 1e-9,
+           _rec(mid))
+
+        # KiCad's own save rewrote the project from its load-time copy and
+        # dropped the record; the board file's copy (newer records_rev) has it.
+        kept = os.path.join(tmp, 'chain_saved', 'b.kicad_pcb')
+        os.makedirs(os.path.dirname(kept))
+        ns = {'records_rev': 3, fab_tiers.HOLE_RING_RECORD_KEY:
+              {'rule': 0.1, 'hole_clearance': 0.25}}
+        with open(kept, 'w', encoding='utf-8') as f:
+            f.write(_board().rstrip()[:-1]
+                    + '\t' + tool_records.board_property_sexpr(ns) + '\n)\n')
+        with open(os.path.splitext(kept)[0] + '.kicad_pro', 'w', encoding='utf-8') as f:
+            json.dump({'board': {'design_settings': {'rules': {
+                'min_hole_clearance': 0.1}}}}, f)
+        ok('the board file\'s newer copy of the record is read',
+           abs(fab_tiers.board_hole_clearance(pcb_file=kept) - 0.25) < 1e-9,
+           fab_tiers.board_hole_clearance(pcb_file=kept))
+        ok('ring_hole_clearance: a record that no longer matches the rule is '
+           'ignored', fab_tiers.ring_hole_clearance(
+               0.12, None, {fab_tiers.HOLE_RING_RECORD_KEY:
+                            {'rule': 0.1, 'hole_clearance': 0.25}}) == 0.12)
     finally:
         fab_tiers.set_via_hole_clearance(None, None)
         fab_tiers.set_escalation_policy(saved_esc, {})
