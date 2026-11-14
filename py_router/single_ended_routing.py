@@ -453,6 +453,72 @@ def _area_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, kind, arrays,
     return ax
 
 
+def _hole_rule_via_reach(pcb_data, hr, layer):
+    """#1853: per row of `_foreign_via_arrays`, how far from the via's BODY
+    another net's track must stand on `layer` for the board's hole_clearance
+    rules: the rule's value less the via's ring, NaN where no rule binds its
+    hole. Cached with the arrays' own signature."""
+    vt = pcb_data.vias[-1] if pcb_data.vias else None
+    sig = (len(pcb_data.vias), (vt.x, vt.y, vt.net_id) if vt is not None else None,
+           id(hr))
+    cache = getattr(pcb_data, '_hole_rule_via_cache', None)
+    if cache is None or cache[0] != sig:
+        cache = pcb_data._hole_rule_via_cache = (sig, {})
+    got = cache[1].get(layer)
+    if got is None:
+        vals = []
+        for v in pcb_data.vias:
+            drill = float(getattr(v, 'drill', 0.0) or 0.0)
+            rule = hr.via_value(v, layer) if drill > 0 else None
+            size = float(getattr(v, 'size', 0.0) or 0.0)
+            vals.append(math.nan if rule is None
+                        else rule - max(0.0, (size - drill) / 2.0))
+        got = cache[1][layer] = np.asarray(vals, dtype=float)
+    return got
+
+
+def _hole_via_excess(config, pcb_data, near, base_clearance, layer, own_type='track'):
+    """#1853: per `near` row of the foreign via arrays, what the board's
+    hole_clearance rules ask between the moving copper and the via's body
+    over `base_clearance`; NaN where they ask no more. The router holds a
+    track off another net's via hole at the rule (`hole_rule_routing`), so a
+    pass that measures the pair at the copper clearance alone moves the track
+    back inside it. A moving VIA (`own_type` 'via') brings a hole of its own:
+    the foreign via's copper stands off it at the rule too. None without such
+    a rule, so callers stay on their own path."""
+    hr = getattr(config, 'hole_rules', None) if config is not None else None
+    if hr is None or base_clearance is None:
+        return None
+    out = _hole_rule_via_reach(pcb_data, hr, layer)[near] - base_clearance
+    own = _own_via_hole_excess(config, hr, base_clearance) if own_type == 'via' else None
+    if own is not None:
+        out = np.fmax(out, own)
+    out = np.where(out > 0, out, np.nan)
+    return out if (~np.isnan(out)).any() else None
+
+
+def _own_via_hole_excess(config, hr, base_clearance):
+    """#1853: what the rules ask between the body of a via this run lays and
+    another net's copper over `base_clearance` (its hole to that copper at
+    the rule, less its own ring), or None."""
+    rule = hr.new_via_value()
+    if rule is None or base_clearance is None:
+        return None
+    ring = max(0.0, (float(config.via_size) - float(config.via_drill)) / 2.0)
+    more = rule - ring - base_clearance
+    return more if more > 0 else None
+
+
+def _raise_excess(excess, more):
+    """#1853: a hole rule is one more floor on the pair, beside its copper
+    clearance: where `more` binds (not NaN) the larger of it and `excess`
+    stands. `excess` unchanged for `more` None."""
+    if more is None:
+        return excess
+    base = excess if excess is not None else np.zeros(len(more))
+    return np.where(np.isnan(more), base, np.maximum(base, more))
+
+
 def _coupled_excess(config, net_id, nids, kind, base_clearance, layer=None):
     """#1630: per foreign item, where it is `net_id`'s own diff-pair partner
     and a rule binding the pair sets their clearance (config.
@@ -991,6 +1057,12 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         # #1630: the pair's own partner at the rule binding the pair
         excess = _fold_scoped_excess(excess, _coupled_excess(
             config, net_id, nid[near], 'track', base_clearance, layer))
+    if (own_type == 'via' and config is not None
+            and getattr(config, 'hole_rules', None) is not None):
+        # #1853: the moving via's hole against the foreign tracks
+        _own = _own_via_hole_excess(config, config.hole_rules, base_clearance)
+        if _own is not None:
+            excess = _raise_excess(excess, np.full(int(near.sum()), _own))
     if need is not None and not exact:
         return _seg_dist_need(x1, y1, x2, y2, sx, sy, ax, ay, bx, by, abx, aby, L2, safe_L2, hw, excess, need)
     if exact:
@@ -1139,6 +1211,9 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         # #1630: the partner's via at the rule binding the pair
         excess = _fold_scoped_excess(excess, _coupled_excess(
             config, net_id, nids[near], 'layer', base_clearance, layer))
+    # #1853: the hole of the foreign via (and of a moving via) at its rule
+    excess = _raise_excess(excess, _hole_via_excess(
+        config, pcb_data, near, base_clearance, layer, own_type))
     if excess is not None:
         d = d - excess
     return float(np.min(d))

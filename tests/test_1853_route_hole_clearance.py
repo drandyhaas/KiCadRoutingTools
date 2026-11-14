@@ -38,7 +38,11 @@ Checks:
   4. each *_fits board and npth: SIG routes, the copper stands the rule's
      distance off the hole, check_drc is clean, the run names the rule;
   5. the gate a via generator off the map asks (`hole_rule_refusal`);
-  6. the map's reference counts balance (KICAD_OBSTACLE_AUDIT).
+  6. the map's reference counts balance (KICAD_OBSTACLE_AUDIT);
+  7. the passes that move copper measure a via's hole at the rule;
+  8. completion first: newvia_tight under a rule no via size holds routes
+     SIG under --escalation fab by the terminal escalation's last rung, at
+     the copper clearance alone, and says so; under board it does not.
 """
 import json
 import math
@@ -77,10 +81,10 @@ def stage(td, name, dru=None):
     return os.path.join(td, name + '.kicad_pcb')
 
 
-def route(td, board, tag, one_layer, env=None):
+def route(td, board, tag, one_layer, env=None, escalation='off', doc_out=None):
     out = os.path.join(td, tag + '.kicad_pcb')
     summary = os.path.join(td, tag + '.json')
-    args = ['--nets', 'SIG', '--grid-step', '0.01', '--escalation', 'off',
+    args = ['--nets', 'SIG', '--grid-step', '0.01', '--escalation', escalation,
             '--json-out', summary]
     args += (['--layers', 'F.Cu'] if one_layer else
              ['--via-size', '0.6', '--via-drill', '0.3', '--clearance', '0.0889',
@@ -89,6 +93,8 @@ def route(td, board, tag, one_layer, env=None):
               accept=True, timeout=900, env=env)
     with open(evidence(summary, 'the summary'), encoding='utf-8') as fh:
         doc = json.load(fh)
+    if doc_out is not None:
+        doc_out.update(doc)
     return (out, sorted(doc.get('routed_single') or []),
             sorted(doc.get('failed_single') or []), (r.stdout or '') + (r.stderr or ''))
 
@@ -262,6 +268,89 @@ def audit(td, sub, name, one_layer):
        f"{name}: the working map returns exactly to the base map")
 
 
+def passes(td):
+    """The post-route passes measure a pair through the shared distance
+    helpers. With the rule read there, a pass cannot move a track back inside
+    the distance the router held."""
+    print("7. the passes that move copper measure a via's hole at the rule")
+    import inspect
+    import pcb_modification
+    import single_ended_routing as ser
+    board = stage(os.path.join(td, 'passes'), 'track_fits')
+    pcb = load(board)
+    cfg = rules_of(board, pcb)
+    via = pcb.vias[0]
+    sig = next(n for n in pcb.nets.values() if n.name == 'SIG').net_id
+    y = via.y + 0.6            # a track of SIG passing 0.6 mm from the via's centre
+    args = (pcb, sig, via.x - 1.0, y, via.x + 1.0, y, 'F.Cu')
+    body = 0.6 - via.size / 2.0
+    more = 0.254 - (via.size - via.drill) / 2.0 - 0.0889
+    got = ser._seg_foreign_via_dist(*args, base_clearance=0.0889, config=cfg)
+    ok(abs(got - (body - more)) < 1e-6,
+       f"a track reads the via {more:.4f} mm nearer than its body, the rule less "
+       f"its ring and the clearance: {got:.4f}")
+    plain = ser._seg_foreign_via_dist(*args, base_clearance=0.0889, config=None)
+    ok(abs(plain - body) < 1e-6, f"and at its body with no rules in hand: {plain:.4f}")
+    ok(abs(ser._seg_foreign_via_dist(*args, base_clearance=0.2, config=cfg) - body) < 1e-6,
+       "by nothing where the ring and the clearance cover the rule")
+    b2 = stage(os.path.join(td, 'passes_none'), 'track_fits', dru=NO_RULES)
+    p2 = load(b2)
+    got2 = ser._seg_foreign_via_dist(p2, sig, *args[2:], base_clearance=0.0889,
+                                     config=rules_of(b2, p2))
+    ok(abs(got2 - body) < 1e-6, f"and by nothing without a rule: {got2:.4f}")
+    # a via of SIG probed beside the other net's via and beside its track
+    vprobe = (pcb, sig, via.x, y, via.x, y, 'F.Cu')
+    gv = ser._seg_foreign_via_dist(*vprobe, base_clearance=0.0889, config=cfg, own_type='via')
+    ok(abs(gv - (body - more)) < 1e-6, f"a moving via reads the same floor: {gv:.4f}")
+    b3 = stage(os.path.join(td, 'passes_via'), 'newvia_fits')
+    p3 = load(b3)
+    c3 = rules_of(b3, p3)
+    sig3 = next(n for n in p3.nets.values() if n.name == 'SIG').net_id
+    other = next(s for s in p3.segments if s.net_id not in (0, sig3)
+                 and not getattr(s, 'graphic', False))
+    mx, my = (other.start_x + other.end_x) / 2, (other.start_y + other.end_y) / 2
+    a = (p3, sig3, mx, my + 0.5, mx, my + 0.5, other.layer)
+    t_ = ser._seg_foreign_seg_dist(*a, base_clearance=0.0889, config=c3, exact=True)
+    v_ = ser._seg_foreign_seg_dist(*a, base_clearance=0.0889, config=c3, exact=True,
+                                   own_type='via')
+    ok(abs((t_ - v_) - more) < 1e-6,
+       f"a moving via reads another net's track {more:.4f} mm nearer than a "
+       f"track does, its own hole at the rule: {t_:.4f} / {v_:.4f}")
+    src = inspect.getsource(pcb_modification)
+    ok('_hole_via_excess' in src and '_raise_excess' in src,
+       "the micro-shift's own measurement folds the rule in too")
+
+
+WIDE_RULE = '(version 1)\n(rule "holes"\n  (constraint hole_clearance (min 0.35mm)))\n'
+
+
+def last_rung(td):
+    """newvia_tight under a rule no via size holds: the via's hole stands at
+    most 0.445 - 0.075 - 0.05 = 0.32 mm from the ring's track, inside 0.35,
+    even at the smallest drill the escalation reaches."""
+    print("8. completion first: a net no rung holding the rule joins")
+    sub = os.path.join(td, 'last_rung')
+    doc = {}
+    out, routed, failed, log = route(sub, stage(sub, 'newvia_tight', dru=WIDE_RULE),
+                                     'fab', False, escalation='fab', doc_out=doc)
+    ok(routed == ['SIG'] and failed == [],
+       f"under --escalation fab SIG is routed: {routed} / {failed}")
+    ok('at the copper clearance alone' in log,
+       "by the terminal escalation's last rung, which says it")
+    esc = (doc.get('terminal_escalations') or {}).get('SIG', '')
+    ok('below the hole_clearance rule' in esc,
+       f"the summary's terminal_escalations entry says so: {esc!r}")
+    ok("rule 'holes' (hole_clearance min 0.35 mm)" in log and 'row(s) of this step' in log,
+       "the rows its copper stands inside are named per rule")
+    ok('Hole:SIG (via) <-> Track:OTHER' in drc(out, flagged=True),
+       "and check_drc names SIG's via hole on the board")
+    sub2 = os.path.join(td, 'last_rung_board')
+    _o, routed, failed, log = route(sub2, stage(sub2, 'newvia_tight', dru=WIDE_RULE),
+                                    'board', False, escalation='board')
+    ok(routed == [] and failed == ['SIG'] and 'at the copper clearance alone' not in log,
+       f"under --escalation board the rule holds and SIG is not routed: {routed} / {failed}")
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         rule_walk(td)
@@ -277,6 +366,8 @@ def main():
         print("6. the map's reference counts balance")
         audit(td, s1, 'track_fits', True)
         audit(td, s2, 'newvia_fits', False)
+        passes(td)
+        last_rung(td)
     if FAILS:
         print(f"\nFAILED ({len(FAILS)}):")
         for f in FAILS:

@@ -6859,7 +6859,8 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
                                       _foreign_via_arrays, _foreign_hole_capsules,
                                       _scoped_excess, _coupled_excess,
                                       _fold_scoped_excess, _fold_scoped_pad_excess,
-                                      _area_excess, _fold_area_pad_excess)
+                                      _area_excess, _fold_area_pad_excess,
+                                      _hole_via_excess, _raise_excess)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     from obstacle_map import resolve_hole_clearance
 
@@ -7031,9 +7032,13 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
         if near.any():
             fcx, fcy, fr = vx[near], vy[near], vr[near]
             d = np.hypot(sx[:, None] - fcx[None, :], sy[:, None] - fcy[None, :]) - fr[None, :]
-            d = d - _excess(vnid[near], 'via', 'layer', _area_excess(
+            _vex = _excess(vnid[near], 'via', 'layer', _area_excess(
                 config, pcb_data, net_id, x1, y1, x2, y2, s.layer, 'via',
-                (vnid, vx, vy, vr), near, clearance, 'via'))[None, :]  # #436
+                (vnid, vx, vy, vr), near, clearance, 'via'))  # #436
+            # #1853: the via's hole at the rule binding it
+            _vex = _raise_excess(_vex, _hole_via_excess(
+                config, pcb_data, near, clearance, s.layer))
+            d = d - _vex[None, :]
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, fcx[j], fcy[j])
 
