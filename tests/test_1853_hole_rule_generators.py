@@ -26,7 +26,14 @@ Checks:
      it and allowed once it is taken back; a trial's own via passed for one
      question refuses the same way; a track 0.25 mm from a via's hole is
      refused at a 0.254 rule and one 0.26 mm from it allowed.
-  The gate reads the board's rules through the routing
+  F. the call's copper is graded once the engines are done: a track of a
+     fan-out 0.250 mm from another net's via hole (0.254 needed) is taken
+     off with its pad's escape and the net reported unescaped
+     (`fanout_hole_rule.hole_takeoff`, the QFN fan-out's pass), one 0.27 mm
+     from it is kept; and the BGA channel engine on the 6x6 part with a
+     0.25 mm rule, whose escapes stood inside it, re-escapes those balls and
+     returns copper the grader finds no row in.
+  The gate and the passes read the board's rules through the routing
   chokepoint (`check_drc.board_design_rules`), the table a step's
   `config.rules` holds.
 """
@@ -170,12 +177,64 @@ def own_copper(td):
        "one 0.26 mm from it is allowed")
 
 
+def passes(td):
+    print("F. the call's copper, graded once the engines are done")
+    from fanout_hole_rule import hole_takeoff, hole_violations
+    from check_drc import board_design_rules
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(stage(os.path.join(td, 'f_track'), 'track_fits'))
+    sig = next(n for n in pcb.nets.values() if n.name == 'SIG').net_id
+    fp = pcb.footprints['P1']
+    for y, gone in ((6.45, True), (6.47, False)):
+        tracks = [{'start': (9.0, 6.45), 'end': (12.0, 6.45), 'width': 0.1, 'layer': 'F.Cu',
+                   'net_id': sig},
+                  {'start': (12.0, 6.45), 'end': (12.0, y), 'width': 0.1, 'layer': 'F.Cu',
+                   'net_id': sig},
+                  {'start': (12.0, y), 'end': (18.0, y), 'width': 0.1, 'layer': 'F.Cu',
+                   'net_id': sig}]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            t, v, failed = hole_takeoff(fp, pcb, tracks, [], [])
+        if gone:
+            ok(t == [] and failed == ['SIG'] and 'hole_clearance (#1853)' in buf.getvalue(),
+               f"a track 0.250 mm from the hole: its escape is taken off, SIG unescaped "
+               f"({len(t)} track(s) left, failed {failed})")
+        else:
+            ok(len(t) == 3 and failed == [], f"0.270 mm from it: kept ({len(t)} tracks)")
+
+    import test_fanout_through_via_layers as bgafix
+    from bga_fanout import generate_bga_fanout
+    sub = os.path.join(td, 'f_bga')
+    os.makedirs(sub)
+    pcb = bgafix.fixture('F')
+    pcb.source_path = os.path.join(sub, 'b.kicad_pcb')
+    with open(pcb.source_path, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb)\n')
+    with open(os.path.join(sub, 'b.kicad_dru'), 'w', encoding='utf-8') as fh:
+        fh.write('(version 1)\n(rule "holes"\n  (constraint hole_clearance (min 0.25mm)))\n')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        t, v, _rm, _failed = generate_bga_fanout(
+            pcb.footprints['U1'], pcb, net_filter=[n.name for n in pcb.nets.values()],
+            layers=list(bgafix.CU), track_width=0.1, clearance=0.1, via_size=0.25,
+            via_drill=0.15, exit_margin=0.5, escape_method='channel', plane_drop='off')
+    import re
+    m = re.search(r"hole_clearance \(#1853\): (\d+) row\(s\) of this escape", buf.getvalue())
+    ok(m is not None and int(m.group(1)) > 0,
+       f"the channel escape stood inside the rule and was re-escaped: "
+       f"{m.group(0) if m else 'no #1853 line'}")
+    rest = hole_violations(pcb, board_design_rules(pcb), t, v)
+    ok(len(t) > 0 and rest == [], f"its copper ({len(t)} tracks, {len(v)} vias) carries no "
+                                  f"row: {rest[:4]}")
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         gate(td)
         bga(td)
         tap(td)
         own_copper(td)
+        passes(td)
     asked()
     if FAILS:
         print(f"\nFAILED ({len(FAILS)}):")

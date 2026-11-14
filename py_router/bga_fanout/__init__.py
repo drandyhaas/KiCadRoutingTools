@@ -5501,8 +5501,8 @@ def _generate_bga_fanout_all(footprint: Footprint,
                 return True
             return False
 
-    tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
-        footprint, pcb_data, net_filter=net_filter,
+    _core_kw = dict(
+        footprint=footprint, pcb_data=pcb_data, net_filter=net_filter,
         diff_pair_patterns=diff_pair_patterns, layers=layers,
         track_width=track_width, clearance=clearance,
         diff_pair_gap=diff_pair_gap, exit_margin=exit_margin,
@@ -5520,6 +5520,7 @@ def _generate_bga_fanout_all(footprint: Footprint,
         same_net_pad_clearance=same_net_pad_clearance,
         hole_to_hole_clearance=hole_to_hole_clearance,
         bus=bus, net_clearances=net_clearances)
+    tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(**_core_kw)
 
     # #621 partial ledger, computed ONLY when a cancel actually fired (so an
     # ordinary run does not even build the sets). A candidate ball that carries
@@ -5688,6 +5689,19 @@ def _generate_bga_fanout_all(footprint: Footprint,
         tracks = tracks + d_tracks
         vias_to_add = vias_to_add + d_vias
         LAST_PLANE_DROP_REPORT.update(rep)
+    # #1853: a .kicad_dru hole_clearance rule. The engines ask the via gate
+    # before they drill; the tracks they lay, and every via, are graded here
+    # with the grader against the board and each other, and a ball whose
+    # escape falls short is escaped again at a copper clearance that holds
+    # the rule (fanout_hole_rule). Free without such a rule.
+    if _pad_filter is None and not _single_pass and not _fired[0]:
+        from check_drc import board_design_rules, _hole_rule_reach
+        _dr1853 = board_design_rules(pcb_data)
+        if _hole_rule_reach(_dr1853) > 0.0:
+            from fanout_hole_rule import hole_reescape
+            tracks, vias_to_add, vias_to_remove, failed_nets = hole_reescape(
+                _generate_bga_fanout_core, _core_kw,
+                (tracks, vias_to_add, vias_to_remove, failed_nets), _dr1853)
     if _pw is not None and _pw['threads']:
         from fab_tiers import note_narrowing
         note_narrowing(None, 'via_diameter', _pw['asked'], _pw['via'],

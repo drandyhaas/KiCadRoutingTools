@@ -2079,13 +2079,15 @@ def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
     (`via_span.only_span_copper`), so a pad or track on another layer blocks
     no via site. The escape layer must be one end of the span."""
     if not via_span:
-        return _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
+        return _hole_rule_pass(footprint, pcb_data,
+                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs))
     import inspect
     from types import SimpleNamespace
     from via_span import apply_span, only_span_copper, board_span
     span, kind = board_span(pcb_data, via_span, via_span_type)
     if kind is None:
-        return _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
+        return _hole_rule_pass(footprint, pcb_data,
+                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs))
     bound = inspect.signature(_generate_qfn_fanout_all).bind(
         footprint, pcb_data, *args, **kwargs)
     bound.apply_defaults()
@@ -2101,7 +2103,17 @@ def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
     n = apply_span(result[1], SimpleNamespace(via_span=list(span), via_span_type=kind))
     if n:
         print(f"  Via span: {n} fan-out via(s) written as {kind} {span[0]}-{span[-1]}")
-    return result
+    return _hole_rule_pass(footprint, pcb_data, result)
+
+
+def _hole_rule_pass(footprint, pcb_data, result):
+    """#1853: the fan-out's own tracks and vias graded against the board's
+    .kicad_dru hole_clearance rules, against the board and each other; a
+    pad whose escape falls short has it taken off and its net reported
+    unescaped (fanout_hole_rule.hole_takeoff). Free without such a rule."""
+    from fanout_hole_rule import hole_takeoff
+    tracks, vias, failed = result
+    return hole_takeoff(footprint, pcb_data, tracks, vias, failed)
 
 
 def _generate_qfn_fanout_all(footprint: Footprint,
