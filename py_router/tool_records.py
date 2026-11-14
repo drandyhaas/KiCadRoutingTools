@@ -4,7 +4,9 @@ THE RECORDS. Everything this repo carries down a chain beside the DRC floors
 sits in one namespace: ``fab_floor_origin`` (ad7f24de), ``protected_nets`` and
 ``net_impedance`` (#521), ``pour_served_pads`` (#678),
 ``same_net_pad_clearance`` (#581), ``class_clearance_relaxed`` (#1160),
-``pad_override_min_clearance`` (#1369), ``saved_severities`` (#856) and
+``pad_override_min_clearance`` (#1369), ``via_ring_hole_clearance`` (#1914,
+the hole clearance the via descent ladder preferred a ring for, under the
+rule a writeback left), ``saved_severities`` (#856) and
 ``route_laps`` (#1807, the improvement gate's record of recent net trades). The CLI keeps it in the sibling ``.kicad_pro``
 under ``"kicad_routing_tools"``, and every chain step carries the project.
 

@@ -784,44 +784,87 @@ def via_hole_ring():
     return max(0.0, hole_clearance - clearance)
 
 
+#: The ``kicad_routing_tools`` record that says ``rules.min_hole_clearance``
+#: holds a value a DRC-floor writeback wrote under the hole clearance the
+#: descent ladder preferred a ring for:
+#: ``{"rule": <the min_hole_clearance the writeback left, mm>,
+#:    "hole_clearance": <what the ladder resolved before it, mm>}``.
+#: Written by the writebacks (fix_kicad_drc_settings
+#: ``apply_targets_to_project`` / ``apply_targets_to_board``, through
+#: tool_records); read by :func:`board_hole_clearance` only, so what KiCad
+#: and check_drc grade the board at is untouched.
+HOLE_RING_RECORD_KEY = "via_ring_hole_clearance"
+
+
+def ring_hole_clearance(rule, origin=None, records=None):
+    """The hole clearance (mm) the descent ladder prefers a via's ring for,
+    from what the board holds: ``rule`` its ``min_hole_clearance`` (None when
+    it declares none), ``origin`` the chain's ``fab_floor_origin`` value
+    (None when absent), ``records`` its ``kicad_routing_tools`` namespace.
+
+    While ``rule`` still holds the value :data:`HOLE_RING_RECORD_KEY` says a
+    writeback left, the rule is the writeback's, not the author's, and the
+    record's ``hole_clearance`` stands. Any other rule value -- one the user
+    set, or a board no writeback touched -- is read as declared: a declared 0
+    is KiCad's "no check" (0, no ring), and nothing declared reads as KiCad's
+    factory 0.25 (``plane_fill_model.KICAD_FACTORY_HOLE_CLEARANCE``), which
+    KiCad grades such a board at. Raised to ``origin`` when that is larger."""
+    from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
+    v = None
+    rec = (records or {}).get(HOLE_RING_RECORD_KEY)
+    if isinstance(rec, dict) and isinstance(rule, (int, float)) \
+            and not isinstance(rule, bool):
+        try:
+            r, hc = float(rec.get("rule")), float(rec.get("hole_clearance"))
+        except (TypeError, ValueError):
+            r = hc = None
+        # 5 nm: a live rule is held in whole nm (as
+        # board_declared_min_clearance matches its record)
+        if r is not None and hc >= 0 and abs(float(rule) - r) <= 5e-6:
+            v = hc
+    if v is None:
+        v = (float(KICAD_FACTORY_HOLE_CLEARANCE) if rule is None
+             else max(0.0, float(rule)))
+    if origin and origin > v:
+        v = float(origin)
+    return v
+
+
 def board_hole_clearance(pcb_data=None, pcb_file=None):
     """The copper-to-hole clearance (mm) KiCad grades this board's vias at,
     which the descent ladder prefers a via's ring to hold (#1914). One
-    resolver for both fronts:
+    resolver for both fronts, :func:`ring_hole_clearance` over:
 
     * the rule the board declares: the LIVE board's ``m_HoleClearance`` when
       ``pcb_data`` was built from pcbnew and the board declares it, else the
       sibling project's ``rules.min_hole_clearance`` (``pcb_file``, else
       ``pcb_data.source_path``);
-    * raised to the chain's ``fab_floor_origin`` when that is larger -- the
-      declaration before a writeback lowered it
-      (:func:`fix_kicad_drc_settings.declared_fab_floor`);
-    * KiCad's factory 0.25 (``plane_fill_model.KICAD_FACTORY_HOLE_CLEARANCE``)
-      when nothing declares it, which is what KiCad grades such a board at.
-
-    A declared 0 is KiCad's "no check": 0, no ring. A KNOWN LIMIT: a board
-    whose input declared nothing has no origin, so once a step's writeback
-    has written ``min_hole_clearance`` (the clearance it routed at) a later
-    step reads that value, not 0.25, and prefers no larger ring."""
-    from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
+    * the chain's ``fab_floor_origin`` -- the declaration before a writeback
+      lowered it (:func:`fix_kicad_drc_settings.declared_fab_floor`);
+    * the board's records (the live board's, else the file's, through
+      tool_records), whose :data:`HOLE_RING_RECORD_KEY` says when the rule is
+      a value a writeback wrote. A board whose input declared nothing has no
+      origin, and a step's writeback writes ``min_hole_clearance`` at the
+      clearance it routed: without the record a later step read that value
+      as the author's and preferred no ring (#1914 follow-up)."""
     try:
         from obstacle_map import _file_hole_floor, _live_hole_rule
         path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
         rule, origin = _file_hole_floor(path) if path else (None, None)
         records = getattr(pcb_data, 'live_records_provider', None)
         if callable(records):
-            _o = ((records() or {}).get('fab_floor_origin') or {}).get(
-                'min_hole_clearance')
+            ns = records() or {}
+            _o = (ns.get('fab_floor_origin') or {}).get('min_hole_clearance')
             origin = (float(_o) if isinstance(_o, (int, float))
                       and not isinstance(_o, bool) and _o > 0 else None)
+        else:
+            import tool_records
+            ns = tool_records.effective_namespace(path) if path else {}
         live = _live_hole_rule(pcb_data) if pcb_data is not None else None
     except Exception:                                           # noqa: BLE001
         rule = origin = live = None
-    v = live if live is not None else rule
-    v = float(KICAD_FACTORY_HOLE_CLEARANCE) if v is None else max(0.0, float(v))
-    if origin and origin > v:
-        v = float(origin)
-    return v
+        ns = {}
+    return ring_hole_clearance(live if live is not None else rule, origin, ns)
 
 
 def _apply_hole_ring(rungs, ring):
