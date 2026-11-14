@@ -831,7 +831,11 @@ the GUI diff tab gets the same answer:
   where it does, so two passes that converge count from where they meet and a
   narrow pass inside a wider track counts too) and a `Self-overlap:` line:
   `skew_mm` and the intra-pair status count all of a member's copper, as
-  KiCad's skew rule does, so that stretch is in them twice.
+  KiCad's skew rule does, so that stretch is in them twice. A member with more
+  segments than the search takes is listed in `self_overlap_not_searched`
+  (and reads `null`, not 0, in `self_overlap_mm` beside a partner that has
+  some), and a search that failed is `self_overlap_error`: none of the three
+  keys means both members were searched and have none.
 - **A pair routed but not coupled** is outcome `uncoupled`, listed in
   `JSON_SUMMARY.uncoupled_diff_pairs` (and the GUI's completion dialog), and is
   **not** counted in `routed_diff_pairs` / `successful`. The end-of-run summary

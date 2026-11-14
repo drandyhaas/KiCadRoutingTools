@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""#1873 (the disclosure): two shapes `net_self_overlap` missed.
+"""#1873 (the disclosure): two shapes `net_self_overlap` missed, and a
+member it did not search.
 
 `net_queries.net_self_overlap` asked that two passes stay within a track
 width over the WHOLE length they run side by side, and compared their centre
@@ -7,10 +8,13 @@ lines with the NARROWER track's width. So:
 
   * a pass that comes back at 2.9 degrees, its copper fused with the first
     for 4 mm before the two part, read 0;
-  * a 0.1 mm pass lying inside a 0.4 mm track of the net read 0.
+  * a 0.1 mm pass lying inside a 0.4 mm track of the net read 0;
+  * a member over the segment limit, or one the search raised on, left no
+    key in the pair's record, which reads the same as "none found".
 
 Now the stretch counted is where the two pieces' copper overlaps (centre
-lines closer than half the two widths together).
+lines closer than half the two widths together), and a member not searched
+is named (`self_overlap_not_searched`, `self_overlap_error`).
 
 Rows (in memory, F.Cu):
   1. converging passes: counted over the stretch where their copper meets;
@@ -18,12 +22,18 @@ Rows (in memory, F.Cu):
   2. unequal widths: a narrow pass inside a wide track is counted, and one
      that only overlaps its edge; beside it with copper apart, not;
   3. equal widths read what they read: the hairpin of
-     test_1873_self_overlap_disclosed.py, and two passes a width apart.
+     test_1873_self_overlap_disclosed.py, and two passes a width apart;
+  4. the pair's copper record: a member over the limit, and a search that
+     raises, are said; beside a partner that has some, the member not
+     searched reads None, not 0.
 
     python3 tests/test_1873_self_overlap_edges.py
 """
+import contextlib
+import io
 import os
 import sys
+from types import SimpleNamespace
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(TESTS)
@@ -112,8 +122,72 @@ def measure_rows():
     return hairpin
 
 
+def record_rows(hairpin):
+    print("4. the pair's copper record says what it did not search")
+    from diff_pair_custody import measure_pair_copper
+    pair = SimpleNamespace(p_net_id=1, n_net_id=2, p_net_name='N1', n_net_name='N2')
+    res = {1: {'is_diff_pair': True}, 2: {'is_diff_pair': True}}
+    partner = [(0, 0.45, 2.6, 0.45, {'net_id': 2})]
+    pcb = board(hairpin + partner, nets=(1, 2))
+
+    def record():
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rec = measure_pair_copper(pcb, [('X', pair)], res, lambda _p: (0.2, 0.2))
+        return rec.get('X') or {}, out.getvalue()
+
+    keep = net_queries.SELF_OVERLAP_MAX_SEGMENTS
+    net_queries.SELF_OVERLAP_MAX_SEGMENTS = 3       # P has 4 pieces, N has 1
+    try:
+        rec, _said = record()
+    finally:
+        net_queries.SELF_OVERLAP_MAX_SEGMENTS = keep
+    ok(rec.get('self_overlap_not_searched') == ['p'] and 'self_overlap_mm' not in rec,
+       f"a member over the limit is named, and no length is claimed for the pair: "
+       f"{rec.get('self_overlap_not_searched')}, {rec.get('self_overlap_mm')}")
+
+    # the other way round: N (5 pieces, with a pass back) is searched, P
+    # (6 pieces) is not. P must not read 0.0 beside N's length.
+    long_p = [(0, 2 + 0.01 * i, 1, 2 + 0.01 * i) for i in range(0, 60, 10)]
+    hairpin_n = [(s[0], s[1] + 1.0, s[2], s[3] + 1.0, {'net_id': 2}) for s in hairpin]
+    mixed = board(long_p + hairpin_n + [(0, 1.45, 2.6, 1.45, {'net_id': 2})],
+                  nets=(1, 2))
+    net_queries.SELF_OVERLAP_MAX_SEGMENTS = 5
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rec = (measure_pair_copper(mixed, [('X', pair)], res,
+                                       lambda _p: (0.2, 0.2)).get('X') or {})
+    finally:
+        net_queries.SELF_OVERLAP_MAX_SEGMENTS = keep
+    ok(rec.get('self_overlap_not_searched') == ['p']
+       and rec.get('self_overlap_mm') == {'p': None, 'n': 0.85},
+       f"beside a partner with 0.85 mm, the member not searched reads None: "
+       f"{rec.get('self_overlap_mm')}")
+
+    real = net_queries.net_self_overlap
+
+    def boom(_pcb, _nid):
+        raise RuntimeError('probe')
+    net_queries.net_self_overlap = boom
+    try:
+        rec, said = record()
+    finally:
+        net_queries.net_self_overlap = real
+    ok(rec.get('self_overlap_error') == 'RuntimeError: probe'
+       and 'could not search X for copper laid along itself' in said
+       and rec.get('coupled_mm') is not None and 'coupled' in rec,
+       f"a search that raises is said, and the rest of the record stands: "
+       f"{rec.get('self_overlap_error')}")
+    rec, said = record()
+    ok(rec.get('self_overlap_mm') == {'p': 0.85, 'n': 0.0}
+       and 'self_overlap_not_searched' not in rec and 'self_overlap_error' not in rec
+       and 'could not search' not in said, "the searched pair carries the length alone")
+    return rec
+
+
 def main():
-    measure_rows()
+    hairpin = measure_rows()
+    record_rows(hairpin)
     if FAILS:
         print(f"\nFAILED ({len(FAILS)}):")
         for f in FAILS:

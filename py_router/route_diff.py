@@ -2507,6 +2507,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                   + ', '.join(f"{k.upper()} {v:.4f} mm" for k, v in sorted(_so1873.items())
                               if v)
                   + f"); its length and skew count that stretch twice{RESET}")
+        if _rec1873.get('self_overlap_not_searched'):
+            from net_queries import SELF_OVERLAP_MAX_SEGMENTS
+            print(f"  {YELLOW}Self-overlap: {_pn1873} was not searched for copper "
+                  f"laid along itself ("
+                  + ', '.join(k.upper() for k in _rec1873['self_overlap_not_searched'])
+                  + f": more than {SELF_OVERLAP_MAX_SEGMENTS} segments){RESET}")
     pair_reports = build_pair_reports(state, diff_pair_ids_to_route,
                                       member_audit,
                                       skipped_fanout=skipped_fanout_info,
