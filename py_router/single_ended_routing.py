@@ -4012,10 +4012,12 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     # rung; nothing under --escalation off; raised to the board's own minimums
     # under board). The advanced rung is the more-costly small via 'auto'
     # escalates to (#237/#857).
-    from fab_tiers import escalation_rungs, note_narrowing
+    from fab_tiers import escalation_rungs, note_narrowing, rung_tier
     ladder = escalation_rungs(ncu, extra_floors=config.rule_floors(net_id))
     candidates = [(config.via_size, config.via_drill, False)]
-    candidates += [(f['via_diameter'], f['via_drill'], i > 0)
+    # rung_tier: the tier rung each was made from (#1914), so the nominal
+    # rung's ring-holding and last-resort vias are not escalations
+    candidates += [(f['via_diameter'], f['via_drill'], rung_tier(ladder, i) > 0)
                    for i, f in enumerate(ladder)]
     via_pairs, seen_dia, escalated_pair = [], set(), set()
     for vd, dr, is_esc in candidates:

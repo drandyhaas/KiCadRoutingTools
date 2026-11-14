@@ -1018,7 +1018,8 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
 
     Deterministic pure function of board state: validate_swap and
     apply_stub_layer_switch both call it and get the same answer."""
-    from fab_tiers import escalation_rungs, warn_fab_escalation, note_narrowing
+    from fab_tiers import (escalation_rungs, warn_fab_escalation, note_narrowing,
+                           ladder_escalates)
     # `or 2` is the documented "layer count unknown -> assume 2" default, but
     # it was only reachable for an EMPTY copper_layers list: a PCBData whose
     # board_info is absent raised AttributeError instead (c5509b7 gave this
@@ -1040,7 +1041,7 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
             via_size=v_dia)
         if clear:
             if i > 0:
-                if ladder and v_dia < ladder[0]['via_diameter'] - 1e-9:
+                if ladder_escalates(ladder, v_dia, v_drill):
                     warn_fab_escalation(f"layer-switch pad via (net {net_id})")
                 note_narrowing(net_id, 'via_diameter', config.via_size, v_dia,
                                'layer-switch pad via')

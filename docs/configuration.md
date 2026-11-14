@@ -599,6 +599,22 @@ than keeping the requested drill round the rung's own ring. Where none can (the
 pad is under the diameter minimum, or too small for the ring round the hole
 minimum) every via there breaks a rule, and the clamp sizes it as before.
 
+**The copper-to-hole ring (#1914).** KiCad grades other-net copper against a
+via's drill at the board's hole clearance, so a via whose ring is narrower than
+`hole clearance - clearance` lets copper kept at the clearance off its copper
+sit too close to its hole (a 0.45/0.2 via rings 0.125; at 0.1 clearance that
+copper is 0.225 from the hole, under KiCad's 0.25). Every descent ladder
+therefore tries each tier rung raised to hold that ring just before the rung
+itself, so the ring is preferred within a tier and never forces a step to a
+smaller (costlier) tier: completion first, and each via that ships smaller
+than its net asked and below the ring is a `hole_clearance` row in
+`JSON_SUMMARY.design_rules` and the `Design rules` line. The hole clearance is
+the board's declared `min_hole_clearance` (the live board's, on the GUI), raised
+to the chain's `fab_floor_origin`, else KiCad's factory 0.25; a declared 0 asks
+for no ring. A known limit: on a board that declared nothing, a route step's
+writeback records `min_hole_clearance` at the clearance it routed, and a later
+step reads that value rather than 0.25.
+
 Every such rule is graded when route.py or route_diff.py ends, over the vias the
 step laid: `.kicad_dru rule 'rf ring' (annular_width min 0.07 mm): this step's 7
 via(s) it binds meet it (smallest ring 0.075 mm)`, or `... 7 BELOW it`, and
