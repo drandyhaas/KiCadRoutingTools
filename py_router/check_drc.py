@@ -4484,6 +4484,47 @@ def chain_skew_row(pcb_data, ch):
             'spans_differ': m['spans_differ'], 'measure': m}
 
 
+_LANES_MEMO: Dict[str, tuple] = {}
+#: #1869: the pairs the last pair-rule pass graded on a recorded lane, for
+#: the --json document (`recorded_lanes`): nets, lane pads, lane and stub mm
+RECORDED_LANES: List[dict] = []
+
+
+def _recorded_lanes(path, rule) -> Dict[str, list]:
+    """The recorded lanes (#1869, `kicad_dru.recorded_intra_pair_lanes`) when
+    `rule` is the board's recorded intra-pair tolerance, else {}: a rule from
+    a `.kicad_dru` file is graded on total copper, KiCad's measure."""
+    from kicad_dru import RECORDED_INTRA_RULE, recorded_intra_pair_lanes
+    if not path or getattr(rule, 'name', None) != RECORDED_INTRA_RULE:
+        return {}
+    pro = os.path.splitext(path)[0] + '.kicad_pro'
+    try:
+        stamp = (os.path.getmtime(pro), os.path.getmtime(path))
+    except OSError:
+        stamp = None
+    hit = _LANES_MEMO.get(path)
+    if hit is None or hit[0] != stamp:
+        hit = _LANES_MEMO[path] = (stamp, recorded_intra_pair_lanes(path))
+    return hit[1]
+
+
+def _skew_member_length(pcb_data, path, rule, net_id):
+    """The length a skew rule grades one member at: all its copper
+    (`net_match_length`, mode 'total'), or -- for a recorded intra-pair
+    tolerance that carries a lane (#1869) -- the path between the lane's
+    pads. None when it cannot be measured."""
+    from net_queries import net_match_length
+    lanes = _recorded_lanes(path, rule)
+    net = pcb_data.nets.get(net_id)
+    pins = lanes.get(getattr(net, 'name', None)) if lanes else None
+    if pins:
+        try:
+            return net_match_length(pcb_data, net_id, 'pin_pair', pins=pins)
+        except ValueError:
+            return None             # the recorded pads are no longer the net's
+    return net_match_length(pcb_data, net_id, 'total')
+
+
 def skew_group_snapshot(pcb_data, path, scope_ids=None):
     """{(rule name, members): row} for every group a skew rule grades
     (skew_rule_groups) with a member in `scope_ids` (all when None), measured
@@ -4513,7 +4554,7 @@ def skew_group_snapshot(pcb_data, path, scope_ids=None):
         if scope_ids is not None and not any(m in scope_ids for m in members):
             continue
         key = (rule.name, members)
-        lens = {m: net_match_length(pcb_data, m, 'total') for m in members}
+        lens = {m: _skew_member_length(pcb_data, path, rule, m) for m in members}
         if any(v is None for v in lens.values()):
             out[key] = None
             continue
@@ -4610,6 +4651,8 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
 
     unmeasured: List[str] = []
     n_skew = n_unc = 0
+    lane_graded: List[dict] = []        # #1869: pairs graded on a recorded lane
+    del RECORDED_LANES[:]
 
     # ---- skew ----------------------------------------------------------
     skew_rules = [r for r in rules if r.kind == 'skew']
@@ -4629,10 +4672,28 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                 undecided_kind.setdefault(rule.name, 'skew')
                 continue
         else:
-            lens = {m: net_match_length(pcb_data, m, 'total') for m in members}
+            lens = {m: _skew_member_length(pcb_data, path, rule, m) for m in members}
         if any(v is None for v in lens.values()):
             unmeasured.append(' / '.join(names[m] for m in members))
             continue
+        # #1869: a recorded pair with a lane is graded on it; what each member
+        # carries off the lane is its stub, said and not added to the skew
+        _lanes = _recorded_lanes(path, rule)
+        _stubs = {}
+        if _lanes and not timed:
+            from intra_pair_lane import stub_lengths
+            for m in members:
+                if names[m] in _lanes:
+                    _st = stub_lengths(pcb_data, m, _lanes[names[m]])
+                    _stubs[m] = None if _st is None else round(_st, 4)
+            if _stubs:
+                lane_graded.append({
+                    'nets': [names[m] for m in members],
+                    'lane': {names[m]: _lanes[names[m]] for m in members
+                             if names[m] in _lanes},
+                    'lane_mm': {names[m]: round(lens[m], 4) for m in members},
+                    'stub_mm': {names[m]: _stubs.get(m) for m in members},
+                    'skew_mm': round(max(lens.values()) - min(lens.values()), 4)})
         n_skew += 1
         top = max(members, key=lambda m: (lens[m], names[m]))
         for m in members:
@@ -4663,7 +4724,11 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                     'skew_mm': round(skew, 4), 'length_mm': round(lens[m], 4),
                     'target_mm': round(lens[top], 4), 'bound': bound,
                     'limit_mm': limit, 'min_mm': rule.min_mm,
-                    'max_mm': rule.max_mm})
+                    'max_mm': rule.max_mm,
+                    **({'lane': {names[x]: _lanes[names[x]] for x in (m, top)
+                                 if names[x] in _lanes},
+                        'stub_mm': {names[x]: _stubs.get(x) for x in (m, top)}}
+                       if _stubs else {})})
 
     # ---- diff_pair_uncoupled ------------------------------------------
     unc_rules = [r for r in rules if r.kind == 'diff_pair_uncoupled']
@@ -4762,6 +4827,21 @@ def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
                'not_graded': {k: {'kind': undecided_kind.get(k, 'skew'),
                                   'reason': r, 'nets': nn}
                               for k, (r, nn) in undecided.items()}}
+    if lane_graded:
+        # #1869: the pairs graded on a recorded lane, with what each member
+        # carries off it
+        summary['lane_graded'] = lane_graded
+        RECORDED_LANES.extend(lane_graded)
+    if not quiet:
+        for _lg in lane_graded:
+            print("  Recorded lane (route_diff, #1869): "
+                  + ' / '.join(
+                      f"{_n} {' -> '.join(_lg['lane'].get(_n, ['?', '?']))} "
+                      f"{_lg['lane_mm'][_n]:.4f} mm"
+                      + (f" (+{_lg['stub_mm'][_n]:.4f} mm of stub)"
+                         if _lg['stub_mm'].get(_n) else '')
+                      for _n in _lg['nets'])
+                  + f": skew {_lg['skew_mm']:.4f} mm on the lane")
     if not quiet:
         print(f"Diff-pair rules (.kicad_dru, #1303): {len(rules)} rule(s); skew: "
               f"{n_skew} group(s)/pair(s) graded, {summary['skew_out_of_range']} "
@@ -9977,6 +10057,9 @@ if __name__ == "__main__":
                 'max_mm': _within.get('max_mm'),
                 'max_nets': _within.get('max_nets'),
                 'above_mm': KICAD_DRC_EPSILON_MM},
+            # #1869: the pairs graded on a lane route_diff recorded, with
+            # what each member carries off it
+            **({'recorded_lanes': list(RECORDED_LANES)} if RECORDED_LANES else {}),
             # #995: accepted, and each one an error in KiCad's own DRC
             'footprint_own_copper': sum(
                 1 for v in violations if v.get('accepted') == 'footprint-own-copper'),

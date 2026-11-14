@@ -348,6 +348,10 @@ class GridRouteConfig:
     # every pair under diff_pair_intra_match, else those a .kicad_dru P/N skew
     # rule binds; None: none (`length_matching.intra_pair_on`)
     intra_pair_tolerances: Optional[Dict[int, float]] = None
+    # #1869: {net id: 'auto' or (pad, pad)} for both members of each pair
+    # matched, recorded and graded on its LANE -- the path between two named
+    # pads (`intra_pair_lane`) -- instead of total copper. None: total copper.
+    intra_pair_lanes: Optional[Dict[int, object]] = None
     # P and N of those same pairs: the nets whose shipped skew is graded, so
     # the post-route cleanup lays them a via-centre bridge (#1583)
     skew_graded_net_ids: FrozenSet[int] = frozenset()

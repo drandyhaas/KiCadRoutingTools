@@ -907,6 +907,7 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |
 | `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
 | `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair (meander shorter track) |
+| `--diff-pair-intra-lane` | - | Match, record and grade each intra-matched pair on its **lane**, the copper path between two pads, instead of total copper (#1869): `auto`, or `P_NET=REF.PAD:REF.PAD ...` |
 | `--ac-couple-match` | false | Match an AC-coupled pair end to end across its series caps (see [Length Matching](length-matching.md#differential-pairs)) |
 
 ## Track Proximity Avoidance
@@ -1014,6 +1015,34 @@ python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" 
 ```
 
 **Execution order**: Inter-pair matching runs first (on centerline), then intra-pair matching adds meanders to individual P/N tracks. This order is intentional - inter-pair regenerates P/N from the meandered centerline, so intra-pair must run last to preserve its meanders.
+
+**A pair with a branch (`--diff-pair-intra-lane`, #1869).** KiCad's skew DRC, and
+so the default here, sums ALL of a member's copper. A pair whose members each
+branch to a third pad -- a protection part, a termination -- cannot be matched in
+both senses: matched pad to pad, its total copper differs by the branches and
+`check_drc.py` fails it against the tolerance the pair step recorded; matched in
+total copper, the signal paths differ. With a lane the pair is matched, recorded
+and graded on the copper path between two pads, and a branch is a stub:
+
+```bash
+# the ends of each member's lane, read off its copper
+python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "/DATA*" \
+    --diff-pair-intra-match --diff-pair-intra-lane auto
+
+# or name the P member's two pads; the N member's are its pads on the same parts
+python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "/DATA*" \
+    --diff-pair-intra-match --diff-pair-intra-lane "/DATA+=J1.5:IC4.10"
+```
+
+The pads are recorded with the tolerance (`kicad_routing_tools.intra_pair_tolerance`,
+`lane: {p: [...], n: [...]}`), so later steps and graders read the same path.
+`check_drc.py` prints `Recorded lane (route_diff, #1869): ... skew 0.1050 mm on the
+lane` with each member's stub length, carries the rows in `--json` under
+`recorded_lanes`, and `board_score.py` adds `lane` and `lane_skew_mm` to the pair's
+record beside the total-copper `skew_mm`. A `.kicad_dru` skew rule over the same
+nets is still graded on total copper, as KiCad grades it. A lane naming a net no
+pair of the step has, or pads its nets lack, refuses with the reason (exit 2). In
+the GUI it is the differential tab's **Intra-pair lane** field.
 
 ### Time Matching
 

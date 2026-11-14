@@ -595,6 +595,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 time_match_tolerance: float = defaults.TIME_MATCH_TOLERANCE,
                 diff_chamfer_extra: float = defaults.DIFF_PAIR_CHAMFER_EXTRA,
                 diff_pair_intra_match: bool = False,
+                diff_pair_intra_lane=None,
                 intra_pair_tolerance: Optional[float] = None,
                 ac_couple_match: bool = False,
                 debug_memory: bool = False,
@@ -656,6 +657,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         gnd_via_enabled: Add GND vias near diff pair signal vias (default: True)
         diff_chamfer_extra: Chamfer multiplier for diff pair meanders (default: 1.5)
         diff_pair_intra_match: Enable intra-pair P/N length matching (default: False)
+        diff_pair_intra_lane: #1869 -- match, record and grade each intra-matched
+            pair on its LANE, the copper path between two pads, instead of
+            total copper: 'auto' (each member's lane ends, read off its
+            copper) or a list of 'P_NET=REF.PAD:REF.PAD'. None: total copper,
+            KiCad's measure. A lane naming pads its nets lack raises
+            ValueError (the CLI prints it and exits 2).
         intra_pair_tolerance: the P/N skew every intra-matched pair is matched
             to, over a .kicad_dru rule's (#1503: the CLI's explicit
             --length-match-tolerance, the GUI's ticked override). None: a pair a
@@ -1830,6 +1837,21 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # P/N skew rule's, the explicit override, else the default
     config.intra_pair_tolerances, _intra_src = resolve_intra_pair_tolerances(
         diff_pair_ids_to_route, config, pcb_data, input_file, intra_pair_tolerance)
+    # #1869: the lane each matched pair is measured on, when one is asked for
+    try:
+        from intra_pair_lane import resolve as _resolve_lanes
+        config.intra_pair_lanes = _resolve_lanes(diff_pair_intra_lane,
+                                                 diff_pair_ids_to_route, pcb_data)
+    except ValueError as _lane_err:
+        if return_results:
+            raise
+        print(f"Error: {_lane_err}", file=sys.stderr)
+        sys.exit(2)
+    if config.intra_pair_lanes:
+        print(f"Intra-pair lane (#1869): {len(config.intra_pair_lanes) // 2} pair(s) "
+              f"are matched, recorded and graded on the path between two pads "
+              f"({'auto: the ends of each lane' if 'auto' in config.intra_pair_lanes.values() else 'named'}), "
+              f"not on total copper")
     config.skew_graded_net_ids = frozenset(
         nid for _n, p in diff_pair_ids_to_route
         if p.p_net_id in (config.intra_pair_tolerances or {})
@@ -2602,7 +2624,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         from length_matching import regrade_intra_pair_reports
         regrade_intra_pair_reports(intra_pair_reports, pair_copper, pcb_data,
                                    diff_pair_ids_to_route,
-                                   config.length_match_tolerance)
+                                   config.length_match_tolerance, config=config)
         # 'skipped' pairs are matched end-to-end by the AC-couple pass, so they
         # belong in neither column -- counting them either way misreports.
         _isk = [r for r in intra_pair_reports if r['status'] == 'skipped']
@@ -2615,11 +2637,23 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # #1503: what each pair is graded to from now on, where no .kicad_dru
         # rule binds it -- recorded on the board by the writeback
         from protected_nets import note_intra_pair_tolerances
+        from intra_pair_lane import lane_pins as _lane_pins1869
+        _by_p1869 = {p.p_net_name: p for _n, p in diff_pair_ids_to_route}
+
+        def _lane_record(p_name):
+            # #1869: the pads the tolerance is graded between, with it
+            pair = _by_p1869.get(p_name)
+            if pair is None:
+                return {}
+            lp = _lane_pins1869(config, pcb_data, pair.p_net_id)
+            ln = _lane_pins1869(config, pcb_data, pair.n_net_id)
+            return {'lane': {'p': lp, 'n': ln}} if lp and ln else {}
         note_intra_pair_tolerances({
             r['p_net']: {'n': r['n_net'], 'tolerance_mm': r['tolerance_mm'],
                          'source': _intra_src.get(next(
                              (p.p_net_id for _n, p in diff_pair_ids_to_route
-                              if p.p_net_name == r['p_net']), None), ('default', None))[0]}
+                              if p.p_net_name == r['p_net']), None), ('default', None))[0],
+                         **_lane_record(r['p_net'])}
             for r in intra_pair_reports_to_record(intra_pair_reports, pair_reports)})
         print(f"\n  Intra-pair (shipped copper, #1303): {len(_im)}/{len(_im) + len(_iu)} "
               f"pair(s) within {'/'.join(f'{t:g}' for t in _tols) or config.length_match_tolerance}mm"
@@ -3428,6 +3462,15 @@ Examples:
                         help="Chamfer multiplier for diff pair meanders (default: 1.5, >1 avoids P/N crossings)")
     parser.add_argument("--diff-pair-intra-match", action="store_true",
                         help="Enable intra-pair P/N length matching (add meanders to shorter track of each diff pair)")
+    parser.add_argument("--diff-pair-intra-lane", nargs='+', default=None,
+                        metavar="LANE",
+                        help="Match, record and grade each intra-matched pair on its "
+                             "lane -- the copper path between two pads -- instead of "
+                             "total copper, so a branch to a third pad counts as a stub "
+                             "(#1869): 'auto' (the ends of each member's lane, read off "
+                             "its copper) or one or more P_NET=REF.PAD:REF.PAD (the N "
+                             "member's pads are its pads on the same two parts). "
+                             "Default: total copper, as KiCad's skew DRC measures.")
     parser.add_argument("--ac-couple-match", action="store_true",
                         help="End-to-end length-match AC-coupled differential pairs split by series DC-blocking "
                              "caps (#196): auto-detect the cap chain, match the concatenated P path vs the N path, "
@@ -3834,6 +3877,7 @@ Examples:
                 time_match_tolerance=args.time_match_tolerance,
                 diff_chamfer_extra=args.diff_chamfer_extra,
                 diff_pair_intra_match=args.diff_pair_intra_match,
+                diff_pair_intra_lane=args.diff_pair_intra_lane,
                 ac_couple_match=args.ac_couple_match,
                 debug_memory=args.debug_memory,
                 mps_reverse_rounds=args.mps_reverse_rounds,

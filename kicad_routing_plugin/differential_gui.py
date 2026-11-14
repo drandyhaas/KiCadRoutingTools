@@ -645,6 +645,22 @@ class DifferentialTab(wx.Panel):
         self.intra_match_check.SetToolTip("Add meanders to shorter track of each pair for P/N matching")
         options_sizer.Add(self.intra_match_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # #1869: the lane a matched pair is measured on (route_diff's
+        # --diff-pair-intra-lane). Named after the engine parameter, so a
+        # plan step sets it by name.
+        lane_row = wx.BoxSizer(wx.HORIZONTAL)
+        lane_row.Add(wx.StaticText(self, label="Intra-pair lane:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.diff_pair_intra_lane = wx.TextCtrl(self, value="", size=(180, -1))
+        self.diff_pair_intra_lane.SetToolTip(
+            "Match, record and grade each intra-matched pair on its lane -- the "
+            "copper path between two pads -- instead of total copper, so a branch "
+            "to a third pad counts as a stub (#1869). 'auto' (the ends of each "
+            "member's lane) or P_NET=REF.PAD:REF.PAD ..., space separated. "
+            "Empty: total copper, as KiCad's skew DRC measures.")
+        lane_row.Add(self.diff_pair_intra_lane, 1, wx.ALIGN_CENTER_VERTICAL)
+        options_sizer.Add(lane_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.ac_couple_check = wx.CheckBox(self, label="AC-coupled end-to-end matching")
         self.ac_couple_check.SetValue(False)
         self.ac_couple_check.SetToolTip("Length-match diff pairs split by series DC-blocking caps "
@@ -1094,6 +1110,7 @@ class DifferentialTab(wx.Panel):
                 polarity_swap_nets=config.get('polarity_swap_nets'),
                 gnd_via_enabled=config.get('gnd_via_enabled', True),
                 diff_pair_intra_match=config.get('diff_pair_intra_match', False),
+                diff_pair_intra_lane=config.get('diff_pair_intra_lane') or None,
                 ac_couple_match=config.get('ac_couple_match', False),
                 enable_layer_switch=config.get('enable_layer_switch', True),
                 debug_lines=config.get('debug_lines', False),
@@ -1640,6 +1657,8 @@ class DifferentialTab(wx.Panel):
             'polarity_swap_nets': self.get_polarity_swap_nets(),
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
+            # #1869: 'auto' or P_NET=REF.PAD:REF.PAD ..., None when empty
+            'diff_pair_intra_lane': self.diff_pair_intra_lane.GetValue().split() or None,
             'ac_couple_match': self.ac_couple_check.GetValue(),
         }
 

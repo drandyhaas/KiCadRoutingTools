@@ -1042,7 +1042,7 @@ def score_diff_pairs(board: str, drc: dict, pcb=None) -> dict:
         names = {nid: n.name for nid, n in pcb.nets.items() if nid and n.name}
         pairs = coupled_net_pairs(names)
         measured, unjoined = {}, []
-        index = dr = None
+        index = dr = lanes = None
         for p, n in sorted(pairs, key=lambda pn: names[pn[0]]):
             if len(pcb.pads_by_net.get(p) or ()) < 2 or len(pcb.pads_by_net.get(n) or ()) < 2:
                 continue
@@ -1055,6 +1055,21 @@ def score_diff_pairs(board: str, drc: dict, pcb=None) -> dict:
             gmin = gap.kicad_min if gap.kicad_min is not None else gap.min
             rec = diff_pair_copper(pcb, p, n, gmin, gap.max, index=index)
             rec.update(n_net=names[n], gap_window_mm=[gmin, gap.max])
+            # #1869: a pair recorded with a lane is graded between its pads;
+            # `skew_mm` above stays KiCad's, over all the copper
+            if lanes is None:
+                from kicad_dru import recorded_intra_pair_lanes
+                lanes = recorded_intra_pair_lanes(board)
+            if names[p] in lanes and names[n] in lanes:
+                from net_queries import net_match_length
+                try:
+                    _lp = net_match_length(pcb, p, 'pin_pair', pins=lanes[names[p]])
+                    _ln = net_match_length(pcb, n, 'pin_pair', pins=lanes[names[n]])
+                except ValueError:
+                    _lp = _ln = None
+                rec['lane'] = {names[p]: lanes[names[p]], names[n]: lanes[names[n]]}
+                rec['lane_skew_mm'] = (None if _lp is None or _ln is None
+                                       else round(abs(_lp - _ln), 4))
             measured[names[p]] = rec
     except Exception as exc:                                 # noqa: BLE001
         return {'ran': True, 'count': None,
