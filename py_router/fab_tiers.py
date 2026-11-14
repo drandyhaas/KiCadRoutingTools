@@ -217,6 +217,10 @@ _BOARD_FLOORS = {}
 # writeback off): the board minimum KiCad grades such a clearance at, which
 # the Default class does not bind. None = no such raise this run.
 _BOARD_RULE_CLEARANCE = None
+# #1914: the copper-to-hole floor the descent ladder holds a via's ring to,
+# as a (hole_clearance, clearance) pair in mm, set per run the same way.
+# None = not installed (no raise): the front never installed one, or the
+# board declares no hole clearance the ladder must hold.
 # #1775: whether this run's DRC-floor writeback will run (--no-fix-drc-settings
 # / the GUI's "Fix DRC settings" box unticked = False): a via below a Board
 # Setup minimum the writeback will not lower ships graded against it.
@@ -746,6 +750,50 @@ def _via_holding_ring(diameter, drill, ring):
     return math.ceil(round(need, 6) * 1000.0 - 1e-6) / 1000.0
 
 
+def set_via_hole_clearance(hole_clearance, clearance):
+    """Install this run's copper-to-hole pair (#1914): ``hole_clearance`` is
+    the board's min_hole_clearance in mm -- declared, else KiCad's factory
+    0.25, which is what a fresh board grades a rule the project leaves out
+    at -- and ``clearance`` is the run's copper clearance. Either may be
+    None (a front that has no value to install); pass (None, None) to clear
+    the pair, e.g. between runs in one process."""
+    global _VIA_HOLE_CLEARANCE
+    if hole_clearance is None or clearance is None:
+        _VIA_HOLE_CLEARANCE = None
+    else:
+        _VIA_HOLE_CLEARANCE = (float(hole_clearance), float(clearance))
+
+
+def via_hole_ring():
+    """The annular ring a descended via must hold so another net's copper,
+    kept at the run's clearance off the via's copper, sits at the hole
+    clearance off its hole: ``max(0, hole_clearance - clearance)``. 0.0
+    when nothing is installed, or the pair asks for no ring (a board
+    declaring hole clearance 0, KiCad's "no check")."""
+    if not _VIA_HOLE_CLEARANCE:
+        return 0.0
+    hole_clearance, clearance = _VIA_HOLE_CLEARANCE
+    return max(0.0, hole_clearance - clearance)
+
+
+def _apply_hole_ring(rungs, ring):
+    """Raise every rung's via diameter to hold ``ring`` round its drill
+    (#1914) and collapse the duplicates that raising makes -- the same
+    shape as :func:`_apply_board_floors`' ring raise, without a floor
+    dict: the hole clearance is a KiCad DRC floor, not a fab floor."""
+    out = []
+    for r in rungs:
+        rr = dict(r)
+        if rr.get('via_diameter') and rr.get('via_drill'):
+            rr['via_diameter'] = _via_holding_ring(rr['via_diameter'],
+                                                   rr['via_drill'], ring)
+            if rr.get('annular') is not None and rr['annular'] < ring:
+                rr['annular'] = ring
+        if not out or rr != out[-1]:
+            out.append(rr)
+    return out
+
+
 def _apply_board_floors(rungs, floors=None):
     """'board' policy: no rung may sit below a floor the board declares
     (``floors`` defaults to the process-wide board floors; a caller may pass
@@ -904,6 +952,18 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     if want and rungs:
         rungs = (_apply_board_floors(rungs, want) if _ESCALATION == 'board'
                  else _first_choice_meets(rungs, want))
+    # #1914: a descended via's ring must hold the copper-to-hole floor, so
+    # another net's copper, kept at the run's clearance off the via's copper,
+    # sits at the hole clearance off its hole. This is what makes the
+    # "never shrink" fix: with the ring held, no descent site can ship a via
+    # whose copper a neighbour at clearance can sit under the hole rule from
+    # -- the track pricing never changes, the via side carries the rule. The
+    # raise runs under every policy that descends at all (``off`` returned []
+    # above); it is a KiCad DRC floor, not a board minimum the writeback
+    # lowers, so it is not a FLOOR_KEYS floor and not in _BOARD_FLOORS.
+    ring = via_hole_ring()
+    if ring and rungs:
+        rungs = _apply_hole_ring(rungs, ring)
     return rungs
 
 
@@ -1759,6 +1819,14 @@ def set_fab_tier_from_config(config):
         floors = drop_stale_board_floors(declared, requested)
     set_escalation_policy(policy, floors,
                           writeback=bool(config.get('fix_drc_settings', True)))
+    # #1914: the live board's copper-to-hole floor, read off the live design
+    # settings by the fronts (a separate config key, not a FLOOR_KEYS floor:
+    # the ladder holds it as a ring, not as a rung floor). Only when the
+    # front carries one -- a config built without it leaves the installed
+    # pair alone, so an older front that never read it changes nothing.
+    _hc = config.get('hole_clearance')
+    if _hc is not None:
+        set_via_hole_clearance(_hc, config.get('clearance'))
 
 
 def fab_tier_from_args(args):
@@ -1871,6 +1939,28 @@ def set_policy_from_args(args, pcb_path=None):
                        else None))
     set_escalation_policy(policy, floors, writeback=writeback)
     set_board_thickness(board_thickness_of_file(pcb_path))      # #502
+    # #1914: the copper-to-hole floor the descent ladder holds a via's ring
+    # to. The board's declared min_hole_clearance -- the rules value, or the
+    # fab_floor_origin a writeback relaxed it from, whichever is larger (the
+    # origin is the declaration before a step lowered it; prefer the larger,
+    # as declared_fab_floor's own docstring says) -- else KiCad's factory
+    # 0.25, which is what a fresh board grades a rule the project leaves out
+    # at (plane_fill_model.KICAD_FACTORY_HOLE_CLEARANCE, probed on 10.0.3).
+    # A declared 0 is KiCad's "no check" and installs 0 (no raise). Paired
+    # with the run's clearance, resolved by the caller before this function.
+    try:
+        from fix_kicad_drc_settings import declared_fab_floor
+        _origin = declared_fab_floor(pcb_path, 'min_hole_clearance') if pcb_path else None
+    except Exception:                                           # noqa: BLE001
+        _origin = None
+    _cands = [v for v in (rules.get('min_hole_clearance'), _origin)
+              if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if _cands:
+        _hc = max(float(v) for v in _cands)
+    else:
+        from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
+        _hc = float(KICAD_FACTORY_HOLE_CLEARANCE)
+    set_via_hole_clearance(_hc, getattr(args, 'clearance', None))
     return floors
 
 

@@ -779,6 +779,20 @@ class RoutingDialog(wx.Dialog):
         return getattr(getattr(getattr(self, 'pcb_data', None), 'board_info', None),
                        'board_thickness', None)
 
+    def _live_hole_clearance(self):
+        """The live board's copper-to-hole floor in mm (#1914): the design
+        settings' m_HoleClearance -- KiCad's factory 0.25 where the project
+        leaves the rule out, 0 where it declares no check. None when
+        unreadable, so the front installs nothing."""
+        try:
+            import pcbnew
+            _b = pcbnew.GetBoard()
+            if _b is None:
+                return None
+            return float(_b.GetDesignSettings().m_HoleClearance) / 1e6
+        except Exception:                                       # noqa: BLE001
+            return None
+
     def _board_floor_dict(self):
         """The live board's Board Setup minimums in fab_tiers FLOOR_KEYS
         vocabulary (only keys declared > 0), for --escalation board."""
@@ -2050,6 +2064,9 @@ class RoutingDialog(wx.Dialog):
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
                 'board_thickness': self._board_thickness(),  # #502
+                # #1914: the live board's copper-to-hole floor for the
+                # descent ladder (fab_tiers.set_via_hole_clearance).
+                'hole_clearance': self._live_hole_clearance(),
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -2188,6 +2205,9 @@ class RoutingDialog(wx.Dialog):
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
                 'board_thickness': self._board_thickness(),  # #502
+                # #1914: the live board's copper-to-hole floor for the
+                # descent ladder (fab_tiers.set_via_hole_clearance).
+                'hole_clearance': self._live_hole_clearance(),
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -3443,6 +3463,9 @@ class RoutingDialog(wx.Dialog):
             'escalation': self._escalation_policy(),
             'board_floors': self._board_floor_dict(),
             'board_thickness': self._board_thickness(),  # #502
+            # #1914: the live board's copper-to-hole floor for the
+            # descent ladder (fab_tiers.set_via_hole_clearance).
+            'hole_clearance': self._live_hole_clearance(),
             # #1262: what KiCad grades a Default net at when the DRC
             # settings writeback is off (fix_drc_settings False).
             'default_class_clearance': self._default_class_clearance(),
