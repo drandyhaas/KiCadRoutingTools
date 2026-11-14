@@ -300,6 +300,13 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
     track_rules: List[TrackRule] = []
     notes: List[str] = []
     skipped: List[Tuple[str, float, Optional[str]]] = []
+    _coupled_memo: List[frozenset] = []
+
+    def _coupled_orders() -> frozenset:
+        # parsed once, and only for a file with a rule that reaches the test
+        if not _coupled_memo:
+            _coupled_memo.append(_coupled_graded_orders(text))
+        return _coupled_memo[0]
     for order, node in enumerate(_parse_nodes(_tokenize(text))):
         if not isinstance(node, list) or not node or node[0] != "rule":
             continue
@@ -365,6 +372,13 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
                 # #1843: read by position (area_clearance, design_rules.AreaIndex)
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
                              f"a rule area -- handled by position (#1843)")
+            elif order in _coupled_orders():
+                # #1293: read, but not here -- it binds a pair's P against
+                # its own N, which the pair step and check_drc resolve
+                notes.append(f"rule '{name}': clearance {clearance_mm}mm between a "
+                             f"coupled pair's P and N -- handled by the coupled-pair "
+                             f"channel (#1293): route_diff.py builds the pair at it "
+                             f"and check_drc grades it")
             else:
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm has a "
                              f"non-layer scope (netclass/area/... condition) -- "
@@ -1180,6 +1194,20 @@ def strip_keep_apart(node):
             out = ('and', out, k)
         return out
     return node
+
+
+def _coupled_graded_orders(text: str) -> frozenset:
+    """The file positions of the rules check_drc's coupled-pair channel
+    grades (#1293): parsed as `design_rules.parse_dru` parses them, and kept
+    by check_drc's own test, `r.coupled and not r.unsupported` -- so a rule
+    with a (severity exclusion) or a non-copper (layer ...) clause is not
+    one, whatever its condition says."""
+    try:
+        from design_rules import parse_dru
+        return frozenset(r.order for r in parse_dru(text)[0]
+                         if r.coupled and not r.unsupported)
+    except Exception:                                            # noqa: BLE001
+        return frozenset()
 
 
 def _condition_is_scoped(src: str) -> bool:

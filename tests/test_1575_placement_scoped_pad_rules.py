@@ -192,8 +192,9 @@ def t_resolver(d):
               and 'handled by' not in got[0], f'{got}')
     m = PadClearanceModel.for_board(parse_kicad_pcb(stage(d, 'coupled')), 0.15,
                                     stage(d, 'coupled'))
-    # MUTATION: `_channel_notes` returns `notes` unchanged -> "skipped, KiCad
-    # will still enforce it" for a rule the model prices
+    # MUTATION: kicad_dru._parse_dru_full's coupled branch dropped -> "skipped,
+    # KiCad will still enforce it" for a rule the model prices (#1293: the
+    # parser names the channel, and placement passes the note through)
     check('coupled: the P/N rule is named handled, not skipped',
           any("'pn'" in n and 'coupled-pair channel' in n for n in m.notes)
           and not any("'pn'" in n and 'skipped' in n for n in m.notes), f'{m.notes}')
