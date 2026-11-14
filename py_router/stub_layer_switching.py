@@ -66,14 +66,18 @@ def _locked_net_ids(pcb_data: PCBData) -> frozenset:
     """Nets holding KiCad-locked copper, or copper a `sense:` group holds
     (#1279, is_immutable_copper). Memoized against the copper lists'
     identity and length: get_stub_info runs per stub per candidate layer, and
-    a board without locked copper must not pay a walk for each call."""
+    a board without locked copper must not pay a walk for each call.
+    Copper a via-span step has set aside for a call is the net's too (#1842,
+    `via_span.set_aside`; the set-aside drops this memo going in and out)."""
     key = (id(pcb_data.segments), len(pcb_data.segments),
            id(pcb_data.vias), len(pcb_data.vias))
     memo = getattr(pcb_data, '_locked_net_ids_memo', None)
     if memo is None or memo[0] != key:
-        ids = frozenset({s.net_id for s in pcb_data.segments
+        from via_span import set_aside
+        aside = set_aside(pcb_data)
+        ids = frozenset({s.net_id for s in list(pcb_data.segments) + aside.get('segments', [])
                          if is_immutable_copper(s)}
-                        | {v.net_id for v in pcb_data.vias
+                        | {v.net_id for v in list(pcb_data.vias) + aside.get('vias', [])
                            if is_immutable_copper(v)})
         memo = (key, ids)
         try:

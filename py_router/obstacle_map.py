@@ -3085,6 +3085,12 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
             J11's 4mm connector pad). When None, every own pad is exemptable
             (the old behavior, correct for a single-terminal corridor set).
     """
+    # #1842: under a via span an own pad with no copper on the span's layers
+    # (and no drill) blocks no via site of the span, as a foreign one does.
+    # (The own STUBS need no view: a stub off the span is off config.layers.)
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
 
