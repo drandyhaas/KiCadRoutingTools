@@ -947,6 +947,8 @@ def manage_vias(
                            laid_copper_edge_clearance)
     _edge_gate = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
     _filled_gate = FilledCopperGate(pcb_data)
+    from check_drc import HoleRuleGate
+    _hole_gate = HoleRuleGate(pcb_data)        # #1853
 
     def via_in_pad_conflict(x, y, v_size, v_drill, net_id):
         """Reason a via physically cannot go at (x, y), or None (#370 B4):
@@ -980,6 +982,8 @@ def manage_vias(
             return "via ring vs the board edge"
         if _filled_gate.via_hit(x, y, v_size, net_id, clearance) is not None:
             return "via in a foreign filled graphic"
+        if _hole_gate and _hole_gate.via_why(x, y, v_size, v_drill or 0.0, net_id):
+            return "via vs a hole_clearance rule"
         for s in pcb_data.segments:
             if s.net_id == net_id:
                 continue
@@ -1005,6 +1009,8 @@ def manage_vias(
     vias_to_add: List[Dict] = []
     vias_to_remove: List[Dict] = []
     via_blocked_routes: List['FanoutRoute'] = []
+    if _hole_gate:
+        _hole_gate.watch(vias=vias_to_add)     # #1853: a later via sees their holes
 
     # Pads no later step can move (locked parts, connectors, test points --
     # #253): a via-in-pad must clear them on EVERY layer, because a through
@@ -4916,6 +4922,12 @@ LAST_ESCAPE_BUDGET: Dict = {}
 # JSON_SUMMARY `board_setup_vias` and the fanout tab read it.
 LAST_BOARD_SETUP_VIAS: List[Dict] = []
 
+# #1853: the .kicad_dru hole_clearance rules the last generate_bga_fanout
+# call's copper breaks, per rule (`check_drc.hole_rule_step_grade`): an
+# escape kept below its rule as the last rung. EMPTY when it breaks none.
+# JSON_SUMMARY `design_rules.hole_rules` and the fanout tab read it.
+LAST_HOLE_RULES: List[Dict] = []
+
 
 def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
                           net_filter: Optional[List[str]] = None,
@@ -5476,6 +5488,7 @@ def _generate_bga_fanout_all(footprint: Footprint,
     # member 'D[3]' fans out itself rather than 'D3' in every pass below.
     LAST_ESCAPE_BUDGET.clear()
     LAST_BOARD_SETUP_VIAS.clear()   # #1775
+    LAST_HOLE_RULES.clear()         # #1853
     LAST_FILTER_MISSES.clear()
     LAST_FILTER_MISSES.extend(net_filter_misses(footprint, pcb_data, net_filter))
     for _line in filter_miss_lines(LAST_FILTER_MISSES):
@@ -5495,8 +5508,8 @@ def _generate_bga_fanout_all(footprint: Footprint,
                 return True
             return False
 
-    tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
-        footprint, pcb_data, net_filter=net_filter,
+    _core_kw = dict(
+        footprint=footprint, pcb_data=pcb_data, net_filter=net_filter,
         diff_pair_patterns=diff_pair_patterns, layers=layers,
         track_width=track_width, clearance=clearance,
         diff_pair_gap=diff_pair_gap, exit_margin=exit_margin,
@@ -5514,6 +5527,11 @@ def _generate_bga_fanout_all(footprint: Footprint,
         same_net_pad_clearance=same_net_pad_clearance,
         hole_to_hole_clearance=hole_to_hole_clearance,
         bus=bus, net_clearances=net_clearances)
+    # the footprint and board go positionally, as they always have (tests
+    # wrap the core and read them as a[0], a[1])
+    tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
+        footprint, pcb_data, **{k: v for k, v in _core_kw.items()
+                                if k not in ('footprint', 'pcb_data')})
 
     # #621 partial ledger, computed ONLY when a cancel actually fired (so an
     # ordinary run does not even build the sets). A candidate ball that carries
@@ -5682,6 +5700,21 @@ def _generate_bga_fanout_all(footprint: Footprint,
         tracks = tracks + d_tracks
         vias_to_add = vias_to_add + d_vias
         LAST_PLANE_DROP_REPORT.update(rep)
+    # #1853: a .kicad_dru hole_clearance rule. The engines ask the via gate
+    # before they drill; the tracks they lay, and every via, are graded here
+    # with the grader against the board and each other. A ball whose escape
+    # falls short is escaped again at a copper clearance that holds the rule,
+    # and keeps its first escape, disclosed, where that does not escape it
+    # (fanout_hole_rule). Free without such a rule.
+    if _pad_filter is None and not _single_pass and not _fired[0]:
+        from check_drc import board_design_rules, _hole_rule_reach
+        _dr1853 = board_design_rules(pcb_data)
+        if _hole_rule_reach(_dr1853) > 0.0:
+            from fanout_hole_rule import hole_reescape
+            tracks, vias_to_add, vias_to_remove, failed_nets, _hg1853 = hole_reescape(
+                _generate_bga_fanout_core, _core_kw,
+                (tracks, vias_to_add, vias_to_remove, failed_nets), _dr1853)
+            LAST_HOLE_RULES[:] = _hg1853
     if _pw is not None and _pw['threads']:
         from fab_tiers import note_narrowing
         note_narrowing(None, 'via_diameter', _pw['asked'], _pw['via'],
@@ -6203,6 +6236,8 @@ def main():
     _dr857 = narrowed_summary()
     if _dr857 is not None:
         summary['design_rules'] = _dr857
+    if LAST_HOLE_RULES:        # #1853: an escape kept below its hole_clearance rule
+        summary.setdefault('design_rules', {})['hole_rules'] = list(LAST_HOLE_RULES)
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
     return finish_design_rules(args, 0)
 

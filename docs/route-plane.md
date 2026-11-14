@@ -776,6 +776,22 @@ re-grade), and its `JSON_SUMMARY` says what is left: `status:
 shortfall still exits 0, as on `route.py`; exit 4 means rip casualties ship
 open.
 
+**Pads per tap via (#1896).** A pad may reach its plane through a
+neighbour's via, joined by a surface track, rather than through a via of its
+own. On the board a step ships, every SMD pad of a plane net is followed
+through the copper on its own layer (tracks, pads, vias; no zone fill) to the
+vias it reaches that have copper on a layer the net is poured on, whoever laid
+them: a fan-out dogbone, a via in the pad, a repair tap, a strap to another
+pad, the join gate's track, the oracle's reconnect. `JSON_SUMMARY.tap_vias`
+counts them: `pads` (pads that reach a tap via), `vias`, `shared_vias` (vias
+reached by more than one pad), `max_pads_per_via`, `pads_on_shared_vias` and
+`shared` (`{net, at, pads}` per shared via, most pads first), and a
+`Tap vias:` line says the same. `repair_planes.py` measures the plane nets it
+processed on the board it wrote, after the oracle's reconnect; the route step
+measures the zone nets its plane finalize served on the board it ships, in
+`--json-out` and the GUI's `results_data` (`tap_via_census.py`). Report-only:
+nothing limits sharing.
+
 **`route_planes.py` taps nothing** (#562, see the note at the top),
 so it is the ROUTE step's in-run plane finalize that runs this repair —
 including the fine-parameter retry (#104) — at the route step's own

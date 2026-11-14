@@ -4252,6 +4252,18 @@ Examples:
                 _summary["sense_branches"] = _sense
         except Exception as _se:                                # noqa: BLE001
             print(f"  (sense-branch summary skipped: {type(_se).__name__}: {_se})")
+        # #1896: the pads each tap via serves, on the board this step wrote
+        # (after the oracle's reconnect) -- every via a plane-net pad reaches
+        # through surface copper, whoever laid it.
+        try:
+            from tap_via_census import tap_via_census, tap_via_line
+            _tv = tap_via_census(parse_kicad_pcb(args.output_file), net_names)
+            _summary["tap_vias"] = _tv
+            _tvl = tap_via_line(_tv)
+            if _tvl:
+                print(f"  {_tvl}")
+        except Exception as _tve:                               # noqa: BLE001
+            print(f"  (tap-via census skipped: {type(_tve).__name__}: {_tve})")
     # `complete` keeps its route_summary meaning: the run FINISHED (it is never
     # a partial tally -- the CLI has no cancel source, so it finished or
     # raised). Whether the plane pads are connected is `status` and the

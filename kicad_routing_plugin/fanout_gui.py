@@ -1731,6 +1731,7 @@ class FanoutTab(wx.Panel):
                     interior = []
                     power_stubs = []
                     setup_vias = list(bga_fanout.LAST_BOARD_SETUP_VIAS)
+                    hole_rules = list(bga_fanout.LAST_HOLE_RULES)       # #1853
                     underpad_pads = {}
                     stub_pads = {}
                 else:
@@ -1743,6 +1744,7 @@ class FanoutTab(wx.Panel):
                     interior = list(qfn_fanout.LAST_SKIPPED_INTERIOR)
                     power_stubs = list(qfn_fanout.LAST_POWER_STUBS_AT_WIDTH)
                     setup_vias = list(qfn_fanout.LAST_BOARD_SETUP_VIAS)
+                    hole_rules = list(qfn_fanout.LAST_HOLE_RULES)       # #1853
                     # #1804: the via-drop's pads, as the CLI's JSON_SUMMARY
                     underpad_pads = qfn_fanout.underpad_pad_counts(
                         footprint.reference)
@@ -1757,7 +1759,7 @@ class FanoutTab(wx.Panel):
                     'vias_to_remove': vias_to_remove, 'skipped': skipped,
                     'filter_misses': misses, 'skipped_interior': interior,
                     'power_stubs_at_width': power_stubs,
-                    'board_setup_vias': setup_vias,
+                    'board_setup_vias': setup_vias, 'hole_rules': hole_rules,
                     'underpad_pads': underpad_pads, 'stub_pads': stub_pads}
         except Exception as exc:                                # noqa: BLE001
             import traceback
@@ -1803,6 +1805,7 @@ class FanoutTab(wx.Panel):
                     skipped_interior=res.get('skipped_interior'),
                     power_stubs_at_width=res.get('power_stubs_at_width'),
                     board_setup_vias=res.get('board_setup_vias'),
+                    hole_rules=res.get('hole_rules'),
                     underpad_pads=res.get('underpad_pads'),
                     stub_pads=res.get('stub_pads'),
                     **apply_kw)
@@ -2261,7 +2264,7 @@ class FanoutTab(wx.Panel):
                               optimize_caps=False, vias_to_remove=None,
                               filter_misses=None, skipped_interior=None,
                               power_stubs_at_width=None, board_setup_vias=None,
-                              underpad_pads=None, stub_pads=None):
+                              underpad_pads=None, stub_pads=None, hole_rules=None):
         """Apply fanout results to the pcbnew board.
 
         Args:
@@ -2295,6 +2298,10 @@ class FanoutTab(wx.Panel):
                 the vias laid below the board's own Board Setup via minimums
                 with "Fix DRC settings" off, listed as the CLI lists them in
                 `board_setup_vias`.
+            hole_rules: the engine's LAST_HOLE_RULES (#1853) -- the
+                .kicad_dru hole_clearance rules the fan-out's copper still
+                breaks (an escape kept below its rule as the last rung),
+                listed as the CLI lists them in `design_rules.hole_rules`.
             underpad_pads: the QFN engine's per-pad via-drop ledger
                 (`qfn_fanout.underpad_pad_counts`, #1804) -- the pads skipped
                 because each already had its via, and the dropped pads by
@@ -2563,6 +2570,11 @@ class FanoutTab(wx.Panel):
                 annular_grade_lines([r for r in board_setup_vias if 'smallest_ring' in r])
                 + via_size_grade_lines([r for r in board_setup_vias
                                         if 'smallest_ring' not in r]))
+        if hole_rules:
+            from check_drc import hole_rule_grade_lines
+            msg += self._net_list(
+                "Escapes kept below a hole_clearance rule (the rule could not be "
+                "held; check_drc names each row)", hole_rule_grade_lines(hole_rules))
         if failed_nets:
             if fanout_kind == 'qfn':
                 unescaped, flagged = self._qfn_failure_split(failed_nets, tracks,

@@ -396,6 +396,18 @@ def _scoped_excess(config, net_id, nids, foreign_type, base_clearance, layer=Non
         if int(nid) == own:
             continue
         pt = pad_types[i] if pad_types is not None else None
+        if layer is not None and layer in s.sc.layered_layers:
+            # #1897: a scoped rule whose (layer ...) clause names this layer,
+            # where it is the pair's last match there
+            lv = s.sc.layer_pair_value(own, own_type, int(nid), foreign_type,
+                                       None, pt, layer)
+            if lv is not None and layer in getattr(s.sc.resolve_pair(
+                    own, own_type, int(nid), foreign_type, None, pt, 0.0, lmap,
+                    s.fab_floor)[1], 'names', ()):
+                out[i] = max(lv[0], s.fab_floor) - base_clearance
+                if orders is not None:
+                    orders[i] = lv[2]
+                continue
         got = s.sc.pair_value(own, own_type, int(nid), foreign_type, None, pt)
         if got is None:
             continue

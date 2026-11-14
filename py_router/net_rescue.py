@@ -1690,6 +1690,12 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     # copper_keepout_gate judges both, as KiCad's
                     # items_not_allowed does.
                     _ko666 = escape_keepout_refusal(pcb_data, _gsegs, _gvias)
+                    if not _ko666:
+                        # #1853: and against the board's hole_clearance
+                        # rules, which the fanout ladder's own maps do not read
+                        from check_drc import hole_rule_refusal
+                        _ko666 = hole_rule_refusal(
+                            pcb_data, getattr(config, 'rules', None), _gsegs, _gvias)
                     if _ko666:
                         print(f"    bare-ball escape: "
                               f"{_pad.component_ref}.{_pad.pad_number} "
@@ -1738,6 +1744,15 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                         width=_s['width'], layer=_s['layer'],
                         net_id=net_id))
                 if not _tsegs and not _tvias:
+                    continue
+                # #1853: against the board's hole_clearance rules, which the
+                # tap's own maps do not read
+                from check_drc import hole_rule_refusal
+                _hr1853 = hole_rule_refusal(pcb_data, getattr(config, 'rules', None),
+                                            _tsegs, _tvias)
+                if _hr1853:
+                    print(f"    bare-ball escape: {_pad.component_ref}."
+                          f"{_pad.pad_number} declined ({_hr1853})")
                     continue
                 pcb_data.segments.extend(_tsegs)
                 pcb_data.vias.extend(_tvias)

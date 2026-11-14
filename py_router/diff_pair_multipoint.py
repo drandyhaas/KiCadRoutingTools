@@ -1071,6 +1071,15 @@ def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
             # caches). Segments/vias are already in pcb_data - the merged
             # result must NOT be passed to add_route_to_pcb_data again.
             merged = dict(leg_results[-1])
+            # #1871: the hybrid's self-graze fallback marks the LEG it laid.
+            # The copy above carried the last leg's marker alone, so a pair
+            # whose earlier leg took the fallback was recorded protected with
+            # no judgement of its copper. The pair carries the largest
+            # marker of any leg; route_diff.judge_selfgraze_on_copper then
+            # judges the whole pair on the copper that ships.
+            _sg = max((r.get('selfgraze') or 0) for r in leg_results)
+            if _sg:
+                merged['selfgraze'] = _sg
             merged['new_segments'] = [s for r in leg_results for s in r['new_segments']]
             merged['new_vias'] = [v for r in leg_results for v in r['new_vias']]
             merged['iterations'] = sum(r.get('iterations', 0) for r in leg_results)
