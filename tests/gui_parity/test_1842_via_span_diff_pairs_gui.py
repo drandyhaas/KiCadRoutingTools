@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(REPO, 'py_router'))
 sys.path.insert(0, os.path.join(REPO, 'tests', 'fixtures', '1842'))
 import diff_pair  # noqa: E402
 KEYS = ('min_via_diameter', 'min_through_hole_diameter', 'min_microvia_diameter',
-        'min_microvia_drill', 'min_via_annular_width')
+        'min_microvia_drill', 'min_via_annular_width', 'min_hole_clearance')
 FAILS = []
 
 
@@ -51,6 +51,14 @@ def run(argv, what):
     return text
 
 
+def _read(path):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
 def facts(path):
     from kicad_parser import parse_kicad_pcb
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -62,7 +70,9 @@ def facts(path):
     return {'vias': len(pcb.vias), 'kinds': vias,
             'layers': sorted({s.layer for s in pcb.segments}),
             'nets': sorted({pcb.nets[s.net_id].name for s in pcb.segments}),
-            'rules': {k: rules.get(k) for k in KEYS}}
+            'rules': {k: rules.get(k) for k in KEYS},
+            # #1842: the micro vias' own rule (fix_kicad_drc_settings.MICRO_VIA_RULE)
+            'dru': _read(os.path.splitext(path)[0] + '.kicad_dru')}
 
 
 def main():
@@ -104,8 +114,12 @@ def main():
         ok(cli['layers'] == gui['layers'] == ['F.Cu', 'In1.Cu'],
            f"tracks on the span only: CLI {cli['layers']} GUI {gui['layers']}")
         ok(cli['rules'] == gui['rules'], f"the same project minimums: {gui['rules']}")
+        ok(cli['dru'] is not None and cli['dru'] == gui['dru']
+           and "(condition \"A.Via_Type == 'Micro'\")" in cli['dru'],
+           f"the same micro via rule in the rules file (#1842): CLI {cli['dru']!r} "
+           f"GUI {gui['dru']!r}")
         kept = ('min_via_diameter', 'min_through_hole_diameter', 'min_microvia_diameter',
-                'min_microvia_drill')
+                'min_microvia_drill', 'min_via_annular_width', 'min_hole_clearance')
         ok(all(gui['rules'][k] == own.get(k) for k in kept),
            "and the board's own via and drilled-hole minimums are kept")
     if FAILS:

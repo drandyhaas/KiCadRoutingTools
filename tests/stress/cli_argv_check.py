@@ -414,6 +414,8 @@ REFUSAL_SITES = {
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'bga_fanout.py': {
+        'if _span_layers and footprint.layer not in (_span_layers[0], _span_lay':
+            ('board', "the part's layer against the via span on the board's stack"),
         'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
         'if bga_components': ('board', "auto-detects the BGA on the board"),
         'if args.component not in pcb_data.footprints':
@@ -426,6 +428,8 @@ REFUSAL_SITES = {
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'qfn_fanout.py': {
+        'except _SpanError from generate_qfn_fanout':
+            ('board', "the part's layer against the via span on the board's stack"),
         '--power-nets (': ('argv', '_power_nets_count_mismatch'),
         'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
         'if qfn_components': ('board', "auto-detects the QFN on the board"),
