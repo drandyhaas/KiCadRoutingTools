@@ -737,6 +737,34 @@ def recorded_intra_pair_rules(board_path: str) -> List[LengthRule]:
     return out
 
 
+def recorded_intra_pair_lanes(board_path: str) -> Dict[str, List[str]]:
+    """{net name: [pad, pad]} for both members of every recorded intra-pair
+    tolerance that carries a lane (#1869): the two pads the pair step matched
+    the member between, which is the path the recorded tolerance is graded
+    on. {} when no record has one."""
+    if not board_path:
+        return {}
+    try:
+        from protected_nets import (AC_CHAIN_PREFIX, pro_path_for_board,
+                                    read_intra_pair_tolerances)
+        rec = read_intra_pair_tolerances(pro_path_for_board(board_path))
+    except Exception:
+        return {}
+    out: Dict[str, List[str]] = {}
+    for p, r in rec.items():
+        if p.startswith(AC_CHAIN_PREFIX) or not isinstance(r, dict):
+            continue
+        lane = r.get('lane')
+        n = str(r.get('n') or '')
+        if not isinstance(lane, dict) or not n:
+            continue
+        lp, ln = lane.get('p'), lane.get('n')
+        if (isinstance(lp, list) and isinstance(ln, list)
+                and len(lp) == 2 and len(ln) == 2):
+            out[p], out[n] = [str(x) for x in lp], [str(x) for x in ln]
+    return out
+
+
 #: the name a recorded AC-coupled chain grades under (#1799)
 RECORDED_AC_CHAIN_RULE = 'route_diff AC-coupled chain (recorded)'
 

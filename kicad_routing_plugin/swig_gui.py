@@ -3218,6 +3218,7 @@ class RoutingDialog(wx.Dialog):
         # a silent SI regression, since a manifest records nothing when ON.
         self.differential_tab.gnd_via_check.SetValue(True)
         self.differential_tab.intra_match_check.SetValue(False)
+        self.differential_tab.diff_pair_intra_lane.SetValue("")     # #1869
         self.differential_tab.impedance_declare_only.SetValue(False)
         self.differential_tab.ac_couple_check.SetValue(False)
 
