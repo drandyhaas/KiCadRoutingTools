@@ -182,6 +182,9 @@ def build(E):
     rows = {}
     for k, opts in ((0, E.T), (1, E.B)):
         rows[k] = []
+        # (every option's neighbours whose runs meet it at once -- E.meet_all, the joint model's own: asked one
+        # option at a time, a four-bus group's eight ends models spent 238 of 275 s here)
+        E.meet_all(k)
         for la, lg in E.lanes:
             lane_rows = []
             for i, o in enumerate(opts[la]):

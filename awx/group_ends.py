@@ -17,11 +17,15 @@ model with no state names the lanes its rules cannot hold together, those lanes'
 it is built again -- until a state stands, or the lanes named have their whole menus already (then that is the answer,
 and the run stops). --full: every ball its whole menu from the start.
 
-THE TIERS (GROUP_TIERS, the default): every BUS ball is offered its whole menu from the start, each move tagged with
-the first tier that holds it -- 0 the pattern, 1 the pattern from the next gap point that stands clear (a pair's
-balls: the lines too), 2 the straight moves toward the bus's other part from every clear gap point and from a via in
-the pad, 3 those by every face, 4 the lines, 5 the rest -- and THE SEARCH starts on the first tiers and takes a wider
-one where it pays (tier_search). The array's other balls keep the pattern, widened as above.
+THE TIERS (GROUP_TIERS, the default): every BUS ball's whole menu is built, each move tagged with the first tier that
+holds it -- 0 the pattern, 1 the pattern from the next gap point that stands clear (a pair's balls: the lines too), 2
+the straight moves toward the bus's other part from every clear gap point and from a via in the pad, 3 those by every
+face, 4 the lines, 5 the rest. THE MENUS BY NEED AND BY USE: the model is offered a bus ball's first TIER_MENU tiers
+(0 to 3, about a fifth of its moves); its whole menu where a refusal's rules name it (need, as the pattern's balls
+are widened) and for one EPOCH of the search (use), each ball's whole menu kept (whole_opts) and its first tiers
+restored after, with the move its lane took. A four-bus group on its whole menus was 371k variables and 1.24 million
+rows, its first state three minutes in; on its first tiers it is 137k and 389k, a state in about one. The array's
+other balls keep the pattern, widened as above.
 
 THE MODEL is each bus's ends model (whole_ends._joint_model: an option a lane and end, each end on a layer its stub
 can take, the crossings the two orders make, each priced by the layers its two lanes share -- JOINT_X_LAYERS), its
@@ -51,8 +55,9 @@ ends at an array chosen from that array's menu, and at each array ONE set of rul
   * NO BUS END ON A GROUND PLANE'S LAYER, where the board has an inner layer without a plane; a run on a POWER
     plane's at its price (route_layers.run_price), ranked with the changes of layer;
   * NO FAR-FACE TOOTH for a lane still on the pattern (a lane on its whole menu may take one, at its price);
-  * a tooth on the source's FAR FACE, and THE WAY ROUND an array, priced as the ends model prices them: the far
-    face past any count of vias, yet no refusal (whole_ends.FAR_TOOTH), ranked with the changes of layer; a lane that
+  * a tooth on the source's FAR FACE -- and a PAIR's berth on its destination's far face, each leg's -- and THE WAY
+    ROUND an array, priced as the ends model prices them: the far face past any count of vias, yet no refusal
+    (whole_ends.FAR_TOOTH), ranked with the changes of layer; a lane that
     leaves by a face turned from its other end, or arrives by one, the length it travels round the array to the face
     toward it at the one exchange rate (select_moves.VIA_MM of track a via), with the vias;
   * EVERY BALL SERVED: the array's other balls are lanes there as the buses' are, offered the same menu under the same
@@ -63,11 +68,22 @@ ends at an array chosen from that array's menu, and at each array ONE set of rul
 
 EVERY rule is hard. Where no state holds them all the rules that cannot hold together are named, and the run stops.
 
-THE SEARCH (tier_search): the start, each lane on its first tiers wherever a state allows; then rounds that free a
-few lanes on their whole menus -- about a plane ball fanned out or a walled ball first, else at random or about one
-lane and its neighbours -- each other lane held at the best state; until a dozen rounds gain less than a via. Each
-solve bounded by deterministic batches, never a clock. (GROUP_TIERS=0: the weighted search, then the rest alone under
-the upper rank it reached.) Its state is CHECKED BY THE WHOLE
+THE SEARCH (tier_search): THE START, the model on the first tiers, each lane priced past its first two -- the state
+nearest the pattern the rules allow. Then THE EPOCHS: the lanes round the source in STRETCHES of some EPOCH_LANES
+(lane_stretches, by their balls' angles about the array's centre); a stretch's balls offered their whole menus, and
+the balls round each COSTLY BALL with them (a plane ball fanned out; the source ball of a lane with a tooth on its far
+face, the dearest end); the model built again from the state, which stands on it as it was (every lane keeps the move
+it took; where a rebuilt bus model refuses a few ends, the state nearest it, the ends moved named); rounds that free
+lanes of the stretch -- about a costly ball first, else at random or about one lane and its neighbours -- each other
+lane held at the best state, until EPOCH_STALL rounds gain less than a via. A SWEEP is every stretch once; one that
+gained a hundredth of the objective is followed by another, its stretches drawn at random (EPOCH_SWEEPS at most).
+Every lane's wide moves are worth the having -- the search held to the first four tiers ended 8 and 11 % dearer on two
+boards -- but never all at once: on its whole menus at once, a four-bus group's search took 12 GB and had not ended
+when it was stopped.
+Each solve bounded by deterministic batches, never a clock. A model solved again after a check or a lesson of the
+field laid (a repair, holding most lanes) that leaves a costly ball searches the lanes nearest it once more, as an
+epoch (COSTLY_TRIES). (GROUP_TIERS=0: the weighted search, then the rest alone under the upper rank it reached.)
+Its state is CHECKED BY THE WHOLE
 SOLVE, bus by bus, as a bus's own ends were (whole_ends.joint_choose): a refusal teaches -- lanes held to one layer,
 crossings held apart, the lanes' state refused -- the lanes named get their whole menus, and the model is solved again
 (whole_ends.JOINT_TRIES at most; ends with no plan are no answer, exit 5). A bus's FIRST refusal, on the pattern,
@@ -91,6 +107,7 @@ import bisect
 import collections
 import contextlib
 import copy
+import gc
 import io
 import itertools
 import json
@@ -139,14 +156,29 @@ STRAP_VIAS = 2.0    # a strap, in vias: more than the drop it does without (1), 
 # at the ends model's own 1.2 a pair left on the back layer 2 mm short of a part's pad, no room to change before it
 EXIT_REACH = 2.0
 SNAP = 0.02         # mm: two coordinates of an array's lines this close are one (_snap)
-# THE TIERS: every bus ball offered its WHOLE menu, each move tagged with the first tier that holds it -- 0 the pattern,
+DROP_CELL = 1.0     # mm: drop_hits' grid, a drop tested against the escapes whose boxes meet its cells
+# THE TIERS: every bus ball's whole menu built, each move tagged with the first tier that holds it -- 0 the pattern,
 # 1 the pattern from the next clear site (a pair's balls: the lines too), 2 the straight moves toward the bus's other
-# part from every clear site and from a via in the pad, 3 those by every face, 4 the lines, 5 the rest -- and the
-# search (tier_search) starts each lane on its first TIER_START tiers and widens where it pays. 0 = the pattern and a
-# refusal's widening, the start nearest the ends wanted and the search, as before
+# part from every clear site and from a via in the pad, 3 those by every face, 4 the lines, 5 the rest -- the model
+# offered its first TIER_MENU tiers (below), and the search's start (tier_search) each lane on its first TIER_START
+# tiers where a state allows. 0 = the pattern and a refusal's widening, the start nearest the ends wanted and the
+# search, as before
 GROUP_TIERS = (awx_settings.get('GROUP_TIERS') or '1') == '1'
 TIER_START = 1      # the start: each lane on its first tiers up to this one wherever a state allows
 TIER_OVER = 50.0    # ...a lane past them priced this many vias in the start alone
+# THE MENUS BY NEED AND BY USE: a bus ball is offered its first TIER_MENU tiers in the model; its whole menu where a
+# refusal names it (need), and for one EPOCH of the search at a time (use): a stretch of EPOCH_LANES lanes round the
+# source offered their whole menus, the model built again from the state, the search freeing lanes of the stretch until
+# EPOCH_STALL rounds gain less than a via -- then the stretch back on its first tiers, each lane keeping the move it
+# took, and the next stretch. Every lane on its whole menu at once, the tiers' four-bus model was 371k variables and
+# 1.24M rows (some 4 GB built) where its first three tiers are 137k and 389k; the lanes' wide moves earned most of the
+# search's gain on two boards (capped at the third tier, 372 -> 366 and 545 -> 523 where they reached 339 and 469)
+TIER_MENU = int(awx_settings.get('GROUP_TIER_MENU') or '3')     # 5: every bus ball on its whole menu in every model
+EPOCH_LANES = 16
+EPOCH_STALL = 12
+EPOCH_SWEEPS = 3    # a sweep that gained a hundredth of the objective is followed by another, its stretches drawn
+EPOCH_GAIN = 0.01
+COSTLY_TRIES = 2    # a costly ball left by a later model (a repair, a lesson of the field laid): its lanes searched again
 LNS_K = 8           # a round of the search frees this many lanes on their whole menus
 LNS_NEAR = 2.5      # mm: another ball this near a freed lane's balls, or the costly ball a round is about, is freed too
 LNS_STALL = 12      # the search ends where this many rounds in a row gained less than a via's worth together
@@ -159,12 +191,58 @@ CHANGE_VIAS = 2.0
 OWN_KEYS = ('FANOUT_JOINT', 'FANOUT_ESCAPE', 'FANOUT_NETS', 'DEST', 'ENDS_CAPTURE', 'ENDS_ONLY')
 
 
-def tier_search(m, meta, log, seed=1):
+def option_tier(b, k_, l_, i_, tier_of):
+    """the tier of bus b's lane l_'s option i_ at its end k_: its moves' widest (tier_of: (array, ball) -> each move's
+    of its menu); 0 where none of its moves is tiered"""
+    ts_ = [tier_of[g_[:2]][g_[2]] for g_ in (getattr(mv_, 'gid', None) for mv_ in (b.E.T, b.E.B)[k_][l_][i_][0])
+           if g_ and g_[:2] in tier_of]
+    return max(ts_) if ts_ else 0
+
+
+def lane_stretches(buses, draw=None):
+    """every bus lane in STRETCHES round its source array, some EPOCH_LANES a stretch -- the lanes in the order of
+    their balls' angles about the array's centre, cut evenly; `draw` (a seed): the lanes DRAWN at random instead, each
+    stretch some EPOCH_LANES from anywhere round the array -- two lanes far apart that cross are freed together, as the
+    whole menus' search's random rounds free them: the search's epochs, a list of [(bus, lane)]"""
+    at = []
+    for b in buses:
+        A = b.arr[0]
+        cx, cy = (A.box[0] + A.box[2]) / 2, (A.box[1] + A.box[3]) / 2
+        for l_ in b.J.lanes:
+            legs = [leg for leg in (b.E.legs_of.get(l_) or (l_,)) if leg in A.ball_of]
+            p = A.bm.items[A.ball_of[legs[0]]][1] if legs else None
+            ang = math.atan2(p.global_y - cy, p.global_x - cx) if p is not None else 0.0
+            at.append((ang, b.name, str(l_)))
+    at.sort()
+    n = max(1, round(len(at) / EPOCH_LANES))
+    size = math.ceil(len(at) / n)
+    if draw is not None:
+        random.Random(draw).shuffle(at)
+    return [[(bn, l_) for _a, bn, l_ in at[i:i + size]] for i in range(0, len(at), size)]
+
+
+def stretch_balls(buses, stretch):
+    """the balls, at either end's array, of the lanes of `stretch` [(bus, lane)]: {(array, ball)}"""
+    st, out = set(stretch), set()
+    for b in buses:
+        for l_ in b.J.lanes:
+            if (b.name, str(l_)) not in st:
+                continue
+            for k_ in (0, 1):
+                A = b.arr[k_]
+                if A is None:
+                    continue
+                out.update((A.ref, A.ball_of[leg]) for leg in (b.E.legs_of.get(l_) or (l_,)) if leg in A.ball_of)
+    return out
+
+
+def tier_search(m, meta, log, seed=1, hint=None, pool=None):
     """THE SEARCH ON TIERED MENUS (GROUP_TIERS) of model `m`, its objective set. `meta`: 'lanes' [{'x': [the option
     variables of each end], 'tier': [their tiers], 'at': [the places of its balls at each end]}], 'others' [{'vars',
     'at'}] (the arrays' other balls), 'W_TOP' (a walled ball's, or a plane ball fanned out's, price).
     THE START: the whole model, each lane priced TIER_OVER vias past its first TIER_START tiers -- a state as near the
-    pattern as the rules allow, a lane taken past it only where none holds or a walled ball would stand. THEN THE
+    pattern as the rules allow, a lane taken past it only where none holds or a walled ball would stand; `hint` a state
+    to start it from (the first tiers' own: main). THEN THE
     NEIGHBOURHOOD SEARCH: rounds that free LNS_K lanes on their whole menus -- about a costly ball still in the state
     (fanned out, walled: the lanes nearest it), else a random LNS_K, else a lane and its nearest -- every other ball
     within LNS_NEAR of theirs freed with them, everything else held at the best state, that state hinted; a better state
@@ -172,6 +250,9 @@ def tier_search(m, meta, log, seed=1):
     solve bounded by deterministic batches, never by a clock. On two boards' models, searched 240 s each way, such
     rounds ended 2 and 5 % below one search of the whole menus, and on one of them 16 % below the pattern's alone; freeing the
     costliest lane and those it crosses instead, a tier at a time or all at once, ended between the two.
+    `pool` (an EPOCH, main's: a stretch of lanes on their whole menus, the rest on their first tiers): None, the start
+    and rounds over every lane; [] the start alone; lane indices, no start -- `hint` is the state -- and rounds that
+    free lanes of the pool (and those nearest them), ending where EPOCH_STALL rounds in a row gained less than a via.
     Returns (the state, a value per variable, or None; a line for the log)"""
     from ortools.sat.python import cp_model
     import cp_seed
@@ -194,7 +275,8 @@ def tier_search(m, meta, log, seed=1):
     for o in others:
         for v in o['vars']:
             at_of.setdefault(v, [tuple(o['at'])])
-    top = sorted(v for v, c in obj if v >= 0 and c >= W_TOP and v in at_of)
+    # (...and a tooth on the source's FAR FACE: the dearest end there is, a hand never lays one)
+    top = sorted({v for v, c in obj if v >= 0 and c >= W_TOP and v in at_of} | {v for v in meta.get('far', ()) if v in at_of})
 
     def run(fix, hint, batches, extra=None):
         mc = m.Clone()
@@ -205,7 +287,7 @@ def tier_search(m, meta, log, seed=1):
             d.extend([x, x])
         if hint is not None:
             Pc.clear_solution_hint()
-            Pc.solution_hint.vars.extend(range(nv))
+            Pc.solution_hint.vars.extend(range(len(hint)))
             Pc.solution_hint.values.extend(hint)
         if extra is not None:
             extra(mc)
@@ -232,14 +314,25 @@ def tier_search(m, meta, log, seed=1):
                 Pc.objective.vars.append(o.Index())
                 Pc.objective.coeffs.append(int(round(1000 * TIER_OVER)))
     t0 = time.time()
-    inc, st = run({}, None, BATCHES, extra=over)
-    if inc is None:
-        return None, f'no state [{st}]'
-    best = value(inc)
-    n_past = sum(1 for e in lanes if any(inc[v] for k_ in (0, 1) for v, t in zip(e['x'][k_], e['tier'][k_])
-                                         if v >= 0 and t > TIER_START))
-    log(f'  the start, each lane on its first {TIER_START + 1} tiers where a state allows ({n_past} of {len(lanes)} '
-        f'past them) [{st}]: {best / 1000:.1f} ({time.time() - t0:.0f} s)')
+    if pool:
+        # (the state before, every lane's ends and every other ball's choice held, the rest of it solved for the
+        # objective: what the model built before it read as derived terms are set at their least)
+        held = {v: hint[v] for e in lanes for k_ in (0, 1) for v in e['x'][k_] if v >= 0}
+        held.update((v, hint[v]) for o in others for v in o['vars'])
+        got, _st = run(held, hint, LNS_BATCHES)
+        inc = got if got is not None else list(hint)
+        best = value(inc)
+    else:
+        inc, st = run({}, hint, BATCHES, extra=over)
+        if inc is None:
+            return None, f'no state [{st}]'
+        best = value(inc)
+        n_past = sum(1 for e in lanes if any(inc[v] for k_ in (0, 1) for v, t in zip(e['x'][k_], e['tier'][k_])
+                                             if v >= 0 and t > TIER_START))
+        log(f'  the start, each lane on its first {TIER_START + 1} tiers where a state allows ({n_past} of {len(lanes)} '
+            f'past them) [{st}]: {best / 1000:.1f} ({time.time() - t0:.0f} s)')
+        if pool is not None:
+            return inc, f'the start alone: {best / 1000:.1f} ({time.time() - t0:.0f} s)'
     rng = random.Random(seed)
     dist = lambda ps, qs: min((math.hypot(p[0] - q[0], p[1] - q[1]) for p in ps for q in qs), default=1e9)  # noqa: E731
 
@@ -250,15 +343,16 @@ def tier_search(m, meta, log, seed=1):
         rnd += 1
         hot = [v for v in top if inc[v] and hot_n[v] < LNS_HOT]
         centre = []
+        among = list(pool) if pool else list(range(len(lanes)))
         if hot:
             hot_n[hot[0]] += 1
             n_hot += 1
             centre = list(at_of[hot[0]])
             free = set(nearest(centre, LNS_K))
         elif rng.random() < 0.5:
-            free = set(rng.sample(range(len(lanes)), min(LNS_K, len(lanes))))
+            free = set(rng.sample(among, min(LNS_K, len(among))))
         else:
-            j0 = rng.randrange(len(lanes))
+            j0 = rng.choice(among)
             free = {j0} | set(nearest(pts_of[j0], LNS_K - 1, but=(j0,)))
         fix = {}
         for j, e in enumerate(lanes):
@@ -277,7 +371,8 @@ def tier_search(m, meta, log, seed=1):
             inc, best = got, value(got)
             hot_n.clear()
         hist.append(best)
-        if len(hist) > LNS_STALL and hist[-1 - LNS_STALL] - hist[-1] < 1000:
+        stall = EPOCH_STALL if pool else LNS_STALL
+        if len(hist) > stall and hist[-1 - stall] - hist[-1] < 1000:
             break
     n_top = sum(inc[v] for v in top)
     return inc, (f'{rnd} rounds of {LNS_K} lanes ({n_hot} about a costly ball): {hist[0] / 1000:.1f} -> '
@@ -364,8 +459,13 @@ def via_groups(bm):
                 if k < k2 and bm.items[k][1].net_id != bm.items[k2][1].net_id and \
                         math.hypot(c[0] - c2[0], c[1] - c2[1]) < r + r2 + bm.sz['cl'] - 1e-6:
                     near.add(((k, i), (k2, i2)))
-    have = {frozenset(map(tuple, g)) for g in cl if via(g)}
-    near = sorted(pr for pr in near if not any(frozenset(pr) <= g for g in have))
+    # (a pair is held apart already where one group holds both: each move's groups, and the pair's two shared --
+    # asked of every group in turn, a three-array model spent 7 s of every build here)
+    of_ = collections.defaultdict(set)
+    for n_, g in enumerate(g for g in cl if via(g)):
+        for mbr in g:
+            of_[tuple(mbr)].add(n_)
+    near = sorted(pr for pr in near if not (of_.get(pr[0], set()) & of_.get(pr[1], set())))
     bm.n_near = len(near)
     return sorted([sorted(g) for g in cl if via(g)] + [list(pr) for pr in near], key=repr), \
         sorted(((sorted(a), sorted(b)) for a, b in bi if via((a, b))), key=repr)
@@ -570,7 +670,9 @@ def array_rules(pcb, A):
                     any(track_banned(a, b, Lg, hw) for a, b, Lg in mv.legs if Lg != je.RUN) or \
                     any(via_banned(c, r) for c, r, _dr in bm.opts[k][i][2].vias):
                 dead.add((k, i))
-    A.dead, A.hits = dead, {}
+    A.dead = dead
+    if getattr(A, 'hits', None) is None:
+        A.hits = {}        # (drop_hits' answers, by the copper's own pieces: kept as menus change)
     A.offer = {k: [i for i in range(len(ms)) if (k, i) not in dead] for k, ms in bm.menu.items()}
     A.cliques, A.bicliques = via_groups(bm)
     A.pts = run_points(bm)
@@ -580,51 +682,71 @@ def drop_hits(A, offered):
     """{(ball, drop index): ({(ball, move index)}, {(ball, drop index)})}: the escapes offered (`offered` {ball: menu
     indices}) and the other balls' drops each drop of array `A` cannot be laid with -- joint_escape._hit, the whole-array
     fanout's own test of two options' copper at the sizes they are laid at (two plane balls of one net at one site share
-    its via). Each pair tested once (A.hits)"""
+    its via). An array's drops are fixed: each drop's against the other balls' drops are tested once (A.hits['dd']), and
+    each escape's copper once against the drops near it, the drops it hits kept with it (A.hits['esc'], by the piece:
+    held beside its id, so no id is met again for another) -- whatever menus the balls are offered since. Keyed by a
+    move's index on its ball's menu, the answers went with every model built again: one board's six models tested 3.3
+    million pairs, 70 of its 154 s; kept a pair at a time, 8 million of them held 0.4 GB"""
     import joint_escape as je
     bm, sz = A.bm, A.bm.sz
     # (a plane ball's drops and, after them, its straps: one list, as array_rows' literals are)
     drops = {k: list(A.drops[k]) + list(A.straps.get(k, ())) for k in A.drops}
-    geo, box, hit = A.hits.setdefault('geo', {}), A.hits.setdefault('box', {}), A.hits.setdefault('hit', {})
-
-    def bx(key, pc):
-        if key not in box:
-            box[key] = je._box(pc, sz['grow'])
-        return box[key]
+    C = A.hits
+    geo = C.setdefault('geo', {})
     apart = lambda a, b: a[0] > b[2] or b[0] > a[2] or a[1] > b[3] or b[1] > a[3]    # noqa: E731
-    out = {}
-    order = sorted(drops)
-    for k in order:
-        net = bm.items[k][0]
-        for j, (_d, pc) in enumerate(drops[k]):
-            b0 = bx(('d', k, j), pc)
-            esc, drs = set(), set()
-            for k2 in sorted(offered):
-                if k2 == k:
-                    continue
-                same = bm.items[k2][0] == net
-                for i in offered[k2]:
-                    key = (k, j, k2, i)
-                    if key not in hit:
-                        pc2 = bm.opts[k2][i][2]
-                        hit[key] = (not apart(b0, bx(('e', k2, i), pc2))) and je._hit(pc, pc2, same, sz, geo)
-                    if hit[key]:
-                        esc.add((k2, i))
-            for k2 in order:
-                if k2 <= k:
-                    continue
-                same = bm.items[k2][0] == net
-                for j2, (_d2, pc2) in enumerate(drops[k2]):
-                    key = (k, j, 'd', k2, j2)
-                    if key not in hit:
-                        hit[key] = (not apart(b0, bx(('d', k2, j2), pc2))) and je._hit(pc, pc2, same, sz, geo)
-                    if hit[key]:
-                        drs.add((k2, j2))
-            out[(k, j)] = (esc, drs)
+
+    def cells(b):
+        return [(gx, gy) for gx in range(math.floor(b[0] / DROP_CELL), math.floor(b[2] / DROP_CELL) + 1)
+                for gy in range(math.floor(b[1] / DROP_CELL), math.floor(b[3] / DROP_CELL) + 1)]
+    if 'dd' not in C:
+        # (the drops by the cells of a coarse grid their boxes meet -- two boxes that meet share a cell, so a drop
+        # met through its cells is every one a whole list would give -- and each drop's against the drops of the
+        # balls after its own, once)
+        dbox, dgrid, dd = {}, collections.defaultdict(list), {}
+        for k in sorted(drops):
+            for j, (_d, pc) in enumerate(drops[k]):
+                dbox[(k, j)] = je._box(pc, sz['grow'])
+                for c_ in cells(dbox[(k, j)]):
+                    dgrid[c_].append((k, j))
+        for k in sorted(drops):
+            net = bm.items[k][0]
+            for j, (_d, pc) in enumerate(drops[k]):
+                b0, drs, seen = dbox[(k, j)], set(), set()
+                for c_ in cells(b0):
+                    for k2, j2 in dgrid.get(c_, ()):
+                        if k2 <= k or (k2, j2) in seen:
+                            continue
+                        seen.add((k2, j2))
+                        if not apart(b0, dbox[(k2, j2)]) and \
+                                je._hit(pc, drops[k2][j2][1], bm.items[k2][0] == net, sz, geo):
+                            drs.add((k2, j2))
+                dd[(k, j)] = drs
+        C['dbox'], C['dgrid'], C['dd'] = dbox, dgrid, dd
+    dbox, dgrid, dd = C['dbox'], C['dgrid'], C['dd']
+    esc_hits = C.setdefault('esc', {})
+    out = {kj: (set(), set(drs)) for kj, drs in dd.items()}
+    for k2 in sorted(offered):
+        net2 = bm.items[k2][0]
+        for i in offered[k2]:
+            pc2 = bm.opts[k2][i][2]
+            g = esc_hits.get(id(pc2))
+            if g is None or g[0] is not pc2:
+                b2, hs, seen = je._box(pc2, sz['grow']), [], set()
+                for c_ in cells(b2):
+                    for k, j in dgrid.get(c_, ()):
+                        if k == k2 or (k, j) in seen:
+                            continue
+                        seen.add((k, j))
+                        if not apart(dbox[(k, j)], b2) and \
+                                je._hit(drops[k][j][1], pc2, bm.items[k][0] == net2, sz, geo):
+                            hs.append((k, j))
+                g = esc_hits[id(pc2)] = (pc2, tuple(sorted(hs)))
+            for kj in g[1]:
+                out[kj][0].add((k2, i))
     return out
 
 
-def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=()):
+def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()):
     """the arrays FANNED OUT as the model chose them, on a copy of the bare `board` (its project beside it): each
     piece of `laid` [(its net's id, its copper: joint_escape.Piece, the layer its run takes, the fan track)] as its own
     legs and its vias at the sizes the menu measured them at -- nothing planned again, nothing moved; two balls of one
@@ -632,7 +754,10 @@ def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=()):
     (`tie_sites` [(the stand-in via, its ball (x, y, radius))]: fanout_from_plan.tie_stand_ins), each unless a via of
     its net is laid in its ball. Then the passives beneath the arrays are nudged off it (place_fanout_clearance
     --beneath-only), THE BUSES' PULL PADS OFF THEIR NETS meanwhile (`pulls`: route_bus.pulled_nets' stub pads, as in
-    each bus's own step). Returns (tracks written, vias written, the nudge's lines)"""
+    each bus's own step), and off THE LANES' WAYS OUT (`wayouts` [(net id, an exit, its direction, its layer)]: each
+    exit's straight run out to where its lane can turn -- two lanes' bars on, its stub's mouth and a bar past it --
+    laid for the nudge alone at the route's track and a grid step, a lane's bar off it at the clearance, and taken up
+    after). Returns (tracks written, vias written, the nudge's lines)"""
     import joint_escape as je
     import fanout_from_plan as fp
     import ship_vias
@@ -687,8 +812,25 @@ def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=()):
     if loose:
         raise SystemExit(f'group_ends: write_field: {len(loose)} pad(s) whose only stub runs on a layer the pad has no '
                          f'copper on, no via there: ' + ', '.join(sorted(loose)[:12]))
+    # (THE LANES' WAYS OUT, for the nudge alone: a decap the nudge moved off a stub moved 0.2 mm into the straight run
+    # out of the next ball's exit, which the ends had been chosen clear of -- the lane stood 0.021 mm short of its bar
+    # there, in every round of its bus's loop. Held off the whole front a single lane's end is priced on, 1.2 mm, a
+    # decap under the array had nowhere to go but onto the next balls' stubs: five lessons, a field laid six times)
+    import rules as _rules
+    from escape_moves import DIRS
+    R_ = _rules.active()
+    w_wo = R_.track + R_.grid
+    reach_wo = 2 * (R_.track / 2 + R_.clearance + R_.grid / 2)
+    wo = []
+    for nid_, (ex_, ey_), dir_, L_ in sorted(set(wayouts)):
+        d_ = DIRS.get(dir_)
+        if d_ is None or L_ not in pcb.board_info.copper_layers:
+            continue
+        wo.append({'start': (round(ex_, 4), round(ey_, 4)), 'width': w_wo, 'layer': L_, 'net_id': nid_,
+                   'end': (round(ex_ + d_[0] * reach_wo, 4), round(ey_ + d_[1] * reach_wo, 4))})
     with contextlib.redirect_stdout(io.StringIO()):
-        add_tracks_and_vias_to_pcb(board, out, tracks, vias, [], net_id_to_name={i: n.name for i, n in pcb.nets.items()})
+        add_tracks_and_vias_to_pcb(board, out, tracks + wo, vias, [],
+                                   net_id_to_name={i: n.name for i, n in pcb.nets.items()})
         fp.copy_pro(board, out)
         ship_vias.stamp(out, 'group ends')      # (a via in a pad or under solder declared filled and capped)
     # (the passives beneath the arrays nudged off the fanout, as every fanout's step does after it: the menus' vias were
@@ -712,6 +854,20 @@ def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=()):
                        env=awx_settings.environ(), capture_output=True, text=True)
     with open(out[:-len('.kicad_pcb')] + '.caps.log', 'w', encoding='utf-8') as f:
         f.write(r.stdout + r.stderr)
+    if wo:
+        # (...the ways out taken up again, every one of them, or the run stops: they are no copper of the field's)
+        from kicad_writer import remove_segments_from_content
+        with open(out, encoding='utf-8') as f:
+            txt_ = f.read()
+        txt_, n_wo = remove_segments_from_content(
+            txt_, [types.SimpleNamespace(start_x=t_['start'][0], start_y=t_['start'][1], end_x=t_['end'][0],
+                                         end_y=t_['end'][1], layer=t_['layer'], net_id=t_['net_id'], width=w_wo)
+                   for t_ in wo], net_id_to_name={i: n.name for i, n in pcb.nets.items()}, match_width=True)
+        if n_wo != len(wo):
+            raise SystemExit(f'group_ends: write_field: {len(wo) - n_wo} of the {len(wo)} ways out laid for the '
+                             f'nudge not found again to take up')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(txt_)
     if held:
         with open(out, encoding='utf-8') as f:
             txt_ = f.read()
@@ -782,6 +938,62 @@ def row_zone(grid, direction):
     return stagger, ROW_STAGGERS * stagger + up(bd.VIA_SIZE / 2 + rl.clearance + bd.TRACK / 2 + step)
 
 
+def _stub_path(segs, p0):
+    """a fanned stub's segments [(a, b, layer)] as one polyline from the end nearest its pad's centre p0 (none: [])"""
+    left = [(tuple(a), tuple(b)) for a, b, _L in segs]
+    if not left:
+        return []
+    d = lambda q: math.hypot(q[0] - p0[0], q[1] - p0[1])        # noqa: E731
+    a, b = min(left, key=lambda s: min(d(s[0]), d(s[1])))
+    left.remove((a, b))
+    path = [a, b] if d(a) <= d(b) else [b, a]
+    while left:
+        nx = next(((s, s[1] if math.dist(s[0], path[-1]) < 1e-6 else s[0]) for s in left
+                   if min(math.dist(s[0], path[-1]), math.dist(s[1], path[-1])) < 1e-6), None)
+        if nx is None:
+            return []
+        left.remove(nx[0])
+        path.append(nx[1])
+    return path
+
+
+def _steps(length, h):
+    """0, h, 2h, ... up to `length`, and `length`"""
+    k = max(1, int(math.ceil(length / h - 1e-9)))
+    return [length * i / k for i in range(k + 1)]
+
+
+def _walk_back(path, h):
+    """(point, the outward heading there) every h back from the polyline's far end to its first bend, the end first"""
+    for i in range(len(path) - 1, 1, -1):
+        a, b = path[i - 1], path[i]
+        L = math.dist(a, b)
+        if L < 1e-9:
+            continue
+        u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+        for r in _steps(L, h):
+            yield (b[0] - u[0] * r, b[1] - u[1] * r), u
+
+
+def _cut_path(path, q, layer):
+    """the polyline's segments from its start to point q on it (as [(a, b, layer)])"""
+    out = []
+    for a, b in zip(path, path[1:]):
+        if _pt_seg_d(q, a, b) < 1e-6:
+            if math.dist(a, q) > 1e-9:
+                out.append((a, q, layer))
+            return out
+        out.append((a, b, layer))
+    return out
+
+
+def _pt_seg_d(p, a, b):
+    ax, ay = b[0] - a[0], b[1] - a[1]
+    L2 = ax * ax + ay * ay
+    t = 0.0 if L2 < 1e-18 else max(0.0, min(1.0, ((p[0] - a[0]) * ax + (p[1] - a[1]) * ay) / L2))
+    return math.hypot(p[0] - a[0] - t * ax, p[1] - a[1] - t * ay)
+
+
 def qfn_berths(st, pcb):
     """a bus's destination menu (`st['dmenu']`, its own run's) with each ROW PART FANNED OUT FIRST BY THE QFN FANOUT
     (py_router/qfn_fanout, its surface fan: a straight stub and a diverging 45-degree fan at the fanout's track, each
@@ -795,7 +1007,9 @@ def qfn_berths(st, pcb):
     -- the ends' conflict test reads axis-aligned lanes, and the fan's stubs are already clear of each other. A pair's
     legs keep their own moves (the fan would part them), as does a net the fan could not escape, and every net of a
     part whose pads have more moves of their own than those two. The fan is held inside the board's edge rule (the
-    fanout's own edge model, given the board's rule), and so is a tip's via"""
+    fanout's own edge model, given the board's rule), and so is a tip's via. A tip is one the lane can LEAVE: it, and
+    its stub's line on for a lane's bar, stand that bar off other copper on its layer -- else it is walked back along
+    its own diagonal to where they do (and a via there held off the fan's other stubs)"""
     import dataclasses
     import braid as bd
     import pairs as _pairs
@@ -827,6 +1041,9 @@ def qfn_berths(st, pcb):
     cfg = bd.run_config(pcb, st.get('base'))
     edge_ = float(getattr(cfg, 'board_edge_clearance', 0.0) or 0.0) or cfg.clearance
     on_ = lambda q, half: bd._on_board(pcb, q[0], q[1], edge_ + half)       # noqa: E731
+    # (a lane's bar off copper where it lies off the grid: its track's half, the clearance, half a grid step -- the
+    # audit's, plan_audit.static)
+    lane_need = cfg.track_width / 2 + cfg.clearance + cfg.grid_step / 2
     for ref, names in sorted(by_ref.items()):
         # (ONLY A PART WHOSE PADS HAVE NO MOVE OF THEIR OWN but a stub and that stub with a via. One with more -- a
         # two-row connector with room for vias between its rows, a dozen moves a pad -- keeps them: fanned too, its
@@ -861,11 +1078,32 @@ def qfn_berths(st, pcb):
             tip = max(pts, key=lambda q: math.hypot(q[0] - p0[0], q[1] - p0[1]))
             b0 = out[n][0]
             home = foot.layer
+            moved = False
+            # (A TIP THE LANE CAN LEAVE: the fan shortens a stub at the clearance from what it meets, and a stub
+            # turned 45 degrees toward a passive beside the part ended facing its pad at the fan's clearance -- the
+            # lane, at its own track and its bar off the grid, could neither go on nor turn there, and the loop found
+            # it short at that berth in every round. Walked back along its own diagonal to where the tip, and its line
+            # on for a lane's bar, stand that bar off other copper on its layer; none: the fan's tip as it was)
+            path = _stub_path(segs, p0)
+            if len(path) > 2:
+                obs_h = obs(nid, home)
+                grow = lane_need - (bd.CLEAR + bd.TRACK / 2)
+                free_ = lambda q: not (obs_h.point_violation(q, pad=grow) or [0])[0]           # noqa: E731
+                for q, u in _walk_back(path, rl.grid / 2):
+                    if all(free_((q[0] + u[0] * r, q[1] + u[1] * r)) for r in _steps(lane_need, rl.grid / 2)):
+                        if q != tip:
+                            segs, tip, moved = _cut_path(path, q, home), q, True
+                        break
             ms = dataclasses.replace(b0, kind='surface', layer=home, exit_pt=tip, vias=0, legs=[], site=None)
             ms.fan_legs = list(segs)
             new = [ms]
             vl = cu if len(RL) > 2 else [home]
-            if on_(tip, bd.VIA_SIZE / 2) and \
+            # (a via at a tip walked back stands nearer the fan's other stubs than the fan spread it from: held off them)
+            via_off = (not moved) or all(
+                _pt_seg_d(tip, a_, b_) >= bd.VIA_SIZE / 2 + rl.clearance + rl.fan_track / 2
+                for t_ in tracks if t_['net_id'] != nid for a_, b_ in [(tuple(t_['start']), tuple(t_['end']))]
+                if t_['layer'] == home)
+            if on_(tip, bd.VIA_SIZE / 2) and via_off and \
                     not any((obs(nid, L).point_violation(tip, pad=(bd.VIA_SIZE - bd.TRACK) / 2) or [0])[0] for L in vl):
                 mv = dataclasses.replace(b0, kind='dogbone', layer=home, exit_pt=tip, vias=1, legs=[], site=tip)
                 mv.fan_legs = list(segs)
@@ -973,12 +1211,14 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, cutvar=False, feedbac
                 clean = [i for i, o in enumerate(opts) if not o[4]]
                 i = None
                 if arr[k_] is None:
-                    # (a row part's berth: the very move, or the option of its signature)
-                    i = next((i for i in clean if len(opts[i][0]) == len(w_)
-                              and all(a is b for a, b in zip(opts[i][0], w_))), None)
-                    if i is None and je_.get(lane):
+                    # (a row part's berth: the option of its signature -- a GROUP berth's way in with its moves, the
+                    # same move being offered once per way -- or the very move)
+                    if je_.get(lane):
                         sig = json.dumps(je_[lane][k_])
                         i = next((i for i in clean if json.dumps(we._opt_sig(opts[i])) == sig), None)
+                    if i is None:
+                        i = next((i for i in clean if len(opts[i][0]) == len(w_)
+                                  and all(a is b for a, b in zip(opts[i][0], w_))), None)
                 elif all(w is not None for w in w_):
                     i = min(clean, key=lambda i: (sum(m.direction != w.direction for m, w in zip(opts[i][0], w_)),
                                                   sum(math.hypot(m.exit_pt[0] - w.exit_pt[0], m.exit_pt[1] - w.exit_pt[1])
@@ -1395,6 +1635,10 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
         vias_ = [(k2, i2, o_.site, r_) for k2 in sorted(opts_) for i2, (kind_, o_, _pc) in enumerate(opts_[k2])
                  for r_ in ([o_.r] if kind_ == 'drop' else [bm.sz['vr']] if getattr(o_, 'site', None) is not None
                             and getattr(o_, 'vias', 0) else [])]
+        # (one row per pair's lane, via and the lane it is another's of: the pair's options it stands in the way of
+        # summed -- a lane takes one option, so that is each of them alone. One row per option and via, four buses'
+        # pairs at one array had 361 thousand)
+        agg_ = {}
         for b, k_ in users:
             opts = b.E.T if k_ == 0 else b.E.B
             for lane, lg in b.E.lanes:
@@ -1419,14 +1663,17 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
                                 je._pt_seg(site, a, e) - je._ring(site, r_) >= bar_p - 1e-9:
                             continue
                         ne = len(esc.get(k2, ()))
-                        left = [((oname, k2, 0), others[k2][2][i2 - ne])] if i2 >= ne else \
-                            [(key2, lane_sum(key2, o)) for key2, o in sorted(by_lane({(k2, esc[k2][i2])}).items())]
-                        for key2, lit in left:
-                            if key2 == key:
-                                continue
-                            m.Add(xs[key][i] + lit <= 1).OnlyEnforceIf(
-                                gate('ways', A.ref, tag(key), tag(key2), lanes={key, key2}))
-                            n_way += 1
+                        left = [((oname, k2, 0), ('drop', k2, i2 - ne))] if i2 >= ne else \
+                            [(key2, ('lane', tuple(sorted(o)))) for key2, o in
+                             sorted(by_lane({(k2, esc[k2][i2])}).items())]
+                        for key2, lid in left:
+                            if key2 != key:
+                                agg_.setdefault((key, key2, lid), set()).add(i)
+        for (key, key2, lid), is_ in sorted(agg_.items(), key=repr):
+            lit = others[lid[1]][2][lid[2]] if lid[0] == 'drop' else lane_sum(key2, set(lid[1]))
+            m.Add(sum(xs[key][i] for i in sorted(is_)) + lit <= 1).OnlyEnforceIf(
+                gate('ways', A.ref, tag(key), tag(key2), lanes={key, key2}))
+            n_way += 1
     # ---- PAIRS WHOLE: no other lane's exit between a pair's two exits on the pair's layer there -- a pair is one lane
     # to the route (whole_frame's PairSplit: a memory bus's data net left on the surface between a strobe pair's two
     # surface teeth, and the bus's step refused the board)
@@ -1631,7 +1878,8 @@ def between_rows(m, A, users, gate, RL):
     P = Q(2 * ((x1 - x0) + (y1 - y0)))
     mid = {'up': ((x0 + x1) / 2, y0), 'right': (x1, (y0 + y1) / 2), 'down': ((x0 + x1) / 2, y1),
            'left': (x0, (y0 + y1) / 2)}
-    way, vals, H = {}, {}, {}
+    from ortools.sat.python import cp_model
+    way, vals, H, PV = {}, {}, {}, {}
     for b, k_ in users:
         # (the face toward its other end, in the bus's own frame the east at its source and the west at its end)
         face = b.F.dirn('right' if k_ == 0 else 'left')
@@ -1645,6 +1893,12 @@ def between_rows(m, A, users, gate, RL):
             for t_, v_ in enumerate(vs):
                 m.Add(h_[t_] - h_[t_ + 1] == sum(x for i, x in b.J.xs[k_][l_].items() if sv[i] == v_))
             vals[(b.name, l_)], H[(b.name, l_)] = vs, h_
+            # (...and the place itself, an integer on exactly those values: two lanes' places compared by one row
+            # each way -- gt. Compared clause by clause over every place of the other, four buses at one array took
+            # 1.1 million rows, two of every five of their model's)
+            pv_ = m.NewIntVarFromDomain(cp_model.Domain.FromValues(vs), '')
+            m.Add(pv_ == vs[0] + sum((vs[t_] - vs[t_ - 1]) * h_[t_] for t_ in range(1, len(vs))))
+            PV[(b.name, l_)] = pv_
     heads = {(b.name, l_): hs for b, k_ in users for l_, hs in lane_heads(m, A, b, k_, way[b.name], P).items()}
 
     def ge(key, v_):
@@ -1652,36 +1906,24 @@ def between_rows(m, A, users, gate, RL):
         return H[key][t_] if t_ < len(vals[key]) else 0
     neg = lambda e_: 1 - e_ if isinstance(e_, int) else e_.Not()     # noqa: E731
 
-    def past(ka, kb, d):
-        """the clauses of [a's place - b's > d]: each (a literal or 0/1, ...) whose conjunction says so"""
-        out = []
-        for v_ in vals[kb]:                     # (b's place <= v_ and a's >= v_ + d + 1)
-            le_b, ge_a = neg(ge(kb, v_ + 1)), ge(ka, v_ + d + 1)
-            if not any(isinstance(e_, int) and e_ == 0 for e_ in (le_b, ge_a)):
-                out.append((le_b, ge_a))
-        return out
     X, cost, const = {}, [], 0
     GT = {}
 
     def gt(ka, kb, d):
-        """a literal, or 0/1: [a's place - b's > d] -- both ways (past's clauses say so, past the other way say not)"""
+        """a literal, or 0/1: [a's place - b's > d] -- both ways, on the two places' integers"""
         if d >= P:
             return 0
         if d < -P:
             return 1
         if (ka, kb, d) not in GT:
-            up, dn = past(ka, kb, d), past(kb, ka, -d - 1)
-            const_ = lambda ts: any(all(isinstance(e_, int) for e_ in t_) for t_ in ts)      # noqa: E731
-            if const_(up) or not dn:
+            if vals[ka][0] - vals[kb][-1] > d:
                 g = 1
-            elif const_(dn) or not up:
+            elif vals[ka][-1] - vals[kb][0] <= d:
                 g = 0
             else:
                 g = m.NewBoolVar('')
-                for t_ in up:
-                    m.AddBoolOr([g] + [neg(e_) for e_ in t_ if not isinstance(e_, int)])
-                for t_ in dn:
-                    m.AddBoolOr([g.Not()] + [neg(e_) for e_ in t_ if not isinstance(e_, int)])
+                m.Add(PV[ka] - PV[kb] >= d + 1).OnlyEnforceIf(g)
+                m.Add(PV[ka] - PV[kb] <= d).OnlyEnforceIf(g.Not())
             GT[(ka, kb, d)] = g
         return GT[(ka, kb, d)]
     ANY = {}
@@ -2308,14 +2550,61 @@ def main():
     # ---- THE PATTERN first: each ball its pattern's moves, its whole menu only where the pattern meets a problem
     every = {(A.ref, k) for A in arrays.values() for k in A.bm.items}
 
+    # (THE MENUS BY NEED AND BY USE: `narrowed` the bus balls on their first TIER_MENU tiers now; `whole_opts` each bus
+    # ball's whole menu, kept; `tier_sig` its moves' tiers by signature; `mver` each ball's menu's version -- a bus's
+    # ends model is built again when a menu of its balls changes)
+    narrowed, whole_opts, tier_sig, mver = set(), {}, {}, collections.Counter()
+
+    def retier(ref, ks):
+        for k in ks:
+            if (ref, k) in tier_sig:
+                S_k, sig_k = tier_sig[(ref, k)]
+                tier_of[(ref, k)] = [S_k.get(sig_k(o_), 5) for o_ in arrays[ref].bm.menu[k]]
+
     def whole(more):
-        """the balls `more` {(array, ball)} offered their whole menus: built now (widen)"""
+        """the balls `more` {(array, ball)} offered their whole menus: built now (widen) -- a bus ball's, kept, back"""
         for ref in sorted({r_ for r_, _k in more}):
             t0, ks = time.time(), {k for r_, k in more if r_ == ref}
-            with awx_settings.given(genv):
-                widen(bpcb, arrays[ref], ks)
-            log(f'    {ref}: {len(ks)} balls\' whole menus built, {sum(len(arrays[ref].bm.menu[k]) for k in ks)} moves '
+            A_ = arrays[ref]
+            back_ = {k for k in ks if (ref, k) in whole_opts}
+            for k in back_:
+                A_.bm.opts[k] = list(whole_opts[(ref, k)])
+                A_.bm.menu[k] = [o_ for kd_, o_, _pc in A_.bm.opts[k] if kd_ == 'escape']
+            if ks - back_:
+                with awx_settings.given(genv):
+                    widen(bpcb, A_, ks - back_)
+            else:
+                array_rules(bpcb, A_)
+            for k in ks:
+                mver[(ref, k)] += 1
+                narrowed.discard((ref, k))
+            retier(ref, ks)
+            log(f'    {ref}: {len(ks)} balls\' whole menus built, {sum(len(A_.bm.menu[k]) for k in ks)} moves '
                 f'({time.time() - t0:.0f} s)')
+
+    def release(bs):
+        """the model built last let go before the next is built: each bus's joint model (b.J) holds its CpModel. Held
+        on, a stretch's model was built beside the last one -- a three-array group's footprint 9.1 GB"""
+        for b_ in bs:
+            b_.J = None
+        gc.collect()
+
+    def narrow(keys, keep=None):
+        """bus balls `keys` {(array, ball)} back on their first TIER_MENU tiers -- and each on the move `keep` names
+        ({key: its signature}: the one its lane took)"""
+        for ref in sorted({r_ for r_, _k in keys}):
+            A_ = arrays[ref]
+            ks = sorted(k for r_, k in keys if r_ == ref)
+            for k in ks:
+                S_k, sig_k = tier_sig[(ref, k)]
+                kp_ = (keep or {}).get((ref, k))
+                A_.bm.opts[k] = [x_ for x_ in whole_opts[(ref, k)] if x_[0] != 'escape'
+                                 or S_k.get(sig_k(x_[1]), 5) <= TIER_MENU or (kp_ is not None and sig_k(x_[1]) == kp_)]
+                A_.bm.menu[k] = [o_ for kd_, o_, _pc in A_.bm.opts[k] if kd_ == 'escape']
+                mver[(ref, k)] += 1
+                narrowed.add((ref, k))
+            array_rules(bpcb, A_)
+            retier(ref, ks)
     wide = set(every) if '--full' in flags else {(A.ref, k) for A in arrays.values() for k in A.bm.items
                                                  if not A.offer[k]}
     if wide:
@@ -2395,12 +2684,19 @@ def main():
                     A_.bm.opts[k] = list(A_.bm.opts[k]) + add_
                     A_.bm.menu[k] = [o_ for kd_, o_, _pc in A_.bm.opts[k] if kd_ == 'escape']
                     n_miss += len(add_)
-            array_rules(bpcb, A_)
             for k in ks_:
-                tier_of[(ref, k)] = [S_[k].get(tsig_(o_), 5) for o_ in A_.bm.menu[k]]
-            cnt_ = collections.Counter(t_ for k in ks_ for t_ in tier_of[(ref, k)])
-            log(f'  {ref}: {len(ks_)} bus balls on their whole menus, moves by tier {dict(sorted(cnt_.items()))}; '
-                f'{n_miss} of the narrower tiers\' moves the whole menu lacked, added ({time.time() - t0:.0f} s)')
+                tier_sig[(ref, k)] = (S_[k], tsig_)
+                whole_opts[(ref, k)] = list(A_.bm.opts[k])
+            cnt_ = collections.Counter(S_[k].get(tsig_(o_), 5) for k in ks_ for o_ in A_.bm.menu[k])
+            if TIER_MENU < 5:
+                narrow({(ref, k) for k in ks_})
+            else:
+                array_rules(bpcb, A_)
+                retier(ref, ks_)
+            log(f'  {ref}: {len(ks_)} bus balls, their whole menus\' moves by tier {dict(sorted(cnt_.items()))}'
+                + (f' -- the first {TIER_MENU + 1} tiers offered, {sum(len(A_.bm.menu[k]) for k in ks_)} moves'
+                   if TIER_MENU < 5 else '')
+                + f'; {n_miss} of the narrower tiers\' moves the whole menu lacked, added ({time.time() - t0:.0f} s)')
     # THE LINES are a bus's when the whole solve refuses its pattern ends (the check below), and with them its cut
     # round its destination ranked (load_bus): the pattern alone ties a ball's exit to its own row or column, the
     # exits' order round the array then the balls' own -- a bus whose balls stand in another order than its berths
@@ -2537,10 +2833,10 @@ def main():
                own_process=True)
         return wr.drc_count(jp)[0], jp
 
-    def lay_and_measure(laid):
+    def lay_and_measure(laid, wayouts=()):
         with awx_settings.given(genv):
             nt_, nv_, caps_ = write_field(board, os.path.join(out, 'shared_field.kicad_pcb'), laid, ties_of=ties_of,
-                                          tie_sites=tie_sites, pulls=pulls)
+                                          tie_sites=tie_sites, pulls=pulls, wayouts=wayouts)
             d_f, jp_f = field_drc(os.path.join(out, 'shared_field.kicad_pcb'), 'field')
             if 'bare' not in measured:
                 measured['bare'] = field_drc(board, 'bare')[0]
@@ -2643,17 +2939,25 @@ def main():
         fresh = {nm: set(fed.get(nm) or ()) for nm in caps}
         prev_x = {nm: {tuple(pr_) for pr_ in x_} for nm, x_ in (R_.get('prev_x') or {}).items()}
     laid_try, M_ = 0, None      # the field's violations answered so far; the last laying's measure
+    # (THE EPOCHS of the search -- TIER_MENU: `stretches` the lanes in stretches round the source, `epoch` the one on
+    # its whole menus now, `in_epoch` a model built for one)
+    stretches, epoch, in_epoch, sweep, sweep_v0, epoch_balls = None, -1, False, 0, None, set()
+    costly_tries = 0
     while True:
-        chk_try += 1
+        chk_try += 0 if in_epoch else 1
         rnd = 0
         while True:
             rnd += 1
             buses, more = [], set()
             for nm, cap in caps.items():
                 st = cap['st']
-                mine = frozenset((ref, arrays[ref].ball_of[n]) for ref in (sref, st['dref']) if ref in arrays
+                # (its balls' menus as they stand: a ball's version -- widened, or back on its first tiers -- each)
+                mine = frozenset((ref, arrays[ref].ball_of[n], mver[(ref, arrays[ref].ball_of[n])])
+                                 for ref in (sref, st['dref']) if ref in arrays
                                  for n in st['launch'] if (ref, arrays[ref].ball_of.get(n)) in wide)
                 if (nm, mine, nm in lined) not in built:
+                    for key_ in [k_ for k_ in built if k_[0] == nm and k_[2] == (nm in lined)]:
+                        del built[key_]         # (a menu since changed: not built on again)
                     built[(nm, mine, nm in lined)] = load_bus(
                         nm, cap, arrays, log, cut=None if CUTVAR else cuts.get((nm, nm in lined)),
                         rank=nm in lined and not CUTVAR, cutvar=CUTVAR, feedback=feedback.get(nm),
@@ -2663,11 +2967,13 @@ def main():
                 buses.append(b)
                 # (a lane with no clean option among the moves offered: its balls' whole menus)
                 more |= {(b.arr[k_].ref, b.arr[k_].ball_of[leg]) for l_, k_ in b.bare
-                         for leg in (b.E.legs_of.get(l_) or (l_,))} - wide
+                         for leg in (b.E.legs_of.get(l_) or (l_,))} - (wide - narrowed)
             if more:
                 log(f'  round {rnd}: no option in the pattern for {sorted(f"{b.name}:{l_}" for b in buses for l_, _k in b.bare)}'
                     f' -- {len(more)} balls offered their whole menu')
                 wide |= more
+                release(buses)
+                m = mc = rows = gates = None
                 whole(more)
                 continue
             stuck = sorted(f'{b.name}:{l_}' for b in buses for l_, _k in b.bare)
@@ -2838,12 +3144,14 @@ def main():
             stuck = [(ref, key) for ref, r_ in rows.items() for key in r_.stuck]
             if stuck:
                 more = {(ref, arrays[ref].ball_of[leg]) for ref, (owner, lane, _k) in stuck
-                        for leg in by_name[owner].E.legs_of[lane]} - wide
+                        for leg in by_name[owner].E.legs_of[lane]} - (wide - narrowed)
                 names_ = ', '.join(f'{owner}:{lane} at {ref}' for ref, (owner, lane, _k) in stuck)
                 if not more:
                     raise SystemExit(f'group_ends: no option in the whole menu for {names_}')
                 log(f'  round {rnd}: no option left in the pattern for {names_} -- {len(more)} balls offered their whole menu')
                 wide |= more
+                release(buses)
+                m = mc = rows = gates = None
                 whole(more)
                 continue
             # (a bus lane's run on a plane's layer: its run out of its tooth, and its run into its berth where it changes
@@ -2864,6 +3172,19 @@ def main():
                 for l_ in b.J.lanes:
                     far += [(int(round(1000 * far_w)) * b.J.npair[l_], x_) for i, x_ in b.J.xs[0][l_].items()
                             if b.E.T[l_][i][0] and b.E.T[l_][i][0][0].direction == 'left']
+            # ...and a PAIR's berth on a ball array destination's FAR FACE at the same price: a pair laid round its
+            # destination to the face turned from its source passes the faces between on its layer, in front of their
+            # berths, and turns two corners as a pair -- a memory bus's clock pair taken round to its DDR's far face
+            # was short of its pitch beside every berth of the face it passed, the whole route's loop stopped with its
+            # ends crowded and 19 nets open. A single lane goes round as before (two did, the same bus routed)
+            for b in buses:
+                if b.arr[1] is None:
+                    continue
+                for l_ in b.J.lanes:
+                    if b.J.npair[l_] < 2:
+                        continue
+                    far += [(int(round(1000 * far_w)) * b.J.npair[l_], x_) for j, x_ in b.J.xs[1][l_].items()
+                            if b.E.B[l_][j][0] and b.E.B[l_][j][0][0].direction == 'right']
             plane += [t_ for t_ in far if t_[0]]
             # NO FAR-FACE TOOTH for a lane still on the pattern, a rule behind its own assumption: where no state holds it
             # the lane is named with the rules it meets (the ball behind it on their one via site, say), their balls get
@@ -2954,7 +3275,7 @@ def main():
             # descended again (whole_ends.joint_descent, as its own ends' search) where a check's core priced a crossing
             # or its menus are of a new tier -- else its start's (load_bus: its own run's ends descended at its cut).
             # The state looked for, and the start, near them)
-            wanted, held_idx = {}, {}
+            wanted, held_idx, lost_ = {}, {}, []
             for b in buses:
                 P_ = prev_bus.get(b.name)
                 s_ = dict(b.own)
@@ -2964,6 +3285,8 @@ def main():
                         for k_, opts_ in enumerate((b.E.T, b.E.B)):
                             sg_, _q, geo_ = P_[l_][k_] if l_ in P_ else (None, None, ())
                             i = next((i for i in b.J.xs[k_][l_] if we._opt_sig(opts_[l_][i]) == sg_), None)
+                            if i is None and sg_ is not None and in_epoch:
+                                lost_.append(f'{b.name}:{l_}:{("tooth", "berth")[k_]}')
                             if i is None and geo_:
                                 # (the end is not on the menu as it now stands -- its ball since offered its whole
                                 # menu, other moves: the nearest of them, as a bus's own ends are read onto the group's)
@@ -3017,14 +3340,172 @@ def main():
                         for j, v in enumerate(dv):
                             m.AddHint(v, int(j == h_[1]))
             t0 = time.time()
+            if lost_:
+                log(f'  round {rnd}: {len(lost_)} end(s) of the state before not on the menus as built again (read '
+                    f'onto the nearest): ' + ', '.join(lost_[:12]))
+            if in_epoch:
+                # (AN EPOCH of the search: the state before stands on the menus as they now are -- every lane keeps
+                # the move it took -- so it is not looked for: each end and ball held where it was, the rest of it
+                # completed. Should it not stand, it is looked for as ever)
+                mf_ = m.Clone()
+                pf_ = mf_.Proto()
+                for v_, x_ in zip(list(pf_.solution_hint.vars), list(pf_.solution_hint.values)):
+                    d_ = pf_.variables[v_].domain
+                    d_.clear()
+                    d_.extend([x_, x_])
+                for g_ in gates.values():
+                    mf_.Add(mf_.GetBoolVarFromProtoIndex(g_.Index()) == 1)
+                mf_.ClearObjective()
+                sc = cp_seed.solver()
+                sc.parameters.num_workers = 1
+                sc.parameters.max_deterministic_time = START_WORK
+                qc = sc.Solve(mf_)
+                if qc not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    # (...not whole: the state NEAREST it -- the most of its choices where they stood, the lanes'
+                    # ends, their layers and every other ball's alike -- and the ends that moved named. Its lanes'
+                    # ends alone kept, the other balls came back anywhere: forty plane balls fanned out)
+                    # (first, the rules it breaks there: each behind its assumption, the state held)
+                    mr_ = m.Clone()
+                    pr2_ = mr_.Proto()
+                    for v_, x_ in zip(list(pr2_.solution_hint.vars), list(pr2_.solution_hint.values)):
+                        d_ = pr2_.variables[v_].domain
+                        d_.clear()
+                        d_.extend([x_, x_])
+                    mr_.ClearObjective()
+                    mr_.AddAssumptions([mr_.GetBoolVarFromProtoIndex(g_.Index()) for g_ in gates.values()])
+                    sr2_ = cp_seed.solver()
+                    sr2_.parameters.num_workers = 1
+                    sr2_.parameters.max_deterministic_time = START_WORK
+                    if sr2_.Solve(mr_) == cp_model.INFEASIBLE:
+                        by_ = {g_.Index(): name for name, g_ in gates.items()}
+                        core_ = sorted(by_[i_] for i_ in sr2_.SufficientAssumptionsForInfeasibility() if i_ in by_)
+                        log(f'  round {rnd}: the state before breaks, on the menus as they are: '
+                            + ('; '.join(' / '.join(str(x) for x in n_)[:160] for n_ in core_[:6])
+                               or 'no rule of the arrays (a bus\'s own model)'))
+                        if not core_:
+                            # (...a bus's own: which of its choices cannot stand together -- each lane's end and
+                            # layer held by an assumption of its own, the core named)
+                            nm_ = {}
+                            for b in buses:
+                                for l_ in b.J.lanes:
+                                    for k_ in (0, 1):
+                                        e_ = ("tooth", "berth")[k_]
+                                        for i, v in b.J.xs[k_][l_].items():
+                                            nm_[v.Index()] = f'{b.name}:{l_}:{e_} #{i}'
+                                        for q, v in enumerate(b.J.y[k_][l_]):
+                                            if hasattr(v, 'Index'):
+                                                nm_[v.Index()] = f'{b.name}:{l_}:{e_} on {RL[q]}'
+                            ma_ = m.Clone()
+                            ma_.ClearObjective()
+                            for g_ in gates.values():
+                                ma_.Add(ma_.GetBoolVarFromProtoIndex(g_.Index()) == 1)
+                            hv2_ = dict(zip(ma_.Proto().solution_hint.vars, ma_.Proto().solution_hint.values))
+                            lits_ = {}
+                            for i_, x_ in sorted(hv2_.items()):
+                                if i_ in nm_:
+                                    v_ = ma_.GetBoolVarFromProtoIndex(i_)
+                                    lits_[i_] = v_ if x_ else v_.Not()
+                            ma_.AddAssumptions(list(lits_.values()))
+                            sa_ = cp_seed.solver()
+                            sa_.parameters.num_workers = 1
+                            sa_.parameters.max_deterministic_time = START_WORK
+                            if sa_.Solve(ma_) == cp_model.INFEASIBLE:
+                                ci_ = set(sa_.SufficientAssumptionsForInfeasibility())
+                                bad_ = sorted(f'{nm_[i_]}={hv2_[i_]}' for i_ in lits_ if lits_[i_].Index() in ci_)
+                                log(f'  round {rnd}: ...its choices that cannot stand together ({len(bad_)}): '
+                                    + ', '.join(bad_[:16]))
+                    hv_ = dict(zip(pf_.solution_hint.vars, pf_.solution_hint.values))
+                    on_ = [(b, l_, k_, v) for b in buses for k_ in (0, 1) for l_ in b.J.lanes
+                           for v in b.J.xs[k_][l_].values() if hv_.get(v.Index()) == 1]
+                    mn_ = m.Clone()
+                    for g_ in gates.values():
+                        mn_.Add(mn_.GetBoolVarFromProtoIndex(g_.Index()) == 1)
+                    ones_ = [i_ for i_, x_ in sorted(hv_.items()) if x_ == 1
+                             and list(m.Proto().variables[i_].domain) == [0, 1]]
+                    mn_.Minimize(sum(1 - mn_.GetBoolVarFromProtoIndex(i_) for i_ in ones_))
+                    sc = cp_seed.solver()
+                    sc.parameters.num_workers = 1
+                    sc.parameters.max_deterministic_time = START_WORK
+                    qc = sc.Solve(mn_)
+                    if qc in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                        mv_ = [f'{b.name}:{l_}:{("tooth", "berth")[k_]}' for b, l_, k_, v in on_
+                               if not sc.Value(mn_.GetBoolVarFromProtoIndex(v.Index()))]
+                        log(f'  round {rnd}: the state before does not stand on the menus as they are -- the nearest '
+                            f'[{sc.StatusName(qc)}]: {len(mv_)} of {len(on_)} ends moved: ' + ', '.join(mv_[:12]))
+                if qc in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    narrow_vals = list(sc.ResponseProto().solution)[:len(m.Proto().variables)]
+                    state_known = True
+                    break
+                log(f'  round {rnd}: the state before does not stand on the menus as they are [{sc.StatusName(qc)}] '
+                    f'-- looked for')
             mc = m.Clone()
             mc.ClearObjective()
             mc.AddAssumptions([mc.GetBoolVarFromProtoIndex(g_.Index()) for g_ in gates.values()])
             if '--model' in flags:      # (a bench's: the model a state is looked for in, its rules' assumptions in it)
                 mc.ExportToFile(os.path.join(out, f'state_{chk_try}_{rnd}.pb.txt'))
+            # (THE FIRST TIERS FIRST, on tiered menus: the same question with every lane's options past its first
+            # TIER_START tiers held off -- a state there holds every rule of the whole model, and starts the search
+            # (tier_search's hint). Asked of the whole menus at once, a four-bus model of 2.7 million rows found no
+            # state in its work, where the pattern's alone had one in seconds. None there: the whole model asked)
+            # A lane's end with no option on its first tiers keeps its whole menu (the start's price, past them only
+            # where nothing nearer is), and the ends a refusal's rules name are given theirs, asked again
+            narrow_vals, qc = None, cp_model.UNKNOWN
+            held_ = {}              # (bus, lane, end) -> its options' variables past its first tiers, held off
+            for b in (buses if tier_of else ()):
+                for l_ in b.J.lanes:
+                    for k_ in (0, 1):
+                        ts_ = {i_: option_tier(b, k_, l_, i_, tier_of) for i_, x_ in b.J.xs[k_][l_].items()
+                               if hasattr(x_, 'Index')}
+                        if ts_ and min(ts_.values()) <= TIER_START:
+                            past_ = [b.J.xs[k_][l_][i_].Index() for i_, t_ in sorted(ts_.items()) if t_ > TIER_START]
+                            if past_:
+                                held_[(b.name, l_, k_)] = past_
+            # (each end held by an ASSUMPTION of its own, as each rule is: a refusal names the ends it cannot do
+            # without -- an end whose first tiers' options other rules rule out, say -- and those are let go)
+            n_held, n_freed, nv_m = len(held_), 0, len(mc.Proto().variables)
+            # (the holds added to the model once, each asked by its assumption while it is held -- one end let go is
+            # one assumption dropped. A copy of the model a try, a three-array model's footprint rose 0.6 GB in it)
+            gl_ = [mc.GetBoolVarFromProtoIndex(g_.Index()) for g_ in gates.values()]
+            hold_of = {}
+            for key in sorted(held_, key=repr):
+                h_ = mc.NewBoolVar('')
+                for v_ in held_[key]:
+                    mc.AddImplication(h_, mc.GetBoolVarFromProtoIndex(v_).Not())
+                hold_of[h_.Index()] = key
+            lit_of = {key: i_ for i_, key in hold_of.items()}
+            while held_:
+                mc.ClearAssumptions()
+                mc.AddAssumptions(gl_ + [mc.GetBoolVarFromProtoIndex(lit_of[key]) for key in sorted(held_, key=repr)])
+                for lin_ in (0, None):
+                    sc = cp_seed.solver()
+                    sc.parameters.num_workers = 1
+                    sc.parameters.max_deterministic_time = START_WORK
+                    if lin_ is not None:
+                        sc.parameters.linearization_level = lin_
+                    qc = sc.Solve(mc)
+                    if qc != cp_model.UNKNOWN:
+                        break
+                if qc in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    narrow_vals = list(sc.ResponseProto().solution)[:nv_m]
+                    break
+                if qc != cp_model.INFEASIBLE:
+                    break
+                keys_ = sorted({hold_of[i_] for i_ in sc.SufficientAssumptionsForInfeasibility() if i_ in hold_of},
+                               key=repr)
+                if not keys_:
+                    break                   # (the rules alone refuse: the whole model is asked, and names them)
+                for key in keys_:
+                    del held_[key]
+                n_freed += len(keys_)
+            if n_held:
+                log(f'  round {rnd}: a state on the lanes\' first {TIER_START + 1} tiers ({n_held} ends held to them, '
+                    f'{n_freed} let go where a refusal named them): [{sc.StatusName(qc)}] '
+                    f'({time.time() - t0:.0f} s)')
+            mc.ClearAssumptions()
+            mc.AddAssumptions(gl_)          # (the whole model: every rule assumed, no end held)
             # (without the LP first -- a four-bus model's state in a quarter of the time with it -- then with it: a
             # bus held to what four checks had taught had neither a state nor its refusal without, in the same work)
-            for lin_ in (0, None):
+            for lin_ in ((0, None) if narrow_vals is None else ()):
                 sc = cp_seed.solver()
                 sc.parameters.num_workers = 1
                 sc.parameters.max_deterministic_time = START_WORK
@@ -3072,7 +3553,7 @@ def main():
                         elif by_name[owner].arr[k_] is not None:
                             A = by_name[owner].arr[k_]
                             more.update((A.ref, A.ball_of[leg]) for leg in by_name[owner].E.legs_of[lane])
-                    more -= wide
+                    more -= (wide - narrowed)
                     if more:
                         break
                 # (a LARGE set's balls a few at a time, those whose lanes most of its rules name first: the solver's
@@ -3100,6 +3581,8 @@ def main():
                         for name in core_:
                             log('      ' + name[0] + ': ' + ' / '.join(str(x) for x in name[1:]))
                     wide |= more
+                    release(buses)
+                    m = mc = rows = gates = None
                     whole(more)
                     continue
                 if not core_:
@@ -3117,7 +3600,7 @@ def main():
                         if isinstance(jb_, tuple) or sb_.Solve(mb_) == cp_model.INFEASIBLE:
                             alone.append(b)
                     more = {(A.ref, A.ball_of[n]) for b in alone for A in b.arr.values() if A is not None
-                            for n in b.E.st['launch'] if n in A.ball_of} - wide
+                            for n in b.E.st['launch'] if n in A.ball_of} - (wide - narrowed)
                     if more:
                         log(f'  round {rnd}: no state in the pattern ({time.time() - t0:.0f} s) -- no array\'s rule named: '
                             f'{", ".join(b.name for b in alone)} alone has none on the moves offered; its {len(more)} '
@@ -3386,19 +3869,17 @@ def main():
             # its balls, each other ball's variables and its place
             t0 = time.time()
             ix_ = lambda v_: v_.Index() if hasattr(v_, 'Index') else -1         # noqa: E731
-            meta_ = {'W_LEX': W_LEX, 'W_TOP': W_TOP, 'lanes': [], 'others': []}
+            meta_ = {'W_LEX': W_LEX, 'W_TOP': W_TOP, 'lanes': [], 'others': [],
+                     'far': [x_.Index() for c_, x_ in far if c_ and hasattr(x_, 'Index')]}
             for b in buses:
                 for l_ in b.J.lanes:
                     e_ = {'bus': b.name, 'lane': str(l_), 'npair': b.J.npair[l_], 'chg': ix_(b.J.chg[l_]),
                           'x': [[], []], 'tier': [[], []], 'at': [[], []],
                           'y': [[ix_(v_) for v_ in b.J.y[k_][l_]] for k_ in (0, 1)]}
                     for k_ in (0, 1):
-                        opts_ = (b.E.T, b.E.B)[k_][l_]
                         for i_, x_ in sorted(b.J.xs[k_][l_].items()):
                             e_['x'][k_].append(ix_(x_))
-                            ts_ = [tier_of[g_[:2]][g_[2]] for g_ in (getattr(mv_, 'gid', None) for mv_ in opts_[i_][0])
-                                   if g_ and g_[:2] in tier_of]
-                            e_['tier'][k_].append(max(ts_) if ts_ else 0)
+                            e_['tier'][k_].append(option_tier(b, k_, l_, i_, tier_of))
                         if b.arr[k_] is not None:
                             for leg_ in (b.E.legs_of.get(l_) or (l_,)):
                                 if leg_ in b.arr[k_].ball_of:
@@ -3415,7 +3896,14 @@ def main():
                 # (a bench's: the model the search takes, and which of its variables are which lane's and ball's)
                 m.ExportToFile(os.path.join(out, 'model.pb.txt'))
                 json.dump(meta_, open(os.path.join(out, 'tiers.json'), 'w'))
-            vals_, line_ = tier_search(m, meta_, log)
+            # (THE EPOCHS, at the first check: the start alone on the first tiers, then each stretch's rounds)
+            pool_ = None
+            if TIER_MENU < 5 and in_epoch and narrow_vals is not None:
+                st_ = set(stretches[epoch])
+                pool_ = [j_ for j_, e_ in enumerate(meta_['lanes']) if (e_['bus'], e_['lane']) in st_]
+            elif TIER_MENU < 5 and chk_try == 0:
+                pool_ = []
+            vals_, line_ = tier_search(m, meta_, log, hint=narrow_vals, pool=pool_)
             if vals_ is None:
                 raise SystemExit(f'group_ends: no state on the tiers -- {line_}')
             log(f'  the search: {line_}')
@@ -3565,7 +4053,7 @@ def main():
             f'{sum(sv.Value(c_) for b in buses for c_ in b.J.chg.values())} lanes changing layer, '
             f'{(sum(c_ * sv.Value(v_) for c_, v_ in plane) - sum(c_ * sv.Value(v_) for c_, v_ in far)) / 1000:.1f} '
             f'vias\' worth of runs on a '
-            f'plane\'s layer, {sum(sv.Value(v_) for _c, v_ in far)} teeth on a far face, '
+            f'plane\'s layer, {sum(sv.Value(v_) for _c, v_ in far)} ends on a far face (teeth, pairs\' berths), '
             f'{sum(c_ * sv.Value(v_) for c_, v_ in ride) / 1000:.1f} vias\' worth of ways round the arrays and '
             f'inside them')
         TR.rec('model', check=chk_try + 1, rnd=rnd, how='repair' if repaired else ('tiers' if tier_of else 'start+search'),
@@ -3586,6 +4074,7 @@ def main():
         # ---- each bus's ends in the group, and each array as the model fanned it out
         rep = {'buses': {}, 'arrays': {ref: {'exits': {}, 'drops': []} for ref in arrays}, 'status': sv.StatusName(r)}
         laid = []                   # (a net's id, its copper, its run's layer, the fan track, its array)
+        wayouts = []                # (a net's id, an exit at an array, its direction, its lane's layer there)
         for b in buses:
             s = {l_: (next(i for i, v in b.J.xs[0][l_].items() if sv.Value(v)),
                       next(j for j, v in b.J.xs[1][l_].items() if sv.Value(v))) for l_ in b.J.lanes}
@@ -3641,6 +4130,7 @@ def main():
                         _r, k, i = mv.gid
                         g0, L_ = A.bm.menu[k][i], RL[lay[l_][k_]]
                         laid.append((A.bm.items[k][1].net_id, A.bm.opts[k][i][2], L_, A.bm.sz['tw'], A.ref))
+                        wayouts.append((A.bm.items[k][1].net_id, tuple(g0.exit_pt), g0.direction, L_))
                         rep['arrays'][A.ref]['exits'][leg] = {
                             'tooth': list(g0.exit_pt), 'direction': g0.direction, 'layer': L_, 'kind': g0.kind,
                             'site': list(g0.site) if g0.site is not None else None, 'bus': b.name,
@@ -3780,6 +4270,108 @@ def main():
             os.makedirs(os.path.join(out, ref), exist_ok=True)
             json.dump(rep['arrays'][ref]['exits'], open(os.path.join(out, ref, 'exits.json'), 'w'), indent=0)
             json.dump(rep['arrays'][ref]['drops'], open(os.path.join(out, ref, 'drops.json'), 'w'), indent=0)
+        # ---- THE EPOCHS (TIER_MENU, at the first check): the stretch just searched back on its first tiers, each lane
+        # on the move it took, and the next stretch of lanes round the source offered their whole menus -- with every
+        # ball near a plane ball still fanned out, whose drops something stands in the way of -- and the model built
+        # again from this state. The last stretch searched, the state is checked
+        def costly_now():
+            # (the COSTLY BALLS of the state: a plane ball fanned out, and the source's ball of every lane with a tooth
+            # on its far face, the dearest end)
+            fan_ = [(ref, k) for ref, A in arrays.items() for k in rows[ref].others if k in A.drops
+                    and (prev_oth.get((ref, k)) or ('d',))[0] == 'x']
+            farl_ = [(b, l_) for b in buses if b.arr[0] is not None for l_ in b.J.lanes
+                     if b.E.T[l_][b.state[l_][0]][0] and b.E.T[l_][b.state[l_][0]][0][0].direction == 'left']
+            return fan_ + [(b.arr[0].ref, b.arr[0].ball_of[leg]) for b, l_ in farl_
+                           for leg in (b.E.legs_of.get(l_) or (l_,)) if leg in b.arr[0].ball_of]
+
+        def near_of(fan_):
+            # (...and the balls round each, not yet on their whole menus)
+            return {(ref, k2) for ref, k in fan_ for k2 in arrays[ref].bm.items
+                    if math.dist(arrays[ref].bm.balls[k], arrays[ref].bm.balls[k2]) <= LNS_NEAR
+                    and ((ref, k2) not in wide or (ref, k2) in narrowed)}
+        if TIER_MENU < 5 and chk_try == 0 and tier_of and not repaired:
+            if stretches is None:
+                stretches, sweep_v0 = lane_stretches(buses), sv.ObjectiveValue()
+            if 0 <= epoch < len(stretches):
+                keep_ = {}
+                for b in buses:
+                    for k_ in (0, 1):
+                        A_ = b.arr[k_]
+                        if A_ is None:
+                            continue
+                        for l_, lg in b.E.lanes:
+                            for leg, mv in zip(lg, (b.E.T, b.E.B)[k_][l_][b.state[l_][k_]][0]):
+                                key_ = (A_.ref, mv.gid[1])
+                                if key_ in tier_sig:
+                                    keep_[key_] = tier_sig[key_][1](A_.bm.menu[mv.gid[1]][mv.gid[2]])
+                # (...every bus ball the epoch offered its whole menu -- its stretch's, and those round a costly ball:
+                # kept whole, the balls round nine far-face teeth made every later model of a four-bus group the
+                # larger, its footprint 8.8 GB where the stretches alone peaked at 4.7)
+                back_ = (epoch_balls | stretch_balls(buses, stretches[epoch])) & (wide - narrowed) & set(keep_)
+                if back_:
+                    narrow(back_, keep_)
+            epoch += 1
+            if epoch == len(stretches) and sweep + 1 < EPOCH_SWEEPS and len(stretches) > 1 \
+                    and sweep_v0 - sv.ObjectiveValue() >= EPOCH_GAIN * sv.ObjectiveValue():
+                # (a sweep that gained: another, its stretches drawn at random)
+                log(f'  the search\'s sweep {sweep + 1}: {sweep_v0 / 1000:.1f} -> {sv.ObjectiveValue() / 1000:.1f} -- '
+                    f'another, its stretches drawn at random')
+                sweep, epoch, sweep_v0 = sweep + 1, 0, sv.ObjectiveValue()
+                stretches = lane_stretches(buses, draw=sweep)
+            if epoch < len(stretches):
+                more_ = stretch_balls(buses, stretches[epoch]) & narrowed
+                fan_ = costly_now()
+                near_ = near_of(fan_)
+                log(f'  the search\'s stretch {epoch + 1} of {len(stretches)}: {len(stretches[epoch])} lanes, '
+                    f'{len(more_)} balls offered their whole menus'
+                    + (f'; {len(near_)} more round {len(fan_)} costly ball(s) (plane balls fanned out, teeth on a '
+                       f'far face)' if near_ else ''))
+                wide |= near_
+                release(buses)
+                m = mc = mh = sv = rows = gates = None
+                whole(more_ | near_)
+                epoch_balls = more_ | near_
+                in_epoch = True
+                continue
+            in_epoch = False
+        elif in_epoch:
+            in_epoch = False            # (a costly ball's stretch searched: on to the checks)
+        elif TIER_MENU < 5 and tier_of and costly_tries < COSTLY_TRIES:
+            # ---- A COSTLY BALL LEFT by a later model -- a repair after a check, the model solved again for a lesson
+            # of the field laid, each holding most lanes on their ends: the lanes nearest it, one stretch, their balls
+            # and the balls round it offered their whole menus, and searched from this state as an epoch is. A repair
+            # that held every lane round a plane ball whose drop a lesson had taken left it fanned out
+            fan_ = costly_now()
+            if fan_:
+                costly_tries += 1
+                dl_ = {}
+                for b in buses:
+                    for l_ in b.J.lanes:
+                        for k_ in (0, 1):
+                            A_ = b.arr[k_]
+                            if A_ is None:
+                                continue
+                            for leg in (b.E.legs_of.get(l_) or (l_,)):
+                                if leg in A_.ball_of:
+                                    for ref, k in fan_:
+                                        if ref == A_.ref:
+                                            d_ = math.dist(A_.bm.balls[A_.ball_of[leg]], arrays[ref].bm.balls[k])
+                                            key_ = (b.name, str(l_))
+                                            dl_[key_] = min(dl_.get(key_, d_), d_)
+                stretches, epoch = [sorted(sorted(dl_, key=lambda kk: (dl_[kk], kk))[:EPOCH_LANES])], 0
+                more_ = stretch_balls(buses, stretches[0]) & narrowed
+                near_ = near_of(fan_)
+                log(f'  {len(fan_)} costly ball(s) left (plane balls fanned out, teeth on a far face): the '
+                    f'{len(stretches[0])} lanes nearest them searched again, {len(more_) + len(near_)} balls offered '
+                    f'their whole menus')
+                wide |= near_
+                release(buses)
+                m = mc = mh = sv = rows = gates = None
+                whole(more_ | near_)
+                epoch_balls = more_ | near_
+                fresh = {}
+                in_epoch = True
+                continue
         # ---- CHECKED BY THE WHOLE SOLVE, as a bus's own ends were (whole_ends.joint_choose): each bus's ends given to
         # the solve under its strict rules, on the board as the model fanned it out; a refusal TEACHES -- the lanes no
         # change fits in held to one layer (and offered their whole menus), the crossings with no window held apart and
@@ -3957,7 +4549,7 @@ def main():
                 for A_ in b.arr.values():
                     if A_ is not None:
                         more |= {(A_.ref, A_.ball_of[leg]) for l_ in nochg_
-                                 for leg in (b.E.legs_of.get(l_) or (l_,)) if leg in A_.ball_of} - wide
+                                 for leg in (b.E.legs_of.get(l_) or (l_,)) if leg in A_.ball_of} - (wide - narrowed)
                 if L_.get('room'):
                     log(f'  {b.name}: no change of layer from here on a lane as short as: '
                         + ', '.join(f'{("a single", "a pair")[kd_[0] - 1]} {kd_[1]} to {kd_[2]} {ln_:.2f} mm'
@@ -3983,7 +4575,7 @@ def main():
                 TR.rec('lessons', check=chk_try + 1, bus=b.name, new=new_l_, free_next=sorted(fresh.get(b.name, ())),
                        totals={k_: len(v_) if hasattr(v_, '__len__') else v_ for k_, v_ in L_.items()})
         if not unplanned:
-            M_ = lay_and_measure(laid)
+            M_ = lay_and_measure(laid, wayouts)
             n_held = len(held)
             n_ban = teach_laid(M_['items'], buses, M_['moved']) if M_['items'] and laid_try < we.JOINT_TRIES else 0
             TR.rec('field', check=chk_try + 1, drc_field=M_['d_f'], drc_bare=M_['d_b'], items=M_['items'][:60],
@@ -4028,7 +4620,7 @@ def main():
                  'held': dict(held), 'prev_x': {nm: sorted(x_) for nm, x_ in prev_x.items()}},
                 open(os.path.join(out, 'resume.pkl'), 'wb'))
     if M_ is None or no_plan:
-        M_ = lay_and_measure(laid)
+        M_ = lay_and_measure(laid, wayouts)
     log(f'  the arrays fanned out as chosen: {M_["nt"]} tracks and {M_["nv"]} vias -> '
         f'{os.path.join(out, "shared_field.kicad_pcb")}')
     for ln in M_['caps']:

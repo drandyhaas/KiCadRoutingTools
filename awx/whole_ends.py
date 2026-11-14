@@ -2027,9 +2027,12 @@ def _last_ends():
 
 
 def _opt_sig(o):
-    """an end option's signature, its legs' moves -- the same end on a field built again"""
+    """an end option's signature, its legs' moves -- and a GROUP berth's way in and its place on the walk, since one
+    move is offered once per way in (Group.options) and the way decides which lanes cross -- the same end on a field
+    built again"""
     import source_realize as sr
-    return tuple(sr.move_sig(m_) for m_ in o[0])
+    sig = tuple(sr.move_sig(m_) for m_ in o[0])
+    return sig + ((o[5][0], round(float(o[5][1]), 4)),) if len(o) > 5 else sig
 
 
 def _stars(pairs, idx):
@@ -2452,11 +2455,17 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
         return nv
 
     def both_ends(a, b, xv):
+        # (a literal per end that the two share a layer there -- set by each layer they both stand on, priced
+        # nothing, so never set for less -- and the crossing's from the two: 2 NL + 1 clauses, where every layer at
+        # one end with every layer at the other was NL * NL, 64 a lane pair on eight layers)
         nv = m.NewBoolVar('')
-        for q in range(NL):
-            for r in range(NL):
-                m.AddBoolOr([nv, y[0][a][q].Not(), y[0][b][q].Not(), y[1][a][r].Not(), y[1][b][r].Not()]
-                            + ([] if isinstance(xv, int) else [xv.Not()]))
+        sh_ = []
+        for k_ in (0, 1):
+            s_ = m.NewBoolVar('')
+            for q in range(NL):
+                m.AddBoolOr([s_, y[k_][a][q].Not(), y[k_][b][q].Not()])
+            sh_.append(s_)
+        m.AddBoolOr([nv, sh_[0].Not(), sh_[1].Not()] + ([] if isinstance(xv, int) else [xv.Not()]))
         return nv
 
     def by_layers(a, b, xv, w_):

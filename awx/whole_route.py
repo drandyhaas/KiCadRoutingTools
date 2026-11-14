@@ -1140,6 +1140,7 @@ def loop(solve, out, rounds, env, log, try_lay=None):
             json.dump(dict(own_spans({'cuts': cuts, 'vcuts': vcuts, 'lcuts': lcuts}, gj, pj), ccuts=ccuts),
                       open(O(f'c{i}.json'), 'w'))
             n = len(cuts) + len(vcuts) + len(lcuts) + len(ccuts)
+            n_cut = n                               # (the cuts alone: what the solve would be given)
             passes = gate(p, O(f'p{i}.audit'))[0] == 0
             if not passes and addhot(p, O(f'p{i}.audit'), O(f'hp{i}.json')):
                 n += 1
@@ -1179,8 +1180,12 @@ def loop(solve, out, rounds, env, log, try_lay=None):
             if after > before:
                 progress(2000 + f, i, fresh=True)
                 st['flips'] = p                       # the polish output carries every flip so far
-                if n == 0:
-                    log(f"=== round {i}: {after - before} new side flip(s) -> the geometry again on the same solve")
+                # (...and with findings but no cut, the same: the flips are the geometry's own answer to them, and the
+                # solve given nothing new plans the same lanes again -- two lanes between a passive's pads, both
+                # flipped round it, went to a solve with an empty cut file, three minutes for the plan it had)
+                if n == 0 or n_cut == 0:
+                    log(f"=== round {i}: {after - before} new side flip(s) -> the geometry again on the same solve"
+                        + (' (its findings left to the flips)' if n else ''))
                     continue
                 # flips AND cuts or findings: both at once -- the solve with them, then the geometry with the flips
                 st['cuts'] = (st['cuts'] + ',' if st['cuts'] else '') + O(f'c{i}.json')

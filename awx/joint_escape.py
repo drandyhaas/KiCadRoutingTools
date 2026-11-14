@@ -324,6 +324,7 @@ def _hit(P, Q, same, sz, geo=None):
                         if _pt_seg(c, u, v) < bar:
                             return True
         return False
+    import numpy as np
     rh = sz['r_home']
     for X, Y, gY in ((P, Q, gQ), (Q, P, gP)):
         yvias = [(c, r + tw2 + cl - 1e-6) for (c, r, _d) in Y.vias]
@@ -337,14 +338,29 @@ def _hit(P, Q, same, sz, geo=None):
                               or c[1] < y0 - k - _BOX_EPS or c[1] > y1 + k + _BOX_EPS)]
             if not near_l and not near_v:
                 continue
+            # (the leg's points every 0.02 mm, all at once: those outside its own balls' and the shared vias' disks,
+            # each against the other's legs and vias near it -- point by point, a three-array model's builds spent
+            # 28 of their 123 s here)
             n = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.02))
-            for i in range(n + 1):
-                t = (a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n)
-                if any(math.hypot(t[0] - o[0], t[1] - o[1]) < rh for o in X.balls) or \
-                        any(math.hypot(t[0] - c[0], t[1] - c[1]) < k for c, k in shared):
-                    continue
-                if any(_pt_seg(t, u, v) < ds for (u, v) in near_l) or \
-                        any(math.hypot(t[0] - c[0], t[1] - c[1]) < k for (c, k) in near_v):
+            ii = np.arange(n + 1, dtype=float)
+            px = a[0] + (b[0] - a[0]) * ii / n
+            py = a[1] + (b[1] - a[1]) * ii / n
+            keep = np.ones(n + 1, dtype=bool)
+            for o in X.balls:
+                keep &= ~(np.hypot(px - o[0], py - o[1]) < rh)
+            for c, k in shared:
+                keep &= ~(np.hypot(px - c[0], py - c[1]) < k)
+            if not keep.any():
+                continue
+            px, py = px[keep], py[keep]
+            for (u, v) in near_l:
+                ux, uy = v[0] - u[0], v[1] - u[1]
+                L2 = ux * ux + uy * uy
+                t = 0.0 if L2 == 0 else np.clip(((px - u[0]) * ux + (py - u[1]) * uy) / L2, 0.0, 1.0)
+                if (np.hypot(px - (u[0] + t * ux), py - (u[1] + t * uy)) < ds).any():
+                    return True
+            for (c, k) in near_v:
+                if (np.hypot(px - c[0], py - c[1]) < k).any():
                     return True
     return False
 
