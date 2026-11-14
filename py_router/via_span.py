@@ -186,41 +186,7 @@ def obstacle_board(pcb_data, config):
     if not span or (isinstance(pcb_data, SpanView)
                     and pcb_data._span == tuple(span)):
         return pcb_data
-    # One view per state of the board: a step stamps from it many times
-    # between the commits that change the copper.
-    segs, vias = pcb_data.segments, pcb_data.vias
-    key = (tuple(span), len(segs), len(vias),
-           id(segs[-1]) if segs else 0, id(vias[-1]) if vias else 0)
-    memo = getattr(pcb_data, '_span_view_memo', None)
-    if memo is None or memo[0] != key:
-        memo = (key, SpanView(pcb_data, span))
-        try:
-            pcb_data._span_view_memo = memo
-        except Exception:                                       # noqa: BLE001
-            pass
-    return memo[1]
-
-
-def reads_span_board(fn):
-    """A stamp of a net's copper (it takes ``pcb_data`` and ``config``): under
-    a via span it reads the board as the span sees it, so copper outside the
-    span blocks nothing, whichever step calls it."""
-    import functools
-    import inspect
-    names = list(inspect.signature(fn).parameters)
-    at_pcb, at_cfg = names.index('pcb_data'), names.index('config')
-
-    @functools.wraps(fn)
-    def stamp(*args, **kwargs):
-        config = kwargs.get('config', args[at_cfg] if len(args) > at_cfg else None)
-        if not getattr(config, 'via_span', None):
-            return fn(*args, **kwargs)
-        if 'pcb_data' in kwargs:
-            kwargs['pcb_data'] = obstacle_board(kwargs['pcb_data'], config)
-        elif len(args) > at_pcb:
-            args = (*args[:at_pcb], obstacle_board(args[at_pcb], config), *args[at_pcb + 1:])
-        return fn(*args, **kwargs)
-    return stamp
+    return SpanView(pcb_data, span)
 
 
 def via_span_summary(config, pcb_data=None) -> Optional[dict]:

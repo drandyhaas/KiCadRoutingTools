@@ -23,7 +23,11 @@ Checks:
      grades that board at 0 violations;
   3. GND return vias: with no GND pour on a layer of the span they are not
      laid, and the run says so;
-  4. a span the stack does not have is refused by name.
+  4. a span the stack does not have is refused by name;
+  5. the pair's OWN pads are stamped from the span's view of the board
+     (`add_diff_pair_own_pads_as_obstacles`): an own pad with copper only on
+     a layer outside the span blocks no via site of the span, and the same
+     pad blocks one without a span (the control).
 """
 import json
 import os
@@ -62,6 +66,32 @@ def route(td, tag, *extra, accept=True, **kw):
                     '--nets', '/D*', '--json-out', summary, *extra],
               accept=accept, timeout=1800, **kw)
     return out, summary, (r.stdout or '') + (r.stderr or '')
+
+
+def own_pad_via_site():
+    """An own pad of the pair moved to B.Cu (copper outside the span):
+    does it block the via site at its centre? Not under the span; yes
+    without one."""
+    from dataclasses import replace
+    from obstacle_map import add_diff_pair_own_pads_as_obstacles
+    from routing_config import GridRouteConfig, GridCoord
+    from grid_router import GridObstacleMap
+    pcb = parse_kicad_pcb(FIX + '.kicad_pcb')
+    ids = {n.name: nid for nid, n in pcb.nets.items()}
+    p, n = ids['/D0_P'], ids['/D0_N']
+    pad = replace(pcb.pads_by_net[p][0], layers=['B.Cu'], drill=0)
+    pcb.pads_by_net[p] = [pad]
+    pcb.pads_by_net[n] = []
+    blocked = {}
+    for tag, span in (('span', ['F.Cu', 'In1.Cu']), ('none', None)):
+        cfg = GridRouteConfig(layers=['F.Cu', 'In1.Cu'], via_span=span,
+                              via_span_type='micro' if span else None)
+        obs = GridObstacleMap(len(cfg.layers))
+        add_diff_pair_own_pads_as_obstacles(obs, pcb, p, n, cfg)
+        gx, gy = GridCoord(cfg.grid_step).to_grid(pad.global_x, pad.global_y)
+        blocked[tag] = bool(obs.is_via_blocked(gx, gy))
+    ok(blocked == {'span': False, 'none': True},
+       f"a B.Cu own pad blocks the via site under it without a span only: {blocked}")
 
 
 def main():
@@ -111,6 +141,9 @@ def main():
         _o, _s, log = route(td, 'bad', '--via-span', 'F.Cu', 'In9.Cu', accept=False,
                             refuse='--via-span', code=2)
         ok('In9.Cu' in log, "is refused by name")
+
+    print("5. the pair's own pads under a span")
+    own_pad_via_site()
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1
