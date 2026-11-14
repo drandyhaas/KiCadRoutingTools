@@ -187,41 +187,7 @@ def obstacle_board(pcb_data, config):
     if not span or (isinstance(pcb_data, SpanView)
                     and pcb_data._span == tuple(span)):
         return pcb_data
-    # One view per state of the board: a step stamps from it many times
-    # between the commits that change the copper.
-    segs, vias = pcb_data.segments, pcb_data.vias
-    key = (tuple(span), len(segs), len(vias),
-           id(segs[-1]) if segs else 0, id(vias[-1]) if vias else 0)
-    memo = getattr(pcb_data, '_span_view_memo', None)
-    if memo is None or memo[0] != key:
-        memo = (key, SpanView(pcb_data, span))
-        try:
-            pcb_data._span_view_memo = memo
-        except Exception:                                       # noqa: BLE001
-            pass
-    return memo[1]
-
-
-def reads_span_board(fn):
-    """A stamp of a net's copper (it takes ``pcb_data`` and ``config``): under
-    a via span it reads the board as the span sees it, so copper outside the
-    span blocks nothing, whichever step calls it."""
-    import functools
-    import inspect
-    names = list(inspect.signature(fn).parameters)
-    at_pcb, at_cfg = names.index('pcb_data'), names.index('config')
-
-    @functools.wraps(fn)
-    def stamp(*args, **kwargs):
-        config = kwargs.get('config', args[at_cfg] if len(args) > at_cfg else None)
-        if not getattr(config, 'via_span', None):
-            return fn(*args, **kwargs)
-        if 'pcb_data' in kwargs:
-            kwargs['pcb_data'] = obstacle_board(kwargs['pcb_data'], config)
-        elif len(args) > at_pcb:
-            args = (*args[:at_pcb], obstacle_board(args[at_pcb], config), *args[at_pcb + 1:])
-        return fn(*args, **kwargs)
-    return stamp
+    return SpanView(pcb_data, span)
 
 
 def via_span_summary(config, pcb_data=None) -> Optional[dict]:
@@ -289,18 +255,37 @@ def default_micro_via(pcb_path: str) -> Tuple[Optional[float], Optional[float]]:
     return None, None
 
 
-def cut_layers_to_span(pcb_data, layers, layer_costs, via_span, via_span_type):
-    """A step's routing layers under a via span: ``(span, type, layers,
-    layer_costs)``, the layers cut down to the span (the span's own where
-    none of the asked layers is in it) and the costs with them. ``span`` and
-    ``type`` are None for no span and for one that covers the whole stack
-    (through vias: the step is unchanged)."""
+def board_span(pcb_data, via_span, via_span_type):
+    """``(span, type)`` of a step's ``via_span`` on this board, or
+    ``(None, None)`` for no span and for one that is the whole stack (through
+    vias). ``type`` is the word the step's vias are written with in this
+    board's file (`file_via_type`: `buried` is KiCad 9's `blind` in a file
+    older than KiCad 10's format), said when it differs. Raises ValueError
+    as `resolve_via_span` does."""
     if not via_span:
-        return None, None, layers, layer_costs
+        return None, None
     span, kind = resolve_via_span(
         list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
         via_span[0], via_span[-1], via_span_type)
     if kind is None:
+        return None, None                         # the whole stack: through vias
+    word = file_via_type(kind, getattr(pcb_data, 'kicad_version', 0) or 0)
+    if word != kind:
+        print(f"Via span (#1842): this board's file format "
+              f"({pcb_data.kicad_version}) predates KiCad 10, which has no "
+              f"'{kind}' via; its vias are written '{word}' "
+              f"(KiCad 9's blind/buried type), on the same layer pair")
+    return span, word
+
+
+def step_span(pcb_data, layers, layer_costs, via_span, via_span_type):
+    """A step's routing layers under a via span: ``(span, type, layers,
+    layer_costs)``, the layers cut down to the span (the span's own where
+    none of the asked layers is in it) and the costs with them. ``span`` and
+    ``type`` are `board_span`'s. The ONE reading every via-span step takes
+    of its span (route.py, route_diff.py, the fan-out wrappers)."""
+    span, kind = board_span(pcb_data, via_span, via_span_type)
+    if not span:
         return None, None, layers, layer_costs
     inside = [l for l in layers if l in span]
     if layer_costs and len(layer_costs) == len(layers):
@@ -318,15 +303,74 @@ class SpanError(ValueError):
     """A via span a step cannot work on (the part is on neither end of it)."""
 
 
+def _set_aside_memos():
+    """Every memo on a PCBData derived from its copper that a set-aside must
+    drop on the way in and on the way out: the ones a live re-sync drops
+    (`kicad_parser.LIVE_COPPER_MEMOS`), and the pad- and pour-derived ones
+    keyed on less than their content (a pad count, the dict's identity, or
+    nothing at all)."""
+    from kicad_parser import LIVE_COPPER_MEMOS
+    return tuple(LIVE_COPPER_MEMOS) + (
+        '_foreign_pad_arr_cache', '_foreign_pad_type_cache', '_foreign_hole_cap_cache',
+        '_neck_exact_pad_cache', '_neck_exact_standoff_cache', '_npth_holes_cache_390',
+        '_pour_launch_memo', '_net_cost_cache', '_ground_domains', '_rescue_map_cache')
+
+
+def _forget_copper(pcb_data):
+    """The copper just changed under every memo: drop them and bump the
+    copper epoch the epoch-keyed ones read."""
+    from pcb_modification import bump_copper_epoch
+    for attr in _set_aside_memos():
+        vars(pcb_data).pop(attr, None)
+    bump_copper_epoch(pcb_data)
+
+
+def _merge_back(lst, before, held_ids):
+    """Put ``lst`` (a copper list as the call left it) back in full, in
+    place: the items of ``before`` (the list on entry) that were set aside or
+    are still there, in their original order, then the ones the call added,
+    in the order it added them. An item the call removed stays removed."""
+    now = {id(x) for x in lst}
+    was = {id(x) for x in before}
+    lst[:] = ([x for x in before if id(x) in held_ids or id(x) in now]
+              + [x for x in lst if id(x) not in was])
+
+
+#: `pcb_data` attribute naming what `only_span_copper` holds set aside
+SET_ASIDE_ATTR = '_span_set_aside'
+
+
+def set_aside(pcb_data) -> dict:
+    """What `only_span_copper` has set aside on ``pcb_data``: ``{'span':
+    [...], 'type': the span's via type, 'segments': [...], 'vias': [...]}``,
+    or {} outside one. A reader
+    that judges a NET by all its copper -- is any of it KiCad-locked or held
+    (`protected_nets.locked_net_names` / `held_net_reasons`,
+    `stub_layer_switching._locked_net_ids`) -- reads these too, so a net
+    whose locked copper is all off the span stays protected inside the
+    call."""
+    return vars(pcb_data).get(SET_ASIDE_ATTR) or {}
+
+
 @_contextmanager
-def only_span_copper(pcb_data, span):
+def only_span_copper(pcb_data, span, via_type: Optional[str] = None):
     """For a step that measures its own via sites off the board (the fan-out
-    engines): the board with the copper outside ``span`` set aside for the
-    duration -- tracks and pours on other layers, vias with no copper on the
-    span's layers, undrilled pads with none -- and put back on exit, in
-    place, with whatever the step added. Drilled pads stay. This is
-    `SpanView` for an engine that adds and removes copper on the board as it
-    works, where a snapshot would go stale."""
+    and plane-repair engines): the board with the copper outside ``span``
+    set aside for the duration -- tracks and pours on other layers, vias
+    with no copper on the span's layers, undrilled pads with none -- and put
+    back on exit, whatever happens inside, every list in its original order
+    with what the step added after it (`_merge_back`). Drilled pads stay.
+    This is `SpanView` for an engine that adds and removes copper on the
+    board as it works, where a snapshot would go stale. ``via_type`` is the
+    type the step's vias are written with (`set_aside` gives it back).
+
+    The board is the same object throughout, so every memo derived from its
+    copper is dropped and the copper epoch bumped on the way in and on the
+    way out (`_forget_copper`): a memo built on one side must not answer on
+    the other. Net-level protection is judged on ALL the copper: the set-
+    aside tracks and vias stay readable through `set_aside`, which the lock
+    and hold readers include, so KiCad-locked copper off the span keeps its
+    net unrippable inside the call."""
     from geometry_utils import via_copper_layers
     from check_drc import pad_copper_layers
     keep = set(span)
@@ -335,35 +379,44 @@ def only_span_copper(pcb_data, span):
     def shown(pad):
         return ((getattr(pad, 'drill', 0) or 0) > 0
                 or bool(keep & set(pad_copper_layers(pad, copper))))
-    held_segs = [s for s in pcb_data.segments if s.layer not in keep]
-    held_vias = [v for v in pcb_data.vias if not keep & set(via_copper_layers(v, copper))]
     zones = getattr(pcb_data, 'zones', None)
-    held_zones = [z for z in (zones or []) if z.layer not in keep]
+    before = {'segments': list(pcb_data.segments), 'vias': list(pcb_data.vias),
+              'zones': list(zones or [])}
+    held = {'segments': [s for s in before['segments'] if s.layer not in keep],
+            'vias': [v for v in before['vias']
+                     if not keep & set(via_copper_layers(v, copper))],
+            'zones': [z for z in before['zones'] if z.layer not in keep]}
     fp_pads = {ref: list(fp.pads) for ref, fp in pcb_data.footprints.items()}
     net_pads = {nid: list(pads) for nid, pads in pcb_data.pads_by_net.items()}
-    gone_s, gone_v, gone_z = ({id(x) for x in held_segs}, {id(x) for x in held_vias},
-                              {id(x) for x in held_zones})
-    pcb_data.segments[:] = [s for s in pcb_data.segments if id(s) not in gone_s]
-    pcb_data.vias[:] = [v for v in pcb_data.vias if id(v) not in gone_v]
-    if zones is not None:
-        zones[:] = [z for z in zones if id(z) not in gone_z]
-    for ref, fp in pcb_data.footprints.items():
-        fp.pads[:] = [p for p in fp_pads[ref] if shown(p)]
-    for nid, pads in pcb_data.pads_by_net.items():
-        pads[:] = [p for p in net_pads[nid] if shown(p)]
+    held_pads = {id(p) for pads in fp_pads.values() for p in pads if not shown(p)}
+    held_pads |= {id(p) for pads in net_pads.values() for p in pads if not shown(p)}
+    lists = {'segments': pcb_data.segments, 'vias': pcb_data.vias, 'zones': zones}
+    held_ids = {k: {id(x) for x in v} for k, v in held.items()}
     try:
+        vars(pcb_data)[SET_ASIDE_ATTR] = {'span': list(span), 'type': via_type,
+                                          'segments': held['segments'],
+                                          'vias': held['vias']}
+        for k, lst in lists.items():
+            if lst is not None:
+                lst[:] = [x for x in lst if id(x) not in held_ids[k]]
+        for ref, fp in pcb_data.footprints.items():
+            fp.pads[:] = [p for p in fp_pads[ref] if id(p) not in held_pads]
+        for nid, pads in pcb_data.pads_by_net.items():
+            pads[:] = [p for p in net_pads[nid] if id(p) not in held_pads]
+        _forget_copper(pcb_data)
         yield
     finally:
-        pcb_data.segments[:] = held_segs + list(pcb_data.segments)
-        pcb_data.vias[:] = held_vias + list(pcb_data.vias)
-        if zones is not None:
-            zones[:] = held_zones + list(zones)
+        for k, lst in lists.items():
+            if lst is not None:
+                _merge_back(lst, before[k], held_ids[k])
         for ref, fp in pcb_data.footprints.items():
             if ref in fp_pads:
-                fp.pads[:] = fp_pads[ref]
+                _merge_back(fp.pads, fp_pads[ref], held_pads)
         for nid, pads in pcb_data.pads_by_net.items():
             if nid in net_pads:
-                pads[:] = net_pads[nid]
+                _merge_back(pads, net_pads[nid], held_pads)
+        vars(pcb_data).pop(SET_ASIDE_ATTR, None)
+        _forget_copper(pcb_data)
 
 
 def add_cli_flags(parser, what: str) -> None:
@@ -383,14 +436,15 @@ def add_cli_flags(parser, what: str) -> None:
 def resolve_cli(parser, args, pcb_path: str, argv=None):
     """A step's `--via-span` checked against the board's own stack:
     ``(span layers, type, micro)``, all falsy without a span or for one that
-    is the whole stack. With no `--layers` the step works on the span's
-    layers, and a micro span with no via size draws the Default class's
-    micro via."""
+    is the whole stack; ``micro`` is `laser_drilled`. With no `--layers` the
+    step works on the span's layers, and a micro span with no via size draws
+    the Default class's micro via."""
     import sys
     if not getattr(args, 'via_span', None):
         return None, None, False
+    copper = file_copper_layers(pcb_path)
     try:
-        layers, kind = resolve_via_span(file_copper_layers(pcb_path), args.via_span[0],
+        layers, kind = resolve_via_span(copper, args.via_span[0],
                                         args.via_span[1], getattr(args, 'via_span_type', None))
     except ValueError as e:
         parser.error(f"--via-span: {e}")
@@ -399,30 +453,24 @@ def resolve_cli(parser, args, pcb_path: str, argv=None):
     given = sys.argv[1:] if argv is None else argv
     if hasattr(args, 'layers') and not any(a in ('--layers', '-l') for a in given):
         args.layers = list(layers)
-    if kind == 'micro':
+    micro = laser_drilled(copper, args.via_span, getattr(args, 'via_span_type', None))
+    if micro:
         dia, drill = default_micro_via(pcb_path)
         for name, val in (('via_size', dia), ('via_drill', drill)):
             if getattr(args, name, None) is None and val:
                 setattr(args, name, val)
                 print(f"--{name.replace('_', '-')} not given; using the board Default "
                       f"net-class micro via {val}mm (--via-span).")
-    return list(layers), kind, kind == 'micro'
+    return list(layers), kind, micro
 
 
 def micro_via_for_span(pcb_data, via_span, via_span_type, pcb_path: str = ''):
     """``(diameter, drill)`` of the Default class's micro via when ``via_span``
-    is a micro span on this board, else None -- for a front that sizes the
-    via itself (no size asked for) and must draw a micro via, not the
-    class's through via."""
-    if not via_span:
-        return None
-    try:
-        _span, kind = resolve_via_span(
-            list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
-            via_span[0], via_span[-1], via_span_type)
-    except ValueError:
-        return None
-    if kind != 'micro':
+    is a laser-drilled micro span on this board (`laser_drilled`), else None
+    -- for a front that sizes the via itself (no size asked for) and must
+    draw a micro via, not the class's through via."""
+    if not laser_drilled(getattr(pcb_data.board_info, 'copper_layers', None),
+                         via_span, via_span_type):
         return None
     dia, drill = default_micro_via(pcb_path or getattr(pcb_data, 'source_path', '') or '')
     return (dia, drill) if dia and drill else None

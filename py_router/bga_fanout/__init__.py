@@ -5264,11 +5264,11 @@ def generate_bga_fanout(footprint: Footprint, pcb_data: PCBData, *args,
         return _generate_bga_fanout_all(footprint, pcb_data, *args, **kwargs)
     import inspect
     from types import SimpleNamespace
-    from via_span import apply_span, cut_layers_to_span, only_span_copper
+    from via_span import apply_span, step_span, only_span_copper
     bound = inspect.signature(_generate_bga_fanout_all).bind(
         footprint, pcb_data, *args, **kwargs)
     asked = bound.arguments.get('layers') or ['F.Cu', 'B.Cu']
-    span, kind, layers, costs = cut_layers_to_span(
+    span, kind, layers, costs = step_span(
         pcb_data, list(asked), bound.arguments.get('layer_costs'), via_span, via_span_type)
     if not span:
         return _generate_bga_fanout_all(footprint, pcb_data, *args, **kwargs)
@@ -5281,7 +5281,7 @@ def generate_bga_fanout(footprint: Footprint, pcb_data: PCBData, *args,
     bound.arguments['layers'] = layers
     if 'layer_costs' in bound.arguments:
         bound.arguments['layer_costs'] = None if costs is None else costs
-    with only_span_copper(pcb_data, span):
+    with only_span_copper(pcb_data, span, kind):
         result = _generate_bga_fanout_all(*bound.args, **bound.kwargs)
     n = apply_span(result[1], SimpleNamespace(via_span=list(span), via_span_type=kind))
     print(f"  Via span: {n} fan-out via(s) written as {kind} {span[0]}-{span[-1]}")
@@ -5445,8 +5445,13 @@ def _generate_bga_fanout_all(footprint: Footprint,
     # -- even below an explicit via size, and disclosed as they are.
     from plane_lattice import plane_web_via
     _ncu_pw = len(pcb_data.board_info.copper_layers or []) or 4
+    # #1842: a laser-drilled micro via of a span (the board is set aside to
+    # it for this call) has no mechanical fab ladder to step down
+    from via_span import laser_drilled as _laser1842, set_aside as _aside1842
+    _laser_pw = _laser1842(pcb_data.board_info.copper_layers,
+                           _aside1842(pcb_data).get('span'), _aside1842(pcb_data).get('type'))
     _pw = plane_web_via(footprint, pcb_data, via_size, via_drill, clearance,
-                        escalation_rungs(_ncu_pw))
+                        [] if _laser_pw else escalation_rungs(_ncu_pw))
     if _pw is not None and _pw['threads']:
         print(f"  Plane web under {_ref} ({_pw['pitch']:g}mm pitch; "
               f"{', '.join(_pw['nets'])} poured at clearance {_pw['clearance']:g}, "
@@ -5458,9 +5463,11 @@ def _generate_bga_fanout_all(footprint: Footprint,
     elif _pw is not None:
         print(f"  WARNING: plane web under {_ref} ({_pw['pitch']:g}mm pitch; "
               f"{', '.join(_pw['nets'])} poured at clearance {_pw['clearance']:g}, "
-              f"min width {_pw['min_width']:g}): no via on the fab ladder lets "
-              f"the plane pass between its vias -- its drops there may be "
-              f"islands; lower the pour's clearance")
+              f"min width {_pw['min_width']:g}): "
+              + (f"the {via_size:g}mm micro via does not let "
+                 if _laser_pw else "no via on the fab ladder lets ")
+              + "the plane pass between its vias -- its drops there may be "
+              "islands; lower the pour's clearance")
     if progress_callback:
         _nballs = sum(1 for _p in footprint.pads if _p.net_id)
         progress_callback(0, 0, f"BGA fanout {_ref}: escaping {_nballs} ball(s)...")
@@ -5962,24 +5969,15 @@ def main():
     # the GUI's (its Cancel button / the plan executor's Stop); a CLI-side
     # wall-clock budget was removed deliberately -- no result this tool produces
     # may depend on timing, or the same command stops producing the same board.
-    try:
-        from via_span import SpanError as _SpanError
-        _fan1842 = generate_bga_fanout
-        if args.via_span:
-            # a part on neither end of the span is refused before any work
-            import functools
-            _fan1842 = functools.partial(generate_bga_fanout, via_span=args.via_span,
-                                         via_span_type=args.via_span_type)
-            if _span_layers and footprint.layer not in (_span_layers[0], _span_layers[-1]):
-                raise _SpanError(
-                    f"--via-span {args.via_span[0]} {args.via_span[1]}: {args.component} "
-                    f"is on {footprint.layer}, which is not an end of the span")
-    except _SpanError as exc:
-        print(f"Error: {exc}")
+    # #1842: a part on neither end of the span is refused before any work
+    if _span_layers and footprint.layer not in (_span_layers[0], _span_layers[-1]):
+        print(f"Error: --via-span {args.via_span[0]} {args.via_span[1]}: {args.component} "
+              f"is on {footprint.layer}, which is not an end of the span")
         return 1
-    tracks, vias_to_add, vias_to_remove, _failed_nets = _fan1842(
+    tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
         footprint,
         pcb_data,
+        via_span=args.via_span, via_span_type=args.via_span_type,   # #1842
         same_net_pad_clearance=args.same_net_pad_clearance,  # #581
         net_filter=args.nets,
         diff_pair_patterns=args.diff_pairs,

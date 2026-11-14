@@ -2071,9 +2071,8 @@ def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
         return _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
     import inspect
     from types import SimpleNamespace
-    from via_span import apply_span, only_span_copper, resolve_via_span
-    span, kind = resolve_via_span(list(pcb_data.board_info.copper_layers),
-                                  via_span[0], via_span[-1], via_span_type)
+    from via_span import apply_span, only_span_copper, board_span
+    span, kind = board_span(pcb_data, via_span, via_span_type)
     if kind is None:
         return _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
     bound = inspect.signature(_generate_qfn_fanout_all).bind(
@@ -2086,7 +2085,7 @@ def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
                          f"{footprint.reference} is not an end of the span")
     print(f"Via span (#1842): {kind} vias {span[0]}-{span[-1]}; only copper on "
           f"{', '.join(span)} (and drilled pads) blocks a via site")
-    with only_span_copper(pcb_data, span):
+    with only_span_copper(pcb_data, span, kind):
         result = _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
     n = apply_span(result[1], SimpleNamespace(via_span=list(span), via_span_type=kind))
     if n:

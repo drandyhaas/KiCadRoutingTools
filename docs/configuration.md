@@ -448,6 +448,36 @@ type) on the same layer pair, and the run says so.
   drilled-hole minimums (`check_drc` grades a micro via at the micro via
   minimums, #1844). A blind or buried span uses the run's via as a through via
   step does.
+- **The micro vias' own rule.** KiCad grades a micro via's ring at the board's
+  `min_via_annular_width` and its drill at `min_hole_clearance`, as it grades
+  a through via's, and a micro via laid at the copper clearance (0.25/0.1 mm at
+  0.1 mm) sits under both on an ordinary board (0.1 / 0.2 mm). The writeback
+  leaves those two board minimums at what the other copper needs and keeps a
+  rule for the micro vias in the board's `.kicad_dru` instead
+  (`fix_kicad_drc_settings.MICRO_VIA_RULE`), so a through via is still graded
+  at the board's own:
+
+  ```
+  (rule "kicad_routing_tools micro vias"
+  	(condition "A.Via_Type == 'Micro'")
+  	(constraint annular_width (min 0.075mm))
+  	(constraint hole_clearance (min 0.1795mm)))
+  ```
+
+  Each value is the smallest the board's micro vias have (rounded down to
+  0.1 um), written only when it is under the board's minimum. A rules file
+  the board already has is kept and the rule merged into it: replaced in place
+  when it is there (each value only ever lowered), appended otherwise, and a
+  run that changes nothing leaves the file as it was. Every step that lays
+  micro vias writes it, on both fronts (the GUI beside the board file, which
+  KiCad reads when its DRC runs); `copy_board` carries it with the board;
+  `check_drc` and every later step read it as any `.kicad_dru` rule (no step
+  sizes a via of its own up to it, since it binds micro vias only, and a later
+  step names it among the rules it does not route to, as it does any
+  `annular_width` or `hole_clearance` rule). With `--no-fix-drc-settings`
+  nothing is written. Measured with kicad-cli 10.0.6: the micro vias pass at
+  the rule, and a through via under the board's ring and hole clearance beside
+  them is still flagged at the board's 0.1 / 0.2 mm.
 - **BGA fields.** A micro via span allows vias inside a BGA's pad field, as
   `--no-bga-zones` does: a micro via between the balls is how a dense part
   escapes. Give `--no-bga-zones` with references to keep the rest.
@@ -517,7 +547,12 @@ type) on the same layer pair, and the run says so.
   site off the board themselves, so for the call the board carries only the
   copper the span has (`via_span.only_span_copper`: pads and tracks on other
   layers are set aside and put back, drilled pads stay), and a pad on the
-  far side of the board under a ball no longer blocks that ball's via. With
+  far side of the board under a ball no longer blocks that ball's via. The
+  set-aside puts every list back in its original order (what the call added
+  after it), also when the call raises; the memos derived from the copper
+  are dropped and the copper epoch bumped on the way in and out; and a net's
+  KiCad-locked copper off the span keeps the net unrippable inside the call
+  (the lock readers read the set-aside copper too). With
   no `--layers` the escape uses the span's layers, and a micro span with no
   via size draws the Default class's micro via. Measured on a top-side
   BGA. Not separately measured: a back-side part, and the QFN via drops,

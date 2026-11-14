@@ -4527,7 +4527,9 @@ class RoutingDialog(wx.Dialog):
                 # #1493: the copper-to-hole floor this step HELD, lowered
                 # only to what the copper it drew needs -- route.py's
                 # step_hole_clearance, as the differential tab writes it (#1369)
-                from .gui_utils import held_hole_clearance_live
+                from .gui_utils import held_hole_clearance_live, live_micro_via_rule
+                # #1842: the micro vias' own rule, as fix_project_for_output writes it
+                live_micro_via_rule(self.pcb_data, board, results_data, eff_clearance)
                 targets = compute_targets(
                     clearance=eff_clearance,
                     hole_clearance=held_hole_clearance_live(

@@ -3069,63 +3069,41 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layers = DEFAULT_4_LAYER_STACK
     # #1842: a via span is the step's sub-stack -- it routes on those layers
     # only, and every via it lays joins exactly that run
-    _span1842 = _span_type1842 = None
-    if via_span:
-        from via_span import resolve_via_span
-        _span1842, _span_type1842 = resolve_via_span(
-            list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
-            via_span[0], via_span[-1], via_span_type)
-        if _span_type1842 is None:
-            _span1842 = None                      # the whole stack: through vias
-        else:
-            # a file older than KiCad 10's format has no `buried` word
-            from via_span import file_via_type
-            _word1842 = file_via_type(_span_type1842,
-                                      getattr(pcb_data, 'kicad_version', 0) or 0)
-            if _word1842 != _span_type1842:
-                print(f"Via span (#1842): this board's file format "
-                      f"({pcb_data.kicad_version}) predates KiCad 10, which has no "
-                      f"'{_span_type1842}' via; its vias are written '{_word1842}' "
-                      f"(KiCad 9's blind/buried type), on the same layer pair")
-                _span_type1842 = _word1842
-            _in_span = [l for l in layers if l in _span1842]
-            if layer_costs and len(layer_costs) == len(layers):
-                layer_costs = [c for l, c in zip(layers, layer_costs) if l in _span1842]
-                if not _in_span:
-                    layer_costs = None
-            layers = _in_span or list(_span1842)
-            print(f"Via span (#1842): {_span_type1842} vias {_span1842[0]}-{_span1842[-1]}; "
-                  f"routing on {', '.join(layers)} only, and only copper on "
-                  f"{', '.join(_span1842)} (and drilled pads) blocks a via site")
-            # copper the step could not lay again stays where it is
-            from via_span import hold_outside_copper as _hold1842
-            _held1842 = _hold1842(pcb_data, _span1842)
-            if _held1842:
-                print(f"  {_held1842} existing track(s) and via(s) with copper outside the "
-                      f"span are held in place for this step")
-            if _span_type1842 == 'micro' and via_from_class:
-                # no via size was asked for: a micro via span draws the
-                # Default class's MICRO via on every net (a class's
-                # via_diameter is its through via's), on both fronts
-                from via_span import default_micro_via
-                _mdia, _mdrill = default_micro_via(
-                    input_file or getattr(pcb_data, 'source_path', '') or '')
-                if _mdia:
-                    via_size = _mdia
-                if _mdrill:
-                    via_drill = _mdrill
-                if _mdia or _mdrill:
-                    print(f"  micro via span: drawing the board Default net-class micro "
-                          f"via {via_size}/{via_drill} mm on every net")
-                via_from_class = False
-            if disable_bga_zones is None:
-                # "no new via in a BGA's pad field" is a rule for through
-                # vias, which the fan-out step lays there. A via of a span
-                # between the balls, or under them on layers the part has no
-                # copper on, is how a dense part escapes.
-                disable_bga_zones = []
-                print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
-                      f"fields (--no-bga-zones)")
+    from via_span import step_span as _step_span1842
+    _span1842, _span_type1842, layers, layer_costs = _step_span1842(
+        pcb_data, layers, layer_costs, via_span, via_span_type)
+    if _span1842:
+        # copper the step could not lay again stays where it is
+        from via_span import hold_outside_copper as _hold1842
+        _held1842 = _hold1842(pcb_data, _span1842)
+        if _held1842:
+            print(f"  {_held1842} existing track(s) and via(s) with copper outside the "
+                  f"span are held in place for this step")
+        from via_span import laser_drilled as _laser1842
+        if via_from_class and _laser1842(pcb_data.board_info.copper_layers,
+                                         _span1842, _span_type1842):
+            # no via size was asked for: a micro via span draws the
+            # Default class's MICRO via on every net (a class's
+            # via_diameter is its through via's), on both fronts
+            from via_span import default_micro_via
+            _mdia, _mdrill = default_micro_via(
+                input_file or getattr(pcb_data, 'source_path', '') or '')
+            if _mdia:
+                via_size = _mdia
+            if _mdrill:
+                via_drill = _mdrill
+            if _mdia or _mdrill:
+                print(f"  micro via span: drawing the board Default net-class micro "
+                      f"via {via_size}/{via_drill} mm on every net")
+            via_from_class = False
+        if disable_bga_zones is None:
+            # "no new via in a BGA's pad field" is a rule for through
+            # vias, which the fan-out step lays there. A via of a span
+            # between the balls, or under them on layers the part has no
+            # copper on, is how a dense part escapes.
+            disable_bga_zones = []
+            print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
+                  f"fields (--no-bga-zones)")
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # One cost per requested layer, or the full-stack append below puts its
