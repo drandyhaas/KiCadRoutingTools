@@ -2618,6 +2618,11 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     base = env.get('BASE') or 'fb_t2q_pairs.kicad_pcb'
     dest = env.get('DEST') or 'DU1'
     stage_env(env)
+    # (what this chain was asked -- its bench, its destination, the settings given over the environment -- kept for a
+    # tool that runs a round's stage again as the chain ran it: whole_movie.py)
+    with open(os.path.join(o, 'chain.json'), 'w') as f_:
+        json.dump({'K': K, 'base': base, 'dest': dest,
+                   'settings': {k_: str(v_) for k_, v_ in sorted((settings or {}).items())}}, f_, indent=1)
     if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
         # (negotiated buses off one shared array: every stage reads the other buses' lanes as they publish them --
         # joint_lanes -- but a round's first solve, coupled with theirs, joint_sync)
