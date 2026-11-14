@@ -10,8 +10,8 @@ protected nets, so a pair whose shipped copper has no P/N shortfall at all
 was left rippable, and nothing said a routed pair had gone unrecorded.
 
 `judge_selfgraze_on_copper` now measures each fallback pair on the board
-(`pair_pn_shortfall`: P segments against N, and each member's vias against
-the partner's copper): with no shortfall left the pair is admitted, with one
+(`pair_pn_shortfall`: each member's tracks and vias against the partner's
+tracks, vias and pads, priced as check_drc grades the pair): with no shortfall left the pair is admitted, with one
 it stays out. Every routed pair the record leaves out is a row of
 `JSON_SUMMARY.unprotected_pairs` and a console line.
 
@@ -27,7 +27,12 @@ Rows:
      shortfall too;
   5. controls: `protection_candidates` with `selfgraze` and no judgement
      still returns {} (test_906_hybrid_pair_and_impedance_record's arm 1b),
-     and a pair with no `selfgraze` is untouched by the judgement.
+     and a pair with no `selfgraze` is untouched by the judgement;
+  6. unit: a P track 0.05 mm from an N PAD under 0.25 mm is a shortfall (and
+     the same track 1.0 mm from it is not);
+  7. unit: P and N tracks 0.3 mm apart under a 0.25 mm clearance and a
+     0.4 mm #735 track rule are a shortfall: track against track is priced
+     at the track rule, as check_drc grades it.
 """
 import json
 import os
@@ -40,7 +45,7 @@ REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, 'py_router'))
 sys.path.insert(0, TESTS)
 from run_utils import check, evidence, tool            # noqa: E402
-from synth import make_seg, make_via, make_net, make_pcb  # noqa: E402
+from synth import make_pad, make_seg, make_via, make_net, make_pcb  # noqa: E402
 from kicad_parser import BoardInfo                     # noqa: E402
 
 PY = [sys.executable, '-X', 'utf8']
@@ -54,16 +59,21 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
-def pair_board(gap, via_gap=None):
+def pair_board(gap, via_gap=None, pad_gap=None):
     """P at y=0 and N a `gap` away (edge to edge, 0.2 mm tracks); with
-    `via_gap`, a 0.5 mm via of P that far from N's track."""
+    `via_gap`, a 0.5 mm via of P that far from N's track; with `pad_gap`, a
+    0.5 mm square N pad that far beyond the end of P's track."""
     segs = [make_seg(0, 0, 10, 0, net_id=1), make_seg(0, 0.2 + gap, 10, 0.2 + gap, net_id=2)]
+    pads = {1: [], 2: []}
+    if pad_gap is not None:
+        pads[2].append(make_pad(2, 10.0 + 0.1 + pad_gap + 0.25, 0.0, ref='J1',
+                                num='2', net_name='X_N'))
     vias = []
     if via_gap is not None:
         vias.append(make_via(12.0, 0.2 + gap, net_id=1))
         segs.append(make_seg(10, 0.2 + gap, 12.0 - 0.25 - via_gap - 0.1, 0.2 + gap, net_id=2))
     pcb = make_pcb(nets={1: make_net(1, 'X_P'), 2: make_net(2, 'X_N')}, segments=segs,
-                   vias=vias, pads_by_net={1: [], 2: []},
+                   vias=vias, pads_by_net=pads,
                    board_info=BoardInfo(layers={0: 'F.Cu', 31: 'B.Cu'},
                                         copper_layers=['F.Cu', 'B.Cu'],
                                         board_bounds=(-1.0, -1.0, 14.0, 3.0)),
@@ -90,7 +100,7 @@ def units():
     rows = unprotected_pair_rows(pairs, prot, res, None, None, short, {'X'})
     ok(short.get('X', 0) >= 1 and prot == {}, f"stays out of the record: shortfall {short}")
     ok(rows == [{'pair': 'X', 'reason': 'self-graze fallback',
-                 'pn_shortfall_segments': short.get('X')}], f"and is listed: {rows}")
+                 'pn_shortfall_items': short.get('X')}], f"and is listed: {rows}")
 
     print("3. a fallback pair whose shipped copper is clear")
     pcb, pairs = pair_board(1.0)
@@ -119,6 +129,31 @@ def units():
     ok(judge_selfgraze_on_copper(res, pcb, cfg, pairs) == {}
        and 'selfgraze_cleared' not in plain,
        "a pair with no `selfgraze` is not touched")
+
+    print("6. a track against the partner's pad")
+    from route_diff import pair_pn_shortfall
+    pcb, pairs = pair_board(1.0, pad_gap=0.05)
+    res = results()
+    short = judge_selfgraze_on_copper(res, pcb, cfg, pairs)
+    ok(pair_pn_shortfall(pcb, pairs[0][1], cfg) == 1 and short == {'X': 1}
+       and protection_candidates(res, pcb, pairs=pairs) == {},
+       f"P's track 0.05 mm from N's pad is a shortfall: {short}")
+    pcb, pairs = pair_board(1.0, pad_gap=1.0)
+    ok(pair_pn_shortfall(pcb, pairs[0][1], cfg) == 0,
+       "...and 1.0 mm from it is not")
+
+    print("7. track against track at the #735 track rule")
+    pcb, pairs = pair_board(0.3)
+    ok(pair_pn_shortfall(pcb, pairs[0][1], cfg) == 0,
+       "0.3 mm apart under 0.25 mm and no track rule: clear")
+    ruled = GridRouteConfig(clearance=0.25, layers=['F.Cu', 'B.Cu'])
+    ruled.track_clearances = {1: 0.4, 2: 0.4}
+    ok(ruled.pair_clearance(1, 2, 'F.Cu') == 0.25
+       and ruled.pair_clearance(1, 2, 'F.Cu', kind='track') == 0.4,
+       "the config prices the pair 0.25 on the layer and 0.4 track to track")
+    ok(pair_pn_shortfall(pcb, pairs[0][1], ruled) == 2,
+       f"under a 0.4 mm track rule both tracks are short: "
+       f"{pair_pn_shortfall(pcb, pairs[0][1], ruled)}")
 
 
 def end_to_end():
