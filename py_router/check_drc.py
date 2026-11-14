@@ -10579,8 +10579,8 @@ if __name__ == "__main__":
               f"net-less pads whose copper equals the drill (#1753); vias at "
               f"{max(args.clearance or 0.0, args.hole_clearance):.4g} mm to "
               f"NPTH holes and those pads; tracks, vias and pads at "
-              f"{(args.hole_clearance if _via_hole_clr is None else _via_hole_clr):.4g} mm to via drills (#1914; KiCad's value, never "
-              f"the fab-floor origin). Ordinary "
+              f"{(args.hole_clearance if _via_hole_clr is None else _via_hole_clr):.4g} mm to via drills (#1914), KiCad's value, never "
+              f"the fab-floor origin. Ordinary "
               f"plated pad holes are not graded against it, unlike KiCad's "
               f"hole_clearance)")
     if not args.quiet:
