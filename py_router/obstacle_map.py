@@ -2620,7 +2620,6 @@ def stamp_hole_rule_pad_holes(obstacles, pads, config: GridRouteConfig,
         if not (getattr(pad, 'drill', 0) or 0) > 0:
             continue
         circles = None
-        worst = None
         for li, layer in enumerate(config.layers):
             v = hr.pad_value(pad, layer)
             if v is None:
@@ -2628,12 +2627,16 @@ def stamp_hole_rule_pad_holes(obstacles, pads, config: GridRouteConfig,
             if circles is None:
                 circles = pad_drill_circles(pad)
             by_layer.setdefault((li, v), []).extend(circles)
-            worst = v if worst is None else max(worst, v)
-        if worst is not None:
-            c = worst + (config.via_size - config.via_drill) / 2.0
+        # a new via's copper, read as a via, on the layers it is on
+        vals = [hr.pad_value(pad, l, 'via') for l in hr.new_via_layers]
+        vals = [x for x in vals if x is not None]
+        if vals:
+            c = max(vals) + (config.via_size - config.via_drill) / 2.0
             if c > config.hole_to_hole_clearance + 1e-9:
+                if circles is None:
+                    circles = pad_drill_circles(pad)
                 by_via.setdefault(round(c, 9), []).extend(circles)
-    if not by_layer:
+    if not by_layer and not by_via:
         return
     widths = _hole_stamp_widths(config, extra_clearance)
     for (li, v), holes in by_layer.items():
@@ -4956,7 +4959,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         clr_groups = _clr_groups(expanded_layers)
         on_copper = any(l.endswith('.Cu') for l in expanded_layers)
         via_margin = (config.via_size / 2 + _via_clr(expanded_layers) + extra_clearance
-                      + config.via_hole_extra(_via_clr(expanded_layers)))
+                      + config.via_hole_extra(_via_clr(expanded_layers), pad=pad))
 
         def _emit(poly, m, via_pass, layer_idxs=None):
             gx_lo, gy_lo, nx, ny, inside, edist = _rasterize_polygon_box(poly, coord, m)
@@ -5032,7 +5035,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # Via blocking near pads - block vias if pad is on any copper layer
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         via_margin = (config.via_size / 2 + _via_clr(expanded_layers) + extra_clearance
-                      + config.via_hole_extra(_via_clr(expanded_layers)))
+                      + config.via_hole_extra(_via_clr(expanded_layers), pad=pad))
         via_cells = pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
                                             config.grid_step, corner_radius, corner_buffer,
                                             off_x, off_y, rotation_deg=pad.rect_rotation)
@@ -5078,7 +5081,7 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
         corner_radius = 0
     corner_buffer = coord.grid_step * 0.75 if extra_clearance > 0 else None
     via_margin = (config.via_size / 2 + clearance + extra_clearance
-                  + config.via_hole_extra(clearance))
+                  + config.via_hole_extra(clearance, pad=pad))
     return pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
                                    config.grid_step, corner_radius, corner_buffer,
                                    off_x, off_y, rotation_deg=pad.rect_rotation)

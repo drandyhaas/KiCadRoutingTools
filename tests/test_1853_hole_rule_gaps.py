@@ -15,6 +15,20 @@ Checks:
      needed) and check_drc failed the board on the rule. Now SIG is refused
      on the tight board and routed clear on the other, check_drc clean; and
      the per-net cache holds a new via's copper off such a hole too.
+  2. the rule walk reads every rule as check_drc's grader does, and the
+     grader (`hole_rule_refusal`) agrees with each value the walk gives:
+     (a) a rule naming one inner layer binds that layer only -- In2.Cu was
+         read as In1.Cu, so rules `a` 0.3 then `b` (layer In1.Cu) 0.1 gave
+         In2.Cu 0.1 where the grader asks 0.3;
+     (b) `B.inDiffPair('D')` binds a pair net however the nets group -- the
+         groups were keyed by class and quoted names, so a pair net added
+         after two others was never asked and the rule bound nothing;
+     (c) a rule on a via and a pad (`A.Type == 'Via' && B.Type == 'Pad'`)
+         holds a new via's copper off a pad's hole and its hole off the
+         pad's copper, and no track -- the walk asked about tracks only;
+     (d) a rule whose condition is not read binds nothing and is named NOT
+         honoured, and the rules before it still bind -- it used to end the
+         walk, so a rule above it bound nothing while named honoured.
 """
 import json
 import math
@@ -110,7 +124,7 @@ def load(board):
     return parse_kicad_pcb(board)
 
 
-def rules_of(board, pcb):
+def rules_of(board, pcb, report=False):
     from routing_config import GridRouteConfig
     from design_rules import install_design_rules
     import contextlib
@@ -119,7 +133,7 @@ def rules_of(board, pcb):
                           via_size=0.6, via_drill=0.3,
                           layers=list(pcb.board_info.copper_layers))
     with contextlib.redirect_stdout(io.StringIO()):
-        install_design_rules(cfg, board, pcb)
+        install_design_rules(cfg, board, pcb, net_keepouts=report)
     return cfg
 
 
@@ -184,9 +198,119 @@ def routed_pad_hole(td):
        "a new via 0.68 mm from the hole is held with the rule, not without")
 
 
+# two pads of a pair, added after the fixture's own nets
+PAIR = '''	(footprint "fixture:DP"
+		(layer "F.Cu")
+		(uuid "11111111-2222-3333-4444-555555555555")
+		(at 0 0)
+		(property "Reference" "DP1" (at 0 0 0) (layer "F.SilkS") (hide yes)
+			(uuid "11111111-2222-3333-4444-555555555556")
+			(effects (font (size 1 1) (thickness 0.15))))
+		(attr smd)
+		(pad "1" smd rect (at 2 1) (size 0.3 0.3) (layers "F.Cu" "F.Mask") (net "D_P")
+			(uuid "11111111-2222-3333-4444-555555555557"))
+		(pad "2" smd rect (at 3 1) (size 0.3 0.3) (layers "F.Cu" "F.Mask") (net "D_N")
+			(uuid "11111111-2222-3333-4444-555555555558"))
+	)
+'''
+
+
+def add_pair(text):
+    return text.replace('\t(embedded_fonts no)', PAIR + '\t(embedded_fonts no)')
+
+
+def dru(*rules):
+    return '(version 1)\n' + ''.join(rules)
+
+
+def grader(pcb, cfg, gap, layer='F.Cu', net='SIG', hole=(15.0, 6.0), hole_r=0.15,
+           kind='track'):
+    """check_drc's refusal of one candidate of ``net`` whose copper edge
+    stands ``gap`` mm from the hole's edge, beside the hole on ``layer``."""
+    from check_drc import hole_rule_refusal
+    from kicad_parser import Segment, Via
+    nid = net_id(pcb, net)
+    if kind == 'via':
+        v = Via(x=hole[0] + hole_r + gap + 0.3, y=hole[1], size=0.6, drill=0.3,
+                layers=['F.Cu', 'B.Cu'], net_id=nid)
+        return hole_rule_refusal(pcb, cfg.rules, vias=[v])
+    x = hole[0] + hole_r + gap + 0.05
+    s = Segment(start_x=x, start_y=hole[1] - 1.0, end_x=x, end_y=hole[1] + 1.0,
+                width=0.1, layer=layer, net_id=nid)
+    return hole_rule_refusal(pcb, cfg.rules, segments=[s])
+
+
+def walk(td):
+    print("2. the rule walk, against the grader")
+    from obstacle_map import build_base_obstacle_map
+    # (a)
+    b = stage(os.path.join(td, 'wa'), 'track_fits', dru=dru(
+        '(rule "a" (constraint hole_clearance (min 0.3mm)))\n',
+        '(rule "b" (layer "In1.Cu") (constraint hole_clearance (min 0.1mm)))\n'))
+    pcb = load(b)
+    cfg = rules_of(b, pcb)
+    got = {l: cfg.hole_rules.via_value(pcb.vias[0], l) for l in pcb.board_info.copper_layers}
+    ok(got == {'F.Cu': 0.3, 'In1.Cu': 0.1, 'In2.Cu': 0.3, 'B.Cu': 0.3},
+       f"(a) rule b binds In1.Cu alone: {got}")
+    ok(bool(grader(pcb, cfg, 0.25, 'In2.Cu', 'WALL')) and not grader(pcb, cfg, 0.25, 'In1.Cu', 'WALL'),
+       "(a) and the grader asks 0.3 on In2.Cu, 0.1 on In1.Cu")
+    # (b)
+    b = stage(os.path.join(td, 'wb'), 'track_fits', edit=add_pair, dru=dru(
+        '(rule "dp" (constraint hole_clearance (min 0.3mm))\n'
+        "  (condition \"B.inDiffPair('D')\"))\n"))
+    pcb = load(b)
+    cfg = rules_of(b, pcb)
+    got = cfg.hole_rules.via_value(pcb.vias[0], 'F.Cu')
+    ok(got == 0.3, f"(b) inDiffPair binds the pair's copper at the via's hole: {got}")
+    ok(bool(grader(pcb, cfg, 0.25, net='D_P')) and not grader(pcb, cfg, 0.25, net='SIG'),
+       "(b) and the grader holds D_P at it, SIG not")
+    # (c)
+    vp = dru('(rule "vp" (constraint hole_clearance (min 0.4mm))\n'
+             "  (condition \"A.Type == 'Via' && B.Type == 'Pad'\"))\n")
+    b = stage(os.path.join(td, 'wc'), 'pth_fits', dru=vp)
+    pcb = load(b)
+    cfg = rules_of(b, pcb, report=True)
+    hr = cfg.hole_rules
+    pad = next(p for fp in pcb.footprints.values() for p in fp.pads if (p.drill or 0) > 0)
+    ok(hr.pad_value(pad, 'F.Cu') is None, "(c) no track is held off the pad's hole")
+    ok(hr.pad_value(pad, 'F.Cu', 'via') == 0.4, "(c) a new via's copper is, at 0.4")
+    want = 0.15 + 0.4 - 0.3 - 0.0889
+    ok(abs(cfg.via_hole_extra(0.0889, pad=pad) - want) < 1e-9,
+       f"(c) and a new via's hole off the pad's copper: grows by {want:.4f} mm")
+    ok(cfg.via_hole_extra(0.0889) == 0.0, "(c) but not off a track's")
+    ok(bool(grader(pcb, cfg, 0.30, kind='via')) and not grader(pcb, cfg, 0.30),
+       "(c) the grader refuses a via 0.30 mm from the hole and allows a track there")
+    sig = net_id(pcb, 'SIG')
+    maps = {}
+    for tag, text in (('rule', vp), ('none', '(version 1)\n')):
+        bb = stage(os.path.join(td, 'wc_' + tag), 'pth_fits', dru=text)
+        pp = load(bb)
+        cc = rules_of(bb, pp)
+        maps[tag] = build_base_obstacle_map(pp, cc, [sig])
+    # a new via's centre 0.15 + 0.35 + 0.3 = 0.80 mm right of the hole
+    gx, gy = 1500 + 80, 600
+    ok(maps['rule'].is_via_blocked(gx, gy) and not maps['none'].is_via_blocked(gx, gy),
+       "(c) the base map holds a new via 0.35 mm from the hole with the rule, not without")
+    ok(any(r.name == 'vp' and r.honoured for r in cfg.rules.rules), "(c) the rule is honoured")
+    # (d)
+    b = stage(os.path.join(td, 'wd'), 'track_fits', dru=dru(
+        '(rule "a" (constraint hole_clearance (min 0.254mm)))\n',
+        '(rule "odd" (constraint hole_clearance (min 0.3mm))\n'
+        "  (condition \"A.getField('x') == 'y'\"))\n"))
+    pcb = load(b)
+    cfg = rules_of(b, pcb, report=True)
+    got = cfg.hole_rules.via_value(pcb.vias[0], 'F.Cu')
+    ok(got == 0.254, f"(d) rule a still binds below a rule not read: {got}")
+    honoured = {r.name: bool(r.honoured) for r in cfg.rules.rules}
+    named = dict(cfg.rules.unsupported())
+    ok(honoured == {'a': True, 'odd': False} and 'odd' in named and 'a' not in named,
+       f"(d) a is honoured, odd named NOT honoured: {honoured} / {named}")
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         routed_pad_hole(td)
+        walk(td)
     if FAILS:
         print(f"\nFAILED ({len(FAILS)}):")
         for f in FAILS:

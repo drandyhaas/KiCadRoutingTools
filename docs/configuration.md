@@ -706,11 +706,14 @@ pad around the hole plus the copper clearance:
   grader over the board near it.
 
 The value is the last rule in the file whose condition and `(layer ...)` clause
-match the pair, read either way round, as KiCad decides it; a hole's own net is
-exempt. One obstacle map serves every net a step routes, so a hole is held at the
-largest value the rules give any other net against it. A rule of severity `ignore`
-binds nothing, and a rule whose condition the tools do not read is named `NOT
-honoured` and left to the grade. The step prints `.kicad_dru rule 'x':
+match the pair, read either way round, as KiCad decides it, for the copper as it
+is (a track, a new via, a pad); a hole's own net is exempt. One obstacle map serves
+every net a step routes, so a hole is held at the largest value the rules give any
+other net against it. A rule of severity `ignore` binds nothing, and a rule whose
+condition the tools do not read binds nothing either -- the rules before it still
+do -- and is named `NOT honoured` and left to the grade. A condition that names
+nets one by one costs build time: each named net is read on its own (a rule ORing
+200 net names added about half a minute to a 250-net board's map). The step prints `.kicad_dru rule 'x':
 hole_clearance min 0.254 mm: routed tracks and vias are kept that far from the
 holes of other nets' vias and pads`. The fan-out and plane steps place their vias
 on maps of their own that do not read these rules yet; `check_drc.py` grades their
