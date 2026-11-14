@@ -136,6 +136,10 @@ def main():
         ok("GND return vias NOT placed: no 'GND' pour is on a layer of the via span "
            "F.Cu-In1.Cu" in log, "the run says they are not laid")
         ok("no GND net was found" not in log, "and does not also say there is no GND net")
+        vs = doc.get('via_span') or {}
+        ok(vs.get('layers') == ['F.Cu', 'In1.Cu'] and vs.get('type') == 'micro'
+           and str(vs.get('gnd_return_vias', '')).startswith("not laid: no 'GND' pour"),
+           f"JSON_SUMMARY.via_span says so: {vs}")
 
         print("4. a span the stack does not have")
         _o, _s, log = route(td, 'bad', '--via-span', 'F.Cu', 'In9.Cu', accept=False,
