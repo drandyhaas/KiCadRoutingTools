@@ -2036,9 +2036,12 @@ An orphan stub is a trace endpoint that:
 1. Has only one connected segment (degree-1 node in the connectivity graph)
 2. Does not overlap same-net copper with its end cap: a via, a pad (by its
    real outline), another track's body, or a same-net zone outline
-3. Is NOT a reverse T: no other same-net track vertex or via lands on the
-   stub's own body within 3 track widths of the free end (check_weird's
-   mid-body-anchor rule, #1167)
+
+A track that runs on past a tee or a via on its own body (a reverse T, #1167)
+is judged by rule 2 alone: its end is no orphan while that tee's or via's
+copper still overlaps its end cap. A nib of up to 3 track widths past the
+anchor used to be excused as well; KiCad's DRC reports such an end
+`track_dangling`, and check_weird names it (#1870).
 
 These represent traces that end without a proper electrical connection.
 
@@ -3069,7 +3072,12 @@ Read-only scan for **weird copper** a routed board should not have. One
 category each:
 
 - `dangling-end` -- trace ends and tails anchored on no same-net pad, via,
-  T-junction or zone outline;
+  T-junction or zone outline. A track that runs on past a tee or a via on its
+  body is named once no anchor's copper touches its end (half the track's
+  width plus half the anchor's), where KiCad's DRC reports `track_dangling`
+  (#1870; it used to be allowed 3 track widths). `--tolerance` still drops
+  a tail shorter than it, so on a track under 0.1 mm wide the default hides
+  a tail KiCad reports;
 - `soft-joint` -- near-open joints: same-net segments that overlap by their end
   caps instead of meeting endpoint-to-endpoint, and meet nowhere else (two stubs
   leaving one vertex are not one, #984);
