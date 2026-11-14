@@ -2936,9 +2936,15 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     (`net_keepouts.config_for_nets`, #1527)."""
     from net_keepouts import stamp as _nk_stamp, config_for_nets
     with _nk_stamp(obstacles, pcb_data, (net_id,), config):
-        return _route_net_with_obstacles_impl(
-            pcb_data, net_id, config_for_nets(pcb_data, (net_id,), config),
-            obstacles, *args, **kwargs)
+        cfg = config_for_nets(pcb_data, (net_id,), config)
+        if getattr(cfg, 'via_budgets', None):
+            # #865: a net with a via_count max is searched again at a higher
+            # via cost when this route would put it over
+            from via_budget import route_within_budget
+            return route_within_budget(_route_net_with_obstacles_impl, pcb_data,
+                                       net_id, cfg, obstacles, *args, **kwargs)
+        return _route_net_with_obstacles_impl(pcb_data, net_id, cfg, obstacles,
+                                              *args, **kwargs)
 
 
 def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridRouteConfig,

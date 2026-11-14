@@ -506,6 +506,11 @@ class GridRouteConfig:
     # The legacy per-channel maps above are being migrated onto it; consumers
     # that resolve through it must treat None as "no rules declared".
     rules: Optional[object] = None
+    # #865: {net_id: (max vias, rule)} from the board's .kicad_dru via_count
+    # rules (via_budget.install, with `rules`). None leaves every route as it
+    # was; a net in it is searched again at a higher via cost when a route
+    # would put it over its max.
+    via_budgets: Optional[object] = None
     # #1843: the board's clearance rules scoped by a rule area
     # (area_clearance.AreaClearance), installed with `rules`. The base map,
     # the per-net caches and the stamp functions compose every keep-out over

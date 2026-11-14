@@ -123,7 +123,8 @@ def sink_summary(summary: Dict) -> None:
 
 
 #: The keys of `design_rules` that come from one run's config, not the ledger
-DESIGN_RULES_PER_RUN = ('unsupported_rules', 'scoped_clearance', 'kicad_refuses_file')
+DESIGN_RULES_PER_RUN = ('unsupported_rules', 'scoped_clearance', 'kicad_refuses_file',
+                        'via_count')
 
 
 def _stamp_rules(doc: Dict, min_clearance_used, design_rules) -> None:

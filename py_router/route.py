@@ -6683,6 +6683,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _dr.update(disclose_step_rules(_rules, pcb_data, results, input_file))
         # #1491: the class/type-scoped rules this call honoured, and each
         # relaxing one another routed net held at its class value
+        if getattr(config, 'via_budgets', None):
+            # #865: the nets a via_count rule gives a max, and those over it
+            from via_budget import report as _vb_report
+            _over865 = _vb_report(config, pcb_data)
+            _dr['via_count'] = {'nets': len(config.via_budgets), 'over': _over865}
+            for _row in _over865:
+                print(f"  via_count: {_row['net']} has {_row['vias']} via(s), over its "
+                      f"max {_row['max']} ({_row['rule']}); no route inside it was found")
         _sc = getattr(config, 'scoped_clearance', None)
         if _sc is not None:
             from kicad_dru import scoped_clearance_report

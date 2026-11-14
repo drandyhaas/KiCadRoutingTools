@@ -616,6 +616,19 @@ itself inside it (check_drc accepts it as `edge-exempt-pad`; KiCad flags both). 
 rule stays in the rule file: the output project's `min_copper_edge_clearance`
 records what the step resolved before it.
 
+**Via count rules (#865).** A `.kicad_dru` `via_count (max N)` rule with N above 0
+gives each net it binds a via budget, on both fronts, with no flag or control
+(`max 0` is a via ban and is honoured as one). A net is still routed whatever it
+takes. A route that would put the net over its max, counting the vias the net
+already has, is searched again at 4 and then 16 times the via cost, and the route
+with the fewest vias is kept; a net inside its budget on the first try is not
+routed twice. The step prints `.kicad_dru rule 'x': via_count max 1: 3 net(s) are
+routed again at a higher via cost when a route would exceed it ...`, and a net that
+still ends over its max is listed when the step ends, on the console and in
+`JSON_SUMMARY.design_rules.via_count` (`nets`, and `over`: `net`, `vias`, `max`,
+`rule`). `check_drc.py` grades the count as KiCad's too_many_vias does (#1707). A
+`min` is graded only.
+
 **A rule file KiCad refuses.** One thing KiCad cannot load in a `.kicad_dru` makes
 it enforce NONE of the file's rules, with exit 0 and nothing printed (measured on
 kicad-cli 10.0.6). A condition does it with a function or property KiCad does not

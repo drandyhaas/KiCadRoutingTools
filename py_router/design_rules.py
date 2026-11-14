@@ -3869,6 +3869,15 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
             rules.net_keepouts = list(rules.net_keepouts) + derive_contact_fingers(pcb_data)
         except Exception as e:                                 # noqa: BLE001
             rules.notes.append(f"contact-finger via keep-outs not derived ({e})")
+    # #865: the via budgets a via_count rule sets
+    try:
+        from via_budget import install as _install_budgets, mark_honoured as _mark_budgets
+        _install_budgets(config, pcb_data)
+        if net_keepouts and pcb_data is not None:
+            _mark_budgets(rules, pcb_data)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  ERROR: via_count budgets not installed ({e}); this run routes "
+              f"WITHOUT them")
     key = (os.path.abspath(rules.source) if rules.source else '',
            tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
                  for r in rules.rules))
