@@ -23,26 +23,30 @@ Synthetic (always runs), all at --clearance 0.1 --hole-clearance 0.25:
   G. a pad 0.05 off a 0.45/0.2 via's copper and 0.175 off its hole ->
      PAD-HOLE still fires (KiCad reports both for pad-vs-via-hole).
 
-ROUTER (was: the descent ladder could ship a 0.45/0.2 via whose 0.125 ring
-left other-net copper 0.225 off its hole): escalation_rungs now raises every
-rung to drill + 2*(hole_clearance - clearance) while the pair is installed,
-and the layer-swap shrink loop caps the drill at size - 2*ring. Unit checks:
-  * no pair installed -> the standard ladder's deepest rung stays 0.45/0.2;
-  * pair (0.25, 0.1) -> standard is a single raised rung, 0.5/0.2;
-  * pair (0.25, 0.1), tier auto -> every rung's annular ring holds 0.15
-    (the fine/advanced rungs stay 0.45/0.15: a thinner drill holds the ring
-    at the smaller diameter, and 0.15 + the 0.1 clearance is the 0.25 rule);
-  * declared hole clearance 0 -> ring 0.0, no raise (KiCad "no check");
+ROUTER (was: the descent ladder shipped a 0.45/0.2 via whose 0.125 ring left
+other-net copper 0.225 off its hole, and said nothing): the ladder PREFERS the
+ring -- escalation_rungs puts every rung raised to drill + 2*(hole_clearance -
+clearance) first and keeps the tier's own rungs as the last resort -- and what
+ships below the ring is named in the design_rules ledger. Unit checks:
+  * a fresh import with nothing installed walks the ladder (the pair's global
+    is defined at module level; it once raised NameError);
+  * no pair installed -> the tier's ladder, unchanged and untagged;
+  * pair (0.25, 0.1) -> standard is 0.5/0.2 first, then 0.45/0.2;
+  * tier auto -> the ring-holding rungs first, then the tier's rungs, each
+    tagged with the tier rung it came from, so a nominal via is never read
+    as a fab-tier escalation (rung_tier, ladder_escalates);
+  * declared hole clearance 0 -> ring 0.0, the tier's ladder (KiCad "no check");
   * policy off -> no rungs at all, even with the pair installed;
-  * set_policy_from_args installs the pair from the rules value, from the
-    fab_floor_origin when that is larger, and from KiCad's factory 0.25 when
-    the board declares nothing;
-  * the swap shrink loop ships (0.5, 0.2) with the pair installed -- the drill
-    capped by the ring, not left at 0.3 -- and (0.5, 0.3) without it.
-
-Repro (only when wk/run1914 is staged; the file still PASSES without it):
-the pre-fix routed tigard board reports exactly the issue's two PAD-HOLE rows
-plus the VIA-HOLE row, and the fixed re-route reports nothing.
+  * a new run (set_escalation_policy) clears the pair; the GUI's config key
+    installs it, and a config without it installs none;
+  * set_policy_from_args and the GUI's PCBData resolve the same value
+    (board_hole_clearance): the rules value, the fab_floor_origin when larger,
+    KiCad's factory 0.25 when nothing is declared, 0 when 0 is declared;
+  * the swap shrink loop ships (0.5, 0.2) with the pair installed where that
+    fits, (0.5, 0.3) without it, and falls back to (0.45, 0.3) where no
+    ring-holding via fits (completion first);
+  * the census rows: only a via under its request AND under the ring is
+    named, once per site, and the end-of-run line says so.
 
     python3 tests/test_1914_hole_clearance_vias.py
 """
@@ -60,9 +64,6 @@ sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 from run_utils import check, evidence  # noqa: E402
 
 CHECK_DRC = os.path.join(ROOT, 'py_router', 'check_drc.py')
-RUN1914 = os.path.join(ROOT, 'wk', 'run1914')
-PREFIXED = os.path.join(RUN1914, 'tigard-prefixed.kicad_pcb')
-FIXED = os.path.join(RUN1914, 'tigard-fixed.kicad_pcb')
 
 fails = []
 
@@ -216,45 +217,75 @@ def checker(tmp):
 
 
 def router_units(tmp):
-    print('8. the descent ladder holds the copper-to-hole ring')
+    print('8. the descent ladder prefers the copper-to-hole ring')
+    # A fresh process: the pair's global must exist before anything installs it.
+    check([sys.executable, '-c',
+           'import sys; sys.path.insert(0, "py_router"); import fab_tiers; '
+           'assert fab_tiers.escalation_rungs(4); '
+           'assert fab_tiers.get_via_hole_clearance() is None; print("fresh ok")'],
+          accept=True)
+    ok('a fresh import walks the ladder with nothing installed', True)
     import fab_tiers
     saved_tier = fab_tiers._DEFAULT_TIER
     saved_esc = fab_tiers._ESCALATION
+
+    def _pairs(rungs):
+        return [(r['via_diameter'], r['via_drill']) for r in rungs]
     try:
         fab_tiers.set_default_fab_tier('standard')
-        fab_tiers.set_via_hole_clearance(None, None)
+        fab_tiers.set_escalation_policy('fab', {})
         raw = fab_tiers.escalation_rungs(4)
-        ok('no pair installed: the standard ladder still descends to 0.45',
-           raw and raw[-1]['via_diameter'] == 0.45
-           and raw[-1]['via_drill'] == 0.2, raw)
+        ok('no pair installed: the standard ladder is 0.45/0.2, untagged',
+           _pairs(raw) == [(0.45, 0.2)]
+           and fab_tiers.TIER_RUNG_KEY not in raw[0], raw)
         fab_tiers.set_via_hole_clearance(0.25, 0.1)
         ok('pair (0.25, 0.1) installs a 0.15 ring',
            abs(fab_tiers.via_hole_ring() - 0.15) < 1e-9, fab_tiers.via_hole_ring())
-        raised = fab_tiers.escalation_rungs(4)
-        ok('pair installed: standard is a single raised rung, 0.5/0.2',
-           len(raised) == 1 and raised[0]['via_diameter'] == 0.5
-           and raised[0]['via_drill'] == 0.2, raised)
+        std = fab_tiers.escalation_rungs(4)
+        ok('pair installed: standard tries 0.5/0.2 first, 0.45/0.2 last',
+           _pairs(std) == [(0.5, 0.2), (0.45, 0.2)]
+           and [fab_tiers.rung_tier(std, i) for i in range(2)] == [0, 0], std)
+        ok('neither standard via is a fab-tier escalation',
+           not fab_tiers.ladder_escalates(std, 0.5, 0.2)
+           and not fab_tiers.ladder_escalates(std, 0.45, 0.2))
         fab_tiers.set_default_fab_tier('auto')
         auto = fab_tiers.escalation_rungs(4)
-        ok('pair installed, tier auto: every rung holds annular ring >= 0.15',
-           auto and all((r['via_diameter'] - r['via_drill']) / 2.0
-                        >= 0.15 - 1e-9 for r in auto), auto)
+        held = [(r['via_diameter'] - r['via_drill']) / 2.0 >= 0.15 - 1e-9 for r in auto]
+        first_short = held.index(False) if False in held else len(held)
+        ok('tier auto: every ring-holding rung comes before every short one',
+           first_short > 0 and not any(held[first_short:]), _pairs(auto))
+        ok('tier auto: the tier\'s own rungs are all still there, last',
+           _pairs(auto)[first_short:] == [(0.45, 0.2), (0.3, 0.15), (0.25, 0.15)],
+           _pairs(auto))
+        ok('tier auto: the nominal\'s vias are not escalations, the rest are',
+           [fab_tiers.ladder_escalates(auto, d, h) for d, h in
+            [(0.5, 0.2), (0.45, 0.2), (0.45, 0.15), (0.3, 0.15)]]
+           == [False, False, True, True], _pairs(auto))
         fab_tiers.set_default_fab_tier('standard')
         fab_tiers.set_via_hole_clearance(0.0, 0.1)
-        ok('declared hole clearance 0 installs a 0.0 ring: no raise',
+        ok('declared hole clearance 0 installs a 0.0 ring: the tier\'s ladder',
            fab_tiers.via_hole_ring() == 0.0
-           and fab_tiers.escalation_rungs(4)[-1]['via_diameter'] == 0.45)
-        fab_tiers.set_via_hole_clearance(0.25, 0.1)
+           and _pairs(fab_tiers.escalation_rungs(4)) == [(0.45, 0.2)])
         fab_tiers.set_escalation_policy('off', {})
+        fab_tiers.set_via_hole_clearance(0.25, 0.1)
         ok('policy off: no rungs at all, even with the pair installed',
            fab_tiers.escalation_rungs(4) == [])
+        fab_tiers.set_escalation_policy('fab', {})
+        ok('a new run clears the last run\'s pair',
+           fab_tiers.get_via_hole_clearance() is None)
+        fab_tiers.set_fab_tier_from_config({'fab_tier': 'standard', 'clearance': 0.1,
+                                            'hole_clearance': 0.25})
+        ok('the GUI config key installs the pair',
+           fab_tiers.get_via_hole_clearance() == (0.25, 0.1))
+        fab_tiers.set_fab_tier_from_config({'fab_tier': 'standard', 'clearance': 0.1})
+        ok('a GUI config without the key installs none (no leak between runs)',
+           fab_tiers.get_via_hole_clearance() is None)
     finally:
         fab_tiers.set_via_hole_clearance(None, None)
         fab_tiers.set_escalation_policy(saved_esc, {})
         fab_tiers.set_default_fab_tier(saved_tier)
 
-    print('9. set_policy_from_args installs the pair from the board or the factory')
-    import fab_tiers
+    print('9. both fronts resolve the board\'s hole clearance the same way')
 
     def _pro(tmp, name, rules, origin=None):
         d = os.path.join(tmp, name)
@@ -273,33 +304,33 @@ def router_units(tmp):
     def _args():
         return SimpleNamespace(clearance=0.1, escalation=None,
                                no_fix_drc_settings=False)
+    from kicad_parser import parse_kicad_pcb
     try:
-        pcb = _pro(tmp, 'policy_declared', {'min_hole_clearance': 0.25})
-        fab_tiers.set_policy_from_args(_args(), pcb)
-        ok('declared 0.25 -> ring 0.15',
-           abs(fab_tiers.via_hole_ring() - 0.15) < 1e-9)
-        pcb = _pro(tmp, 'policy_none', {})
-        fab_tiers.set_policy_from_args(_args(), pcb)
-        ok('nothing declared -> the factory 0.25, ring 0.15',
-           abs(fab_tiers.via_hole_ring() - 0.15) < 1e-9)
-        pcb = _pro(tmp, 'policy_tight', {'min_hole_clearance': 0.1})
-        fab_tiers.set_policy_from_args(_args(), pcb)
-        ok('declared 0.1 at clearance 0.1 -> ring 0.0',
-           fab_tiers.via_hole_ring() == 0.0)
-        pcb = _pro(tmp, 'policy_zero', {'min_hole_clearance': 0})
-        fab_tiers.set_policy_from_args(_args(), pcb)
-        ok('declared 0 (KiCad "no check") -> ring 0.0',
-           fab_tiers.via_hole_ring() == 0.0)
-        pcb = _pro(tmp, 'policy_origin', {'min_hole_clearance': 0.1}, origin=0.25)
-        fab_tiers.set_policy_from_args(_args(), pcb)
-        ok('rules 0.1 but the origin is 0.25 -> the larger wins, ring 0.15',
-           abs(fab_tiers.via_hole_ring() - 0.15) < 1e-9)
+        for name, rules, origin, want in (
+                ('policy_declared', {'min_hole_clearance': 0.25}, None, 0.25),
+                ('policy_none', {}, None, 0.25),
+                ('policy_tight', {'min_hole_clearance': 0.1}, None, 0.1),
+                ('policy_zero', {'min_hole_clearance': 0}, None, 0.0),
+                ('policy_origin', {'min_hole_clearance': 0.1}, 0.25, 0.25)):
+            pcb = _pro(tmp, name, rules, origin)
+            fab_tiers.set_policy_from_args(_args(), pcb)
+            cli = fab_tiers.get_via_hole_clearance()
+            gui = fab_tiers.board_hole_clearance(parse_kicad_pcb(pcb))
+            ok(f'{name}: the CLI installs ({want:g}, 0.1) and the PCBData '
+               f'resolver reads {want:g}',
+               cli is not None and abs(cli[0] - want) < 1e-9
+               and abs(cli[1] - 0.1) < 1e-9 and abs(gui - want) < 1e-9,
+               (cli, gui))
+        # A live board: a declared rule from the provider wins over the file.
+        data = parse_kicad_pcb(_pro(tmp, 'policy_live', {}))
+        data.live_rules_provider = lambda: {'min_hole_clearance': 0.3}
+        ok('a live board\'s declared rule is read first',
+           abs(fab_tiers.board_hole_clearance(data) - 0.3) < 1e-9)
     finally:
         fab_tiers.set_via_hole_clearance(None, None)
         fab_tiers.set_escalation_policy(saved_esc, {})
 
-    print('10. the layer-swap shrink loop caps the drill at the ring')
-    import fab_tiers
+    print('10. the layer-swap shrink loop prefers the ring, then falls back')
     from layer_swap_optimization import _swap_vias_fit_or_shrink
 
     def _fake_config():
@@ -312,20 +343,26 @@ def router_units(tmp):
             pad_pair_clearance_before_override=lambda pad, net: 0.1,
             rule_floors=lambda net_id: {})
 
-    # A foreign 0.6/0.3 via at (20,20). A new via at 0.66 from it: full-size
+    # A foreign 0.6/0.3 via at (20,20). A new via 0.66 from it: full-size
     # needs 0.70 (fails), (0.55, 0.25) needs 0.675 (fails), (0.5, 0.2)
-    # needs 0.65 (fits). Without the ring cap the drill would stay 0.3.
+    # needs 0.65 (fits). Without the ring the drill stays 0.3.
     pcb = _stage(tmp, 'swap', _board(vias=[(20, 20, 0.6, 0.3, 2)]))
-    sys.path.insert(0, os.path.join(ROOT, 'py_router'))
-    from kicad_parser import parse_kicad_pcb
     data = parse_kicad_pcb(pcb)
     cfg = _fake_config()
     try:
+        fab_tiers.set_default_fab_tier('standard')
+        fab_tiers.set_escalation_policy('fab', {})
         fab_tiers.set_via_hole_clearance(0.25, 0.1)
         v = SimpleNamespace(x=20.66, y=20.0, size=0.6, drill=0.3, net_id=1)
         fitted = _swap_vias_fit_or_shrink(data, [v], cfg)
-        ok('pair installed: the swap via shrinks to (0.5, 0.2), drill capped',
+        ok('pair installed: the swap via shrinks to (0.5, 0.2), the ring held',
            fitted and (v.size, v.drill) == (0.5, 0.2), (fitted, v.size, v.drill))
+        # 0.63 off: no ring-holding via fits (0.5/0.2 needs 0.65); the
+        # last resort 0.45/0.3 needs 0.625 copper and 0.5 hole-to-hole.
+        v = SimpleNamespace(x=20.63, y=20.0, size=0.6, drill=0.3, net_id=1)
+        fitted = _swap_vias_fit_or_shrink(data, [v], cfg)
+        ok('pair installed, no ring-holding via fits: the last resort ships',
+           fitted and (v.size, v.drill) == (0.45, 0.3), (fitted, v.size, v.drill))
         fab_tiers.set_via_hole_clearance(None, None)
         v = SimpleNamespace(x=20.66, y=20.0, size=0.6, drill=0.3, net_id=1)
         fitted = _swap_vias_fit_or_shrink(data, [v], cfg)
@@ -333,7 +370,51 @@ def router_units(tmp):
            fitted and (v.size, v.drill) == (0.5, 0.3), (fitted, v.size, v.drill))
     finally:
         fab_tiers.set_via_hole_clearance(None, None)
-        fab_tiers._LEDGER['narrowed'].clear()
+        fab_tiers.set_escalation_policy(saved_esc, {})
+        fab_tiers.set_default_fab_tier(saved_tier)
+
+    print('11. what ships below the ring is named in the design_rules ledger')
+    import io
+    import contextlib
+    try:
+        fab_tiers.set_default_fab_tier('standard')
+        fab_tiers.set_escalation_policy('fab', {})
+        fab_tiers.set_via_hole_clearance(0.25, 0.1)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rows = fab_tiers.replace_hole_ring_rows(
+                [(1, 'A', {(0.45, 0.2): 3, (0.5, 0.2): 2}),
+                 (2, 'B', {(0.55, 0.25): 1})], 'census')
+            fab_tiers.replace_hole_ring_rows(
+                [(1, 'A', {(0.45, 0.2): 3})], 'census')
+        ok('only the short pair is a row: 0.45/0.2, 3 vias, at 0.225',
+           len(rows) == 1 and rows[0]['count'] == 3
+           and rows[0]['via'] == [0.45, 0.2]
+           and abs(rows[0]['delivered'] - 0.225) < 1e-9
+           and abs(rows[0]['requested'] - 0.25) < 1e-9, rows)
+        led = [r for r in fab_tiers.escalation_summary()['narrowed']
+               if r['kind'] == fab_tiers.HOLE_RING_KIND]
+        ok('a census run twice counts once', len(led) == 1, led)
+        ok('the step says so on the console', 'below the 0.15 mm ring' in buf.getvalue(),
+           buf.getvalue())
+        line = fab_tiers.escalation_report_line()
+        ok('the end-of-run Design rules line names it',
+           '3 via(s) below the copper-to-hole ring' in line and '0.225' in line, line)
+        with contextlib.redirect_stdout(io.StringIO()):
+            got = fab_tiers.disclose_hole_ring_vias(
+                SimpleNamespace(nets={1: SimpleNamespace(name='A')}),
+                [{'size': 0.45, 'drill': 0.2, 'net_id': 1},
+                 {'size': 0.45, 'drill': 0.2, 'net_id': 1},
+                 {'size': 0.6, 'drill': 0.3, 'net_id': 1}], 0.45, 'fan')
+        ok('a via drawn at its request is not named (a choice, not a descent)',
+           got == [], got)
+        fab_tiers.set_via_hole_clearance(0.0, 0.1)
+        ok('no ring, no rows',
+           fab_tiers.replace_hole_ring_rows([(1, 'A', {(0.45, 0.2): 1})], 'x') == [])
+    finally:
+        fab_tiers.set_via_hole_clearance(None, None)
+        fab_tiers.set_escalation_policy(saved_esc, {})
+        fab_tiers.set_default_fab_tier(saved_tier)
 
 
 def main():
@@ -341,43 +422,6 @@ def main():
         checker(tmp)
         router_units(tmp)
 
-    if fails:
-        print(f'{len(fails)} FAILURE(S): {fails}')
-        return 1
-
-    # The issue's own repro, when the run-1914 assets are staged. The
-    # synthetic arms above always assert, so the file is a PASS without it.
-    if not (os.path.isfile(PREFIXED) and os.path.isfile(FIXED)):
-        print('SKIP (repro): wk/run1914 boards absent -- the synthetic '
-              'checks above passed; the repro was not run')
-        print('all checks passed (repro skipped)')
-        return 0
-    with tempfile.TemporaryDirectory() as tmp:
-        out = os.path.join(tmp, 'prefixed.json')
-        _r = check([sys.executable, '-X', 'utf8', CHECK_DRC, PREFIXED,
-                    '--clearance', '0.1', '--hole-clearance', '0.25',
-                    '--json', out], refuse='PAD-HOLE', code=1)
-        evidence(out, 'pre-fix tigard check_drc --json')
-        with open(out, encoding='utf-8') as f:
-            doc = json.load(f)
-        ok('pre-fix tigard: the issue\'s two pad-hole rows, plus one via-hole',
-           doc.get('by_type', {}).get('pad-hole') == 2
-           and doc.get('by_type', {}).get('via-hole') == 1
-           and doc.get('violations') == 3, doc.get('by_type'))
-        _ph = [it for it in doc.get('items', []) if it.get('type') == 'pad-hole']
-        ok('pre-fix tigard: both pad-hole rows are the RN3 pair at 0.225',
-           sorted(it.get('pad_ref') for it in _ph) == ['RN3.5', 'RN3.7']
-           and all(abs(it.get('overlap_mm', 0) - 0.025) < 1e-9 for it in _ph),
-           f"{sorted(it.get('pad_ref') for it in _ph)}")
-        out = os.path.join(tmp, 'fixed.json')
-        check([sys.executable, '-X', 'utf8', CHECK_DRC, FIXED,
-               '--clearance', '0.1', '--hole-clearance', '0.25',
-               '--json', out], accept=True)
-        evidence(out, 'fixed tigard check_drc --json')
-        with open(out, encoding='utf-8') as f:
-            doc = json.load(f)
-        ok('fixed tigard: the fixed checker reports no violations',
-           doc.get('violations') == 0, doc.get('by_type'))
     if fails:
         print(f'{len(fails)} FAILURE(S): {fails}')
         return 1

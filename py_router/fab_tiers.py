@@ -217,10 +217,11 @@ _BOARD_FLOORS = {}
 # writeback off): the board minimum KiCad grades such a clearance at, which
 # the Default class does not bind. None = no such raise this run.
 _BOARD_RULE_CLEARANCE = None
-# #1914: the copper-to-hole floor the descent ladder holds a via's ring to,
-# as a (hole_clearance, clearance) pair in mm, set per run the same way.
-# None = not installed (no raise): the front never installed one, or the
-# board declares no hole clearance the ladder must hold.
+# #1914: the copper-to-hole floor the descent ladder PREFERS a via's ring to
+# hold, as a (hole_clearance, clearance) pair in mm, set per run the same way
+# and cleared at the start of each run (set_escalation_policy). None = not
+# installed: the ladder is the tier's, unchanged.
+_VIA_HOLE_CLEARANCE = None
 # #1775: whether this run's DRC-floor writeback will run (--no-fix-drc-settings
 # / the GUI's "Fix DRC settings" box unticked = False): a via below a Board
 # Setup minimum the writeback will not lower ships graded against it.
@@ -263,7 +264,11 @@ def set_escalation_policy(policy, board_floors=None, writeback=True):
     clearances (:func:`rule_fab_floors`, #1630). ``writeback`` is whether the
     run's DRC-floor writeback will run (:func:`project_writeback`, #1775)."""
     global _ESCALATION, _BOARD_FLOORS, _BOARD_RULE_CLEARANCE, _WRITEBACK
+    global _VIA_HOLE_CLEARANCE
     _WRITEBACK = bool(writeback)
+    # #1914: a run installs its own copper-to-hole pair after this call (the
+    # two fronts' setters do); one run's pair never carries into the next.
+    _VIA_HOLE_CLEARANCE = None
     policy = policy or DEFAULT_ESCALATION
     if policy not in ESCALATION_POLICIES:
         raise ValueError(f"unknown escalation policy {policy!r} "
@@ -752,11 +757,9 @@ def _via_holding_ring(diameter, drill, ring):
 
 def set_via_hole_clearance(hole_clearance, clearance):
     """Install this run's copper-to-hole pair (#1914): ``hole_clearance`` is
-    the board's min_hole_clearance in mm -- declared, else KiCad's factory
-    0.25, which is what a fresh board grades a rule the project leaves out
-    at -- and ``clearance`` is the run's copper clearance. Either may be
-    None (a front that has no value to install); pass (None, None) to clear
-    the pair, e.g. between runs in one process."""
+    the board's min_hole_clearance in mm (:func:`board_hole_clearance`) and
+    ``clearance`` the run's copper clearance. Either may be None (a front
+    that has no value to install), which clears the pair."""
     global _VIA_HOLE_CLEARANCE
     if hole_clearance is None or clearance is None:
         _VIA_HOLE_CLEARANCE = None
@@ -764,16 +767,61 @@ def set_via_hole_clearance(hole_clearance, clearance):
         _VIA_HOLE_CLEARANCE = (float(hole_clearance), float(clearance))
 
 
+def get_via_hole_clearance():
+    """The installed ``(hole_clearance, clearance)`` pair, or None."""
+    return _VIA_HOLE_CLEARANCE
+
+
 def via_hole_ring():
-    """The annular ring a descended via must hold so another net's copper,
-    kept at the run's clearance off the via's copper, sits at the hole
-    clearance off its hole: ``max(0, hole_clearance - clearance)``. 0.0
-    when nothing is installed, or the pair asks for no ring (a board
-    declaring hole clearance 0, KiCad's "no check")."""
+    """The annular ring a via must hold so another net's copper, kept at the
+    run's clearance off the via's copper, sits at the hole clearance off its
+    hole: ``max(0, hole_clearance - clearance)``. 0.0 when nothing is
+    installed, or the pair asks for no ring (a board declaring hole clearance
+    0, KiCad's "no check")."""
     if not _VIA_HOLE_CLEARANCE:
         return 0.0
     hole_clearance, clearance = _VIA_HOLE_CLEARANCE
     return max(0.0, hole_clearance - clearance)
+
+
+def board_hole_clearance(pcb_data=None, pcb_file=None):
+    """The copper-to-hole clearance (mm) KiCad grades this board's vias at,
+    which the descent ladder prefers a via's ring to hold (#1914). One
+    resolver for both fronts:
+
+    * the rule the board declares: the LIVE board's ``m_HoleClearance`` when
+      ``pcb_data`` was built from pcbnew and the board declares it, else the
+      sibling project's ``rules.min_hole_clearance`` (``pcb_file``, else
+      ``pcb_data.source_path``);
+    * raised to the chain's ``fab_floor_origin`` when that is larger -- the
+      declaration before a writeback lowered it
+      (:func:`fix_kicad_drc_settings.declared_fab_floor`);
+    * KiCad's factory 0.25 (``plane_fill_model.KICAD_FACTORY_HOLE_CLEARANCE``)
+      when nothing declares it, which is what KiCad grades such a board at.
+
+    A declared 0 is KiCad's "no check": 0, no ring. A KNOWN LIMIT: a board
+    whose input declared nothing has no origin, so once a step's writeback
+    has written ``min_hole_clearance`` (the clearance it routed at) a later
+    step reads that value, not 0.25, and prefers no larger ring."""
+    from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
+    try:
+        from obstacle_map import _file_hole_floor, _live_hole_rule
+        path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
+        rule, origin = _file_hole_floor(path) if path else (None, None)
+        records = getattr(pcb_data, 'live_records_provider', None)
+        if callable(records):
+            _o = ((records() or {}).get('fab_floor_origin') or {}).get(
+                'min_hole_clearance')
+            origin = (float(_o) if isinstance(_o, (int, float))
+                      and not isinstance(_o, bool) and _o > 0 else None)
+        live = _live_hole_rule(pcb_data) if pcb_data is not None else None
+    except Exception:                                           # noqa: BLE001
+        rule = origin = live = None
+    v = live if live is not None else rule
+    v = float(KICAD_FACTORY_HOLE_CLEARANCE) if v is None else max(0.0, float(v))
+    if origin and origin > v:
+        v = float(origin)
+    return v
 
 
 def _apply_hole_ring(rungs, ring):
@@ -792,6 +840,61 @@ def _apply_hole_ring(rungs, ring):
         if not out or rr != out[-1]:
             out.append(rr)
     return out
+
+
+#: The key each rung of a hole-ring ladder carries (#1914): the index of the
+#: tier rung it was made from, 0 = the nominal. See :func:`rung_tier`.
+TIER_RUNG_KEY = 'tier_rung'
+
+
+def _prefer_hole_ring(rungs, ring):
+    """#1914: the ladder ``rungs`` with the copper-to-hole ring PREFERRED, not
+    required: every rung raised to hold ``ring`` round its drill first, then
+    the tier's own rungs as the last resort (those already holding it are
+    dropped as duplicates). Completion first: a via only the last resort
+    fits still ships, and the run's census of its shipped vias names it
+    (:func:`replace_hole_ring_rows`).
+
+    Each rung carries :data:`TIER_RUNG_KEY`, its index in ``rungs``, so a
+    site that tells a fab-tier escalation by the rung (:func:`rung_tier`,
+    :func:`ladder_escalates`) still reads the nominal rung's raised and
+    unraised vias as the nominal, not as an escalation."""
+    def _key(r):
+        return {k: v for k, v in r.items() if k != TIER_RUNG_KEY}
+    tagged = [dict(r, **{TIER_RUNG_KEY: i}) for i, r in enumerate(rungs)]
+    raised = []
+    for r in tagged:
+        rr = _apply_hole_ring([r], ring)[0]
+        if raised and _key(rr) == _key(raised[-1]):
+            continue
+        raised.append(rr)
+    seen = [_key(r) for r in raised]
+    return raised + [r for r in tagged if _key(r) not in seen]
+
+
+def rung_tier(ladder, i):
+    """The tier rung ``ladder[i]`` was made from: its :data:`TIER_RUNG_KEY`,
+    else ``i`` (a ladder with no hole ring is the tier's own). >0 is a
+    fab-tier escalation."""
+    return ladder[i].get(TIER_RUNG_KEY, i)
+
+
+def ladder_escalates(ladder, diameter, drill=None):
+    """True when a via of ``diameter`` (and ``drill``) taken off ``ladder``
+    went below the ladder's nominal rung -- a fab-tier escalation. Without a
+    hole ring this is ``diameter < ladder[0]['via_diameter']``, as every
+    descent site read it; with one (:func:`_prefer_hole_ring`) the nominal
+    is the smaller of the nominal rung's raised and unraised vias, and a
+    drill below the nominal's is an escalation too (a raised fine rung keeps
+    the advanced drill at the nominal diameter)."""
+    if not ladder:
+        return False
+    nominal = [r for i, r in enumerate(ladder) if rung_tier(ladder, i) == 0] or ladder[:1]
+    if diameter < min(r['via_diameter'] for r in nominal) - 1e-9:
+        return True
+    if drill is not None and any(TIER_RUNG_KEY in r for r in ladder):
+        return drill < min(r['via_drill'] for r in nominal) - 1e-9
+    return False
 
 
 def _apply_board_floors(rungs, floors=None):
@@ -952,18 +1055,18 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     if want and rungs:
         rungs = (_apply_board_floors(rungs, want) if _ESCALATION == 'board'
                  else _first_choice_meets(rungs, want))
-    # #1914: a descended via's ring must hold the copper-to-hole floor, so
-    # another net's copper, kept at the run's clearance off the via's copper,
-    # sits at the hole clearance off its hole. This is what makes the
-    # "never shrink" fix: with the ring held, no descent site can ship a via
-    # whose copper a neighbour at clearance can sit under the hole rule from
-    # -- the track pricing never changes, the via side carries the rule. The
-    # raise runs under every policy that descends at all (``off`` returned []
-    # above); it is a KiCad DRC floor, not a board minimum the writeback
-    # lowers, so it is not a FLOOR_KEYS floor and not in _BOARD_FLOORS.
+    # #1914: a descended via PREFERS a ring that holds the copper-to-hole
+    # floor, so another net's copper, kept at the run's clearance off the
+    # via's copper, sits at the hole clearance off its hole. The ring-holding
+    # rungs come first and the tier's own rungs stay as the last resort
+    # (completion first; what ships below the ring is disclosed by the run's
+    # via census, replace_hole_ring_rows). Under every policy that descends
+    # at all (``off`` returned [] above). It is a KiCad DRC floor, not a
+    # board minimum the writeback lowers, so it is not a FLOOR_KEYS floor and
+    # not in _BOARD_FLOORS.
     ring = via_hole_ring()
     if ring and rungs:
-        rungs = _apply_hole_ring(rungs, ring)
+        rungs = _prefer_hole_ring(rungs, ring)
     return rungs
 
 
@@ -1460,6 +1563,87 @@ def replace_via_rows(shipped, site):
             })
 
 
+#: The ledger kind of a via that ships below the copper-to-hole ring (#1914).
+HOLE_RING_KIND = 'hole_clearance'
+
+
+def hole_ring_short(diameter, drill):
+    """True when a via of ``diameter``/``drill`` rings less than
+    :func:`via_hole_ring` (0.1 um tolerance): other-net copper kept at the
+    run's clearance off its copper can sit under the hole clearance off its
+    hole."""
+    ring = via_hole_ring()
+    if not ring or not diameter or not drill:
+        return False
+    return (float(diameter) - float(drill)) / 2.0 < ring - 1e-4
+
+
+def replace_hole_ring_rows(shipped, site):
+    """#1914: name the vias a step SHIPS below the copper-to-hole ring, from
+    the step's census of its own vias (like :func:`replace_via_rows`).
+
+    ``shipped`` is [(net_id, net_name, {(diameter, drill): count}), ...] --
+    the vias the step laid smaller than the size its net asked for (a via
+    drawn as asked is the caller's choice, not a descent). Each pair ringing
+    less than :func:`via_hole_ring` -- a via only the ladder's last-resort
+    rungs fitted -- is one ledger row of kind :data:`HOLE_RING_KIND`:
+    ``requested`` the hole clearance, ``delivered`` the copper-to-hole
+    distance at the run's clearance (``clearance + ring``), ``via`` the pair.
+    Rows of this ``site`` are replaced, so a census run twice counts once.
+    Prints one line when there is any. Returns the rows added."""
+    _LEDGER['narrowed'] = [r for r in _LEDGER['narrowed']
+                           if not (r.get('kind') == HOLE_RING_KIND
+                                   and r.get('site') == site)]
+    if not via_hole_ring():
+        return []
+    hc, clr = _VIA_HOLE_CLEARANCE
+    rows = []
+    for nid, name, pairs in shipped or ():
+        for (dia, drill), n in sorted((pairs or {}).items()):
+            if not hole_ring_short(dia, drill):
+                continue
+            ring = (float(dia) - float(drill)) / 2.0
+            rows.append({
+                'net': int(nid) if nid is not None else None, 'net_name': name,
+                'kind': HOLE_RING_KIND, 'requested': round(hc, 4),
+                'delivered': round(clr + ring, 4), 'site': site,
+                'count': int(n), 'via': [round(float(dia), 4), round(float(drill), 4)],
+            })
+    _LEDGER['narrowed'].extend(rows)
+    if rows:
+        n = sum(r['count'] for r in rows)
+        worst = min(rows, key=lambda r: r['delivered'])
+        print(f"  WARNING: {site}: {n} via(s) on "
+              f"{len({r['net'] for r in rows})} net(s) fitted only below the "
+              f"{via_hole_ring():g} mm ring the board's {hc:g} mm hole clearance "
+              f"needs at the {clr:g} mm clearance (smallest "
+              f"{worst['via'][0]:g}/{worst['via'][1]:g} mm: copper at the "
+              f"clearance sits {worst['delivered']:g} mm from its hole); the "
+              f"ring-holding vias did not fit there (#1914)")
+    return rows
+
+
+def disclose_hole_ring_vias(pcb_data, vias, requested, site):
+    """:func:`replace_hole_ring_rows` for a step whose own vias are in hand
+    (the fan-outs: dicts with ``size``/``drill``/``net_id``, or Via objects)
+    and whose request is one via diameter ``requested``."""
+    if not via_hole_ring() or requested is None:
+        return []
+    per = {}
+    for v in vias or ():
+        get = v.get if isinstance(v, dict) else (lambda k, _v=v: getattr(_v, k, None))
+        size, drill, nid = get('size'), get('drill'), get('net_id')
+        if not size or not drill or size >= float(requested) - 1e-3:
+            continue
+        pair = (round(float(size), 4), round(float(drill), 4))
+        per.setdefault(nid, {})
+        per[nid][pair] = per[nid].get(pair, 0) + 1
+    nets = getattr(pcb_data, 'nets', None) or {}
+    return replace_hole_ring_rows(
+        [(nid, getattr(nets.get(nid), 'name', None), pairs)
+         for nid, pairs in per.items()], site)
+
+
 def escalation_summary():
     """The per-run ledger as JSON-ready data (the JSON_SUMMARY ``design_rules``
     block). ``count`` is the number of recorded narrowings; ``fab_tier_escalations``
@@ -1525,8 +1709,11 @@ def escalation_report_line():
     parts = []
     # A row with no net is run-wide (#1210: the run's clearance below the
     # board's minimum clearance), not a feature on a net.
-    run_wide = [r for r in s['narrowed'] if r['net'] is None]
-    per_net = [r for r in s['narrowed'] if r['net'] is not None]
+    run_wide = [r for r in s['narrowed'] if r['net'] is None
+                and r['kind'] != HOLE_RING_KIND]
+    per_net = [r for r in s['narrowed'] if r['net'] is not None
+               and r['kind'] != HOLE_RING_KIND]
+    hole_ring = [r for r in s['narrowed'] if r['kind'] == HOLE_RING_KIND]
     for r in run_wide:
         parts.append(f"{r['kind'].replace('_', ' ')} {r['delivered']:g} mm, below the "
                      f"{r['site']} {r['requested']:g} mm")
@@ -1538,8 +1725,13 @@ def escalation_report_line():
         kinds = ', '.join(f"smallest {k.replace('_', ' ')} {v:g} mm"
                           for k, v in sorted(mins.items()))
         parts.append(f"{sum(r['count'] for r in per_net)} feature(s) on "
-                     f"{len(s['nets'])} net(s) delivered below "
+                     f"{len({r['net'] for r in per_net})} net(s) delivered below "
                      f"the requested size ({kinds})")
+    if hole_ring:
+        parts.append(f"{sum(r['count'] for r in hole_ring)} via(s) below the "
+                     f"copper-to-hole ring (hole clearance "
+                     f"{max(r['requested'] for r in hole_ring):g} mm, held only to "
+                     f"{min(r['delivered'] for r in hole_ring):g} mm at the clearance)")
     if s['fab_tier_escalations']:
         _where = ("the board's own declared floors"
                   if s['fab_tier_target'] == 'board_floors' else 'advanced')
@@ -1819,14 +2011,12 @@ def set_fab_tier_from_config(config):
         floors = drop_stale_board_floors(declared, requested)
     set_escalation_policy(policy, floors,
                           writeback=bool(config.get('fix_drc_settings', True)))
-    # #1914: the live board's copper-to-hole floor, read off the live design
-    # settings by the fronts (a separate config key, not a FLOOR_KEYS floor:
-    # the ladder holds it as a ring, not as a rung floor). Only when the
-    # front carries one -- a config built without it leaves the installed
-    # pair alone, so an older front that never read it changes nothing.
-    _hc = config.get('hole_clearance')
-    if _hc is not None:
-        set_via_hole_clearance(_hc, config.get('clearance'))
+    # #1914: the board's copper-to-hole clearance, which the GUI resolves off
+    # its PCBData with the CLI's resolver (board_hole_clearance) into the
+    # derived 'hole_clearance' key -- not a FLOOR_KEYS floor: the ladder
+    # prefers it as a ring. set_escalation_policy cleared the last run's
+    # pair, so a config without the key installs none.
+    set_via_hole_clearance(config.get('hole_clearance'), config.get('clearance'))
 
 
 def fab_tier_from_args(args):
@@ -1939,27 +2129,10 @@ def set_policy_from_args(args, pcb_path=None):
                        else None))
     set_escalation_policy(policy, floors, writeback=writeback)
     set_board_thickness(board_thickness_of_file(pcb_path))      # #502
-    # #1914: the copper-to-hole floor the descent ladder holds a via's ring
-    # to. The board's declared min_hole_clearance -- the rules value, or the
-    # fab_floor_origin a writeback relaxed it from, whichever is larger (the
-    # origin is the declaration before a step lowered it; prefer the larger,
-    # as declared_fab_floor's own docstring says) -- else KiCad's factory
-    # 0.25, which is what a fresh board grades a rule the project leaves out
-    # at (plane_fill_model.KICAD_FACTORY_HOLE_CLEARANCE, probed on 10.0.3).
-    # A declared 0 is KiCad's "no check" and installs 0 (no raise). Paired
-    # with the run's clearance, resolved by the caller before this function.
-    try:
-        from fix_kicad_drc_settings import declared_fab_floor
-        _origin = declared_fab_floor(pcb_path, 'min_hole_clearance') if pcb_path else None
-    except Exception:                                           # noqa: BLE001
-        _origin = None
-    _cands = [v for v in (rules.get('min_hole_clearance'), _origin)
-              if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    if _cands:
-        _hc = max(float(v) for v in _cands)
-    else:
-        from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
-        _hc = float(KICAD_FACTORY_HOLE_CLEARANCE)
+    # #1914: the copper-to-hole clearance the descent ladder prefers a via's
+    # ring to hold (board_hole_clearance, the resolver the GUI uses too),
+    # paired with the run's clearance, resolved by the caller before this.
+    _hc = board_hole_clearance(pcb_file=pcb_path)
     set_via_hole_clearance(_hc, getattr(args, 'clearance', None))
     return floors
 

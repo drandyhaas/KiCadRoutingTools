@@ -612,7 +612,7 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     # advanced 0.25/0.15), mirroring the plane-tap escalation. Only rungs
     # strictly smaller than the run's via are added; the escalation warning
     # matches the tap path's.
-    from fab_tiers import escalation_rungs, warn_fab_escalation
+    from fab_tiers import escalation_rungs, warn_fab_escalation, ladder_escalates
     n_layers = len(pcb_data.board_info.copper_layers) or 2
     # escalation_rungs: empty under --escalation off, raised to the board's
     # own minimums under board (#857) and to this net's rule minimums (#530).
@@ -623,7 +623,7 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
         v_dia, v_drill = floor['via_diameter'], floor['via_drill']
         if v_dia >= _own_via - 1e-9:
             continue
-        if v_dia < _ladder[0]['via_diameter'] - 1e-9:
+        if ladder_escalates(_ladder, v_dia, v_drill):
             warn_fab_escalation(f"net rescue net_{net_id}")
         rungs.append(_via_step_down(config, net_id, grid_step=fine_grid,
                                     clearance=floor_clearance,
@@ -2076,7 +2076,7 @@ def _escalation_ladder(config, pcb_data, net_id):
     march) -- callers skip such nets silently.
     """
     from plane_pad_tap import fab_floor_clearance_track
-    from fab_tiers import escalation_rungs, warn_fab_escalation, may_narrow
+    from fab_tiers import escalation_rungs, warn_fab_escalation, may_narrow, ladder_escalates
 
     if not may_narrow():
         return []  # --escalation off: nothing may march (#842)
@@ -2128,7 +2128,7 @@ def _escalation_ladder(config, pcb_data, net_id):
         if key == prev_key:
             continue  # discrete via ladder can repeat a rung; dedupe
         prev_key = key
-        if m and v_dia < ladder[0]['via_diameter'] - 1e-9:
+        if m and ladder_escalates(ladder, v_dia, v_drill):
             warn_fab_escalation(f"terminal escalation net_{net_id}")
         _rung = dict(track_width=w, layer_widths={},
                      power_net_widths=power_widths,

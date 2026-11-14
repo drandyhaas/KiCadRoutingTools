@@ -9803,6 +9803,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     [(_ids1371[_nm], _nm, _r['requested_mm'], _r['sizes'])
                      for _nm, _r in _short1371.items()],
                     'via copper shipped under size')
+                # #1914: and those of them below the copper-to-hole ring
+                from fab_tiers import replace_hole_ring_rows
+                replace_hole_ring_rows(
+                    [(_ids1371[_nm], _nm, _r['pairs'])
+                     for _nm, _r in _short1371.items()],
+                    'via shipped below the hole ring')
                 _dr1371 = _es1371()
                 for _sm in list(_SUMMARY_SINK) + [summary]:
                     if isinstance(_sm.get('design_rules'), dict):

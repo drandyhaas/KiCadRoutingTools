@@ -183,7 +183,8 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
         return True
     if _bare_pad_pair_vias_fit(pcb_data, new_vias, config)[0]:
         return True
-    from fab_tiers import escalation_rungs, warn_fab_escalation, note_narrowing, via_hole_ring
+    from fab_tiers import (escalation_rungs, warn_fab_escalation, note_narrowing,
+                           via_hole_ring, ladder_escalates)
     copper = sum(1 for l in config.layers if l.endswith('.Cu'))
     # escalation_rungs, never the physical fab floor: empty under --escalation
     # off (the vias stay as asked and the caller reverts the swap), bounded by
@@ -196,37 +197,41 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
     ladder = escalation_rungs(copper, extra_floors=net_floors)
     if not ladder:
         return False
-    via_floor = ladder[-1]['via_diameter']
-    drill_floor = ladder[-1]['via_drill']
+    via_floor = min(f['via_diameter'] for f in ladder)
+    drill_floor = min(f['via_drill'] for f in ladder)
     orig = [(v.size, v.drill) for v in new_vias]
     ANNULAR = 0.1  # keep body - drill >= this (2x ring) as we shrink
-    size = config.via_size
-    while size > via_floor + 1e-9:
-        size = max(round(size - 0.05, 3), via_floor)
-        drill = max(min(config.via_drill, round(size - ANNULAR, 3)), drill_floor)
-        if drill >= size:              # floor drill wider than the shrunk body: stop
-            break
-        # #1914: the drill must also leave the copper-to-hole ring round it:
-        # a via shrunk to (size, drill) holds another net's copper at the
-        # clearance off its copper and at the hole clearance off its hole
-        # only when (size - drill) / 2 >= via_hole_ring(). Cap the drill
-        # there; when the cap drops under the drill floor the pair cannot
-        # hold the ring at this size -- stop, restore, and let the caller
-        # revert the swap. (0 when nothing is installed: the cap is inert.)
-        _ring = via_hole_ring()
-        if _ring:
-            drill = min(drill, round(size - 2.0 * _ring, 3))
-            if drill < drill_floor - 1e-9:
+    # #1914: the copper-to-hole ring is PREFERRED: a first walk caps each
+    # drill to leave the ring round it -- (size - drill) / 2 >= via_hole_ring()
+    # holds another net's copper, kept at the clearance off the via's copper,
+    # at the hole clearance off its hole -- and only then the walk without it,
+    # as the last resort (the run's via census names what ships below the
+    # ring). With no ring installed the first walk is the only one.
+    ring = via_hole_ring()
+    tried = set()
+    for hold_ring in ((True, False) if ring else (False,)):
+        size = config.via_size
+        while size > via_floor + 1e-9:
+            size = max(round(size - 0.05, 3), via_floor)
+            drill = max(min(config.via_drill, round(size - ANNULAR, 3)), drill_floor)
+            if hold_ring:
+                drill = min(drill, round(size - 2.0 * ring, 3))
+                if drill < drill_floor - 1e-9:
+                    break       # no smaller via holds the ring at the drill floor
+            if drill >= size:              # floor drill wider than the shrunk body: stop
                 break
-        for v in new_vias:
-            v.size, v.drill = size, drill
-        if _bare_pad_pair_vias_fit(pcb_data, new_vias, config)[0]:
-            if size < ladder[0]['via_diameter'] - 1e-9:
-                warn_fab_escalation("layer-swap pad vias")
+            if (size, drill) in tried:
+                continue
+            tried.add((size, drill))
             for v in new_vias:
-                note_narrowing(v.net_id, 'via_diameter', config.via_size, size,
-                               'layer-swap pad via')
-            return True
+                v.size, v.drill = size, drill
+            if _bare_pad_pair_vias_fit(pcb_data, new_vias, config)[0]:
+                if ladder_escalates(ladder, size, drill):
+                    warn_fab_escalation("layer-swap pad vias")
+                for v in new_vias:
+                    note_narrowing(v.net_id, 'via_diameter', config.via_size, size,
+                                   'layer-swap pad via')
+                return True
     for v, (s, d) in zip(new_vias, orig):
         v.size, v.drill = s, d
     return False
