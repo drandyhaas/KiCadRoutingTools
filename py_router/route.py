@@ -9850,6 +9850,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _vias_ship = _in_run_ids(_b_ship.vias)
             if _segs_ship is not None:
                 _nm_ship = {_n: _nn.name for _n, _nn in pcb_data.nets.items()}
+                # the input's copper as it was, net-less copper included
+                _in_segs_ship = {segment_identity(_s, _nm_ship.get(_s.net_id, ''))
+                                 for _s in (_orig_copper_values or ((), ()))[0]}
                 _in_vias_ship = {via_identity(_v, _nm_ship.get(_v.net_id, ''))
                                  for _v in (_orig_copper_values or ((), ()))[1]}
                 _view_ship = _copy_ship.copy(pcb_data)
@@ -9859,8 +9862,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _rules_ship, _view_ship, [{
                         'new_segments': [
                             s for s in _segs_ship
-                            if segment_identity(s, _nm_ship.get(s.net_id, ''))
-                            not in _orig_seg_keys1282],
+                            if not getattr(s, 'graphic', False)
+                            and segment_identity(s, _nm_ship.get(s.net_id, ''))
+                            not in _in_segs_ship],
                         'new_vias': [
                             v for v in _vias_ship
                             if via_identity(v, _nm_ship.get(v.net_id, ''))
