@@ -135,9 +135,10 @@ GRADED_ONLY_KINDS = frozenset({'length', 'skew', 'diff_pair_uncoupled'})
 # route.py's `design_rules.unsupported_rules` -- rather than passing as consumed.
 # `via_count` (#1707) likewise: no step counts a net's vias against it -- a
 # net is routed with the vias it needs, completion first -- and check_drc
-# grades it as KiCad's too_many_vias does. `hole_clearance` too: no step
-# reads a rule of it (`obstacle_map.resolve_hole_clearance` holds the board's
-# min_hole_clearance or the fab floor), and check_drc grades it
+# grades it as KiCad's too_many_vias does. `hole_clearance` too, unless the
+# step that installs the rules routes to it (#1853,
+# `hole_rule_routing.mark_honoured`: the route step does, for every rule
+# whose condition it reads), and check_drc grades it
 # (`check_drc.hole_rule_grade`).
 ROUTER_UNHONOURED_KINDS = frozenset({'annular_width', 'via_count', 'hole_clearance'})
 #: why each ROUTER_UNHONOURED_KINDS kind is not honoured, as `unsupported()` says it
@@ -149,10 +150,10 @@ _ROUTER_UNHONOURED_WHY = {
     'via_count': ("no routing step counts a net's vias against it (a net is routed "
                   "with the vias it needs, completion first); check_drc grades the "
                   "board's vias per net against it, as KiCad's too_many_vias does"),
-    'hole_clearance': ("no routing step reads this rule: copper is kept off another "
-                       "net's NPTH holes at the board's min_hole_clearance (or the fab "
-                       "floor) and off plated holes at the copper clearance, not at this "
-                       "rule's value; check_drc grades the board against it"),
+    'hole_clearance': ("this step does not route to this rule: copper is kept off "
+                       "another net's NPTH holes at the board's min_hole_clearance (or "
+                       "the fab floor) and off plated holes at the copper clearance, not "
+                       "at this rule's value; check_drc grades the board against it"),
 }
 # `disallow` item tokens (#1527). The router lays tracks and THROUGH vias
 # only, so a rule forbidding only blind, buried or micro vias asks nothing of
