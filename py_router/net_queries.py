@@ -1288,8 +1288,31 @@ def pin_pair_path_length(pcb_data: PCBData, net_id: int,
     broken net) -- distinguish that from 0.0, which means pad-to-pad direct
     contact. Zone/pour connections are NOT traversed: a net that reaches its
     pads only through a plane has no track path and returns None.
+
+    The net's other pads are copper too (#1867): a lane that enters an
+    in-line part's pad on one track and leaves it on another (an ESD part, a
+    test point, a connector's second contact) is joined through that pad's
+    copper. Such a pad is read only when the track copper alone does not join
+    the two pads, so every pair the tracks join measures what it measured;
+    the way across it is then charged from where a track meets the pad to
+    the pad's centre and out again. Without it the two pads read None on a
+    net `net_pads_joined` and check_connected call joined.
     """
-    graph = _net_track_graph(pcb_data, net_id, (pad_a, pad_b), tolerance)
+    got = _pin_pair_shortest(pcb_data, net_id, pad_a, pad_b, tolerance, ())
+    if got is None:
+        others = [p for p in _copper_pads(pcb_data, net_id)
+                  if p is not pad_a and p is not pad_b]
+        if others:
+            got = _pin_pair_shortest(pcb_data, net_id, pad_a, pad_b, tolerance, others)
+    return got
+
+
+def _pin_pair_shortest(pcb_data: PCBData, net_id: int, pad_a: Pad, pad_b: Pad,
+                       tolerance: float, crossed) -> Optional[float]:
+    """`pin_pair_path_length`'s walk, with the pads in `crossed` in the graph
+    as copper the path may pass through."""
+    graph = _net_track_graph(pcb_data, net_id, [pad_a, pad_b] + list(crossed),
+                             tolerance, crossed=crossed)
     if graph is None:
         return None
     adjacency, pad_nodes = graph
@@ -1727,7 +1750,8 @@ def _segment_crossings(segments) -> Dict[int, List[Tuple[float, float]]]:
 
 
 def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
-                     tolerance: float = 0.02, detail: Optional[dict] = None):
+                     tolerance: float = 0.02, detail: Optional[dict] = None,
+                     crossed=()):
     """(adjacency, pad_nodes) over ONE net's track copper, with `pads` attached.
 
     The weighted graph `pin_pair_path_length` walks (see its docstring for the
@@ -1751,6 +1775,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     segments = [s for s in pcb_data.segments if s.net_id == net_id]
     if not segments:
         return None
+    _crossed = {id(p) for p in crossed}
 
     # Point interning: endpoints within `tolerance` are ONE node (the same
     # coincidence rule check_connected unions at). Bucketing on round(x/tol)
@@ -1951,7 +1976,12 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                                  ('via_join', obj, node))
                         joined = True
                 elif hit(nx, ny, half_w.get(node, 0.0)):
-                    add_edge(hub, node, 0.0, ('pad', obj))
+                    # #1867: a pad a walk may pass THROUGH is charged the way
+                    # across it, to its centre and out again; a pad that ends
+                    # the walk is reached free, as ever
+                    add_edge(hub, node,
+                             math.hypot(nx - cx, ny - cy) if id(obj) in _crossed
+                             else 0.0, ('pad', obj))
                     hub_joins.setdefault(hub, []).append(node)
                     joined = True
             if joined or kind == 'pad' \

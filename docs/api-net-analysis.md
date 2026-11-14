@@ -349,6 +349,11 @@ so a via in an SMD pad whose tracks leave on an inner layer reaches its pad
 through the barrel (#1314; before, the pad met only track ends and such a net
 read as not joined). Two of the pads whose copper touches on a shared layer
 join each other (#1629: a module's two overlapping same-number pads).
+A path may also pass **through another pad of the net** (#1867): a lane that
+enters an in-line part's pad on one track and leaves it on another is joined
+through that pad, charged from where each track meets it to the pad's centre.
+That pad is read only when the tracks alone do not join the two pads, so a
+pair the tracks join measures the track path and is never shortened by a pad.
 
 Returns `None` when no track path joins the two pads: an unrouted or broken
 net, or one whose pads meet only through a **zone** (pours are not traversed).
