@@ -352,6 +352,10 @@ FLAG_PARAMS = {
     # omitted-flag default). The fallthrough spelled it after the flag, which
     # no control matched, so a replay ran at the auto setback.
     '--diff-pair-centerline-setback': 'centerline_setback',
+    # #1842: the via type written for --via-span and its escape mode, each a
+    # word (the span itself is a LIST flag). Choices beside the span field.
+    '--via-span-type': 'via_span_type',
+    '--via-span-escape': 'via_span_escape',
     # (#856's --relax-drc-severities is a store_true switch and lives in
     # BOOL_FLAGS. It used to sit here, where the value branch consumed the
     # NEXT token as its value: `--relax-drc-severities --clearance 0.1`
@@ -360,6 +364,8 @@ FLAG_PARAMS = {
 }
 LIST_FLAGS = {
     '--layers': 'layers',
+    # #1842: route.py's via span (nargs=2: the top and bottom layer)
+    '--via-span': 'via_span',
     '--power-nets': 'power_nets',
     '--power-nets-widths': 'power_nets_widths',
     '--layer-costs': 'layer_costs',
@@ -854,7 +860,7 @@ def parse_command(argv, cwd=None):
     # LIST_FLAGS row's own comment says a converted plan used to drop it, and
     # it still did (26 kept bga_fanout steps on 18 corpus boards).
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers', '--polarity-swap-nets', '--coplanar-nets',
+              '--layers', '--via-span', '--polarity-swap-nets', '--coplanar-nets',
               '--rip-existing-nets', '--plane-net-layers', '--keep-away'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]

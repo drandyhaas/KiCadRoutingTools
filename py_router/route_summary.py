@@ -329,7 +329,9 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False,
         # sub-run's own summary has none. A sub-run that ever measured one
         # would be measuring a slice, so first always wins.
         for _k in ('power_widths', 'power_widths_measured_on',
-                   'power_widths_run_scope'):
+                   'power_widths_run_scope',
+                   # #1843: the necks, measured the same way
+                   'area_necks'):
             if _k in first:
                 merged[_k] = first[_k]
         # The length-match groups (#1247) are the RUN's: pass 1 formed them
