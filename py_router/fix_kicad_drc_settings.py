@@ -1399,8 +1399,10 @@ def size_values_below_authored(pcb_path: str, floors: dict, rules_from: str) -> 
                              for v in pcb.vias if v.size],
         "min_via_drill": [(v.drill, dr.via_item(v), None)
                           for v in pcb.vias if v.drill],
-        # ... and its ring as itself, so the micro via rule binds it
-        "min_via_annular_width": [((v.size - v.drill) / 2.0, dr.via_item(v), None)
+        # ... and a micro via's ring as itself, so the micro via rule binds it
+        "min_via_annular_width": [((v.size - v.drill) / 2.0,
+                                   dr.via_item(v) if getattr(v, 'via_type', None) == 'micro'
+                                   else dr.item_for_net(v.net_id, "via"), None)
                                   for v in pcb.vias
                                   if v.size and v.drill and v.size > v.drill],
     }
@@ -2564,7 +2566,7 @@ def plane_floor_segments(segments):
                     else getattr(s, 'soft_joint', False))]
 
 
-def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, exclude_micro=False):
+def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, micro_pairs=False):
     """The smallest copper-to-HOLE distance (mm) between a step's OWN copper
     -- ``segments`` and ``vias``, what it drew -- and the board, when it is
     below ``limit``; None when every such distance is at or above it.
@@ -2592,10 +2594,12 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, exclude_micro
     such pair, a P via overlapping its own N track, which KiCad's
     hole_clearance grade did not list.
 
-    ``exclude_micro``: leave out every pair one of whose items is a via
-    typed micro (#1842) -- its hole or its copper. A step that lays micro
-    vias writes them a `.kicad_dru` rule of their own (`micro_via_floors`),
-    so the board's min_hole_clearance follows the other copper only."""
+    A pair one of whose items is a via typed micro (#1842) -- its hole or
+    its copper -- is left out unless ``micro_pairs``: the board's micro vias
+    are held by a `.kicad_dru` rule of their own (`micro_via_floors`, which
+    passes ``micro_pairs=True``), so the board's min_hole_clearance follows
+    the other copper only. On a board with no micro via nothing is left
+    out, and the census is the one it always was."""
     import math
     from geometry_utils import (point_to_segment_distance,
                                 segment_to_segment_distance, via_on_layer)
@@ -2609,7 +2613,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, exclude_micro
     best = [None]
 
     def note(d, micro=False):
-        if micro and exclude_micro:
+        if micro and not micro_pairs:
             return
         if d < limit - 1e-9 and (best[0] is None or d < best[0]):
             best[0] = d
@@ -2841,7 +2845,7 @@ def micro_via_floors(pcb, board_rules, clearance) -> dict:
     hole_min = board_rules.get('min_hole_clearance')
     if (isinstance(hole_min, (int, float)) and clearance is not None
             and hole_min > clearance + 1e-9):
-        d = step_copper_to_hole(pcb, [], micro, hole_min, clearance)
+        d = step_copper_to_hole(pcb, [], micro, hole_min, clearance, micro_pairs=True)
         if d is not None:
             out['hole_clearance'] = round(max(float(d), float(clearance)), 6)
     return out
@@ -3009,9 +3013,8 @@ def step_hole_clearance(input_pcb, output_pcb, clearance, verbose=True, ledger=T
     if out is None:
         return None
     try:
-        # #1842: the micro vias' pairs are their rule's (micro_via_floors)
-        step_min = step_copper_to_hole(out, segs, vias, held, clearance,
-                                       exclude_micro=True)
+        # (#1842: a micro via's pairs are left out -- their rule's)
+        step_min = step_copper_to_hole(out, segs, vias, held, clearance)
     except Exception as e:                                      # noqa: BLE001
         if verbose:
             print(f"  (copper-to-hole census skipped: {e}); hole floor follows "
