@@ -204,6 +204,13 @@ python3 pair_teeth.py RUN/r1/fo.kicad_pcb RUN/r1/nets.lines U1 U2   # another ne
 <details>
 <summary><b>The same, stage by stage</b></summary>
 
+Every stage reads the bench under the chain's plan environment
+(`whole_route.stage_env` sets it for a run):
+
+```bash
+export PLAN_PAGES=1 BRAID_PAIRS=1 PLAN_PAIRS=1 BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2
+```
+
 **1. A bench** -- the human's ends, or our own:
 
 ```bash
@@ -211,7 +218,7 @@ NETS=$(python3 coherent_nets.py 51 --board=fb_t2q_pairs.kicad_pcb)
 # the human's ends ...
 python3 human_ends_bench.py fb_t2q_human.kicad_pcb tmp/hp/HHe_k51.kicad_pcb "$NETS" \
     --others bench:fb_t2q_pairs.kicad_pcb --ladder fb_t2q_pairs.ladder.txt --sidecar --marker
-# ... or our own (the fanout's plan environment: PLAN_PAGES=1 BRAID_PAIRS=1 PLAN_PAIRS=1)
+# ... or our own
 mkdir -p tmp/e tmp/e2
 PLAN_JUDGE=ends python3 fanout_from_plan.py tmp/e/fo.kicad_pcb 51 --board=fb_t2q_pairs.kicad_pcb
 export BENCH=tmp/hp/HHe_k51.kicad_pcb NETS DEST=DU1   # (or tmp/e/fo.kicad_pcb) the bench every whole_* tool reads
@@ -220,7 +227,7 @@ export BENCH=tmp/hp/HHe_k51.kicad_pcb NETS DEST=DU1   # (or tmp/e/fo.kicad_pcb) 
 **2. The plan:**
 
 ```bash
-python3 whole_solve.py SOLVE.json                  # crossings and layer changes
+SOLVE_UNPROVED=1 python3 whole_solve.py SOLVE.json   # crossings and layer changes (a round's first solve: unproved, still a plan)
 python3 whole_route.py --loop SOLVE.json OUTDIR   # geometry -> polish -> audit -> pairs -> singles -> snap
 python3 whole_render.py OUTDIR/plan.json OUT.png   # look at it (AUDIT=FILE marks the audit's findings)
 ```
@@ -233,9 +240,11 @@ when it stopped at crowded ends.
 net connects:
 
 ```bash
-python3 route_lanes.py all --plan OUTDIR/plan.json --board $BENCH --nets "$NETS" --dest DU1 \
-    --mode seq --write ROUTED.kicad_pcb            # the router on the plan, each lane in its band
-python3 ../py_router/check_connected.py ROUTED.kicad_pcb   # and check_drc.py
+BRAID_PAIR_SLACKS=0 python3 route_lanes.py all --plan OUTDIR/plan.json --board $BENCH --nets "$NETS" --dest DU1 \
+    --mode seq --write ROUTED.kicad_pcb            # the router on the plan, each lane in its band (a pair's not widened)
+# the checkers on the run's nets, each matched under its sheet (*/NAME)
+python3 ../py_router/check_connected.py ROUTED.kicad_pcb --nets $(echo "*/$NETS" | sed 's|,| */|g')
+python3 ../py_router/check_drc.py ROUTED.kicad_pcb --nets $(echo "*/$NETS" | sed 's|,| */|g') --clearance-margin 0.1
 ```
 
 **4. Feedback to the fanout** (on our own ends):
@@ -244,7 +253,7 @@ python3 ../py_router/check_connected.py ROUTED.kicad_pcb   # and check_drc.py
 python3 whole_gate.py OUTDIR/p1.json OUTDIR/p1.audit --hot HOT.json
 python3 whole_feedback.py tmp/e/fo.plan.json FEEDBACK.json HOT.json          # the audits' crowded ends
 python3 whole_feedback.py --name tmp/e/fo.plan.json FEEDBACK.json [NET ...]  # or: lanes to move, by name
-FEEDBACK=FEEDBACK.json INCREMENTAL=tmp/e/fo.plan.json PLAN_JUDGE=ends \
+FANOUT_NETS="$NETS" FEEDBACK=FEEDBACK.json INCREMENTAL=tmp/e/fo.plan.json PLAN_JUDGE=ends \
     python3 fanout_from_plan.py tmp/e2/fo.kicad_pcb 51 --board=tmp/e/SOURCE_BOARD   # the 'source board:' its log names
 ```
 
