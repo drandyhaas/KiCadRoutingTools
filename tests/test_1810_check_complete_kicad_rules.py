@@ -6,8 +6,9 @@ KiCad finds it met or broken. With it, one kicad-cli DRC of the board as
 shipped counts the error rows naming each such rule: 0 reads it met
 (disclosed, `judged by KiCad <version>`), N blocks with the count. Anything
 that leaves KiCad's rows unattributable -- no kicad-cli, a rules file KiCad
-does not load (#1690), a rule name declared twice, a type cut at 199 rows --
-keeps today's INCOMPLETE and says why.
+does not load (#1690), a rule name declared twice, a type of its own cut
+short (#1865, `test_1865_capped_type_scope.py`) -- keeps today's INCOMPLETE
+and says why.
 
 Whether KiCad loaded the rules file is asked of KiCad, not only of the model
 of what it refuses: the staged copy's file gets one probe rule, and a report
@@ -167,11 +168,12 @@ def part1(b):
 
     for why, inj in (
             ('kicad-cli missing', {'error': 'kicad-cli not found (set KICAD_CLI)'}),
-            ('a type cut at 199 rows', dict(ok, capped_types=['clearance']))):
+            ('its own type cut short', dict(ok, capped_types=['clearance']))):
         code, doc = graded(b['met'], inj, '--kicad-rules')
         check(f'fails closed on {why}: INCOMPLETE, saying why',
               code == 4 and "nothing grades: 'court gap'" in doc['reason']
-              and ('kicad-cli not found' in doc['reason'] or 'cut at 199' in doc['reason']),
+              and ('kicad-cli not found' in doc['reason']
+                   or 'cut at 499 rows of clearance' in doc['reason']),
               doc['reason'][:300])
 
     dru = os.path.join(os.path.dirname(b['met']), 'b.kicad_dru')
