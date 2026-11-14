@@ -1368,8 +1368,10 @@ def _length_group_chains(pcb, chains, mode, tol, lo, hi, pads=None,
     joined by track copper leaves the group unmeasured (`unmeasured` True).
     In `pin_pair` mode `pads` is the group's named pad pairs and each chain
     carries `measured_pads`, the pair each of its nets was measured between
-    (#1866); `pad_nets` is every net the group's `"pads"` names, and one that
-    is in none of the chains fails the group."""
+    (#1866), and the group's `ambiguous_pair` names the nets whose pair was
+    chosen from three or more copper pads; `pad_nets` is every net the
+    group's `"pads"` names, and one that is in none of the chains fails the
+    group."""
     from chain_length import measure_chain, chain_label
     if chains == 'auto':
         try:
@@ -1398,6 +1400,10 @@ def _length_group_chains(pcb, chains, mode, tol, lo, hi, pads=None,
                           **({'measured_pads': m['pads']} if 'pads' in m else {})}
                       for k, m in measured.items()},
            'tolerance_mm': tol}
+    ambiguous = {n: pr for m in measured.values()
+                 for n, pr in (m.get('ambiguous_pair') or {}).items()}
+    if ambiguous:
+        out['ambiguous_pair'] = ambiguous
     if lo is not None or hi is not None:
         out.update(min_mm=lo, max_mm=hi)
     missing = sorted({n for m in measured.values() for n in m['missing_nets']})
@@ -1459,12 +1465,17 @@ def score_length(board: str, groups_file: str) -> dict:
     `mode: "pin_pair"` measures the PATH between two pads of each net instead
     of total net copper. Use it for any multipoint or stubbed net: total copper
     sums every branch and matches no real signal path. `"pads"` (#1866) names
-    the two pads, `{"/USB_DP": ["U3.6", "J1.A6"], ...}`; a net it does not
-    name is measured between its first two pads in the order the board file
-    lists its footprints, which need not be the lane's ends. Either way the
-    group's `measured_pads` names the pair each net was measured between. A
-    `"pads"` entry that is not two copper pads of a net of the group fails the
-    group and says why.
+    the two pads, `{"/USB_DP": ["U3.6", "J1.A6"], ...}`. A net it does not
+    name is measured between the pair `net_queries.pin_pair_pads` chooses
+    from its copper pads, whatever order the board file lists them in: its
+    two pads, or on a net of three or more the two farthest apart along the
+    copper (by straight line while the net is not joined), ties to the
+    labels first in natural order. Either way the group's `measured_pads`
+    names the pair each net was measured between, and `ambiguous_pair`
+    names, with its pair, each net whose pair was chosen from three or more
+    copper pads: its lane ends were assumed, so name them in `"pads"`. A
+    `"pads"` entry that is not two copper pads of a net of the group fails
+    the group and says why.
 
     `min_mm` / `max_mm` (#1812) bound each member's length; a member outside
     fails the group and is named in `out_of_bounds`. With a bound, one net is
@@ -1549,15 +1560,24 @@ def score_length(board: str, groups_file: str) -> dict:
                 detail[gname]['unknown_keys'] = unknown
             failures += 1          # a group naming nets that do not exist is a
             continue               # finding about the spec, not a pass
-        lengths, unjoined, measured_pads = {}, [], {}
+        lengths, unjoined, measured_pads, ambiguous = {}, [], {}, {}
         for n in names:
             if n not in by_name:
                 continue
-            L = net_match_length(pcb, by_name[n], mode=mode, pads=pads_of.get(n))
             if mode == 'pin_pair':
-                pair = pin_pair_pads(pcb, by_name[n], pads_of.get(n))
-                if pair:
-                    measured_pads[n] = [pad_label(p) for p in pair]
+                # the pair resolved once, so the length, its pad-to-die term
+                # and the name it is reported under are one pair
+                how = {}
+                pads_of[n] = pin_pair_pads(pcb, by_name[n], pads_of.get(n),
+                                           detail=how)
+                if pads_of[n]:
+                    measured_pads[n] = [pad_label(p) for p in pads_of[n]]
+                    if how.get('ambiguous'):
+                        ambiguous[n] = measured_pads[n]
+                L = (net_match_length(pcb, by_name[n], mode=mode, pads=pads_of[n])
+                     if pads_of[n] else None)
+            else:
+                L = net_match_length(pcb, by_name[n], mode=mode)
             if L is None:
                 unjoined.append(n)
             else:
@@ -1575,6 +1595,8 @@ def score_length(board: str, groups_file: str) -> dict:
                              'unjoined_nets': unjoined, 'missing_nets': missing}
             if mode == 'pin_pair':
                 detail[gname]['measured_pads'] = measured_pads
+                if ambiguous:
+                    detail[gname]['ambiguous_pair'] = ambiguous
             if unknown:
                 detail[gname]['unknown_keys'] = unknown
             unmeasured += 1
@@ -1588,8 +1610,11 @@ def score_length(board: str, groups_file: str) -> dict:
                          'worst': max(lengths, key=lengths.get)}
         if mode == 'pin_pair':
             # #1866: the pair each net was measured between -- the named one,
-            # else its first two pads in file order, which a reader can now see
+            # else the one pin_pair_pads chose; `ambiguous_pair` names the
+            # nets whose pair was chosen from three or more copper pads
             detail[gname]['measured_pads'] = measured_pads
+            if ambiguous:
+                detail[gname]['ambiguous_pair'] = ambiguous
         if lo is not None or hi is not None:
             detail[gname].update(min_mm=lo, max_mm=hi, out_of_bounds=bounds,
                                  lengths_mm={n: round(v, 4)
@@ -2036,7 +2061,9 @@ def build_parser():
                         '"tolerance_mm": 0.1, "mode": "pin_pair", "min_mm": .., '
                         '"max_mm": ..}} ("pads": {net: ["REF.PAD", "REF.PAD"]} '
                         'names the two pads pin_pair measures a net between; '
-                        'unnamed, its first two in file order) '
+                        'unnamed, its two copper pads farthest apart along '
+                        'the copper, flagged in ambiguous_pair on a net of '
+                        '3+ copper pads) '
                         '-- or "chains": [[net, net, ...], ...] '
                         'in place of "nets" for lanes through series parts '
                         '(a chain is its nets summed; "chains": "auto" takes '

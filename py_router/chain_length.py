@@ -56,7 +56,9 @@ def measure_chain(pcb_data, nets: Sequence, mode: str = 'total',
     part}. `mode` is net_match_length's ('total' or 'pin_pair'). In
     'pin_pair' mode `pads` may name the two pads a net is measured between
     ({net name: (pad, pad)}, #1866), and the result carries 'pads': {name:
-    [REF.PAD, REF.PAD]}, the pair each net was measured between."""
+    [REF.PAD, REF.PAD]}, the pair each net was measured between, and
+    'ambiguous_pair': the same for each net whose pair `pin_pair_pads`
+    chose from three or more copper pads because `pads` named none."""
     from net_queries import net_match_length, pad_label, pin_pair_pads
     id_of = {n.name: nid for nid, n in pcb_data.nets.items() if n.name}
     name_of = {nid: n.name for nid, n in pcb_data.nets.items()}
@@ -72,15 +74,23 @@ def measure_chain(pcb_data, nets: Sequence, mode: str = 'total',
             missing.append(names[-1])
     raw: Dict[str, Optional[float]] = {}
     measured_pads: Dict[str, List[str]] = {}
+    ambiguous: Dict[str, List[str]] = {}
     for nm, nid in zip(names, ids):
         if nid is None:
             continue
         given = (pads or {}).get(nm)
-        raw[nm] = net_match_length(pcb_data, nid, mode=mode, pads=given)
         if mode == 'pin_pair':
-            pair = pin_pair_pads(pcb_data, nid, given)
-            if pair:
-                measured_pads[nm] = [pad_label(p) for p in pair]
+            # the pair resolved once, so the length and its name agree
+            how: dict = {}
+            given = pin_pair_pads(pcb_data, nid, given, detail=how)
+            if given:
+                measured_pads[nm] = [pad_label(p) for p in given]
+                if how.get('ambiguous'):
+                    ambiguous[nm] = measured_pads[nm]
+            else:
+                raw[nm] = None
+                continue
+        raw[nm] = net_match_length(pcb_data, nid, mode=mode, pads=given)
     net_mm = {nm: None if L is None else round(L, 4) for nm, L in raw.items()}
     unjoined = [nm for nm, L in net_mm.items() if L is None]
     joints, unbridged, spans = [], [], []
@@ -103,6 +113,7 @@ def measure_chain(pcb_data, nets: Sequence, mode: str = 'total',
            'span_mm': (round(math.fsum(spans), 4) if not unbridged else None)}
     if mode == 'pin_pair':
         out['pads'] = measured_pads
+        out['ambiguous_pair'] = ambiguous
     return out
 
 
