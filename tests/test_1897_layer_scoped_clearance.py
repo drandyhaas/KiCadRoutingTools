@@ -260,6 +260,37 @@ def route_apart(td):
     ok('NO DRC VIOLATIONS FOUND' in drc(out), "check_drc is clean")
 
 
+def whole_board(td):
+    """The post-route passes on a real board: every pass that moves copper
+    prices a pair at the rule on the layer where the two items meet. The via
+    nudge read the scoped rules without their (layer ...) clause, and moved a
+    via 0.379 mm from a track the rule holds at 0.4."""
+    print("1e. splitflap_driver routed under a rule that widens F.Cu")
+    sub = os.path.join(td, 'splitflap')
+    os.makedirs(sub, exist_ok=True)
+    src = os.path.join(REPO, 'kicad_files', 'splitflap_driver.kicad_pcb')
+    board = os.path.join(sub, 'in.kicad_pcb')
+    check(PY + [os.path.join(REPO, 'py_router', 'copy_board.py'),
+                evidence(src, 'the board'), board], accept=True)
+    with open(os.path.join(sub, 'in.kicad_dru'), 'w', encoding='utf-8') as fh:
+        fh.write('(version 1)\n(rule "front wide"\n  (layer "F.Cu")\n'
+                 '  (condition "A.hasNetclass(\'Default\') && B.hasNetclass(\'Default\')")\n'
+                 '  (constraint clearance (min 0.4mm)))\n')
+    out = os.path.join(sub, 'out.kicad_pcb')
+    summary = os.path.join(sub, 'out.json')
+    check(PY + [os.path.join(REPO, 'py_router', 'route.py'), board, out,
+                '--json-out', summary], accept=True, timeout=900)
+    with open(evidence(summary, 'the summary'), encoding='utf-8') as fh:
+        doc = json.load(fh)
+    ok(not (doc.get('failed_single') or []) and len(doc.get('routed_single') or []) > 50,
+       f"every net routes: {len(doc.get('routed_single') or [])} routed, "
+       f"{doc.get('failed_single')} failed")
+    r = check(PY + [os.path.join(REPO, 'py_router', 'check_drc.py'),
+                    evidence(out, 'the routed board')], accept=True)
+    ok('NO DRC VIOLATIONS FOUND' in (r.stdout or '') and "'front wide':0.4" in (r.stdout or ''),
+       "check_drc grades the rule and finds the board clean")
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         grade(td)
@@ -267,6 +298,7 @@ def main():
         grade_apart(td)
         route_apart(td)
         pair_floor(td)
+        whole_board(td)
 
         print("2. a rule that tightens In1.Cu")
         sub = os.path.join(td, 'tight')
