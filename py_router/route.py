@@ -362,6 +362,7 @@ def _empty_results_data() -> dict:
         'keep_away': [],
         'length_match_groups': [],
         'skew_moved_by_cleanup': [],
+        'length_moved_by_cleanup': [],
     }
 
 
@@ -1296,6 +1297,57 @@ def _print_skew_moved(rows, what):
               f"-> {_sm['skew_after_mm']:.4f} mm"
               + ("" if _sm['was_within'] else " (already out, now further)")
               + " -- route.py does not re-match it (#1759)")
+
+
+def _print_length_moved(rows, what):
+    """The #1851 WARNING, one line per net `what` moved out of its
+    `.kicad_dru` length window (check_drc.length_moved_out_of_window rows)."""
+    for _lm in rows:
+        _u = _lm['unit']
+        _lim = ' / '.join(f"{_k} {_lm[_k]:g}" for _k in ('min', 'max')
+                          if _lm[_k] is not None)
+        print(f"  {RED}WARNING{RESET}: {what} moved {_lm['net']} out of its "
+              f"length rule '{_lm['rule']}' ({_lim} {_u}): "
+              f"{_lm['length_before']:.4f} -> {_lm['length_after']:.4f} {_u}"
+              + ("" if _lm['was_within'] else " (already out, now further)")
+              + " -- route.py does not re-tune it (#1851)")
+
+
+def _late_length_snapshot1851(pcb_data, output_file, return_results, results_data,
+                              write_model, rule_path, scope_names):
+    """#1851: check_drc.length_window_snapshot on the board the end-of-run
+    passes read and change (the written file on the CLI, the write model on
+    the GUI, pcb_data itself on the "nothing to route" return), for the nets
+    in `scope_names`. {} when no length rule binds one, which costs no parse,
+    and when the measurement fails, which is said on the console."""
+    import copy as _copy
+    try:
+        from check_drc import length_rule_nets, length_window_snapshot
+        names = set(scope_names)
+        bound = length_rule_nets(rule_path, pcb_data).bound
+        if not any(pcb_data.nets[m].name in names for m in bound
+                   if m in pcb_data.nets):
+            return {}
+        if return_results:
+            board = _copy.copy(pcb_data)
+            if write_model is not None:
+                segs_by_net, vias_by_net = write_model(results_data or {})
+                board.segments = [x for _l in segs_by_net.values() for x in _l]
+                board.vias = [x for _l in vias_by_net.values() for x in _l]
+            else:
+                board.segments = list(pcb_data.segments)
+                board.vias = list(pcb_data.vias)
+        elif output_file and os.path.isfile(output_file):
+            from kicad_parser import parse_kicad_pcb as _pk1851
+            board = _pk1851(output_file)
+        else:
+            return {}
+        ids = {nid for nid, n in board.nets.items() if n.name in names}
+        return length_window_snapshot(board, rule_path, ids)
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  (#1851 end-of-run length measurement failed: "
+              f"{type(_e).__name__}: {_e})")
+        return {}
 
 
 def _skew_row_key(row):
@@ -3853,6 +3905,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 return []
             _sk = _late_skew_snapshot1798(pcb_data, output_file, as_gui, rd,
                                           None, _skew_path1798, _scope1166)
+            _lw = _late_length_snapshot1851(pcb_data, output_file, as_gui, rd,
+                                            None, _skew_path1798, _scope1166)
             full = quick < 2
             for _pass in ((_late_kicad_dangling_split1217, _late_strict_collapse1063)
                           if full else ()) + (_late_dangling_via_sweep1166,) + (
@@ -3869,6 +3923,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     pcb_data, output_file, as_gui, rd, None, _skew_path1798,
                     _scope1166))
             _print_skew_moved(_moved, "the end-of-run cleanup (#1798)")
+            if _lw:
+                # #1851: and the nets a length rule holds to a window
+                from check_drc import length_moved_out_of_window as _lmo1851
+                _lmoved = _lmo1851(_lw, _late_length_snapshot1851(
+                    pcb_data, output_file, as_gui, rd, None, _skew_path1798,
+                    _scope1166))
+                _print_length_moved(_lmoved, "the end-of-run cleanup")
+                if _lmoved:
+                    _extra1499['length_moved_by_cleanup'] = _lmoved
+                    if rd is not None:
+                        rd['length_moved_by_cleanup'] = _lmoved
             return _moved
         if return_results:
             _rd659 = _empty_results_data()
@@ -5544,6 +5609,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                         sweep_scope_ids)
         except Exception as _e1759:
             print(f"  (#1759 skew snapshot failed: {_e1759})")
+    # #1851: likewise the nets a .kicad_dru length rule holds to a window
+    _len_before1851 = {}
+    if not (_ckpt_stop and not _ckpt_cleanup):
+        try:
+            from check_drc import length_window_snapshot as _lws1851
+            _len_before1851 = _lws1851(pcb_data, _skew_path1759, sweep_scope_ids)
+        except Exception as _e1851:
+            print(f"  (#1851 length snapshot failed: {_e1851})")
     _cleanup = None if (_ckpt_stop and not _ckpt_cleanup) else run_post_route_cleanup(
         results, pcb_data, sweep_scope_ids, config,
         protect_net_ids=_protect_unfinished,
@@ -9427,6 +9500,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 {m for r in _skew_before1759.values() if r for m in r['nets']}))
         if return_results and locals().get('results_data') is not None:
             results_data['skew_moved_by_cleanup'] = _late_skew1798
+    # #1851: the nets a length rule holds to a window, in ONE comparison from
+    # before the post-route cleanup to the board that ships.
+    _late_len1851 = None
+    if (_len_before1851 and final_reconcile and not skip_routing
+            and not _ckpt_stop and quick < 2):
+        from check_drc import length_moved_out_of_window as _lmo1851
+        _late_len1851 = _lmo1851(_len_before1851, _late_length_snapshot1851(
+            pcb_data, output_file, return_results, locals().get('results_data'),
+            _gui_write_model, _skew_path1759,
+            {n for n, r in _len_before1851.items() if r}))
+        _print_length_moved(_late_len1851,
+                            "the post-route and end-of-run cleanups")
+        if return_results and locals().get('results_data') is not None:
+            results_data['length_moved_by_cleanup'] = _late_len1851
 
     # #962: declare Type VII on every via this run put in a pad or a paste
     # opening. It runs HERE because this is after the last pass that adds or
@@ -9960,6 +10047,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _merged['skew_moved_by_cleanup'] = _late_skew1798
                 else:
                     _merged.pop('skew_moved_by_cleanup', None)
+            # #1851: and the length-window rows
+            if _merged is not None and _late_len1851:
+                _merged['length_moved_by_cleanup'] = _late_len1851
             # #1146: likewise the keep-away reading of the shipped board.
             if _merged is not None and _ka_shipped is not None:
                 _merged['keep_away'] = _ka_shipped

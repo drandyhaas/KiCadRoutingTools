@@ -145,17 +145,23 @@ def _centre_stub_net_ids(pcb_data):
     length window, and the net left the window by a via radius.
 
     The length-rule nets are the ones check_drc's length pass grades
-    (check_drc.length_rule_nets). The graze passes' read-only set (#1759)
-    stays _skew_bound_net_ids."""
-    ids = set(_skew_bound_net_ids(pcb_data))
+    (check_drc.length_rule_nets). The graze passes' read-only set is the
+    same nets (#1759, #1851)."""
+    return set(_skew_bound_net_ids(pcb_data)) | _length_window_net_ids(pcb_data)
+
+
+def _length_window_net_ids(pcb_data):
+    """Nets a `.kicad_dru` length rule holds to a window
+    (check_drc.length_rule_nets): graded by check_drc's length pass (#1313)
+    and by KiCad, and re-tuned by no later route.py step."""
     try:
         from check_drc import length_rule_nets
-        ids |= set(length_rule_nets(getattr(pcb_data, 'source_path', '') or '',
+        return set(length_rule_nets(getattr(pcb_data, 'source_path', '') or '',
                                     pcb_data).bound)
     except Exception as e:                                      # noqa: BLE001
         print(f"  (#1798 .kicad_dru length-rule nets unread, their via-centre "
-              f"stubs not held: {type(e).__name__}: {e})")
-    return ids
+              f"stubs and input copper not held: {type(e).__name__}: {e})")
+        return set()
 
 
 @dataclass
@@ -391,15 +397,20 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # micro-shift) run with the input copper of skew-graded nets read-only:
     # those nets go in a second call with keep_input_copper set, the rest in
     # the first as before. Inert (one call each) when no skew rule binds a
-    # net in scope.
+    # net in scope. #1851: and of the nets a .kicad_dru length rule holds to a
+    # window, which no later step re-tunes either.
     _ro_ids = set()
     if not (keep_input_copper or _judge):
-        _ro_ids = _skew_bound_net_ids(pcb_data)
+        _len_ids = _length_window_net_ids(pcb_data)
+        _ro_ids = _skew_bound_net_ids(pcb_data) | _len_ids
         if _ro_ids and scope_net_ids is not None:
             _ro_ids &= set(scope_net_ids)
         if _ro_ids:
-            print(f"{label}Graze passes: {len(_ro_ids)} skew-graded net(s) keep "
-                  f"their input copper (#1759): "
+            # the #1759 line as it was when only skew rules hold nets
+            _what = ("skew- or length-graded net(s) keep their input copper "
+                     "(#1759, #1851): " if _ro_ids & _len_ids else
+                     "skew-graded net(s) keep their input copper (#1759): ")
+            print(f"{label}Graze passes: {len(_ro_ids)} {_what}"
                   + ', '.join(sorted(pcb_data.nets[i].name for i in _ro_ids
                                      if i in pcb_data.nets)[:6])
                   + (' ...' if len(_ro_ids) > 6 else ''))

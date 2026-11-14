@@ -4553,6 +4553,60 @@ def skew_moved_out_of_range(before, after, tol=1e-4):
     return rows
 
 
+def length_window_snapshot(pcb_data, path, scope_ids=None):
+    """{net name: row} for every net a `.kicad_dru` length window grades
+    (`length_rule_nets`, in `scope_ids` when given), measured as the length
+    pass grades it: mm by `net_match_length(mode 'total')`, ps by the tuning
+    profile's delay (#1846). A row carries `length`, the window (`min`,
+    `max`), its `unit` and `excess`, how far the net is outside the window (0
+    within); None for a net that cannot be measured. {} when no rule binds
+    (#1851). Keyed by name: the shipped board may be a re-parse."""
+    lr = length_rule_nets(path, pcb_data, scope_ids, time_domain=True)
+    if not lr.bound:
+        return {}
+    from net_queries import net_match_length
+    timing = None
+    out = {}
+    for nid, rule in lr.bound.items():
+        name = lr.names[nid]
+        if rule.unit == 'ps':
+            if timing is None:
+                timing = _TimeDomain(path, pcb_data, lr.member, lr.names)
+            value = timing.delay(nid, rule, {})
+        else:
+            value = net_match_length(pcb_data, nid, 'total')
+        if value is None:
+            out[name] = None
+            continue
+        excess = 0.0
+        if rule.min_mm is not None:
+            excess = max(excess, rule.min_mm - value)
+        if rule.max_mm is not None:
+            excess = max(excess, value - rule.max_mm)
+        out[name] = {'net': name, 'rule': rule.name,
+                     'unit': 'ps' if rule.unit == 'ps' else 'mm',
+                     'length': round(value, 4), 'min': rule.min_mm,
+                     'max': rule.max_mm, 'excess': round(excess, 4)}
+    return out
+
+
+def length_moved_out_of_window(before, after, tol=1e-4):
+    """The nets `after` grades outside their length window that `before`
+    graded inside it, or outside by less: [{net, rule, unit, length_before,
+    length_after, min, max, was_within}]. Both are length_window_snapshot
+    results; a net either side could not measure is not compared (#1851)."""
+    rows = []
+    for name, a in sorted((after or {}).items()):
+        b = (before or {}).get(name)
+        if not a or not b or a['excess'] <= b['excess'] + tol or a['excess'] <= tol:
+            continue
+        rows.append({'net': name, 'rule': a['rule'], 'unit': a['unit'],
+                     'length_before': b['length'], 'length_after': a['length'],
+                     'min': a['min'], 'max': a['max'],
+                     'was_within': b['excess'] <= tol})
+    return rows
+
+
 def _pair_rule_pass(pcb_file, pcb_data, matching_net_ids, violations, quiet):
     """Grade every `.kicad_dru` skew and diff_pair_uncoupled rule (#1303).
 
