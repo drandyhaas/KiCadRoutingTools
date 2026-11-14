@@ -824,7 +824,22 @@ the GUI diff tab gets the same answer:
   `coupled_mm`, `uncoupled_mm`, `length_p_mm` / `length_n_mm`, `layers_p` /
   `layers_n`, `skew_mm`, the gap window, `coupled_floor_mm`, `coupled_share`
   (coupled run over the pair's length, capped at 1), `coupled_share_floor` and
-  `coupled`.
+  `coupled`. A member whose copper runs back along itself (#1873: a hybrid
+  terminal leg laid beside its own coupled middle) adds `self_overlap_mm`
+  (`{p, n}`, `net_queries.net_self_overlap`: two same-layer passes within 5
+  degrees of parallel whose copper overlaps over more than a width, counted
+  where it does, so two passes that converge count from where they meet and a
+  narrow pass inside a wider track counts too) and every such overlap in
+  `self_overlaps` (`member`, `layer`, the two passes, `centre_gap_mm`,
+  `along_mm`, `width_mm`). A `Self-overlap:` line names a pair with one longer
+  than twice its track width: `skew_mm` and the intra-pair status count all of
+  a member's copper, as KiCad's skew rule does, so that stretch is in them
+  twice. The pair's `intra_pair_matching` record carries the totals beside its
+  `status`, so a `matched` there can be read with them. A member with more
+  segments than the search takes is listed in `self_overlap_not_searched`
+  (and reads `null`, not 0, in `self_overlap_mm` beside a partner that has
+  some), and a search that failed is `self_overlap_error`: none of the three
+  keys means both members were searched and have none.
 - **A pair routed but not coupled** is outcome `uncoupled`, listed in
   `JSON_SUMMARY.uncoupled_diff_pairs` (and the GUI's completion dialog), and is
   **not** counted in `routed_diff_pairs` / `successful`. The end-of-run summary

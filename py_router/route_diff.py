@@ -2756,6 +2756,19 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         pcb_data, diff_pair_ids_to_route, routed_results,
         lambda _pr: _geom1303.get(_pr.p_net_id,
                                   (config.track_width, config.diff_pair_gap)))
+    # #1873: a member whose copper runs back along itself (every overlap is
+    # in the record; the line names one longer than twice its track width)
+    from diff_pair_custody import self_overlap_line as _so_line1873
+    for _pn1873, _rec1873 in sorted(pair_copper.items()):
+        _l1873 = _so_line1873(_pn1873, _rec1873)
+        if _l1873:
+            print(f"  {YELLOW}{_l1873}{RESET}")
+        if _rec1873.get('self_overlap_not_searched'):
+            from net_queries import SELF_OVERLAP_MAX_SEGMENTS
+            print(f"  {YELLOW}Self-overlap: {_pn1873} was not searched for copper "
+                  f"laid along itself ("
+                  + ', '.join(k.upper() for k in _rec1873['self_overlap_not_searched'])
+                  + f": more than {SELF_OVERLAP_MAX_SEGMENTS} segments){RESET}")
     pair_reports = build_pair_reports(state, diff_pair_ids_to_route,
                                       member_audit,
                                       skipped_fanout=skipped_fanout_info,

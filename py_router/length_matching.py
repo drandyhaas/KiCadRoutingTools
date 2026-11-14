@@ -4809,6 +4809,11 @@ def regrade_intra_pair_reports(reports, pair_copper, pcb_data, diff_pair_ids,
 
     `delta_before_mm` stays the matcher's estimate before it meandered: the
     shipped copper before the meander no longer exists to measure.
+    `self_overlap_mm` (#1873) is copied from the pair's copper record where
+    a member has copper laid along itself: `delta_mm` counts that stretch
+    twice, so a `matched` beside it is a match of two sums, one of which
+    holds that copper two times. `self_overlap_not_searched` and
+    `self_overlap_error` are copied with it: a member that was not searched.
     `pair_copper` is `diff_pair_custody.measure_pair_copper`'s records; a
     pair without one (no coupled result) is measured here."""
     from intra_pair_lane import pair_skew as _pair_skew, lane_pins as _lane_pins
@@ -4827,6 +4832,13 @@ def regrade_intra_pair_reports(reports, pair_copper, pcb_data, diff_pair_ids,
         rec['matcher_status'] = rec.get('status')
         rec['matcher_delta_mm'] = rec.get('delta_mm')
         rec['delta_mm'] = None if skew is None else round(skew, 4)
+        # #1873: `delta_mm` counts all of a member's copper, so copper a
+        # member lays along itself is in it twice. The record that says
+        # `matched` carries that length beside the status.
+        for _key in ('self_overlap_mm', 'self_overlap_not_searched',
+                     'self_overlap_error'):
+            if cop is not None and cop.get(_key):
+                rec[_key] = cop[_key]
         st = rec.get('status')
         if st in ('not-matchable', 'skipped'):
             continue
