@@ -4,7 +4,8 @@ route_diff.py.
 
 The differential tab reads the route tab's Via Span controls and hands them
 to the same engine `route_diff.py --via-span` calls. Both legs route
-tests/fixtures/1842/diff_pair (see tests/test_1842_via_span_diff_pairs.py)
+the board tests/fixtures/1842/diff_pair.py writes (see
+tests/test_1842_via_span_diff_pairs.py)
 with one step, via span F.Cu-In1.Cu on the pair `/D0`: the CLI with
 route_diff.py, the GUI with the same step as a plan through the REAL headless
 dialog and plan executor (`py_router/run_plan.py`). They must agree on: the
@@ -27,7 +28,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, 'py_router'))
-BOARD = os.path.join(REPO, 'tests', 'fixtures', '1842', 'diff_pair.kicad_pcb')
+sys.path.insert(0, os.path.join(REPO, 'tests', 'fixtures', '1842'))
+import diff_pair  # noqa: E402
 KEYS = ('min_via_diameter', 'min_through_hole_diameter', 'min_microvia_diameter',
         'min_microvia_drill', 'min_via_annular_width')
 FAILS = []
@@ -72,10 +74,8 @@ def main():
         return 77
     py = [sys.executable, '-X', 'utf8']
     with tempfile.TemporaryDirectory() as td:
-        board = os.path.join(td, 'in.kicad_pcb')
-        run(py + [os.path.join(REPO, 'py_router', 'copy_board.py'), BOARD, board],
-            'copy_board')
-        with open(os.path.splitext(BOARD)[0] + '.kicad_pro', encoding='utf-8') as fh:
+        board = diff_pair.write(os.path.join(td, 'in.kicad_pcb'))
+        with open(os.path.splitext(diff_pair.BASE)[0] + '.kicad_pro', encoding='utf-8') as fh:
             own = json.load(fh)['board']['design_settings']['rules']
 
         cli_out = os.path.join(td, 'cli.kicad_pcb')

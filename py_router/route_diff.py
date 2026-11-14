@@ -831,8 +831,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if layers is None:
         layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']  # Default 4-layer signal stack
     # #1842: a via span is the step's sub-stack
-    from via_span import cut_layers_to_span as _cut1842
-    _span1842, _span_type1842, layers, layer_costs = _cut1842(
+    from via_span import step_span as _step_span1842
+    _span1842, _span_type1842, layers, layer_costs = _step_span1842(
         pcb_data, layers, layer_costs, via_span, via_span_type)
     if _span1842:
         # copper the step could not lay again stays where it is
@@ -1330,7 +1330,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         selected_net_ids=_sel_ids)
 
     # #1676: a via this run sizes itself starts at the board's own via rules
-    if via_from_class and _span_type1842 == 'micro':
+    from via_span import laser_drilled as _laser1842
+    if via_from_class and _laser1842(pcb_data.board_info.copper_layers,
+                                     _span1842, _span_type1842):
         # #1842: ... and under a micro via span, at the Default class's MICRO
         # via (a class's via_diameter is its through via's), on both fronts
         from via_span import default_micro_via
@@ -1432,10 +1434,6 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         config_kwargs['via_span_type'] = _span_type1842
     config = GridRouteConfig(**config_kwargs)
     config.quick = int(quick or 0)
-    # #1842: the board as the span sees it, for every obstacle map this step
-    # builds (the board itself without a span)
-    from via_span import obstacle_board as _obs_board1842
-    _obs_pcb = _obs_board1842(pcb_data, config)
     # #1293: every P<->N pricing site (the #318 neck, via spacing, the
     # self-checks) reads the coupled-pair rule through pair_clearance.
     config.coupled_pair_clearances = _coupled_map
@@ -1802,7 +1800,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         if progress_callback:
             progress_callback(0, 0, "Building layer-swap probe obstacle map...")
         swap_probe_obstacles = build_base_obstacle_map(
-            _obs_pcb, config, [nid for _, nid in net_ids], _swap_probe_clearance,
+            pcb_data, config, [nid for _, nid in net_ids], _swap_probe_clearance,
             net_clearances=net_clearances, progress_callback=progress_callback)
         total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer = apply_diff_pair_layer_swaps(
             pcb_data, config, diff_pair_ids_to_route_set, diff_pairs,
@@ -1900,7 +1898,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     all_net_ids_to_route = [nid for _, nid in net_ids]
     print("Building base obstacle map...")
     base_start = time.time()
-    base_obstacles = build_base_obstacle_map(_obs_pcb, config, all_net_ids_to_route,
+    base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route,
                                              net_clearances=net_clearances,
                                              progress_callback=progress_callback)
     base_elapsed = time.time() - base_start
@@ -1939,7 +1937,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if progress_callback:
         progress_callback(0, 0, "Building diff-pair obstacle map...")
     dp_base_start = time.time()
-    diff_pair_base_obstacles = build_base_obstacle_map(_obs_pcb, config, all_net_ids_to_route,
+    diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route,
                                                        diff_pair_extra_clearance,
                                                        net_clearances=net_clearances,
                                                        progress_callback=progress_callback)
@@ -2002,7 +2000,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                             0, 0, f"Building diff-pair obstacle map "
                                   f"(width {geom[0]} / gap {geom[1]})...")
                     diff_pair_base_obstacles_by_geom[geom] = build_base_obstacle_map(
-                        _obs_pcb, replace(config, track_width=geom[0], diff_pair_gap=geom[1]),
+                        pcb_data, replace(config, track_width=geom[0], diff_pair_gap=geom[1]),
                         all_net_ids_to_route, _ec, net_clearances=net_clearances,
                         progress_callback=progress_callback)
             if len(set(pair_diff_geom.values())) > 1:
@@ -2071,7 +2069,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             as its geometry's map is -- stamped at the narrowed widths, with
             the same connector regions blocked."""
             dp_map = build_base_obstacle_map(
-                _obs_pcb, narrow_config, all_net_ids_to_route,
+                pcb_data, narrow_config, all_net_ids_to_route,
                 _cec1729(narrow_config), net_clearances=net_clearances)
             _block_connector_regions(only_geom=geom, dp_map=dp_map)
             return dp_map
@@ -2093,6 +2091,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Match the GND family robustly ('/GND', 'GNDA', 'DGND', ... all count),
     # not a literal 'GND' that silently disabled --gnd-vias on most boards (#379).
     gnd_net_id = None
+    # #1842: JSON_SUMMARY['via_span']['gnd_return_vias'] -- what a via-span
+    # step did with the pairs' GND return vias
+    _gnd_span1842 = 'laid' if config.gnd_via_enabled else 'off'
     if config.gnd_via_enabled:
         gnd_net_id, gnd_net_name = resolve_gnd_net_id(pcb_data)
         _gnd_off_span = False
@@ -2111,6 +2112,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 config.gnd_via_enabled = False
                 gnd_net_id = None
                 _gnd_off_span = True
+                _gnd_span1842 = (f"not laid: no '{gnd_net_name}' pour on a layer of "
+                                 f"{config.via_span[0]}-{config.via_span[-1]}")
         if gnd_net_id:
             print(f"GND net: '{gnd_net_name}' (id {gnd_net_id}) "
                   f"(GND vias will be added as obstacles)")
@@ -2125,12 +2128,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             hint = f" Candidate nets: {', '.join(cands)}." if cands else ""
             print(f"WARNING: --gnd-vias is enabled but no GND net was found; "
                   f"GND return vias will NOT be placed.{hint}")
+            _gnd_span1842 = 'not laid: no GND net'
 
     # Pre-compute net obstacles for caching (speeds up per-route setup)
     print("Pre-computing net obstacle cache...")
     cache_start = time.time()
     net_obstacles_cache = precompute_all_net_obstacles(
-        _obs_pcb, list(all_unrouted_net_ids), config,
+        pcb_data, list(all_unrouted_net_ids), config,
         extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
     )
     cache_time = time.time() - cache_start
@@ -2902,6 +2906,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # width floor, {layer: [solved_mm, floor_mm]} -- those layers will NOT
         # meet the impedance request. Key absent when no clamp fired.
         summary['impedance_width_clamped'] = impedance_width_clamped
+    # #1842: the step's via span (route.py's key), and what became of the
+    # pairs' GND return vias under it
+    if config.via_span:
+        from via_span import via_layer_pair as _vlp1842
+        summary['via_span'] = {'layers': _vlp1842(config),
+                               'type': config.via_span_type,
+                               'gnd_return_vias': _gnd_span1842}
     # #831: which copper the plane-fragility field came from (route.py's key).
     _pfg = getattr(config, '_plane_fragility_geometry', None)
     if _pfg is not None:
@@ -3067,6 +3078,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             'rule_area_keepouts': summary.get('rule_area_keepouts'),
             # #1843: JSON_SUMMARY['area_necks'] (absent without a neck)
             'area_necks': summary.get('area_necks'),
+            # #1842: JSON_SUMMARY['via_span'] (None without a span)
+            'via_span': summary.get('via_span'),
             # successful/failed only count pairs that were coupled-routed or
             # outright failed -- pairs deferred to the single-ended pass
             # (electrically short, or coupled route failed), and pairs
@@ -3659,14 +3672,18 @@ Examples:
     # The fab floor's via sizes are a mechanical drill's and do not pin it.
     _micro_span = False
     if getattr(args, 'via_span', None):
-        from via_span import file_copper_layers, resolve_via_span, default_micro_via
+        from via_span import (file_copper_layers, resolve_via_span, default_micro_via,
+                              laser_drilled)
+        _file_copper1842 = file_copper_layers(args.input_file)
         try:
             _span_layers, _span_type = resolve_via_span(
-                file_copper_layers(args.input_file), args.via_span[0], args.via_span[1],
+                _file_copper1842, args.via_span[0], args.via_span[1],
                 getattr(args, 'via_span_type', None))
         except ValueError as _e:
             parser.error(f"--via-span: {_e}")
-        _micro_span = _span_type == 'micro'
+        # the GUI's via size / drill controls read the same predicate
+        _micro_span = laser_drilled(_file_copper1842, args.via_span,
+                                    getattr(args, 'via_span_type', None))
         if _span_type and not any(a in ('--layers', '-l') for a in sys.argv[1:]):
             # no layers were asked for: the pairs route on the span's
             args.layers = list(_span_layers)

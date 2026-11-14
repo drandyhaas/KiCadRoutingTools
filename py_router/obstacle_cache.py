@@ -10,7 +10,6 @@ from typing import List, Tuple, Dict, Set, Optional
 from dataclasses import dataclass, field
 import math
 import numpy as np
-from via_span import reads_span_board as _reads_span_board
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord, extra_on_layer
@@ -773,7 +772,6 @@ def _small_via_pair(config, pcb_data):
     return None
 
 
-@_reads_span_board
 def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               extra_clearance: float = 0.0,
                               diagonal_margin: float = defaults.DIAGONAL_MARGIN,
