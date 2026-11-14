@@ -123,11 +123,14 @@ def clashes(pcb, runs, layers, clear, why=None):
     return ban, sep
 
 
-def relayer(board, out, moves, log=print):
+def relayer(board, out, moves, log=print, stays=()):
     """`moves` [(net, its stub's end, the layer the stub is on, the layer to move it to[, group])] on `board`, written to
     `out` with its siblings. A GROUP (a pair end's legs, one key) moves whole or not at all: one leg moved alone leaves
-    the pair on two layers there, which no coupled route launches from. Returns (the nets moved, the nets left -- no run
-    to a via, or a leg of a group one of whose legs has none)"""
+    the pair on two layers there, which no coupled route launches from. `stays` [(net, its stub's end, its layer)]: the
+    ends the plan LEAVES on the layer they stand on -- nothing of theirs moves, but one standing on its via, planned on
+    its neck's own layer, has a via that joins nothing all the same (a dog-bone's at its stub's end, the lane arriving
+    on the pad's layer), and it goes as a moved run's does. Returns (the nets moved, the nets left -- no run to a via,
+    or a leg of a group one of whose legs has none)"""
     from kicad_parser import parse_kicad_pcb
     from kicad_writer import remove_segments_from_content, add_tracks_and_vias_to_pcb
     with contextlib.redirect_stdout(io.StringIO()):
@@ -162,6 +165,11 @@ def relayer(board, out, moves, log=print):
         add += [dict(start=(s.start_x, s.start_y), end=(s.end_x, s.end_y), width=s.width, layer=L1, net_id=s.net_id)
                 for s in run]
         moved.append(nm)
+    for nm, pt, L in stays:
+        nid = byname.get(nm)
+        on = [v for v in pcb.vias if v.net_id == nid and math.hypot(v.x - pt[0], v.y - pt[1]) < v.size / 2]
+        if nid is not None and on:
+            at_via.append((nid, on[0], L))
     n2n = {i: n.name for i, n in pcb.nets.items()}
     content, n_cut = remove_segments_from_content(open(board, encoding='utf-8').read(), strip, n2n)
     if n_cut != len(strip):

@@ -1514,18 +1514,23 @@ def relay_ends(d, bench, J, say, name='fo_layers', env=None):
     # F and B swapped -- read back into the sidecar's own frame, or a run kept on the board's B moves onto its F)
     from bga_fanout.flip_frame import other_layer
     OL = other_layer if int(sc.get('chi') or 1) < 0 else (lambda L: L)
-    moves = []
+    moves, stays = [], []
     for lane, ls in sorted(J['layers'].items()):
         for k_, L1 in ((0, OL(ls[0])), (1, OL(ls[-1]))):
             for leg in legs.get(lane, [lane]):
                 L0 = sc['tooth_layer' if k_ == 0 else 'dest_layer'].get(leg)
                 if L0 and L1 != L0 and leg in sc['ends']:
                     moves.append((leg, tuple(sc['ends'][leg][k_]), L0, L1, (lane, k_)))     # (a pair end: one group)
-    if not moves:
+                elif L0 and leg in sc['ends']:
+                    # (an end the plan leaves on the layer it stands on: nothing moves, but a via it stands on that
+                    # joins nothing there -- planned on its neck's own layer, which the solve counts a via dropped --
+                    # goes all the same, relayer's `stays`)
+                    stays.append((leg, tuple(sc['ends'][leg][k_]), L0))
+    if not moves and not stays:
         return bench
     import relayer
     out = os.path.join(d, name + '.kicad_pcb')
-    moved, left = relayer.relayer(bench, out, moves, log=lambda s: say('  ' + s))
+    moved, left = relayer.relayer(bench, out, moves, log=lambda s: say('  ' + s), stays=stays)
     if left:
         say(f"  the plan's layers for {', '.join(sorted(set(left)))} could not be laid: their stubs run to no via")
     # NO BALL WALLED IN by a run moved (SRC_WALLS, as the fanout's realize and berths hold it): where the runs moved
@@ -1582,7 +1587,7 @@ def relay_ends(d, bench, J, say, name='fo_layers', env=None):
             if not keep_:
                 out = bench
                 break
-            moved, left = relayer.relayer(bench, out, keep_, log=lambda s: say('  ' + s))
+            moved, left = relayer.relayer(bench, out, keep_, log=lambda s: say('  ' + s), stays=stays)
         if kept_:
             vb_ = (env or {}).get('VBAN_WALLS') or os.path.join(d, 'vban_walls.json')   # (the round's one file)
             rows_ = json.load(open(vb_)) if os.path.isfile(vb_) else []
