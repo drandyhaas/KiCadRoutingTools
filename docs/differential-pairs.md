@@ -838,6 +838,13 @@ the GUI diff tab gets the same answer:
   (and reads `null`, not 0, in `self_overlap_mm` beside a partner that has
   some), and a search that failed is `self_overlap_error`: none of the three
   keys means both members were searched and have none.
+  The direct hybrid no longer lays the shape it was found on: a terminal leg
+  that ran beside its own coupled middle up to the middle's end is joined to
+  the middle where the two first meet, and the doubled stretch (the middle's
+  tail and the leg copper on it) is not laid
+  (`diff_pair_routing._fold_legs_onto_middle`; the step prints `leg fold
+  (#1873): net N joins its coupled middle X mm short of the middle's end`). A
+  tail that carries the net's own via is left as it was.
 - **A pair routed but not coupled** is outcome `uncoupled`, listed in
   `JSON_SUMMARY.uncoupled_diff_pairs` (and the GUI's completion dialog), and is
   **not** counted in `routed_diff_pairs` / `successful`. The end-of-run summary

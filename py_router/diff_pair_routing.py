@@ -4196,6 +4196,17 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                     return None, (f"{bypassed} leg plan(s) joined the terminals "
                                   f"without the coupled middle")
                 return None, _LEGS_UNATTACHED
+            # #1873: a leg that ran back along its own middle joins it where
+            # the two first meet
+            mid_segs, leg_segs, _folded = _fold_legs_onto_middle(
+                mid_segs, leg_segs, p_vias + n_vias + leg_vias + list(pair_vias),
+                (p_net_id, n_net_id))
+            if _folded:
+                print("      leg fold (#1873): "
+                      + ", ".join(f"net {_n} joins its coupled middle {_mm:.3f} mm "
+                                  f"short of the middle's end" for _n, _mm in
+                                  sorted(_folded.items()))
+                      + "; the doubled copper is not laid")
             all_segs = mid_segs + leg_segs
             all_vias = p_vias + n_vias + leg_vias
             # The legs are single-ended grid routes attracted to each other:
@@ -4754,6 +4765,151 @@ def _terminal_island_taps(term_xy, own_segs, own_vias, coord, layer_names):
         return []
     from single_ended_routing import get_all_segment_tap_points
     return get_all_segment_tap_points(isl_s, coord, layer_names, vias=isl_v)
+
+
+#: #1873: two pieces of one net run along each other when they are within
+#: this sine of parallel (5 degrees, `net_queries.net_self_overlap`'s reading).
+_FOLD_SIN = 0.0872
+
+
+def _fold_legs_onto_middle(mid_segs, leg_segs, own_vias, net_ids):
+    """#1873: where a terminal leg runs back along its own coupled middle to
+    reach the middle's end, join the two where they first meet instead.
+
+    A leg is routed to the END of its net's coupled middle. When the terminal
+    lies beside the middle short of that end, the cheapest path runs beside
+    the middle, on the same layer and inside its copper, up to the end: one
+    strip of copper laid twice (glasgow_revC /IO_Banks/Z9_N, 0.85 mm, 0.05 mm
+    off a 0.2 mm track). The net's length counts that stretch twice, so the
+    pair's skew reads matched while the signal's path is that much shorter.
+
+    For each net in `net_ids` and each free end of its middle: the middle is
+    walked back from that end. A leg segment that overlaps a middle segment
+    there (same layer, within `_FOLD_SIN` of parallel, centre lines closer
+    than half the two widths together, over more than the narrower width),
+    from that segment's end nearest the free end, marks the doubled stretch.
+    The middle is cut where the overlap stops, the leg is cut at the same
+    place, and a join the width of their offset connects them; the middle's
+    tail and the leg copper lying on it (the turn back) are not laid. Only
+    the end's first `2 x reach` of middle may lie before the overlap (the
+    middle's own end stub). Left alone: a tail that carries one of the net's
+    vias, and any fold that would leave the net's copper in more pieces.
+
+    Returns (mid_segs, leg_segs, {net_id: mm of doubled copper removed})."""
+    from dataclasses import replace as _rep
+    folded = {}
+
+    def _k(x, y):
+        return (round(x, 4), round(y, 4))
+
+    def _pieces(segs, vias):
+        par = {}
+
+        def find(k):
+            while par.setdefault(k, k) != k:
+                par[k] = par[par[k]]
+                k = par[k]
+            return k
+        for s in segs:
+            par[find(_k(s.start_x, s.start_y))] = find(_k(s.end_x, s.end_y))
+        for v in vias:
+            find(_k(v.x, v.y))
+        return len({find(k) for k in list(par)})
+
+    for nid in net_ids:
+        mine_v = [v for v in own_vias if v.net_id == nid]
+        for _round in range(4):
+            M = [s for s in mid_segs if s.net_id == nid]
+            L = [s for s in leg_segs if s.net_id == nid]
+            at = {}
+            for s in M:
+                at.setdefault(_k(s.start_x, s.start_y), []).append(s)
+                at.setdefault(_k(s.end_x, s.end_y), []).append(s)
+            best = None
+            for end, touching in at.items():
+                if len(touching) != 1:
+                    continue                      # not a free end of the middle
+                # walk the middle back from this end: (segment, its end nearest
+                # the free end, the path length from the free end to that point)
+                walk, cur, seg, d0 = [], end, touching[0], 0.0
+                seen = set()
+                while seg is not None and id(seg) not in seen:
+                    seen.add(id(seg))
+                    a, b = _k(seg.start_x, seg.start_y), _k(seg.end_x, seg.end_y)
+                    near = (seg.start_x, seg.start_y) if a == cur else (seg.end_x, seg.end_y)
+                    far = (seg.end_x, seg.end_y) if a == cur else (seg.start_x, seg.start_y)
+                    walk.append((seg, near, far, d0))
+                    d0 += math.hypot(far[0] - near[0], far[1] - near[1])
+                    cur = _k(*far)
+                    nxt = [s for s in at.get(cur, ()) if id(s) not in seen]
+                    seg = nxt[0] if len(nxt) == 1 else None
+                for idx, (m, near, far, lead) in enumerate(walk):
+                    lm = math.hypot(far[0] - near[0], far[1] - near[1])
+                    if lm < 1e-9:
+                        continue
+                    ux, uy = (far[0] - near[0]) / lm, (far[1] - near[1]) / lm
+                    for l in L:
+                        if l.layer != m.layer:
+                            continue
+                        lx, ly = l.end_x - l.start_x, l.end_y - l.start_y
+                        ll = math.hypot(lx, ly)
+                        if ll < 1e-9 or abs(ux * ly - uy * lx) / ll > _FOLD_SIN:
+                            continue
+                        reach = ((m.width or 0.0) + (l.width or 0.0)) / 2.0
+                        w = min(m.width or 0.0, l.width or 0.0)
+                        if w <= 0 or lead > 2.0 * reach:
+                            continue
+                        t0 = (l.start_x - near[0]) * ux + (l.start_y - near[1]) * uy
+                        t1 = (l.end_x - near[0]) * ux + (l.end_y - near[1]) * uy
+                        o0 = (l.start_x - near[0]) * uy - (l.start_y - near[1]) * ux
+                        o1 = (l.end_x - near[0]) * uy - (l.end_y - near[1]) * ux
+                        if max(abs(o0), abs(o1)) >= reach - 1e-9:
+                            continue
+                        lo, hi = max(0.0, min(t0, t1)), min(lm, max(t0, t1))
+                        if hi - lo <= w or lo > reach:
+                            continue
+                        if best is None or lead + hi > best[0]:
+                            best = (lead + hi, walk[:idx], m, near, (ux, uy), lm, hi,
+                                    l, t0, t1, reach)
+            if best is None:
+                break
+            total, before_m, m, near, (ux, uy), lm, hi, l, t0, t1, reach = best
+            jx, jy = near[0] + ux * hi, near[1] + uy * hi      # the join, on the middle
+            tail = [(s_near, s_far) for _s, s_near, s_far, _d in before_m] + [(near, (jx, jy))]
+
+            def _to_tail(px, py):
+                return min(_pt_seg_dist(px, py, a[0], a[1], b[0], b[1]) for a, b in tail)
+            if any(_to_tail(v.x, v.y) < (v.size or 0.0) / 2.0 for v in mine_v):
+                break                             # the tail carries a via: leave it
+            # the leg: keep the part beyond the overlap, cut where it stops
+            far_is_start = t0 >= t1
+            fx, fy = (l.start_x, l.start_y) if far_is_start else (l.end_x, l.end_y)
+            t_far, t_near = max(t0, t1), min(t0, t1)
+            f = 0.0 if t_far - t_near < 1e-12 else (t_far - hi) / (t_far - t_near)
+            nx_, ny_ = (l.end_x, l.end_y) if far_is_start else (l.start_x, l.start_y)
+            cx, cy = fx + (nx_ - fx) * f, fy + (ny_ - fy) * f      # the cut, on the leg
+            gone_m = {id(s) for s, _n, _f, _d in before_m} | {id(m)}
+            new_mid = [s for s in mid_segs if id(s) not in gone_m]
+            if lm - hi > 1e-6:
+                far_pt = (near[0] + ux * lm, near[1] + uy * lm)
+                new_mid.append(_rep(m, start_x=jx, start_y=jy,
+                                    end_x=far_pt[0], end_y=far_pt[1]))
+            new_leg = [s for s in leg_segs
+                       if s is not l and not (
+                           s.net_id == nid and s.layer == m.layer
+                           and _to_tail(s.start_x, s.start_y) < reach
+                           and _to_tail(s.end_x, s.end_y) < reach)]
+            if math.hypot(cx - fx, cy - fy) > 1e-6:
+                new_leg.append(_rep(l, start_x=fx, start_y=fy, end_x=cx, end_y=cy))
+            if math.hypot(cx - jx, cy - jy) > 1e-6:
+                new_leg.append(_rep(l, start_x=cx, start_y=cy, end_x=jx, end_y=jy))
+            before = _pieces(M + L, mine_v)
+            after = _pieces([s for s in new_mid + new_leg if s.net_id == nid], mine_v)
+            if after > before:
+                break                             # the fold would open the net
+            mid_segs, leg_segs = new_mid, new_leg
+            folded[nid] = folded.get(nid, 0.0) + hi
+    return mid_segs, leg_segs, folded
 
 
 # Net-filtered keep-outs (net_keepouts.py): a hybrid leg is ONE net's track,
