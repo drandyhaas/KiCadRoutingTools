@@ -461,7 +461,10 @@ def copper_box(pcb, ref):
 
 
 def open_layers(pcb, ref):
-    """the routing layers no pad of part `ref` stands on (a drilled pad, or copper on every layer, stands on all)"""
+    """the routing layers no pad stands on inside part `ref`'s copper box: its own pads', and ANOTHER PART's whose copper
+    reaches into that box (a drilled pad, or copper on every layer, stands on all). A lane taken under a QFN on the back
+    layer, open by the QFN's own pads, met the decoupling caps placed under it there -- seven lanes to a connector's pins
+    priced straight under it on that layer, through the caps, and three of them never laid"""
     import route_layers
     RL = route_layers.layers()
     used = set()
@@ -469,6 +472,20 @@ def open_layers(pcb, ref):
         if (p.drill or 0) > 0 or '*.Cu' in p.layers:
             return frozenset()
         used |= {L for L in p.layers if L in RL}
+    x0, y0, x1, y1 = copper_box(pcb, ref)
+    for r, fp in pcb.footprints.items():
+        if r == ref:
+            continue
+        for p in fp.pads:
+            if p.pad_type == 'np_thru_hole':
+                continue
+            hx, hy = (p.size_x or 0.0) / 2, (p.size_y or 0.0) / 2
+            if min(x1, p.global_x + hx) - max(x0, p.global_x - hx) <= 1e-6 or \
+                    min(y1, p.global_y + hy) - max(y0, p.global_y - hy) <= 1e-6:
+                continue
+            if (p.drill or 0) > 0 or '*.Cu' in p.layers:
+                return frozenset()
+            used |= {L for L in p.layers if L in RL}
     return frozenset(L for L in RL if L not in used)
 
 

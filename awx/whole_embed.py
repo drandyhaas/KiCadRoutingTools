@@ -259,6 +259,37 @@ for v_ in ctx.base_vias:
                       'svia ' + whole_ctx.copper_name(ctx, v_)))
         FIXNET[len(FIXED) - 1] = v_.net_id
         NSTUB += 1
+# ...and under a GROUP's part, on the layers it leaves open (no box there: whole_passages.Census), the bus's own stubs
+# and vias standing inside its box whole -- the berths' vias between a connector's rows and their legs under it, which
+# a lane laid under the part passes as it passes any copper (the census lists the other nets' there)
+_OPENB = [Fr.DBs[r_] for r_ in Fr.dests if Fr.group is not None and Fr.group.open[r_]]
+_inopen = lambda x, y: any(b[0] <= x <= b[2] and b[1] <= y <= b[3] for b in _OPENB)     # noqa: E731
+NOPEN = 0
+for s_ in (ctx.base_segments if _OPENB else ()):
+    if s_.layer not in LI or s_.net_id not in bus_ids:
+        continue
+    ln_ = math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y)
+    k_ = max(1, int(math.ceil(ln_ / 0.2)))
+    r_ = s_.width / 2
+    for j_ in range(k_):
+        ax, ay = s_.start_x + (s_.end_x - s_.start_x) * j_ / k_, s_.start_y + (s_.end_y - s_.start_y) * j_ / k_
+        bx, by = (s_.start_x + (s_.end_x - s_.start_x) * (j_ + 1) / k_,
+                  s_.start_y + (s_.end_y - s_.start_y) * (j_ + 1) / k_)
+        if not (_inopen(ax, ay) or _inopen(bx, by)):
+            continue
+        FIXED.append((min(ax, bx) - r_, min(ay, by) - r_, max(ax, bx) + r_, max(ay, by) + r_,
+                      frozenset([LI[s_.layer]]), 'stub ' + whole_ctx.copper_name(ctx, s_)))
+        FIXNET[len(FIXED) - 1] = s_.net_id
+        NOPEN += 1
+for v_ in (ctx.base_vias if _OPENB else ()):
+    if v_.net_id not in bus_ids or not _inopen(v_.x, v_.y) or (round(v_.x, 4), round(v_.y, 4)) in _havec or \
+            _near(v_.x, v_.y, VIA_ST + bd.VIA_NEED):
+        continue
+    r_ = max(v_.size / 2, _pairs.svia_reach(ctx.cfg, v_.x, v_.y, v_.size))
+    FIXED.append((v_.x - r_, v_.y - r_, v_.x + r_, v_.y + r_, frozenset(range(NL)),
+                  'svia ' + whole_ctx.copper_name(ctx, v_)))
+    FIXNET[len(FIXED) - 1] = v_.net_id
+    NOPEN += 1
 
 
 def holes(layer, bar, bar_array):
@@ -623,7 +654,8 @@ def fit_dive(vk, V, hs):
     return None if best is None else (best[1], best[2])
 
 
-log(f'fixed copper: {len(FIXED)} piece(s), {NSTUB} of them stubs and vias on the arrays\' box lines; cells: '
+log(f'fixed copper: {len(FIXED)} piece(s), {NSTUB} of them stubs and vias on the arrays\' box lines'
+    + (f', {NOPEN} the bus\'s own under a group\'s parts open on some layer' if _OPENB else '') + '; cells: '
     + ', '.join(f'{LNAME[L_]} {len(MESH[L_].T)}' for L_ in range(NL)) + f', vias {len(VMESH.T)}  ({time.time() - T0:.1f} s)')
 
 # ---------------------------------------------------------------- the reference layout: each lane's runs and vias

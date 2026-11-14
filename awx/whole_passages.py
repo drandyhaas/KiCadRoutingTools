@@ -30,7 +30,10 @@ class Census:
     the arrays' boxes (the source's on every layer; the destination's where whole_solve's dest_boxes puts them), each
     island of other parts' pads (whole_ctx.part_islands: pads no lane passes between, one box per island and layer set
     -- a header's row of holes one wall on every layer), other nets' vias (every layer) and tracks (their own) outside
-    the arrays' boxes, and the board's edge"""
+    the arrays' boxes on their layers, and the board's edge. A GROUP's part stands on its pads' layers alone, as the
+    ends model and the solve have it (whole_frame.Group.open; whole_solve's dest_boxes): closed on every layer here, the
+    2-D geometry pushed every lane the plan laid under the part -- 2 to 3 mm deep under a PHY, under a connector -- out
+    onto the box's edge, into the strip between the two parts, where they crossed and stood short of a pitch"""
 
     def __init__(self, ctx, Fr, LAYN, trk, clr, via, pitch, bus_nets=(), dest_boxes=None):
         import whole_ctx
@@ -46,10 +49,17 @@ class Census:
         LI = {L: i for i, L in enumerate(self.LAYN)}
         obs = []                                          # (x0, y0, x1, y1, layer indices, label)
         obs.append(tuple(Fr.SB) + (ALL, 'src ' + str(Fr.src)))
+        grp = getattr(Fr, 'group', None)
+        if dest_boxes is None and grp is not None:
+            def dest_boxes(i):
+                return [B_ for r_, B_ in Fr.DBs.items() if self.LAYN[i] not in grp.open[r_]]
+        on_ = []                                          # each layer's boxes: the source's, the destination's there
         for i in range(self.NL):
+            on_.append([tuple(Fr.SB)])
             for r_, B_ in (Fr.DBs.items() if dest_boxes is None else
                            [(r_, B_) for r_, B_ in Fr.DBs.items() if B_ in dest_boxes(i)]):
                 obs.append(tuple(B_) + (frozenset([i]), 'dest ' + r_))
+                on_[i].append(tuple(B_))
         isl = {}
         import pairs as _pairs
         import board_rules
@@ -74,11 +84,13 @@ class Census:
         for (lab_, ls_), b_ in sorted(isl.items(), key=lambda kv: (kv[0][0], sorted(kv[0][1]))):
             obs.append(tuple(b_) + (ls_, lab_))
         self.islands = isl
-        boxes = [Fr.SB] + list(Fr.DBs.values())
-        inbox = lambda x, y: any(B_[0] <= x <= B_[2] and B_[1] <= y <= B_[3] for B_ in boxes)
+        # (what a box covers is left out: a via inside one that stands on EVERY layer, a track inside one on its own --
+        # a group's part open on a layer leaves the vias and tracks under it there in the way)
+        inbox = lambda x, y, bs: any(B_[0] <= x <= B_[2] and B_[1] <= y <= B_[3] for B_ in bs)   # noqa: E731
+        every = [B_ for B_ in on_[0] if all(B_ in on_[i] for i in range(self.NL))]
         bus = set(bus_nets)
         for v in ctx.base_vias:
-            if v.net_id in bus or inbox(v.x, v.y):
+            if v.net_id in bus or inbox(v.x, v.y, every):
                 continue
             r_ = (v.size or via) / 2
             obs.append((v.x - r_, v.y - r_, v.x + r_, v.y + r_, ALL, 'via ' + whole_ctx.copper_name(ctx, v)))
@@ -93,7 +105,7 @@ class Census:
                 ay_ = s_.start_y + (s_.end_y - s_.start_y) * j_ / k_
                 bx_ = s_.start_x + (s_.end_x - s_.start_x) * (j_ + 1) / k_
                 by_ = s_.start_y + (s_.end_y - s_.start_y) * (j_ + 1) / k_
-                if inbox(ax_, ay_) and inbox(bx_, by_):
+                if inbox(ax_, ay_, on_[LI[s_.layer]]) and inbox(bx_, by_, on_[LI[s_.layer]]):
                     continue
                 obs.append((min(ax_, bx_) - h_, min(ay_, by_) - h_, max(ax_, bx_) + h_, max(ay_, by_) + h_,
                             frozenset([LI[s_.layer]]), 'track ' + whole_ctx.copper_name(ctx, s_)))

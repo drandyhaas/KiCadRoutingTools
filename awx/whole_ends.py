@@ -1864,7 +1864,14 @@ JOINT = (awx_settings.get('ENDS_JOINT') or '1') == '1'
 JOINT_UNDECIDED = set()    # the buses (their lanes) whose joint ends' strict check could not decide, this process
 CHECK_UNDECIDED = set()    # ...and those a strict check left UNKNOWN -- no plan in its work, none proved absent
 JOINT_X = 10.0             # a crossing, in vias
-JOINT_LEARN = 20.0         # a crossing in a failing check's core: this many vias more, doubled each time it is again
+# ...or (JOINT_X_LAYERS, the group's model: group_ends) by the LAYERS its two lanes stand on: X_TRUNK where they share
+# no layer end to end -- the solve crosses them on two layers for nothing -- JOINT_X_MID where they share one at one
+# end only, and JOINT_X where they stand on one layer at BOTH ends: they cross only between two staggered changes of
+# layer, or one of them changes for it. Priced JOINT_X whatever the layers, the group's model kept every lane of a
+# bus on one side of the others and sent a pair round the back of the destination across the whole bus
+JOINT_X_LAYERS = False
+JOINT_X_MID = 0.2
+JOINT_LEARN = 20.0        # a crossing in a failing check's core: this many vias more, doubled each time it is again
 JOINT_TRIES = 5            # the joint ends put to the check at most this many times; none with a plan, the last
 #                           state stands -- and a round left with nets open is followed by the next seed's (whole_route)
 JOINT_SOFT = 3             # the joint ends solved again at most this many times, each core of conflicts no state holds priced
@@ -2422,12 +2429,52 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
             return B1_[(a, b)]
         CV = (T_, C_, wrap_, tc_, est_, est_[0] <= top_)
     X, const = {}, 0
+    # (JOINT_X_LAYERS: a crossing's base X_TRUNK, and past it its price by the layers the two lanes share -- one at one
+    # end JOINT_X_MID, one at both ends JOINT_X and what was learned)
+    W_E_ = min(Q(X_TRUNK), Q(JOINT_X))
+    W_M_ = max(W_E_, min(Q(JOINT_X_MID), Q(JOINT_X)))
+    on_ = {}
+
+    def on(l_):
+        # (the layers lane l_ stands on at either end)
+        if l_ not in on_:
+            us = [m.NewBoolVar('') for _ in range(NL)]
+            for q in range(NL):
+                m.AddMaxEquality(us[q], [y[0][l_][q], y[1][l_][q]])
+            on_[l_] = us
+        return on_[l_]
+
+    def shared(a, b, xv):
+        nv = m.NewBoolVar('')
+        ua, ub = on(a), on(b)
+        for q in range(NL):
+            m.AddBoolOr([nv, ua[q].Not(), ub[q].Not()] + ([] if isinstance(xv, int) else [xv.Not()]))
+        return nv
+
+    def both_ends(a, b, xv):
+        nv = m.NewBoolVar('')
+        for q in range(NL):
+            for r in range(NL):
+                m.AddBoolOr([nv, y[0][a][q].Not(), y[0][b][q].Not(), y[1][a][r].Not(), y[1][b][r].Not()]
+                            + ([] if isinstance(xv, int) else [xv.Not()]))
+        return nv
+
+    def by_layers(a, b, xv, w_):
+        # (a crossing's terms past its base, with their tags)
+        return [((W_M_ - W_E_), shared(a, b, xv), {'crossing': W_M_ - W_E_, 'learned': 0}),
+                ((w_ - W_M_), both_ends(a, b, xv), {'crossing': Q(JOINT_X) - W_M_, 'learned': w_ - Q(JOINT_X)})]
     for a, b in itertools.combinations(lanes, 2):
         w_ = Q(JOINT_X + (learned or {}).get(frozenset((a, b)), 0.0))
         terms = [(before(0, a, b), before1(b, a)), (before(0, b, a), before1(a, b))]
         if any(all(isinstance(e_, int) and e_ == 1 for e_ in t_) for t_ in terms):
-            const += w_
             xv = 1
+            if JOINT_X_LAYERS:
+                const += W_E_
+                for c_, v_, t_ in by_layers(a, b, 1, w_):
+                    cost.append(c_ * v_)
+                    cost_tag.append(('crossing', (a, b), t_))
+            else:
+                const += w_
         elif all(any(isinstance(e_, int) and e_ == 0 for e_ in t_) for t_ in terms):
             continue
         else:
@@ -2436,9 +2483,16 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
                 if any(isinstance(e_, int) and e_ == 0 for e_ in t_):
                     continue
                 m.AddBoolOr([xv] + [neg(e_) for e_ in t_ if not isinstance(e_, int)])
-            cost.append(w_ * xv)
-            cost_tag.append(('crossing', (a, b), {'crossing': Q(JOINT_X),
-                                                  'learned': w_ - Q(JOINT_X)}))
+            if JOINT_X_LAYERS:
+                cost.append(W_E_ * xv)
+                cost_tag.append(('crossing', (a, b), {'crossing': W_E_, 'learned': 0}))
+                for c_, v_, t_ in by_layers(a, b, xv, w_):
+                    cost.append(c_ * v_)
+                    cost_tag.append(('crossing', (a, b), t_))
+            else:
+                cost.append(w_ * xv)
+                cost_tag.append(('crossing', (a, b), {'crossing': Q(JOINT_X),
+                                                      'learned': w_ - Q(JOINT_X)}))
             if frozenset((a, b)) in getattr(E, '_nocross', ()):
                 m.Add(xv == 0)                     # (a crossing whose window the check could not hold: not again)
         X[(a, b)] = xv

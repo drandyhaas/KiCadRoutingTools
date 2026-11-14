@@ -17,9 +17,15 @@ model with no state names the lanes its rules cannot hold together, those lanes'
 it is built again -- until a state stands, or the lanes named have their whole menus already (then that is the answer,
 and the run stops). --full: every ball its whole menu from the start.
 
+THE TIERS (GROUP_TIERS, the default): every BUS ball is offered its whole menu from the start, each move tagged with
+the first tier that holds it -- 0 the pattern, 1 the pattern from the next gap point that stands clear (a pair's
+balls: the lines too), 2 the straight moves toward the bus's other part from every clear gap point and from a via in
+the pad, 3 those by every face, 4 the lines, 5 the rest -- and THE SEARCH starts on the first tiers and takes a wider
+one where it pays (tier_search). The array's other balls keep the pattern, widened as above.
+
 THE MODEL is each bus's ends model (whole_ends._joint_model: an option a lane and end, each end on a layer its stub
-can take, the crossings the two orders make, the changes ranked first), its ends at an array chosen from that array's
-menu, and at each array ONE set of rules over every lane there alike:
+can take, the crossings the two orders make, each priced by the layers its two lanes share -- JOINT_X_LAYERS), its
+ends at an array chosen from that array's menu, and at each array ONE set of rules over every lane there alike:
 
   * VIAS: two moves one of whose vias stands on the other's site or within its reach of the other's run (a via is a
     barrel through every layer: conflict_groups' site and reach parts) are never both chosen;
@@ -27,7 +33,8 @@ menu, and at each array ONE set of rules over every lane there alike:
     crossing there, or leaving by one exit) stand on different layers;
   * WAYS OUT: no via stands in a bus lane's way out of its exit -- the lane goes on from there, straight out past the
     face, at its own track and the router's clearance (joint_escape.exit_ray_conflicts): a plane ball's drop, or the
-    via of another lane's escape;
+    via of another lane's escape -- and a PAIR's way out from the middle of its two exits on, the pair's width, where
+    the route lays it as one lane;
   * PAIRS WHOLE: no other lane's exit lies between a pair's two exits on the pair's layer there -- a pair is one lane
     to the route (whole_frame's PairSplit);
   * REGIONS (an array several buses leave): on each layer, a bus's exits are ONE stretch round the array with no
@@ -56,14 +63,18 @@ menu, and at each array ONE set of rules over every lane there alike:
 
 EVERY rule is hard. Where no state holds them all the rules that cannot hold together are named, and the run stops.
 
-THE SEARCH is the weighted one, then the rest alone under the upper rank it reached. Its state is CHECKED BY THE WHOLE
+THE SEARCH (tier_search): the start, each lane on its first tiers wherever a state allows; then rounds that free a
+few lanes on their whole menus -- about a plane ball fanned out or a walled ball first, else at random or about one
+lane and its neighbours -- each other lane held at the best state; until a dozen rounds gain less than a via. Each
+solve bounded by deterministic batches, never a clock. (GROUP_TIERS=0: the weighted search, then the rest alone under
+the upper rank it reached.) Its state is CHECKED BY THE WHOLE
 SOLVE, bus by bus, as a bus's own ends were (whole_ends.joint_choose): a refusal teaches -- lanes held to one layer,
 crossings held apart, the lanes' state refused -- the lanes named get their whole menus, and the model is solved again
 (whole_ends.JOINT_TRIES at most; ends with no plan are no answer, exit 5). A bus's FIRST refusal, on the pattern,
 gives its balls THE LINES instead: from the pattern's via site, every line it can leave along (some thirty moves a
 ball). Each model starts from the last one's state.
-The objective is the buses' own, summed: a walled ball first; then the changes of layer and the runs on a plane's
-layer, together; then the rest.
+The objective is the buses' own, summed: a walled ball (or a plane ball fanned out) first; then the rest, a change of
+layer CHANGE_VIAS vias in it and a run on a plane's layer at its price in changes.
 
 CAPTURES: a directory of DEST.ends.pkl, each bus's ends model as its own run built it (whole_ends.choose under
 ENDS_CAPTURE): its plan state -- the frame, the cut, a row part's berths' menu -- and its run's settings; its menus at
@@ -128,8 +139,149 @@ STRAP_VIAS = 2.0    # a strap, in vias: more than the drop it does without (1), 
 # at the ends model's own 1.2 a pair left on the back layer 2 mm short of a part's pad, no room to change before it
 EXIT_REACH = 2.0
 SNAP = 0.02         # mm: two coordinates of an array's lines this close are one (_snap)
+# THE TIERS: every bus ball offered its WHOLE menu, each move tagged with the first tier that holds it -- 0 the pattern,
+# 1 the pattern from the next clear site (a pair's balls: the lines too), 2 the straight moves toward the bus's other
+# part from every clear site and from a via in the pad, 3 those by every face, 4 the lines, 5 the rest -- and the
+# search (tier_search) starts each lane on its first TIER_START tiers and widens where it pays. 0 = the pattern and a
+# refusal's widening, the start nearest the ends wanted and the search, as before
+GROUP_TIERS = (awx_settings.get('GROUP_TIERS') or '1') == '1'
+TIER_START = 1      # the start: each lane on its first tiers up to this one wherever a state allows
+TIER_OVER = 50.0    # ...a lane past them priced this many vias in the start alone
+LNS_K = 8           # a round of the search frees this many lanes on their whole menus
+LNS_NEAR = 2.5      # mm: another ball this near a freed lane's balls, or the costly ball a round is about, is freed too
+LNS_STALL = 12      # the search ends where this many rounds in a row gained less than a via's worth together
+LNS_BATCHES = 24    # a round's deterministic batches (a round frees a few lanes, not the model)
+LNS_HOT = 3         # rounds about one costly ball (fanned out, walled) with no gain before the search lets it be
+# a lane's CHANGE OF LAYER, in vias -- in the rest's own currency (a run on a plane's layer at its price in changes).
+# Ranked above everything below it, one change outweighed any number of crossings and any length
+CHANGE_VIAS = 2.0
 # (a bus's own run's settings that name ITS fanout: not the group's)
 OWN_KEYS = ('FANOUT_JOINT', 'FANOUT_ESCAPE', 'FANOUT_NETS', 'DEST', 'ENDS_CAPTURE', 'ENDS_ONLY')
+
+
+def tier_search(m, meta, log, seed=1):
+    """THE SEARCH ON TIERED MENUS (GROUP_TIERS) of model `m`, its objective set. `meta`: 'lanes' [{'x': [the option
+    variables of each end], 'tier': [their tiers], 'at': [the places of its balls at each end]}], 'others' [{'vars',
+    'at'}] (the arrays' other balls), 'W_TOP' (a walled ball's, or a plane ball fanned out's, price).
+    THE START: the whole model, each lane priced TIER_OVER vias past its first TIER_START tiers -- a state as near the
+    pattern as the rules allow, a lane taken past it only where none holds or a walled ball would stand. THEN THE
+    NEIGHBOURHOOD SEARCH: rounds that free LNS_K lanes on their whole menus -- about a costly ball still in the state
+    (fanned out, walled: the lanes nearest it), else a random LNS_K, else a lane and its nearest -- every other ball
+    within LNS_NEAR of theirs freed with them, everything else held at the best state, that state hinted; a better state
+    kept. It ends where LNS_STALL rounds in a row gained less than a via's worth together. Reproducible: one seed, each
+    solve bounded by deterministic batches, never by a clock. On two boards' models, searched 240 s each way, such
+    rounds ended 2 and 5 % below one search of the whole menus, and on one of them 16 % below the pattern's alone; freeing the
+    costliest lane and those it crosses instead, a tier at a time or all at once, ended between the two.
+    Returns (the state, a value per variable, or None; a line for the log)"""
+    from ortools.sat.python import cp_model
+    import cp_seed
+    import whole_solve
+    P = m.Proto()
+    nv = len(P.variables)
+    ob = P.objective
+    obj = list(zip(ob.vars, ob.coeffs))
+
+    def value(vs):
+        return sum(c * (vs[v] if v >= 0 else 1 - vs[-v - 1]) for v, c in obj)
+    lanes, others, W_TOP = meta['lanes'], meta['others'], meta['W_TOP']
+    pts_of = [[tuple(p) for k_ in (0, 1) for p in e['at'][k_]] for e in lanes]
+    at_of = {}
+    for j, e in enumerate(lanes):
+        for k_ in (0, 1):
+            for v in e['x'][k_]:
+                if v >= 0:
+                    at_of.setdefault(v, pts_of[j])
+    for o in others:
+        for v in o['vars']:
+            at_of.setdefault(v, [tuple(o['at'])])
+    top = sorted(v for v, c in obj if v >= 0 and c >= W_TOP and v in at_of)
+
+    def run(fix, hint, batches, extra=None):
+        mc = m.Clone()
+        Pc = mc.Proto()
+        for v, x in fix.items():
+            d = Pc.variables[v].domain
+            d.clear()
+            d.extend([x, x])
+        if hint is not None:
+            Pc.clear_solution_hint()
+            Pc.solution_hint.vars.extend(range(nv))
+            Pc.solution_hint.values.extend(hint)
+        if extra is not None:
+            extra(mc)
+        s = cp_seed.solver()
+        s.parameters.num_workers = whole_solve.SOLVE_WORKERS
+        s.parameters.subsolvers.extend(SEARCH)
+        s.parameters.interleave_search = True
+        s.parameters.max_num_deterministic_batches = batches
+        s.parameters.share_glue_clauses = False
+        s.parameters.share_binary_clauses = False
+        r = s.Solve(mc)
+        return (list(s.ResponseProto().solution)[:nv] if r in (cp_model.OPTIMAL, cp_model.FEASIBLE) else None), \
+            s.StatusName(r)
+
+    def over(mc):
+        # (the start's price on a lane past its first tiers: a literal each, set by any option past them)
+        Pc = mc.Proto()
+        for e in lanes:
+            vs = [v for k_ in (0, 1) for v, t in zip(e['x'][k_], e['tier'][k_]) if v >= 0 and t > TIER_START]
+            if vs:
+                o = mc.NewBoolVar('')
+                for v in vs:
+                    mc.AddImplication(mc.GetBoolVarFromProtoIndex(v), o)
+                Pc.objective.vars.append(o.Index())
+                Pc.objective.coeffs.append(int(round(1000 * TIER_OVER)))
+    t0 = time.time()
+    inc, st = run({}, None, BATCHES, extra=over)
+    if inc is None:
+        return None, f'no state [{st}]'
+    best = value(inc)
+    n_past = sum(1 for e in lanes if any(inc[v] for k_ in (0, 1) for v, t in zip(e['x'][k_], e['tier'][k_])
+                                         if v >= 0 and t > TIER_START))
+    log(f'  the start, each lane on its first {TIER_START + 1} tiers where a state allows ({n_past} of {len(lanes)} '
+        f'past them) [{st}]: {best / 1000:.1f} ({time.time() - t0:.0f} s)')
+    rng = random.Random(seed)
+    dist = lambda ps, qs: min((math.hypot(p[0] - q[0], p[1] - q[1]) for p in ps for q in qs), default=1e9)  # noqa: E731
+
+    def nearest(ps, k, but=()):
+        return [j for _d, j in sorted((dist(pts_of[j], ps), j) for j in range(len(lanes)) if j not in but)[:k]]
+    hist, rnd, hot_n, n_hot = [best], 0, collections.Counter(), 0
+    while True:
+        rnd += 1
+        hot = [v for v in top if inc[v] and hot_n[v] < LNS_HOT]
+        centre = []
+        if hot:
+            hot_n[hot[0]] += 1
+            n_hot += 1
+            centre = list(at_of[hot[0]])
+            free = set(nearest(centre, LNS_K))
+        elif rng.random() < 0.5:
+            free = set(rng.sample(range(len(lanes)), min(LNS_K, len(lanes))))
+        else:
+            j0 = rng.randrange(len(lanes))
+            free = {j0} | set(nearest(pts_of[j0], LNS_K - 1, but=(j0,)))
+        fix = {}
+        for j, e in enumerate(lanes):
+            if j not in free:
+                for k_ in (0, 1):
+                    for v in e['x'][k_]:
+                        if v >= 0:
+                            fix[v] = inc[v]
+        ps = [p for j in free for p in pts_of[j]] + centre
+        for o in others:
+            if dist([tuple(o['at'])], ps) > LNS_NEAR:
+                for v in o['vars']:
+                    fix[v] = inc[v]
+        got, _st = run(fix, inc, LNS_BATCHES)
+        if got is not None and value(got) < best:
+            inc, best = got, value(got)
+            hot_n.clear()
+        hist.append(best)
+        if len(hist) > LNS_STALL and hist[-1 - LNS_STALL] - hist[-1] < 1000:
+            break
+    n_top = sum(inc[v] for v in top)
+    return inc, (f'{rnd} rounds of {LNS_K} lanes ({n_hot} about a costly ball): {hist[0] / 1000:.1f} -> '
+                 f'{best / 1000:.1f}, {n_top} costly balls left ({time.time() - t0:.0f} s)')
 
 
 def frame_map(pads_f, pads_c):
@@ -191,14 +343,14 @@ def via_groups(bm):
     import conflict_groups as cg
     tags = {}
     cl, bi, _pr = cg.conflict_groups(bm.menu, stack=True, stack_pitch=bm.sz['stack'],
-                                     via_r=lambda m: bm.via_r.get(id(m), bm.sz['vr']),
+                                     via_r=lambda m: getattr(m, 'via_r', bm.sz['vr']),
                                      reach_extra=bm.sz['cl'] + bm.sz['tw'] / 2, xing=2, tags=tags)
     via = lambda g: any(t[0] in ('site', 'reach') for t in tags[g])   # noqa: E731
     # ...and two moves of two nets whose VIAS stand nearer than their two radii and a clearance (bm.n_near of them):
     # the relation's parts know one site shared, and a via within its reach of a RUN -- two vias on neighbouring
     # sites, neither's run beside the other's, are neither (a connector's pins at a pitch finer than a via and a
     # clearance each took one, laid into each other pair after pair)
-    rmax = max([bm.sz['vr']] + list(bm.via_r.values()))
+    rmax = max([bm.sz['vr']] + [getattr(m, 'via_r', bm.sz['vr']) for ms in bm.menu.values() for m in ms])
     G_ = 2 * rmax + bm.sz['cl']
     cells = collections.defaultdict(list)
     for k in sorted(bm.menu):
@@ -293,7 +445,7 @@ def verify_runs(bm, pts, cliques, bicliques, n=200000, seed=1):
             continue
         seen += 1
         ma, mb = bm.menu[a[0]][a[1]], bm.menu[b[0]][b[1]]
-        ra, rb = (bm.via_r.get(id(mm), bm.sz['vr']) for mm in (ma, mb))
+        ra, rb = (getattr(mm, 'via_r', bm.sz['vr']) for mm in (ma, mb))
         # (the test's one reach for both vias: the larger, where the two differ)
         want = sm._conflict(ma, mb, strict=True, stack=True, xing=2, reach=max(ra, rb) + bm.sz['cl'] + bm.sz['tw'] / 2)
         got = (min(a, b), max(a, b)) in hard or bool(at[a] & at[b])
@@ -385,7 +537,6 @@ def widen(pcb, A, keys):
     wm = _menus(pcb, A.ref, A.nets, only=set(keys), pattern=False)
     for k in sorted(keys):
         A.bm.menu[k], A.bm.opts[k] = wm.menu[k], wm.opts[k]
-    A.bm.via_r.update(wm.via_r)
     A.wide |= set(keys)
     array_rules(pcb, A)
 
@@ -397,7 +548,6 @@ def expand(pcb, A, keys):
     lm = _menus(pcb, A.ref, A.nets, only=set(keys), lines=True)
     for k in sorted(keys):
         A.bm.menu[k], A.bm.opts[k] = lm.menu[k], lm.opts[k]
-    A.bm.via_r.update(lm.via_r)
     array_rules(pcb, A)
 
 
@@ -1233,6 +1383,50 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
                     m.Add(lit + lane_sum(key2, o) <= 1).OnlyEnforceIf(
                         gate('ways', A.ref, tag(key1), tag(key2), lanes={key1, key2}))
                     n_way += 1
+        # ...and a PAIR's way out: one lane to the route, from the middle of its two exits on, its two tracks and their
+        # gap wide -- the legs' own rays pass either side of a via standing between them. A GND drop 0.135 mm inside
+        # the berths' line, midway between a strobe pair's two berths 0.8 mm apart, was 0.4 mm from each leg's ray and
+        # 0.006 mm short of the pair's own bar, the bus's loop stopped on it two rounds running
+        import braid as te
+        import escape_plan as ep
+        import rules as _rules
+        from escape_moves import DIRS
+        bar_p = _rules.active().pair_gap / 2 + te.TRACK + te.CLEAR + te.GRID / 2
+        vias_ = [(k2, i2, o_.site, r_) for k2 in sorted(opts_) for i2, (kind_, o_, _pc) in enumerate(opts_[k2])
+                 for r_ in ([o_.r] if kind_ == 'drop' else [bm.sz['vr']] if getattr(o_, 'site', None) is not None
+                            and getattr(o_, 'vias', 0) else [])]
+        for b, k_ in users:
+            opts = b.E.T if k_ == 0 else b.E.B
+            for lane, lg in b.E.lanes:
+                key = (b.name, lane, k_)
+                if len(lg) != 2:
+                    continue
+                for i in sorted(xs[key]):
+                    if (key, i) in dead:
+                        continue
+                    g_ = [bm.menu[mv.gid[1]][mv.gid[2]] for mv in opts[lane][i][0]]
+                    if len(g_) != 2 or g_[0].direction != g_[1].direction:
+                        continue
+                    u = DIRS[g_[0].direction]
+                    mid = ((g_[0].exit_pt[0] + g_[1].exit_pt[0]) / 2, (g_[0].exit_pt[1] + g_[1].exit_pt[1]) / 2)
+                    back = (ep.PAST - 0.5) * (bm.grid.pitch_x if u[0] else bm.grid.pitch_y)
+                    a = (mid[0] - u[0] * back, mid[1] - u[1] * back)
+                    e = (mid[0] + u[0] * je.LANE_REACH, mid[1] + u[1] * je.LANE_REACH)
+                    reach_ = max(back, je.LANE_REACH) + bar_p + 1.0
+                    own_ = {mv.gid[1] for mv in opts[lane][i][0]}
+                    for k2, i2, site, r_ in vias_:
+                        if k2 in own_ or abs(site[0] - mid[0]) > reach_ or abs(site[1] - mid[1]) > reach_ or \
+                                je._pt_seg(site, a, e) - je._ring(site, r_) >= bar_p - 1e-9:
+                            continue
+                        ne = len(esc.get(k2, ()))
+                        left = [((oname, k2, 0), others[k2][2][i2 - ne])] if i2 >= ne else \
+                            [(key2, lane_sum(key2, o)) for key2, o in sorted(by_lane({(k2, esc[k2][i2])}).items())]
+                        for key2, lit in left:
+                            if key2 == key:
+                                continue
+                            m.Add(xs[key][i] + lit <= 1).OnlyEnforceIf(
+                                gate('ways', A.ref, tag(key), tag(key2), lanes={key, key2}))
+                            n_way += 1
     # ---- PAIRS WHOLE: no other lane's exit between a pair's two exits on the pair's layer there -- a pair is one lane
     # to the route (whole_frame's PairSplit: a memory bus's data net left on the surface between a strobe pair's two
     # surface teeth, and the bus's step refused the board)
@@ -2025,6 +2219,7 @@ def main():
         from kicad_parser import parse_kicad_pcb
         from ortools.sat.python import cp_model
         we.OPP_SOFT = True          # (a pair that must cross over pays for it, ranked as a change)
+        we.JOINT_X_LAYERS = True    # (a crossing priced by the layers its two lanes share: whole_ends.JOINT_X_LAYERS)
         import fanout_from_plan as fp_
         we.FRONT_REACH = fp_.PAIR_EXIT_REACH = EXIT_REACH       # (this run's alone: a single's front, a pair's)
         # ---- THE BOARD PREPARED: the movable passives beside each bus's ROW PART destinations moved off its escapes
@@ -2126,6 +2321,86 @@ def main():
     if wide:
         log(f'  {len(wide)} balls offered their whole menu from the start')
         whole(wide)
+    # THE TIERS (GROUP_TIERS): every bus ball on its WHOLE menu, each move tagged with the first tier that holds it --
+    # 0 the pattern, 1 the pattern from the next clear site (a pair's balls: the lines too), 2 the straight moves toward
+    # the bus's other part from every clear site and from a via in the pad, 3 those by every face, 4 the lines, 5 the
+    # rest of the whole menu. The search starts on the first tiers and widens where it pays (tier_search). A ball
+    # whose pattern's gap point stood blocked by a part on the other side had no dog-bone at all; on the pattern alone
+    # a bus's lanes ran down inside an FPGA to its far face, a pair round the back of the memory across the whole bus
+    tier_of = {}                # (array, ball) -> the tier of each move of its menu
+    if GROUP_TIERS:
+        def tbox_(ref_):
+            if ref_ in arrays:
+                return arrays[ref_].box
+            xs_ = [p_.global_x for p_ in bpcb.footprints[ref_].pads]
+            ys_ = [p_.global_y for p_ in bpcb.footprints[ref_].pads]
+            return (min(xs_), min(ys_), max(xs_), max(ys_))
+
+        def tface_(ref_, other_):
+            # (the face of `ref_` turned toward `other_`)
+            a_, b_ = tbox_(ref_), tbox_(other_)
+            cx_, cy_ = (b_[0] + b_[2] - a_[0] - a_[2]) / 2, (b_[1] + b_[3] - a_[1] - a_[3]) / 2
+            return ('right' if cx_ > 0 else 'left') if abs(cx_) >= abs(cy_) else ('down' if cy_ > 0 else 'up')
+        tsig_ = lambda o_: (o_.kind, o_.direction, tuple(round(v_, 4) for v_ in (o_.site or ())),     # noqa: E731
+                            tuple((tuple(round(v_, 4) for v_ in a_), tuple(round(v_, 4) for v_ in b_))
+                                  for a_, b_, _l in o_.legs))
+        for ref in sorted(arrays):
+            A_ = arrays[ref]
+            ks_ = sorted(set(A_.ball_of.values()) - {k for r_, k in wide if r_ == ref})
+            if not ks_:
+                continue
+            t0 = time.time()
+            net_of_ = {k: n_ for n_, k in A_.ball_of.items()}
+            pr_ = je.array_pairs(bpcb.footprints[ref], set(A_.bus_of), je.namer(bpcb))
+            pk_ = {A_.ball_of[leg] for legs_ in pr_.values() for leg in legs_ if leg in A_.ball_of}
+            face_ = {}
+            for k in ks_:
+                dref_ = caps[A_.bus_of[net_of_[k]]]['st']['dref']
+                face_[k] = tface_(ref, dref_ if ref != dref_ else sref)
+            S_ = {k: {tsig_(o_): 0 for o_ in A_.bm.menu[k]} for k in ks_}
+            ent_ = {k: {tsig_(x_[1]): x_ for x_ in A_.bm.opts[k] if x_[0] == 'escape'} for k in ks_}
+
+            def tadd_(ns_, t_, only_=None, toward_=False):
+                for k in ks_:
+                    if only_ is not None and k not in only_:
+                        continue
+                    for x_ in ns_.opts[k]:
+                        if x_[0] != 'escape' or (toward_ and x_[1].direction != face_[k]):
+                            continue
+                        S_[k].setdefault(tsig_(x_[1]), t_)
+                        ent_[k].setdefault(tsig_(x_[1]), x_)
+            try:
+                je.PATTERN_NEXT_SITE = True
+                with awx_settings.given(genv):
+                    tadd_(_menus(bpcb, ref, A_.nets, only=set(ks_)), 1)
+                    n4_ = _menus(bpcb, ref, A_.nets, only=set(ks_), lines=True)
+                    tadd_(n4_, 1, only_=pk_)
+                    je.PATTERN_ALL_SITES = True
+                    n3_ = _menus(bpcb, ref, A_.nets, only=set(ks_))
+                    je.PATTERN_ALL_SITES = False
+                    tadd_(n3_, 2, toward_=True)
+                    tadd_(n3_, 3)
+                    tadd_(n4_, 4)
+            finally:
+                je.PATTERN_ALL_SITES = je.PATTERN_NEXT_SITE = False
+            more_ = {(ref, k) for k in ks_}
+            whole(more_)
+            wide |= more_
+            n_miss = 0
+            for k in ks_:
+                # (a narrower tier's move the whole menu does not hold -- its site from another gap point -- added)
+                have_ = {tsig_(x_[1]) for x_ in A_.bm.opts[k] if x_[0] == 'escape'}
+                add_ = [x_ for sg_, x_ in ent_[k].items() if sg_ not in have_]
+                if add_:
+                    A_.bm.opts[k] = list(A_.bm.opts[k]) + add_
+                    A_.bm.menu[k] = [o_ for kd_, o_, _pc in A_.bm.opts[k] if kd_ == 'escape']
+                    n_miss += len(add_)
+            array_rules(bpcb, A_)
+            for k in ks_:
+                tier_of[(ref, k)] = [S_[k].get(tsig_(o_), 5) for o_ in A_.bm.menu[k]]
+            cnt_ = collections.Counter(t_ for k in ks_ for t_ in tier_of[(ref, k)])
+            log(f'  {ref}: {len(ks_)} bus balls on their whole menus, moves by tier {dict(sorted(cnt_.items()))}; '
+                f'{n_miss} of the narrower tiers\' moves the whole menu lacked, added ({time.time() - t0:.0f} s)')
     # THE LINES are a bus's when the whole solve refuses its pattern ends (the check below), and with them its cut
     # round its destination ranked (load_bus): the pattern alone ties a ball's exit to its own row or column, the
     # exits' order round the array then the balls' own -- a bus whose balls stand in another order than its berths
@@ -2977,8 +3252,9 @@ def main():
         walls = [t for b in buses for t in b.J.walls] + fans
         legs = sum(b.J.npair[l_] for b in buses for l_ in b.J.lanes)
         m.Minimize(sum(cost) + const)
-        # (a change outweighs everything below it, a walled ball every change: the most the terms below can differ by --
-        # of the options of one lane's end, or of its layers, one is taken, so the dearest of them counts once)
+        # (a walled ball outweighs everything below it: the most the terms below can differ by -- of the options of one
+        # lane's end, or of its layers, one is taken, so the dearest of them counts once -- and every change of layer;
+        # a change itself is priced CHANGE_VIAS vias, in the rest's own currency)
         one_of = {}
         groups = [list(b.J.xs[k_][l_].values()) for b in buses for k_ in (0, 1) for l_ in b.J.lanes] + \
             [list(b.J.y[k_][l_]) for b in buses for k_ in (0, 1) for l_ in b.J.lanes] + \
@@ -2999,6 +3275,7 @@ def main():
         W_LEX = int(math.ceil(rest_ + sum(top_[g_] - low_[g_] for g_ in top_))) + 1
         W_LEX += -W_LEX % 1000              # (a thousandth of it whole: the planes' prices are in thousandths of a via)
         W_TOP = W_LEX * (legs + 1) + sum(c_ for c_, _v in plane) * (W_LEX // 1000)
+        W_LEX = int(round(1000 * CHANGE_VIAS))
         m.Minimize(W_TOP * sum(walls) + W_LEX * sum(chg) + sum(c_ * (W_LEX // 1000) * v_ for c_, v_ in plane)
                    + sum(cost) + const)
         log(f'  the objective: a change {W_LEX}, a walled ball {W_TOP}')
@@ -3103,6 +3380,68 @@ def main():
         elif not state_known:
             raise SystemExit(f'group_ends: a state not found nor ruled out, and none by the repair '
                              f'[{sh.StatusName(rh)}]')
+        elif tier_of:
+            # ---- THE SEARCH ON THE TIERS (tier_search): the start on each lane's first tiers, then the rounds that
+            # free a few lanes on their whole menus -- each lane's option variables with their tiers and the places of
+            # its balls, each other ball's variables and its place
+            t0 = time.time()
+            ix_ = lambda v_: v_.Index() if hasattr(v_, 'Index') else -1         # noqa: E731
+            meta_ = {'W_LEX': W_LEX, 'W_TOP': W_TOP, 'lanes': [], 'others': []}
+            for b in buses:
+                for l_ in b.J.lanes:
+                    e_ = {'bus': b.name, 'lane': str(l_), 'npair': b.J.npair[l_], 'chg': ix_(b.J.chg[l_]),
+                          'x': [[], []], 'tier': [[], []], 'at': [[], []],
+                          'y': [[ix_(v_) for v_ in b.J.y[k_][l_]] for k_ in (0, 1)]}
+                    for k_ in (0, 1):
+                        opts_ = (b.E.T, b.E.B)[k_][l_]
+                        for i_, x_ in sorted(b.J.xs[k_][l_].items()):
+                            e_['x'][k_].append(ix_(x_))
+                            ts_ = [tier_of[g_[:2]][g_[2]] for g_ in (getattr(mv_, 'gid', None) for mv_ in opts_[i_][0])
+                                   if g_ and g_[:2] in tier_of]
+                            e_['tier'][k_].append(max(ts_) if ts_ else 0)
+                        if b.arr[k_] is not None:
+                            for leg_ in (b.E.legs_of.get(l_) or (l_,)):
+                                if leg_ in b.arr[k_].ball_of:
+                                    p_ = b.arr[k_].bm.items[b.arr[k_].ball_of[leg_]][1]
+                                    e_['at'][k_].append([p_.global_x, p_.global_y])
+                    meta_['lanes'].append(e_)
+            for ref_, r_ in rows.items():
+                for k, (xs_o, ys_o, dv_o) in r_.others.items():
+                    p_ = arrays[ref_].bm.items[k][1]
+                    vs_ = list(xs_o.values() if isinstance(xs_o, dict) else xs_o) + list(ys_o) + list(dv_o)
+                    meta_['others'].append({'ref': ref_, 'ball': k, 'at': [p_.global_x, p_.global_y],
+                                            'vars': [ix_(v_) for v_ in vs_ if ix_(v_) >= 0]})
+            if '--model' in flags:
+                # (a bench's: the model the search takes, and which of its variables are which lane's and ball's)
+                m.ExportToFile(os.path.join(out, 'model.pb.txt'))
+                json.dump(meta_, open(os.path.join(out, 'tiers.json'), 'w'))
+            vals_, line_ = tier_search(m, meta_, log)
+            if vals_ is None:
+                raise SystemExit(f'group_ends: no state on the tiers -- {line_}')
+            log(f'  the search: {line_}')
+            # (the state as a solver's answer, every variable held at it)
+            mh = m.Clone()
+            for i_, v_ in enumerate(vals_):
+                d_ = mh.Proto().variables[i_].domain
+                d_.clear()
+                d_.extend([v_, v_])
+            sv = cp_seed.solver()
+            sv.parameters.num_workers = 1
+            r, quick = sv.Solve(mh), True
+            m.ClearHints()
+            for i_, v_ in enumerate(vals_):
+                m.AddHint(m.GetIntVarFromProtoIndex(i_), v_)
+            searched.update((b.name, b.name in lined) for b in buses)
+            # (THE CUT the search chose stands through every model of this tier built after it: cut_hold)
+            for b in buses:
+                if getattr(b.J, 'cutvar', None) and (b.name, b.name in lined) not in cut_held:
+                    T_, C_, _w, tc_ = b.J.cutvar[:4]
+                    k_ = max(k for k in range(len(T_)) if isinstance(C_[k], int) or vals_[C_[k].Index()])
+                    c_ = tc_[T_[k_]]
+                    cut_held[(b.name, b.name in lined)] = None if c_ is None else (c_[0], float(c_[1]))
+                    cut_hold(m, b, cut_held[(b.name, b.name in lined)])
+                    log(f'  {b.name}: its cut round {b.E.st["dref"]} chosen by the search, held from here: '
+                        + ('the far face\'s middle' if c_ is None else f'{c_[0]} {float(c_[1]):.2f}'))
         else:
             # ---- THE START, as a bus's own ends' search starts (whole_ends.nearest_start): the state NEAREST the ends wanted
             # -- the fewest of them moved -- then, those ends HELD, the rest searched for the objective (the other balls'
@@ -3229,7 +3568,7 @@ def main():
             f'plane\'s layer, {sum(sv.Value(v_) for _c, v_ in far)} teeth on a far face, '
             f'{sum(c_ * sv.Value(v_) for c_, v_ in ride) / 1000:.1f} vias\' worth of ways round the arrays and '
             f'inside them')
-        TR.rec('model', check=chk_try + 1, rnd=rnd, how='repair' if repaired else 'start+search',
+        TR.rec('model', check=chk_try + 1, rnd=rnd, how='repair' if repaired else ('tiers' if tier_of else 'start+search'),
                status=sv.StatusName(r), secs=round(time.time() - t0, 1), W_LEX=W_LEX, W_TOP=W_TOP,
                free={bn_: dict(sorted(v_.items())) for bn_, v_ in repair_info.items()},
                objective=objective_split(sv, buses, rows, between_cost, ride, walls, fans, chg, plane, far))

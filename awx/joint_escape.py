@@ -384,6 +384,12 @@ def _straps(pcb, grid, items, obs):
     return straps
 
 
+# (the group's TIERS, group_ends: the pattern's wider forms, set while it builds a tier's menus) the pattern from the
+# next gap point that stands clear where the first does not; and from every gap point that does and from the pad
+PATTERN_NEXT_SITE = False
+PATTERN_ALL_SITES = False
+
+
 def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_clear, inpad_r, run, pattern=False,
                        lines=False):
     """(`escape_to`) ball p's moves as the ESCAPE FIELD has them (escape_plan.escape_menu / escape_out), from
@@ -414,9 +420,38 @@ def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_cl
         dx, dy = (hx if c[0] >= (x0 + x1) / 2 else -hx), (hy if c[1] >= (y0 + y1) / 2 else -hy)
         q = (c[0] + (dx if x0 - 1e-6 <= c[0] + dx <= x1 + 1e-6 else -dx),
              c[1] + (dy if y0 - 1e-6 <= c[1] + dy <= y1 + 1e-6 else -dy))
-        if site_clear(q, None) and stub_clear(c, q):
-            out += (ep.escape_menu(p, q, grid, faces, layers, copper) if lines else
-                    ep.escape_menu(p, q, grid, faces, layers, copper, side=0, own_line=True))
+        cands = [q]
+        if PATTERN_NEXT_SITE:
+            # (that point blocked -- a part's pad on the other side of the board under it -- the ball had NO dog-bone
+            # in its pattern, and one of the outer rows only its surface escape, out of the face it stands at whatever
+            # its bus's other part: the next gap point that stands clear is taken, the two beside the first before the
+            # one across the ball)
+            oth = [(c[0] + sx * hx, c[1] + sy * hy) for sx in (-1, 1) for sy in (-1, 1)]
+            oth = [o for o in oth if x0 - 1e-6 <= o[0] <= x1 + 1e-6 and y0 - 1e-6 <= o[1] <= y1 + 1e-6
+                   and math.hypot(o[0] - q[0], o[1] - q[1]) > 1e-6]
+            cands += sorted(oth, key=lambda o: (round(math.hypot(o[0] - q[0], o[1] - q[1]), 6),
+                                                 -round(math.hypot(o[0] - (x0 + x1) / 2, o[1] - (y0 + y1) / 2), 6), o))
+        if PATTERN_ALL_SITES:
+            # (the pattern from EVERY gap point that stands clear -- into a band of the array with no balls as toward
+            # its corner -- and from a via in the ball's own pad, each run straight out along its own row or column by
+            # each face)
+            for sx in (-1, 1):
+                for sy in (-1, 1):
+                    q_ = (c[0] + sx * hx, c[1] + sy * hy)
+                    if site_clear(q_, None) and stub_clear(c, q_):
+                        out += (ep.escape_menu(p, q_, grid, faces, layers, copper) if lines else
+                                ep.escape_menu(p, q_, grid, faces, layers, copper, side=0, own_line=True))
+            if site_clear(c, inpad_r):
+                out += (ep.escape_menu(p, c, grid, faces, layers, copper) if lines else
+                        ep.escape_menu(p, c, grid, faces, layers, copper, side=0, own_line=True))
+            cands = []
+        for q in cands:
+            if site_clear(q, None) and stub_clear(c, q):
+                mv_ = (ep.escape_menu(p, q, grid, faces, layers, copper) if lines else
+                       ep.escape_menu(p, q, grid, faces, layers, copper, side=0, own_line=True))
+                out += mv_
+                if mv_ or len(cands) == 1:        # (a point that stands clear with no line out of it is no site)
+                    break
         depth = {'left': (c[0] - x0) / (2 * hx), 'right': (x1 - c[0]) / (2 * hx),
                  'up': (c[1] - y0) / (2 * hy), 'down': (y1 - c[1]) / (2 * hy)}
         surface = ep.escape_out(p, grid, [d for d in faces if depth[d] < pattern - 0.5], copper)
@@ -653,11 +688,22 @@ def sweep_crossings(pcb, grid, escape_to, refs, far_ang=None, fixed=()):
 
 
 def zone_regions(pcb):
-    """{layer: [(net id, priority, outline)]}: the board's pours, by layer"""
+    """{layer: [(net id, priority, outline)]}: the board's pours, by layer -- and each KEEP-OUT rule area that forbids
+    a pour on the layer, as a pour of no net (-1) that fills before every other: no plane is there. A plane ball's drop
+    planned inside one on a board's only layer of its net's pour -- inside the pour's outline, under the array -- was
+    joined to no pour once the board was filled"""
     out = collections.defaultdict(list)
     for z in pcb.zones or ():
         if z.net_id and len(z.polygon) >= 3:
             out[z.layer].append((z.net_id, z.priority or 0, z.polygon))
+    for k in (getattr(pcb.board_info, 'keepouts', None) or ()):
+        poly = [tuple(q[:2]) for q in (k.get('polygon') or ())]
+        if k.get('copper_pour_allowed', True) or len(poly) < 3:
+            continue
+        Ls = set(k.get('layers') or ())
+        for L in list(out):
+            if L in Ls or '*.Cu' in Ls or ('F&B.Cu' in Ls and L in ('F.Cu', 'B.Cu')):
+                out[L].append((-1, float('inf'), poly))
     return out
 
 
@@ -1137,6 +1183,30 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
         if ok is None:
             ok = seg_memo[key] = obs(nid, layer).seg_clear(a, b)
         return ok
+    # (VIAS IN PADS are in the menus -- a dog-bone's site, a via in the ball's own pad, a plane ball's drop -- unless
+    # the board's chain recorded a SAME-NET PAD CLEARANCE (bga_fanout --same-net-pad-clearance > 0, #581): then a via
+    # stands that far off every pad of its own net on the part, as every other step's vias do)
+    import protected_nets as _pn
+    snpc = _pn.read_snpc_for_pcb_data(pcb)
+    own_pads = collections.defaultdict(list)
+    if snpc > 0:
+        for q_ in foot.pads:
+            if q_.net_id:
+                own_pads[q_.net_id].append(q_)
+
+    def off_pads(p_, site, r):
+        """a via of radius r at `site` stands `snpc` off every pad of ball p_'s net on the part"""
+        for q_ in own_pads[p_.net_id]:
+            dx, dy = abs(site[0] - q_.global_x), abs(site[1] - q_.global_y)
+            if dx > 3.0 or dy > 3.0:
+                continue
+            if (q_.shape or '') == 'circle':
+                d = math.hypot(dx, dy) - q_.size_x / 2
+            else:
+                d = math.hypot(max(dx - q_.size_x / 2, 0.0), max(dy - q_.size_y / 2, 0.0))
+            if d - r < snpc - 1e-9:
+                return False
+        return True
     items, menu, balls, dmenu = {}, {}, {}, {}
     firm_g = {}                 # ball -> its FIRM tooth (`firm`), each menu filter judging at it and off it apart
     bus_layers = bus_route_layers(pcb)
@@ -1195,6 +1265,8 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
         if nm in drop_s:
             menu[key] = []
             dmenu[key] = _drops(pcb, grid, p, obs, sz, foot, rays, regions, fine=exit_rays)
+            if snpc > 0:
+                dmenu[key] = [d for d in dmenu[key] if off_pads(p, d.site, d.r)]
             continue
         home = next((L for L in pcb.board_info.copper_layers if L in p.layers), 'F.Cu')
         # (a plane layer only where a leg's layer is the plan's own and priced: on more routing layers than two a via
@@ -1244,6 +1316,8 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
                 if m.runs_on:
                     kept.append(m)
             moves = kept
+        if snpc > 0:
+            moves = [m for m in moves if m.site is None or off_pads(p, m.site, sz['vr'])]
         if not esc:
             # (one climb per exit row -- never across an escape field's SITES: which site is the plan's choice)
             moves = fp.dedupe_climbs(moves)
@@ -1358,7 +1432,7 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
         straps = {k: [s for s in v if _free(items[k][0], [(s.a, s.b, s.layer)], [])] for k, v in straps.items()}
     # every ball's options, escapes first (their conflicts are the whole route's own, by index); each with its copper
     # at its real size: a via in the ball's own pad the engine's clamped one, any other the rung's
-    opts, via_r = {}, {}
+    opts = {}
     for key, (nm, p) in items.items():
         own = [(p.global_x, p.global_y)]
         o = []
@@ -1367,7 +1441,10 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
             if m.site is not None:
                 r, dr = sz['inpad'](p) if tuple(m.site) == own[0] else (sz['vr'], sz['vdr'])
                 vias = [(tuple(m.site), r, dr)]
-                via_r[id(m)] = r
+                # (its radius ON THE MOVE: kept by id(move), a menu widened or rebuilt left its dead moves' ids
+                # behind, Python gave a new move such an id, and it took the dead one's radius -- the group's model
+                # then differed with the string hash seed, in six groups of vias of one array)
+                m.via_r = r
             o.append(('escape', m, Piece(nm, list(m.legs), vias, own)))
         o += [('strap', s, Piece(nm, [(s.a, s.b, s.layer)], [], [s.a, s.b])) for s in straps.get(key, ())]
         o += [('drop', d, Piece(nm, [d.stub + (d.layer,)] if d.stub else [], [(d.site, d.r, d.dr)], own))
@@ -1393,7 +1470,7 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
             if len(by_net.get(pn, ())) == 1 and len(by_net.get(nn, ())) == 1]
     return types.SimpleNamespace(foot=foot, grid=grid, bus_s=bus_s, oth_s=oth_s, drop_s=drop_s, sz=sz, items=items,
                                  menu=menu, balls=balls, opts=opts, straps=straps, dmenu=dmenu, t_menu=t_menu,
-                                 via_r=via_r, pairs=legs, lane_faces=lane_faces(rays), unheld=unheld, firm_g=firm_g)
+                                 pairs=legs, lane_faces=lane_faces(rays), unheld=unheld, firm_g=firm_g)
 
 
 _SOLVED = {}         # a plan's model, with what phase 2 prices -> both phases' answers (plan_array: one model, one answer)
@@ -1583,8 +1660,6 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                 for L_ in at_:
                     pin_o = copy.copy(o_)
                     pin_o.runs_on, pin_o.pinned = (L_,), True
-                    if id(o_) in bm.via_r:
-                        bm.via_r[id(pin_o)] = bm.via_r[id(o_)]
                     new_.append((kind_, pin_o, pc_))
                 rest_ = tuple(L_ for L_ in o_.runs_on if L_ not in at_)
                 if rest_:
@@ -1698,7 +1773,6 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     rls = run_layers()                # (more routing layers than two: the via moves' runs on RUN)
     items, menu, balls, opts, straps, dmenu, t_menu = (bm.items, bm.menu, bm.balls, bm.opts, bm.straps, bm.dmenu,
                                                        bm.t_menu)
-    via_r = bm.via_r
     import braid as _bd
     _bd.forget_obstacles()           # (the menus were the models' last use here: their memory goes to the solve)
     n_moves = sum(len(v) for v in menu.values())
@@ -1713,7 +1787,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     t1 = time.time()
     tags = {}
     groups, bigroups, gpairs = cg.conflict_groups(menu, stack=True, stack_pitch=sz['stack'],
-                                                  via_r=lambda m: via_r.get(id(m), sz['vr']),
+                                                  via_r=lambda m: getattr(m, 'via_r', sz['vr']),
                                                   reach_extra=sz['cl'] + sz['tw'] / 2, xing=2, tags=tags)
     pairs = [(a[0], a[1], b[0], b[1]) for a, b in sorted(gpairs)]
     # (the groups of runs on RUN alone -- their lane, crossing and exit conflicts -- are the K layers' capacity; one a
