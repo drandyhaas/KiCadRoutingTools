@@ -404,6 +404,8 @@ REFUSAL_SITES = {
         'call:finish_design_rules': ('after the run', '--strict-sizes: exit 3 after routing'),
     },
     'repair_planes.py': {
+        'except _SpanError from repair_planes':
+            ('board', "the plane layers against the via span on the board's stack"),
         'call:fab_tier_from_args': ('file', '_fab_overrides_missing'),
         'both a positional output and --output we': ('argv', '_output_twice'),
         'if len(args.nets) != len(args.plane_layers)':

@@ -493,12 +493,31 @@ type) on the same layer pair, and the run says so.
   via as well.) `route` lays the escapes and then routes
   within the span. A pad whose net already has copper on the span's other
   layers nearby is left alone, as is a drilled pad.
-- **A step on a partial span does not run the plane finalize.** The
-  finalize's taps are through vias at the step's via size, which under a
-  micro, blind or buried span is not a through via's; the run says so, and
-  the plane step connects the plane nets. `JSON_SUMMARY` and `--json-out`
-  carry `via_span`: `{"layers": [top, bottom], "type": ..., "plane_finalize":
-  "not run", "zones": N}`, on every via-span step.
+- **Plane taps are vias of the span.** The route step's plane finalize, and
+  `repair_planes.py --via-span TOP BOTTOM` on its own, lay their taps and
+  region joins as vias of the span, and count "this site reaches the plane"
+  on the span's layers only. A pour on a layer the span does not have is
+  not tapped by the step (the run names it; `repair_planes.py` refuses a
+  `--plane-layers` entry outside the span). Like the fan-out, the engine
+  runs with the copper outside the span set aside and put back, with its
+  net protection read on all of the board's copper (a net whose KiCad-locked
+  copper is all off the span is still never ripped as a blocker), and its
+  guaranteed-join check hands KiCad the taps as the span's vias, as they are
+  written. Stitch and thermal vias laid by `route_planes.py` are through
+  vias.
+- **Pour first.** A via of the span reaches a plane only on a layer the
+  span has, and the diff-pair step lays a pair's GND return vias only when
+  a ground pour is already on one of those layers. Pour the planes before
+  the steps that tap them or route pairs under a span, and expect no return
+  vias for a span that does not include the ground plane's layer.
+- **The summary says so.** `JSON_SUMMARY` and `--json-out` carry `via_span` on
+  every via-span step: `{"layers": [top, bottom], "type": ..., "plane_finalize":
+  "run" | "not run", "zones": N, "zones_off_span": M}` -- whether the step's
+  plane finalize ran on a pour of the span (its taps are vias of the span),
+  and M of the board's N
+  pours lie on layers the span does not have and are left to the plane step.
+  The printed `JSON_SUMMARY:` line predates the finalize and reads "not run";
+  `--json-out` and the summary the engine returns carry the final state.
 - **Copper outside the span is held in place.** A via-span step lays copper on
   the span only, so it could not lay an escape's stub and via again: every
   existing track on another layer, and every via with copper on a layer the
@@ -548,7 +567,7 @@ type) on the same layer pair, and the run says so.
   span like any other, so it reaches a plane only on a layer the span has.
 - The GUI route tab has the same three controls (**Via Span**, the type and
   the escape mode beside it), and the differential and fan-out tabs read the
-  span from them. The plane steps lay through vias only.
+  span from them; the route tab's finalize carries it to the plane taps.
 
 On an 8-layer board with a 0.8 mm BGA over a field of bottom-side pads
 (`tests/fixtures/1842`), a bare route completes 25 of 36 nets with through
