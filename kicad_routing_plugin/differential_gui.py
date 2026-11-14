@@ -1502,6 +1502,9 @@ class DifferentialTab(wx.Panel):
                 # step_hole_clearance, from the tab's applied lists.
                 _hole_clr = self._held_hole_clearance(board, results_data,
                                                       eff_clearance)
+                # #1842: the micro vias' own rule, as fix_project_for_output writes it
+                from .gui_utils import live_micro_via_rule
+                live_micro_via_rule(self.pcb_data, board, results_data, eff_clearance)
                 targets = compute_targets(
                     clearance=eff_clearance,
                     hole_clearance=_hole_clr,

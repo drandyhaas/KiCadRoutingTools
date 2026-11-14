@@ -19,8 +19,10 @@ Checks:
      every via a micro via F.Cu-In1.Cu at the Default class's micro via
      size, nothing on a layer outside the span, check_drc and
      check_connected clean;
-  4. the output project keeps the board's via and drilled-hole minimums (a
-     micro via says nothing about them);
+  4. the output project keeps the board's via, drilled-hole, annular and
+     copper-to-hole minimums (a micro via says nothing about them), and the
+     micro vias are held by `fix_kicad_drc_settings.MICRO_VIA_RULE` in the
+     output's .kicad_dru;
   5. --via-span refuses a layer the board does not have, by name;
   6. `--via-span-escape only` lays a micro via beside every pad of the
      selected nets, joined by a short track, and routes nothing; a second
@@ -147,9 +149,17 @@ def routed(td):
               encoding='utf-8') as fh:
         after = json.load(fh)['board']['design_settings']['rules']
     keys = ('min_via_diameter', 'min_through_hole_diameter', 'min_microvia_diameter',
-            'min_microvia_drill')
+            'min_microvia_drill', 'min_via_annular_width', 'min_hole_clearance')
     ok(all(after.get(k) == before.get(k) for k in keys),
        f"{ {k: (before.get(k), after.get(k)) for k in keys} }")
+    # the micro vias' ring and drill are held by a rule of their own instead
+    with open(evidence(os.path.splitext(out)[0] + '.kicad_dru', 'the output rules'),
+              encoding='utf-8') as fh:
+        dru = fh.read()
+    ok("(rule \"kicad_routing_tools micro vias\"" in dru
+       and "(condition \"A.Via_Type == 'Micro'\")" in dru
+       and '(constraint annular_width (min 0.075mm))' in dru,
+       f"and the micro vias have their rule:\n{dru}")
     return board
 
 

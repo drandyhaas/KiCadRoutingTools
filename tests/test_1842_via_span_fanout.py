@@ -18,8 +18,10 @@ Checks:
      over a bottom-side pad of another net);
   2. with `--via-span F.Cu In1.Cu` it escapes all 36, with 12 micro vias
      F.Cu-In1.Cu at the Default class's micro via size, copper on F.Cu and
-     In1.Cu only, check_drc clean, and the project's via and drilled-hole
-     minimums left alone. kicad-cli 10.0.8 grades that board at 0 violations;
+     In1.Cu only, check_drc clean, and the project's via, drilled-hole,
+     annular and copper-to-hole minimums left alone (the micro vias get a
+     rule of their own: tests/test_1842_micro_via_rule.py). kicad-cli 10.0.8
+     grades that board at 0 violations;
   3. the board is as it was after the call: `only_span_copper` puts back
      every pad, track, via and pour it set aside, in place;
   4. a part that is on neither end of the span is refused by name;
@@ -49,7 +51,7 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 PY = [sys.executable, '-X', 'utf8']
 FIX = os.path.join(TESTS, 'fixtures', '1842', 'bga_under')
 KEYS = ('min_via_diameter', 'min_through_hole_diameter', 'min_microvia_diameter',
-        'min_microvia_drill')
+        'min_microvia_drill', 'min_via_annular_width', 'min_hole_clearance')
 FAILS = []
 
 

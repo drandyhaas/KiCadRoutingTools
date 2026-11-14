@@ -20,7 +20,8 @@ Checks:
   2. with `--via-span F.Cu In1.Cu` it routes: four micro vias F.Cu-In1.Cu at
      the Default class's micro via size, tracks on F.Cu and In1.Cu only, the
      pair reported routed, check_drc clean, both members connected, and the
-     project's via and drilled-hole minimums left alone. kicad-cli 10.0.8
+     project's via, drilled-hole, annular and copper-to-hole minimums left
+     alone (the micro vias get a rule of their own, #1842). kicad-cli 10.0.8
      grades that board at 0 violations;
   3. GND return vias: with no GND pour on a layer of the span they are not
      laid, and the run says so;
@@ -47,7 +48,7 @@ import diff_pair  # noqa: E402
 PY = [sys.executable, '-X', 'utf8']
 PRO = os.path.splitext(diff_pair.BASE)[0] + '.kicad_pro'
 KEYS = ('min_via_diameter', 'min_through_hole_diameter', 'min_microvia_diameter',
-        'min_microvia_drill')
+        'min_microvia_drill', 'min_via_annular_width', 'min_hole_clearance')
 FAILS = []
 
 

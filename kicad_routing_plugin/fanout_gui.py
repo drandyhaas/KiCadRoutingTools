@@ -2458,7 +2458,11 @@ class FanoutTab(wx.Panel):
             try:
                 from fix_kicad_drc_settings import apply_fix_to_board
                 from .gui_utils import (board_minima_from_live,
-                                        update_live_drc_floors)
+                                        update_live_drc_floors,
+                                        live_micro_via_rule_dicts)
+                # #1842: the micro vias' own rule, as fix_project_for_output writes it
+                live_micro_via_rule_dicts(self.pcb_data, board, tracks, vias,
+                                          _fix_kw['clearance'])
                 apply_fix_to_board(board, minima=board_minima_from_live(board),
                                    **_fix_kw)
                 # The step's last live writer: the protected / pour-served
