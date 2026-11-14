@@ -3,8 +3,8 @@
 
 CHECKER (was: vias never entered the `holes` list, so --hole-clearance graded
 only NPTH holes, uncovered plated holes and flush pegs): a plated via's drill
-is now graded against other-net tracks, vias and pads, at
-max(clearance, hole_clearance) -- with the pair-clearance suppression KiCad
+is now graded against other-net tracks, vias and pads, at the declared
+hole clearance (none declared: not graded) -- with the pair-clearance suppression KiCad
 itself applies (a hole row does not stand beside a failing copper-clearance
 row, except pad-vs-via-hole, where KiCad reports both).
 
@@ -21,7 +21,8 @@ Synthetic (always runs), all at --clearance 0.1 --hole-clearance 0.25:
   F. two vias 0.45 apart (copper overlapping) -> the clearance row carries
      it, VIA-HOLE is 0 (suppression);
   G. a pad 0.05 off a 0.45/0.2 via's copper and 0.175 off its hole ->
-     PAD-HOLE still fires (KiCad reports both for pad-vs-via-hole).
+     PAD-HOLE still fires (KiCad reports both for pad-vs-via-hole);
+  H. the same board with no hole clearance declared -> the pad-via row only.
 
 ROUTER (was: the descent ladder shipped a 0.45/0.2 via whose 0.125 ring left
 other-net copper 0.225 off its hole, and said nothing): the ladder PREFERS the
@@ -121,10 +122,11 @@ def _stage(tmp, name, text):
     return pcb
 
 
-def _grade(pcb, tmp, tag, violating, refuse=None):
+def _grade(pcb, tmp, tag, violating, refuse=None, hole_clearance='0.25'):
     out = os.path.join(tmp, f'{tag}.json')
     argv = [sys.executable, '-X', 'utf8', CHECK_DRC, pcb, '--clearance', '0.1',
-            '--hole-clearance', '0.25', '--json', out]
+            '--json', out] + (['--hole-clearance', hole_clearance]
+                              if hole_clearance else [])
     if violating:
         r = check(argv, refuse=refuse, code=1)
     else:
@@ -214,6 +216,11 @@ def checker(tmp):
     doc, _r = _grade(pcb, tmp, 'pad_both', True, refuse='PAD-HOLE')
     ok('pad-hole fires even when the copper clearance also fails',
        doc.get('by_type', {}).get('pad-hole', 0) == 1, doc.get('by_type'))
+    doc, _r = _grade(pcb, tmp, 'pad_both_undeclared', True, refuse='PAD-VIA',
+                     hole_clearance=None)
+    ok('no hole clearance declared: a via drill is not graded, the pad-via row stands',
+       doc.get('by_type', {}).get('pad-hole', 0) == 0
+       and doc.get('by_type', {}).get('pad-via', 0) == 1, doc.get('by_type'))
 
 
 def router_units(tmp):
