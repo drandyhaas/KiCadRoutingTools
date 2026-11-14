@@ -19,6 +19,7 @@ runnable tool in the clone with a one-line purpose.
   [non-orthonormal segments](#non-orthonormal-segment-checker-check_orthonormalpy) ·
   [impedance](#impedance-audit-check_impedancepy) ·
   [return vias](#return-via-coverage-check_return_viaspy) ·
+  [reference planes](#reference-plane-check-check_reference_planepy) ·
   [power drop](#power-drop-report-check_power_droppy) ·
   [reachability](#reachability-check-check_reachabilitypy) ·
   [net forensics](#net-forensics-net_forensicspy) ·
@@ -3230,6 +3231,39 @@ gap -- no ground beside it, or a gap off the declaration -- over more than
 --impedance-nets` counts by; the audit names those nets); else 0
 (`--exit-zero`: always 0). The model and every option are in
 [Impedance API](api-impedance.md).
+
+## Reference Plane Check (`check_reference_plane.py`)
+
+Where does a signal track leave its reference plane (#595)? It reports, per
+signal net, the track that runs over NO pour copper on its adjacent plane
+layer(s), how many times a track crosses such a void, and how many times the
+pour under it changes net, as text and JSON. Read-only, report-only (exit 0
+whatever it counts; 2 when a `--nets` pattern names no net of the board; 3 for
+a missing board).
+
+```bash
+python3 py_tools/check_reference_plane.py routed.kicad_pcb [--nets GLOB ...] \
+    [--step MM] [--json report.json]
+```
+
+- A track's reference layers are the copper layers next to its own in the stack
+  that carry a pour. Track on a layer with no poured neighbour is totalled apart
+  (`unreferenced_mm`).
+- The copper under a point is the zone's FILL (`plane_fill_model`: the zone
+  clearance around foreign tracks, vias and pads included), so a slot a track or
+  a row of vias cuts in a plane counts like a split between two pours.
+- A `crossing` is a track that leaves the copper and comes back over copper
+  within one segment; a `reference_change` is the pour under the track changing
+  net, across a void or not; `void_mm` is the length over no copper on any
+  reference layer. Tracks are sampled every `--step` mm (default 0.1), so a
+  void's length is good to one step.
+- A signal net is one that is neither ground nor power
+  (`list_nets.power_net_evidence`), as in the return-via check.
+
+The JSON carries `reference_layers`, `totals`, `by_net` and `rows` (each crossing
+and change with its position). The measure is `reference_plane.
+reference_plane_report`. It prices and routes nothing: it is the instrument a
+routing cost for this would be judged by.
 
 ## Return Via Coverage (`check_return_vias.py`)
 
