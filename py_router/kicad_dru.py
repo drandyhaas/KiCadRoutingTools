@@ -1521,6 +1521,10 @@ def apply_layer_rules(value: float, layer_map: Dict[str, float], *,
     return value
 
 
+#: the layer map of a config with no layer rule: ONE object, never mutated,
+#: so a memo keyed on a layer map's identity hits on such a board as well
+_NO_LAYER_RULES: Dict[str, float] = {}
+
 #: the item types a routed net lays (tracks and vias), and the obstacle types
 #: a track / via stamp stands for
 _ROUTED_TYPES = ('track', 'via')
@@ -1629,7 +1633,7 @@ class ScopedClearanceInstall:
             return None
         clr = config.clearance
         nc = config.net_clearances or {}
-        lmap = config.layer_clearances or {}
+        lmap = config.layer_clearances or _NO_LAYER_RULES
         key = (self.sc._sig(net_id), pad_type, layer, id(lmap), clr,
                nc.get(int(net_id or 0)))
         hit = self._layered_memo.get(key)
