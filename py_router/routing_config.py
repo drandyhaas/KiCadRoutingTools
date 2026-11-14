@@ -506,6 +506,10 @@ class GridRouteConfig:
     # The legacy per-channel maps above are being migrated onto it; consumers
     # that resolve through it must treat None as "no rules declared".
     rules: Optional[object] = None
+    # #1853: the board's .kicad_dru hole_clearance rules as the route steps
+    # read them (hole_rule_routing.RoutedHoleRules), installed with `rules`.
+    # None (no such rule) leaves every hole keep-out as it was.
+    hole_rules: Optional[object] = None
     # #1843: the board's clearance rules scoped by a rule area
     # (area_clearance.AreaClearance), installed with `rules`. The base map,
     # the per-net caches and the stamp functions compose every keep-out over
@@ -643,6 +647,16 @@ class GridRouteConfig:
         over it for the routed nets it binds (#1491, KiCad's last match);
         without one, or with no such rule, the layer rule replaces as
         before."""
+        s1897 = self.scoped_clearance
+        if (s1897 is not None and layer in s1897.layered_layers
+                and (net_id is not None or pad is not None)):
+            # #1897: a scoped rule with a (layer ...) clause naming this layer
+            got = s1897.stamp_layered(
+                int((net_id if net_id is not None else getattr(pad, 'net_id', 0)) or 0),
+                (getattr(pad, 'pad_type', None) or 'smd') if pad is not None else None,
+                layer, self)
+            if got is not None:
+                return got
         if self.layer_clearances:
             v = self.layer_clearances.get(layer)
             if v is not None:
@@ -658,6 +672,20 @@ class GridRouteConfig:
                 return v
         return fallback
 
+    def via_hole_extra(self, clearance: float, other_via=None, pad=None) -> float:
+        """#1853: the mm a NEW via's keep-out from another net's copper grows
+        by under the board's `.kicad_dru` hole_clearance rules, on top of the
+        ring-to-copper distance priced at ``clearance``. KiCad measures those
+        rules from the HOLE, so they bind where they exceed the annular ring
+        plus the clearance. The copper is a track unless ``pad`` (that pad)
+        or ``other_via`` (an existing via, whose own hole the new via's copper
+        is held off the same way) is given, each read as the item it is.
+        0.0 with no such rule."""
+        if self.hole_rules is None:
+            return 0.0
+        from hole_rule_routing import via_hole_extra
+        return via_hole_extra(self, clearance, other_via, pad)
+
     def stack_clearance(self, fallback: float, net_id: Optional[int] = None,
                         pad=None) -> float:
         """#498 clearance for STACK-SPANNING pairs (via barrels, TH drills):
@@ -667,11 +695,17 @@ class GridRouteConfig:
         ruled lower, since the board may have copper on layers outside
         config.layers. `net_id` / `pad` order each layer's rule against the
         scoped channel as `layer_clearance` does."""
-        if not self.layer_clearances:
+        s1897 = self.scoped_clearance
+        layered = (s1897.layered_layers if s1897 is not None
+                   and (net_id is not None or pad is not None) else ())
+        if not self.layer_clearances and not layered:
             return fallback
         if self.scoped_clearance is not None and (net_id is not None or pad is not None):
+            # #1897: and the layers a scoped rule's (layer ...) clause names
             return max([fallback] + [self.layer_clearance(l, fallback, net_id, pad)
-                                     for l in self.layer_clearances])
+                                     for l in (list(self.layer_clearances or ())
+                                               + [l for l in sorted(layered)
+                                                  if l not in (self.layer_clearances or ())])])
         return max([fallback] + list(self.layer_clearances.values()))
 
     def obstacle_clearance(self, net_id: int) -> float:

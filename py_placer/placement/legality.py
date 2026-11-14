@@ -4239,13 +4239,14 @@ def _channel_notes(notes, channels):
     cdr = (channels.coupled_dr
            if channels is not None and channels.coupled_nets else None)
     out = []
+    # the parser's "handled" tail, with or without a layer clause's issue
+    # number: "(#1491)" or "(#1491, #1897)"
+    handled = re.compile(r"handled by the scoped channel \(#1491[^)]*\)$")
     for n in notes:
         m = re.match(r"\.kicad_dru: rule '(.*?)': clearance ([0-9.eE+-]+)mm ", n)
-        if m and n.endswith('handled by the scoped channel (#1491)') \
-                and m.group(1) not in scoped:
-            n = n.replace('handled by the scoped channel (#1491)',
-                          'NOT priced here (the scoped channel did not read it); '
-                          'KiCad will still enforce it')
+        if m and handled.search(n) and m.group(1) not in scoped:
+            n = handled.sub('NOT priced here (the scoped channel did not read it); '
+                            'KiCad will still enforce it', n)
         out.append(n)
     if cdr is not None and cdr.has_pair_gap_classes():
         out.append("net-class diff-pair gaps below the class clearance price a "
