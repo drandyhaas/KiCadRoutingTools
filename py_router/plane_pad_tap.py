@@ -1024,8 +1024,10 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
         # detoured past it drops that target and the rest are tried again.
         beyond = chained.get(tuple(pos) if pos is not None else None)
         if beyond is not None:
-            strap = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
-                        for s in segs)
+            strap = sum(math.hypot(e[0] - a[0], e[1] - a[1])
+                        for a, e in (((s['start'], s['end']) if isinstance(s, dict)
+                                      else ((s.start_x, s.start_y), (s.end_x, s.end_y)))
+                                     for s in segs))
             if strap + beyond > radius + 1e-6:
                 positions = [p for p in positions if tuple(p) != tuple(pos)]
                 continue

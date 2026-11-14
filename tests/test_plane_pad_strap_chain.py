@@ -106,10 +106,11 @@ def run():
             if (10.6, 10.0) not in [tuple(p) for p in positions]:
                 return [], None
             half = length / 2.0
-            return ([Segment(start_x=11.2, start_y=10.0, end_x=10.9, end_y=10.0 + half,
-                             width=0.127, layer="B.Cu", net_id=1),
-                     Segment(start_x=10.9, start_y=10.0 + half, end_x=10.6, end_y=10.0,
-                             width=0.127, layer="B.Cu", net_id=1)], (10.6, 10.0))
+            # the router's own segment shape: dicts with 'start' / 'end'
+            return ([{'start': (11.2, 10.0), 'end': (10.9, 10.0 + half),
+                      'width': 0.127, 'layer': "B.Cu", 'net_id': 1},
+                     {'start': (10.9, 10.0 + half), 'end': (10.6, 10.0),
+                      'width': 0.127, 'layer': "B.Cu", 'net_id': 1}], (10.6, 10.0))
         return route
 
     for detour, want in ((0.0, True), (1.0, False)):
