@@ -198,7 +198,7 @@ def via_span_summary(config, pcb_data=None) -> Optional[dict]:
     span = getattr(config, 'via_span', None)
     if not span:
         return None
-    return {'layers': [span[0], span[-1]],
+    return {'layers': via_layer_pair(config),
             'type': getattr(config, 'via_span_type', None),
             'plane_finalize': 'not run',
             'zones': len(getattr(pcb_data, 'zones', None) or ())}
@@ -248,6 +248,43 @@ def default_micro_via(pcb_path: str) -> Tuple[Optional[float], Optional[float]]:
             return (float(dia) if isinstance(dia, (int, float)) and dia > 0 else None,
                     float(drill) if isinstance(drill, (int, float)) and drill > 0 else None)
     return None, None
+
+
+def step_span(pcb_data, layers, layer_costs, via_span, via_span_type):
+    """A step's routing layers under a via span: ``(span, type, layers,
+    layer_costs)``, the layers cut down to the span (the span's own where
+    none of the asked layers is in it) and the costs with them. ``span`` and
+    ``type`` are None for no span and for one that covers the whole stack
+    (through vias: the step is unchanged). ``type`` is the word the step's
+    vias are written with in this board's file (`file_via_type`: `buried`
+    is KiCad 9's `blind` in a file older than KiCad 10's format). The ONE
+    reading every via-span step takes of its span (route.py, route_diff.py).
+
+    Raises ValueError as `resolve_via_span` does."""
+    if not via_span:
+        return None, None, layers, layer_costs
+    span, kind = resolve_via_span(
+        list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
+        via_span[0], via_span[-1], via_span_type)
+    if kind is None:
+        return None, None, layers, layer_costs   # the whole stack: through vias
+    word = file_via_type(kind, getattr(pcb_data, 'kicad_version', 0) or 0)
+    if word != kind:
+        print(f"Via span (#1842): this board's file format "
+              f"({pcb_data.kicad_version}) predates KiCad 10, which has no "
+              f"'{kind}' via; its vias are written '{word}' "
+              f"(KiCad 9's blind/buried type), on the same layer pair")
+        kind = word
+    inside = [l for l in layers if l in span]
+    if layer_costs and len(layer_costs) == len(layers):
+        layer_costs = [c for l, c in zip(layers, layer_costs) if l in span]
+        if not inside:
+            layer_costs = None
+    layers = inside or list(span)
+    print(f"Via span (#1842): {kind} vias {span[0]}-{span[-1]}; routing on "
+          f"{', '.join(layers)} only, and only copper on {', '.join(span)} "
+          f"(and drilled pads) blocks a via site")
+    return span, kind, layers, layer_costs
 
 
 def apply_span(vias, config) -> int:
