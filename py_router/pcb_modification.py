@@ -5743,6 +5743,9 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
             return clearance
         return max(clearance, net_clearances.get(nid, clearance))
 
+    # #595: the reference-void map of a run that armed it (None otherwise)
+    _rv595 = getattr(config, '_reference_void_map', None) if config is not None else None
+
     def pair_base(nid, layer):
         # #498: a .kicad_dru layer rule REPLACES the net/class value on its
         # layer (may relax below it); unruled layers keep class resolution.
@@ -6334,6 +6337,14 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                                 _in_dense_field(pts[q][0], pts[q][1],
                                                                 pts[q + 1][0], pts[q + 1][1])
                                                 for q in range(len(pts) - 1)):
+                                            continue
+                                        # #595: a net that pays the
+                                        # reference-void cost was routed
+                                        # round a gap in its plane; the
+                                        # connector may not lie over more
+                                        # of it than the copper it replaces
+                                        if _rv595 is not None and _rv595.worse(
+                                                net_id, layer, poly[i:j + 1], pts):
                                             continue
                                         if all(clears_m(pts[q][0], pts[q][1],
                                                         pts[q + 1][0], pts[q + 1][1])
