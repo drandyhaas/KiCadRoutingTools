@@ -299,15 +299,74 @@ class SpanError(ValueError):
     """A via span a step cannot work on (the part is on neither end of it)."""
 
 
+def _set_aside_memos():
+    """Every memo on a PCBData derived from its copper that a set-aside must
+    drop on the way in and on the way out: the ones a live re-sync drops
+    (`kicad_parser.LIVE_COPPER_MEMOS`), and the pad- and pour-derived ones
+    keyed on less than their content (a pad count, the dict's identity, or
+    nothing at all)."""
+    from kicad_parser import LIVE_COPPER_MEMOS
+    return tuple(LIVE_COPPER_MEMOS) + (
+        '_foreign_pad_arr_cache', '_foreign_pad_type_cache', '_foreign_hole_cap_cache',
+        '_neck_exact_pad_cache', '_neck_exact_standoff_cache', '_npth_holes_cache_390',
+        '_pour_launch_memo', '_net_cost_cache', '_ground_domains', '_rescue_map_cache')
+
+
+def _forget_copper(pcb_data):
+    """The copper just changed under every memo: drop them and bump the
+    copper epoch the epoch-keyed ones read."""
+    from pcb_modification import bump_copper_epoch
+    for attr in _set_aside_memos():
+        vars(pcb_data).pop(attr, None)
+    bump_copper_epoch(pcb_data)
+
+
+def _merge_back(lst, before, held_ids):
+    """Put ``lst`` (a copper list as the call left it) back in full, in
+    place: the items of ``before`` (the list on entry) that were set aside or
+    are still there, in their original order, then the ones the call added,
+    in the order it added them. An item the call removed stays removed."""
+    now = {id(x) for x in lst}
+    was = {id(x) for x in before}
+    lst[:] = ([x for x in before if id(x) in held_ids or id(x) in now]
+              + [x for x in lst if id(x) not in was])
+
+
+#: `pcb_data` attribute naming what `only_span_copper` holds set aside
+SET_ASIDE_ATTR = '_span_set_aside'
+
+
+def set_aside(pcb_data) -> dict:
+    """What `only_span_copper` has set aside on ``pcb_data``: ``{'span':
+    [...], 'type': the span's via type, 'segments': [...], 'vias': [...]}``,
+    or {} outside one. A reader
+    that judges a NET by all its copper -- is any of it KiCad-locked or held
+    (`protected_nets.locked_net_names` / `held_net_reasons`,
+    `stub_layer_switching._locked_net_ids`) -- reads these too, so a net
+    whose locked copper is all off the span stays protected inside the
+    call."""
+    return vars(pcb_data).get(SET_ASIDE_ATTR) or {}
+
+
 @_contextmanager
-def only_span_copper(pcb_data, span):
+def only_span_copper(pcb_data, span, via_type: Optional[str] = None):
     """For a step that measures its own via sites off the board (the fan-out
-    engines): the board with the copper outside ``span`` set aside for the
-    duration -- tracks and pours on other layers, vias with no copper on the
-    span's layers, undrilled pads with none -- and put back on exit, in
-    place, with whatever the step added. Drilled pads stay. This is
-    `SpanView` for an engine that adds and removes copper on the board as it
-    works, where a snapshot would go stale."""
+    and plane-repair engines): the board with the copper outside ``span``
+    set aside for the duration -- tracks and pours on other layers, vias
+    with no copper on the span's layers, undrilled pads with none -- and put
+    back on exit, whatever happens inside, every list in its original order
+    with what the step added after it (`_merge_back`). Drilled pads stay.
+    This is `SpanView` for an engine that adds and removes copper on the
+    board as it works, where a snapshot would go stale. ``via_type`` is the
+    type the step's vias are written with (`set_aside` gives it back).
+
+    The board is the same object throughout, so every memo derived from its
+    copper is dropped and the copper epoch bumped on the way in and on the
+    way out (`_forget_copper`): a memo built on one side must not answer on
+    the other. Net-level protection is judged on ALL the copper: the set-
+    aside tracks and vias stay readable through `set_aside`, which the lock
+    and hold readers include, so KiCad-locked copper off the span keeps its
+    net unrippable inside the call."""
     from geometry_utils import via_copper_layers
     from check_drc import pad_copper_layers
     keep = set(span)
@@ -316,35 +375,44 @@ def only_span_copper(pcb_data, span):
     def shown(pad):
         return ((getattr(pad, 'drill', 0) or 0) > 0
                 or bool(keep & set(pad_copper_layers(pad, copper))))
-    held_segs = [s for s in pcb_data.segments if s.layer not in keep]
-    held_vias = [v for v in pcb_data.vias if not keep & set(via_copper_layers(v, copper))]
     zones = getattr(pcb_data, 'zones', None)
-    held_zones = [z for z in (zones or []) if z.layer not in keep]
+    before = {'segments': list(pcb_data.segments), 'vias': list(pcb_data.vias),
+              'zones': list(zones or [])}
+    held = {'segments': [s for s in before['segments'] if s.layer not in keep],
+            'vias': [v for v in before['vias']
+                     if not keep & set(via_copper_layers(v, copper))],
+            'zones': [z for z in before['zones'] if z.layer not in keep]}
     fp_pads = {ref: list(fp.pads) for ref, fp in pcb_data.footprints.items()}
     net_pads = {nid: list(pads) for nid, pads in pcb_data.pads_by_net.items()}
-    gone_s, gone_v, gone_z = ({id(x) for x in held_segs}, {id(x) for x in held_vias},
-                              {id(x) for x in held_zones})
-    pcb_data.segments[:] = [s for s in pcb_data.segments if id(s) not in gone_s]
-    pcb_data.vias[:] = [v for v in pcb_data.vias if id(v) not in gone_v]
-    if zones is not None:
-        zones[:] = [z for z in zones if id(z) not in gone_z]
-    for ref, fp in pcb_data.footprints.items():
-        fp.pads[:] = [p for p in fp_pads[ref] if shown(p)]
-    for nid, pads in pcb_data.pads_by_net.items():
-        pads[:] = [p for p in net_pads[nid] if shown(p)]
+    held_pads = {id(p) for pads in fp_pads.values() for p in pads if not shown(p)}
+    held_pads |= {id(p) for pads in net_pads.values() for p in pads if not shown(p)}
+    lists = {'segments': pcb_data.segments, 'vias': pcb_data.vias, 'zones': zones}
+    held_ids = {k: {id(x) for x in v} for k, v in held.items()}
     try:
+        vars(pcb_data)[SET_ASIDE_ATTR] = {'span': list(span), 'type': via_type,
+                                          'segments': held['segments'],
+                                          'vias': held['vias']}
+        for k, lst in lists.items():
+            if lst is not None:
+                lst[:] = [x for x in lst if id(x) not in held_ids[k]]
+        for ref, fp in pcb_data.footprints.items():
+            fp.pads[:] = [p for p in fp_pads[ref] if id(p) not in held_pads]
+        for nid, pads in pcb_data.pads_by_net.items():
+            pads[:] = [p for p in net_pads[nid] if id(p) not in held_pads]
+        _forget_copper(pcb_data)
         yield
     finally:
-        pcb_data.segments[:] = held_segs + list(pcb_data.segments)
-        pcb_data.vias[:] = held_vias + list(pcb_data.vias)
-        if zones is not None:
-            zones[:] = held_zones + list(zones)
+        for k, lst in lists.items():
+            if lst is not None:
+                _merge_back(lst, before[k], held_ids[k])
         for ref, fp in pcb_data.footprints.items():
             if ref in fp_pads:
-                fp.pads[:] = fp_pads[ref]
+                _merge_back(fp.pads, fp_pads[ref], held_pads)
         for nid, pads in pcb_data.pads_by_net.items():
             if nid in net_pads:
-                pads[:] = net_pads[nid]
+                _merge_back(pads, net_pads[nid], held_pads)
+        vars(pcb_data).pop(SET_ASIDE_ATTR, None)
+        _forget_copper(pcb_data)
 
 
 def add_cli_flags(parser, what: str) -> None:

@@ -505,7 +505,12 @@ type) on the same layer pair, and the run says so.
   site off the board themselves, so for the call the board carries only the
   copper the span has (`via_span.only_span_copper`: pads and tracks on other
   layers are set aside and put back, drilled pads stay), and a pad on the
-  far side of the board under a ball no longer blocks that ball's via. With
+  far side of the board under a ball no longer blocks that ball's via. The
+  set-aside puts every list back in its original order (what the call added
+  after it), also when the call raises; the memos derived from the copper
+  are dropped and the copper epoch bumped on the way in and out; and a net's
+  KiCad-locked copper off the span keeps the net unrippable inside the call
+  (the lock readers read the set-aside copper too). With
   no `--layers` the escape uses the span's layers, and a micro span with no
   via size draws the Default class's micro via. Measured on a top-side
   BGA. Not separately measured: a back-side part, and the QFN via drops,
