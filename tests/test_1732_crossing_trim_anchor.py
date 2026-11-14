@@ -20,10 +20,12 @@ own segment already crosses.
 Checks (P joined only by an X: a horizontal 1 mm past the crossing, a
 vertical 0.168 mm past it, 0.14 mm tracks):
   1. route_diff's cleanup (snap off) cuts the 1 mm tail back to the
-     crossing; the 0.168 mm one is under the trim's 3-width floor and stays,
-     as any such nib does; P stays connected;
-  2. route.py's cleanup (snap on) lays no connector over the short tail and
-     ships the same copper;
+     crossing, and the 0.168 mm one too: its end is 1.2 track widths past
+     the other track, which no copper touches, so KiCad reports it
+     `track_dangling` and the trim takes it (#1870; under the 3-width floor
+     the trim had before, it stayed); P stays connected;
+  2. route.py's cleanup (snap on), whose snap runs before the trim, lays no
+     connector over the short tail and ships the same copper;
   3. controls: a track crossing on ANOTHER layer is no anchor (the tail is
      cut back past it, to the tee behind it), and a T-junction tail is still
      trimmed as before.
@@ -136,8 +138,9 @@ def main():
                   abs(x - 115.0) < 1e-6, f'horizontal ends at x={x:.4f}')
             check(f'{who}: P stays connected', conn.get('connected') is True,
                   str(conn.get('connected')))
-            check(f'{who}: no connector is laid over the short tail, and the '
-                  f'copper is 15.168 mm', not snaps and abs(copper - 15.168) < 1e-6,
+            check(f'{who}: no connector is laid over the short tail, and both '
+                  f'tails are cut back (copper 15.000 mm)',
+                  not snaps and abs(copper - 15.0) < 1e-6,
                   f'{len(snaps)} snap connector(s); copper {copper:.4f}')
 
         pcb, _c, _s, copper = clean(paths['layers'], False)

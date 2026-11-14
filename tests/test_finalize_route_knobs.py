@@ -74,7 +74,9 @@ def test_every_sub_run_takes_the_knobs():
         body = src[c:c + 4000]          # the call and its argument comments
         assert 'route_knobs=_finalize_route_knobs(_reconcile_kwargs)' in body, \
             src[c:c + 200]
-    rsrc = _source(repair_planes.repair_planes)
+    # #1842: `repair_planes` is the wrapper that runs the engine on a via
+    # span; the sub-runs are in the engine body
+    rsrc = _source(repair_planes._repair_planes_all)
     subs = [m.start() for m in re.finditer(r'= batch_route\(', rsrc)]
     assert len(subs) == 3, len(subs)
     for c in subs:

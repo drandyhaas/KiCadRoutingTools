@@ -876,7 +876,26 @@ def auto_detect_zones(
 
 
 
-def repair_planes(
+def repair_planes(*args, via_span: Optional[List[str]] = None,
+                  via_span_type: Optional[str] = None, **kwargs):
+    """`_repair_planes_all`, on a via span when one is given (#1842), or when
+    the route step that calls it carries one in ``route_knobs``. The taps and
+    region joins are then vias of the span, and for the call the board
+    carries only the copper the span has (`via_span.only_span_copper`), so
+    "this site reaches the plane" and every via-site test read the span's
+    layers alone. The copper is put back when the call returns, however it
+    returns."""
+    span = via_span or (kwargs.get('route_knobs') or {}).get('via_span')
+    if not span:
+        return _repair_planes_all(*args, **kwargs)
+    kind = via_span_type or (kwargs.get('route_knobs') or {}).get('via_span_type')
+    import contextlib
+    with contextlib.ExitStack() as stack:
+        return _repair_planes_all(*args, _span=(list(span), kind), _span_stack=stack,
+                                  **kwargs)
+
+
+def _repair_planes_all(
     input_file: str,
     output_file: str,
     net_names: List[str],
@@ -945,6 +964,10 @@ def repair_planes(
     # sub-run's own explicit settings. The #562 finalize passes its run's;
     # None (the standalone CLI) = batch_route's defaults.
     route_knobs: Optional[dict] = None,
+    # #1842: (span layers, type) and the stack that holds the board's
+    # off-span copper for the call; set by `repair_planes`
+    _span=None,
+    _span_stack=None,
     # #1621: net names the calling route step's --nets negates ('!/RF'),
     # never ripped as a tap blocker here nor by the sub-runs below. The #562
     # finalize passes its step's set; None (the standalone CLI) = none.
@@ -1105,6 +1128,24 @@ def repair_planes(
         routing_layers = pcb_data.board_info.copper_layers
         if not routing_layers:
             routing_layers = ['F.Cu', 'B.Cu']  # Fallback
+    # #1842: a via span. The step works on the span's layers, a plane on a
+    # layer the span does not have is not this step's to tap, and the copper
+    # outside the span is set aside until the copper is written.
+    _span_cfg = None
+    if _span is not None:
+        from types import SimpleNamespace
+        from via_span import (SpanError, step_span, only_span_copper)
+        _sl, _sk, routing_layers, layer_costs = step_span(
+            pcb_data, list(routing_layers), layer_costs, _span[0], _span[1])
+        if _sl:
+            _off = sorted({l for l in plane_layers if l not in _sl})
+            if _off:
+                raise SpanError(
+                    f"--via-span {_sl[0]} {_sl[-1]}: the plane layer(s) {', '.join(_off)} "
+                    f"are outside the span, so a via of it cannot reach them")
+            _span_cfg = SimpleNamespace(via_span=list(_sl), via_span_type=_sk)
+            route_knobs = dict(route_knobs or {}, via_span=list(_sl), via_span_type=_sk)
+            _span_stack.enter_context(only_span_copper(pcb_data, _sl, _sk))
     # One cost per routing layer: the nested batch_route sub-runs below append
     # the unrequested copper layers after these costs, positionally.
     from routing_config import layer_costs_count_error
@@ -2734,8 +2775,18 @@ def repair_planes(
                          if pcb_uses_name_nets(pcb_data)
                          else None)
                 _reconcile_write_list_vs_board('pre-oracle')
+                # #1842: under a via span the vias this step laid are graded
+                # as the span's, as they will be written -- a through via in
+                # the file would reach (and be credited with) a pour on a
+                # layer the span does not have
+                _gate_vias = all_new_vias
+                if _span_cfg is not None:
+                    from via_span import apply_span
+                    _gate_vias = [dict(d) for d in all_new_vias]
+                    apply_span([d for d in _gate_vias if not d.get('from_restore')],
+                               _span_cfg)
                 _write_output(input_file, _tmp.name, all_new_segments,
-                              all_new_vias, None,
+                              _gate_vias, None,
                               net_id_to_name=_nm10,
                               exclude_net_ids=(ripped_net_ids + partial_ids
                                                + inplace_reconnected_ids))
@@ -3444,6 +3495,20 @@ def repair_planes(
     from pcb_modification import merge_close_same_net_vias
     merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
                               config.hole_to_hole_clearance)
+    if _span_cfg is not None:
+        # #1842: every via this step laid joins the span (the board it was
+        # placed on was the span's); a via it only put back keeps its own
+        # type. Then the copper outside the span comes back, before anything
+        # is written or measured for the project.
+        from via_span import apply_span
+        _laid = [d for d in all_new_vias if not d.get('from_restore')]
+        _n_span = apply_span(_laid, _span_cfg)
+        _keys = {(round(d['x'], 4), round(d['y'], 4), d.get('net_id')) for d in _laid}
+        apply_span([v for v in pcb_data.vias
+                    if (round(v.x, 4), round(v.y, 4), v.net_id) in _keys], _span_cfg)
+        print(f"  Via span: {_n_span} plane via(s) written as {_span_cfg.via_span_type} "
+              f"{_span_cfg.via_span[0]}-{_span_cfg.via_span[-1]}")
+        _span_stack.close()
 
     _reconcile_write_list_vs_board('final')
 
@@ -3795,6 +3860,7 @@ Examples:
                              "project's recorded value, else -1.")
 
     # Via options (for config)
+    __import__('via_span').add_cli_flags(parser, "Lay the plane taps and region joins")
     parser.add_argument("--via-size", type=float, default=None,
                         help="Via outer diameter in mm (default: the board Default net-class via, else 0.5)")
     parser.add_argument("--via-drill", type=float, default=None,
@@ -3884,6 +3950,10 @@ Examples:
     # Resolved here, before enforce_fab_floors and every downstream use.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
                            resolve_cli_floor)
+    # #1842: --via-span against the board's own stack; a micro span draws the
+    # class's micro via, which the mechanical fab floor does not pin
+    _span_layers, _span_type, _micro_span = __import__('via_span').resolve_cli(
+        parser, args, args.input_file)
     _vs_explicit = args.via_size is not None or args.via_drill is not None
     for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
                                       ('via_size', 'via_diameter', defaults.VIA_SIZE),
@@ -3943,8 +4013,8 @@ Examples:
         min_track_width=getattr(args, 'min_track_width', None),
         clearance=getattr(args, 'clearance', None),
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
-        via_size=getattr(args, 'via_size', None),
-        via_drill=getattr(args, 'via_drill', None),
+        via_size=None if _micro_span else getattr(args, 'via_size', None),
+        via_drill=None if _micro_span else getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
         board_edge_clearance=getattr(args, 'board_edge_clearance', None))
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
@@ -4003,46 +4073,52 @@ Examples:
     # GUI's (the planes tab's Cancel button); the CLI passes neither. There is
     # deliberately no wall-clock budget -- no result this tool produces may
     # depend on timing.
-    _rdp_result = repair_planes(
-        input_file=args.input_file,
-        output_file=args.output_file,
-        layer_costs=(list(args.layer_costs) if args.layer_costs else None),
+    from via_span import SpanError as _SpanError
+    try:
+        _rdp_result = repair_planes(
+            via_span=args.via_span, via_span_type=args.via_span_type,
+            input_file=args.input_file,
+            output_file=args.output_file,
+            layer_costs=(list(args.layer_costs) if args.layer_costs else None),
 
-        net_names=net_names,
-        plane_layers=plane_layers,
-        track_width=args.track_width,
-        clearance=args.clearance,
-        zone_clearance=args.zone_clearance,
-        grid_step=args.grid_step,
-        analysis_grid_step=args.analysis_grid_step,
-        ripup_blocker_select=args.ripup_blocker_select,
-        max_track_width=args.max_track_width,
-        min_track_width=args.min_track_width,
-        track_via_clearance=args.track_via_clearance,
-        hole_to_hole_clearance=args.hole_to_hole_clearance,
-        board_edge_clearance=args.board_edge_clearance,
-        via_size=args.via_size,
-        via_drill=args.via_drill,
-        via_from_class=not _vs_explicit,
-        max_iterations=args.max_iterations,
-        verbose=args.verbose,
-        dry_run=args.dry_run,
-        debug_lines=args.debug_lines,
-        routing_layers=args.layers,
-        repair_pads=args.repair_pads,
-        max_search_radius=args.max_search_radius,
-        rip_blocker_nets=args.rip_blocker_nets,
-        max_rip_nets=args.max_rip_nets,
-        tap_via_share=args.tap_via_share,
-        reroute_ripped_nets=args.reroute_ripped_nets,
-        power_nets=args.power_nets,
-        power_nets_widths=args.power_nets_widths,
-        no_bga_zone=args.no_bga_zone,
-        clamp_netclasses=args._clamp_netclasses,
-        clearance_ceiling=args._clearance_ceiling,
-        add_teardrops=args.add_teardrops,
-        same_net_pad_clearance=args.same_net_pad_clearance
-    )
+            net_names=net_names,
+            plane_layers=plane_layers,
+            track_width=args.track_width,
+            clearance=args.clearance,
+            zone_clearance=args.zone_clearance,
+            grid_step=args.grid_step,
+            analysis_grid_step=args.analysis_grid_step,
+            ripup_blocker_select=args.ripup_blocker_select,
+            max_track_width=args.max_track_width,
+            min_track_width=args.min_track_width,
+            track_via_clearance=args.track_via_clearance,
+            hole_to_hole_clearance=args.hole_to_hole_clearance,
+            board_edge_clearance=args.board_edge_clearance,
+            via_size=args.via_size,
+            via_drill=args.via_drill,
+            via_from_class=not _vs_explicit,
+            max_iterations=args.max_iterations,
+            verbose=args.verbose,
+            dry_run=args.dry_run,
+            debug_lines=args.debug_lines,
+            routing_layers=args.layers,
+            repair_pads=args.repair_pads,
+            max_search_radius=args.max_search_radius,
+            rip_blocker_nets=args.rip_blocker_nets,
+            max_rip_nets=args.max_rip_nets,
+            tap_via_share=args.tap_via_share,
+            reroute_ripped_nets=args.reroute_ripped_nets,
+            power_nets=args.power_nets,
+            power_nets_widths=args.power_nets_widths,
+            no_bga_zone=args.no_bga_zone,
+            clamp_netclasses=args._clamp_netclasses,
+            clearance_ceiling=args._clearance_ceiling,
+            add_teardrops=args.add_teardrops,
+            same_net_pad_clearance=args.same_net_pad_clearance
+        )
+    except _SpanError as exc:
+        print(f"Error: {exc}")
+        return 1
 
     # Dead-end sweep + gap-snap on the repaired plane copper (issue #84), gated
     # against connectivity + pours so it never breaks a net.
@@ -4201,7 +4277,10 @@ Examples:
                 hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=read_project_edge_clearance(args.input_file),
                 track_width=args.track_width,
-                via_diameter=args.via_size, via_drill=args.via_drill,
+                # #1842: a micro via's size is no statement about the
+                # board's via minimums
+                via_diameter=None if _micro_span else args.via_size,
+                via_drill=None if _micro_span else args.via_drill,
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
