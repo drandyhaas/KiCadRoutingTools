@@ -2314,6 +2314,65 @@ def diff_pair_coupling(pcb_data: PCBData, p_net_id: int, n_net_id: int,
             'arc_chords': arcs}
 
 
+#: above this many segments a net is not searched for self-overlap
+SELF_OVERLAP_MAX_SEGMENTS = 2000
+#: two passes count as running along each other within this angle (sine)
+_SELF_OVERLAP_SIN = 0.0872          # 5 degrees
+
+
+def net_self_overlap(pcb_data: PCBData, net_id: int):
+    """Where a net's track copper runs ALONG ITSELF (#1873): two same-layer
+    pieces, within 5 degrees of parallel, whose centre lines stand closer
+    than the narrower track's width over more than that width -- one strip of
+    copper laid twice. A leg that comes back along its own coupled middle has
+    it; a straight continuation, a bend and a T-junction do not.
+
+    Returns (total mm laid twice, rows), each row {'layer', 'a', 'b' (the two
+    pieces' end points), 'centre_gap_mm', 'along_mm'}; (None, []) for a net
+    with more than SELF_OVERLAP_MAX_SEGMENTS segments (not searched). A
+    length-match measure that sums all of a net's copper, as KiCad's does,
+    counts such a stretch twice."""
+    from geometry_utils import point_to_segment_distance
+    segs = [s for s in pcb_data.segments
+            if s.net_id == net_id and not getattr(s, 'graphic', False)
+            and math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) > 1e-9]
+    if len(segs) > SELF_OVERLAP_MAX_SEGMENTS:
+        return None, []
+    rows, total = [], 0.0
+    for i, a in enumerate(segs):
+        ax, ay = a.end_x - a.start_x, a.end_y - a.start_y
+        la = math.hypot(ax, ay)
+        ux, uy = ax / la, ay / la
+        for b in segs[i + 1:]:
+            if b.layer != a.layer:
+                continue
+            bx, by = b.end_x - b.start_x, b.end_y - b.start_y
+            lb = math.hypot(bx, by)
+            if abs(ux * by - uy * bx) / lb > _SELF_OVERLAP_SIN:
+                continue
+            w = min(a.width or 0.0, b.width or 0.0)
+            if w <= 0.0:
+                continue
+            t0 = (b.start_x - a.start_x) * ux + (b.start_y - a.start_y) * uy
+            t1 = (b.end_x - a.start_x) * ux + (b.end_y - a.start_y) * uy
+            lo, hi = max(0.0, min(t0, t1)), min(la, max(t0, t1))
+            if hi - lo <= w:
+                continue
+            gap = max(point_to_segment_distance(a.start_x + ux * t, a.start_y + uy * t,
+                                                b.start_x, b.start_y, b.end_x, b.end_y)
+                      for t in (lo, hi))
+            if gap >= w - 1e-9:
+                continue
+            rows.append({'layer': a.layer,
+                         'a': [(round(a.start_x, 4), round(a.start_y, 4)),
+                               (round(a.end_x, 4), round(a.end_y, 4))],
+                         'b': [(round(b.start_x, 4), round(b.start_y, 4)),
+                               (round(b.end_x, 4), round(b.end_y, 4))],
+                         'centre_gap_mm': round(gap, 4), 'along_mm': round(hi - lo, 4)})
+            total += hi - lo
+    return round(total, 4), rows
+
+
 def diff_pair_skew(pcb_data: PCBData, p_net_id: int, n_net_id: int,
                    tolerance: float = 0.02) -> Dict:
     """A pair's P/N lengths and their skew as KiCad's skew DRC measures them

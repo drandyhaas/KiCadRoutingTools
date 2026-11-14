@@ -394,6 +394,17 @@ def measure_pair_copper(pcb_data, diff_pairs_list, routed_results,
                    coupled_share=round(coupled_share(rec['coupled_mm'], length), 4),
                    coupled_share_floor=COUPLED_SHARE_FLOOR,
                    coupled=meets_coupled_floor(rec['coupled_mm'], length, floor))
+        # #1873: a member laid back along itself counts that copper twice in
+        # the skew above (all of a net's copper, KiCad's measure). Said, and
+        # only where there is some.
+        try:
+            from net_queries import net_self_overlap
+            _so = {k: net_self_overlap(pcb_data, nid)[0]
+                   for k, nid in (('p', pair.p_net_id), ('n', pair.n_net_id))}
+            if any(_so.values()):
+                rec['self_overlap_mm'] = {k: (v or 0.0) for k, v in _so.items()}
+        except Exception:                                    # noqa: BLE001
+            pass
         if not rec['coupled']:
             try:
                 along = diff_pair_coupling(pcb_data, pair.p_net_id, pair.n_net_id,
