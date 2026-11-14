@@ -261,18 +261,31 @@ class RoutedHoleRules:
                 it, getattr(via, 'net_id', 0), via_copper_layers(via, self.dr.copper_layers))
         return vals['copper']
 
+    def _pad_entry(self, pad):
+        """(pad, its RuleItem, its answers), built once per pad: the stamps
+        ask about each pad on every layer, in every net's cache build."""
+        hit = self._memo.get(('pad', id(pad)))
+        if hit is None or hit[0] is not pad:
+            # the pad is kept with its entry, so its id cannot be reused
+            hit = self._memo[('pad', id(pad))] = (pad, self.dr.pad_item(pad), {})
+        return hit
+
     def pad_value(self, pad, layer: str, kind: str = 'track') -> Optional[float]:
-        return self.value(self.dr.pad_item(pad), getattr(pad, 'net_id', 0), layer, kind)
+        _pad, it, vals = self._pad_entry(pad)
+        if (layer, kind) not in vals:
+            vals[(layer, kind)] = self.value(it, getattr(pad, 'net_id', 0), layer, kind)
+        return vals[(layer, kind)]
 
     def pad_copper_value(self, pad) -> Optional[float]:
         """`copper_value` for one pad of the board (None for a pad with no
         copper)."""
         if getattr(pad, 'pad_type', None) == 'np_thru_hole':
             return None
-        it = self.dr.pad_item(pad)
-        if not it.layers:
-            return None
-        return self.copper_value(it, getattr(pad, 'net_id', 0), it.layers)
+        _pad, it, vals = self._pad_entry(pad)
+        if 'copper' not in vals:
+            vals['copper'] = (self.copper_value(it, getattr(pad, 'net_id', 0), it.layers)
+                              if it.layers else None)
+        return vals['copper']
 
 
 def _routed(config, pcb_data, rules=None):
