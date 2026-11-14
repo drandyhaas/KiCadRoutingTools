@@ -1071,9 +1071,8 @@ def held_hole_clearance_live(pcb_data, board, results_data, clearance):
         if not held or clearance is None or held <= clearance:
             return None
         pcb, segs, vias = _live_step_board(pcb_data, results_data)
-        # #1842: the micro vias' pairs are their rule's (micro_via_floors)
-        step_min = step_copper_to_hole(pcb, segs, vias, held, clearance,
-                                       exclude_micro=True)
+        # (#1842: a micro via's pairs are left out -- their rule's)
+        step_min = step_copper_to_hole(pcb, segs, vias, held, clearance)
         v = held_hole_clearance(held, clearance, step_min)
         # #1493: a floor written under the one held is ledgered, as the CLI's
         # step_hole_clearance ledgers it
