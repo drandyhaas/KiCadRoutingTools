@@ -8697,21 +8697,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # holds another net's copper off it, and the loop above grades only PAD
     # holes, so a downsized via's drill went entirely unseen: a 0.45/0.2 via
     # rings 0.125, and copper at the 0.1 clearance sits 0.225 from its hole
-    # under a 0.25 floor. Grade it at max(clearance, hole_clearance) -- NOT
-    # the NPTH track fab floor, which is a routing policy for tracks, not a
-    # KiCad rule (the via arm's note below). copper_exempt carries the via's
-    # own copper disc, so the track arm's disc-overlap exemption suppresses
-    # the shorts it grades elsewhere.
-    for via in pcb_data.vias:
-        if via.drill <= 0:
-            continue
-        _vnet = pcb_data.nets.get(via.net_id, None)
-        _vname = _vnet.name if _vnet else f"net_{via.net_id}"
-        holes.append(((via.x, via.y), (via.x, via.y), via.drill / 2.0, via.net_id,
-                      f"Via [{_vname}]",
-                      max(clearance, hole_clearance),
-                      (via.x, via.y, via.size / 2.0),
-                      True))
+    # under a 0.25 floor. Graded at the declared copper-to-hole clearance
+    # itself, which is the constraint KiCad grades a hole at (not the copper
+    # clearance, and not the NPTH track fab floor, a routing policy); none
+    # when nothing declares one. copper_exempt carries the via's own copper
+    # disc, so the arms' disc-overlap exemption leaves shorts to the passes
+    # that grade them.
+    if hole_clearance and hole_clearance > 0:
+        for via in pcb_data.vias:
+            if via.drill <= 0:
+                continue
+            _vnet = pcb_data.nets.get(via.net_id, None)
+            _vname = _vnet.name if _vnet else f"net_{via.net_id}"
+            holes.append(((via.x, via.y), (via.x, via.y), via.drill / 2.0, via.net_id,
+                          f"Via [{_vname}]", float(hole_clearance),
+                          (via.x, via.y, via.size / 2.0), True))
     segs = list(pcb_data.segments)
     _seg_arrays = None  # (sx1, sy1, sx2, sy2, dx, dy, safe_len2, sw); also reused by the slot-edge check
     if holes and segs:
@@ -8834,7 +8834,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # hole at min_hole_clearance, and route.py's via keep-out prices it.
             # (req_clr is max(npth_clr, override), so it stands in for the
             # override here.)
-            kicad_req = npth_via_clearance(req_clr, clearance, hole_clearance)
+            kicad_req = (req_clr if is_via_hole     # #1914: the declared value
+                         else npth_via_clearance(req_clr, clearance, hole_clearance))
             for via in pcb_data.vias:
                 # Own-net copper legitimately lands on the pad (mirrors the
                 # track arm's snet != hnet exemption, #442).
@@ -8884,9 +8885,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
     # PAD arm of the same rule, for VIA holes only (#1914). The passes above
     # grade tracks and vias against a via's drill; a pad's copper against it
-    # went unseen -- the two violations KiCad reports on the pre-fix tigard
-    # board are exactly this (RN3 pads 5 and 7, 0.225 from the /CS via's
-    # hole). KiCad keeps BOTH rows for a pad against a via's hole
+    # went unseen -- an other-net pad at the copper clearance off a 0.45/0.2
+    # via's copper sits 0.225 from its hole. KiCad keeps BOTH rows for a pad against a via's hole
     # (_HOLE_ROW_BESIDE_CLEARANCE), so there is no clearance suppression
     # here, only the own-net skip and the short exemption: copper that
     # overlaps the via's copper is a pad-via short graded elsewhere. Pads
@@ -8904,9 +8904,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                                        math.hypot(_pad.size_x, _pad.size_y) / 2.0,
                                        getattr(_pad, 'local_clearance', 0.0) or 0.0,
                                        sorted(_cl)[0] if _cl else 'F.Cu'))
+            # Bounding-circle pre-filter, vectorized over the pads: a pad's
+            # copper cannot be within the requirement of a hole whose centre
+            # is farther than its half-diagonal + hole radius + requirement.
+            _fpx = np.array([f[0].global_x for f in _flat_pads], dtype=np.float64)
+            _fpy = np.array([f[0].global_y for f in _flat_pads], dtype=np.float64)
+            _fpr = np.array([f[2] for f in _flat_pads], dtype=np.float64)
+            _flc = np.array([f[3] for f in _flat_pads], dtype=np.float64)
             for (h1x, h1y), (h2x, h2y), hr, hnet, ref, req_clr, _ce, _is_vh in _via_holes:
                 _vr = _ce[2]
-                for _pad, _pn, _pr, _lc, _layer in _flat_pads:
+                if not _flat_pads:
+                    break
+                _near = np.nonzero(np.hypot(_fpx - h1x, _fpy - h1y)
+                                   <= _fpr + hr + np.maximum(req_clr, _flc))[0]
+                for _k in _near.tolist():
+                    _pad, _pn, _pr, _lc, _layer = _flat_pads[_k]
                     if _pn == hnet:
                         continue
                     if matching_net_ids is not None \
@@ -8914,12 +8926,6 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                             and hnet not in matching_net_ids:
                         continue
                     _req = req_clr if req_clr > _lc else _lc
-                    # Bounding-circle pre-filter: the pad's copper cannot be
-                    # within _req of the hole when its centre is farther than
-                    # its half-diagonal + hole radius + _req.
-                    if math.hypot(_pad.global_x - h1x, _pad.global_y - h1y) \
-                            > _pr + hr + _req:
-                        continue
                     _pd = point_to_pad_distance(h1x, h1y, _pad)
                     # Copper that overlaps the via's copper is a pad-via short
                     # graded elsewhere, not a hole graze -- exempt it. At
@@ -8946,7 +8952,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     if _req > clearance + 1e-9:
                         v['required_mm'] = _req
                         v['required_source'] = ('pad override'
-                                                if _lc > max(clearance, hole_clearance) + 1e-9
+                                                if _lc > req_clr + 1e-9
                                                 else 'declared hole clearance')
                     violations.append(v)
 
