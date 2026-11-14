@@ -5264,11 +5264,11 @@ def generate_bga_fanout(footprint: Footprint, pcb_data: PCBData, *args,
         return _generate_bga_fanout_all(footprint, pcb_data, *args, **kwargs)
     import inspect
     from types import SimpleNamespace
-    from via_span import apply_span, cut_layers_to_span, only_span_copper
+    from via_span import apply_span, step_span, only_span_copper
     bound = inspect.signature(_generate_bga_fanout_all).bind(
         footprint, pcb_data, *args, **kwargs)
     asked = bound.arguments.get('layers') or ['F.Cu', 'B.Cu']
-    span, kind, layers, costs = cut_layers_to_span(
+    span, kind, layers, costs = step_span(
         pcb_data, list(asked), bound.arguments.get('layer_costs'), via_span, via_span_type)
     if not span:
         return _generate_bga_fanout_all(footprint, pcb_data, *args, **kwargs)
@@ -5962,24 +5962,15 @@ def main():
     # the GUI's (its Cancel button / the plan executor's Stop); a CLI-side
     # wall-clock budget was removed deliberately -- no result this tool produces
     # may depend on timing, or the same command stops producing the same board.
-    try:
-        from via_span import SpanError as _SpanError
-        _fan1842 = generate_bga_fanout
-        if args.via_span:
-            # a part on neither end of the span is refused before any work
-            import functools
-            _fan1842 = functools.partial(generate_bga_fanout, via_span=args.via_span,
-                                         via_span_type=args.via_span_type)
-            if _span_layers and footprint.layer not in (_span_layers[0], _span_layers[-1]):
-                raise _SpanError(
-                    f"--via-span {args.via_span[0]} {args.via_span[1]}: {args.component} "
-                    f"is on {footprint.layer}, which is not an end of the span")
-    except _SpanError as exc:
-        print(f"Error: {exc}")
+    # #1842: a part on neither end of the span is refused before any work
+    if _span_layers and footprint.layer not in (_span_layers[0], _span_layers[-1]):
+        print(f"Error: --via-span {args.via_span[0]} {args.via_span[1]}: {args.component} "
+              f"is on {footprint.layer}, which is not an end of the span")
         return 1
-    tracks, vias_to_add, vias_to_remove, _failed_nets = _fan1842(
+    tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
         footprint,
         pcb_data,
+        via_span=args.via_span, via_span_type=args.via_span_type,   # #1842
         same_net_pad_clearance=args.same_net_pad_clearance,  # #581
         net_filter=args.nets,
         diff_pair_patterns=args.diff_pairs,

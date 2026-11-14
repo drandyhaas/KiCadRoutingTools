@@ -251,31 +251,38 @@ def default_micro_via(pcb_path: str) -> Tuple[Optional[float], Optional[float]]:
     return None, None
 
 
-def step_span(pcb_data, layers, layer_costs, via_span, via_span_type):
-    """A step's routing layers under a via span: ``(span, type, layers,
-    layer_costs)``, the layers cut down to the span (the span's own where
-    none of the asked layers is in it) and the costs with them. ``span`` and
-    ``type`` are None for no span and for one that covers the whole stack
-    (through vias: the step is unchanged). ``type`` is the word the step's
-    vias are written with in this board's file (`file_via_type`: `buried`
-    is KiCad 9's `blind` in a file older than KiCad 10's format). The ONE
-    reading every via-span step takes of its span (route.py, route_diff.py).
-
-    Raises ValueError as `resolve_via_span` does."""
+def board_span(pcb_data, via_span, via_span_type):
+    """``(span, type)`` of a step's ``via_span`` on this board, or
+    ``(None, None)`` for no span and for one that is the whole stack (through
+    vias). ``type`` is the word the step's vias are written with in this
+    board's file (`file_via_type`: `buried` is KiCad 9's `blind` in a file
+    older than KiCad 10's format), said when it differs. Raises ValueError
+    as `resolve_via_span` does."""
     if not via_span:
-        return None, None, layers, layer_costs
+        return None, None
     span, kind = resolve_via_span(
         list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
         via_span[0], via_span[-1], via_span_type)
     if kind is None:
-        return None, None, layers, layer_costs   # the whole stack: through vias
+        return None, None                         # the whole stack: through vias
     word = file_via_type(kind, getattr(pcb_data, 'kicad_version', 0) or 0)
     if word != kind:
         print(f"Via span (#1842): this board's file format "
               f"({pcb_data.kicad_version}) predates KiCad 10, which has no "
               f"'{kind}' via; its vias are written '{word}' "
               f"(KiCad 9's blind/buried type), on the same layer pair")
-        kind = word
+    return span, word
+
+
+def step_span(pcb_data, layers, layer_costs, via_span, via_span_type):
+    """A step's routing layers under a via span: ``(span, type, layers,
+    layer_costs)``, the layers cut down to the span (the span's own where
+    none of the asked layers is in it) and the costs with them. ``span`` and
+    ``type`` are `board_span`'s. The ONE reading every via-span step takes
+    of its span (route.py, route_diff.py, the fan-out wrappers)."""
+    span, kind = board_span(pcb_data, via_span, via_span_type)
+    if not span:
+        return None, None, layers, layer_costs
     inside = [l for l in layers if l in span]
     if layer_costs and len(layer_costs) == len(layers):
         layer_costs = [c for l, c in zip(layers, layer_costs) if l in span]
@@ -357,14 +364,15 @@ def add_cli_flags(parser, what: str) -> None:
 def resolve_cli(parser, args, pcb_path: str, argv=None):
     """A step's `--via-span` checked against the board's own stack:
     ``(span layers, type, micro)``, all falsy without a span or for one that
-    is the whole stack. With no `--layers` the step works on the span's
-    layers, and a micro span with no via size draws the Default class's
-    micro via."""
+    is the whole stack; ``micro`` is `laser_drilled`. With no `--layers` the
+    step works on the span's layers, and a micro span with no via size draws
+    the Default class's micro via."""
     import sys
     if not getattr(args, 'via_span', None):
         return None, None, False
+    copper = file_copper_layers(pcb_path)
     try:
-        layers, kind = resolve_via_span(file_copper_layers(pcb_path), args.via_span[0],
+        layers, kind = resolve_via_span(copper, args.via_span[0],
                                         args.via_span[1], getattr(args, 'via_span_type', None))
     except ValueError as e:
         parser.error(f"--via-span: {e}")
@@ -373,30 +381,24 @@ def resolve_cli(parser, args, pcb_path: str, argv=None):
     given = sys.argv[1:] if argv is None else argv
     if hasattr(args, 'layers') and not any(a in ('--layers', '-l') for a in given):
         args.layers = list(layers)
-    if kind == 'micro':
+    micro = laser_drilled(copper, args.via_span, getattr(args, 'via_span_type', None))
+    if micro:
         dia, drill = default_micro_via(pcb_path)
         for name, val in (('via_size', dia), ('via_drill', drill)):
             if getattr(args, name, None) is None and val:
                 setattr(args, name, val)
                 print(f"--{name.replace('_', '-')} not given; using the board Default "
                       f"net-class micro via {val}mm (--via-span).")
-    return list(layers), kind, kind == 'micro'
+    return list(layers), kind, micro
 
 
 def micro_via_for_span(pcb_data, via_span, via_span_type, pcb_path: str = ''):
     """``(diameter, drill)`` of the Default class's micro via when ``via_span``
-    is a micro span on this board, else None -- for a front that sizes the
-    via itself (no size asked for) and must draw a micro via, not the
-    class's through via."""
-    if not via_span:
-        return None
-    try:
-        _span, kind = resolve_via_span(
-            list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
-            via_span[0], via_span[-1], via_span_type)
-    except ValueError:
-        return None
-    if kind != 'micro':
+    is a laser-drilled micro span on this board (`laser_drilled`), else None
+    -- for a front that sizes the via itself (no size asked for) and must
+    draw a micro via, not the class's through via."""
+    if not laser_drilled(getattr(pcb_data.board_info, 'copper_layers', None),
+                         via_span, via_span_type):
         return None
     dia, drill = default_micro_via(pcb_path or getattr(pcb_data, 'source_path', '') or '')
     return (dia, drill) if dia and drill else None
