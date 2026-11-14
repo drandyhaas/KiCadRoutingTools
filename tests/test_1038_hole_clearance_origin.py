@@ -117,7 +117,7 @@ def main():
         ok('the console states the scope, including what is NOT graded',
            'copper-to-hole scope:' in _r.stdout
            and 'ring does not cover the drill' in _r.stdout
-           and 'via drills (#1914)' in _r.stdout
+           and 'to via drills (#1914)' in _r.stdout
            and 'not graded against it' in _r.stdout, _r.stdout[-600:])
 
         doc, _r = _grade(_stage(tmp, 'plain', None), tmp, 'plain', False)

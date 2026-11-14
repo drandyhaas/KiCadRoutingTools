@@ -10519,13 +10519,12 @@ if __name__ == "__main__":
               f"to NPTH holes and to plated holes whose copper ring does not "
               f"cover the drill (#441), and at "
               f"{max(args.clearance or 0.0, args.hole_clearance):.4g} mm to "
-              f"net-less pads whose copper equals the drill (#1753) and to via "
-              f"drills (#1914); vias at "
+              f"net-less pads whose copper equals the drill (#1753); vias at "
               f"{max(args.clearance or 0.0, args.hole_clearance):.4g} mm to "
-              f"NPTH holes, those pads, and via drills (#1914); pads at "
-              f"{max(args.clearance or 0.0, args.hole_clearance):.4g} mm to via "
-              f"drills only (#1914). Ordinary plated pad holes are not graded "
-              f"against it, unlike KiCad's hole_clearance)")
+              f"NPTH holes and those pads; tracks, vias and pads at "
+              f"{args.hole_clearance:.4g} mm to via drills (#1914). Ordinary "
+              f"plated pad holes are not graded against it, unlike KiCad's "
+              f"hole_clearance)")
     if not args.quiet:
         # #1594: say which tolerance the clearance grades use, always.
         if args.clearance_margin_mm is not None:
