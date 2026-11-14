@@ -893,6 +893,50 @@ def _pad_has_same_net_copper(opad, net_id, local, tol: float = 0.2) -> bool:
     return False
 
 
+def _track_to_plane(opad, net_id, local, limit: float, plane_oracle=None,
+                    tol: float = 0.2) -> Optional[float]:
+    """Shortest same-net track length from `opad` to a plane connection (a
+    same-net via, or a plated through-hole pad, the oracle's main component when
+    one is given), walking `local.segments` endpoint to endpoint; None when
+    there is none within `limit`. A pad whose copper is only another pad's strap
+    is as far from the plane as that pad's own path."""
+    import heapq
+    ox, oy = opad.global_x, opad.global_y
+
+    def plane_at(x, y):
+        for v in local.vias:
+            if (v.net_id == net_id and abs(v.x - x) < tol and abs(v.y - y) < tol
+                    and (plane_oracle is None or plane_oracle.via_on_plane(v.x, v.y))):
+                return True
+        for p in local.pads_by_net.get(net_id, []):
+            if (pad_is_plated_through(p) and abs(p.global_x - x) < tol
+                    and abs(p.global_y - y) < tol
+                    and (plane_oracle is None or plane_oracle.pad_on_plane(p))):
+                return True
+        return False
+
+    segs = [s for s in local.segments if s.net_id == net_id]
+    best = {(ox, oy): 0.0}
+    q = [(0.0, ox, oy)]
+    while q:
+        d, x, y = heapq.heappop(q)
+        if d > limit:
+            return None
+        if d > best.get((x, y), math.inf):
+            continue
+        if plane_at(x, y):
+            return d
+        for s in segs:
+            for (ax, ay), (bx, by) in (((s.start_x, s.start_y), (s.end_x, s.end_y)),
+                                       ((s.end_x, s.end_y), (s.start_x, s.start_y))):
+                if abs(ax - x) < tol and abs(ay - y) < tol:
+                    nd = d + math.hypot(bx - ax, by - ay)
+                    if nd <= limit and nd < best.get((bx, by), math.inf):
+                        best[(bx, by)] = nd
+                        heapq.heappush(q, (nd, bx, by))
+    return None
+
+
 def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, config,
                                   route_multi_fn, radius: float, plane_oracle=None):
     """Issue #180: before dropping a NEW via, connect the pad by a trace to the
@@ -937,7 +981,17 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
         # layer-reachability guard in _try_distant_pad_trace.
         same_layer = (pad_layer in opad.layers
                       or any(l.startswith('*') for l in opad.layers))
-        if pad_is_plated_through(opad) or (same_layer and _pad_has_same_net_copper(opad, net_id, local)):
+        # The radius bounds the whole track from this pad to the plane, not one
+        # link: an escaped SMD neighbour counts only when its own track to a
+        # plane via plus this strap fits in it. Otherwise each new strap makes
+        # the next pad's target, and a row of same-net pads chains into one web
+        # several mm from its only via (ulx3s U1.W16: 5.6 mm through 7 pads).
+        d_opad = math.hypot(opad.global_x - px, opad.global_y - py)
+        escaped = (same_layer and d_opad <= radius
+                   and _pad_has_same_net_copper(opad, net_id, local)
+                   and _track_to_plane(opad, net_id, local, radius - d_opad,
+                                       plane_oracle) is not None)
+        if pad_is_plated_through(opad) or escaped:
             # T6 island guard: the "already escaped" proxy above only proves
             # the pad has copper ON it, not that the copper reaches the plane
             # -- and even a plated through-hole can float (outside every zone
