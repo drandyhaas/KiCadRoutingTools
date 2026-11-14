@@ -1441,6 +1441,19 @@ def _tap_copper(net_id: int, result: TapResult) -> Tuple[List[Segment], List[Via
     return segs, vias
 
 
+def _tap_breaks_hole_rule(config: GridRouteConfig, pcb_data: PCBData, net_id: int,
+                          result: TapResult) -> str:
+    """Why a tap's new copper breaks a `.kicad_dru` hole_clearance rule (#1853),
+    '' when it does not: `check_drc.hole_rule_refusal`, the grader's own
+    measurement. The tap places on maps of its own, which do not read those
+    rules. Free on a board without one."""
+    dr = getattr(config, 'rules', None)
+    if dr is None or getattr(config, 'hole_rules', None) is None:
+        return ''
+    from check_drc import hole_rule_refusal
+    return hole_rule_refusal(pcb_data, dr, *_tap_copper(net_id, result))
+
+
 def _tap_cuts_barrier(config: GridRouteConfig, pcb_data: PCBData, net_id: int,
                       result: TapResult, pad: Optional[Pad] = None) -> Optional[str]:
     """The net of a pour barrier (#1260) a tap's new copper enters, else None.
@@ -1493,6 +1506,7 @@ def tap_pad_with_escalation(
     last_failure = TapResult(success=False)
     ko_refused: List[Dict] = []     # the last rung a net keep-out refused
     barrier_refused: Optional[str] = None
+    hole_refused = ''               # #1853: the last rung a hole rule refused
     if try_default:
         result = try_tap_pad(
             pad, pad_layer, net_id, pcb_data, config, max_search_radius,
@@ -1510,6 +1524,10 @@ def tap_pad_with_escalation(
             _cut = _tap_cuts_barrier(config, pcb_data, net_id, result, pad)
             if _cut:
                 barrier_refused, result = _cut, TapResult(success=False)
+        if result.success:
+            _hole = _tap_breaks_hole_rule(config, pcb_data, net_id, result)
+            if _hole:
+                hole_refused, result = _hole, TapResult(success=False)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -1581,6 +1599,10 @@ def tap_pad_with_escalation(
                 if _cut:
                     barrier_refused, result = _cut, TapResult(success=False)
             if result.success:
+                _hole = _tap_breaks_hole_rule(fine_config, pcb_data, net_id, result)
+                if _hole:
+                    hole_refused, result = _hole, TapResult(success=False)
+            if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance
                 note_clearance_used(pcb_data, fine_config.clearance,
@@ -1598,6 +1620,8 @@ def tap_pad_with_escalation(
     if barrier_refused:
         print(f"    tap of {pad.component_ref}.{pad.pad_number} refused: its copper "
               f"would cut the {barrier_refused} pour (#1260)")
+    if hole_refused:
+        print(f"    tap of {pad.component_ref}.{pad.pad_number} refused: {hole_refused}")
     # Return the last failure so a rip-up caller sees its via_blocked /
     # blocked_cells diagnostics.
     return last_failure

@@ -54,7 +54,8 @@ GATE_RE = re.compile(r'JSON_IMPROVEMENT_GATE: (\{.*\})')
 # every JSON_SUMMARY of that run when they differ from what a printed summary
 # carried (see restamp_shipped_rules).
 SHIPPED_RULES_RE = re.compile(r'JSON_SHIPPED_RULES: (\{.*\})')
-# The outermost run's audits of the board it SHIPS (#1760: rule_area_keepouts),
+# The outermost run's audits of the board it SHIPS (#1760: rule_area_keepouts;
+# #1896: tap_vias),
 # measured after every JSON_SUMMARY of that run, as {summary key: value}.
 # route.py sets the same keys on the merged `--json-out` document, so a reader
 # of the log alone (merge_route_summaries) must apply them too.

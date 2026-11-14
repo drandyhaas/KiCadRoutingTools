@@ -143,9 +143,14 @@ def chain_rows(tmp):
     pcb = parse_kicad_pcb(b)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
+        # at the floors the CLI step resolved from the board's Default net
+        # class (its console says so), as the GUI takes the board's own
+        # values: at the library defaults the pair's copper, routed at
+        # 0.1 mm, grazes at 0.25 mm and the graze prune takes it (#1851)
         _ok, _fail, _t, rd = batch_route(
             b, '', [n.name for n in pcb.nets.values() if n.name],
-            pcb_data=pcb, return_results=True)
+            pcb_data=pcb, return_results=True, clearance=0.1,
+            track_width=0.2, via_size=0.6, via_drill=0.3)
     gui = pair_rows(rd.get('skew_moved_by_cleanup'))
     m = re.search(r"the post-route cleanup moved CSI_CLK_P / CSI_CLK_N out of its "
                   r"skew rule[^\n]*-> ([0-9.]+) mm", buf.getvalue())

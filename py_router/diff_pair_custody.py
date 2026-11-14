@@ -336,6 +336,24 @@ def meets_coupled_floor(coupled_mm: float, length_mm: float,
             and coupled_mm >= COUPLED_SHARE_FLOOR * length_mm - eps)
 
 
+def self_overlap_line(pair_name, rec):
+    """#1873: the console line for a pair whose member runs back along itself,
+    or None. Every overlap is in the copper record (`self_overlaps`); the
+    line is printed only for an overlap longer than twice its track's
+    width, since a shorter one is the size of a corner, not a leg laid
+    twice."""
+    long_ = [r for r in (rec or {}).get('self_overlaps') or ()
+             if r.get('along_mm', 0.0) > 2.0 * r.get('width_mm', 0.0)]
+    if not long_:
+        return None
+    so = rec.get('self_overlap_mm') or {}
+    worst = max(long_, key=lambda r: r['along_mm'])
+    return (f"Self-overlap: {pair_name} has copper laid along itself ("
+            + ', '.join(f"{k.upper()} {v:.4f} mm" for k, v in sorted(so.items()) if v)
+            + f"; the longest {worst['along_mm']:.4f} mm on a {worst['width_mm']:g} mm "
+            f"track); its length and skew count that stretch twice")
+
+
 def measure_pair_copper(pcb_data, diff_pairs_list, routed_results,
                         geometry_of) -> Dict[str, Dict]:
     """#1303: what each pair the run CLAIMS to have routed coupled delivers on
@@ -394,6 +412,32 @@ def measure_pair_copper(pcb_data, diff_pairs_list, routed_results,
                    coupled_share=round(coupled_share(rec['coupled_mm'], length), 4),
                    coupled_share_floor=COUPLED_SHARE_FLOOR,
                    coupled=meets_coupled_floor(rec['coupled_mm'], length, floor))
+        # #1873: a member laid back along itself counts that copper twice in
+        # the skew above (all of a net's copper, KiCad's measure). Recorded,
+        # every overlap, and only where there is some; the console line is
+        # self_overlap_line's. A member that was not searched (over the
+        # segment limit) or could not be is said too: no key at all would
+        # read as "none found".
+        try:
+            from net_queries import net_self_overlap
+            _so, _rows = {}, []
+            for k, nid in (('p', pair.p_net_id), ('n', pair.n_net_id)):
+                _tot, _r = net_self_overlap(pcb_data, nid)
+                _so[k] = _tot
+                _rows += [dict(x, member=k) for x in _r]
+        except Exception as exc:                             # noqa: BLE001
+            print(f"{RED}#1873: could not search {pair_name} for copper laid "
+                  f"along itself ({type(exc).__name__}: {exc}){RESET}")
+            rec['self_overlap_error'] = f'{type(exc).__name__}: {exc}'
+        else:
+            # a member that was not searched stays None beside its partner's
+            # length: 0.0 would claim it was searched and has none
+            if any(_so.values()):
+                rec['self_overlap_mm'] = dict(_so)
+                rec['self_overlaps'] = _rows
+            if any(v is None for v in _so.values()):
+                rec['self_overlap_not_searched'] = sorted(
+                    k for k, v in _so.items() if v is None)
         if not rec['coupled']:
             try:
                 along = diff_pair_coupling(pcb_data, pair.p_net_id, pair.n_net_id,
