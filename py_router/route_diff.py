@@ -831,8 +831,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if layers is None:
         layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']  # Default 4-layer signal stack
     # #1842: a via span is the step's sub-stack
-    from via_span import cut_layers_to_span as _cut1842
-    _span1842, _span_type1842, layers, layer_costs = _cut1842(
+    from via_span import step_span as _step_span1842
+    _span1842, _span_type1842, layers, layer_costs = _step_span1842(
         pcb_data, layers, layer_costs, via_span, via_span_type)
     if _span1842:
         # copper the step could not lay again stays where it is
@@ -1330,7 +1330,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         selected_net_ids=_sel_ids)
 
     # #1676: a via this run sizes itself starts at the board's own via rules
-    if via_from_class and _span_type1842 == 'micro':
+    from via_span import laser_drilled as _laser1842
+    if via_from_class and _laser1842(pcb_data.board_info.copper_layers,
+                                     _span1842, _span_type1842):
         # #1842: ... and under a micro via span, at the Default class's MICRO
         # via (a class's via_diameter is its through via's), on both fronts
         from via_span import default_micro_via
@@ -3655,14 +3657,18 @@ Examples:
     # The fab floor's via sizes are a mechanical drill's and do not pin it.
     _micro_span = False
     if getattr(args, 'via_span', None):
-        from via_span import file_copper_layers, resolve_via_span, default_micro_via
+        from via_span import (file_copper_layers, resolve_via_span, default_micro_via,
+                              laser_drilled)
+        _file_copper1842 = file_copper_layers(args.input_file)
         try:
             _span_layers, _span_type = resolve_via_span(
-                file_copper_layers(args.input_file), args.via_span[0], args.via_span[1],
+                _file_copper1842, args.via_span[0], args.via_span[1],
                 getattr(args, 'via_span_type', None))
         except ValueError as _e:
             parser.error(f"--via-span: {_e}")
-        _micro_span = _span_type == 'micro'
+        # the GUI's via size / drill controls read the same predicate
+        _micro_span = laser_drilled(_file_copper1842, args.via_span,
+                                    getattr(args, 'via_span_type', None))
         if _span_type and not any(a in ('--layers', '-l') for a in sys.argv[1:]):
             # no layers were asked for: the pairs route on the span's
             args.layers = list(_span_layers)
