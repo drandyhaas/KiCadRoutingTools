@@ -42,7 +42,8 @@ Checks:
   7. the passes that move copper measure a via's hole at the rule;
   8. completion first: newvia_tight under a rule no via size holds routes
      SIG under --escalation fab by the terminal escalation's last rung, at
-     the copper clearance alone, and says so; under board it does not.
+     the copper clearance alone, and says so -- on the console and in
+     --json-out's design_rules.hole_rules; under board it does not.
 """
 import json
 import math
@@ -342,6 +343,10 @@ def last_rung(td):
        f"the summary's terminal_escalations entry says so: {esc!r}")
     ok("rule 'holes' (hole_clearance min 0.35 mm)" in log and 'row(s) of this step' in log,
        "the rows its copper stands inside are named per rule")
+    hr = (doc.get('design_rules') or {}).get('hole_rules') or []
+    ok(any(g.get('rule') == 'holes' and g.get('rows') and 'SIG' in (g.get('nets') or ())
+           for g in hr),
+       f"and in --json-out's design_rules.hole_rules, graded on the shipped copper: {hr}")
     ok('Hole:SIG (via) <-> Track:OTHER' in drc(out, flagged=True),
        "and check_drc names SIG's via hole on the board")
     sub2 = os.path.join(td, 'last_rung_board')
