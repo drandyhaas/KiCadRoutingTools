@@ -358,6 +358,13 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
                 # #1843: read by position (area_clearance, design_rules.AreaIndex)
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
                              f"a rule area -- handled by position (#1843)")
+            elif _condition_is_coupled(condition):
+                # #1293: read, but not here -- it binds a pair's P against
+                # its own N, which the pair step and check_drc resolve
+                notes.append(f"rule '{name}': clearance {clearance_mm}mm between a "
+                             f"coupled pair's P and N -- handled by the coupled-pair "
+                             f"channel (#1293): route_diff.py builds the pair at it "
+                             f"and check_drc grades it")
             else:
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm has a "
                              f"non-layer scope (netclass/area/... condition) -- "
@@ -1156,6 +1163,16 @@ def _scoped_node_ok(node) -> bool:
     if op == 'call':
         return node[1] in ('A', 'B') and node[2] in _SCOPED_FUNCS
     return False
+
+
+def _condition_is_coupled(src) -> bool:
+    """Does a condition AND in `AB.isCoupledDiffPair()` (the #1293 shape, a
+    rule binding a diff pair's P against its own N)?"""
+    try:
+        from design_rules import parse_condition, _coupled_terms
+        return _coupled_terms(parse_condition(str(src))) == (True, False)
+    except Exception:                                            # noqa: BLE001
+        return False
 
 
 def _condition_is_scoped(src: str) -> bool:
