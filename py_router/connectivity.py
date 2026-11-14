@@ -216,14 +216,21 @@ def lands_on_interior(t: float, seg_len_sq: float,
 
 def end_touches(distance: float, track_width: float, item_width: float) -> bool:
     """KiCad's test for whether a connected item counts at a track's END
-    (#1870, `CN_ANCHOR::IsDangling`): the item's copper lies within half the
-    track's width of the end point. `distance` is from the end to the item's
-    centre line (a via: its centre) and `item_width` the item's width (a via:
-    its size). An end no connected item touches this way is `track_dangling`
-    in KiCad's DRC, however short the copper past the last joint: measured on
-    kicad-cli 10.0.7, a 0.127 mm track that runs 0.20 mm past a tee of the
-    same width is reported and one that runs 0.10 mm past it is not."""
-    return distance <= (item_width + track_width) / 2.0 + 1e-9
+    (#1870; its DRC calls `CONNECTIVITY_DATA::TestTrackEndpointDangling`):
+    the item's copper collides with a circle of half the track's width at the
+    end point. `distance` is from the end to the item's centre line (a via:
+    its centre) and `item_width` the item's width (a via: its size). An end no
+    connected item touches this way is `track_dangling` in KiCad's DRC,
+    however short the copper past the last joint: measured on kicad-cli 10.0.6
+    and 10.0.7, a 0.127 mm track that runs 0.20 mm past a tee of the same
+    width is reported and one that runs 0.10 mm past it is not.
+
+    The comparison is strict, as KiCad's `Collide` is (`dist_sq <
+    Square(min_dist)`): an item exactly half the two widths away does NOT
+    touch -- a 0.127 mm tail on a 0.127 mm tee is reported, 0.1269 is not.
+    The 1 nm margin is KiCad's own resolution, so a float distance a rounding
+    error under the boundary still reads as touching nothing."""
+    return distance < (item_width + track_width) / 2.0 - 1e-6
 
 
 def span_endpoint_degree(segs, group=lambda s: s.layer) -> Dict:

@@ -40,9 +40,13 @@ failures = []
 
 #: (anchor, track width, anchor width, tail, named?) -- the anchor is a tee
 #: of that width, a tee leaning 45 degrees toward the free end, or a via of
-#: that size on the body. Named = longer than (track + anchor) / 2 from the
-#: anchor's copper; each pair of rows stands on either side of that.
+#: that size on the body. Named = at least (track + anchor) / 2 from the
+#: anchor's copper; each pair of rows stands on either side of that. The
+#: comparison is strict, as KiCad's: a tail of exactly that distance is
+#: reported (the 0.127 and 0.2 rows), one a tenth of a micron short is not.
 ROWS = (
+    ('tee', 0.127, 0.127, 0.1269, False), ('tee', 0.127, 0.127, 0.127, True),
+    ('tee', 0.2, 0.2, 0.1999, False), ('tee', 0.2, 0.2, 0.2, True),
     ('tee', 0.127, 0.127, 0.10, False), ('tee', 0.127, 0.127, 0.20, True),
     ('tee', 0.127, 0.127, 0.30, True), ('tee', 0.127, 0.127, 0.38, True),
     ('tee', 0.127, 0.127, 0.50, True),
