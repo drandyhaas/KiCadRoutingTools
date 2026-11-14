@@ -254,6 +254,8 @@ def add_gnd_vias_to_existing_board(
     from check_drc import FilledCopperGate, HoleRuleGate, copper_keepout_gate
     _filled_gate = FilledCopperGate(pcb_data)
     _hole_gate = HoleRuleGate(pcb_data, getattr(config, 'rules', None))   # #1853
+    if _hole_gate:
+        _hole_gate.watch(vias=new_gnd_vias)    # a later via sees their holes
     _ko_gate = copper_keepout_gate(pcb_data)
 
     def _exact_copper_clear(x_mm, y_mm, own_net):

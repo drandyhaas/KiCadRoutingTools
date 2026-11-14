@@ -21,6 +21,14 @@ Checks:
      rule, by name;
   D. every generator asks: the BGA dogbone and under-pad engines, the QFN
      engine, the GND vias and the plane tap each call the gate.
+  E. the gate grades the generator's own copper: a via site beside a via of
+     another net in a list the gate watches is refused while the via is in
+     it and allowed once it is taken back; a trial's own via passed for one
+     question refuses the same way; a track 0.25 mm from a via's hole is
+     refused at a 0.254 rule and one 0.26 mm from it allowed.
+  The gate reads the board's rules through the routing
+  chokepoint (`check_drc.board_design_rules`), the table a step's
+  `config.rules` holds.
 """
 import ast
 import contextlib
@@ -133,11 +141,41 @@ def asked():
         ok(names <= called, f"{rel} calls {', '.join(sorted(names))}")
 
 
+def own_copper(td):
+    print("E. the gate grades the generator's own copper")
+    from check_drc import HoleRuleGate
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(stage(os.path.join(td, 'e_fits'), 'newvia_fits'))
+    sig = next(n for n in pcb.nets.values() if n.name == 'SIG').net_id
+    other = next(n for n in pcb.nets.values() if n.name == 'OTHER').net_id
+    g = HoleRuleGate(pcb)
+    laid = []
+    g.watch(vias=laid)
+    ok(g.via_why(9.0, 6.0, 0.6, 0.3, sig) == '', "the site is allowed on the board as it is")
+    # its copper 0.25 mm from the laid via's hole, 0.10 from the via's copper
+    laid.append({'x': 9.70, 'y': 6.0, 'size': 0.6, 'drill': 0.3, 'net_id': other})
+    why = g.via_why(9.0, 6.0, 0.6, 0.3, sig)
+    ok("hole_clearance 0.254mm" in why, f"refused beside a via the generator laid: {why}")
+    laid.clear()
+    ok(g.via_why(9.0, 6.0, 0.6, 0.3, sig) == '', "allowed again once it is taken back")
+    why = g.via_why(9.0, 6.0, 0.6, 0.3, sig, extra_vias=[
+        {'x': 9.70, 'y': 6.0, 'size': 0.6, 'drill': 0.3, 'net_id': other}])
+    ok("hole_clearance 0.254mm" in why, f"and beside a trial's own via: {why}")
+    pcb = parse_kicad_pcb(stage(os.path.join(td, 'e_track'), 'track_fits'))
+    sig = next(n for n in pcb.nets.values() if n.name == 'SIG').net_id
+    g = HoleRuleGate(pcb)
+    why = g.segment_why(15.45, 5.5, 15.45, 6.5, 0.1, 'F.Cu', sig)
+    ok("hole_clearance 0.254mm" in why, f"a track 0.25 mm from a via's hole is refused: {why}")
+    ok(g.segment_why(15.46, 5.5, 15.46, 6.5, 0.1, 'F.Cu', sig) == '',
+       "one 0.26 mm from it is allowed")
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         gate(td)
         bga(td)
         tap(td)
+        own_copper(td)
     asked()
     if FAILS:
         print(f"\nFAILED ({len(FAILS)}):")

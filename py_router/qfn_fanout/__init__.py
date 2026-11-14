@@ -1379,7 +1379,15 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         if _filled_gate and _filled_gate.via_hit(
                 vx, vy, via_size, net_id, lambda sh: _pc(net_id, sh.net_id)) is not None:
             return False
-        if _hole_gate and _hole_gate.via_why(vx, vy, via_size, via_drill, net_id):
+        if _hole_gate and _hole_gate.via_why(
+                vx, vy, via_size, via_drill, net_id,
+                # #1853: and this run's own vias and stubs so far
+                extra_vias=[{'x': qx, 'y': qy, 'size': via_size, 'drill': via_drill,
+                             'net_id': qn} for qx, qy, qn, _qpx, _qpy in placed],
+                extra_segments=[{'start': (qpx, qpy), 'end': (qx, qy), 'width': track_width,
+                                 'layer': layer, 'net_id': qn}
+                                for qx, qy, qn, qpx, qpy in placed
+                                if qpx is not None and (qpx, qpy) != (qx, qy)]):
             return False
         for fx, fy, fs, fn, fd in foreign_vias:
             # The DRILLS are an obstacle whatever the net: hole-to-hole is

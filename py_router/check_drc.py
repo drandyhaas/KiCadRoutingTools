@@ -3151,45 +3151,69 @@ def _hole_gate_verdict(board, pcb_data, dr, segments, vias) -> str:
     return ''
 
 
+def board_design_rules(pcb_data):
+    """The board's `design_rules.DesignRules` as every routing step installs
+    them (`kicad_dru.install_layer_clearances`, the chokepoint that sets a
+    step's ``config.rules``), for an engine with no config of its own: the
+    fan-out engines' `HoleRuleGate`. Kept on the board object, so the engines
+    of one step read one table. None when the board declares none."""
+    held = vars(pcb_data).get('_board_design_rules') if hasattr(pcb_data, '__dict__') else None
+    path = getattr(pcb_data, 'source_path', '') or ''
+    stamp = []
+    for ext in ('.kicad_dru', '.kicad_pro'):
+        f = os.path.splitext(path)[0] + ext if path else ''
+        stamp.append(os.path.getmtime(f) if f and os.path.isfile(f) else None)
+    key = (path, tuple(stamp))
+    if held is not None and held[0] == key:
+        return held[1]
+    import contextlib
+    import io
+    from routing_config import GridRouteConfig
+    from kicad_dru import install_layer_clearances
+    cfg = GridRouteConfig(layers=list(getattr(getattr(pcb_data, 'board_info', None),
+                                              'copper_layers', None) or ['F.Cu', 'B.Cu']))
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            install_layer_clearances(cfg, None, None, pcb_data)
+        dr = getattr(cfg, 'rules', None)
+    except Exception:                                            # noqa: BLE001
+        dr = None
+    if hasattr(pcb_data, '__dict__'):
+        vars(pcb_data)['_board_design_rules'] = (key, dr)
+    return dr
+
+
 class HoleRuleGate:
     """`hole_rule_refusal` for a generator that asks about many via sites on
     one board (#1853): the fan-out engines, the GND vias, the plane taps. The
-    board's copper and holes are indexed once, on a 1 mm grid, as they stand
-    when the gate is built; copper the generator lays afterwards is its own to
-    keep apart. False (and free) on a board with no hole_clearance rule.
+    board's copper and holes are indexed once, on a 1 mm grid, and the copper
+    the generator lays is graded with it: copper it keeps for good is added
+    (`add`), and the lists it lays into and may take back from are watched
+    (`watch`), read as they stand at each question. False (and free) on a
+    board with no hole_clearance rule.
 
-    ``dr``: the board's `design_rules.DesignRules`; read from the board's
-    sibling project and rule file when None."""
+    ``dr``: the board's `design_rules.DesignRules` -- a step's
+    ``config.rules``; with None, the same table read through the routing
+    chokepoint (`board_design_rules`)."""
 
     CELL = 1.0
 
-    def __init__(self, pcb_data, dr=None, board_path=None):
+    def __init__(self, pcb_data, dr=None):
         self.pcb_data = pcb_data
         if dr is None:
-            path = board_path or getattr(pcb_data, 'source_path', '') or ''
-            if path and os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
-                try:
-                    from design_rules import DesignRules
-                    dr = DesignRules.from_project(
-                        pcb_data, path, copper_layers=list(
-                            getattr(getattr(pcb_data, 'board_info', None),
-                                    'copper_layers', None) or []) or None)
-                except Exception:                                # noqa: BLE001
-                    dr = None
+            dr = board_design_rules(pcb_data)
         self.dr = dr
         self.reach = _hole_rule_reach(dr)
         self._grid: Dict[Tuple[int, int], list] = defaultdict(list)
         self._memo: Dict[tuple, str] = {}
+        self._watched: List[Tuple[list, list]] = []
+        self._as: Dict[int, tuple] = {}
         if self.reach <= 0.0:
             return
         for v in pcb_data.vias:
-            hs = v.size / 2.0
-            self._put(('via', v, None), v.x - hs, v.y - hs, v.x + hs, v.y + hs)
+            self._put_via(v)
         for sg in pcb_data.segments:
-            hw = (sg.width or 0.0) / 2.0
-            self._put(('seg', sg, None), min(sg.start_x, sg.end_x) - hw,
-                      min(sg.start_y, sg.end_y) - hw, max(sg.start_x, sg.end_x) + hw,
-                      max(sg.start_y, sg.end_y) + hw)
+            self._put_seg(sg)
         for key, fp in pcb_data.footprints.items():
             for p in fp.pads:
                 pr = max(math.hypot(p.size_x, p.size_y), 2.0 * (p.drill or 0.0)) / 2.0
@@ -3205,27 +3229,98 @@ class HoleRuleGate:
             for gy in range(int(math.floor(y0 / c)), int(math.floor(y1 / c)) + 1):
                 self._grid[(gx, gy)].append(entry)
 
-    def via_why(self, x, y, size, drill, net_id, layers=('F.Cu', 'B.Cu'),
-                via_type=None) -> str:
-        """Why a via of `net_id` at (x, y) may not be laid under the board's
-        hole_clearance rules ('' when it may)."""
-        if self.reach <= 0.0:
-            return ''
-        key = (round(x, 6), round(y, 6), round(size, 6), round(drill or 0.0, 6),
-               int(net_id or 0), tuple(layers), via_type)
-        hit = self._memo.get(key)
-        if hit is not None:
-            return hit
+    def _put_via(self, v):
+        hs = v.size / 2.0
+        self._put(('via', v, None), v.x - hs, v.y - hs, v.x + hs, v.y + hs)
+
+    def _put_seg(self, sg):
+        hw = (sg.width or 0.0) / 2.0
+        self._put(('seg', sg, None), min(sg.start_x, sg.end_x) - hw,
+                  min(sg.start_y, sg.end_y) - hw, max(sg.start_x, sg.end_x) + hw,
+                  max(sg.start_y, sg.end_y) + hw)
+
+    @staticmethod
+    def as_via(v):
+        """A Via of the board, or one from an engine's via dict."""
+        if not isinstance(v, dict):
+            return v
         from kicad_parser import Via
-        cand = Via(x=x, y=y, size=size, drill=drill, layers=list(layers),
-                   net_id=int(net_id or 0))
-        if via_type:
-            cand.via_type = via_type
-        r = size / 2.0 + self.reach
+        out = Via(x=v['x'], y=v['y'], size=v['size'], drill=v.get('drill') or 0.0,
+                  layers=list(v.get('layers') or ['F.Cu', 'B.Cu']),
+                  net_id=int(v.get('net_id') or 0))
+        if v.get('via_type'):
+            out.via_type = v['via_type']
+        return out
+
+    @staticmethod
+    def as_segment(s):
+        """A Segment of the board, or one from an engine's track dict."""
+        if not isinstance(s, dict):
+            return s
+        from kicad_parser import Segment
+        return Segment(start_x=s['start'][0], start_y=s['start'][1], end_x=s['end'][0],
+                       end_y=s['end'][1], width=s['width'], layer=s['layer'],
+                       net_id=int(s.get('net_id') or 0))
+
+    def add(self, segments=(), vias=()):
+        """Copper the generator has laid (Segments / Vias, or its own track
+        and via dicts): later candidates are graded against it as against
+        the board's."""
+        if self.reach <= 0.0:
+            return
+        for v in vias:
+            self._put_via(self.as_via(v))
+        for s in segments:
+            self._put_seg(self.as_segment(s))
+        self._memo.clear()
+
+    def watch(self, vias=None, segments=None):
+        """Lists the generator lays copper into (Vias / Segments or its own
+        dicts) and may take copper back from: each question reads them as
+        they stand then."""
+        if self.reach <= 0.0:
+            return
+        self._watched.append((vias if vias is not None else [],
+                              segments if segments is not None else []))
+
+    def _watched_near(self, x0, y0, x1, y1, seen):
+        """The watched copper whose bounding box meets the window."""
+        vias, segs = [], []
+        for wv, ws in self._watched:
+            for raw in wv:
+                v = self._converted(raw, self.as_via)
+                if id(v) in seen:
+                    continue
+                hs = v.size / 2.0
+                if v.x + hs >= x0 and v.x - hs <= x1 and v.y + hs >= y0 and v.y - hs <= y1:
+                    seen.add(id(v))
+                    vias.append(v)
+            for raw in ws:
+                s = self._converted(raw, self.as_segment)
+                if id(s) in seen:
+                    continue
+                hw = (s.width or 0.0) / 2.0
+                if (max(s.start_x, s.end_x) + hw >= x0 and min(s.start_x, s.end_x) - hw <= x1
+                        and max(s.start_y, s.end_y) + hw >= y0
+                        and min(s.start_y, s.end_y) - hw <= y1):
+                    seen.add(id(s))
+                    segs.append(s)
+        return vias, segs
+
+    def _converted(self, raw, conv):
+        if not isinstance(raw, dict):
+            return raw
+        hit = self._as.get(id(raw))
+        if hit is None or hit[0] is not raw:
+            # the dict is kept with its entry, so its id cannot be reused
+            hit = self._as[id(raw)] = (raw, conv(raw))
+        return hit[1]
+
+    def _near(self, x0, y0, x1, y1):
         c = self.CELL
         seen, vias, segs, pads = set(), [], [], {}
-        for gx in range(int(math.floor((x - r) / c)), int(math.floor((x + r) / c)) + 1):
-            for gy in range(int(math.floor((y - r) / c)), int(math.floor((y + r) / c)) + 1):
+        for gx in range(int(math.floor(x0 / c)), int(math.floor(x1 / c)) + 1):
+            for gy in range(int(math.floor(y0 / c)), int(math.floor(y1 / c)) + 1):
                 for kind, obj, key_fp in self._grid.get((gx, gy), ()):
                     if id(obj) in seen:
                         continue
@@ -3236,9 +3331,59 @@ class HoleRuleGate:
                         segs.append(obj)
                     else:
                         pads.setdefault(key_fp, []).append(obj)
+        if self._watched:
+            wv, ws = self._watched_near(x0, y0, x1, y1, seen)
+            vias += wv
+            segs += ws
+        return vias, segs, pads
+
+    def via_why(self, x, y, size, drill, net_id, layers=('F.Cu', 'B.Cu'),
+                via_type=None, extra_vias=(), extra_segments=()) -> str:
+        """Why a via of `net_id` at (x, y) may not be laid under the board's
+        hole_clearance rules ('' when it may). ``extra_vias`` /
+        ``extra_segments``: copper the generator holds for this question only
+        (a trial's own placements), as Vias / Segments or its dicts."""
+        if self.reach <= 0.0:
+            return ''
+        key = ('via', round(x, 6), round(y, 6), round(size, 6), round(drill or 0.0, 6),
+               int(net_id or 0), tuple(layers), via_type)
+        hit = (None if (self._watched or extra_vias or extra_segments)
+               else self._memo.get(key))
+        if hit is not None:
+            return hit
+        from kicad_parser import Via
+        cand = Via(x=x, y=y, size=size, drill=drill, layers=list(layers),
+                   net_id=int(net_id or 0))
+        if via_type:
+            cand.via_type = via_type
+        r = size / 2.0 + self.reach
+        vias, segs, pads = self._near(x - r, y - r, x + r, y + r)
+        vias = vias + [self.as_via(v) for v in extra_vias]
+        segs = segs + [self.as_segment(s) for s in extra_segments]
         board = _HoleGateBoard(self.pcb_data.nets, vias + [cand], segs,
                                {k: _HoleGatePads(v) for k, v in pads.items()})
         out = self._memo[key] = _hole_gate_verdict(board, self.pcb_data, self.dr, [], [cand])
+        return out
+
+    def segment_why(self, ax, ay, bx, by, width, layer, net_id) -> str:
+        """Why a track of `net_id` from (ax, ay) to (bx, by) on `layer` may not
+        be laid under the board's hole_clearance rules ('' when it may)."""
+        if self.reach <= 0.0:
+            return ''
+        key = ('seg', round(ax, 6), round(ay, 6), round(bx, 6), round(by, 6),
+               round(width, 6), layer, int(net_id or 0))
+        hit = None if self._watched else self._memo.get(key)
+        if hit is not None:
+            return hit
+        from kicad_parser import Segment
+        cand = Segment(start_x=ax, start_y=ay, end_x=bx, end_y=by, width=width,
+                       layer=layer, net_id=int(net_id or 0))
+        r = width / 2.0 + self.reach
+        vias, segs, pads = self._near(min(ax, bx) - r, min(ay, by) - r,
+                                      max(ax, bx) + r, max(ay, by) + r)
+        board = _HoleGateBoard(self.pcb_data.nets, vias, segs + [cand],
+                               {k: _HoleGatePads(v) for k, v in pads.items()})
+        out = self._memo[key] = _hole_gate_verdict(board, self.pcb_data, self.dr, [cand], [])
         return out
 
 

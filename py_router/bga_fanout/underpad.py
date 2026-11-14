@@ -2139,6 +2139,9 @@ def generate_underpad_escape(footprint: Footprint,
     tracks: List[Dict] = []
     vias_to_add: List[Dict] = []
     failed: List[str] = []
+    if hole_gate:
+        # #1853: a later via site is graded against this escape's own copper
+        hole_gate.watch(vias=vias_to_add, segments=tracks)
     nvia = 0
     n_fcu = 0
 

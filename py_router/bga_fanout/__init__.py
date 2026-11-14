@@ -1009,6 +1009,8 @@ def manage_vias(
     vias_to_add: List[Dict] = []
     vias_to_remove: List[Dict] = []
     via_blocked_routes: List['FanoutRoute'] = []
+    if _hole_gate:
+        _hole_gate.watch(vias=vias_to_add)     # #1853: a later via sees their holes
 
     # Pads no later step can move (locked parts, connectors, test points --
     # #253): a via-in-pad must clear them on EVERY layer, because a through
