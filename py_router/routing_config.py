@@ -506,6 +506,10 @@ class GridRouteConfig:
     # The legacy per-channel maps above are being migrated onto it; consumers
     # that resolve through it must treat None as "no rules declared".
     rules: Optional[object] = None
+    # #1853: the board's .kicad_dru hole_clearance rules as the route steps
+    # read them (hole_rule_routing.RoutedHoleRules), installed with `rules`.
+    # None (no such rule) leaves every hole keep-out as it was.
+    hole_rules: Optional[object] = None
     # #1843: the board's clearance rules scoped by a rule area
     # (area_clearance.AreaClearance), installed with `rules`. The base map,
     # the per-net caches and the stamp functions compose every keep-out over
@@ -657,6 +661,20 @@ class GridRouteConfig:
                         return s
                 return v
         return fallback
+
+    def via_hole_extra(self, clearance: float, other_via=None, pad=None) -> float:
+        """#1853: the mm a NEW via's keep-out from another net's copper grows
+        by under the board's `.kicad_dru` hole_clearance rules, on top of the
+        ring-to-copper distance priced at ``clearance``. KiCad measures those
+        rules from the HOLE, so they bind where they exceed the annular ring
+        plus the clearance. The copper is a track unless ``pad`` (that pad)
+        or ``other_via`` (an existing via, whose own hole the new via's copper
+        is held off the same way) is given, each read as the item it is.
+        0.0 with no such rule."""
+        if self.hole_rules is None:
+            return 0.0
+        from hole_rule_routing import via_hole_extra
+        return via_hole_extra(self, clearance, other_via, pad)
 
     def stack_clearance(self, fallback: float, net_id: Optional[int] = None,
                         pad=None) -> float:

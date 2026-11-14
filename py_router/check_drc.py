@@ -3056,6 +3056,89 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
     return list(rows_by_pair.values()), unread, drop
 
 
+class _HoleGateBoard:
+    """The part of a board `hole_rule_grade` reads, near some candidates."""
+    def __init__(self, nets, vias, segments, footprints):
+        self.nets, self.vias, self.segments, self.footprints = nets, vias, segments, footprints
+
+
+class _HoleGatePads:
+    def __init__(self, pads):
+        self.pads = pads
+
+
+def hole_rule_refusal(pcb_data, dr, segments=(), vias=()):
+    """Why these not-yet-laid items may not be laid ('' when they may) under
+    the board's `.kicad_dru` hole_clearance rules: `hole_rule_grade` over the
+    board near them with the candidates added, at no tolerance, read for the
+    rows a candidate is in -- so a generator that does not place on the
+    obstacle map refuses what this checker would report (#1853). ``dr`` is
+    the board's `design_rules.DesignRules` (a step's ``config.rules``). Free
+    without a hole_clearance rule."""
+    segments, vias = list(segments), list(vias)
+    if dr is None or not (segments or vias):
+        return ''
+    mins = [(r.constraints['hole_clearance'].get('min') or 0.0) for r in dr.rules
+            if 'hole_clearance' in r.constraints
+            and r.severity not in ('ignore', 'exclusion')]
+    if not mins or max(mins) <= 0.0:
+        return ''
+    reach = max(mins)
+    xs, ys = [], []
+    for s in segments:
+        hw = (s.width or 0.0) / 2.0
+        xs += [s.start_x - hw, s.end_x - hw, s.start_x + hw, s.end_x + hw]
+        ys += [s.start_y - hw, s.end_y - hw, s.start_y + hw, s.end_y + hw]
+    for v in vias:
+        xs += [v.x - v.size / 2.0, v.x + v.size / 2.0]
+        ys += [v.y - v.size / 2.0, v.y + v.size / 2.0]
+    x0, x1, y0, y1 = min(xs) - reach, max(xs) + reach, min(ys) - reach, max(ys) + reach
+
+    def _near(ax0, ay0, ax1, ay1):
+        return not (ax1 < x0 or ax0 > x1 or ay1 < y0 or ay0 > y1)
+
+    near_vias = [v for v in pcb_data.vias
+                 if _near(v.x - v.size / 2.0, v.y - v.size / 2.0,
+                          v.x + v.size / 2.0, v.y + v.size / 2.0)]
+    near_segs = [s for s in pcb_data.segments
+                 if _near(min(s.start_x, s.end_x) - (s.width or 0.0) / 2.0,
+                          min(s.start_y, s.end_y) - (s.width or 0.0) / 2.0,
+                          max(s.start_x, s.end_x) + (s.width or 0.0) / 2.0,
+                          max(s.start_y, s.end_y) + (s.width or 0.0) / 2.0)]
+    fps = {}
+    for key, fp in pcb_data.footprints.items():
+        pads = []
+        for p in fp.pads:
+            pr = max(math.hypot(p.size_x, p.size_y), 2.0 * (p.drill or 0.0)) / 2.0
+            if _near(p.global_x - pr, p.global_y - pr, p.global_x + pr, p.global_y + pr):
+                pads.append(p)
+        if pads:
+            fps[key] = _HoleGatePads(pads)
+    board = _HoleGateBoard(pcb_data.nets, near_vias + vias, near_segs + segments, fps)
+    copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
+                  or dr.copper_layers)
+    nets = {getattr(i, 'net_id', 0) for i in segments + vias}
+    rows, _unread, _drop = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets)
+    via_at = {(round(v.x, 6), round(v.y, 6)) for v in vias}
+    seg_at = {(round(s.start_x, 6), round(s.start_y, 6), round(s.end_x, 6),
+               round(s.end_y, 6), s.layer) for s in segments}
+    for r in rows:
+        mine = False
+        if r.get('via_loc') is not None:
+            mine = (round(r['via_loc'][0], 6), round(r['via_loc'][1], 6)) in via_at
+        if not mine and r.get('seg_loc') is not None:
+            mine = tuple(round(c, 6) for c in r['seg_loc']) + (r.get('layer'),) in seg_at
+        if not mine and r.get('hole_ref') == 'via':
+            mine = (round(r['hole_loc'][0], 6), round(r['hole_loc'][1], 6)) in via_at
+        if mine:
+            what = {'track-hole': 'a track', 'via-hole': 'a via', 'pad-hole': 'a pad'}.get(
+                r['type'], 'copper')
+            return (f"{what} of {r['net2']} would stand {r['required_mm'] - r['overlap_mm']:.3f}mm "
+                    f"from the hole of {r['hole_ref']} ({r['net1']}), inside "
+                    f"hole_clearance {r['required_mm']:g}mm ({r['required_source']})")
+    return ''
+
+
 def hole_row_key(v: dict):
     """The `hole_rule_grade` pair key of a copper-to-hole row, or None."""
     t = v.get('type')
