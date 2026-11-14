@@ -5,14 +5,17 @@ tooth's and the whole route reads a tooth's face and a pair's end connectors fro
   python3 tests/test_622_end_dir.py
 
 It is the longest segment of the free end's RUN -- the stub from its free end back while each turn stays under 60
-degrees -- pointed toward the free end:
+degrees and the stub runs within 60 degrees of the way it leaves its free end -- pointed toward the free end:
 
 1. an escape down a channel and out of the array's face at a corner: the way out of the face, though the channel
    is the longer;
 2. a run ended by a 45-degree jog: the run's way, the jog taken in;
 3. a half-pitch jog along the row and a half-pitch run out, one as long as the other: the run out;
 4. a stub of one segment: its way, pointed toward the free end;
-5. no copper at the free end: +x.
+5. no copper at the free end: +x;
+6. a stub drawn in a curve from its ball's row round to the face, each turn 45 degrees, its segment along the row
+   the longest: the way out of the face;
+7. the same curve chamfered at each corner by a hundredth of a millimetre: the way out of the face.
 """
 import os
 import sys
@@ -54,6 +57,10 @@ check(way([(0.0, 0.0), (-0.4257, 0.0), (-0.4257, 0.425)]) == (0.0, 1.0),
 check(way([(0.0, 0.0), (0.0, -1.0)]) == (0.0, -1.0), '4: one segment')
 pcb, pads = board([(0.0, 0.0), (1.0, 0.0)])
 check(bd._end_dir(pcb, 8, (1.0, 0.0), pads) == (1.0, 0.0), '5: no copper at the free end')
-print('end_dir: ' + ('FAIL' if fails else 'PASS: the longest segment of the free end\'s run -- a corner ends it, a '
-                     '45-degree jog does not'))
+check(way([(0.0, 0.0), (-1.3, 0.0), (-1.6, 0.3), (-1.6, 1.4)]) == (0.0, 1.0),
+      '6: along the row 1.3 mm, a 45-degree turn, out of the face 1.1 mm: the way out')
+check(way([(0.0, 0.0), (-1.3, 0.0), (-1.31, 0.01), (-1.6, 0.3), (-1.6, 0.31), (-1.6, 1.4)]) == (0.0, 1.0),
+      '7: the same, a chamfer at each corner: the way out')
+print('end_dir: ' + ('FAIL' if fails else 'PASS: the longest segment of the free end\'s run -- a corner ends it, and a '
+                     'curve once it has turned 60 degrees from the free end; a 45-degree jog does not'))
 sys.exit(1 if fails else 0)

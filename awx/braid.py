@@ -1374,7 +1374,8 @@ def _end_dir(pcb, nid, pt, pads):
     """The direction the net's stub ESCAPES in at its free end `pt`:
     walk the copper from the free end to the pad it reaches, and take
     the longest segment of the free end's RUN -- the stub from its free
-    end back while each turn stays under 60 degrees -- pointed toward
+    end back while each turn stays under 60 degrees and the stub runs
+    within 60 degrees of the way it leaves its free end -- pointed toward
     the free end. The stub's last segment is the wrong thing to read
     (the fanout ends many escapes with a 45-degree jog, which the run
     takes in), and pad-to-end is too (the escape runs half a pitch off
@@ -1382,7 +1383,13 @@ def _end_dir(pcb, nid, pt, pads):
     array sits. The longest segment of the whole stub is wrong too: an
     escape down a channel and out of the array's face at a corner read
     as the channel's way where the channel was the longer, and a pair
-    whose leg read so had no end connector ahead of its teeth."""
+    whose leg read so had no end connector ahead of its teeth. And a
+    run held by its turns alone follows a stub drawn in a CURVE, no
+    turn of it past 45 degrees, from its free end to its ball: a tooth
+    that leaves the south face read as the west its longest segment
+    runs at the ball -- to the frame a far-face tooth inside the
+    array, which it refuses -- and teeth out of the facing face as
+    the way of the channel behind them."""
     key = _snapper()
     segs = [s for s in pcb.segments if s.net_id == nid]
     adj = {}
@@ -1418,12 +1425,13 @@ def _end_dir(pcb, nid, pt, pads):
     for t in order:
         after.setdefault(t[1], []).append(t)
     run = [order[0]]
+    w0 = way(order[0])
     while True:
         nx = after.get(run[-1][2], ())
         if len(nx) != 1:
             break
         a, b = way(run[-1]), way(nx[0])
-        if a is None or b is None or a[0] * b[0] + a[1] * b[1] < 0.5:
+        if a is None or b is None or a[0] * b[0] + a[1] * b[1] < 0.5 or w0[0] * b[0] + w0[1] * b[1] < 0.5:
             break
         run.append(nx[0])
     s, near, far = max(run, key=lambda t: math.hypot(
