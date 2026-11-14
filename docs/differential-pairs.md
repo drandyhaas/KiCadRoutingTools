@@ -1026,7 +1026,7 @@ total copper, the signal paths differ. With a lane the pair is matched, recorded
 and graded on the copper path between two pads, and a branch is a stub:
 
 ```bash
-# the ends of each member's lane, read off its copper
+# the two terminals the pair step routes the pair between
 python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "/DATA*" \
     --diff-pair-intra-match --diff-pair-intra-lane auto
 
@@ -1040,10 +1040,20 @@ The pads are recorded with the tolerance (`kicad_routing_tools.intra_pair_tolera
 `check_drc.py` prints `Recorded lane (route_diff, #1869): ... skew 0.1050 mm on the
 lane` with each member's stub length, carries the rows in `--json` under
 `recorded_lanes`, and `board_score.py` adds `lane` and `lane_skew_mm` to the pair's
-record beside the total-copper `skew_mm`. A `.kicad_dru` skew rule over the same
-nets is still graded on total copper, as KiCad grades it. A lane naming a net no
-pair of the step has, or pads its nets lack, refuses with the reason (exit 2). In
-the GUI it is the differential tab's **Intra-pair lane** field.
+record beside the total-copper `skew_mm`.
+
+`auto` is the pair step's own two end terminals: a two-terminal pair's two, a
+multi-point pair's coupled legs' ends (a branch the step leaves for a later step
+is not the lane, however long). N's lane ends on the same two parts as P's; a
+pair whose coupled legs do not form one path, or whose P and N end on different
+parts, gets no lane, is matched on total copper, and the step says why. A lane
+applies only to a pair the step intra-matches (with no `--diff-pair-intra-match`
+the step says the lane is unused) and that no `.kicad_dru` skew rule binds: KiCad
+grades such a rule on total copper, so that pair is matched on total copper, and
+the console line, the record and the step's `intra_pair_matching` row say so
+(`lane_ignored`). A lane naming a net no pair of the step has, or pads its nets
+lack, refuses with the reason (exit 2). In the GUI it is the differential tab's
+**Intra-pair lane** field.
 
 ### Time Matching
 

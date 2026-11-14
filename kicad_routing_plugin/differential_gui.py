@@ -655,8 +655,10 @@ class DifferentialTab(wx.Panel):
         self.diff_pair_intra_lane.SetToolTip(
             "Match, record and grade each intra-matched pair on its lane -- the "
             "copper path between two pads -- instead of total copper, so a branch "
-            "to a third pad counts as a stub (#1869). 'auto' (the ends of each "
-            "member's lane) or P_NET=REF.PAD:REF.PAD ..., space separated. "
+            "to a third pad counts as a stub (#1869). 'auto' (the two terminals "
+            "the pair step routes) or P_NET=REF.PAD:REF.PAD ..., space separated. "
+            "Needs intra-pair matching; a pair a .kicad_dru skew rule binds is "
+            "matched on total copper, as KiCad grades the rule. "
             "Empty: total copper, as KiCad's skew DRC measures.")
         lane_row.Add(self.diff_pair_intra_lane, 1, wx.ALIGN_CENTER_VERTICAL)
         options_sizer.Add(lane_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)

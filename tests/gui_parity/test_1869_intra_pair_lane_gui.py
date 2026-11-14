@@ -94,7 +94,7 @@ def main():
         ok(lane(cli_out) == want, f"the CLI records the lane's pads: {lane(cli_out)}")
         line = 'Intra-pair lane (#1869):'
         ok("set diff_pair_intra_lane=['auto']" in outs['gui'] and line in outs['gui']
-           and 'auto: the ends of each lane' in outs['gui'],
+           and 'auto: the two terminals the pair step routes' in outs['gui'],
            "the plan sets the control by the parameter's name and the engine takes the lane")
         ok(line not in outs['gui_off'],
            "with the parameter left out the engine takes none")
