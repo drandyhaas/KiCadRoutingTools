@@ -58,7 +58,7 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 </head>
 <body>
 <nav class="toc"><a class="home" href="../">&larr; KiCadRoutingTools</a>
-<a href="#sec-films">Films</a><a href="#pipeline">Pipeline</a><a href="#ends">Ends</a><a href="#frame">Frame</a><a href="#cpsat">CP-SAT</a><a href="#sec-lp">HiGHS LP</a><a href="#simplex">How an LP is solved</a><a href="dual/">The dual as forces &rarr;</a><a href="#sec-loop">Negotiation</a><a href="#sec-after">Polish &middot; snap &middot; audit &middot; route</a><a href="#rounds">Rounds</a><a href="#summary">Side by side</a></nav>
+<a href="#sec-films">Films</a><a href="#pipeline">Pipeline</a><a href="#ends">Ends</a><a href="#frame">Frame</a><a href="#cpsat">CP-SAT</a><a href="#sec-lp">HiGHS LP</a><a href="#simplex">How an LP is solved</a><a href="#sec-embed">Geometry in board xy</a><a href="dual/">The dual as forces &rarr;</a><a href="#sec-loop">Negotiation</a><a href="#sec-after">Polish &middot; snap &middot; audit &middot; route</a><a href="#rounds">Rounds</a><a href="#summary">Side by side</a></nav>
 <main>
 
 <h1>What CP-SAT and HiGHS actually do in the whole route</h1>
@@ -75,14 +75,18 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 <dt>crossing</dt><dd>a pair of lanes whose order is swapped between source and destination. They must pass through each other, so at that point they sit on different layers.</dd>
 <dt>via</dt><dd>a layer change. Vias are what the discrete plan tries to minimise. Every via is a through via.</dd>
 <dt>convex</dt><dd>a region with no dents, holes or separate pieces: every point between two allowed points is allowed too. An LP's region always is, which is why the LP finds the best answer overall and not just the best nearby (<a href="#sec-lp">section 2</a>).</dd>
+<dt>run</dt><dd>a lane's stretch on one layer, from one of its ends or vias to the next.</dd>
+<dt>free space, cell</dt><dd>(the second geometry stage, <a href="#sec-embed">2c</a>) a layer's free space is where a lane's centreline may stand: the board, less a keep-out zone round every piece of copper. A cell is one triangle of it, with its corners on the corners of those zones.</dd>
+<dt>mouth</dt><dd>(2c) the first point of free space straight out of a lane's escape stub, where its run begins.</dd>
+<dt>breach</dt><dd>(<a href="#sec-slide">2d</a>) a place where a lane's planned line crosses copper that its layer's free space does not lead round. Only a change of layer answers it.</dd>
 </dl>
 <div class="legend"><span><i style="background:var(--F)"></i>F.Cu (top layer)</span><span><i style="background:var(--B)"></i>B.Cu (bottom layer)</span><span><i style="background:#fff;border:2px solid #1d2330"></i>via</span></div>
 
-<div class="callout warn"><b>One correction to the framing.</b> In the whole route HiGHS is a plain <b>LP</b> (continuous, via <code>scipy.optimize.linprog</code> in <code>whole_geo.py</code>), not a MILP. HiGHS <i>is</i> used as a MILP (<code>scipy.optimize.milp</code>) in the older braid-chain code and its instruments: <code>schedule.exact_pages</code>, <code>joint_floor.py</code>, <code>synth_bus.cap_floor</code>. Those are covered at the end.</div>
+<div class="callout warn"><b>One correction to the framing.</b> In the whole route HiGHS is a plain <b>LP</b> (continuous, via <code>scipy.optimize.linprog</code> in <code>whole_geo.py</code>, and in the second geometry stage <code>whole_embed.py</code>, <a href="#sec-embed">2c</a>), not a MILP. HiGHS <i>is</i> used as a MILP (<code>scipy.optimize.milp</code>) in the older braid-chain code and its instruments: <code>schedule.exact_pages</code>, <code>joint_floor.py</code>, <code>synth_bus.cap_floor</code>. Those are covered at the end.</div>
 
 <!-- ======================= FILMS ======================= -->
 <h2 id="sec-films">Watch a whole run</h2>
-<p>Two films of real runs of the whole route on a two-layer bench (a processor's BGA to a DDR3 memory), made by <code>awx/whole_movie.py</code> in September. Each walks the stages in order: the ends, the frame, the solve, the geometry, the polish, the snap, the audit and the route. The stages are the same today; what has been added since (more than two layers, the escape fanout, the winding cut) is described below. Beside the board the film draws what each solver decides:</p>
+<p>Two films of real runs of the whole route on a two-layer bench (a processor's BGA to a DDR3 memory), made by <code>awx/whole_movie.py</code> in September. Each walks the stages in order: the ends, the frame, the solve, the geometry, the polish, the snap, the audit and the route. The stages are the same today; what has been added since (more than two layers, the escape fanout, the winding cut, and a second geometry stage in the board's own x and y that is off by default) is described below. Beside the board the film draws what each solver decides:</p>
 <ul>
  <li><b>The solve (CP-SAT)</b> is a braid under the board, sharing its x axis. Each strand is a lane, its height is the lane's order, and its colour is its layer. Two strands that cross differ in colour, and a white ring is a via. The search is replayed from the plans CP-SAT really found, in the order it found them, with the bound that proved the last one. On the board above, the lanes swap exactly where the solve put each crossing.</li>
  <li><b>The geometry (HiGHS LP)</b> is drawn as forces on the board. Every rule that holds a lane where it is has a <b>shadow price</b> in the LP's dual, and the price is how hard it pushes: a neighbour on the same layer, a via's room, a pad, the board edge, a turn limit.</li>
@@ -103,9 +107,9 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 
 <!-- ======================= 0. PIPELINE ======================= -->
 <h2 id="pipeline">0 &nbsp; The pipeline, and where the two solvers sit</h2>
-<p>Click a stage. Dashed arrows are the feedback that makes this a negotiation instead of a one-way pipe. <code>whole_route.py</code> repeats the fanout for up to 3 rounds (<code>--rounds</code>; the bus step in the routing chain runs 2), and within a round its loop repeats solve, geometry, polish and audit for up to 6 rounds (<code>LOOP_ROUNDS</code>).</p>
+<p>Click a stage. Dashed arrows are the feedback that makes this a negotiation instead of a one-way pipe. <code>whole_route.py</code> repeats the fanout for up to 4 rounds (its <code>ROUNDS</code>; the bus step's <code>--rounds</code>, 4 too), and within a round its loop repeats solve, geometry, polish and audit for up to 6 rounds (<code>LOOP_ROUNDS</code>). The dashed box is a second geometry stage that the loop runs only when asked (<code>GEO_EMBED=1</code>): by default the plan goes from the geometry straight to the polish.</p>
 <div class="card">
-  <svg id="pipe" viewBox="0 0 1000 300"></svg>
+  <svg id="pipe" viewBox="0 0 1000 310"></svg>
   <div class="row"><button id="pipePlay" class="primary">Play the flow</button><span class="stat" id="pipeStat"></span></div>
   <div id="pipeDetail" style="min-height:70px"></div>
 </div>
@@ -253,7 +257,7 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 
 <!-- ======================= 2. LP ======================= -->
 <h2 id="sec-lp">2 &nbsp; HiGHS: the continuous geometry (<code>whole_geo.py</code>)</h2>
-<p>CP-SAT has fixed the <b>topology</b>: the order of lanes at every column, where each pair crosses, and each lane's layer, so where along its route each via sits. What is still unknown is <b>real numbers</b>: how far off its frame's spine each lane sits at each column (one column every 4 router grid steps, along the trunk and along both rings). That question is a linear program, one for the whole bus.</p>
+<p>CP-SAT has fixed the <b>topology</b>: the order of lanes at every column, where each pair crosses, and each lane's layer, so where along its route each via sits. What is still unknown is <b>real numbers</b>: how far off its frame's spine each lane sits at each column (one column every 4 router grid steps, along the trunk and along both rings). That question is a linear program, one for the whole bus. It is a one-dimensional question: a lane moves sideways off its road, and a via stays at the place along the road where CP-SAT put it. A second geometry stage, off by default, takes this LP's layout and fits it again in the board's own x and y, where a via can move too (<a href="#sec-embed">2c</a>).</p>
 <p>The unknown is one number per (lane, column): its sideways offset <code>o[lane][col]</code>. The rows are:</p>
 <ul>
 <li><b>Pitch</b> (hard): neighbours on the same layer are at least <code>P_MIN</code> apart, plus half a pair's pitch for diff pairs. The real code adds tangent cuts of <code>sqrt(1+k&sup2;)</code> so slope is priced correctly.</li>
@@ -313,11 +317,72 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 </div>
 <p style="font-size:14px;color:var(--mut)"><code>whole_geo.lp_by_dual</code> has one further trick: it solves the <b>dual</b> LP. This LP has many more rows than columns, so its dual has a row per column and every slack is a plain inequality. HiGHS's interior point runs it about 6&times; faster (on a 51-net bench's second pass: 31 s instead of 188 s). The lane offsets come back in the same answer: HiGHS returns a multiplier for every balance equation of the dual, and those multipliers are the offsets. The interior point is capped at 500 iterations (it once ran 2329 on an 18-net bench); past that the dual simplex solves it, and lands on the same point. What that dual <i>is</i>: its prices are the forces that hold each lane where it is, and a rule that pushes must be touching, which is how the forces place the lanes. See <a href="dual/">Shadow prices as forces</a>.</p>
 
+<h3 id="sec-embed">2c &nbsp; The same plan in the board's own x and y: cells, and a lane's own points (<code>whole_embed.py</code>)</h3>
+<div class="callout warn"><b>Where this stands.</b> This second geometry stage is new and <b>off by default</b>. It is a stage of its own (<a href="https://github.com/drandyhaas/KiCadRoutingTools/blob/bus_take6/awx/whole_embed.py"><code>awx/whole_embed.py</code></a>, on the <code>bus_take6</code> branch), and the loop runs it, between the geometry above and the polish, only when the setting <code>GEO_EMBED=1</code> is given. It starts from the first geometry's layout, so the LP of section 2 still runs before it, and which side of each pad a lane passes is still the side that layout chose.</div>
+<p><b>Why fit the plan a second time.</b> The LP of section 2 is one-dimensional. A lane is a sideways offset from its road at fixed columns, and a via stands at the place along the road where CP-SAT put the layer change. CP-SAT chose that place without knowing how much room the board has there. So the first LP can push a lane sideways, but it cannot move a via along its lane to a roomier place. All it can do is pay, and send a cut back for another solve (<a href="#sec-loop">section 3</a>). This stage fits the <i>same</i> plan (the same layers, the same order of the lanes that share a layer, the same vias) into the board's own x and y, where a via is a point like any other and can move.</p>
+<p><b>Start with one layer and its copper.</b> Take everything on the layer that a lane must keep off: other parts' pads, other nets' tracks and vias, the board's edge. Grow each of them by the distance a lane's centreline has to keep from it (half a track, the clearance and half a grid step). What is left over is the layer's <b>free space</b>: a lane's centreline may stand anywhere in it, and nowhere else. In the figure below that distance is 0.15 mm. The two pads on the left are 0.80 mm apart, so the strip of free space between them is 0.80 &minus; 0.15 &minus; 0.15 = 0.50 mm wide: room for two centrelines a lane pitch (0.25 mm) apart, and even a comfortable 0.40 mm apart. Now cut the free space into triangles whose corners are the corners of those grown shapes. These triangles are the <b>cells</b>. No corner of a cell stands in open space, so the cells a lane passes through say one thing only: which side of each piece of copper it goes.</p>
+<p><b>A lane carries its own points.</b> A <b>run</b> is a lane's stretch on one layer, from one of its ends or vias to the next. It passes through a chain of cells, and it carries two kinds of point. Where it crosses the edge between two cells it has a point <i>on</i> that edge, free to slide along it: one number. Between those it has free points, each free to move <i>across</i> its lane inside its cell: one number again, because a point that slides along its own lane changes nothing. Two points in a row always share a cell, and a cell is free space all through, so the straight piece between them is free too. <b>However the points move, the lane cannot touch copper.</b></p>
+<div class="card">
+  <p style="margin-top:0">A made-up corner of a board. Three pads (grey) each have a zone round them that a lane's centreline keeps out of (pale), and the free space is cut into cells (thin lines). Two lanes of one layer run left to right, A above B. The dashed lines are the layout this stage starts from: kinked, and in places closer than a lane pitch. <b>Drag a point.</b> A diamond slides along its cell edge. A round dot moves across its lane: it stops at a keep-out zone, goes on into the next cell at an edge with free space beyond, and cannot be dragged through the other lane. Then press <b>One round</b>, or <b>Run to the end</b>, and watch one LP place every point together, a short step each round.</p>
+  <svg id="emb" viewBox="0 0 900 432" style="touch-action:none"></svg>
+  <div class="row"><button id="emRound" class="primary">One round</button><button id="emRun">Run to the end</button><button id="emReset">Start again</button>
+   <label><input type="checkbox" id="emCells" checked> show the cells</label><label><input type="checkbox" id="emRules" checked> show the rules</label></div>
+  <div class="row"><span class="stat">round <b id="emN">0</b></span><span class="stat">length of both lanes <b id="emLen">-</b></span><span class="stat">closest the lanes come <b id="emGap">-</b></span><span class="stat">a lane's points <b id="emPts">-</b></span><span class="stat">moves into a next cell <b id="emHop">0</b></span></div>
+  <div class="legend"><span><i style="background:#fff;border:2px solid var(--F);transform:rotate(45deg) scale(.8)"></i>a point on a cell edge (slides along it)</span><span><i style="background:#fff;border:2px solid var(--F);border-radius:50%"></i>a free point (moves across its lane)</span><span><i style="background:var(--F)"></i>a fixed end</span><span><i style="background:#d33"></i>closer than the pitch</span><span><i style="background:#d39a00"></i>closer than comfortable</span><span><i style="background:var(--acc)"></i>a rule's separating line</span></div>
+  <div class="log" id="emLog" style="min-height:56px"></div>
+  <details><summary>Try this</summary>
+  <ul>
+   <li>Press <b>One round</b> a few times with the rules shown. Between the lanes each short purple line is one rule: a point of one lane and the nearest stretch of the other must stay a pitch apart, measured straight across that line. After every round the lines are drawn again from where the lanes now stand.</li>
+   <li>Drag a round dot of lane A down onto lane B. It stops a hair short. The LP's rules have a stop of the same kind built in: a rule can fall short, but only so far.</li>
+   <li>Drag a round dot toward a cell edge with white space beyond it. It goes on into the next cell (the cell it is in is tinted). Where the lane had no crossing of that edge beside the dot, it gets two new diamonds: one where it now goes out across the edge, one where it comes back.</li>
+   <li>Drag a round dot far out into open board, away from the other lane, then press <b>Run to the end</b>. The lane comes back: each round its points step toward the shortest line, and a loop with nothing inside it is pulled straight.</li>
+   <li>Read the log after each round: how many unknowns and rows that round's LP had, how far the farthest point moved, and what stood short. The moves shrink round by round, and the rounds end when nothing moves.</li>
+  </ul></details>
+</div>
+<p><b>One LP a round.</b> Every point of every lane, and every via, is placed together by one LP with the aim of section 2: the shortest and straightest lanes, the lanes of a layer a pitch apart, a via's room kept from every other lane. The rules need care. "These two lanes stay a pitch apart" is not a straight wall when both lanes can move in x and y, and an LP has only straight walls. So each rule is read off the layout <i>as it stands</i>: take a point of one lane and the nearest stretch of the lane beside it, draw the line from one to the other, and ask for a pitch between them <i>along that line</i>. That is a straight wall, a <b>separating line</b>, so the region stays in one piece and the LP's answer can be trusted (<a href="#sec-lp">section 2</a>). A line read off the layout is only right while things stay near where they were. So a point may move only a short step in one round (its <b>trust</b>, 0.65 of a lane pitch), and then every line is read again. The rounds end when nothing moves.</p>
+<ul>
+ <li><b>Nothing passes through anything.</b> As in section 2, a rule may fall short at a price. The price comes in steps: a comfortable pitch that costs little to give up, then a slack of a tenth of the least distance, then that least distance itself, dear. But the shortfall has a cap. However short a rule falls, it still holds the two things it parts on the sides of each other they stand on, along its own line: two lanes of a layer, a lane and a via, two vias. And two lanes on one cell edge keep their order.</li>
+ <li><b>On into the next cell.</b> A point pushed against an edge of its cell stops there if the edge is the rim of a keep-out zone. If there is free space beyond, the point goes on into the next cell before the next round: a lane pushed aside bulges into it, crossing that edge and coming back. Which cells a lane is in is this stage's either-or choice, and it changes only between rounds, never inside an LP.</li>
+ <li><b>Pulled straight.</b> A run that doubles back on itself with nothing inside the loop (no copper, no other lane of its layer, no via) is replaced by the straight line.</li>
+ <li><b>The ends.</b> A lane leaves its tooth, and reaches its berth, straight along its escape stub, as far as the first point of free space. That point is the stub's <b>mouth</b>, and the run begins there (the squares on the left of the figure).</li>
+</ul>
+
+<h3 id="sec-slide">2d &nbsp; A via is a free point too, and can slide along its lane</h3>
+<p>A via is one more point, and its x and y are two unknowns in the same LP. It has a free space and cells of its own. Its barrel goes through the whole board, so it has to keep its distance from the copper of <i>every</i> layer. Pressed on an edge of its cell with free space beyond, it goes on into the next cell as any point does, and the ends of its two runs go with it.</p>
+<p><b>One via in a narrow corridor.</b> There is one move those short steps cannot make. Picture a corridor between two pads, 0.65 mm wide, and CP-SAT has put a layer change in it. A lane's centreline keeps 0.15 mm from a pad, so two lanes fit side by side: 0.65 &minus; 0.15 &minus; 0.15 leaves 0.35 mm between them, more than the 0.25 mm pitch. But a via is wider. Its centre keeps 0.25 mm from a pad, and it needs 0.30 mm of room from the lane beside it. Push the lane against one pad's zone and the via against the other's, and 0.65 &minus; 0.15 &minus; 0.25 leaves 0.25 mm between them: <b>0.05 mm short</b>. A short step along the corridor gains nothing, because the corridor is as narrow there. So, after the rounds, a via left short of its room is <b>slid along its own lane</b>: either way, up to twelve lane pitches, to the most open place it can reach, the one farthest from any copper's keep-out zone. The piece of lane between the old place and the new one changes layer with the via. That is allowed only where that piece lies in the other layer's free space and crosses no lane of that layer. The plan keeps all its vias, and the lanes of each layer keep their order. Only the place of that one layer change along its lane is new. Then the rounds run again from there.</p>
+<div class="card">
+  <p style="margin-top:0">A made-up board again. Lane X changes layer in the corridor between two pads, where CP-SAT put the change: it is on <span class="F">F.Cu</span> before its via and on <span class="B">B.Cu</span> after. Lane Y, on F.Cu, passes beside it through the corridor, and lane Z, on B.Cu, crosses both. The wide dashed circle is the room the via needs from other lanes, red where it is short. Under the board is the same measure at <i>every</i> place along X: how short the via would be there (red), and how open the board is there (green). <b>Drag the via along its lane</b> and watch the lane change colour with it. Then press <b>Slide the via</b>, the stage's own move.</p>
+  <svg id="slide" viewBox="0 0 900 524" style="touch-action:none"></svg>
+  <div class="row"><button id="slGo" class="primary">Slide the via</button><button id="slStep">Try a short step instead</button><button id="slBack">Back where CP-SAT put it</button>
+   <span class="stat">the via's room <b id="slShort">-</b></span><span class="stat">how open <b id="slOpen">-</b></span></div>
+  <div class="legend"><span><i style="background:#fff;border:2px solid #1d2330;border-radius:50%"></i>the via (drag it)</span><span><i style="background:#fff;border:2px dashed var(--acc);border-radius:50%"></i>where CP-SAT put the change</span><span><i style="background:rgba(192,57,43,.25);border:1px dashed #c0392b;border-radius:50%"></i>the via's room, short</span><span><i style="background:rgba(46,157,76,.25);border:1px dashed #2e9d4c;border-radius:50%"></i>the via's room, clear</span><span><i style="background:rgba(217,72,59,.3)"></i>the piece of X that changed layer with the via</span></div>
+  <div class="log" id="slLog" style="min-height:56px"></div>
+</div>
+<p><b>What goes back to the solve.</b> The stage writes its lanes in the same form as the first geometry, so the polish, the snap and the audit read them unchanged. Its findings are cuts for CP-SAT, as in <a href="#sec-loop">section 3</a>:</p>
+<ul>
+ <li>a <b>via cut</b> for each via that is still short of its room after sliding, or still inside a keep-out zone;</li>
+ <li>a layer cut for each <b>breach</b>. A breach is a place where the layout it started from crosses copper that no free cells lead round: the two sides are separate pieces of that layer's free space, like two rooms with no door between them. No geometry can lay that lane on that layer there. The lane has to cross on another layer, and only the solve can decide that.</li>
+</ul>
+<details><summary>What the real stage does beyond these two toys</summary>
+<ul>
+ <li><b>Read off the first layout.</b> Each run's cells and points are read off the first geometry's line: a free point wherever that line bends, and one every three and a half lane pitches of a straight stretch. Where that line stands inside a keep-out zone it is read out to the free space, the lanes kept in the order that line has them and put a pitch apart.</li>
+ <li><b>The fixed copper</b> is the two arrays, every other part's pads each on its own (so a lane can pass between two pads of one part where the cells between them are free), other nets' tracks and vias, and the escape stubs at the arrays' edges. The stage works in a window 4 mm round the layout it starts from.</li>
+ <li><b>Length</b> is priced as the snap will lay it, on the router's eight headings, and a bend by how far a point stands off the line through its two neighbours. Lanes and vias also keep a grid step more off copper wherever there is room.</li>
+ <li><b>A point that swings</b> to and fro has its trust halved, and so has a via that wanders. A point changes cell three times at most and a via twelve.</li>
+ <li><b>Only what moved.</b> After the first round an LP holds only the points and vias near where the round before moved. The rest stand as fixed points.</li>
+ <li><b>A slid via</b> must gain at least half a pitch of openness, and the sides CP-SAT gave the other lanes round it are no longer held. Vias are slid after the rounds, twice at most.</li>
+ <li><b>A differential pair</b> is one lane with half its width added to every distance. Its via is what the later stages lay there: two barrels either side of the pair's line, across one of the router's eight headings, and the pair router's straight run along that heading either side. The via stands only where both barrels and both straight runs fit, its two runs end at the ends of the straight run, and every other lane keeps off each barrel.</li>
+ <li><b>A round with no answer.</b> The caps can leave a round's LP with no answer at all. That round is solved again with the caps of its dear rules lifted, and the log says which rules went past a cap. The stage never stops on a round.</li>
+ <li><b>The written lines</b> are cleared of folds and notches, by the audit's own measures, wherever leaving a point out brings the lane no nearer anything.</li>
+ <li><b>Lanes that cross.</b> The first toy checks each round's answer, and solves the round again with a shorter step if the two lanes would cross. The real stage has no such check: its caps hold lanes apart, and its log counts any crossing of two lanes of one layer that still stands after a round.</li>
+ <li><b>The solver</b> is HiGHS through <code>scipy.optimize.linprog</code>: the interior point first, the dual simplex if that fails. Every length the stage chooses but the window (a trust, a spacing, a reach) is a multiple of the board's own pitch, track width or grid step.</li>
+</ul></details>
+
 <!-- ======================= 3. LOOP ======================= -->
 <h2 id="sec-loop">3 &nbsp; The two solvers negotiate</h2>
 <p>CP-SAT proves a plan is optimal in vias, but it knows nothing about millimetres. The LP knows the millimetres but can't change topology. When the LP has to pay on a hard row, it says which lane and which place. That becomes a <b>cut</b> (a boolean disjunction) added to the CP-SAT model, and CP-SAT solves again. Audits after the polish and snap do the same and also feed the congestion history. The loop (<code>whole_route.py</code>) runs up to 6 rounds.</p>
 <ul>
- <li><b>What comes back.</b> From the geometry: an island a lane could not be kept off, a change it could not give its room, a pair's dive it could not lay straight. From the polish: <b>side flips</b>, a lane sent round the other side of a part (back to the geometry, not the solve). From the audits: every finding's place, as <b>history</b>, so a round with no cut still solves again. A lane found against a part on one layer gets a <b>layer cut</b>: held on another layer across that part. Each cut is held to the stretch of the lane's own laid route that met what cut it.</li>
+ <li><b>What comes back.</b> From the geometry: an island a lane could not be kept off, a change it could not give its room, a pair's dive it could not lay straight. From the second geometry, when it is on (<a href="#sec-embed">2c</a>): a via still short of its room, and a lane that cannot stand on its layer at all (a breach), as a layer cut. From the polish: <b>side flips</b>, a lane sent round the other side of a part (back to the geometry, not the solve). From the audits: every finding's place, as <b>history</b>, so a round with no cut still solves again. A lane found against a part on one layer gets a <b>layer cut</b>: held on another layer across that part. Each cut is held to the stretch of the lane's own laid route that met what cut it.</li>
  <li><b>Soft and firm.</b> A cut is soft, priced at three vias, so a plan breaks it only when holding it would cost more. A cut from another net's track (an earlier bus) or a keep-out area is <b>firm</b>, a hundred vias, because a lane planned across another net's track is a lane that cannot be laid. A firm track cut holds for every lane whose path passes that place, not just the one found there.</li>
  <li><b>When it stops.</b> <b>Not converging</b>: two rounds in a row that do not beat the best so far (a round with new side flips to try is not counted). <b>Ends crowded</b>: a finding at the ends that stands two rounds running, which only the fanout can move (<a href="#audit">4c</a>).</li>
 </ul>
@@ -393,20 +458,20 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 <ul>
  <li><b>A loop that does not pass is laid all the same</b>, from the plan it held (its snapped plan, else its best smooth plan snapped with no gate). A lane that cannot be laid stays open. If that lay is not clean, the round lays one other loop round's plan too (the fewest findings first) and keeps the better: DRC first, then open nets, vias and copper.</li>
  <li><b>The rounds stop at the first clean lay.</b> A round whose plan lays connected and DRC-clean ends the run, whether or not its loop passed or its solve was proved. A later round could only move the ends its audits named, which the lay already went round.</li>
- <li>Otherwise a round that leaves nets open feeds the next fanout (<a href="#audit">4c</a>), up to the round limit. Every round is graded, and the best (fewest open nets, then fewest vias) is the run's board. When no round laid anything, a <b>last resort</b> plans only part of the lanes, the ones the rounds named left out.</li>
+ <li>Otherwise a round that leaves nets open is followed by <b>round 1 again under the next seed</b>: every solve of the round searches under a new seed, from the same board, with nothing carried over. It is another draw, not a repair, up to the round limit (4). With <code>--feedback-rounds</code>, some of those rounds are instead fed what the round before found (<a href="#audit">4c</a>), and a round whose solve has no plan at all is always followed by one. Every round is graded, and the best (fewest open nets, then fewest vias) is the run's board. When no round laid anything, a <b>last resort</b> plans only part of the lanes, the ones the rounds named left out.</li>
 </ul>
 <p><b>On a real board</b> the bus step (<code>route_bus.py</code>) wraps this. It finds the buses between pairs of ball arrays (or takes them from <code>--bus SRC:DEST[:MODE[:LAYERS]]</code>, each with its own fanout mode, <code>joint</code>, <code>escape</code> or <code>plain</code>, and its own routing layers), strips the bus's old copper, fans out, turns the board into the flow frame, runs the whole route and turns the copper back. It then grades the board where it is written: every bus net connected, no DRC violation on a bus net, the whole board no worse than it came. The board's length and skew rules are named but not counted, because the bus is laid untuned. A net left open, or named in a violation, goes back as it came, for the rest of the routing chain. The nets handed on are protected in the board's project and their tracks and vias <b>locked</b>, so the later routing steps route round them and never rip them up. Several buses are routed in turn, each on the board the one before handed on.</p>
 
 <h2 id="summary">5 &nbsp; Side by side</h2>
 <table>
-<tr><th></th><th>CP-SAT <span class="tag">whole_solve.py</span></th><th>HiGHS LP <span class="tag">whole_geo.py</span></th></tr>
-<tr><td><b>Question</b></td><td>Which pairs cross, at which position along the route (<code>u</code>), and on which layer does each lane sit at each crossing? How many vias are unavoidable?</td><td>Given that order and those layers, what sideways offset does each lane have at each column of the trunk and the rings?</td></tr>
-<tr><td><b>Unknowns</b></td><td>Booleans (which lane above, change active), small integers (crossing position, up to 3 changes per lane, and on more than two layers each run's layer)</td><td>Real offsets (tens of thousands of columns of them), plus elastic slacks</td></tr>
-<tr><td><b>Structure</b></td><td>Combinatorial. Search + propagation + clause learning + LP bounds, in parallel sub-solvers, deterministic.</td><td>Convex: one piece, because CP-SAT and <code>static_sides</code> have made every either-or choice. Simplex or interior point on a sparse system (often dual), with a tie-break for a unique optimum.</td></tr>
-<tr><td><b>Objective</b></td><td>One sum in vias: vias, five more for each via a net carries past two, one more for each run on a plane's layer; then history congestion; then the planes, as a tie-break.</td><td>Length + bends + squeeze below comfortable pitch, plus 10&#8308;&times; anything hard it had to break.</td></tr>
-<tr><td><b>Guarantee</b></td><td>Proves the via minimum where it can. A round's first solve keeps the best plan it found even unproved, so a round never ends with nothing; a model with no plan names the crowded lanes instead.</td><td>Global optimum of its LP, always feasible. Whatever it pays on hard rows is reported.</td></tr>
-<tr><td><b>Failure feedback</b></td><td>Receives cuts (soft, or firm for another net's track or a keep-out), layer cuts, and history (audit found this place hot).</td><td>Produces cuts, and flips a static side when the polish found no room.</td></tr>
-<tr><td><b>Scale</b></td><td>Cost tracks the number of crossings: about 20 crossings proved in 2 s, 135 in 20 s, 280 in about 4 minutes; one bus of 317 crossings was kept unproved after 518 s.</td><td>One LP per geometry pass; seconds to tens of seconds.</td></tr>
+<tr><th></th><th>CP-SAT <span class="tag">whole_solve.py</span></th><th>HiGHS LP <span class="tag">whole_geo.py</span></th><th>HiGHS LP, in board xy <span class="tag">whole_embed.py</span> <span class="tag">off by default</span></th></tr>
+<tr><td><b>Question</b></td><td>Which pairs cross, at which position along the route (<code>u</code>), and on which layer does each lane sit at each crossing? How many vias are unavoidable?</td><td>Given that order and those layers, what sideways offset does each lane have at each column of the trunk and the rings?</td><td>Given the same order and layers, and the first geometry's layout: where in x and y does each point of each lane stand, and each via?</td></tr>
+<tr><td><b>Unknowns</b></td><td>Booleans (which lane above, change active), small integers (crossing position, up to 3 changes per lane, and on more than two layers each run's layer)</td><td>Real offsets (tens of thousands of columns of them), plus elastic slacks</td><td>One real number per lane point (its place along a cell edge, or across its lane) and two per via, plus slacks with a cap</td></tr>
+<tr><td><b>Structure</b></td><td>Combinatorial. Search + propagation + clause learning + LP bounds, in parallel sub-solvers, deterministic.</td><td>Convex: one piece, because CP-SAT and <code>static_sides</code> have made every either-or choice. Simplex or interior point on a sparse system (often dual), with a tie-break for a unique optimum.</td><td>Convex inside a round: the cells each lane is in, and the side of each other that two things stand on, are fixed while the LP runs. Its rules are separating lines read off the layout as it stands, so it is solved again every round.</td></tr>
+<tr><td><b>Objective</b></td><td>One sum in vias: vias, five more for each via a net carries past two, one more for each run on a plane's layer; then history congestion; then the planes, as a tie-break.</td><td>Length + bends + squeeze below comfortable pitch, plus 10&#8308;&times; anything hard it had to break.</td><td>Length + bends + pitch short of comfortable, then short of its slack, plus 10&#8308;&times; anything short of its least distance.</td></tr>
+<tr><td><b>Guarantee</b></td><td>Proves the via minimum where it can. A round's first solve keeps the best plan it found even unproved, so a round never ends with nothing; a model with no plan names the crowded lanes instead.</td><td>Global optimum of its LP, always feasible. Whatever it pays on hard rows is reported.</td><td>Each rule's cap holds the two things it parts on their own sides; a round whose LP has no answer inside the caps is solved again with them lifted, and the log says so. The rounds themselves are a local search with no proof: they end when nothing moves, or at a round limit.</td></tr>
+<tr><td><b>Failure feedback</b></td><td>Receives cuts (soft, or firm for another net's track or a keep-out), layer cuts, and history (audit found this place hot).</td><td>Produces cuts, and flips a static side when the polish found no room.</td><td>Produces via cuts, and a layer cut for each breach.</td></tr>
+<tr><td><b>Scale</b></td><td>Cost tracks the number of crossings: about 20 crossings proved in 2 s, 135 in 20 s, 280 in about 4 minutes; one bus of 317 crossings was kept unproved after 518 s.</td><td>One LP per geometry pass; seconds to tens of seconds.</td><td>One LP a round, smaller after the first: it holds only what stands near where the round before moved.</td></tr>
 </table>
 
 <h3>Where else these solvers appear (older braid chain and instruments)</h3>
@@ -416,7 +481,7 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 </ul>
 
 <footer>
-Source: <a href="https://github.com/drandyhaas/KiCadRoutingTools/tree/bus622-take5/awx"><code>awx/</code> on the <code>bus622-take5</code> branch</a> (<code>route_bus.py</code>, <code>whole_route.py</code>, <code>whole_ends.py</code>, <code>whole_frame.py</code>, <code>whole_solve.py</code>, <code>whole_geo.py</code>, <code>whole_polish.py</code>, <code>whole_snap.py</code>, <code>route_lanes.py</code>; its <code>README.md</code> has every detail). The interactive toys are simplified re-implementations, not the real solvers.
+Source: <a href="https://github.com/drandyhaas/KiCadRoutingTools/tree/bus622-take5/awx"><code>awx/</code> on the <code>bus622-take5</code> branch</a> (<code>route_bus.py</code>, <code>whole_route.py</code>, <code>whole_ends.py</code>, <code>whole_frame.py</code>, <code>whole_solve.py</code>, <code>whole_geo.py</code>, <code>whole_polish.py</code>, <code>whole_snap.py</code>, <code>route_lanes.py</code>; its <code>README.md</code> has every detail). The second geometry stage of 2c and 2d is <a href="https://github.com/drandyhaas/KiCadRoutingTools/blob/bus_take6/awx/whole_embed.py"><code>awx/whole_embed.py</code> on the <code>bus_take6</code> branch</a>. The interactive toys are simplified re-implementations, not the real solvers.
 &nbsp;&middot;&nbsp; <a href="../">KiCadRoutingTools home</a> &nbsp;&middot;&nbsp; <a href="https://github.com/drandyhaas/KiCadRoutingTools">GitHub</a>
 </footer>
 </main>
@@ -439,32 +504,38 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
    {t:['Frame','trunk + rings'],f:'whole_frame.py',c:'#8a94a8',d:'<b>One road per lane.</b> A straight trunk from the source\'s pad box through the destination\'s, and a ring round each side of the destination, meeting at the cut. Both arrays\' outlines unrolled into two orders, whose disagreements are the crossings. Each lane\'s route is one coordinate, <code>u</code>.'},
    {t:['CP-SAT','solve'],f:'whole_solve.py',c:'#6a3fc4',d:'<b>The discrete plan.</b> One model decides every crossing, its position in <code>u</code>, every layer change and, on more than two layers, every run\'s layer. Minimises vias with a proof where it can; a round\'s first solve keeps an unproved plan rather than none. Takes in cuts from the LP and audits, plus history congestion.'},
    {t:['HiGHS LP','geometry'],f:'whole_geo.py',c:'#0f8a7a',d:'<b>The continuous geometry.</b> First the relayer moves each via end\'s run onto the layer the solve chose. Then the LP takes the fixed order and layers and finds each lane\'s sideways offset at each column with one joint LP (trunk + both rings). Elastic hard rows: what it has to pay is written as cuts for the solve. Run as the dual through HiGHS IPM.'},
+   {t:['Geometry','in board xy'],f:'whole_embed.py',c:'#0f8a7a',opt:true,d:'<b>Off by default</b> (the loop runs it only with <code>GEO_EMBED=1</code>). The same plan fitted again in the board\'s own x and y, starting from the first geometry\'s layout. Each layer\'s free space is cut into cells, each lane carries its own points, and a via is a free point too. One LP a round moves them all a short step, every rule a separating line read off the layout as it stands, with a cap that keeps the two things it parts on their own sides. A via left short of its room is slid along its lane to a more open place. What it cannot fit goes to the solve as cuts.'},
    {t:['Polish','xy per round'],f:'whole_polish.py',c:'#8a94a8',d:'Meets the audit\'s measures in board xy with small vertex moves, an LP per round, keeping the best state any round reached. When a lane has no room on its side of an island, it is flipped to the other side and sent back to the geometry.'},
    {t:['Snap','to grid'],f:'whole_snap.py',c:'#8a94a8',d:'Lands the planned lines on the router\'s own grid, the pairs first as the pair router moves, then the singles, so what is audited is what the router can draw.'},
    {t:['Audit','gate / lint'],f:'whole_gate.py',c:'#c07a00',d:'Checks the plan against the router\'s own rules, nothing waived. "Hot" places become <b>history</b> for the next solve, and unfixable ones become <b>cuts</b>. Crowded ends (exit 4) go through <code>whole_feedback</code> back to the fanout.'},
    {t:['Route','all lanes'],f:'route_lanes.py',c:'#2e9d4c',d:'Routes every lane from the audited plan (<code>--plan</code>), each in its band, then <code>check_connected</code> and <code>check_drc</code> grade the board. A loop that does not pass is laid from the plan it held; the best round is handed on (4e).'}];
-  const W=106,GAP=17,X0=8,Y0=70,H=76;
+  const W=96,GAP=14,X0=12,Y0=84,H=76;
   const bx=st.map((s,i)=>X0+i*(W+GAP));
   const defs=S('defs',{},svg);
   const mk=S('marker',{id:'ah',viewBox:'0 0 10 10',refX:9,refY:5,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);S('path',{d:'M0 0L10 5L0 10z',fill:'#8a94a8'},mk);
   const mk2=S('marker',{id:'ah2',viewBox:'0 0 10 10',refX:9,refY:5,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);S('path',{d:'M0 0L10 5L0 10z',fill:'#c07a00'},mk2);
-  for(let i=0;i<st.length-1;i++)S('line',{x1:bx[i]+W,y1:Y0+H/2,x2:bx[i+1],y2:Y0+H/2,stroke:'#8a94a8','stroke-width':2,'marker-end':'url(#ah)'},svg);
   const cx=i=>bx[i]+W/2;
+  for(let i=0;i<st.length-1;i++){const o=st[i].opt||st[i+1].opt,a={x1:bx[i]+W,y1:Y0+H/2,x2:bx[i+1],y2:Y0+H/2,stroke:'#8a94a8','stroke-width':o?1.5:2,'marker-end':'url(#ah)'};if(o)a['stroke-dasharray']='5 4';S('line',a,svg)}
+  // the default way: from the stage before an optional one straight to the stage after it
+  st.forEach((q,i)=>{if(!q.opt)return;S('path',{d:`M${cx(i-1)+18} ${Y0} C ${cx(i-1)+18} ${Y0-40}, ${cx(i+1)-18} ${Y0-40}, ${cx(i+1)-18} ${Y0-3}`,fill:'none',stroke:'#8a94a8','stroke-width':2,'marker-end':'url(#ah)'},svg);
+    T(svg,cx(i),Y0-36,'by default',{'text-anchor':'middle','font-size':11,fill:'#5b6577'})});
   const fb=(a,b,depth,lab,lx)=>{S('path',{d:`M${cx(a)} ${Y0+H} C ${cx(a)} ${Y0+H+depth}, ${cx(b)} ${Y0+H+depth}, ${cx(b)} ${Y0+H+4}`,fill:'none',stroke:'#c07a00','stroke-width':2,'stroke-dasharray':'6 4','marker-end':'url(#ah2)'},svg);T(svg,lx,Y0+H+depth*0.75+12,lab,{'font-size':12,fill:'#8a5a00','text-anchor':'middle'})};
-  fb(3,2,58,'cuts: "this can\'t be drawn"',cx(2)+62);
-  fb(6,2,110,'cuts + history congestion from audits',cx(4));
-  fb(6,0,160,'crowded ends, open nets -> whole_feedback -> fanout again',cx(3)-10);
+  fb(3,2,58,'cuts: "this can\'t be drawn"',cx(2)+56);
+  fb(7,2,110,'cuts + history congestion from audits',(cx(2)+cx(7))/2);
+  fb(7,0,160,'crowded ends, open nets -> whole_feedback -> fanout again',(cx(0)+cx(7))/2);
   const boxes=st.map((s,i)=>{
     const g=S('g',{style:'cursor:pointer'},svg);
-    const r=S('rect',{x:bx[i],y:Y0,width:W,height:H,rx:10,fill:'#fff',stroke:s.c,'stroke-width':i==2||i==3?3:1.5},g);
+    const ra={x:bx[i],y:Y0,width:W,height:H,rx:10,fill:'#fff',stroke:s.c,'stroke-width':i==2||i==3?3:1.5};if(s.opt)ra['stroke-dasharray']='6 4';
+    const r=S('rect',ra,g);
     T(g,cx(i),Y0+30,s.t[0],{'text-anchor':'middle','font-weight':700,'font-size':i==2||i==3?15:13.5,fill:s.c});
     T(g,cx(i),Y0+48,s.t[1],{'text-anchor':'middle','font-size':12,fill:'#5b6577'});
-    T(g,cx(i),Y0+66,s.f,{'text-anchor':'middle','font-size':10,fill:'#8a94a8'});
+    T(g,cx(i),Y0+66,s.f,{'text-anchor':'middle','font-size':9,fill:'#8a94a8'});
     g.addEventListener('click',()=>{stop();sel(i)});return{g,r,s}});
   const tok=S('circle',{r:9,fill:'#e3a008',stroke:'#fff','stroke-width':2,cx:cx(0),cy:Y0+H/2,opacity:0},svg);
-  T(svg,500,26,'ends -> frame -> plan -> geometry -> polish -> snap -> audit -> route, with feedback to the solve and to the fanout',{'text-anchor':'middle','font-size':13,fill:'#5b6577'});
+  T(svg,500,18,'ends -> frame -> plan -> geometry -> polish -> snap -> audit -> route, with feedback to the solve and to the fanout',{'text-anchor':'middle','font-size':13,fill:'#5b6577'});
   let cur=-1,timer=null,pos=0;
-  const DEMO=['#ends','#frame','#cpsat','#sec-lp','#polish','#snap','#audit','#route'];
+  const DEMO=['#ends','#frame','#cpsat','#sec-lp','#sec-embed','#polish','#snap','#audit','#route'];
+  const FLOW=st.map((q,i)=>i).filter(i=>!st[i].opt);     // the default flow: the optional stage is passed by
   function sel(i){cur=i;boxes.forEach((b,k)=>{b.r.setAttribute('fill',k===i?'#f1ecfb':'#fff')});
     $('#pipeDetail').innerHTML=`<div class="callout"><b>${st[i].t.join(' ')}</b> <span class="tag">${st[i].f}</span><br>${st[i].d}<br><a href="${DEMO[i]}">Jump to the demo &darr;</a></div>`}
   function stop(){if(timer){clearInterval(timer);timer=null;$('#pipePlay').textContent='Play the flow';tok.setAttribute('opacity',0)}}
@@ -473,11 +544,11 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
     $('#pipePlay').textContent='Stop';tok.setAttribute('opacity',1);pos=0;
     let tt=0;
     timer=setInterval(()=>{
-      tt+=0.022;const n=st.length,i=Math.floor(tt)%n,f=tt%1;
-      const x=cx(i)+(i<n-1?f*(W+GAP):0);
-      tok.setAttribute('cx',x);
+      tt+=0.022;const n=FLOW.length,k=Math.floor(tt)%n,f=tt%1,i=FLOW[k],j=k<n-1?FLOW[k+1]:i,over=j-i>1;
+      tok.setAttribute('cx',cx(i)+f*(cx(j)-cx(i)));
+      tok.setAttribute('cy',Y0+H/2-(over?(H/2+30)*Math.sin(Math.PI*f):0));
       if(f<0.05)sel(i);
-      $('#pipeStat').textContent='stage '+(i+1)+' of '+n;
+      $('#pipeStat').textContent='stage '+(k+1)+' of '+n;
     },30)};
   sel(2);
 })();
@@ -940,6 +1011,341 @@ function simplex(cost,rows){
   reset();
 })();
 
+/* ================= 2c. the geometry in board xy: cells, a lane's own points, one LP a round ================= */
+(function(){
+  const svg=$('#emb'),SC=120,OX=18,OY=12,X=x=>OX+x*SC,Y=y=>OY+y*SC;
+  // a made-up board: three pads, each grown by the distance a lane's centreline keeps from copper (BAR). The free
+  // space is cut into triangles on those corners as whole_embed.py cuts it (shapely.constrained_delaunay_triangles
+  // of this scene): V the corners, TR each cell's three corners, NB the cell across each of its edges (-1: a rim)
+  const BAR=0.15,BOARD=[0.1,0.05,7.1,3.35],PADS=[[2.0,0.45,2.8,1.15],[2.0,1.95,2.8,2.65],[4.5,1.5,5.2,2.2]];
+  const V=[[1.85,1.8],[0.25,0.2],[0.25,3.2],[2.95,1.3],[1.85,1.3],[4.35,2.35],[2.95,1.8],[2.95,2.8],[4.35,1.35],[1.85,0.3],[2.95,0.3],[6.95,3.2],[6.95,0.2],[1.85,2.8],[5.35,1.35],[5.35,2.35]];
+  const TR=[[0,2,1],[3,0,4],[5,7,6],[6,8,5],[1,9,4],[10,9,1],[3,6,0],[11,7,5],[1,4,0],[1,12,10],[3,8,6],[13,2,0],[8,3,10],[10,14,8],[7,2,13],[10,12,14],[7,11,2],[11,14,12],[5,15,11],[11,15,14]];
+  const NB=TR.map(()=>[-1,-1,-1]);
+  {const em={};TR.forEach((t,ti)=>{for(let i=0;i<3;i++){const a=t[(i+1)%3],b=t[(i+2)%3],k=Math.min(a,b)+'_'+Math.max(a,b);(em[k]=em[k]||[]).push([ti,i])}});
+   for(const k in em)if(em[k].length===2){const [[t1,i1],[t2,i2]]=em[k];NB[t1][i1]=t2;NB[t2][i2]=t1}}
+  // the rules, in mm: the least and the comfortable pitch, a point's move in one round, how near two lanes may come
+  // at worst (never through), how far past a free cell edge a point may be pushed in a round (it then changes cell)
+  const PMIN=0.25,PCOMF=0.40,TRUST=0.16,SIDE=0.04,STEP=0.02,HPT=0.9,TOL=0.01,EPS=0.002,ORD=0.01;
+  const WLEN=1,WBEND=1,WCOMF=2,WHARD=1000;
+  const DIRS=[];for(const [c,s] of [[1,Math.SQRT2-1],[Math.SQRT2-1,1]])for(const sx of [1,-1])for(const sy of [1,-1])DIRS.push([c*sx,s*sy]);
+  // the layout it starts from, as a first geometry might leave it: kinked, and short of the pitch in places
+  const REF=[[[0.4,1.3],[1.5,1.44],[3.3,1.44],[4.0,1.0],[5.7,0.96],[6.8,0.8]],
+             [[0.4,1.8],[1.5,1.62],[3.3,1.62],[4.0,1.2],[5.7,1.2],[6.8,1.25]]];
+  const NAMES='AB';
+  let lanes,nround=0,nhop=0,timer=null,drag=null,sel=null,uid=0;
+
+  const cross=(a,b,p)=>(b[0]-a[0])*(p[1]-a[1])-(b[1]-a[1])*(p[0]-a[0]);
+  const inside=(t,p,tol)=>{const a=V[TR[t][0]],b=V[TR[t][1]],c=V[TR[t][2]];return cross(a,b,p)>=-tol&&cross(b,c,p)>=-tol&&cross(c,a,p)>=-tol};
+  const locate=(p,pref)=>{if(pref!==undefined&&inside(pref,p,1e-9))return pref;for(let t=0;t<TR.length;t++)if(inside(t,p,1e-9))return t;return -1};
+  const edge=(t,i)=>[TR[t][(i+1)%3],TR[t][(i+2)%3]],ekey=(a,b)=>Math.min(a,b)+'_'+Math.max(a,b);
+  // a cell as three half planes n . p >= c (n pointing in), in its edges' order
+  const planes=t=>[0,1,2].map(i=>{const [ia,ib]=edge(t,i),a=V[ia],b=V[ib],L=Math.hypot(b[0]-a[0],b[1]-a[1]),nx=-(b[1]-a[1])/L,ny=(b[0]-a[0])/L;return[nx,ny,nx*a[0]+ny*a[1]]});
+  // a lane's point where it crosses from cell t into its neighbour t2, nearest x
+  function portal(t,t2,x){const [a,b]=edge(t,NB[t].indexOf(t2)),A=V[a],B=V[b],len=Math.hypot(B[0]-A[0],B[1]-A[1]);
+    return{k:'P',id:++uid,a,b,len,t:clamp(((x[0]-A[0])*(B[0]-A[0])+(x[1]-A[1])*(B[1]-A[1]))/len,EPS,len-EPS),from:t,to:t2}}
+  const at=p=>p.k==='F'?p.xy:[V[p.a][0]+(V[p.b][0]-V[p.a][0])*p.t/p.len,V[p.a][1]+(V[p.b][1]-V[p.a][1])*p.t/p.len];
+  const line=ln=>[ln.S,...ln.pts.map(at),ln.E];
+  // where the line a -> b meets the line of the edge between cells t and t2 (b itself where they run alongside)
+  function cut(t,t2,a,b){const [ia,ib]=edge(t,NB[t].indexOf(t2)),A=V[ia],B=V[ib],dx=b[0]-a[0],dy=b[1]-a[1],ex=B[0]-A[0],ey=B[1]-A[1],den=dx*ey-dy*ex;
+    if(Math.abs(den)<1e-12)return b;const u=((A[0]-a[0])*ey-(A[1]-a[1])*ex)/den;return[a[0]+dx*u,a[1]+dy*u]}
+  // the nearest point of the stretch a-b to p: {d, q, w (its place along the stretch, 0..1)}
+  function foot(p,a,b){const dx=b[0]-a[0],dy=b[1]-a[1],l2=dx*dx+dy*dy,w=l2<1e-18?0:clamp(((p[0]-a[0])*dx+(p[1]-a[1])*dy)/l2,0,1),q=[a[0]+dx*w,a[1]+dy*w];return{d:Math.hypot(p[0]-q[0],p[1]-q[1]),q,w}}
+  function nearest(p,c){let b=null;for(let i=0;i<c.length-1;i++){const f=foot(p,c[i],c[i+1]);if(!b||f.d<b.d){b=f;b.i=i}}return b}
+  function gap(){const a=line(lanes[0]),b=line(lanes[1]);let m=1e9;for(const p of a)m=Math.min(m,nearest(p,b).d);for(const p of b)m=Math.min(m,nearest(p,a).d);return m}
+  const segX=(a,b,c,d)=>cross(a,b,c)*cross(a,b,d)<0&&cross(c,d,a)*cross(c,d,b)<0;
+  function crossed(){const a=line(lanes[0]),b=line(lanes[1]);for(let i=0;i<a.length-1;i++)for(let j=0;j<b.length-1;j++)if(segX(a[i],a[i+1],b[j],b[j+1]))return true;return false}
+  const length=()=>lanes.reduce((s,ln)=>{const c=line(ln);for(let i=0;i<c.length-1;i++)s+=Math.hypot(c[i+1][0]-c[i][0],c[i+1][1]-c[i][1]);return s},0);
+
+  // a lane read off its reference line: a point where it crosses each cell edge, a free point where the reference
+  // bends and every HPT along a straight stretch
+  function read(ref){
+    const pts=[];let t=locate(ref[0]),since=0;const first=t;
+    for(let s=0;s<ref.length-1;s++){const p=ref[s],q=ref[s+1],L=Math.hypot(q[0]-p[0],q[1]-p[1]),n=Math.ceil(L/0.01);
+      for(let i=1;i<=n;i++){const x=[p[0]+(q[0]-p[0])*i/n,p[1]+(q[1]-p[1])*i/n],t2=locate(x,t);since+=L/n;
+        if(t2!==t){pts.push(portal(t,t2,x));t=t2}
+        if(!(s===ref.length-2&&i===n)&&(i===n||since>=HPT)){pts.push({k:'F',id:++uid,xy:x,tri:t});since=0}}}
+    return{S:ref[0].slice(),E:ref[ref.length-1].slice(),pts,first}}
+  // a free point goes on into the cell t2 beyond an edge of its own: the lane's crossing of that edge moved past it
+  // where it has one beside it, else the lane crosses the edge there and back (a bulge)
+  function hop(ln,idx,t2){const p=ln.pts[idx],t=p.tri,c=line(ln),nx=ln.pts[idx+1],pv=ln.pts[idx-1];
+    if(nx&&nx.k==='P'&&nx.from===t&&nx.to===t2){ln.pts[idx]=nx;ln.pts[idx+1]=p}
+    else if(pv&&pv.k==='P'&&pv.from===t2&&pv.to===t){ln.pts[idx-1]=p;ln.pts[idx]=pv}
+    else ln.pts.splice(idx,1,portal(t,t2,cut(t,t2,c[idx],p.xy)),p,portal(t2,t,cut(t,t2,p.xy,c[idx+2])));
+    p.tri=t2}
+  // an edge crossed and crossed straight back with nothing between: neither
+  function tidy(ln){for(let i=0;i+1<ln.pts.length;){const a=ln.pts[i],b=ln.pts[i+1];
+    if(a.k==='P'&&b.k==='P'&&a.from===b.to&&a.to===b.from){ln.pts.splice(i,2);i=Math.max(i-1,0)}else i++}}
+  // PULLED STRAIGHT: a lane that crosses a cell edge, goes out to one free point and comes straight back across the
+  // same edge doubles back on itself. Where its way round is half as long again as the straight line (or the point
+  // stands a hair beyond the edge), nothing of the other lane is inside the loop, and the straight line stands no
+  // nearer the other lane than the pitch or than the loop did, the lane is that straight line: the point back on
+  // the edge, in the cell it left. (A point a hair beyond the edge has gone to and fro: it stays on that edge.)
+  const inPoly=(q,poly)=>{let c=false;for(let i=0,j=poly.length-1;i<poly.length;j=i++){const a=poly[i],b=poly[j];
+    if((a[1]>q[1])!==(b[1]>q[1])&&q[0]<(b[0]-a[0])*(q[1]-a[1])/(b[1]-a[1])+a[0])c=!c}return c};
+  const apart=(c1,c2)=>Math.min(...c1.map(p=>nearest(p,c2).d),...c2.map(p=>nearest(p,c1).d));
+  function pull(ln,li){let n=0;const oth=line(lanes[1-li]);
+    for(let i=0;i<ln.pts.length;i++){const f=ln.pts[i];if(f.k!=='F'||f.hopped)continue;
+      let k=0;for(;i-k-1>=0&&i+k+1<ln.pts.length;k++){const a=ln.pts[i-k-1],b=ln.pts[i+k+1];if(!(a.k==='P'&&b.k==='P'&&a.from===b.to&&a.to===b.from))break}
+      if(!k)continue;
+      const a=ln.pts[i-k],b=ln.pts[i+k],A=V[a.a],B=V[a.b],loop=ln.pts.slice(i-k,i+k+1).map(at),pa=loop[0],pb=loop[loop.length-1];
+      let way=0;for(let j=0;j<loop.length-1;j++)way+=Math.hypot(loop[j+1][0]-loop[j][0],loop[j+1][1]-loop[j][1]);
+      const chord=Math.hypot(pb[0]-pa[0],pb[1]-pa[1]),hair=k===1&&Math.abs(cross(A,B,f.xy))/a.len<=1.5*STEP;
+      if(!hair&&!(way-chord>=PMIN/2&&way>=1.5*chord))continue;
+      if(oth.some(q=>inPoly(q,loop)))continue;
+      const dn=apart([pa,pb],oth);if(dn<PMIN&&dn<apart(loop,oth)-1e-9)continue;
+      const t=TR[a.from],cx=(V[t[0]][0]+V[t[1]][0]+V[t[2]][0])/3,cy=(V[t[0]][1]+V[t[1]][1]+V[t[2]][1])/3,x=(pa[0]+pb[0])/2,y=(pa[1]+pb[1])/2;
+      f.xy=[x+(cx-x)*1e-4,y+(cy-y)*1e-4];f.tri=a.from;if(hair)f.stay=ekey(a.a,a.b);ln.pts.splice(i-k,2*k+1,f);i-=k;n++}
+    return n}
+  // a free point's way across its lane (the normal of the line through its two neighbours) and the stretch of it its
+  // cell leaves it: [lo, hi] (`past` further at a free edge), the cell edge at each end where that is a free one
+  // (-1: a rim) and that edge's own place (clo, chi)
+  function across(ln,idx,past){const p=ln.pts[idx],c=line(ln),pm=c[idx],pn=c[idx+2];let tx=pn[0]-pm[0],ty=pn[1]-pm[1],tl=Math.hypot(tx,ty);
+    if(tl<1e-6){tx=-(p.xy[1]-pm[1]);ty=p.xy[0]-pm[0];tl=Math.hypot(tx,ty)}      // (a spur's tip, its neighbours at one place: along the spur)
+    if(tl<1e-9){tx=1;ty=0;tl=1}
+    return span(p,[-ty/tl,tx/tl],past)}
+  function span(p,n,past){let lo=-Infinity,hi=Infinity,elo=-1,ehi=-1,clo=0,chi=0;
+    planes(p.tri).forEach(([ax,ay,c],i)=>{const g=ax*n[0]+ay*n[1],h=c-(ax*p.xy[0]+ay*p.xy[1]),fr=NB[p.tri][i]>=0,ex=fr?past:0;
+      if(g>1e-9){const b=h/g-ex;if(b>lo){lo=b;clo=h/g;elo=fr?i:-1}}else if(g<-1e-9){const b=h/g+ex;if(b<hi){hi=b;chi=h/g;ehi=fr?i:-1}}});
+    return{n,lo:Math.min(lo,0),hi:Math.max(hi,0),elo,ehi,clo,chi}}
+  // a point's own trust for the next round: halved where its move turned back on the round before's, grown again
+  // while it keeps its way (its least well under TOL, so a point that swings to and fro comes to rest)
+  const trust=(tr,was,now)=>Math.abs(now)<1e-6?tr:was*now<0?Math.max(tr/2,0.4*TOL):Math.min(TRUST,tr*1.5);
+
+  // ONE ROUND: one LP from the layout as it stands, and the layout moved to its answer (every trust times K)
+  function round(K){
+    const cost=[],rows=[],addv=c=>{cost.push(c);return cost.length-1},le=(t,b)=>rows.push({t,b}),add=(t,v,a)=>{if(v>=0&&a!==0)t[v]=(t[v]||0)+a};
+    const cur=lanes.map(line);
+    // each point as c + d * z, z >= 0 the LP's unknown: its place along its cell edge, or across its lane
+    const aff=lanes.map((ln,li)=>{const A=[{c:ln.S,v:-1,d:[0,0]}];
+      ln.pts.forEach((p,j)=>{const tr=(p.tr||TRUST)*K;
+        if(p.k==='P'){const a=V[p.a],b=V[p.b],u=[(b[0]-a[0])/p.len,(b[1]-a[1])/p.len],lo=Math.max(EPS,p.t-tr),hi=Math.min(p.len-EPS,p.t+tr);
+          p.lo=Math.min(lo,p.t);p.v=hi-p.lo>1e-7?addv(0):-1;if(p.v>=0)le({[p.v]:1},hi-p.lo);
+          A.push({c:[a[0]+u[0]*p.lo,a[1]+u[1]*p.lo],v:p.v,d:u});return}
+        const s=across(ln,j,STEP);p.n=s.n;p.lo=Math.max(s.lo,-tr);p.hi=Math.min(s.hi,tr);p.elo=s.elo;p.ehi=s.ehi;p.clo=s.clo;p.chi=s.chi;
+        p.v=p.hi-p.lo>1e-7?addv(0):-1;if(p.v>=0)le({[p.v]:1},p.hi-p.lo);
+        A.push({c:[p.xy[0]+s.n[0]*p.lo,p.xy[1]+s.n[1]*p.lo],v:p.v,d:s.n})});
+      A.push({c:ln.E,v:-1,d:[0,0]});return A});
+    const dt=(o,q)=>[o[0]*q.c[0]+o[1]*q.c[1],q.v<0?0:o[0]*q.d[0]+o[1]*q.d[1]];
+    aff.forEach((A,li)=>{const c=cur[li];
+      // the lane's length, as the snap will lay it: on the eight headings (the ones a round's move can reach)
+      for(let j=0;j<A.length-1;j++){if(A[j].v<0&&A[j+1].v<0)continue;
+        const e=addv(WLEN),vals=DIRS.map(o=>o[0]*(c[j+1][0]-c[j][0])+o[1]*(c[j+1][1]-c[j][1])),mx=Math.max(...vals);
+        DIRS.forEach((o,k)=>{if(vals[k]<mx-4.4*TRUST)return;const [cq,aq]=dt(o,A[j+1]),[cp,ap]=dt(o,A[j]),t={};add(t,A[j+1].v,aq);add(t,A[j].v,-ap);t[e]=-1;le(t,cp-cq)})}
+      // the price of a bend: a point off the line through its two neighbours
+      for(let j=1;j<A.length-1;j++){if(A[j].v<0&&A[j-1].v<0&&A[j+1].v<0)continue;
+        const l1=Math.hypot(c[j][0]-c[j-1][0],c[j][1]-c[j-1][1]),l2=Math.hypot(c[j+1][0]-c[j][0],c[j+1][1]-c[j][1]);if(l1+l2<1e-6)continue;
+        const w0=l2/(l1+l2),w2=l1/(l1+l2),hx=c[j+1][0]-c[j-1][0],hy=c[j+1][1]-c[j-1][1],hl=Math.hypot(hx,hy);if(hl<1e-9)continue;
+        const ax=[-hy/hl,hx/hl],[c1,a1]=dt(ax,A[j]),[c0,a0]=dt(ax,A[j-1]),[c2,a2]=dt(ax,A[j+1]),b=addv(WBEND),cst=c1-w0*c0-w2*c2,t={};
+        add(t,A[j].v,a1);add(t,A[j-1].v,-w0*a0);add(t,A[j+1].v,-w2*a2);
+        const t1=Object.assign({},t),t2={};for(const k in t)t2[k]=-t[k];t1[b]=-1;t2[b]=-1;le(t1,-cst);le(t2,cst)}});
+    // two lanes on one cell edge keep their order
+    const el={};lanes.forEach((ln,li)=>ln.pts.forEach(p=>{if(p.k==='P'){const k=Math.min(p.a,p.b)+'_'+Math.max(p.a,p.b);(el[k]=el[k]||[]).push([li,p,p.a<p.b])}}));
+    for(const k in el){const lst=el[k],can=e=>e[2]?e[1].t:e[1].len-e[1].t;lst.sort((x,y)=>can(x)-can(y));
+      for(let i=0;i<lst.length-1;i++){const x=lst[i],y=lst[i+1];if(x[0]===y[0]||(x[1].v<0&&y[1].v<0))continue;
+        const t={};let cst=0;for(const [e,sg] of [[y,1],[x,-1]]){cst+=sg*(e[2]?e[1].lo:e[1].len-e[1].lo);add(t,e[1].v,-sg*(e[2]?1:-1))}
+        le(t,cst-Math.min(ORD,can(y)-can(x)))}}
+    // every lane apart from the lane beside it: each of its points held off the nearest stretch of the other, along
+    // the line between the two as they stand (a SEPARATING LINE). The shortfall is priced in steps -- little up to the
+    // comfortable pitch, dear below the pitch -- and capped: the two stay SIDE apart, so neither passes the other
+    let nrule=0;
+    lanes.forEach((la,ia)=>lanes.forEach((lb,ib)=>{if(ia===ib)return;
+      cur[ia].forEach((p,j)=>{const f=nearest(p,cur[ib]);if(f.d>PCOMF+TRUST||f.d<1e-6)return;
+        const A=aff[ia][j],B0=aff[ib][f.i],B1=aff[ib][f.i+1];if(A.v<0&&B0.v<0&&B1.v<0)return;
+        const nv=[(f.q[0]-p[0])/f.d,(f.q[1]-p[1])/f.d],[c0,a0]=dt(nv,B0),[c1,a1]=dt(nv,B1),[cp,ap]=dt(nv,A),sc=addv(WCOMF),sh=addv(WHARD),t={};
+        le({[sc]:1},PCOMF-PMIN);le({[sh]:1},PMIN-Math.min(SIDE,f.d));
+        add(t,B0.v,-(1-f.w)*a0);add(t,B1.v,-f.w*a1);add(t,A.v,ap);t[sc]=-1;t[sh]=-1;le(t,-PCOMF+(1-f.w)*c0+f.w*c1-cp);nrule++})}));
+    const t0=performance.now(),r=simplex(cost,rows),ms=performance.now()-t0;
+    if(!r.ok)return null;
+    let move=0,hops=0,pulled=0;
+    lanes.forEach(ln=>{const over=[];
+      ln.pts.forEach((p,idx)=>{if(p.v<0)return;const z=r.x[p.v];
+        if(p.k==='P'){const d=p.lo+z-p.t;p.t=clamp(p.lo+z,EPS,p.len-EPS);p.tr=trust(p.tr||TRUST,p.was||0,d);p.was=d;move=Math.max(move,Math.abs(d));return}
+        let s=p.lo+z;const e=(p.elo>=0&&s<p.clo-1e-9)?p.elo:(p.ehi>=0&&s>p.chi+1e-9)?p.ehi:-1;      // past a free edge of its cell
+        p.hopped=false;
+        if(e>=0){const t2=NB[p.tri][e],q=[p.xy[0]+p.n[0]*s,p.xy[1]+p.n[1]*s],ek=ekey(...edge(p.tri,e)),n=p.last===ek?p.fro+1:1;
+          // (a point that has gone to and fro across one edge stays ON it)
+          if(inside(t2,q,1e-9)&&p.stay!==ek&&n<3){over.push([idx,t2]);p.last=ek;p.fro=n;p.hopped=true}
+          else{if(n>=3)p.stay=ek;s=e===p.elo?Math.min(p.clo,0):Math.max(p.chi,0)}}
+        const was=(p.was||0)*(p.wn&&p.wn[0]*p.n[0]+p.wn[1]*p.n[1]<0?-1:1);
+        p.tr=trust(p.tr||TRUST,was,s);p.was=s;p.wn=p.n;p.xy=[p.xy[0]+p.n[0]*s,p.xy[1]+p.n[1]*s];move=Math.max(move,Math.abs(s))});
+      over.reverse().forEach(([idx,t2])=>{hop(ln,idx,t2);hops++});tidy(ln)});
+    lanes.forEach((ln,li)=>{pulled+=pull(ln,li)});
+    return{move,hops,pulled,vars:cost.length,rows:rows.length,nrule,ms}}
+
+  const f2=v=>v.toFixed(2);
+  function draw(){
+    svg.innerHTML='';
+    S('rect',{x:X(BOARD[0]),y:Y(BOARD[1]),width:(BOARD[2]-BOARD[0])*SC,height:(BOARD[3]-BOARD[1])*SC,fill:'#eceef3',stroke:'#7d8699','stroke-width':1.5},svg);
+    S('rect',{x:X(BOARD[0]+BAR),y:Y(BOARD[1]+BAR),width:(BOARD[2]-BOARD[0]-2*BAR)*SC,height:(BOARD[3]-BOARD[1]-2*BAR)*SC,fill:'#fff'},svg);
+    S('rect',{x:X(BOARD[0]),y:Y(BOARD[1]),width:BAR*SC,height:(BOARD[3]-BOARD[1])*SC,fill:'#cfd4de',stroke:'#7d8699'},svg);
+    T(svg,X(BOARD[0])+13,Y(2.55),'an array\'s edge',{'font-size':11,fill:'#3d4557',transform:`rotate(-90 ${X(BOARD[0])+13} ${Y(2.55)})`});
+    const hot=sel?lanes[sel.li].pts.find(q=>q.id===sel.id):null;
+    if(hot){const ts=hot.k==='F'?[hot.tri]:[hot.from,hot.to];for(const t of ts)S('polygon',{points:TR[t].map(i=>X(V[i][0])+','+Y(V[i][1])).join(' '),fill:'#f1ecfb'},svg)}
+    for(const [a,b,c,d] of PADS){S('rect',{x:X(a-BAR),y:Y(b-BAR),width:(c-a+2*BAR)*SC,height:(d-b+2*BAR)*SC,fill:'#eceef3',stroke:'#c9cfdb','stroke-dasharray':'4 3'},svg);
+      S('rect',{x:X(a),y:Y(b),width:(c-a)*SC,height:(d-b)*SC,fill:'#b7bdca',stroke:'#7d8699'},svg);T(svg,X((a+c)/2),Y((b+d)/2)+4,'pad',{'text-anchor':'middle','font-size':12,fill:'#3d4557'})}
+    if($('#emCells').checked)TR.forEach((t,ti)=>{for(let i=0;i<3;i++){const nb=NB[ti][i];if(nb<ti)continue;const [a,b]=edge(ti,i);
+      S('line',{x1:X(V[a][0]),y1:Y(V[a][1]),x2:X(V[b][0]),y2:Y(V[b][1]),stroke:'#c3cad8','stroke-width':1},svg)}});
+    T(svg,X(BOARD[0]+BAR)+8,Y(BOARD[3])-6,'the board\'s edge, and the strip inside it a centreline keeps out of',{'font-size':11,fill:'#8a94a8'});
+    REF.forEach(ref=>S('polyline',{points:ref.map(q=>X(q[0])+','+Y(q[1])).join(' '),fill:'none',stroke:'#a9b0be','stroke-width':1.5,'stroke-dasharray':'5 4'},svg));
+    const cur=lanes.map(line);
+    // the rules between the two lanes: each point and its foot on the other lane, and the line that parts them
+    if($('#emRules').checked)cur.forEach((c,ia)=>c.forEach(p=>{const f=nearest(p,cur[1-ia]);if(f.d>PCOMF+TRUST||f.d<1e-6)return;
+      const col=f.d<PMIN-1e-3?'#d33':f.d<PCOMF-1e-3?'#d39a00':'#2e9d4c',mx=(p[0]+f.q[0])/2,my=(p[1]+f.q[1])/2,nx=(f.q[0]-p[0])/f.d,ny=(f.q[1]-p[1])/f.d,h=0.11;
+      S('line',{x1:X(p[0]),y1:Y(p[1]),x2:X(f.q[0]),y2:Y(f.q[1]),stroke:col,'stroke-width':col==='#2e9d4c'?1.5:3,opacity:col==='#2e9d4c'?.55:.9},svg);
+      S('line',{x1:X(mx-ny*h),y1:Y(my+nx*h),x2:X(mx+ny*h),y2:Y(my-nx*h),stroke:'#6a3fc4','stroke-width':1.5},svg)}));
+    lanes.forEach((ln,li)=>{const c=cur[li];
+      S('line',{x1:X(BOARD[0]),y1:Y(ln.S[1]),x2:X(ln.S[0]),y2:Y(ln.S[1]),stroke:'#7d8699','stroke-width':5},svg);
+      S('polyline',{points:c.map(q=>X(q[0])+','+Y(q[1])).join(' '),fill:'none',stroke:CF,'stroke-width':4,'stroke-linejoin':'round'},svg);
+      for(const q of [ln.S,ln.E])S('rect',{x:X(q[0])-5,y:Y(q[1])-5,width:10,height:10,fill:CF},svg);
+      T(svg,X(ln.E[0])+12,Y(ln.E[1])+5,NAMES[li],{'font-weight':700,fill:CF});
+      ln.pts.forEach(p=>{const q=at(p),on=sel&&sel.id===p.id;
+        const h=p.k==='P'?S('rect',{x:X(q[0])-4.5,y:Y(q[1])-4.5,width:9,height:9,transform:`rotate(45 ${X(q[0])} ${Y(q[1])})`,fill:on?'#f1ecfb':'#fff',stroke:CF,'stroke-width':2,style:'cursor:grab'},svg)
+          :S('circle',{cx:X(q[0]),cy:Y(q[1]),r:6.5,fill:on?'#f1ecfb':'#fff',stroke:CF,'stroke-width':2.5,style:'cursor:grab'},svg);
+        h.addEventListener('pointerdown',e=>{stop();e.preventDefault();sel={li,id:p.id};lanes.forEach(l=>l.pts.forEach(q=>{delete q.tr;q.was=0}));delete p.stay;delete p.last;drag={li,id:p.id,n:p.k==='F'?across(ln,ln.pts.indexOf(p),0).n:null};draw()})})});
+    T(svg,X(lanes[0].S[0])-4,Y(lanes[0].S[1])-26,'a stub, and its mouth',{'font-size':11,fill:'#5b6577'});
+    S('line',{x1:X(lanes[0].S[0]),y1:Y(lanes[0].S[1])-22,x2:X(lanes[0].S[0]),y2:Y(lanes[0].S[1])-8,stroke:'#8a94a8'},svg);
+    $('#emN').textContent=nround;$('#emLen').textContent=f2(length())+' mm';
+    const g=gap(),x=crossed();$('#emGap').innerHTML=x?'<span style="color:#c0392b">they cross</span>':`<span style="color:${g<PMIN-1e-3?'#c0392b':g<PCOMF-1e-3?'#b07a00':'#2e9d4c'}">${f2(g)} mm</span> (pitch ${f2(PMIN)}, comfortable ${f2(PCOMF)})`;
+    $('#emPts').textContent=lanes.map((ln,li)=>NAMES[li]+' '+ln.pts.filter(p=>p.k==='P').length+' on edges + '+ln.pts.filter(p=>p.k==='F').length+' free').join(', ');
+    $('#emHop').textContent=nhop}
+  function stop(){if(timer){clearInterval(timer);timer=null;$('#emRun').textContent='Run to the end'}}
+  function one(){
+    // (the toy's own safeguard: a round whose answer would take one lane through the other -- the rules' lines are
+    // only right nearby, and a hand-made spike can slip past one -- is not taken; it is solved again with half the step)
+    const g0=gap(),keep=JSON.stringify(lanes.map(ln=>ln.pts));let r=null,K=1,again=0;
+    for(;K>1/40;K/=2,again++){r=round(K);if(!r)break;if(!crossed()&&gap()>=Math.min(SIDE,g0)-1e-9)break;
+      JSON.parse(keep).forEach((pts,li)=>{lanes[li].pts=pts});r=null}
+    if(!r){JSON.parse(keep).forEach((pts,li)=>{lanes[li].pts=pts});draw();
+      $('#emLog').textContent='No step from this layout keeps the two lanes apart. Pull the spike back by hand, or press Start again.';return true}
+    nround++;nhop+=r.hops;draw();
+    const g=gap(),done=r.move<TOL&&!r.hops&&!r.pulled;
+    $('#emLog').innerHTML=`Round ${nround}: one LP of ${r.vars} unknowns and ${r.rows} rows (${r.nrule} of them separating lines between the two lanes), solved in ${r.ms.toFixed(0)} ms. The farthest point moved ${r.move.toFixed(3)} mm`+
+      (r.hops?`, and <b>${r.hops} point${r.hops>1?'s':''} pressed on a free cell edge went on into the next cell</b>`:'')+
+      (r.pulled?`, and <b>${r.pulled} place${r.pulled>1?'s':''} where a lane doubled back with nothing inside ${r.pulled>1?'were':'was'} pulled straight</b>`:'')+'. '+
+      (g<PMIN-1e-3?`The lanes are still ${(PMIN-g).toFixed(3)} mm short of the pitch at their closest: a point moves ${TRUST} mm a round at most.`:g<PCOMF-1e-3?'No rule is short now; the amber ties are places closer than comfortable, which cost a little.':'Every tie is at the comfortable pitch or more.')+
+      (again?` (At full step this round's answer would have taken one lane through the other, so the toy solved it again with ${again>1?'a shorter':'half the'} step.)`:'')+
+      (done?' <b>Nothing moved: the rounds end here.</b>':'');
+    return done}
+  function reset(){stop();uid=0;lanes=REF.map(read);nround=0;nhop=0;sel=null;draw();
+    $('#emLog').textContent='The dashed lines are the layout it starts from. Each lane has been read onto its own points: a diamond on every cell edge it crosses, round dots between. Drag one, or press One round.'}
+  // dragging: a point on a cell edge slides along it; a free point moves across its lane, as far as its cell lets it,
+  // and on into the next cell at a free edge. A move that would take one lane through the other is refused
+  function world(e){const b=svg.getBoundingClientRect();return[((e.clientX-b.left)/b.width*900-OX)/SC,((e.clientY-b.top)/b.height*432-OY)/SC]}
+  svg.addEventListener('pointermove',e=>{if(!drag)return;const ln=lanes[drag.li],w=world(e),keep=JSON.stringify(ln.pts),hop0=nhop;
+    let idx=ln.pts.findIndex(q=>q.id===drag.id),p=ln.pts[idx],msg='';if(!p)return;
+    if(p.k==='P'){const A=V[p.a],B=V[p.b];p.t=clamp(((w[0]-A[0])*(B[0]-A[0])+(w[1]-A[1])*(B[1]-A[1]))/p.len,EPS,p.len-EPS);
+      msg='A point on a cell edge: it slides along the edge, and stops at the edge\'s two ends, which are corners of keep-out zones.'}
+    else{msg='A free point: it moves across its lane, inside its cell.';
+      for(let k=0;k<6;k++){const want=drag.n[0]*(w[0]-p.xy[0])+drag.n[1]*(w[1]-p.xy[1]),s=span(p,drag.n,0);
+        if(want>=s.lo&&want<=s.hi){p.xy=[p.xy[0]+drag.n[0]*want,p.xy[1]+drag.n[1]*want];break}
+        const lo=want<s.lo,e=lo?s.elo:s.ehi,b=lo?s.lo:s.hi;
+        if(e<0||Math.abs(want-b)<0.03){p.xy=[p.xy[0]+drag.n[0]*b,p.xy[1]+drag.n[1]*b];
+          msg=e<0?'It stops here: this edge of its cell is the rim of a keep-out zone.':'Pressed on a cell edge with free space beyond: push a little further and it goes on into the next cell.';break}
+        const t2=NB[p.tri][e],q=[p.xy[0]+drag.n[0]*(b+(lo?-0.004:0.004)),p.xy[1]+drag.n[1]*(b+(lo?-0.004:0.004))];
+        if(!inside(t2,q,1e-9)){p.xy=[p.xy[0]+drag.n[0]*b,p.xy[1]+drag.n[1]*b];break}
+        p.xy=q;hop(ln,idx,t2);tidy(ln);idx=ln.pts.indexOf(p);nhop++;msg='<b>It went on into the next cell.</b> The lane now crosses that edge where the diamonds are.'}}
+    if(crossed()||gap()<SIDE){ln.pts=JSON.parse(keep);nhop=hop0;msg='<b>Refused:</b> that would take one lane through the other. Nothing passes through anything.'}
+    draw();$('#emLog').innerHTML=msg});
+  const up=()=>{drag=null};svg.addEventListener('pointerup',up);svg.addEventListener('pointerleave',up);svg.addEventListener('pointercancel',up);
+  $('#emRound').onclick=()=>{stop();one()};
+  $('#emRun').onclick=()=>{if(timer){stop();return}$('#emRun').textContent='Stop';let n=0;
+    timer=setInterval(()=>{if(one())stop();else if(++n>=60){stop();$('#emLog').innerHTML+=' <b>Stopped after 60 rounds with something still moving.</b> Two lanes hooked round each other by hand stay hooked: no round takes one through the other. Press Start again.'}},380)};
+  $('#emReset').onclick=reset;$('#emCells').onchange=draw;$('#emRules').onchange=draw;
+  reset();
+})();
+
+/* ================= 2d. a via slid along its own lane ================= */
+(function(){
+  const svg=$('#slide'),SC=120,OX=18,OY=10,X=x=>OX+x*SC,Y=y=>OY+y*SC;
+  // a made-up board: a corridor between two pads, wide enough for two lanes and not for a via and a lane. Lane X
+  // changes layer in it (F.Cu before its via, B.Cu after), lane Y (F.Cu) passes beside it, lane Z (B.Cu) crosses both
+  const BOARD=[0.1,0.05,7.1,2.95],PADS=[[2.2,0.45,4.2,1.10],[2.2,1.75,4.2,2.55],[5.9,2.15,6.6,2.7]];
+  const BAR=0.15,VBAR=0.25,ROOM=0.30,PITCH=0.25,REACH=12*PITCH,TRUST=0.16,X0=3.2,XA=0.45,XB=6.75;
+  const LX=[[0.3,1.85],[1.7,1.85],[2.05,1.5],[4.35,1.5],[4.7,1.85],[6.9,1.85]];
+  const LY=[[0.3,0.95],[1.75,0.95],[2.05,1.25],[4.35,1.25],[4.65,0.95],[6.9,0.95]];
+  const LZ=[[1.45,0.3],[1.45,2.7]];
+  const P0=380,PH=134,VH=524;       // the strip under the board: its top, its height; the drawing's height
+  let vx=X0,timer=null,drag=false;
+  // lane X at x (it runs left to right, so its place along it is its x), and how far along it x is
+  const onX=x=>{for(let i=0;i<LX.length-1;i++)if(x<=LX[i+1][0]+1e-12){const a=LX[i],b=LX[i+1],u=(x-a[0])/(b[0]-a[0]);return[x,a[1]+(b[1]-a[1])*u]}return LX[LX.length-1].slice()};
+  const along=x=>{let s=0;for(let i=0;i<LX.length-1;i++){const a=LX[i],b=LX[i+1],L=Math.hypot(b[0]-a[0],b[1]-a[1]);if(x<=b[0])return s+L*(x-a[0])/(b[0]-a[0]);s+=L}return s};
+  const atS=s=>{for(let i=0;i<LX.length-1;i++){const a=LX[i],b=LX[i+1],L=Math.hypot(b[0]-a[0],b[1]-a[1]);if(s<=L)return a[0]+(b[0]-a[0])*s/L;s-=L}return LX[LX.length-1][0]};
+  const dseg=(p,a,b)=>{const dx=b[0]-a[0],dy=b[1]-a[1],w=clamp(((p[0]-a[0])*dx+(p[1]-a[1])*dy)/(dx*dx+dy*dy),0,1);return Math.hypot(p[0]-a[0]-dx*w,p[1]-a[1]-dy*w)};
+  const dline=(p,ln)=>{let m=1e9;for(let i=0;i<ln.length-1;i++)m=Math.min(m,dseg(p,ln[i],ln[i+1]));return m};
+  const dpad=p=>Math.min(...PADS.map(([a,b,c,d])=>Math.hypot(Math.max(a-p[0],0,p[0]-c),Math.max(b-p[1],0,p[1]-d))));
+  // at x along lane X: how short the via's room is there, and how open the board (how far from any keep-out zone)
+  const shortBy=x=>{const q=onX(x);return Math.max(0,ROOM-dline(q,LY),ROOM-dline(q,LZ),VBAR-dpad(q))};
+  const openAt=x=>Math.max(0,dpad(onX(x))-BAR);
+  // the piece of lane between CP-SAT's place and x changes layer with the via: to B.Cu when the via slides back, and
+  // there it may cross no B.Cu lane (lane Z); to F.Cu when it slides on, where lane Y stays beside it
+  const allowed=x=>x>LZ[0][0]+1e-9;
+  // the stage's own move: every half pitch along the lane, each way, as far as the reach and no further than an
+  // allowed place; the most open place where a via may stand, if it is half a pitch more open than here
+  function best(){let b=null;for(const dir of [1,-1])for(let k=1;k*PITCH/2<=REACH+1e-9;k++){const s=along(X0)+dir*k*PITCH/2;if(s<along(XA)||s>along(XB))break;
+      const x=atS(s);if(!allowed(x))break;if(dpad(onX(x))<VBAR-1e-9)continue;const o=openAt(x);if(!b||o>b.o)b={x,o}}
+    return b&&b.o>=openAt(X0)+PITCH/2?b:null}
+  const f2=v=>v.toFixed(2);
+  function draw(){
+    svg.innerHTML='';
+    S('rect',{x:X(BOARD[0]),y:Y(BOARD[1]),width:(BOARD[2]-BOARD[0])*SC,height:(BOARD[3]-BOARD[1])*SC,fill:'#fff',stroke:'#7d8699','stroke-width':1.5},svg);
+    for(const [a,b,c,d] of PADS){S('rect',{x:X(a-BAR),y:Y(b-BAR),width:(c-a+2*BAR)*SC,height:(d-b+2*BAR)*SC,fill:'#eceef3',stroke:'#c9cfdb','stroke-dasharray':'4 3'},svg);
+      S('rect',{x:X(a),y:Y(b),width:(c-a)*SC,height:(d-b)*SC,fill:'#b7bdca',stroke:'#7d8699'},svg);T(svg,X((a+c)/2),Y((b+d)/2)+4,'pad',{'text-anchor':'middle','font-size':12,fill:'#3d4557'})}
+    const pl=(ln,col,w)=>S('polyline',{points:ln.map(q=>X(q[0])+','+Y(q[1])).join(' '),fill:'none',stroke:col,'stroke-width':w||4,'stroke-linejoin':'round','stroke-linecap':'round'},svg);
+    pl(LZ,CB);pl(LY,CF);
+    const q=onX(vx),before=LX.filter(p=>p[0]<vx).concat([q]),after=[q].concat(LX.filter(p=>p[0]>vx));
+    pl(after,CB);pl(before,CF);
+    T(svg,X(0.3)-2,Y(0.95)-9,'Y',{'font-weight':700,fill:CF});T(svg,X(0.3)-2,Y(1.85)-9,'X',{'font-weight':700,fill:CF});T(svg,X(1.45)+8,Y(0.3)+12,'Z',{'font-weight':700,fill:CB});
+    // the piece of X that has changed layer with the via, and a crossing it may not make
+    const ok=allowed(vx);
+    if(Math.abs(vx-X0)>1e-6){const a=Math.min(vx,X0),b=Math.max(vx,X0),piece=[onX(a)].concat(LX.filter(p=>p[0]>a&&p[0]<b)).concat([onX(b)]);
+      S('polyline',{points:piece.map(p=>X(p[0])+','+Y(p[1])).join(' '),fill:'none',stroke:vx>X0?CF:CB,'stroke-width':11,opacity:.22,'stroke-linecap':'round','stroke-linejoin':'round'},svg)}
+    if(!ok){const c=[LZ[0][0],onX(LZ[0][0])[1]];S('circle',{cx:X(c[0]),cy:Y(c[1]),r:13,fill:'none',stroke:'#c0392b','stroke-width':3},svg);
+      T(svg,X(c[0])+18,Y(c[1])+30,'X would cross Z on B.Cu',{'font-size':12,fill:'#c0392b','font-weight':700})}
+    const s0=onX(X0);S('circle',{cx:X(s0[0]),cy:Y(s0[1]),r:13,fill:'none',stroke:'#6a3fc4','stroke-width':2,'stroke-dasharray':'3 3'},svg);
+    const sh=shortBy(vx),bad=sh>1e-6||!ok;
+    S('circle',{cx:X(q[0]),cy:Y(q[1]),r:ROOM*SC,fill:bad?'rgba(192,57,43,.10)':'rgba(46,157,76,.10)',stroke:bad?'#c0392b':'#2e9d4c','stroke-dasharray':'5 4'},svg);
+    const v=S('circle',{cx:X(q[0]),cy:Y(q[1]),r:9,fill:'#fff',stroke:'#1d2330','stroke-width':2.5,style:'cursor:ew-resize'},svg);
+    v.addEventListener('pointerdown',e=>{stop();e.preventDefault();drag=true});
+    // under the board, at every place along X: how short the via would be (red), how open the board is (green)
+    const base=P0+PH-24,top=P0+24,KS=700,KO=75,xz=LZ[0][0];
+    S('rect',{x:X(BOARD[0]),y:P0,width:(BOARD[2]-BOARD[0])*SC,height:PH,fill:'#fff',stroke:'#d8dde6'},svg);
+    const cp=S('clipPath',{id:'slClip'},S('defs',{},svg));S('rect',{x:X(BOARD[0]),y:top,width:(BOARD[2]-BOARD[0])*SC,height:base-top+2},cp);
+    S('rect',{x:X(BOARD[0]),y:P0,width:(xz-BOARD[0])*SC,height:PH,fill:'#eceef3'},svg);
+    T(svg,X(BOARD[0])+8,P0+50,'the via may not',{'font-size':11,fill:'#5b6577'});T(svg,X(BOARD[0])+8,P0+64,'slide here: X would',{'font-size':11,fill:'#5b6577'});T(svg,X(BOARD[0])+8,P0+78,'cross Z on B.Cu',{'font-size':11,fill:'#5b6577'});
+    const xs=[];for(let x=xz;x<=XB+1e-9;x+=0.01)xs.push(x);
+    S('polygon',{points:[X(xz)+','+base].concat(xs.map(x=>X(x)+','+(base-shortBy(x)*KS))).concat([X(XB)+','+base]).join(' '),fill:'rgba(211,51,51,.35)',stroke:'#d33','stroke-width':1.5,'clip-path':'url(#slClip)'},svg);
+    S('polyline',{points:xs.map(x=>X(x)+','+(base-openAt(x)*KO)).join(' '),fill:'none',stroke:'#2e9d4c','stroke-width':2.5,'clip-path':'url(#slClip)'},svg);
+    S('line',{x1:X(XA),y1:base,x2:X(XB),y2:base,stroke:'#8a94a8'},svg);
+    const ra=Math.max(xz,atS(Math.max(along(XA),along(X0)-REACH))),rb=atS(Math.min(along(XB),along(X0)+REACH));
+    for(const x of [ra,rb])S('line',{x1:X(x),y1:top,x2:X(x),y2:base+6,stroke:'#6a3fc4','stroke-width':1.5,'stroke-dasharray':'4 3'},svg);
+    S('line',{x1:X(ra),y1:base+6,x2:X(rb),y2:base+6,stroke:'#6a3fc4','stroke-width':1.5},svg);
+    T(svg,X((ra+rb)/2),base+19,'how far the via may slide: twelve lane pitches along its lane, each way from where CP-SAT put it',{'text-anchor':'middle','font-size':11,fill:'#6a3fc4'});
+    S('line',{x1:X(vx),y1:Y(q[1])+10,x2:X(vx),y2:base,stroke:'#1d2330','stroke-width':1,'stroke-dasharray':'2 3'},svg);
+    if(ok){S('circle',{cx:X(vx),cy:Math.max(top,base-openAt(vx)*KO),r:4,fill:'#2e9d4c'},svg);if(sh>1e-6)S('circle',{cx:X(vx),cy:Math.max(top,base-sh*KS),r:4,fill:'#d33'},svg)}
+    T(svg,X(xz)+10,P0+16,'at each place along lane X:',{'font-size':11,fill:'#5b6577'});
+    T(svg,X(xz)+158,P0+16,'how short the via\'s room would be there',{'font-size':11,fill:'#c0392b','font-weight':600});
+    T(svg,X(xz)+382,P0+16,'how open the board is there',{'font-size':11,fill:'#2e9d4c','font-weight':600});
+    $('#slShort').innerHTML=!ok?'<span style="color:#c0392b">not allowed here</span>':sh>1e-6?`<span style="color:#c0392b">short by ${f2(sh)} mm</span>`:'<span style="color:#2e9d4c">clear</span>';
+    $('#slOpen').textContent=f2(openAt(vx))+' mm from the nearest keep-out zone'}
+  function stop(){if(timer){clearInterval(timer);timer=null}}
+  function go(to,done){stop();const from=vx,n=Math.max(12,Math.round(Math.abs(to-from)*22));let k=0;
+    timer=setInterval(()=>{const u=++k/n,e=u<.5?2*u*u:1-Math.pow(-2*u+2,2)/2;vx=from+(to-from)*e;draw();if(k>=n){stop();vx=to;draw();done&&done()}},25)}
+  function say(){const sh=shortBy(vx),d=vx-X0;
+    $('#slLog').innerHTML=!allowed(vx)?'<b style="color:#c0392b">Not allowed.</b> From here to where CP-SAT put the change, lane X would now be on B.Cu, and it would cross lane Z, which is on B.Cu too. The slide stops before any such place.'
+      :Math.abs(d)<0.02?`In the corridor the via is ${f2(sh)} mm short of its room from lane Y. The red strip is flat from one end of the corridor to the other: every place in it is as short.`
+      :(d>0?'Slid on: the piece of X behind the via is now on F.Cu (shaded), beside lane Y. It keeps a lane pitch from Y there, which the corridor has room for. ':'Slid back: the piece of X ahead of the via is now on B.Cu (shaded). Lane Y beside it is on F.Cu, the other layer, so the two need no pitch between them there. ')+(sh>1e-6?`Here the via is ${f2(sh)} mm short of its room.`:'Here the via has its room.')}
+  svg.addEventListener('pointermove',e=>{if(!drag)return;const b=svg.getBoundingClientRect();vx=clamp(((e.clientX-b.left)/b.width*900-OX)/SC,XA,XB);draw();say()});
+  svg.setAttribute('viewBox','0 0 900 '+VH);
+  const up=()=>{drag=false};svg.addEventListener('pointerup',up);svg.addEventListener('pointerleave',up);svg.addEventListener('pointercancel',up);
+  $('#slGo').onclick=()=>{const b=best();if(!b){$('#slLog').textContent='No place in reach is half a pitch more open than here: the via stays, and goes to the solve as a via cut.';return}
+    go(b.x,()=>{$('#slLog').innerHTML=`<b>Slid ${f2(Math.abs(along(b.x)-along(X0)))} mm along its own lane</b> to the most open place in reach: ${f2(b.o)} mm from the nearest keep-out zone, where it stood ${f2(openAt(X0))} mm from one. The via has its room, and no cut goes to the solve. The plan still has one via on lane X; the piece of X between the two places is on F.Cu now, in the same order beside lane Y.`})};
+  $('#slStep').onclick=()=>{const s=along(vx),c=[atS(s-TRUST),atS(s+TRUST)].filter(allowed),h=shortBy(vx),b=c.reduce((m,x)=>shortBy(x)<shortBy(m)-1e-9?x:m,vx);
+    if(b===vx){$('#slLog').innerHTML=h>1e-6?`<b>A short step gains nothing.</b> ${TRUST} mm either way along the lane, the via would be exactly as short (${f2(h)} mm): the corridor is as narrow there. An LP that moves each point a short step sees no reason to move this one.`:'The via has its room here: there is nothing for a step to gain.';return}
+    go(b,()=>{$('#slLog').innerHTML=`A short step along the lane helps here, because this is the corridor's end: the via is now ${shortBy(vx)>1e-6?f2(shortBy(vx))+' mm short':'clear'}.`})};
+  $('#slBack').onclick=()=>go(X0,say);
+  draw();say();
+})();
+
 /* ================= 3. negotiation loop ================= */
 (function(){
   const svg=$('#loop');let step=0;
@@ -948,7 +1354,7 @@ function simplex(cost,rows){
    {lab:'2 LP tries to draw it',t:'The LP places the lanes. C\'s via needs a <b>room</b> around it and A, B have to spread to cross, but the corridor is too narrow. The LP does not fail. It <b>pays</b> on the elastic "via room" row (0.06 mm short) and reports which lane, which row, which place.'},
    {lab:'3 the cut',t:'The shortfall becomes a <b>cut</b>, a boolean disjunction added to the CP-SAT model: <code>NOT (A×B crossing near C\'s dive)</code>, i.e. move the crossing, or move the dive, or give C its via elsewhere. History congestion at that place is raised too.'},
    {lab:'4 CP-SAT re-solves',t:'Same objective, same proof of optimality, now under the cut. The proved minimum is still <b>2 vias</b>: C dives later, at s=8.4 mm, where the corridor is wide. No extra vias were needed. Had the cut cost one, the plan would have paid one more via.'},
-   {lab:'5 LP is content',t:'The LP finds a drawing that pays on no hard row. The plan continues to the polish (LP per round), then the snap to the router\'s grid, then the audit. If the audit finds a still-hot place, the loop goes around again (up to 6 loop rounds within a fanout round, and up to 3 fanout rounds).'}];
+   {lab:'5 LP is content',t:'The LP finds a drawing that pays on no hard row. The plan continues to the polish (LP per round), then the snap to the router\'s grid, then the audit. If the audit finds a still-hot place, the loop goes around again (up to 6 loop rounds within a fanout round, and up to 4 fanout rounds).'}];
   const XA=40,XB=760;
   function lane(y0,y1,x0,x1,col,w=5){S('line',{x1:x0,y1:y0,x2:x1,y2:y1,stroke:col,'stroke-width':w,'stroke-linecap':'round'},svg)}
   function draw(){

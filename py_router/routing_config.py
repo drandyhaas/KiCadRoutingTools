@@ -312,6 +312,15 @@ class GridRouteConfig:
     # against the run's via, so a rung-1 retry from that clone must ship the
     # pair the map was stamped at, not one derived from the net's own via.
     run_via: Optional[Tuple[float, float]] = None
+    # #1842: the copper layers, top to bottom, that every via this step lays
+    # joins -- a contiguous run of the board's stack, and the only layers the
+    # step routes on. None = through vias over the whole stack. The obstacle
+    # builders then read the board through `via_span.SpanView`, so only
+    # copper on these layers (and drilled pads) blocks a via site.
+    via_span: Optional[Tuple[str, ...]] = None
+    # `Via.via_type` of those vias: 'micro', 'blind' or 'buried'
+    # (`via_span.resolve_via_span`).
+    via_span_type: Optional[str] = None
     neckdown_length: float = 2.5  # mm pad-entry zone (pad-capped width where it fits, #1318)
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
@@ -497,6 +506,12 @@ class GridRouteConfig:
     # The legacy per-channel maps above are being migrated onto it; consumers
     # that resolve through it must treat None as "no rules declared".
     rules: Optional[object] = None
+    # #1843: the board's clearance rules scoped by a rule area
+    # (area_clearance.AreaClearance), installed with `rules`. The base map,
+    # the per-net caches and the stamp functions compose every keep-out over
+    # it: class values outside the areas, the rule's value inside. None (no
+    # such rule) leaves every stamp as it was. No CLI flag, no GUI control.
+    area_clearance: Optional[object] = None
     # #530 decision 4: per-net VIA geometry {net_id: (diameter, drill)} for
     # nets whose resolved draw size differs from via_size/via_drill (their
     # net class or a .kicad_dru via_diameter/hole_size rule). Filled by
@@ -1000,6 +1015,19 @@ class GridRouteConfig:
         3.0). Correctness wins there; an undershoot is a clearance violation,
         an overshoot only costs some routability."""
         reserve = self.route_reserve_width(layer)
+        margin = self._margin_over_reserve(layer, net_width, reserve)
+        # #1843: a room that narrows the track reserves its own width in its
+        # keep-outs. A net wider than the run's reserve keeps its width in
+        # the room, so its margin must cover the room's reserve as well.
+        area = self.area_clearance
+        if margin > 0.0 and area is not None:
+            room = area.min_width(layer)
+            if room is not None and room < reserve:
+                margin = max(margin, self._margin_over_reserve(layer, net_width, room))
+        return margin
+
+    def _margin_over_reserve(self, layer: str, net_width: float, reserve: float) -> float:
+        """`_phase_exact_margin` against stamps that reserve ``reserve``."""
         e = (net_width - reserve) / 2.0 / self.grid_step
         if e <= 1e-9:
             return 0.0

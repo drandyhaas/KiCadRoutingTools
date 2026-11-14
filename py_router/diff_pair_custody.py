@@ -776,7 +776,7 @@ NARROWED_PAIR_WIDTH_SITE = 'coupled pair narrowed to fit, both members'
 DRAWN_WIDTH_TOL = 1e-4
 
 
-def disclose_pair_widths(pcb_data, members, input_keys, site) -> Dict:
+def disclose_pair_widths(pcb_data, members, input_keys, site, area=None) -> Dict:
     """The design-rules rows of pair members' narrowed copper, as shipped.
 
     Route.py's rule for a net with its own width (found reviewing #1282), on
@@ -795,8 +795,12 @@ def disclose_pair_widths(pcb_data, members, input_keys, site) -> Dict:
     matched to the stubs it lands on), or None. New copper at `drawn` is
     delivered at that request and is not a shortfall; copper under it is.
     Rows of other kinds (vias, clearance) and of other nets are untouched.
+    Copper at the width of the rule area whose track_width rule binds it
+    (``area``, #1843) is the board's own rule, not a shortfall
+    (`area_clearance.neck_census` discloses it).
     Returns the shortfall per covered net name."""
     from routing_common import new_copper_width_shortfall
+    from area_clearance import is_room_neck
     from fab_tiers import replace_track_rows
     if not members:
         return {}
@@ -809,7 +813,7 @@ def disclose_pair_widths(pcb_data, members, input_keys, site) -> Dict:
                 and abs(seg.width - m[1]) <= DRAWN_WIDTH_TOL)
 
     short = new_copper_width_shortfall(
-        [s for s in pcb_data.segments if not _as_drawn(s)],
+        [s for s in pcb_data.segments if not _as_drawn(s) and not is_room_neck(area, s)],
         lambda nid: names.get(nid, f"Net {nid}"), input_keys,
         lambda nm, layer: (members[by_name[nm]][0](layer)
                            if nm in by_name else None))
@@ -845,7 +849,8 @@ def disclose_member_fallback_widths(pcb_data, config, member_names,
             members[nid] = (lambda layer, _n=nid:
                             config.get_net_track_width(_n, layer), None)
     return disclose_pair_widths(pcb_data, members, input_keys,
-                                MEMBER_FALLBACK_WIDTH_SITE)
+                                MEMBER_FALLBACK_WIDTH_SITE,
+                                area=getattr(config, 'area_clearance', None))
 
 
 def disclose_coupled_pair_widths(pcb_data, config, pairs, fallback_names,
@@ -896,10 +901,11 @@ def disclose_coupled_pair_widths(pcb_data, config, pairs, fallback_names,
                 narrowed_members[nid] = (
                     pcfg.get_track_width,
                     pcfg.track_width if nar > pcfg.track_width + DRAWN_WIDTH_TOL else None)
+    area = getattr(config, 'area_clearance', None)
     short = disclose_pair_widths(pcb_data, members, input_keys,
-                                 COUPLED_PAIR_WIDTH_SITE)
+                                 COUPLED_PAIR_WIDTH_SITE, area=area)
     short.update(disclose_pair_widths(pcb_data, narrowed_members, input_keys,
-                                      NARROWED_PAIR_WIDTH_SITE))
+                                      NARROWED_PAIR_WIDTH_SITE, area=area))
     return short
 
 
