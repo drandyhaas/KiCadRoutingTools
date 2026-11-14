@@ -224,6 +224,32 @@ def checker(tmp):
        doc.get('by_type', {}).get('pad-hole', 0) == 0
        and doc.get('by_type', {}).get('pad-via', 0) == 1, doc.get('by_type'))
 
+    print('7b. a via drill is graded at the project\'s value, never the origin')
+    # Case 4's track (0.225 off the drill) on a board whose chain wrote 0.1
+    # over a declared 0.25: KiCad grades the project's 0.1, so the via drill
+    # is clean, though the NPTH arms still read the 0.25 origin.
+    for name, rules, origin, want_rows in (
+            ('origin_only', {'min_hole_clearance': 0.1}, 0.25, 0),
+            ('project_declares', {'min_hole_clearance': 0.25}, None, 1)):
+        pcb = _stage(tmp, 'via_drill_' + name, _board(
+            vias=[(20, 20, 0.45, 0.2, 1)],
+            segs=[(15, 20.425, 25, 20.425, 0.2, 2)]))
+        proj = {'board': {'design_settings': {'rules': rules}}}
+        if origin is not None:
+            proj['kicad_routing_tools'] = {
+                'fab_floor_origin': {'min_hole_clearance': origin}}
+        with open(os.path.splitext(pcb)[0] + '.kicad_pro', 'w', encoding='utf-8') as f:
+            json.dump(proj, f)
+        doc, _r = _grade(pcb, tmp, 'via_drill_' + name, bool(want_rows),
+                         refuse='TRACK-HOLE' if want_rows else None,
+                         hole_clearance=None)
+        ok(f'{name}: {want_rows} track-hole row(s) at the via drill',
+           doc.get('by_type', {}).get('track-hole', 0) == want_rows,
+           doc.get('by_type'))
+        ok(f'{name}: the report names the via-drill value',
+           abs((doc.get('graded_at', {}).get('hole_clearance_via_drill') or 0)
+               - rules['min_hole_clearance']) < 1e-9, doc.get('graded_at'))
+
 
 def router_units(tmp):
     print('8. the descent ladder prefers the copper-to-hole ring')

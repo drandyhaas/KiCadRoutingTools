@@ -6893,6 +6893,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             hole_to_hole_clearance: float = defaults.HOLE_TO_HOLE_CLEARANCE, board_edge_clearance: float = 0.0,
             hole_clearance: float = 0.0,
             clearance_margin: float = 0.05, max_print: int = 20,
+            via_hole_clearance: Optional[float] = None,
             min_track_width: Optional[float] = None,
             min_via_diameter: Optional[float] = None,
             min_via_drill: Optional[float] = None,
@@ -8703,14 +8704,20 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # when nothing declares one. copper_exempt carries the via's own copper
     # disc, so the arms' disc-overlap exemption leaves shorts to the passes
     # that grade them.
-    if hole_clearance and hole_clearance > 0:
+    # The value is KiCad's: `via_hole_clearance` when the caller resolved it
+    # apart (check_drc's main: an explicit --hole-clearance or the project's
+    # min_hole_clearance, NOT the fab_floor_origin the NPTH arms are pinned to
+    # -- the router holds NPTH walls at that origin, a via's drill only at the
+    # copper clearance plus its ring, which the project then records).
+    _via_hc = hole_clearance if via_hole_clearance is None else via_hole_clearance
+    if _via_hc and _via_hc > 0:
         for via in pcb_data.vias:
             if via.drill <= 0:
                 continue
             _vnet = pcb_data.nets.get(via.net_id, None)
             _vname = _vnet.name if _vnet else f"net_{via.net_id}"
             holes.append(((via.x, via.y), (via.x, via.y), via.drill / 2.0, via.net_id,
-                          f"Via [{_vname}]", float(hole_clearance),
+                          f"Via [{_vname}]", float(_via_hc),
                           (via.x, via.y, via.size / 2.0), True))
     segs = list(pcb_data.segments)
     _seg_arrays = None  # (sx1, sy1, sx2, sy2, dx, dy, safe_len2, sw); also reused by the slot-edge check
@@ -10415,6 +10422,7 @@ if __name__ == "__main__":
     net_clearances = None
     # #1038: where the copper-to-hole floor came from, for graded_at.
     _hole_clr_requested = args.hole_clearance
+    _via_hole_clr = None   # #1914: the via-drill value, before the origin pin-up
     _hole_clr_source = ('--hole-clearance' if args.hole_clearance > 0
                         else 'fab floor')
     try:
@@ -10498,6 +10506,7 @@ if __name__ == "__main__":
         from fix_kicad_drc_settings import declared_fab_floor as _dff1038
         _origin_hc = _dff1038(args.pcb, 'min_hole_clearance') or 0.0
         _before1038 = args.hole_clearance
+        _via_hole_clr = args.hole_clearance
         _pin_up('hole_clearance', float(_origin_hc),
                 'fab_floor_origin.min_hole_clearance',
                 'Copper-to-hole clearance')
@@ -10522,7 +10531,8 @@ if __name__ == "__main__":
               f"net-less pads whose copper equals the drill (#1753); vias at "
               f"{max(args.clearance or 0.0, args.hole_clearance):.4g} mm to "
               f"NPTH holes and those pads; tracks, vias and pads at "
-              f"{args.hole_clearance:.4g} mm to via drills (#1914). Ordinary "
+              f"{(args.hole_clearance if _via_hole_clr is None else _via_hole_clr):.4g} mm to via drills (#1914; KiCad's value, never "
+              f"the fab-floor origin). Ordinary "
               f"plated pad holes are not graded against it, unlike KiCad's "
               f"hole_clearance)")
     if not args.quiet:
@@ -10543,6 +10553,7 @@ if __name__ == "__main__":
                          args.hole_to_hole_clearance, args.board_edge_clearance,
                          args.hole_clearance,
                          args.clearance_margin, max_print=args.max_print,
+                         via_hole_clearance=_via_hole_clr,
                          min_track_width=args.min_track_width,
                          min_via_diameter=args.min_via_diameter,
                          min_via_drill=args.min_via_drill,
@@ -10626,14 +10637,18 @@ if __name__ == "__main__":
                 # like NPTH); both arms also grade #1753's net-less pegs (copper
                 # equal to the drill) at max(clearance, this floor) when that is
                 # above the clearance. #1914 grades a VIA's own drill too:
-                # the track and via arms grade it at max(clearance, the
-                # declared floor), and the pad arm grades pads against it --
+                # tracks, vias and pads grade against it at KiCad's own value
+                # (`hole_clearance_via_drill`: the explicit flag or the
+                # project's, never the fab-floor origin) --
                 # KiCad's own hole_clearance rule does the same (run 32
                 # routed_c3: kicad-cli reports 199 items at 0.25). Pad
                 # overrides are graded per hole and carry their own
                 # required_mm.
                 'hole_clearance_via': max(args.clearance or 0.0,
                                           args.hole_clearance),
+                'hole_clearance_via_drill': (args.hole_clearance
+                                             if _via_hole_clr is None
+                                             else _via_hole_clr),
                 'hole_clearance_scope': {
                     'tracks': 'npth+uncovered_plated+flush_pegs+via_holes',
                     'vias': 'npth+flush_pegs+via_holes',
