@@ -703,7 +703,11 @@ pad around the hole plus the copper clearance:
   and pads, and its copper that far from their holes;
 - a via placed off the obstacle map (the rescue's pad escape, a layer-swap or
   stub-switch via) is refused by `check_drc.hole_rule_refusal`, which runs the
-  grader over the board near it.
+  grader over the board near it;
+- the post-route passes that move copper (smoothing, the graze prune and re-bend,
+  the micro-shift, the via nudge) measure a track or a via against another net's
+  via with the rule folded in (`single_ended_routing._hole_via_excess`), so they
+  cannot move copper back inside the distance the router held.
 
 The value is the last rule in the file whose condition and `(layer ...)` clause
 match the pair, read either way round, as KiCad decides it, for the copper as it
