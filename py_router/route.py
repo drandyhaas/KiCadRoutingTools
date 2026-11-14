@@ -1316,14 +1316,35 @@ def _print_length_moved(rows, what):
               + " -- route.py does not re-tune it (#1851)")
 
 
+def _late_board1798(pcb_data, output_file, return_results, results_data,
+                    write_model):
+    """The board the end-of-run passes read and change, for the #1798 skew
+    and #1851 length measurements: the written file on the CLI (a re-parse),
+    the write model on the GUI, pcb_data itself on the "nothing to route"
+    return. None when there is no such board (no file written)."""
+    import copy as _copy
+    if return_results:
+        board = _copy.copy(pcb_data)
+        if write_model is not None:
+            segs_by_net, vias_by_net = write_model(results_data or {})
+            board.segments = [x for _l in segs_by_net.values() for x in _l]
+            board.vias = [x for _l in vias_by_net.values() for x in _l]
+        else:
+            board.segments = list(pcb_data.segments)
+            board.vias = list(pcb_data.vias)
+        return board
+    if output_file and os.path.isfile(output_file):
+        from kicad_parser import parse_kicad_pcb as _pk1798
+        return _pk1798(output_file)
+    return None
+
+
 def _late_length_snapshot1851(pcb_data, output_file, return_results, results_data,
                               write_model, rule_path, scope_names):
     """#1851: check_drc.length_window_snapshot on the board the end-of-run
-    passes read and change (the written file on the CLI, the write model on
-    the GUI, pcb_data itself on the "nothing to route" return), for the nets
-    in `scope_names`. {} when no length rule binds one, which costs no parse,
-    and when the measurement fails, which is said on the console."""
-    import copy as _copy
+    passes read and change (_late_board1798), for the nets in `scope_names`.
+    {} when no length rule binds one, which costs no parse, and when the
+    measurement fails, which is said on the console."""
     try:
         from check_drc import length_rule_nets, length_window_snapshot
         names = set(scope_names)
@@ -1331,19 +1352,9 @@ def _late_length_snapshot1851(pcb_data, output_file, return_results, results_dat
         if not any(pcb_data.nets[m].name in names for m in bound
                    if m in pcb_data.nets):
             return {}
-        if return_results:
-            board = _copy.copy(pcb_data)
-            if write_model is not None:
-                segs_by_net, vias_by_net = write_model(results_data or {})
-                board.segments = [x for _l in segs_by_net.values() for x in _l]
-                board.vias = [x for _l in vias_by_net.values() for x in _l]
-            else:
-                board.segments = list(pcb_data.segments)
-                board.vias = list(pcb_data.vias)
-        elif output_file and os.path.isfile(output_file):
-            from kicad_parser import parse_kicad_pcb as _pk1851
-            board = _pk1851(output_file)
-        else:
+        board = _late_board1798(pcb_data, output_file, return_results,
+                                results_data, write_model)
+        if board is None:
             return {}
         ids = {nid for nid, n in board.nets.items() if n.name in names}
         return length_window_snapshot(board, rule_path, ids)
@@ -1369,13 +1380,11 @@ def _skew_by_name(snap):
 def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
                             write_model, skew_path, scope_names):
     """#1798: the #1759 skew measurement, on the board the end-of-run passes
-    (_late_strict_collapse1063 and the rest) read and change -- the written
-    file on the CLI, the write model on the GUI, pcb_data itself on the
-    "nothing to route" return -- keyed by name (_skew_by_name), for the
-    groups with a member in `scope_names`. {} when no skew rule binds a net
-    in scope, which costs no parse, and when the measurement fails, which is
-    said on the console."""
-    import copy as _copy
+    (_late_strict_collapse1063 and the rest) read and change
+    (_late_board1798), keyed by name (_skew_by_name), for the groups with a
+    member in `scope_names`. {} when no skew rule binds a net in scope, which
+    costs no parse, and when the measurement fails, which is said on the
+    console."""
     try:
         from check_drc import (skew_rule_groups, skew_group_snapshot,
                                recorded_chain_groups)
@@ -1386,19 +1395,9 @@ def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
         if not any(pcb_data.nets[m].name in names for _r, ms in groups
                    for m in ms if m in pcb_data.nets):
             return {}
-        if return_results:
-            board = _copy.copy(pcb_data)
-            if write_model is not None:
-                segs_by_net, vias_by_net = write_model(results_data or {})
-                board.segments = [x for _l in segs_by_net.values() for x in _l]
-                board.vias = [x for _l in vias_by_net.values() for x in _l]
-            else:
-                board.segments = list(pcb_data.segments)
-                board.vias = list(pcb_data.vias)
-        elif output_file and os.path.isfile(output_file):
-            from kicad_parser import parse_kicad_pcb as _pk1798
-            board = _pk1798(output_file)
-        else:
+        board = _late_board1798(pcb_data, output_file, return_results,
+                                results_data, write_model)
+        if board is None:
             return {}
         ids = {nid for nid, n in board.nets.items() if n.name in names}
         return _skew_by_name(skew_group_snapshot(board, skew_path, ids))
