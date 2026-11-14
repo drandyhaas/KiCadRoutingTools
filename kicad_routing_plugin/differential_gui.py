@@ -1089,6 +1089,9 @@ class DifferentialTab(wx.Panel):
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 via_from_class=config.get('via_from_class', False),
+                # #1842: the route tab's Via Span, as route_diff.py --via-span
+                via_span=config.get('via_span'),
+                via_span_type=config.get('via_span_type'),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance',
                                                   defaults.HOLE_TO_HOLE_CLEARANCE),
                 board_edge_clearance=config.get('board_edge_clearance',
@@ -1516,6 +1519,9 @@ class DifferentialTab(wx.Panel):
                 # step_hole_clearance, from the tab's applied lists.
                 _hole_clr = self._held_hole_clearance(board, results_data,
                                                       eff_clearance)
+                # #1842: the micro vias' own rule, as fix_project_for_output writes it
+                from .gui_utils import live_micro_via_rule
+                live_micro_via_rule(self.pcb_data, board, results_data, eff_clearance)
                 targets = compute_targets(
                     clearance=eff_clearance,
                     hole_clearance=_hole_clr,

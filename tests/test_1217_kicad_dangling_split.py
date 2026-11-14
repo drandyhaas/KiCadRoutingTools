@@ -242,6 +242,8 @@ def exposed_tail(tmp):
     # grp_ft A_s3's /OSCO (a routed corpus board): the 0.15 host runs on
     # 0.43 mm past the joint to nothing. Whole, no removal can take that
     # stretch (the host carries the joint); split, it is a separate segment.
+    # That stretch is 2.9 track widths past the joint and no copper touches
+    # its end, so it is a dangling end of its own (#1870) beside the joint.
     rb = RoutingBoard(w=160, h=120)
     rb.pad('U4', 115.758, 99.952, '/OSCO', sx=1.55, sy=0.3)
     rb.pad('Y1', 113.2, 100.8, '/OSCO', sx=0.4, sy=0.4)
@@ -255,14 +257,15 @@ def exposed_tail(tmp):
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write(rb.text())
     pcb = parse_kicad_pcb(path)
-    check('flagged once before', [f['category'] for f in
-                                  check_weird(pcb, tolerance=0)[0]] == ['kicad-dangling'])
+    check('the joint and the dead stretch are flagged before',
+          sorted(f['category'] for f in check_weird(pcb, tolerance=0)[0])
+          == ['dangling-end', 'kicad-dangling'])
     pcb = parse_kicad_pcb(path)
     collapse_strict_redundant([], pcb, None)
     split_kicad_dangling_hosts(pcb, None)
     w = [f['category'] for f in check_weird(pcb, tolerance=0)[0]]
     check('witness: collapse THEN split leaves the exposed stretch removable',
-          w == ['removable-segment'], f'{w}')
+          w == ['dangling-end', 'removable-segment'], f'{w}')
     pcb = parse_kicad_pcb(path)
     split_kicad_dangling_hosts(pcb, None)
     n, _strip = collapse_strict_redundant([], pcb, None)

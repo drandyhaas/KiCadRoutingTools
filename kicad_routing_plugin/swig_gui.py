@@ -2108,6 +2108,12 @@ class RoutingDialog(wx.Dialog):
                 # #581: one via-in-pad policy for every step (Basic tab).
                 # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
+                # #1842: the route tab's Via Span, as bga_fanout.py /
+                # qfn_fanout.py --via-span
+                'via_span': (self.via_span.GetValue().replace(',', ' ').split() or None),
+                'via_span_type': (self.via_span_type.GetStringSelection()
+                                  if self.via_span_type.GetStringSelection()
+                                  in ('micro', 'blind', 'buried') else None),
             }
 
         return FanoutTab(
@@ -4522,7 +4528,9 @@ class RoutingDialog(wx.Dialog):
                 # #1493: the copper-to-hole floor this step HELD, lowered
                 # only to what the copper it drew needs -- route.py's
                 # step_hole_clearance, as the differential tab writes it (#1369)
-                from .gui_utils import held_hole_clearance_live
+                from .gui_utils import held_hole_clearance_live, live_micro_via_rule
+                # #1842: the micro vias' own rule, as fix_project_for_output writes it
+                live_micro_via_rule(self.pcb_data, board, results_data, eff_clearance)
                 targets = compute_targets(
                     clearance=eff_clearance,
                     hole_clearance=held_hole_clearance_live(
