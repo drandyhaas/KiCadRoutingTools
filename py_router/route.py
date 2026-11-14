@@ -4801,6 +4801,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # free, the GUI's were priced on the input fill.
         from plane_fragility import carve_in_memory_copper
         carve_in_memory_copper(config, pcb_data)
+    # #595: a soft cost over gaps in the adjacent reference plane, for the
+    # nets with an impedance declaration (KICAD_REFERENCE_VOID_COST, off at 0)
+    from reference_void import register_reference_void
+    register_reference_void(pcb_data, config, track_proximity_cache)
 
     # Congestion v2 (#424): demand/capacity bins + owner terminals; per-net
     # stamping happens at prepare (routing_context.stamp_congestion2).
@@ -6757,6 +6761,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _pfg = getattr(config, '_plane_fragility_geometry', None)
     if _pfg is not None:
         summary['plane_fragility'] = dict(_pfg)
+    # #595: the reference-void field, when the run armed it
+    _rv595 = getattr(config, '_reference_void', None)
+    if _rv595 and _rv595.get('cost_mm'):
+        summary['reference_void'] = dict(_rv595)
     if _pour_guard_report is not None:
         # #1260: which out-of-scope pours were blocked as obstacles and which
         # were left crossable, and from what geometry. Absent when the run had

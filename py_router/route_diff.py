@@ -2400,6 +2400,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     from plane_fragility import register_plane_fragility
     register_plane_fragility(pcb_data, config, track_proximity_cache,
                              dynamic=False)
+    # #595: a soft cost over gaps in the adjacent reference plane; every
+    # pair this step routes pays it (KICAD_REFERENCE_VOID_COST, off at 0)
+    from reference_void import register_reference_void
+    register_reference_void(
+        pcb_data, config, track_proximity_cache,
+        extra_payers=[n for _nm, _p in diff_pairs.items()
+                      for n in (_p.p_net_id, _p.n_net_id)])
 
     # History congestion (#590): fresh per-cell conflict field for this call.
     from history_congestion import reset_history
@@ -3152,6 +3159,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     _pfg = getattr(config, '_plane_fragility_geometry', None)
     if _pfg is not None:
         summary['plane_fragility'] = dict(_pfg)
+    _rv595 = getattr(config, '_reference_void', None)       # #595
+    if _rv595 and _rv595.get('cost_mm'):
+        summary['reference_void'] = dict(_rv595)
     # #1146: per net, the track length left inside a keep-away band, measured
     # on the whole board (route.py reports the same key).
     from keep_away import disclose_keep_away

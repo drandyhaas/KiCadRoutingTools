@@ -139,6 +139,9 @@ def _per_net_cost_sources(track_proximity_cache, net_ids, sibs=()):
     as the cache when nothing is dropped."""
     from plane_fragility import without_own_fragility
     cache = without_own_fragility(track_proximity_cache, net_ids)
+    # #595: the reference-void field is charged to the nets that pay it only
+    from reference_void import without_reference_void
+    cache = without_reference_void(cache, track_proximity_cache, net_ids)
     # Only entries that price something: at the default track proximity cost
     # 0 every routed net holds an EMPTY array, and dropping it would build a
     # new dict (a memo miss and one more pinned stack) for nothing.
