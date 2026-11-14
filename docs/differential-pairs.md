@@ -827,9 +827,12 @@ the GUI diff tab gets the same answer:
   `coupled`. A member whose copper runs back along itself (#1873: a hybrid
   terminal leg laid beside its own coupled middle) adds `self_overlap_mm`
   (`{p, n}`, `net_queries.net_self_overlap`: two same-layer passes closer than a
-  track width over more than a width) and a `Self-overlap:` line: `skew_mm` and
-  the intra-pair status count all of a member's copper, as KiCad's skew rule
-  does, so that stretch is in them twice.
+  track width over more than a width) and every such overlap in
+  `self_overlaps` (`member`, `layer`, the two passes, `centre_gap_mm`,
+  `along_mm`, `width_mm`). A `Self-overlap:` line names a pair with one longer
+  than twice its track width: `skew_mm` and the intra-pair status count all of
+  a member's copper, as KiCad's skew rule does, so that stretch is in them
+  twice.
 - **A pair routed but not coupled** is outcome `uncoupled`, listed in
   `JSON_SUMMARY.uncoupled_diff_pairs` (and the GUI's completion dialog), and is
   **not** counted in `routed_diff_pairs` / `successful`. The end-of-run summary

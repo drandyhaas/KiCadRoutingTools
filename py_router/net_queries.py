@@ -2552,7 +2552,8 @@ def net_self_overlap(pcb_data: PCBData, net_id: int):
     it; a straight continuation, a bend and a T-junction do not.
 
     Returns (total mm laid twice, rows), each row {'layer', 'a', 'b' (the two
-    pieces' end points), 'centre_gap_mm', 'along_mm'}; (None, []) for a net
+    pieces' end points), 'centre_gap_mm', 'along_mm', 'width_mm' (the
+    narrower track's)}; (None, []) for a net
     with more than SELF_OVERLAP_MAX_SEGMENTS segments (not searched). A
     length-match measure that sums all of a net's copper, as KiCad's does,
     counts such a stretch twice."""
@@ -2592,7 +2593,8 @@ def net_self_overlap(pcb_data: PCBData, net_id: int):
                                (round(a.end_x, 4), round(a.end_y, 4))],
                          'b': [(round(b.start_x, 4), round(b.start_y, 4)),
                                (round(b.end_x, 4), round(b.end_y, 4))],
-                         'centre_gap_mm': round(gap, 4), 'along_mm': round(hi - lo, 4)})
+                         'centre_gap_mm': round(gap, 4), 'along_mm': round(hi - lo, 4),
+                         'width_mm': round(w, 4)})
             total += hi - lo
     return round(total, 4), rows
 

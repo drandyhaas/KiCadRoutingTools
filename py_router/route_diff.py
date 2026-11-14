@@ -2570,14 +2570,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         pcb_data, diff_pair_ids_to_route, routed_results,
         lambda _pr: _geom1303.get(_pr.p_net_id,
                                   (config.track_width, config.diff_pair_gap)))
-    # #1873: a member whose copper runs back along itself
+    # #1873: a member whose copper runs back along itself (every overlap is
+    # in the record; the line names one longer than twice its track width)
+    from diff_pair_custody import self_overlap_line as _so_line1873
     for _pn1873, _rec1873 in sorted(pair_copper.items()):
-        _so1873 = _rec1873.get('self_overlap_mm') or {}
-        if any(_so1873.values()):
-            print(f"  {YELLOW}Self-overlap: {_pn1873} has copper laid along itself ("
-                  + ', '.join(f"{k.upper()} {v:.4f} mm" for k, v in sorted(_so1873.items())
-                              if v)
-                  + f"); its length and skew count that stretch twice{RESET}")
+        _l1873 = _so_line1873(_pn1873, _rec1873)
+        if _l1873:
+            print(f"  {YELLOW}{_l1873}{RESET}")
     pair_reports = build_pair_reports(state, diff_pair_ids_to_route,
                                       member_audit,
                                       skipped_fanout=skipped_fanout_info,
