@@ -382,6 +382,8 @@ PARAM_RANGES = {
     'turn_cost': {'min': 0, 'max': 10000},
     'direction_preference_cost': {'min': 0, 'max': 10000},
     'max_ripup': {'min': 0, 'max': 50},
+    # #1896: pads per plane tap via; 0 = no limit
+    'tap_via_share': {'min': 0, 'max': 64},
     'stub_proximity_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'stub_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'neckdown_length': {'min': 0.0, 'max': 50.0, 'inc': 0.5, 'digits': 1},

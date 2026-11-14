@@ -1140,6 +1140,8 @@ class RoutingDialog(wx.Dialog):
             ('max_probe_iterations', 'Probe Iterations:', defaults.MAX_PROBE_ITERATIONS, "Iterations for quick probe routing attempts"),
             ('turn_cost', 'Turn Cost:', defaults.TURN_COST, "Penalty for 90-degree turns (encourages straighter routes)"),
             ('direction_preference_cost', 'Dir. Pref. Cost:', defaults.DIRECTION_PREFERENCE_COST, "Penalty for routing against layer's preferred direction"),
+            # #1896: the plane finalize's opt-in limit on pads per tap via, named after the engine parameter (0 = no limit)
+            ('tap_via_share', 'Tap Via Share:', 0, "At most this many pads on one plane tap via of the route step's plane finalize: a pad whose tap would reuse a neighbour's via that already serves that many gets a via of its own where a legal site exists, else keeps the shared tap and is named. 1 = a via per pad. 0 = no limit."),
         ]
         for name, label, default, tooltip in int_params:
             r = defaults.PARAM_RANGES[name]
@@ -2990,6 +2992,7 @@ class RoutingDialog(wx.Dialog):
         self.grid_step.SetValue(defaults.GRID_STEP)
         self.via_cost.SetValue(defaults.VIA_COST)
         self.max_ripup.SetValue(defaults.MAX_RIPUP)
+        self.tap_via_share.SetValue(0)                       # #1896: no limit
         self.ripup_abandon_metric.SetStringSelection(defaults.RIPUP_ABANDON_METRIC)
         self.ripup_blocker_select.SetStringSelection(defaults.RIPUP_BLOCKER_SELECT)
 
@@ -3424,6 +3427,8 @@ class RoutingDialog(wx.Dialog):
             'turn_cost': self.turn_cost.GetValue(),
             'direction_preference_cost': self.direction_preference_cost.GetValue(),
             'max_ripup': self.max_ripup.GetValue(),
+            # #1896: 0 in the control is "no limit"
+            'tap_via_share': int(self.tap_via_share.GetValue()) or None,
             'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
                 self.ripup_abandon_metric.GetSelection()),
             'ripup_blocker_select': self.ripup_blocker_select.GetString(
@@ -4009,6 +4014,7 @@ class RoutingDialog(wx.Dialog):
                     turn_cost=config['turn_cost'],
                     direction_preference_cost=config.get('direction_preference_cost', defaults.DIRECTION_PREFERENCE_COST),
                     max_rip_up_count=config['max_ripup'],
+                    tap_via_share=config.get('tap_via_share') or None,
                     ripup_abandon_metric=config.get('ripup_abandon_metric', defaults.RIPUP_ABANDON_METRIC),
                     ripup_blocker_select=config.get('ripup_blocker_select', defaults.RIPUP_BLOCKER_SELECT),
                     ordering_strategy=config['ordering_strategy'],

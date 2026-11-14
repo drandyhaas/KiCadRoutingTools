@@ -728,6 +728,7 @@ python3 py_router/repair_planes.py input.kicad_pcb --max-iterations 500000
 | `--max-search-radius` | 10.0 | Max radius to search for a via position during pad repair (mm) |
 | `--rip-blocker-nets` | off | Connect a pad that can't reach its plane by tracing to a nearby same-net pad, ripping the signal net(s) blocking that trace (see below) |
 | `--max-rip-nets` | 3 | Maximum blocker nets to rip per pad |
+| `--tap-via-share` | - | At most N pads on one tap via (#1896): a pad whose tap would reuse a neighbour's via that already serves N pads gets a via of its own where a legal site exists, else keeps the shared tap and is named (`tap_vias.over_limit`). `1` = a via per pad. With or without it the repair's `JSON_SUMMARY.tap_vias` counts the tap vias, the ones serving more than one pad and the most pads on one (`vias`, `shared_vias`, `max_pads_per_via`, `pads_on_shared_vias`), and prints a `Tap vias:` line when any is shared. Also `route.py --tap-via-share N` for the route step's plane finalize, and the route tab's **Tap Via Share** (0 = no limit) |
 | `--reroute-ripped-nets` | off | **Deprecated no-op** (issue #141 reverted): ripped blocker nets are now reconnected in-run (restore-first, an end-of-run reconnect pass, and custody restore on failure), so no separate `route.py` pass is needed. Accepted for compatibility |
 | `--power-nets` | — | Power net names needing wider tracks when re-routing ripped nets |
 | `--power-nets-widths` | — | Track width (mm) per `--power-nets` entry, for re-routing ripped nets |
