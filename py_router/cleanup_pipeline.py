@@ -118,9 +118,11 @@ def _skew_bound_net_ids(pcb_data):
     """Nets a skew rule grades on this board (#1759): every member of a
     group `check_drc.skew_rule_groups` forms from the board's recorded
     intra-pair tolerances and its .kicad_dru skew rules. The graze passes
-    that change copper LENGTH leave these nets' INPUT copper alone: a pair an
+    that MOVE copper leave these nets' INPUT copper alone: a pair an
     earlier step matched has no re-match in a later route.py step, so a
-    re-bend that straightened its meander shipped it out of tolerance.
+    re-bend that straightened its meander shipped it out of tolerance. The
+    graze prune and detour weld still remove such copper where it grazes a
+    foreign net (run_post_route_cleanup).
     A recorded AC-coupled chain's nets (#1799) are skew-graded too."""
     try:
         from check_drc import skew_rule_groups, recorded_chain_groups
@@ -393,12 +395,18 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     _nc = getattr(config, 'net_clearances', None) or None
     _bec = getattr(config, 'board_edge_clearance', 0.0) or 0.0
 
-    # #1759: the length-changing graze passes (prune, detour weld, re-bend,
+    # #1759: the length-changing graze passes that MOVE copper (re-bend,
     # micro-shift) run with the input copper of skew-graded nets read-only:
     # those nets go in a second call with keep_input_copper set, the rest in
     # the first as before. Inert (one call each) when no skew rule binds a
     # net in scope. #1851: and of the nets a .kicad_dru length rule holds to a
     # window, which no later step re-tunes either.
+    # The hold YIELDS to copper that touches or stands inside clearance of a
+    # foreign net: the graze prune and the detour weld, which remove only
+    # such copper and only while the net stays connected, take these nets'
+    # input copper as any other's. Held read-only, a P track grazing its N
+    # partner shipped in contact (#1851 review); a length or skew the removal
+    # moves out of its rule is named by the before/after comparison.
     _ro_ids = set()
     if not (keep_input_copper or _judge):
         _len_ids = _length_window_net_ids(pcb_data)
@@ -415,8 +423,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                                      if i in pcb_data.nets)[:6])
                   + (' ...' if len(_ro_ids) > 6 else ''))
 
-    def _graze_pass(fn, scope, **kw):
-        if not _ro_ids:
+    def _graze_pass(fn, scope, yields=False, **kw):
+        if not _ro_ids or yields:
             return fn(results, pcb_data, scope,
                       keep_input_copper=keep_input_copper, **kw)
         full = set(scope) if scope is not None else set(pcb_data.nets)
@@ -430,7 +438,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if graze:
         _prog("graze prune")
         _gz_segs, _gz_nets, _gz_strip = _graze_pass(
-            prune_grazing_segments, scope_net_ids, clearance=config.clearance,
+            prune_grazing_segments, scope_net_ids, yields=True,
+            clearance=config.clearance,
             check_foreign_segments=True,
             net_clearances=_nc,
             config=config)  # #1619: scoped .kicad_dru rules
@@ -440,12 +449,19 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _gz_segs:
             print(f"{label}Graze prune: removed {_gz_segs} grazing segment(s) "
                   f"across {_gz_nets} net(s)")
+        _yielded = sorted({pcb_data.nets[s.net_id].name for s in _gz_strip
+                           if s.net_id in _ro_ids and s.net_id in pcb_data.nets})
+        if _yielded:
+            print(f"{label}Graze prune: the hold yields on {len(_yielded)} "
+                  f"graded net(s), whose input copper grazed a foreign net "
+                  f"(#1851): " + ', '.join(_yielded[:6])
+                  + (' ...' if len(_yielded) > 6 else ''))
         # #441: drop a redundant out-and-back detour whose nub grazes a foreign net
         # and that prune_grazing_segments' strict gate refused (the surviving A~C
         # overlap is non-coincident), by welding the solidly-overlapping neighbours
         # coincident (picodvi DVI_CK terminal-leg jog).
         _wd_segs, _wd_nets, _wd_strip = _graze_pass(
-            weld_redundant_grazing_detours, scope_net_ids,
+            weld_redundant_grazing_detours, scope_net_ids, yields=True,
             clearance=config.clearance, net_clearances=_nc,
             config=config)  # #1843: area clearance rules
         counts['detours_welded'] = _wd_segs
