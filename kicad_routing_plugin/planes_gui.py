@@ -1930,6 +1930,10 @@ class PlanesTab(wx.Panel):
                 _hole_clr = (self._held_hole_clearance(board, _floor_segs,
                                                        _floor_vias, eff_clearance)
                              if _pkw['copper_holes'] else None)
+                # #1842: the micro vias' own rule, as fix_project_for_output writes it
+                from .gui_utils import live_micro_via_rule_dicts
+                live_micro_via_rule_dicts(self.pcb_data, board, _floor_segs, _floor_vias,
+                                          eff_clearance)
                 # #338: no edge_clearance. This step's own value is the
                 # plane-zone inset, and written here it became the board's rule
                 # for every later step, which routed and graded at 0.5 where

@@ -490,9 +490,15 @@ def read_pour_served_for_pcb_data(pcb_data, input_file: Optional[str] = None
 def locked_net_names(pcb_data) -> Set[str]:
     """Nets with any KiCad-locked segment or via. The user pinned that copper;
     rip machinery must never strip the net (a partial rip would strand the
-    locked fragments). Read straight from the board -- no .kicad_pro entry."""
-    ids = {s.net_id for s in pcb_data.segments if getattr(s, 'locked', False)}
-    ids |= {v.net_id for v in pcb_data.vias if getattr(v, 'locked', False)}
+    locked fragments). Read straight from the board -- no .kicad_pro entry --
+    including copper a via-span step has set aside for a call (#1842,
+    `via_span.set_aside`): that copper is still the net's."""
+    from via_span import set_aside
+    aside = set_aside(pcb_data)
+    ids = {s.net_id for s in list(pcb_data.segments) + aside.get('segments', [])
+           if getattr(s, 'locked', False)}
+    ids |= {v.net_id for v in list(pcb_data.vias) + aside.get('vias', [])
+            if getattr(v, 'locked', False)}
     ids.discard(0)
     return {pcb_data.nets[i].name for i in ids
             if i in pcb_data.nets and pcb_data.nets[i].name}
@@ -518,10 +524,13 @@ def cached_protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[st
 
 def held_net_reasons(pcb_data) -> Dict[str, str]:
     """{net name: `sense:<REF>.<PAD>`} for nets carrying copper a `sense:`
-    group holds (#1279, Segment.held_by). Read straight from the board."""
+    group holds (#1279, Segment.held_by). Read straight from the board,
+    including copper a via-span step has set aside for a call (#1842)."""
     out: Dict[str, str] = {}
-    from via_span import HELD_OUTSIDE_SPAN
-    for it in list(pcb_data.segments) + list(pcb_data.vias):
+    from via_span import HELD_OUTSIDE_SPAN, set_aside
+    aside = set_aside(pcb_data)
+    for it in (list(pcb_data.segments) + list(pcb_data.vias)
+               + aside.get('segments', []) + aside.get('vias', [])):
         held = getattr(it, 'held_by', '')
         if held == HELD_OUTSIDE_SPAN:
             # #1842: a via-span step holds the COPPER it could not lay again;
