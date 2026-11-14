@@ -16,6 +16,7 @@ runnable tool in the clone with a one-line purpose.
   [pad geometry](#pad-geometry-checker-check_padspy) ·
   [cycles](#cycle-checker-check_cyclespy) ·
   [copper hygiene](#copper-hygiene-checker-check_weirdpy) ·
+  [vias in mask openings](#via-mask-checker-check_via_maskpy) ·
   [non-orthonormal segments](#non-orthonormal-segment-checker-check_orthonormalpy) ·
   [impedance](#impedance-audit-check_impedancepy) ·
   [return vias](#return-via-coverage-check_return_viaspy) ·
@@ -3150,6 +3151,46 @@ python3 py_router/check_weird.py routed.kicad_pcb --nets "*lvds*" --tolerance 0
 # Include the slow removable-segment scan on large nets
 python3 py_router/check_weird.py routed.kicad_pcb --thorough
 ```
+
+## Via Mask Checker (`check_via_mask.py`)
+
+Vias whose copper ring reaches into, or crowds, a pad's solder-mask opening
+(#1232). A pad's opening is its copper grown by its resolved solder-mask
+expansion (`mask_apertures`, pinned to pcbnew's `GetSolderMaskExpansion`).
+
+- `via-mask-contact` -- the via's ring touches or overlaps a pad's opening on
+  a side the via reaches, its centre outside that pad's copper. Any net.
+  Against a pad whose same-net paste opening on that side holds the via's
+  barrel, the contact is `check_drc`'s `via-in-paste` and is not repeated
+  here; the via is still graded against every other pad.
+- `via-mask-web` -- a via plugged with soldermask on that side (KiCad
+  `plugging`, resolved per side against the board setup) whose ring is closer
+  to a pad opening than `--plug-web` (default
+  `fab_tiers.JLC_PLUGGED_VIA_MASK_WEB_MM`, 0.35 mm, JLCPCB's figure for
+  soldermask-plugged vias).
+
+A positive margin rounds the opening's corners at the margin, as KiCad plots
+it. Openings of trapezoid and chamfered pads, and of custom pads with a
+negative margin, are approximate; a finding against one names the reason in
+its `approximation` field, and the report counts them.
+
+KiCad's own `solder_mask_bridge` rule reports an opening that exposes copper
+of two different nets; it says nothing about a same-net via, and the corpus
+A/B's KiCad grade does not count it.
+
+```bash
+python3 py_tools/check_via_mask.py board.kicad_pcb [OPTIONS]
+
+Options:
+  --baseline BOARD   Accept findings this board (e.g. the unrouted input)
+                     already had: same category, pad and side, from a via on
+                     the same net name within half the smaller diameter
+  --plug-web MM      The via-mask-web limit
+  --json PATH        Write {"counts", "findings", "inherited"}
+  --max-print INT    Findings printed per category (<=0 prints all)
+```
+
+Read-only. Exit 1 when anything not accepted is found, else 0.
 
 ## Non-Orthonormal Segment Checker (`check_orthonormal.py`)
 
