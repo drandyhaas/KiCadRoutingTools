@@ -34,7 +34,8 @@ Checks:
      protected, and it ships with both tracks;
   6. the finalize's taps are vias of the span: the route step run as its
      finalize alone (KICAD_FINALIZE_ONLY=1 --skip-routing) connects VDD with
-     micro vias F.Cu-In1.Cu and no through via; the guaranteed-join gate's KiCad check
+     micro vias F.Cu-In1.Cu, no through via, and `--json-out` says
+     `via_span.plane_finalize: run`; the guaranteed-join gate's KiCad check
      is handed those vias as micro vias (spied on `exact_unconnected`), not as
      the through vias the engine places them as before it writes them.
 """
@@ -155,6 +156,10 @@ def finalize_rows(td, board):
     check(PY + [os.path.join(REPO, 'py_router', 'check_connected.py'), out,
                 '--nets', 'VDD'], accept=True)
     ok(True, "VDD is connected")
+    with open(evidence(summary, 'the summary'), encoding='utf-8') as fh:
+        vs = json.load(fh).get('via_span') or {}
+    ok(vs.get('plane_finalize') == 'run' and vs.get('type') == 'micro',
+       f"--json-out says the finalize ran: {vs}")
     with open(evidence(seen, 'the gate spy'), encoding='utf-8') as fh:
         words = json.load(fh)
     ok(words and all(w == ' micro' for files in words for w in files)

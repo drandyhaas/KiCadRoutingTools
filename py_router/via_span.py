@@ -192,21 +192,31 @@ def obstacle_board(pcb_data, config):
 
 def via_span_summary(config, pcb_data=None) -> Optional[dict]:
     """JSON_SUMMARY['via_span'] of a via-span step, None without a span: its
-    end layers, the via type it writes, and `plane_finalize` -- 'span': the
-    finalize's taps are vias of the span, reaching a pour only on a layer the
-    span has -- with the board's zone count and how many of those zones lie on
-    a layer outside the span (`zones_off_span`), which this step does not tap
-    and the plane step connects."""
+    end layers, the via type it writes, `plane_finalize` -- 'run' once the
+    step's plane finalize has run on a pour of the span (its taps and joins
+    are vias of the span; route.py marks it, `PLANE_FINALIZE_ATTR`), else
+    'not run' (no finalize, or no pour on the span's layers) -- the board's
+    zone count, and
+    how many of those zones lie on a layer outside the span
+    (`zones_off_span`), which this step does not tap and the plane step
+    connects. The JSON_SUMMARY line route.py prints predates the finalize,
+    so it reads 'not run'; `--json-out` and the returned summary carry the
+    final state."""
     span = getattr(config, 'via_span', None)
     if not span:
         return None
     zones = list(getattr(pcb_data, 'zones', None) or ())
     return {'layers': via_layer_pair(config),
             'type': getattr(config, 'via_span_type', None),
-            'plane_finalize': 'span',
+            'plane_finalize': getattr(config, PLANE_FINALIZE_ATTR, None) or 'not run',
             'zones': len(zones),
             'zones_off_span': sum(1 for z in zones
                                   if getattr(z, 'layer', None) not in span)}
+
+
+#: config attribute route.py sets to 'run' when a via-span step's plane
+#: finalize runs (`via_span_summary`)
+PLANE_FINALIZE_ATTR = '_via_span_plane_finalize'
 
 
 def via_layer_pair(config) -> List[str]:

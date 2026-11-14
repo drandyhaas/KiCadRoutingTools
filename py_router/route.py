@@ -7315,9 +7315,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _sense = _sense_entries(pcb_data)
     if _sense:
         summary['sense_branches'] = _sense
-    # #1842: the step's via span, and that its plane finalize taps with vias
-    # of the span, with how many pours lie outside it -- a key, so a chain
-    # reader need not grep the console line
+    # #1842: the step's via span, whether its plane finalize ran (its taps
+    # are vias of the span) and how many pours lie outside the span -- a key,
+    # so a chain reader need not grep the console line. Printed before the
+    # finalize: the finalize updates it in `summary` (by reference)
     _span_summary1842 = via_span_summary(config, pcb_data)
     if _span_summary1842:
         summary['via_span'] = _span_summary1842
@@ -7802,6 +7803,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           f"tapped by this step: {', '.join(_off1842[:6])}"
                           f"{' ...' if len(_off1842) > 6 else ''}")
                 _zpairs = [(n, l) for n, l in _zpairs if l in config.via_span]
+            if config.via_span and _zpairs:
+                # #1842: the finalize taps the span's pours on this step: say
+                # so in the summary (by reference, as finalize_excluded_nets
+                # above). With no pour on the span it has nothing to tap.
+                from via_span import PLANE_FINALIZE_ATTR as _pfa1842
+                setattr(config, _pfa1842, 'run')
+                if isinstance(summary.get('via_span'), dict):
+                    summary['via_span'] = via_span_summary(config, pcb_data)
             _zpairs_all = list(_zpairs)
             _ship_scope678 = sorted({n for n, _l in _zpairs_all})
             if _zpairs:

@@ -18,9 +18,10 @@
   E. a rebuilt net cache under a span is the span's: a net's pad on a layer
      outside the span blocks no via site after a rip any more than before;
   F. an explicit via size on a micro span is not pinned to the fab floor;
-  G. JSON_SUMMARY and the merged --json-out carry `via_span`: the plane
-     finalize taps with vias of the span (`span`), and the zone counts say how
-     many pours lie outside it; none without a span;
+  G. JSON_SUMMARY and the merged --json-out carry `via_span`: on a board
+     with no pour the plane finalize taps nothing (`not run`), and the zone
+     counts say how many pours lie outside the span; none without a span
+     (test_1842_via_span_planes reads `run` where the finalize taps a pour);
   H. a route end beside an earlier step's escape stub (held by the span) is
      bridged like any other joint of its net: the span hold is no sense hold;
   I. held copper is not ripped with its net: `--force-reroute` on a step
@@ -257,7 +258,7 @@ def g_summary(td):
     board = stage(fixture_text(), os.path.join(td, 'g.kicad_pcb'))
     for args, want in ((['--via-span', 'F.Cu', 'In1.Cu'],
                         {'layers': ['F.Cu', 'In1.Cu'], 'type': 'micro',
-                         'plane_finalize': 'span', 'zones': 0, 'zones_off_span': 0}),
+                         'plane_finalize': 'not run', 'zones': 0, 'zones_off_span': 0}),
                        ([], None)):
         out = os.path.join(td, f'g{len(args)}.kicad_pcb')
         js = os.path.join(td, f'g{len(args)}.json')

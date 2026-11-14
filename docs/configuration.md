@@ -512,9 +512,12 @@ type) on the same layer pair, and the run says so.
   vias for a span that does not include the ground plane's layer.
 - **The summary says so.** `JSON_SUMMARY` and `--json-out` carry `via_span` on
   every via-span step: `{"layers": [top, bottom], "type": ..., "plane_finalize":
-  "span", "zones": N, "zones_off_span": M}` -- the finalize's taps are vias of
-  the span, and M of the board's N pours lie on layers the span does not have
-  and are left to the plane step.
+  "run" | "not run", "zones": N, "zones_off_span": M}` -- whether the step's
+  plane finalize ran on a pour of the span (its taps are vias of the span),
+  and M of the board's N
+  pours lie on layers the span does not have and are left to the plane step.
+  The printed `JSON_SUMMARY:` line predates the finalize and reads "not run";
+  `--json-out` and the summary the engine returns carry the final state.
 - **Copper outside the span is held in place.** A via-span step lays copper on
   the span only, so it could not lay an escape's stub and via again: every
   existing track on another layer, and every via with copper on a layer the
