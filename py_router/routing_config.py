@@ -647,6 +647,16 @@ class GridRouteConfig:
         over it for the routed nets it binds (#1491, KiCad's last match);
         without one, or with no such rule, the layer rule replaces as
         before."""
+        s1897 = self.scoped_clearance
+        if (s1897 is not None and layer in s1897.layered_layers
+                and (net_id is not None or pad is not None)):
+            # #1897: a scoped rule with a (layer ...) clause naming this layer
+            got = s1897.stamp_layered(
+                int((net_id if net_id is not None else getattr(pad, 'net_id', 0)) or 0),
+                (getattr(pad, 'pad_type', None) or 'smd') if pad is not None else None,
+                layer, self)
+            if got is not None:
+                return got
         if self.layer_clearances:
             v = self.layer_clearances.get(layer)
             if v is not None:
@@ -685,11 +695,17 @@ class GridRouteConfig:
         ruled lower, since the board may have copper on layers outside
         config.layers. `net_id` / `pad` order each layer's rule against the
         scoped channel as `layer_clearance` does."""
-        if not self.layer_clearances:
+        s1897 = self.scoped_clearance
+        layered = (s1897.layered_layers if s1897 is not None
+                   and (net_id is not None or pad is not None) else ())
+        if not self.layer_clearances and not layered:
             return fallback
         if self.scoped_clearance is not None and (net_id is not None or pad is not None):
+            # #1897: and the layers a scoped rule's (layer ...) clause names
             return max([fallback] + [self.layer_clearance(l, fallback, net_id, pad)
-                                     for l in self.layer_clearances])
+                                     for l in (list(self.layer_clearances or ())
+                                               + [l for l in sorted(layered)
+                                                  if l not in (self.layer_clearances or ())])])
         return max([fallback] + list(self.layer_clearances.values()))
 
     def obstacle_clearance(self, net_id: int) -> float:

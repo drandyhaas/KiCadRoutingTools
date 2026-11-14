@@ -320,6 +320,15 @@ class PairRuleChannels:
                                               if layer is None else None))
             if v != eff:
                 eff, src = v, 'layer rule'
+                # #1897: a scoped rule with a (layer ...) clause, by name
+                named = getattr(lm, 'names', None)
+                if named:
+                    at = ([layer] if layer is not None else
+                          sorted(set(layers_a) & set(layers_b if layers_b is not None
+                                                     else layers_a)))
+                    hit = [named[l] for l in at if l in named and lm.get(l) == v]
+                    if hit:
+                        src = f"rule '{hit[0]}'"
         if type_a is not None and type_b is not None:
             c = self.coupled_rule(net_a, net_b, type_a, type_b,
                                   (layer,) if layer is not None else layers_a)
@@ -7213,7 +7222,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                       f"grade for this constraint) -- the items it binds are "
                       f"not graded here; KiCad still enforces it")
     _coupled_cl = _chan.coupled
-    _chan_layers = bool(_lcl) or _coupled_dr is not None
+    # A pad's copper layers are what the pair is judged on wherever a layer
+    # map can reach it: the #498 layer rules, a coupled rule, and a scoped
+    # rule with a (layer ...) clause (#1897), which joins the pair's map even
+    # on a board with no layer rule of its own.
+    _chan_layers = (bool(_lcl) or _coupled_dr is not None
+                    or bool(getattr(_chan.scoped, 'layered_layers', None)))
 
     def _pad_pair_cl(pad, other_net: int, layer: str = None, other_pad=None,
                      other_type: str = None, other=None, want_rule: bool = False):
