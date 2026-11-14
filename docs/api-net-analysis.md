@@ -350,6 +350,32 @@ through the barrel (#1314; before, the pad met only track ends and such a net
 read as not joined). Two of the pads whose copper touches on a shared layer
 join each other (#1629: a module's two overlapping same-number pads).
 
+When no track path joins the two pads, the net's other copper pads are
+attached as well (#1867), so a path that runs **through** one is walked: a
+lane that enters an in-line part's pad (an ESD device, a test point) at one
+point and leaves it at another, with no track between the two. A pad the
+path only passes is charged in its plane **the way a via is** (#1583): each
+track is measured up to where its centreline crosses the pad's copper
+outline (the exact outline: rotation, rounded corners, custom shapes), and
+the walk is charged the straight line from that edge point to the pad's
+centre, then from the centre straight to the edge point it leaves at. The
+track inside the pad is not counted on top of that hop. Where no track
+crosses the outline the hop starts at the copper the walk does meet: a
+track end inside the pad or whose round end touches it, the centre of a via
+whose copper overlaps it, or the centre of another passed pad whose copper
+touches it. Changing layer in a drilled pad's barrel costs nothing, as in
+an end pad. The two end pads stay free, and so does a pad whose copper
+touches one of them (#1629: one terminal, such as a module's overlapping
+twin of that pad). Before, such a path read `None` on a connected net. A
+length the track copper alone gives is unchanged: the other pads are not
+attached for it.
+
+For example, a lane that enters a 1.06 x 0.65 mm roundrect pad on a
+45-degree run and leaves it off its centre line through a rounded corner
+is charged 0.546 + 0.562 = 1.108 mm across the pad, where the 0.184 + 0.326
+mm of track inside it plus two hops from the track ends to the centre
+(0.400 + 0.283 mm) read 1.192 mm.
+
 Returns `None` when no track path joins the two pads: an unrouted or broken
 net, or one whose pads meet only through a **zone** (pours are not traversed).
 `0.0` means the pads' copper touches directly.
@@ -372,7 +398,9 @@ print(f"{net.name}: {total:.2f} mm total copper, "
 ```python
 net_pads_joined(pcb_data, net_id, pads=None, tolerance=0.02) -> bool
 net_match_length(pcb_data, net_id, mode='total', tolerance=0.02,
-                 include_pad_to_die=True) -> Optional[float]
+                 include_pad_to_die=True, pads=None) -> Optional[float]
+pin_pair_pads(pcb_data, net_id, pads=None, tolerance=0.02, detail=None)
+    -> Optional[Tuple[Pad, Pad]]
 ```
 
 `net_copper_length` reports whatever copper a net has, routed or not: a net
@@ -386,8 +414,39 @@ not traversed)?
 `net_match_length` is the one measurement every length-match grader uses
 (`board_score.py --length-groups`, the review-routed-board recipe): total net
 copper (`mode='total'`) only once `net_pads_joined` holds, or the path between
-the net's first two pads (`mode='pin_pair'`). `None` in either mode means "not
+two pads of the net (`mode='pin_pair'`). `None` in either mode means "not
 routed yet" (unrouted, stub-only, broken or plane-only), never `0.0`.
+
+Which two pads `'pin_pair'` measures is `pin_pair_pads(pcb, net_id, pads)`
+(#1866): `pads` when given -- two of the net's copper pads, each a `Pad` or
+its `REF.PAD` label, a `ValueError` saying why when they are not. Without
+it the pair is chosen from the net's **copper** pads (an NPTH hole or a
+paste-only pad is no end of a lane), whatever order the board file lists
+its footprints in:
+
+- two copper pads: those two;
+- three or more, all joined by track copper (`net_pads_joined`): the two
+  **farthest apart along the copper** (`pin_pair_path_length` over every
+  pair), the lane's ends;
+- three or more, not all joined: the two whose centres are farthest apart
+  in a **straight line**. A copper length is not defined for a pad no track
+  reaches, and the farthest of the pairs that are joined would grade part
+  of a broken lane as the whole of it; the straight line names the pair the
+  routed lane will have to join, and its length reads `None` while that
+  pair is apart.
+
+Ties (lengths equal to the nanometre) go to the pair whose `REF.PAD` labels
+come first in natural order (`U1.9` before `U1.10`), and the pair comes back
+in that order. `detail`, when given, is
+filled with `how` (`named`, `two_pads`, `farthest_along_copper`,
+`farthest_straight_line`) and `ambiguous`: True when the pair was chosen
+from three or more copper pads, where the lane's ends were assumed rather
+than stated. `net_match_length`, `net_match_pad_to_die` and `measure_chain`
+take `pads`; `board_score --length-groups` reads a group's `"pads": {net:
+["REF.PAD", "REF.PAD"]}`, names the pair each net was measured between in
+`measured_pads`, and names each net whose pair was chosen from three or more
+copper pads, with that pair, in `ambiguous_pair` (absent when there is
+none). On a net of three or more pads, name the lane's two pads.
 
 A lane that runs through a **series part** (an AC-coupling capacitor, a series
 resistor) is two or more nets, and every per-net grade measures each alone.
