@@ -713,11 +713,26 @@ other net against it. A rule of severity `ignore` binds nothing, and a rule whos
 condition the tools do not read binds nothing either -- the rules before it still
 do -- and is named `NOT honoured` and left to the grade. A condition that names
 nets one by one costs build time: each named net is read on its own (a rule ORing
-200 net names added about half a minute to a 250-net board's map). The step prints `.kicad_dru rule 'x':
-hole_clearance min 0.254 mm: routed tracks and vias are kept that far from the
-holes of other nets' vias and pads`. The fan-out and plane steps place their vias
-on maps of their own that do not read these rules yet; `check_drc.py` grades their
-copper at the rule all the same.
+200 net names added about half a minute to a 250-net board's map). The step
+prints `.kicad_dru rule 'x': hole_clearance min 0.254 mm: routed tracks and vias
+are kept that far from the holes of other nets' vias and pads`.
+
+The generators that test a via site by their own means ask the same grader:
+`bga_fanout.py` (dogbone and under-pad), `qfn_fanout.py`, `route_planes.py
+--add-gnd-vias` and the plane taps each refuse a site through
+`check_drc.HoleRuleGate` (the board's copper and holes indexed once, with the
+lists the generator lays copper into watched, so a site is graded against its
+own vias and tracks too) or `hole_rule_refusal`, reading the rules a step's
+`config.rules` holds (`check_drc.board_design_rules` for an engine with no
+config). Once the BGA and QFN engines are done, every track and via the call laid
+is graded with the grader, against the board and each other
+(`fanout_hole_rule`). Completion first, disclosed: the BGA escape escapes each
+ball that falls short again at the copper clearance that holds the rule at its
+via's ring, and a ball that rung leaves bare keeps its first escape, below the
+rule, as the last rung; the QFN fan-out keeps its escapes. What the copper still
+breaks is named per rule on the console and in `JSON_SUMMARY.design_rules.hole_rules`
+(the fanout tab lists it too) -- the key `design_rules.disclose_step_rules` gives a
+route step's own copper.
 
 **A rule file KiCad refuses.** One thing KiCad cannot load in a `.kicad_dru` makes
 it enforce NONE of the file's rules, with exit 0 and nothing printed (measured on
