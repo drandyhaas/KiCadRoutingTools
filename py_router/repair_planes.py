@@ -1108,8 +1108,8 @@ def _repair_planes_all(
     _span_cfg = None
     if _span is not None:
         from types import SimpleNamespace
-        from via_span import (SpanError, cut_layers_to_span, only_span_copper)
-        _sl, _sk, routing_layers, layer_costs = cut_layers_to_span(
+        from via_span import (SpanError, step_span, only_span_copper)
+        _sl, _sk, routing_layers, layer_costs = step_span(
             pcb_data, list(routing_layers), layer_costs, _span[0], _span[1])
         if _sl:
             _off = sorted({l for l in plane_layers if l not in _sl})
@@ -1119,7 +1119,7 @@ def _repair_planes_all(
                     f"are outside the span, so a via of it cannot reach them")
             _span_cfg = SimpleNamespace(via_span=list(_sl), via_span_type=_sk)
             route_knobs = dict(route_knobs or {}, via_span=list(_sl), via_span_type=_sk)
-            _span_stack.enter_context(only_span_copper(pcb_data, _sl))
+            _span_stack.enter_context(only_span_copper(pcb_data, _sl, _sk))
     # One cost per routing layer: the nested batch_route sub-runs below append
     # the unrequested copper layers after these costs, positionally.
     from routing_config import layer_costs_count_error
@@ -2715,8 +2715,18 @@ def _repair_planes_all(
                          if pcb_uses_name_nets(pcb_data)
                          else None)
                 _reconcile_write_list_vs_board('pre-oracle')
+                # #1842: under a via span the vias this step laid are graded
+                # as the span's, as they will be written -- a through via in
+                # the file would reach (and be credited with) a pour on a
+                # layer the span does not have
+                _gate_vias = all_new_vias
+                if _span_cfg is not None:
+                    from via_span import apply_span
+                    _gate_vias = [dict(d) for d in all_new_vias]
+                    apply_span([d for d in _gate_vias if not d.get('from_restore')],
+                               _span_cfg)
                 _write_output(input_file, _tmp.name, all_new_segments,
-                              all_new_vias, None,
+                              _gate_vias, None,
                               net_id_to_name=_nm10,
                               exclude_net_ids=(ripped_net_ids + partial_ids
                                                + inplace_reconnected_ids))

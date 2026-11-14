@@ -21,11 +21,22 @@ Checks:
   2. `--via-span F.Cu In1.Cu`: all 7 pads are tapped, with micro vias
      F.Cu-In1.Cu at the class's micro via size, at the balls; check_drc is
      clean, the net is connected, and the project's via and drilled-hole
-     minimums are left alone. kicad-cli 10.0.8 grades that board at 0
-     violations with the net connected;
+     minimums -- the annular ring and copper-to-hole ones included, the micro
+     vias get a rule of their own -- are left alone. kicad-cli 10.0.8 grades
+     that board at 0 violations with the net connected;
   3. a plane on a layer the span does not have is refused by name;
   4. the route step under the same span runs its plane finalize (it used to
-     skip it), lays no through via, and leaves the net connected.
+     skip it), lays no through via, and leaves the net connected;
+  5. a net whose KiCad-locked copper is all off the span (S05: an unlocked
+     F.Cu stub at its pad and a locked B.Cu track) is never a blocker to
+     rip, read inside the set-aside: repair_planes.py --rip-blocker-nets and
+     the route step's finalize (which rips by default) both name it
+     protected, and it ships with both tracks;
+  6. the finalize's taps are vias of the span: the route step run as its
+     finalize alone (KICAD_FINALIZE_ONLY=1 --skip-routing) connects VDD with
+     micro vias F.Cu-In1.Cu and no through via; the guaranteed-join gate's KiCad check
+     is handed those vias as micro vias (spied on `exact_unconnected`), not as
+     the through vias the engine places them as before it writes them.
 """
 import json
 import os
@@ -45,7 +56,35 @@ PY = [sys.executable, '-X', 'utf8']
 FIX = os.path.join(TESTS, 'fixtures', '1842', 'plane_under')
 BGA = (6.0, 6.0, 14.0, 14.0)
 KEYS = ('min_via_diameter', 'min_through_hole_diameter', 'min_microvia_diameter',
-        'min_microvia_drill')
+        'min_microvia_drill', 'min_via_annular_width', 'min_hole_clearance')
+# S05's copper (#1842 check 5): an unlocked stub on the span from its pad
+# J1.5 (joined to a pad, so no orphan sweep takes it), and a KiCad-locked
+# track off the span
+LOCKED_OFF_SPAN = '''\t(segment (start 23.25 3.5) (end 22 3.5) (width 0.1) (layer "F.Cu") (net "S05")
+\t\t(uuid "00000000-0000-4000-8000-000000018421"))
+\t(segment (start 27 3) (end 28.5 3) (width 0.1) (locked yes) (layer "B.Cu") (net "S05")
+\t\t(uuid "00000000-0000-4000-8000-000000018422"))
+'''
+# runs route.py in-process with kicad_exact_fill.exact_unconnected spied on:
+# the via type words of every board file the KiCad check is handed
+SPY = '''import json, os, re, runpy, sys
+sys.path.insert(0, os.path.join(sys.argv[1], 'py_router'))
+import kicad_exact_fill
+_real = kicad_exact_fill.exact_unconnected
+seen = []
+def spy(board_file, *a, **kw):
+    with open(board_file, encoding='utf-8') as fh:
+        seen.append(re.findall(r'\\(via( micro| blind| buried)?\\s', fh.read()))
+    return _real(board_file, *a, **kw)
+kicad_exact_fill.exact_unconnected = spy
+out = sys.argv[2]
+sys.argv = [os.path.join(sys.argv[1], 'py_router', 'route.py')] + sys.argv[3:]
+try:
+    runpy.run_path(sys.argv[0], run_name='__main__')
+finally:
+    with open(out, 'w', encoding='utf-8') as fh:
+        json.dump(seen, fh)
+'''
 FAILS = []
 
 
@@ -55,11 +94,72 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
-def stage(td, tag):
+def stage(td, tag, extra=''):
     board = os.path.join(td, tag + '_in.kicad_pcb')
     for ext in ('.kicad_pcb', '.kicad_pro'):
         shutil.copy(evidence(FIX + ext, 'the fixture'), os.path.splitext(board)[0] + ext)
+    if extra:
+        with open(board, encoding='utf-8') as fh:
+            t = fh.read()
+        k = t.rindex('\t(embedded_fonts')
+        with open(board, 'w', encoding='utf-8') as fh:
+            fh.write(t[:k] + extra + t[k:])
     return board, os.path.join(td, tag + '.kicad_pcb')
+
+
+def s05_kept(path):
+    pcb = parse_kicad_pcb(evidence(path, 'the output board'))
+    ids = {n.name: i for i, n in pcb.nets.items()}
+    return sorted((s.layer, bool(s.locked)) for s in pcb.segments
+                  if s.net_id == ids.get('S05'))
+
+
+def locked_rows(td):
+    print("5. a net whose locked copper is all off the span")
+    board, out = stage(td, 'locked', LOCKED_OFF_SPAN)
+    pcb = parse_kicad_pcb(board)
+    ok(len([s for s in pcb.segments if s.locked]) == 1, "the staged board carries the lock")
+    r = check(PY + [os.path.join(REPO, 'py_router', 'repair_planes.py'), board, out,
+                    '--nets', 'VDD', '--plane-layers', 'In1.Cu', '--clearance', '0.1',
+                    '--track-width', '0.1', '--via-span', 'F.Cu', 'In1.Cu',
+                    '--rip-blocker-nets'], accept=True, timeout=1800)
+    log = (r.stdout or '') + (r.stderr or '')
+    ok(re.search(r'PROTECTED net\(s\) excluded from blocker rip-up \([^)]*S05', log)
+       is not None, "repair_planes.py reads S05 as protected inside the set-aside")
+    ok(s05_kept(out) == [('B.Cu', True), ('F.Cu', False)],
+       f"and ships both its tracks: {s05_kept(out)}")
+    return board
+
+
+def finalize_rows(td, board):
+    print("6. the route step's finalize, alone, under the span")
+    out = os.path.join(td, 'fin.kicad_pcb')
+    summary = os.path.join(td, 'fin.json')
+    seen = os.path.join(td, 'gate.json')
+    driver = os.path.join(td, 'spy.py')
+    with open(driver, 'w', encoding='utf-8') as fh:
+        fh.write(SPY)
+    env = dict(os.environ, KICAD_FINALIZE_ONLY='1')
+    r = check(PY + [driver, REPO, seen, board, out, '--nets', 'VDD', '--skip-routing',
+                    '--via-span', 'F.Cu', 'In1.Cu', '--json-out', summary],
+              accept=True, timeout=1800, env=env)
+    log = (r.stdout or '') + (r.stderr or '')
+    ok(re.search(r'PROTECTED net\(s\) excluded from blocker rip-up \([^)]*S05', log)
+       is not None, "the finalize reads S05 as protected inside the set-aside")
+    ok(s05_kept(out) == [('B.Cu', True), ('F.Cu', False)],
+       f"and ships both its tracks: {s05_kept(out)}")
+    pcb = parse_kicad_pcb(evidence(out, 'the finalized board'))
+    kinds = sorted({(v.via_type, tuple(v.layers)) for v in pcb.vias})
+    ok(pcb.vias and kinds == [('micro', ('F.Cu', 'In1.Cu'))],
+       f"the taps are micro vias of the span: {kinds} x{len(pcb.vias)}")
+    check(PY + [os.path.join(REPO, 'py_router', 'check_connected.py'), out,
+                '--nets', 'VDD'], accept=True)
+    ok(True, "VDD is connected")
+    with open(evidence(seen, 'the gate spy'), encoding='utf-8') as fh:
+        words = json.load(fh)
+    ok(words and all(w == ' micro' for files in words for w in files)
+       and any(files for files in words),
+       f"the gate's KiCad check is handed micro vias only: {words}")
 
 
 def repair(td, tag, *extra, **kw):
@@ -133,6 +233,8 @@ def main():
         check(PY + [os.path.join(REPO, 'py_router', 'check_connected.py'), out,
                     '--nets', 'VDD'], accept=True)
         ok(True, "and the net is connected")
+
+        finalize_rows(td, locked_rows(td))
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1

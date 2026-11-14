@@ -499,8 +499,12 @@ type) on the same layer pair, and the run says so.
   on the span's layers only. A pour on a layer the span does not have is
   not tapped by the step (the run names it; `repair_planes.py` refuses a
   `--plane-layers` entry outside the span). Like the fan-out, the engine
-  runs with the copper outside the span set aside and put back. Stitch and
-  thermal vias laid by `route_planes.py` are through vias.
+  runs with the copper outside the span set aside and put back, with its
+  net protection read on all of the board's copper (a net whose KiCad-locked
+  copper is all off the span is still never ripped as a blocker), and its
+  guaranteed-join check hands KiCad the taps as the span's vias, as they are
+  written. Stitch and thermal vias laid by `route_planes.py` are through
+  vias.
 - **Pour first.** A via of the span reaches a plane only on a layer the
   span has, and the diff-pair step lays a pair's GND return vias only when
   a ground pour is already on one of those layers. Pour the planes before
