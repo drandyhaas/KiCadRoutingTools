@@ -3706,7 +3706,11 @@ tab (#1577), write it the same way, and a floor written under the board's own
 is a `hole_clearance` row in `JSON_SUMMARY.design_rules`. A writeback only
 ever lowers this floor: a step whose copper holds more than the project
 already declares says so (`Copper-to-hole floor stays ...`) rather than
-raising it.
+raising it. A rule written below the hole clearance the via descent ladder
+preferred a ring for is recorded with it
+(`kicad_routing_tools.via_ring_hole_clearance`: `{rule, hole_clearance}`), so
+a later step's ladder prefers the same ring while the rule still holds that
+value; KiCad and `check_drc` grade the rule (#1914).
 
 The `#530` cap lowers `rules.min_clearance` to the smallest pad clearance
 override the run honoured (KiCad floors an override there). That number

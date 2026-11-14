@@ -611,9 +611,15 @@ than its net asked and below the ring is a `hole_clearance` row in
 `JSON_SUMMARY.design_rules` and the `Design rules` line. The hole clearance is
 the board's declared `min_hole_clearance` (the live board's, on the GUI), raised
 to the chain's `fab_floor_origin`, else KiCad's factory 0.25; a declared 0 asks
-for no ring. A known limit: on a board that declared nothing, a route step's
-writeback records `min_hole_clearance` at the clearance it routed, and a later
-step reads that value rather than 0.25.
+for no ring. A step's DRC writeback lowers `min_hole_clearance` to what it
+routed (on a board that declared nothing, it writes the rule at the
+clearance), so when it leaves the rule below the hole clearance the ladder
+preferred it records both (`kicad_routing_tools.via_ring_hole_clearance`:
+`{rule, hole_clearance}`, both fronts), and while the rule still holds that
+value every later step's ladder prefers the same ring. A rule set to any other
+value -- a Board Setup edit between steps -- is read as declared. The record
+is the ladder's alone: KiCad, `check_drc` and the router's NPTH keep-outs grade
+and hold the rule the project declares.
 
 Every such rule is graded when route.py or route_diff.py ends, over the vias the
 step laid: `.kicad_dru rule 'rf ring' (annular_width min 0.07 mm): this step's 7
