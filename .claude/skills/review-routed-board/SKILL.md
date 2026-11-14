@@ -159,11 +159,19 @@ with a stub**, total copper is the sum of every branch and matches no signal
 path — measure the driver→receiver path instead, and match on that:
 
 ```python
-path_mm = net_match_length(pcb, name_to_id['DQ0'], mode='pin_pair')
-# None = the net's first two pads are not joined by TRACK copper
-# (plane-only or broken; a via centred in a pad joins it through its
-# barrel, #1314); pin_pair_path_length(pcb, nid, pad_a, pad_b)
-# measures any other pad pair
+path_mm = net_match_length(pcb, name_to_id['DQ0'], mode='pin_pair',
+                           pads=('U1.H3', 'U7.B2'))
+# None = those two pads are not joined by TRACK copper (plane-only or
+# broken; a via centred in a pad joins it through its barrel, #1314).
+# Name the lane's two pads (#1866): without `pads` a net of three or more
+# copper pads is measured between its two farthest apart along the copper
+# (straight line while it is not joined), which need not be the lane's
+# ends. In a `--length-groups` file the same is
+# `"pads": {"DQ0": ["U1.H3", "U7.B2"]}`; the group's `measured_pads` names
+# the pair each net was measured between, and `ambiguous_pair` each net
+# whose pair was chosen, not named -- name those. A pad the lane passes
+# THROUGH (an ESD or test-point pad, no track across it) is charged like a
+# via: track to its edge, edge -> centre -> edge (#1867).
 ```
 
 Report both when they differ by more than the tolerance: a group that passes on
