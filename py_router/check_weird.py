@@ -9,7 +9,11 @@ Categories:
                      pcb_modification._point_anchored). Includes the
                      half-segment variant: a tail dangling PAST a mid-body
                      anchor (trim_dangles_past_body_anchor geometry,
-                     report-only). Reports the dangling length.
+                     report-only). Reports the dangling length. A tail is
+                     named once no anchor's copper touches its end, the test
+                     KiCad's DRC reports `track_dangling` by
+                     (connectivity.end_touches, #1870), not after a flat
+                     3 track widths.
   soft-joint         same-net endpoints whose caps overlap but are not
                      coincident (check_drc's 'segment-endpoint-gap' class;
                      reuses routing_constants.SOFT_JOINT_MIN_GAP and approach).
@@ -121,7 +125,8 @@ from check_connected import (matches_any_pattern, check_net_connectivity,
                              analyze_conn_excluding, point_in_polygon,
                              _point_in_pad)
 from check_drc import point_to_pad_distance
-from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad, strict_joint_roots,
+from connectivity import (COINCIDENCE_TOL, end_touches, endpoint_reaches_pad,
+                          strict_joint_roots,
                           endpoint_reaches_via, lands_on_interior,
                           off_centre_via_ends,
                           span_endpoint_degree, via_copper_layers)
@@ -444,7 +449,7 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
         # Mid-body anchors (trim_dangles_past_body_anchor geometry): a same-net
         # via barrel overlapping the centerline, or another same-net segment
         # endpoint teeing into the body.
-        cands = []
+        cands = []      # (t, the free end's distance to the anchor, its width)
         if L2 >= 1e-9:
             for vx, vy, vsize in via_pts_on(s.layer):
                 t = ((vx - s.start_x) * dx + (vy - s.start_y) * dy) / L2
@@ -452,7 +457,7 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                     continue
                 cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                 if math.hypot(vx - cx_, vy - cy_) < (vsize + s.width) / 2 - 1e-6:
-                    cands.append(t)
+                    cands.append((t, math.hypot(vx - fx, vy - fy), vsize))
             for o in net_segs:
                 if o is s or o.layer != s.layer:
                     continue
@@ -462,13 +467,19 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                         continue
                     cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                     if math.hypot(ox - cx_, oy - cy_) < (o.width + s.width) / 2 - 1e-6:
-                        cands.append(t)
+                        cands.append((t, _pt_seg_dist(fx, fy, o.start_x, o.start_y,
+                                                      o.end_x, o.end_y), o.width))
         if cands:
-            t_anchor = min(cands) if free_is_start else max(cands)
+            t_anchor = (min if free_is_start else max)(c[0] for c in cands)
             nx, ny = s.start_x + t_anchor * dx, s.start_y + t_anchor * dy
             tail = math.hypot(fx - nx, fy - ny)
-            if tail <= max(tol, 3 * s.width):
-                continue  # sub-visible nib past the anchor (as the trim pass)
+            # #1870: a nib is a tail whose end an anchor's copper still
+            # touches, KiCad's own test (`end_touches`), as the trim pass has
+            # it. A flat 3 track widths was allowed here, and KiCad's DRC
+            # reports `track_dangling` from about one.
+            if tail <= tol or any(end_touches(d, s.width, w)
+                                  for _t, d, w in cands):
+                continue
             findings.append(_finding(
                 'dangling-end', name, s.layer, fx, fy,
                 f"half-segment tail dangling {tail:.3f}mm past body anchor "

@@ -1232,7 +1232,8 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
                 "min_via_drill": [v.drill for v in pcb.vias if v.drill
                                   and getattr(v, 'via_type', None) != 'micro'],
                 "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
-                                          if v.size and v.drill and v.size > v.drill],
+                                          if v.size and v.drill and v.size > v.drill
+                                          and getattr(v, 'via_type', None) != 'micro'],
             }
             # #1843: and a track a rule area's track_width rule binds is graded
             # at that rule, as `board_size_values` reads it
@@ -1308,8 +1309,9 @@ def board_size_values(pcb) -> dict:
     # read that board as UNSOUND (run 26, esp_prog).
     # #1842: a micro via is graded at the micro via minimums (#1844), so it
     # says nothing about the board's via diameter, via drill or smallest
-    # drilled hole. Its ring does count: KiCad holds a micro via to
-    # min_via_annular_width.
+    # drilled hole. KiCad does hold its ring to min_via_annular_width, but
+    # a step that lays micro vias writes them a rule of their own instead
+    # (`micro_via_floors`), so the through vias keep the board's minimum.
     drilled = [v for v in pcb.vias if getattr(v, 'via_type', None) != 'micro']
     via_drills = [v.drill for v in drilled if v.drill]
     # Through-hole pad / via drills set the smallest hole diameter on the board.
@@ -1324,7 +1326,7 @@ def board_size_values(pcb) -> dict:
                             and not getattr(s, 'graphic', False)],
         "min_via_diameter": [v.size for v in drilled if v.size],
         "min_via_drill": via_drills,
-        "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
+        "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in drilled
                                   if v.size and v.drill and v.size > v.drill],
         "min_through_hole_diameter": hole,
     }
@@ -1397,8 +1399,11 @@ def size_values_below_authored(pcb_path: str, floors: dict, rules_from: str) -> 
                              for v in pcb.vias if v.size],
         "min_via_drill": [(v.drill, dr.via_item(v), None)
                           for v in pcb.vias if v.drill],
-        "min_via_annular_width": [((v.size - v.drill) / 2.0, dr.item_for_net(v.net_id, "via"),
-                                   None) for v in pcb.vias
+        # ... and a micro via's ring as itself, so the micro via rule binds it
+        "min_via_annular_width": [((v.size - v.drill) / 2.0,
+                                   dr.via_item(v) if getattr(v, 'via_type', None) == 'micro'
+                                   else dr.item_for_net(v.net_id, "via"), None)
+                                  for v in pcb.vias
                                   if v.size and v.drill and v.size > v.drill],
     }
     holes = [(v.drill, dr.item_for_net(v.net_id, "via"), None) for v in pcb.vias
@@ -1483,7 +1488,6 @@ def copper_minima(segments=(), vias=()):
               if not _get(s, 'graphic') and (_get(s, 'width') or 0) > 0]
     if widths:
         out["min_track_width"] = min(widths)
-    vs = [(_get(v, 'size') or 0.0, _get(v, 'drill') or 0.0) for v in vias or ()]
     # #1842: a micro via is no statement about the via or hole minimums
     drilled = [(_get(v, 'size') or 0.0, _get(v, 'drill') or 0.0) for v in vias or ()
                if _get(v, 'via_type') != 'micro']
@@ -1494,7 +1498,8 @@ def copper_minima(segments=(), vias=()):
     if drills:
         out["min_via_drill"] = min(drills)
         out["min_through_hole_diameter"] = min(drills)
-    rings = [(s - d) / 2.0 for s, d in vs if s and d and s > d]
+    # ... nor its ring: the micro via rule holds it (`micro_via_floors`)
+    rings = [(s - d) / 2.0 for s, d in drilled if s and d and s > d]
     if rings:
         out["min_via_annular_width"] = min(rings)
     return out
@@ -2561,7 +2566,7 @@ def plane_floor_segments(segments):
                     else getattr(s, 'soft_joint', False))]
 
 
-def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
+def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, micro_pairs=False):
     """The smallest copper-to-HOLE distance (mm) between a step's OWN copper
     -- ``segments`` and ``vias``, what it drew -- and the board, when it is
     below ``limit``; None when every such distance is at or above it.
@@ -2587,7 +2592,14 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
     skipped: KiCad reports such a pair once, as a copper clearance violation
     (or a short), and not again as a hole one -- the census found exactly one
     such pair, a P via overlapping its own N track, which KiCad's
-    hole_clearance grade did not list."""
+    hole_clearance grade did not list.
+
+    A pair one of whose items is a via typed micro (#1842) -- its hole or
+    its copper -- is left out unless ``micro_pairs``: the board's micro vias
+    are held by a `.kicad_dru` rule of their own (`micro_via_floors`, which
+    passes ``micro_pairs=True``), so the board's min_hole_clearance follows
+    the other copper only. On a board with no micro via nothing is left
+    out, and the census is the one it always was."""
     import math
     from geometry_utils import (point_to_segment_distance,
                                 segment_to_segment_distance, via_on_layer)
@@ -2600,9 +2612,14 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
     CELL = 1.0
     best = [None]
 
-    def note(d):
+    def note(d, micro=False):
+        if micro and not micro_pairs:
+            return
         if d < limit - 1e-9 and (best[0] is None or d < best[0]):
             best[0] = d
+
+    def is_micro(v):
+        return v is not None and getattr(v, 'via_type', None) == 'micro'
 
     def cells(x0, y0, x1, y1):
         for i in range(int(math.floor(x0 / CELL)), int(math.floor(x1 / CELL)) + 1):
@@ -2675,7 +2692,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
             if h[7] is not None and segment_pad_gap(
                     s.start_x, s.start_y, s.end_x, s.end_y, h[7]) - w < clearance - 1e-6:
                 continue
-            note(d - w - h[4])
+            note(d - w - h[4], is_micro(h[6]))
 
     if own_vias:
         seg_grid = index(all_segs, lambda s: (min(s.start_x, s.end_x) - s.width / 2,
@@ -2716,6 +2733,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
             from check_drc import graphic_own_pad_nets
             gfx_own = graphic_own_pad_nets(pcb)
     for v in own_vias:
+        vm = is_micro(v)
         r_cu, r_hole = v.size / 2.0, (v.drill or 0.0) / 2.0
         box = (v.x - r_cu - reach, v.y - r_cu - reach,
                v.x + r_cu + reach, v.y + r_cu + reach)
@@ -2735,7 +2753,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
             if h[7] is not None and point_to_pad_distance(v.x, v.y, h[7]) - r_cu \
                     < clearance - 1e-6:
                 continue
-            note(d - r_cu - h[4])
+            note(d - r_cu - h[4], vm or is_micro(h[6]))
         if r_hole <= 0:
             continue
         # Its drill against foreign copper: tracks, vias, pads.
@@ -2745,13 +2763,13 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
             d = point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
                                           s.end_x, s.end_y) - s.width / 2.0
             if d - r_cu >= clearance - 1e-6:
-                note(d - r_hole)
+                note(d - r_hole, vm)
         for o in near(via_grid, *box):
             if o is v or o.net_id == v.net_id:
                 continue
             d = math.hypot(o.x - v.x, o.y - v.y) - o.size / 2.0
             if d - r_cu >= clearance - 1e-6:
-                note(d - r_hole)
+                note(d - r_hole, vm or is_micro(o))
         for p in near(pad_grid, *box):
             if p.net_id == v.net_id:
                 continue
@@ -2760,7 +2778,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
                 continue
             d = point_to_pad_distance(v.x, v.y, p)
             if d - r_cu >= clearance - 1e-6:
-                note(d - r_hole)
+                note(d - r_hole, vm)
         # Its drill against a footprint's own copper, which has no net, so
         # KiCad grades the hole against it for every net. A net tie's bridge
         # the via's net is tied through: KiCad lets the via's copper touch it
@@ -2784,8 +2802,171 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0):
             if ring and point_in_polygon(v.x, v.y, ring):
                 d = -d
             if d - r_cu >= clearance - 1e-6 or own:
-                note(d - r_hole)
+                note(d - r_hole, vm)
     return None if best[0] is None else round(max(best[0], 0.0), 6)
+
+
+#: The `.kicad_dru` rule a writeback keeps for the board's MICRO vias
+#: (#1842): KiCad grades a micro via's ring at min_via_annular_width and its
+#: drill at min_hole_clearance, like a through via's, and a micro via laid at
+#: the copper clearance sits under both on an ordinary board. Lowering the
+#: board-wide minimums for it graded every through via looser too; a rule
+#: conditioned on the via type binds the micro vias alone (kicad-cli 10.0.6:
+#: KiCad accepts them at the rule and still grades a through via at the
+#: board's own minimums).
+MICRO_VIA_RULE = 'kicad_routing_tools micro vias'
+MICRO_VIA_CONDITION = "A.Via_Type == 'Micro'"
+#: kind -> the board minimum it stands under (the project's rule key)
+MICRO_VIA_RULE_KINDS = {'annular_width': 'min_via_annular_width',
+                        'hole_clearance': 'min_hole_clearance'}
+
+
+def micro_via_floors(pcb, board_rules, clearance) -> dict:
+    """#1842: what the micro vias of ``pcb`` (the board as the step leaves
+    it: a parsed output, or the GUI's PCBData with the step's copper) need
+    below the board's own minimums ``board_rules`` (the project's rules
+    before this writeback, {rule key: mm}): ``{'annular_width': mm,
+    'hole_clearance': mm}``, a kind absent when every micro via meets the
+    board's value or the board declares none. The ring is each micro via's
+    own; the hole clearance is the smallest copper-to-hole distance of a
+    pair one of whose items is a micro via (`step_copper_to_hole`, every
+    micro via of the board taken as the step's own), never below
+    ``clearance``. {} on a board with no micro via."""
+    micro = [v for v in (getattr(pcb, 'vias', None) or ())
+             if getattr(v, 'via_type', None) == 'micro']
+    out = {}
+    if not micro:
+        return out
+    ann_min = board_rules.get('min_via_annular_width')
+    rings = [(v.size - v.drill) / 2.0 for v in micro
+             if v.size and v.drill and v.size > v.drill]
+    if rings and isinstance(ann_min, (int, float)) and min(rings) < ann_min - 1e-6:
+        out['annular_width'] = round(min(rings), 6)
+    hole_min = board_rules.get('min_hole_clearance')
+    if (isinstance(hole_min, (int, float)) and clearance is not None
+            and hole_min > clearance + 1e-9):
+        d = step_copper_to_hole(pcb, [], micro, hole_min, clearance, micro_pairs=True)
+        if d is not None:
+            out['hole_clearance'] = round(max(float(d), float(clearance)), 6)
+    return out
+
+
+def _rule_block(text: str, name: str):
+    """(start, end) of the `(rule "name" ...)` block in a .kicad_dru text,
+    paren-balanced (a quoted string may hold a paren), or None."""
+    m = re.search(r'\(rule\s+"' + re.escape(name) + r'"', text)
+    if not m:
+        return None
+    depth, i, quoted = 0, m.start(), False
+    while i < len(text):
+        c = text[i]
+        if quoted:
+            if c == '\\':
+                i += 1
+            elif c == '"':
+                quoted = False
+        elif c == '"':
+            quoted = True
+        elif c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return m.start(), i + 1
+        i += 1
+    return None
+
+
+def _floor_mm(v: float) -> float:
+    """``v`` rounded DOWN to 0.1 um, so the rule never sits above a via it
+    was measured from."""
+    import math
+    return math.floor(float(v) * 1e4 + 1e-6) / 1e4
+
+
+def merge_micro_via_rule(pcb_path: str, floors: dict):
+    """#1842: keep :data:`MICRO_VIA_RULE` in the `.kicad_dru` beside
+    ``pcb_path`` at ``floors`` (`micro_via_floors`): the board's own rules
+    file is kept and the rule merged into it -- replaced in place when it is
+    there, each value the lower of the two (a writeback only lowers),
+    appended otherwise, the file created with `(version 1)` when the board
+    has none. A run that changes nothing writes nothing, so a re-run never
+    adds a second copy. Returns the rule's values as written, or None when
+    the file was left as it was."""
+    if not floors or not pcb_path:
+        return None
+    dru = os.path.splitext(pcb_path)[0] + '.kicad_dru'
+    try:
+        with open(dru, encoding='utf-8', newline='') as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        text = ''
+    span = _rule_block(text, MICRO_VIA_RULE)
+    have = {}
+    if span:
+        for kind, mm in re.findall(r'\(constraint\s+(\w+)\s+\(min\s+([0-9.]+)\s*mm\s*\)',
+                                   text[span[0]:span[1]]):
+            if kind in MICRO_VIA_RULE_KINDS:
+                have[kind] = float(mm)
+    want = dict(have)
+    for kind, v in floors.items():
+        if kind in MICRO_VIA_RULE_KINDS:
+            v = _floor_mm(v)
+            want[kind] = min(want.get(kind, v), v)
+    if span and want == have:
+        return None
+    nl = '\r\n' if '\r\n' in text else '\n'
+    block = nl.join([f'(rule "{MICRO_VIA_RULE}"',
+                     f'\t(condition "{MICRO_VIA_CONDITION}")']
+                    + [f'\t(constraint {k} (min {want[k]:g}mm))'
+                       for k in MICRO_VIA_RULE_KINDS if k in want]) + ')'
+    if span:
+        text = text[:span[0]] + block + text[span[1]:]
+    elif text.strip():
+        text = text.rstrip() + nl + nl + block + nl
+    else:
+        text = '(version 1)' + nl + nl + block + nl
+    tmp = dru + '.tmp'
+    with open(tmp, 'w', encoding='utf-8', newline='') as fh:
+        fh.write(text)
+    os.replace(tmp, dru)
+    return want
+
+
+def write_micro_via_rule(pcb, pcb_path: str, board_rules, clearance,
+                         verbose=True):
+    """`micro_via_floors` of ``pcb`` merged into ``pcb_path``'s `.kicad_dru`
+    (`merge_micro_via_rule`), said when it changed: the ONE micro via rule
+    writer of both fronts (fix_project_for_output, and the GUI tabs through
+    gui_utils.held_hole_clearance_live). Returns what was written, or
+    None."""
+    floors = micro_via_floors(pcb, board_rules or {}, clearance)
+    if not floors:
+        return None
+    wrote = merge_micro_via_rule(pcb_path, floors)
+    if wrote and verbose:
+        what = ', '.join(f"{k} {v:g} mm (board {board_rules.get(MICRO_VIA_RULE_KINDS[k])} mm)"
+                         for k, v in wrote.items())
+        print(f"  Micro via rule (#1842): '{MICRO_VIA_RULE}' in "
+              f"{os.path.basename(os.path.splitext(pcb_path)[0] + '.kicad_dru')} "
+              f"holds the micro vias at {what}; the through vias keep the board's "
+              f"minimums")
+    return wrote
+
+
+def _micro_via_rule(output_pcb, board_rules, clearance, verbose):
+    """`write_micro_via_rule` for a board file, parsed only when it carries a
+    micro via. Best-effort: a board that cannot be read writes no rule."""
+    try:
+        with open(output_pcb, encoding='utf-8', errors='replace') as fh:
+            if '(via micro' not in fh.read():
+                return None
+        from kicad_parser import parse_kicad_pcb
+        return write_micro_via_rule(parse_kicad_pcb(output_pcb), output_pcb,
+                                    board_rules, clearance, verbose)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  warning: micro via rule not written ({e})")
+        return None
 
 
 def held_hole_clearance(held, clearance, step_min=None):
@@ -2832,6 +3013,7 @@ def step_hole_clearance(input_pcb, output_pcb, clearance, verbose=True, ledger=T
     if out is None:
         return None
     try:
+        # (#1842: a micro via's pairs are left out -- their rule's)
         step_min = step_copper_to_hole(out, segs, vias, held, clearance)
     except Exception as e:                                      # noqa: BLE001
         if verbose:
@@ -2990,6 +3172,10 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     if minima is None:
         minima = scan_board_minima(output_pcb)
     clr = clearance if clearance is not None else project_copper_clearance(proj)
+    # #1842: the board's micro vias are held by a rule of their own in the
+    # .kicad_dru (carried over just above), not by lowering the board-wide
+    # annular and copper-to-hole minimums the through vias are graded at
+    _micro_via_rule(output_pcb, _rules_before, clr, verbose)
     targets = compute_targets(clearance=clr, hole_clearance=hole_clearance,
                               hole_to_hole=hole_to_hole, edge_clearance=edge_clearance,
                               track_width=track_width, via_diameter=via_diameter,

@@ -130,7 +130,9 @@ REGISTRY = {
     ('py_router/bga_fanout/__init__.py', '_generate_bga_fanout_core'): (
         NO_LIFT, 'BGA fanout escapes; built for every fanned net at once, so '
                  'the old bake never fired here either'),
-    ('py_router/qfn_fanout/__init__.py', 'generate_qfn_fanout'): (
+    # #1842: the engine body; `generate_qfn_fanout` is now the wrapper that
+    # runs it on a via span
+    ('py_router/qfn_fanout/__init__.py', '_generate_qfn_fanout_all'): (
         NO_LIFT, 'QFN fanout; as for BGA fanout'),
     ('py_router/qfn_fanout/__init__.py', '_obstacles_for'): (
         NO_LIFT, 'QFN under-pad escape, one map per stub net-class floor '
