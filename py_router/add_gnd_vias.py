@@ -251,8 +251,11 @@ def add_gnd_vias_to_existing_board(
     _pad_rad = np.array([math.hypot(p.size_x, p.size_y) / 2.0 for p in _cu_pads],
                         dtype=np.float64)
 
-    from check_drc import FilledCopperGate, copper_keepout_gate
+    from check_drc import FilledCopperGate, HoleRuleGate, copper_keepout_gate
     _filled_gate = FilledCopperGate(pcb_data)
+    _hole_gate = HoleRuleGate(pcb_data, getattr(config, 'rules', None))   # #1853
+    if _hole_gate:
+        _hole_gate.watch(vias=new_gnd_vias)    # a later via sees their holes
     _ko_gate = copper_keepout_gate(pcb_data)
 
     def _exact_copper_clear(x_mm, y_mm, own_net):
@@ -263,6 +266,9 @@ def add_gnd_vias_to_existing_board(
                                    lambda sh: config.pair_clearance(own_net, sh.net_id, sh.layer))
         if _fs is not None:
             return (False, f"filled_graphic({_fs.layer})")
+        if _hole_gate and _hole_gate.via_why(x_mm, y_mm, config.via_size,
+                                             config.via_drill, own_net):
+            return (False, "hole_clearance_rule")
         if len(_seg_rows):
             with np.errstate(divide='ignore', invalid='ignore'):
                 t = np.clip(((x_mm - _seg_ax) * _seg_dx + (y_mm - _seg_ay) * _seg_dy)

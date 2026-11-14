@@ -691,6 +691,49 @@ itself inside it (check_drc accepts it as `edge-exempt-pad`; KiCad flags both). 
 rule stays in the rule file: the output project's `min_copper_edge_clearance`
 records what the step resolved before it.
 
+**Hole clearance rules (#1853).** A `.kicad_dru` `hole_clearance` rule holds the
+route step's copper off the HOLES of other nets, on both fronts, with no flag or
+control, and `check_drc.py` grades the same pairs (`hole_rule_grade`). KiCad
+measures it from the hole's wall, so it binds wherever it is wider than the ring or
+pad around the hole plus the copper clearance:
+
+- a routed track is kept the rule's distance from the hole of another net's via,
+  plated pad and unplated pad, on each layer the rule names;
+- a via the step adds keeps its own hole that far from other nets' tracks, vias
+  and pads, and its copper that far from their holes;
+- a via placed off the obstacle map (the rescue's pad escape, a layer-swap or
+  stub-switch via) is refused by `check_drc.hole_rule_refusal`, which runs the
+  grader over the board near it.
+
+The value is the last rule in the file whose condition and `(layer ...)` clause
+match the pair, read either way round, as KiCad decides it, for the copper as it
+is (a track, a new via, a pad); a hole's own net is exempt. One obstacle map serves
+every net a step routes, so a hole is held at the largest value the rules give any
+other net against it. A rule of severity `ignore` binds nothing, and a rule whose
+condition the tools do not read binds nothing either -- the rules before it still
+do -- and is named `NOT honoured` and left to the grade. A condition that names
+nets one by one costs build time: each named net is read on its own (a rule ORing
+200 net names added about half a minute to a 250-net board's map). The step
+prints `.kicad_dru rule 'x': hole_clearance min 0.254 mm: routed tracks and vias
+are kept that far from the holes of other nets' vias and pads`.
+
+The generators that test a via site by their own means ask the same grader:
+`bga_fanout.py` (dogbone and under-pad), `qfn_fanout.py`, `route_planes.py
+--add-gnd-vias` and the plane taps each refuse a site through
+`check_drc.HoleRuleGate` (the board's copper and holes indexed once, with the
+lists the generator lays copper into watched, so a site is graded against its
+own vias and tracks too) or `hole_rule_refusal`, reading the rules a step's
+`config.rules` holds (`check_drc.board_design_rules` for an engine with no
+config). Once the BGA and QFN engines are done, every track and via the call laid
+is graded with the grader, against the board and each other
+(`fanout_hole_rule`). Completion first, disclosed: the BGA escape escapes each
+ball that falls short again at the copper clearance that holds the rule at its
+via's ring, and a ball that rung leaves bare keeps its first escape, below the
+rule, as the last rung; the QFN fan-out keeps its escapes. What the copper still
+breaks is named per rule on the console and in `JSON_SUMMARY.design_rules.hole_rules`
+(the fanout tab lists it too) -- the key `design_rules.disclose_step_rules` gives a
+route step's own copper.
+
 **A rule file KiCad refuses.** One thing KiCad cannot load in a `.kicad_dru` makes
 it enforce NONE of the file's rules, with exit 0 and nothing printed (measured on
 kicad-cli 10.0.6). A condition does it with a function or property KiCad does not
@@ -1096,6 +1139,7 @@ These options are only available in `route_diff.py`. All nets passed to route_di
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--diff-chamfer-extra` | 1.5 | Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings) |
 | `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair |
+| `--diff-pair-intra-lane` | - | Measure each intra-matched pair between two pads (its lane) instead of in total copper: `auto` or `P_NET=REF.PAD:REF.PAD ...` (#1869) |
 | `--ac-couple-match` | false | End-to-end length-match AC-coupled pairs split by series DC-blocking caps (#196): the cap chain is found, the concatenated P path is matched against the N path, and the meanders go on whichever segment has room |
 
 `--track-width` is the pair's leg width here (see [Geometry Options](#geometry-options)).

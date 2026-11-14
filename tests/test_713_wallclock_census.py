@@ -230,6 +230,12 @@ REGISTRY = {
         'multipad_unconnected_to_route keys its cache of a board\'s jumper '
         'declarations on (path, os.path.getmtime) so a re-saved board is read '
         'afresh (#1405); the mtime decides only whether the file is re-read'),
+    'py_router/check_drc.py': (
+        'file_mtime',
+        'keys its memos of a board\'s sibling .kicad_dru / .kicad_pro on '
+        '(path, os.path.getmtime) so a re-saved file is read afresh (#1853 '
+        'board_design_rules, #1869 recorded lanes); the mtime decides only '
+        'whether the file is re-read'),
     'py_router/route_planes.py': (
         'file_mtime',
         'compares the output file st_mtime before/after to detect that a '

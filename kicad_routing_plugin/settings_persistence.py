@@ -218,6 +218,7 @@ def get_dialog_settings(dialog):
         'polarity_swap_nets_text': dialog.differential_tab.polarity_swap_nets_text.GetValue(),
         'gnd_via_check': dialog.differential_tab.gnd_via_check.GetValue(),
         'intra_match_check': dialog.differential_tab.intra_match_check.GetValue(),
+        'diff_pair_intra_lane': dialog.differential_tab.diff_pair_intra_lane.GetValue(),
         'ac_couple_check': dialog.differential_tab.ac_couple_check.GetValue(),
         'diff_hide_short': dialog.differential_tab.hide_short_check.GetValue(),
 
@@ -720,6 +721,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.gnd_via_check.SetValue(settings['gnd_via_check'])
     if 'intra_match_check' in settings:
         dialog.differential_tab.intra_match_check.SetValue(settings['intra_match_check'])
+    if 'diff_pair_intra_lane' in settings:
+        dialog.differential_tab.diff_pair_intra_lane.SetValue(
+            str(settings['diff_pair_intra_lane'] or ''))
     if 'ac_couple_check' in settings:
         dialog.differential_tab.ac_couple_check.SetValue(settings['ac_couple_check'])
     if 'diff_hide_short' in settings:

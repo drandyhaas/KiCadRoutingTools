@@ -22,7 +22,11 @@ Rows (in memory, F.Cu, 0.2 mm tracks):
   3. an exact duplicate segment is its whole length;
   4. a net over the segment limit is not searched (None);
   5. the pair record: `measure_pair_copper` adds `self_overlap_mm` for the
-     member that has it, and no key at all for a clean pair.
+     member that has it, and no key at all for a clean pair;
+  6. every overlap is recorded (`self_overlaps`, with its track width), but
+     the console line (`self_overlap_line`) names only one longer than twice
+     its track's width: the 0.85 mm hairpin on a 0.2 mm track is named, a
+     0.25 mm one is recorded and not printed.
 """
 import os
 import sys
@@ -104,7 +108,28 @@ def main():
     clean = [(0, 0.05, 2.6, 0.05)]
     rec = measure_pair_copper(board(clean + partner, nets=(1, 2)), [('X', pair)], res,
                               lambda _p: (0.2, 0.2)).get('X') or {}
-    ok(rec and 'self_overlap_mm' not in rec, "a clean pair carries no such key")
+    ok(rec and 'self_overlap_mm' not in rec and 'self_overlaps' not in rec,
+       "a clean pair carries no such key")
+
+    print("6. recorded always, printed past twice the width")
+    from diff_pair_custody import self_overlap_line
+    rec = measure_pair_copper(board(hairpin + partner, nets=(1, 2)), [('X', pair)], res,
+                              lambda _p: (0.2, 0.2)).get('X') or {}
+    rows = rec.get('self_overlaps') or []
+    ok(len(rows) == 1 and rows[0]['member'] == 'p' and rows[0]['width_mm'] == 0.2
+       and rows[0]['along_mm'] == 0.85, f"the overlap is recorded with its width: {rows}")
+    line = self_overlap_line('X', rec) or ''
+    ok(line.startswith('Self-overlap: X has copper laid along itself (P 0.8500 mm')
+       and 'the longest 0.8500 mm on a 0.2 mm track' in line,
+       f"0.85 mm on a 0.2 mm track is printed: {line}")
+    short_pin = [(0, 0.05, 2.55, 0.05), (2.55, 0.05, 2.6, 0.0), (2.6, 0.0, 2.3, 0.0),
+                 (2.3, 0.0, 1.55, -0.75)]
+    rec = measure_pair_copper(board(short_pin + partner, nets=(1, 2)), [('X', pair)], res,
+                              lambda _p: (0.2, 0.2)).get('X') or {}
+    ok(rec.get('self_overlap_mm') == {'p': 0.25, 'n': 0.0}
+       and [r['along_mm'] for r in rec.get('self_overlaps') or []] == [0.25],
+       f"0.25 mm on a 0.2 mm track is recorded: {rec.get('self_overlap_mm')}")
+    ok(self_overlap_line('X', rec) is None, "...and not printed")
     if FAILS:
         print(f"\nFAILED ({len(FAILS)}):")
         for f in FAILS:

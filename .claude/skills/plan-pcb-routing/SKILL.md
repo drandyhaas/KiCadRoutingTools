@@ -692,10 +692,11 @@ manifest routes.
     whole board. A via below a rule ships only when nothing else connected the
     net, so read a `BELOW it` as a place to look, not a run to fail.
   - A rule with a `hole_clearance` constraint (fab templates carry several)
-    prints `.kicad_dru rule '<name>': NOT honoured (hole_clearance ...)` the
-    same way: no routing step reads it (copper keeps off holes at the board's
-    `min_hole_clearance` or the fab floor), so no chain removes the line;
-    `check_drc` grades the board against the rule.
+    is routed to by the route step, which prints `.kicad_dru rule '<name>':
+    hole_clearance min X mm: routed tracks and vias are kept that far ...`.
+    One whose condition the tools do not read prints `NOT honoured` the same
+    way as above and binds nothing; `check_drc` grades the board against
+    every one.
   - An `edge_clearance` rule holds every step's tracks and vias with no flag
     (`edge_rules` in `JSON_SUMMARY`), and its `(layer ...)` clause scopes only a
     zone's gap: KiCad applies `(layer inner)` to an F.Cu track too.

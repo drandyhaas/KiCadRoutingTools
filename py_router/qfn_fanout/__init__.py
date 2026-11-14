@@ -107,6 +107,11 @@ LAST_SKIPPED_INTERIOR: List[str] = []
 # EMPTY when every via meets them. The CLI's JSON_SUMMARY `board_setup_vias`
 # and the fanout tab's completion message read it.
 LAST_BOARD_SETUP_VIAS: List[Dict] = []
+# #1853: the .kicad_dru hole_clearance rules the last generate_qfn_fanout
+# call's copper breaks, per rule (`check_drc.hole_rule_step_grade`), the
+# escape kept and disclosed. JSON_SUMMARY `design_rules.hole_rules` and the
+# fanout tab read it.
+LAST_HOLE_RULES: List[Dict] = []
 
 
 def pad_has_via_escape(pad, segments, vias, escape_layer, copper_layers) -> bool:
@@ -1312,8 +1317,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from check_drc import _point_on_board as _pt_on_board
     # #1682: a filled graphic's interior, on the nets this run erases from its
     # map too (a fanned net's shape is foreign to the part's other pins).
-    from check_drc import FilledCopperGate
+    from check_drc import FilledCopperGate, HoleRuleGate
     _filled_gate = FilledCopperGate(pcb_data)
+    _hole_gate = HoleRuleGate(pcb_data)        # #1853
 
     # #1568: each pad with the radius about its centre that holds all its
     # copper, so `via_clears` calls the grader only on a pad the via's
@@ -1377,6 +1383,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
         if _filled_gate and _filled_gate.via_hit(
                 vx, vy, via_size, net_id, lambda sh: _pc(net_id, sh.net_id)) is not None:
+            return False
+        if _hole_gate and _hole_gate.via_why(
+                vx, vy, via_size, via_drill, net_id,
+                # #1853: and this run's own vias and stubs so far
+                extra_vias=[{'x': qx, 'y': qy, 'size': via_size, 'drill': via_drill,
+                             'net_id': qn} for qx, qy, qn, _qpx, _qpy in placed],
+                extra_segments=[{'start': (qpx, qpy), 'end': (qx, qy), 'width': track_width,
+                                 'layer': layer, 'net_id': qn}
+                                for qx, qy, qn, qpx, qpy in placed
+                                if qpx is not None and (qpx, qpy) != (qx, qy)]):
             return False
         for fx, fy, fs, fn, fd in foreign_vias:
             # The DRILLS are an obstacle whatever the net: hole-to-hole is
@@ -2068,13 +2084,15 @@ def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
     (`via_span.only_span_copper`), so a pad or track on another layer blocks
     no via site. The escape layer must be one end of the span."""
     if not via_span:
-        return _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
+        return _hole_rule_pass(footprint, pcb_data,
+                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs))
     import inspect
     from types import SimpleNamespace
     from via_span import apply_span, only_span_copper, board_span
     span, kind = board_span(pcb_data, via_span, via_span_type)
     if kind is None:
-        return _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
+        return _hole_rule_pass(footprint, pcb_data,
+                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs))
     bound = inspect.signature(_generate_qfn_fanout_all).bind(
         footprint, pcb_data, *args, **kwargs)
     bound.apply_defaults()
@@ -2090,6 +2108,16 @@ def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
     n = apply_span(result[1], SimpleNamespace(via_span=list(span), via_span_type=kind))
     if n:
         print(f"  Via span: {n} fan-out via(s) written as {kind} {span[0]}-{span[-1]}")
+    return _hole_rule_pass(footprint, pcb_data, result)
+
+
+def _hole_rule_pass(footprint, pcb_data, result):
+    """#1853: the fan-out's own tracks and vias graded against the board's
+    .kicad_dru hole_clearance rules, against the board and each other; what
+    they break is named per rule and kept in LAST_HOLE_RULES, the escape
+    kept (fanout_hole_rule.hole_disclose). Free without such a rule."""
+    from fanout_hole_rule import hole_disclose
+    LAST_HOLE_RULES[:] = hole_disclose(pcb_data, result[0], result[1])
     return result
 
 
@@ -2199,6 +2227,7 @@ def _generate_qfn_fanout_all(footprint: Footprint,
     LAST_STUB_REPORT.clear()        # #1834: nor one with no surface fan
     LAST_POWER_STUBS_AT_WIDTH.clear()   # #1743
     LAST_BOARD_SETUP_VIAS.clear()   # #1775
+    LAST_HOLE_RULES.clear()         # #1853
     _RULES_SAID.clear()             # #1565: said once per call
     # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
     # returns early on several paths that never reach `_underpad_via_escape`
@@ -3659,6 +3688,8 @@ def main():
     _dr857 = narrowed_summary()
     if _dr857 is not None:
         summary['design_rules'] = _dr857
+    if LAST_HOLE_RULES:        # #1853: copper kept below its hole_clearance rule
+        summary.setdefault('design_rules', {})['hole_rules'] = list(LAST_HOLE_RULES)
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
     return finish_design_rules(args, 0)
 
