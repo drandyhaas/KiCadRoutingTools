@@ -402,8 +402,9 @@ def apply_via_protection(pcb_via, tenting_attrs):
 
 def live_via_is_micro(via) -> bool:
     """A pcbnew PCB_VIA typed micro (#1842): the project writeback leaves it
-    out of the via diameter, via drill and smallest-hole minimums, as the
-    file-side `fix_kicad_drc_settings.board_size_values` does."""
+    out of the via diameter, via drill, annular ring and smallest-hole
+    minimums, as the file-side `fix_kicad_drc_settings.board_size_values`
+    does."""
     try:
         from kicad_parser import pcbnew_via_type
         return pcbnew_via_type(via) == 'micro'
@@ -831,15 +832,16 @@ def board_minima_from_live(board):
                     except Exception:
                         w = pcbnew.ToMM(t.GetWidth())
                     d = pcbnew.ToMM(t.GetDrillValue())
-                    # #1842: a micro via is graded at the micro via minimums;
-                    # only its ring is a statement about the board's
+                    # #1842: a micro via is graded at the micro via minimums,
+                    # and its ring at the micro via rule the step writes
+                    # (fix_kicad_drc_settings.micro_via_floors)
                     _micro = live_via_is_micro(t)
                     if w and not _micro:
                         via_sizes.append(w)
                     if d and not _micro:
                         via_drills.append(d)
                         holes.append(d)
-                    if w and d and w > d:
+                    if w and d and w > d and not _micro:
                         annular.append((w - d) / 2.0)
                 else:
                     w = pcbnew.ToMM(t.GetWidth())
@@ -991,6 +993,65 @@ def persist_live_tool_records(board, same_net_pad_clearance=None):
         pass
 
 
+def _live_step_board(pcb_data, results_data):
+    """``(board, segs, vias)``: the board the step's copper was drawn on --
+    the routed PCBData without the copper this step removed, as a namespace
+    the copper-to-hole census reads -- and the copper the step drew."""
+    segs, vias = [], []
+    for result in results_data.get('results', []):
+        segs.extend(result.get('new_segments', []))
+        vias.extend(result.get('new_vias', []))
+    segs.extend(results_data.get('all_swap_segments', []))
+    vias.extend(results_data.get('all_swap_vias', []))
+    from types import SimpleNamespace
+
+    def _sk(s):
+        a = (round(s.start_x, 4), round(s.start_y, 4))
+        b = (round(s.end_x, 4), round(s.end_y, 4))
+        return (min(a, b), max(a, b), s.layer, s.net_id)
+
+    def _vk(v):
+        return (round(v.x, 4), round(v.y, 4), v.net_id)
+    _gone_s = {_sk(s) for s in results_data.get('segments_to_remove') or ()}
+    _gone_v = {_vk(v) for v in results_data.get('vias_to_remove') or ()}
+    pcb = SimpleNamespace(
+        segments=[s for s in pcb_data.segments if _sk(s) not in _gone_s],
+        vias=[v for v in pcb_data.vias if _vk(v) not in _gone_v],
+        footprints=pcb_data.footprints,
+        board_info=pcb_data.board_info)
+    return pcb, segs, vias
+
+
+def live_micro_via_rule(pcb_data, board, results_data, clearance):
+    """#1842: the GUI twin of fix_project_for_output's micro via rule: the
+    micro vias of the board as this step leaves it (the routed PCBData and
+    the copper the step drew) held by `fix_kicad_drc_settings.
+    MICRO_VIA_RULE` in the `.kicad_dru` beside the board file, against the
+    minimums the live board declares before this step's writeback --
+    `write_micro_via_rule`, the writer both fronts call. KiCad reads the
+    rules file when its DRC runs. A board with no file writes none. Every
+    tab's writeback calls it, under the same "Fix DRC settings" gate the
+    CLI's --no-fix-drc-settings is."""
+    try:
+        path = board.GetFileName() or ''
+        if not path:
+            return None
+        from fix_kicad_drc_settings import live_declared_rules, write_micro_via_rule
+        pcb, segs, vias = _live_step_board(pcb_data, results_data)
+        if not any(getattr(v, 'via_type', None) == 'micro' for v in list(pcb.vias) + vias):
+            return None
+        from types import SimpleNamespace
+        after = SimpleNamespace(segments=list(pcb.segments) + segs,
+                                vias=list(pcb.vias) + vias,
+                                footprints=pcb.footprints, board_info=pcb.board_info)
+        rules = live_declared_rules(board, ('min_via_annular_width',
+                                            'min_hole_clearance')) or {}
+        return write_micro_via_rule(after, path, rules, clearance)
+    except Exception as e:                                  # noqa: BLE001
+        print(f"(micro via rule not written: {e})")
+        return None
+
+
 def held_hole_clearance_live(pcb_data, board, results_data, clearance):
     """The copper-to-hole floor to write for this step (#1369): the
     board's declared hole clearance the engine held
@@ -999,7 +1060,8 @@ def held_hole_clearance_live(pcb_data, board, results_data, clearance):
     (``fix_kicad_drc_settings.step_copper_to_hole``) -- the GUI twin of
     route_diff.py's ``step_hole_clearance``, shared by the differential
     and route tabs (#1493). None (write the copper clearance, as before)
-    when the board declares none."""
+    when the board declares none. The micro vias' pairs are left out: they
+    are held by the board's micro via rule (`live_micro_via_rule`, #1842)."""
     try:
         from obstacle_map import declared_hole_clearance
         from fix_kicad_drc_settings import (step_copper_to_hole,
@@ -1008,30 +1070,8 @@ def held_hole_clearance_live(pcb_data, board, results_data, clearance):
             pcb_data, board.GetFileName() or None)
         if not held or clearance is None or held <= clearance:
             return None
-        segs, vias = [], []
-        for result in results_data.get('results', []):
-            segs.extend(result.get('new_segments', []))
-            vias.extend(result.get('new_vias', []))
-        segs.extend(results_data.get('all_swap_segments', []))
-        vias.extend(results_data.get('all_swap_vias', []))
-        # The board the copper was drawn on: the routed PCBData without
-        # the copper this step removed.
-        from types import SimpleNamespace
-
-        def _sk(s):
-            a = (round(s.start_x, 4), round(s.start_y, 4))
-            b = (round(s.end_x, 4), round(s.end_y, 4))
-            return (min(a, b), max(a, b), s.layer, s.net_id)
-
-        def _vk(v):
-            return (round(v.x, 4), round(v.y, 4), v.net_id)
-        _gone_s = {_sk(s) for s in results_data.get('segments_to_remove') or ()}
-        _gone_v = {_vk(v) for v in results_data.get('vias_to_remove') or ()}
-        pcb = SimpleNamespace(
-            segments=[s for s in pcb_data.segments if _sk(s) not in _gone_s],
-            vias=[v for v in pcb_data.vias if _vk(v) not in _gone_v],
-            footprints=pcb_data.footprints,
-            board_info=pcb_data.board_info)
+        pcb, segs, vias = _live_step_board(pcb_data, results_data)
+        # (#1842: a micro via's pairs are left out -- their rule's)
         step_min = step_copper_to_hole(pcb, segs, vias, held, clearance)
         v = held_hole_clearance(held, clearance, step_min)
         # #1493: a floor written under the one held is ledgered, as the CLI's
@@ -1047,20 +1087,34 @@ def held_hole_clearance_live(pcb_data, board, results_data, clearance):
         return None
 
 
-def held_hole_clearance_dicts(pcb_data, board, tracks, vias, clearance):
-    """:func:`held_hole_clearance_live` for a tab whose copper is the
-    engine's track and via DICTS (the fanout tab, #1568; the Planes tab,
-    #1577) rather than routing results."""
+def _dict_results(tracks, vias):
+    """An engine's track and via DICTS as the results_data the live
+    helpers read."""
     from kicad_parser import Segment, Via
     segs = [Segment(start_x=t['start'][0], start_y=t['start'][1],
                     end_x=t['end'][0], end_y=t['end'][1], width=t['width'],
                     layer=t['layer'], net_id=t['net_id']) for t in tracks]
     new_vias = [Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
                     layers=list(v.get('layers') or ['F.Cu', 'B.Cu']),
-                    net_id=v['net_id']) for v in vias]
-    return held_hole_clearance_live(
-        pcb_data, board,
-        {'results': [{'new_segments': segs, 'new_vias': new_vias}]}, clearance)
+                    net_id=v['net_id'],
+                    # #1842: a via of a span keeps its type (a micro via's
+                    # pairs are its rule's, micro_via_floors)
+                    via_type=v.get('via_type') or 'through') for v in vias]
+    return {'results': [{'new_segments': segs, 'new_vias': new_vias}]}
+
+
+def live_micro_via_rule_dicts(pcb_data, board, tracks, vias, clearance):
+    """:func:`live_micro_via_rule` for a tab whose copper is the engine's
+    track and via DICTS (the fanout and Planes tabs)."""
+    return live_micro_via_rule(pcb_data, board, _dict_results(tracks, vias), clearance)
+
+
+def held_hole_clearance_dicts(pcb_data, board, tracks, vias, clearance):
+    """:func:`held_hole_clearance_live` for a tab whose copper is the
+    engine's track and via DICTS (the fanout tab, #1568; the Planes tab,
+    #1577) rather than routing results."""
+    return held_hole_clearance_live(pcb_data, board, _dict_results(tracks, vias),
+                                    clearance)
 
 
 def update_live_drc_floors(board, *, clearance=None, track_width=None,
@@ -1151,19 +1205,20 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                     except Exception:
                         w = t.GetWidth()
                     d = t.GetDrillValue()
-                    # #1842: a micro via is no statement about the board's via
-                    # or drilled-hole minimums; its ring still is
+                    # #1842: a micro via is no statement about the board's via,
+                    # drilled-hole or annular minimums: its ring is held by the
+                    # micro via rule the step writes (micro_via_floors)
                     _micro = live_via_is_micro(t)
                     if not _micro:
                         min_via = w if min_via is None else min(min_via, w)
                         min_drill = d if min_drill is None else min(min_drill, d)
-                    ann = (w - d) // 2
-                    min_ann = ann if min_ann is None else min(min_ann, ann)
+                        ann = (w - d) // 2
+                        min_ann = ann if min_ann is None else min(min_ann, ann)
                     if not _micro:
                         _objs['min_via_diameter'].append(w / 1e6)
                     if d and not _micro:
                         _objs['min_via_drill'].append(d / 1e6)
-                    if w > d:
+                    if w > d and not _micro:
                         _objs['min_via_annular_width'].append((w - d) / 2e6)
                 else:
                     w = t.GetWidth()
