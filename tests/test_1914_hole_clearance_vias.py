@@ -26,14 +26,15 @@ Synthetic (always runs), all at --clearance 0.1 --hole-clearance 0.25:
 
 ROUTER (was: the descent ladder shipped a 0.45/0.2 via whose 0.125 ring left
 other-net copper 0.225 off its hole, and said nothing): the ladder PREFERS the
-ring -- escalation_rungs puts every rung raised to drill + 2*(hole_clearance -
-clearance) first and keeps the tier's own rungs as the last resort -- and what
+ring -- escalation_rungs puts each tier rung raised to drill + 2*(hole_clearance
+- clearance) just before the rung itself, so the ring never forces a fab-tier
+step -- and what
 ships below the ring is named in the design_rules ledger. Unit checks:
   * a fresh import with nothing installed walks the ladder (the pair's global
     is defined at module level; it once raised NameError);
   * no pair installed -> the tier's ladder, unchanged and untagged;
   * pair (0.25, 0.1) -> standard is 0.5/0.2 first, then 0.45/0.2;
-  * tier auto -> the ring-holding rungs first, then the tier's rungs, each
+  * tier auto -> each tier rung's ring-holding version just before it, each
     tagged with the tier rung it came from, so a nominal via is never read
     as a fab-tier escalation (rung_tier, ladder_escalates);
   * declared hole clearance 0 -> ring 0.0, the tier's ladder (KiCad "no check");
@@ -45,7 +46,8 @@ ships below the ring is named in the design_rules ledger. Unit checks:
     KiCad's factory 0.25 when nothing is declared, 0 when 0 is declared;
   * the swap shrink loop ships (0.5, 0.2) with the pair installed where that
     fits, (0.5, 0.3) without it, and falls back to (0.45, 0.3) where no
-    ring-holding via fits (completion first);
+    ring-holding via fits (completion first) -- never to the advanced 0.15
+    drill for the ring's sake;
   * the census rows: only a via under its request AND under the ring is
     named, once per site, and the end-of-run line says so.
 
@@ -257,13 +259,11 @@ def router_units(tmp):
            and not fab_tiers.ladder_escalates(std, 0.45, 0.2))
         fab_tiers.set_default_fab_tier('auto')
         auto = fab_tiers.escalation_rungs(4)
-        held = [(r['via_diameter'] - r['via_drill']) / 2.0 >= 0.15 - 1e-9 for r in auto]
-        first_short = held.index(False) if False in held else len(held)
-        ok('tier auto: every ring-holding rung comes before every short one',
-           first_short > 0 and not any(held[first_short:]), _pairs(auto))
-        ok('tier auto: the tier\'s own rungs are all still there, last',
-           _pairs(auto)[first_short:] == [(0.45, 0.2), (0.3, 0.15), (0.25, 0.15)],
-           _pairs(auto))
+        ok('tier auto: each tier rung\'s ring-holding version just before it',
+           _pairs(auto) == [(0.5, 0.2), (0.45, 0.2), (0.45, 0.15), (0.3, 0.15),
+                            (0.45, 0.15), (0.25, 0.15)]
+           and [fab_tiers.rung_tier(auto, i) for i in range(len(auto))]
+           == [0, 0, 1, 1, 2, 2], _pairs(auto))
         ok('tier auto: the nominal\'s vias are not escalations, the rest are',
            [fab_tiers.ladder_escalates(auto, d, h) for d, h in
             [(0.5, 0.2), (0.45, 0.2), (0.45, 0.15), (0.3, 0.15)]]

@@ -604,8 +604,9 @@ via's drill at the board's hole clearance, so a via whose ring is narrower than
 `hole clearance - clearance` lets copper kept at the clearance off its copper
 sit too close to its hole (a 0.45/0.2 via rings 0.125; at 0.1 clearance that
 copper is 0.225 from the hole, under KiCad's 0.25). Every descent ladder
-therefore tries each rung raised to hold that ring first, and keeps the tier's
-own rungs as the last resort: completion first, and each via that ships smaller
+therefore tries each tier rung raised to hold that ring just before the rung
+itself, so the ring is preferred within a tier and never forces a step to a
+smaller (costlier) tier: completion first, and each via that ships smaller
 than its net asked and below the ring is a `hole_clearance` row in
 `JSON_SUMMARY.design_rules` and the `Design rules` line. The hole clearance is
 the board's declared `min_hole_clearance` (the live board's, on the GUI), raised

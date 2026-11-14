@@ -849,27 +849,28 @@ TIER_RUNG_KEY = 'tier_rung'
 
 def _prefer_hole_ring(rungs, ring):
     """#1914: the ladder ``rungs`` with the copper-to-hole ring PREFERRED, not
-    required: every rung raised to hold ``ring`` round its drill first, then
-    the tier's own rungs as the last resort (those already holding it are
-    dropped as duplicates). Completion first: a via only the last resort
-    fits still ships, and the run's census of its shipped vias names it
-    (:func:`replace_hole_ring_rows`).
+    required: each tier rung raised to hold ``ring`` round its drill comes
+    immediately before the rung itself (duplicates dropped, so a rung that
+    already holds the ring appears once). The ring is preferred WITHIN a tier
+    rung and never causes a fab-tier escalation by itself: a smaller tier is
+    tried only after the rung above it, raised and as it is, did not fit.
+    Completion first: a via only an unraised rung fits still ships, and the
+    run's census of its shipped vias names it (:func:`replace_hole_ring_rows`).
 
     Each rung carries :data:`TIER_RUNG_KEY`, its index in ``rungs``, so a
     site that tells a fab-tier escalation by the rung (:func:`rung_tier`,
-    :func:`ladder_escalates`) still reads the nominal rung's raised and
-    unraised vias as the nominal, not as an escalation."""
+    :func:`ladder_escalates`) reads the nominal rung's raised and unraised
+    vias as the nominal, not as an escalation."""
     def _key(r):
         return {k: v for k, v in r.items() if k != TIER_RUNG_KEY}
-    tagged = [dict(r, **{TIER_RUNG_KEY: i}) for i, r in enumerate(rungs)]
-    raised = []
-    for r in tagged:
-        rr = _apply_hole_ring([r], ring)[0]
-        if raised and _key(rr) == _key(raised[-1]):
-            continue
-        raised.append(rr)
-    seen = [_key(r) for r in raised]
-    return raised + [r for r in tagged if _key(r) not in seen]
+    out, seen = [], []
+    for i, r in enumerate(rungs):
+        tagged = dict(r, **{TIER_RUNG_KEY: i})
+        for cand in (_apply_hole_ring([tagged], ring)[0], tagged):
+            if _key(cand) not in seen:
+                seen.append(_key(cand))
+                out.append(cand)
+    return out
 
 
 def rung_tier(ladder, i):
@@ -1057,10 +1058,10 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
                  else _first_choice_meets(rungs, want))
     # #1914: a descended via PREFERS a ring that holds the copper-to-hole
     # floor, so another net's copper, kept at the run's clearance off the
-    # via's copper, sits at the hole clearance off its hole. The ring-holding
-    # rungs come first and the tier's own rungs stay as the last resort
-    # (completion first; what ships below the ring is disclosed by the run's
-    # via census, replace_hole_ring_rows). Under every policy that descends
+    # via's copper, sits at the hole clearance off its hole. Each tier rung's
+    # ring-holding version comes just before the rung itself, so the ring
+    # never forces a fab-tier step (completion first; what ships below the
+    # ring is disclosed by the run's via census, replace_hole_ring_rows). Under every policy that descends
     # at all (``off`` returned [] above). It is a KiCad DRC floor, not a
     # board minimum the writeback lowers, so it is not a FLOOR_KEYS floor and
     # not in _BOARD_FLOORS.
