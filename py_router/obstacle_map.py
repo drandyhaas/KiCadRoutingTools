@@ -2596,6 +2596,58 @@ def _hole_stamp_widths(config: GridRouteConfig,
     return groups
 
 
+def stamp_hole_rule_pad_holes(obstacles, pads, config: GridRouteConfig,
+                              extra_clearance: float = 0.0) -> None:
+    """#1853: hold copper off the HOLES of ``pads`` -- plated or not -- at the
+    board's `.kicad_dru` hole_clearance rules (`config.hole_rules`): track
+    cells on each layer the rule binds at the rule's value, and via cells
+    where a new via's copper (hole_r + value + via_size/2 from the hole's
+    centre, the #1038 idiom) reaches past the hole-to-hole stamp. A plated
+    hole's only other keep-out is its pad's copper, which a rule wider than
+    the ring plus the copper clearance reaches past.
+
+    ``obstacles`` is anything with `add_blocked_cells_batch` /
+    `add_blocked_vias_batch`: the base map (pads of the nets a step does not
+    route), a routed net's map (`add_net_pads_as_obstacles`), or the per-net
+    cache's collector (`precompute_net_obstacles`). No-op with no such rule,
+    so a board without one builds the same map."""
+    hr = getattr(config, 'hole_rules', None)
+    if hr is None:
+        return
+    by_layer: Dict[tuple, list] = {}
+    by_via: Dict[float, list] = {}
+    for pad in pads:
+        if not (getattr(pad, 'drill', 0) or 0) > 0:
+            continue
+        circles = None
+        for li, layer in enumerate(config.layers):
+            v = hr.pad_value(pad, layer)
+            if v is None:
+                continue
+            if circles is None:
+                circles = pad_drill_circles(pad)
+            by_layer.setdefault((li, v), []).extend(circles)
+        # a new via's copper, read as a via, on the layers it is on
+        vals = [hr.pad_value(pad, l, 'via') for l in hr.new_via_layers]
+        vals = [x for x in vals if x is not None]
+        if vals:
+            c = max(vals) + (config.via_size - config.via_drill) / 2.0
+            if c > config.hole_to_hole_clearance + 1e-9:
+                if circles is None:
+                    circles = pad_drill_circles(pad)
+                by_via.setdefault(round(c, 9), []).extend(circles)
+    if not by_layer and not by_via:
+        return
+    widths = _hole_stamp_widths(config, extra_clearance)
+    for (li, v), holes in by_layer.items():
+        for (stamp_w, stamp_ex), stamp_layers in widths.items():
+            if li in stamp_layers:
+                block_track_cells_near_drills(obstacles, holes, stamp_w,
+                                              v + stamp_ex, config.grid_step, [li])
+    for c, holes in by_via.items():
+        block_via_cells_near_drills(obstacles, holes, config.via_drill, c, config.grid_step)
+
+
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, nets_to_route_set: set,
                               extra_clearance: float = 0.0):
@@ -2693,45 +2745,16 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             block_track_cells_near_drills(obstacles, npth_holes, _stamp_w,
                                           npth_clr, config.grid_step, _stamp_layers)
 
-    # #1853: a .kicad_dru hole_clearance rule holds a track off the HOLE of
-    # another net's pad -- plated or not -- at the rule's value, on the layers
-    # the rule names. A plated hole's only keep-out was its pad's copper, which
-    # a rule wider than the ring plus the copper clearance reaches past. Per
-    # layer, and only where a rule binds, so a board with no such rule builds
-    # the same map. (A via's hole is held where its track keep-out is
-    # computed, `_via_track_expansion_per_layer`.)
-    _hr1853 = getattr(config, 'hole_rules', None)
-    if _hr1853 is not None:
-        _by1853: Dict[tuple, list] = {}
-        for _nid, _pads in pcb_data.pads_by_net.items():
-            if _nid in nets_to_route_set:
-                continue    # a net reaches its own holes; KiCad exempts them
-            for _pad in _pads:
-                if not (getattr(_pad, 'drill', 0) or 0) > 0:
-                    continue
-                _circles = None
-                for _li, _layer in enumerate(config.layers):
-                    _v = _hr1853.pad_value(_pad, _layer)
-                    if _v is None:
-                        continue
-                    if _circles is None:
-                        _circles = pad_drill_circles(_pad)
-                    _by1853.setdefault((_li, _v), []).extend(_circles)
-        for (_li, _v), _holes in _by1853.items():
-            for (_stamp_w, _stamp_ex), _stamp_layers in _hole_widths.items():
-                if _li in _stamp_layers:
-                    block_track_cells_near_drills(obstacles, _holes, _stamp_w,
-                                                  _v + _stamp_ex, config.grid_step, [_li])
-        # ... and a new via's COPPER off the same holes (the #1038 idiom:
-        # hole_r + value + via_size/2), where that reaches past the h2h stamp
-        _via1853: Dict[float, list] = {}
-        for (_li, _v), _holes in _by1853.items():
-            _c = _v + (config.via_size - config.via_drill) / 2.0
-            if _c > config.hole_to_hole_clearance + 1e-9:
-                _via1853.setdefault(round(_c, 9), []).extend(_holes)
-        for _c, _holes in _via1853.items():
-            block_via_cells_near_drills(obstacles, _holes, config.via_drill,
-                                        _c, config.grid_step)
+    # #1853: a .kicad_dru hole_clearance rule holds copper off the HOLE of
+    # another net's pad (`stamp_hole_rule_pad_holes`). The pads of the nets
+    # this step routes are stamped with the rest of their net's keep-outs
+    # (the per-net cache and `add_net_pads_as_obstacles`), so that a net
+    # still reaches its own holes while every other net is held off them.
+    if getattr(config, 'hole_rules', None) is not None:
+        stamp_hole_rule_pad_holes(
+            obstacles, [p for nid, ps in pcb_data.pads_by_net.items()
+                        if nid not in nets_to_route_set for p in ps],
+            config, extra_clearance)
 
     # #1753: a net-less pad whose copper EQUALS its drill has no ring, so its
     # copper clearance is the whole distance to the hole and KiCad's
@@ -3085,6 +3108,12 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
             J11's 4mm connector pad). When None, every own pad is exemptable
             (the old behavior, correct for a single-terminal corridor set).
     """
+    # #1842: under a via span an own pad with no copper on the span's layers
+    # (and no drill) blocks no via site of the span, as a foreign one does.
+    # (The own STUBS need no view: a stub off the span is off config.layers.)
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
 
@@ -3157,6 +3186,9 @@ def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # #1491: by the pad's own type (a scoped rule may bind pads alone)
         _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
                           clearance_override=config.pad_obstacle_clearance(pad))
+    # #1853: and off their holes at a hole_clearance rule, as the base map
+    # holds the pads of the nets a step does not route
+    stamp_hole_rule_pad_holes(obstacles, pads, config, extra_clearance)
     # #1226: into each per-net via rung too, at that rung's via.
     _stamp_rungs_at_own_via(obstacles, config, lambda s, c: add_net_pads_as_obstacles(
         s, pcb_data, net_id, c, extra_clearance), populated_only=True)
@@ -4927,7 +4959,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         clr_groups = _clr_groups(expanded_layers)
         on_copper = any(l.endswith('.Cu') for l in expanded_layers)
         via_margin = (config.via_size / 2 + _via_clr(expanded_layers) + extra_clearance
-                      + config.via_hole_extra(_via_clr(expanded_layers)))
+                      + config.via_hole_extra(_via_clr(expanded_layers), pad=pad))
 
         def _emit(poly, m, via_pass, layer_idxs=None):
             gx_lo, gy_lo, nx, ny, inside, edist = _rasterize_polygon_box(poly, coord, m)
@@ -5003,7 +5035,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # Via blocking near pads - block vias if pad is on any copper layer
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         via_margin = (config.via_size / 2 + _via_clr(expanded_layers) + extra_clearance
-                      + config.via_hole_extra(_via_clr(expanded_layers)))
+                      + config.via_hole_extra(_via_clr(expanded_layers), pad=pad))
         via_cells = pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
                                             config.grid_step, corner_radius, corner_buffer,
                                             off_x, off_y, rotation_deg=pad.rect_rotation)
@@ -5049,7 +5081,7 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
         corner_radius = 0
     corner_buffer = coord.grid_step * 0.75 if extra_clearance > 0 else None
     via_margin = (config.via_size / 2 + clearance + extra_clearance
-                  + config.via_hole_extra(clearance))
+                  + config.via_hole_extra(clearance, pad=pad))
     return pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
                                    config.grid_step, corner_radius, corner_buffer,
                                    off_x, off_y, rotation_deg=pad.rect_rotation)

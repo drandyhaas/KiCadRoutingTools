@@ -183,7 +183,9 @@ the routing pipeline applies both so the model and the output file agree.
 > (check_connected, KiCad, the length graph since #1705). So
 > `trim_dangles_past_body_anchor` takes a crossing on a segment's body as an
 > anchor, beside a via and a tee, and cuts a dead-end tail past it back to the
-> crossing (its 3-width nib floor and connectivity gate unchanged); and
+> crossing (its nib floor and connectivity gate unchanged; the nib is a tail
+whose end an anchor's copper still touches, #1870, where it was 3 track
+widths); and
 > `snap_stub_gaps` skips a target trace the stub's own segment already crosses,
 > instead of laying a connector back over the tail.
 

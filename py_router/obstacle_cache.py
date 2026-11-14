@@ -827,6 +827,21 @@ def _compose_area_cache(area, pcb_data, net_id, config, extra_clearance,
     return data
 
 
+class _CellCollector:
+    """A map stand-in that collects a stamp's batches into a per-net cache's
+    cell lists (#1853), so a stamp written against the map serves both."""
+    __slots__ = ('cells', 'vias')
+
+    def __init__(self, cells: list, vias: list):
+        self.cells, self.vias = cells, vias
+
+    def add_blocked_cells_batch(self, cells):
+        self.cells.append(np.asarray(cells, dtype=np.int32).reshape(-1, 3))
+
+    def add_blocked_vias_batch(self, vias):
+        self.vias.append(np.asarray(vias, dtype=np.int32).reshape(-1, 2))
+
+
 def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               extra_clearance: float = 0.0,
                               diagonal_margin: float = defaults.DIAGONAL_MARGIN,
@@ -1048,6 +1063,12 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
                                 blocked_cells_set, blocked_vias_set,
                                 obs_clearance=(obs_clearance if config.scoped_clearance is None
                                                else config.pad_obstacle_clearance(pad)))
+    if getattr(config, 'hole_rules', None) is not None:
+        # #1853: the pads' HOLES at a hole_clearance rule, as the base map
+        # holds the pads of the nets a step does not route
+        from obstacle_map import stamp_hole_rule_pad_holes
+        stamp_hole_rule_pad_holes(_CellCollector(blocked_cells_set, blocked_vias_set),
+                                  pads, config, extra_clearance)
 
     # Concatenate and deduplicate (the Rust map refcounts batch adds, so
     # each cell must appear once per net - same as the old set semantics)
@@ -1286,7 +1307,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         clr_groups = _clr_groups(expanded_layers)
         on_copper = any(l.endswith('.Cu') for l in expanded_layers)
         via_margin = (config.via_size / 2 + _via_clr(expanded_layers) + config.grid_step / 2
-                      + config.via_hole_extra(_via_clr(expanded_layers)))
+                      + config.via_hole_extra(_via_clr(expanded_layers), pad=pad))
         for poly in pad_polys:
             for (g_clr, g_ex), g_idxs in clr_groups.items():
                 margin = g_clr + g_ex
@@ -1340,7 +1361,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         # Add half grid step buffer to account for grid quantization errors
         via_margin = (config.via_size / 2 + _via_clr(expanded_layers) + config.grid_step / 2
-                      + config.via_hole_extra(_via_clr(expanded_layers)))
+                      + config.via_hole_extra(_via_clr(expanded_layers), pad=pad))
         blocked_vias.append(pad_blocked_cells_array(gx, gy, half_width, half_height,
                                                     via_margin, config.grid_step, corner_radius,
                                                     off_x=off_x, off_y=off_y,

@@ -2062,7 +2062,41 @@ def _widen_power_stub_legs(stubs, power_w, track_width, clearance, seg_grazes,
     return {k: tuple(v) for k, v in cur.items()}
 
 
-def generate_qfn_fanout(footprint: Footprint,
+def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
+                        via_span: Optional[List[str]] = None,
+                        via_span_type: Optional[str] = None, **kwargs):
+    """`_generate_qfn_fanout_all`, on a via span when one is given (#1842):
+    the via drops join exactly that run of neighbouring copper layers, and
+    for the call the board carries only the copper the span has
+    (`via_span.only_span_copper`), so a pad or track on another layer blocks
+    no via site. The escape layer must be one end of the span."""
+    if not via_span:
+        return _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
+    import inspect
+    from types import SimpleNamespace
+    from via_span import apply_span, only_span_copper, board_span
+    span, kind = board_span(pcb_data, via_span, via_span_type)
+    if kind is None:
+        return _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
+    bound = inspect.signature(_generate_qfn_fanout_all).bind(
+        footprint, pcb_data, *args, **kwargs)
+    bound.apply_defaults()
+    layer = bound.arguments.get('layer') or footprint.layer
+    if layer not in (span[0], span[-1]):
+        from via_span import SpanError
+        raise SpanError(f"--via-span {span[0]} {span[-1]}: the escape layer {layer} of "
+                         f"{footprint.reference} is not an end of the span")
+    print(f"Via span (#1842): {kind} vias {span[0]}-{span[-1]}; only copper on "
+          f"{', '.join(span)} (and drilled pads) blocks a via site")
+    with only_span_copper(pcb_data, span, kind):
+        result = _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
+    n = apply_span(result[1], SimpleNamespace(via_span=list(span), via_span_type=kind))
+    if n:
+        print(f"  Via span: {n} fan-out via(s) written as {kind} {span[0]}-{span[-1]}")
+    return result
+
+
+def _generate_qfn_fanout_all(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
                         layer: str = "F.Cu",
@@ -3188,6 +3222,7 @@ def main():
                              "With --nets either method via-drops the interior pads the filter "
                              "selects (stub: after its fan, #1717); a run without --nets never "
                              "via-drops the exposed/thermal pad.")
+    __import__('via_span').add_cli_flags(parser, "Drop the escape vias")
     parser.add_argument('--via-size', type=float, default=None,
                         help="Underpad escape via outer diameter (mm, default the board's "
                              "Default net-class via, else 0.45)")
@@ -3281,6 +3316,9 @@ def main():
         args.track_width = args.width
     # #1795: a via nobody asked for starts at the board's Default net-class via,
     # as on route.py and the GUI's QFN panel; #1676: raised to its .kicad_dru rules
+    # #1842: --via-span against the board's own stack
+    _span_layers, _span_type, _micro_span = __import__('via_span').resolve_cli(
+        parser, args, args.pcb)
     _vs_explicit = args.via_size is not None or args.via_drill is not None
     from list_nets import board_default_netclass_param
     for _pname, _nckey, _fallback in (('via_size', 'via_diameter', 0.45),
@@ -3305,8 +3343,8 @@ def main():
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
-        via_size=getattr(args, 'via_size', None),
-        via_drill=getattr(args, 'via_drill', None),
+        via_size=None if _micro_span else getattr(args, 'via_size', None),
+        via_drill=None if _micro_span else getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
         # #513 item 15: the resolved edge keep-out must be manufacturable too
         # (a board declaring 0.025mm is pinned up to the 0.2 fab edge floor,
@@ -3388,28 +3426,34 @@ def main():
     # the GUI's (its Cancel button / the plan executor's Stop); a CLI-side
     # wall-clock budget was removed deliberately -- no result this tool produces
     # may depend on timing, or the same command stops producing the same board.
-    tracks, vias, _failed_nets = generate_qfn_fanout(
-        footprint,
-        pcb_data,
-        net_filter=args.nets,
-        layer=layer,
-        track_width=args.width,
-        extension=args.extension,
-        clearance=args.clearance,
-        grid_step=args.grid_step,
-        board_edge_clearance=args.board_edge_clearance,
-        escape_method=args.escape_method,
-        via_size=args.via_size,
-        via_drill=args.via_drill,
-        allow_via_in_pad=args.allow_via_in_pad,
-        same_net_pad_clearance=args.same_net_pad_clearance,  # #581
-        power_nets=args.power_nets or None,                  # #1318
-        power_nets_widths=args.power_nets_widths or None,
-        # #1529: the board's classes (read from pcb_data.source_path), capped
-        # at the ceiling when one was given, as route.py's map is.
-        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
-        via_from_class=not _vs_explicit,                     # #1795
-    )
+    from via_span import SpanError as _SpanError
+    try:
+        tracks, vias, _failed_nets = generate_qfn_fanout(
+            footprint,
+            pcb_data,
+            via_span=args.via_span, via_span_type=args.via_span_type,
+            net_filter=args.nets,
+            layer=layer,
+            track_width=args.width,
+            extension=args.extension,
+            clearance=args.clearance,
+            grid_step=args.grid_step,
+            board_edge_clearance=args.board_edge_clearance,
+            escape_method=args.escape_method,
+            via_size=args.via_size,
+            via_drill=args.via_drill,
+            allow_via_in_pad=args.allow_via_in_pad,
+            same_net_pad_clearance=args.same_net_pad_clearance,  # #581
+            power_nets=args.power_nets or None,                  # #1318
+            power_nets_widths=args.power_nets_widths or None,
+            # #1529: the board's classes (read from pcb_data.source_path), capped
+            # at the ceiling when one was given, as route.py's map is.
+            clearance_ceiling=getattr(args, 'clearance_ceiling', None),
+            via_from_class=not _vs_explicit,                     # #1795
+        )
+    except _SpanError as exc:
+        print(f"Error: {exc}")
+        return 1
     # #1641: a --nets list naming no net on the board is an input error (a
     # typo, a stale list), refused as route.py refuses one; a pattern that
     # names a net but selects no pad here is disclosed in `unmatched`.
@@ -3497,8 +3541,10 @@ def main():
     # given -- as route.py's writeback does.
     _fix_kw = fanout_fix_kwargs('qfn', tracks, vias, clearance=eff_clearance,
                                 track_width=args.width,
-                                via_size=getattr(args, 'via_size', None),
-                                via_drill=getattr(args, 'via_drill', None),
+                                # #1842: a micro via's size is no statement
+                                # about the board's via minimums
+                                via_size=None if _micro_span else getattr(args, 'via_size', None),
+                                via_drill=None if _micro_span else getattr(args, 'via_drill', None),
                                 clearance_ceiling=getattr(args, 'clearance_ceiling', None))
     if out_path and os.path.isfile(out_path) and _fix_kw is None:
         # #1195: a run that changed no copper writes no floors -- the board
