@@ -415,19 +415,29 @@ def measure_pair_copper(pcb_data, diff_pairs_list, routed_results,
         # #1873: a member laid back along itself counts that copper twice in
         # the skew above (all of a net's copper, KiCad's measure). Recorded,
         # every overlap, and only where there is some; the console line is
-        # self_overlap_line's.
+        # self_overlap_line's. A member that was not searched (over the
+        # segment limit) or could not be is said too: no key at all would
+        # read as "none found".
         try:
             from net_queries import net_self_overlap
             _so, _rows = {}, []
             for k, nid in (('p', pair.p_net_id), ('n', pair.n_net_id)):
                 _tot, _r = net_self_overlap(pcb_data, nid)
-                _so[k] = _tot or 0.0
+                _so[k] = _tot
                 _rows += [dict(x, member=k) for x in _r]
+        except Exception as exc:                             # noqa: BLE001
+            print(f"{RED}#1873: could not search {pair_name} for copper laid "
+                  f"along itself ({type(exc).__name__}: {exc}){RESET}")
+            rec['self_overlap_error'] = f'{type(exc).__name__}: {exc}'
+        else:
+            # a member that was not searched stays None beside its partner's
+            # length: 0.0 would claim it was searched and has none
             if any(_so.values()):
-                rec['self_overlap_mm'] = _so
+                rec['self_overlap_mm'] = dict(_so)
                 rec['self_overlaps'] = _rows
-        except Exception:                                    # noqa: BLE001
-            pass
+            if any(v is None for v in _so.values()):
+                rec['self_overlap_not_searched'] = sorted(
+                    k for k, v in _so.items() if v is None)
         if not rec['coupled']:
             try:
                 along = diff_pair_coupling(pcb_data, pair.p_net_id, pair.n_net_id,
