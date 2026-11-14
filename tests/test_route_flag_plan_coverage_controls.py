@@ -225,8 +225,8 @@ class NegativeControls(unittest.TestCase):
         """The largest fix the enumeration found: 26 kept bga_fanout steps
         whose future-pour declaration the converter collected and never
         copied into the step."""
-        self._mutate(M2P, "'--rip-existing-nets', '--plane-net-layers', '--keep-away'):",
-                     "'--rip-existing-nets', '--keep-away'):")
+        self._mutate(M2P, "'--rip-existing-nets', '--plane-net-layers', '--keep-away',",
+                     "'--rip-existing-nets', '--keep-away',")
         self._run(refuse='--plane-net-layers: NOT REACHED -- the converter '
                          'consumes it and emits nothing')
 
