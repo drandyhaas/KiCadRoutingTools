@@ -321,6 +321,9 @@ _FINALIZE_ROUTE_KNOBS = (
     # #1260: the step's pour barriers, so a casualty reconnect cannot cut
     # the out-of-scope pours the step itself was kept out of.
     'pour_barriers',
+    # #1842: the step's via span, so the finalize's taps, joins and
+    # reconnects are vias of the span too (repair_planes reads it here)
+    'via_span', 'via_span_type',
 )
 
 
@@ -3118,63 +3121,41 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layers = DEFAULT_4_LAYER_STACK
     # #1842: a via span is the step's sub-stack -- it routes on those layers
     # only, and every via it lays joins exactly that run
-    _span1842 = _span_type1842 = None
-    if via_span:
-        from via_span import resolve_via_span
-        _span1842, _span_type1842 = resolve_via_span(
-            list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
-            via_span[0], via_span[-1], via_span_type)
-        if _span_type1842 is None:
-            _span1842 = None                      # the whole stack: through vias
-        else:
-            # a file older than KiCad 10's format has no `buried` word
-            from via_span import file_via_type
-            _word1842 = file_via_type(_span_type1842,
-                                      getattr(pcb_data, 'kicad_version', 0) or 0)
-            if _word1842 != _span_type1842:
-                print(f"Via span (#1842): this board's file format "
-                      f"({pcb_data.kicad_version}) predates KiCad 10, which has no "
-                      f"'{_span_type1842}' via; its vias are written '{_word1842}' "
-                      f"(KiCad 9's blind/buried type), on the same layer pair")
-                _span_type1842 = _word1842
-            _in_span = [l for l in layers if l in _span1842]
-            if layer_costs and len(layer_costs) == len(layers):
-                layer_costs = [c for l, c in zip(layers, layer_costs) if l in _span1842]
-                if not _in_span:
-                    layer_costs = None
-            layers = _in_span or list(_span1842)
-            print(f"Via span (#1842): {_span_type1842} vias {_span1842[0]}-{_span1842[-1]}; "
-                  f"routing on {', '.join(layers)} only, and only copper on "
-                  f"{', '.join(_span1842)} (and drilled pads) blocks a via site")
-            # copper the step could not lay again stays where it is
-            from via_span import hold_outside_copper as _hold1842
-            _held1842 = _hold1842(pcb_data, _span1842)
-            if _held1842:
-                print(f"  {_held1842} existing track(s) and via(s) with copper outside the "
-                      f"span are held in place for this step")
-            if _span_type1842 == 'micro' and via_from_class:
-                # no via size was asked for: a micro via span draws the
-                # Default class's MICRO via on every net (a class's
-                # via_diameter is its through via's), on both fronts
-                from via_span import default_micro_via
-                _mdia, _mdrill = default_micro_via(
-                    input_file or getattr(pcb_data, 'source_path', '') or '')
-                if _mdia:
-                    via_size = _mdia
-                if _mdrill:
-                    via_drill = _mdrill
-                if _mdia or _mdrill:
-                    print(f"  micro via span: drawing the board Default net-class micro "
-                          f"via {via_size}/{via_drill} mm on every net")
-                via_from_class = False
-            if disable_bga_zones is None:
-                # "no new via in a BGA's pad field" is a rule for through
-                # vias, which the fan-out step lays there. A via of a span
-                # between the balls, or under them on layers the part has no
-                # copper on, is how a dense part escapes.
-                disable_bga_zones = []
-                print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
-                      f"fields (--no-bga-zones)")
+    from via_span import step_span as _step_span1842
+    _span1842, _span_type1842, layers, layer_costs = _step_span1842(
+        pcb_data, layers, layer_costs, via_span, via_span_type)
+    if _span1842:
+        # copper the step could not lay again stays where it is
+        from via_span import hold_outside_copper as _hold1842
+        _held1842 = _hold1842(pcb_data, _span1842)
+        if _held1842:
+            print(f"  {_held1842} existing track(s) and via(s) with copper outside the "
+                  f"span are held in place for this step")
+        from via_span import laser_drilled as _laser1842
+        if via_from_class and _laser1842(pcb_data.board_info.copper_layers,
+                                         _span1842, _span_type1842):
+            # no via size was asked for: a micro via span draws the
+            # Default class's MICRO via on every net (a class's
+            # via_diameter is its through via's), on both fronts
+            from via_span import default_micro_via
+            _mdia, _mdrill = default_micro_via(
+                input_file or getattr(pcb_data, 'source_path', '') or '')
+            if _mdia:
+                via_size = _mdia
+            if _mdrill:
+                via_drill = _mdrill
+            if _mdia or _mdrill:
+                print(f"  micro via span: drawing the board Default net-class micro "
+                      f"via {via_size}/{via_drill} mm on every net")
+            via_from_class = False
+        if disable_bga_zones is None:
+            # "no new via in a BGA's pad field" is a rule for through
+            # vias, which the fan-out step lays there. A via of a span
+            # between the balls, or under them on layers the part has no
+            # copper on, is how a dense part escapes.
+            disable_bga_zones = []
+            print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
+                  f"fields (--no-bga-zones)")
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # One cost per requested layer, or the full-stack append below puts its
@@ -7407,9 +7388,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _sense = _sense_entries(pcb_data)
     if _sense:
         summary['sense_branches'] = _sense
-    # #1842: the step's via span, and that its plane finalize does not run
-    # (its taps are through vias) -- a key, so a chain reader need not grep
-    # the console line, which is printed only on a board with zones
+    # #1842: the step's via span, whether its plane finalize ran (its taps
+    # are vias of the span) and how many pours lie outside the span -- a key,
+    # so a chain reader need not grep the console line. Printed before the
+    # finalize: the finalize updates it in `summary` (by reference)
     _span_summary1842 = via_span_summary(config, pcb_data)
     if _span_summary1842:
         summary['via_span'] = _span_summary1842
@@ -7815,18 +7797,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"KICAD_FINALIZE_ONLY=1 + --skip-routing)")
         except Exception as _e9c:
             print(f"  (pre-finalize checkpoint failed: {_e9c})")
-    # #1842: the plane finalize lays THROUGH taps, at the step's via size. A
-    # step on a partial span draws a micro, blind or buried via of that size,
-    # so it does not run the finalize; the plane step does.
-    _span_no_finalize = bool(via_span_summary(config, pcb_data))
-    if (_span_no_finalize and final_reconcile and not quick
-            and (getattr(pcb_data, 'zones', None) or [])):
-        print(f"\n  Plane finalize not run: this step lays {config.via_span_type} vias "
-              f"on {config.via_span[0]}-{config.via_span[-1]}, and a plane tap is a "
-              f"through via. Run the plane step for the plane nets.")
     if (final_reconcile and (not skip_routing or _fin_only)
             and not _ckpt_stop and not quick
-            and not _span_no_finalize
             and (output_file or return_results)
             and not _plane_finalize_active()
             and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
@@ -7896,6 +7868,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # OVER-credits (castor-class gaps only KiCad's exact fill
             # sees), and the oracle is the model-independent verifier --
             # on a healthy board it costs one refill and exits at round 0.
+            if config.via_span and config.via_span_type != 'through':
+                # #1842: a via of the span reaches a plane only on a layer the
+                # span has; the others are not this step's to tap
+                _off1842 = sorted({f"{n} on {l}" for n, l in _zpairs
+                                   if l not in config.via_span})
+                if _off1842:
+                    print(f"\n  Plane finalize: {len(_off1842)} pour(s) outside the via "
+                          f"span {config.via_span[0]}-{config.via_span[-1]} are not "
+                          f"tapped by this step: {', '.join(_off1842[:6])}"
+                          f"{' ...' if len(_off1842) > 6 else ''}")
+                _zpairs = [(n, l) for n, l in _zpairs if l in config.via_span]
+            if config.via_span and _zpairs:
+                # #1842: the finalize taps the span's pours on this step: say
+                # so in the summary (by reference, as finalize_excluded_nets
+                # above). With no pour on the span it has nothing to tap.
+                from via_span import PLANE_FINALIZE_ATTR as _pfa1842
+                setattr(config, _pfa1842, 'run')
+                if isinstance(summary.get('via_span'), dict):
+                    summary['via_span'] = via_span_summary(config, pcb_data)
             _zpairs_all = list(_zpairs)
             _ship_scope678 = sorted({n for n, _l in _zpairs_all})
             if _zpairs:
