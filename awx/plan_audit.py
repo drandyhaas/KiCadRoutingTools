@@ -893,7 +893,10 @@ def check_static(ctx, corridors, only=None):
     copper's edge (and a single's, in a pad's corner zone, the router's corner
     buffer further: pairs.pad_corner_buffer): a planned line the router cannot sit
     on. The pitch audit measures lanes against lanes and the dives audit vias
-    against static copper; neither sees a line through a pad."""
+    against static copper; neither sees a line through a pad. A base via counts
+    by the ring the router keeps a track's cells off it (pairs.svia_reach) --
+    but by its own copper at the lane's own tooth or berth, the point the
+    router's search starts or ends on whatever its map says of the cell."""
     cfg = ctx.cfg
     TW, CL, g = cfg.track_width, cfg.clearance, cfg.grid_step
     need = TW / 2 + CL + g / 2                   # the bar for a lane piece off the grid (it lands up to half a step off)
@@ -944,7 +947,15 @@ def check_static(ctx, corridors, only=None):
                 if not len(P):
                     continue
                 # (within a lane pitch of its own tooth or berth, the fanout's track: the terminal neck, _neck_ends)
-                NEED = NEED - cut * _near_ends(P, _neck_ends(ctx, c, nm), bd.LANE_MIN)
+                ne_ = _neck_ends(ctx, c, nm)
+                NEED = NEED - cut * _near_ends(P, ne_, bd.LANE_MIN)
+                # (AT its own tooth or berth -- within the grid's rounding of the point, where the fanout's copper
+                # already ends: the router's search starts and ends on the grid point nearest it whatever its map says
+                # of that cell (connect: its sources and targets), and the stub it lays onto the point is held to the
+                # copper's own clearance (the terminal neck). Another net's via is measured there by its copper, not by
+                # the ring its grid point keeps a track's cells off -- a ring that covers the next berth of a fine row
+                # is no fault of the lane ending on it)
+                at_end = _near_ends(P, ne_, g * math.sqrt(0.5) + 1e-6)
                 x0, y0 = P.min(0) - 4 * bd.LANE_MIN       # the static copper near the lane: a few lane pitches round it
                 x1, y1 = P.max(0) + 4 * bd.LANE_MIN
                 inb = lambda x, y: x0 <= x <= x1 and y0 <= y <= y1
@@ -970,7 +981,8 @@ def check_static(ctx, corridors, only=None):
                 for v in ctx.base_vias:
                     if v.net_id in own or not inb(v.x, v.y):
                         continue
-                    cand.append((np.hypot(P[:, 0] - v.x, P[:, 1] - v.y) - _pairs.svia_reach(cfg, v.x, v.y, v.size),
+                    cand.append((np.hypot(P[:, 0] - v.x, P[:, 1] - v.y)
+                                 - np.where(at_end, v.size / 2, _pairs.svia_reach(cfg, v.x, v.y, v.size)),
                                  f'via {name(v.net_id)}'))
                 # (a KEEP-OUT rule area whose tracks are not allowed on L: the samples' signed distance to it, inside
                 # negative -- the router stamps it as it stamps copper, and refuses a lane in it)
