@@ -2546,17 +2546,26 @@ _SELF_OVERLAP_SIN = 0.0872          # 5 degrees
 
 def net_self_overlap(pcb_data: PCBData, net_id: int):
     """Where a net's track copper runs ALONG ITSELF (#1873): two same-layer
-    pieces, within 5 degrees of parallel, whose centre lines stand closer
-    than the narrower track's width over more than that width -- one strip of
-    copper laid twice. A leg that comes back along its own coupled middle has
-    it; a straight continuation, a bend and a T-junction do not.
+    pieces, within 5 degrees of parallel, whose copper overlaps -- their
+    centre lines closer than half the two widths together -- over more than
+    the narrower track's width: one strip of copper laid twice. A leg that
+    comes back along its own coupled middle has it; a straight continuation,
+    a bend and a T-junction do not.
+
+    The stretch counted is where that holds, not the whole length the two
+    pieces run side by side: two passes that converge are counted from where
+    their copper meets. Tracks of one width overlap when their centre lines
+    are closer than that width; a narrow pass that lies inside a wider track
+    of the net, or only overlaps its edge, is counted too. Which way the
+    second piece runs does not matter: a branch that leaves the first at
+    under 5 degrees, or crosses it, is counted while the two overlap.
 
     Returns (total mm laid twice, rows), each row {'layer', 'a', 'b' (the two
-    pieces' end points), 'centre_gap_mm', 'along_mm'}; (None, []) for a net
-    with more than SELF_OVERLAP_MAX_SEGMENTS segments (not searched). A
-    length-match measure that sums all of a net's copper, as KiCad's does,
-    counts such a stretch twice."""
-    from geometry_utils import point_to_segment_distance
+    pieces' end points), 'centre_gap_mm' (at its narrowest over the stretch),
+    'along_mm'}; (None, []) for a net with more than
+    SELF_OVERLAP_MAX_SEGMENTS segments (not searched). A length-match measure
+    that sums all of a net's copper, as KiCad's does, counts such a stretch
+    twice."""
     segs = [s for s in pcb_data.segments
             if s.net_id == net_id and not getattr(s, 'graphic', False)
             and math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) > 1e-9]
@@ -2572,20 +2581,35 @@ def net_self_overlap(pcb_data: PCBData, net_id: int):
                 continue
             bx, by = b.end_x - b.start_x, b.end_y - b.start_y
             lb = math.hypot(bx, by)
-            if abs(ux * by - uy * bx) / lb > _SELF_OVERLAP_SIN:
+            vx, vy = bx / lb, by / lb
+            # how fast a point moving along `a` leaves `b`'s line: the sine
+            # of the angle between the two pieces
+            drift = vx * uy - vy * ux
+            if abs(drift) > _SELF_OVERLAP_SIN:
                 continue
             w = min(a.width or 0.0, b.width or 0.0)
             if w <= 0.0:
                 continue
+            reach = ((a.width or 0.0) + (b.width or 0.0)) / 2.0
             t0 = (b.start_x - a.start_x) * ux + (b.start_y - a.start_y) * uy
             t1 = (b.end_x - a.start_x) * ux + (b.end_y - a.start_y) * uy
             lo, hi = max(0.0, min(t0, t1)), min(la, max(t0, t1))
             if hi - lo <= w:
                 continue
-            gap = max(point_to_segment_distance(a.start_x + ux * t, a.start_y + uy * t,
-                                                b.start_x, b.start_y, b.end_x, b.end_y)
-                      for t in (lo, hi))
-            if gap >= w - 1e-9:
+            # the point of `a` at t stands off0 + drift * t from `b`'s line;
+            # keep the part of [lo, hi] where that is inside `reach`
+            off0 = vx * (a.start_y - b.start_y) - vy * (a.start_x - b.start_x)
+            if abs(drift) < 1e-12:
+                if abs(off0) >= reach - 1e-9:
+                    continue
+            else:
+                ta, tb = sorted(((-reach - off0) / drift, (reach - off0) / drift))
+                lo, hi = max(lo, ta), min(hi, tb)
+                if hi - lo <= w:
+                    continue
+            e0, e1 = off0 + drift * lo, off0 + drift * hi
+            gap = 0.0 if e0 * e1 < 0 else min(abs(e0), abs(e1))
+            if gap >= reach - 1e-9:
                 continue
             rows.append({'layer': a.layer,
                          'a': [(round(a.start_x, 4), round(a.start_y, 4)),
