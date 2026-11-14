@@ -4519,7 +4519,7 @@ def _skew_member_length(pcb_data, path, rule, net_id):
     pins = lanes.get(getattr(net, 'name', None)) if lanes else None
     if pins:
         try:
-            return net_match_length(pcb_data, net_id, 'pin_pair', pins=pins)
+            return net_match_length(pcb_data, net_id, 'pin_pair', pads=pins)
         except ValueError:
             return None             # the recorded pads are no longer the net's
     return net_match_length(pcb_data, net_id, 'total')

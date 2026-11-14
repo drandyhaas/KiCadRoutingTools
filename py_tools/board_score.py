@@ -1063,8 +1063,8 @@ def score_diff_pairs(board: str, drc: dict, pcb=None) -> dict:
             if names[p] in lanes and names[n] in lanes:
                 from net_queries import net_match_length
                 try:
-                    _lp = net_match_length(pcb, p, 'pin_pair', pins=lanes[names[p]])
-                    _ln = net_match_length(pcb, n, 'pin_pair', pins=lanes[names[n]])
+                    _lp = net_match_length(pcb, p, 'pin_pair', pads=lanes[names[p]])
+                    _ln = net_match_length(pcb, n, 'pin_pair', pads=lanes[names[n]])
                 except ValueError:
                     _lp = _ln = None
                 rec['lane'] = {names[p]: lanes[names[p]], names[n]: lanes[names[n]]}

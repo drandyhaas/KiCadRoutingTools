@@ -152,7 +152,7 @@ def main():
            f"the pads named, and the N member's on the same parts: {lane}")
 
         print("5. lanes that cannot be")
-        for spec, why in (('/DATA+=J1.5:R9.1', 'expected two different copper pads of /DATA+'),
+        for spec, why in (('/DATA+=J1.5:R9.1', 'R9.1 names 0 of its copper pads'),
                           ('/NOPE+=J1.5:IC4.10', 'is not a member of a pair this step routes'),
                           ('/DATA+', 'expected P_NET=REF.PAD:REF.PAD or auto')):
             check(PY + [tool('route_diff.py'), os.path.join(td, 'in.kicad_pcb'),

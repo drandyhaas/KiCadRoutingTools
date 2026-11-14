@@ -10,8 +10,8 @@ step matches the path between the lane's pads, records them with the
 tolerance, and check_drc grades the recorded tolerance on that path and
 reports each member's branch as a stub.
 
-A spec is `auto` (each member's lane ends, read off its copper by
-`net_queries.pin_pair_pads`) or one or more `P_NET=REF.PAD:REF.PAD`, the P
+A spec is `auto` (each member's lane ends, read off the copper the pair step
+laid: `_routed_lane_ends`, on `net_queries.pin_pair_pads`) or one or more `P_NET=REF.PAD:REF.PAD`, the P
 member's two pads; the N member's are its pads on the same two parts.
 """
 
@@ -56,14 +56,14 @@ def resolve(spec: Optional[Sequence[str]], diff_pair_ids, pcb_data
                              f"of a pair this step routes")
         given, other = ((pair.p_net_id, pair.n_net_id) if net == pair.p_net_name
                         else (pair.n_net_id, pair.p_net_id))
-        from net_queries import pin_pair_pads, pad_name, _copper_pads
+        from net_queries import pin_pair_pads, pad_label, _copper_pads
         try:
             first = pin_pair_pads(pcb_data, given, [a, b])
         except ValueError as e:
             raise ValueError(f"--diff-pair-intra-lane {s!r}: {e}") from None
         twin = []
         for p in first:
-            same = sorted(pad_name(q) for q in _copper_pads(pcb_data, other)
+            same = sorted(pad_label(q) for q in _copper_pads(pcb_data, other)
                           if q.component_ref == p.component_ref)
             if len(same) != 1:
                 oname = pcb_data.nets[other].name
@@ -88,10 +88,32 @@ def lane_pins(config, pcb_data, net_id: int) -> Optional[List[str]]:
     if entry is None:
         return None
     if entry == AUTO:
-        from net_queries import pin_pair_pads, pad_name
-        pair = pin_pair_pads(pcb_data, net_id)
-        return None if pair is None else [pad_name(pair[0]), pad_name(pair[1])]
+        pair = _routed_lane_ends(pcb_data, net_id)
+        from net_queries import pad_label
+        return None if pair is None else [pad_label(pair[0]), pad_label(pair[1])]
     return list(entry)
+
+
+def _routed_lane_ends(pcb_data, net_id: int):
+    """The ends of the lane the net's copper forms NOW: of the pad pairs
+    joined by track copper, the two farthest apart along it. The pair step
+    routes a pair between two of its pads and leaves a branch to a third for
+    a later step, so the lane is the path that step joined -- not the two
+    pads farthest apart in a straight line, which `net_queries.pin_pair_pads`
+    chooses for a net whose pads are not all joined. With no pair joined, or
+    all pads joined, that function's choice stands."""
+    from itertools import combinations
+    from net_queries import (pin_pair_pads, pin_pair_path_length, _copper_pads,
+                             _pad_order, net_pads_joined)
+    own = sorted(_copper_pads(pcb_data, net_id), key=_pad_order)
+    if len(own) <= 2 or net_pads_joined(pcb_data, net_id):
+        return pin_pair_pads(pcb_data, net_id)
+    best = None
+    for a, b in combinations(own, 2):
+        d = pin_pair_path_length(pcb_data, net_id, a, b)
+        if d is not None and (best is None or round(d, 6) > round(best[0], 6)):
+            best = (d, a, b)
+    return pin_pair_pads(pcb_data, net_id) if best is None else (best[1], best[2])
 
 
 def member_lengths(config, pcb_data, p_net_id: int, n_net_id: int
@@ -102,8 +124,8 @@ def member_lengths(config, pcb_data, p_net_id: int, n_net_id: int
     if not lp or not ln:
         return None
     from net_queries import net_match_length
-    return (net_match_length(pcb_data, p_net_id, 'pin_pair', pins=lp),
-            net_match_length(pcb_data, n_net_id, 'pin_pair', pins=ln), lp, ln)
+    return (net_match_length(pcb_data, p_net_id, 'pin_pair', pads=lp),
+            net_match_length(pcb_data, n_net_id, 'pin_pair', pads=ln), lp, ln)
 
 
 def pair_skew(config, pcb_data, p_net_id: int, n_net_id: int) -> Optional[float]:
@@ -122,7 +144,7 @@ def stub_lengths(pcb_data, net_id: int, pins) -> Optional[float]:
     from net_queries import net_match_length
     total = net_match_length(pcb_data, net_id, 'total', include_pad_to_die=False)
     lane = net_match_length(pcb_data, net_id, 'pin_pair', include_pad_to_die=False,
-                            pins=list(pins))
+                            pads=list(pins))
     if total is None or lane is None:
         return None
     return max(0.0, total - lane)
