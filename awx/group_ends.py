@@ -1418,6 +1418,10 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
     bm, NL, oname = A.bm, len(RL), f'{OTHER}:{A.ref}'
     xs, ys, dom, where = {}, {}, {}, collections.defaultdict(list)
     exits = collections.defaultdict(list)       # a lane's option -> [where each of its legs' exits lies round the array]
+    # (...and ALONG its face, the exit's own coordinate there: an exit past the face's end -- a side-stepped escape at a
+    # corner -- lies round the box AT the corner, with every other exit past it)
+    along = collections.defaultdict(list)
+    along_ = lambda d_, p_: int(round((p_[1] if d_ in ('left', 'right') else p_[0]) * 1000))     # noqa: E731
     dead = set()
     for b, k_ in users:
         for lane, _lg in b.E.lanes:
@@ -1430,6 +1434,7 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
                     where[mv.gid[1:]].append((key, i))
                     g0 = bm.menu[mv.gid[1]][mv.gid[2]]
                     exits[(key, i)].append((place_round(A.box, g0.direction, g0.exit_pt), g0.direction))
+                    along[(key, i)].append((g0.direction, along_(g0.direction, g0.exit_pt)))
             # (not offered: a single's exit blocked in front on every layer it could take with no room for a via
             # before the block -- priced past any via count for a bus alone, which keeps it where a lane has no other)
             dead.update((key, i) for i, c_ in (b.E.front.get((lane, k_)) or {}).items()
@@ -1450,6 +1455,7 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
                 (None, None, frozenset(RL.index(L_) for L_ in mv.runs_on if L_ in RL))
             where[(k, i)].append((key, i))
             exits[(key, i)].append((place_round(A.box, mv.direction, mv.exit_pt), mv.direction))
+            along[(key, i)].append((mv.direction, along_(mv.direction, mv.exit_pt)))
         # (a plane ball's drops, then its straps)
         dv = [m.NewBoolVar('') for _ in list(A.drops.get(k, ())) + list(A.straps.get(k, ()))]
         m.Add(sum(xs[key].values()) + sum(dv) <= 1)
@@ -1711,10 +1717,27 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
         spans = collections.defaultdict(list)               # (the pair's lane, its two exits) -> its options there
         for (key, i), es in sorted(exits.items()):
             if len(es) == 2 and (key, i) not in dead and es[0][1] == es[1][1]:
-                spans[(key,) + tuple(sorted(e_[0] for e_ in es))].append(i)
-        for (key, lo, hi), mine in sorted(spans.items()):
+                spans[(key,) + tuple(sorted(e_[0] for e_ in es))
+                      + tuple(sorted(a_ for _d, a_ in along[(key, i)]))].append(i)
+        # (...and between them ALONG THEIR FACE, where one of the two lies past the face's end: round the box both
+        # that exit and any beside it stand at the corner, one place, and nothing was read as between them -- a
+        # pair's legs a ball pitch apart at an array's corner with another net's surface tooth between, and the bus's
+        # step refused the board)
+        by_face = collections.defaultdict(list)             # a face -> [(along it, lane, option)] of every exit on it
+        for (key, i), es in along.items():
+            if (key, i) not in dead:
+                for d_, a_ in es:
+                    by_face[d_].append((a_, key, i))
+        for d_ in by_face:
+            by_face[d_].sort()
+        at_face = {d_: [e_[0] for e_ in es_] for d_, es_ in by_face.items()}
+        for (key, lo, hi, a0_, a1_), mine in sorted(spans.items()):
             between = collections.defaultdict(set)          # another lane -> its options with an exit between the two
             for _p, k2, j in every_[bisect.bisect_right(pos_, lo):bisect.bisect_left(pos_, hi)]:
+                if k2 != key:
+                    between[k2].add(j)
+            d_ = along[(key, mine[0])][0][0]
+            for _a, k2, j in by_face[d_][bisect.bisect_right(at_face[d_], a0_):bisect.bisect_left(at_face[d_], a1_)]:
                 if k2 != key:
                     between[k2].add(j)
             for k2, js in sorted(between.items()):
