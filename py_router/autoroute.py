@@ -728,15 +728,23 @@ class Chain(ChainEvents):
         clearance), the chain's input as baseline."""
         env = _child_env()
         env['KICAD_NO_GRADE_RECONCILE'] = '1'
-        r = subprocess.run([sys.executable, '-X', 'utf8', '-c', _CONN_PROBE, HERE, board],
-                           capture_output=True, text=True, env=env)
-        m = re.search(r'^AUTOROUTE_OPEN: (\[.*\])$', r.stdout, re.M)
-        if r.returncode != 0 or not m:
+        # #1940: the two checkers only read the board, and with the KiCad
+        # cross-check off neither starts kicad-cli, so they run side by side;
+        # the grade is read from them in the order it always was.
+        drc = self._check_drc_start(board)
+        conn = subprocess.Popen(
+            [sys.executable, '-X', 'utf8', '-c', _CONN_PROBE, HERE, board],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        out, _err = conn.communicate()
+        m = re.search(r'^AUTOROUTE_OPEN: (\[.*\])$', out, re.M)
+        if conn.returncode != 0 or not m:
+            # check_connected decides first, as it did when it ran alone
+            self._check_drc_abandon(drc)
             print(f"  grade: check_connected failed on {os.path.basename(board)}",
                   flush=True)
             return None
         open_nets = json.loads(m.group(1))
-        d = self.check_drc(board)
+        d = self._check_drc_finish(board, drc)
         if d is None:
             return None
         return {'open': len(open_nets), 'open_nets': open_nets, 'drc': int(d['violations']),
@@ -746,6 +754,10 @@ class Chain(ChainEvents):
         """check_drc's JSON report for BOARD at the board's recorded floors
         (else the chain's clearance), the chain's input as baseline; None when
         it could not grade."""
+        return self._check_drc_finish(board, self._check_drc_start(board))
+
+    def _check_drc_start(self, board):
+        """Start check_drc on BOARD; (the process, its JSON report's path)."""
         fd, jpath = tempfile.mkstemp(suffix='.json', dir=self.work)
         os.close(fd)
         argv = [sys.executable, '-X', 'utf8', os.path.join(HERE, 'check_drc.py'),
@@ -754,7 +766,25 @@ class Chain(ChainEvents):
             argv += ['--clearance', str(self.clearance)]
         if self.baseline:
             argv += ['--baseline', self.baseline]
-        subprocess.run(argv, capture_output=True, text=True, env=_child_env())
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, env=_child_env())
+        return proc, jpath
+
+    @staticmethod
+    def _check_drc_abandon(started):
+        """Stop a check_drc nobody will read and remove its report."""
+        proc, jpath = started
+        proc.kill()
+        proc.wait()
+        try:
+            os.remove(jpath)
+        except OSError:
+            pass
+
+    def _check_drc_finish(self, board, started):
+        """Wait for a started check_drc and read its report, or None."""
+        proc, jpath = started
+        proc.wait()
         try:
             with open(jpath) as fh:
                 d = json.load(fh)
