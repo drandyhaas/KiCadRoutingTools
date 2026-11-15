@@ -2001,14 +2001,16 @@ class _Repair:
         return ko
 
     def _cap_hole_reach(self, cap) -> float:
-        """The widest copper-to-hole requirement any of this cap's pads can
-        be priced at -- the board value or a rule, raised by the cap's own
-        pad overrides. 0.0 when the channel is off. For the via prune."""
-        if not self._hole_on:
-            return 0.0
-        lc = max([getattr(p, 'local_clearance', 0.0) or 0.0
-                  for p in getattr(cap, 'pad_objs', ())] or [0.0])
-        return max(self._hole_reach, lc)
+        """How far past a via's drill radius the via prune must reach for
+        the copper-to-hole term: the board value or the widest rule. 0.0
+        when the channel is off.
+
+        A pad override needs no term here. Where it binds the hole pair it
+        binds the copper pair too (the copper requirement is at least the
+        override), and a via's radius is at least its drill radius, so that
+        hole keep-out never passes the copper one, which the copper bound and
+        its cap-side slack already reach."""
+        return self._hole_reach if self._hole_on else 0.0
 
     def _via_hole_effs(self, ref, cap, vias):
         """[cap pad i][via j] copper-to-hole keep-out (`via_hole_keepout`),
