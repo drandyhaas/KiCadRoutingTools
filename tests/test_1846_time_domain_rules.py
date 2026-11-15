@@ -99,6 +99,37 @@ def _override(sig_from, sig_to, via_from, via_to, delay):
     return edit
 
 
+_GOOD = {'delay': 5000000, 'signal_layer_from': 'F.Cu', 'signal_layer_to': 'B.Cu',
+         'via_layer_from': 'F.Cu', 'via_layer_to': 'B.Cu'}
+
+
+def _unread(change, where='via_overrides'):
+    """B.Cu at 7 ps/mm and a 5 ps override, then `change(target)` on the
+    override, the B.Cu layer entry or the profile itself."""
+    def edit(proj):
+        _bcu(proj)
+        prof = _profile(proj)
+        prof['via_overrides'] = [dict(_GOOD)]
+        change({'via_overrides': prof['via_overrides'][0],
+                'layer_entries': prof['layer_entries'][1], 'profile': prof}[where])
+    edit.unread = True
+    return edit
+
+
+def _second_profile(first: bool):
+    """A second profile no class names, with an override KiCad cannot read,
+    stored before or after the one in use."""
+    def edit(proj):
+        _bcu(proj)
+        stored = proj['tuning_profiles']['tuning_profiles_impedance_geometric']
+        other = copy.deepcopy(stored[0])
+        other['profile_name'] = 'OTHER'
+        other['via_overrides'] = [{k: v for k, v in _GOOD.items() if k != 'delay'}]
+        stored.insert(0 if first else len(stored), other)
+    edit.unread = first
+    return edit
+
+
 def _faster(proj):
     _profile(proj)['layer_entries'][0]['delay'] = 7500000
 
@@ -139,6 +170,32 @@ ROWS = {
     'and time-domain tuning off: the pad-to-die delay alone': (
         False, _off, (0.00, 10.00), True),
     'and the class names no profile: 0 ps': (False, _no_profile, (0.00, 0.00), True),
+    # a profile KiCad cannot read: it and every profile after it are not
+    # loaded, and their nets read 0.00 ps
+    'the 5 ps override as stored': (True, _unread(lambda e: None), (120.00, 143.00), False),
+    'an override with no delay: the profile is not loaded': (
+        True, _unread(lambda e: e.pop('delay')), (0.00, 0.00), False),
+    'an override whose delay is a string': (
+        True, _unread(lambda e: e.update(delay='5000000')), (0.00, 0.00), False),
+    'an override with no via_layer_to': (
+        True, _unread(lambda e: e.pop('via_layer_to')), (0.00, 0.00), False),
+    'a layer entry with no width': (
+        True, _unread(lambda e: e.pop('width'), 'layer_entries'), (0.00, 0.00), False),
+    'via_prop_delay a string, a 10 ps pad-to-die delay on Q': (
+        True, _unread(lambda p: p.update(via_prop_delay='6000000'), 'profile'),
+        (0.00, 0.00), True),
+    'enable_time_domain_tuning 1, not a boolean': (
+        True, _unread(lambda p: p.update(enable_time_domain_tuning=1), 'profile'),
+        (0.00, 0.00), False),
+    'an unreadable profile stored before the one in use': (
+        True, _second_profile(True), (0.00, 0.00), False),
+    'an unreadable profile stored after it: the one in use is loaded': (
+        True, _second_profile(False), (120.00, 151.48), False),
+    'an override with no signal_layer_from is passed over': (
+        True, _unread(lambda e: e.pop('signal_layer_from')), (120.00, 151.48), False),
+    'a layer entry for a layer the board does not have matches nothing': (
+        True, _unread(lambda e: e.update(signal_layer='Zz.Cu'), 'layer_entries'),
+        (120.00, 94.00), False),
 }
 
 #: one of Q's pads, as the fixture writes it
@@ -221,6 +278,13 @@ def rows(td):
         if edit in (_no_profile, _off):
             ok('get no track or via delay, as in KiCad' in text,
                "   and the run says why they get no track or via delay")
+        if getattr(edit, 'unread', False) and want == (0.00, 0.00):
+            ok('KiCad cannot read it and does not load it' in text
+               and 'which KiCad does not load' in text,
+               "   and the run names the profile and the field KiCad cannot read")
+        elif edit is not None and hasattr(edit, 'unread'):
+            ok('which KiCad does not load' not in text,
+               "   and no net is reported as timed with a profile KiCad does not load")
 
 
 def readers(td):

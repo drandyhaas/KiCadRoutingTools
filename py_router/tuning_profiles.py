@@ -23,7 +23,10 @@ Measured on kicad-cli 10.0.8 (tests/test_1846_time_domain_rules.py):
     pad-to-die delays included;
   * a net whose profile has `enable_time_domain_tuning` off gets no track or
     via delay, but its pads' pad-to-die delays still count (measured on
-    kicad-cli 10.0.6: a 10 ps `die_delay` reads 10.00 ps).
+    kicad-cli 10.0.6: a 10 ps `die_delay` reads 10.00 ps);
+  * a profile KiCad cannot read ends its load of the list: that profile and
+    every one after it do not exist, so a net whose class names one has a
+    delay of 0 ps, as with no profile (`_unreadable` has what was measured).
 """
 import json
 import os
@@ -55,32 +58,125 @@ class TuningProfile(NamedTuple):
     via_overrides: Dict[tuple, float]
 
 
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float))
+
+
+#: a profile's own fields, and what KiCad needs each to be
+_PROFILE_FIELDS = (('profile_name', str), ('type', 'number'),
+                   ('target_impedance', 'number'), ('enable_time_domain_tuning', bool),
+                   ('via_prop_delay', 'number'))
+_LAYER_FIELDS = (('signal_layer', str), ('top_reference_layer', str),
+                 ('bottom_reference_layer', str), ('delay', 'number'),
+                 ('diff_pair_gap', 'number'), ('width', 'number'))
+_OVERRIDE_FIELDS = (('signal_layer_from', str), ('signal_layer_to', str),
+                    ('via_layer_from', str), ('via_layer_to', str), ('delay', 'number'))
+
+
+def _bad_field(obj: dict, fields) -> Optional[str]:
+    for key, want in fields:
+        if key not in obj:
+            return f"has no `{key}`"
+        v = obj[key]
+        # a number may be a JSON boolean: KiCad reads true / false as 1 / 0
+        good = (_is_num(v) if want == 'number'
+                else isinstance(v, bool) if want is bool
+                else isinstance(v, str))
+        if not good:
+            return f"`{key}` is {json.dumps(v)}"
+    return None
+
+
+def _unreadable(p) -> Optional[str]:
+    """Why KiCad cannot read profile ``p``, or None when it can.
+
+    Measured on kicad-cli 10.0.8, one field at a time on the profile of
+    tests/test_1846_time_domain_rules.py: the profile's own five fields, a
+    layer entry's six and a via override's five must each be present with the
+    stored type (a number, a string, a JSON boolean for
+    `enable_time_domain_tuning`); one missing, null or of another type and
+    every net of the profile reads 0.00 ps. `layer_entries` and
+    `via_overrides` may be absent, an entry that is not an object is passed
+    over, and so is an override with no `signal_layer_from`. A layer name the
+    board does not have loads; the entry then matches nothing."""
+    if not isinstance(p, dict):
+        return "is not an object"
+    why = _bad_field(p, _PROFILE_FIELDS)
+    if why:
+        return why
+    for kind, key, fields in (('layer entry', 'layer_entries', _LAYER_FIELDS),
+                              ('via override', 'via_overrides', _OVERRIDE_FIELDS)):
+        entries = p.get(key)
+        for i, e in enumerate(entries if isinstance(entries, list) else []):
+            if not isinstance(e, dict):
+                continue
+            if key == 'via_overrides' and 'signal_layer_from' not in e:
+                continue
+            why = _bad_field(e, fields)
+            if why:
+                return f"{kind} {i + 1} {why}"
+    return None
+
+
+def unread_tuning_profiles(board_path: str) -> Dict[str, str]:
+    """{profile name: why KiCad does not load it} for the board's project:
+    the first profile KiCad cannot read, and every profile after it."""
+    return _read_project(board_path)[2]
+
+
 def read_tuning_profiles(board_path: str
                          ) -> Tuple[Dict[str, TuningProfile], List[Tuple[int, str, str]]]:
     """(profiles by name, [(priority, class name, profile name)]) from the
     board's sibling `.kicad_pro`; ({}, []) when there is no project or it
     declares none. A project that exists but cannot be read or parsed also
     gives ({}, []), with a warning, so a ps rule or a time-matched net is not
-    silently given no profile."""
+    silently given no profile. The profiles are the ones KiCad loads: the
+    list ends at the first profile it cannot read, with a warning that names
+    the profile and the field (`unread_tuning_profiles`)."""
+    return _read_project(board_path)[:2]
+
+
+def _read_project(board_path: str):
+    """`read_tuning_profiles`' pair, and {profile name: why it is not
+    loaded}."""
     pro = os.path.splitext(board_path)[0] + '.kicad_pro' if board_path else ''
     if not pro or not os.path.isfile(pro):
-        return {}, []
+        return {}, [], {}
     try:
         with open(pro, encoding='utf-8') as fh:
             proj = json.load(fh)
     except (OSError, ValueError) as e:
         _warn_once(pro, f"could not read {pro} ({e}); its tuning profiles are "
                         f"not read, so no net is timed with one")
-        return {}, []
+        return {}, [], {}
     if not isinstance(proj, dict):
         _warn_once(pro, f"{pro} is not a JSON object; its tuning profiles are "
                         f"not read, so no net is timed with one")
-        return {}, []
+        return {}, [], {}
     profiles: Dict[str, TuningProfile] = {}
+    unread: Dict[str, str] = {}
     block = proj.get('tuning_profiles') or {}
-    for p in (block.get('tuning_profiles_impedance_geometric') or []
-              if isinstance(block, dict) else []):
-        if not isinstance(p, dict) or not p.get('profile_name'):
+    stored = (block.get('tuning_profiles_impedance_geometric') or []
+              if isinstance(block, dict) else [])
+    for i, p in enumerate(stored if isinstance(stored, list) else []):
+        why = _unreadable(p)
+        if why:
+            def _name(q, j):
+                n = q.get('profile_name') if isinstance(q, dict) else None
+                return str(n) if isinstance(n, str) and n else f'#{j + 1}'
+            rest = [_name(q, j) for j, q in enumerate(stored) if j > i]
+            unread[_name(p, i)] = why
+            for n in rest:
+                unread.setdefault(n, f"it comes after profile '{_name(p, i)}', "
+                                     f"which KiCad cannot read")
+            _warn_once(pro + '|unread', (
+                f"{pro}: tuning profile '{_name(p, i)}' {why}; KiCad cannot read "
+                f"it and does not load it"
+                + (f", nor the {len(rest)} profile(s) after it ({', '.join(rest)})"
+                   if rest else '')
+                + "; a net timed with one reads 0 ps, as in KiCad"))
+            break
+        if not p.get('profile_name'):
             continue
         layers = {}
         for e in p.get('layer_entries') or []:
@@ -100,14 +196,14 @@ def read_tuning_profiles(board_path: str
             prio = c.get('priority')
             classes.append((int(prio) if isinstance(prio, int) and name != 'Default'
                             else _DEFAULT_PRIORITY, name, str(c['tuning_profile'])))
-    return profiles, sorted(classes)
+    return profiles, sorted(classes), unread
 
 
 def _via_overrides(entries) -> Dict[tuple, float]:
     """A profile's `via_overrides` as {(signal from, signal to, via from, via
     to): ps}. The stored `delay` is attoseconds for the whole via."""
     out: Dict[tuple, float] = {}
-    for e in entries or []:
+    for e in entries if isinstance(entries, list) else []:
         if not isinstance(e, dict) or not isinstance(e.get('delay'), (int, float)):
             continue
         key = tuple(str(e.get(k) or '') for k in ('signal_layer_from', 'signal_layer_to',
@@ -122,7 +218,7 @@ class DelayModel:
 
     def __init__(self, board_path: str, pcb_data, memberships=None):
         self.pcb_data = pcb_data
-        self.profiles, self._classes = read_tuning_profiles(board_path)
+        self.profiles, self._classes, self.unread = _read_project(board_path)
         if memberships is None:
             from list_nets import net_class_memberships
             names = {nid: n.name for nid, n in pcb_data.nets.items() if nid and n.name}
@@ -136,6 +232,15 @@ class DelayModel:
         for _prio, cls, prof in self._classes:
             if cls in mine:
                 return self.profiles.get(prof)
+        return None
+
+    def unread_profile_of(self, net_id: int) -> Optional[Tuple[str, str]]:
+        """(profile name, why) when the net's class names a profile KiCad
+        does not load, else None."""
+        mine = set(self._member.get(net_id) or ()) | {'Default'}
+        for _prio, cls, prof in self._classes:
+            if cls in mine:
+                return (prof, self.unread[prof]) if prof in self.unread else None
         return None
 
     def net_delay(self, net_id: int) -> Tuple[Optional[float], str]:
@@ -153,6 +258,10 @@ class DelayModel:
             return None, 'pads not joined by track copper'
         prof = self.profile_of(net_id)
         if prof is None:
+            lost = self.unread_profile_of(net_id)
+            if lost:
+                return 0.0, (f"its net class names tuning profile '{lost[0]}', "
+                             f"which KiCad does not load ({lost[1]})")
             return 0.0, "its net class names no tuning profile"
         if not prof.time_domain:
             return (net_match_pad_to_die(pcb, net_id, 'total', attr='die_delay'),

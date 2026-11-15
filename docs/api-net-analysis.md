@@ -513,7 +513,13 @@ reads them as a `TuningProfile` (`name`, `time_domain`, `layer_ps_per_mm`,
 `via_ps_per_mm`, and `via_overrides`: `{(signal layer from, signal layer to,
 via layer from, via layer to): ps}`, each entry as the project stores it),
 with the classes that name each profile. A missing project gives
-none; one that cannot be parsed gives none with a warning.
+none; one that cannot be parsed gives none with a warning. The profiles are
+the ones KiCad loads: a profile with a field missing or of another type (its
+own five, a layer entry's six, a via override's five) ends KiCad's load of
+the list, so that profile and every one after it are left out, with a
+warning that names the profile and the field, and a net whose class names
+one measures 0 ps as in KiCad. `unread_tuning_profiles` gives
+`{profile name: why}`.
 
 `kicad_net_length_parts_nm` is `kicad_net_length_nm` (above) in its parts:
 each layer's track length and the via length, measured the same way, so a
