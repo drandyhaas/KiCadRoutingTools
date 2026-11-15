@@ -542,9 +542,8 @@ The corpus itself is not redistributed: anyone builds it with
 recorded chains in `tests/stress/corpus_chains/` (RUNBOOK, "Building the
 corpus yourself").
 **Arc outlines barely run in those replays**: the ordinary prep rebuilds Edge.Cuts
-as chained lines. A change to how an arc outline is read adds `--sets set1arc`, 6
-chains whose inputs keep their arcs, which no range includes (RUNBOOK, "Arc
-outlines: `set1arc`").
+as chained lines, so a change to how an arc outline is read needs boards of its
+own.
 **Per-net via sizes (#530) never run in those replays**: they are live only when
 route.py is given no `--via-size`, and 396 of the 403 recorded route steps pass
 one. A change that touches per-net vias is A/B'd with
