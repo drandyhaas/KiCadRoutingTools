@@ -7006,14 +7006,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             clearance_margin_mm: Optional[float] = None,
             severity_overrides: Optional[Dict[str, str]] = None,
             within_margin: Optional[dict] = None,
-            not_graded: Optional[list] = None):
+            not_graded: Optional[list] = None,
+            pattern_accounting: Optional[dict] = None):
     """Run DRC checks on the PCB file.
 
     Args:
         pcb_file: Path to the KiCad PCB file
         clearance: Minimum clearance in mm
-        net_patterns: Optional list of net name patterns (fnmatch style) to focus on.
-                     If provided, only checks involving at least one matching net are reported.
+        net_patterns: Optional list of net name patterns to focus on, in
+                     route.py's `--nets` glob syntax (`net_queries.
+                     matches_net_filter`: fnmatch wildcards, sheet-path aware,
+                     '!' excludes). If provided, only checks involving at
+                     least one matching net are reported. Each inclusion
+                     pattern is accounted on its own (#1849): one naming no
+                     net of the board is named on the console, since the
+                     nets it was meant to select are not graded.
         debug_output: If True, write debug lines to User.7 layer showing violation locations
         quiet: If True, only print a summary line unless there are violations
         print_summary: With quiet=True, False prints NOTHING at all, OK or
@@ -7065,6 +7072,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             the rule may bind, and the rule's ``constraints`` for a `size` row,
             ``clearance_mm`` / ``condition`` for a `clearance` one. ``kind`` is
             the one the console line names. None (default) collects nothing.
+        pattern_accounting: A dict this run fills (#1849) when NET_PATTERNS
+            is given: ``patterns_matching_no_net`` (the inclusion patterns
+            naming no net of the board, `net_queries.account_net_patterns`)
+            and ``nets_selected`` (how many nets the patterns select). The
+            CLI exits 2 on either a no-net pattern or 0 nets selected; the
+            return value does not change. None (default) keeps nothing.
     """
     if within_margin is not None:
         # Set for this call only, as clearance_margin_mm below is.
@@ -7702,14 +7715,18 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                                   f"the copper it binds is not graded here; "
                                   f"KiCad still enforces it")
 
-    # Helper to check if a net_id matches the filter patterns
+    # Helper to check if a net_id matches the filter patterns. #1849: the
+    # shared matcher, the one account_net_patterns counts with, so a pattern
+    # it calls matched selects nets here too (plain fnmatch read 'GND' as
+    # naming no net of a board whose net is '/GND' and graded nothing).
+    from net_queries import matches_net_filter as _mnf
     def net_matches_filter(net_id: int) -> bool:
         if net_patterns is None:
             return True  # No filter, include all
         net_info = pcb_data.nets.get(net_id, None)
         if net_info is None:
             return False
-        return matches_any_pattern(net_info.name, net_patterns)
+        return _mnf(net_info.name, net_patterns)
 
     if net_patterns and not quiet:
         print(f"Filtering to nets matching: {net_patterns}")
@@ -7784,10 +7801,28 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     _accepted_edge = []  # pad-covered edge items: published (not counted) for kicad_drc_compare
 
     # Pre-compute matching nets for filtering
+    _scope_note = None      # #1849: why the --nets scope grades less than asked
     if net_patterns:
         matching_net_ids = set(net_id for net_id in pcb_data.nets.keys() if net_matches_filter(net_id))
         if not quiet:
             print(f"Filtering to {len(matching_net_ids)} matching nets")
+        # #1849: each pattern on its own -- a mistyped or stale one selects
+        # nothing, and nothing selected used to read NO DRC VIOLATIONS FOUND
+        from net_queries import account_net_patterns, no_net_patterns_note
+        _no_net = account_net_patterns(net_patterns, pcb_data)[0]
+        if pattern_accounting is not None:
+            pattern_accounting['patterns_matching_no_net'] = list(_no_net)
+            pattern_accounting['nets_selected'] = len(matching_net_ids)
+        if _no_net:
+            _scope_note = (no_net_patterns_note(_no_net, '--nets')
+                           + (" -- no net is graded" if not matching_net_ids else
+                              " -- the grade covers only the nets the other "
+                              "patterns name"))
+        elif not matching_net_ids:
+            _scope_note = (f"--nets {net_patterns} selects no net of the board "
+                           f"-- no net is graded")
+        if _scope_note and not quiet:
+            print(f"NOTE: {_scope_note}")
     else:
         matching_net_ids = None
 
@@ -10080,6 +10115,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         if violations:
             if print_summary:
                 print(f"FAILED ({len(violations)} violations)")
+                if _scope_note:
+                    print(f"NOTE: {_scope_note}")
             else:
                 if debug_output:
                     write_debug_lines(pcb_file, violations, clearance)
@@ -10093,7 +10130,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         f"(the board's own severities)"] if _sev_warn else []) \
                     + ([f"{len(_own_gap_rows)} library pad pair(s) of one footprint "
                         f"KiCad reports as clearance"] if _own_gap_rows else [])
-                print("OK" + (f" ({'; '.join(_notes)})" if _notes else ""))
+                print(("NO NETS GRADED" if net_patterns and not matching_net_ids
+                       else "OK") + (f" ({'; '.join(_notes)})" if _notes else ""))
+                if _scope_note:
+                    print(f"NOTE: {_scope_note}")
             return violations + _accepted_edge
 
     # Print detailed results (always for non-quiet, or when violations in quiet mode)
@@ -10380,8 +10420,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             trunc = "" if listed == len(violations) else \
                 " TRUNCATED (use --max-print 0 to list all)"
             print(f"\nLISTING: {listed} of {len(violations)} violation(s) shown{trunc}")
+        elif net_patterns and not matching_net_ids:
+            # #1849: nothing selected is no grade, not a clean one
+            print("NO NETS GRADED: --nets selects no net of the board")
         else:
             print("NO DRC VIOLATIONS FOUND!")
+        if _scope_note:
+            print(f"NOTE: {_scope_note}")
 
         _warn_note()
         print("=" * 60)
@@ -10697,6 +10742,7 @@ if __name__ == "__main__":
 
     _within = {}    # #1803: filled by run_drc
     _not_graded = []    # #1831: filled by run_drc, --quiet or not
+    _patterns = {}      # #1849: filled by run_drc when --nets is given
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
                          args.hole_clearance,
@@ -10711,7 +10757,13 @@ if __name__ == "__main__":
                          net_clearances=net_clearances,
                          baseline=args.baseline,
                          clearance_margin_mm=args.clearance_margin_mm,
-                         within_margin=_within, not_graded=_not_graded)
+                         within_margin=_within, not_graded=_not_graded,
+                         pattern_accounting=_patterns)
+    # #1849: a --nets pattern naming no net (or a --nets that selects none)
+    # grades less than was asked, so it is not a clean result: exit 2, as
+    # check_return_vias does, whatever the graded nets' own verdict
+    _scope_short = bool(args.nets) and 'nets_selected' in _patterns and bool(
+        _patterns['patterns_matching_no_net'] or not _patterns['nets_selected'])
     if _within.get('count') and not args.quiet:
         # #1803: a clean verdict says what its tolerance let through that
         # KiCad's 500 nm does not. The grade and the exit status are as before.
@@ -10865,6 +10917,11 @@ if __name__ == "__main__":
             # knows them): `violations` is a partial grade while any is
             # listed, since KiCad still grades those rules. [] = none.
             'not_graded': _not_graded,
+            # #1849: the --nets patterns naming no net of the board ([] when
+            # every one names a net, or no --nets), and how many nets --nets
+            # selected (None without it); either short of the ask exits 2
+            'patterns_matching_no_net': _patterns.get('patterns_matching_no_net', []),
+            'nets_selected': _patterns.get('nets_selected'),
             'by_type': dict(_c.Counter(v.get('type') for v in _real)),
             # CONTACT, per type. `overlap_mm >= clearance` means the two pieces
             # of copper physically reach each other -- required_dist is
@@ -10918,4 +10975,6 @@ if __name__ == "__main__":
         print(f"  JSON -> {args.json}")
     # 'accepted' items (e.g. a track covered by an edge-exempt pad) are published in
     # the return for other graders but are NOT failures -- exclude from exit status.
+    if _scope_short:
+        sys.exit(2)
     sys.exit(1 if any(not v.get('accepted') for v in violations) else 0)

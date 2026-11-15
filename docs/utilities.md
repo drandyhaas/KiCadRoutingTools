@@ -105,7 +105,12 @@ Options:
                             of the fraction (#1594; the two flags refuse each other).
                             0.0005 is KiCad's own (500 nm on every pair) and grades as
                             KiCad does on every net class
-  --nets, -n PATTERN [...]  Only check nets matching these fnmatch patterns
+  --nets, -n PATTERN [...]  Only check nets matching these patterns (route.py --nets glob
+                            syntax: fnmatch, sheet-path aware, '!' excludes). Each pattern
+                            is accounted on its own (#1849): one naming no net of the board
+                            is named (`--nets pattern(s) matching no net of the board`, JSON
+                            `patterns_matching_no_net`, `nets_selected`) and the exit is 2,
+                            as it is when the patterns together select no net
   --debug-lines, -d    Write debug lines on User.7 showing violation locations
   --quiet, -q          Print only a summary line unless there are violations
   --max-print INT      Max violations listed per type before "... and N more"
@@ -140,7 +145,9 @@ change nothing here. `--fab-tier` does not move the size floors either (they
 are the physical floor, check 11); only `--fab-overrides` does.
 
 Exit 0 when nothing but accepted items and warnings remain, 1 when any
-violation is left.
+violation is left, 2 when a `--nets` pattern names no net of the board or the
+patterns select none (#1849): the grade then covers less than was asked, so it
+is not a clean one whatever the graded nets' own verdict.
 
 The per-type listing is capped at `--max-print` (default 20); when a type has
 more, a `... and N more (use --max-print 0 to show all)` marker is printed so
