@@ -62,8 +62,13 @@ def _run(declared):
         path = os.path.join(tmp, 'b.kicad_pcb')
         shutil.copyfile(BOARD, path)
         with open(os.path.join(tmp, 'b.kicad_pro'), 'w', encoding='utf-8') as fh:
+            # copper-to-hole at the copper clearance: a 0.05 ring's drill then
+            # stays inside the copper keep-out, so the cap's one offender is
+            # the target via -- with no declaration the step would hold the
+            # pad off the ring vias' drills at the 0.2 floor it writes
             json.dump({'board': {'design_settings': {'rules': {
-                'min_hole_to_hole': declared}}}}, fh)
+                'min_hole_to_hole': declared,
+                'min_hole_clearance': CLEAR}}}}, fh)
         pcb = parse_kicad_pcb(path)
         fp = pcb.footprints[CAP]
         for ref in list(pcb.footprints):

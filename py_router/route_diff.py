@@ -3213,6 +3213,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             [(_id1371[_nm], _nm, _r['requested_mm'], _r['sizes'])
              for _nm, _r in _short1371.items()],
             'via copper shipped under size')
+        # #1914: and those of them below the copper-to-hole ring
+        from fab_tiers import replace_hole_ring_rows
+        replace_hole_ring_rows(
+            [(_id1371[_nm], _nm, _r['pairs']) for _nm, _r in _short1371.items()],
+            'via shipped below the hole ring')
     except Exception as _vre:                                   # noqa: BLE001
         print(f"  (via-size disclosure skipped: {_vre})")
     # #1679: a member the fallback necked below its layer width ships that

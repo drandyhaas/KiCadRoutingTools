@@ -411,31 +411,40 @@ class TestEveryTermOfTheBoundIsLoadBearing(unittest.TestCase):
     day a pad size or the default displacement cap changes. Measured on this
     rig: max_disp 3.0000 + span 0.8544 opens the band at 3.8544, and v[3]
     (0.4 radius + 0.1 keep-out) closes it at 4.3544. The flat-scalar mutation
-    moves the edge to 3.9544, so a probe in the middle of the band separates
-    all three spellings.
+    moves the edge to 3.9544, and the copper-to-hole reach (drill radius
+    0.15 + the 0.2 floor this project-less rig is held at) to 4.2044, so a
+    probe at nine tenths of the band separates every spelling.
     """
 
     def _probe(self, offset_frac):
         """Place one via at `max_disp + span + offset_frac * v[3]` from C1's
-        seed centre and report whether the prune kept it."""
+        seed centre and report whether the prune kept it, and how far the
+        COPPER-TO-HOLE reach goes (drill radius + the cap's widest hole
+        requirement), which keeps a via of its own."""
         with _stub() as path:
             pcb, _v = _board(VIA_CLEAR, 'F.Cu')
             st = _repair(pcb, path)
             ccx, ccy, span, _r = st._cap_geom['C1']
             v3 = st.vias[0][3]
             d = st._max_disp_cap + span + offset_frac * v3
+            hole = (st._max_disp_cap + span + V_DRILL / 2.0
+                    + st._cap_hole_reach(st.caps['C1']))
             pcb.vias.append(make_via(ccx + d, ccy, net_id=FAR_NET,
                                      size=V_SIZE, drill=V_DRILL))
             st2 = _repair(pcb, path)
             probe = [t for t in st2.vias if abs(t[0] - (ccx + d)) < 1e-9]
             self.assertEqual(len(probe), 1, 'the probe via was not graded')
-            return probe[0] in st2.cap_vias['C1'], d, v3
+            return probe[0] in st2.cap_vias['C1'], d, v3, hole
 
     def test_a_via_inside_the_KEEPOUT_band_is_KEPT(self):
-        kept, d, v3 = self._probe(0.5)
+        # Past the hole reach (this 0.8/0.3 barrel's drill keep-out is
+        # narrower than its copper one), so the copper term alone keeps it.
+        kept, d, v3, hole = self._probe(0.9)
+        self.assertGreater(d, hole, 'the probe sits inside the hole reach, so '
+                                    'it cannot see the copper term')
         self.assertTrue(kept,
                         'a via %.4fmm from the seed centre was pruned away, '
-                        'but it sits INSIDE the reach by half of v[3] '
+                        'but it sits INSIDE the reach, within v[3] '
                         '(%.4fmm). The keep-out term was dropped or replaced '
                         'by a smaller one, and the prune is no longer exact.'
                         % (d, v3))
@@ -445,7 +454,7 @@ class TestEveryTermOfTheBoundIsLoadBearing(unittest.TestCase):
         """The other side of the bracket. Without it the arm above is
         satisfied by a prune that keeps everything, which is the de-prune this
         whole branch removes."""
-        kept, d, _v3 = self._probe(1.5)
+        kept, d, _v3, _hole = self._probe(1.5)
         self.assertFalse(kept,
                          'a via %.4fmm away is kept, which is beyond the '
                          'reachable disk -- the bound was widened' % d)

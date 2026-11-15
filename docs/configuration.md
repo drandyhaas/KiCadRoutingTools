@@ -599,6 +599,28 @@ than keeping the requested drill round the rung's own ring. Where none can (the
 pad is under the diameter minimum, or too small for the ring round the hole
 minimum) every via there breaks a rule, and the clamp sizes it as before.
 
+**The copper-to-hole ring (#1914).** KiCad grades other-net copper against a
+via's drill at the board's hole clearance, so a via whose ring is narrower than
+`hole clearance - clearance` lets copper kept at the clearance off its copper
+sit too close to its hole (a 0.45/0.2 via rings 0.125; at 0.1 clearance that
+copper is 0.225 from the hole, under KiCad's 0.25). Every descent ladder
+therefore tries each tier rung raised to hold that ring just before the rung
+itself, so the ring is preferred within a tier and never forces a step to a
+smaller (costlier) tier: completion first, and each via that ships smaller
+than its net asked and below the ring is a `hole_clearance` row in
+`JSON_SUMMARY.design_rules` and the `Design rules` line. The hole clearance is
+the board's declared `min_hole_clearance` (the live board's, on the GUI), raised
+to the chain's `fab_floor_origin`, else KiCad's factory 0.25; a declared 0 asks
+for no ring. A step's DRC writeback lowers `min_hole_clearance` to what it
+routed (on a board that declared nothing, it writes the rule at the
+clearance), so when it leaves the rule below the hole clearance the ladder
+preferred it records both (`kicad_routing_tools.via_ring_hole_clearance`:
+`{rule, hole_clearance}`, both fronts), and while the rule still holds that
+value every later step's ladder prefers the same ring. A rule set to any other
+value -- a Board Setup edit between steps -- is read as declared. The record
+is the ladder's alone: KiCad, `check_drc` and the router's NPTH keep-outs grade
+and hold the rule the project declares.
+
 Every such rule is graded when route.py or route_diff.py ends, over the vias the
 step laid: `.kicad_dru rule 'rf ring' (annular_width min 0.07 mm): this step's 7
 via(s) it binds meet it (smallest ring 0.075 mm)`, or `... 7 BELOW it`, and
@@ -703,7 +725,21 @@ pad around the hole plus the copper clearance:
   and pads, and its copper that far from their holes;
 - a via placed off the obstacle map (the rescue's pad escape, a layer-swap or
   stub-switch via) is refused by `check_drc.hole_rule_refusal`, which runs the
-  grader over the board near it.
+  grader over the board near it;
+- the post-route passes that move copper (smoothing, the graze prune and re-bend,
+  the micro-shift, the via nudge) measure a track or a via against another net's
+  via with the rule folded in (`single_ended_routing._hole_via_excess`), so they
+  cannot move copper back inside the distance the router held.
+
+Completion first, disclosed: a net that every rung holding the rule leaves open
+gets one more terminal-escalation rung, at the most permissive size the ladder
+reached and the copper clearance alone (`net_rescue._escalation_ladder`). It runs
+only in the run's last recovery tier (the final reconciliation, so a net a later
+lap joins within the rule is not joined below it first) and only under
+`--escalation fab`, the default; `board` and `off` hold the rule and ship the net
+open. The net's `terminal_escalations` entry says `below the hole_clearance
+rule(s)`, and the rows its copper stands inside are named per rule on the console
+and in that step's `JSON_SUMMARY.design_rules.hole_rules`.
 
 The value is the last rule in the file whose condition and `(layer ...)` clause
 match the pair, read either way round, as KiCad decides it, for the copper as it
@@ -1273,7 +1309,7 @@ See [Length Matching](length-matching.md#time-matching) for how propagation dela
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--json-out FILE` | - | Also write the run's `JSON_SUMMARY` to FILE. This is the merged tally: when the end-of-run reconciliation fires, stdout carries a second, subset-scoped summary, and scraping either one alone is wrong. Prefer this over parsing stdout. `route_diff.py` takes it too, with the same meaning (#1421). A run with nothing to route still writes the file, with a `status` saying why |
+| `--json-out FILE` | - | Also write the run's `JSON_SUMMARY` to FILE. This is the merged tally: when the end-of-run reconciliation fires, stdout carries a second, subset-scoped summary, and scraping either one alone is wrong. Prefer this over parsing stdout. `route_diff.py` takes it too, with the same meaning (#1421). A run with nothing to route still writes the file, with a `status` saying why. Its `design_rules` is the ledger the run ships (the narrowed rows, re-measured on the shipped board), each summary's own `unsupported_rules` / `scoped_clearance` / `kicad_refuses_file`, and the grades of the step's own copper against the board's rules -- `annular_rules`, `via_rules`, `edge_rules`, `hole_rules`, `board_setup_vias` -- which route.py measures once on the copper it ships (what the input did not carry), since each printed `JSON_SUMMARY` grades only the copper its own pass laid; a `JSON_SHIPPED_RULES` line carries the same to a reader of the log |
 | `--write-fill` | off | After writing the board, fill its zones with KiCad's own zone filler so the file carries `(filled_polygon ...)` blocks (#910); without it the board ships zone outlines only. Needs KiCad's bundled python |
 | `--capabilities` | off | Print this clone's module and flag inventory as JSON and exit (see `krt_capabilities.py --require`) |
 

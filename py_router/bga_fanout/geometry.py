@@ -283,7 +283,8 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
             new_drill = held
         note_narrowing(getattr(pad, 'net_id', None), 'via_diameter', via_size, new_size,
                        'via-in-pad clamp')
-        return new_size, round(new_drill, 4), 'clamped', rung
+        from fab_tiers import rung_tier
+        return new_size, round(new_drill, 4), 'clamped', rung_tier(floors, rung)
 
     # Even the deepest rung's via bulges past this pad: hold it at that floor.
     deepest = len(floors) - 1
@@ -299,7 +300,9 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
         return via_size, via_drill, 'floor', 0
     note_narrowing(getattr(pad, 'net_id', None), 'via_diameter', via_size,
                    floors[deepest]['via_diameter'], 'via-in-pad clamp (floor)')
-    return floors[deepest]['via_diameter'], floors[deepest]['via_drill'], 'floor', deepest
+    from fab_tiers import rung_tier
+    return (floors[deepest]['via_diameter'], floors[deepest]['via_drill'], 'floor',
+            rung_tier(floors, deepest))
 
 
 def create_45_stub(pad_x: float, pad_y: float,

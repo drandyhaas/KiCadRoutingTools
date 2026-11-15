@@ -6859,7 +6859,8 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
                                       _foreign_via_arrays, _foreign_hole_capsules,
                                       _scoped_excess, _coupled_excess,
                                       _fold_scoped_excess, _fold_scoped_pad_excess,
-                                      _area_excess, _fold_area_pad_excess)
+                                      _area_excess, _fold_area_pad_excess,
+                                      _hole_via_excess, _raise_excess)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     from obstacle_map import resolve_hole_clearance
 
@@ -7031,9 +7032,13 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
         if near.any():
             fcx, fcy, fr = vx[near], vy[near], vr[near]
             d = np.hypot(sx[:, None] - fcx[None, :], sy[:, None] - fcy[None, :]) - fr[None, :]
-            d = d - _excess(vnid[near], 'via', 'layer', _area_excess(
+            _vex = _excess(vnid[near], 'via', 'layer', _area_excess(
                 config, pcb_data, net_id, x1, y1, x2, y2, s.layer, 'via',
-                (vnid, vx, vy, vr), near, clearance, 'via'))[None, :]  # #436
+                (vnid, vx, vy, vr), near, clearance, 'via'))  # #436
+            # #1853: the via's hole at the rule binding it
+            _vex = _raise_excess(_vex, _hole_via_excess(
+                config, pcb_data, near, clearance, s.layer))
+            d = d - _vex[None, :]
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, fcx[j], fcy[j])
 
@@ -7582,7 +7587,8 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
 
     _scoped = getattr(config, 'scoped_clearance', None) if config is not None else None
 
-    def pair_clr(own, foreign_nid, own_nid=None, ftype=None, pad_type=None):
+    def pair_clr(own, foreign_nid, own_nid=None, ftype=None, pad_type=None,
+                 layers=None):
         # #436: KiCad's pairwise requirement max(own floor, foreign class).
         v = own if not net_clearances else max(own, net_clearances.get(foreign_nid, clearance))
         if _scoped is not None and own_nid is not None:
@@ -7591,7 +7597,29 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             got = _scoped.sc.pair_value(own_nid, 'via', foreign_nid, ftype, None, pad_type)
             if got is not None:
                 v = max(got[0], _scoped.fab_floor)
+            # #1897: a scoped rule with a (layer ...) clause binds the pair on
+            # the layers it names where the two items meet (`layers`: the
+            # track's layer or the pad's copper; None for another via, which
+            # meets this one on every layer). The later rule in the file
+            # stands on each layer; the largest of it and the value so far is
+            # held, which only ever keeps the via further off.
+            _ll = _scoped.layered_layers
+            for _l in (_ll if layers is None else [l for l in layers if l in _ll]):
+                g2 = _scoped.sc.layer_pair_value(own_nid, 'via', foreign_nid, ftype,
+                                                 None, pad_type, _l)
+                if g2 is not None and (got is None or g2[2] > got[2]):
+                    v = max(v, g2[0], _scoped.fab_floor)
         return v
+
+    def _pad_layers1897(p):
+        # the copper layers of a pad among those a layered scoped rule names
+        if _scoped is None:
+            return ()
+        pl = list(getattr(p, 'layers', None) or ())
+        if any(l in ('*.Cu', 'F&B.Cu') for l in pl):
+            return tuple(l for l in _scoped.layered_layers
+                         if '*.Cu' in pl or l in ('F.Cu', 'B.Cu'))
+        return tuple(l for l in pl if l in _scoped.layered_layers)
 
     def worse(before, after):
         return ((before.get('connected') and not after.get('connected')) or
@@ -7826,7 +7854,8 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         for s in near_segs:
             d, t = _pt_seg_dist_t(x, y, s)
             consider(d - (r + s.width / 2.0 + _area_need(
-                         pair_clr(own, s.net_id, v.net_id, 'track'), x, y, 'track', s)),
+                         pair_clr(own, s.net_id, v.net_id, 'track',
+                                  layers=(s.layer,)), x, y, 'track', s)),
                      s.start_x + t * (s.end_x - s.start_x),
                      s.start_y + t * (s.end_y - s.start_y))
         for o in near_vias:
@@ -7847,7 +7876,8 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                 _need = same_net_pad_clearance  # #581 (only gathered when > 0)
             else:
                 _need = max(_area_need(pair_clr(own, p.net_id, v.net_id, 'pad',
-                                                getattr(p, 'pad_type', None) or 'smd'),
+                                                getattr(p, 'pad_type', None) or 'smd',
+                                                layers=_pad_layers1897(p)),
                                        x, y, 'pad', p),
                             getattr(p, 'local_clearance', 0.0) or 0.0)
             consider(g - (r + _need), tp[0], tp[1])
