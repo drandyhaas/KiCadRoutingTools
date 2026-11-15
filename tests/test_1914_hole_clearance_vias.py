@@ -4,9 +4,9 @@
 CHECKER (was: vias never entered the `holes` list, so --hole-clearance graded
 only NPTH holes, uncovered plated holes and flush pegs): a plated via's drill
 is now graded against other-net tracks, vias and pads, at the declared
-hole clearance (none declared: not graded) -- with the pair-clearance suppression KiCad
-itself applies (a hole row does not stand beside a failing copper-clearance
-row, except pad-vs-via-hole, where KiCad reports both).
+hole clearance (none declared: not graded). A hole row stands beside a
+failing copper-clearance row, and beside a short, as kicad-cli reports it
+with --all-track-errors (#1850).
 
 Synthetic (always runs), all at --clearance 0.1 --hole-clearance 0.25:
   A. a 0.45/0.2 via with an other-net pad 0.225 off its hole -> PAD-HOLE,
@@ -16,10 +16,9 @@ Synthetic (always runs), all at --clearance 0.1 --hole-clearance 0.25:
      gap 0.23) -> VIA-HOLE (the pre-fix board's third row, UART_CTS/VREF);
   D. a track at copper clearance off a 0.45/0.2 via, 0.225 off its hole ->
      TRACK-HOLE, overlap 0.025;
-  E. the same track 0.05 off the via's copper -> the clearance row carries
-     it, TRACK-HOLE is 0 (suppression);
-  F. two vias 0.45 apart (copper overlapping) -> the clearance row carries
-     it, VIA-HOLE is 0 (suppression);
+  E. the same track 0.05 off the via's copper -> the clearance row AND
+     TRACK-HOLE (KiCad with --all-track-errors reports both);
+  F. two vias 0.45 apart (copper overlapping) -> the short AND VIA-HOLE;
   G. a pad 0.05 off a 0.45/0.2 via's copper and 0.175 off its hole ->
      PAD-HOLE still fires (KiCad reports both for pad-vs-via-hole);
   H. the same board with no hole clearance declared -> the pad-via row only.
@@ -198,23 +197,23 @@ def checker(tmp):
        doc.get('by_type', {}).get('track-hole', 0) == 1
        and doc.get('violations') == 1, doc.get('by_type'))
 
-    print('5. suppression: the clearance row carries a grazing track')
+    print('5. a grazing track: the clearance row and the hole row')
     # Track centred at y = 20.375: edge 0.275 off centre, 0.05 off the copper.
     pcb = _stage(tmp, 'track_suppress', _board(
         vias=[(20, 20, 0.45, 0.2, 1)],
         segs=[(15, 20.375, 25, 20.375, 0.2, 2)]))
-    doc, _r = _grade(pcb, tmp, 'track_suppress', True, refuse=None)
-    ok('no track-hole beside a failing clearance row',
-       doc.get('by_type', {}).get('track-hole', 0) == 0
-       and doc.get('violations', 0) >= 1, doc.get('by_type'))
+    doc, _r = _grade(pcb, tmp, 'track_suppress', True, refuse='TRACK-HOLE')
+    ok('track-hole beside the failing clearance row (#1850)',
+       doc.get('by_type', {}).get('track-hole', 0) == 1
+       and doc.get('by_type', {}).get('via-segment', 0) == 1, doc.get('by_type'))
 
-    print('6. suppression: the clearance row carries overlapping vias')
+    print('6. overlapping vias: the short and the hole row')
     pcb = _stage(tmp, 'via_suppress', _board(
         vias=[(20, 20, 0.45, 0.2, 1), (20.45, 20, 0.6, 0.3, 2)]))
-    doc, _r = _grade(pcb, tmp, 'via_suppress', True, refuse=None)
-    ok('no via-hole beside a failing clearance row',
-       doc.get('by_type', {}).get('via-hole', 0) == 0
-       and doc.get('violations', 0) >= 1, doc.get('by_type'))
+    doc, _r = _grade(pcb, tmp, 'via_suppress', True, refuse='VIA-HOLE')
+    ok('via-hole beside the short (#1850)',
+       doc.get('by_type', {}).get('via-hole', 0) == 1
+       and doc.get('by_type', {}).get('via-via', 0) == 1, doc.get('by_type'))
 
     print('7. pad-vs-via-hole reports both rows, like KiCad')
     # Pad edge 0.275 off centre: 0.05 off the via copper (clearance fails)
