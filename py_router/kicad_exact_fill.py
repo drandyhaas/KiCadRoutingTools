@@ -83,7 +83,10 @@ filler.Fill(zones)
 # aSkipSettings: dst is parsed for island polygons only; the settings save
 # aborts this subprocess (SIGABRT, degrading the fill to the raster model)
 # when the staged project predates KiCad 10.
-pcbnew.SaveBoard(dst, board, aSkipSettings=True)
+# tool_records.save_board: the record stays on the saved file, which is the
+# delivered board for fill_for_delivery (#1906: KiCad 10.0.7+ drops it)
+import tool_records
+tool_records.save_board(pcbnew.SaveBoard, dst, board, aSkipSettings=True)
 print("REFILL_OK", len(list(zones)))
 """
 

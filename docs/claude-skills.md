@@ -114,7 +114,10 @@ python3 py_router/run_plan.py board.kicad_pcb plan.json --steps 1,3-5 # run a su
 
 The input board is never modified — it is copied *with its `.kicad_pro`* (which
 carries the DRC floor, #441) to the output path, and the plan runs on that.
-`--snapshot-dir` keeps the board after each step.
+`--snapshot-dir` keeps the board after each step. The output and each snapshot
+carry the board copy of the tool records (`(property "kicad_routing_tools" ...)`)
+the board held when it was saved, also on KiCad 10.0.7 and later, whose pcbnew
+save drops it (#1906).
 
 This is the same driver (`headless_plan.py`) the GUI/CLI parity harness uses, so
 what runs here is what the buttons run.

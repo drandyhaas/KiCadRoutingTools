@@ -286,6 +286,12 @@ Validate routed boards against the *real* spec, with the right checker — most
   `.kicad_pro` from its load-time copy and drops whatever a GUI run wrote after
   load. Every reader takes the newer copy by `records_rev` and every writer
   goes through `py_router/tool_records.py`, never straight to the project JSON.
+  **The board copy does not survive a plain `SaveBoard` on newer KiCad (#1906)**:
+  it replaces a board's properties with the project's text variables before
+  saving. So every pcbnew save in this repo goes through
+  `tool_records.save_board`, which writes the namespace back to the file and
+  the live board (an AST check holds every `SaveBoard` call to it); the
+  user's own save in such a KiCad is not covered.
   Rationale: a retry step once ripped a whole DDR match group and rerouted it
   unmatched (allwinner_h3_ddr3, 40/41 nets unmatched, one net stranded).
   **KiCad-LOCKED copper** (`segment.locked`/`via.locked`, both parse paths) makes

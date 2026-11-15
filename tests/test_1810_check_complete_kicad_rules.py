@@ -260,7 +260,7 @@ def part1_probe(b):
         g = check_complete.kicad_rule_grade(board)
         check('a report with the probe\'s row: graded, and the probe is no finding',
               g == {'kicad_version': '10.9.9', 'errors_by_rule': {'court gap': 1},
-                    'capped_types': []}, str(g))
+                    'capped_types': [], 'unignored_types': []}, str(g))
 
         check_complete._kicad_drc_report = answering(
             [_row('court gap', kind='assertion_failure')] * 199)
@@ -308,11 +308,33 @@ def part1_probe(b):
             fh.write('(kicad_pcb (version 20241229) (generator "pcbnew")\n'
                      '  (layers (0 "F.Cu" signal) (2 "B.Cu" signal)))\n')
         shutil.copy(dru, os.path.join(os.path.dirname(board), 'bare.kicad_dru'))
-        seen.clear()
-        g = check_complete.kicad_rule_grade(run_utils.evidence(bare))
-        check('a board with no footprint to probe with fails closed, KiCad not asked',
-              'no footprint with a plain reference' in g.get('error', '')
-              and not seen, str(g))
+        # #1852: a board with no footprint to probe with is asked on a stub
+        real_stub = check_complete._stub_load_answer
+        check_complete._kicad_drc_report = answering([_row('court gap')])
+        try:
+            seen.clear()
+            check_complete._stub_load_answer = lambda _b: {
+                'loaded': None, 'why': 'kicad-cli not found (set KICAD_CLI)'}
+            g = check_complete.kicad_rule_grade(run_utils.evidence(bare))
+            check('a board with no footprint to probe with, KiCad not askable on a '
+                  'stub either: fails closed, the board not graded',
+                  'no footprint with a plain reference' in g.get('error', '')
+                  and not seen, str(g))
+            check_complete._stub_load_answer = lambda _b: {
+                'loaded': False, 'kicad_version': '10.9.9'}
+            g = check_complete.kicad_rule_grade(bare)
+            check('... the stub says KiCad drops the file: not loaded, the board '
+                  'not graded', NOT_LOADED in g.get('error', '') and 'stub board'
+                  in g['error'] and not seen, str(g))
+            check_complete._stub_load_answer = lambda _b: {
+                'loaded': True, 'kicad_version': '10.9.9'}
+            g = check_complete.kicad_rule_grade(bare)
+            check('... the stub says KiCad loads it: the board is graded on its own '
+                  'rules file, no probe appended',
+                  g.get('errors_by_rule') == {'court gap': 1} and 'own' in seen
+                  and seen['staged'] is None, f'{g} {seen.get("staged")!r}')
+        finally:
+            check_complete._stub_load_answer = real_stub
     finally:
         check_complete._kicad_drc_report = real
         with open(dru, 'w', encoding='utf-8') as fh:
@@ -349,7 +371,7 @@ def part2_dropped(b):
 
         with open(dru, 'w', encoding='utf-8') as fh:
             fh.write(_OK)
-        design_rules.read_board_kicad_refusals = lambda _board: []
+        design_rules.read_board_kicad_refusals = lambda _board, ask_kicad=True: []
         g = check_complete.kicad_rule_grade(board)
         design_rules.read_board_kicad_refusals = real_model
         check('a refusal the model does name (no version line), the model '

@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """check_drc grades a `.kicad_dru` `hole_clearance` rule as kicad-cli does.
 
-check_drc's copper-to-hole passes grade the board minimum against NPTH holes
-(and a few plated ones). A `hole_clearance` RULE binds far more: every via
-drill, plated and NPTH hole against the copper of every track, via and pad of
-another net, on each copper layer both occupy, the last matching rule in the
-file deciding. Such a rule was graded by nothing, so a board carrying the
-JLCPCB or PCBWay rules template (each has several) read clean wherever its
-copper broke them.
+A `hole_clearance` RULE binds every via drill, plated and NPTH hole against
+the copper of every track, via and pad of another net, on each copper layer
+both occupy, the last matching rule in the file deciding. Such a rule was
+graded by nothing, so a board carrying the JLCPCB or PCBWay rules template
+(each has several) read clean wherever its copper broke them. The same pass
+grades the board minimum where no rule binds (#1850,
+`test_1850_hole_clearance_board_minimum.py`).
 
-`KICAD` is what kicad-cli 10.0.6 reports on `board()`: per rules file, the
-configurations (cells) it flags. Measured on these probes:
+`KICAD` is what kicad-cli 10.0.6 reports on `board()` with
+`--all-track-errors`: per rules file, the configurations (cells) it flags.
+Measured on these probes:
 
   - a hole binds the copper of another net only: same-net pairs, and two
     net-less items, are never flagged;
@@ -18,9 +19,11 @@ configurations (cells) it flags. Measured on these probes:
     B too), and a (layer ...) clause scopes the COPPER item's layer;
   - the last matching rule wins, below the board minimum too (a relaxing
     rule clears a pair the minimum would flag);
-  - a pad clearance override binds before any rule;
-  - where the pair's copper clearance also fails, KiCad reports the
-    clearance row alone, except a pad against a via's hole;
+  - a pad clearance override binds before any rule, floored at the board
+    minimum (cell 21 under `relax_min`);
+  - where the pair's copper clearance also fails, the hole row stands
+    beside the clearance row (cells 19 and 20; a default report, which
+    stops at a track's first error, drops cell 19's);
   - a pair 0.01 mm inside the rule is flagged (cell 22, two vias), so
     check_drc is run at KiCad's tolerance, `--clearance-margin-mm 0.0005`:
     at its default 5 % margin it lets such a pair through;
@@ -82,14 +85,14 @@ CONFIGS = {
     21: [('pth', 'H21', 0, 0, 0.2), ('trk', 'C21', 0.8, 'F.Cu')],  # override .2
     22: [('via', 'H22', 0, 0), ('via', 'C22', 0.94, 0)],           # hole gap .49
 }
-ALL = {1, 2, 4, 6, 8, 9, 11, 12, 13, 14, 15, 16, 20, 22}
+ALL = {1, 2, 4, 6, 8, 9, 11, 12, 13, 14, 15, 16, 19, 20, 22}
 HC = '(constraint hole_clearance (min 0.5mm))'
 #: name: (rules file, board min_hole_clearance, cells kicad-cli 10.0.6 flags,
 #: severity of its rows)
 KICAD = {
     'uncond': (f'(rule "hc" {HC})', 0.0, ALL, 'error'),
     'via': (f'(rule "hc" {HC} (condition "A.Type == \'Via\'"))', 0.0,
-            {1, 2, 4, 9, 11, 13, 14, 20, 22}, 'error'),
+            {1, 2, 4, 9, 11, 13, 14, 19, 20, 22}, 'error'),
     'pad_track': (f'(rule "hc" {HC} (condition "A.Type == \'Pad\' && B.Type == \'Track\'"))',
                   0.0, {6, 8}, 'error'),
     'npth': (f'(rule "hc" {HC} (condition "A.Pad_Type == \'NPTH, mechanical\'"))', 0.0,
@@ -101,14 +104,13 @@ KICAD = {
                   f' (condition "A.NetName == \'H1\' || B.NetName == \'H1\'"))', 0.0,
                   ALL - {1}, 'error'),
     'warning': (f'(rule "hc" (severity warning) {HC})', 0.0, ALL, 'warning'),
-    'relax_min': ('(rule "lo" (constraint hole_clearance (min 0.05mm)))', 0.5, set(), 'error'),
+    'relax_min': ('(rule "lo" (constraint hole_clearance (min 0.05mm)))', 0.5, {21}, 'error'),
 }
 #: graded at kicad-cli's own tolerance: cell 22's pair stands 0.01 mm inside
 #: the rule, under the default 5 % margin (0.025 mm at 0.5)
 KICAD_TOL = '0.0005'
-#: cells left off a board: a pad override is floored at the board minimum,
-#: which the board-minimum passes grade, not a rule
-OMIT = {'relax_min': {21}}
+#: cells left off a board
+OMIT = {}
 UNREAD = f'(rule "hc_unread" {HC} (condition "A.getField(\'x\') == \'y\'"))'
 
 
@@ -213,8 +215,14 @@ def tool(boards):
         ok(got == want, f"{name}: cells {sorted(got)}, kicad-cli {sorted(want)}")
         if sev == 'warning':
             ok(not rows, f"{name}: a warning rule's rows are demoted, none counted")
-        named = {v.get('rule') for v in rows + warned}
-        ok(named <= {'hc', 'lo'} and (not got or named), f"{name}: each row names its rule {named}")
+        # cell 21's pad override binds before any rule: it names none
+        ruled = [v for v in rows + warned if cell_of(*v['hole_loc']) != 21]
+        named = {v.get('rule') for v in ruled}
+        ok(named <= {'hc', 'lo'}, f"{name}: each row names its rule {named}")
+        ovr = [v for v in rows + warned if cell_of(*v['hole_loc']) == 21]
+        ok(all(v.get('required_source') == 'declared hole clearance' and not v.get('rule')
+               for v in ovr), f"{name}: the override, floored at the minimum, binds "
+                              f"cell 21 {[(v.get('required_source'), v.get('rule')) for v in ovr]}")
         ok('NOT GRADED (hole_clearance)' not in r.stdout,
            f"{name}: the rule is graded, not named NOT GRADED")
 
@@ -237,7 +245,8 @@ def kicad(boards, cli):
     for name, path in boards.items():
         _rules, _mh, want, sev = KICAD[name]
         rep = path + '.kicad.json'
-        subprocess.run([cli, 'pcb', 'drc', '--format', 'json', '--severity-all', '-o', rep, path],
+        subprocess.run([cli, 'pcb', 'drc', '--format', 'json', '--severity-all',
+                        '--all-track-errors', '-o', rep, path],
                        capture_output=True, text=True, timeout=600)
         with open(evidence(rep, 'kicad-cli DRC report'), encoding='utf-8') as fh:
             rep = json.load(fh)
