@@ -20,7 +20,13 @@ configurations (cells) it flags. Measured on these probes:
     rule clears a pair the minimum would flag);
   - a pad clearance override binds before any rule;
   - where the pair's copper clearance also fails, KiCad reports the
-    clearance row alone, except a pad against a via's hole.
+    clearance row alone, except a pad against a via's hole;
+  - a pair 0.01 mm inside the rule is flagged (cell 22, two vias), so
+    check_drc is run at KiCad's tolerance, `--clearance-margin-mm 0.0005`:
+    at its default 5 % margin it lets such a pair through;
+  - KiCad lists a pair once per copper layer the two items share, and a
+    via-pad pair twice over; check_drc lists a pair once, at the worse
+    direction where both items have a hole.
 
 1. check_drc flags exactly the cells `KICAD` lists, each row naming its rule;
    a rule of severity warning is demoted; a rule whose condition it cannot
@@ -74,20 +80,22 @@ CONFIGS = {
     19: [('via', 'H19', 0, 0), ('trk', 'C19', 0.45, 'F.Cu')],      # copper .05 too
     20: [('via', 'H20', 0, 0), ('smd', 'C20', 0.6, 'F.Cu')],       # copper .05 too
     21: [('pth', 'H21', 0, 0, 0.2), ('trk', 'C21', 0.8, 'F.Cu')],  # override .2
+    22: [('via', 'H22', 0, 0), ('via', 'C22', 0.94, 0)],           # hole gap .49
 }
-ALL = {1, 2, 4, 6, 8, 9, 11, 12, 13, 14, 15, 16, 20}
+ALL = {1, 2, 4, 6, 8, 9, 11, 12, 13, 14, 15, 16, 20, 22}
 HC = '(constraint hole_clearance (min 0.5mm))'
 #: name: (rules file, board min_hole_clearance, cells kicad-cli 10.0.6 flags,
 #: severity of its rows)
 KICAD = {
     'uncond': (f'(rule "hc" {HC})', 0.0, ALL, 'error'),
     'via': (f'(rule "hc" {HC} (condition "A.Type == \'Via\'"))', 0.0,
-            {1, 2, 4, 9, 11, 13, 14, 20}, 'error'),
+            {1, 2, 4, 9, 11, 13, 14, 20, 22}, 'error'),
     'pad_track': (f'(rule "hc" {HC} (condition "A.Type == \'Pad\' && B.Type == \'Track\'"))',
                   0.0, {6, 8}, 'error'),
     'npth': (f'(rule "hc" {HC} (condition "A.Pad_Type == \'NPTH, mechanical\'"))', 0.0,
              {8, 14, 15}, 'error'),
-    'layer_b': (f'(rule "hc" (layer "B.Cu") {HC})', 0.0, {2, 4, 11, 12, 13, 14}, 'error'),
+    'layer_b': (f'(rule "hc" (layer "B.Cu") {HC})', 0.0, {2, 4, 11, 12, 13, 14, 22},
+                'error'),
     'same_net': (f'(rule "hc" {HC} (condition "A.Net == B.Net"))', 0.0, set(), 'error'),
     'last_wins': (f'(rule "hc" {HC})\n(rule "lo" (constraint hole_clearance (min 0.05mm))'
                   f' (condition "A.NetName == \'H1\' || B.NetName == \'H1\'"))', 0.0,
@@ -95,6 +103,9 @@ KICAD = {
     'warning': (f'(rule "hc" (severity warning) {HC})', 0.0, ALL, 'warning'),
     'relax_min': ('(rule "lo" (constraint hole_clearance (min 0.05mm)))', 0.5, set(), 'error'),
 }
+#: graded at kicad-cli's own tolerance: cell 22's pair stands 0.01 mm inside
+#: the rule, under the default 5 % margin (0.025 mm at 0.5)
+KICAD_TOL = '0.0005'
 #: cells left off a board: a pad override is floored at the board minimum,
 #: which the board-minimum passes grade, not a rule
 OMIT = {'relax_min': {21}}
@@ -191,8 +202,8 @@ def tool(boards):
         _rules, _mh, want, sev = KICAD[name]
         js = path + '.tool.json'
         # cells 19 and 20 fail their copper clearance on every board
-        r = check(PY + [CHECK_DRC, path, '--json', js], refuse='VIA-SEGMENT violations (1)',
-                  code=1)
+        r = check(PY + [CHECK_DRC, path, '--json', js, '--clearance-margin-mm', KICAD_TOL],
+                  refuse='VIA-SEGMENT violations (1)', code=1)
         with open(evidence(js, "check_drc's JSON"), encoding='utf-8') as fh:
             doc = json.load(fh)
         hole = [v for v in doc['items'] if v['type'] in ('track-hole', 'via-hole', 'pad-hole')]
