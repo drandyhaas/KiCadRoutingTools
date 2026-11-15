@@ -410,6 +410,13 @@ def _rewrite_text_ats(fp_text: str, ref: str, new_at, what: str) -> str:
     return ''.join(out)
 
 
+# One stored zone fill, as KiCad 6-10 write it: `(filled_polygon (layer "X")
+# [(island)] (pts (xy x y) ...))`, the layer absent in older files.
+_FILLED_POLYGON_RE = re.compile(
+    r'\(filled_polygon\s+(?:\(layer\s+"[^"]*"\)\s*)?(?:\(island(?:\s+[a-z]+)?\)\s*)?'
+    r'\(pts\s+(?:\(xy\s+[^\s()]+\s+[^\s()]+\)\s*)+\)\s*\)')
+
+
 def _move_zone_pts(fp_text: str, ref: str, old_x: float, old_y: float,
                    delta_rot: float, dx: float, dy: float) -> str:
     """Translate and rotate a footprint's own keep-out zone `(pts ...)`.
@@ -472,12 +479,10 @@ def _move_zone_pts(fp_text: str, ref: str, old_x: float, old_y: float,
             continue
         if head != 'zone':
             continue
-        if re.search(r'\(filled_polygon\b', node):
-            # A fill is also absolute, and a moved outline with a stale fill
-            # is a second way to ship copper where the part used to be.
+        if re.search(r'\(fill_segments\b', node):
             raise SideFlipUnsupported(
-                f"{ref}: a footprint-internal (zone ...) carries a "
-                f"(filled_polygon ...), which this move does not carry. "
+                f"{ref}: a footprint-internal (zone ...) carries KiCad 5's "
+                f"(fill_segments ...), which this move does not carry. "
                 f"Refusing rather than leaving its fill behind: {node[:120]!r}")
         polygons = list(re.finditer(
             r'\(polygon\s+\(pts\s+((?:\(xy\s+[^\s()]+\s+[^\s()]+\)\s*)+)\)\s*\)', node))
@@ -487,6 +492,19 @@ def _move_zone_pts(fp_text: str, ref: str, old_x: float, old_y: float,
                 f"this move cannot parse -- expected a (pts (xy x y) ...) "
                 f"list. Refusing rather than moving the footprint and "
                 f"leaving its keep-out zone behind: {node[:120]!r}")
+        # A stored fill is absolute too, and pcbnew's own move and rotation
+        # carry it with the outline (#1927), so it is carried the same way:
+        # a moved outline over a stale fill would ship the fill where the
+        # part used to be.
+        fills = list(_FILLED_POLYGON_RE.finditer(node))
+        if len(fills) != len(re.findall(r'\(filled_polygon\b', node)):
+            raise SideFlipUnsupported(
+                f"{ref}: a footprint-internal (zone ...) has a "
+                f"(filled_polygon ...) this move cannot parse -- expected an "
+                f"optional (layer ...) and (island), then a (pts (xy x y) ...) "
+                f"list. Refusing rather than leaving its fill behind: "
+                f"{node[:120]!r}")
+        polygons = sorted(polygons + fills, key=lambda m: m.start())
         if not polygons:
             continue
         rep_parts = []
@@ -1071,13 +1089,14 @@ def _flip_zone(node: str, ref: str, y0: str, flip=flip_layer_token) -> str:
 
     Its outline is stored in ABSOLUTE board coordinates, so pcbnew 10.0's flip
     sends each point to `y' = 2*y0 - y`, in the same order, and toggles the
-    zone's layers. A fill is absolute too, and refuses here as it does on a
-    move (`_move_zone_pts`).
+    zone's layers. A stored fill is absolute too and pcbnew mirrors it with
+    the outline (#1927): its points are mirrored by the same rewrite and its
+    `(layer ...)` toggled with the zone's.
     """
-    if re.search(r'\(filled_polygon\b', node):
+    if re.search(r'\(fill_segments\b', node):
         raise SideFlipUnsupported(
-            f"{ref}: a footprint-internal (zone ...) carries a "
-            f"(filled_polygon ...), which this flip does not carry. Refusing "
+            f"{ref}: a footprint-internal (zone ...) carries KiCad 5's "
+            f"(fill_segments ...), which this flip does not carry. Refusing "
             f"rather than leaving its fill behind: {node[:120]!r}")
 
     def fix(m):
@@ -1253,6 +1272,61 @@ def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
         prev = e
     out.append(fp_text[prev:])
     return ''.join(out)
+
+
+def _move_footprint_block(fp_text: str, key: str, at_match, old_rot: float,
+                          new_x: float, new_y: float, new_rot: float) -> str:
+    """The same-side move of one footprint block whose `(at ...)` is already
+    rewritten: its pad, text and zone geometry carried to the new pose.
+    Raises `SideFlipUnsupported` for a construct it cannot carry."""
+    delta_rot = (new_rot - old_rot) % 360
+    if delta_rot != 0:
+        fp_text = _rotate_pad_angles(fp_text, delta_rot)
+        # The texts' angles are absolute too (pcbnew 10 probe), so they
+        # compose the same way; leaving them was how a rotated part shipped
+        # its Reference at the old angle.
+        fp_text = _rotate_text_angles(fp_text, delta_rot, key)
+    # A footprint-internal (zone ...) stores its (pts ...) in ABSOLUTE board
+    # coordinates, so a move or rotation must carry the zone's points with
+    # the footprint (#1214). Runs for a pure move too, not just a rotation;
+    # _move_zone_pts is a no-op when the pose is unchanged. Under a
+    # (transform ...) pose they are in the footprint's frame and move with it.
+    if at_match.re is not TRANSFORM_NODE_RE:
+        fp_text = _move_zone_pts(
+            fp_text, key, float(at_match.group(1)), float(at_match.group(2)),
+            delta_rot, new_x - float(at_match.group(1)),
+            new_y - float(at_match.group(2)))
+    return fp_text
+
+
+def move_refusals(board_file: str, refs) -> Dict[str, str]:
+    """`{ref: reason}` for the parts in `refs` whose blocks the same-side
+    move of `write_placed_output` refuses (`SideFlipUnsupported`).
+
+    Asked of a trial pose -- 1 mm along each axis and a quarter turn -- before
+    a placement run spends its time (#1927): a refusal used to surface only
+    when the finished placement was written, after every seed had annealed.
+    No construct's refusal depends on how far a part goes, only on whether it
+    moves and turns. Board-outline owners (`OutlineOwnerMove`) are the
+    movable-set gates' business and are not asked about here."""
+    from kicad_parser import footprint_at_match, iter_footprint_blocks, read_board_text
+    refs = set(refs)
+    out: Dict[str, str] = {}
+    for _s, _e, fp_text, _raw, key in iter_footprint_blocks(
+            read_board_text(board_file, quiet=True)):
+        if key not in refs:
+            continue
+        m = footprint_at_match(fp_text)
+        if not m:
+            continue
+        old_rot = float(m.group(3)) if m.group(3) else 0.0
+        try:
+            _move_footprint_block(fp_text, key, m, old_rot,
+                                  float(m.group(1)) + 1.0, float(m.group(2)) + 1.0,
+                                  (old_rot + 90.0) % 360)
+        except SideFlipUnsupported as ex:
+            out[key] = str(ex)
+    return out
 
 
 def write_placed_output(input_file: str, output_file: str,
@@ -1473,25 +1547,8 @@ def write_placed_output(input_file: str, output_file: str,
                 (new_rot + old_rot) % 360, new_x - float(at_match.group(1)),
                 new_y - float(at_match.group(2)))
         else:
-            delta_rot = (new_rot - old_rot) % 360
-            if delta_rot != 0:
-                new_fp_text = _rotate_pad_angles(new_fp_text, delta_rot)
-                # The texts' angles are absolute too (pcbnew 10 probe), so
-                # they compose the same way; leaving them was how a rotated
-                # part shipped its Reference at the old angle.
-                new_fp_text = _rotate_text_angles(new_fp_text, delta_rot, key)
-            # A footprint-internal (zone ...) stores its (pts ...) in
-            # ABSOLUTE board coordinates, so a move or rotation must carry
-            # the zone's points with the footprint (#1214). Runs for a
-            # pure move too, not just a rotation; _move_zone_pts is a
-            # no-op when the pose is unchanged. Under a (transform ...)
-            # pose they are in the footprint's frame and move with it.
-            if at_match.re is not TRANSFORM_NODE_RE:
-                new_fp_text = _move_zone_pts(
-                    new_fp_text, key,
-                    float(at_match.group(1)), float(at_match.group(2)),
-                    delta_rot, new_x - float(at_match.group(1)),
-                    new_y - float(at_match.group(2)))
+            new_fp_text = _move_footprint_block(new_fp_text, key, at_match,
+                                                old_rot, new_x, new_y, new_rot)
 
         # #1163: an absolute text angle, after either path has composed its
         # texts, so it holds whatever the rotation or the side did.

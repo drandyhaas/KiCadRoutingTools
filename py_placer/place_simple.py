@@ -1529,6 +1529,18 @@ def main(argv=None):
     from placement import simple_anneal
     from placement.simple import legal
     state, model, movable, notes = build(pcb, src, doc, base, a, intent, blocks, set(fixed))
+    # a part the board writer cannot move is said now, not after every seed
+    # has annealed and the write refuses it (#1927)
+    from placement.writer import move_refusals
+    cannot_move = move_refusals(src, movable)
+    if cannot_move:
+        print("place_simple: the board writer cannot move "
+              + '; '.join(f"{r} ({why})" for r, why in sorted(cannot_move.items()))
+              + ". Lock it in the board to place around it. Nothing was written.",
+              file=sys.stderr)
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return 2
     # FACES the groups file leaves open (`flippable`, placement/faces.py): a
     # part keeps its face unless the front has no room for it (after the
     # anneal, below)
