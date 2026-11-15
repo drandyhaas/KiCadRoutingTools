@@ -51,6 +51,7 @@ KRT_TOOL = {'scope': ['routing', 'combined'], 'kind': 'instrument'}
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -241,7 +242,55 @@ _KICAD_ROW_TYPES = {
     'via_count': ('too_many_vias',),
     'disallow': ('items_not_allowed',),
     'assertion': ('assertion_failure',),
+    # #1901: these two rows name their rule bare, not ``(rule 'NAME'``
+    # (`_row_rule_name`), measured on kicad-cli 10.0.6
+    'diff_pair_gap': ('diff_pair_gap_out_of_range',),
+    'diff_pair_uncoupled': ('diff_pair_uncoupled_length_too_long',),
 }
+
+#: #1901: the violation types whose rows name their rule BARE, and how --
+#: kicad-cli 10.0.6 prints ``Differential pair gap out of range (NAME minimum
+#: gap 1.0000 mm; actual 0.3000 mm)``, ``... (NAME maximum gap ...`` and
+#: ``Differential uncoupled length too long (NAME maximum uncoupled length
+#: 2.0000 mm; actual ...)`` (KiCad's diff-pair coupling provider formats
+#: ``gapRuleName`` / ``uncoupledRuleName`` with no ``rule '...'`` around it).
+#: The words after the name anchor it, so a name holding spaces or brackets
+#: is read whole.
+_BARE_RULE_ROWS = {
+    'diff_pair_gap_out_of_range':
+        re.compile(r"\((.+) (?:minimum|maximum) gap [^;()]*; actual "),
+    'diff_pair_uncoupled_length_too_long':
+        re.compile(r"\((.+) maximum uncoupled length [^;()]*; actual "),
+}
+
+
+def _row_rule_name(row):
+    """The rule a kicad-cli violation row names, or None: ``(rule 'NAME'``,
+    or for a type in `_BARE_RULE_ROWS` the bare name KiCad prints there."""
+    desc = row.get('description') or ''
+    m = re.search(r"\(rule '([^']*)'", desc)
+    if m:
+        return m.group(1)
+    bare = _BARE_RULE_ROWS.get(row.get('type'))
+    m = bare.search(desc) if bare is not None else None
+    return m.group(1) if m else None
+
+
+def _ignored_row_types(board):
+    """#1901: the violation types a judged rule reports under
+    (`_KICAD_ROW_TYPES`) that the project beside ``board`` sets to
+    ``ignore``. KiCad lists no row of an ignored type (its DRC engine gives
+    such a type a row limit of 0), so its 0 rows naming a rule are no grade of
+    it. Sorted; [] without a project or when it cannot be read."""
+    pro = os.path.splitext(board)[0] + '.kicad_pro'
+    try:
+        with open(pro, encoding='utf-8') as fh:
+            sev = ((json.load(fh).get('board') or {}).get('design_settings')
+                   or {}).get('rule_severities') or {}
+    except (OSError, ValueError, AttributeError):
+        return []
+    listed = {t for ts in _KICAD_ROW_TYPES.values() for t in ts}
+    return sorted(t for t in listed if sev.get(t) == 'ignore')
 
 
 def _type_cap(kind):
@@ -304,11 +353,20 @@ def kicad_rule_grade(board, timeout=3600):
     counted per rule KiCad names in them (``(rule 'NAME' ...``).
 
     -> ``{'kicad_version': str, 'errors_by_rule': {name: N}, 'capped_types':
-    [type, ...]}``, or ``{'error': why}`` when KiCad cannot be asked: no
-    kicad-cli, a timeout, no report, or a rules file KiCad does not load
-    (#1690 -- KiCad then enforces none of its rules and says nothing, so its
-    silence about a rule is no grade of it). A warning-severity row counts 0,
-    as check_drc does not count it (#1626). Never raises.
+    [type, ...], 'unignored_types': [type, ...]}``, or ``{'error': why}``
+    when KiCad cannot be asked: no kicad-cli, a timeout, no report, or a rules
+    file KiCad does not load (#1690 -- KiCad then enforces none of its rules
+    and says nothing, so its silence about a rule is no grade of it). A
+    warning-severity row counts 0, as check_drc does not count it (#1626).
+    Never raises.
+
+    A violation type a judged rule reports under that the project sets to
+    ``ignore`` gets no row at all (#1901), so the staged copy's project sets
+    each such type to ``error`` (`_ignored_row_types`, listed in
+    ``unignored_types``): KiCad then lists the rule's rows and they count. A
+    type at ``warning`` is left as it is, since KiCad lists those rows.
+    A row names its rule as ``(rule 'NAME'`` or, for a diff-pair gap or
+    uncoupled-length row, bare (`_row_rule_name`).
 
     Whether KiCad loaded the file is KiCad's answer: the staged copy's rules
     file gets one more rule, `_load_probe`, and a report with no row naming
@@ -316,7 +374,6 @@ def kicad_rule_grade(board, timeout=3600):
     (`read_board_kicad_refusals`, which every tool that does not ask KiCad
     reads) only says WHY, when it knows: beside a file KiCad did not load,
     or in place of KiCad's answer when KiCad cannot be asked."""
-    import re
     try:
         from design_rules import read_board_kicad_refusals
         refused = read_board_kicad_refusals(board)
@@ -333,8 +390,15 @@ def kicad_rule_grade(board, timeout=3600):
     probe, rule = _load_probe(board, taken)
     if probe is None:
         return {'error': known or rule}
+    unignored = _ignored_row_types(board)
+
+    def _unignore(proj):
+        sev = proj.setdefault('board', {}).setdefault(
+            'design_settings', {}).setdefault('rule_severities', {})
+        for t in unignored:
+            sev[t] = 'error'
     report = _kicad_drc_report(
-        board, timeout,
+        board, timeout, project_edit=_unignore if unignored else None,
         rules_edit=lambda text: text.rstrip('\n') + '\n' + rule + '\n')
     if 'error' in report:
         return {'error': known} if known else report
@@ -342,16 +406,16 @@ def kicad_rule_grade(board, timeout=3600):
     for v in report.get('violations') or ():
         # the probe's row counts toward its type's 199 rows: it took one
         by_type[v.get('type')] = by_type.get(v.get('type'), 0) + 1
-        m = re.search(r"\(rule '([^']*)'", v.get('description') or '')
-        if m and m.group(1) == probe:
+        name = _row_rule_name(v)
+        if name is not None and name == probe:
             loaded = True
             continue
-        if m and m.group(1) in taken:
+        if name is not None and name in taken:
             # a row naming a rule of the file is the same proof, and the one
             # left when the probe's own row is past its type's 199
             loaded = True
-        if m and v.get('severity') == 'error':
-            by_rule[m.group(1)] = by_rule.get(m.group(1), 0) + 1
+        if name is not None and v.get('severity') == 'error':
+            by_rule[name] = by_rule.get(name, 0) + 1
     if not loaded:
         return {'error': 'KiCad did not load the .kicad_dru: a probe rule '
                          'appended to the staged copy of it did not fire, so '
@@ -361,7 +425,8 @@ def kicad_rule_grade(board, timeout=3600):
     return {'kicad_version': str(report.get('kicad_version') or 'unknown'),
             'errors_by_rule': by_rule,
             'capped_types': sorted(t for t, n in by_type.items()
-                                   if n >= _type_cap(t))}
+                                   if n >= _type_cap(t)),
+            'unignored_types': unignored}
 
 
 def judge_rules(names, grade, dru_names, kinds=None):
@@ -379,7 +444,9 @@ def judge_rules(names, grade, dru_names, kinds=None):
     A report is cut short FOR A RULE only in a violation type the rule
     reports under (#1865, `_KICAD_ROW_TYPES`): 199 `track_width` rows drop no
     row of a `hole_clearance` rule. A rule with a constraint kind the table
-    does not list, or one ``kinds`` does not name, is held by every cut type."""
+    does not list, or one ``kinds`` does not name, is held by every cut type.
+    A rule whose type the grade asked at error because the project ignores it
+    (#1901, ``unignored_types``) says so in its ``why``."""
     out = {}
     for nm in names:
         if 'error' in grade:
@@ -396,14 +463,19 @@ def judge_rules(names, grade, dru_names, kinds=None):
                                   f"a rule name in the file contains a quote "
                                   f"({', '.join(repr(x) for x in quoted)})"))}
             continue
-        k = grade['errors_by_rule'].get(nm, 0)
-        if k:
-            out[nm] = {'verdict': 'broken', 'kicad_errors': k,
-                       'why': f"{k} KiCad violation{'' if k == 1 else 's'}"}
-            continue
         mine = sorted(set((kinds or {}).get(nm) or ()))
         unlisted = [c for c in mine if c not in _KICAD_ROW_TYPES]
         under = {t for c in mine for t in _KICAD_ROW_TYPES.get(c, ())}
+        # #1901: a type the project ignores was asked at error; say so
+        raised = sorted(under & set(grade.get('unignored_types') or ()))
+        asked = (f" (asked with {', '.join(raised)} at error: the project's "
+                 f"rule_severities ignore {'it' if len(raised) == 1 else 'them'})"
+                 if raised else '')
+        k = grade['errors_by_rule'].get(nm, 0)
+        if k:
+            out[nm] = {'verdict': 'broken', 'kicad_errors': k,
+                       'why': f"{k} KiCad violation{'' if k == 1 else 's'}{asked}"}
+            continue
         cut = [t for t in grade['capped_types']
                if not mine or unlisted or t in under]
         if cut:
@@ -419,7 +491,7 @@ def judge_rules(names, grade, dru_names, kinds=None):
                                  f"dropped row")}
         else:
             out[nm] = {'verdict': 'met', 'kicad_errors': 0,
-                       'why': '0 KiCad violations'}
+                       'why': f'0 KiCad violations{asked}'}
     return out
 
 
@@ -993,6 +1065,8 @@ def _grade(a, doc):
                               'kicad_version': grade.get('kicad_version'),
                               'error': grade.get('error'),
                               'capped_types': grade.get('capped_types'),
+                              # #1901: types the project ignores, asked at error
+                              'unignored_types': grade.get('unignored_types'),
                               'rules': judged}
     _ver = (doc.get('kicad_rules') or {}).get('kicad_version')
 

@@ -1296,7 +1296,12 @@ which `board_score` lists in
 `drc.ungraded_rules` (with `drc.ungraded_rule_kinds`). `--kicad-rules` (#1810,
 off by default) has KiCad's own DRC grade those rules: one `kicad-cli pcb drc`
 of a staged copy, on the fill as shipped, whose error-severity violations are
-counted per rule KiCad names in them. A rule with none is disclosed (`judged
+counted per rule KiCad names in them (`(rule 'NAME'`, or bare in a diff-pair
+gap or uncoupled-length row, as KiCad prints those, #1901). A violation type
+such a rule reports under that the project's `rule_severities` set to `ignore`
+gets no row from KiCad at all, so the staged copy's project sets it to `error`
+(`kicad_rules.unignored_types`, and the rule's `why` says so, #1901); a type
+at `warning` is left alone, and its rows count 0. A rule with none is disclosed (`judged
 by KiCad <version>`) and stops blocking; one with N blocks, named with its
 count; one KiCad's report cannot be attributed to stays as before, saying why
 (no kicad-cli, a timeout, a rules file KiCad does not load (#1690), a rule

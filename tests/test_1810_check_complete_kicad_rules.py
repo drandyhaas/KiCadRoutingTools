@@ -260,7 +260,7 @@ def part1_probe(b):
         g = check_complete.kicad_rule_grade(board)
         check('a report with the probe\'s row: graded, and the probe is no finding',
               g == {'kicad_version': '10.9.9', 'errors_by_rule': {'court gap': 1},
-                    'capped_types': []}, str(g))
+                    'capped_types': [], 'unignored_types': []}, str(g))
 
         check_complete._kicad_drc_report = answering(
             [_row('court gap', kind='assertion_failure')] * 199)

@@ -86,20 +86,20 @@ def part1_judge():
     r = judged(['hole_size'], ['microvia_drill_out_of_range'])
     check('a kind that reports under two types is held by each',
           r['verdict'] == 'unknown', str(r))
-    r = judged(['diff_pair_gap'], ['track_width'])
+    r = judged(['connection_width'], ['track_width'])
     check('a constraint the table does not list is held by every cut type, '
           'saying so', r['verdict'] == 'unknown'
-          and 'which type a diff_pair_gap rule reports under is not known here'
+          and 'which type a connection_width rule reports under is not known here'
           in r['why'] and '199 rows of track_width' in r['why'], str(r))
-    r = judged(['hole_clearance', 'diff_pair_gap'], ['track_width'])
+    r = judged(['hole_clearance', 'connection_width'], ['track_width'])
     check('... also beside a listed one', r['verdict'] == 'unknown'
-          and 'a diff_pair_gap rule' in r['why'], str(r))
+          and 'a connection_width rule' in r['why'], str(r))
     for label, kinds in (('nobody read', None), ('are empty', [])):
         r = judged(kinds, ['track_width'])
         check(f'a rule whose constraint kinds {label} is held by every cut type',
               r['verdict'] == 'unknown'
               and 'its constraint kinds were not read' in r['why'], str(r))
-    r = judged(['diff_pair_gap'], [])
+    r = judged(['connection_width'], [])
     check('nothing cut: met, whatever the kind', r['verdict'] == 'met', str(r))
 
 
@@ -206,12 +206,18 @@ PROBES = (
     ('via_count', '(constraint via_count (max 0)) (condition "A.NetName == \'N1\'")'),
     ('disallow', '(constraint disallow via) (condition "A.NetName == \'N2\'")'),
     ('assertion', '(constraint assertion "A.NetName != \'N3\'")'),
+    # #1901: these rows name the rule bare (check_complete._row_rule_name)
+    ('diff_pair_gap', '(constraint diff_pair_gap (min 1mm)) '
+                      '(condition "A.inDiffPair(\'DP\')")'),
+    ('diff_pair_uncoupled', '(constraint diff_pair_uncoupled (max 2mm)) '
+                            '(condition "A.inDiffPair(\'DP\')")'),
 )
 
 
 def probe_board():
     """Two nets with a via each, a drilled pad beside a track, a track end
-    near the outline and two courtyards 1 mm apart."""
+    near the outline, two courtyards 1 mm apart and a diff pair 0.3 mm apart
+    edge to edge, one member leaving the other for 15 mm."""
     rb = RoutingBoard(w=60, h=40)
     rb.pad('A', 10, 10, 'N1')
     rb.pad('B', 10, 11.2, 'N2')
@@ -224,6 +230,14 @@ def probe_board():
     rb.seg(30.9, 10, 30.9, 14, 'N2')
     rb.seg(10, 11.2, 0.5, 11.2, 'N2')
     rb.pad('B2', 30.9, 14, 'N2')
+    y = 20.0
+    for ref, x, net, dy in (('DP1', 5, 'DP_P', 0), ('DP2', 25, 'DP_P', 0),
+                            ('DN1', 5, 'DP_N', 0.6), ('DN2', 25, 'DP_N', 0.6)):
+        rb.pad(ref, x, y + dy, net, sx=0.3, sy=0.3)
+    rb.seg(5, y, 25, y, 'DP_P')
+    for x1, y1, x2, y2 in ((5, 0.6, 7, 0.6), (7, 0.6, 7, 6), (7, 6, 22, 6),
+                           (22, 6, 22, 0.6), (22, 0.6, 25, 0.6)):
+        rb.seg(x1, y + y1, x2, y + y2, 'DP_N')
     for ref, x in (('K1', 45.0), ('K2', 49.0)):
         rb.items.append(
             '  (footprint "synth:C" (layer "F.Cu") (uuid "%s") (at %s 30)\n'
@@ -261,7 +275,7 @@ def part2_table(cli, td):
         with open(os.path.join(d, 'b.kicad_dru'), 'w', encoding='utf-8') as fh:
             fh.write(f'(version 1)\n(rule "probe" {body})\n')
         got = collections.Counter(v['type'] for v in kicad_rows(cli, board)
-                                  if "(rule 'probe'" in (v.get('description') or ''))
+                                  if check_complete._row_rule_name(v) == 'probe')
         check(f'{kind}: rows naming the rule, all of a listed type '
               f'({", ".join(listed.get(kind, ()))})',
               bool(got) and set(got) <= set(listed.get(kind, ())), str(dict(got)))
