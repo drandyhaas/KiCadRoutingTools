@@ -1311,8 +1311,11 @@ the rule reports under that kicad-cli cut short: it lists 199 rows of a type,
 holds nothing (#1865)). Whether KiCad loaded the file is asked of KiCad:
 the staged copy's rules file gets one probe rule that KiCad reports once, at
 warning severity, and a report with no row naming it or any rule of the file
-is a file KiCad dropped, whatever the reason; the refusal model check_drc and
-the routing steps read (#1690) only adds its reason when it knows one, and
+is a file KiCad dropped, whatever the reason. A board with no footprint of a
+reference of its own for the probe to name is asked on a stub board instead,
+the load check check_drc and the routing steps read (#1852, "A rule file KiCad
+refuses" in `docs/configuration.md`), and its own report then carries no probe.
+The refusal model (#1690) only adds its reason when it knows one, and
 stands in for KiCad's answer only when kicad-cli cannot be asked. The per-rule results are the
 document's `kicad_rules`, `measured_by: kicad-cli`. With the flag the verdict
 depends on the installed KiCad. A component the BOARD declares and nothing grades (a project

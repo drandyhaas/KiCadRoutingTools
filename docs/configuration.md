@@ -784,6 +784,34 @@ first, naming the rule: `.kicad_dru: KiCad ENFORCES NO RULE OF THIS FILE: rule '
 in check_drc's `--json`. The tools still read the file's other rules, so such a board
 is routed and graded by rules KiCad's DRC is not applying until the file is fixed.
 
+That list is a hand-written model of KiCad's grammar, and KiCad drops more forms
+than it names (#1852: a constraint kind twice in one rule, two `(layer ...)`
+clauses, `(layer "f.cu")`, a length or skew with no unit, `zone_connection
+thermal`, `(version 1)` not first, ... -- 31 measured on kicad-cli 10.0.6). So
+when kicad-cli is installed, **KiCad is asked** (`py_router/dru_load.py`): one
+`kicad-cli pcb drc` of a stub board -- one footprint and the board's own layer
+table, user names included, so a layer named either way resolves as on the board --
+with the rules file plus one probe rule, an `assertion` at warning severity the
+footprint fails. "Loaded" means a row names the probe. KiCad's answer then decides,
+and the model only says WHY: a file KiCad drops for a cause the model names keeps
+the model's reason, one it drops for a cause the model does not know reads `KiCad
+refuses this file: kicad-cli <version> enforced no rule of it on a stub board ...`,
+and a file KiCad loads has no finding even where the model would name one. The line
+then reads `.kicad_dru: KiCad ENFORCES NO RULE OF THIS FILE (kicad-cli <version>
+does not load it): ...` and each `kicad_refuses_file` row carries `kicad_version`.
+Without kicad-cli the model's answer stands, as before.
+
+The stub costs one kicad-cli start (about 1.5 s) whatever the board's size, and
+only a board with a `.kicad_dru` asks it, once per step and only when the finding
+is printed or written. Answers are cached by the rules text, the layer table and
+the kicad-cli version in `$XDG_CACHE_HOME/krt_dru_load` (else
+`~/.cache/krt_dru_load`), one file per answer written by rename, so parallel runs
+share it safely; the version is remembered by the binary's path, size and
+modification time, so a cached answer starts no kicad-cli at all. **It is disclosure
+only**: what a step reads and routes is the same with and without kicad-cli
+(`tests/test_1852_dru_load_check.py` routes one board both ways); only what it says
+about the file differs.
+
 **Disclosure.** Every descent is recorded and reported three ways: the
 `JSON_SUMMARY` block `design_rules` (policy, tier, the board floors read, every
 narrowing with net / kind / requested / delivered / site, the fab-tier escalation
