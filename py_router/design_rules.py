@@ -1789,8 +1789,12 @@ class DesignRules:
     source: str = ''
     dru_path: str = ''
     notes: List[str] = field(default_factory=list)
-    # `dru_refusals`: why KiCad enforces no rule of this board's .kicad_dru
-    kicad_refused: List[dict] = field(default_factory=list)
+    # `dru_refusals` of this board's .kicad_dru: the model's answer, which
+    # `kicad_refused` reads only when KiCad cannot be asked (#1852)
+    model_refused: List[dict] = field(default_factory=list)
+    # the .kicad_dru's text as read (None: no rules file), for asking KiCad
+    dru_text: Optional[str] = field(default=None, repr=False)
+    _kicad_refused: Optional[List[dict]] = field(default=None, repr=False)
     # net_keepouts.derive_area_keepouts' regions (install_design_rules)
     net_keepouts: List[dict] = field(default_factory=list)
     # the project's rule_severities: {KiCad error key: severity}
@@ -1833,9 +1837,34 @@ class DesignRules:
                 else:
                     dr.rules, notes = parse_dru(text)
                     dr.notes.extend(notes)
-                    dr.kicad_refused = dru_refusals(text, dr.rules)
+                    dr.dru_text = text
+                    dr.model_refused = dru_refusals(text, dr.rules)
         dr._finish()
         return dr
+
+    @property
+    def kicad_refused(self) -> List[dict]:
+        """Why KiCad enforces no rule of the board's `.kicad_dru`, [] when it
+        loads it (#1690, #1852): KiCad's own answer when kicad-cli is
+        installed (`dru_load.refusals`, a stub-board DRC, cached), the
+        refusal model's (`model_refused`) otherwise. Asked on first use, so
+        a table built only to resolve sizes starts no kicad-cli.
+
+        DISCLOSURE ONLY: nothing that reads or routes the rules asks this, so
+        no copper depends on whether kicad-cli is installed."""
+        if self._kicad_refused is None:
+            try:
+                from dru_load import refusals
+                self._kicad_refused = refusals(
+                    self.dru_text, self.model_refused,
+                    board_path=self.source or None, copper_layers=self.copper_layers)
+            except Exception:                                  # noqa: BLE001
+                self._kicad_refused = list(self.model_refused)
+        return self._kicad_refused
+
+    @kicad_refused.setter
+    def kicad_refused(self, value: List[dict]) -> None:
+        self._kicad_refused = list(value)
 
     @classmethod
     def from_pcbnew(cls, board, pcb_data, *, fab_floor: Optional[dict] = None,
@@ -2705,16 +2734,24 @@ class DesignRules:
 
 def kicad_refusal_lines(refused: Sequence[dict]) -> List[str]:
     """The finding `dru_refusals` is, for a console: about the file, and first,
-    because KiCad itself says nothing (exit 0, no message). One line per cause."""
+    because KiCad itself says nothing (exit 0, no message). One line per cause.
+    A row KiCad's own answer stands behind (#1852) says which kicad-cli."""
     return [".kicad_dru: KiCad ENFORCES NO RULE OF THIS FILE"
+            + (f" (kicad-cli {r['kicad_version']} does not load it)"
+               if r.get('kicad_version') else '')
             + (f": rule '{r['rule']}': " if r['rule'] else ': ') + r['reason']
             + ". This tool still reads the file's other rules, so it routes and "
               "grades by rules KiCad's own DRC is not applying" for r in refused]
 
 
-def read_board_kicad_refusals(board_path: Optional[str]) -> List[dict]:
-    """`dru_refusals` of the `.kicad_dru` beside a board, [] without one, for a
-    tool with no DesignRules in hand."""
+def read_board_kicad_refusals(board_path: Optional[str], ask_kicad: bool = True) -> List[dict]:
+    """Why KiCad enforces no rule of the `.kicad_dru` beside a board, [] when
+    it loads it or there is none, for a tool with no DesignRules in hand.
+
+    KiCad's own answer when kicad-cli is installed (`dru_load.refusals`, a
+    stub-board DRC, #1852), with the refusal model's reasons (`dru_refusals`)
+    when it names one; the model's answer alone without kicad-cli, or with
+    ``ask_kicad=False`` (a caller that asks KiCad itself and wants only WHY)."""
     dru = os.path.splitext(board_path)[0] + '.kicad_dru' if board_path else ''
     if not dru or not os.path.isfile(dru):
         return []
@@ -2722,7 +2759,14 @@ def read_board_kicad_refusals(board_path: Optional[str]) -> List[dict]:
         text = open(dru, encoding='utf-8').read()
     except OSError:
         return []
-    return dru_refusals(text, parse_dru(text)[0])
+    model = dru_refusals(text, parse_dru(text)[0])
+    if not ask_kicad:
+        return model
+    try:
+        from dru_load import refusals
+        return refusals(text, model, board_path=board_path)
+    except Exception:                                          # noqa: BLE001
+        return model
 
 
 def relaxing_rules(rules, board_min) -> List[dict]:

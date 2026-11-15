@@ -249,26 +249,19 @@ def _type_cap(kind):
     return _KICAD_TYPE_CAPS.get(kind, _KICAD_TYPE_CAP)
 
 
-#: The rule `kicad_rule_grade` appends to the STAGED rules file to learn
-#: whether KiCad loaded that file (#1810).
-_LOAD_PROBE = 'check_complete load probe'
-
-
 def _load_probe(board, taken=()):
-    """A `.kicad_dru` rule that KiCad reports once on ``board`` whenever it
-    loads the rules file the rule stands in, and never when it drops the
-    file: an `assertion`, at warning severity, that one footprint -- named by
-    a reference no other footprint has -- does not carry that reference.
-    ``taken`` is the rule names the file already declares.
+    """The rule `kicad_rule_grade` appends to the STAGED rules file to learn
+    whether KiCad loaded that file (#1810), the same probe the stub-board
+    load check appends (#1852): a `.kicad_dru` rule that KiCad reports once
+    on ``board`` whenever it loads the rules file the rule stands in, and
+    never when it drops the file (`dru_load.probe_rule`), on one footprint of ``board`` named by a
+    reference no other footprint has. ``taken`` is the rule names the file
+    already declares.
 
     -> ``(name, rule text)``, or ``(None, why)`` when the board has no such
-    footprint. It can neither add a finding nor hide one: a warning row is
-    never counted, the grader leaves its name out of the per-rule counts, and
-    KiCad reports every assertion rule that binds an item, so the probe takes
-    nothing from an assertion of the file's own on the same footprint
-    (measured on kicad-cli 10.0.6 and 10.0.7: the report with the probe is the
-    report without it plus the probe's one row, also on a project whose
-    `rule_severities` ignores `assertion_failure`).
+    footprint. It can neither add a finding nor hide one: the grader leaves
+    its name out of the per-rule counts, and `probe_rule` says why it takes
+    nothing from the file's own rules.
 
     The references are read off the board's text by the parser's own block
     scan (`kicad_parser.iter_footprint_blocks`), not a full parse: the probe
@@ -289,13 +282,20 @@ def _load_probe(board, taken=()):
         return None, ('the board has no footprint with a plain reference of '
                       'its own to probe the rules file with, so whether KiCad '
                       'loaded the .kicad_dru is not known')
-    name, n = _LOAD_PROBE, 1
-    while name in taken:
-        n += 1
-        name = f'{_LOAD_PROBE} {n}'
-    return name, (f'(rule "{name}" (severity warning)\n'
-                  f'  (constraint assertion "A.Reference != \'{ref}\'")\n'
-                  f'  (condition "A.Type == \'Footprint\'"))')
+    from dru_load import probe_rule
+    return probe_rule(ref, taken)
+
+
+def _stub_load_answer(board):
+    """`dru_load.kicad_loads_dru` of the `.kicad_dru` beside ``board``, on a
+    stub board with its layers; ``{'loaded': None, 'why': ...}`` when it
+    cannot be read or asked."""
+    try:
+        from dru_load import kicad_loads_dru
+        with open(os.path.splitext(board)[0] + '.kicad_dru', encoding='utf-8') as fh:
+            return kicad_loads_dru(fh.read(), board)
+    except Exception as exc:                                    # noqa: BLE001
+        return {'loaded': None, 'why': f'{type(exc).__name__}: {exc}'}
 
 
 def kicad_rule_grade(board, timeout=3600):
@@ -312,14 +312,16 @@ def kicad_rule_grade(board, timeout=3600):
 
     Whether KiCad loaded the file is KiCad's answer: the staged copy's rules
     file gets one more rule, `_load_probe`, and a report with no row naming
-    it, or any rule of the file, is a file KiCad dropped. The refusal model
-    (`read_board_kicad_refusals`, which every tool that does not ask KiCad
-    reads) only says WHY, when it knows: beside a file KiCad did not load,
-    or in place of KiCad's answer when KiCad cannot be asked."""
+    it, or any rule of the file, is a file KiCad dropped. A board with no
+    footprint the probe can name is asked on a stub board instead
+    (`dru_load.kicad_loads_dru`, #1852), and its own report then needs no
+    probe. The refusal model (`read_board_kicad_refusals`) only says WHY,
+    when it knows: beside a file KiCad did not load, or in place of KiCad's
+    answer when KiCad cannot be asked."""
     import re
     try:
         from design_rules import read_board_kicad_refusals
-        refused = read_board_kicad_refusals(board)
+        refused = read_board_kicad_refusals(board, ask_kicad=False)
     except Exception as exc:                                    # noqa: BLE001
         refused = [{'rule': '', 'reason': f'the rules file could not be read: '
                                           f'{type(exc).__name__}: {exc}'}]
@@ -331,14 +333,26 @@ def kicad_rule_grade(board, timeout=3600):
     except Exception:                                           # noqa: BLE001
         taken = []
     probe, rule = _load_probe(board, taken)
+    loaded = False
     if probe is None:
-        return {'error': known or rule}
+        # no footprint to probe the board with: KiCad is asked on a stub
+        stub = _stub_load_answer(board)
+        if stub.get('loaded') is False:
+            return {'error': 'KiCad did not load the .kicad_dru: a probe rule '
+                             'appended to it did not fire on a stub board with '
+                             'this board\'s layers, so KiCad enforces none of the '
+                             'file\'s rules and its silence about a rule is no '
+                             'grade of it' + (f' ({known})' if known else '')}
+        if stub.get('loaded') is not True:
+            return {'error': known or f"{rule} ({stub.get('why')})"}
+        loaded = True
     report = _kicad_drc_report(
         board, timeout,
-        rules_edit=lambda text: text.rstrip('\n') + '\n' + rule + '\n')
+        rules_edit=(None if probe is None else
+                    lambda text: text.rstrip('\n') + '\n' + rule + '\n'))
     if 'error' in report:
         return {'error': known} if known else report
-    by_rule, by_type, loaded = {}, {}, False
+    by_rule, by_type = {}, {}
     for v in report.get('violations') or ():
         # the probe's row counts toward its type's 199 rows: it took one
         by_type[v.get('type')] = by_type.get(v.get('type'), 0) + 1
