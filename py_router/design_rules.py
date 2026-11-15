@@ -2933,7 +2933,7 @@ def board_setup_via_grade(pcb_data, vias, board_path: Optional[str] = None,
 
 
 def disclose_board_setup_vias(pcb_data, vias, board_path: Optional[str] = None,
-                              rules=None) -> List[dict]:
+                              rules=None, echo: bool = True) -> List[dict]:
     """`board_setup_via_grade`, printed one line per row: the end-of-step
     disclosure of vias laid below the board's own Board Setup minimum, which
     a self-sized via is under any policy but ``board`` (#1775). Returns the
@@ -2941,7 +2941,8 @@ def disclose_board_setup_vias(pcb_data, vias, board_path: Optional[str] = None,
     rows = board_setup_via_grade(pcb_data, vias, board_path, rules)
     ring = [r for r in rows if 'smallest_ring' in r]
     size = [r for r in rows if 'smallest_ring' not in r]
-    for line in annular_grade_lines(ring) + via_size_grade_lines(size):
+    for line in (annular_grade_lines(ring) + via_size_grade_lines(size)
+                 if echo else ()):
         print(f"  WARNING: {line}; the project writeback is off, so the minimum "
               f"ships as declared (--escalation board sizes a self-sized via to it)")
     return rows
@@ -3033,14 +3034,17 @@ def edge_rule_grade_lines(rows) -> List[str]:
     return out
 
 
-def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = None) -> dict:
+def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = None,
+                        echo: bool = True) -> dict:
     """The rule grades of one routing step's own copper, printed per rule and
     returned as `JSON_SUMMARY.design_rules` keys: `annular_rules` (#1649),
     `via_rules` (#1676), `edge_rules` (#1678), `hole_rules` (#1853) and
     `board_setup_vias` (#1775,
     the vias below a Board Setup minimum the writeback will not lower). A rule broken by a descent is
     named here whatever the policy that allowed the descent. A disclosure only:
-    it changes no copper. Both routing engines call it, so both fronts get it."""
+    it changes no copper. Both routing engines call it, so both fronts get it.
+    ``echo`` False grades without printing (the outermost route run's grade
+    of the copper it ships, `route_summary.STEP_RULE_KEYS`)."""
     vias = [v for r in results for v in (r.get('new_vias') or [])]
     segs = [s for r in results for s in (r.get('new_segments') or [])]
     out = {}
@@ -3058,9 +3062,11 @@ def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = No
     if hg:
         out['hole_rules'] = hg
     for line in (annular_grade_lines(ag) + via_size_grade_lines(vg)
-                 + edge_rule_grade_lines(eg) + hole_rule_grade_lines(hg)):
+                 + edge_rule_grade_lines(eg) + hole_rule_grade_lines(hg)
+                 if echo else ()):
         print(f"  {line}")
-    bs = disclose_board_setup_vias(pcb_data, vias, board_path or rules.source or None, rules)
+    bs = disclose_board_setup_vias(pcb_data, vias, board_path or rules.source or None, rules,
+                                   echo=echo)
     if bs:
         out['board_setup_vias'] = bs
     return out

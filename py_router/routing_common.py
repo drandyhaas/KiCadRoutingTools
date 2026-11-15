@@ -307,7 +307,8 @@ def new_via_shortfall(vias, name_of, input_keys, requested_of):
 
     Returns {net_name: {requested_mm, min_mm, count, sizes}} for every net
     with at least one new via more than 1 um under its request -- `count`
-    those vias, `sizes` {diameter: how many}."""
+    those vias, `sizes` {diameter: how many}, `pairs` {(diameter, drill):
+    how many} (#1914: what fab_tiers.replace_hole_ring_rows reads)."""
     out: Dict[str, Dict] = {}
     for v in vias:
         if not v.net_id:
@@ -319,10 +320,15 @@ def new_via_shortfall(vias, name_of, input_keys, requested_of):
         if v.size >= req - 1e-3:
             continue
         r = out.setdefault(name, {'requested_mm': round(float(req), 4),
-                                  'min_mm': None, 'count': 0, 'sizes': {}})
+                                  'min_mm': None, 'count': 0, 'sizes': {},
+                                  'pairs': {}})
         d = round(float(v.size), 4)
         r['count'] += 1
         r['sizes'][d] = r['sizes'].get(d, 0) + 1
+        drill = getattr(v, 'drill', None)
+        if drill:
+            pair = (d, round(float(drill), 4))
+            r['pairs'][pair] = r['pairs'].get(pair, 0) + 1
         r['min_mm'] = d if r['min_mm'] is None else min(r['min_mm'], d)
     return out
 

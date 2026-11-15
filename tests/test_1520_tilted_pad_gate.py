@@ -54,6 +54,11 @@ CAP = 'C16'          # a decoupling cap with clear board on both sides
 TILT = 110.0         # the seed angle: its pads tilt 70 degrees
 FOREIGN = 5          # neither of the cap's own nets
 VIA = 0.3
+# The via's drill. The board declares no copper-to-hole clearance, so the
+# pass holds a cap pad off a drill at the NPTH floor (0.2): a 0.1 drill's
+# hole keep-out (0.05 + 0.2) stays within the copper one (0.15 + CLEAR), and
+# what is priced here is the copper term alone, the shape this file is about.
+DRILL = 0.1
 
 
 def _copper(fp):
@@ -82,7 +87,7 @@ def _rig(vias=(), segs=()):
 
 class TestTheRigIsOnTheBranch(unittest.TestCase):
     def test_the_cap_moves_and_its_pads_are_tilted(self):
-        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA)])
+        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA, drill=DRILL)])
         self.assertIn(CAP, st.caps, 'the turned cap is not a mover -- '
                                     'nothing below grades the pass')
         tilts = [p.rect_rotation % 90.0 for p in _copper(fp)]
@@ -103,7 +108,7 @@ class TestViaShortfallIsMeasuredOnTheRealPad(unittest.TestCase):
         pts = [(x0 + dx * 0.11, y0 + dy * 0.11)
                for dx in range(-5, 6) for dy in range(-5, 6)]
         nets = list(range(1000, 1000 + len(pts)))
-        vias = [make_via(px, py, net_id=n, size=VIA)
+        vias = [make_via(px, py, net_id=n, size=VIA, drill=DRILL)
                 for (px, py), n in zip(pts, nets)]
         st, cap, fp = _rig(vias)
         st.cap_segs = {k: [] for k in st.caps}
@@ -154,7 +159,7 @@ class TestTheNoWorseGateHoldsAtTheSeedsRealGraze(unittest.TestCase):
         self.assertIsNotNone(corner, 'no box corner sits off the real pad '
                                      'within reach -- the rig tests nothing')
         vx, vy, d_seed = corner
-        st, cap, fp = _rig([make_via(vx, vy, net_id=FOREIGN, size=VIA)])
+        st, cap, fp = _rig([make_via(vx, vy, net_id=FOREIGN, size=VIA, drill=DRILL)])
         # Isolate the via gate: no tracks, and no courtyard neighbours (the
         # turned cap's courtyard already overlaps its neighbours, which would
         # refuse every move for a reason this file is not about).
@@ -210,7 +215,7 @@ class TestTheNoWorseGateHoldsAtTheSeedsRealGraze(unittest.TestCase):
 
 class TestATurnOffTheLatticeTurnsThePad(unittest.TestCase):
     def test_box_extents_follow_the_turned_pad(self):
-        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA)])
+        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA, drill=DRILL)])
         for rot in (0.0, 90.0, 180.0, 270.0, 200.0):
             got = cap.pad_rects(cap.x, cap.y, rot)
             pads = _real_pads(fp, (cap.x, cap.y, rot))
@@ -238,7 +243,7 @@ class TestTrackShortfallIsMeasuredOnTheRealPad(unittest.TestCase):
                                  y0 + dy + 0.1, net_id=n, width=0.1,
                                  layer='F.Cu'))
             nets.append(n)
-        st, cap, fp = _rig([make_via(x0 + 5.0, y0, net_id=FOREIGN, size=VIA)],
+        st, cap, fp = _rig([make_via(x0 + 5.0, y0, net_id=FOREIGN, size=VIA, drill=DRILL)],
                            segs)
         for rot in (TILT, 0.0, 200.0):
             got = st._seg_shortfalls(CAP, cap, x0, y0, rot)
@@ -264,7 +269,7 @@ class TestAnOrthogonalPartIsUnchanged(unittest.TestCase):
         pcb = parse_kicad_pcb(BOARD)
         fp = pcb.footprints[CAP]
         self.assertTrue(all(abs(p.rect_rotation) < 1e-9 for p in _copper(fp)))
-        vias = [make_via(fp.x + 0.3, fp.y + 0.25, net_id=FOREIGN, size=VIA)]
+        vias = [make_via(fp.x + 0.3, fp.y + 0.25, net_id=FOREIGN, size=VIA, drill=DRILL)]
         pcb.vias[:] = vias
         with contextlib.redirect_stdout(io.StringIO()):
             st = _Repair(pcb, BOARD, CLEAR, 0.1, 0.55, 1.0, 2.0, 0.3,

@@ -128,7 +128,11 @@ def _rig(dvs, gaps, sizes=None, stubs=()):
     cy = (rect[1] + rect[3]) / 2.0
     if sizes is None:
         sizes = [0.0] * len(gaps)
-    pcb.vias[:] = [make_via(rect[2] + g, cy, net_id=FOREIGN, size=sz)
+    # A 0.1 drill: its hole keep-out (0.05 + the 0.2 copper-to-hole floor this
+    # project-less board is held at) stays within every copper keep-out here,
+    # so the via channel prices the barrel's RADIUS alone, which is what this
+    # family is about. (make_via's 0.3 drill would put the hole term at 0.35.)
+    pcb.vias[:] = [make_via(rect[2] + g, cy, net_id=FOREIGN, size=sz, drill=0.1)
                    for g, sz in zip(gaps, sizes)]
     pcb.segments[:] = list(stubs)
     st = _repair(pcb, dvs)

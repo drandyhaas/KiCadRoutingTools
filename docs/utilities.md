@@ -173,7 +173,7 @@ The DRC checker validates:
 4. **Via-to-via clearance** - Vias maintain clearance from each other
 5. **Pad-to-via clearance** - Vias maintain clearance from pads on other nets (an SMD pad off a blind/micro via's span is not graded against it)
 6. **Pad-to-pad clearance** - Pads of different nets on a shared copper layer maintain clearance (catches overlaps/shorts, e.g. a placement step nudging a part onto a foreign pad). Two pads of ONE footprint that TOUCH on different nets are a `pad-pad` violation too (#1306, `check_drc.footprint_own_pad_census`, which check_assembly and place_pose read): KiCad reports them as `shorting_items`, or as `clearance` at actual 0 against a no-net pad. Exempt as KiCad exempts them: one net, one pad number (unless it carries two different real nets), one `net_tie_pad_groups` group; two no-net pads are not graded. With `--baseline BOARD`, a contact the baseline's same footprint already had is accepted `inherited-own-pad-contact`. Two of a footprint's pads closer than clearance without touching are library pad geometry no step changes; KiCad reports each as `clearance`, so check_drc publishes each pair without grading it (#1628): an accepted `own-footprint-gap` row named under WARNINGS (`LIBRARY PAD GAPS: N pair(s)`, each with its gap and requirement), the `--json` `own_footprint_gaps` count, `board_score`'s `drc.library_pad_gaps` and console line (also before routing), a `check_complete` disclosure, and a channel of its own in `kicad_drc_compare` (`kicad_library_pad_gaps` counts KiCad's items, which list a pair once per copper layer its pads share, so a through-hole pair on a 2-layer board is two; `checkdrc_library_pad_gaps` counts pairs). What clears one is the board's own: a `.kicad_dru` clearance rule that binds the pair, a pad or footprint `(clearance)` override, or a net-tie pad group. Every clearance rule is asked of each pair as KiCad asks it, the last matching rule in file order winning (#1706), including a rule the clearance channels do not model. A rule scoped by a courtyard term prices the pair before it is counted, by where each pad stands (#1832), so a pair it clears is no gap at all; in the walk after it a courtyard term (`insideCourtyard('X')` / `intersectsCourtyard('X')`) is read for a pad as `memberOfFootprint('X')`. A pair the binding rule clears, or one a `(severity ignore)` rule binds, is not published (a console line counts them by rule); a pair a rule decided by a term check_drc cannot read may clear is published tagged `unverified_rule` (the `--json` `own_footprint_gaps_unverified` count), and board_score and check_complete then say KiCad will report UP TO the count. `kicad_drc_compare` names a published pair KiCad lists no item for (`checkdrc_library_pad_gaps_unreported`, the tagged ones counted apart); it does not enter the verdict. A project that sets `clearance` to `ignore` publishes none.
-7. **Copper-to-hole clearance** - Tracks maintain clearance from NPTH (no-copper) drill holes of other nets — a real fab short the via-drill hole check misses (e.g. a track across a mounting hole)
+7. **Copper-to-hole clearance** - Tracks maintain clearance from NPTH (no-copper) drill holes of other nets — a real fab short the via-drill hole check misses (e.g. a track across a mounting hole). A via's own drill is a hole too (#1914): when a copper-to-hole clearance is declared (`--hole-clearance`, else the project's `min_hole_clearance` or its `fab_floor_origin`), other-net tracks, vias and pads are graded against it at that value, so a via whose ring is narrower than the hole clearance less the copper clearance is caught. As kicad-cli 10.0.6 reports it, a track or via that also fails copper clearance to the via is one clearance row, and a pad gets both rows. Ordinary plated pad holes, and pads against NPTH holes, are not graded
 8. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint). A `.kicad_dru` `hole_to_hole` rule sets the spacing of the drill pairs it binds (#1848): the last matching rule, conditions such as `A.Via_Type == 'Micro'` included, replaces the run's one value above or below it, and a rule the resolver cannot read is named `NOT GRADED (hole_to_hole)`. A rule with `(severity ignore)` still binds its pairs and leaves them ungraded (listed accepted under the rule); any other severity grades them at the rule. The fab floor pins the spacing up (the finding then says so) only for two mechanically drilled holes: a pair with a laser-drilled micro via (one joining two adjacent copper layers) is held to its rule, else Board Setup's `min_hole_to_hole`, alone. As in KiCad (measured on kicad-cli 10.0.6), two vias whose copper spans share no layer are not graded against each other, and neither are two laser-drilled micro vias; the run counts those pairs in one `NOT GRADED (hole_to_hole)` line. A via typed micro over more than two adjacent layers is a mechanical drill and is graded as one.
 9. **Board edge clearance** - Tracks and vias maintain clearance from the real `Edge.Cuts` outline (outer ring **plus interior cutouts/slots**), so copper routed into a cutout — which sits inside the bounding box — is caught. Falls back to the bounding box when the parser finds no usable outline. With `--check-pad-edge`, pads are checked too.
 10. **Same-net soft joints** (`segment-endpoint-gap`) - Two same-net track ends whose caps overlap without meeting: connected today, an open after etch tolerance. A counted violation; a gap at or below 0.02 mm (quantization-level contact) is only a warning.
@@ -2621,6 +2621,15 @@ still replay.
   `made_room`, #1681). Quarter-turn rotations are tried unless `--no-rotate`;
   `--beneath-only` moves only the passives under a BGA's package and keeps
   them there.
+- **Holes.** A cap pad is held off a via's copper at the pair's clearance and
+  off its DRILL at the copper-to-hole clearance KiCad grades: the project's
+  `min_hole_clearance` (never the fab-floor origin), a `.kicad_dru`
+  `hole_clearance` rule where one binds the pair (it replaces the project
+  value), or the pad's own clearance override where larger -- on the layers
+  the via's barrel joins, as `check_drc` grades it
+  (`check_drc.pad_via_hole_required`). A via whose ring is narrower than the
+  difference between the two clearances needs the second. The run prints the
+  value (`Cap pads held off via drills at ...`).
 - **Vias.** The last resort for a cap still not clear moves the offending via
   at most 0.6 mm, with a connector back to where it stood. It prefers the
   board's own `min_hole_to_hole`; if nothing clears at that it takes a landing
@@ -2650,7 +2659,9 @@ still replay.
   when given, and the size floors (track, via, drill, ring) of the copper the
   pass laid or moved -- a via it nudged and its connector segments -- and of
   nothing else (#1578). A cap move lays no copper, so a run that only moved
-  caps writes no size floor. `--no-fix-drc-settings` writes none of it and
+  caps writes no size floor. The copper-to-hole clearance it writes is the one
+  the cap pads were held off via drills at, so the project never declares a
+  value the moved caps break. `--no-fix-drc-settings` writes none of it and
   carries the input's project through as it was, as on a routing step; in
   the GUI the "Fix DRC settings after routing" box is the same switch.
 
@@ -3706,7 +3717,11 @@ tab (#1577), write it the same way, and a floor written under the board's own
 is a `hole_clearance` row in `JSON_SUMMARY.design_rules`. A writeback only
 ever lowers this floor: a step whose copper holds more than the project
 already declares says so (`Copper-to-hole floor stays ...`) rather than
-raising it.
+raising it. A rule written below the hole clearance the via descent ladder
+preferred a ring for is recorded with it
+(`kicad_routing_tools.via_ring_hole_clearance`: `{rule, hole_clearance}`), so
+a later step's ladder prefers the same ring while the rule still holds that
+value; KiCad and `check_drc` grade the rule (#1914).
 
 The `#530` cap lowers `rules.min_clearance` to the smallest pad clearance
 override the run honoured (KiCad floors an override there). That number

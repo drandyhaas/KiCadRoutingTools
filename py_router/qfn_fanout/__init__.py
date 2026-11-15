@@ -2083,19 +2083,22 @@ def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
     for the call the board carries only the copper the span has
     (`via_span.only_span_copper`), so a pad or track on another layer blocks
     no via site. The escape layer must be one end of the span."""
+    import inspect
+    bound = inspect.signature(_generate_qfn_fanout_all).bind(
+        footprint, pcb_data, *args, **kwargs)
+    bound.apply_defaults()
+    asked_via = bound.arguments.get('via_size')
     if not via_span:
         return _hole_rule_pass(footprint, pcb_data,
-                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs))
-    import inspect
+                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs),
+                               asked_via)
     from types import SimpleNamespace
     from via_span import apply_span, only_span_copper, board_span
     span, kind = board_span(pcb_data, via_span, via_span_type)
     if kind is None:
         return _hole_rule_pass(footprint, pcb_data,
-                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs))
-    bound = inspect.signature(_generate_qfn_fanout_all).bind(
-        footprint, pcb_data, *args, **kwargs)
-    bound.apply_defaults()
+                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs),
+                               asked_via)
     layer = bound.arguments.get('layer') or footprint.layer
     if layer not in (span[0], span[-1]):
         from via_span import SpanError
@@ -2108,16 +2111,21 @@ def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
     n = apply_span(result[1], SimpleNamespace(via_span=list(span), via_span_type=kind))
     if n:
         print(f"  Via span: {n} fan-out via(s) written as {kind} {span[0]}-{span[-1]}")
-    return _hole_rule_pass(footprint, pcb_data, result)
+    return _hole_rule_pass(footprint, pcb_data, result, asked_via)
 
 
-def _hole_rule_pass(footprint, pcb_data, result):
+def _hole_rule_pass(footprint, pcb_data, result, asked_via=None):
     """#1853: the fan-out's own tracks and vias graded against the board's
     .kicad_dru hole_clearance rules, against the board and each other; what
     they break is named per rule and kept in LAST_HOLE_RULES, the escape
-    kept (fanout_hole_rule.hole_disclose). Free without such a rule."""
+    kept (fanout_hole_rule.hole_disclose). Free without such a rule.
+    #1914: and the vias under ``asked_via`` that ring less than the board's
+    hole clearance needs, named (fab_tiers.disclose_hole_ring_vias)."""
     from fanout_hole_rule import hole_disclose
     LAST_HOLE_RULES[:] = hole_disclose(pcb_data, result[0], result[1])
+    from fab_tiers import disclose_hole_ring_vias
+    disclose_hole_ring_vias(pcb_data, result[1], asked_via,
+                            f"QFN fanout {footprint.reference}")
     return result
 
 
