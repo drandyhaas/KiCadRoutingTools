@@ -1585,7 +1585,10 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
         # stages the on-disk project, which is missing every clamp
         # update_live_drc_floors applied in memory (#627). Re-author the
         # sibling from the live board instead, crash-free.
-        pcbnew.SaveBoard(tmp, board, aSkipSettings=True)
+        # tool_records.save_board keeps the record on the file (#1906)
+        import tool_records
+        tool_records.save_board(pcbnew.SaveBoard, tmp, board,
+                                aSkipSettings=True)
         try:
             from kicad_parser import stage_live_project_rules
             stage_live_project_rules(tmp, board)

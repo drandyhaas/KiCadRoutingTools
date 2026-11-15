@@ -379,7 +379,10 @@ class AutorouteTab(wx.Panel):
             # on pre-KiCad-10 projects (see swig_gui._stage_live_board). The
             # siblings come from the board's own files, as the AI tabs stage.
             import pcbnew
-            pcbnew.SaveBoard(staged, board, aSkipSettings=True)
+            # tool_records.save_board keeps the record on the file (#1906)
+            import tool_records
+            tool_records.save_board(pcbnew.SaveBoard, staged, board,
+                                    aSkipSettings=True)
         elif self.board_filename and os.path.isfile(self.board_filename):
             shutil.copyfile(self.board_filename, staged)
         else:
