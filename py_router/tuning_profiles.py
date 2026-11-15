@@ -179,7 +179,8 @@ def _read_project(board_path: str):
         if not p.get('profile_name'):
             continue
         layers = {}
-        for e in p.get('layer_entries') or []:
+        entries = p.get('layer_entries')
+        for e in entries if isinstance(entries, list) else []:
             if isinstance(e, dict) and e.get('signal_layer') and isinstance(
                     e.get('delay'), (int, float)):
                 layers[str(e['signal_layer'])] = float(e['delay']) / _AS_PER_PS
