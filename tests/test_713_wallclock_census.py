@@ -236,6 +236,12 @@ REGISTRY = {
         '(path, os.path.getmtime) so a re-saved file is read afresh (#1853 '
         'board_design_rules, #1869 recorded lanes); the mtime decides only '
         'whether the file is re-read'),
+    'py_router/dru_load.py': (
+        'file_mtime',
+        'keys its on-disk cache of `kicad-cli version` on the binary\'s '
+        '(realpath, size, st_mtime_ns) so an upgraded kicad-cli is asked '
+        'afresh (#1852); the mtime decides only whether the version is '
+        're-read, and the answer is disclosure only'),
     'py_router/route_planes.py': (
         'file_mtime',
         'compares the output file st_mtime before/after to detect that a '

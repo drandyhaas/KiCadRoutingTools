@@ -20,13 +20,10 @@ Four things this file pins that are easy to get wrong:
 
   * The keep-out is measured against `check_drc`'s own REQUIREMENT, not
     against legality's own inflation -- that comparison is the one the defect
-    survived for want of. It is a hand MIRROR and this file says so: a
-    fact-check of the #761 premise established that `check_drc` has NO
-    pad-vs-NPTH-hole arm at all (its `holes` list feeds a TRACK arm and a VIA
-    arm, and the pad-pad check skips NPTH pads), so "grade the corpus with
-    check_drc" is not available as a check on this fix. See
-    `TestParityWithTheChecker`, which pins both the absence and the
-    expression.
+    survived for want of. It is check_drc's track requirement at an NPTH hole
+    (`npth_track_clearance`, imported); check_drc grades pad copper against
+    an NPTH hole too since #1850, at KiCad's value, which the keep-out never
+    undercuts. See `TestParityWithTheChecker`.
   * The broad phase must reach the hole or the fix is INERT: both early-outs
     are bounded by pad floors, and an NPTH pad reaches no pad floor.
     `TestTheBroadPhaseReachesTheHole` fails if either term is dropped.
@@ -478,67 +475,58 @@ class TestParityWithTheChecker(unittest.TestCase):
                 self.assertEqual(
                     ctx.pair_shortfall('C1', 'H1').hole > EPS, want_flag)
 
-    def test_there_IS_no_pad_vs_hole_arm_in_check_drc_to_compare_against(self):
-        """A disclosure, and the reason this file cannot close the loop by
-        grading the corpus.
-
-        #761 says "check_drc grades the same geometry at max(npth_clr, lc)".
-        It grades the same RULE, not the same geometry: the `holes` list it
-        builds is consumed in exactly two places, a TRACK arm and a VIA arm,
-        and the pad-to-pad check skips NPTH pads outright. Nothing in this
-        repo grades pad copper against an NPTH hole -- which is precisely why
-        the placer could model that pair at zero for as long as it did, and
-        why "run check_drc on the corpus" is not available as a check on this
-        fix.
-
-        Reported by LINE, never `assertIn` over the module source: test_732
-        measured a 393KB failure message doing that."""
-        src = io.open(os.path.join(_ROOT, 'py_router', 'check_drc.py'),
-                      encoding='utf-8').read().splitlines()
-        consumers = [i + 1 for i, l in enumerate(src)
-                     if l.strip().startswith('if holes and ')]
-        self.assertEqual(len(consumers), 2,
-                         'check_drc consumes its NPTH `holes` list at %d '
-                         'places now, not 2. If one of them is a PAD arm, '
-                         'this file should compare against it instead of '
-                         'mirroring the requirement' % len(consumers))
-        kinds = [src[i - 1].strip() for i in consumers]
-        self.assertEqual(kinds, ['if holes and segs:',
-                                 'if holes and pcb_data.vias:'])
-        skips = [i + 1 for i, l in enumerate(src)
-                 if 'NPTH hole: no copper to short/graze' in l]
-        self.assertEqual(len(skips), 2,
-                         'the pad-pad check no longer skips NPTH pads at two '
-                         'sites (found %r) -- re-read what it does now' % skips)
+    def test_check_drc_grades_pad_copper_at_an_npth_hole_no_looser(self):
+        """check_drc's copper-to-hole pass grades a pad's copper against an
+        NPTH hole (#1850), at KiCad's value: the pad override floored at the
+        board minimum, else the minimum. legality's keep-out adds the copper
+        clearance and the fab floor on top, so wherever check_drc flags the
+        pair legality flags it too -- the generator is never looser than the
+        checker."""
+        from check_drc import hole_rule_grade
+        hc = 0.25
+        for lc, clearance in ((AUDIO1_LC, 0.25), (0.0, 0.25), (0.0, 0.40)):
+            check_req = max(lc, hc)
+            for gap in (check_req - 0.01, check_req + 0.01):
+                pcb, ctx, _parts = _hole_pair(gap, lc=lc, clearance=clearance)
+                rows, _unread = hole_rule_grade(
+                    pcb, None, ['F.Cu', 'B.Cu'], clearance, 0.0,
+                    board_min=hc, no_copper_floor=hc)
+                flagged = [r for r in rows if r['type'] == 'pad-hole']
+                with self.subTest(lc=lc, clearance=clearance, gap=round(gap, 4)):
+                    self.assertEqual(bool(flagged), gap < check_req, rows)
+                    if flagged:
+                        self.assertAlmostEqual(flagged[0]['required_mm'], check_req,
+                                               places=9)
+                        self.assertGreater(ctx.pair_shortfall('H1', 'C1').hole, EPS)
 
     def test_the_requirement_matches_check_drcs_own_expression(self):
-        """A hand MIRROR, said out loud. `npth_clr` is a function-local inside
-        `run_drc`, so it cannot be imported; this pins the line it lives on so
-        the mirror breaks loudly rather than drifting."""
+        """check_drc grades a TRACK at an NPTH hole through
+        `npth_track_clearance` (#1850: its one copper-to-hole pass calls it),
+        which this compares against, imported rather than mirrored; the
+        source pin makes the comparison break loudly if the pass stops
+        calling it."""
+        from check_drc import npth_track_clearance
         src = io.open(os.path.join(_ROOT, 'py_router', 'check_drc.py'),
                       encoding='utf-8').read().splitlines()
-        want = ('npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE, '
-                'hole_clearance)')
-        hits = [i + 1 for i, l in enumerate(src) if l.strip() == want]
+        hits = [i + 1 for i, l in enumerate(src)
+                if 'floor = npth_track_clearance(' in l]
         self.assertEqual(len(hits), 1,
-                         'check_drc\'s NPTH requirement is no longer spelled '
-                         '%r (found at %r); the mirror below is stale' %
-                         (want, hits))
+                         'check_drc\'s copper-to-hole pass no longer grades a '
+                         'track at an NPTH hole through npth_track_clearance '
+                         '(found at %r); the comparison below is stale' % hits)
         for board, ref in ((ULX3S, 'AUDIO1'), (FLAT_HIER, 'HOLE4')):
             pcb = parse_kicad_pcb(board)
             fp = pcb.footprints[ref]
             floor = resolve_npth_floor(pcb)
             for clearance in (0.10, 0.25, 0.40):
                 pp = PartPads(fp, clearance, None, True, floor)
-                # check_drc.py:2714 then :2733, spelled the same way.
                 # Compared as SETS, not per-pad against the footprint max: a
                 # max hides a hole whose own requirement is lower, which is
                 # exactly the per-hole property #730 shipped.
-                npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
-                               resolve_hole_clearance(pcb, None))
+                hc = resolve_hole_clearance(pcb, None)
                 want = sorted({
-                    round(max(npth_clr,
-                              getattr(p, 'local_clearance', 0.0) or 0.0), 9)
+                    round(npth_track_clearance(
+                        getattr(p, 'local_clearance', 0.0) or 0.0, clearance, hc), 9)
                     for p in fp.pads
                     if _pad_has_no_copper(p) and (p.drill or 0) > 0})
                 with self.subTest(board=os.path.basename(board),

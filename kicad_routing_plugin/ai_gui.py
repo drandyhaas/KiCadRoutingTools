@@ -77,7 +77,10 @@ def board_path_for_analysis(board_filename):
             # aSkipSettings: analysis snapshot; writing a .kicad_pro besides
             # would crash on pre-KiCad-10 projects (uncaught C++ type_error
             # in the .kicad_pro merge; see _stage_live_board in swig_gui.py).
-            pcbnew.SaveBoard(snapshot, board, aSkipSettings=True)
+            # tool_records.save_board keeps the record on the file (#1906)
+            import tool_records
+            tool_records.save_board(pcbnew.SaveBoard, snapshot, board,
+                                    aSkipSettings=True)
             # Stage the on-disk project siblings beside the snapshot so the
             # analysis sees the real netclasses and layer rules (#498) --
             # the implicit settings save this replaced never carried the

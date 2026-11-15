@@ -201,7 +201,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # twice -- this build at the class values, kept outside the areas, and
     # one sub-build per area at its rule's value, kept inside it
     # (`_area_pass` = (the area clearance, the region, the parent's stamp
-    # target, the parent's config)). Both write the SAME map.
+    # target, the parent's config, the parent's real map)). Both write the
+    # SAME map.
     _area = getattr(config, 'area_clearance', None) if _area_pass is None else None
     _area_config = config
     if _area is not None:
@@ -223,6 +224,17 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                                          other=_real_obstacles)
     elif _area is not None:
         obstacles = _area.outside(obstacles, _area_config)
+    # Where the LIFTABLE rows go: the real map, past the static proxy, so a
+    # lift's remove_* can reach them -- and through the same side of the area
+    # composition as every other row, since the lift record is cut that way
+    # (`_compose_area_passes`). Stamped whole, a net tie in a rule area held
+    # the rows of the class value while its lift took off the area's.
+    _lift_target = _real_obstacles
+    if _area_pass is not None:
+        _lift_target = _area_pass[0].inside(_area_pass[4], _area_pass[3], _area_pass[1],
+                                            other=_real_obstacles)
+    elif _area is not None:
+        _lift_target = _area.outside(_real_obstacles, _area_config)
 
     # Set BGA proximity radius for is_in_bga_proximity() checks -- armed only
     # when the COST knob is on, so --bga-proximity-cost 0 is a real off-switch.
@@ -442,18 +454,18 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         _rows[:, 3] = _li
         obstacles.add_blocked_cell_spans_batch(np.ascontiguousarray(_rows))
     # The liftable rows go to the REAL map, bypassing the static proxy, so the
-    # lift's remove_* can actually reach them. When static_base is off,
-    # `obstacles is _real_obstacles` and this is the same call as above.
+    # lift's remove_* can actually reach them (`_lift_target`). When
+    # static_base is off this is the same call as above.
     for _li, _arrs in sorted(_lift_cell_batch.items()):
         _sp = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
         _rows = np.empty((len(_sp), 4), dtype=np.int32)
         _rows[:, :3] = _sp
         _rows[:, 3] = _li
-        _real_obstacles.add_blocked_cell_spans_batch(np.ascontiguousarray(_rows))
+        _lift_target.add_blocked_cell_spans_batch(np.ascontiguousarray(_rows))
     if _lift_via_batch:
         _vl = (np.concatenate(_lift_via_batch)
                if len(_lift_via_batch) > 1 else _lift_via_batch[0])
-        _real_obstacles.add_blocked_via_spans_batch(
+        _lift_target.add_blocked_via_spans_batch(
             np.ascontiguousarray(_vl.astype(np.int32)))
     if _seg_via_batch:
         # Every producer must emit the SAME form (spans, 3 columns). Assert it
@@ -486,7 +498,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 continue
             _lift = (filled_graphic_lift_nets(_sh, _own_pad_nets, _fps)
                      if _own_pad_nets else frozenset())
-            _target = _real_obstacles if _lift else obstacles
+            _target = _lift_target if _lift else obstacles
             _li = layer_map.get(_sh.layer)
             if _li is not None:
                 _rows = filled_graphic_interior_spans(_gx, _gy, _li)
@@ -630,7 +642,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         for _nid, _rws in _own_pad_via_rows.items() if _rws}
     if _area is not None:
         _compose_area_passes(_area, _area_config, _stamp_target, pcb_data,
-                             nets_to_route, extra_clearance, stamp_pads)
+                             nets_to_route, extra_clearance, stamp_pads,
+                             _real_obstacles)
         # #1843: no via of the run straddles a tight area's edge
         _band = _area.via_band_cells(config.grid_step)
         if len(_band):
@@ -716,7 +729,7 @@ _LIFT_RECORDS = (('_net_tie_lift', 'cells'), ('_graphic_own_pad_lift', 'cell_spa
 
 
 def _compose_area_passes(area, config, target, pcb_data, nets_to_route,
-                         extra_clearance, stamp_pads) -> None:
+                         extra_clearance, stamp_pads, real) -> None:
     """#1843: stamp ``target`` inside each rule area at the area's
     clearance, and compose the lift records the same way -- a record names
     the rows a map holds for one piece of copper, so it is cut exactly as
@@ -729,7 +742,7 @@ def _compose_area_passes(area, config, target, pcb_data, nets_to_route,
             build_base_obstacle_map(
                 pcb_data, area.region_config(config, i), nets_to_route,
                 extra_clearance, {}, stamp_pads=stamp_pads,
-                _area_pass=(area, i, target, config))
+                _area_pass=(area, i, target, config, real))
             inner.append({k: getattr(pcb_data, k, None) or {} for k, _ in _LIFT_RECORDS})
     finally:
         for key, kind in _LIFT_RECORDS:

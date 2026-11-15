@@ -142,6 +142,7 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
     """
     import wx
     import pcbnew
+    import tool_records
 
     board_path = os.path.abspath(board_path)
     indices = list(range(len(steps))) if indices is None else list(indices)
@@ -224,7 +225,10 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
                 # on-disk project JSON with its migrated in-memory view;
                 # an uncaught type_error aborts the process on any
                 # pre-KiCad-10 project).
-                pcbnew.SaveBoard(snap, board, aSkipSettings=True)
+                # tool_records.save_board: the record stays on the file
+                # (KiCad 10.0.7+ drops it at save, #1906)
+                tool_records.save_board(pcbnew.SaveBoard, snap, board,
+                                        aSkipSettings=True)
                 result['snapshots'].append(snap)
             except Exception as e:
                 result['log'].append(f"snapshot step {index + 1} failed: {e}")
@@ -243,7 +247,10 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
                 # and on pre-KiCad-10 projects it aborts the process outright
                 # (uncaught type_error merging the pre-migration file with
                 # the migrated in-memory settings).
-                pcbnew.SaveBoard(board_path, board, aSkipSettings=True)
+                # The board copy of the records too (#1906: KiCad 10.0.7+
+                # drops it at save; tool_records.save_board writes it back).
+                tool_records.save_board(pcbnew.SaveBoard, board_path, board,
+                                        aSkipSettings=True)
             except Exception as e:
                 result['log'].append(f"final save failed: {e}")
         exit_main_loop(app)
