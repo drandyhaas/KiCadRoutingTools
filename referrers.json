@@ -207,58 +207,6 @@
    "uniques": 9
   }
  ],
- "2026-10-14": [
-  {
-   "count": 532,
-   "referrer": "Google",
-   "uniques": 342
-  },
-  {
-   "count": 161,
-   "referrer": "forum.kicad.info",
-   "uniques": 131
-  },
-  {
-   "count": 155,
-   "referrer": "github.com",
-   "uniques": 89
-  },
-  {
-   "count": 87,
-   "referrer": "github-com.btglss.net",
-   "uniques": 53
-  },
-  {
-   "count": 59,
-   "referrer": "DuckDuckGo",
-   "uniques": 35
-  },
-  {
-   "count": 57,
-   "referrer": "linkedin.com",
-   "uniques": 37
-  },
-  {
-   "count": 36,
-   "referrer": "youtube.com",
-   "uniques": 27
-  },
-  {
-   "count": 26,
-   "referrer": "Bing",
-   "uniques": 22
-  },
-  {
-   "count": 18,
-   "referrer": "com.linkedin.android",
-   "uniques": 14
-  },
-  {
-   "count": 12,
-   "referrer": "hackaday.io",
-   "uniques": 8
-  }
- ],
  "2026-10-15": [
   {
    "count": 503,
@@ -1869,6 +1817,58 @@
    "count": 23,
    "referrer": "search.brave.com",
    "uniques": 16
+  }
+ ],
+ "2026-11-15": [
+  {
+   "count": 945,
+   "referrer": "aocr.org",
+   "uniques": 939
+  },
+  {
+   "count": 518,
+   "referrer": "Google",
+   "uniques": 330
+  },
+  {
+   "count": 293,
+   "referrer": "github.com",
+   "uniques": 174
+  },
+  {
+   "count": 292,
+   "referrer": "linkedin.com",
+   "uniques": 145
+  },
+  {
+   "count": 162,
+   "referrer": "forum.kicad.info",
+   "uniques": 119
+  },
+  {
+   "count": 104,
+   "referrer": "l.facebook.com",
+   "uniques": 28
+  },
+  {
+   "count": 95,
+   "referrer": "com.linkedin.android",
+   "uniques": 39
+  },
+  {
+   "count": 39,
+   "referrer": "Bing",
+   "uniques": 30
+  },
+  {
+   "count": 36,
+   "referrer": "DuckDuckGo",
+   "uniques": 17
+  },
+  {
+   "count": 25,
+   "referrer": "t.co",
+   "uniques": 22
   }
  ]
 }
