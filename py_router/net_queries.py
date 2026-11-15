@@ -1045,11 +1045,15 @@ def _touched_via_layers(via, c, r, segments, copper):
 
 
 def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
-                    key) -> List[int]:
+                    key, spans: Optional[list] = None) -> List[int]:
     """The barrel KiCad charges each of `vias`, in nm, as release `key` does
-    (step 1 and 5 of the block comment above)."""
+    (step 1 and 5 of the block comment above). `spans`, when given, is
+    filled with one entry per via: the (upper, lower) copper layers the
+    charge was measured between, or None for a via charged nothing."""
     from geometry_utils import via_end_layers
     if not via_height_in_length(pcb_data):
+        if spans is not None:
+            spans.extend([None] * len(vias))
         return [0] * len(vias)       # #1731: Board Setup counts no via height
     copper = _copper_stack(pcb_data)
     rank = {l: i for i, l in enumerate(copper)}
@@ -1057,10 +1061,14 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
     off_centre = key >= (10, 0, 4)       # 19cc51bd
     pad_side = key >= (10, 0, 5)         # e4f5c357
 
+    _last = [None]
+
     def height(layers):
         span = sorted({l for l in layers if l in rank}, key=rank.get)
         if len(span) < 2:
+            _last[0] = None
             return 0
+        _last[0] = (span[0], span[-1])
         return _stackup_height_nm(pcb_data, span[0], span[-1], half)
 
     ends: Dict[Tuple[int, int], List[int]] = {}
@@ -1077,6 +1085,7 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
             grid.setdefault((p[0] // cell, p[1] // cell), []).append(p)
     out = []
     for v in vias:
+        _last[0] = None
         c = (_nm(v.x), _nm(v.y))
         r = _nm(v.size) // 2
         joined = set(ends.get(c, ()))
@@ -1097,6 +1106,8 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
             elif touched:
                 top = touched[0]
             out.append(height((top, bottom)))
+            if spans is not None:
+                spans.append(_last[0])
             continue
         layers = {items[i].layer for i in joined}
         if pad_side:
@@ -1116,6 +1127,8 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
                 out.append(0)
         else:
             out.append(height(layers))
+        if spans is not None:
+            spans.append(_last[0])
     return out
 
 
@@ -1210,6 +1223,19 @@ def kicad_net_length_parts_nm(pcb_data, segments, vias, pads,
     for run in runs:
         by_layer[run.layer] = by_layer.get(run.layer, 0) + _chain_len(run.pts)
     return by_layer, via_nm
+
+
+def kicad_net_via_parts_nm(pcb_data, segments, vias, pads,
+                           release: Optional[str] = None) -> List[Tuple[int, Optional[tuple]]]:
+    """Per via of `vias`, in their order: (the barrel nm KiCad charges it,
+    the (upper, lower) copper layers the signal joins it on, or None). What a
+    tuning profile's via override is looked up by: KiCad keys it on the
+    signal's two layers and the via's own two."""
+    key = _release_key(length_measure_release(release))
+    segments = _tracks(segments)
+    spans: list = []
+    nm = _via_charges_nm(pcb_data, vias, _line_items(segments), segments, pads, key, spans)
+    return list(zip(nm, spans))
 
 
 def kicad_via_length(via: Via, segments, pads, pcb_data,

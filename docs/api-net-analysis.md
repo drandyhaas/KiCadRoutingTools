@@ -510,8 +510,9 @@ KiCad 10 times a net with the tuning profile its net class names
 `net_settings.classes[].tuning_profile`): a delay per signal layer and one
 per mm of via, each stored in attoseconds per mm. `read_tuning_profiles`
 reads them as a `TuningProfile` (`name`, `time_domain`, `layer_ps_per_mm`,
-`via_ps_per_mm`, `via_overrides`, the count of overrides, which are not
-modelled), with the classes that name each profile. A missing project gives
+`via_ps_per_mm`, and `via_overrides`: `{(signal layer from, signal layer to,
+via layer from, via layer to): ps}`, each entry as the project stores it),
+with the classes that name each profile. A missing project gives
 none; one that cannot be parsed gives none with a warning.
 
 `kicad_net_length_parts_nm` is `kicad_net_length_nm` (above) in its parts:
@@ -523,7 +524,13 @@ pads' pad-to-die delays. A layer the profile has no entry for adds nothing.
 A net whose class names no profile measures 0 ps; one whose profile has
 time-domain tuning off gets only its pads' pad-to-die delays. The `why`
 string says which. It is None for a net whose pads are not joined by track
-copper, or whose profile has via overrides.
+copper. Under a profile with via overrides, a via whose signal joins it on an
+override's two signal layers, and whose own two end layers are the
+override's, takes the override's delay whole in place of barrel length times
+the via delay; KiCad looks an override up with each pair upper layer first,
+so an entry stored the other way round never matches (`DelayModel._via_delay`;
+`net_queries.kicad_net_via_parts_nm` gives each via's charged length and the
+two layers it was measured between).
 
 `net_time_profile` is the router's side (`--time-matching`): the profile of
 the net when the router can time it as KiCad does (time-domain tuning on, no

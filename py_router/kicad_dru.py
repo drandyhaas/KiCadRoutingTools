@@ -592,29 +592,92 @@ class LengthRule(NamedTuple):
     kind: str = 'length'
     within_diff_pairs: bool = False
     unit: str = 'mm'
+    #: net-name patterns the rule leaves out: `&& A.NetName != 'x'` factors
+    #: after the ||-list (KiCad's `!=` is the negation of its wildcard,
+    #: case-insensitive `==`, measured on kicad-cli 10.0.8)
+    exclude: Tuple[str, ...] = ()
+
+
+_LEN_NOT_NAME = re.compile(r"^A\s*\.\s*NetName\s*!=\s*['\"]([^'\"]*)['\"]$")
+
+
+def _split_top(expr: str, op: str) -> List[str]:
+    """`expr` split on `op` outside parentheses and quotes."""
+    out, depth, quote, start, i = [], 0, '', 0, 0
+    while i < len(expr):
+        ch = expr[i]
+        if quote:
+            if ch == quote:
+                quote = ''
+        elif ch in '\'"':
+            quote = ch
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        elif depth == 0 and expr.startswith(op, i):
+            out.append(expr[start:i])
+            start = i + len(op)
+            i += len(op)
+            continue
+        i += 1
+    out.append(expr[start:])
+    return out
+
+
+def _strip_parens(t: str) -> str:
+    t = t.strip()
+    while t.startswith('(') and t.endswith(')'):
+        depth, whole = 0, True
+        for k, ch in enumerate(t):
+            depth += ch == '('
+            depth -= ch == ')'
+            if depth == 0 and k < len(t) - 1:
+                whole = False
+                break
+        if not whole:
+            break
+        t = t[1:-1].strip()
+    return t
 
 
 def _parse_length_condition(expr: Optional[str]):
-    """(terms, reason): terms as LengthRule.terms, reason '' when honoured."""
+    """(terms, reason, exclude): terms as LengthRule.terms, reason '' when
+    honoured, exclude as LengthRule.exclude.
+
+    The honoured shape is an ||-list of net terms, optionally ANDed with
+    `A.NetName != '...'` factors: "these classes or nets, but not those
+    nets". Exclusions alone bind every other net."""
     if expr is None or not expr.strip():
-        return (), ''
-    if '&&' in expr or '!' in expr:
-        return None, f"condition {expr!r} is not an ||-list of net terms"
+        return (), '', ()
+    factors = [_strip_parens(f) for f in _split_top(expr, '&&')]
+    exclude = []
+    keep = []
+    for f in factors:
+        m = _LEN_NOT_NAME.match(f)
+        if m:
+            exclude.append(m.group(1))
+        else:
+            keep.append(f)
+    if len(keep) > 1 or any('!' in f or '&&' in f for f in keep):
+        return None, f"condition {expr!r} is not an ||-list of net terms", ()
+    if not keep:
+        return (), '', tuple(exclude)
     terms = []
-    for raw in expr.split('||'):
+    for raw in _split_top(keep[0], '||'):
         t = raw.strip()
         while t.startswith('(') and t.endswith(')'):
             t = t[1:-1].strip()
         m = _LEN_TERM.match(t)
         if not m:
-            return None, f"condition term {raw.strip()!r} is not modelled"
+            return None, f"condition term {raw.strip()!r} is not modelled", ()
         if m.group(1) == 'NetName':
             terms.append(('netname', m.group(2)))
         elif m.group(3) == 'inDiffPair':
             terms.append(('indiffpair', m.group(4)))
         else:
             terms.append(('netclass', m.group(2) if m.group(1) else m.group(4)))
-    return tuple(terms), ''
+    return tuple(terms), '', tuple(exclude)
 
 
 _KIND_NOUN = {'length': 'length window', 'skew': 'skew window',
@@ -665,7 +728,7 @@ def parse_dru_length_rules(text: str, kinds=('length',), time_domain: bool = Fal
                 notes.append(f"rule '{name}': {_KIND_NOUN.get(kind, kind)}, "
                              f"severity ignore -- skipped")
             continue
-        terms, why = _parse_length_condition(condition)
+        terms, why, exclude = _parse_length_condition(condition)
         if layer_clause is not None and terms is not None:
             terms, why = None, f"a (layer {layer_clause}) clause is not modelled"
         for kind, bounds, within, timed, times in found:
@@ -682,7 +745,7 @@ def parse_dru_length_rules(text: str, kinds=('length',), time_domain: bool = Fal
                     bounds, unit = times, 'ps'
             rules.append(LengthRule(str(name), bounds.get('min'), bounds.get('opt'),
                                     bounds.get('max'), t, w, severity, kind, within,
-                                    unit))
+                                    unit, exclude if t is not None else ()))
     return rules, notes
 
 
@@ -843,6 +906,8 @@ def length_rule_matches(rule: LengthRule, net_name: str, classes,
     without it the complement is taken as present."""
     if rule.terms is None:
         return None
+    if rule.exclude and any(_kicad_wild_eq(x, net_name or '') for x in rule.exclude):
+        return False
     if not rule.terms:
         return True
     cls = list(classes or ('Default',))
