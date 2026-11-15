@@ -1283,6 +1283,18 @@ def loop(solve, out, rounds, env, log, try_lay=None):
                 st['flips'] = (st['flips'] + ',' if st['flips'] else '') + qf
                 log(f"  pairs held: {nq} new side flip(s) for the next geometry")
             progress(1000 + findings(gq), i, fresh=nq != 0)
+            # ...and the VIA CUTS that polish wrote: a single's change it found no room for beside a laid pair goes to
+            # the solve as a via cut, as a smooth polish's does in the round's cut file. Left to the history's price
+            # alone, a via 0.02 mm inside a capacitor's pad bar beside a laid pair was answered by a whole plan the
+            # solve could not prove, seven lanes over two vias, where moving that one change answered it
+            try:
+                vq = json.load(open(qf)).get('vcuts', [])
+                if vq:
+                    json.dump(own_spans({'vcuts': vq}, json.load(open(O(f'g{i}.json')))), open(O(f'qc{i}.json'), 'w'))
+                    st['cuts'] = (st['cuts'] + ',' if st['cuts'] else '') + O(f'qc{i}.json')
+                    log(f"  pairs held: {len(vq)} via cut(s) for the solve")
+            except Exception:
+                traceback.print_exc(file=err)
             # (...and the pairs laid again's findings, where they were laid again: theirs are places too)
             if os.path.isfile(O(f'qk{i}.json')) and os.path.isfile(O(f'qk{i}.audit')):
                 addhot(O(f'qk{i}.json'), O(f'qk{i}.audit'), O(f'hqk{i}.json'))

@@ -54,6 +54,9 @@ ends at an array chosen from that array's menu, and at each array ONE set of rul
     before any via fits;
   * NO BUS END ON A GROUND PLANE'S LAYER, where the board has an inner layer without a plane; a run on a POWER
     plane's at its price (route_layers.run_price), ranked with the changes of layer;
+  * A POCKET'S MOUTH HOLDS ITS LANES: a group's lanes that enter a pocket between two of its parts by one mouth are
+    no more than land across it a lane pitch apart (whole_frame's Group.landings, which lands every lane of a mouth
+    side by side whatever its layer); the rest go in by the other mouth, or straight under a part;
   * NO FAR-FACE TOOTH for a lane still on the pattern (a lane on its whole menu may take one, at its price);
   * a tooth on the source's FAR FACE -- and a PAIR's berth on its destination's far face, each leg's -- and THE WAY
     ROUND an array, priced as the ends model prices them: the far face past any count of vias, yet no refusal
@@ -2943,6 +2946,7 @@ def main():
     # its whole menus now, `in_epoch` a model built for one)
     stretches, epoch, in_epoch, sweep, sweep_v0, epoch_balls = None, -1, False, 0, None, set()
     costly_tries = 0
+    mouth_said = None           # (the mouths offered to more lanes than they hold: said once a count)
     while True:
         chk_try += 0 if in_epoch else 1
         rnd = 0
@@ -3186,6 +3190,39 @@ def main():
                     far += [(int(round(1000 * far_w)) * b.J.npair[l_], x_) for j, x_ in b.J.xs[1][l_].items()
                             if b.E.B[l_][j][0] and b.E.B[l_][j][0][0].direction == 'right']
             plane += [t_ for t_ in far if t_[0]]
+            # A POCKET'S MOUTH HOLDS ITS LANES A LANE PITCH APART, a rule behind its own assumption. A group's lanes that
+            # enter a pocket between two of its parts by a mouth land across that mouth in their order, a lane pitch
+            # apart from the wall of their own part (whole_frame's Group.landings) -- every lane of the mouth, whatever
+            # its layer -- and a mouth too short for them is shared evenly, its lanes nearer than a pitch. Unheld, seven
+            # lanes were sent through a mouth 1.2 mm wide that lands two: those on one layer were laid on top of each
+            # other at their berths in every round, and the loop stopped with its ends crowded. A lane past a mouth's
+            # count goes in by another way: the pocket's other mouth, or straight under a part on a layer it leaves open
+            n_mouth = 0
+            for b in buses:
+                if getattr(b.E, 'group', None) is None:
+                    continue
+                with awx_settings.given(b.env):
+                    import braid as bd
+                    room_ = bd.LPITCH
+                by_m_ = collections.defaultdict(list)
+                for l_ in b.J.lanes:
+                    for j, x_ in b.J.xs[1][l_].items():
+                        w_ = b.E.B[l_][j][5]
+                        if w_[0] == 'mouth':
+                            by_m_[tuple(round(v_, 4) for p_ in w_[2] for v_ in p_)].append((l_, x_))
+                for mk_, mem_ in sorted(by_m_.items()):
+                    # (as the landings read it: k lanes stand a pitch apart where k + 1 pitches lie within the mouth)
+                    cap_ = int(math.floor(math.hypot(mk_[2] - mk_[0], mk_[3] - mk_[1]) / room_ + 1e-9)) - 1
+                    lanes_ = sorted({l_ for l_, _x in mem_})
+                    if sum(b.J.npair[l_] for l_ in lanes_) <= cap_:
+                        continue
+                    m.Add(sum(b.J.npair[l_] * x_ for l_, x_ in mem_) <= max(0, cap_)).OnlyEnforceIf(
+                        gate('mouth', b.name, mk_, lanes={(b.name, l_, 1) for l_ in lanes_}))
+                    n_mouth += 1
+            if n_mouth and n_mouth != mouth_said:
+                mouth_said = n_mouth
+                log(f'  a pocket\'s mouth holds its lanes a lane pitch apart: {n_mouth} mouth(s) offered to more lanes '
+                    f'than they hold')
             # NO FAR-FACE TOOTH for a lane still on the pattern, a rule behind its own assumption: where no state holds it
             # the lane is named with the rules it meets (the ball behind it on their one via site, say), their balls get
             # their whole menus, and a lane on its whole menu may take the far face, at its price

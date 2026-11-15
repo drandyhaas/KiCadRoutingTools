@@ -1060,7 +1060,11 @@ group of one. The step:
    the array's lines one lane a layer, no via in a lane's way out (a pair's
    from the middle of its two exits, at the pair's width), a pair's two exits
    with nothing between them, each bus's exits one stretch round the array on
-   each layer, two buses' lanes that meet on two layers or priced, and every
+   each layer, two buses' lanes that meet on two layers or priced, a pocket
+   between two parts of a group entered by one mouth by no more lanes than
+   land across it a lane pitch apart (the frame lands every lane of a mouth
+   side by side, whatever its layer; the rest go in by the other mouth or
+   straight under a part), and every
    plane ball dropped, strapped or (dearest of all) fanned out -- dropped only
    where its plane will pour (a rule area that forbids pours stands as a pour
    of no net, `joint_escape.zone_regions`), and no via within a pad's own
@@ -1151,7 +1155,7 @@ gives the same ends):
 | kintex | 1 bus, 32 lanes | 203 s | 2.1 GB |
 | h616 | 1 bus, 41 lanes | 402 s | 1.9 GB |
 | orangecrab | 1 bus, 47 lanes | 1251 s | 5.6 GB |
-| zynq7020 | 2 buses, 75 lanes | 1604 s | — |
+| zynq7020 | 2 buses, 75 lanes | 1874 s | 3.1 GB |
 
 The bus step on those ends, `tests/stress/bus_boards.py`, every bus in one
 round:
@@ -1161,12 +1165,11 @@ round:
 | kintex | 34 | 0 | 0 | 0 | 34 | 508 mm | 303 s |
 | h616 | 45 | 0 | 0 | 0 | 70 | 845 mm | 499 s |
 | orangecrab | 50 | 0 | 0 | 0 | 80 | 735 mm | 1621 s |
-| zynq7020 | 78 | 1 | 0 | 0 | 136 | 1330 mm | 3278 s |
-
-The one open net on zynq7020 is the TODO's ends past a part's face.
+| zynq7020 | 78 | 0 | 0 | 0 | 137 | 1389 mm | 2672 s |
+| h3 | 53 | 0 | 0 | 0 | 114 | 1701 mm | 1466 s |
 
 ```bash
-python3 tests/stress/bus_boards.py --cases kintex,h616,orangecrab,zynq7020 --rounds 1 \
+python3 tests/stress/bus_boards.py --cases kintex,h616,orangecrab,zynq7020,h3 --rounds 1 \
     --set GROUP_FLOW=1 --set GEO_EMBED=1 --set SOLVE_LAYER_WALLS=1
 ```
 
@@ -2040,8 +2043,14 @@ polish; off by default. What it still lacks is in the
   between is the lane's own, written with it, and the lane's points next to
   a mouth are held ahead of it along the stub's way, so the two meet with no
   fold. A stub that ends in a via, or has nothing free straight ahead of it
-  within three bars, has no mouth: its run is read from the nearest free
-  point.
+  within three bars, has no mouth along its stub: a single lane's is then
+  where its own reference line last stands in the free space, walking back
+  from that end, the side it arrives by. Read from the nearest free point,
+  the end of a lane on a via in a row of vias (a connector's berths a pin
+  pitch apart, their bars one wall) was as near the row's far side as the
+  near one, and the lane was taken through a gap of the row and back to its
+  via from behind. With no free point of its own line within that reach, its
+  run is read from the nearest free point.
 - **A pair's via** is what the later stages lay there: two barrels either
   side of the pair's line, across **one router heading** through the via,
   and the pair router's straight run along that heading either side. The
@@ -2202,7 +2211,12 @@ The smooth plan made octilinear on the router's grid, one lane at a time: a
 grid search in a band round each lane's smooth line (length, bends, distance
 from the line). The **pairs** go first and alone, moving as the pair router
 does; they are then **held** while the polish fits the singles round them,
-and the snap lays the singles.
+and the snap lays the singles. Where a single's change of layer has no room
+beside a laid pair, the polish names it, and the loop's next solve keeps that
+lane's changes out of the place (a via cut) as well as pricing where the
+singles stood short; with the price alone, one via 0.02 mm inside a
+capacitor's pad bar was answered by a whole new plan the solve could not
+prove.
 
 <details>
 <summary>Details</summary>
@@ -3062,18 +3076,20 @@ channels first, and the other escapes leave round it.
   layer twice) and forbids two lanes on one layer at both ends to cross; and
   its best states are not ranked on the exact route, as a bus's own ends
   are. Its first plan's corridor solve also stops far from its bound there.
-- **Smaller at its peak.** The group's ends peak at 2 to 6 GB, near 6 on the
-  larger boards, mostly CP-SAT's own memory on a stretch's model: fewer balls
+- **Smaller at its peak.** The group's ends peak at 2 to 6 GB, mostly CP-SAT's
+  own memory on a stretch's model: fewer balls
   offered their whole menus at once round a costly ball and round a pair's
   legs, and fewer search workers at the peak.
-- **Ends the plan can lay past a part's face.** The model does not see the
-  room past the passives and pin rows at a part's face. The search finds ends
-  it rates well below the ones that routed clean, and the plan then sends two
-  lanes through a gap that holds one (between a capacitor's pads, or between
-  a connector's berth vias); the geometry lays them on top of each other, the
-  loop stops with its ends crowded, and one lane is left open (one net on
-  zynq7020's group bus). The idea: price, in the ends model, the lanes its
-  ends send through each gap beside a part's face against the gap's room.
+- **Room past a part's face for the lanes that ride along it.** An end's
+  front is read straight ahead of its exit (`whole_ends._front`), and a
+  pocket's mouth holds its count of lanes, but nothing counts the lanes that
+  turn and ride along a face on a passive's layer against the room between
+  that face and the passive, nor the lanes sent under a part through one gap
+  of its own row of berth vias. On zynq7020 both buses' loops still stop with
+  their ends crowded there (two lanes under the PHY through one gap of its
+  berth vias; two teeth of the memory bus) and the board is clean because
+  the laying recovers. The idea: such a face channel, and each gap of a row
+  of berth vias, held to its count of lanes in the ends model, as a mouth is.
 
 **Later, once the basics route real boards:**
 

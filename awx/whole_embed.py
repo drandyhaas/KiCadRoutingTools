@@ -702,10 +702,39 @@ NVIA_MOVED = sum(1 for k in VKEYS if VIA[k] != VIA_REF[k])
 # A lane LEAVES ITS TOOTH, and reaches its berth, straight along its stub: through its own stub's bar (its own
 # copper) to the first free point of the layer -- the stub's MOUTH. The run begins there (ends there); the straight
 # piece between the end and the mouth is the lane's own, written with it. A stub that ends in a via, or one with
-# nothing free straight ahead of it within three bars, has no mouth: its run is read from the nearest free point
+# nothing free straight ahead of it within three bars, has no mouth along its stub: a single lane's is then where its
+# own reference line last stands in the free space, walking back from that end -- the side it arrives by. Read from
+# the nearest free point of the layer, the end of a lane on a via in a ROW of vias (a connector's berths, a pin pitch
+# apart, their bars one wall) was as near the row's far side as the near one: every such lane was taken through a
+# gap of the row and back to its via from behind, and two through one gap were laid across each other, in every
+# round. With no free point of its own line within the reach either, its run is read from the nearest free point
 import whole_ctx as _wc
 MOUTH_REACH = 3 * LANE_ST
-NMOUTH = 0
+
+
+def back_mouth(m, ref, e_):
+    """(the mouth, the reference kept up to it): the first free point of mesh `m` walking BACK along the reference
+    `ref` from its end `e_` (0 its start, 1 its end), within MOUTH_REACH of that end; None where none is"""
+    seq = list(ref) if e_ == 1 else list(ref)[::-1]            # (the end last)
+    gone = 0.0
+    for i in range(len(seq) - 1, 0, -1):
+        a, b = seq[i], seq[i - 1]
+        ln = math.hypot(b[0] - a[0], b[1] - a[1])
+        if ln < 1e-12:
+            continue
+        k_ = max(1, int(math.ceil(ln / (0.4 * GS))))
+        for j in range(1, k_ + 1):
+            if gone + ln * j / k_ > MOUTH_REACH + 1e-9:
+                return None
+            q = (float(a[0] + (b[0] - a[0]) * j / k_), float(a[1] + (b[1] - a[1]) * j / k_))
+            if m.locate([q])[0] >= 0:
+                kept = seq[:i] + ([q] if j < k_ else [])
+                return q, (kept if e_ == 1 else kept[::-1])
+        gone += ln
+    return None
+
+
+NMOUTH = NBACK = 0
 for n in M:
     for (key, e_, i_) in (((n, 0), 0, 0), ((n, len(RUNL[n]) - 1), 1, -1)):
         r_ = RUN[key]
@@ -718,20 +747,28 @@ for n in M:
         else:
             u = _wc.stub_dir(ctx, n, pt, Ln)
         ul = math.hypot(*u) if u is not None else 0.0
-        if ul < 1e-9:
+        mth = None
+        if ul >= 1e-9:
+            ds = np.arange(0.0, MOUTH_REACH + 1e-9, 0.4 * GS)
+            cand = np.array([(pt[0] + u[0] / ul * d_, pt[1] + u[1] / ul * d_) for d_ in ds])
+            hit = np.nonzero(MESH[r_['L']].locate(cand) >= 0)[0]
+            if len(hit):
+                d_ = float(ds[hit[0]]) + 0.08 * GS
+                mth = (float(pt[0] + u[0] / ul * d_), float(pt[1] + u[1] / ul * d_))
+                if MESH[r_['L']].locate([mth])[0] < 0:
+                    mth = None
+        if mth is not None:
+            r_['lead' if e_ == 0 else 'tail'] = tuple(pt)
+            r_['ref'][i_] = mth
+            NMOUTH += 1
             continue
-        ds = np.arange(0.0, MOUTH_REACH + 1e-9, 0.4 * GS)
-        cand = np.array([(pt[0] + u[0] / ul * d_, pt[1] + u[1] / ul * d_) for d_ in ds])
-        hit = np.nonzero(MESH[r_['L']].locate(cand) >= 0)[0]
-        if not len(hit):
+        if n in prs or MESH[r_['L']].locate([pt])[0] >= 0:
             continue
-        d_ = float(ds[hit[0]]) + 0.08 * GS
-        mth = (float(pt[0] + u[0] / ul * d_), float(pt[1] + u[1] / ul * d_))
-        if MESH[r_['L']].locate([mth])[0] < 0:
-            continue
-        r_['lead' if e_ == 0 else 'tail'] = tuple(pt)
-        r_['ref'][i_] = mth
-        NMOUTH += 1
+        got = back_mouth(MESH[r_['L']], r_['ref'], e_)
+        if got is not None and len(got[1]) >= 2:
+            r_['lead' if e_ == 0 else 'tail'] = tuple(pt)
+            r_['ref'] = [tuple(p_) for p_ in got[1]]
+            NBACK += 1
 
 
 def portal(m, t, t2, x=None):
@@ -1112,7 +1149,7 @@ for _try in range(4):
         t_ = int(MESH[RUN[ka]['L']].locate([xy_])[0])
         for k_ in (ka, kb):
             RUN[k_]['pts'] = [p_ for p_ in RUN[k_]['pts'] if not (p_['k'] == 'F' and p_['tri'] == t_)]
-log(f'{NMOUTH} of {2 * len(M)} lane ends leave straight through their own stub; {NSPREAD} cell edge(s) with runs read '
+log(f'{NMOUTH} of {2 * len(M)} lane ends leave straight through their own stub, {NBACK} more by their own line; {NSPREAD} cell edge(s) with runs read '
     f'out of a bar, or on one place, put in order a pitch apart')
 VIEW = tuple(float(v) for v in OPT['--view'].split(',')) if '--view' in OPT else None
 _x0 = same_layer_crossings(layout())
