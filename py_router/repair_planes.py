@@ -2975,13 +2975,16 @@ def _repair_planes_all(
         # other-net copper often cannot take the nominal via but fits a smaller
         # fab-legal one; we never go below the deepest fab floor.
         from list_nets import escalation_rungs, warn_fab_escalation, note_narrowing
+        from fab_tiers import rung_tier
         _ncu = len([l for l in (pcb_data.board_info.copper_layers or routing_layers)
                     if l.endswith('.Cu')]) or 2
         # escalation_rungs: empty under --escalation off, raised to the
         # board's own minimums under board (#857).
         _ladder = escalation_rungs(_ncu)
         _cands = [(via_size, via_drill, False)]
-        _cands += [(f['via_diameter'], f['via_drill'], _i > 0)
+        # rung_tier: the tier rung each was made from (#1914), so the
+        # nominal rung's ring-holding and last-resort vias are not escalations
+        _cands += [(f['via_diameter'], f['via_drill'], rung_tier(_ladder, _i) > 0)
                    for _i, f in enumerate(_ladder)]
         via_pairs, _escalated_pairs = [], set()
         for _vd, _dr, _is_esc in _cands:

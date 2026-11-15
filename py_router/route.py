@@ -378,7 +378,7 @@ def _empty_results_data() -> dict:
 from route_summary import (SUMMARY_SINK as _SUMMARY_SINK,          # noqa: E402
                            RECONCILE_RAISED as _RECONCILE_RAISED,
                            FINAL_REGRADE as _FINAL_REGRADE,
-                           DESIGN_RULES_PER_RUN)
+                           stamp_design_rules)
 
 # #562 finalize re-entry guard. batch_route's plane finalize calls
 # repair_planes, whose own rip-casualty / pad-repair sub-runs call batch_route
@@ -9630,9 +9630,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _dr1033 = _es1033()
                     for _sm in list(_SUMMARY_SINK) + [summary]:
                         if isinstance(_sm.get('design_rules'), dict):
-                            _keep = {k: v for k, v in _sm['design_rules'].items()
-                                     if k in DESIGN_RULES_PER_RUN}
-                            _sm['design_rules'] = dict(_dr1033, **_keep)
+                            stamp_design_rules(_sm, _dr1033)
                 except Exception as _dre1033:                   # noqa: BLE001
                     print(f"  (design_rules power reconcile skipped: "
                           f"{_dre1033})")
@@ -9728,10 +9726,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _dr1282 = _es1282()
                     for _sm in list(_SUMMARY_SINK) + [summary]:
                         if isinstance(_sm.get('design_rules'), dict):
-                            _keep = {k: v for k, v in
-                                     _sm['design_rules'].items()
-                                     if k in DESIGN_RULES_PER_RUN}
-                            _sm['design_rules'] = dict(_dr1282, **_keep)
+                            stamp_design_rules(_sm, _dr1282)
         except Exception as _wwe:                               # noqa: BLE001
             print(f"  (wide-net width disclosure skipped: {_wwe})")
 
@@ -9803,14 +9798,83 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     [(_ids1371[_nm], _nm, _r['requested_mm'], _r['sizes'])
                      for _nm, _r in _short1371.items()],
                     'via copper shipped under size')
+                # #1914: and those of them below the copper-to-hole ring
+                from fab_tiers import replace_hole_ring_rows
+                replace_hole_ring_rows(
+                    [(_ids1371[_nm], _nm, _r['pairs'])
+                     for _nm, _r in _short1371.items()],
+                    'via shipped below the hole ring')
                 _dr1371 = _es1371()
                 for _sm in list(_SUMMARY_SINK) + [summary]:
                     if isinstance(_sm.get('design_rules'), dict):
-                        _keep = {k: v for k, v in _sm['design_rules'].items()
-                                 if k in DESIGN_RULES_PER_RUN}
-                        _sm['design_rules'] = dict(_dr1371, **_keep)
+                        stamp_design_rules(_sm, _dr1371)
         except Exception as _vre:                               # noqa: BLE001
             print(f"  (via-size disclosure skipped: {_vre})")
+
+    # The rule grades of this run's own copper (`disclose_step_rules`:
+    # annular_rules, via_rules, edge_rules, hole_rules, board_setup_vias),
+    # measured once on the copper the run SHIPS. Each summary graded the
+    # copper ITS pass laid -- pass 1 before the finalize and the laps, a lap
+    # only its retry set -- so no one summary's grade describes the board,
+    # and the merged --json-out took the last one's. New copper only: what the
+    # input did not carry. Outermost run only, both fronts (the write model on
+    # the GUI, the written board on the CLI); None (each summary keeps its own)
+    # when it cannot be measured.
+    _step_ship = None
+    _rules_ship = getattr(config, 'rules', None)
+    if final_reconcile and not _ckpt_stop and _rules_ship is not None:
+        try:
+            import copy as _copy_ship
+            from routing_common import segment_identity, via_identity
+            from design_rules import disclose_step_rules
+            _segs_ship = _vias_ship = None
+            if return_results:
+                _as_ship, _av_ship = _gui_write_model(results_data)
+                _segs_ship = [s for _l in _as_ship.values() for s in _l]
+                _vias_ship = [v for _l in _av_ship.values() for v in _l]
+            elif output_file and os.path.isfile(output_file):
+                from kicad_parser import parse_kicad_pcb as _pk_ship
+                _b_ship = _pk_ship(output_file)
+                # in this run's net ids: the rules resolve a net by its id
+                _ids_ship = {_nn.name: _n for _n, _nn in pcb_data.nets.items()}
+                _bn_ship = {_n: _nn.name for _n, _nn in _b_ship.nets.items()}
+
+                def _in_run_ids(_items):
+                    _out = []
+                    for _it in _items:
+                        _c = _copy_ship.copy(_it)
+                        _c.net_id = _ids_ship.get(_bn_ship.get(_it.net_id), 0)
+                        _out.append(_c)
+                    return _out
+                _segs_ship = _in_run_ids(_b_ship.segments)
+                _vias_ship = _in_run_ids(_b_ship.vias)
+            if _segs_ship is not None:
+                _nm_ship = {_n: _nn.name for _n, _nn in pcb_data.nets.items()}
+                # the input's copper as it was, net-less copper included
+                _in_segs_ship = {segment_identity(_s, _nm_ship.get(_s.net_id, ''))
+                                 for _s in (_orig_copper_values or ((), ()))[0]}
+                _in_vias_ship = {via_identity(_v, _nm_ship.get(_v.net_id, ''))
+                                 for _v in (_orig_copper_values or ((), ()))[1]}
+                _view_ship = _copy_ship.copy(pcb_data)
+                _view_ship.segments = _segs_ship
+                _view_ship.vias = _vias_ship
+                _step_ship = disclose_step_rules(
+                    _rules_ship, _view_ship, [{
+                        'new_segments': [
+                            s for s in _segs_ship
+                            if not getattr(s, 'graphic', False)
+                            and segment_identity(s, _nm_ship.get(s.net_id, ''))
+                            not in _in_segs_ship],
+                        'new_vias': [
+                            v for v in _vias_ship
+                            if via_identity(v, _nm_ship.get(v.net_id, ''))
+                            not in _in_vias_ship]}],
+                    input_file, echo=False)
+        except Exception as _ste:                               # noqa: BLE001
+            print(f"  (shipped design-rule grade skipped: "
+                  f"{type(_ste).__name__}: {_ste}); design_rules keeps each "
+                  f"pass's own grade")
+            _step_ship = None
 
     # ---- THE FLOOR THIS RUN SHIPS ------------------------------------------
     # Every summary measured min_clearance_used and design_rules when it was
@@ -9827,7 +9891,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             from fab_tiers import escalation_summary as _es_ship
             from route_summary import restamp_shipped_rules
             _rec_ship = restamp_shipped_rules(
-                _cl_ship.effective(clearance), _es_ship())
+                _cl_ship.effective(clearance), _es_ship(), _step_ship)
             if _rec_ship is not None:
                 print(f"JSON_SHIPPED_RULES: {json.dumps(_rec_ship)}")
         except Exception as _sre:                               # noqa: BLE001

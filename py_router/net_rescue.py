@@ -463,7 +463,8 @@ def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
     in the key. Bounded LRU (escalation maps are board-global at fine
     grids); build cfg fields beyond the rung-varying five are constant
     within a pass by construction (_rescue_rungs / the escalation ladder
-    vary exactly grid/clearance/track/via geometry).
+    vary exactly grid/clearance/track/via geometry, and the terminal
+    escalation's last rung drops the hole rules, #1853).
 
     The clone it returns carries the #908 own-pad lift, applied here. The
     rescue is the one routing path that never reaches
@@ -484,8 +485,11 @@ def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
     if cache is None:
         cache = parent_pcb._rescue_map_cache = OrderedDict()
     epoch = getattr(parent_pcb, '_copper_epoch', 0)
+    # #1853: the terminal escalation's last rung builds without the hole
+    # rules at a geometry a rung before it built with them
     key = (net_id, scope_key, epoch, cfg.grid_step, cfg.clearance,
-           cfg.track_width, cfg.via_size, cfg.via_drill)
+           cfg.track_width, cfg.via_size, cfg.via_drill,
+           getattr(cfg, 'hole_rules', None) is not None)
     entry = cache.get(key)
     if entry is None:
         pristine = build_base_obstacle_map(board, cfg, [net_id],
@@ -612,7 +616,7 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     # advanced 0.25/0.15), mirroring the plane-tap escalation. Only rungs
     # strictly smaller than the run's via are added; the escalation warning
     # matches the tap path's.
-    from fab_tiers import escalation_rungs, warn_fab_escalation
+    from fab_tiers import escalation_rungs, warn_fab_escalation, ladder_escalates
     n_layers = len(pcb_data.board_info.copper_layers) or 2
     # escalation_rungs: empty under --escalation off, raised to the board's
     # own minimums under board (#857) and to this net's rule minimums (#530).
@@ -623,7 +627,7 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
         v_dia, v_drill = floor['via_diameter'], floor['via_drill']
         if v_dia >= _own_via - 1e-9:
             continue
-        if v_dia < _ladder[0]['via_diameter'] - 1e-9:
+        if ladder_escalates(_ladder, v_dia, v_drill):
             warn_fab_escalation(f"net rescue net_{net_id}")
         rungs.append(_via_step_down(config, net_id, grid_step=fine_grid,
                                     clearance=floor_clearance,
@@ -2064,7 +2068,43 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
 # ---------------------------------------------------------------------------
 
 def _escalation_ladder(config, pcb_data, net_id):
-    """The terminal escalation rungs for one net: 2-3 whole-net retry configs
+    """The terminal escalation rungs for one net: the size rungs
+    (`_size_escalation_ladder`), then, on a board with `.kicad_dru`
+    hole_clearance rules, one rung more at the most permissive geometry the
+    size rungs reached that routes at the copper clearance alone (#1853,
+    completion first): `hole_rules` off, so the map, the via taps and the
+    distance helpers hold the copper clearance and nothing more. Every rung
+    before it holds the rules; it is reached only by a net that would
+    otherwise ship open, only in the run's last recovery tier
+    (`config.final_reconcile` False: the final reconciliation sub-run, or a
+    run with none after it), so a net a later lap can join within the rules
+    is not joined below them first, and only under `--escalation fab` (the
+    default), the policy that lets a step go below the board's own declared
+    rules; `board` and `off` hold them. The rows its copper stands inside are
+    named per rule by `design_rules.disclose_step_rules` (JSON_SUMMARY
+    design_rules.hole_rules) and the net's terminal_escalations entry says
+    it. [] when there is nothing to try."""
+    from fab_tiers import get_escalation_policy
+    rungs = _size_escalation_ladder(config, pcb_data, net_id)
+    if (getattr(config, 'hole_rules', None) is not None
+            and not getattr(config, 'final_reconcile', False)
+            and get_escalation_policy()[0] == 'fab'):
+        base = rungs[-1] if rungs else replace(
+            config, max_iterations=max(config.max_iterations,
+                                       defaults.RESCUE_MAX_ITERATIONS))
+        rungs.append(replace(base, hole_rules=None))
+    return rungs
+
+
+def _below_hole_rules(config, cfg) -> bool:
+    """Whether escalation rung `cfg` is the #1853 last rung: the step holds
+    hole_clearance rules and the rung does not."""
+    return (getattr(config, 'hole_rules', None) is not None
+            and getattr(cfg, 'hole_rules', None) is None)
+
+
+def _size_escalation_ladder(config, pcb_data, net_id):
+    """The terminal escalation SIZE rungs for one net: 2-3 whole-net retry configs
     whose track width AND via size march down TOGETHER from the net's current
     geometry to the fab-tier floor (fab_floor_clearance_track for the track,
     fab_floor_ladder for the via -- the same fab-floor resolution and
@@ -2076,7 +2116,7 @@ def _escalation_ladder(config, pcb_data, net_id):
     march) -- callers skip such nets silently.
     """
     from plane_pad_tap import fab_floor_clearance_track
-    from fab_tiers import escalation_rungs, warn_fab_escalation, may_narrow
+    from fab_tiers import escalation_rungs, warn_fab_escalation, may_narrow, ladder_escalates
 
     if not may_narrow():
         return []  # --escalation off: nothing may march (#842)
@@ -2128,7 +2168,7 @@ def _escalation_ladder(config, pcb_data, net_id):
         if key == prev_key:
             continue  # discrete via ladder can repeat a rung; dedupe
         prev_key = key
-        if m and v_dia < ladder[0]['via_diameter'] - 1e-9:
+        if m and ladder_escalates(ladder, v_dia, v_drill):
             warn_fab_escalation(f"terminal escalation net_{net_id}")
         _rung = dict(track_width=w, layer_widths={},
                      power_net_widths=power_widths,
@@ -2480,9 +2520,12 @@ def terminal_geometry_escalation(state, single_ended_nets, net_clearances=None,
         for k, cfg in enumerate(rungs, 1):
             if cancel_check and cancel_check():
                 break
+            _below = _below_hole_rules(config, cfg)
             print(f"  terminal escalation: {net_name} at track "
                   f"{cfg.track_width:.4g} via {cfg.via_size:.4g}/"
-                  f"{cfg.via_drill:.4g} (rung {k}/{n_rungs})")
+                  f"{cfg.via_drill:.4g} (rung {k}/{n_rungs})"
+                  + (", at the copper clearance alone: below the board's "
+                     "hole_clearance rule(s)" if _below else ""))
             _prog = ((lambda m, _i=_idx, _n=net_name, _k=k: progress_callback(
                 _i + 1, len(candidates),
                 f"Terminal escalation: {_n} rung {_k}/{n_rungs} {m}"))
@@ -2527,14 +2570,19 @@ def terminal_geometry_escalation(state, single_ended_nets, net_clearances=None,
             pass
         _commit_whole_net(state, net_name, net_id, edge_results,
                           'is_terminal_escalation')
+        _below = _below_hole_rules(config, accepted_cfg)
         record_net_event(state, net_id, "terminal_escalation_succeeded",
                          {"geometry": geom, "edges_routed": len(edge_results),
                           "components_before": num0,
+                          "below_hole_rules": _below,
                           "time_s": round(elapsed, 2)})
-        outcomes[net_name] = f"recovered at {geom}"
+        outcomes[net_name] = (f"recovered at {geom}"
+                              + (" below the hole_clearance rule(s)" if _below else ""))
         print(f"    {GREEN}terminal escalation: {net_name} recovered at "
               f"{geom}{RESET} ({num0} -> 1 parts, {elapsed:.1f}s, "
-              f"{net_stats.get('iterations', 0)} iterations)")
+              f"{net_stats.get('iterations', 0)} iterations)"
+              + ("; its copper may stand inside a hole_clearance rule, each "
+                 "row named under design_rules.hole_rules" if _below else ""))
 
     summary['time'] = round(time.time() - pass_start, 2)
     if summary['attempted']:

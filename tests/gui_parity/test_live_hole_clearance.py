@@ -22,7 +22,11 @@ Real pcbnew, real boards:
     file declares nothing, and both fronts read 0.0 (no divergence on a fresh
     load); after one GUI step's writeback (apply_targets_to_board at 0.2) the
     GUI reads 0.2 -- the floor the CLI's next step reads from the project its
-    own writeback (fix_project_for_output at 0.2) leaves;
+    own writeback (fix_project_for_output at 0.2) leaves; the via descent
+    ladder's hole clearance (fab_tiers.board_hole_clearance) is not that
+    floor: both fronts still read the factory 0.25 there, since the rule is
+    the writeback's, while an unsaved Board Setup edit to 0.15 is honoured,
+    and stays so after the next GUI writeback lowers the rule to 0.1;
   * a board that was never saved prices a live edit.
 
 Needs KiCad python (pcbnew); re-execs into it like its siblings, and does NOT
@@ -202,6 +206,26 @@ def main():
         f4 = floor(parse_kicad_pcb(cli))
         check("the floor the CLI's next step reads from its own writeback's "
               "project", abs(f4 - l4) < 1e-9, f"CLI {f4}, GUI {l4}")
+        # The via ladder's hole clearance is not that floor: the rule both
+        # writebacks wrote is theirs, and the board declared nothing, so the
+        # next step on either front prefers the ring for KiCad's factory 0.25
+        # (the writeback's record, fab_tiers.HOLE_RING_RECORD_KEY).
+        from fab_tiers import board_hole_clearance
+        r_gui, r_cli = board_hole_clearance(live2), board_hole_clearance(
+            parse_kicad_pcb(cli))
+        check("after one step's writeback both fronts' via ladders still read "
+              "the factory 0.25", abs(r_gui - factory) < 1e-9
+              and abs(r_cli - factory) < 1e-9, f"GUI {r_gui}, CLI {r_cli}")
+        bds2.m_HoleClearance = 150000                 # Board Setup, NOT saved
+        r_edit = board_hole_clearance(live2)
+        check("a Board Setup edit between steps (0.15) is honoured by the "
+              "GUI's ladder", abs(r_edit - 0.15) < 1e-9, f"{r_edit}")
+        _quiet(apply_targets_to_board, board2, compute_targets(clearance=0.1), {})
+        r_next = board_hole_clearance(live2)
+        check("and stays honoured after the next GUI writeback lowers the rule "
+              "to 0.1", abs(bds2.m_HoleClearance / 1e6 - 0.1) < 1e-9
+              and abs(r_next - 0.15) < 1e-9,
+              f"rule {bds2.m_HoleClearance / 1e6}, ladder {r_next}")
 
         print("--- a writeback that targets exactly the factory 0.25")
         at = os.path.join(td, 'at25', 'b.kicad_pcb')

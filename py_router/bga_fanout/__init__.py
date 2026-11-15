@@ -5738,6 +5738,11 @@ def _generate_bga_fanout_all(footprint: Footprint,
     # #1775: the vias laid below the board's Board Setup via minimums
     from design_rules import disclose_board_setup_vias
     LAST_BOARD_SETUP_VIAS[:] = disclose_board_setup_vias(pcb_data, vias_to_add)
+    # #1914: and the vias only the ladder's last-resort rungs fitted, below
+    # the copper-to-hole ring the board's hole clearance needs
+    from fab_tiers import disclose_hole_ring_vias
+    disclose_hole_ring_vias(pcb_data, vias_to_add, via_size,
+                            f"BGA fanout {footprint.reference}")
     # What both fronts report (the CLI's failed / unescaped_nets, the GUI
     # tab's failed list) is the nets still unescaped, not every route the
     # passes gave up: those per-route lists drove the retries above and stay

@@ -1686,6 +1686,11 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     rules = ds.setdefault("rules", {})
     sev = ds.setdefault("rule_severities", {})
     changes = []
+    # The copper-to-hole rule before this writer: what the descent ladder
+    # resolved from it is recorded below when the rule is left under it.
+    _hole_before = rules.get("min_hole_clearance")
+    _hole_before = (float(_hole_before) if isinstance(_hole_before, (int, float))
+                    and not isinstance(_hole_before, bool) else None)
 
     for key, target in targets.items():
         if key not in _RULE_KEYS:
@@ -1726,6 +1731,22 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
         if cur is None or cur > target + EPS:        # lower only; never raise
             changes.append(f"rules.{key}: {cur} -> {target} mm")
             rules[key] = target
+
+    # A copper-to-hole rule this writer leaves under the hole clearance the
+    # descent ladder resolved is the writeback's value, not a declaration:
+    # recorded, so the next step prefers the ring this one did (on a board
+    # that declared nothing, the factory 0.25 -- a value no origin carries).
+    if targets.get("min_hole_clearance") is not None:
+        _ns = proj.setdefault("kicad_routing_tools", {})
+        if _store_hole_ring_record(_ns, hole_ring_record(
+                _ns, _hole_before, rules.get("min_hole_clearance"),
+                _origin_hole_clearance(_ns))):
+            from fab_tiers import HOLE_RING_RECORD_KEY
+            changes.append(f"kicad_routing_tools.{HOLE_RING_RECORD_KEY}: "
+                           + ("recorded" if HOLE_RING_RECORD_KEY in _ns
+                              else "dropped (the rule is the board's own)"))
+        if not _ns:
+            proj.pop("kicad_routing_tools", None)
 
     # KiCad enforces copper clearance PER NET CLASS (rules.min_clearance alone
     # does not relax it), so keep the Default class at the floor too -- creating
@@ -2076,6 +2097,65 @@ def record_pad_override_floor(proj: dict, rule_before, uncapped) -> bool:
     else:
         proj.setdefault("kicad_routing_tools", {})[PAD_OVERRIDE_FLOOR_KEY] = rec
     return True
+
+
+def hole_ring_record(records, rule_before, rule_after, origin=None):
+    """The :data:`fab_tiers.HOLE_RING_RECORD_KEY` record a writeback leaves
+    after writing ``min_hole_clearance``, or None when the rule it leaves
+    says what the descent ladder prefers.
+
+    ``rule_before`` / ``rule_after``: the rule before and after this writer
+    (mm; None = undeclared). ``origin``: the chain's ``fab_floor_origin``
+    value. The ladder's hole clearance before the write is
+    :func:`fab_tiers.ring_hole_clearance` of ``rule_before`` (an earlier
+    record unmasked, KiCad's factory value when nothing is declared); a rule
+    left below it is the writeback's value, recorded so the next step's
+    ladder prefers the same ring this one did, while KiCad, check_drc and
+    every obstacle map still read the rule."""
+    from fab_tiers import ring_hole_clearance
+    if not isinstance(rule_after, (int, float)) or isinstance(rule_after, bool):
+        return None
+    want = ring_hole_clearance(rule_before, origin, records)
+    if float(rule_after) < want - 5e-6:       # 5 nm: a live rule is whole nm
+        return {"rule": round(float(rule_after), 6),
+                "hole_clearance": round(float(want), 6)}
+    return None
+
+
+def _store_hole_ring_record(ns: dict, rec) -> bool:
+    """Put (or drop) ``rec`` in the namespace ``ns``. True when it changed."""
+    from fab_tiers import HOLE_RING_RECORD_KEY
+    old = ns.get(HOLE_RING_RECORD_KEY)
+    if rec == old or (rec is None and old is None):
+        return False
+    if rec is None:
+        ns.pop(HOLE_RING_RECORD_KEY, None)
+    else:
+        ns[HOLE_RING_RECORD_KEY] = dict(rec)
+    return True
+
+
+def _origin_hole_clearance(ns):
+    v = ((ns or {}).get("fab_floor_origin") or {}).get("min_hole_clearance")
+    return (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool)
+            and v > 0 else None)
+
+
+def record_live_hole_ring(board, rule_before) -> None:
+    """Live-board half of :func:`hole_ring_record`: after a live writer set
+    ``m_HoleClearance``, store (or drop) the record in the board's records
+    (tool_records -- its project and the board itself), as the file writer
+    stores it in the project. ``rule_before`` is the DECLARED rule before the
+    writer (None when the board declares none). Best-effort: never raises."""
+    try:
+        import tool_records
+        after = board.GetDesignSettings().m_HoleClearance / 1e6
+        ns = tool_records.live_namespace(board)
+        rec = hole_ring_record(ns, rule_before, after, _origin_hole_clearance(ns))
+        tool_records.update_live_namespace(
+            board, lambda n: _store_hole_ring_record(n, rec))
+    except Exception:                                           # noqa: BLE001
+        pass
 
 
 def record_live_pad_override_floor(board, rule_before, uncapped) -> None:
@@ -3561,6 +3641,11 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
             except Exception:
                 pass
     record_live_pad_override_floor(board, _mc_before, _mc_uncapped)   # #1369
+    if targets.get("min_hole_clearance") is not None:
+        # The file writer's hole-ring record (apply_targets_to_project), on
+        # the board's records: the rule the board DECLARED before this writer
+        # (None on a project-less board at pcbnew's factory value).
+        record_live_hole_ring(board, _declared.get("min_hole_clearance"))
 
     # Default net class CLEARANCE (the one class field KiCad's DRC enforces).
     # Track/via/drill/diff-pair class values are draw defaults and are never
