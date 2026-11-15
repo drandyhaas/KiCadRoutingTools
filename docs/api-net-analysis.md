@@ -545,6 +545,18 @@ built once and kept on `pcb_data`, from `pcb_data.source_path`'s project --
 on the GUI front, the project file next to the board as last saved.
 `route_delay_ps` times one net's copper with a profile, without pad-to-die.
 
+A profile also stores the track width (and, for a differential profile, the
+pair gap) that meets its target impedance on each signal layer; the
+`TuningProfile` carries them as `layer_width_mm` and `layer_gap_mm`, with
+`differential`. `profile_layer_widths(pcb_data, board_path)` gives
+`{net id: {layer: mm}}` for the nets whose class names a profile with widths
+(pinned up at `floor`, the raised rows returned too). A route step given no
+`--track-width` and no `--impedance` draws such a net at its profile's width
+on each layer (#1936), after a stored impedance declaration and a
+`.kicad_dru` rule's own layer widths, and prints how many nets took them. A
+layer the profile gives no width falls through to the class width. Pair
+geometry per layer is not applied yet.
+
 ```python
 from kicad_parser import parse_kicad_pcb
 from net_queries import kicad_net_length_parts_nm
