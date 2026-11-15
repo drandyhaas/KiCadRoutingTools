@@ -38,7 +38,9 @@ Pad openings: every netted pad on the side whose copper (its real, possibly
 rotated rectangle) meets the artwork is cut out of it grown by OWN_MARGIN, so
 a mask-defined pad or a test point keeps nothing out and a broad opening keeps
 copper out everywhere but next to its pads. A pad that is merely near the
-artwork exempts nothing.
+artwork exempts nothing. A FILLED copper graphic (a footprint's tab, #1181)
+is cut out the same way: the opening exposes copper already there, and that
+copper keeps out every net it does not grant.
 
 Scope: the keep-outs reach the consumers that read `routing_keepouts` (the
 obstacle stamper, hence every engine that builds a map with it, and the
@@ -247,13 +249,25 @@ def _point_in(p: Point, poly: Sequence[Point]) -> bool:
     return inside
 
 
-def _pad_trees(footprints) -> Dict[str, tuple]:
-    """{copper side: (STRtree, [pad copper rectangle])} of every pad with a net
-    (its real size and tilt; round and rounded pads by their enclosing
-    rectangle)."""
+def _pad_trees(footprints, copper_graphics=None) -> Dict[str, tuple]:
+    """{copper side: (STRtree, [copper shape])} of every pad with a net (its
+    real size and tilt; round and rounded pads by their enclosing rectangle)
+    and every FILLED copper graphic (`copper_graphics`, Segments whose
+    `graphic_ring` is set: a SOT89 tab, a filled land): an opening drawn over
+    copper exposes that copper, exactly as a pad's own opening does, and the
+    copper already keeps every net it does not grant out (#1181)."""
     from shapely import STRtree, affinity
-    from shapely.geometry import box
+    from shapely.geometry import Polygon, box
     shapes: Dict[str, list] = {'F.Cu': [], 'B.Cu': []}
+    seen_rings = set()
+    for seg in copper_graphics or ():
+        ring = getattr(seg, 'graphic_ring', None)
+        if not ring or len(ring) < 3 or id(ring) in seen_rings:
+            continue
+        seen_rings.add(id(ring))
+        if seg.layer in shapes:
+            g = Polygon(ring)
+            shapes[seg.layer].append(g if g.is_valid else g.buffer(0))
     for fp in (footprints or {}).values():
         for pad in getattr(fp, 'pads', ()) or ():
             if not getattr(pad, 'net_id', 0):
@@ -310,7 +324,10 @@ def board_mask_artwork(pcb_data) -> List[dict]:
         path = getattr(pcb_data, 'source_path', '') or ''
         if path and os.path.isfile(path):
             with open(path, 'r', encoding='utf-8') as f:
-                art = extract_mask_artwork(f.read(), getattr(pcb_data, 'footprints', None))
+                art = extract_mask_artwork(
+                    f.read(), getattr(pcb_data, 'footprints', None),
+                    [s for s in getattr(pcb_data, 'segments', ()) or ()
+                     if getattr(s, 'graphic', False) and getattr(s, 'graphic_ring', None)])
         bi.mask_artwork = art
     return art
 
@@ -409,19 +426,21 @@ def _graphics(content: str, footprints):
                 yield g, lm.group(1)
 
 
-def extract_mask_artwork(content: str, footprints=None) -> List[dict]:
+def extract_mask_artwork(content: str, footprints=None, copper_graphics=None) -> List[dict]:
     """Keep-out dicts for the F.Mask / B.Mask artwork of a board (see module
     doc): the union of every graphic on a side, minus the pads' own openings,
     so a logo of many strokes is a few polygons rather than one per stroke.
     `footprints` (parse_kicad_pcb's) supply the pads whose own mask openings
-    are exempt, and the footprints' poses; None exempts nothing."""
+    are exempt, and the footprints' poses; None exempts nothing.
+    `copper_graphics` (filled graphic copper Segments) are exempt the same
+    way: an opening over a footprint's copper tab is that tab's opening."""
     from shapely import union_all
     found = {'F.Mask': [], 'B.Mask': []}
     for g, mask in _graphics(content, footprints):
         found[mask].append(g)
     if not any(found.values()):
         return []
-    pads = _pad_trees(footprints)
+    pads = _pad_trees(footprints, copper_graphics)
     out = []
     for mask, geoms in found.items():
         if not geoms:
