@@ -7040,12 +7040,26 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # in it, not a floor under every pair. `_ncl_low` holds those nets; a
     # board with none grades exactly as before.
     _ncl_low: Dict[int, float] = {}
+    # Only when the grade is the board's own (the Default class's value, or
+    # Board Setup min_clearance above it): an explicit stricter --clearance
+    # grades every pair at what was asked, as before.
+    _default_cl = 0.0
+    if net_clearances:
+        try:
+            from list_nets import read_design_rules as _rdr
+            _default_cl = float(((_rdr(pcb_file).get('classes') or {})
+                                 .get('Default') or {}).get('clearance') or 0.0)
+            from design_rules import board_min_clearance_for as _bm0
+            if clearance > max(_default_cl, _bm0(pcb_data, pcb_file)) + 1e-9:
+                _default_cl = 0.0          # an explicit stricter grade
+        except Exception:                                      # noqa: BLE001
+            _default_cl = 0.0
     if net_clearances:
         for nid, net in pcb_data.nets.items():
             c = net_clearances.get(net.name, 0.0)
             if c > clearance:
                 _ncl_by_id[nid] = c
-            elif 0.0 < c < clearance - 1e-9:
+            elif 0.0 < c < _default_cl - 1e-9 and c < clearance - 1e-9:
                 _ncl_low[nid] = c
 
     # #498: per-layer clearance rules from the board's own sibling .kicad_dru,
@@ -7144,7 +7158,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     def _pair_base(net_a: int, net_b: int) -> float:
         if _ncl_low and net_a in _ncl_low and net_b in _ncl_low:
             # both nets' classes stand below the Default class's value
-            return max(_ncl_low[net_a], _ncl_low[net_b])
+            # ... floored at Board Setup min_clearance, as KiCad floors
+            # every class (#1210)
+            return max(_ncl_low[net_a], _ncl_low[net_b], _board_min_clr)
         return clearance if not _ncl_by_id else \
             max(clearance, _ncl_by_id.get(net_a, 0.0), _ncl_by_id.get(net_b, 0.0))
 

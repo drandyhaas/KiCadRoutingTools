@@ -22,7 +22,11 @@ Rows:
      net takes the Default value);
   3. with BUS raised to 0.3 the A1/A2 pairs are reported (a class above the
      Default is graded as before);
-  4. with both classes at 0.1 the board is clean.
+  4. with both classes at 0.1 the board is clean;
+  5. with Board Setup min_clearance at 0.25 the A1/A2 pairs are reported:
+     KiCad floors every class at it (kicad-cli 10.0.8: the same rows at
+     "board minimum clearance");
+  6. an explicit stricter --clearance grades every pair at what was asked.
 """
 import json
 import os
@@ -46,7 +50,7 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
-def stage(td, tag, default, bus):
+def stage(td, tag, default, bus, board_min=None):
     sub = os.path.join(td, tag)
     os.makedirs(sub)
     shutil.copy(evidence(os.path.join(FIX, 'pairs.kicad_pcb'), 'the fixture'),
@@ -56,6 +60,8 @@ def stage(td, tag, default, bus):
         pro = json.load(fh)
     for c in pro['net_settings']['classes']:
         c['clearance'] = default if c['name'] == 'Default' else bus
+    if board_min is not None:
+        pro['board']['design_settings']['rules']['min_clearance'] = board_min
     with open(os.path.join(sub, 'b.kicad_pro'), 'w', encoding='utf-8') as fh:
         json.dump(pro, fh, indent=2)
     with open(os.path.join(sub, 'b.kicad_dru'), 'w', encoding='utf-8') as fh:
@@ -63,10 +69,10 @@ def stage(td, tag, default, bus):
     return os.path.join(sub, 'b.kicad_pcb')
 
 
-def grade(board, clean=False):
+def grade(board, clean=False, extra=()):
     out = os.path.join(os.path.dirname(board), 'drc.json')
     argv = PY + [os.path.join(REPO, 'py_router', 'check_drc.py'), board,
-                 '--clearance-margin-mm', '0.0005', '--json', out]
+                 '--clearance-margin-mm', '0.0005', '--json', out] + list(extra)
     if clean:
         check(argv, accept=True)
     else:
@@ -90,6 +96,12 @@ def main():
         ok(('A1', 'A2') in up, "A1 against A2 is reported at the class's 0.3")
         print("4. both classes at 0.10")
         ok(grade(stage(td, 'flat', 0.10, 0.10), clean=True) == [], "the board is clean")
+        print("5. Board Setup min_clearance 0.25 over BUS 0.10")
+        ok(('A1', 'A2') in grade(stage(td, 'floor', 0.25, 0.10, board_min=0.25)),
+           "A1 against A2 is reported at the board minimum")
+        print("6. an explicit --clearance 0.3")
+        ok(('A1', 'A2') in grade(stage(td, 'asked', 0.25, 0.10), extra=['--clearance', '0.3']),
+           "A1 against A2 is reported at the clearance asked")
     if FAILS:
         print(f"\nFAILED ({len(FAILS)}):")
         for f in FAILS:
