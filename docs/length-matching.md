@@ -106,6 +106,7 @@ Before placing each bump, `get_safe_amplitude_at_point()` checks the bump area a
 
 - Clearance margin: half of each track's width (the foreign copper at its real width) plus the clearance, plus a corner allowance for the 45° chamfers and half a grid step for output merging. The clearance is the one `check_drc` grades that pair of nets at on that layer (net classes and `.kicad_dru` rules, #1136); a board with neither uses the flat `--clearance`.
 - The board edge is kept at `--board-edge-clearance` (else the clearance) plus half the track width.
+- The net's **own** copper outside the run being meandered (the track coming into an acute corner of the route, its stubs and escapes) is kept at the arm pitch, centre to centre, as the bump's own arms are (#1873). The run itself and its straight continuation are not: the bump joins them. Without it a bump beside an acute corner climbed back over the route's own track, laying one strip of copper twice and counting it twice in the net's length.
 - If the full amplitude doesn't fit, the amplitude is reduced in 0.7× steps (binary-search style) down to a 0.2mm minimum.
 - If neither the up nor the down direction fits at all, the bump position is skipped forward 0.2mm and tried again.
 

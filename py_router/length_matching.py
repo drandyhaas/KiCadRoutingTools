@@ -636,7 +636,8 @@ def get_safe_amplitude_at_point(
     paired_net_id: int = None,
     clearance_index: 'ClearanceIndex' = None,
     own_width: float = 0.0,
-    chamfer: float = None
+    chamfer: float = None,
+    own_segments: List[Segment] = None
 ) -> float:
     """
     Find the maximum safe amplitude for a meander bump at a specific point.
@@ -664,6 +665,12 @@ def get_safe_amplitude_at_point(
         chamfer: Chamfer size the caller will emit bumps with (#501). Pass the
             generator's resolved value so the checked geometry matches the
             emitted geometry; None = resolve from config/net width here.
+        own_segments: the net's OWN copper outside the run being meandered
+            (#1873). Every other check here skips own-net copper, so a
+            bump beside an acute corner of its own route climbed back over
+            the route's earlier copper (measured: risers 0.054 mm off their
+            own track, and crossing it). A bump keeps from this copper the
+            pitch it keeps between its own arms (2 x chamfer).
 
     Returns:
         Safe amplitude, or 0 if no safe amplitude found
@@ -723,6 +730,13 @@ def get_safe_amplitude_at_point(
         return c + max(0.0, (other_seg.width - config.track_width) / 2.0)
     if chamfer is None:
         chamfer = resolve_meander_chamfer(config, net_id, layer, own_width)
+    if own_segments:
+        own_segments = [o for o in own_segments if o.layer == layer]
+
+    def own_keep(o):
+        """#1873: the centreline distance a bump keeps from its own net's
+        copper `o`: the pitch between its own arms (2 x chamfer)."""
+        return net_half + (o.width or 0.0) / 2.0 + max(0.0, 2.0 * chamfer - net_w)
 
     # Board-edge keep-out (meanders overran the board outline). The A* router avoids
     # the edge via add_board_edge_obstacles, but this geometric meander pass never
@@ -762,6 +776,16 @@ def get_safe_amplitude_at_point(
         bump_max_x = max(max(bx1, bx2) for bx1, by1, bx2, by2 in bump_segs)
         bump_min_y = min(min(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
         bump_max_y = max(max(by1, by2) for bx1, by1, bx2, by2 in bump_segs)
+
+        # #1873: nor may a bump lie on, or cross, the net's own copper
+        # outside the run: centre lines at least the arms' own pitch apart
+        # (checked first: the fewest items)
+        if own_segments and any(
+                segment_to_segment_distance(
+                    bx1, by1, bx2, by2, o.start_x, o.start_y, o.end_x, o.end_y)
+                < own_keep(o) - AT_CLEARANCE_MM
+                for bx1, by1, bx2, by2 in bump_segs for o in own_segments):
+            continue  # try a smaller amplitude clear of the net's own copper
 
         # Reject amplitudes whose bump would print past the board edge or over an
         # interior cutout (real Edge.Cuts geometry; bbox fallback, #370 B1).
@@ -1009,7 +1033,8 @@ def generate_trombone_meander(
     extra_vias: List = None,
     min_bumps: int = 0,
     paired_net_id: int = None,
-    clearance_index: 'ClearanceIndex' = None
+    clearance_index: 'ClearanceIndex' = None,
+    own_segments: List[Segment] = None
 ) -> Tuple[List[Segment], int]:
     """
     Generate trombone-style meander segments to replace a straight segment.
@@ -1040,6 +1065,8 @@ def generate_trombone_meander(
         extra_vias: Additional vias to check against (e.g., from other nets already processed)
         min_bumps: Minimum number of bumps to generate (0 = use extra_length to determine)
         paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
+        own_segments: the net's own copper outside this segment's run, which
+            no bump may lie on (#1873, `get_safe_amplitude_at_point`)
 
     Returns:
         Tuple of (segments, bump_count) - the meander segments and number of bumps added
@@ -1161,7 +1188,8 @@ def generate_trombone_meander(
                 check_cx, check_cy, ux, uy, px, py, direction, amplitude, min_amplitude,
                 segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
                 paired_net_id=paired_net_id, clearance_index=clearance_index,
-                own_width=segment.width, chamfer=chamfer
+                own_width=segment.width, chamfer=chamfer,
+                own_segments=own_segments
             )
             if safe_amp < min_amplitude:
                 # Try the other direction
@@ -1178,7 +1206,8 @@ def generate_trombone_meander(
                     other_check_cx, other_check_cy, ux, uy, px, py, other_dir, amplitude, min_amplitude,
                     segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
                     paired_net_id=paired_net_id, clearance_index=clearance_index,
-                    own_width=segment.width, chamfer=chamfer
+                    own_width=segment.width, chamfer=chamfer,
+                    own_segments=own_segments
                 )
                 if safe_amp_other >= min_amplitude:
                     # Mark the original direction as blocked if safe_amp was 0
@@ -1462,6 +1491,65 @@ def find_all_straight_runs(segments: List[Segment], min_length: float = 1.0) -> 
     return runs
 
 
+def _own_board_copper(pcb_data, net_id, segments) -> List[Segment]:
+    """#1873: `net_id`'s track copper on the board that is not `segments`
+    (the route being meandered): its stubs, escapes and other legs. A board
+    segment lying along one of `segments` is that route's own copy (the
+    route is committed as it is found) and is left out, so a run an earlier
+    spill round replaced with bumps is not read back as copper."""
+    if pcb_data is None or net_id is None:
+        return []
+
+    def _key(s):
+        a = (s.layer, round(s.start_x, 4), round(s.start_y, 4))
+        b = (s.layer, round(s.end_x, 4), round(s.end_y, 4))
+        return (a, b) if a <= b else (b, a)
+    mine = {_key(s) for s in segments}
+    out = []
+    for s in pcb_data.segments:
+        if (s.net_id != net_id or getattr(s, 'graphic', False)
+                or segment_length(s) < MIN_SEGMENT_LENGTH or _key(s) in mine):
+            continue
+        pts = ((s.start_x, s.start_y), (s.end_x, s.end_y),
+               ((s.start_x + s.end_x) / 2, (s.start_y + s.end_y) / 2))
+        if any(r.layer == s.layer and all(
+                point_to_segment_distance(x, y, r.start_x, r.start_y, r.end_x, r.end_y)
+                < POSITION_TOLERANCE for x, y in pts) for r in segments):
+            continue
+        out.append(s)
+    return out
+
+
+def _own_copper_beside_run(run: Segment, own: List[Segment],
+                           amplitude: float) -> List[Segment]:
+    """#1873: the pieces of `own` (the net's copper outside the straight
+    `run`) a bump on `run` could reach: on its layer, within the amplitude
+    and a margin of it, and not on the run's own line -- the run itself, or
+    its straight continuation, which no bump comes near (bumps stand a
+    lead-in from the run's ends)."""
+    rx, ry = run.end_x - run.start_x, run.end_y - run.start_y
+    rl = math.hypot(rx, ry)
+    if rl < MIN_SEGMENT_LENGTH:
+        return []
+    ux, uy = rx / rl, ry / rl
+    reach = amplitude + 1.0
+
+    def _off_line(x, y):
+        return abs((x - run.start_x) * uy - (y - run.start_y) * ux)
+    out = []
+    for o in own:
+        if o.layer != run.layer:
+            continue
+        if (_off_line(o.start_x, o.start_y) < POSITION_TOLERANCE
+                and _off_line(o.end_x, o.end_y) < POSITION_TOLERANCE):
+            continue
+        if segment_to_segment_distance(
+                run.start_x, run.start_y, run.end_x, run.end_y,
+                o.start_x, o.start_y, o.end_x, o.end_y) < reach:
+            out.append(o)
+    return out
+
+
 def apply_meanders_to_route(
     segments: List[Segment],
     extra_length: float,
@@ -1537,6 +1625,11 @@ def apply_meanders_to_route(
     added_so_far = 0.0
     max_spill_rounds = 10  # cap: a round that stalls breaks out below anyway
 
+    # #1873: the net's own copper on the board that is not this route's
+    # (stubs, escapes, other legs), which no bump may be laid on
+    board_own = _own_board_copper(
+        pcb_data, net_id if net_id is not None else segments[0].net_id, segments)
+
     for round_idx in range(max_spill_rounds):
         remaining_bumps = (min_bumps - total_bumps) if min_bumps > 0 else 0
         remaining_extra = extra_length - added_so_far
@@ -1606,7 +1699,10 @@ def apply_meanders_to_route(
                 extra_vias=extra_vias,
                 min_bumps=remaining_bumps,
                 paired_net_id=paired_net_id,
-                clearance_index=clearance_index
+                clearance_index=clearance_index,
+                own_segments=_own_copper_beside_run(
+                    merged_seg, board_own + current_segments[:start_idx]
+                    + current_segments[end_idx + 1:], amplitude)
             )
 
             if bump_count == 0:
