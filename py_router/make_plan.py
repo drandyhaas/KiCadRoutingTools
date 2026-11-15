@@ -105,7 +105,7 @@ def plan_commands(source):
     routing skill requires verification commands to BE comments. A rule about
     those has to read the file text.
     """
-    from redo_stress_test import parse_manifest
+    from redo_record import parse_manifest
     return parse_manifest(resolve_manifest(source))
 
 

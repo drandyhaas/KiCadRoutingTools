@@ -39,7 +39,7 @@ driver could not run at all.
 
 WHAT IT READS, AND WHY NOT THE CONVERTED PLAN
 ----------------------------------------------
-`make_plan.plan_commands` -> `redo_stress_test.parse_manifest`: every recorded
+`make_plan.plan_commands` -> `redo_record.parse_manifest`: every recorded
 command, in file order, nothing pruned. NOT `plan_steps_from_manifest`, which
 is the GUI conversion and drops exactly what these rules are about -- measured
 on a skill-compliant plan, the converted steps see 0 of the three verification
@@ -191,7 +191,7 @@ class Plan:
         """Each command's argv WITHOUT its leading `NAME=value` env prefix,
         which parse_manifest puts there for an `export`ed or recorded knob
         (#1302, #1337), so `argv[0]` is the command run."""
-        from redo_stress_test import split_env_prefix
+        from redo_record import split_env_prefix
         return [split_env_prefix(argv)[1] for _cwd, argv in self.cmds]
 
     def by_tool(self, *names):
@@ -608,8 +608,8 @@ def _step_io(p):
     """[(cwd, argv, boards read, board written or None, is a check)] for each
     command, boards keyed by the path each resolves to from its cwd -- the
     replayer's reading (`board_tokens`, `boards_read`), as R18 reads it."""
-    from redo_stress_test import (board_tokens, boards_read, is_check_cmd,
-                                  split_env_prefix)
+    from redo_record import (board_tokens, boards_read, is_check_cmd,
+                             split_env_prefix)
     here = os.path.dirname(os.path.abspath(p.path))
     out = []
     for cwd, argv in p.cmds:
@@ -856,7 +856,7 @@ def r_every_board_read_is_written_first(p):
     still exit 0 with a final board the skipped step never touched.
 
     Inputs and outputs are read the way the replayer reads them
-    (`redo_stress_test.board_tokens`: the last board token is the output),
+    (`redo_record.board_tokens`: the last board token is the output),
     keyed by the path each resolves to from its command's cwd, so two
     folders' `s1.kicad_pcb` are two boards. A `mv` takes its source away.
 
@@ -865,8 +865,8 @@ def r_every_board_read_is_written_first(p):
     construction."""
     if p.chain:
         return []
-    from redo_stress_test import (board_tokens, boards_read, is_check_cmd,
-                                  split_env_prefix)
+    from redo_record import (board_tokens, boards_read, is_check_cmd,
+                             split_env_prefix)
     here = os.path.dirname(os.path.abspath(p.path))
 
     def where(cwd, tok):

@@ -29,6 +29,7 @@ krt.exe self-test
 krt.exe route input.kicad_pcb output.kicad_pcb
 krt.exe place input.kicad_pcb placed.kicad_pcb --groups groups.json --intent intent.json
 krt.exe judge-seeds judge.json --chain judge_chain.txt
+krt.exe check-route-plan judge_chain.txt --board input.kicad_pcb
 krt.exe check-drc output.kicad_pcb
 krt.exe check-connected output.kicad_pcb
 krt.exe render-placement output.kicad_pcb --before input.kicad_pcb -o placement.png
@@ -53,6 +54,10 @@ Internal subprocesses use `CREATE_NO_WINDOW` on Windows. A GUI host should
 also hide the initial `krt.exe` process using its own process-launch options.
 Internal tasks belong to a Windows Job and exit when their application worker
 closes. This does not make a force kill of the extraction parent graceful.
+
+`check-route-plan` validates a shell plan or a `judge-seeds` chain without
+executing its routing steps. Use `--list` to show the rules or `--board` to
+apply the checks that need a board.
 
 The PyInstaller one-file bootloader extracts its contents to a temporary
 directory during execution and removes them after normal termination. A force

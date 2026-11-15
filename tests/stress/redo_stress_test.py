@@ -226,103 +226,9 @@ def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None, footprint_interval=
     return p.returncode, peak, timed_out, peak_fp
 
 
-def parse_manifest(path):
-    """Yield (cwd, argv) for each recorded command.
-
-    A `# cwd=` line sets the working directory for every following command until
-    the next `# cwd=` -- shell-faithful (a `cd` persists), NOT one-shot. run_limited.sh
-    records a `# cwd=` before each command it wraps, so normally every command
-    carries its own and the stickiness is a no-op. It matters for hand-spliced
-    steps that share the preceding command's cwd: the de-hole `cp <step> <final>`
-    + follow-up pair (#334/#345), where the `cp` consumes the `# cwd=` and the
-    follow-up command has none of its own. Resetting to None there made the
-    follow-up run in the launcher's cwd, breaking the relative-path chain
-    (FileNotFoundError on the just-cp'd board) and falsely marking the board
-    chain-broken under --remap.
-
-    A command may span SEVERAL lines when one of its arguments contains
-    newlines -- `--net-clearances '{ ...pretty-printed JSON... }'` is the real
-    case (uncutgem_nv). Splitting per line raises "No closing quotation" and, in
-    the shared parser, that killed the whole board: not just manifest_to_plan,
-    but every replay path (redo_stress_test, ab_replay_grade, the Modal sweep).
-    So lines are ACCUMULATED until shlex can split them, which is exactly the
-    shell's own continuation rule. Newlines inside the quotes survive into the
-    token, reproducing the recorded argument byte-for-byte.
-
-    Two SHELL lines are directives here, not commands (#1337). A hand-written
-    plan.sh starts with `cd <repo>` -- the routing skill requires it and
-    route_plan_check enforces it -- and this read it as a command, so every
-    command's cwd stayed None and its relative paths resolved against the
-    manifest's folder: manifest_to_plan "rejected" a valid repo-relative
-    `--intent`, and the pruner dropped every step upstream of it (gp14
-    daplink: 4 plan steps where the chain has 7).
-      * `cd DIR` sets the cwd exactly as `# cwd=` does, sticky. `~` expands;
-        a relative DIR resolves against the cwd so far, else the manifest's
-        folder. `cd` alone is $HOME. A `cd` sharing a line with more
-        (`cd x && ...`) stays a command.
-      * `export NAME=value ...` exports a knob to every LATER command, as
-        the shell does: each export that `env_knobs.is_replay_knob` accepts
-        joins the leading `NAME=value` prefix of every command after it
-        (#1302; a command's own prefix still wins, as in the shell).
-        Anything else exported -- REDO_MANIFEST, REDO_RUNDIR, PATH -- is the
-        recording harness's, and is dropped: a replay that inherited
-        REDO_MANIFEST would append to the ORIGINAL run's manifest.
-    """
-    cmds = []
-    current_cwd = None
-    exported = {}
-    base = os.path.dirname(os.path.abspath(path))
-    try:
-        from env_knobs import is_replay_knob
-    except Exception:                  # the engine dir missing: export none
-        def is_replay_knob(_name):
-            return False
-    buf = ""
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if not buf:
-                # Directives/comments only apply BETWEEN commands -- mid-continuation
-                # a '#' is data inside a quoted argument, not a comment.
-                if line.startswith("# cwd="):
-                    # The cwd was recorded with %q quoting on the value after 'cwd='.
-                    current_cwd = " ".join(shlex.split(line[len("# cwd="):]))
-                    continue
-                if not line or line.startswith("#") or line in ("set -e",):
-                    continue
-                if line.startswith("#!"):
-                    continue
-                buf = line
-            else:
-                buf += "\n" + line
-            try:
-                argv = shlex.split(buf)
-            except ValueError:
-                continue  # unbalanced quote so far -> this command continues
-            buf = ""
-            if not argv:
-                continue
-            if argv[0] == "cd" and len(argv) <= 2:
-                target = os.path.expanduser(argv[1] if len(argv) == 2 else "~")
-                if not os.path.isabs(target):
-                    target = os.path.join(current_cwd or base, target)
-                current_cwd = os.path.normpath(target)
-                continue
-            if argv[0] == "export":
-                for tok in argv[1:]:
-                    if "=" in tok:
-                        k, v = tok.split("=", 1)
-                        if is_replay_knob(k):
-                            exported[k] = v
-                continue
-            if exported:
-                argv = [f"{k}={v}" for k, v in exported.items()] + argv
-            cmds.append((current_cwd, argv))
-    if buf.strip():
-        # Genuinely unterminated at EOF: raise rather than silently drop the tail,
-        # which would replay a TRUNCATED chain and look like a routing failure.
-        raise ValueError(f"{path}: unterminated quote at end of manifest: {buf[:120]!r}")
-    return cmds
+from redo_record import (  # noqa: E402
+    _is_check_tool, board_tokens, boards_read, is_check_cmd, parse_manifest,
+)
 
 
 # the parser lives beside the writer (`redo_record.env_prefix_tokens`), so
@@ -386,33 +292,6 @@ def apply_remaps(argv, remaps):
         out.append(a)
     return out
 
-
-#: The write flag that makes a check_* tool's command a COPPER step: it writes
-#: a board a chain continues from, and records itself (#1397). Matched with
-#: argparse's own rule that an unambiguous prefix of a long option is it.
-CHECK_WRITE_FLAGS = ("--keep-staged",)
-
-
-def _writes_board(argv):
-    for a in argv:
-        name = a.split("=", 1)[0]
-        if len(name) > 2 and name.startswith("--") and any(
-                f.startswith(name) for f in CHECK_WRITE_FLAGS):
-            return True
-    return False
-
-
-def _is_check_tool(argv):
-    return any(os.path.basename(a).startswith("check_") for a in argv)
-
-
-def is_check_cmd(argv):
-    """A check: a check_* tool that reads boards and writes none. A check_*
-    command with a write flag (`check_join --keep-staged OUT`, #1637) is a
-    copper step to every reader of a manifest -- the pruner, contamination,
-    seeding, the clobber guard, --skip-checks, the plan converters --
-    because a chain continues from the board it writes."""
-    return _is_check_tool(argv) and not _writes_board(argv)
 
 
 def mirror_project_sibling(argv, cwd):
@@ -488,37 +367,6 @@ def board_io(argv):
     ins, out = board_tokens(argv)
     return ([os.path.basename(b) for b in ins],
             os.path.basename(out) if out is not None else None)
-
-
-def boards_read(ins, out):
-    """Which of a command's `board_io` inputs it READS. An input equal to its
-    output is the output named twice (`route_diff.py a b --output b`, which
-    the recorded manifests carry) unless it is the only input: `route.py s1b
-    s1b` reads s1b (#1708). Keys are whatever the caller compares (basenames
-    or resolved paths)."""
-    others = [b for b in ins if b != out]
-    return others if others else list(ins)
-
-
-def board_tokens(argv):
-    """`board_io`'s reading with each board AS WRITTEN rather than by
-    basename: (input tokens, output token or None). For a reader that keys
-    boards by their resolved path -- route_plan_check's provenance rule
-    (#1708) -- where two folders' `s1.kicad_pcb` are different boards."""
-    def _named_board(a):
-        return a.split("=", 1)[1] if a.startswith("-") and "=" in a else a
-
-    vals = [_named_board(a) for a in argv]
-    idx = [i for i, v in enumerate(vals) if v.endswith(".kicad_pcb")]
-    if not idx:
-        return [], None
-    if len(idx) == 1:
-        i = idx[0]
-        prev = argv[i - 1] if i > 0 else ""
-        written = prev in ("--output", "-o") or argv[i].startswith("--output=")
-        if not written:
-            return [vals[i]], None
-    return [vals[i] for i in idx[:-1]], vals[idx[-1]]
 
 
 def run_site(cwd, argv, remaps=(), workdir=None):

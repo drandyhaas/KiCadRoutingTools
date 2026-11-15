@@ -31,6 +31,8 @@ TOOLS = (
     ToolSpec('check-floorplan', 'py_tools/check_floorplan.py', 'Check floorplan intent'),
     ToolSpec('check-assembly', 'py_tools/check_assembly.py', 'Check placement assembly'),
     ToolSpec('check-groups', 'py_tools/check_groups.py', 'Check placement groups'),
+    ToolSpec('check-route-plan', '.claude/skills/plan-pcb-routing/scripts/route_plan_check.py',
+             'Check a routing plan or seed judging chain'),
     ToolSpec('quick-score', 'py_tools/quick_score.py', 'Score a routed placement'),
     ToolSpec('board-context', 'py_tools/board_context.py', 'Read component and board context'),
     ToolSpec('board-brief', 'py_tools/board_brief.py', 'Summarize a board for placement'),
@@ -66,7 +68,7 @@ def bundled_scripts(root=None):
             path.relative_to(root).as_posix()
             for directory in directories
             for path in (root / directory).rglob('*.py')
-        ) | {'krt_capabilities.py'}
+        ) | {'krt_capabilities.py', '.claude/skills/plan-pcb-routing/scripts/route_plan_check.py'}
     return scripts
 
 
