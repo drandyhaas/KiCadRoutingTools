@@ -28,6 +28,10 @@ class BusGroup:
     target_positions: List[Tuple[float, float]] = field(default_factory=list)
     # Which endpoint type formed the clique (determines routing direction)
     clique_endpoint: str = "source"  # "source" or "target"
+    # Declared by the user (--bus-nets) rather than detected: net_ids is the
+    # side-by-side order the members must keep along the whole run, and each
+    # member is attracted to its own lane of the planned corridor.
+    ordered: bool = False
 
     @property
     def count(self) -> int:
@@ -410,8 +414,9 @@ def bus_attraction_context(
     """(attraction_path, reverse_direction) for a bus member.
 
     The one place that encodes the priority every routing site must share:
-    the group's PLANNED corridor first (one centerline for the whole group,
-    guide included), else an already-routed neighbor's path; route from the
+    an ordered bus member's own LANE of the planned corridor first (keyed
+    (group.name, net_id)), else the group's PLANNED corridor (one centerline
+    for the whole group, guide included), else an already-routed neighbor's path; route from the
     clustered endpoints when the clique was target-based. Non-members get
     (None, False). Callers pass whatever paths dict they track (the main
     loop's sampled bus paths, the reroute loop's routed_net_paths) or None.
@@ -419,6 +424,188 @@ def bus_attraction_context(
     bg = (bus_net_to_group or {}).get(net_id)
     if bg is None:
         return None, False
-    attr = ((bus_corridors or {}).get(bg.name)
+    corridors = bus_corridors or {}
+    # An ordered (declared) bus: the member's own lane of the corridor first.
+    attr = (corridors.get((bg.name, net_id)) or corridors.get(bg.name)
             or get_attraction_neighbor(bg, net_id, routed_paths or {}))
     return attr, (bg.clique_endpoint == "target")
+
+
+def declared_bus_groups(pcb_data: PCBData, specs: List[List[str]]) -> List[BusGroup]:
+    """The buses the user declared (--bus-nets "A,B,C", repeatable): one
+    ordered BusGroup per list, its members in the list's order -- the order
+    they keep side by side along their common run. An unknown net name or a
+    net named twice is an error (a silent drop would reorder the lanes)."""
+    by_name = {net.name: nid for nid, net in pcb_data.nets.items()}
+    groups: List[BusGroup] = []
+    seen: Dict[int, int] = {}
+    for gi, names in enumerate(specs):
+        ids: List[int] = []
+        for name in names:
+            if name not in by_name:
+                raise ValueError(f"--bus-nets: no net named {name!r}")
+            nid = by_name[name]
+            if nid in seen:
+                raise ValueError(f"--bus-nets: net {name!r} declared twice")
+            seen[nid] = gi
+            ids.append(nid)
+        if len(ids) < 2:
+            raise ValueError(f"--bus-nets: a bus needs two nets or more, got {names}")
+        ends = [get_net_routing_endpoints(pcb_data, nid) for nid in ids]
+        groups.append(BusGroup(
+            name=f"declared_bus_{gi}", net_ids=ids,
+            source_positions=[e[0] if e else (0.0, 0.0) for e in ends],
+            target_positions=[e[1] if len(e) > 1 else (0.0, 0.0) for e in ends],
+            clique_endpoint="source", ordered=True))
+    return groups
+
+
+def net_points(pcb_data: PCBData, net_id: int) -> List[Tuple[float, float]]:
+    """Every place a net has copper to join (its pads, its tracks' ends), mm."""
+    pts = [(p.global_x, p.global_y) for p in pcb_data.pads_by_net.get(net_id, [])]
+    for seg in pcb_data.segments:
+        if seg.net_id == net_id:
+            pts += [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]
+    return pts
+
+
+def net_span(pcb_data: PCBData, net_id: int
+             ) -> Tuple[float, Optional[Tuple[Tuple[float, float], Tuple[float, float]]]]:
+    """A net's whole run: its two farthest-apart points and their distance
+    (mm). A multipoint member's routing endpoints may be a short local edge;
+    an ordered bus's corridor follows the run instead."""
+    pts = sorted(set(net_points(pcb_data, net_id)))
+    best = (0.0, None)
+    for i, a in enumerate(pts):
+        for b in pts[i + 1:]:
+            d = math.hypot(a[0] - b[0], a[1] - b[1])
+            if d > best[0]:
+                best = (d, (a, b))
+    return best
+
+
+def ordered_bus_representative(pcb_data: PCBData, bus: BusGroup) -> int:
+    """The member whose run is longest (ties: the earlier in the order): an
+    ordered bus's corridor is probed along it, so every member's lane runs as
+    far as the farthest-reaching member does."""
+    return max(bus.net_ids, key=lambda nid: (net_span(pcb_data, nid)[0], -bus.net_ids.index(nid)))
+
+
+def lane_offsets(n: int, pitch: float, centre: Optional[int] = None) -> List[float]:
+    """Sideways offset of each of n lanes from the corridor's centreline, in
+    the corridor's left-hand normal, one pitch apart: lane i at
+    (i - centre) * pitch, centre the lane the centreline is (by default the
+    middle, (n-1)/2; an ordered bus's corridor is its representative's lane)."""
+    c = (n - 1) / 2.0 if centre is None else centre
+    return [(i - c) * pitch for i in range(n)]
+
+
+def _tangent(path: List[Tuple[int, int, int]], i: int, window: int) -> Tuple[float, float]:
+    """The unit direction of the path at point i, over +-window points (a
+    smoothed tangent, so a 45 degree jog does not swing the lanes)."""
+    a = path[max(0, i - window)]
+    b = path[min(len(path) - 1, i + window)]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    d = math.hypot(dx, dy)
+    if d == 0:
+        return (1.0, 0.0)
+    return (dx / d, dy / d)
+
+
+def offset_path(path: List[Tuple[int, int, int]], offset: float,
+                window: int = 4) -> List[Tuple[int, int, int]]:
+    """The dense (gx, gy, layer) path moved sideways by offset grid cells
+    along its left-hand normal (-ty, tx), each point keeping its layer;
+    consecutive duplicates dropped. offset 0 returns the path unchanged."""
+    if offset == 0 or len(path) < 2:
+        return list(path)
+    out: List[Tuple[int, int, int]] = []
+    for i, (x, y, layer) in enumerate(path):
+        tx, ty = _tangent(path, i, window)
+        p = (int(round(x - ty * offset)), int(round(y + tx * offset)), layer)
+        if not out or out[-1] != p:
+            out.append(p)
+    return out
+
+
+def lane_sign(path: List[Tuple[int, int, int]], ends_grid: List[List[Tuple[int, int]]]) -> int:
+    """+1 if the members' ends, taken in the declared order, run along the
+    corridor's left-hand normal at the end of the corridor nearer to them,
+    -1 if against it (then the lanes are mirrored, so member 0 takes the
+    side its own pads are on). ends_grid[i] is member i's endpoints in grid
+    coordinates. Both corridor ends vote; a tie keeps +1."""
+    if len(path) < 2 or not ends_grid:
+        return 1
+    n = len(ends_grid)
+    mid = (n - 1) / 2.0
+    vote = 0.0
+    for k in (0, len(path) - 1):
+        cx, cy, _ = path[k]
+        tx, ty = _tangent(path, k, 4)
+        nx, ny = -ty, tx
+        for i, ends in enumerate(ends_grid):
+            if not ends:
+                continue
+            ex, ey = min(ends, key=lambda e: math.hypot(e[0] - cx, e[1] - cy))
+            vote += (i - mid) * ((ex - cx) * nx + (ey - cy) * ny)
+    return -1 if vote < 0 else 1
+
+
+def lane_paths(path: List[Tuple[int, int, int]], net_ids: List[int], pitch: float,
+               ends_grid: List[List[Tuple[int, int]]],
+               centre: Optional[int] = None) -> Dict[int, List[Tuple[int, int, int]]]:
+    """Each member's own lane of an ordered bus: the corridor's centreline
+    offset by its lane (lane_offsets, pitch in grid cells; centre the index
+    of the member the corridor was probed along), mirrored by lane_sign so
+    the declared order meets the members' copper the right way round.
+    ends_grid[i] is member i's copper points in grid cells.
+    {net_id: dense (gx, gy, layer) path}."""
+    sign = lane_sign(path, ends_grid)
+    return {nid: offset_path(path, sign * off)
+            for nid, off in zip(net_ids, lane_offsets(len(net_ids), pitch, centre))}
+
+
+class Lane(list):
+    """An ordered bus member's lane: a dense (gx, gy, layer) attraction path
+    whose direction is the member's, not the corridor probe's. The router's
+    attraction rewards only moves ALONG the path's direction, so a lane is
+    turned to each route's direction of travel (LaneOrientedRouter)."""
+
+
+class LaneOrientedRouter:
+    """A GridRouter whose attraction path (a Lane) is set, before each
+    route, pointing from that route's sources towards its targets -- forward
+    and backward probes alike, multipoint edges in either sense. Everything
+    else is the wrapped router's."""
+
+    def __init__(self, router, lane: List[Tuple[int, int, int]]):
+        self._router = router
+        self._ways = (list(lane), list(reversed(lane)))
+        self._current = 0
+        router.set_attraction_path(self._ways[0])
+
+    def _orient(self, sources, targets) -> None:
+        if not sources or not targets or len(self._ways[0]) < 2:
+            return
+        sx = math.fsum(p[0] for p in sources) / len(sources)
+        sy = math.fsum(p[1] for p in sources) / len(sources)
+        tx = math.fsum(p[0] for p in targets) / len(targets)
+        ty = math.fsum(p[1] for p in targets) / len(targets)
+        head, tail = self._ways[0][0], self._ways[0][-1]
+        along = (math.hypot(head[0] - sx, head[1] - sy) + math.hypot(tail[0] - tx, tail[1] - ty))
+        against = (math.hypot(tail[0] - sx, tail[1] - sy) + math.hypot(head[0] - tx, head[1] - ty))
+        way = 0 if along <= against else 1
+        if way != self._current:
+            self._router.set_attraction_path(self._ways[way])
+            self._current = way
+
+    def route_with_frontier(self, obstacles, sources, targets, *args, **kwargs):
+        self._orient(sources, targets)
+        return self._router.route_with_frontier(obstacles, sources, targets, *args, **kwargs)
+
+    def route_multi(self, obstacles, sources, targets, *args, **kwargs):
+        self._orient(sources, targets)
+        return self._router.route_multi(obstacles, sources, targets, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._router, name)

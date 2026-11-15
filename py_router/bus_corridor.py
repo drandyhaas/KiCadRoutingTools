@@ -37,7 +37,9 @@ from dataclasses import replace
 import env_knobs
 from typing import Dict, List, Optional, Tuple
 
-from bus_detection import BusGroup, get_bus_routing_order
+from bus_detection import (BusGroup, Lane, get_bus_routing_order, lane_paths, net_points,
+                           net_span, ordered_bus_representative)
+from connectivity import get_net_endpoints_anchor_split
 from obstacle_map import build_base_obstacle_map
 
 # A missing sibling-room costs this many mm of detour before the planner
@@ -106,6 +108,19 @@ def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
           f"room unit {room_mm:.3f}mm ===")
     for g in bus_groups:
         rep = get_bus_routing_order(g)[0]
+        ends_override = {}
+        if g.ordered:
+            # An ordered bus is probed along its farthest-reaching member's
+            # whole run (its two farthest-apart copper points as the sides),
+            # not along that net's first edge: a multipoint member's own
+            # endpoints may be a short local joint.
+            rep = ordered_bus_representative(pcb_data, g)
+            _span, _ab = net_span(pcb_data, rep)
+            if _ab is not None:
+                _sa, _sb, _err = get_net_endpoints_anchor_split(
+                    pcb_data, rep, config, _ab[0], _ab[1])
+                if not _err:
+                    ends_override = dict(sources_override=_sa, targets_override=_sb)
         rep_name = pcb_data.nets[rep].name if rep in pcb_data.nets else str(rep)
         k_max = min(MAX_RUNG, max(1, (len(g.net_ids)) // 2))
         best = None      # (score, k, length, result)
@@ -129,7 +144,8 @@ def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
                                   rep: config.track_width + 2 * k * room_mm})
             result = route_net_with_obstacles(
                 pcb_data, rep, cfg_k, probe_map,
-                reverse_direction=(g.clique_endpoint == "target"))
+                reverse_direction=(g.clique_endpoint == "target"),
+                **ends_override)
             # A corridor probe commits nothing, so neither may the #189
             # unblock copper it committed to the live pcb_data (#803).
             uncommit_dropped_result(pcb_data, result)
@@ -182,6 +198,20 @@ def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
                   f"DEMOTED, members route as plain nets")
             continue
         corridors[g.name] = _sample_dense(result['path'], step=1)
+        if g.ordered:
+            # An ordered bus: each member gets its own lane, the centreline
+            # moved sideways by its place in the declared order, one pitch
+            # (track + clearance) apart -- the order is then which lane, not
+            # which side of a shared line is cheaper, and holds through bends
+            # and layer changes. Keyed (group, net) beside the centreline.
+            pitch = room_mm / config.grid_step
+            ends = [[(int(round(x / config.grid_step)), int(round(y / config.grid_step)))
+                     for x, y in net_points(pcb_data, nid)]
+                    for nid in g.net_ids]
+            for nid, lane in lane_paths(corridors[g.name], g.net_ids, pitch, ends,
+                                        centre=g.net_ids.index(rep)).items():
+                corridors[(g.name, nid)] = Lane(_sample_dense(lane, step=1))
+            print(f"  {g.name}: {len(g.net_ids)} ordered lanes, pitch {room_mm:.3f}mm")
         lay = sorted({p[2] for p in result['path']})
         print(f"  {g.name}: corridor via {rep_name} at rung {k} "
               f"(room for {k} sibling(s)/side), {length:.1f}mm, "
