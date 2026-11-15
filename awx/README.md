@@ -1123,7 +1123,11 @@ its moves. Its whole menu comes in two ways:
   Then the stretch goes back to its first four tiers, each ball keeping the
   move its lane took. A sweep is every stretch once; a sweep that gained a
   hundredth of the objective is followed by another, its stretches drawn at
-  random (three sweeps at most).
+  random (three sweeps at most). The gain is read with the walled balls and
+  the plane balls fanned out as a count, and the rest of the objective
+  apart: the weight on one such ball is each model's own and grows with the
+  menus it was built on, so two builds' whole objectives are not comparable
+  while one stands.
 
 The wide moves are worth having: a search held to the first four tiers ended
 8 and 11 % dearer on two boards. Offering them all at once is what does not
@@ -1132,11 +1136,26 @@ rows, and its search took 12 GB and had not ended when it was stopped. On the
 first tiers that model is 137k variables and 389k rows, its stretches about
 180k and 490k.
 
+**A state at all** is looked for before any search: every rule assumed, and
+each lane's end held to its first two tiers where a state allows, since
+that is the state the search starts from. Where the whole model has none
+its refusal names the rules that cannot hold together, and the balls of
+the lanes they name are offered their whole menus. The whole model's
+question is asked beside the first tiers', a worker each: its refusal is
+theirs too and ends the wait, a state on the first tiers ends its
+question, and with neither its answer is the one it would have given asked
+after. Asked one after the other, a group's six rounds with no state spent
+289 s, 229 of them on first tiers the whole model then refused; asked
+together they take 60 s, and name the same rules.
+
 **The search** starts on the first tiers, a lane that takes a move past
 tier 1 priced 50 vias, so the start stays as near the pattern as the rules
 allow (160 deterministic batches); then it runs the epochs: rounds that free 8 lanes
 of the stretch and the other balls near them (24 batches each), each other
 lane held at the best state, until 12 rounds in a row gain less than a via.
+A round that frees the lanes and balls a round has already freed since the
+state last changed is not solved again: it is the same model under the same
+count of work, and counts as a round that gained nothing.
 A **costly ball** -- a plane ball fanned out, or a lane with a tooth on the
 source's far face, the dearest end -- draws the rounds first, and the balls
 round it are offered their whole menus with the stretch. A model solved

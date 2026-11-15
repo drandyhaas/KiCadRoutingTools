@@ -3496,9 +3496,15 @@ def _front(pcb, nid, m, kids):
     pts = [at(k) for k in range(n + 1)]
     layers = list(getattr(pcb.board_info, 'copper_layers', None) or ('F.Cu', 'B.Cu'))
     t_bar, v_bar = _bd.CLEAR + _bd.TRACK / 2, _bd.VIA_SIZE / 2 + _bd.CLEAR
-    cnr = {L: _corner_blocked(pcb, nid, L, pts, t_bar) for L in layers}
-    track =_bd.build_obstacles(pcb, nid, kids, L0)
-    blocked = lambda o, L, k: o.point_violation(at(k)) or cnr[L][k]
+    cnr_ = {}
+
+    def cnr(L):
+        # (each layer's corners as it is first asked: a clear front asks its own layer's alone)
+        if L not in cnr_:
+            cnr_[L] = _corner_blocked(pcb, nid, L, pts, t_bar)
+        return cnr_[L]
+    track = _bd.build_obstacles(pcb, nid, kids, L0)
+    blocked = lambda o, L, k: o.point_violation(at(k)) or cnr(L)[k]
     hits = [k for k in range(1, n + 1) if blocked(track, L0, k)]
     import route_layers
     RL = [L for L in route_layers.layers() if L in layers]

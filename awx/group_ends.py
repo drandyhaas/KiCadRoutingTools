@@ -120,6 +120,7 @@ import pickle
 import random
 import re
 import sys
+import threading
 import time
 import types
 
@@ -342,6 +343,10 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
     def nearest(ps, k, but=()):
         return [j for _d, j in sorted((dist(pts_of[j], ps), j) for j in range(len(lanes)) if j not in but)[:k]]
     hist, rnd, hot_n, n_hot = [best], 0, collections.Counter(), 0
+    # (a round asked again of the state it was asked of -- the same lanes freed about the same place -- is the same
+    # solve with the same answer, which bettered nothing: counted as the round it is, not solved. A round about a
+    # costly ball that gains nothing frees the same nearest lanes at its next two tries)
+    asked, n_same = set(), 0
     while True:
         rnd += 1
         hot = [v for v in top if inc[v] and hot_n[v] < LNS_HOT]
@@ -369,16 +374,23 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
             if dist([tuple(o['at'])], ps) > LNS_NEAR:
                 for v in o['vars']:
                     fix[v] = inc[v]
-        got, _st = run(fix, inc, LNS_BATCHES)
+        ask_ = (frozenset(free), tuple(centre))
+        if ask_ in asked:
+            got, n_same = None, n_same + 1
+        else:
+            asked.add(ask_)
+            got, _st = run(fix, inc, LNS_BATCHES)
         if got is not None and value(got) < best:
             inc, best = got, value(got)
             hot_n.clear()
+            asked.clear()
         hist.append(best)
         stall = EPOCH_STALL if pool else LNS_STALL
         if len(hist) > stall and hist[-1 - stall] - hist[-1] < 1000:
             break
     n_top = sum(inc[v] for v in top)
-    return inc, (f'{rnd} rounds of {LNS_K} lanes ({n_hot} about a costly ball): {hist[0] / 1000:.1f} -> '
+    return inc, (f'{rnd} rounds of {LNS_K} lanes ({n_hot} about a costly ball'
+                 + (f', {n_same} asked before and not solved again' if n_same else '') + f'): {hist[0] / 1000:.1f} -> '
                  f'{best / 1000:.1f}, {n_top} costly balls left ({time.time() - t0:.0f} s)')
 
 
@@ -1141,7 +1153,16 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, cutvar=False, feedbac
             inb = lambda x, y, x0=x0, y0=y0, x1=x1, y1=y1: x0 <= x <= x1 and y0 <= y <= y1      # noqa: E731
             pcb.segments = [s for s in pcb.segments if not (inb(s.start_x, s.start_y) and inb(s.end_x, s.end_y))]
             pcb.vias = [v for v in pcb.vias if not inb(v.x, v.y)]
-        pcb.__dict__.pop('_exit_front', None)
+        # (the FRONTS read on this board -- whole_ends._front's, kept per exit -- held from one building of the bus's
+        # model to the next: the board is the capture's with the same copper left out each time, read again only if
+        # it is not. Read afresh at every building, a 53-lane bus's fronts were a fifth of each)
+        of_ = (len(pcb.segments), len(pcb.vias),
+               hash(tuple((s.start_x, s.start_y, s.end_x, s.end_y, s.layer, s.net_id) for s in pcb.segments)),
+               hash(tuple((v.x, v.y, v.net_id) for v in pcb.vias)),
+               hash(tuple((p.global_x, p.global_y, p.net_id) for f in pcb.footprints.values() for p in f.pads)))
+        if cap.get('_fronts_of') != of_:
+            cap['_fronts_of'], cap['_fronts'] = of_, {}
+        pcb.__dict__['_exit_front'] = cap['_fronts']
         st['pcb'] = pcb
         for k_, A in arr.items():
             if A is None:
@@ -2970,7 +2991,9 @@ def main():
                 teach(b)
                 buses.append(b)
                 # (a lane with no clean option among the moves offered: its balls' whole menus)
-                more |= {(b.arr[k_].ref, b.arr[k_].ball_of[leg]) for l_, k_ in b.bare
+                # (...where the end is an array's: a row part's or a group's berths are its own run's menu, with
+                # none wider to offer -- such a lane is named below)
+                more |= {(b.arr[k_].ref, b.arr[k_].ball_of[leg]) for l_, k_ in b.bare if b.arr[k_] is not None
                          for leg in (b.E.legs_of.get(l_) or (l_,))} - (wide - narrowed)
             if more:
                 log(f'  round {rnd}: no option in the pattern for {sorted(f"{b.name}:{l_}" for b in buses for l_, _k in b.bare)}'
@@ -3510,18 +3533,59 @@ def main():
                     mc.AddImplication(h_, mc.GetBoolVarFromProtoIndex(v_).Not())
                 hold_of[h_.Index()] = key
             lit_of = {key: i_ for i_, key in hold_of.items()}
+
+            def ask_(lin_):
+                # (one worker, its work counted: the same answer whatever else runs beside it)
+                s_ = cp_seed.solver()
+                s_.parameters.num_workers = 1
+                s_.parameters.max_deterministic_time = START_WORK
+                if lin_ is not None:
+                    s_.parameters.linearization_level = lin_
+                return s_
+            # (THE TWO QUESTIONS AT ONCE, where ends are held: THE WHOLE MODEL's -- every rule assumed, no end held,
+            # on a copy of this one -- asked beside the first tiers', a worker each. Its refusal is the first tiers'
+            # too, which are then not waited for; a state on the first tiers ends its question; and with neither, its
+            # answer is the one it gave when asked after them, the same model under the same count of work. Asked
+            # one after the other, a group's six rounds with no state spent 229 s on first tiers the whole model
+            # then refused in 60)
+            # (without the LP first -- a four-bus model's state in a quarter of the time with it -- then with it: a
+            # bus held to what four checks had taught had neither a state nor its refusal without, in the same work)
+            both_ = None
+            if held_:
+                both_ = {'m': mc.Clone(), 'ask': [ask_(0), ask_(None)], 'sc': None, 'qc': cp_model.UNKNOWN,
+                         'refused': False, 'stop': False, 'first': None, 'err': None}
+
+                def ask_whole(w_=both_):
+                    try:
+                        for s_ in w_['ask']:
+                            w_['sc'] = s_
+                            if w_['stop']:
+                                return
+                            w_['qc'] = s_.Solve(w_['m'])
+                            if w_['qc'] != cp_model.UNKNOWN or w_['stop']:
+                                break
+                        if w_['qc'] == cp_model.INFEASIBLE and not w_['stop']:
+                            w_['refused'] = True
+                            if w_['first'] is not None:
+                                w_['first'].StopSearch()
+                    except BaseException as e_:         # noqa: B902 (raised again where it is waited for)
+                        w_['err'] = e_
+                both_['thread'] = threading.Thread(target=ask_whole, daemon=True)
+                both_['thread'].start()
+            refused_ = lambda: both_ is not None and both_['refused']      # noqa: E731
             while held_:
                 mc.ClearAssumptions()
                 mc.AddAssumptions(gl_ + [mc.GetBoolVarFromProtoIndex(lit_of[key]) for key in sorted(held_, key=repr)])
                 for lin_ in (0, None):
-                    sc = cp_seed.solver()
-                    sc.parameters.num_workers = 1
-                    sc.parameters.max_deterministic_time = START_WORK
-                    if lin_ is not None:
-                        sc.parameters.linearization_level = lin_
-                    qc = sc.Solve(mc)
-                    if qc != cp_model.UNKNOWN:
+                    sc = ask_(lin_)
+                    both_['first'] = sc
+                    if refused_():
                         break
+                    qc = sc.Solve(mc)
+                    if qc != cp_model.UNKNOWN or refused_():
+                        break
+                if refused_():
+                    break
                 if qc in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     narrow_vals = list(sc.ResponseProto().solution)[:nv_m]
                     break
@@ -3530,27 +3594,35 @@ def main():
                 keys_ = sorted({hold_of[i_] for i_ in sc.SufficientAssumptionsForInfeasibility() if i_ in hold_of},
                                key=repr)
                 if not keys_:
-                    break                   # (the rules alone refuse: the whole model is asked, and names them)
+                    break                   # (the rules alone refuse: the whole model's answer names them)
                 for key in keys_:
                     del held_[key]
                 n_freed += len(keys_)
             if n_held:
                 log(f'  round {rnd}: a state on the lanes\' first {TIER_START + 1} tiers ({n_held} ends held to them, '
-                    f'{n_freed} let go where a refusal named them): [{sc.StatusName(qc)}] '
-                    f'({time.time() - t0:.0f} s)')
+                    f'{n_freed} let go where a refusal named them): '
+                    + ('not waited for, the whole model refusing' if refused_() else f'[{sc.StatusName(qc)}]')
+                    + f' ({time.time() - t0:.0f} s)')
             mc.ClearAssumptions()
             mc.AddAssumptions(gl_)          # (the whole model: every rule assumed, no end held)
-            # (without the LP first -- a four-bus model's state in a quarter of the time with it -- then with it: a
-            # bus held to what four checks had taught had neither a state nor its refusal without, in the same work)
-            for lin_ in ((0, None) if narrow_vals is None else ()):
-                sc = cp_seed.solver()
-                sc.parameters.num_workers = 1
-                sc.parameters.max_deterministic_time = START_WORK
-                if lin_ is not None:
-                    sc.parameters.linearization_level = lin_
-                qc = sc.Solve(mc)
-                if qc != cp_model.UNKNOWN:
-                    break
+            if both_ is not None:
+                if narrow_vals is not None:
+                    both_['stop'] = True
+                while both_['thread'].is_alive():
+                    if both_['stop'] and both_['sc'] is not None:
+                        both_['sc'].StopSearch()
+                    both_['thread'].join(0.2)
+                if both_['err'] is not None:
+                    raise both_['err']
+                if narrow_vals is None:
+                    sc, qc = both_['sc'], both_['qc']
+                both_ = None
+            else:
+                for lin_ in (0, None):
+                    sc = ask_(lin_)
+                    qc = sc.Solve(mc)
+                    if qc != cp_model.UNKNOWN:
+                        break
             if qc == cp_model.INFEASIBLE:
                 by_ = {g_.Index(): name for name, g_ in gates.items()}
                 core_ = sorted(by_[i_] for i_ in sc.SufficientAssumptionsForInfeasibility() if i_ in by_)
@@ -3643,6 +3715,8 @@ def main():
                             f'{", ".join(b.name for b in alone)} alone has none on the moves offered; its {len(more)} '
                             f'balls offered their whole menu')
                         wide |= more
+                        release(buses)
+                        m = mc = rows = gates = None
                         whole(more)
                         continue
                 # (every rule named a LESSON of a check -- an end taken off its layer -- and nothing left to widen: the
@@ -4326,9 +4400,15 @@ def main():
             return {(ref, k2) for ref, k in fan_ for k2 in arrays[ref].bm.items
                     if math.dist(arrays[ref].bm.balls[k], arrays[ref].bm.balls[k2]) <= LNS_NEAR
                     and ((ref, k2) not in wide or (ref, k2) in narrowed)}
+        def sweep_value():
+            # (a state's price for the sweeps' rule: its walled balls and plane balls fanned out as a COUNT, and the
+            # rest of its objective apart -- the weight on one such ball, W_TOP, is each model's own, grown with the
+            # menus it was built on, so two builds' whole objectives differ by it where one such ball stands in both)
+            n_ = sum(sv.Value(w_) for w_ in walls)
+            return n_, sv.ObjectiveValue() - W_TOP * n_
         if TIER_MENU < 5 and chk_try == 0 and tier_of and not repaired:
             if stretches is None:
-                stretches, sweep_v0 = lane_stretches(buses), sv.ObjectiveValue()
+                stretches, sweep_v0 = lane_stretches(buses), sweep_value()
             if 0 <= epoch < len(stretches):
                 keep_ = {}
                 for b in buses:
@@ -4348,12 +4428,16 @@ def main():
                 if back_:
                     narrow(back_, keep_)
             epoch += 1
+            now_ = sweep_value()
             if epoch == len(stretches) and sweep + 1 < EPOCH_SWEEPS and len(stretches) > 1 \
-                    and sweep_v0 - sv.ObjectiveValue() >= EPOCH_GAIN * sv.ObjectiveValue():
-                # (a sweep that gained: another, its stretches drawn at random)
-                log(f'  the search\'s sweep {sweep + 1}: {sweep_v0 / 1000:.1f} -> {sv.ObjectiveValue() / 1000:.1f} -- '
-                    f'another, its stretches drawn at random')
-                sweep, epoch, sweep_v0 = sweep + 1, 0, sv.ObjectiveValue()
+                    and (now_[0] < sweep_v0[0]
+                         or (now_[0] == sweep_v0[0] and sweep_v0[1] - now_[1] >= EPOCH_GAIN * now_[1])):
+                # (a sweep that gained -- a walled ball or a plane ball fanned out the fewer, or with as many the
+                # rest of the objective down by EPOCH_GAIN of itself: another, its stretches drawn at random)
+                top_ = (lambda n_: f' with {n_} ball(s) walled or fanned out' if n_ else '')   # noqa: E731
+                log(f'  the search\'s sweep {sweep + 1}: {sweep_v0[1] / 1000:.1f}{top_(sweep_v0[0])} -> '
+                    f'{now_[1] / 1000:.1f}{top_(now_[0])} -- another, its stretches drawn at random')
+                sweep, epoch, sweep_v0 = sweep + 1, 0, now_
                 stretches = lane_stretches(buses, draw=sweep)
             if epoch < len(stretches):
                 more_ = stretch_balls(buses, stretches[epoch]) & narrowed
@@ -4634,6 +4718,8 @@ def main():
             for it in M_['items'][:12]:
                 log('    ' + ', '.join(f'{k_} {it[k_]}' for k_ in ('type', 'layer', 'net1', 'net2', 'pad_ref')
                                        if it.get(k_) is not None)[:200])
+            release(buses)
+            m = mc = mh = sv = rows = gates = None
             continue
         # (...nor is a pass that took the solve's layers: its ends have a plan, and it has JOINT_TRIES of its own)
         adopts += adopted
@@ -4643,6 +4729,8 @@ def main():
                 + ('' if taught else ' -- and nothing to learn from the last'))
             no_plan = unplanned
             break
+        release(buses)
+        m = mc = mh = sv = rows = gates = None
         if more:
             log(f'  check {chk_try + 1}: the {len(more)} balls of the lanes held to one layer offered their whole menu')
             wide |= more
