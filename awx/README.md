@@ -2175,6 +2175,26 @@ polish; off by default. What it still lacks is in the
   pieces of that layer's free space -- the run is read as it stands, with a
   **breach**: two fixed points either side of the copper. No geometry can
   lay that lane on that layer there, and it is a finding for the solve.
+- **Where a passage has no room.** Before the rounds, a passage between two
+  pieces of fixed copper that holds fewer lanes on a layer than were read
+  through it has an end run of it taken another way through the cells: round
+  the far side of the copper it stood next to (`jump_edges`). A passage's
+  room is the two bars' distance apart, not the length of a cell edge
+  across it: between two vias a slanted edge of the mesh measured twice the
+  gap. The cells a run crosses are the reference's reading of the plan; the
+  braid orders lanes and vias, not which side of a piece of copper a lane
+  passes, and a lane taken round it through cells no other lane of its
+  layer stands in crosses nothing. The way taken is the shortest found that
+  crosses no run of its layer, passes no other lane's via on its other
+  side, and goes through passages with a grid step to spare. Two lanes of
+  a three-part bus were read on one inner layer through the one gap between
+  two of the bus's own berth vias, 0.45 mm that holds one: no round could
+  part them, no layer cut answers a via, and the whole solve had no plan
+  with the two on different layers there. One now goes round the far via,
+  and that bus's loop passes in its second round. A way with no room to
+  spare is not taken: through a channel between two parts' pads that holds
+  one lane to fifteen microns, a lane ended four hundredths short of both
+  pads after the polish.
 - **Written clean.** The written lines are cleared of folds and notches by
   the audit's own measures (a turn of more than 100 degrees; two opposite
   turns of 60 degrees or more nearer than a track and a grid step): a point
@@ -3135,13 +3155,13 @@ channels first, and the other escapes leave round it.
   (`whole_passages.Census`) hold each gap of the fixed copper to its count of
   lanes at the lane pitch. They count neither the bus's own vias among that
   copper nor a change of layer the solve plans inside a gap, whose via needs
-  its room there on every layer. On zynq7020 the three-part bus's loop still
-  stops with its ends crowded: two lanes are planned on one inner layer
-  through a 0.45 mm gap between two of the PHY's berth vias, which holds one.
-  The idea: a census that measures a via's room (the real pads and the bus's
-  own stubs and vias, not the arrays' grown boxes), the bus's own vias among
-  the fixed copper, and each planned change counted at a via's width in every
-  layer's row of the gap it stands in.
+  its room there on every layer. The geometry now takes a lane round the
+  copper where a passage is over full and another way has room; where none
+  has, the plan is still the solve's to change. The idea: a census that
+  measures a via's room (the real pads and the bus's own stubs and vias, not
+  the arrays' grown boxes), the bus's own vias among the fixed copper, and
+  each planned change counted at a via's width in every layer's row of the
+  gap it stands in.
 
 **Later, once the basics route real boards:**
 

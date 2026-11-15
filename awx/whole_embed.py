@@ -32,6 +32,13 @@ doubles back on itself with nothing in between is pulled straight -- by another 
 moving the places it crosses the same cell edges at: those are the LP's own. A round's LP holds only what stands
 near where the round before moved, and the rounds end when nothing moves.
 
+WHERE A PASSAGE HAS NO ROOM: before the rounds, a passage between two pieces of fixed copper that holds fewer lanes
+on a layer than were read through it -- two lanes through the one gap between two vias -- has an end run of it
+taken ANOTHER WAY through the cells, round the far side of the copper it stood next to (jump_edges). The cells a run
+crosses are the reference's reading of the plan, not the plan's: the braid orders lanes and vias, not which side of
+a piece of copper a lane passes, and a lane taken round it through cells no other lane of its layer stands in
+crosses nothing. The way taken has room to spare, and passes no other lane's via on its other side.
+
 --ref=GEO.json: the layout it starts from and reads each run's cells off (a whole_geo.py geometry of the same solve).
 Where that layout stands inside a bar of fixed copper its line is read out to the free space, the runs kept in the
 order its own line has them and put a pitch apart. Where it crosses fixed copper no free cells of the layer lead
@@ -57,7 +64,9 @@ from BENCH / NETS / DEST (whole_ctx).
                              each round's largest paid rows by name; the layout's largest shortfalls with their
                              places; where the round moved; where the layout's wiggles are
   --show-why                 every place the round moved, by its cause: a point of a run the LP moved (how far, its
-                             trust), a point's or a via's cell change, a pull (the run, the stretch pulled)
+                             trust), a point's or a via's cell change, a pull (the run, the stretch pulled); and each
+                             passage short of room, with the run taken round or why none was
+  --no-jump                  no run taken the other side of fixed copper where a passage has no room
   --watch=LANE.k,LANE.k      two runs followed round by round: their points, how near they stand, the rows
                              between them and each pull of either; with --show-rows, the LP's rows that hold each of
                              their points, by kind, with the price each puts on the point's move
@@ -1157,6 +1166,211 @@ for _try in range(4):
             RUN[k_]['pts'] = [p_ for p_ in RUN[k_]['pts'] if not (p_['k'] == 'F' and p_['tri'] == t_)]
 log(f'{NMOUTH} of {2 * len(M)} lane ends leave straight through their own stub, {NBACK} more by their own line; {NSPREAD} cell edge(s) with runs read '
     f'out of a bar, or on one place, put in order a pitch apart')
+JUMP_SHORT = GS                 # a passage this far short of its runs' room, at the least: one of them goes round
+JUMP_BACK = 16 * P_MIN          # ...leaving its way this far before the passage at most, and back on it as far after
+JUMP_TRY = 12                   # ...the shortest of the ways found tried, this many at most
+JUMP_ROOM = GS                  # ...through passages each with this much room to spare, at the least
+JUMP_MAX = 12 * P_MIN           # ...by a way this much longer than the stretch it leaves, at most (twelve pitches)
+_RINGS = {}
+
+
+def rings_of(L_):
+    """(each mesh point's ring, the rings) of layer L_'s free space: its boundary's closed lines -- the outline of each
+    piece of it and of each hole in it, a hole the bar round one piece of fixed copper or round several that touch"""
+    if L_ not in _RINGS:
+        m = MESH[L_]
+        rings = []
+        for g in (m.free.geoms if m.free.geom_type == 'MultiPolygon' else [m.free]):
+            rings += [g.exterior] + list(g.interiors)
+        of = {}
+        for ri, ring in enumerate(rings):
+            for (x, y) in ring.coords:
+                of[(round(x, 6), round(y, 6))] = ri
+        _RINGS[L_] = ([of.get((round(float(x), 6), round(float(y), 6)), -1) for (x, y) in m.V], rings)
+    return _RINGS[L_]
+
+
+def passages():
+    """{(layer, ring, ring): [(run, its point there, its share of the way from the first ring to the second)]}: the
+    runs that pass BETWEEN two pieces of fixed copper -- each crosses a cell edge from the one's bar to the other's. A
+    passage's room is the two bars' distance apart, whatever the cell edges across it measure: between two vias a
+    slanted edge of the mesh is twice the gap they leave"""
+    out = collections.defaultdict(dict)
+    for key in KEYS:
+        L_ = RUN[key]['L']
+        vr, rings = rings_of(L_)
+        m = MESH[L_]
+        for p in RUN[key]['pts']:
+            if p['k'] != 'P':
+                continue
+            ra, rb = vr[p['a']], vr[p['b']]
+            if ra < 0 or rb < 0 or ra == rb:
+                continue
+            A, B = m.V[p['a']], m.V[p['b']]
+            q = Point(float(A[0] + (B[0] - A[0]) * p['t'] / p['len']), float(A[1] + (B[1] - A[1]) * p['t'] / p['len']))
+            r1, r2 = min(ra, rb), max(ra, rb)
+            d1, d2 = q.distance(rings[r1]), q.distance(rings[r2])
+            f = d1 / (d1 + d2) if d1 + d2 > 0 else 0.5
+            if key not in out[(L_, r1, r2)]:
+                out[(L_, r1, r2)][key] = (key, p, f)
+    return {pk: sorted(v_.values(), key=lambda e_: (e_[2], e_[0])) for pk, v_ in out.items()}
+
+
+def passage_short(pk, lst):
+    """how far short of the room its runs need the passage `pk` is: the pitches of the lanes side by side in it
+    summed, less its two bars' distance apart between its two end runs' half widths"""
+    _vr, rings = rings_of(pk[0])
+    need = sum(0.0 if x[0][0] == y[0][0] else P_MIN + hw[x[0][0]] + hw[y[0][0]] for x, y in zip(lst, lst[1:]))
+    return need - (rings[pk[1]].distance(rings[pk[2]]) - hw[lst[0][0][0]] - hw[lst[-1][0][0]])
+
+
+def jump_run(pk, e_, ring, on):
+    """run e_ of the overfull passage `pk` taken ANOTHER WAY through the cells, round the far side of the copper
+    `ring` it stands next to there: from a cell of its way before the passage to one after it (up to JUMP_BACK of
+    its way either side), the shortest chain of cells through edges no other run of the layer stands on, or that
+    touch that copper -- there it goes next the copper, as it stood in the passage. Of the ways found the one that
+    leaves the run shortest is kept, where it crosses no run of its layer, passes no other lane's via on its other
+    side, goes through passages with JUMP_ROOM to spare, and is no more than JUMP_MAX longer
+    -> (the copper it now passes the other side of, or None; why each way tried was not taken, counted)"""
+    L_, r1, r2 = pk
+    key = e_[0]
+    r, m = RUN[key], MESH[L_]
+    vr, _rings = rings_of(L_)
+    pts = r['pts']
+    Ps = [j for j, q in enumerate(pts) if q['k'] == 'P']
+    inp = [c for c, j in enumerate(Ps) if {vr[pts[j]['a']], vr[pts[j]['b']]} == {r1, r2}]
+    x0 = len(same_layer_crossings(layout()))
+    old_xy = run_xy(key)
+    old = LineString(old_xy)
+    cum = [0.0]
+    for a_, b_ in zip(old_xy, old_xy[1:]):
+        cum.append(cum[-1] + math.hypot(b_[0] - a_[0], b_[1] - a_[1]))
+    why = collections.Counter()
+
+    def free_edge(t, k):
+        a_, b_ = m.edge(t, k)
+        if {vr[a_], vr[b_]} == {r1, r2}:
+            return False
+        return ring in (vr[a_], vr[b_]) or all(q_[0] == key for q_ in on.get((L_, min(a_, b_), max(a_, b_)), ()))
+
+    def by_ring(t, t2):
+        # (its point on the edge from t to t2: next the copper it goes round where the edge touches it)
+        q = portal(m, t, t2)
+        if vr[q['a']] == ring or vr[q['b']] == ring:
+            q['t'] = q['raw'] = 0.0 if vr[q['a']] == ring else q['len']
+        return q
+    cands = []
+    for back in range(len(Ps)):
+        if inp[0] - back < 0 or cum[Ps[inp[0]] + 1] - cum[Ps[inp[0] - back] + 1] > JUMP_BACK:
+            break
+        lo = Ps[inp[0] - back]
+        s_ = pts[lo]['from']
+        dist, prev, pq = {s_: 0.0}, {}, [(0.0, s_)]
+        while pq:
+            d, t = heapq.heappop(pq)
+            if d > dist.get(t, math.inf) or d > JUMP_BACK * 3:
+                continue
+            for k in range(3):
+                t2 = int(m.N[t, k])
+                if t2 < 0 or not free_edge(t, k):
+                    continue
+                nd = d + float(np.hypot(*(m.cen[t2] - m.cen[t])))
+                if nd < dist.get(t2, math.inf):
+                    dist[t2], prev[t2] = nd, t
+                    heapq.heappush(pq, (nd, t2))
+        for fwd in range(len(Ps)):
+            if inp[-1] + fwd >= len(Ps) or cum[Ps[inp[-1] + fwd] + 1] - cum[Ps[inp[-1]] + 1] > JUMP_BACK:
+                break
+            hi = Ps[inp[-1] + fwd]
+            g_ = pts[hi]['to']
+            if any(q['k'] in ('X', 'D') for q in pts[lo:hi + 1]):
+                why['a breach or a dive in it'] += 1
+                continue
+            if g_ != s_ and g_ not in prev:
+                why['no chain of free cells'] += 1
+                continue
+            chain = [g_]
+            while chain[-1] != s_:
+                chain.append(prev[chain[-1]])
+            chain.reverse()
+            est = cum[lo] + dist.get(g_, 0.0) + cum[-1] - cum[min(hi + 2, len(cum) - 1)]
+            cands.append((est, back, fwd, lo, hi, chain))
+    for _est, _back, _fwd, lo, hi, chain in sorted(cands, key=lambda c_: c_[:3])[:JUMP_TRY]:
+        keep = list(pts)
+        items = [by_ring(u0, u1) for u0, u1 in zip(chain, chain[1:])]
+        r['pts'] = pts[:lo] + items + pts[hi + 1:]
+        new = LineString(run_xy(key))
+        ok = new.length <= old.length + JUMP_MAX and len(same_layer_crossings(layout())) <= x0
+        if not ok:
+            why['too long' if new.length > old.length + JUMP_MAX else 'crosses a run'] += 1
+        if ok:
+            # (...and by a way with ROOM: every passage it now goes through a grid step to spare at the least. Taken
+            # through a channel between two parts' pads that holds one lane to fifteen microns, a lane was laid
+            # there by the rounds and stood four hundredths short of both pads after the polish)
+            mine = {(L_, min(vr[q['a']], vr[q['b']]), max(vr[q['a']], vr[q['b']])) for q in items
+                    if vr[q['a']] >= 0 and vr[q['b']] >= 0 and vr[q['a']] != vr[q['b']]}
+            now = passages()
+            ok = all(passage_short(pk2, now[pk2]) <= -JUMP_ROOM for pk2 in mine if pk2 in now)
+            if not ok:
+                why['no room that way'] += 1
+        over = []
+        if ok:
+            # (what stands between the way it left and the way it takes: no other lane's via, whose side of this
+            # lane is the braid's -- and the fixed copper there is what it now passes the other side of)
+            loop = list(shapely.ops.polygonize(shapely.ops.unary_union([old, new])))
+            ok = bool(loop) and not any(g2.contains(Point(VIA[vk])) for g2 in loop for vk in VKEYS if vk[0] != key[0])
+            over = [lab for (x0_, y0_, x1_, y1_, ls, lab) in FIXED if L_ in ls
+                    and any(g2.intersects(_box(x0_, y0_, x1_, y1_)) for g2 in loop)] if ok else []
+            if not ok:
+                why['a via between, or no loop'] += 1
+            elif not over:
+                why['no copper between'] += 1
+            ok = ok and bool(over)
+        if ok:
+            return sorted(set(over)), why
+        r['pts'] = keep
+    return None, why
+
+
+def jump_edges():
+    """WHERE A PASSAGE HAS NO ROOM for the runs read through it -- two lanes of a layer through the one gap between
+    two vias, a gap that holds one -- an end run of it GOES ROUND: the other side of the copper on its side of the
+    passage (jump_run). The cells a run crosses say which side of each piece of fixed copper it passes, and that is
+    the reference's reading of the plan, not the plan's: the braid orders lanes and vias, and a lane taken the other
+    side of a piece of copper, through cells no lane of its layer stands in, crosses nothing. No LP can make the
+    move -- nothing passes through anything -- and no solve: the two lanes of the case measured had no plan on two
+    layers there. The worst passage first, its end runs alone (a run between two others would cross one).
+    -> [(run, layer, the copper, how far short)]"""
+    out, tried = [], set()
+    for _n in range(4 * len(KEYS)):
+        cand = []
+        for pk, lst in passages().items():
+            if len({q_[0][0] for q_ in lst}) < 2:
+                continue
+            short = passage_short(pk, lst)
+            if short > JUMP_SHORT:
+                cand += [(short, pk, e_, rg_) for e_, rg_ in ((lst[0], pk[1]), (lst[-1], pk[2]))
+                         if (pk, e_[0]) not in tried]
+        if not cand:
+            break
+        short, pk, e_, rg_ = max(cand, key=lambda c_: (c_[0], c_[1], c_[2][0]))
+        tried.add((pk, e_[0]))
+        over, why = jump_run(pk, e_, rg_, edge_lists())
+        if '--show-why' in OPT:
+            log(f'      a passage of {LNAME[pk[0]]} {short:.3f} short of the room its runs need: {e_[0][0]}.{e_[0][1]} '
+                + (f'no other way {dict(why)}' if over is None else 'round ' + ', '.join(over)))
+        if over is None:
+            continue
+        out.append((e_[0], pk[0], over, short))
+        spread_edges()
+    return out
+
+
+JUMPED = [] if '--no-jump' in OPT else jump_edges()
+if JUMPED:
+    log(f'{len(JUMPED)} run(s) taken the other side of fixed copper, a passage short of the room its runs need: '
+        + '; '.join(f'{k_[0]}.{k_[1]} on {LNAME[L_]} round {", ".join(o_[:3])} ({sh_:.3f} short)'
+                    for k_, L_, o_, sh_ in JUMPED[:12]))
 VIEW = tuple(float(v) for v in OPT['--view'].split(',')) if '--view' in OPT else None
 _x0 = same_layer_crossings(layout())
 log(f'the layout it starts from, read onto its points: {len(_x0)} same-layer crossing(s)')
