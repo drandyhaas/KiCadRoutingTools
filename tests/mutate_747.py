@@ -103,9 +103,9 @@ ROWS = [
     # tuple, so only the arm written for it can see this.
     ('the-derive-marker-is-None-again', 'fc',
      [("    def _register_via(self, x, y, net_id, radius=None,\n"
-       "                      keepout=_DERIVE_KEEPOUT):",
+       "                      keepout=_DERIVE_KEEPOUT, via=None):",
        "    def _register_via(self, x, y, net_id, radius=None,\n"
-       "                      keepout=None):"),
+       "                      keepout=None, via=None):"),
       ("        if radius is None and keepout is _DERIVE_KEEPOUT:",
        "        if radius is None and keepout is None:"),
       ("             if keepout is _DERIVE_KEEPOUT else keepout)",
@@ -151,8 +151,8 @@ ROWS = [
     # carry-over is still the mutation.
     ('drop-keepout-carry-over', 'fc',
      """                        radius=None if rec is None else rec[1],
-                        keepout=t[3])""",
-     """                        radius=0.0 if rec is None else rec[1])""",
+                        keepout=t[3],""",
+     """                        radius=0.0 if rec is None else rec[1],""",
      (T747,), 'KILLED'),
 
     # ---- the registrar: the match --------------------------------------
@@ -232,13 +232,15 @@ ROWS = [
     ('reinline-the-tuple-in-init', 'fc',
      """        for v in pcb_data.vias:
             self.vias.append(self._register_via(v.x, v.y, v.net_id,
-                                                radius=self.via_radius(v)))""",
+                                                radius=self.via_radius(v),
+                                                via=v))""",
      """        for v in pcb_data.vias:
             _r = self.via_radius(v)
             _t = (v.x, v.y, v.net_id,
                   _r + self._item_reach(self._via_floor_for(v.net_id)))
             self.vias.append(_t)
-            self._via_radius_by_id[id(_t)] = (_t, _r)""",
+            self._via_radius_by_id[id(_t)] = (_t, _r)
+            self._via_obj_by_id[id(_t)] = (_t, v)""",
      (T747,), 'KILLED'),
 
     # ---- the survivors -------------------------------------------------

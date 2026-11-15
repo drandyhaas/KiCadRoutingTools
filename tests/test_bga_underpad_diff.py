@@ -133,16 +133,11 @@ def main():
               "--json", drc_json], verbose)
         with open(drc_json, encoding="utf-8") as fh:
             by_type = json.load(fh).get("by_type") or {}
-        # #1914: check_drc grades a via's drill as KiCad does, and the cap
-        # step clears a cap's pads off a via's COPPER at the clearance, not
-        # off its hole at the board's hole clearance: a few cap pads sit
-        # 0.175-0.18 mm from an under-pad via's drill under the project's
-        # 0.187 mm, and kicad-cli 10.0.6 reports the same pad/via pairs. Those
-        # rows are the cap step's open question, not the escape's; anything
-        # else fails here.
-        other = {k: n for k, n in by_type.items() if k != "pad-hole"}
-        check("under-pad escape + cap-opt is DRC-clean (but for pad-to-via-hole rows)",
-              not other, f"{by_type}")
+        # Clean includes the pad-to-via-HOLE rows (#1914): the cap step holds
+        # a cap's pads off a via's drill at the project's copper-to-hole
+        # clearance, not only off its copper at the copper clearance -- the
+        # under-pad vias' narrow ring left cap pads inside that band.
+        check("under-pad escape + cap-opt is DRC-clean", not by_type, f"{by_type}")
         fan = capopt  # route_diff consumes the pipeline state, as in production
 
         nets = []

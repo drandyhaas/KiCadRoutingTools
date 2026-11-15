@@ -2621,6 +2621,15 @@ still replay.
   `made_room`, #1681). Quarter-turn rotations are tried unless `--no-rotate`;
   `--beneath-only` moves only the passives under a BGA's package and keeps
   them there.
+- **Holes.** A cap pad is held off a via's copper at the pair's clearance and
+  off its DRILL at the copper-to-hole clearance KiCad grades: the project's
+  `min_hole_clearance` (never the fab-floor origin), a `.kicad_dru`
+  `hole_clearance` rule where one binds the pair (it replaces the project
+  value), or the pad's own clearance override where larger -- on the layers
+  the via's barrel joins, as `check_drc` grades it
+  (`check_drc.pad_via_hole_required`). A via whose ring is narrower than the
+  difference between the two clearances needs the second. The run prints the
+  value (`Cap pads held off via drills at ...`).
 - **Vias.** The last resort for a cap still not clear moves the offending via
   at most 0.6 mm, with a connector back to where it stood. It prefers the
   board's own `min_hole_to_hole`; if nothing clears at that it takes a landing
@@ -2650,7 +2659,9 @@ still replay.
   when given, and the size floors (track, via, drill, ring) of the copper the
   pass laid or moved -- a via it nudged and its connector segments -- and of
   nothing else (#1578). A cap move lays no copper, so a run that only moved
-  caps writes no size floor. `--no-fix-drc-settings` writes none of it and
+  caps writes no size floor. The copper-to-hole clearance it writes is the one
+  the cap pads were held off via drills at, so the project never declares a
+  value the moved caps break. `--no-fix-drc-settings` writes none of it and
   carries the input's project through as it was, as on a routing step; in
   the GUI the "Fix DRC settings after routing" box is the same switch.
 

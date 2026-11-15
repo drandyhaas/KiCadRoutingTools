@@ -53,6 +53,11 @@ CAP = 'C16'          # an orthogonal 0402 with roundrect pads (rratio 0.25)
 BALL_FP = 'U2'       # the BGA beside it: circle balls on the cap's side
 FOREIGN = 5          # neither of the cap's own nets
 VIA = 0.3
+# The via's drill. The board declares no copper-to-hole clearance, so the
+# pass holds a cap pad off a drill at the NPTH floor (0.2): a 0.1 drill's
+# hole keep-out (0.05 + 0.2) stays within the copper one (0.15 + CLEAR), and
+# what is priced here is the copper term alone, the shape this file is about.
+DRILL = 0.1
 KEEP = VIA / 2.0 + CLEAR
 
 
@@ -78,7 +83,7 @@ def _rig(vias=(), segs=(), keep_pads=False):
 
 class TestTheRigIsRoundCornered(unittest.TestCase):
     def test_the_cap_moves_and_its_pads_are_roundrect(self):
-        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA)])
+        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA, drill=DRILL)])
         self.assertIn(CAP, st.caps, 'the cap is not a mover -- nothing below '
                                     'grades the pass')
         pads = _copper(fp)
@@ -100,7 +105,7 @@ class TestViaShortfallIsCheckDrcsDistance(unittest.TestCase):
         pts = [(x0 + dx * 0.07, y0 + dy * 0.07)
                for dx in range(-8, 9) for dy in range(-8, 9)]
         nets = list(range(1000, 1000 + len(pts)))
-        vias = [make_via(px, py, net_id=n, size=VIA)
+        vias = [make_via(px, py, net_id=n, size=VIA, drill=DRILL)
                 for (px, py), n in zip(pts, nets)]
         st, cap, fp = _rig(vias)
         st.cap_vias = {k: st.vias for k in st.caps}
@@ -151,7 +156,7 @@ class TestTrackShortfallIsCheckDrcsDistance(unittest.TestCase):
                                          mx + uy * 0.08, my - ux * 0.08,
                                          net_id=n, width=width, layer='F.Cu'))
                     nets.append(n)
-        st, cap, fp = _rig([make_via(x0 + 5.0, y0, net_id=FOREIGN, size=VIA)],
+        st, cap, fp = _rig([make_via(x0 + 5.0, y0, net_id=FOREIGN, size=VIA, drill=DRILL)],
                            segs)
         over = 0.0
         for rot in (0.0, 90.0):
@@ -179,7 +184,7 @@ class TestPadChannelsMeasureTheRoundShapes(unittest.TestCase):
     pad-to-pad gap."""
 
     def test_cap_against_the_ball_field(self):
-        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA)])
+        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA, drill=DRILL)])
         pcb = parse_kicad_pcb(BOARD)
         balls = [p for p in _copper(pcb.footprints[BALL_FP])]
         self.assertTrue(balls and all(p.shape == 'circle' for p in balls))
@@ -217,7 +222,7 @@ class TestPadChannelsMeasureTheRoundShapes(unittest.TestCase):
                                        'tests nothing')
 
     def test_cap_against_cap(self):
-        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA)])
+        st, cap, fp = _rig([make_via(0.0, 0.0, net_id=FOREIGN, size=VIA, drill=DRILL)])
         a = _real_pads(fp, (fp.x, fp.y, 0.0))
         rects_a = cap.pad_rects(fp.x, fp.y, 0.0)
         frames_a = cap.pad_frames(fp.x, fp.y, 0.0)
@@ -273,7 +278,7 @@ class TestTheNoWorseGateHoldsAtTheSeedsRealGraze(unittest.TestCase):
                                      'clear of the other pad -- the rig tests '
                                      'nothing')
         target, vx, vy, d_seed = corner
-        st, cap, fp = _rig([make_via(vx, vy, net_id=FOREIGN, size=VIA)])
+        st, cap, fp = _rig([make_via(vx, vy, net_id=FOREIGN, size=VIA, drill=DRILL)])
         # Isolate the via gate: no tracks and no courtyard neighbours.
         st.cap_segs = {k: [] for k in st.caps}
         st.cap_static[CAP] = []

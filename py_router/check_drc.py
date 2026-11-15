@@ -2752,6 +2752,146 @@ def check_via_hole_overlap(x: float, y: float, via_size: float, hole,
 _HOLE_ROW_BESIDE_CLEARANCE = frozenset({('pad', 'via')})
 
 
+class HoleRuleBinder:
+    """Which `.kicad_dru` `hole_clearance` rule binds a pair of items, as
+    kicad-cli 10.0.6 decides it: the LAST rule in the file whose condition and
+    layer clause match the pair either way round, per layer. The one walk
+    `hole_rule_grade` grades with, and that a generator pricing a pair before
+    it lays it asks (`pad_via_hole_required`). ``dr`` is the board's
+    `design_rules.DesignRules`; `walk` is empty when it declares no
+    hole_clearance rule."""
+
+    def __init__(self, dr):
+        from design_rules import parse_condition_maybe, rule_may_match
+        self._match = rule_may_match
+        self.dr = dr
+        self.walk = []
+        for r in (dr.rules if dr is not None else ()):
+            spec = r.constraints.get('hole_clearance')
+            if spec is None:
+                continue
+            ast = (('unknown',) if str(r.unsupported or '').startswith('constraint')
+                   else parse_condition_maybe(r.condition_src))
+            self.walk.append((r, ast, spec.get('min') or 0.0))
+        #: the widest value a reporting rule asks, 0.0 with none
+        self.reach = max([mn for r, _a, mn in self.walk
+                          if r.severity not in ('ignore', 'exclusion')] or [0.0])
+        self.ctx = ('hole_clearance', dr._net_name_set()) if self.walk else None
+        #: rule name -> why its condition is not read here
+        self.unread: Dict[str, str] = {}
+        self._items: Dict[int, Any] = {}
+        self._decided: Dict[tuple, Any] = {}
+
+    def item(self, kind, obj):
+        """The RuleItem of one board item ('via', 'track' or 'pad'), memoised
+        on the object (which the memo keeps alive)."""
+        got = self._items.get(id(obj))
+        if got is None:
+            dr = self.dr
+            if kind == 'via':
+                it = dr.via_item(obj)
+                vt = getattr(obj, 'via_type', None)
+                if vt:
+                    from dataclasses import replace as _dc_replace
+                    it = _dc_replace(it, via_type=vt)
+            elif kind == 'track':
+                it = dr.track_item(obj)
+            else:
+                it = dr.pad_item(obj)
+            got = self._items[id(obj)] = (obj, it)
+        return got[1]
+
+    def _decide(self, a, b, layer):
+        """The rule that binds the pair on `layer` (None: no rule), or
+        ('unknown', rule) when a rule not read here may decide it."""
+        key = (a, b, layer)
+        if key not in self._decided:
+            out = None
+            for r, ast, _mn in reversed(self.walk):
+                m = self._match(r, ast, a, b, layer, self.dr.copper_layers, self.ctx)
+                if m is None:
+                    out = ('unknown', r)
+                    break
+                if m:
+                    out = r
+                    break
+            self._decided[key] = out
+        return self._decided[key]
+
+    def bind(self, a, b, layers):
+        """None (no rule binds on any layer), 'unknown', or (req, rule,
+        layer): the strictest reporting rule over `layers`, req None where
+        only rules of severity ignore bind."""
+        best = None
+        for layer in layers:
+            got = self._decide(a, b, layer)
+            if isinstance(got, tuple):
+                self.unread.setdefault(got[1].name, got[1].unsupported
+                                       or 'its condition is not read here')
+                return 'unknown'
+            if got is None:
+                continue
+            if got.severity in ('ignore', 'exclusion'):
+                if best is None:
+                    best = (None, got, layer)
+                continue
+            mn = got.constraints['hole_clearance'].get('min') or 0.0
+            if best is None or best[0] is None or mn > best[0]:
+                best = (mn, got, layer)
+        return best
+
+
+def _pad_via_hole_board_required(via_hole_clearance, pad_lc):
+    """The board-level requirement between a pad's copper and a via's drill:
+    the pad's clearance override where it asks more, else the declared
+    copper-to-hole clearance (#1914) -- run_drc's pad arm term, and
+    `pad_via_hole_required`'s."""
+    return via_hole_clearance if via_hole_clearance > pad_lc else pad_lc
+
+
+def pad_via_hole_required(pad, via, via_hole_clearance, board_copper, binder=None):
+    """KiCad's copper-to-hole requirement (mm) between ``pad``'s copper and
+    ``via``'s drill, or None where KiCad grades no such pair: the same net
+    (two net-less items are one net), a pad without copper, a via without a
+    drill, or no copper layer the pad shares with the via's own span.
+
+    The requirement is the one this checker grades the pair at: a pad
+    clearance override binds where it asks more than the declared value
+    (run_drc's pad arm, #1914); without one, a `.kicad_dru` hole_clearance
+    rule that binds the pair on a shared layer REPLACES the declared value --
+    the strictest such rule (`hole_rule_grade`), none where only an ignore
+    rule binds -- and a rule whose condition is not read here leaves it, as
+    the checker keeps the board-minimum row then. ``via_hole_clearance`` is
+    KiCad's own value (the project's ``min_hole_clearance``, never the
+    fab-floor origin; 0 or None when nothing declares one), ``binder`` a
+    `HoleRuleBinder` of the board's rules (None: no rule). The gap it is held
+    to is `point_to_pad_distance(via centre, pad)` less the drill radius.
+
+    For a generator that places a pad or a via without the checker (the
+    placement cap step), so it holds the pair where this checker grades it
+    and never looser."""
+    if pad.net_id == via.net_id or not (getattr(via, 'drill', 0.0) or 0.0) > 0.0:
+        return None
+    if _pad_has_no_copper(pad):
+        return None
+    board_copper = list(board_copper)
+    span = frozenset(via_copper_layers(via, board_copper)
+                     or (getattr(via, 'layers', None) or ('F.Cu', 'B.Cu')))
+    shared = frozenset(pad_copper_layers(pad, board_copper)) & span
+    if not shared:
+        return None
+    board = float(via_hole_clearance or 0.0)
+    lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+    if lc > 0.0:
+        return _pad_via_hole_board_required(board, lc)
+    if binder is not None and binder.walk:
+        got = binder.bind(binder.item('pad', pad), binder.item('via', via),
+                          sorted(shared))
+        if got is not None and got != 'unknown':
+            return got[0]
+    return board if board > 0.0 else None
+
+
 def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
                     clearance_margin: float = 0.05, matching_net_ids=None, prior=()):
     """The copper-to-hole rows a `.kicad_dru` `hole_clearance` rule makes,
@@ -2780,24 +2920,15 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
     read here, and that may bind a pair close enough to be flagged, to why;
     such a pair is not graded. drop holds the ids of `prior` rows to drop."""
     from kicad_parser import pad_drill_capsule, plated_drill_exposed, flush_drill_peg
-    from design_rules import parse_condition_maybe, rule_may_match
-    walk = []
-    for r in dr.rules:
-        spec = r.constraints.get('hole_clearance')
-        if spec is None:
-            continue
-        ast = (('unknown',) if str(r.unsupported or '').startswith('constraint')
-               else parse_condition_maybe(r.condition_src))
-        walk.append((r, ast, spec.get('min') or 0.0))
-    if not walk:
+    binder = HoleRuleBinder(dr)
+    if not binder.walk:
         return [], {}, []
-    reach = max([mn for r, _a, mn in walk
-                 if r.severity not in ('ignore', 'exclusion')] or [0.0])
-    ctx = ('hole_clearance', dr._net_name_set())
+    reach = binder.reach
     copper = list(board_copper)
     copper_set = set(copper)
     all_copper = frozenset(copper)
-    unread: Dict[str, str] = {}
+    unread = binder.unread
+    _item, _bind = binder.item, binder.bind
 
     def _name(nid):
         n = pcb_data.nets.get(nid)
@@ -2808,65 +2939,6 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
 
     def _ovr(p):
         return (getattr(p, 'local_clearance', 0.0) or 0.0) > 0.0
-
-    items: Dict[int, Any] = {}
-
-    def _item(kind, obj):
-        got = items.get(id(obj))
-        if got is None:
-            if kind == 'via':
-                it = dr.via_item(obj)
-                vt = getattr(obj, 'via_type', None)
-                if vt:
-                    from dataclasses import replace as _dc_replace
-                    it = _dc_replace(it, via_type=vt)
-            elif kind == 'track':
-                it = dr.track_item(obj)
-            else:
-                it = dr.pad_item(obj)
-            got = items[id(obj)] = (obj, it)
-        return got[1]
-
-    decided: Dict[tuple, Any] = {}
-
-    def _decide(a, b, layer):
-        """The rule that binds the pair on `layer` (None: no rule), or
-        ('unknown', rule) when a rule not read here may decide it."""
-        key = (a, b, layer)
-        if key not in decided:
-            out = None
-            for r, ast, _mn in reversed(walk):
-                m = rule_may_match(r, ast, a, b, layer, dr.copper_layers, ctx)
-                if m is None:
-                    out = ('unknown', r)
-                    break
-                if m:
-                    out = r
-                    break
-            decided[key] = out
-        return decided[key]
-
-    def _bind(a, b, layers):
-        """None (no rule binds on any layer), 'unknown', or (req, rule,
-        layer): the strictest reporting rule over `layers`, req None where
-        only rules of severity ignore bind."""
-        best = None
-        for layer in layers:
-            got = _decide(a, b, layer)
-            if isinstance(got, tuple):
-                unread.setdefault(got[1].name, got[1].unsupported
-                                  or 'its condition is not read here')
-                return 'unknown'
-            if got is None:
-                continue
-            if got.severity in ('ignore', 'exclusion'):
-                if best is None:
-                    best = (None, got, layer)
-                continue
-            mn = got.constraints['hole_clearance'].get('min') or 0.0
-            if best is None or best[0] is None or mn > best[0]:
-                best = (mn, got, layer)
-        return best
 
     def _gap(ckind, cobj, h1x, h1y, h2x, h2y, hr):
         if ckind == 'track':
@@ -8979,7 +9051,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                             and _pn not in matching_net_ids \
                             and hnet not in matching_net_ids:
                         continue
-                    _req = req_clr if req_clr > _lc else _lc
+                    _req = _pad_via_hole_board_required(req_clr, _lc)
                     _pd = point_to_pad_distance(h1x, h1y, _pad)
                     # Copper that overlaps the via's copper is a pad-via short
                     # graded elsewhere, not a hole graze -- exempt it. At
