@@ -985,6 +985,58 @@ boards" and "which commit broke connectivity".
   the 2026-09-03 four-way A/B (old engine / new engine old policy / new
   engine new policy), which read -3 real DRC / -11 incomplete nets.
 
+### Building the corpus yourself (contributors, #1918)
+
+The corpus is not redistributed: the boards belong to their authors, and most
+of their repos name no licence. What the repo carries is the recipe -- each
+set's `manifest_setN.json` (upstream repo, path, and a `raw_url` pinned to a
+commit), `fetch_setN.py`, `prep_setN.sh` -- and every board's recorded routing
+chain, in `tests/stress/corpus_chains/<set>/<board>/redo_commands.sh`. From
+those anyone can build a corpus and run the A/B on their own Modal account.
+
+```bash
+pip install modal && modal setup          # once: your Modal account
+python3 tests/stress/build_corpus.py      # sets 1-28 into $STRESS_DIR
+```
+
+`build_corpus.py` downloads every board from its upstream repo, strips it with
+KiCad's bundled python (`--kicad-python`, else `$KICAD_PYTHON`, else the
+installed KiCad), and installs the chains into `runs_<set>/<board>/`. Prep runs
+one board at a time, a few seconds each; the whole corpus takes about 3 GB of
+disk (sources included), and `--sets set10,set11` builds some sets. Each set takes `fetch_setN.py`'s download, so a repo that
+has since disappeared drops its boards; they are listed at the end and are
+simply absent.
+
+Then the A/B: one arm at the commit your branch starts from, one at your
+branch, with the same boards left out, then pair them. The image is a clean
+checkout of the commit you launch from, so commit first and run each arm from
+its own checkout (a `git worktree` is the easy way to have both). The first
+arm uploads the corpus to your `kicad-corpus` volume.
+
+```bash
+SLOW=abn6502,covg_patchclamp,mez_rx,butterstick,zynq7020_som
+python3 tests/stress/cloud_replay_sets.py --sets set1-set28 --label base \
+    --no-baseline --no-local-regrade --limit 0 --exclude $SLOW    # from the base checkout
+python3 tests/stress/cloud_replay_sets.py --sets set1-set28 --label mine \
+    --no-baseline --no-local-regrade --limit 0 --exclude $SLOW    # from your branch
+python3 tests/stress/pair_arms.py $STRESS_DIR/cloud_base-kc_<sha> $STRESS_DIR/cloud_mine-kc_<sha>
+```
+
+Run `--only plan` first: it spends nothing and checks every board is found
+(on a fresh corpus it cannot price the run, having no replay times yet).
+`--limit 0 --exclude` replaces the default `--limit -5`, which picks the five
+slowest boards from replays you do not have yet. With those five left out, an
+arm of sets 1-28 costs a few dollars and finishes in under an hour. If your branch changes `check_drc.py`, regrade the base arm with
+your grader before pairing (`modal_sweep/regrade_arm.py`), so both arms are
+graded the same way.
+
+**Compare your two arms with each other, never with someone else's numbers.**
+Your corpus is close to the maintainer's but not identical: a board may have
+changed upstream since its chain was recorded, a different KiCad writes a
+slightly different stripped board, and every prep gives the board fresh random
+uuids. Within one corpus the comparison is exact, and the rules below apply as
+they do to any A/B (per-board spread is +-2..3 nets).
+
 ### Per-net via sizes: `pernet_via_ab.py`
 
 Per-net via sizes (#530: a net drawn at its own class / rule via) are live only
@@ -1006,62 +1058,6 @@ arms with the base checkers (shorts the run created = shorts absent from the
 graded input), and stops the app once every board is in. After editing the
 tool, `modal app stop pernet-via-ab -y` before relaunching: warm containers
 keep serving the previous code.
-
-### Arc outlines: `set1arc`
-
-`normalize_boards.py` and `prep_set2.py` rebuild Edge.Cuts as chained lines, so
-an ordinary corpus input has almost no arc left on its outline, and a replay
-barely sees a change to how an arc outline is read. Those inputs and their
-baselines stay as they are. `set1arc` adds 6 chains beside them, whose inputs keep
-their arcs: a round outline, plain rounded corners, three outlines #550's check
-refused before #1700, and a nearly round one whose chain fans out and moves parts.
-Three of them have bounds at least 1.9 um apart between the 5 um and the 0.5 um
-sag. No `--sets` range includes the set, so name it.
-
-**What goes where.** The repo holds `manifest_set1arc.json`, the rows naming each
-board and its source set, and `prep_set1arc.py`. Everything else lives under the
-stress dir and does not travel with the repo: `boards_set1arc/`,
-`boards_unrouted_set1arc/`, `runs_set1arc/` and `results_set1arc/`, and the
-`kicad-corpus` volume holds its copy once `upload` has run. On another machine, with
-the source sets in place:
-
-```bash
-python3 tests/stress/prep_set1arc.py     # about 8 minutes on a laptop, no LLM
-python3 tests/stress/cloud_replay_sets.py --sets set1arc --only plan
-```
-
-The input is `strip_copper_only.py` of the source's routed board, so it differs
-from the source's ordinary input by more than its outline: pour outlines and board
-graphics stay. The chain is the source's recorded one, repointed at that input and
-replayed. A short name ends `_arc` because tools key a board by its bare name
-across sets, and a twin named like its source would vanish from a run that names
-both sets. `run_queue.sh` leaves a set with a name rather than a number alone
-unless `QUEUE_SETS` names it, so no LLM worker takes these. A tool that globs `runs_set*` sees the set too:
-`test_manifest_plan_parity.py` reads its chains, and `pernet_via_ab.py select`
-qualifies one of its boards, which that tool's two arms then share.
-
-**A/B an outline change.** Commit it (the image is `git archive HEAD`) and replay
-the set against its recorded runs, with an ordinary range alongside so a change
-that moves copper on every outline shows as that:
-
-```bash
-python3 tests/stress/cloud_replay_sets.py --sets set1arc,set10-set19 --label outline
-```
-
-- The recorded runs hold the engine of the commit that recorded them (each run's
-  `git_version.txt`). If main has moved copper since, check out the change's base
-  and rerun `prep_set1arc.py` first, or the delta carries main's change too. Nothing
-  else reads these recordings, so re-recording voids no other baseline. Two boards
-  replayed on Modal laid the same segments and vias as their recording on a Mac,
-  so the recording's machine did not show in that comparison.
-- The compare table reads `drc` and `incompl` as for any set, and a pour or a track
-  can move without changing either. To see whether copper moved at all, compare the
-  segments and vias of `<wave>/set1arc/<board>/<final>` with
-  `runs_set1arc/<board>/<final>`, never the whole file (per-run UUIDs). The same
-  check says whether the outline survived: an Edge.Cuts arc count from
-  `prep_set1arc.edge_arc_count` should match the input's.
-- Six boards show what a change does on arc outlines. They do not decide a default:
-  the rules below still apply to that, over the ordinary sets.
 
 ### Rules that make these trustworthy
 
