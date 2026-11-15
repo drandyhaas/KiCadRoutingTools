@@ -563,9 +563,8 @@ per-board results JSON.
 
 ```bash
 cd tests/stress
-python3 fetch_boards.py        # download corpus (needs gh auth)
-# normalize + strip with KiCad's bundled python — see stress/README.md
-python3 validate_boards.py     # corpus sanity check
+python3 build_corpus.py        # fetch + strip every set, install the recorded chains
+                               # (prep uses KiCad's bundled python; see stress/README.md)
 ```
 
 Once the corpus exists, drive the whole run with the queue manager and watch

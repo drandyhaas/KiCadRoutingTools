@@ -537,6 +537,10 @@ make them trustworthy -- notably: the baseline is the RECORDED RUNS re-graded
 (not an archived wave), grade both sides on the same terms, compare only boards
 that replayed an IDENTICAL chain, and **a two-board result is not a default
 change** (per-board spread is +-2..3 nets).
+The corpus itself is not redistributed: anyone builds it with
+`tests/stress/build_corpus.py`, from each set's pinned manifest and the
+recorded chains in `tests/stress/corpus_chains/` (RUNBOOK, "Building the
+corpus yourself").
 **Arc outlines barely run in those replays**: the ordinary prep rebuilds Edge.Cuts
 as chained lines. A change to how an arc outline is read adds `--sets set1arc`, 6
 chains whose inputs keep their arcs, which no range includes (RUNBOOK, "Arc

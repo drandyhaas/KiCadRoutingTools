@@ -985,6 +985,58 @@ boards" and "which commit broke connectivity".
   the 2026-09-03 four-way A/B (old engine / new engine old policy / new
   engine new policy), which read -3 real DRC / -11 incomplete nets.
 
+### Building the corpus yourself (contributors, #1918)
+
+The corpus is not redistributed: the boards belong to their authors, and most
+of their repos name no licence. What the repo carries is the recipe -- each
+set's `manifest_setN.json` (upstream repo, path, and a `raw_url` pinned to a
+commit), `fetch_setN.py`, `prep_setN.sh` -- and every board's recorded routing
+chain, in `tests/stress/corpus_chains/<set>/<board>/redo_commands.sh`. From
+those anyone can build a corpus and run the A/B on their own Modal account.
+
+```bash
+pip install modal && modal setup          # once: your Modal account
+python3 tests/stress/build_corpus.py      # sets 1-28 + set1arc into $STRESS_DIR
+```
+
+`build_corpus.py` downloads every board from its upstream repo, strips it with
+KiCad's bundled python (`--kicad-python`, else `$KICAD_PYTHON`, else the
+installed KiCad), and installs the chains into `runs_<set>/<board>/`. Prep runs
+one board at a time, a few seconds each; the whole corpus takes about 3 GB of
+disk (sources included), and `--sets set10,set11` builds some sets. Each set takes `fetch_setN.py`'s download, so a repo that
+has since disappeared drops its boards; they are listed at the end and are
+simply absent.
+
+Then the A/B: one arm at the commit your branch starts from, one at your
+branch, with the same boards left out, then pair them. The image is a clean
+checkout of the commit you launch from, so commit first and run each arm from
+its own checkout (a `git worktree` is the easy way to have both). The first
+arm uploads the corpus to your `kicad-corpus` volume.
+
+```bash
+SLOW=abn6502,covg_patchclamp,mez_rx,butterstick,zynq7020_som
+python3 tests/stress/cloud_replay_sets.py --sets set1-set28,set1arc --label base \
+    --no-baseline --no-local-regrade --limit 0 --exclude $SLOW    # from the base checkout
+python3 tests/stress/cloud_replay_sets.py --sets set1-set28,set1arc --label mine \
+    --no-baseline --no-local-regrade --limit 0 --exclude $SLOW    # from your branch
+python3 tests/stress/pair_arms.py $STRESS_DIR/cloud_base-kc_<sha> $STRESS_DIR/cloud_mine-kc_<sha>
+```
+
+Run `--only plan` first: it spends nothing and checks every board is found
+(on a fresh corpus it cannot price the run, having no replay times yet).
+`--limit 0 --exclude` replaces the default `--limit -5`, which picks the five
+slowest boards from replays you do not have yet. With those five left out, an
+arm of sets 1-28 + set1arc costs a few dollars and finishes in under an hour. If your branch changes `check_drc.py`, regrade the base arm with
+your grader before pairing (`modal_sweep/regrade_arm.py`), so both arms are
+graded the same way.
+
+**Compare your two arms with each other, never with someone else's numbers.**
+Your corpus is close to the maintainer's but not identical: a board may have
+changed upstream since its chain was recorded, a different KiCad writes a
+slightly different stripped board, and every prep gives the board fresh random
+uuids. Within one corpus the comparison is exact, and the rules below apply as
+they do to any A/B (per-board spread is +-2..3 nets).
+
 ### Per-net via sizes: `pernet_via_ab.py`
 
 Per-net via sizes (#530: a net drawn at its own class / rule via) are live only
@@ -1009,7 +1061,7 @@ keep serving the previous code.
 
 ### Arc outlines: `set1arc`
 
-`normalize_boards.py` and `prep_set2.py` rebuild Edge.Cuts as chained lines, so
+`prep_set2.py` rebuilds Edge.Cuts as chained lines, so
 an ordinary corpus input has almost no arc left on its outline, and a replay
 barely sees a change to how an arc outline is read. Those inputs and their
 baselines stay as they are. `set1arc` adds 6 chains beside them, whose inputs keep

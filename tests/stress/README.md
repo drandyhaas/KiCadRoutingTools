@@ -10,29 +10,26 @@ All artifacts live outside the repo in `$STRESS_DIR`
 
 ## Pipeline
 
+Every set N is built the same way, from three tracked files: `manifest_setN.json`
+(each board's upstream repo, path and pinned `raw_url`), `fetch_setN.py` and
+`prep_setN.sh`.
+
 ```bash
-# 1. Download .kicad_pcb files from the curated repo list (needs `gh` auth)
-python3 fetch_boards.py                      # -> $STRESS_DIR/sources/github_set1/
+# 1. Download each board (and its .kicad_pro) from its upstream repo
+python3 fetch_setN.py                        # -> $STRESS_DIR/sources/github_setN/
 
-# 2. Normalize to current KiCad format via pcbnew round-trip
-#    (uses KiCad's bundled Python; rescues old KiCad 4-7 format boards)
-KIPY=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
-$KIPY normalize_boards.py                    # -> $STRESS_DIR/boards_set1/
-
-# 3. Strip routing -> unrouted test corpus
-#    Removes tracks/vias/pour zones (keeps rule areas), regenerates Edge.Cuts
+# 2. Normalize + strip routing, one pcbnew process per board (pcbnew segfaults
+#    on a second board in one process), with KiCad's bundled python. prep_set2.py
+#    removes tracks/vias/pour zones (keeps rule areas), regenerates Edge.Cuts
 #    as plain chained lines, drops non-copper board graphics, and retypes all
-#    copper layers as 'signal'. The last three steps work around known
-#    kicad_parser limitations (see "Parser workarounds" below).
-#    NOTE: run one board per process (pcbnew segfaults on multi-board runs):
-for f in $STRESS_DIR/boards_set1/*.kicad_pcb; do
-  $KIPY strip_routing.py "$(basename ${f%.kicad_pcb})"
-done                                         # -> $STRESS_DIR/boards_unrouted_set1/
-
-# 4. Sanity-check that set 1's SOURCE boards parse with the repo parser
-#    (sources/github_set1/manifest.json; it does not read the stripped corpus)
-python3 validate_boards.py
+#    copper layers as 'signal' (the last three work around kicad_parser
+#    limitations, see "Parser workarounds" below).
+bash prep_setN.sh                            # -> boards_setN/ + boards_unrouted_setN/
 ```
+
+`build_corpus.py` runs both for every set and installs the recorded routing
+chains from `corpus_chains/` into `runs_setN/`, so a corpus A/B can replay them
+(RUNBOOK, "Building the corpus yourself").
 
 ## Running the stress test
 
@@ -388,7 +385,7 @@ rebuilds as lines, built from those boards' own sets by `prep_set1arc.py` from
 `manifest_set1arc.json`, with no fetch; RUNBOOK → "Arc outlines: `set1arc`". No
 `--sets` range includes it. The first four:
 
-- **Set 1** — the original 15 (curated in `fetch_boards.py` / `normalize_boards.py`).
+- **Set 1** — the original 15 (listed in `manifest_set1.json`).
   `spirit_cm5` (6-layer) was dropped and replaced by `lpddr4_testbed`
   (antmicro/lpddr4-testbed, 6-layer BGA LPDDR4). Boards live in
   `boards_unrouted_set1/`; results in `results_set1/`; run-1 baseline in `results_baseline/`.

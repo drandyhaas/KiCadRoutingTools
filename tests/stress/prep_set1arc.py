@@ -5,9 +5,9 @@
     python3 tests/stress/prep_set1arc.py --stage-only # no replay
     python3 tests/stress/prep_set1arc.py --boards a_arc,b_arc
 
-`normalize_boards.py` and `prep_set2.py` rebuild Edge.Cuts as chained lines, so an
+`prep_set2.py` rebuilds Edge.Cuts as chained lines, so an
 ordinary corpus input has almost no arc left on its outline, and a corpus replay
-cannot see a change to how an arc outline is read. Changing them would void every
+cannot see a change to how an arc outline is read. Changing it would void every
 recorded baseline, so this set ADDS a few chains instead and touches nothing else.
 
 For each row of `manifest_set1arc.json`, naming a `source_set` and `source_board`:

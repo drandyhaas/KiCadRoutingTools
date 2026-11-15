@@ -729,6 +729,10 @@ _NOT_A_BASELINE = (
      'prefix quietly exempted both'),
     (r'tests/fixtures/.*\.jsonl?$',
      'fixture inputs a test feeds in, not measurements it took'),
+    (r'tests/stress/corpus_chains/set\d+(arc)?/[^/]+/net_clearances[A-Za-z0-9_]*\.json$',
+     'a recorded routing chain\'s `--net-clearances` file, beside the '
+     'redo_commands.sh that passes it: an input the replay reads, written by '
+     'the stress run, never a measurement (#1918)'),
 )
 
 
