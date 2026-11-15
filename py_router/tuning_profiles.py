@@ -12,6 +12,12 @@ Measured on kicad-cli 10.0.8 (tests/test_1846_time_domain_rules.py):
   * a net's delay is each track's length times its layer's delay, plus each
     via's barrel length (as the length DRC charges it) times the via delay,
     plus its pads' pad-to-die delays;
+  * a `via_overrides` entry replaces that via term for the vias it names: a
+    via whose signal joins it on `signal_layer_from` / `signal_layer_to` and
+    whose own ends are `via_layer_from` / `via_layer_to` takes the entry's
+    `delay` (attoseconds, for the whole via). KiCad looks an entry up with
+    each pair upper layer first, so one stored the other way round never
+    matches (read in 10.0.7's `getViaPropagationDelay`, measured on 10.0.8);
   * a track on a layer the profile has no entry for adds nothing;
   * a net whose class names no profile has a delay of 0 ps, its pads'
     pad-to-die delays included;
@@ -44,7 +50,9 @@ class TuningProfile(NamedTuple):
     time_domain: bool                 # enable_time_domain_tuning
     layer_ps_per_mm: Dict[str, float]  # signal layer -> ps/mm
     via_ps_per_mm: float
-    via_overrides: int                # entries of `via_overrides` (not modelled)
+    #: {(signal layer from, signal layer to, via layer from, via layer to): ps},
+    #: each entry as the project stores it
+    via_overrides: Dict[tuple, float]
 
 
 def read_tuning_profiles(board_path: str
@@ -83,7 +91,7 @@ def read_tuning_profiles(board_path: str
         profiles[str(p['profile_name'])] = TuningProfile(
             str(p['profile_name']), bool(p.get('enable_time_domain_tuning')), layers,
             float(via) / _AS_PER_PS if isinstance(via, (int, float)) else 0.0,
-            len(p.get('via_overrides') or []))
+            _via_overrides(p.get('via_overrides')))
     classes = []
     settings = proj.get('net_settings')
     for c in ((settings if isinstance(settings, dict) else {}).get('classes') or []):
@@ -93,6 +101,20 @@ def read_tuning_profiles(board_path: str
             classes.append((int(prio) if isinstance(prio, int) and name != 'Default'
                             else _DEFAULT_PRIORITY, name, str(c['tuning_profile'])))
     return profiles, sorted(classes)
+
+
+def _via_overrides(entries) -> Dict[tuple, float]:
+    """A profile's `via_overrides` as {(signal from, signal to, via from, via
+    to): ps}. The stored `delay` is attoseconds for the whole via."""
+    out: Dict[tuple, float] = {}
+    for e in entries or []:
+        if not isinstance(e, dict) or not isinstance(e.get('delay'), (int, float)):
+            continue
+        key = tuple(str(e.get(k) or '') for k in ('signal_layer_from', 'signal_layer_to',
+                                                 'via_layer_from', 'via_layer_to'))
+        if all(key):
+            out[key] = float(e['delay']) / _AS_PER_PS
+    return out
 
 
 class DelayModel:
@@ -120,8 +142,7 @@ class DelayModel:
         """(delay in ps, note) of one net as the time-domain DRC measures it.
 
         (None, why) when it cannot be measured: its pads are not joined by
-        track copper (as `net_queries.net_match_length`), or its profile
-        carries via overrides, which are not modelled. (ps, why) when KiCad
+        track copper (as `net_queries.net_match_length`). (ps, why) when KiCad
         gives the net no track or via delay: no profile (0 ps), or time-domain
         tuning off (its pads' pad-to-die delays alone, as kicad-cli 10.0.6
         measures it)."""
@@ -137,17 +158,43 @@ class DelayModel:
             return (net_match_pad_to_die(pcb, net_id, 'total', attr='die_delay'),
                     f"tuning profile '{prof.name}' has time-domain tuning off "
                     f"(only pad-to-die delays count)")
-        if prof.via_overrides:
-            return None, f"tuning profile '{prof.name}' has via overrides (not modelled)"
         segs = [s for s in pcb.segments if s.net_id == net_id]
         vias = [v for v in pcb.vias if v.net_id == net_id]
         pads = (getattr(pcb, 'pads_by_net', None) or {}).get(net_id) or []
         by_layer, via_nm = kicad_net_length_parts_nm(pcb, segs, vias, pads)
         ps = sum(nm / _NM_PER_MM * prof.layer_ps_per_mm.get(layer, 0.0)
                  for layer, nm in by_layer.items())
-        ps += via_nm / _NM_PER_MM * prof.via_ps_per_mm
+        if prof.via_overrides:
+            ps += self._via_delay(prof, segs, vias, pads)
+        else:
+            ps += via_nm / _NM_PER_MM * prof.via_ps_per_mm
         ps += net_match_pad_to_die(pcb, net_id, 'total', attr='die_delay')
         return ps, ''
+
+    def _via_delay(self, prof: TuningProfile, segs, vias, pads) -> float:
+        """The vias' delay (ps) under a profile with via overrides, as KiCad
+        10.0.7 computes it (`TUNING_PROFILE_PARAMETERS_USER_DEFINED::
+        getViaPropagationDelay`, and measured on kicad-cli 10.0.8): a via
+        whose signal joins it on the two layers an override names, and whose
+        own two end layers are the override's, takes the override's delay
+        whole; every other via takes its barrel length times the via delay.
+        KiCad looks the override up with each pair upper layer first, so an
+        entry stored lower layer first never matches (measured)."""
+        from geometry_utils import via_end_layers
+        from net_queries import kicad_net_via_parts_nm, _NM_PER_MM
+        copper = list(self.pcb_data.board_info.copper_layers)
+        rank = {l: i for i, l in enumerate(copper)}
+        total = 0.0
+        for v, (nm, span) in zip(vias, kicad_net_via_parts_nm(self.pcb_data, segs, vias, pads)):
+            ps = nm / _NM_PER_MM * prof.via_ps_per_mm
+            if span is not None:
+                ends = sorted((l for l in via_end_layers(v) if l in rank), key=rank.get)
+                if len(ends) == 2:
+                    hit = prof.via_overrides.get((span[0], span[1], ends[0], ends[1]))
+                    if hit is not None:
+                        ps = hit
+            total += ps
+        return total
 
 
 _MODEL_ATTR = '_tuning_delay_model'

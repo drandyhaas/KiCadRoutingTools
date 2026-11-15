@@ -14,7 +14,10 @@ stackup alone gives 5.53 ps/mm, so the two sources can be told apart.
 Every row of `ROWS` is one variant with the delays kicad-cli 10.0.8 reports
 for P and Q (measured, read off a `length (min 1000ps)` rule's rows):
   * a layer entry's delay is attoseconds per mm;
-  * a via adds the via delay times its barrel length (1.54 mm here);
+  * a via adds the via delay times its barrel length (1.54 mm here), unless
+    the profile has a via override for the two layers the signal joins it on
+    and the via's own two end layers, which then gives the via's whole delay
+    (an entry stored with either pair lower layer first never matches);
   * a track on a layer the profile has no entry for adds nothing;
   * a class that names no profile measures 0 ps, a pad-to-die delay
     included;
@@ -86,6 +89,16 @@ def _bcu_slow_via(proj):
     _profile(proj)['via_prop_delay'] = 20000000
 
 
+def _override(sig_from, sig_to, via_from, via_to, delay):
+    """B.Cu at 7 ps/mm plus one via override, as the project stores it."""
+    def edit(proj):
+        _bcu(proj)
+        _profile(proj)['via_overrides'] = [{
+            'delay': delay, 'signal_layer_from': sig_from, 'signal_layer_to': sig_to,
+            'via_layer_from': via_from, 'via_layer_to': via_to}]
+    return edit
+
+
 def _faster(proj):
     _profile(proj)['layer_entries'][0]['delay'] = 7500000
 
@@ -107,6 +120,19 @@ ROWS = {
     'Q through two vias, B.Cu at 7 ps/mm': (True, _bcu, (120.00, 151.48), False),
     'and the via delay at 20 ps/mm': (True, _bcu_slow_via, (120.00, 194.60), False),
     'Q through two vias, no B.Cu entry': (True, None, (120.00, 102.48), False),
+    # via overrides: a via whose signal joins it on the override's two layers,
+    # and whose own ends are the override's, takes the override's delay whole
+    # (attoseconds); without one each of the two vias adds 1.54 mm x 6 ps/mm
+    'a 5 ps override for F.Cu to B.Cu through an F.Cu-B.Cu via': (
+        True, _override('F.Cu', 'B.Cu', 'F.Cu', 'B.Cu', 5000000), (120.00, 143.00), False),
+    'a 0 ps override': (
+        True, _override('F.Cu', 'B.Cu', 'F.Cu', 'B.Cu', 0), (120.00, 133.00), False),
+    'the override stored lower signal layer first: not applied': (
+        True, _override('B.Cu', 'F.Cu', 'F.Cu', 'B.Cu', 5000000), (120.00, 151.48), False),
+    'stored lower via layer first: not applied': (
+        True, _override('F.Cu', 'B.Cu', 'B.Cu', 'F.Cu', 5000000), (120.00, 151.48), False),
+    'an override for other signal layers: not applied': (
+        True, _override('F.Cu', 'In1.Cu', 'F.Cu', 'B.Cu', 5000000), (120.00, 151.48), False),
     'the class names no profile': (False, _no_profile, (0.00, 0.00), False),
     'time-domain tuning off': (False, _off, (0.00, 0.00), False),
     'a 10 ps pad-to-die delay on Q': (False, None, (120.00, 136.00), True),
