@@ -12,7 +12,8 @@ KiCad's bundled Python.
 
 The list of packages is read from `requirements.txt` at the plugin root, so
 requirements.txt is the single source of truth for both the CLI install path
-(install_plugin.py) and this runtime check.
+(install_plugin.py) and this runtime check. CLI-only packages are excluded from
+the embedded GUI's probes and install prompts.
 
 TOO OLD counts as missing (2026-09-18). The probe used to be `except
 ImportError` and nothing else, and the specifiers were deliberately stripped
@@ -61,6 +62,7 @@ for _d in (_PLUGIN_ROOT, os.path.join(_PLUGIN_ROOT, 'py_router')):
 # re-exported here because that is the name this module's callers and tests
 # already use, and it is the SAME dict object, not a copy.
 from startup_checks import (                                   # noqa: E402
+    BROKEN_ADVICE,
     IMPORT_TESTS,
     Problem,
     dependency_problems,
@@ -82,12 +84,19 @@ from startup_checks import (                                   # noqa: E402
 # separate gate for exactly this reason, and gating the GUI on Pillow here
 # re-made, one layer up, the mistake that function was written to record.
 #
-# ortools is the BUS STEP's (#1355): awx/route_bus.py and the whole route plan
-# with CP-SAT, which nothing the plugin runs imports.
 OPTIONAL_PACKAGES = {
     "Pillow": "board renders and the placement preview",
-    "ortools": "the bus step and the whole route (awx/route_bus.py, awx/whole_route.py)",
 }
+
+# OR-Tools belongs to the standalone bus step (#1355), not this GUI. Its Windows
+# wheels ship DLLs with the same names as KiCad's but incompatible exports:
+# importing it after pcbnew raises WinError 127 while loading ortools.dll.
+# Never load it in the embedded process, even as an optional dependency probe.
+# The standalone bus gate in startup_checks still verifies and loads it.
+# "CLI only" means never imported in KiCad's process: a GUI step that needs one
+# runs its script as a child process, as the Autoroute tab runs autoroute.py
+# (`autoroute_gui.python_for_subprocess`), and the child's own gate checks it.
+CLI_ONLY_PACKAGES = {"ortools"}
 
 
 def _optional_effect(names):
@@ -123,18 +132,19 @@ def _parse_requirements(path):
 
 
 def _required_packages():
-    """Return [(pip_name, import_statement)] derived from requirements.txt."""
+    """Return the GUI's [(pip_name, import_statement)] from requirements.txt."""
     return [(name, IMPORT_TESTS.get(name, f"import {name}"))
-            for name in _parse_requirements(_requirements_path())]
+            for name in _parse_requirements(_requirements_path())
+            if name not in CLI_ONLY_PACKAGES]
 
 
 def _problems():
-    """Every requirements.txt package that is absent OR too old, as Problems.
+    """Every GUI dependency that is absent OR too old, as Problems.
 
     One call, both fronts: `startup_checks.dependency_problems` is the same
     function the CLI gate runs, over the same IMPORT_TESTS and the same floors.
     """
-    names = _parse_requirements(_requirements_path())
+    names = [name for name, _stmt in _required_packages()]
     return dependency_problems(names, floors=requirement_floors())
 
 
@@ -359,8 +369,19 @@ def ensure_dependencies(parent=None):
         # on sys.path -- and restarting KiCad will not fix that, so the path in
         # each line is the thing to act on.
         stale = [p for p in still_missing if p.state == 'outdated']
+        broken = [p for p in still_missing if p.state == 'broken']
         detail = _describe_missing(still_missing, [])
-        if stale:
+        if broken:
+            # Installed, and still failing to load (#1937): `pip install
+            # --upgrade` leaves an up-to-date copy alone, so the install did
+            # nothing for it, and a restart may not either.
+            wx.MessageBox(
+                "These packages are installed but fail to load in this KiCad "
+                f"session:\n\n{detail}\n\n{BROKEN_ADVICE}",
+                "Package fails to load", wx.OK | wx.ICON_ERROR,
+                parent=parent,
+            )
+        elif stale:
             wx.MessageBox(
                 "pip finished, but this Python still imports an older copy:\n\n"
                 f"{detail}\n\n"
