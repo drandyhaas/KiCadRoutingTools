@@ -35,6 +35,8 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 #: profile delays are stored in attoseconds per mm
 _AS_PER_PS = 1e6
+#: profile widths and gaps are stored in nanometres
+_NM_PER_MM = 1e6
 _DEFAULT_PRIORITY = 2147483647
 _WARNED: set = set()
 
@@ -56,6 +58,12 @@ class TuningProfile(NamedTuple):
     #: {(signal layer from, signal layer to, via layer from, via layer to): ps},
     #: each entry as the project stores it
     via_overrides: Dict[tuple, float]
+    #: signal layer -> the track width (mm) the profile gives that layer, and
+    #: for a differential profile the pair gap (mm); a layer whose entry
+    #: stores 0 is absent
+    layer_width_mm: Dict[str, float] = {}
+    layer_gap_mm: Dict[str, float] = {}
+    differential: bool = False        # profile type 1
 
 
 def _is_num(v) -> bool:
@@ -178,17 +186,23 @@ def _read_project(board_path: str):
             break
         if not p.get('profile_name'):
             continue
-        layers = {}
+        layers, widths, gaps = {}, {}, {}
         entries = p.get('layer_entries')
         for e in entries if isinstance(entries, list) else []:
             if isinstance(e, dict) and e.get('signal_layer') and isinstance(
                     e.get('delay'), (int, float)):
                 layers[str(e['signal_layer'])] = float(e['delay']) / _AS_PER_PS
+                # width and diff_pair_gap are stored in nanometres
+                for key, into in (('width', widths), ('diff_pair_gap', gaps)):
+                    v = e.get(key)
+                    if _is_num(v) and v > 0:
+                        into[str(e['signal_layer'])] = float(v) / _NM_PER_MM
         via = p.get('via_prop_delay')
         profiles[str(p['profile_name'])] = TuningProfile(
             str(p['profile_name']), bool(p.get('enable_time_domain_tuning')), layers,
             float(via) / _AS_PER_PS if isinstance(via, (int, float)) else 0.0,
-            _via_overrides(p.get('via_overrides')))
+            _via_overrides(p.get('via_overrides')), widths, gaps,
+            p.get('type') == 1)
     classes = []
     settings = proj.get('net_settings')
     for c in ((settings if isinstance(settings, dict) else {}).get('classes') or []):
@@ -308,6 +322,45 @@ class DelayModel:
 
 
 _MODEL_ATTR = '_tuning_delay_model'
+
+
+def profile_layer_widths(pcb_data, board_path: str = None, net_ids=None,
+                         floor: float = 0.0):
+    """({net id: {signal layer: track width mm}}, {profile name: net count},
+    [(profile, layer, stored mm, floor mm)]) for the nets whose class names a
+    tuning profile that gives a width.
+
+    KiCad 10's tuning profile holds, per signal layer, the track width (and
+    for a differential profile the pair gap) that meets the profile's target
+    impedance on that layer of the stackup; a net class that names the
+    profile is drawn at it. The same impedance is a different width on an
+    outer and an inner layer, which a net class's one `track_width` cannot
+    say. ``floor`` pins a width up (the fab's minimum track); the third value
+    lists what it raised. A layer the profile has no width for is absent, so
+    the caller's next width source decides there."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path:
+        return {}, {}, []
+    model = DelayModel(path, pcb_data)
+    if not model.profiles:
+        return {}, {}, []
+    out, used, raised = {}, {}, []
+    ids = list(net_ids) if net_ids is not None else [n for n in pcb_data.nets if n]
+    for nid in ids:
+        prof = model.profile_of(nid)
+        if prof is None or not prof.layer_width_mm:
+            continue
+        got = {}
+        for layer, w in prof.layer_width_mm.items():
+            if floor and w < floor - 1e-9:
+                row = (prof.name, layer, w, floor)
+                if row not in raised:
+                    raised.append(row)
+                w = floor
+            got[layer] = w
+        out[nid] = got
+        used[prof.name] = used.get(prof.name, 0) + 1
+    return out, used, raised
 
 
 def net_time_profile(pcb_data, net_id) -> Optional[TuningProfile]:

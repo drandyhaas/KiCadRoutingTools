@@ -3501,6 +3501,32 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         for _nid, _bl in (_per_layer or {}).items():
             if _nid not in net_layer_widths_map:
                 net_layer_widths_map[_nid] = dict(_bl)
+        # KiCad 10 tuning profiles: a net whose class names one is drawn on
+        # each layer at the width the profile gives that layer, under the
+        # same two conditions and after a .kicad_dru rule's own layer widths.
+        try:
+            from tuning_profiles import profile_layer_widths
+            from fab_tiers import fab_floor_min as _pf_floor
+            _pf_ncl = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
+            _pf_w, _pf_used, _pf_raised = profile_layer_widths(
+                pcb_data, input_file,
+                floor=_pf_floor(_pf_ncl).get('track_width', 0.0))
+        except (OSError, ValueError) as _pfe:
+            print(f"Warning: tuning-profile widths unavailable ({_pfe}).")
+            _pf_w, _pf_used, _pf_raised = {}, {}, []
+        _pf_n = 0
+        for _nid, _bl in _pf_w.items():
+            if _nid not in net_layer_widths_map:
+                net_layer_widths_map[_nid] = dict(_bl)
+                _pf_n += 1
+        if _pf_n:
+            print(f"Tuning-profile widths: {_pf_n} net(s) are drawn at their "
+                  f"profile's width on each layer ("
+                  + ", ".join(f"{_k}: {_v}" for _k, _v in sorted(_pf_used.items()))
+                  + ").")
+            for _pn, _pl, _pw0, _pfl in _pf_raised:
+                print(f"  profile '{_pn}' {_pl}: {_pw0:g} mm is below the fab "
+                      f"floor, drawn at {_pfl:g} mm")
     if net_layer_widths_map:
         config_kwargs['net_layer_widths'] = net_layer_widths_map
     # #530 decision 4: per-net via geometry -> config.net_via_sizes (the
