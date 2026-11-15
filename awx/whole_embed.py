@@ -1097,8 +1097,13 @@ def _isotonic(z):
 
 def spread_edges():
     """on each cell edge where a run was read out of a bar, or two stand on one place: the runs in the order the
-    reference has them (RAW; two at one place as the braid orders them), a pitch apart where the edge has the room
-    (evenly where it has not), each as near its own place as that leaves it. -> the edges spread"""
+    reference has them (RAW) -- but two of them read within a pitch of each other AS THE BRAID ORDERS THEM, wherever
+    it has the two side by side -- a pitch apart where the edge has the room (evenly where it has not), each as near
+    its own place as that leaves it. The reference's lines that near each other are no order: a frame's lanes round
+    their array's corner lie inside its bar on top of each other, and two of them stood there the other way round
+    over a stretch -- a crossing and a crossing back, hidden in the bar. Read by their places, the two were put on
+    their cell edges in that order; the rounds, which pass nothing through anything, kept them crossed twice, and the
+    round's audit found two lanes of one layer 0.006 mm apart at the teeth. -> the edges spread"""
     import functools
     done = 0
     for (L_, a, b), lst in edge_lists().items():
@@ -1107,11 +1112,12 @@ def spread_edges():
 
         def cmp(x, y):
             dx = can(x) - can(y)
-            if abs(dx) > 1e-4 or x[0][0] == y[0][0]:
-                return -1 if dx < 0 else 1 if dx > 0 else 0
+            by_place = -1 if dx < 0 else 1 if dx > 0 else 0
+            if abs(dx) > P_MIN or x[0][0] == y[0][0]:
+                return by_place
             bit = order_bit(x[0][0], x[0][1], y[0][0], y[0][1])     # +1: y on x's left
             if not bit:
-                return 0
+                return by_place
             return -1 if ((bit > 0) == x[2]) else 1
         lst.sort(key=functools.cmp_to_key(cmp))
         tight = any(e_[1]['psh'] for e_ in lst) or any(can(y) - can(x) < 2 * SIDE_READ and x[0][0] != y[0][0]

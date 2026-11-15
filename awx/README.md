@@ -999,6 +999,25 @@ buses one after another only.
    the loop's audits to the lay, plans round the other buses' lanes as they
    publish them (`joint_lanes`: plans, laid boards and each bus's own bench
    copper, in the board's frame).
+   The buses **lay in turn** (`whole_route.joint_lay_turn`): one bus lays at
+   a time, and a bus whose loop did not pass lays after every other bus has
+   laid, two such buses in the order of their names. Such a bus lays the
+   plan its loop held, its best round's, which it never published: the
+   others had planned round its last round's lanes. Laid at the same time,
+   a bus that passed went round the fourth round's lanes of one that then
+   laid its second, and a via of one came 0.064 mm short of a track of the
+   other in one run of two.
+   A bus whose loop did not pass, and that waited for another bus's lay,
+   **runs its loop again** before it lays (`JOINT_LOOP_AGAIN`, on): from its
+   best round's solve, that round's cuts held, with the buses that have laid
+   standing as copper in its re-solves (`joint_final`). While another bus
+   still routes, its lanes move from round to round, and a finding against
+   them is settled in one place and met in another. A memory bus's loop
+   found 7, 1, 5 and 2 places in four rounds beside a bus still routing and
+   stopped; run again on that bus's laid copper, its second round's solve
+   passed in its first round, in under two minutes. The loop it ran again
+   stands in place of the first where it passes or its best round has no
+   more findings.
 4. **Merged.** OUT is the first bus's board with each other bus's nets'
    copper taken from its own board: those it routed, and those it put back
    as they came, whose escapes keep only the pieces its lanes still clear.
@@ -2143,8 +2162,15 @@ polish; off by default. What it still lacks is in the
   along its lane that change stands is new, and the solve's sides of a slid
   via are no longer held.
 - **Where the layout it starts from cannot stand.** Inside a bar of fixed
-  copper its line is read out to the free space, the runs kept in the order
-  that line has them and put a pitch apart. Where it crosses fixed copper
+  copper its line is read out to the free space and the runs put a pitch
+  apart. Two runs read more than a pitch apart on a cell's edge keep the
+  order that line has them in; two read within a pitch of each other take
+  the order the solve's braid gives them (`order_bit`), since lines that
+  lie on top of each other inside a bar say nothing of their order. Round
+  an array's corner two lanes of one layer lay so, the other way round over
+  one stretch: ordered by where the lines stood, they crossed and crossed
+  back inside the bar, no round could part them, and the gate read the two
+  as teeth short of their pitch. Where it crosses fixed copper
   that no free cells of the layer lead round -- the two sides are separate
   pieces of that layer's free space -- the run is read as it stands, with a
   **breach**: two fixed points either side of the copper. No geometry can
@@ -3103,12 +3129,19 @@ channels first, and the other escapes leave round it.
   front is read straight ahead of its exit (`whole_ends._front`), and a
   pocket's mouth holds its count of lanes, but nothing counts the lanes that
   turn and ride along a face on a passive's layer against the room between
-  that face and the passive, nor the lanes sent under a part through one gap
-  of its own row of berth vias. On zynq7020 both buses' loops still stop with
-  their ends crowded there (two lanes under the PHY through one gap of its
-  berth vias; two teeth of the memory bus) and the board is clean because
-  the laying recovers. The idea: such a face channel, and each gap of a row
-  of berth vias, held to its count of lanes in the ends model, as a mouth is.
+  that face and the passive. The idea: such a face channel held to its count
+  of lanes in the ends model, as a mouth is.
+- **A via's room in the solve's passages.** The passage rows
+  (`whole_passages.Census`) hold each gap of the fixed copper to its count of
+  lanes at the lane pitch. They count neither the bus's own vias among that
+  copper nor a change of layer the solve plans inside a gap, whose via needs
+  its room there on every layer. On zynq7020 the three-part bus's loop still
+  stops with its ends crowded: two lanes are planned on one inner layer
+  through a 0.45 mm gap between two of the PHY's berth vias, which holds one.
+  The idea: a census that measures a via's room (the real pads and the bus's
+  own stubs and vias, not the arrays' grown boxes), the bus's own vias among
+  the fixed copper, and each planned change counted at a via's width in every
+  layer's row of the gap it stands in.
 
 **Later, once the basics route real boards:**
 

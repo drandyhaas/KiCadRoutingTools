@@ -860,8 +860,8 @@ def loop(solve, out, rounds, env, log, try_lay=None):
             # still routing coupled there, not copper, and those ended now read, as a round's first solve: joint_sync.
             # As copper, another bus's lanes as it last published them -- moved on since -- were hard bans on this
             # bus's via ends and via cuts at its lanes, and the re-solve had no plan)
-            soft = {**soft, 'JOINT_FOREIGN': 'finished', 'JOINT_FINISHED': ','.join(sorted(
-                f_[:-len('.finished')] for f_ in os.listdir(env['JOINT_DIR']) if f_.endswith('.finished')))}
+            # (...and one that has LAID its round, joint_final: its loop is over, its copper there)
+            soft = {**soft, 'JOINT_FOREIGN': 'finished', 'JOINT_FINISHED': ','.join(joint_final(env))}
         import route_layers
         if len(route_layers.layers()) > 2 and (awx_settings.get('LOOP_HOLD') or '1') == '1':
             # (more routing layers than two: FIRST the round's REPAIR -- the re-solve with every lane the round's AUDIT
@@ -2481,6 +2481,108 @@ def joint_step_sync(env, pos, tag, say):
         time.sleep(5)
 
 
+def joint_lay_turn(env, r, passed, say):
+    """(JOINT_DIR) round r's LAYS IN TURN: one bus lays at a time (DIR/lay.lock, the bus holding it named inside), so
+    a lay reads, of every bus that laid before it, the copper it laid -- and a bus whose loop did NOT pass lays after
+    every other bus has laid its round (DIR/end.{r}/PEER.laid; a peer whose whole route has ended, or one in a later
+    round, has), two such buses in the order of their names (DIR/end.{r}/BUS.json: how its loop ended). Its plan is
+    the one its loop held, a round's the other buses' plans have moved on from and none of them was shown, and it has
+    its loop's other rounds to lay in its place (lay_rounds) where a loop that passed has the one plan. Two buses
+    laying at once read each other's last plan, not each other's copper: a bus that passed read the round-4 lanes of
+    one that then laid its held round 2, and the two boards, each clean, merged with a via of one 0.064 mm short of a
+    track of the other -- or not, by which of the two was the faster that day. Returns (what ends the turn --
+    joint_lay_done, the lock given up -- and, for a loop that did not pass, the buses that have laid since it ended)"""
+    jd, bus = env['JOINT_DIR'], env['JOINT_BUS']
+    peers = [p_ for p_ in (env.get('JOINT_PEERS') or '').split(',') if p_ and p_ != bus]
+    ed = os.path.join(jd, f'end.{int(r)}')
+    os.makedirs(ed, exist_ok=True)
+    tmp = os.path.join(ed, f'.{bus}.json')
+    json.dump({'bus': bus, 'passed': bool(passed)}, open(tmp, 'w'))
+    os.replace(tmp, os.path.join(ed, f'{bus}.json'))
+
+    def laid(p_):
+        if os.path.isfile(os.path.join(ed, f'{p_}.laid')) or os.path.isfile(os.path.join(jd, f'{p_}.finished')):
+            return True
+        try:
+            return int(json.load(open(os.path.join(jd, f'pos.{p_}.json')))[0]) > int(r)
+        except (OSError, ValueError, IndexError, TypeError):
+            return False
+
+    def held(p_):
+        try:
+            return not json.load(open(os.path.join(ed, f'{p_}.json'))).get('passed')
+        except (OSError, ValueError):
+            return False
+    t0 = time.time()
+    since = [p_ for p_ in peers if not laid(p_)]              # (the buses not laid yet when this one's loop ended)
+    if not passed:
+        while not all(laid(p_) or (p_ > bus and held(p_)) for p_ in peers):
+            if time.time() - t0 > JOINT_WAIT:
+                say(f'  negotiation: the other buses\' lays not there after {JOINT_WAIT} s -- laid without them')
+                break
+            time.sleep(5)
+        since = [p_ for p_ in since if laid(p_)]
+        if since:
+            say(f'  negotiation: {", ".join(since)} laid since this bus\'s loop ended ({time.time() - t0:.0f} s)')
+    lock = os.path.join(jd, 'lay.lock')
+    mine = False
+    while not mine:
+        try:
+            fd_ = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd_, bus.encode())
+            os.close(fd_)
+            mine = True
+        except FileExistsError:
+            if time.time() - t0 > JOINT_WAIT:
+                say(f'  negotiation: another bus\'s lay not over after {JOINT_WAIT} s -- laid beside it')
+                break
+            time.sleep(2)
+
+    def done():
+        joint_lay_done(env, r)
+        if mine and os.path.isfile(lock):
+            os.remove(lock)
+    return done, ([] if passed else since)
+
+
+def joint_final(env):
+    """(JOINT_DIR) the buses whose copper STANDS for a re-solve of this bus's round: those whose whole route has
+    ended (DIR/BUS.finished) and those that have laid this round (DIR/end.{JOINT_ROUND}/BUS.laid), sorted"""
+    jd = env['JOINT_DIR']
+    out = {f_[:-len('.finished')] for f_ in os.listdir(jd) if f_.endswith('.finished')}
+    ed = os.path.join(jd, f"end.{int(env.get('JOINT_ROUND') or 0)}")
+    if os.path.isdir(ed):
+        out |= {f_[:-len('.laid')] for f_ in os.listdir(ed) if f_.endswith('.laid')}
+    return sorted(out - {env.get('JOINT_BUS')})
+
+
+def joint_lay_done(env, r):
+    """(JOINT_DIR) this bus's round r laid, or with nothing to lay: said (DIR/end.{r}/BUS.laid) for the buses that
+    lay after it (joint_lay_turn)"""
+    if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
+        ed = os.path.join(env['JOINT_DIR'], f'end.{int(r)}')
+        os.makedirs(ed, exist_ok=True)
+        open(os.path.join(ed, f'{env["JOINT_BUS"]}.laid'), 'w').close()
+
+
+def joint_laid_since(env, t):
+    """(JOINT_DIR) whether another bus has published a LAID board since `t` (joint_lanes: DIR/lanes/PEER.json, its
+    'laid')"""
+    jd, bus = env.get('JOINT_DIR'), env.get('JOINT_BUS')
+    d = os.path.join(jd or '', 'lanes')
+    if not (jd and bus and os.path.isdir(d)):
+        return False
+    for f in sorted(os.listdir(d)):
+        if not f.endswith('.json') or f.startswith('.') or f == f'{bus}.json':
+            continue
+        try:
+            if os.stat(os.path.join(d, f)).st_mtime > t and json.load(open(os.path.join(d, f))).get('laid'):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def joint_loop_sync(env, pos, solve, say):
     """(JOINT_DIR) a loop's re-solve one COUPLED solve, every bus's loop in step: this bus's own re-solve `solve`, just
     made (its model's every variable beside it, SOLVE.vals.json), asked for at the exchange `pos` (round, loop, i) with
@@ -3076,6 +3178,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 + (f" (no room for the crossings of {', '.join(crowded)})" if crowded else ''))
             if env.get('JOINT_DIR'):
                 joint_pos(env, (r, LOOP_END, LOOP_END))
+                joint_lay_done(env, r)
         else:
             J = json.load(open(solve))
             proved = J.get('proved', True)
@@ -3132,6 +3235,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             tried = {}
 
             def try_lay_(plan_i, i_):
+                tried['t0'] = time.time()
                 tried['res'] = lay(r, d, plan_i, plan_bench(loopd, plan_i, bench), sub, tag=f'try{i_}', quiet=True)
                 return tried['res']
             tl_ = try_lay_ if (awx_settings.get('LOOP_TRY_LAY') or '1') == '1' else None
@@ -3167,38 +3271,82 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             # (the round's loops ended: past every loop exchange of the round, for a bus still in one -- joint_pos)
             if env.get('JOINT_DIR'):
                 joint_pos(env, (r, LOOP_END, LOOP_END))
-            # a loop that did not pass is laid all the same, from the plan it held (held_plan): a lane it cannot lay
-            # stays open, and the round's result stands against the others'
-            plan = os.path.join(loopd, 'plan.json') if rc == 0 else held_plan(loopd, env)
-            if rc != 0 and plan is not None:
-                plan = pick_by_snap(loopd, env, plan, say)
-            if rc != 0:
-                say(f"  the loop did not pass -- laid from the plan it held: "
-                    f"{os.path.relpath(plan, d) if plan else 'none'}")
-            try_ = rc != 0 and plan is not None and lay_tries() != 1
-            tr_ = tried.get('res') if rc == 0 else None
-            if tr_ is not None and tr_['open'] == 0 and tr_['drc'] == 0:
-                # (the loop passed BY its plan's lay, LOOP_TRY_LAY: that lay is the round's -- said and published as
-                # an unquiet lay says and publishes itself)
-                for nm in ('seq.kicad_pcb', 'seq.kicad_pro', 'route_seq.log', 'conn.log', 'drc.log'):
-                    b_, e_ = os.path.splitext(nm)
-                    if os.path.isfile(os.path.join(d, f"{b_}{tr_['tag']}{e_}")):
-                        shutil.copyfile(os.path.join(d, f"{b_}{tr_['tag']}{e_}"), os.path.join(d, nm))
-                res = dict(tr_, board=os.path.join(d, 'seq.kicad_pcb'))
-                say(res['grade'])
-                joint_publish(env, None, f'round {r} laid', board=res['board'], nets=nets_all)
-            else:
-                res = lay(r, d, plan, plan_bench(loopd, plan, bench), sub, quiet=try_) if plan else None
-            if try_:
-                res = lay_rounds(loopd, d, env, res, lambda hp, tag: lay(r, d, hp, plan_bench(loopd, hp, bench), sub,
-                                                                          tag=tag, quiet=True), say, plan=plan)
-                if res is not None:
+            # (negotiated buses: the round's lay IN TURN -- joint_lay_turn: one bus's at a time, and a loop that did not
+            # pass after every other bus's, so the plan it held, and the rounds laid in its place, are laid round the
+            # copper the others laid)
+            turn_, since_ = joint_lay_turn(env, r, rc == 0, say) if env.get('JOINT_DIR') and env.get('JOINT_BUS') \
+                else (None, [])
+            try:
+                # ...and A LOOP THAT DID NOT PASS, RUN AGAIN once the buses it was routed beside have laid: from
+                # where it got (loop_seeds: its best round's solve, every cut it held), their copper standing where
+                # their lanes moved under it round after round -- each coupled re-solve settles the two buses' lanes
+                # where they meet as laid out, and the lanes laid out again meet somewhere else: a memory bus's rounds
+                # found 7, 1, 7 and 1 places against the other bus's lanes and stopped as not converging, the round
+                # the other bus passed in; run again on that bus's laid copper, its second round's solve passed in
+                # its first round. Its plan where it passes; else the better of the two loops' held
+                if since_ and (awx_settings.get('JOINT_LOOP_AGAIN') or '1') == '1':
+                    try:
+                        solve_, seeds_ = loop_seeds(loopd)
+                    except (OSError, ValueError, KeyError):
+                        solve_ = None
+                    if solve_ is not None and os.path.isfile(solve_):
+                        loopf_ = os.path.join(d, 'loop_final')
+                        say(f"  the loop again on the other buses' laid copper from {os.path.basename(solve_)}, its "
+                            f"{len([c_ for c_ in seeds_['SEED_CUTS'].split(',') if c_])} cut file(s) held")
+                        if env.get('BENCH0'):
+                            bench = relayed(d, env['BENCH0'], json.load(open(solve_)), env, say, name='fo_layers_final')
+                        with open(os.path.join(d, 'loop_final.log'), 'w') as lf:
+                            tried.clear()
+                            rcf_ = loop(solve_, loopf_, loop_rounds(),
+                                        {**lenv(), **seeds_, 'JOINT_LOOP': '3'}, Log(lf), try_lay=tl_)
+                        for ln in grep(os.path.join(d, 'loop_final.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
+                            say(ln[:170])
+                        say(f"  the loop again on the other buses' laid copper: exit {rcf_} at {secs()} s")
+                        joint_pos(env, (r, LOOP_END, LOOP_END))
+                        best_ = lambda ld_: (json.load(open(os.path.join(ld_, 'best.json'))).get('score', 10 ** 9)
+                                             if os.path.isfile(os.path.join(ld_, 'best.json')) else 10 ** 9)
+                        if rcf_ == 0 or best_(loopf_) <= best_(loopd):
+                            loopd, rc = loopf_, rcf_
+                # a loop that did not pass is laid all the same, from the plan it held (held_plan): a lane it cannot
+                # lay stays open, and the round's result stands against the others'
+                plan = os.path.join(loopd, 'plan.json') if rc == 0 else held_plan(loopd, env)
+                if rc != 0 and plan is not None:
+                    plan = pick_by_snap(loopd, env, plan, say)
+                if rc != 0:
+                    say(f"  the loop did not pass -- laid from the plan it held: "
+                        f"{os.path.relpath(plan, d) if plan else 'none'}")
+                try_ = rc != 0 and plan is not None and lay_tries() != 1
+                tr_ = tried.get('res') if rc == 0 else None
+                if tr_ is not None and joint_laid_since(env, tried.get('t0') or 0.0):
+                    # (...laid before another bus laid its round: laid again, round that bus's copper)
+                    say("  the plan's lay stood before another bus laid -- laid again")
+                    tr_ = None
+                if tr_ is not None and tr_['open'] == 0 and tr_['drc'] == 0:
+                    # (the loop passed BY its plan's lay, LOOP_TRY_LAY: that lay is the round's -- said and published
+                    # as an unquiet lay says and publishes itself)
+                    for nm in ('seq.kicad_pcb', 'seq.kicad_pro', 'route_seq.log', 'conn.log', 'drc.log'):
+                        b_, e_ = os.path.splitext(nm)
+                        if os.path.isfile(os.path.join(d, f"{b_}{tr_['tag']}{e_}")):
+                            shutil.copyfile(os.path.join(d, f"{b_}{tr_['tag']}{e_}"), os.path.join(d, nm))
+                    res = dict(tr_, board=os.path.join(d, 'seq.kicad_pcb'))
                     say(res['grade'])
-                    # (the lay KEPT published, as an unquiet lay publishes itself: every lay here was quiet, and the
-                    # other buses went on reading this one's last plan, not its copper)
                     joint_publish(env, None, f'round {r} laid', board=res['board'], nets=nets_all)
-            if plan and res is None:
-                say("  no board laid from the plan (route_seq.log)")
+                else:
+                    res = lay(r, d, plan, plan_bench(loopd, plan, bench), sub, quiet=try_) if plan else None
+                if try_:
+                    res = lay_rounds(loopd, d, env, res,
+                                     lambda hp, tag: lay(r, d, hp, plan_bench(loopd, hp, bench), sub, tag=tag,
+                                                         quiet=True), say, plan=plan)
+                    if res is not None:
+                        say(res['grade'])
+                        # (the lay KEPT published, as an unquiet lay publishes itself: every lay here was quiet, and
+                        # the other buses went on reading this one's last plan, not its copper)
+                        joint_publish(env, None, f'round {r} laid', board=res['board'], nets=nets_all)
+                if plan and res is None:
+                    say("  no board laid from the plan (route_seq.log)")
+            finally:
+                if turn_ is not None:
+                    turn_()
         del env['BENCH']
         env.pop('VIA_ENDS', None)
         env.pop('BENCH0', None)
