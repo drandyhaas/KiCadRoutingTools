@@ -1183,31 +1183,39 @@ ends) that leaves a costly ball has the lanes nearest it searched once more,
 as an epoch. Every solve is bounded by deterministic batches, never a clock,
 so a board and its settings give one answer.
 
-**What it costs,** the group's ends alone, on a Mac sharing its cores with
-two to four other runs (peak memory as macOS counts it, the process's
-footprint, measured on the model run alone on the step's captures, which
-gives the same ends):
+**What it costs,** the group's ends within each board's bus step below. Peak
+memory is as macOS counts it, the process's footprint, measured on the model
+run alone on the step's captures (which gives the same ends), beside three
+to six other runs:
 
 | board | buses, lanes | the group's ends | peak memory |
 |---|---|---|---|
-| kintex | 1 bus, 32 lanes | 203 s | 2.1 GB |
-| h616 | 1 bus, 41 lanes | 402 s | 1.9 GB |
-| orangecrab | 1 bus, 47 lanes | 1251 s | 5.6 GB |
-| zynq7020 | 2 buses, 75 lanes | 1874 s | 3.1 GB |
+| kintex | 1 bus, 32 lanes | 187 s | 2.5 GB |
+| h616 | 1 bus, 41 lanes | 439 s | 1.9 GB |
+| orangecrab | 1 bus, 47 lanes | 967 s | 5.0 GB |
+| zynq7020 | 2 buses, 75 lanes | 1435 s | 3.4 GB |
+| h3 | 1 bus, 50 lanes | 299 s | 1.0 GB |
+| sdi | 4 buses, 101 lanes | 3477 s | not measured |
 
 The bus step on those ends, `tests/stress/bus_boards.py`, every bus in one
-round:
+round. Every bus's loop passes (one of sdi's when run again, once the bus
+beside it had laid): none is laid from a plan its loop held.
 
 | board | bus nets | open | DRC | walled | vias | copper | the step |
 |---|---|---|---|---|---|---|---|
-| kintex | 34 | 0 | 0 | 0 | 34 | 508 mm | 303 s |
-| h616 | 45 | 0 | 0 | 0 | 70 | 845 mm | 499 s |
-| orangecrab | 50 | 0 | 0 | 0 | 80 | 735 mm | 1621 s |
-| zynq7020 | 78 | 0 | 0 | 0 | 137 | 1389 mm | 2672 s |
-| h3 | 53 | 0 | 0 | 0 | 114 | 1701 mm | 1466 s |
+| kintex | 34 | 0 | 0 | 0 | 34 | 508 mm | 307 s |
+| h616 | 45 | 0 | 0 | 0 | 70 | 845 mm | 546 s |
+| orangecrab | 50 | 0 | 0 | 0 | 80 | 735 mm | 1311 s |
+| zynq7020 | 78 | 0 | 0 | 0 | 137 | 1386 mm | 2048 s |
+| h3 | 53 | 0 | 0 | 0 | 114 | 1707 mm | 687 s |
+| sdi | 119 | 0 | 0 | 0 | 235 | 3281 mm | 6008 s |
+
+The times are of a Mac's twelve cores shared between the boards run at
+once: kintex, h616 and orangecrab with a fourth board; zynq7020 and h3 each
+alone; sdi beside one other.
 
 ```bash
-python3 tests/stress/bus_boards.py --cases kintex,h616,orangecrab,zynq7020,h3 --rounds 1 \
+python3 tests/stress/bus_boards.py --cases kintex,h616,orangecrab,zynq7020,h3,sdi --rounds 1 \
     --set GROUP_FLOW=1 --set GEO_EMBED=1 --set SOLVE_LAYER_WALLS=1
 ```
 
