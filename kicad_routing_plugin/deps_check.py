@@ -62,6 +62,7 @@ for _d in (_PLUGIN_ROOT, os.path.join(_PLUGIN_ROOT, 'py_router')):
 # re-exported here because that is the name this module's callers and tests
 # already use, and it is the SAME dict object, not a copy.
 from startup_checks import (                                   # noqa: E402
+    BROKEN_ADVICE,
     IMPORT_TESTS,
     Problem,
     dependency_problems,
@@ -92,6 +93,9 @@ OPTIONAL_PACKAGES = {
 # importing it after pcbnew raises WinError 127 while loading ortools.dll.
 # Never load it in the embedded process, even as an optional dependency probe.
 # The standalone bus gate in startup_checks still verifies and loads it.
+# "CLI only" means never imported in KiCad's process: a GUI step that needs one
+# runs its script as a child process, as the Autoroute tab runs autoroute.py
+# (`autoroute_gui.python_for_subprocess`), and the child's own gate checks it.
 CLI_ONLY_PACKAGES = {"ortools"}
 
 
@@ -365,8 +369,19 @@ def ensure_dependencies(parent=None):
         # on sys.path -- and restarting KiCad will not fix that, so the path in
         # each line is the thing to act on.
         stale = [p for p in still_missing if p.state == 'outdated']
+        broken = [p for p in still_missing if p.state == 'broken']
         detail = _describe_missing(still_missing, [])
-        if stale:
+        if broken:
+            # Installed, and still failing to load (#1937): `pip install
+            # --upgrade` leaves an up-to-date copy alone, so the install did
+            # nothing for it, and a restart may not either.
+            wx.MessageBox(
+                "These packages are installed but fail to load in this KiCad "
+                f"session:\n\n{detail}\n\n{BROKEN_ADVICE}",
+                "Package fails to load", wx.OK | wx.ICON_ERROR,
+                parent=parent,
+            )
+        elif stale:
             wx.MessageBox(
                 "pip finished, but this Python still imports an older copy:\n\n"
                 f"{detail}\n\n"
