@@ -68,7 +68,8 @@ def bundled_scripts(root=None):
             path.relative_to(root).as_posix()
             for directory in directories
             for path in (root / directory).rglob('*.py')
-        ) | {'krt_capabilities.py', '.claude/skills/plan-pcb-routing/scripts/route_plan_check.py'}
+        ) | {'krt_capabilities.py', 'check_complete.py',
+             '.claude/skills/plan-pcb-routing/scripts/route_plan_check.py'}
     return scripts
 
 

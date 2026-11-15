@@ -104,11 +104,14 @@ def _run(args, timeout=3600):
     (see the finally in main) -- which loses the verdict on exactly the boards
     a close-out exists for.
     """
+    run_process = subprocess.run
+    if getattr(sys, 'frozen', False):
+        from krt_standalone.process import run as run_process
     try:
-        p = subprocess.run(PY + args, capture_output=True, text=True,
-                           encoding='utf-8', errors='replace', cwd=ROOT,
-                           timeout=timeout,
-                           env=dict(os.environ, KRT_NO_BANNER='1'))
+        p = run_process(PY + args, capture_output=True, text=True,
+                        encoding='utf-8', errors='replace', cwd=ROOT,
+                        timeout=timeout,
+                        env=dict(os.environ, KRT_NO_BANNER='1'))
     except subprocess.TimeoutExpired:
         return TIMED_OUT, f'timed out after {timeout}s'
     return p.returncode, (p.stdout or '') + (p.stderr or '')

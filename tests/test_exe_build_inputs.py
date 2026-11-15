@@ -39,6 +39,8 @@ def test_metadata_manifest_is_reproducible_and_scoped():
         assert scripts['schema'] == 1
         assert 'py_router/route.py' in scripts['scripts']
         assert 'krt_capabilities.py' in scripts['scripts']
+        assert 'check_complete.py' in scripts['scripts']
+        assert '.claude/skills/plan-pcb-placement/scripts/grade.py' in scripts['scripts']
         assert info['schema'] == 1
         assert info['platform'] == 'windows-x86_64'
         assert info['native']['version'] == '0.23.7'

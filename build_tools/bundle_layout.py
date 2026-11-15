@@ -15,7 +15,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIRS = ('py_router', 'py_placer', 'py_tools', 'awx', 'krt_standalone')
-ROOT_SOURCES = ('krt_capabilities.py',)
+ROOT_SOURCES = ('krt_capabilities.py', 'check_complete.py')
 RESOURCE_SUFFIXES = frozenset({'.json', '.txt', '.yaml', '.yml', '.csv', '.ttf', '.otf'})
 THIRD_PARTY_ROOTS = frozenset({
     'numpy', 'scipy', 'shapely', 'PIL', 'ortools', 'pandas', 'google',
