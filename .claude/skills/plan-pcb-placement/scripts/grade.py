@@ -118,7 +118,10 @@ _usage = []
 
 
 def _run(argv):
-    p = subprocess.run([sys.executable, '-X', 'utf8'] + [str(a) for a in argv],
+    run_process = subprocess.run
+    if getattr(sys, 'frozen', False):
+        from krt_standalone.process import run as run_process
+    p = run_process([sys.executable, '-X', 'utf8'] + [str(a) for a in argv],
                        cwd=ROOT, capture_output=True, text=True,
                        encoding='utf-8', errors='replace')
     if p.returncode == 2:
