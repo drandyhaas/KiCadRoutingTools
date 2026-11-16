@@ -164,6 +164,8 @@ REGISTRY = {
 
     # --- reporting only: elapsed accumulated or printed ---------------------
     'py_router/route.py': ('reporting', 'phase timing prints'),
+    'py_router/route_portfolio.py': (
+        'reporting', "each attempt's and the run's elapsed seconds in portfolio.json (#1941)"),
     'py_placer/placement/decap_repair.py': (
         'reporting', "the repair's elapsed seconds in its record (#1382)"),
     'py_placer/placement/escape_flow.py': (
