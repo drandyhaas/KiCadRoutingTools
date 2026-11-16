@@ -844,7 +844,6 @@ def exact_clusters(pcb_data, net_id: int, islands,
     is not a legal start for a track, a copper point is.
     len(clusters) > 1 => KiCad demands links.
     """
-    import math as _m
     from kicad_oracle import _net_track_components, _cluster_points
     from kicad_parser import pad_is_plated_through
 
@@ -875,12 +874,32 @@ def exact_clusters(pcb_data, net_id: int, islands,
         if ra != rb:
             parent[rb] = ra
 
-    _samples_cache = {}
+    _edges_cache = {}
 
-    def _island_samples(ii):
-        if ii not in _samples_cache:
-            _samples_cache[ii] = sample_poly_edges(islands[ii][1], cap=2000)
-        return _samples_cache[ii]
+    def _island_touches_pad(ii, p, reach):
+        # (the island's edges whose box comes within `reach` of the pad's
+        # centre, each measured exactly against the pad's copper)
+        import numpy as _np
+        from check_drc import segment_pad_gap
+        if ii not in _edges_cache:
+            poly = islands[ii][1]
+            a = _np.asarray(poly, float)
+            b = _np.roll(a, -1, axis=0)
+            _edges_cache[ii] = (a, b, _np.minimum(a, b), _np.maximum(a, b),
+                                a.min(axis=0), a.max(axis=0))
+        a, b, lo, hi, plo, phi = _edges_cache[ii]
+        px, py = p.global_x, p.global_y
+        if px + reach < plo[0] or px - reach > phi[0] \
+                or py + reach < plo[1] or py - reach > phi[1]:
+            return False
+        near = _np.nonzero((hi[:, 0] >= px - reach) & (lo[:, 0] <= px + reach)
+                           & (hi[:, 1] >= py - reach)
+                           & (lo[:, 1] <= py + reach))[0]
+        for k in near:
+            if segment_pad_gap(a[k, 0], a[k, 1], b[k, 0], b[k, 1],
+                               p) <= tolerance:
+                return True
+        return False
 
     # Island <-> copper components.
     for ii, (layer, poly) in enumerate(islands):
@@ -917,12 +936,19 @@ def exact_clusters(pcb_data, net_id: int, islands,
             if root is not None:
                 union(pnode, ('c', root))
                 break
-        # Pad <-> island: NEVER by center containment -- a thermal-relief
-        # connection excludes the pad area from the filled polygon (the
-        # spokes land on the pad ring), so the center tests OUTSIDE the
-        # fill. Touch = any island boundary sample within the pad's copper
-        # reach (+tol). zone_connection=none pads stay separate for free:
-        # their fill keeps full clearance, beyond the reach test.
+        # Pad <-> island: NEVER by center containment alone -- a
+        # thermal-relief connection excludes the pad area from the filled
+        # polygon (the spokes land on the pad ring), so the center tests
+        # OUTSIDE the fill. Touch = the island's BOUNDARY within `tolerance`
+        # of the pad's COPPER, measured on the pad's own shape
+        # (check_drc.segment_pad_gap over the island's edges near it): a
+        # spoke's end lies on the pad, the relief gap and a NONE pad's
+        # clearance lie beyond it. Measured from the pad's bounding CIRCLE
+        # (half its longer side), a 2.8 x 0.74 mm header finger reached the
+        # fill islands round its neighbours 1.27 mm away: its own island,
+        # cut off by the tracks between the fingers, read as joined, and the
+        # oracle asked no link for a pad KiCad grades open (the #346 class,
+        # pad <-> island).
         _pr = max(p.size_x, p.size_y) / 2.0 + tolerance
         for ii, (layer, poly) in enumerate(islands):
             if not (_th or '*.Cu' in p.layers or layer in p.layers):
@@ -930,10 +956,8 @@ def exact_clusters(pcb_data, net_id: int, islands,
             if point_in_poly(p.global_x, p.global_y, poly):
                 union(pnode, ('i', ii))
                 continue
-            for sx, sy in _island_samples(ii):
-                if _m.hypot(sx - p.global_x, sy - p.global_y) <= _pr:
-                    union(pnode, ('i', ii))
-                    break
+            if _island_touches_pad(ii, p, _pr):
+                union(pnode, ('i', ii))
 
     # Pad <-> pad: copper-overlap union (the dual-pad / castellated class).
     # Two same-net pads whose copper physically overlaps are one cluster
