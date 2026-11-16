@@ -1410,6 +1410,13 @@ ledger compares two rows' graded sets before their `blocking`, so a quick row
 followed by a full one reads as incommensurable, not as a full row that
 graded fewer components (#1323).
 
+With `--json`, the report also includes `judge_key`, the same sort key used
+by `judge_seeds.py`. Compare the entries in order, with lower values first:
+floorplan errors plus assembly findings, blocking, joins needed, vias,
+copper length in millimetres, and segments. A `null` entry sorts after
+every number in that position. Compare candidates scored with the same
+inputs and coverage.
+
 ```bash
 python3 -X utf8 py_tools/quick_score.py s0_fast.kicad_pcb --intent intent.json --baseline pile.kicad_pcb --json s0_fast.score.json
 ```
