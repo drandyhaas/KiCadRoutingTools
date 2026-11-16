@@ -435,13 +435,15 @@ def width_paths():
     stale = sorted(set(WIDTH_REGISTRY) - found)
     ok(not stale, "and WIDTH_REGISTRY names only live sites"
        + (f": {stale}" if stale else ""))
+    # ipc-migration: main's two live-board scans (gui_utils.py's
+    # board_minima_from_live and update_live_drc_floors, over pcbnew's
+    # GetTracks) do not exist here -- the IPC writeback edits the project file
+    # through fix_project_for_output, whose scan is board_size_values, above.
     ok({'fix_kicad_drc_settings.py:board_size_values',
         'fix_kicad_drc_settings.py:size_values_below_authored',
-        'gui_utils.py:board_minima_from_live',
-        'gui_utils.py:update_live_drc_floors',
         'diff_pair_custody.py:disclose_pair_widths'} <= found,
-       "the scan finds the writeback, the authored grade, the GUI's live scans "
-       "and the pair-width census")
+       "the scan finds the writeback, the authored grade and the pair-width "
+       "census (no live-board scan on ipc-migration)")
 
 
 def main():
