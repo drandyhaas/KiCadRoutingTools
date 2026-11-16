@@ -21,7 +21,7 @@ keeps the copper from before the run until the run ends, as in a real KiCad.
 Needs KiCad's python (wx + kipy on this branch); re-execs into it, and exits
 77 only when no interpreter has both.
 
-    <KiCad python> tests/gui_parity/test_1897_layer_scoped_clearance_gui.py
+    python3 tests/gui_parity/test_1897_layer_scoped_clearance_gui.py
 """
 import contextlib
 import io

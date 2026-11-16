@@ -112,10 +112,13 @@ impl PoseState {
         DIRECTIONS[self.theta_idx as usize]
     }
 
-    /// Get theta in radians
+    /// Get theta in radians, in the grid's own y-down frame: atan2(dy, dx) of
+    /// `direction()`, so North (0,-1) is -pi/2. The Dubins calculator measures
+    /// headings against raw grid coordinates, so a y-up angle would mirror every
+    /// heading with a vertical component (#1441).
     #[inline]
     pub fn theta_radians(&self) -> f64 {
-        (self.theta_idx as f64) * std::f64::consts::FRAC_PI_4
+        -(self.theta_idx as f64) * std::f64::consts::FRAC_PI_4
     }
 }
 

@@ -714,3 +714,25 @@ impl PoseRouter {
         path
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1441: a pose heading straight at a goal ten steps ahead, arriving with
+    /// the same heading, is a straight line for every one of the 8 headings,
+    /// so the Dubins heuristic must not exceed the straight-line length.
+    #[test]
+    fn dubins_heuristic_straight_ahead_is_straight_line_for_all_headings() {
+        let router = PoseRouter::new(0, 1.0, 0, 3.0, 0, 0, 4, 0, 0, 0, 0, 0, None, None, 0);
+        let dubins = DubinsCalculator::new(3.0);
+        for (idx, &(dx, dy)) in DIRECTIONS.iter().enumerate() {
+            let start = PoseState::new(0, 0, idx as u8, 0);
+            let goal = PoseState::new(10 * dx, 10 * dy, idx as u8, 0);
+            let h = router.dubins_heuristic(&dubins, &start, &goal);
+            let straight = (10.0 * ((dx * dx + dy * dy) as f64).sqrt() * 1000.0) as i32;
+            assert!((h - straight).abs() <= 1,
+                    "heading {} ({}, {}): h = {}, straight line = {}", idx, dx, dy, h, straight);
+        }
+    }
+}

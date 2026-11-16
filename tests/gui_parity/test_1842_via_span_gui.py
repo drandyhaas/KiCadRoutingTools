@@ -30,7 +30,7 @@ PCBData, since the file's scan behind `fix_project_for_output` cannot see it.
 Needs KiCad's python (wx + kipy on this branch); re-execs into it, and exits
 77 only when no interpreter has both.
 
-    <KiCad python> tests/gui_parity/test_1842_via_span_gui.py
+    python3 tests/gui_parity/test_1842_via_span_gui.py
 """
 import contextlib
 import io

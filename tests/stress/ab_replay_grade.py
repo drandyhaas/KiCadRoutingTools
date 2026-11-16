@@ -183,6 +183,16 @@ def _tool_of(argv):
     return argv[-1] if argv else "?"
 
 
+#: What the replay itself measured (ab_replay_grade's run row, plus the fields
+#: modal_app stamps on a cloud row). A regrade re-runs no command, so it keeps
+#: these from the row it replaces rather than dropping them.
+RUN_FIELDS = ("replay_rc", "total_seconds", "cpu_seconds", "total_iterations",
+              "peak_rss_mb", "time_by_tool", "peak_by_tool", "steps",
+              "rescue_steps", "peak_footprint_mb", "peak_footprint_by_tool",
+              "arm", "set", "git", "deps", "rc", "sweep_wall_s",
+              "patched_defaults", "env_overrides", "artifacts")
+
+
 def _diff_pair_stats(log_text):
     """Coupled diff-pair completion, from route_diff's JSON_SUMMARY lines in the
     replay log. route_diff classifies each pair as coupled (routed_diff_pairs),
@@ -635,6 +645,16 @@ def regrade(out_dir, set_dir):
     summary.json -- e.g. after a grading fix like the route_clearance change, or
     to reuse a prior wave as a baseline."""
     out_dir = Path(out_dir); set_dir = Path(set_dir)
+    # A regrade re-scores the final board and re-runs no command, so what the
+    # RUN measured -- timing, steps, the arm, and the diff-pair outcome, which
+    # only route_diff's own log carries -- is kept from the row being replaced.
+    # A cloud harvest keeps boards but no _replay.log: re-deriving the pair
+    # counts from an empty log zeroed every one of them.
+    try:
+        prev = {r.get("board"): r for r in
+                json.loads((out_dir / "summary.json").read_text())}
+    except (OSError, ValueError):
+        prev = {}
     results = []
     for bdir in sorted(p for p in out_dir.iterdir() if p.is_dir()):
         b = bdir.name
@@ -646,12 +666,15 @@ def regrade(out_dir, set_dir):
         final = bdir / fname if fname else None
         done = bool(final) and final.exists()
         lp = bdir / "_replay.log"
-        log_text = lp.read_text(errors="replace") if lp.exists() else ""
-        dp = _diff_pair_stats(log_text)
+        old = prev.get(b) or {}
+        dp = _diff_pair_stats(lp.read_text(errors="replace") if lp.exists() else "")
+        if not lp.exists() and all(k in old for k in dp):
+            dp = {k: old[k] for k in dp}
         res = {"board": b, "clearance": clr, "replay_rc": 0,
                "final": fname if done else None, "chain_complete": done,
                "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
-               "completion_pct": None, **dp}  # regrade re-runs no commands, so no timing
+               "completion_pct": None, **dp}
+        res.update({k: old[k] for k in RUN_FIELDS if k in old})
         if done:
             # Resolve the unrouted-input baseline against the wave board dir and
             # the manifest's set dir (a relative board0.kicad_pcb token lives in

@@ -10,7 +10,9 @@ bga_fanout.py, the GUI with the same step as a plan through the REAL headless
 dialog and plan executor (`py_router/run_plan.py`). They must agree on: the
 vias (count, type, layer pair, size, drill), the layers the tracks are on,
 how many nets got copper, and the output project's via and drilled-hole
-minimums, which must be the board's own.
+minimums, which must be the board's own. (Main's gate adds a third leg that
+reads those minimums off the LIVE board; see the last paragraph for why this
+branch has none.)
 
 ipc-migration: the dialog reaches the board through kicad_ipc_adapter, and
 run_plan.py (headless_plan) points it at tests/gui_parity/fake_ipc_board (the
@@ -26,7 +28,9 @@ settings, which a headless pcbnew SaveBoard does not write to the .kicad_pro,
 so there those two checks read the copied input project (measured: main's tab
 lowers the live via floors 0.4 -> 0.25 and 0.15 -> 0.1 under the span, and its
 gate passes). The fanout tab now leaves the via floors alone under a micro
-span, as both fanout mains do (`_micro_span`).
+span, as both fanout mains do (`_micro_span`). Main's live-board leg reads
+pcbnew's live design settings, which kipy does not expose and this front
+never writes, so the project check above is this branch's whole coverage.
 
     python3 tests/gui_parity/test_1842_via_span_fanout_gui.py
 """
@@ -137,6 +141,11 @@ def main():
                 'min_microvia_drill', 'min_via_annular_width', 'min_hole_clearance')
         ok(all(gui['rules'][k] == own.get(k) for k in kept),
            "and the board's own via and drilled-hole minimums are kept")
+        # ipc-migration: main's third leg (the plan run in process, the
+        # minimums read off pcbnew.GetBoard()'s live design settings) has no
+        # IPC twin -- kipy exposes no live design settings and this front
+        # never writes any. Its writeback IS the project file, which the
+        # `kept` check just above reads, so that check covers the leg here.
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1
