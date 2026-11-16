@@ -575,6 +575,29 @@ python3 -X utf8 py_tools/check_groups.py board.kicad_pcb --groups groups.json --
 
 Exit 0 placeable (warnings allowed); 2 unreadable input; 4 errors.
 
+## Local Placement Refinement (`place_refine.py`)
+
+Refines selected footprints on an already placed, unrouted board using the
+same objective and move proposals as `place_simple.py`. Only selected movable
+footprints can change pose. The radius is measured in millimetres from each
+footprint's input origin. The search can try quarter turns and keeps each
+footprint on its original board face. Native locks and fixed poses are held.
+
+```bash
+python3 -X utf8 py_placer/place_refine.py input.kicad_pcb refined.kicad_pcb \
+    --refs U1 C1 C2 --radius 3 --moves 2000 --seed 0 --json refinement.json
+```
+
+`--groups` and `--intent` accept the same files as `place_simple.py`. The
+optional JSON report includes the objective and selected-footprint legality
+before and after, plus each changed pose and its movement distance. The
+command writes a separate board and copies its project and rule files. If
+the search finds no improving legal result, it copies the input board as-is.
+
+Exit 0 means the selected movable footprints are geometrically legal, 4
+means some remain illegal, and 2 indicates invalid input or an output
+error. Run routing and DRC checks separately to grade the resulting board.
+
 ## Pose Setter (`place_pose.py`)
 
 Applies a pose the MODEL chose, and lets the engine grade it, so a rotation or
