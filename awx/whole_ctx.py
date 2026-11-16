@@ -308,7 +308,7 @@ def bench_with(board, nets, dest):
 def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
     """the bench a CANDIDATE's ends make, read as braid.setup reads a board with its plan sidecar beside it -- with
     nothing written: the board `pcb` (parsed once) with the candidate's escape runs `tracks` ({start, end, width, layer,
-    net_id}) added in memory, and `plan` the sidecar's keys (ends, tooth_layer,
+    net_id}, and its vias {via, net_id[, size, drill]}: whole_ends.state_plan's) added in memory, and `plan` the sidecar's keys (ends, tooth_layer,
     dest_layer, tooth_dir, stub_dir, dest_cut, chi). The fields the whole frame and the solve read -- the ends (a
     pair's at its legs' midpoints), the layers (a pair's its P leg's, its N leg's beside them), the escape directions,
     the source part, the destination's cut, the copper, each lane's taut path -- as setup gives them
@@ -343,8 +343,10 @@ def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
         from kicad_parser import Via
         import route_layers
         _rl = route_layers.layers()
-        pcb2.vias = list(pcb.vias) + [Via(x=float(t_['via'][0]), y=float(t_['via'][1]), size=bd.VIA_SIZE,
-                                          drill=float(getattr(cfg, 'via_drill', 0.0) or bd.VIA_SIZE / 2),
+        pcb2.vias = list(pcb.vias) + [Via(x=float(t_['via'][0]), y=float(t_['via'][1]),
+                                          size=float(t_.get('size') or bd.VIA_SIZE),
+                                          drill=float(t_.get('drill') or getattr(cfg, 'via_drill', 0.0)
+                                                      or bd.VIA_SIZE / 2),
                                           layers=[_rl[0], _rl[-1]], net_id=int(t_['net_id'])) for t_ in _vs]
     ctx = bd.Ctx()
     ctx.chi, ctx.M = chi, None

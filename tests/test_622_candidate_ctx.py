@@ -6,19 +6,26 @@ only the solve's verdict if the in-memory bench IS the one the round's solve wil
   python3 tests/test_622_candidate_ctx.py
 
 On a board of its own -- two 5 x 5 ball arrays at 0.8 mm pitch, the source U1 west of the destination U5 (the canonical
-frame), four copper layers, every ball netted, five bus nets between them (one a differential pair), both arrays
-dog-boned (dogbone_arrays) -- the ends model's starting state on its escape menus is turned into a plan
-(whole_ends.state_plan) and, two ways, into a bench: candidate() in memory, and braid.setup on the board with the
-state's escapes LAID (escape_plan.lay) and its plan sidecar beside it, as the round's solve reads it. Pinned:
+frame), four copper layers, every ball netted, five bus nets between them (one a differential pair) -- the ends are
+made as a plain bus's fanout makes them: the source fanned out for the bus (make_bench.fanout_source, the bus step's
+own), the plan state read off that board (fanout_from_plan.plan_state), and the berths chosen against the teeth as laid
+(fanout_from_plan.dest_choice: the greedy selection, then whole_ends.choose -- a destination re-plan's choice, S2's and
+S3's berths held on the destination's near face so those two lanes cross). That state is turned into a plan
+(whole_ends.state_plan) and, two ways, into a bench: candidate() in memory, built as solve_check builds it, and
+braid.setup on the board with the berths LAID by the fanout engine (fanout_from_plan.fanout_once, every berth as asked)
+and the state's plan sidecar beside it, as the round's solve reads it. Pinned:
 
 1. every field the whole frame and the solve read is the same: the lanes and pairs, each lane's ends (a pair's at its
    legs' midpoints) and its legs' ends, the layers (a pair's P leg's, its N leg's beside them), the escape directions,
    the source part, the pair frame, the destination's cut, the routing config, the copper (the board's own and the
-   escape runs, segment for segment), and each lane's TAUT PATH -- round the arrays' dog-bone vias, and a 0402 beside
-   the trunk whose pads the solve's built-in via cuts read the lanes' references against;
+   escape runs, each net's runs on each layer as drawn: the engine lays a straight run as one segment where the
+   state's tracks may carry it in two), the vias at their sizes, and each lane's TAUT PATH -- round the arrays' other
+   balls, and a 0402 beside the trunk whose pads the solve's built-in via cuts read the lanes' references against;
 2. the whole frame built on each (whole_frame.build) is the same: its lanes, launch and final orders, ring classes,
    starts, landings, handoffs, and each lane's reference (mid);
-3. whole_solve.solve(check=True) gives each the same verdict -- and its solve, run as the round runs it, the same plan;
+3. whole_solve.solve(check=True), asked as solve_check asks it (no escape's face zones, its cores on), gives each the
+   same verdict, and measures the same rooms, via ends and banned end layers -- and its solve, run as the round runs
+   it but on one worker (on the round's four, plans equal in every price race), the same plan;
 4. a run of the pair alone, every lane a pair, reads the same sidecar (keyed by the pair's legs) and the same fields --
    an all-pair bus's setup once found its member's name in none of the sidecar's keys and dropped the plan, reading
    the escape directions off copper (sdi_mipi_conv's MIPI bus to J4: a south tooth read west, refused every round).
@@ -47,21 +54,30 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'awx'))
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 os.environ.pop('AWX_RULES', None)
-os.environ.update(BRAID_PAIRS='1', PLAN_PAIRS='1', ROUTE_LAYERS='F.Cu,B.Cu,In1.Cu,In2.Cu', DEST='U5')
-for k_ in ('BENCH', 'NETS', 'FEEDBACK', 'INCREMENTAL', 'FANOUT_ESCAPE', 'STAGE_CACHE', 'TAUT_MEMO'):
+# (the fanout stage's own plan environment, as the whole route sets it for every stage: whole_route.stage_env)
+os.environ.update(BRAID_PAIRS='1', PLAN_PAIRS='1', ROUTE_LAYERS='F.Cu,B.Cu,In1.Cu,In2.Cu', DEST='U5',
+                  PLAN_PAGES='1', PLAN_JUDGE='ends', BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2')
+for k_ in ('BENCH', 'NETS', 'FEEDBACK', 'INCREMENTAL', 'STAGE_CACHE', 'TAUT_MEMO', 'GROUP_ENDS', 'ENDS_CAPTURE',
+           'FANOUT_NETS', 'ENDS_BLOCKED', 'JOINT_FOREIGN'):
     os.environ.pop(k_, None)
 
 import rules as _rules  # noqa: E402
 _rules.install(_rules.Rules(clearance=0.09, track=0.15, via_size=0.45, via_drill=0.3, fan_track=0.12,
                             hole_to_hole=0.25, edge_clearance=0.2, source='test'))
 import braid as bd  # noqa: E402
-import dogbone_arrays as dga  # noqa: E402
-import escape_plan as ep  # noqa: E402
+import escape_moves as em  # noqa: E402
+import fanout_from_plan as ffp  # noqa: E402
+import make_bench as mb  # noqa: E402
+import source_realize as sr  # noqa: E402
 import whole_ctx  # noqa: E402
 import whole_ends  # noqa: E402
 import whole_frame  # noqa: E402
 import whole_solve  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402
+
+# (every solve on ONE worker: two solves of one model then give one plan. On the round's four, plans equal in every
+# price -- the crossings' places along the lanes -- come out of the two solves either way, run to run)
+whole_solve.SOLVE_WORKERS = 1
 
 N, PITCH, GAP = 5, 0.8, 7.0
 # net: (U1 ball, U5 ball) -- the balls' moment about the source-to-destination axis positive: pair chirality +1; S2
@@ -73,8 +89,8 @@ BUS_TURNED = {nm: tuple((N - 1 - b_ // N) * N + b_ % N for b_ in ab) for nm, ab 
 
 
 def board(bus):
-    """two dog-boneable arrays, U1 at x 0 and U5 at x GAP + 4 pitches: the bus's balls on `bus`'s nets, every other
-    ball a net of its own"""
+    """two ball arrays, U1 at x 0 and U5 at x GAP + 4 pitches: the bus's balls on `bus`'s nets, every other ball a net
+    of its own"""
     nets, n_of = ['(net 0 "")'], {}
     for nm in bus:
         n_of[nm] = len(nets)
@@ -131,31 +147,110 @@ def case(bus, want, fails_all):
     fails_all += [f'(chirality {want:+d}) {f_}' for f_ in fails]
 
 
+@contextlib.contextmanager
+def quiet():
+    """the engine's and the planner's console, on both streams, out of the test's"""
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        yield
+
+
+def runs(segs):
+    """the copper of `segs` as drawn: each net's maximal straight runs on each layer at each width, collinear pieces
+    that touch or overlap joined -- a run the same however it is cut into segments"""
+    by = {}
+    for s in segs:
+        ax, ay, bx, by_ = s.start_x, s.start_y, s.end_x, s.end_y
+        ln = math.hypot(bx - ax, by_ - ay)
+        if ln < 1e-9:
+            continue
+        ux, uy = (bx - ax) / ln, (by_ - ay) / ln
+        if ux < -1e-9 or (abs(ux) <= 1e-9 and uy < 0):
+            ux, uy = -ux, -uy
+        key = (s.net_id, s.layer, round(s.width, 4), round(ux, 4), round(uy, 4), round(ux * ay - uy * ax, 4))
+        t0, t1 = sorted((ux * ax + uy * ay, ux * bx + uy * by_))
+        by.setdefault(key, []).append((t0, t1))
+    out = []
+    for key, iv in by.items():
+        iv.sort()
+        a, b = iv[0]
+        for c, d in iv[1:]:
+            if c <= b + 1e-4:
+                b = max(b, d)
+            else:
+                out.append(key + (round(a, 4), round(b, 4)))
+                a, b = c, d
+        out.append(key + (round(a, 4), round(b, 4)))
+    return sorted(out)
+
+
 def _case(bus, want, fails):
     with tempfile.TemporaryDirectory() as td:
-        raw, base, laid = (os.path.join(td, f) for f in ('raw.kicad_pcb', 'base.kicad_pcb', 'laid.kicad_pcb'))
+        raw, src, laid = (os.path.join(td, f) for f in ('raw.kicad_pcb', 'src.kicad_pcb', 'laid.kicad_pcb'))
         open(raw, 'w').write(board(bus))
-        with contextlib.redirect_stdout(io.StringIO()):
-            dga.dogbone_file(raw, base, ['U1', 'U5'], log=lambda *a: None)
-            pcb = parse_kicad_pcb(base)
         names = list(BUS)
-        st = ep.plan_state(pcb, names, 'U1', 'U5', log=lambda *a: None)
-        st['base'] = base
-        E = whole_ends.Ends(st, src_free=True)
-        state = E.start()
+        # the source fanned out for the bus, as the bus step fans it (route_bus: make_bench.fanout_source)
+        with quiet():
+            _nt, _nv, refused = mb.fanout_source(raw, src, 'U1', names)
+            pcb = parse_kicad_pcb(src)
+        if refused:
+            fails.append(f'the fixture: the source fanout refused {refused}')
+            return
+        # the plan state on that board, and the berths a destination pass chooses against its teeth as laid
+        # (fanout_from_plan.dest_choice: the greedy selection, then the ends model's choice -- whole_ends.choose) --
+        # with S2's and S3's held, as a re-plan holds the berths laid before (its `fixed`): each a dog-bone on the
+        # destination's near face, so the two lanes cross between the arrays (left to the ends model, it takes them
+        # round the destination's sides and nothing crosses: no crossing window, no change, no via cut for the solve)
+        with quiet():
+            st = ffp.plan_state(pcb, names)
+            st['base'] = src
+        cen = lambda ref: tuple(sum(c) / len(c) for c in zip(*[(p.global_x, p.global_y)
+                                                                for p in pcb.footprints[ref].pads]))
+        (sx, sy), (dx, dy) = cen('U1'), cen('U5')
+        near = max(em.DIRS, key=lambda d: em.DIRS[d][0] * (sx - dx) + em.DIRS[d][1] * (sy - dy))
+        hold = {}
+        for nm in ('S2', 'S3'):
+            ball = st['dst_pad'][nm]
+            ms = [m for m in st['dmenu'][nm] if m.direction == near and m.kind == 'dogbone']
+            if not ms:
+                fails.append(f'the fixture: {nm} has no dog-bone berth on U5\'s {near} face')
+                return
+            hold[nm] = sr.move_sig(min(ms, key=lambda m: math.hypot(m.site[0] - ball.global_x,
+                                                                     m.site[1] - ball.global_y)))
+        with quiet():
+            choice, unplaced = ffp.dest_choice(st, src, log=lambda *a: None, fixed=hold)
+            E = whole_ends.Ends(st, src_free=False)
+            state = E.start(choice)
+        if unplaced or set(choice) != set(names):
+            fails.append(f'the fixture: no berth chosen for {sorted(set(names) - set(choice))}')
+            return
+        loose = sorted(nm for nm, sig in hold.items() if sr.move_sig(choice[nm]) != sig)
+        if loose:
+            fails.append(f'the fixture: the berths held for {loose} not chosen')
+            return
+        # (the state is the choice: each lane at the berth option of the moves chosen, its teeth as laid)
+        berths = {leg: m for lane, lg in E.lanes for leg, m in zip(lg, E.B[lane][state[lane][1]][0])}
+        off = sorted(l_ for l_ in names if sr.move_sig(berths[l_]) != sr.move_sig(choice[l_]))
+        if off:
+            fails.append(f'the fixture: the ends model\'s state is not the berths chosen for {off}')
+            return
         plan, tracks, nets = whole_ends.state_plan(E, state)
         if plan['chi'] != want:
             fails.append(f'the fixture reads pair chirality {plan["chi"]}, written for {want:+d}')
-        moves = []
-        for lane, lg in E.lanes:
-            for k_, opts in ((0, E.T[lane]), (1, E.B[lane])):
-                moves += list(zip(lg, opts[state[lane][k_]][0]))
-        with contextlib.redirect_stdout(io.StringIO()):
-            ok, faults = ep.lay(base, laid, moves, st['byname'], log=lambda *a: None)
+        # the berths laid by the fanout engine, as the destination pass lays them -- every one as asked, or the board
+        # is not the state's ends and nothing below compares what it means to
+        with quiet():
+            _got, audit, ok = ffp.fanout_once(laid, names, berths, st['dst_pad'], st['dref'], st['byname'], src)
+        missed = sorted(l_ for l_ in names if not (audit.get(l_) or {}).get('exact'))
+        if missed or not ok:
+            fails.append(f'the fixture: the fanout engine laid {missed or "every berth"} '
+                         f'{"not as asked" if missed else "with a DRC violation or a failed net"}')
+            return
         json.dump(plan, open(laid[:-len('.kicad_pcb')] + '.plan.json', 'w'))
-        with contextlib.redirect_stdout(io.StringIO()):
+        with quiet():
             real, _g = bd.setup(laid, nets, 'U5', lambda *a: None, pairs=True)
-        cand = whole_ctx.candidate(pcb, nets, 'U5', plan, tracks, board=base)
+        # (built as solve_check builds it: the board before its berths, their runs and vias in memory, the run's config
+        # read off that board)
+        cand = whole_ctx.candidate(pcb, nets, 'U5', plan, tracks, cfg=bd.run_config(pcb, src), board=src)
         if cand is None:
             fails.append('candidate() gave no bench')
             return
@@ -184,23 +279,24 @@ def _case(bus, want, fails):
                         c.board_edge_clearance, tuple(c.layers))
         if cf(cand.cfg) != cf(real.cfg):
             fails.append(f'1. cfg: candidate {cf(cand.cfg)} != setup {cf(real.cfg)}')
-        seg = lambda s: (round(s.start_x, 4), round(s.start_y, 4), round(s.end_x, 4), round(s.end_y, 4),
-                         round(s.width, 4), s.layer, s.net_id)
-        und = lambda s: tuple(sorted([s[:2], s[2:4]])) + s[4:]
-        sc = sorted(und(seg(s)) for s in cand.base_segments)
-        sr_ = sorted(und(seg(s)) for s in real.base_segments)
-        if sc != sr_:
-            fails.append(f'1. copper: {len(sc)} candidate segments vs {len(sr_)} laid, '
-                         f'{len(set(sc) ^ set(sr_))} differ')
+        rc_, rr_ = runs(cand.base_segments), runs(real.base_segments)
+        if rc_ != rr_:
+            name_ = {i: n.name for i, n in pcb.nets.items()}
+            fmt_ = lambda r: f'{name_.get(r[0], r[0])} {r[1]} {r[6]:.3f}..{r[7]:.3f} along ({r[3]:+.2f}, {r[4]:+.2f})'
+            fails.append(f'1. copper: {len(rc_)} candidate runs vs {len(rr_)} laid; candidate only: '
+                         f'{[fmt_(r) for r in sorted(set(rc_) - set(rr_))]}; laid only: '
+                         f'{[fmt_(r) for r in sorted(set(rr_) - set(rc_))]}')
         via = lambda v: (round(v.x, 4), round(v.y, 4), round(v.size, 4), v.net_id)
-        if sorted(map(via, cand.base_vias)) != sorted(map(via, real.base_vias)):
-            fails.append('1. vias differ')
+        vc_, vr_ = sorted(map(via, cand.base_vias)), sorted(map(via, real.base_vias))
+        if vc_ != vr_:
+            fails.append(f'1. vias differ: candidate only {sorted(set(vc_) - set(vr_))}, laid only '
+                         f'{sorted(set(vr_) - set(vc_))}' + (' (one stands twice)' if set(vc_) == set(vr_) else ''))
         pth = lambda c: {k: [r6(p) for p in v] for k, v in c.paths.items()}
         pc_, pr_ = pth(cand), pth(real)
         if pc_ != pr_:
             fails.append(f'1. taut paths differ on {sorted(k for k in set(pc_) | set(pr_) if pc_.get(k) != pr_.get(k))}')
         # 2. the frames
-        with contextlib.redirect_stdout(io.StringIO()):
+        with quiet():
             Fc, Fr = whole_frame.build(cand, 'U5'), whole_frame.build(real, 'U5')
         for f_ in ('M', 'launch', 'final', 'cls', 'Hk', 'H0'):
             a, b = getattr(Fc, f_), getattr(Fr, f_)
@@ -215,22 +311,29 @@ def _case(bus, want, fails):
         b = {k: [r6(p) for p in v] for k, v in Fr.mid.items()}
         if a != b:
             fails.append(f'2. frame mid (the references) differ on {sorted(k for k in a if a[k] != b.get(k))}')
-        # 3. the solve
-        with contextlib.redirect_stdout(io.StringIO()):
-            vc = whole_solve.solve(cand, 'U5', front={}, check=True)
-            vr = whole_solve.solve(real, 'U5', front={}, check=True)
+        # 3. the solve: no escape's face zones on either (solve_check's candidate, and the round's solve reading a plain
+        # fanout's sidecar), the check asked as solve_check asks it
+        cand.escape = real.escape = False
+        with quiet():
+            vc = whole_solve.solve(cand, 'U5', front={}, check=True, core=True)
+            vr = whole_solve.solve(real, 'U5', front={}, check=True, core=True)
             Jc = whole_solve.solve(cand, 'U5', front={})
             Jr = whole_solve.solve(real, 'U5', front={})
-        if (vc or {}).get('plan') != (vr or {}).get('plan'):
-            fails.append(f'3. the check: candidate {vc} != setup {vr}')
+        # (the verdict, and what the check measured before it searched: each lane's rooms, its via ends, the layers the
+        # copper beside an end bans)
+        verdict = lambda v: None if v is None else dict(
+            {k: v.get(k) for k in ('plan', 'status', 'core', 'nochange', 'vend', 'vban')},
+            rooms={n: [round(float(x), 6) for x in r] for n, r in (v.get('rooms') or {}).items()})
+        if verdict(vc) != verdict(vr):
+            fails.append(f'3. the check: candidate {verdict(vc)} != setup {verdict(vr)}')
         keep = lambda J: None if J is None else {k: J[k] for k in ('cross', 'changes', 'layers', 'entry', 'end', 'tend')}
         if keep(Jc) != keep(Jr):
-            fails.append('3. the solve on the two benches differs')
+            fails.append(f'3. the solve on the two benches differs: candidate {keep(Jc)} != setup {keep(Jr)}')
         # 4. a run of the pair alone (every lane a pair): setup reads the sidecar, which keys the pair by its legs
         pr_nets = ['D_P', 'D_N']
-        with contextlib.redirect_stdout(io.StringIO()):
+        with quiet():
             real1, _g1 = bd.setup(laid, pr_nets, 'U5', lambda *a: None, pairs=True)
-        cand1 = whole_ctx.candidate(pcb, pr_nets, 'U5', plan, tracks, board=base)
+        cand1 = whole_ctx.candidate(pcb, pr_nets, 'U5', plan, tracks, cfg=bd.run_config(pcb, src), board=src)
         if real1.plan is None:
             fails.append('4. the pair alone: setup dropped the plan sidecar')
         for f_ in ('tooth_layer', 'dest_layer', 'pair_layers', 'tooth_dir', 'stub_dir'):
@@ -242,8 +345,8 @@ def _case(bus, want, fails):
                 {k: (r6(v[0]), r6(v[1])) for k, v in real1.ends.items() if k in cand1.ends}:
             fails.append('4. the pair alone: ends differ')
         if not fails:
-            print(f'   chirality {want:+d}: {len(nets)} nets, {len(E.lanes)} lanes, {len(tracks)} escape runs; check {vc}; '
-                  f'frame lanes {Fc.M}')
+            print(f'   chirality {want:+d}: {len(nets)} nets, {len(E.lanes)} lanes, {len(tracks)} escape runs; check '
+                  f'{ {k: (vc or {}).get(k) for k in ("plan", "status", "crossings")} }; frame lanes {Fc.M}')
 
 
 def report(fails):

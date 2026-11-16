@@ -3427,13 +3427,23 @@ def state_plan(E, state):
             plan['tooth_dir'][leg], plan['stub_dir'][leg] = list(FAR[tm.direction]), list(FAR[bm.direction])
             nid = st['byname'][leg][0]
             for m, (_e, more_) in zip((tm, bm), ends_):
+                # (every leg the engine lays: a dog-bone's neck from its pad to its via, on the pad's layer, as well as
+                # its run -- the fanout lays both, and a bench without the neck checked the other lanes past copper
+                # the board will have)
                 for p, q, L in list(m.legs) + ([more_] if more_ else []):
-                    if L == m.layer and math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-6:
+                    if math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-6:
                         tracks.append({'start': tuple(p), 'end': tuple(q), 'width': fan, 'layer': L, 'net_id': nid})
                 if m.vias and m.site is not None:
                     # (its via too: the solve reads an end whose stub carries a via as a VIA END, its layer the solve's
-                    # -- without it, a dog-bone the state chose stood on the bench as a fixed end)
-                    tracks.append({'via': tuple(m.site), 'net_id': nid})
+                    # -- without it, a dog-bone the state chose stood on the bench as a fixed end. A via IN its pad is
+                    # laid at the size the engine clamps it to for that pad, joint_escape._sizes' in-pad via)
+                    pad_ = (st['src_pad'] if m is tm else st['dst_pad']).get(leg)
+                    if pad_ is not None and math.hypot(m.site[0] - pad_.global_x, m.site[1] - pad_.global_y) < 1e-6:
+                        import joint_escape as je_
+                        r_, dr_ = je_._sizes(st['pcb'], st['pcb'].footprints[pad_.component_ref])['inpad'](pad_)
+                        tracks.append({'via': tuple(m.site), 'net_id': nid, 'size': 2 * r_, 'drill': 2 * dr_})
+                    else:
+                        tracks.append({'via': tuple(m.site), 'net_id': nid})
     sp_ = E.score(state)[1]
     # (the destination's cut the state was SCORED at: winding's, else the far face's tied cut it scores best at
     # (_score) -- not the far face's widest gap, which the frame takes where the sidecar carries no cut: the two split
