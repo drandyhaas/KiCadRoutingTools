@@ -65,6 +65,22 @@ def _grade_tol(clearance: float, clearance_margin: float) -> float:
     return max(clearance * clearance_margin, FP_EPS_MM)
 
 
+def copper_width(seg) -> float:
+    """The width of a segment's COPPER, what a clearance is measured from
+    (#1952). A track's is its width. A graphic's is its stroke as drawn: a
+    filled shape drawn at stroke 0 is parsed with its perimeter at the track
+    width (`Segment.width`), so the obstacle map has something to stamp, and
+    measuring that would put copper 0.15 mm outside the shape that KiCad does
+    not see. Its interior is graded on its own (`filled_graphic_shapes`)."""
+    if getattr(seg, 'graphic', False):
+        dw = getattr(seg, 'drawn', None)            # a posed GraphicStroke
+        if dw is None:
+            dw = getattr(seg, 'drawn_width', None)
+        if dw is not None:
+            return dw
+    return seg.width or 0.0
+
+
 # #1803: the clearance shortfalls a run ACCEPTED that KiCad reports -- above
 # its absolute 500 nm and at or under the run's tolerance. Not graded, not
 # returned: counted, so a clean verdict says what it let through. A context
@@ -700,7 +716,7 @@ def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, cleara
         return False, 0.0, None, None
 
     # Required distance is half-widths plus clearance
-    required_dist = seg1.width / 2 + seg2.width / 2 + clearance
+    required_dist = copper_width(seg1) / 2 + copper_width(seg2) / 2 + clearance
     actual_dist, pt1, pt2 = segment_to_segment_closest_points(seg1, seg2)
     overlap = required_dist - actual_dist
 
@@ -724,7 +740,7 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
     if not via_on_layer(via, seg.layer):
         return False, 0.0
 
-    required_dist = via.size / 2 + seg.width / 2 + clearance
+    required_dist = via.size / 2 + copper_width(seg) / 2 + clearance
     actual_dist = point_to_segment_distance(via.x, via.y,
                                             seg.start_x, seg.start_y,
                                             seg.end_x, seg.end_y)
@@ -1122,11 +1138,16 @@ def graphic_effective_nets(pcb_data, include_mutable=True):
             if include_mutable and (not _owner or (
                     _ofp is not None and getattr(_ofp, 'net_tie_groups', None))):
                 _sh = shape_of.get(id(g))
+                # Touching is judged on the copper as drawn (#1952): at the
+                # modelled stroke of a stroke-0 fill, a foreign via 0.04 mm
+                # short of a tie's bridge gave the bridge its net and waived
+                # the clearance violation KiCad reports.
+                chw = copper_width(g) / 2.0
                 # touching routed/input segments
                 for sg in pcb_data.segments:
                     if getattr(sg, 'graphic', False) or sg.layer != g.layer:
                         continue
-                    if _seg_seg_distance(g, sg) <= hw + sg.width / 2.0 + 1e-6:
+                    if _seg_seg_distance(g, sg) <= chw + sg.width / 2.0 + 1e-6:
                         if _sh is not None and (
                                 _sh.contains(sg.start_x, sg.start_y)
                                 or _sh.contains(sg.end_x, sg.end_y)
@@ -1136,7 +1157,7 @@ def graphic_effective_nets(pcb_data, include_mutable=True):
                         eff.add(sg.net_id)
                 # touching vias (barrel spans all layers)
                 for v in pcb_data.vias:
-                    if _pt_seg_d(v.x, v.y, g) <= hw + (v.size or 0.5) / 2.0 + 1e-6:
+                    if _pt_seg_d(v.x, v.y, g) <= chw + (v.size or 0.5) / 2.0 + 1e-6:
                         if _sh is not None and _sh.contains(v.x, v.y):
                             continue
                         eff.add(v.net_id)
@@ -1525,11 +1546,11 @@ class GraphicStroke:
     slotted record rather than a Segment copy, because the placement gate
     poses these per candidate.
 
-    `width` is the MODELLED stroke the checker grades clearance at (a
-    stroke-0 fill is modelled at the track width, #962), and `drawn` the
-    copper's real width, which is what decides CONTACT: graded at the
-    modelled width, every pad that abuts a stroke-0 shape read as 0.15 mm
-    deep in it."""
+    `width` is the MODELLED stroke (a stroke-0 fill is modelled at the track
+    width, #962), and `drawn` the copper's real width, which is what the
+    checker grades clearance at (`copper_width`, #1952) and what decides
+    CONTACT: graded at the modelled width, every pad that abuts a stroke-0
+    shape read as 0.15 mm deep in it."""
     __slots__ = ('start_x', 'start_y', 'end_x', 'end_y', 'width', 'layer',
                  'drawn')
     graphic = True
@@ -1686,27 +1707,32 @@ def pad_graphic_piece_overlap(pad, piece: GraphicPiece, clearance: float,
     test check_drc grades pad-to-segment with) and the filled interior by
     depth, since a pad lying INSIDE a filled shape touches none of its
     strokes. `contact` is the copper TOUCHING the pad, whatever the nets --
-    the assembly fact, judged on the stroke as DRAWN (`GraphicStroke.drawn`)
-    where the shortfall takes the modelled width the checker grades. `inside`
+    the assembly fact, judged on the stroke as DRAWN (`GraphicStroke.drawn`),
+    as the shortfall is (`copper_width`, #1952). `inside`
     is the pad WHOLLY inside the filled interior: its centre in it and no
     stroke touching it. Margin 0. Nets are the caller's: `piece.nets` says
     which ones the copper is its owner's own.
     """
     best = 0.0
     contact = False
+    # A pad merely TOUCHING a stroke-0 edge is a contact with no shortfall at
+    # clearance 0, and the margin-0 test only hits above FP_EPS_MM: test at a
+    # hair more than that, and take the hair back off the shortfall (#1952).
+    hair = max(0.0, 2.0 * FP_EPS_MM - clearance)
     for s in piece.strokes:
-        hit, over, _pt = check_pad_segment_overlap(pad, s, clearance,
+        hit, over, _pt = check_pad_segment_overlap(pad, s, clearance + hair,
                                                    routing_layers, 0.0)
         if hit:
-            if over > best:
-                best = over
+            if over - hair > best:
+                best = over - hair
             drawn = getattr(s, 'drawn', None)
             if drawn is None:
                 drawn = getattr(s, 'drawn_width', None)
             if drawn is None:
                 drawn = s.width
             # `over` is width/2 + clearance - (pad edge to the centre line)
-            if s.width / 2.0 + clearance - over <= drawn / 2.0 + FP_EPS_MM:
+            if (copper_width(s) / 2.0 + clearance + hair - over
+                    <= drawn / 2.0 + FP_EPS_MM):
                 contact = True
     inside = False
     f = piece.filled
@@ -2113,6 +2139,33 @@ def graphic_item_label(seg) -> str:
         return ''
     owner = getattr(seg, 'owner_ref', '')
     return f'Polygon({owner})' if owner else 'Graphic'
+
+
+def _graphic_shape_key(seg):
+    """One copper graphic's identity, shared by every perimeter segment the
+    parser cut it into (they carry its uuid); None for a track or a graphic
+    with no uuid, which stays one item per segment."""
+    if not getattr(seg, 'graphic', False):
+        return None
+    u = getattr(seg, 'uuid', None)
+    return ('graphic', getattr(seg, 'owner_ref', ''), u) if u else None
+
+
+def _append_per_item(violations, seen, row, a, b):
+    """Append `row` for the pair (a, b), one row per pair of ITEMS as KiCad
+    reports them (#1952): a filled shape's perimeter segments are one item, so
+    a via beside two of its edges is one row, the worse one, not two."""
+    ka, kb = _graphic_shape_key(a), _graphic_shape_key(b)
+    if ka is None and kb is None:
+        violations.append(row)
+        return
+    key = (row['type'], frozenset((ka or ('item', id(a)), kb or ('item', id(b)))))
+    j = seen.get(key)
+    if j is None:
+        seen[key] = len(violations)
+        violations.append(row)
+    elif row['overlap_mm'] > violations[j]['overlap_mm']:
+        violations[j] = row
 
 
 def _graphic_pair_is_same_net(seg_a, seg_b, net_a, net_b):
@@ -2643,7 +2696,7 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
     if pad_polys:
         dist_to_pad, closest_pt = _segment_to_polys_distance(
             seg.start_x, seg.start_y, seg.end_x, seg.end_y, pad_polys)
-        required_dist = seg.width / 2 + clearance
+        required_dist = copper_width(seg) / 2 + clearance
         overlap = required_dist - dist_to_pad
         _tol = _grade_tol(clearance, clearance_margin)
         if overlap > _tol:
@@ -2676,7 +2729,7 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
 
     # Required clearance: segment half-width + clearance
     # (dist_to_pad is already edge-to-edge from pad)
-    required_dist = seg.width / 2 + clearance
+    required_dist = copper_width(seg) / 2 + clearance
     overlap = required_dist - dist_to_pad
 
     tolerance = _grade_tol(clearance, clearance_margin)
@@ -3011,11 +3064,68 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
     def _ovr(p):
         return (getattr(p, 'local_clearance', 0.0) or 0.0) > 0.0
 
+    # a filled graphic's perimeter segment -> its shape, whose interior is
+    # copper too: a hole inside it is a hole in copper (#1952)
+    shape_of = {}
+    if grading or walk:
+        for _fsh in filled_graphic_shapes(pcb_data):
+            for _fm in _fsh.members:
+                shape_of[id(_fm)] = _fsh
+
+    def _inside(cobj, x1, y1, x2, y2):
+        """How deep (mm) the deeper end of a hole's axis lies inside the
+        filled shape `cobj` bounds, or None when neither end is inside."""
+        sh = shape_of.get(id(cobj)) if shape_of else None
+        if sh is None:
+            return None
+        depth = None
+        for x, y in ((x1, y1), (x2, y2)):
+            if sh.contains(x, y):
+                d = sh.boundary_distance(x, y)
+                depth = d if depth is None else max(depth, d)
+        return depth
+
+    _fps = getattr(pcb_data, 'footprints', None) or {}
+    # a part's net-less copper and the one net its own pads give it (#995):
+    # a hole of that net in or beside it is the part's own copper, which the
+    # clearance grade publishes as accepted, not graded
+    own_copper = footprint_own_copper_nets(pcb_data) if shape_of or any(
+        getattr(s, 'graphic', False) for s in pcb_data.segments) else {}
+
+    def _tie_excluded(hnet, cobj, h1x, h1y, h2x, h2y):
+        """KiCad's net-tie exclusion (DRC_ENGINE::IsNetTieExclusion) for a
+        hole of net `hnet` against a net tie's copper `cobj`: waived where
+        the collision lies on a tied pad of `hnet` of that footprint -- a via
+        on the tie's own pad (#1952; kicad-cli 10.0.6 reports none)."""
+        from types import SimpleNamespace
+        fp = _fps.get(getattr(cobj, 'owner_ref', '') or '')
+        groups = getattr(fp, 'net_tie_groups', None) if fp is not None else None
+        if not groups or not hnet:
+            return False
+        tied = {n for g in groups for n in g}
+        own = [p for p in fp.pads if p.net_id == hnet and p.pad_number in tied
+               and cobj.layer in expand_pad_layers(p.layers or [], [cobj.layer])]
+        if not own:
+            return False
+        sh = shape_of.get(id(cobj)) if shape_of else None
+        pts = [(x, y) for x, y in ((h1x, h1y), (h2x, h2y))
+               if sh is not None and sh.contains(x, y)]
+        if not pts:
+            _d, _ph, pc = segment_to_segment_closest_points(
+                SimpleNamespace(start_x=h1x, start_y=h1y, end_x=h2x, end_y=h2y),
+                cobj)
+            pts = [pc]
+        return all(any(point_to_pad_distance(x, y, p) <= NET_TIE_CONTACT_EPS
+                       for p in own) for x, y in pts)
+
     def _gap(ckind, cobj, h1x, h1y, h2x, h2y, hr):
         if ckind == 'track':
+            depth = _inside(cobj, h1x, h1y, h2x, h2y)
+            if depth is not None:
+                return -hr - depth
             return (_seg_seg_dist_coords(h1x, h1y, h2x, h2y, cobj.start_x, cobj.start_y,
                                          cobj.end_x, cobj.end_y)
-                    - hr - (cobj.width or 0.0) / 2.0)
+                    - hr - copper_width(cobj) / 2.0)
         if ckind == 'via':
             return (point_to_segment_distance(cobj.x, cobj.y, h1x, h1y, h2x, h2y)
                     - hr - cobj.size / 2.0)
@@ -3025,16 +3135,19 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
         """The gap between the two items' copper."""
         if hkind == 'via':
             if ckind == 'track':
+                depth = _inside(cobj, hobj.x, hobj.y, hobj.x, hobj.y)
+                if depth is not None:
+                    return -hobj.size / 2.0 - depth
                 return (point_to_segment_distance(hobj.x, hobj.y, cobj.start_x,
                                                   cobj.start_y, cobj.end_x, cobj.end_y)
-                        - hobj.size / 2.0 - (cobj.width or 0.0) / 2.0)
+                        - hobj.size / 2.0 - copper_width(cobj) / 2.0)
             if ckind == 'via':
                 return (math.hypot(hobj.x - cobj.x, hobj.y - cobj.y)
                         - hobj.size / 2.0 - cobj.size / 2.0)
             return point_to_pad_distance(hobj.x, hobj.y, cobj) - hobj.size / 2.0
         if ckind == 'track':
             return (segment_pad_gap(cobj.start_x, cobj.start_y, cobj.end_x,
-                                    cobj.end_y, hobj) - (cobj.width or 0.0) / 2.0)
+                                    cobj.end_y, hobj) - copper_width(cobj) / 2.0)
         if ckind == 'via':
             return point_to_pad_distance(cobj.x, cobj.y, hobj) - cobj.size / 2.0
         return pad_copper_gap(hobj, cobj)
@@ -3076,9 +3189,14 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
         if getattr(seg, 'graphic', False) and not grading:
             continue
         hw = (seg.width or 0.0) / 2.0
-        _put(('track', seg, frozenset((seg.layer,))),
-             min(seg.start_x, seg.end_x) - hw, min(seg.start_y, seg.end_y) - hw,
-             max(seg.start_x, seg.end_x) + hw, max(seg.start_y, seg.end_y) + hw)
+        x0, y0 = min(seg.start_x, seg.end_x) - hw, min(seg.start_y, seg.end_y) - hw
+        x1, y1 = max(seg.start_x, seg.end_x) + hw, max(seg.start_y, seg.end_y) + hw
+        _fsh = shape_of.get(id(seg)) if shape_of else None
+        if _fsh is not None and _fsh.members[0] is seg:
+            # the shape's first member stands for its interior
+            bx0, by0, bx1, by1 = _fsh._bbox
+            x0, y0, x1, y1 = min(x0, bx0), min(y0, by0), max(x1, bx1), max(y1, by1)
+        _put(('track', seg, frozenset((seg.layer,))), x0, y0, x1, y1)
     for via in pcb_data.vias:
         hs = via.size / 2.0
         _put(('via', via, via_layers[id(via)]), via.x - hs, via.y - hs, via.x + hs, via.y + hs)
@@ -3121,6 +3239,11 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
                 continue
             gap = _gap(ckind, cobj, h1x, h1y, h2x, h2y, hr)
             if gap >= reach:
+                continue
+            if ckind == 'track' and getattr(cobj, 'graphic', False) and (
+                    (not cobj.net_id and hnet and own_copper.get(
+                        getattr(cobj, 'owner_ref', '') or '') == frozenset((hnet,)))
+                    or _tie_excluded(hnet, cobj, h1x, h1y, h2x, h2y)):
                 continue
             # KiCad's value for the pair: an override, a rule, the minimum
             rule = None
@@ -3215,7 +3338,10 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
                 v['layer'] = layer
                 v['pad_ref'] = _pad_ref(cobj)
                 v['pad_loc'] = (cobj.global_x, cobj.global_y)
-            pk = frozenset((id(hobj), id(cobj)))
+            # one row per hole and item, a filled graphic's perimeter being
+            # one item, as KiCad reports it (#1952)
+            _csh = shape_of.get(id(cobj)) if ckind == 'track' else None
+            pk = frozenset((id(hobj), id(_csh if _csh is not None else cobj)))
             if pk not in rows_by_pair or overlap > rows_by_pair[pk]['overlap_mm']:
                 rows_by_pair[pk] = v
     return list(rows_by_pair.values()), unread
@@ -7891,6 +8017,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
     checked_pairs = set()  # Track checked segment pairs to avoid duplicates
     crossings_seen = set()
+    _per_item_ss = {}
     for seg1 in pcb_data.segments:
         net1 = seg1.net_id
         net1_matches = matching_net_ids is None or net1 in matching_net_ids
@@ -7969,7 +8096,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     # full rule name; harness floors key on the prefix before
                     # ':' (split(':')[0]) -- keep both derivable.
                     _v['track_rule'] = _trule.name
-                violations.append(_mark_rule(_v, _eff, _cyr))
+                _append_per_item(violations, _per_item_ss, _mark_rule(_v, _eff, _cyr),
+                                 seg1, seg2)
 
             # Also check for segment crossings (different nets). Two tracks
             # touch as well as cross (#1684); a graphic is not a track.
@@ -8144,6 +8272,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # Check via-to-segment violations using spatial index
     if not quiet:
         print("Checking via-to-segment clearances...")
+    _per_item_vs = {}
     for via in pcb_data.vias:
         via_net = via.net_id
         via_net_matches = matching_net_ids is None or via_net in matching_net_ids
@@ -8183,7 +8312,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     seg_net_name = pcb_data.nets.get(seg_net, None)
                     via_net_str = via_net_name.name if via_net_name else f"net_{via_net}"
                     seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
-                    violations.append(_mark_rule({
+                    _append_per_item(violations, _per_item_vs, _mark_rule({
                         'type': 'via-segment',
                         'item2': graphic_item_label(seg),
                         'net1': via_net_str,
@@ -8192,7 +8321,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'overlap_mm': overlap,
                         'via_loc': (via.x, via.y),
                         'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
-                    }, _eff, _cyr))
+                    }, _eff, _cyr), via, seg)
 
     # #1181: copper lying INSIDE a filled graphic. The two loops above measure
     # to the perimeter strokes, so a via or track wholly inside the shape
@@ -8224,7 +8353,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
         for _sh in _filled:
             _g0 = _sh.members[0]
-            _hw = max(m.width for m in _sh.members) / 2.0
+            _hw = max(copper_width(m) for m in _sh.members) / 2.0
             _x0, _y0, _x1, _y1 = _sh._bbox
             _shape_ok = matching_net_ids is None or _sh.net_id in matching_net_ids
             if len(_vxy) and _sh.layer in routing_layers:
@@ -8409,6 +8538,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         print("Checking pad-to-segment clearances...")
 
     pad_net_ids = list(pads_by_net.keys())
+    _per_item_ps = {}
     for seg in pcb_data.segments:
         seg_net = seg.net_id
         seg_net_matches = matching_net_ids is None or seg_net in matching_net_ids
@@ -8471,7 +8601,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 seg_net_name = pcb_data.nets.get(seg_net, None)
                 pad_net_str = pad_net_name.name if pad_net_name else f"net_{pad_net}"
                 seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
-                violations.append(_mark_rule({
+                _append_per_item(violations, _per_item_ps, _mark_rule({
                     'type': 'pad-segment',
                     'item2': graphic_item_label(seg),
                     'no_net': pad_net == 0 or seg_net == 0,
@@ -8483,7 +8613,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                     'closest_pt': closest_pt,
-                }, _eff, _cyr))
+                }, _eff, _cyr), pad, seg)
 
     # Check pad-to-via violations using spatial index
     if not quiet:
