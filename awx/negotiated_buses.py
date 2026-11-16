@@ -577,7 +577,11 @@ def give_back(out, board, path, log=print):
     return give
 
 
-GROUP_SET = {'GROUP_LAYERS': 'free', 'GROUP_CUT': 'model'}     # the group's ends, as its buses' runs take them
+# the group's ends, as its buses' runs take them. The CUT round a ball array destination is the ends model's own --
+# its far face's middle -- and no variable of the group's model: left to the model to choose with the ends, a
+# two-layer bus's search ended a quarter dearer over six seeds (and a hand's far face is cut within 26 degrees of
+# its middle on fourteen of sixteen buses read)
+GROUP_SET = {'GROUP_LAYERS': 'free', 'GROUP_CUT': 'base'}
 
 
 def _capture_all(jobs, files, log):
