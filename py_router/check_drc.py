@@ -171,6 +171,26 @@ def pads_shared_layer_clearance(eff: float, layer_rules, layers_a, layers_b=None
     return max([eff] + vals)
 
 
+#: a pair of tracks' rule types, as `PairRuleChannels.pair` takes them
+_TRACK_TRACK = (('track', None), ('track', None))
+
+
+def _seg_rule_type(seg) -> str:
+    """What a `.kicad_dru` rule's `Type` reads for a segment: a footprint's
+    or the board's copper graphic is a `Graphic` to KiCad, never a `Track`
+    (#1931; `design_rules.DesignRules.track_item` types it the same way)."""
+    return 'graphic' if getattr(seg, 'graphic', False) else 'track'
+
+
+def _seg_pair_types(a, b):
+    """Two segments' rule types for `PairRuleChannels.pair`; the shared
+    `_TRACK_TRACK` when both are tracks, which a track rule (#735) tests by
+    identity."""
+    if not (getattr(a, 'graphic', False) or getattr(b, 'graphic', False)):
+        return _TRACK_TRACK
+    return ((_seg_rule_type(a), None), (_seg_rule_type(b), None))
+
+
 class PairRuleChannels:
     """The two pair-exact clearance channels this grader applies beyond the
     net-class and per-layer maps, as ONE object that `run_drc` and the
@@ -3116,7 +3136,9 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
                         else 'declared hole clearance')
             else:
                 best = None
-                if walk and not getattr(cobj, 'graphic', False):
+                if walk:
+                    # copper graphic is typed a Graphic (`track_item`), as KiCad
+                    # binds a hole rule to it (#1931, #1935)
                     a, b = _item(hkind, hobj), _item(ckind, cobj)
                     best = _bind(a, b, shared)
                 if best == 'unknown':
@@ -7259,7 +7281,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     _track_names = ({nid: n.name for nid, n in pcb_data.nets.items()}
                     if any(r.except_coupled for r in _track_rules) else None)
 
-    def _track_pair_cl(net_a: int, net_b: int, layer: str):
+    def _track_pair_cl(net_a: int, net_b: int, layer: str, types=_TRACK_TRACK):
         """Effective seg-seg clearance for the pair, plus the TrackRule
         that RAISED it (None when no track rule binds above the base value).
         The rule identity is what lets the violation record distinguish a
@@ -7274,10 +7296,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         The empty-list early-out stays HERE rather than inside the resolver:
         this runs per nearby seg-seg pair, and a board with no rules must not
         pay a call for it (the same zero-cost-when-undeclared property the
-        netclass and override channels above have)."""
-        eff = _pair_cl(net_a, net_b, layer=layer,
-                       types=(('track', None), ('track', None)))
-        if not _track_rules:
+        netclass and override channels above have).
+
+        ``types``: the two items' rule types, `_seg_rule_type` of each -- a
+        copper graphic is a Graphic to KiCad, so a scoped rule reads it so
+        and a track rule never binds it (#1931)."""
+        eff = _pair_cl(net_a, net_b, layer=layer, types=types)
+        if not _track_rules or types is not _TRACK_TRACK:
             return eff, None
         coupled = (_track_names is not None
                    and nets_coupled(_track_names.get(net_a), _track_names.get(net_b)))
@@ -7888,7 +7913,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             checked_pairs.add(pair_key)
 
-            _eff, _trule = _track_pair_cl(net1, net2, layer=seg1.layer)
+            _types = _seg_pair_types(seg1, seg2)
+            _eff, _trule = _track_pair_cl(net1, net2, layer=seg1.layer, types=_types)
             _cv = _coupled_cl(net1, net2, 'track', 'track', (seg1.layer,))
             if _cv is not None:
                 _eff, _trule = _cv, None
@@ -7922,8 +7948,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 # check_dru floor gates; graders may treat them as advisory.
                 _rule_only = False
                 if _trule is not None:
-                    _base = _pair_cl(net1, net2, layer=seg1.layer,
-                                     types=(('track', None), ('track', None)))
+                    _base = _pair_cl(net1, net2, layer=seg1.layer, types=_types)
                     _rule_only = (_eff - overlap) >= _base - _grade_tol(_base, clearance_margin)
                 _v = {
                     'type': ('segment-segment-track-rule' if _rule_only
@@ -8137,7 +8162,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     continue
 
                 _eff = _pair_cl(via_net, seg_net, layer=seg.layer,
-                                types=(('via', None), ('track', None)))
+                                types=(('via', None), (_seg_rule_type(seg), None)))
                 _cv = _coupled_cl(via_net, seg_net, 'via', 'track', (seg.layer,))
                 if _cv is not None:
                     _eff = _cv
@@ -8216,7 +8241,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         continue
                     if not _sh.contains(_v.x, _v.y):
                         continue
-                    _eff = _pair_cl(_v.net_id, _sh.net_id, layer=_sh.layer)
+                    _eff = _pair_cl(_v.net_id, _sh.net_id, layer=_sh.layer,
+                                    types=(('via', None), ('graphic', None)))
                     _r = (_v.size or 0.0) / 2.0
                     _bd = _sh.boundary_distance(_v.x, _v.y)
                     if _bd < _r + _hw + _eff - clearance_margin:
@@ -8305,7 +8331,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                              if _sh.contains(px, py)), None)
                 if _pin is None:
                     continue
-                _eff, _trule = _track_pair_cl(_t.net_id, _sh.net_id, layer=_sh.layer)
+                _eff, _trule = _track_pair_cl(_t.net_id, _sh.net_id, layer=_sh.layer,
+                                              types=(('track', None), ('graphic', None)))
                 if any(check_segment_overlap(_t, _m, _eff, clearance_margin)[0]
                        for _m in _sh.members):
                     continue        # the stroke test reached it (flagged or waived)
@@ -8410,8 +8437,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 # avoids it: named, accepted. Otherwise a landing clear of
                 # the partner exists, so it is graded below as KiCad grades it.
                 if net_tie_landing_forced(pcb_data, seg_net, pad):
-                    _tie_cl = _pad_pair_cl(pad, seg_net, layer=seg.layer, other_type='track',
-                                           other=seg)
+                    _tie_cl = _pad_pair_cl(pad, seg_net, layer=seg.layer,
+                                           other_type=_seg_rule_type(seg), other=seg)
                     if check_pad_segment_overlap(pad, seg, _tie_cl, routing_layers,
                                                  clearance_margin)[0]:
                         _touch = check_pad_segment_overlap(
@@ -8424,8 +8451,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if not seg_net_matches and not pad_net_matches:
                 continue
 
-            _eff, _cyr = _pad_pair_cl(pad, seg_net, layer=seg.layer, other_type='track',
-                                      other=seg, want_rule=True)
+            _eff, _cyr = _pad_pair_cl(pad, seg_net, layer=seg.layer,
+                                      other_type=_seg_rule_type(seg), other=seg, want_rule=True)
             has_violation, overlap, closest_pt = check_pad_segment_overlap(
                 pad, seg, _eff, routing_layers, clearance_margin
             )

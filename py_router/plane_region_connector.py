@@ -3346,6 +3346,10 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
             best = max(best, config.layer_clearance(
                 layer, config.obstacle_clearance(nid), nid))
         if config.scoped_clearance is not None:
+            # #1931: and copper graphic as a Graphic
+            for nid in {s.net_id for s in _segs_l if getattr(s, 'graphic', False)}:
+                best = max(best, config.layer_clearance(
+                    layer, config.obstacle_clearance(nid, graphic=True), nid, graphic=True))
             # #1491: a pad may be priced apart from its net's tracks
             _one = {}
             for p in _pads_l:
@@ -3405,9 +3409,11 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                 continue
             # #498 layer rule, then the #735 track rule (#1135): the leg is a
             # track, and so is this foreign segment
+            _gr = getattr(s, 'graphic', False)  # #1931: a Graphic to a scoped rule
             req = half + s.width / 2.0 + config.track_obstacle_clearance(
                 s.net_id, config.layer_clearance(
-                    layer, config.obstacle_clearance(s.net_id), s.net_id))
+                    layer, config.obstacle_clearance(s.net_id, graphic=_gr), s.net_id,
+                    graphic=_gr), graphic=_gr)
             if not (bb[0] - req <= max(s.start_x, s.end_x)
                     and min(s.start_x, s.end_x) <= bb[2] + req
                     and bb[1] - req <= max(s.start_y, s.end_y)
@@ -3611,8 +3617,10 @@ def build_base_obstacles(
         if seg.net_id in exclude_net_ids:
             continue
         layer_idx = layer_map.get(seg.layer)
+        _gr = getattr(seg, 'graphic', False)    # #1931: a Graphic to a scoped rule
         _seg_clr = config.layer_clearance(  # #498 (#434 cross-class)
-            seg.layer, config.obstacle_clearance(seg.net_id), seg.net_id)
+            seg.layer, config.obstacle_clearance(seg.net_id, graphic=_gr), seg.net_id,
+            graphic=_gr)
         if layer_idx is None:
             # Copper on a layer OUTSIDE routing_layers (repair joins route on
             # the plane layers only): tracks cannot go there, but a repair
@@ -3628,7 +3636,8 @@ def build_base_obstacles(
         # #1135: the track stamp also takes the .kicad_dru track-to-track rule
         # (#735, raise-only; the via stamp below does not -- it binds tracks)
         seg_expansion_mm = (track_width / 2 + seg.width / 2
-                            + config.track_obstacle_clearance(seg.net_id, _seg_clr)
+                            + config.track_obstacle_clearance(seg.net_id, _seg_clr,
+                                                              graphic=_gr)
                             + cushion)
         _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         # Also block vias along this segment - must include segment width for proper clearance

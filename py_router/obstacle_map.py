@@ -185,17 +185,19 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     max_net_clearance = max(_routed_clearances) if _routed_clearances else config.clearance
     effective_clearance = max(config.clearance, max_net_clearance)
 
-    def _obstacle_clearance(net_id, pad=None):
+    def _obstacle_clearance(net_id, pad=None, graphic=False):
         # KiCad pairwise clearance: max(routing-side floor classA, this obstacle net's own class
         # clearance classB). A net not in the map falls back to config.clearance, so an EMPTY map
         # reproduces the prior behaviour exactly (inert until a per-net clearance map is supplied).
         # #1491: a class/type-scoped .kicad_dru rule replaces it where it binds
-        # (a pad by its pad type); without one the value is unchanged.
+        # (a pad by its pad type, copper graphic as KiCad's Graphic, #1931);
+        # without one the value is unchanged.
         v = max(effective_clearance, net_clearances.get(net_id, config.clearance))
         if config.scoped_clearance is None:
             return v
         return config.scoped_stamp(
-            net_id, (getattr(pad, 'pad_type', None) or 'smd') if pad is not None else None, v)
+            net_id, (getattr(pad, 'pad_type', None) or 'smd') if pad is not None
+            else config._graphic_key(graphic), v)
 
     # #1843: a board with a clearance rule scoped by a rule area is stamped
     # twice -- this build at the class values, kept outside the areas, and
@@ -370,8 +372,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 seg_width = seg.width if getattr(seg, 'width', 0) > 0 else config.track_width
                 # #498: the via meets this copper ON seg.layer, so a .kicad_dru
                 # rule for that layer replaces the net/class value.
-                seg_clearance = config.layer_clearance(seg.layer, _obstacle_clearance(seg.net_id),
-                                                       seg.net_id)
+                _gr = getattr(seg, 'graphic', False)
+                seg_clearance = config.layer_clearance(
+                    seg.layer, _obstacle_clearance(seg.net_id, graphic=_gr), seg.net_id,
+                    graphic=_gr)
                 via_block_mm = (config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
                         + config.via_hole_extra(seg_clearance))
                 # SPANS, like the main loop below: both producers feed
@@ -393,11 +397,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         reserve_width = config.route_reserve_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
-        seg_clearance = config.layer_clearance(seg.layer, _obstacle_clearance(seg.net_id),
-                                               seg.net_id)
+        # #1931: a scoped rule reads copper graphic as a Graphic, not a Track.
+        _gr = getattr(seg, 'graphic', False)
+        seg_clearance = config.layer_clearance(
+            seg.layer, _obstacle_clearance(seg.net_id, graphic=_gr), seg.net_id, graphic=_gr)
         # A track-scoped DRU rule RAISES the seg-vs-seg requirement only (#735)
         # (the track capsule); via_block keeps the resolved value.
-        trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
+        trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance, graphic=_gr)
         expansion_mm = (reserve_width / 2 + seg_width / 2 + trk_clearance
                         + extra_on_layer(extra_clearance, seg.layer))
         # For via blocking by segments: via half-size + segment half-width + clearance
@@ -2982,9 +2988,16 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         reserve_width = config.route_reserve_width(seg.layer)
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
-        seg_clearance = config.layer_clearance(seg.layer, obs_clearance, net_id)
+        # #1931: a net's copper graphic is a Graphic to a scoped rule.
+        if getattr(seg, 'graphic', False) and config.scoped_clearance is not None:
+            seg_clearance = config.layer_clearance(
+                seg.layer, config.obstacle_clearance(net_id, graphic=True), net_id,
+                graphic=True)
+        else:
+            seg_clearance = config.layer_clearance(seg.layer, obs_clearance, net_id)
         # A track-scoped DRU rule RAISES the seg-vs-seg requirement only (#735).
-        trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
+        trk_clearance = config.track_obstacle_clearance(
+            seg.net_id, seg_clearance, graphic=getattr(seg, 'graphic', False))
         expansion_mm = (reserve_width / 2 + seg_width / 2 + trk_clearance
                         + extra_on_layer(extra_clearance, seg.layer))
         via_block_mm = (config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
