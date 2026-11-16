@@ -713,24 +713,35 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     minx, maxx = min(xs) - margin, max(xs) + margin
     miny, maxy = min(ys) - margin, max(ys) + margin
 
-    def _in_box(lo_x, hi_x, lo_y, hi_y):
-        return not (hi_x < minx or lo_x > maxx or hi_y < miny or lo_y > maxy)
-
+    # One pass over the board's copper per call, so the box test is written
+    # out here: a function call and four min/max per item cost more than the
+    # test itself.
     o_segs = []
     for s in pcb_data.segments:
-        if s.net_id in own or s.net_id == 0:
+        nid = s.net_id
+        if nid == 0 or nid in own:
             continue
         h = s.width / 2.0
-        if _in_box(min(s.start_x, s.end_x) - h, max(s.start_x, s.end_x) + h,
-                   min(s.start_y, s.end_y) - h, max(s.start_y, s.end_y) + h):
-            o_segs.append(s)
+        lo, hi = s.start_x, s.end_x
+        if lo > hi:
+            lo, hi = hi, lo
+        if hi + h < minx or lo - h > maxx:
+            continue
+        lo, hi = s.start_y, s.end_y
+        if lo > hi:
+            lo, hi = hi, lo
+        if hi + h < miny or lo - h > maxy:
+            continue
+        o_segs.append(s)
     o_vias = []
     for v in pcb_data.vias:
-        if v.net_id in own or v.net_id == 0:
+        nid = v.net_id
+        if nid == 0 or nid in own:
             continue
         h = v.size / 2.0
-        if _in_box(v.x - h, v.x + h, v.y - h, v.y + h):
-            o_vias.append(v)
+        if v.x + h < minx or v.x - h > maxx or v.y + h < miny or v.y - h > maxy:
+            continue
+        o_vias.append(v)
 
     hits = []
     seen = set()
