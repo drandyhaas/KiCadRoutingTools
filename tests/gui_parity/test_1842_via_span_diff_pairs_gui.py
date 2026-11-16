@@ -13,9 +13,11 @@ pair routed, the vias (count, type, layer pair, size, drill), the layers the
 tracks are on, and the output project's via and drilled-hole minimums, which
 must be the board's own.
 
-Needs KiCad's python (pcbnew + wx): exit 77 without it.
+Needs KiCad's python (pcbnew + wx): launched under any other, it re-execs
+into KiCad's (`headless_plan.reexec_into_kicad`), and exits 77 only when
+there is none.
 
-    <KiCad python> tests/gui_parity/test_1842_via_span_diff_pairs_gui.py
+    python3 tests/gui_parity/test_1842_via_span_diff_pairs_gui.py
 """
 import contextlib
 import io
@@ -80,7 +82,9 @@ def main():
         import pcbnew  # noqa: F401
         import wx      # noqa: F401
     except Exception as e:                                     # noqa: BLE001
-        print(f"SKIP: needs KiCad's python (pcbnew + wx): {e}")
+        from headless_plan import reexec_into_kicad
+        reexec_into_kicad(__file__)
+        print(f"SKIP: needs KiCad's python (pcbnew + wx), and none was found: {e}")
         return 77
     py = [sys.executable, '-X', 'utf8']
     with tempfile.TemporaryDirectory() as td:
