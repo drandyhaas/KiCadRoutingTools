@@ -2117,6 +2117,28 @@ def _trust(tr, was, now):
     return min(TRUST, tr * 1.5)
 
 
+def round_an_end(key, c, d):
+    """`c`, `d`: two points of run `key`, one after the other once what lies between them is taken away. Are they a
+    crossing of one cell edge and straight back over it, with ANOTHER run of the layer crossing that edge between
+    the two and ENDING in the cell past it (its first crossing, come out of that cell, or its last, gone into it)?
+    Then the run goes round that end, and may not be folded back onto the edge before it"""
+    if not (c['k'] == 'P' and d['k'] == 'P' and c['from'] == d['to'] and c['to'] == d['from']):
+        return False
+    e = (min(c['a'], c['b']), max(c['a'], c['b']))
+    at = lambda p: p['t'] if p['a'] < p['b'] else p['len'] - p['t']      # noqa: E731
+    s1, s2 = sorted((at(c), at(d)))
+    L_, past = RUN[key]['L'], c['to']
+    for k2 in KEYS:
+        if k2 == key or RUN[k2]['L'] != L_:
+            continue
+        ps = [p for p in RUN[k2]['pts'] if p['k'] == 'P']
+        for j, p in enumerate(ps):
+            if (min(p['a'], p['b']), max(p['a'], p['b'])) == e and s1 < at(p) < s2 and \
+                    ((j == 0 and p['from'] == past) or (j == len(ps) - 1 and p['to'] == past)):
+                return True
+    return False
+
+
 def round_of(it):
     """one LP from the layout as it stands, and the layout moved to its answer. The LP holds the points and vias
     within REACH of where the round before moved (the rest stand where they are: fixed points to it); what moved in
@@ -2637,6 +2659,14 @@ def round_of(it):
         while i + 1 < len(r['pts']):                # an edge crossed and crossed straight back, nothing between: neither
             a_, b_ = r['pts'][i], r['pts'][i + 1]
             if a_['k'] == 'P' and b_['k'] == 'P' and a_['from'] == b_['to'] and a_['to'] == b_['from']:
+                # (...unless the run turns back there ROUND ANOTHER RUN'S END: with the two gone, the points either
+                # side of them are such a pair over the edge before, and a run of the layer crosses that edge between
+                # them and ends in the cell past it -- at its via. The way past that end stays. Dropped pair after
+                # pair, a run that went over a neighbour's via was folded back through the cell the via stands in,
+                # came out below it, and crossed the neighbour's run on its own layer for every round after)
+                if 0 < i and i + 2 < len(r['pts']) and round_an_end(key, r['pts'][i - 1], r['pts'][i + 2]):
+                    i += 1
+                    continue
                 del r['pts'][i:i + 2]
                 i = max(i - 1, 0)
             else:
