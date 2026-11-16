@@ -9,7 +9,7 @@ loop's files, OUTDIR/rN/loop) or a setting of its own.
 What it is for: a stage's trouble reproduced in seconds, no round run -- a pair snap from the loop's recorded plan
 (`whole_snap.py loop/p3.json OUT --pairs`), a repair re-solve from its recorded hold and cut files (`whole_solve.py
 OUT --set SOLVE_HOLD=.. --set CUTS=..`), a geometry from a recorded solve. WORK is the bus's work dir (route_bus's
-BUS.bus: frame.kicad_pcb, joint.json for a whole-array bus); ROUND_DIR a whole_route round in it (run/rN).
+BUS.bus: frame.kicad_pcb); ROUND_DIR a whole_route round in it (run/rN).
 Exits as the stage does; its lines to stdout."""
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # a research tool (awx), catalogued, shown at no door
 
@@ -46,8 +46,6 @@ def round_env(work, round_dir, sizes, dest=None, layers=None, sets=()):
     env = dict(os.environ)
     env.update(rb.STEP_SETTINGS)
     env[_rules.SETTING] = _rules.as_setting(rr)
-    if os.path.isfile(os.path.join(work, 'joint.json')):
-        env['FANOUT_JOINT'] = os.path.join(work, 'joint.json')
     env.update(BASE=frame, DEST=dest or env.get('DEST') or 'U1',
                ROUTE_LAYERS=layers or ','.join(['F.Cu', 'B.Cu'] + [L for L in cu if L not in ('F.Cu', 'B.Cu')]))
     wr.stage_env(env)

@@ -18,7 +18,6 @@ pitch is the rules' track plus the pair gap.
 """
 import bisect
 import math
-import awx_settings
 import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -30,8 +29,8 @@ Pt = Tuple[float, float]
 # lanes are ROUTED at -- the braid's hug (clearance + 5 um), not the spec:
 # the pair router rejects a pair whose legs sit closer than the config's
 # clearance as a short (measured: gap 0.100 against clearance 0.105,
-# SDQS0 refused after a found route). Overridable per invocation.
-GAP = float(awx_settings.get('BRAID_PAIR_GAP', '0') or 0) or _rules.active().pair_gap
+# SDQS0 refused after a found route).
+GAP = _rules.active().pair_gap
 # (the hug plus a grid diagonal, rules.pair_gap: the pose router's short test
 # is `gap < clearance` on the legs it GENERATES on the grid, and at a corner
 # the inner leg's gap shrinks -- measured 0.102, 0.1035 and 0.092 against
@@ -40,18 +39,9 @@ GAP = float(awx_settings.get('BRAID_PAIR_GAP', '0') or 0) or _rules.active().pai
 # the farthest apart a pair's two teeth (or two berths) may stand for the
 # pair to be routed as ONE lane: beyond it the legs are singles, and the
 # log says so (the plan chose the ends apart -- the joint menu's job)
-MAX_SEP = float(awx_settings.get('BRAID_PAIR_SEP', '0') or 0) or 2.0 * _rules.active().lane_pitch
+MAX_SEP = 2.0 * _rules.active().lane_pitch
 
 _SUFFIX = re.compile(r'^(.*?)(_P|_N|P|N|\+|-|_p|_n)$')
-
-# BRAID_PAIR_ONLY (2026-09-21): a comma list of pair BASE names (SCK,SDQS0).
-# A pair not named has its legs planned and routed as SINGLES everywhere --
-# the plan's pair clauses, harmonise, the judge's penalty, the braid's
-# member -- which is the instrument for "one pair at a time": the same 51
-# nets, one pair coupled, the rest as they were before pairs existed. Unset
-# = every pair the suffix rule finds. The ladder's ADMISSION (coherent_nets)
-# ignores it (admit_all), so every arm routes the same net list.
-ONLY = {s.strip() for s in awx_settings.get('BRAID_PAIR_ONLY', '').split(',') if s.strip()}
 
 
 def pitch(track: float = None) -> float:
@@ -80,15 +70,12 @@ def via_ring(cfg, extra: float = 0.0, size: float = None) -> float:
 
 
 def svia_reach(cfg, x: float, y: float, size: float) -> float:
-    """(SVIA_RING) how far a via ON THE BOARD (another net's: a dog-bone, a stitch) reaches for a planned lane,
+    """How far a via ON THE BOARD (another net's: a dog-bone, a stitch) reaches for a planned lane,
     as a disc's radius that the stages' lane bars (half a track and the clearance, and their grid allowance) are
     added to: the router keeps a track's grid cells off it by its RING about the grid point it rounds to (via_ring,
     the via's own size), and as far again as it stands off that point. Planned at the copper's bar alone, a lane met
     the ring in the snap (zynq LVDS K40: EN_AGC 0.408 off VCC_1V8's dog-bone at U1's corner, the geometry, the polish
-    and the audit asking 0.4025, the ring 0.417 -- one free column, closed where its neighbour's share began). Off
-    (SVIA_RING=0), the via's own radius"""
-    if (awx_settings.get('SVIA_RING') or '1') != '1':
-        return size / 2
+    and the audit asking 0.4025, the ring 0.417 -- one free column, closed where its neighbour's share began)"""
     g = cfg.grid_step
     off = math.hypot(x - round(x / g) * g, y - round(y / g) * g)
     return max(size / 2, via_ring(cfg, size=size) + off - cfg.track_width / 2 - cfg.clearance)
@@ -620,8 +607,8 @@ def dive_barrels(site: Pt, centreline, off: float) -> List[Pt]:
 
 
 def pair_names(names: Sequence[str], admit_all: bool = False) -> Dict[str, Tuple[str, str]]:
-    """{base: (P name, N name)} over the given net names, by suffix.
-    BRAID_PAIR_ONLY narrows it to the named pairs unless admit_all."""
+    """{base: (P name, N name)} over the given net names, by suffix: every pair the suffix rule finds, whatever
+    `admit_all` (kept for its callers) says."""
     by: Dict[str, Dict[str, str]] = {}
     for nm in names:
         m = _SUFFIX.match(nm)
@@ -630,10 +617,7 @@ def pair_names(names: Sequence[str], admit_all: bool = False) -> Dict[str, Tuple
         base, suf = m.group(1), m.group(2)
         pol = 'P' if suf in ('_P', 'P', '+', '_p') else 'N'
         by.setdefault(base, {})[pol] = nm
-    out = {b: (d['P'], d['N']) for b, d in by.items() if 'P' in d and 'N' in d}
-    if ONLY and not admit_all:
-        out = {b: v for b, v in out.items() if b in ONLY}
-    return out
+    return {b: (d['P'], d['N']) for b, d in by.items() if 'P' in d and 'N' in d}
 
 
 def members(names: Sequence[str]) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:

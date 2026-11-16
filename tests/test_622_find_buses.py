@@ -125,7 +125,7 @@ def main():
                          f'the board handed on as it came with its summary')
         else:
             s = json.load(open(summ))
-            if s['buses'] or s['found'] != [] or s['exit'] != 1:
+            if s['buses'] or (s.get('plan') or {}).get('buses') != [] or s['exit'] != 1:
                 fails.append(f'no bus: summary {s}, want no bus run, none found, exit 1')
             if os.path.getsize(out) != os.path.getsize(src):
                 fails.append('no bus: OUT is not the board as it came')

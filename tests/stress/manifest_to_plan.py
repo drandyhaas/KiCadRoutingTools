@@ -177,15 +177,6 @@ REFUSED_TOOLS = {
         'plans and lays one awx escape for every signal ball of an array; the '
         'plan\'s fanout step is bga_fanout / qfn_fanout, not this. Run it on '
         'the CLI and start the plan from its output'),
-    'dogbone_arrays.py': (
-        'dog-bones every netted ball of an awx bus\'s two arrays, the base of '
-        'route_bus --escape; the plan\'s fanout step is bga_fanout / '
-        'qfn_fanout, not this. Run it on the CLI and start the plan from its '
-        'output'),
-    'escape_plan.py': (
-        'plans and lays an awx escape fanout on a dog-boned array pair, a '
-        'stage of route_bus --escape; the plan format has no bus step. Run it '
-        'on the CLI and start the plan from its output'),
     'braid.py': (
         'emits the awx braid for a fanned-out bus; the plan format has no bus '
         'step. Run it on the CLI and start the plan from its output'),
@@ -228,6 +219,32 @@ REFUSED_TOOLS = {
     'fanout_logdiff.py': (
         'compares two awx fanout logs; a research tool, not a board-chain '
         'step. Run it on the CLI'),
+    'group_ends.py': (
+        'chooses the ends of every awx bus off one array in one model, a '
+        'stage of route_bus; the plan format has no bus step. Run it on the '
+        'CLI'),
+    'whole_joint.py': (
+        'the coupled solve of the awx buses off one array, a stage of '
+        'route_bus; the plan format has no bus step. Run it on the CLI'),
+    'whole_passages.py': (
+        'reads the passages a bus\'s lanes take through an awx bench and '
+        'checks a plan against them; a research tool, not a board-chain step. '
+        'Run it on the CLI'),
+    'frame_render.py': (
+        'draws an awx bus round with its whole-route frame; a research tool, '
+        'not a board-chain step. Run it on the CLI'),
+    'snap_render.py': (
+        'draws an awx snap\'s laid lanes at track level; a research tool, not '
+        'a board-chain step. Run it on the CLI'),
+    'replay_stage.py': (
+        'runs one stage of a recorded awx bus round again; a research driver, '
+        'not a board-chain step. Run it on the CLI'),
+    'replay_round.py': (
+        'runs one round of a recorded awx bus run again; a research driver, '
+        'not a board-chain step. Run it on the CLI'),
+    'replay_loop.py': (
+        'runs a recorded awx bus round\'s loop again from a plan; a research '
+        'driver, not a board-chain step. Run it on the CLI'),
 }
 
 # Board-writing tools whose recorded command has NOTHING to replay on a live

@@ -76,7 +76,7 @@ SRC_DIRS = ('py_router', 'py_tools', 'py_placer', 'awx')
 
 #: A module imported at module scope ONLY by the tool it is the runtime of,
 #: which cannot start without it: awx's Modal launchers are run BY `modal run`.
-LAUNCHER_ONLY = {'modal': ('awx/modal_curve.py', 'awx/modal_k.py', 'awx/modal_whole.py')}
+LAUNCHER_ONLY = {'modal': ('awx/modal_whole.py',)}
 
 
 def _repo_local_names():

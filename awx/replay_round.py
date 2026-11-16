@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """replay_round.py WORK OUT_DIR --sizes CLR,TRK,FTRK,VIA,DRILL --k K [--fanout-from ROUND_DIR] -- ONE round of a bus's
 whole route run again from its recorded work dir: whole_route.chain at one round under the settings route_bus gives
-it (STEP_SETTINGS, the run's rules at its sizes, FANOUT_JOINT, the bus's ROUTE_LAYERS), in process as --inproc runs
+it (STEP_SETTINGS, the run's rules at its sizes, the bus's ROUTE_LAYERS), in process as --inproc runs
 it. With `--fanout-from` the round's FANOUT is the recorded round's (its fo.kicad_pcb with siblings, fo.plan.json and
 fo.log copied in where fanout_from_plan.py would write them), so the rest of the round -- solve, loop, lay -- runs on
 the very same ends; with `--solve-from` its first SOLVE is the recorded round's too (solve.json and its log), so the
@@ -9,7 +9,7 @@ loop runs on the very same plan.
 
 What it is for: a change to the solve, the loop or the lay judged on the ends a recorded run laid, the fanout's own
 spread taken out; and a round in a fraction of its time where the fanout is the slow part. WORK is the bus's work
-dir (route_bus's BUS.bus: frame.kicad_pcb, joint.json for a whole-array bus). Its lines to stdout, its run dir
+dir (route_bus's BUS.bus: frame.kicad_pcb). Its lines to stdout, its run dir
 OUT_DIR/run; the last line the chain's grade."""
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # a research tool (awx), catalogued, shown at no door
 
@@ -59,8 +59,6 @@ def main():
         cu = parse_kicad_pcb(frame).board_info.copper_layers
     layers = a.layers or ','.join(['F.Cu', 'B.Cu'] + [L for L in cu if L not in ('F.Cu', 'B.Cu')])
     settings = {'ROUTE_LAYERS': layers, **rb.STEP_SETTINGS, _rules.SETTING: _rules.as_setting(rr)}
-    if os.path.isfile(os.path.join(work, 'joint.json')):
-        settings['FANOUT_JOINT'] = os.path.join(work, 'joint.json')
     settings.update(kv.partition('=')[::2] for kv in a.set)
     os.makedirs(out, exist_ok=True)
     wr.INPROC = True
@@ -68,9 +66,8 @@ def main():
         run0 = wr.run
 
         def run_(argv, env, *x, **k):
-            # (the round's fanout -- not a held one, which lays the round's own plan -- taken from the recorded round)
-            if argv and argv[0] == 'fanout_from_plan.py' and '--hold' not in argv and \
-                    os.path.basename(os.path.dirname(argv[1])) == 'r1':
+            # (the round's fanout taken from the recorded round)
+            if argv and argv[0] == 'fanout_from_plan.py' and os.path.basename(os.path.dirname(argv[1])) == 'r1':
                 d_ = os.path.dirname(argv[1])
                 for f_ in ('fo.kicad_pcb', 'fo.kicad_pro', 'fo.kicad_prl', 'fo.plan.json', 'fo.log'):
                     if os.path.isfile(os.path.join(fo_from, f_)):

@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
-"""A bus step keeps the array's OTHER balls an escape (awx/fanout_from_plan.py: trial_wins; awx/route_bus.py:
-ball_way's next sites).
+"""A bus step keeps the array's OTHER balls an escape (awx/route_bus.py: ball_way's next sites).
 
   python3 tests/test_622_other_balls.py
 
-Under the whole-array fanout the bus's teeth are planned with every other ball of the array. The residue rounds laid
-the teeth that plan chose, judged them a few counts worse than the teeth before and put those back -- on which a
-supply ball in the bus's own rows had no option at any size, was left bare, and was walled in by the lanes laid past
-it. trial_wins: fewer pairs split, then fewer other balls left without an escape, then the count.
-
-And where the lay still walls a ball in, its lanes are lifted and routed again round the via site the ball reaches with
+Where the lay still walls a ball in, its lanes are lifted and routed again round the via site the ball reaches with
 them gone (route_lanes.lift_walls). The nearest site alone was tried: a clearance off the lifted lane's own tooth,
 which stands, it left the lane no room to leave past the via. ball_way's `sites` gives the next ones too.
 
-1. trial_wins: the pairs split decide first; equal, the balls stranded; equal, the judge's count;
-2. ball_way with `sites` (on kicad_files/ulx3s.kicad_pcb U1's innermost ball): the first way is the one it gives
+ball_way with `sites` (on kicad_files/ulx3s.kicad_pcb U1's innermost ball): the first way is the one it gives
    alone, each site a via's width or more from every one before it, and each way starts at the ball and ends at its
    site.
 """
@@ -36,7 +29,6 @@ sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 os.chdir(os.path.join(ROOT, 'awx'))
 BOARD = os.path.join(ROOT, 'kicad_files', 'ulx3s.kicad_pcb')
 
-import fanout_from_plan as fp  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 BAD = []
@@ -49,14 +41,6 @@ def check(ok, what):
     if not ok:
         BAD.append(what)
 
-
-# ---- 1. trial_wins
-check(fp.trial_wins(1, 0, 0, 3, False) and not fp.trial_wins(0, 1, 3, 0, True),
-      'the pairs split decide first, whatever the balls stranded and the count say')
-check(fp.trial_wins(0, 0, 1, 0, False) and not fp.trial_wins(0, 0, 0, 1, True),
-      'the pairs equal, fewer other balls left without an escape wins -- against the count either way')
-check(fp.trial_wins(0, 0, 1, 1, True) and not fp.trial_wins(0, 0, 1, 1, False),
-      'both equal, the judge\'s count decides')
 
 # ---- 2. a walled ball's next via sites
 if not os.path.exists(BOARD):

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The bus step's pulls in the escape fanout (route_bus.attach_pulls; coherent_nets.admissible's BUS_ATTACHED).
+"""The pull pads the bus step joins to its lanes on the routed board (route_bus.attach_pulls), and how
+coherent_nets.admissible reads a net with one joined.
 
   python3 tests/test_622_attach_pulls.py
 
@@ -14,8 +15,9 @@ pins:
    gap lines, every piece clear of that track, within ATTACH_PITCHES of the pitch;
 3. one farther than that from its via (R2), and one walled off by another net's via (R4), stay off their nets for the
    rest of the chain, no copper laid for them;
-4. coherent_nets.admissible: the net with a pull pad joined (three pads on three parts) is a lane only while that pad
-   is named in BUS_ATTACHED -- none of its two ends.
+4. coherent_nets.admissible on the board handed on: the net with a pull pad joined (three pads on three parts) is a
+   lane U1 to U2 -- the joined pad, a two-pad part's pad its net's own copper touches (pairs.wired), is none of its two
+   ends; the same pad on its net with no copper to it (the board as drawn) is a third end, and no lane.
 """
 import contextlib
 import io
@@ -32,7 +34,6 @@ os.environ.pop('AWX_RULES', None)
 import rules as _rules  # noqa: E402
 _rules.install(_rules.Rules(clearance=0.09, track=0.15, via_size=0.45, via_drill=0.3, fan_track=0.12,
                             hole_to_hole=0.25, source='test'))
-import awx_settings  # noqa: E402
 import route_bus as rb  # noqa: E402
 from coherent_nets import admissible  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402
@@ -150,12 +151,14 @@ gap = min(min(_pt_seg((oth.start_x, oth.start_y), (s.start_x, s.start_y), (s.end
               _pt_seg((oth.end_x, oth.end_y), (s.start_x, s.start_y), (s.end_x, s.end_y))) for s in r3)
 check(gap >= 0.06 + 0.06 + 0.09 - 1e-6, f'2: R3\'s stub clear of OTHER\'s track: {gap:.3f}')
 
-# 4. the ladder: N12 has three pads (U1, U2, R1.1) on three parts once joined
+# 4. the ladder: N12 has three pads (U1, U2, R1.1) on three parts once joined, R1.1 wired by its stub
 net12 = pcb.nets[byname['N12']]
 check(len(net12.pads) == 3, f'4: N12 three pads once R1 is joined: {len(net12.pads)}')
-check(not admissible(pcb, net12), '4: a three-part net is no lane without BUS_ATTACHED')
-with awx_settings.given({**awx_settings.environ(), 'BUS_ATTACHED': 'R1.1'}):
-    check(admissible(pcb, net12), '4: with R1.1 named in BUS_ATTACHED, N12 is a lane U1 to U2')
+check(admissible(pcb, net12), '4: with R1.1 joined by its stub, N12 is a lane U1 to U2')
+# (the board as drawn: R1.1 on N12, nothing of N12's touching it -- three ends)
+net12_0 = pcb0.nets[{n.name: i for i, n in pcb0.nets.items()}['N12']]
+check(len(net12_0.pads) == 3, f'4: N12 three pads on the board as drawn: {len(net12_0.pads)}')
+check(not admissible(pcb0, net12_0), '4: control: R1.1 on N12 with no copper to it is a third end -- no lane')
 
 print('ALL PASS' if not fails else f'{len(fails)} FAILED')
 sys.exit(1 if fails else 0)

@@ -210,33 +210,24 @@ PAGES_SIDERS = int(awx_settings.get('PLAN_PAGES_SIDERS', '1') or 0)   # default 
 # routes 98 and leaves SDQ11 open. None = the plan decides (today's
 # behaviour, byte-identical); '0' forces it off; anything else forces it on.
 EXACT_PAGES_ENV = awx_settings.get('BRAID_EXACT_PAGES')
-BRANCH = awx_settings.get('BRAID_BRANCH', '1') != '0'   # the trunk and its branches (build_branches); BRAID_BRANCH=0 off
 import pairs as _pairs  # noqa: E402  the bus's differential pairs as members (#622, 2026-09-20)
 PAIRS = int(awx_settings.get('BRAID_PAIRS', '0') or 0)   # 1: a differential pair is ONE lane, routed coupled by the production pair router (pairs.py, connect_pair); 0: its legs are singles -- byte-identical
 PROX_TRACK = 0.25              # two same-layer lines nearer than this: a short (pinch_gate.py reads it)
-ECON_LONG = float(awx_settings.get('BRAID_ECON_LONG', '3.0'))   # econ re-lay: a lane this far (mm) over its airline is a candidate
-# BRAID_ECON_MM_PER_VIA (mm, 0 = unbounded, the rule until 2026-09-20): the
-# most copper the econ re-lay may buy a via with. K36 SBA1 was re-laid
-# from 2 vias / 20.5 mm to 0 vias / 44.7 mm -- round the outside of the
+ECON_LONG = 3.0                # econ re-lay: a lane this far (mm) over its airline is a candidate
+# ECON_MM_PER_VIA (mm): the most copper the econ re-lay may buy a via
+# with. K36 SBA1 was re-laid from 2 vias / 20.5 mm to 0 vias / 44.7 mm
+# -- round the outside of the
 # DDR and back up under its balls to its own dogbone via, the neighbour
 # SA0 hugging the comb in front of its berth -- and SDQ0 from 5 / 28.0
 # to 3 / 47.6; the grade has no length term and never saw either. A DDR
 # lane 24 mm over its group is 24 mm of meander on every other lane of
 # the group at the length-matching phase.
-ECON_MM_PER_VIA = float(awx_settings.get('BRAID_ECON_MM_PER_VIA', '6.0'))
-# BRAID_ECON_JOINT (default on): when a lane's cheaper re-lay is too long
-# for the guard, or an extra-long lane has no cheaper lane alone, the
-# min-cut probe of rip_for names the lane(s) of this run its short path
-# would cross (SA0 in front of SBA1's berth), rips them, re-lays the lane
-# and then them, and keeps the set only when it is cheaper in all.
-ECON_JOINT = int(awx_settings.get('BRAID_ECON_JOINT', '1'))
-# BRAID_APPROACH_RESERVE (mm, 0 = off): see Corridor.approach_virt
-APPROACH_RESERVE = float(awx_settings.get('BRAID_APPROACH_RESERVE', '1.0') or 0)
-# ...and how hard the rip tries when a lane is refused. These were hard
-# coded defaults on rip_for; they are the natural dials for "repair
-# harder" and there was no way to turn them.
-RIP_VICTIMS = int(awx_settings.get('BRAID_RIP_VICTIMS', '3'))
-RIP_DEPTH = int(awx_settings.get('BRAID_RIP_DEPTH', '1'))
+ECON_MM_PER_VIA = 6.0
+APPROACH_RESERVE = 1.0         # mm: see Corridor.approach_virt
+# ...and how hard the rip tries when a lane is refused (rip_for's
+# max_victims and depth when its caller names none)
+RIP_VICTIMS = 3
+RIP_DEPTH = 1
 
 
 def _prime_highs_threads():
@@ -289,16 +280,7 @@ def _prime_highs_threads():
 HIGHS_PRIMED = _prime_highs_threads()
 
 
-BLOCK_PUSH = int(awx_settings.get('BRAID_BLOCK_PUSH', '1') or 0)
-# ^ 2: pushed only when the push CLEARS within its cap (a push that finds
-# copper at every step is no push -- see _clear_block); 1: pushed to the
-# cap regardless (the recorded chain's rule).
-# ^ 0: a side block is NOT pushed whole clear of static copper (_clear_block);
-# it starts a BLOCK_GAP beyond the stubs and each lane is bent round what its
-# own run meets (deflect_islands). The human bench's north block: pushed 1.5 mm
-# clear of the passive cluster north of DU1, ours sat 2 mm further out than
-# the human's lanes (SDQ10 -7.9 against -5.5), every north diagonal steeper.
-JOG_VIA = float(awx_settings.get('BRAID_JOG_VIA', '1.0') or 1.0)
+JOG_VIA = 1.0                  # vias a lane pitch (LPITCH) of jog is worth: a leg's move off an island (move_cost)
 W_GATE = 0.33                  # narrowest swap column the gated schedule
                                # gets: every clean gated K on the bench
                                # had W >= 0.343 (K21, W=0.322, needed
@@ -311,7 +293,7 @@ W_GATE = 0.33                  # narrowest swap column the gated schedule
 
 class CtxView:
     """A corridor's view of the shared braid context with some per-net END
-    tables overridden (BRAID_BRANCH): a trunk whose side exits end at their
+    tables overridden (build_branches): a trunk whose side exits end at their
     HANDOFF points, a branch whose lanes start there. Every other attribute
     -- the board, the landed set, the corridors, the config -- is the
     shared context's own, read and written through."""
@@ -344,7 +326,7 @@ class CtxView:
             setattr(object.__getattribute__(self, '_base'), k, v)
 
 
-HAND_DS = 0.6                  # BRAID_BRANCH: the handoff line this far past the trunk's s1
+HAND_DS = 0.6                  # build_branches: the handoff line this far past the trunk's s1
 
 
 def _simplify_so(pts, tol):
@@ -416,7 +398,7 @@ def ring_spine(dpads, handoffs, stubs, start, ccw, arrive, tails, wrap_side=Fals
 
 
 def build_branches(ctx, c1, log, _tgt=None, _before=None, _round=0):
-    """BRAID_BRANCH: the corridor `c1` (planned) as a TRUNK with BRANCHES.
+    """The corridor `c1` (planned) as a TRUNK with BRANCHES.
     Its side exits leave it at HANDOFF points -- their exit-block slot HAND_DS
     past s1, on their page (a swimmer: its berth's layer) -- and ride a
     branch per side round the destination (corridor.build_wrap_spine from
@@ -1619,7 +1601,7 @@ class Corridor:
             return self._head_exit(nm, se[nm], self.stubs[nm], ctx.dest_layer[nm])
 
         if getattr(self, 'branch', False):
-            # a BRANCH (BRAID_BRANCH): its teeth are the trunk's handoff
+            # a BRANCH (build_branches): its teeth are the trunk's handoff
             # points, laid across its start, and every lane peels off to
             # its berth on a leg -- none runs head-on through the others
             self.heads_l = list(M)
@@ -1977,31 +1959,13 @@ class Corridor:
         end, and the router refused it)."""
         sp, ctx = self.spine, self.ctx
         base0 = base
-        if not BLOCK_PUSH:
-            return base
-        cleared = False
         for k in range(tries):
             a, b = sp.xy(s_from, base), sp.xy(s_to, base)
             ok = {L: ctx.obs_but(nm, self.members, L).seg_clear(a, b)
                   for L in ('F.Cu', 'B.Cu')}
             if all(ok.values()):
-                cleared = True
                 break
             base += sg * step
-        if BLOCK_PUSH >= 2 and not cleared:
-            # ^ 2: a push that does NOT clear within its cap is no push.
-            # The human bench's north block: the passive cluster north
-            # of DU1 spans 4 mm of o, every one of the 15 steps found
-            # copper and the block shipped 1.5 mm out for nothing --
-            # every north lane a steeper diagonal, the far-face lanes
-            # refused (K51: 8 north lanes, +11..13 vias against the
-            # unpushed block). Left at its base, each lane is bent round
-            # what its own run meets (deflect_islands / the early dive),
-            # which is what routes it anyway.
-            self.log(f'  block on side {"+" if sg > 0 else "-"} not pushed: '
-                     f'static copper within {tries * step:.1f} mm at every '
-                     f'offset (s {s_from:.1f}..{s_to:.1f})')
-            return base0
         if abs(base - base0) > 1e-9:
             self.log(f'  block on side {"+" if sg > 0 else "-"} pushed '
                      f'{abs(base - base0):.2f} mm clear of static copper '
@@ -2066,7 +2030,7 @@ class Corridor:
         # legal minimum was measured alone on the ladder as K35 82 -> 97
         # vias and K41 4 -> 5 open, so a pitch it stays.
         end_clash = LPITCH - 1e-6
-        own_hw = ((-_pairs.pitch(TRACK) / 2, _pairs.pitch(TRACK) / 2) if nm in prs and BRANCH else (0.0,))
+        own_hw = ((-_pairs.pitch(TRACK) / 2, _pairs.pitch(TRACK) / 2) if nm in prs else (0.0,))
         # ...and a free end is measured from the leg's nearest CONDUCTOR, as
         # a placed leg is: from a pair's centreline, HHa SA6's tooth read
         # 0.346 mm clear of SCK's join leg and stood 0.21 from its outer leg
@@ -2080,11 +2044,10 @@ class Corridor:
             n = sum(1 for p in (ends_L if layer_only else ends)
                     if p[2] - end_clash - own_ext < s < p[3] + end_clash + own_ext
                     and lo_ - 0.05 < p[1] < hi_ + 0.05)
-            # under BRAID_BRANCH a PAIR's leg is its two conductors, half the
+            # a PAIR's leg is its two conductors, half the
             # pair pitch either side (placed legs are recorded that way too):
             # measured as one line at its centre, HHa's SCK leg left SODT1's
-            # leg on SCKN's (off the branch frame it moved zynq's pair plan
-            # for the worse, and the leg stays one line)
+            # leg on SCKN's
             n += sum(1 for (ps, plo, phi) in placed
                      if min(abs(ps - s - h_) for h_ in own_hw) < TRACK + 0.1 + 0.02
                      and plo < hi_ and phi > lo_)
@@ -2278,7 +2241,7 @@ class Corridor:
             for nm in sorted(js, key=lambda nm: st[nm][0]):
                 s_l = self._leg_s(nm, st[nm][0], st[nm][1], far, True, placed)
                 self.join_leg_s[nm] = s_l
-                if nm in (getattr(self.ctx, 'pairs', None) or {}) and BRANCH:
+                if nm in (getattr(self.ctx, 'pairs', None) or {}):
                     # a PAIR's join leg is its two conductors, as its exit leg's is
                     h_ = _pairs.pitch(TRACK) / 2
                     placed.append((s_l - h_, min(st[nm][1], far), max(st[nm][1], far)))
@@ -2299,7 +2262,7 @@ class Corridor:
                 launch_o[nm] = base + sg * (offs[-1] - offs[k])
                 self.join_block[nm] = launch_o[nm]
         # head-on exits: stub offsets at the exit pitch floor
-        # a PINNED end (a trunk's handoff, BRAID_BRANCH) is its own slot:
+        # a PINNED end (a trunk's handoff, build_branches) is its own slot:
         # the side block that laid it had the floors and the board, and
         # relaxed again here the trunk spread it back past the outline
         pin = getattr(self, 'pin_target', None) or ()
@@ -2385,7 +2348,7 @@ class Corridor:
                             key=lambda nm: -st[nm][0])
             order = ports + joined
             if getattr(self, 'keep_order', False):
-                # a BRANCH (BRAID_BRANCH) keeps the order its lanes arrive in
+                # a BRANCH (build_branches) keeps the order its lanes arrive in
                 # from the trunk: its peel-off legs cross the lanes still
                 # inside by layer, as a human ring's do
                 order = sorted(xs, key=lambda nm: sg * launch_o[nm])
@@ -2398,13 +2361,13 @@ class Corridor:
                 # them was 0.15 mm of copper room (HHa SA2 / SA0, slope ~2.5)
                 gap_ = max(gap_, self._secant_floor(edge, order[0], LPITCH, sched))
             base = sg * max(ext + gap_, -LPITCH * (len(xs) - 1) / 2)
-            # a side that leaves on a BRANCH (BRAID_BRANCH) rides round the
+            # a side that leaves on a BRANCH (build_branches) rides round the
             # destination on the branch's own spine, never along the straight
             # run the push clears: HHa's south block went its full 1.5 mm out
             # for a run no lane takes, five of its slots off the board
             # (a branch's own block is its launch offsets, set below)
             in_branch = getattr(self, 'branch', False)
-            to_branch = BRANCH and len(xs) >= 2 and not in_branch
+            to_branch = len(xs) >= 2 and not in_branch
             s_run = self.s1 + HAND_DS if to_branch else max(se[nm][0] for nm in xs)
             if not (to_branch or in_branch):
                 base = self._clear_block(base, sg, self.s1, s_run, order[0])
@@ -2858,7 +2821,7 @@ class Corridor:
                 s_l = self._leg_s(nm, s_base, o_l, o_e, False, placed, avoid_nm,
                                   extra_cands.get(nm, ()) if avoid else ())
                 self.exit_leg_s[nm] = s_l
-                if nm in (getattr(self.ctx, 'pairs', None) or {}) and BRANCH:
+                if nm in (getattr(self.ctx, 'pairs', None) or {}):
                     h_ = _pairs.pitch(TRACK) / 2
                     placed.append((s_l - h_, min(o_l, o_e), max(o_l, o_e)))
                     placed.append((s_l + h_, min(o_l, o_e), max(o_l, o_e)))
@@ -3839,7 +3802,8 @@ class Corridor:
         where the band opens both layers -- at a single's dive gap it fits
         nowhere (zynq K44: both pairs refused at the launch, boxed
         0.6 mm past the tips where the band closed the tooth's layer).
-        BRAID_PAIR_DIVE_EXTRA, pair pitches each side of a change."""
+        PAIR_DIVE_EXTRA: rules.PAIR_DIVE_EXTRA_PITCHES pair pitches each side
+        of a change."""
         if nm not in (getattr(self.ctx, 'pairs', None) or {}):
             return 0.0
         return PAIR_DIVE_EXTRA
@@ -3957,10 +3921,9 @@ class Corridor:
                     if not pres.any():
                         continue
                     o_m = np.interp(sg, os_, oo_)
-                    # (BRAID_BRANCH only: on the default chain this and the
-                    # corner rule together cost K51 its last net -- SDQ11's
-                    # last-call route walled -- where the branch frame needs it)
-                    m = pres & (self.planned_vec(om, sg, L) if BRANCH else self.allowed_vec(om, sg, L))
+                    # a neighbour pinches only where the PLAN puts it on L
+                    # (planned_vec), as the branch frame needs
+                    m = pres & self.planned_vec(om, sg, L)
                     prev = np.where(m & (o_m < o_nm1), np.maximum(prev, o_m), prev)
                     nxt = np.where(m & (o_m > o_nm1), np.minimum(nxt, o_m), nxt)
                 lo1 = np.where(prev > -BIG / 2, (prev + o_nm1) / 2 + HALF_SEP, -BIG)
@@ -4259,11 +4222,11 @@ class Corridor:
     def _corner_dive(self, nm):
         """Does the plan change `nm`'s layer where it turns onto its exit
         leg: the layer it arrives on (its profile before the leg) is not
-        the leg's layer. (BRAID_BRANCH only, with planned_vec in band_of:
-        off the branch frame every corner is reserved, as before.)"""
+        the leg's layer (with planned_vec in band_of). A lane with no exit
+        leg or no leg layer: True."""
         s_l = self.exit_leg_s.get(nm)
         Lg = self.leg_layer.get(nm)
-        if not BRANCH or s_l is None or Lg is None:
+        if s_l is None or Lg is None:
             return True
         prof = self.layer_profile(nm)
         before = [L for (s_, L) in prof if s_ < s_l - 1e-6]
@@ -4387,9 +4350,8 @@ class Corridor:
         and two grid cells, so the outer leg's cell at the edge of a leg
         strip -- sized for one lane -- is inside the band (measured K36:
         at half the pitch alone the berth-side pose failed on the outer
-        leg's cell at every setback). BRAID_PAIR_SLACK adds to it."""
-        return (_pairs.pitch(TRACK) / 2 + TRACK / 2 + 2 * self.ctx.cfg.grid_step
-                + float(awx_settings.get('BRAID_PAIR_SLACK', '0') or 0))
+        leg's cell at every setback)."""
+        return _pairs.pitch(TRACK) / 2 + TRACK / 2 + 2 * self.ctx.cfg.grid_step
 
     def _pair_conn_points(self, nm):
         """Where a pair member's ROUTED CONNECTORS end (connect_pair): a
@@ -4505,11 +4467,10 @@ class Corridor:
             margin = 2.0
             if getattr(self, '_swim_boost', False):
                 margin = max(margin, 6.0)
-        # the band widened by half the pair pitch a side (its legs), plus
-        # BRAID_PAIR_SLACK (an experiment knob: the band's leg strips are
-        # sized for one lane)
+        # the band widened by half the pair pitch a side (its legs: the
+        # band's leg strips are sized for one lane)
         half = self._pair_band_slack()
-        # BRAID_PAIR_FREE (default on): a pair is searched like a free
+        # FREE unless the caller says otherwise: a pair is searched like a free
         # swimmer -- no band, a 2 mm window margin -- with every unrouted
         # neighbour's reservation and every routed lane's copper still in
         # force. Measured K36 (2026-09-20): in its single-lane band the
@@ -4517,7 +4478,7 @@ class Corridor:
         # dive zones and slope pitches are sized for one track, and the
         # pair's centreline (half a pitch of extra clearance) found a
         # neck in each; free, the same search landed them at last call.
-        free_pair = (awx_settings.get('BRAID_PAIR_FREE', '1') != '0') if free is None else bool(free)
+        free_pair = True if free is None else bool(free)
         if slack is not None:
             half = slack
         wpts = list(self.lane_xy[nm])
@@ -4529,7 +4490,7 @@ class Corridor:
             margin = max(margin, half + 0.6)
             # (a WHOLE-ROUTE plan draws the pair's ends as the pair step lays them -- its approach and first setback
             # along the stub's own way: no widening there, and no lane-guided connectors below)
-            if band is not None and PAIR_FANIN_BAND > 0 and getattr(self, '_geo', None) is None:
+            if band is not None and getattr(self, '_geo', None) is None:
                 band, corners = self._pair_fanin_band(nm, band)
                 wpts += corners
         # the CROSS-CORRIDOR reservation (other corridors' planned lanes,
@@ -4541,7 +4502,7 @@ class Corridor:
         # its band, widened and free with the same 402-cell pocket, landed
         # only free of the plan, and five singles stayed open behind it
         pe_ = getattr(ctx, 'pair_ends', {}) or {}
-        if nm in pe_ and PAIR_FANIN > 0 and PAIR_CROSS_FANIN:
+        if nm in pe_:
             (tp_, tn_), (sp_, sn_) = pe_[nm]
             ends_ = [e for e in (tp_, tn_, sp_, sn_) if e is not None]
 
@@ -4762,11 +4723,11 @@ class Corridor:
                 self.log(f'  plan-only lanes not laid ({e})')
             return
         boost = {}                # ribbon: refused lanes route earlier
-        # PAIRS FIRST (BRAID_PAIRS_FIRST, default on with the pair member): a
-        # pair lane needs the room of two and a coupled dive; routed after
+        # PAIRS FIRST (with the pair member): a pair lane needs the room
+        # of two and a coupled dive; routed after
         # the singles it found none and landed only at last call (K34-K36:
         # every pair). Boosted above the ribbon's own refused-lane boost.
-        if getattr(ctx, 'pairs', None) and int(awx_settings.get('BRAID_PAIRS_FIRST', '1') or 0):
+        if getattr(ctx, 'pairs', None):
             for nm in M:
                 if nm in ctx.pairs:
                     boost[nm] = boost.get(nm, 0) + 100
@@ -5105,8 +5066,7 @@ class Corridor:
                         nv1 = len(r_[1])
                         mm1 = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
                                   for s in r_[0])
-                        if nv1 < nv0 and (ECON_MM_PER_VIA <= 0
-                                          or mm1 <= lane_mm(nm) + ECON_MM_PER_VIA * (nv0 - nv1)):
+                        if nv1 < nv0 and mm1 <= lane_mm(nm) + ECON_MM_PER_VIA * (nv0 - nv1):
                             res = r_
                             break
                         if nv1 == nv0 and mm1 < lane_mm(nm) - 0.5:
@@ -5114,24 +5074,22 @@ class Corridor:
                             break
                         if nv1 < nv0:
                             too_long = (nv1, mm1)
-                if ECON_JOINT and (res is None or len(res[1]) >= 1) \
-                        and (ECON_JOINT >= 2 or res is None and (too_long is not None or nm in longs)):
-                    # THE JOINT RE-LAY: the lane's short path crosses a
-                    # neighbour laid before it (K36: SA0, routed at last
-                    # call, hugged the DDR's comb 0.2 mm in front of SBA1's
-                    # berth); the min-cut probe names it, the trial rips it,
+                if res is None and (too_long is not None or nm in longs):
+                    # THE JOINT RE-LAY, when the lane's cheaper re-lay is too
+                    # long for the guard or an extra-long lane has no cheaper
+                    # lane alone: the lane's short path crosses a neighbour
+                    # laid before it (K36: SA0, routed at last call, hugged
+                    # the DDR's comb 0.2 mm in front of SBA1's berth); the
+                    # min-cut probe of rip_for names it, the trial rips it,
                     # lays this lane, re-lays the victim, and the set is
                     # kept only when cheaper in all -- vias first under
                     # the same per-via guard, else shorter at equal vias
                     def _mm(ss):
                         return sum(math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y) for s_ in ss)
 
-                    # the baseline the set must beat: the rung's lane when
-                    # one was found (SBA1: a 2-via lane 0.7 mm shorter was
-                    # accepted before the joint re-lay ever ran), else the
-                    # lane as it stands
-                    bv = len(res[1]) if res is not None else nv0
-                    bm = _mm(res[0]) if res is not None else lane_mm(nm)
+                    # the baseline the set must beat: the lane as it stands
+                    bv = nv0
+                    bm = lane_mm(nm)
 
                     def econ_ok(r1, relaid):
                         # every lane the trial changed: its direct victims
@@ -5152,8 +5110,7 @@ class Corridor:
                             # and SA8 their 0-via re-lays after it), none
                             # buys its own with more than the guard, and one
                             # that saves none may not grow
-                            if b_v > a_v or (ECON_MM_PER_VIA > 0
-                                             and b_m > a_m + ECON_MM_PER_VIA * max(0, a_v - b_v) + 1.0):
+                            if b_v > a_v or b_m > a_m + ECON_MM_PER_VIA * max(0, a_v - b_v) + 1.0:
                                 log(f'    econ joint {nm}: refused -- {_v} {a_v} -> {b_v} via(s), '
                                     f'{a_m:.1f} -> {b_m:.1f} mm')
                                 return False
@@ -5166,7 +5123,7 @@ class Corridor:
                         # SODT1 took the space SA2's 0-via re-lay needed after
                         # it, 46 -> 48); the single rungs harvest length
                         if v1 < v0:
-                            return ECON_MM_PER_VIA <= 0 or m1 <= m0 + ECON_MM_PER_VIA * (v0 - v1)
+                            return m1 <= m0 + ECON_MM_PER_VIA * (v0 - v1)
                         log(f'    econ joint {nm}: refused -- {v0} -> {v1} via(s) in all, no via saved')
                         return False
                     seg_b, via_b = list(ctx.pcb.segments), list(ctx.pcb.vias)
@@ -5331,8 +5288,6 @@ class Corridor:
         in from above was taken. A member's own approach is never in its
         list; a lane whose copper already fills its approach loses
         nothing to the duplicate."""
-        if APPROACH_RESERVE <= 0:
-            return []
         ctx = self.ctx
         out = []
         for om in self.members:
@@ -5372,9 +5327,7 @@ class Corridor:
         refused lane's copper, not yet in the board, like any ladder."""
         import time as _time
         ctx, log = self.ctx, self.log
-        # the two dials (see RIP_VICTIMS / RIP_DEPTH); None = whatever the
-        # environment says, which defaults to the 3 and 1 this signature
-        # used to hard code
+        # the two dials; None = RIP_VICTIMS / RIP_DEPTH
         if max_victims is None:
             max_victims = RIP_VICTIMS
         if depth is None:
@@ -5809,7 +5762,7 @@ def _walk_stub(segs_n, start, lay, _stop, _k, max_hops=24):
     return chain
 
 
-SRC_TRIM_REACH = float(awx_settings.get('SRC_TRIM_REACH', '4.0') or 0)  # mm: the longest splice tried (K44 DQ13 came back three channels over, 2.5 mm)
+SRC_TRIM_REACH = 4.0                                                   # mm: the longest splice tried (K44 DQ13 came back three channels over, 2.5 mm)
 SRC_TRIM_TRIES = 6                                                     # candidates graded per lane, best saving first
 SRC_TRIM_MIN = 0.3                                                     # mm: the least stub depth worth a splice
 
@@ -5829,7 +5782,7 @@ def note_source_joint(ctx, nm, lane, vias, board_path, log):
     economy: the routed world is untouched (the same reason note_joint
     is deferred). Returns the mm saved, 0.0 when nothing was done."""
     chain = ctx.src_chain.get(nm) or []
-    if not chain or len(lane) < 2 or SRC_TRIM_REACH <= 0:
+    if not chain or len(lane) < 2:
         return 0.0
     lay = chain[0][0].layer
     pcb = ctx.pcb
@@ -6059,7 +6012,7 @@ def main(argv=None):
 # resort. Its copper is protected and the singles are routed by the same
 # plan around it.
 # the pair step's reaches and widenings in the rules' units: PAIR PITCHES (a pair's own track + gap, PP) and LANE
-# pitches; each BRAID_PAIR_* override is in the same unit
+# pitches (rules.PAIR_*: how many of each)
 PP = _pairs.pitch(TRACK)
 
 
@@ -6069,17 +6022,17 @@ def pair_slacks():
     return [float(v) * PP for v in awx_settings.get('BRAID_PAIR_SLACKS', '2,4').split(',') if v.strip()]
 
 
-PAIR_FANIN = float(awx_settings.get('BRAID_PAIR_FANIN', '10') or 0) * LANE_MIN
-# BRAID_PAIR_CROSS_FANIN (1): the cross-corridor reservation under the pair's fan-in rule
-PAIR_CROSS_FANIN = int(awx_settings.get('BRAID_PAIR_CROSS_FANIN', '1') or 0)
-PAIR_DIVE_EXTRA = float(awx_settings.get('BRAID_PAIR_DIVE_EXTRA', '2') or 0) * PP
-# BRAID_PAIR_FANIN_BAND (pair pitches, 0 = off): the convergence zone's extra half-width
+# PAIR_FANIN (mm, a count of lane pitches): the pair's fan-in round either of its ends (Corridor.route_pair_lane's
+# cross-corridor reservation, the planned pair step's fan-in rule, the convergence zone's length)
+PAIR_FANIN = _rules.PAIR_FANIN_LANES * LANE_MIN
+PAIR_DIVE_EXTRA = _rules.PAIR_DIVE_EXTRA_PITCHES * PP
+# PAIR_FANIN_BAND (mm, a count of pair pitches): the convergence zone's extra half-width
 # beyond the ends' separation (Corridor._pair_fanin_band)
-PAIR_FANIN_BAND = float(awx_settings.get('BRAID_PAIR_FANIN_BAND', '2') or 0) * PP
-# BRAID_PAIR_APPROACH (pair pitches): how far in front of a pair's tips a neighbour's
+PAIR_FANIN_BAND = _rules.PAIR_FANIN_BAND_PITCHES * PP
+# PAIR_APPROACH (mm, a count of pair pitches): how far in front of a pair's tips a neighbour's
 # exit stub may not be reserved (the pair router's setback ladder reaches four pair pitches -- twice its four-spacing
 # setback -- and this is half a pitch more)
-PAIR_APPROACH = float(awx_settings.get('BRAID_PAIR_APPROACH', '4.5') or 0) * PP
+PAIR_APPROACH = _rules.PAIR_APPROACH_PITCHES * PP
 
 
 def _in_boxes(pt, boxes, grow=0.0):
@@ -6172,28 +6125,24 @@ def _route_pairs_planned_in_order(ctx, corridors, log, order, free=True, slacks=
             e_a, e_b = c.teeth[nm], c.stubs[nm]
             (tp_, tn_), (sp_, sn_) = ctx.pair_ends[nm]
             boxes = []
-            if BRANCH:
-                # BRAID_BRANCH: THE PAIR OWNS THE FIRST MILLIMETRE IN FRONT OF
-                # ITS TIPS, and no more (the human's ends): a neighbour's exit
-                # stub is reserved as a straight line along ITS escape
-                # direction, and a stub that leaves its berth at an angle (the
-                # human's SDQ9 enters the DDR's west edge from the north-west)
-                # ran across the pair's own approach 0.5 mm out -- SDQS1 refused
-                # at every setback, and landed the moment that one line was cut
-                # at 0.3 mm. So a stub is clipped where it enters the box in
-                # front of either of the pair's ends (the connector's reach,
-                # PAIR_APPROACH mm, out along the escape; the tips' separation
-                # plus a track and a clearance across), and the others' pieces
-                # are CUT there instead of dropped whole within the fan-in.
-                # (Off the branch frame the fan-in rule stands: on the zynq
-                # article the boxes kept its spread pairs, teeth 1.55 mm apart,
-                # out of their bands and the clipped stubs cost DQ6 its exit.)
-                for e_, d_, (u_, w_) in ((e_a, ctx.tooth_dir.get(nm), (tp_, tn_)),
-                                         (e_b, ctx.stub_dir.get(nm), (sp_, sn_))):
-                    if d_ is None:
-                        continue
-                    sep_ = math.hypot(u_[0] - w_[0], u_[1] - w_[1])
-                    boxes.append((e_, d_, sep_ / 2 + TRACK + SPEC_CLEARANCE, PAIR_APPROACH))
+            # THE PAIR OWNS THE FIRST MILLIMETRE IN FRONT OF
+            # ITS TIPS, and no more (the human's ends): a neighbour's exit
+            # stub is reserved as a straight line along ITS escape
+            # direction, and a stub that leaves its berth at an angle (the
+            # human's SDQ9 enters the DDR's west edge from the north-west)
+            # ran across the pair's own approach 0.5 mm out -- SDQS1 refused
+            # at every setback, and landed the moment that one line was cut
+            # at 0.3 mm. So a stub is clipped where it enters the box in
+            # front of either of the pair's ends (the connector's reach,
+            # PAIR_APPROACH mm, out along the escape; the tips' separation
+            # plus a track and a clearance across), and the others' pieces
+            # are CUT there instead of dropped whole within the fan-in.
+            for e_, d_, (u_, w_) in ((e_a, ctx.tooth_dir.get(nm), (tp_, tn_)),
+                                     (e_b, ctx.stub_dir.get(nm), (sp_, sn_))):
+                if d_ is None:
+                    continue
+                sep_ = math.hypot(u_[0] - w_[0], u_[1] - w_[1])
+                boxes.append((e_, d_, sep_ / 2 + TRACK + SPEC_CLEARANCE, PAIR_APPROACH))
             stubs = []
             # a WHOLE-ROUTE plan draws every lane's own exit (whole_ctx.install): the others' planned lines are its
             # reservation there, and a synthetic stub along an escape a lane does not take is an obstacle nothing
@@ -6228,19 +6177,15 @@ def _route_pairs_planned_in_order(ctx, corridors, log, order, free=True, slacks=
             fan = ([(p, q, L) for (p, q, L) in c.virtual_of(others) if not any(near_end(p, q))] + fan_stubs,
                    [v for v in c.virtual_vias_of(others)
                     if min(math.hypot(v[0] - e[0], v[1] - e[1]) for e in (e_a, e_b)) >= R])
-            if BRANCH:
-                virt = _clip_boxes(c.virtual_of(others), boxes) + stubs
-                vv = [v for v in c.virtual_vias_of(others) if not _in_boxes(v, boxes, VIA_SIZE / 2)]
-                # the band tried with the approach boxes first, then with the
-                # fan-in rule: a pair whose tips stand apart must converge over
-                # whatever runs between them, which the boxes kept reserved --
-                # zynq K44's DQS pairs (teeth 0.80 and 1.55 mm apart, DQ6 and
-                # DQ0 between DQS0's) refused in their bands under the boxes
-                # alone, were routed free of the plan first and walled DQ6
-                rules = [(virt, vv), fan]
-            else:
-                virt, vv = fan
-                rules = [fan]
+            virt = _clip_boxes(c.virtual_of(others), boxes) + stubs
+            vv = [v for v in c.virtual_vias_of(others) if not _in_boxes(v, boxes, VIA_SIZE / 2)]
+            # the band tried with the approach boxes first, then with the
+            # fan-in rule: a pair whose tips stand apart must converge over
+            # whatever runs between them, which the boxes kept reserved --
+            # zynq K44's DQS pairs (teeth 0.80 and 1.55 mm apart, DQ6 and
+            # DQ0 between DQS0's) refused in their bands under the boxes
+            # alone, were routed free of the plan first and walled DQ6
+            rules = [(virt, vv), fan]
             ways = _pairs.pair_waypoints(ctx.pcb, pid, nid_n, ctx.src_ref.get(nm) or ctx.src_ref.get(pn), ctx.ends[nm][2])
             res = None
             how = ''
@@ -6321,7 +6266,10 @@ def route_pairs_planned(ctx, corridors, log):
         if best is None or score > best[0]:
             best = (score, order, done, list(ctx.pcb.segments), list(ctx.pcb.vias))
         refused = [b for b in order if b not in done]
-        # the ORDER retried, as route_pairs_free does: a refused pair first
+        # the ORDER retried: a pair refused because the pairs before it
+        # took its room (zynq K47: DQS1 walled by DQS0's copper) is tried
+        # FIRST in a new order; the order that lands the most pairs (then
+        # the fewest vias) stands. At most one new order per refused pair.
         nxt = next(([b] + [o for o in order if o != b] for b in refused
                     if [b] + [o for o in order if o != b] not in tried), None)
         if nxt is None or len(done) == len(order):
@@ -6395,155 +6343,9 @@ def _route_pair_legs(ctx, base, pid, nid_n, teeth, berths, ways, virt, log):
     return all_segs, all_vias
 
 
-def _route_pairs_in_order(ctx, groups, log, order):
-    """route_pairs_free's worker: the pairs in `order`, each against the copper of those before it; returns {base: (segments, vias)} of the pairs that landed (their copper left on ctx.pcb)."""
-    done = {}
-    # every OTHER net's exits, reserved: a short virtual stub from each
-    # tooth tip and each berth tip along its escape direction, on the
-    # tip's layer, so a pair laid across the front of a tooth row cannot
-    # seal a single into its tooth (K36 pf1: SA4 walled by static copper
-    # -- the pair SDQS1's copper -- at every stage, a 6 mm free window
-    # refused in 0.05 s). BRAID_PAIR_EXIT_RESERVE: the stub's length, mm.
-    reach = float(awx_settings.get('BRAID_PAIR_EXIT_RESERVE', '1.0') or 0)
-    members = [nm for g in groups for nm in g]
-    virt = []
-    if reach > 0:
-        for nm in members:
-            if nm in ctx.pairs:
-                continue
-            for k_, dirs in ((0, ctx.tooth_dir), (1, ctx.stub_dir)):
-                d = dirs.get(nm)
-                e = ctx.ends[nm][k_]
-                L = (ctx.tooth_layer if k_ == 0 else ctx.dest_layer)[nm]
-                if d is None or e is None:
-                    continue
-                virt.append(((e[0], e[1]), (e[0] + d[0] * reach, e[1] + d[1] * reach), L))
-    for base in order:
-        pn, nn = ctx.pairs[base]
-        pid, nid_n = ctx.byname[pn][0], ctx.byname[nn][0]
-        (tp_, tn_), (sp_, sn_) = ctx.pair_ends[base]
-        rep = {}
-        t0 = _time.time()
-        # WAYPOINTS (Andy, 2026-09-20: "the tap treatment for CK"): a two-pad
-        # part with one pad on P and the other on N -- the pair's
-        # termination resistor -- is a place the pair PASSES THROUGH, as
-        # the human takes the zynq's CK through R20. The pair is routed in
-        # legs, the part's pads standing in for a tooth or a berth, each
-        # leg by the same router; every leg must land or the pair is
-        # refused whole.
-        ways = _pairs.pair_waypoints(ctx.pcb, pid, nid_n, ctx.src_ref.get(base) or ctx.src_ref.get(pn), ctx.ends[base][2])
-        if ways:
-            res = _route_pair_legs(ctx, base, pid, nid_n, (tp_, tn_), (sp_, sn_), ways, virt, log)
-            if res is None:
-                log(f'  pair {base}: NOT routed through its {len(ways)} waypoint(s) ({_time.time() - t0:.1f}s) '
-                    f'-- it falls to its corridor')
-                continue
-            segs_o, vias_o = res
-            why = _pairs.intra_ok(segs_o, vias_o, pid, nid_n, TRACK, VIA_SIZE, SPEC_CLEARANCE)
-            if why is not None:
-                log(f'  pair {base}: routed through its waypoints but its legs are not clean ({why}) -- refused')
-                continue
-            ctx.pcb.segments.extend(segs_o)
-            ctx.pcb.vias.extend(vias_o)
-            done[base] = (segs_o, vias_o)
-            log(f'  pair {base} routed FIRST and protected through {", ".join(w[0].component_ref for w in ways)}: '
-                f'{len(segs_o)} segment(s), {len(vias_o)} via(s) ({_time.time() - t0:.1f}s)')
-            continue
-        # the pair routed FREE: no band, a 6 mm window round its ends
-        res = cn.connect_pair(ctx.pcb, pid, nid_n, tp_, tn_, ctx.tooth_layer[base],
-                              sp_, sn_, ctx.dest_layer[base], ctx.cfg, band=None,
-                              margin=6.0, window_pts=None,
-                              virtual=virt or None,
-                              gap=_pairs.GAP, a_dir=ctx.tooth_dir.get(base), b_dir=ctx.stub_dir.get(base),
-                              a_n_layer=ctx.pair_layers[base][0], b_n_layer=ctx.pair_layers[base][1],
-                              report=rep)
-        if res is None:
-            why = ''
-            bl = rep.get('blocked') or []
-            if bl:
-                g = ctx.cfg.grid_step
-                why = (f'frontier {len(bl)} cells in ({min(c[0] for c in bl) * g:.2f},{min(c[1] for c in bl) * g:.2f})-'
-                       f'({max(c[0] for c in bl) * g:.2f},{max(c[1] for c in bl) * g:.2f})')
-            elif rep.get('empty'):
-                why = 'the pose router stopped at the source (no copper)'
-            elif rep.get('intra'):
-                why = f'legs not clean: {rep["intra"]}'
-            elif rep.get('polarity'):
-                why = 'polarity crossing lead unroutable'
-            log(f'  pair {base}: NOT routed free ({_time.time() - t0:.1f}s{", " + why if why else ""}) '
-                f'-- it falls to its corridor')
-            continue
-        segs_o, vias_o = res
-        why = _pairs.intra_ok(segs_o, vias_o, pid, nid_n, TRACK, VIA_SIZE, SPEC_CLEARANCE)
-        if why is not None:
-            log(f'  pair {base}: routed free but its legs are not clean ({why}) -- it falls to its corridor')
-            continue
-        ctx.pcb.segments.extend(segs_o)
-        ctx.pcb.vias.extend(vias_o)
-        done[base] = (segs_o, vias_o)
-        log(f'  pair {base} routed FIRST and protected: {len(segs_o)} segment(s), {len(vias_o)} via(s) '
-            f'({_time.time() - t0:.1f}s)')
-    return done
-
-
-
-def route_pairs_free(ctx, groups, log):
-    """PAIRS FIRST (Andy, 2026-09-20): every pair is routed before any
-    single is planned -- on the fanout board as it stands, by the
-    production pair router, free of bands and reservations -- and its
-    copper is then PROTECTED: it joins the board's base copper, so the
-    corridors plan and route the singles around it, and no rescue, rip
-    or re-lay stage can touch it (it is no corridor's member). Measured
-    K36 (2026-09-20): free on the fanout board the router landed all
-    three pairs DRC-clean, coupled 0.83-0.90; inside the singles' plan --
-    single-lane bands, leg strips, dive zones and reservations -- it
-    landed none. A pair the free pass refuses stays a corridor member
-    and takes the in-band path. Returns the corridor groups without the
-    pairs routed here."""
-    base_segs, base_vias = list(ctx.pcb.segments), list(ctx.pcb.vias)
-    order = list(ctx.pairs)
-    best = None
-    tried = []
-    while True:
-        ctx.pcb.segments = list(base_segs)
-        ctx.pcb.vias = list(base_vias)
-        done = _route_pairs_in_order(ctx, groups, log, order)
-        tried.append(order)
-        score = (len(done), -sum(len(v) for _s, v in done.values()))
-        if best is None or score > best[0]:
-            best = (score, order, done, list(ctx.pcb.segments), list(ctx.pcb.vias))
-        refused = [b for b in order if b not in done]
-        # ORDER (2026-09-20): a pair refused because the pairs before it
-        # took its room (zynq K47: DQS1 walled by DQS0's copper) is tried
-        # FIRST in a new order; the order that lands the most pairs (then
-        # the fewest vias) stands. At most one new order per refused pair.
-        nxt = next(([b] + [o for o in order if o != b] for b in refused
-                    if [b] + [o for o in order if o != b] not in tried), None)
-        if nxt is None or len(done) == len(order):
-            break
-        log(f'  pairs: {refused} refused in the order {order}; trying {nxt}')
-        order = nxt
-    score, order, done, segs, vias = best
-    ctx.pcb.segments = segs
-    ctx.pcb.vias = vias
-    if len(tried) > 1:
-        log(f'  pairs: order {order} kept ({len(done)} of {len(ctx.pairs)} pairs)')
-    for base in done:
-        ctx.landed.add(base)
-    ctx.protected = set(done)
-    ctx.pre_segs = {b: s for b, (s, _v) in done.items()}
-    ctx.pre_vias = {b: v for b, (_s, v) in done.items()}
-    # the pairs' copper is BASE copper from here: the plan phase's reset
-    # keeps it, every map sees it
-    ctx.base_segments = list(ctx.pcb.segments)
-    ctx.base_vias = list(ctx.pcb.vias)
-    groups = [[nm for nm in g if nm not in done] for g in groups]
-    return [g for g in groups if g]
-
-
 def plan_corridors(board, names, dest, log):
     """The braid up to its first route: the context (setup), one corridor
-    per group -- under BRAID_BRANCH each a trunk with branches -- and every
+    per group -- each a trunk with branches (build_branches) -- and every
     corridor PLANNED, the board's copper reset to its base. (ctx,
     corridors): what run() routes, and what the plan tools (plan_audit.py,
     route_lanes.py) audit, so a tool never plans differently from the run."""
@@ -6553,17 +6355,16 @@ def plan_corridors(board, names, dest, log):
     for ci, members in enumerate(groups):
         corridors.append(Corridor(ci, members, ctx, log))
     ctx.corridors = corridors
-    if BRANCH:
-        # a trunk with branches (build_branches), each corridor planned
-        # once as today to find its side exits and their block slots
-        for i_, c_ in enumerate(corridors):
-            try:
-                c_.run(plan_only=True)
-                corridors[i_] = build_branches(ctx, c_, log)
-            except Exception as e:
-                log(f'  branch build: corridor {c_.idx} left as it was ({e})')
-        ctx.corridors = corridors
-        ctx.laid, ctx.laid_tubes = [], []
+    # a trunk with branches (build_branches), each corridor planned
+    # once as today to find its side exits and their block slots
+    for i_, c_ in enumerate(corridors):
+        try:
+            c_.run(plan_only=True)
+            corridors[i_] = build_branches(ctx, c_, log)
+        except Exception as e:
+            log(f'  branch build: corridor {c_.idx} left as it was ({e})')
+    ctx.corridors = corridors
+    ctx.laid, ctx.laid_tubes = [], []
 
     # PHASE 1 -- every corridor PLANNED (spine, offsets, schedule,
     # planned lanes) before any is routed, each spine relaxed round
@@ -7417,7 +7218,7 @@ def write_out(a, ctx, corridors, names, log):
     pcb, byname, ends, kids = ctx.pcb, ctx.byname, ctx.ends, ctx.kids
     out_segs = {nm: c.out_segs.get(nm, []) for c in corridors for nm in c.members}
     out_vias = {nm: c.out_vias.get(nm, []) for c in corridors for nm in c.members}
-    # ...and the pairs routed FIRST (route_pairs_free), no corridor's members
+    # ...and the pairs routed FIRST (route_pairs_planned), no corridor's members
     out_segs.update(getattr(ctx, 'pre_segs', {}) or {})
     out_vias.update(getattr(ctx, 'pre_vias', {}) or {})
     refused = sorted(nm for c in corridors for nm in c.refused)
@@ -7465,7 +7266,7 @@ def write_out(a, ctx, corridors, names, log):
         log(f'refusal reasons -> {rp}')
     # deferred berth trim: each successfully-routed net's FINAL lane
     # decides its joint; a refused net's stub stays whole
-    # THE RE-ESCAPE (re_escape.py, BRAID_RE_ESCAPE mm, 0 = off): a lane whose
+    # THE RE-ESCAPE (re_escape.py, RE_ESCAPE mm): a lane whose
     # stub + lane run far over its pad-to-berth airline is routed again from
     # its PAD, free, and ships only when cheaper at ECON_MM_PER_VIA and no
     # worse in scoped DRC -- the other half of the source trim; BEFORE the
@@ -7474,15 +7275,13 @@ def write_out(a, ctx, corridors, names, log):
     import re_escape as _re
     ctx.re_escapes = {}
     ctx.re_escape_vias = []
-    if _re.RE_ESCAPE > 0:
-        _cands = [nm for nm in names if out_segs.get(nm) and nm not in refused and nm not in _legs]
-        _cands.sort(key=lambda nm: -_re.excess(ctx, nm, out_segs[nm]))     # the worst offender first
-        _mm2 = sum(_re.re_escape(ctx, nm, out_segs[nm], out_vias.setdefault(nm, []), a.board, log, cn,
-                                 ECON_MM_PER_VIA if ECON_MM_PER_VIA > 0 else 6.0)
-                   for nm in _cands)
-        if ctx.re_escapes:
-            log(f're-escape: {len(ctx.re_escapes)} lane(s) routed again from their pads, -{_mm2:.1f} mm '
-                f'({", ".join(f"{k} {v[1]}->{v[2]} via(s)" for k, v in sorted(ctx.re_escapes.items()))})')
+    _cands = [nm for nm in names if out_segs.get(nm) and nm not in refused and nm not in _legs]
+    _cands.sort(key=lambda nm: -_re.excess(ctx, nm, out_segs[nm]))     # the worst offender first
+    _mm2 = sum(_re.re_escape(ctx, nm, out_segs[nm], out_vias.setdefault(nm, []), a.board, log, cn, ECON_MM_PER_VIA)
+               for nm in _cands)
+    if ctx.re_escapes:
+        log(f're-escape: {len(ctx.re_escapes)} lane(s) routed again from their pads, -{_mm2:.1f} mm '
+            f'({", ".join(f"{k} {v[1]}->{v[2]} via(s)" for k, v in sorted(ctx.re_escapes.items()))})')
     for nm in names:
         if out_segs.get(nm) and nm not in refused and nm not in _legs:
             note_joint(ctx, nm, out_segs[nm])
@@ -7761,16 +7560,15 @@ def write_out(a, ctx, corridors, names, log):
     # copper laid at 0.1. Lower-only, so a project already at the floor is
     # untouched; the copper is unaffected either way (the braid routes from
     # ctx.cfg, never from the project).
-    if awx_settings.get('AWX_STAMP_PRO', '1') != '0':   # 0 = the flag-off parity control
-        try:
-            from fix_kicad_drc_settings import fix_project_for_output
-            fix_project_for_output(out_board, a.board,
-                                   clearance=min(SPEC_CLEARANCE, ctx.cfg.clearance),
-                                   track_width=ctx.cfg.track_width,
-                                   via_diameter=VIA_SIZE, via_drill=VIA_DRILL,
-                                   verbose=False)
-        except Exception as e:  # a project problem must not lose the board
-            log(f'  project floor NOT stamped: {e}')
+    try:
+        from fix_kicad_drc_settings import fix_project_for_output
+        fix_project_for_output(out_board, a.board,
+                               clearance=min(SPEC_CLEARANCE, ctx.cfg.clearance),
+                               track_width=ctx.cfg.track_width,
+                               via_diameter=VIA_SIZE, via_drill=VIA_DRILL,
+                               verbose=False)
+    except Exception as e:  # a project problem must not lose the board
+        log(f'  project floor NOT stamped: {e}')
     nv = sum(len(v) for v in out_vias.values())
     nseg = sum(len(emit[nm]) for nm in names)
     # A VIA-LESS LAYER CHANGE IS A BROKEN NET, and it ships silently: the

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bus_boards.py -- the BUS BOARDS check: each board of tests/fixtures/bus_boards routed by the bus step from its pre-bus
-input (route_bus.py, the board's recorded arguments: every bus of the board in one call -- routed in turn, or
-negotiated where the buses off one array need it, as the step decides), and graded on the board the step hands on,
+input (route_bus.py at the board's sizes, the manifest's: the step finds the buses itself -- route_bus.bus_plan -- and
+routes them in one call, each source's buses one group), and graded on the board the step hands on,
 against its input (route_bus.board_grade, read off that board -- not the step's own count): every bus net CONNECTED,
 no DRC violation the step made, and no ball of the buses' arrays WALLED in.
 
@@ -9,10 +9,10 @@ no DRC violation the step made, and no ball of the buses' arrays WALLED in.
 
 Not collected by tests/run_all.py: a run is an hour or more of routing (the boards run -j at a time, each a full
 route_bus call). Exit 0 when every board is clean -- no bus net open, no DRC, no ball walled -- 1 otherwise or when a
-run failed; the table names each board's open nets, DRC and walled balls, its buses (mode, vias, copper) and its time,
+run failed; the table names each board's open nets, DRC and walled balls, its buses (vias, copper) and its time,
 and OUT/report.json holds it.
 
-  --set K=V   a setting for every run (e.g. ENDS_JOINT_ALL=1): an A/B arm of a change behind a setting
+  --set K=V   a setting for every run: an A/B arm of a change behind a setting
   --rounds R  route_bus --rounds (default 1: a bus closes in its first round)
 """
 import argparse

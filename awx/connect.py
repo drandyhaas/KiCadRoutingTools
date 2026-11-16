@@ -71,16 +71,6 @@ def make_config(pcb: PCBData, track: float, clearance: float,
     return cfg
 
 
-def _band_cells(coord: GridCoord, window: PCBData, band,
-                layers: List[str], slack: float) -> np.ndarray:
-    """Every window cell outside the band, as ONE (N, 3) int32 array
-    (the strips of _band_cell_strips concatenated; probes use it)."""
-    parts = list(_band_cell_strips(coord, window, band, layers, slack))
-    if not parts:
-        return np.zeros((0, 3), dtype=np.int32)
-    return np.concatenate(parts)
-
-
 def _band_cell_strips(coord: GridCoord, window: PCBData, band,
                       layers: List[str], slack: float):
     """Every window cell outside the band, as (n, 3) int32 arrays of
@@ -375,7 +365,7 @@ def connect_pair(pcb: PCBData, p_id: int, n_id: int,
         import pairs as _pairs
         ha = _pairs.hand(a_dir, a_p, a_n)
         hb = _pairs.hand(b_dir, b_p, b_n, arriving=True)
-        if ha and hb and ha != hb and awx_settings.get('BRAID_PAIR_CROSS', '1') != '0':
+        if ha and hb and ha != hb:
             # OPPOSITE HANDS (2026-09-22): the production router refuses a
             # polarity mismatch outright (a pad swap is never allowed on real
             # nets, a flipped connector only where a direction was not forced),

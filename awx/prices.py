@@ -1,15 +1,12 @@
 """ONE price for a swimmer -- a lane the schedule gives no page -- in vias,
 the same number everywhere it is charged: the plan's judge (plan_ends) and
-the pages-first model (schedule). One number, calibrated on the ladder;
-the two site names exist so a disagreement can be DIAGNOSED by setting one,
-never to ship different prices at different sites.
+the pages-first model (schedule). One number, calibrated on the ladder.
 
-    SWIM_PRICE   the price (default 2)
-    SWIM_VIAS    plan_ends' reading of it
-    BRAID_SWIM_W schedule's reading of it
+    SWIM    the price (2)
+    JUDGE   plan_ends' reading of it
+    PAGES   schedule's reading of it
 """
-import awx_settings
 
-SWIM = float(awx_settings.get('SWIM_PRICE', '2'))
-JUDGE = float(awx_settings.get('SWIM_VIAS', SWIM))       # plan_ends: accepts/rejects a batch
-PAGES = float(awx_settings.get('BRAID_SWIM_W', SWIM))    # schedule: a page lane's swimmer
+SWIM = 2.0
+JUDGE = SWIM        # plan_ends: accepts/rejects a batch
+PAGES = SWIM        # schedule: a page lane's swimmer

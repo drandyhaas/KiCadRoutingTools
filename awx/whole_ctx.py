@@ -308,7 +308,7 @@ def bench_with(board, nets, dest):
 def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
     """the bench a CANDIDATE's ends make, read as braid.setup reads a board with its plan sidecar beside it -- with
     nothing written: the board `pcb` (parsed once) with the candidate's escape runs `tracks` ({start, end, width, layer,
-    net_id}, as escape_plan.lay lays them) added in memory, and `plan` the sidecar's keys (ends, tooth_layer,
+    net_id}) added in memory, and `plan` the sidecar's keys (ends, tooth_layer,
     dest_layer, tooth_dir, stub_dir, dest_cut, chi). The fields the whole frame and the solve read -- the ends (a
     pair's at its legs' midpoints), the layers (a pair's its P leg's, its N leg's beside them), the escape directions,
     the source part, the destination's cut, the copper, each lane's taut path -- as setup gives them
@@ -468,8 +468,7 @@ def lanes(ctx, dest, geo, log=print):
 CTX_CACHE = os.path.join(HERE, 'tmp', 'ctx_cache')
 # what the loop hands one stage and not the next, read only by whole_solve, whole_geo and whole_snap once the bench is
 # planned: not in the plan's key, or each stage would plan the same bench again
-STAGE_VARS = ('HINT', 'CUTS', 'HIST', 'GEO_FLIPS_FROM', 'SEED_FLIPS', 'SEED_CUTS', 'SEED_HIST', 'WHOLE_SOLVE_BATCHES',
-              'WHOLE_SOLVE_PROBE', 'SNAP_KEEP')
+STAGE_VARS = ('HINT', 'CUTS', 'HIST', 'GEO_FLIPS_FROM', 'SEED_FLIPS', 'SEED_CUTS', 'SEED_HIST', 'SNAP_KEEP')
 
 
 class _NoCell:

@@ -30,37 +30,36 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import awx_settings  # noqa: E402
 
-W_CROSS = int(awx_settings.get('JOINT_W_CROSS') or '20')    # a broken coupling, in vias
+W_CROSS = 20                                                # a broken coupling, in vias
 # ...and one of a VIA-END RUN (whole_route.with_end_runs): a run inside the array moves onto its lane's end layer and
 # nothing after moves it, so a broken one ships a short -- a loop's coupled re-solve broke two at 20 vias each, an LVDS
 # bus's run across two of a memory bus's on one layer, and the merge had both crossings. Priced past any plan: at 200
 # the same re-solve still broke both (its search stopped at 894 vias-worth); at this, none, for 546.6 against 534
-W_RUN_CROSS = int(awx_settings.get('JOINT_W_RUN_CROSS') or '100000')
-BATCHES = int(awx_settings.get('JOINT_BATCHES') or '100')   # the search's interleaved batches at most
+W_RUN_CROSS = 100000
+BATCHES = 100                                               # the search's interleaved batches at most
 # ROOM: a lane's change of layer within this (mm along its lane) of a place another bus's lane meets it is CRAMPED --
 # allowed (a via's room off the place is the rule), priced, so that a change takes open run where its lane has some.
 # The places are read off the buses' reference paths, and the laid-out lanes pass a few mm off them: a change put a
 # via's room past its lane's last meeting with another bus stood, laid out, among that bus's lanes
-ROOM = float(awx_settings.get('JOINT_ROOM') or '4')
-W_ROOM = float(awx_settings.get('JOINT_W_ROOM') or '1')     # a cramped change, in vias
-# each bus's own CROSSINGS held within this (mm) of where its own plan put them (JOINT_HOLD_X=free: not): the couplings
-# are read off the buses' own plans as laid out, and a crossing moved along its lanes moves the lanes -- a coupled
-# search took a lane's ten crossings from 8 mm out back to 2 mm off its tooth to change layer before two of another
-# bus's lanes, and the lane, laid again, ran along the source's face across four of that bus's lanes on its own
-# layer, where no coupling stood. 'free': a crossing is the coupled search's to place anywhere in its window.
-# A millimetre, not the very place: a change stands between two of its lane's crossings, and with those held where
-# they were a via could not step off another bus's lane beside it -- four buses' first coupled search left 31 of
-# 1327 couplings broken, each a via of one bus within a via's room of another's lane 2 to 3 mm off the shared array;
-# the same requests with a millimetre's play left 6
-# each change of a lane held this far (mm) off every place another bus's lane meets it (JOINT_STRETCH=0: a via's room
-# alone) -- the two lanes' layers different over that stretch, not at the one place read: a coupled plan, laid out,
-# moved two memory buses' crossings 2 to 3 mm along their lanes, past changes held a via's room off the places read,
-# the two met on one layer, and their next audits had 27 and 14 findings of each other's copper; held 3 mm off, the
-# same state's next audits had none between them and the board routed clean in round 1
-STRETCH = float(awx_settings.get('JOINT_STRETCH') or '3')
-HOLD_X = awx_settings.get('JOINT_HOLD_X') or '1.0'
-HOLD_X = None if HOLD_X == 'free' else HOLD_X
+ROOM = 4.0
+W_ROOM = 1.0                                                # a cramped change, in vias
+# each bus's own CROSSINGS held within this (mm) of where its own plan put them: the couplings are read off the buses'
+# own plans as laid out, and a crossing moved along its lanes moves the lanes -- a coupled search took a lane's ten
+# crossings from 8 mm out back to 2 mm off its tooth to change layer before two of another bus's lanes, and the lane,
+# laid again, ran along the source's face across four of that bus's lanes on its own layer, where no coupling stood. A
+# millimetre, not the very place: a change stands between two of its lane's crossings, and with those held where they
+# were a via could not step off another bus's lane beside it -- four buses' first coupled search left 31 of 1327
+# couplings broken, each a via of one bus within a via's room of another's lane 2 to 3 mm off the shared array; the
+# same requests with a millimetre's play left 6
+# each change of a lane held this far (mm) off every place another bus's lane meets it -- the two lanes' layers
+# different over that stretch, not at the one place read: a coupled plan, laid out, moved two memory buses' crossings
+# 2 to 3 mm along their lanes, past changes held a via's room off the places read, the two met on one layer, and their
+# next audits had 27 and 14 findings of each other's copper; held 3 mm off, the same state's next audits had none
+# between them and the board routed clean in round 1
+STRETCH = 3.0
+HOLD_X = 1.0
 WORKERS = 4
+CUT_R = 0.35                # a coupling held through the loop: the layer cut's box, this far (mm) round its place
 
 
 def turn(p, q, cx, cy):
@@ -124,6 +123,9 @@ def near_points(pa, pb, near):
 
 
 def main():
+    if any(a in ('--help', '-h') for a in sys.argv[1:]) or len(sys.argv) < 3:
+        print('usage: ' + __doc__.split(' -- ', 1)[0].strip())
+        sys.exit(0 if len(sys.argv) > 1 else 2)
     d, rnd = sys.argv[1], sys.argv[2]
     rd = os.path.join(d, f'r{rnd}')
     reqs = {}
@@ -155,12 +157,11 @@ def main():
         for i, v in zip(range(n0, n1), vals):
             m.AddHint(m.GetIntVarFromProtoIndex(i), v)
         p.bus, p.req, p.vals = bus, r, vals
-        if HOLD_X not in (None, ''):
-            d_ = int(round(float(HOLD_X) / p.G))
-            for k_, tv_ in sorted(p.t.items()):
-                v_ = vals[tv_.Index() - n0]
-                m.Add(tv_ >= v_ - d_)
-                m.Add(tv_ <= v_ + d_)
+        d_ = int(round(HOLD_X / p.G))
+        for k_, tv_ in sorted(p.t.items()):
+            v_ = vals[tv_.Index() - n0]
+            m.Add(tv_ >= v_ - d_)
+            m.Add(tv_ <= v_ + d_)
         p.q, p.cx, p.cy = r['turn']
         # (a bus whose pairs read chirality -1 is planned on its board TURNED OVER -- braid.setup: y mirrored about a
         # lattice line, F.Cu and B.Cu swapped, the mirror ctx.M its own inverse -- so its points are mirrored back
@@ -189,8 +190,7 @@ def main():
         parts[bus] = p
         print(f'  {bus}: {len(p.M)} lanes, {n1 - n0} variables, its own plan the start'
               + (' (planned turned over: chirality -1)' if p.flip else '')
-              + (f'; its {len(p.t)} crossings held within {float(HOLD_X):g} mm of its own plan\'s'
-                 if HOLD_X not in (None, '') else ''))
+              + f'; its {len(p.t)} crossings held within {HOLD_X:g} mm of its own plan\'s')
     # the couplings: two lanes of two buses whose paths cross -- their layers there differ, each change a via's room
     # off the place, or the coupling is broken
     W_V = ws.W_V
@@ -274,26 +274,25 @@ def main():
     # ROOM: each lane's stretches among another bus's lanes (its meetings with them, ROOM either side, joined where
     # they overlap), and each of its changes inside one priced
     cramped = []
-    if ROOM > 0:
-        for (bus_, n_), us_ in sorted(met.items()):
-            p_ = parts[bus_]
-            pad_ = p_.QU(p_.VNEED) + p_.QU(ROOM)
-            spans = []
-            for U_ in sorted(p_.Q(u_) for u_ in us_):
-                if spans and U_ - pad_ <= spans[-1][1]:
-                    spans[-1][1] = U_ + pad_
-                else:
-                    spans.append([U_ - pad_, U_ + pad_])
-            cs_, act = p_.chg[n_]
-            for x_, a_ in zip(cs_, act):
-                for lo_, hi_ in spans:
-                    bf, af, inn = m.NewBoolVar(''), m.NewBoolVar(''), m.NewBoolVar('')
-                    m.Add(x_ <= lo_).OnlyEnforceIf(bf)
-                    m.Add(x_ >= hi_).OnlyEnforceIf(af)
-                    m.AddBoolOr([bf, af, inn, a_.Not()])
-                    cramped.append(inn)
-        print(f'  room: a change within {ROOM:g} mm of a place another bus\'s lane meets its lane priced '
-              f'{W_ROOM:g} via(s): {len(cramped)} (change, stretch) pairs over {len(met)} lanes')
+    for (bus_, n_), us_ in sorted(met.items()):
+        p_ = parts[bus_]
+        pad_ = p_.QU(p_.VNEED) + p_.QU(ROOM)
+        spans = []
+        for U_ in sorted(p_.Q(u_) for u_ in us_):
+            if spans and U_ - pad_ <= spans[-1][1]:
+                spans[-1][1] = U_ + pad_
+            else:
+                spans.append([U_ - pad_, U_ + pad_])
+        cs_, act = p_.chg[n_]
+        for x_, a_ in zip(cs_, act):
+            for lo_, hi_ in spans:
+                bf, af, inn = m.NewBoolVar(''), m.NewBoolVar(''), m.NewBoolVar('')
+                m.Add(x_ <= lo_).OnlyEnforceIf(bf)
+                m.Add(x_ >= hi_).OnlyEnforceIf(af)
+                m.AddBoolOr([bf, af, inn, a_.Not()])
+                cramped.append(inn)
+    print(f'  room: a change within {ROOM:g} mm of a place another bus\'s lane meets its lane priced '
+          f'{W_ROOM:g} via(s): {len(cramped)} (change, stretch) pairs over {len(met)} lanes')
     OBJ = sum(p.OBJ for p in parts.values()) + W_CROSS * W_V * sum(brk) + \
         (W_RUN_CROSS - W_CROSS) * W_V * sum(brk_run) + int(round(W_ROOM * W_V)) * sum(cramped)
     m.Minimize(OBJ)
@@ -364,7 +363,7 @@ def main():
     # dearer by a via end's run on the joint layer, and its audit, of its own geometry, finding nothing there)
     jc = {bus: [] for bus in parts}
     if sv is not None:
-        R_ = float(awx_settings.get('JOINT_CUT_R') or '0.35')
+        R_ = CUT_R
         def phys_of(sol, p_, L_):
             return next((l_ for l_ in range(len(p_.LAYN)) if sol.Value(L_[p_.lix[l_]])), None)
         for (A, a, ua, B, b, ub, X), lt_, k_ in zip(cpl, lits, brk):

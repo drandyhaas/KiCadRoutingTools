@@ -9,6 +9,9 @@ Read when asked, never at import: a stage run in another stage's process reads i
 import awx_settings
 
 DEFAULT = ('F.Cu', 'B.Cu')
+GND_RUN = 10.0              # a run on a ground plane's layer, in vias (gnd_run_vias)
+PWR_RUN = 10.0              # a run on a power plane's layer, in vias (pwr_run_vias)
+PWR_X = 2.0                 # a run's length on a power plane's layer, priced this many times a signal layer's
 
 
 def layers():
@@ -31,7 +34,7 @@ def escape_layers(copper=None):
     """the layers a bus's ESCAPES are planned and laid on: F.Cu and B.Cu (stack order) -- a surface escape on F.Cu, a
     via's run on B.Cu. A via stands through every layer, so a run on an inner routing layer is the same via; with more
     routing layers than two the lane's layer at a via end is the solve's (whole_solve's via ends), and the relayer
-    moves the run onto it. Offered on every routing layer, the four-layer zynq LVDS bus's escape plans past 1.5 GB
+    moves the run onto it. Offered on every routing layer, the four-layer zynq LVDS bus's escape plans grew past 1.5 GB
     (U1's comb 23,639 moves, against 14,577); on two layers these are the routing layers themselves"""
     return [L for L in stacked(copper) if L in DEFAULT]
 
@@ -81,28 +84,28 @@ def inner_signal(kinds):
 
 
 def gnd_run_vias(inner=True):
-    """PLANE_GND_RUN: a lane's run on a GROUND plane's layer, in vias over the same run on a signal layer (default 10),
+    """GND_RUN: a lane's run on a GROUND plane's layer, in vias over the same run on a signal layer (10),
     whatever its length: the run cuts the reference plane under its neighbours, so it is taken only where it saves
     that many vias. With no inner signal layer (`inner` False: inner_signal), a via"""
-    return float(awx_settings.get('PLANE_GND_RUN') or '10') if inner else 1.0
+    return GND_RUN if inner else 1.0
 
 
 def pwr_run_vias(inner=True):
-    """PLANE_PWR_RUN: a lane's run on a POWER plane's layer, in vias over the same run on a signal layer (default 10,
+    """PWR_RUN: a lane's run on a POWER plane's layer, in vias over the same run on a signal layer (10,
     a ground plane's), whatever its length -- with its length's price beside it (pwr_vias_per_mm): a supply's pour is
     cut round the run and its pieces must be joined again, so the layer is a FALLBACK, taken only where it saves that
     many vias. At its length's price alone a bus laid half its exits on a supply's layer, 738 mm of it, where a hand
     had 13 mm. With no inner signal layer (`inner` False: inner_signal), a via"""
-    return float(awx_settings.get('PLANE_PWR_RUN') or '10') if inner else 1.0
+    return PWR_RUN if inner else 1.0
 
 
 def pwr_vias_per_mm():
-    """PLANE_PWR_X: a POWER plane's layer prices a run's length this many times a signal layer's (default 2) -- the
+    """PWR_X: a POWER plane's layer prices a run's length this many times a signal layer's (2) -- the
     excess, in vias per mm at the one exchange rate (select_moves.VIA_MM): a supply's pour is cut round the run, and its
     pieces must be joined again. The solve prices each run by its length; the ends model, which ranks ends and lays
     no run, a run flat at VIA_MM's length (run_price)"""
     import select_moves
-    return max(0.0, float(awx_settings.get('PLANE_PWR_X') or '2') - 1.0) / select_moves.VIA_MM
+    return max(0.0, PWR_X - 1.0) / select_moves.VIA_MM
 
 
 def run_price(kind, inner=True):

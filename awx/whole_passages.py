@@ -223,11 +223,10 @@ def route_coords(Fr, G):
     return Hn, rs, entry, end, tend, u_ring
 
 
-def references(ctx, Fr, G, rs, end, pitch, trk, clr, ring_stack=False):
+def references(ctx, Fr, G, rs, end, pitch, trk, clr):
     """{lane: [(u, x, y)]}: each lane's REFERENCE route on the board in its route coordinate, every G of u -- the
     frame's mid path on the trunk; a ring lane's ramped at 45 degrees onto its handoff offset, then out to its ring's
-    standoff (a pair: its landing's offset), held there and in to its landing (whole_geo's references). `ring_stack`
-    (whole_solve's probe SOLVE_RING_STACK_REF): along the ring at its place in the ring's stack instead"""
+    standoff (a pair: its landing's offset), held there and in to its landing (whole_geo's references)"""
     import pairs as _pairs
     prs = getattr(ctx, 'pairs', {}) or {}
     M, spine, bname, ring_of, Hk = list(Fr.M), Fr.spine, Fr.cls, Fr.rings, Fr.Hk
@@ -260,17 +259,6 @@ def references(ctx, Fr, G, rs, end, pitch, trk, clr, ring_stack=False):
         out_ = 1.0 if ob1_ >= sp_.project_pt(DCEN_)[1] else -1.0
         orun_ = ob1_ if n in prs else ob1_ + out_ * STAND_
         srun_ = sb1_ - (STAND_ + trk + clr)
-        if ring_stack:
-            mem_ = [m_ for m_ in M if bname.get(m_) == k_]
-            sbe_ = {m_: end[m_] - Hn[m_] + rs[k_] for m_ in mem_}
-            inner_ = [(sbe_[m_], pitch + (_pairs.pitch(trk) if m_ in prs else 0.0))
-                      for m_ in mem_ if m_ != n and sbe_[m_] < sbe_[n]]
-            o_st = lambda sb_: ob0_ - out_ * sum(w_ for e_, w_ in inner_ if e_ <= sb_)
-            for sb_ in np.arange(sb0_, sb1_ + 1e-9, G):
-                o_ = (o_st(sb_) if sb_ <= srun_ else
-                      float(np.interp(sb_, [srun_, sb1_], [o_st(srun_), ob1_])))
-                pts_.append((u_ring(n, float(sb_)),) + sp_.xy(float(sb_), o_))
-            return pts_
         sout_ = sb0_ + abs(orun_ - ob0_)
         rp_ = ([(sb0_, ob0_), (sout_, orun_), (srun_, orun_), (sb1_, ob1_)] if sout_ < srun_ else
                [(sb0_, ob0_), (srun_, orun_), (sb1_, ob1_)] if srun_ > sb0_ + 1e-9 else [(sb0_, ob0_), (sb1_, ob1_)])

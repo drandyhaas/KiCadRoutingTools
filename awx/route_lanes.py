@@ -58,10 +58,9 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 import braid as bd  # noqa: E402
 import connect as cn  # noqa: E402
 from plan_audit import plan, read_nets, dseg  # noqa: E402
-# WALL_LIFT=1: a ball of the bus's parts on no bus net that the lay WALLED IN (the step's own cage test,
+# after a plan's seq lay, a ball of the bus's parts on no bus net that the lay WALLED IN (the step's own cage test,
 # route_bus.walls_made) has the lanes walling it lifted and routed again round its way kept -- the via site it escapes
-# by with them gone, reserved as a lane's line is (lift_walls). 0 = no test
-WALL_LIFT = (awx_settings.get('WALL_LIFT') or '1') == '1'
+# by with them gone, reserved as a lane's line is (lift_walls)
 WALL_SITES = 6      # (lift_walls) the via sites a walled ball's lanes are routed again round, the nearest first
 
 
@@ -374,7 +373,7 @@ def main(argv=None):
     n_ok = n_free = v_tot = v_plan = 0
     errors = []                 # lanes whose routing RAISED: a crash, not a routing result
     laid = {}                   # (a plan's singles, seq: each laid lane's corridor and copper -- lift_walls')
-    print(f'{a.mode}: {len(chosen)} lane(s), branch={bd.BRANCH}')
+    print(f'{a.mode}: {len(chosen)} lane(s)')
     # (a whole-route PLAN: every lane in its own band first -- a pair by its band rungs alone -- and a pair refused there
     # tried in a WIDER band, then FREE of the plan, only after them, round what they laid. Free in its turn, ahead of the
     # singles, a pair took the room the plan gave them: zynq LVDS round 3 with RX_D4's dive laid, RX_D1 routed free
@@ -494,7 +493,7 @@ def main(argv=None):
             render(ctx, c, nm, calls[-1], segs_nm, vias_nm, os.path.join(a.png, f'{nm}.png'), box)
         if a.plan and a.mode == 'seq' and kind != 'pair' and res is not None:
             laid[nm] = (c, list(segs_nm), list(vias_nm))
-    if a.plan and a.mode == 'seq' and laid and WALL_LIFT:
+    if a.plan and a.mode == 'seq' and laid:
         lift_walls(ctx, laid, routed, a.board, read_nets(a.nets), a.dest, base_s, base_v)
     print(f'SUMMARY {a.mode}: {n_ok}/{len(chosen)} in band' + (f' (+{n_free} free)' if n_free else '')
           + f', {v_tot} vias (plan {v_plan} for those)' + (f'; {len(errors)} ERROR(S): {errors}' if errors else ''))

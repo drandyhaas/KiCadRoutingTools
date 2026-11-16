@@ -10,17 +10,15 @@ round the bottom -- 54 mm of copper for an 18.7 mm airline, where the
 human drops a dogbone at the ball and runs south under the array, 38 mm.
 
 At write time, for a lane whose stub + lane exceed the PAD-to-berth
-airline by BRAID_RE_ESCAPE mm: the lane and its stub chain are lifted,
+airline by RE_ESCAPE mm: the lane and its stub chain are lifted,
 the net is routed again from its source PAD to its berth, free, against
 every other piece of copper as it stands, and the new copper ships only
 when it is cheaper under the economy's rate (ECON_MM_PER_VIA of copper a
 via) and the net's scoped DRC is no worse. Pure output economy: the
 routed world is untouched, as the trim's is."""
 import math
-import awx_settings
 
-RE_ESCAPE_DEFAULT = 8.0                                             # mm over the pad->berth airline (2026-09-21, on by default)
-RE_ESCAPE = float(awx_settings.get('BRAID_RE_ESCAPE', str(RE_ESCAPE_DEFAULT)) or 0)   # 0 = off
+RE_ESCAPE = 8.0                                                     # mm over the pad->berth airline
 
 
 def _mm(segs):
@@ -53,7 +51,7 @@ def excess(ctx, nm, lane):
 def re_escape(ctx, nm, lane, vias, board_path, log, cn, rate):
     """Returns the mm saved, 0.0 when nothing was done. `cn` is connect.py,
     `rate` the mm of copper a via is worth."""
-    if RE_ESCAPE <= 0 or not lane:
+    if not lane:
         return 0.0
     chain = ctx.src_chain.get(nm) or []
     if not chain:

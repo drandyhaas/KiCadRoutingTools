@@ -80,7 +80,7 @@ BAN_KICKS = 8             # then BAN kicks (ban_kicks): the most crossed lanes' 
 BAN_LANES = 3             # ... this many lanes a kick
 BAN_PATIENCE = 4          # ... stopping after this many kicks in a row that find nothing
 POCKET_PASSES = 2         # (a group) every pocket split again, a pocket's lanes at once (pocket_kicks), this many passes
-ILS_SEED = int(awx_settings.get('ENDS_ILS_SEED', '622'))   # the kicks' seed (a setting: one bench, other trajectories)
+ILS_SEED = 622            # the kicks' seed
 VIA_PREF = 2              # no more than two vias on a net where that can be had (whole_solve's first objective)
 W_OVER = 5.0              # each via a net carries past two costs this many MORE (nets of 0..4 vias: 0, 1, 2, 8, 14) --
 #                           a price, never a cap, the same as the whole solve's
@@ -92,9 +92,7 @@ _PARTS_KEEP = 256          # score: the states whose parts are kept (the search'
 EXACT_TOP = 6             # the search's best distinct ends re-ranked on the exact route (best_exact) ...
 EXACT_MARGIN = 4.0        # ... those within this much of the best by the estimate
 EXACT_KMAX = 3            # a lane's changes at most in the exact route (the whole solve's KMAX)
-WIND_TRY = 3              # WINDING (WIND_CUT): the cuts off the far face searched again, the best few by the estimate
-ONE_WINDING = (awx_settings.get('ENDS_ONE_WINDING') or '0') == '1'   # (probe) no second search with the teeth
-#                           free where no tooth is laid (an escape base): its model is the first's
+WIND_TRY = 3              # WINDING (wind_on): the cuts off the far face searched again, the best few by the estimate
 WIND_GAIN = 1.0           # ...a cut taken only when its ends lay fewer vias and beat the far face's by this much: within
 #                           it, the model's own error on a wound plan (its rides, the stubs the fanout lays) -- h3 K28
 #                           took two cuts at 1.2 and 0.18 and laid 30 vias and 584 mm against the far cut's 32 and 544
@@ -318,19 +316,7 @@ def corner_slope(spine, p0, p1, box, tol=0.05):
     return float(abs(o1 - oc) / (s1 - sc)) if s1 - sc > 1e-6 else math.inf
 
 
-def frame_spine(SB, DB):
-    """the whole frame's straight trunk spine (whole_frame.build's) from the two grown boxes"""
-    import numpy as np
-    import corridor as _cr
-    ca = np.array([(SB[0] + SB[2]) / 2, (SB[1] + SB[3]) / 2])
-    cb = np.array([(DB[0] + DB[2]) / 2, (DB[1] + DB[3]) / 2])
-    d = (cb - ca) / np.hypot(*(cb - ca))
-    back = math.hypot(SB[2] - SB[0], SB[3] - SB[1]) / 2 + _bd.LPITCH
-    fwd = math.hypot(DB[2] - DB[0], DB[3] - DB[1]) / 2 + _bd.LPITCH
-    return _cr.Spine([tuple(ca - d * back), tuple(cb + d * fwd)])
-
-
-OPP_DIVE = float(awx_settings.get('ENDS_OPP_DIVE') or '0')   # (probe) vias for a crossover riding on a pair's dive
+OPP_DIVE = 0.0            # vias for a crossover riding on a pair's dive (one of the ends kernel's constants)
 
 
 def _seg_d(a, b, p, q):
@@ -367,10 +353,8 @@ class Ends:
         self.src_shared = bool(st.get('src_shared'))
         # (`dst_shared`: the destination a ball array the group holds the same way -- its berths' menu the group's)
         self.dst_shared = bool(st.get('dst_shared'))
-        # (a lane with no option at an end is no lane -- the run leaves it out, and names it: on an escape base its
-        # teeth are its menu's alone, so with no tooth escape it is none either -- zynq U1's CTRL_OUT0, its via
-        # walled in, crashed the joint ends)
-        names = [n for n in st['launch'] if st['dmenu'].get(n) and (st['smenu'].get(n) or not st.get('escape'))]
+        # (a lane with no berth option is no lane -- the run leaves it out, and names it)
+        names = [n for n in st['launch'] if st['dmenu'].get(n)]
         prs = {}
         if int(awx_settings.get('PLAN_PAIRS', awx_settings.get('BRAID_PAIRS', '0')) or 0):
             prs = {b: pr for b, pr in _pairs.pair_names(names).items() if pr[0] in names and pr[1] in names}
@@ -417,12 +401,10 @@ class Ends:
         rl_c = _rules_c.active()
 
         def end_reach(v_d):
-            # (how far a via keeps another move's run off it at one end: at the via the engine lays under that end's
-            # arrays -- fan_via; the rule exactly for an escape's moves, laid as they are, else the router's grid
-            # ring -- None, select_moves' own, where that via is the rules')
+            # (how far a via keeps another move's run off it at one end, at the via the engine lays under that end's
+            # arrays -- fan_via: the router's grid ring about it -- None, select_moves' own, where that via is the
+            # rules')
             rl_e = dataclasses.replace(rl_c, via_size=v_d[0], via_drill=v_d[1])
-            if st.get('escape'):
-                return _rules_c.fan_via_clear(rl_e)
             return None if tuple(v_d) == (rl_c.via_size, rl_c.via_drill) else _rules_c.fan_via_reach(rl_e)
         # (each end's via: the one the engine lays under its arrays, the largest of them -- board_rules.fan_via_at)
         import board_rules
@@ -430,9 +412,9 @@ class Ends:
                              for refs in ([st['sref']], dests_))
         self.via_reach = tuple(end_reach(v_d) for v_d in self.fan_via)
         # (a pair's own two legs: laid together exactly as their moves are, a via keeping the other leg's run off by
-        # the rule -- fan_via_clear, plain bus or escape. At the router's grid ring a dog-bone met the other leg's run
-        # on the next ball line of an array whose ring stands past half its pitch, and a strobe pair kept a fifth of
-        # its tooth options, none of them clear of its neighbours')
+        # the rule -- fan_via_clear. At the router's grid ring a dog-bone met the other leg's run on the next ball line
+        # of an array whose ring stands past half its pitch, and a strobe pair kept a fifth of its tooth options, none
+        # of them clear of its neighbours')
         legs_reach = tuple(_rules_c.fan_via_clear(dataclasses.replace(rl_c, via_size=v_d[0], via_drill=v_d[1]))
                            for v_d in self.fan_via)
 
@@ -597,11 +579,10 @@ class Ends:
         # only to its tooth's tip -- and the loop's audits then found it against a passive the solve cannot move it
         # off (zynq: C105 0.6 mm in front of the source teeth, C98 beside the berths -- most of the static findings)
         self.front, self.run_ids = {}, run_ids
-        # (the tracks across the source's side bands, read on the board the bus's routed neighbours stand on -- the
-        # shared field where the ends are chosen on the bus's own: escape_plan, `fence_pcb`)
+        # (the tracks across the source's side bands, read on the board the bus's routed neighbours stand on)
         import whole_frame as _wf
         skip_ = {l_ for _lane, lg in self.lanes for l_ in lg}
-        fpcb_ = st.get('fence_pcb') or st['pcb']
+        fpcb_ = st['pcb']
         self.fence = side_fences(fpcb_, _wf.box_of(st['pcb'], st['sref']), skip_)
         # (the LAID lanes of another bus among them -- locked copper: FENCE_LAID each one a lane passes, (north, south)
         # per tooth option, a far-face one's by the side of the cut it goes round; and a lane whose every other way out
@@ -668,7 +649,7 @@ class Ends:
                 by_net_[sg.net_id] += math.hypot(sg.end_x - sg.start_x, sg.end_y - sg.start_y)
         self._laid_len = {leg: by_net_.get(st['byname'][leg][0], 0.0) for leg, m in cur.items()
                           if m is not None and not m.legs and leg in st['byname']}
-        # (the whole-array fanout's plane balls of the arrays, each kept a way down: plane_ways)
+        # (the plane balls of the arrays, each kept a way down: plane_ways)
         self.pw = plane_ways(st, self.lanes, self.T, self.B, cur,
                              ends=tuple(e_ for e_, sh_ in ((0, self.src_shared), (1, self.dst_shared)) if not sh_))
         # a TIE VIA at the ball where a pad of the net's own lies under it on the other layer (fanout_from_plan.
@@ -688,13 +669,13 @@ class Ends:
         conf = collections.defaultdict(set)
         # (the escape fanout lays its moves exactly as they are: a via keeps another lane's run off by the rule, not by
         # the router's grid ring -- rules.fan_via_clear; each end at the via the engine lays there: end_reach)
-        for end_, cands, strict in ((0, {n: list(kept[0][n].values()) for n in names}, True),
-                                    (1, {n: list(kept[1][n].values()) for n in names}, bool(pf.PAGES_STRICT))):
+        for end_, cands in ((0, {n: list(kept[0][n].values()) for n in names}),
+                            (1, {n: list(kept[1][n].values()) for n in names})):
             if (self.src_shared, self.dst_shared)[end_]:
                 continue
             # stacked: the whole route orders each layer's lanes on their own, so an F exit over a B one is
             # no conflict
-            for (a, i, b, j) in pf._conflicts(cands, strict, stack=True, via_reach=self.via_reach[end_]):
+            for (a, i, b, j) in pf._conflicts(cands, True, stack=True, via_reach=self.via_reach[end_]):
                 conf[(a, id(cands[a][i]))].add((b, id(cands[b][j])))
                 conf[(b, id(cands[b][j]))].add((a, id(cands[a][i])))
             # ...and two nets' vias nearer than a via and a clearance apart (vias_clash), found by their sites' cells
@@ -816,32 +797,28 @@ class Ends:
             # passes under the part through -- the ways under it priced as open on every layer its pads leave free,
             # eight lanes to a connector's pins went straight under a QFN across a pocket, through the QFN's own
             # berth vias, and the three the gaps had no room for were never laid
-            if (awx_settings.get('ENDS_UNDER_VIAS') or '1') == '1':
-                import numpy as np
-                import rules as _rules_u
-                R_ = _rules_u.fan_via_clear(dataclasses.replace(_rules_u.active(), via_size=self.fan_via[1][0],
-                                                                via_drill=self.fan_via[1][1]))
-                sites_ = [(l_, j, m.site) for l_, _lg in self.lanes for j, o in enumerate(self.B[l_])
-                          for m in o[0] if m.site is not None]
-                if sites_:
-                    SP_ = np.array([s_[2] for s_ in sites_], float)
-                    n_u = 0
-                    for a, _lg in self.lanes:
-                        for i, o in enumerate(self.B[a]):
-                            if o[5][0] not in ('straight', 'under'):
-                                continue
-                            p_, q_ = np.array(o[1], float), np.array(self.group.pt(o[5][1]), float)
-                            d_ = q_ - p_
-                            L2_ = float(d_ @ d_)
-                            t_ = np.clip(((SP_ - p_) @ d_) / L2_, 0.0, 1.0) if L2_ > 1e-12 else np.zeros(len(SP_))
-                            dist_ = np.hypot(*(SP_ - (p_ + t_[:, None] * d_)).T)
-                            for k_ in np.nonzero(dist_ < R_)[0]:
-                                b, j, _s = sites_[k_]
-                                if b != a:
-                                    self.oconf[(a, 1, i)].add((b, j))
-                                    self.oconf[(b, 1, j)].add((a, i))
-                                    n_u += 1
-                    self.under_vias = n_u
+            import numpy as np
+            import rules as _rules_u
+            R_ = _rules_u.fan_via_clear(dataclasses.replace(_rules_u.active(), via_size=self.fan_via[1][0],
+                                                            via_drill=self.fan_via[1][1]))
+            sites_ = [(l_, j, m.site) for l_, _lg in self.lanes for j, o in enumerate(self.B[l_])
+                      for m in o[0] if m.site is not None]
+            if sites_:
+                SP_ = np.array([s_[2] for s_ in sites_], float)
+                for a, _lg in self.lanes:
+                    for i, o in enumerate(self.B[a]):
+                        if o[5][0] not in ('straight', 'under'):
+                            continue
+                        p_, q_ = np.array(o[1], float), np.array(self.group.pt(o[5][1]), float)
+                        d_ = q_ - p_
+                        L2_ = float(d_ @ d_)
+                        t_ = np.clip(((SP_ - p_) @ d_) / L2_, 0.0, 1.0) if L2_ > 1e-12 else np.zeros(len(SP_))
+                        dist_ = np.hypot(*(SP_ - (p_ + t_[:, None] * d_)).T)
+                        for k_ in np.nonzero(dist_ < R_)[0]:
+                            b, j, _s = sites_[k_]
+                            if b != a:
+                                self.oconf[(a, 1, i)].add((b, j))
+                                self.oconf[(b, 1, j)].add((a, i))
         self._ride = {}
         # ...and the RING's standoff round the destination's ball box, for a WOUND lane's ride (wound_ride): its berths'
         # exits stand outside the box by their stubs (the median, whole_frame.grown's measure), and the ring a lane pitch
@@ -869,7 +846,6 @@ class Ends:
         self.end_learned = {}      # {lane: vias}: a lane's fixed end layers the solve could not hold (checked, rules)
         self.wcut = None           # the destination's cut when WINDING moved it off the far face (choose: cut_phase)
         self.pool = {}             # every search's result: its state -> its objective by the estimate
-        self.pool_all = set()      # ...and every search's result whatever cut it was searched at (ENDS_PORTFOLIO)
         self._memo = {}            # every state scored: its objective -- the search asks a third of them again
         self._parts = collections.OrderedDict()     # the last _PARTS_KEEP states' parts (score), the oldest dropped
 
@@ -1059,8 +1035,6 @@ class Ends:
         exact_route on two; None where it finds no plan"""
         lanes = [l_ for l_, _lg in self.lanes]
         npair = {l_: len(lg) for l_, lg in self.lanes}
-        to = {l_: self.T[l_][state[l_][0]] for l_ in lanes}
-        bo = {l_: self.B[l_][state[l_][1]] for l_ in lanes}
 
         def cb(kp, kd, ends, sv, xo, sep, tl, dl):
             kp_ = {lanes[i]: (v_, i) for i, (v_, _i) in enumerate(kp)}
@@ -1536,7 +1510,6 @@ class Ends:
         for sw, (b_, s_) in enumerate(sweeps_):
             log(f'  whole ends: sweep {sw}: objective {b_:.2f} {self.score(s_)[1]}')
         self.pool[tuple(sorted(state.items()))] = best
-        self.pool_all.add(tuple(sorted(state.items())))
         return state
 
     def iterate(self, state, rounds=None, log=print):
@@ -1739,14 +1712,11 @@ def wound_ride(a, b, box, side, pad=0.3, turns=False):
 
 
 def wind_on():
-    """WIND_CUT: the destination's cut anywhere round it (cut_phase), '1', or on its far face alone, '0'. Unset: on with
-    more routing layers than two (route_layers), where a wound family takes its own layer through the channel beside
-    the destination (synth wind_rot16_g3); off on two"""
+    """the destination's cut anywhere round it (cut_phase) with more routing layers than two (route_layers), where a
+    wound family takes its own layer through the channel beside the destination (synth wind_rot16_g3); on its far face
+    alone on two"""
     import route_layers
-    v = awx_settings.get('WIND_CUT') or ('1' if len(route_layers.layers()) > 2 else '0')
-    if v not in ('0', '1'):
-        raise SystemExit(f'WIND_CUT={v!r}: expected 0 or 1')
-    return v == '1'
+    return len(route_layers.layers()) > 2
 
 
 WIND_SEEN = []      # the cuts off the far face the cut phase chose in this process, for judge to price a choice at
@@ -1855,12 +1825,11 @@ def _searched(E, s0, log=print):
                         log=log)
 
 
-# THE JOINT ENDS (an escape base; ENDS_JOINT=0: the local search alone): every lane's tooth and berth chosen TOGETHER by CP-SAT over the ends
+# THE JOINT ENDS (an escape base): every lane's tooth and berth chosen TOGETHER by CP-SAT over the ends
 # model's own menus, CROSSINGS FIRST -- the local search's objective prices a stack at five vias and a crossing at a
 # hundredth of one, so it buys stacks back with crossings the whole solve then cannot place: on the zynq LVDS bus's
 # escapes 117 of its local optima were put to the solve's strict check, and at K47 none of 78 had a plan, where the
 # joint ends had one at the first check on all six round-one frames (K32/K40/K47, edge-free and not), in 10-70 s
-JOINT = (awx_settings.get('ENDS_JOINT') or '1') == '1'
 JOINT_UNDECIDED = set()    # the buses (their lanes) whose joint ends' strict check could not decide, this process
 CHECK_UNDECIDED = set()    # ...and those a strict check left UNKNOWN -- no plan in its work, none proved absent
 JOINT_X = 10.0             # a crossing, in vias
@@ -1875,9 +1844,8 @@ JOINT_LEARN = 20.0        # a crossing in a failing check's core: this many vias
 JOINT_TRIES = 5            # the joint ends put to the check at most this many times; none with a plan, the last
 #                           state stands -- and a round left with nets open is followed by the next seed's (whole_route)
 JOINT_SOFT = 3             # the joint ends solved again at most this many times, each core of conflicts no state holds priced
-OPP_SOFT = (awx_settings.get('ENDS_OPP_SOFT') or '0') == '1'   # (the group's ends) a pair's opposite hands priced
+OPP_SOFT = False          # a pair's opposite hands priced, not forbidden (the group's ends: group_ends sets it)
 JOINT_BATCHES = 40         # CP-SAT's interleaved batches, the solve's budget (reproducible)
-JOINT_SEED = awx_settings.get('JOINT_SEED') or ''   # (probe) CP-SAT's random_seed for the joint ends: another trajectory
 START_WORK = 30.0          # the search's start, the nearest state the rules allow: CP-SAT's deterministic seconds, one worker
 
 
@@ -2894,7 +2862,6 @@ def _joint_state(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
         return {by_[i_] for i_ in sc_.SufficientAssumptionsForInfeasibility() if i_ in by_}
     t1 = time.time()
     # THE START: the descent's ends and the last round's, each moved to the nearest state the rules allow and completed
-    sv_val = lambda sv_, mm_, v_: sv_.Value(mm_.GetBoolVarFromProtoIndex(v_.Index()))
     starts = [('the descent\'s', {l_: tuple(hint[l_]) for l_ in lanes})]
     last = _last_ends()
     if last:
@@ -2933,8 +2900,6 @@ def _joint_state(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
     sv.parameters.max_num_deterministic_batches = JOINT_BATCHES
     sv.parameters.share_glue_clauses = False
     sv.parameters.share_binary_clauses = False
-    if JOINT_SEED:
-        sv.parameters.random_seed = int(JOINT_SEED)
     r = sv.Solve(m)
     built = f'built in {t1 - t0:.1f} s; start {t2 - t1:.1f} s: {"; ".join(why)}'
     if r not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -2986,7 +2951,6 @@ def joint_choose(st, log=print, fixed=None, seed=None, learned=None, free_teeth=
         + ', '.join(f'{fc(c_)} {cost_:.0f} ({nx_} x)' for cost_, _q2, c_, _s2, nx_ in ranked))
     t_c = time.time()
     xl = {}
-    check_on = (awx_settings.get('ENDS_SOLVE_CHECK') or '1') == '1'
     t_chk = []
     # what each refused state teaches, held for every later state (joint_state): the LANES its exact core names not
     # all on those ends again, a lane with no room for a change on its ends on one layer, and two lanes whose crossing's
@@ -3006,7 +2970,7 @@ def joint_choose(st, log=print, fixed=None, seed=None, learned=None, free_teeth=
             return None
         last_ = (s, how)
         t_k = time.time()
-        chk = solve_check(E, s, exact=True) if check_on else None
+        chk = solve_check(E, s, exact=True)
         t_chk.append(time.time() - t_k)
         if chk is None or chk.get('plan'):
             break
@@ -3051,7 +3015,7 @@ def joint_choose(st, log=print, fixed=None, seed=None, learned=None, free_teeth=
     log(f'  whole ends: THE JOINT ENDS ({how}; {k + 1} check(s), {time.time() - t0:.0f} s: ends model {t_e - t0:.1f} s, '
         f'greedy start {t_s - t_e:.1f} s, the cuts\' descents {t_c - t_s:.1f} s, check(s) '
         f'{" + ".join(f"{c_:.1f}" for c_ in t_chk)} s, scored {time.time() - t_f:.1f} s): {_fmt(p)}')
-    # (joint_ends: these ends by signature, for the next round's start -- the plan sidecar carries them, escape_plan)
+    # (joint_ends: these ends by signature -- the group's ends read them off the ends capture, group_ends)
     # (`st` the state itself, not its id: an id outlives its object, and a later state given it read as this one)
     import source_realize as _sr
     choose.last = dict(laid=v, laid_parts=p, free=None, free_parts=None, moved=bool(out[1]), st=st, cut=E.wcut,
@@ -3103,14 +3067,11 @@ def _choose(st, log=print, src_free=True, fixed=None, seed=None, learned=None, f
     `fixed` {net: move signature}: berths held; `seed` {net: Move}: the berths to start from; `learned`: berth pairs
     not to be laid together (Ends); `free_teeth` {lane}: with `src_free`, only these lanes' teeth move. THE JOINT ENDS
     first (joint_choose: the ends together, conflicts held apart, the whole solve's strict check), the search only where
-    they have no state, or none the check passed -- its ends then taken only where the check passes them -- on an
-    escape base and a plain bus's: the search prices a conflict, and a plain bus's search
-    chose a tooth move through another lane's tooth as laid, which the fanout then refused and banned. Not on a
-    whole-array fanout's (FANOUT_JOINT), whose realize plans the source again whole round the moves asked: the joint
-    ends asked a DDR bus 40 tooth moves where the search asked 23, and its round left a lane open the search's closed"""
+    they have no state, or none the check passed -- its ends then taken only where the check passes them: the search
+    prices a conflict, and a plain bus's search chose a tooth move through another lane's tooth as laid, which the
+    fanout then refused and banned"""
     joint_kept = None
-    joint_on = JOINT and (st.get('escape') or not awx_settings.get('FANOUT_JOINT'))
-    if joint_on and not src_free:
+    if not src_free:
         # THE BERTHS ALONE, the teeth as laid (a fanout's destination passes): the joint ends with every tooth held --
         # berths the solve's check has passed, as its other choices are. Left to the search alone, the berths a plain
         # bus was laid with after its tooth moves were turned down had never been asked of the check, and its round's
@@ -3122,7 +3083,7 @@ def _choose(st, log=print, src_free=True, fixed=None, seed=None, learned=None, f
             joint_kept = (got, dict(choose.last))
             log('  whole ends: the joint ends: no state the solve\'s check passed -- the search\'s ends weighed '
                 'against the last one')
-    if joint_on and src_free:
+    if src_free:
         got = joint_choose(st, log=log, fixed=fixed, seed=seed, learned=learned, free_teeth=free_teeth)
         if got is not None and choose.last.get('unplanned'):
             # NO STATE of the joint ends passed the solve's check: the one that stands is unverified, and the search's
@@ -3132,9 +3093,9 @@ def _choose(st, log=print, src_free=True, fixed=None, seed=None, learned=None, f
             joint_kept, got = (got, dict(choose.last)), None
             log('  whole ends: the joint ends: no state the solve\'s check passed -- the search\'s ends weighed '
                 'against the last one')
-        if got is not None and not st.get('escape'):
-            # (teeth laid -- not an escape base: the berths searched against them as they stand too, the objective a
-            # realized board is judged on. The joint state's own score holds the moves it asks, and judged on it the
+        if got is not None:
+            # (the teeth as laid: the berths searched against them as they stand too, the objective a realized board
+            # is judged on. The joint state's own score holds the moves it asks, and judged on it the
             # board that laid them exactly lost to the board before by the moves its next state asked: reverted to
             # teeth with four balls walled in and 70 more crossings)
             vJ, pJ = choose.last['laid'], choose.last['laid_parts']
@@ -3175,9 +3136,6 @@ def _choose(st, log=print, src_free=True, fixed=None, seed=None, learned=None, f
             out = EL.choice(sL)
             choose.last.update(moved=False, parts=pL, cut=EL.wcut if EL.wcut is not None else pL.get('cut'))
             return out
-        if got is not None:
-            return got
-    quiet = lambda *a: None
     E = Ends(st, src_free=False, fixed=fixed, learned=learned)
     if E.pw is not None:
         log(f'  whole ends: {len(E.pw.balls)} ball(s) of the arrays kept a way down ({E.pw.n_ways} ways, {E.pw.secs:.0f} s)')
@@ -3196,10 +3154,8 @@ def _choose(st, log=print, src_free=True, fixed=None, seed=None, learned=None, f
             sF_, (vF_, pF_) = cut_phase(E2_, sF_, (vF_, pF_), log=log_, into=into)
         return E2_, sF_, vF_, pF_
     spec = None
-    no_tooth_laid = all(v_ is None for v_ in E.cur.values())
-    one_search = ONE_WINDING and no_tooth_laid and src_free
     if wind_on():
-        if src_free and not one_search:
+        if src_free:
             # (the second search SPECULATED beside the berths' winding, from the berths as they stand: a winding that
             # leaves them so leaves the second search's ends its own -- its lines said, and its cut seen, where they
             # would have been; one that moves them has the second search run again from those. The two-end USB and
@@ -3210,12 +3166,7 @@ def _choose(st, log=print, src_free=True, fixed=None, seed=None, learned=None, f
     out, vF, pF = E.choice(sL), None, None
     log(f'  whole ends: on the teeth as laid: {_fmt(pL)}')
     E2 = None
-    if one_search:
-        # (probe ENDS_ONE_WINDING: with no tooth laid -- an escape base -- the teeth 'as laid' are every tooth's whole
-        # menu (Ends: a lane held only where its teeth stand), so the teeth-free model is this one, and a second search
-        # of it from here only went on searching: half the ends' time on the zynq LVDS escapes)
-        log('  whole ends: no tooth laid -- one search, the teeth free in it')
-    elif src_free:
+    if src_free:
         if spec is not None:
             sL0, seen2, buf, fut = spec
             got = fut.result()
@@ -3233,22 +3184,20 @@ def _choose(st, log=print, src_free=True, fixed=None, seed=None, learned=None, f
             log(f'  whole ends: teeth moved ({len(out[1])}): {_fmt(pF)}')
         else:
             log('  whole ends: no tooth move is better')
-    # (the chosen state's own reading -- its lanes' nets over two, load, crossings and blocked fronts -- for the
-    # sidecar: escape_plan wrote the lane_* keys from choose.last's top level, where they never were, so the round's
-    # solve had no blocked front the check's had (solve_check's front=lane_front) and whole_feedback no lane to name)
+    # (the chosen state's own reading -- its lanes' nets over two, load, crossings and blocked fronts, its ways in:
+    # choose.last's `parts`)
     parts_ = pF if (E2 is not None and vF < vL - TOOTH_GAIN) else pL
-    # (asked of an ESCAPE's ends and a GROUP's, where the ends model's route and the solve part: lanes leaving the
-    # source's near face, a group's ways in. A single destination's fanout ends the solve takes as they come -- asked
-    # of a DDR bus's whole-array fanout four times, 260 s, the state stood each time)
-    check_on = (awx_settings.get('ENDS_SOLVE_CHECK') or '1') == '1'
+    # (asked of a GROUP's ends, where the ends model's route and the solve part: a group's ways in. A single
+    # destination's fanout ends the solve takes as they come -- asked of a DDR bus's whole-array fanout four times,
+    # 260 s, the state stood each time)
     Ef, sf, pf_ = (E2, sF, pF) if (E2 is not None and vF < vL - TOOTH_GAIN) else (E, sL, pL)
-    if (st.get('escape') or len(st.get('dests') or ()) > 1) and check_on:
+    if len(st.get('dests') or ()) > 1:
         sf = checked(Ef, sf, pf_, log=log)
         out = Ef.choice(sf)
         parts_ = Ef.score(sf, exact=True)[1]
     if joint_kept is not None:
         # (the joint ends had no state the check passed: the search's ends stand only where the check passes them)
-        chk_ = solve_check(Ef, sf, exact=True) if check_on else None
+        chk_ = solve_check(Ef, sf, exact=True)
         if not (chk_ and chk_.get('plan')):
             log('  whole ends: the search\'s ends have no plan from the solve\'s check either -- the joint ends\' last '
                 'state stands')
@@ -3314,46 +3263,6 @@ def _sweep(E, state, lanes, log=print, hands=()):
     return None
 
 
-PORTFOLIO = int(awx_settings.get('ENDS_PORTFOLIO') or '0')   # (probe) other states asked before the repair
-
-
-def _portfolio(E, state, v, t0, log=print):
-    """(probe ENDS_PORTFOLIO) the search's OTHER best states asked of the whole solve before any repair: the ends search
-    finds many distinct states on its way (its pool: the sweeps', kicks' and cuts' results) and keeps one; where that one
-    has no plan, the next best by the estimate that change one of the lanes the check named (crowded, in its core or its
-    rules) are asked in turn, PORTFOLIO at most, the first with a plan the choice. Each ask is one solve check (~14 s at
-    K47); the repair's re-searches cost 300-475 s where they fail (zynq LVDS: K47 both arms, every repair failed while
-    another search's state of the same round had a plan). None: the repair as before"""
-    key0 = tuple(sorted(state.items()))
-    named = set(v.get('crowded') or []) | {l_ for c_ in (v.get('core') or []) for l_ in c_} | \
-        {l_ for l_, _f in (v.get('rules') or [])}
-    cands = []
-    for k_ in set(E.pool) | getattr(E, 'pool_all', set()):
-        if k_ == key0:
-            continue
-        s_ = dict(k_)
-        if named and not any(s_.get(l_) != state.get(l_) for l_ in named):
-            continue                    # (moves none of the lanes the solve named: the same failure again)
-        o_ = E.objective(s_)
-        if o_ < BIG:
-            cands.append((o_, k_))
-    cands.sort()
-    n_ask = 0
-    for o_, k_ in cands[:PORTFOLIO]:
-        s_ = dict(k_)
-        p_ = E.score(s_, exact=True)[1]
-        r_ = solve_check(E, s_, front=p_.get('lane_front'), crowd=False)
-        n_ask += 1
-        if r_ and r_['plan']:
-            moved_ = sorted(l_ for l_ in named if s_.get(l_) != state.get(l_))
-            log(f'  whole ends: the portfolio: the search\'s state {n_ask} of {len(cands)} by the estimate ({o_:.2f}; '
-                f'{", ".join(moved_)} moved) -- the solve takes it ({time.time() - t0:.0f} s): {_fmt(p_)}')
-            return s_
-    log(f'  whole ends: the portfolio: none of {n_ask} of the search\'s {len(cands)} other states moving '
-        f'{sorted(named)} has a plan ({time.time() - t0:.0f} s) -- the repair')
-    return None
-
-
 def checked(E, state, parts, log=print):
     """the chosen state ASKED OF THE WHOLE SOLVE (solve_check) and, where it holds no plan under its strict rules,
     searched again, CHECK_TRIES times at most: first a crowded lane's alternatives alone (_sweep); then the crossings the
@@ -3379,10 +3288,6 @@ def checked(E, state, parts, log=print):
     say('as chosen', v)
     if not v['plan'] and v.get('status') == 'UNKNOWN':
         CHECK_UNDECIDED.add(bus_)
-    if not v['plan'] and PORTFOLIO:
-        s_p = _portfolio(E, state, v, t0, log)
-        if s_p is not None:
-            return s_p
     cur, quiet = state, (lambda *a: None)
     for k in range(CHECK_TRIES):
         # (no plan in the check's work, and no proof there is none -- UNKNOWN: the round's own solve, with its whole
@@ -3428,7 +3333,7 @@ def checked(E, state, parts, log=print):
             key = frozenset((a_, b_))
             E.x_learned[key] = 2.0 * E.x_learned[key] if key in E.x_learned else X_LEARN
         if v.get('rules'):
-            # (the rules the solve could not hold together, by lane (whole_solve rules=True; ENDS_CHECK_RULES=0 off):
+            # (the rules the solve could not hold together, by lane (whole_solve rules=True):
             # every crossing among the core's lanes priced as a learned crossing, a pair named for its HANDS -- a
             # crossover it has no place for -- priced for opposite hands, and a lane named for its END LAYERS -- a
             # fixed end whose layer cannot hold -- priced for each fixed end, so the search tries its via ends. A core
@@ -3502,24 +3407,21 @@ def engine_end(m, grid):
 
 
 def state_plan(E, state):
-    """(plan, tracks, names) of a state: the plan sidecar's keys as escape_plan.sidecar writes them for its
-    ends (each leg's tooth and berth exits, their layers, the escape directions, the pair frame, the ends model's cut),
-    the escape runs escape_plan.lay lays for them ({start, end, width, layer, net_id}), and the run's nets in its
-    order. An ESCAPE state's ends stand at its moves' exits, where its own lay puts them; any other state's, laid by
-    the fanout engine, where the engine ends them (engine_end) -- judged at the exits, every lane not yet laid was a
-    cell longer than the board it became, and a state the check had passed had no plan once laid"""
+    """(plan, tracks, names) of a state: the plan sidecar's keys for its ends (each leg's tooth and berth ends, their
+    layers, the escape directions, the pair frame, the ends model's cut), the escape runs laid for them ({start, end,
+    width, layer, net_id}), and the run's nets in its order. Its ends stand where the fanout engine that lays them ends
+    them (engine_end) -- judged at the moves' exits, every lane not yet laid was a cell longer than the board it
+    became, and a state the check had passed had no plan once laid"""
     st = E.st
     import rules as _rules_
     fan = _rules_.active().fan_track
     plan = {'ends': {}, 'tooth_layer': {}, 'dest_layer': {}, 'tooth_dir': {}, 'stub_dir': {}, 'chi': int(st['chi'])}
     tracks = []
-    esc = bool(st.get('escape'))
     for lane, lg in E.lanes:
         to_, bo_ = E.T[lane][state[lane][0]], E.B[lane][state[lane][1]]
         dg_ = (st.get('dgrid_of') or {}).get(E.dest_of.get(lane)) or st.get('dgrid')
         for leg, tm, bm in zip(lg, to_[0], bo_[0]):
-            ends_ = [(tuple(tm.exit_pt), None), (tuple(bm.exit_pt), None)] if esc else \
-                [engine_end(tm, st.get('sgrid')), engine_end(bm, dg_)]
+            ends_ = [engine_end(tm, st.get('sgrid')), engine_end(bm, dg_)]
             plan['ends'][leg] = [list(ends_[0][0]), list(ends_[1][0])]
             plan['tooth_layer'][leg], plan['dest_layer'][leg] = tm.layer, bm.layer
             plan['tooth_dir'][leg], plan['stub_dir'][leg] = list(FAR[tm.direction]), list(FAR[bm.direction])
@@ -3590,10 +3492,9 @@ def _solve_check(E, st, plan, tracks, names, front, crowd, exact):
     ctx = whole_ctx.candidate(st['pcb'], names, dest_, plan, tracks, cfg=E._check_cfg, board=st.get('base'))
     if ctx is None:
         return None
-    # (whether these are an ESCAPE's ends: the solve holds an escape's changes out of both arrays' face zones, and any
-    # other bus's to its end rooms alone -- as its round's solve will, by the fanout's sidecar)
-    ctx.escape = bool(st.get('escape'))
-    rules_ = (awx_settings.get('ENDS_CHECK_RULES') or '1') == '1'
+    # (these are no ESCAPE's ends: the solve holds their changes to their end rooms alone, not out of both arrays' face
+    # zones -- as its round's solve will, by the fanout's sidecar)
+    ctx.escape = False
     import whole_frame
     with contextlib.redirect_stdout(io.StringIO()):
         try:
@@ -3632,7 +3533,7 @@ def _solve_check(E, st, plan, tracks, names, front, crowd, exact):
                 out['lanes'] = sorted({r_[0] for r_ in (Jl or {}).get('rules') or []}
                                       | {l_ for k_ in out['core'] + jc_ for l_ in k_})
             return out
-        if rules_ and crowd and not out['plan'] and not out['core'] and out['status'] == 'INFEASIBLE':
+        if crowd and not out['plan'] and not out['core'] and out['status'] == 'INFEASIBLE':
             # (the RULES core only where the windows' names nothing: it costs a solve per rule to make minimal, and
             # a core of crossings the repair already prices -- zynq LVDS K47, 15 crossings: a plan at its first
             # search again in 180 s, by the rules in 460)
@@ -3745,8 +3646,7 @@ def _front(pcb, nid, m, kids):
 
 
 def plane_ways(st, lanes, T, B, cur, ends=(0, 1)):
-    """The arrays' PLANE balls kept a way down by the ends (the whole-array fanout's, FANOUT_JOINT, or a plain bus's,
-    read off the board; None on the escape fanout's field). Each plane ball of the two arrays (the spec's `drops`) has
+    """The arrays' PLANE balls kept a way down by the ends, read off the board. Each plane ball of the two arrays has
     its WAYS: its drops as the joint escape plans them (joint_escape._drops: a via behind a stub in a diagonal gap or
     straight off an edge, at the rung's via or a finer rung's, or a via in its pad), measured on the board without the
     run's copper, and its straps to a neighbouring ball of its net
@@ -3762,11 +3662,7 @@ def plane_ways(st, lanes, T, B, cur, ends=(0, 1)):
     `stub` or a strap's on `layer`), and `secs` (its own build time). `ends`: the arrays asked (0 the source, 1 the
     destination)"""
     t0 = time.time()
-    path = awx_settings.get('FANOUT_JOINT')
-    if not path and st.get('escape'):
-        return None             # (the escape fanout's field: every plane ball dog-boned before the ends choose)
     import copy
-    import json
     import types
     import escape_moves as em
     import joint_escape as je
@@ -3789,25 +3685,20 @@ def plane_ways(st, lanes, T, B, cur, ends=(0, 1)):
         return {s.net_id for s in pcb.segments if s.locked and (inb_(s.start_x, s.start_y) or inb_(s.end_x, s.end_y))} \
             | {v.net_id for v in pcb.vias if v.locked and inb_(v.x, v.y)}
     zone_ids = {z.net_id for z in (pcb.zones or []) if z.net_id}
-    if path:
-        with open(path, encoding='utf-8') as f:
-            spec = json.load(f)
-    else:
-        # a PLAIN bus: its arrays' plane balls, every net with a pour that has a ball there (route_bus names a whole-array
-        # spec's drops the same way), kept a way down by the ends as the whole-array fanout's are -- the realizes then
-        # reserve no via in every plane ball's pad (the board's `_fanout_plane_ways`, read by the under-pad engine).
-        # Reserved, at a 0.5 mm pitch with 0.25 mm vias each closed the gaps beside it on every layer: the human's 166
-        # plane balls there go down through 83 vias in the gaps, none in a pad, and the bus's menus held as the engine
-        # held them lost 1496 of 2345 tooth moves, three nets every one. ...And its arrays' OTHER balls, each net's
-        # with a pad elsewhere (route_bus.walls_made's): a via of its own takes such a ball off the bus's layers as one
-        # takes a plane ball down, and nothing else held them -- the bus's teeth walled four of its source's signal
-        # balls in, found only once laid, banned and the ends chosen again, round after round
-        # (a net an earlier step routed -- its copper LOCKED there -- has its way out laid already: no bus walls its ball
-        # in, and counted as one its ball read walled in every state the ends weighed, eight such on a shared array)
-        spec = {'arrays': [{'ref': r, 'others': [], 'drops': sorted(
-            {p.net_name for p in pcb.footprints[r].pads if p.net_id and p.net_name and p.pad_type != 'np_thru_hole'
-             and (p.net_id in zone_ids or (len(pcb.nets[p.net_id].pads) > 1 and p.net_id not in laid_))})}
-            for r in (st['sref'], st['dref']) if r in pcb.footprints for laid_ in [laid_at(r)]]}
+    # the bus's arrays' plane balls, every net with a pour that has a ball there, kept a way down by the ends -- the
+    # realizes then reserve no via in every plane ball's pad (the board's `_fanout_plane_ways`, read by the under-pad
+    # engine). Reserved, at a 0.5 mm pitch with 0.25 mm vias each closed the gaps beside it on every layer: the human's
+    # 166 plane balls there go down through 83 vias in the gaps, none in a pad, and the bus's menus held as the engine
+    # held them lost 1496 of 2345 tooth moves, three nets every one. ...And its arrays' OTHER balls, each net's with a
+    # pad elsewhere (route_bus.walls_made's): a via of its own takes such a ball off the bus's layers as one takes a
+    # plane ball down, and nothing else held them -- the bus's teeth walled four of its source's signal balls in, found
+    # only once laid, banned and the ends chosen again, round after round
+    # (a net an earlier step routed -- its copper LOCKED there -- has its way out laid already: no bus walls its ball
+    # in, and counted as one its ball read walled in every state the ends weighed, eight such on a shared array)
+    spec = {'arrays': [{'ref': r, 'drops': sorted(
+        {p.net_name for p in pcb.footprints[r].pads if p.net_id and p.net_name and p.pad_type != 'np_thru_hole'
+         and (p.net_id in zone_ids or (len(pcb.nets[p.net_id].pads) > 1 and p.net_id not in laid_))})}
+        for r in (st['sref'], st['dref']) if r in pcb.footprints for laid_ in [laid_at(r)]]}
     run = {l_ for _l, lg in lanes for l_ in lg}
     run_ids = {st['byname'][l_][0] for l_ in run}
     pcb0 = copy.copy(pcb)
@@ -3822,36 +3713,21 @@ def plane_ways(st, lanes, T, B, cur, ends=(0, 1)):
         if ar is None or foot is None:
             continue
         sn = namer(pcb)
-        oth_ = {sn(n) for n in ar.get('others', ())}
-        # (...and, a whole-array bus's, its array's OTHER signal balls a bus can wall in -- each net's with a pad
-        # elsewhere, no pour and no way out laid there, within a cage's view of the bus's own balls -- as a plain bus's
-        # are: the whole-array fanout escapes them round the teeth the ends choose, and where the teeth left one no way
-        # out it shipped walled in, the ends never having priced it (a memory bus's VCC_1V5 ball with 57 pads, no pour)
-        sig_ = set()
-        if path and oth_:
-            mine_ = [(q.global_x, q.global_y) for q in foot.pads if q.net_id and q.net_name and sn(q.net_name) in run]
-            la_ = laid_at(ref)
-            sig_ = {sn(p.net_name) for p in foot.pads if p.net_id and p.net_name and sn(p.net_name) in oth_
-                    and p.pad_type != 'np_thru_hole' and p.net_id not in zone_ids and p.net_id not in la_
-                    and len(pcb.nets[p.net_id].pads) > 1
-                    and any(abs(p.global_x - x_) <= CAGE_VIEW and abs(p.global_y - y_) <= CAGE_VIEW for x_, y_ in mine_)}
-        drop_s = ({sn(n) for n in ar.get('drops', ())} - oth_ - run) | (sig_ - run)
+        drop_s = {sn(n) for n in ar.get('drops', ())} - run
         items = {f'{sn(p.net_name)}#{p.pad_number}': (sn(p.net_name), p)
                  for p in foot.pads if p.net_id and p.net_name and sn(p.net_name) in drop_s}
         if not items:
             continue
         grid = em.grid_of(foot)
         sz = je._sizes(pcb0, foot)
-        # (the passives a cap step moves off a via -- the whole-array fanout's; a plain bus's realize lays round every
-        # pad as it stands, source_realize, and its walls are graded so)
-        skip = je.movable_refs(pcb0, ref, run) if path else ()
+        # (every pad as it stands: the bus's realize lays round them, source_realize, and its walls are graded so)
         cache = {}
 
-        def obs(nid, layer, via=False, _c=cache, _sz=sz, _skip=skip):
+        def obs(nid, layer, via=False, _c=cache, _sz=sz):
             k = (nid, layer, via)
             if k not in _c:
                 _c[k] = _bd.build_obstacles(pcb0, nid, {nid}, layer, margin=_sz['cl'] + _sz['tw'] / 2,
-                                            skip_refs=_skip if via else ())
+                                            skip_refs=())
             return _c[k]
         regions = je.zone_regions(pcb0)
         poured = {z.net_id for z in (pcb0.zones or []) if z.net_id}

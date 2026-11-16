@@ -120,7 +120,7 @@ def _seg_hits_box(a: Pt, b: Pt, box) -> bool:
 # SEL_XING (2026-09-10): a row-gap run and a column-gap run on one layer
 # that cross are a conflict (see _conflict). 1 = for pairs with a climbing
 # move, whose long legs cross the plain stubs' gaps (K28: 13 bans -> 0 with
-# it); 2 = every pair; 0 = off. The default is the JUDGE's: 2 under
+# it); 2 = every pair; 0 = off. This module's rule is the JUDGE's: 2 under
 # PLAN_JUDGE=ends (the whole route: every crossing of two escapes on one
 # layer is a stub the engine lays over another), 1 under the braid's judges
 # (where 2 reached the plain menu and changed the K28 chain for the worse:
@@ -129,7 +129,7 @@ def _seg_hits_box(a: Pt, b: Pt, box) -> bool:
 # greedy berths it starts from both read it -- ONE rule for the seed and
 # the judge. A caller meaning another rule passes `xing` (pages_first's own
 # planner: 2); nothing sets this module value at import.
-SEL_XING = int(awx_settings.get('SEL_XING', '2' if awx_settings.get('PLAN_JUDGE') == 'ends' else '1'))
+SEL_XING = 2 if awx_settings.get('PLAN_JUDGE') == 'ends' else 1
 
 
 def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
@@ -165,9 +165,6 @@ def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
 # The router's own via/length exchange rate: a via costs 75 units on
 # the 0.1 mm grid, i.e. one via == 7.5 mm of track. Every objective
 # that mixes vias with distance converts at this ONE rate.
-# RIDE_MM_PER_VIA overrides it for calibration studies ONLY -- the
-# open unit question is that plan_floor counts CROSSINGS (a dive is
-# ~2 vias), so the honest rate for the floor+ride sum may be 2x.
 VIA_MM = 7.5
 
 
@@ -680,21 +677,6 @@ def lanes_free(m: Move, sel: Dict[str, Move], me: str,
     quietly propose a move that two nets would have to share."""
     return not any(_conflict(m, om, strict=strict) for other, om in sel.items()
                    if other != me)
-
-
-def plan_floor(sel: Dict[str, Move], geo: 'Corridor') -> int:
-    """The via floor for the WHOLE plan, corridor boundaries ignored.
-
-    A per-corridor floor prices only the crossings inside a corridor,
-    which makes any change that pushes crossings across a corridor
-    boundary look free. It is not: the board is one surface, and the
-    corridor split is our decomposition for search, not an accounting
-    boundary. Measured at K32, moving from no crossing pricing to
-    cross_weight 6 cut total crossings 241 -> 112 while the per-corridor
-    via count ROSE 37 -> 45, purely because the crossings it removed
-    were the ones nobody was charging for."""
-    nets = list(sel)
-    return 2 * (len(nets) - len(geo.keep(nets, sel)))
 
 
 def _floor(bus: Sequence[str], sel: Dict[str, Move],

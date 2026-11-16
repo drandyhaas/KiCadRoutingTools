@@ -51,7 +51,7 @@ def cli(td):
     s = json.load(open(evidence(summ, 'summary'), encoding='utf-8'))
     ok('exit 0 with OUT written', os.path.isfile(out), r.stdout[-300:])
     ok("...the summary keeps the step's status: none found, exit 1",
-       s.get('exit') == 1 and s.get('buses') == [] and s.get('found') == [], str(s)[:300])
+       s.get('exit') == 1 and s.get('buses') == [] and (s.get('plan') or {}).get('buses') == [], str(s)[:300])
     ok('...and the console says OUT is the board as it came',
        'OUT is the board as it came' in r.stdout + r.stderr, (r.stdout + r.stderr)[-300:])
 
@@ -79,21 +79,22 @@ def unit(td):
 
     print('5. route_buses with a bus left as it came')
 
-    def step(board, out_, src, dest, *a, **kw):
+    import negotiated_buses as nb
+
+    def step(board, out_, buses, *a, **kw):
         shutil.copy(board, out_)
         shutil.copy(board[:-len('.kicad_pcb')] + '.kicad_pro', out_[:-len('.kicad_pcb')] + '.kicad_pro')
-        rb.HANDED_ON.add(os.path.abspath(out_))
-        return 1, f'BUS {src}->{dest}'
-    real = rb.route_bus
-    rb.route_bus = step
+        return 1, [f'BUS {s_}->{d_}' for s_, d_ in buses]
+    real = nb.route_grouped
+    nb.route_grouped = step
     try:
         b0 = os.path.join(td, 'b.kicad_pcb')
         open(b0, 'w').write('(kicad_pcb)\n')
         open(os.path.join(td, 'b.kicad_pro'), 'w').write('{}\n')
         o = os.path.join(td, 'o.kicad_pcb')
-        code, _g = rb.route_buses(b0, o, [('U1', 'U2', 'plain', None)], log=lambda *a: None)
+        code, _g = rb.route_buses(b0, o, [('U1', 'U2')], log=lambda *a: None)
     finally:
-        rb.route_bus = real
+        nb.route_grouped = real
     s = json.load(open(os.path.join(td, 'o.bus', 'summary.json'), encoding='utf-8'))
     ok('the step status is 1 (as it came), in the summary too', code == 1 and s['exit'] == 1, f'{code} {s}')
     ok('...OUT written, and the process exit 0', os.path.isfile(o) and rb.cli_exit(code, o) == 0,

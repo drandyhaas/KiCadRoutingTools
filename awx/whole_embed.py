@@ -49,8 +49,8 @@ OUT.json is written as whole_geo writes a geometry -- the polish, the audit and 
 Its findings for the solve: a via cut for each via that stands short of its room, or inside a bar of fixed copper;
 a layer cut for each breach (also under 'breach', with the copper's names); under 'tight' every place the slack had
 to be given up. Every length the stage chooses is a multiple of the board's own pitch, track width or grid step.
-The loop (whole_route.py) runs it after whole_geo.py when GEO_EMBED=1 is set -- its lanes the round's geometry, its
-findings the round's cuts -- and not otherwise; on its own it runs from a recorded round (replay_stage.py). The bench
+The loop (whole_route.py) runs it after whole_geo.py every round -- its lanes the round's geometry, its findings the
+round's cuts; on its own it runs from a recorded round (replay_stage.py). The bench
 from BENCH / NETS / DEST (whole_ctx).
 
   --draw=PNG / --draw0=PNG   the layout after the rounds / as it starts, exact geometry; --view=X0,Y0,X1,Y1 a window

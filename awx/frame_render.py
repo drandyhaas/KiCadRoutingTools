@@ -306,13 +306,6 @@ def main():
                                 outline=rc_, width=5)
                     d.text((max(p0_[0], p1_[0]) + 6, min(p0_[1], p1_[1]) + 22 * ri_),
                            f'{tag_} off {ln_} at {lab_[:14]}: ' + ' '.join(sorted(set(ls_))), fill=rc_, font=f20b)
-                for c_ in cj_.get('ccuts', []):
-                    ls_ = [n_ for n_ in c_.get('lanes', []) if n_ in SV.REF]
-                    if not ls_:
-                        continue
-                    q_ = M(wp.ref_at(SV.REF[ls_[0]], (float(c_['u_lo']) + float(c_['u_hi'])) / 2))
-                    d.text((q_[0], q_[1]), f'{tag_} room {swap(c_["layer"])}: at most {c_["cap"]} of '
-                           + ' '.join(n_.replace('RAM_', '') for n_ in ls_), fill=rc_, font=f20b)
         d.rectangle([0, 0, W, TOP - 8], fill=(252, 252, 248))
         d.text((12, 10), 'the frame (trunk grey, arrival black, rings dashed + starts, handoffs dots'
                + (', group purple' if G is not None else '') + ')' + (f'; plan {os.path.basename(plan)}' if plan else '')

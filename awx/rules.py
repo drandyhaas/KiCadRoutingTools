@@ -149,6 +149,12 @@ GRID = 0.025              # the routing grid the chain plans and routes on (brai
 FAN_TRACK = 0.1           # the production engine's fanout stub width
 LANE_PITCH = 0.35         # braid.LPITCH
 EXIT_PITCH = 0.38         # braid.MINP
+# the pair step's reaches and widenings in the rules' units -- LANE pitches (braid.LANE_MIN) and PAIR pitches (a
+# pair's track + gap, braid.PP): braid derives its constants from them at import, install() at install
+PAIR_FANIN_LANES = 10.0         # braid.PAIR_FANIN, lane pitches round either of a pair's ends
+PAIR_DIVE_EXTRA_PITCHES = 2.0   # braid.PAIR_DIVE_EXTRA, pair pitches each side of a pair's layer change
+PAIR_FANIN_BAND_PITCHES = 2.0   # braid.PAIR_FANIN_BAND, pair pitches
+PAIR_APPROACH_PITCHES = 4.5     # braid.PAIR_APPROACH, pair pitches
 
 _ROUND = 6                # decimals every derived quantity lands on
 
@@ -455,9 +461,8 @@ def install(rules, verbose=False):
     put('braid', 'MINP', rules.exit_pitch)
     put('braid', 'GRID', rules.grid)
 
-    # pairs: the pair gap (unless the invocation set its own, BRAID_PAIR_GAP)
-    if not float(awx_settings.get('BRAID_PAIR_GAP', '0') or 0):
-        put('pairs', 'GAP', rules.pair_gap)
+    # pairs: the pair gap
+    put('pairs', 'GAP', rules.pair_gap)
 
     # source_realize: the production engine's fanout geometry
     put('source_realize', 'FAN_TRACK', rules.fan_track)
@@ -467,15 +472,14 @@ def install(rules, verbose=False):
     # install leaves every module exactly as a fresh import under the same rules does (test_622_rules_supplied): a
     # module imported before the install -- a GUI's process, an earlier stage in the driver's -- is not re-imported
     put('braid', 'WRAP_REACH', 10 * rules.lane_min)
-    put('braid', 'PAIR_FANIN', float(awx_settings.get('BRAID_PAIR_FANIN', '10') or 0) * rules.lane_min)
+    put('braid', 'PAIR_FANIN', PAIR_FANIN_LANES * rules.lane_min)
     for m in _modules('pairs'):
-        if not float(awx_settings.get('BRAID_PAIR_SEP', '0') or 0):
-            put('pairs', 'MAX_SEP', 2.0 * rules.lane_pitch)
+        put('pairs', 'MAX_SEP', 2.0 * rules.lane_pitch)
         pp = rules.track + m.GAP                                  # pairs.pitch(TRACK), after GAP above
         put('braid', 'PP', pp)
-        put('braid', 'PAIR_DIVE_EXTRA', float(awx_settings.get('BRAID_PAIR_DIVE_EXTRA', '2') or 0) * pp)
-        put('braid', 'PAIR_FANIN_BAND', float(awx_settings.get('BRAID_PAIR_FANIN_BAND', '2') or 0) * pp)
-        put('braid', 'PAIR_APPROACH', float(awx_settings.get('BRAID_PAIR_APPROACH', '4.5') or 0) * pp)
+        put('braid', 'PAIR_DIVE_EXTRA', PAIR_DIVE_EXTRA_PITCHES * pp)
+        put('braid', 'PAIR_FANIN_BAND', PAIR_FANIN_BAND_PITCHES * pp)
+        put('braid', 'PAIR_APPROACH', PAIR_APPROACH_PITCHES * pp)
     stack = rules.track + rules.clearance + HUG_OVER
     put('select_moves', '_STACK_PITCH', stack)
     put('select_moves', '_VIA_REACH', fan_via_reach(rules))

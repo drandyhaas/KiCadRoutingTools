@@ -6,7 +6,7 @@ about one board, not a routing concept. But the split itself is real:
 turning it off makes the entry assignment fail outright. So the groups
 need to be FOUND, not declared.
 
-Detection: pre-route every net as a TAUT string (topo_strings.relax --
+Detection: pre-route every net as a TAUT string (taut_fast.relax_many --
 the shortest obstacle-aware path it can be pulled to, ignoring the other
 bus nets), then cluster the nets by how much of their length actually
 runs TOGETHER. Two nets share a bus when a long stretch of one path
@@ -69,7 +69,7 @@ _TAUT_MEMO_LEGACY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # in the memo" depend on when you last ran. A shard is now capped by ENTRY
 # COUNT, oldest-inserted first, which is deterministic given the same
 # sequence of runs.
-TAUT_MAX_ENTRIES = int(awx_settings.get('TAUT_MAX_ENTRIES', '20000'))
+TAUT_MAX_ENTRIES = 20000
 _TAUT_SHARDS: Dict[str, dict] = {}
 _TAUT_DIRTY = set()
 _TAUT_MIGRATED = False
@@ -291,81 +291,37 @@ def taut_paths(nets: Sequence[str],
                log=None) -> Dict[str, List[Pt]]:
     """One taut string per net, tooth -> ball, avoiding static copper."""
     import taut_clean as tc
+    import taut_fast as tf
     out = {}
     dirty = False
-    # The batched, convergent relaxation (taut_fast) is the default since
-    # 2026-09-08: every string missing from the memo relaxed together in
-    # one array, contact as a constraint (no wedged oscillation), a string
-    # that touches nothing leaves after one block. Its strings are not the
-    # old relaxation's, so its memo entries carry their own tag and never
-    # mix with the old algorithm's inside a run. TAUT_FAST=0 keeps the old
-    # per-string relaxation reachable for comparison.
-    fast = awx_settings.get('TAUT_FAST', '1') != '0'
+    # The batched, convergent relaxation (taut_fast): every string missing
+    # from the memo relaxed together in one array, contact as a constraint
+    # (no wedged oscillation), a string that touches nothing leaves after
+    # one block. Its memo entries carry their own tag.
     # (#fast2: a string no taut path -- diverged, or past three chords -- is its chord, taut_fast; the memo's strings
     # from before it were the folded ones)
-    tag = '#fast2' if fast else ''
-    if fast:
-        import taut_fast as tf
-        todo = []
-        for nm in nets:
-            obs = obs_for(nm)
-            key = (f'{ends[nm][0][0]:.4f},{ends[nm][0][1]:.4f}>'
-                   f'{ends[nm][1][0]:.4f},{ends[nm][1][1]:.4f}@{obs.signature()}{tag}')
-            hit = _memo_get(key)
-            if hit is not None:
-                out[nm] = hit
-            else:
-                todo.append((nm, key, obs))
-        if todo:
-            res = tf.relax_many([(ends[nm][0], ends[nm][1], obs) for (nm, _k, obs) in todo])
-            for (nm, key, obs), (pts, it) in zip(todo, res):
-                pts, it, status, n_re = tc.assess(pts, it, obs)
-                _memo_put(key, pts)
-                dirty = True
-                out[nm] = pts
-                if status == 'violating':
-                    print(f'TAUT VIOLATING: {nm} -- {tc.relax_clean.last} (assert-only)', flush=True)
-                elif status == 'tolerated':
-                    print(f'TAUT tolerated: {nm} -- {tc.relax_clean.last}', flush=True)
-        if dirty:
-            _memo_save()
-        return out
+    tag = '#fast2'
+    todo = []
     for nm in nets:
-        # CLEANLINESS, not convergence (user, 0902): relax can settle
-        # in a stable cycle THROUGH a thin foreign capsule and report
-        # success; relax_clean asserts point_violation None along the
-        # whole string and reseeds around the offender (wrong SECTOR,
-        # never a realisation problem). An INVALID string is a loud
-        # line, never a silent spine input.
-        # MEMO (run-wide): a taut path is a pure function of its two ends
-        # and the static copper it relaxes against (the run's own nets'
-        # copper is excluded from that model), and the plan loop asks for
-        # the same paths again at every judgment -- 14 times at K15, 82 %
-        # of the fanout stage. Same inputs, same answer, no recomputation.
         obs = obs_for(nm)
         key = (f'{ends[nm][0][0]:.4f},{ends[nm][0][1]:.4f}>'
-               f'{ends[nm][1][0]:.4f},{ends[nm][1][1]:.4f}@{obs.signature()}')
+               f'{ends[nm][1][0]:.4f},{ends[nm][1][1]:.4f}@{obs.signature()}{tag}')
         hit = _memo_get(key)
         if hit is not None:
             out[nm] = hit
-            continue
-        pts, iters, status, n_re = tc.relax_clean(
-            ends[nm][0], ends[nm][1], obs)
-        _memo_put(key, pts)
-        dirty = True
-        out[nm] = pts
-        if status == 'reseeded':
-            print(f'TAUT RESEEDED: {nm} ({n_re} reseed(s))', flush=True)
-        elif status == 'violating':
-            print(f'TAUT VIOLATING: {nm} -- {tc.relax_clean.last} '
-                  '(assert-only)', flush=True)
-        elif status == 'tolerated':
-            print(f'TAUT tolerated: {nm} -- {tc.relax_clean.last}',
-                  flush=True)
-        elif status == 'INVALID':
-            print(f'TAUT INVALID: {nm} -- no clean homotopy sector found '
-                  f'after {n_re} reseed(s); spine input violates copper: '
-                  f'{tc.relax_clean.last}', flush=True)
+        else:
+            todo.append((nm, key, obs))
+    if todo:
+        res = tf.relax_many([(ends[nm][0], ends[nm][1], obs) for (nm, _k, obs) in todo])
+        for (nm, key, obs), (pts, it) in zip(todo, res):
+            pts, it, status, n_re = tc.assess(pts, it, obs)
+            _memo_put(key, pts)
+            dirty = True
+            out[nm] = pts
+            if status == 'violating':
+                print(f'TAUT VIOLATING: {nm} -- {tc.relax_clean.last} (assert-only)', flush=True)
+            elif status == 'tolerated':
+                print(f'TAUT tolerated: {nm} -- {tc.relax_clean.last}', flush=True)
     if dirty:
         _memo_save()
     return out

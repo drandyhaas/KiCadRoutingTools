@@ -1,44 +1,32 @@
-"""negotiated_buses.py -- several buses off ONE shared array routed NEGOTIATED: every bus at the same time, each in
-its own frame, on one shared field, their solves coupled (route_bus's buses off one array, by default: route_buses;
---sequential routes them one after another instead).
+"""negotiated_buses.py -- the buses off ONE source array routed as one GROUP (route_bus.route_buses: each source's
+buses, found by route_bus.bus_plan or named by --bus; a bus alone on its array is a group of one).
 
-    python3 route_bus.py BOARD.kicad_pcb OUT.kicad_pcb --bus SRC:DEST1[:MODE[:LAYERS]] --bus SRC:DEST2 ..
+    python3 route_bus.py BOARD.kicad_pcb OUT.kicad_pcb [--bus SRC:DEST1 --bus SRC:DEST2 ..]
 
-Buses that leave one array in different directions -- a star round it -- routed sequentially meet near it: a later
-bus's lanes cross an earlier one's routed lanes where the earlier left them no room, and the bus routed first is never
-moved for the one after. Negotiated, every bus is routed by its own whole route, in its own frame, all at the same
-time, and every step of each is taken with the others in sight:
-
-1. SOLO ENDS: each bus's ends chosen by itself on BOARD (route_bus under ENDS_ONLY, a process each, all at the same
-   time): its fanout and its first plan, and there it stops -- no cut, no polish, no snap, nothing laid. Where its
-   escapes leave the shared array with nothing else there, on the layers that plan put them on, are its SOLO TEETH
-   (solo_teeth). Routed whole for them, every bus was routed twice, and the route past the first plan moved 2 teeth
-   of 979 and put 57 on another layer.
-2. THE SHARED FIELD (lay_field): the shared array planned ONCE for every bus off it -- joint_escape.plan_array, each
-   bus net escaping toward its own destination (escape_to), the array's other nets and plane balls with them -- each
-   bus ball preferring its solo tooth, the bus runs stacked as the other balls' are (stack_bus), and each escape priced
-   for every other bus's lane its sweep to its destination crosses (sweep, against the solo teeth). Laid on BOARD in
-   one call of the under-pad engine, the passives beneath the array nudged off it, and each plain bus's nets RESERVED
-   in the shared field's project (protected, 'reserved'), so a whole-array bus's fanout plans round them.
-3. NEGOTIATED: every bus routed on the shared field at the same time, a process each, each plain bus keeping its
-   escapes there (SOURCE_SHARED), a whole-array bus laying its own again each round round theirs, as in its solo run.
-   Their rounds' first plans and every loop's re-solve are one COUPLED SOLVE, the buses in step
-   (whole_route.joint_sync and joint_loop_sync, whole_joint.py: where two buses' laid-out lanes cross or come within a
-   lane's pitch, their layers differ there or the coupling is paid for), the couplings each coupled solve settles are
-   held from there, and every stage plans round the other buses' lanes as they publish them (joint_lanes). A bus whose
-   process ends is said ended right away, so no other waits for it.
+route_grouped:
+1. CAPTURE: each bus's ends model captured by itself on BOARD (route_bus --src/--dest under ENDS_ONLY and
+   ENDS_CAPTURE, a process each, all at the same time, each stopped as soon as its capture is written).
+2. THE GROUP'S ENDS (group_ends.py): every bus's teeth and berths chosen in ONE model, with the arrays' fanout -- every
+   ball of the shared source and of each destination that is a ball array served -- and laid on BOARD: the SHARED
+   FIELD.
+3. ON THE FIELD (route_on_field): every bus routed on the shared field at the same time, a process each (GROUP_ENDS:
+   its ends the field's), its own whole route in its own frame. With more buses than one their rounds' first plans
+   and every loop's re-solve are one COUPLED SOLVE, the buses in step (JOINT_DIR: whole_route.joint_sync and
+   joint_loop_sync, whole_joint.py: where two buses' laid-out lanes cross or come within a lane's pitch, their layers
+   differ there or the coupling is paid for), and every stage plans round the other buses' lanes as they publish them
+   (joint_lanes). A bus whose process ends is said ended right away, so no other waits for it.
 4. MERGED (merge): OUT is the first bus's board with every other bus's nets' copper from that bus's own board -- those
-   it routed and those it put back as they came --, every routed net protected and the reservations lifted -- a
-   reserved net its bus did not hand on is the chain's to route. Each DRC violation between two buses' nets, or between a bus's net and another, is named (conflicts.json).
+   it routed and those it put back as they came --, every routed net protected. Each DRC violation between two buses'
+   nets, or between a bus's net and another, is named (conflicts.json); another net's copper in one is given back to
+   the chain (give_back).
+The group's ROUNDS: a round that leaves the board short of clean sends what its buses' steps found at their ends to the
+model (group_ends --from --feedback), which answers from the state it had, and the buses are routed again on that field;
+the best round's board is OUT.
 
-The buses share their source, each goes to parts of its own (DEST 'A+B': one bus to several parts, its nets each
-escaping toward its own part -- a group bus, planned as one whole route in one frame), and they share their routing
-layers, which the shared field is planned on. The first may be whole-array (its fanout plans the arrays' other balls,
-one part), the rest are plain or escape (an escape bus's solo run is its own escape fanout; on the shared field it is
-plain, keeping the escapes the field gave it): the merge takes from each other bus only its own nets. Every bus is its
-own routing step, in its own process with its own pool of threads, so N buses are N runs at the same time. Everything is
-written in OUT's work directory, <OUT stem>.bus/: solo/DEST/, shared_field.kicad_pcb, negotiation/ (the buses' meeting
-place, JOINT_DIR), neg/DEST/, conflicts.json and summary.json.
+Every bus is its own routing step, in its own process with its own pool of threads, so N buses are N runs at the same
+time. Everything is written in OUT's work directory, <OUT stem>.bus/: caps/, capture/DEST/, group/ (the model's
+output, the shared field), solo/DEST/ or neg/DEST/, negotiation/ (the buses' meeting place), conflicts.json and
+summary.json.
 
 Exits as route_buses does: 0 when every bus is handed on routed and the merge has no cross-bus conflict, 1 otherwise,
 2 on a usage error.
@@ -47,7 +35,6 @@ import collections
 import contextlib
 import io
 import json
-import math
 import os
 import re
 import shutil
@@ -66,30 +53,14 @@ POLL = 5.0          # (s) between looks at the buses' processes
 RESERVED = 'reserved'   # (the protection a bus's nets carry on the shared field until the merge)
 
 
-def check(buses):
-    """None when `buses` [(src, dest, mode, layers)], their modes resolved, can be routed negotiated, else why not"""
-    if len(buses) < 2:
-        return 'two buses or more'
-    srcs = sorted({b[0] for b in buses})
-    if len(srcs) > 1:
-        return f'the buses share one source, not {", ".join(srcs)}'
-    parts = [p_ for b in buses for p_ in b[1].split('+')]
-    if len(set(parts)) < len(parts):
-        return 'each bus goes to parts of its own'
-    if buses[0][2] not in ('whole-array', 'plain') or any(b[2] not in ('plain', 'escape') for b in buses[1:]) or \
-            (buses[0][2] == 'whole-array' and '+' in buses[0][1]):
-        return 'the first bus is whole-array or plain and the rest plain or escape: the merge takes from each other ' \
-               'bus only its own nets'
-    if len({b[3] for b in buses}) > 1:
-        return 'the buses share their routing layers: the shared field is planned on one set'
-    return None
-
-
 def _bus_argv(board, out, bus, k, rounds, inproc, feedback_rounds, sizes):
     """route_bus.py's command line for `bus` by itself, BOARD to OUT, at the run's sizes"""
-    src, dest, mode, layers = bus
+    src, dest = bus
+    # (the bus BY ITSELF: route_bus.route_bus, its summary where _bus_out reads it; its layers the environment's
+    # ROUTE_LAYERS, which route_buses gives every bus's process)
     argv = [sys.executable, '-u', '-X', 'utf8', os.path.join(HERE, 'route_bus.py'), board, out,
-            '--bus', ':'.join([src, dest, mode] + ([layers] if layers else [])), '--rounds', str(rounds)]
+            '--src', src, '--dest', dest, '--rounds', str(rounds),
+            '--json-out', os.path.join(out[:-len('.kicad_pcb')] + '.bus', f'{src}-{dest}.summary.json')]
     if k:
         argv += ['--k', str(k)]
     if inproc:
@@ -146,241 +117,6 @@ def _run_all(jobs, log, ended=None):
                 except subprocess.TimeoutExpired:
                     p.kill()
             f.close()
-
-
-def solo_teeth(board, ref, nets, grid):
-    """{net: {'tooth', 'direction', 'layer', 'kind'}}: where each of `nets` (short names) leaves `ref` on `board`, a
-    bus's solo run -- the point its copper, from the ball out, crosses the exit line (`grid`'s box grown escape_plan.
-    PAST pitches; the crossing nearest its ball), the face it crosses, the layer, and its site's kind: a surface run,
-    a via in the pad, or a dog-bone (its via within a pitch and a half of the ball, inside the array's box). An escape
-    that stops at the face, short of that line -- a run of the ends only, nothing laid past them -- has its tooth
-    where its end, the copper farthest from the ball, goes straight on out of that face to the line"""
-    import escape_plan as ep
-    from coherent_nets import namer
-    from kicad_parser import parse_kicad_pcb
-    x0, y0, x1, y1 = grid.bbox
-    ex = (x0 - ep.PAST * grid.pitch_x, y0 - ep.PAST * grid.pitch_y, x1 + ep.PAST * grid.pitch_x,
-          y1 + ep.PAST * grid.pitch_y)
-    ins = lambda p: ex[0] < p[0] < ex[2] and ex[1] < p[1] < ex[3]   # noqa: E731
-    with contextlib.redirect_stdout(io.StringIO()):
-        b = parse_kicad_pcb(board)
-    sb = namer(b)
-    bf = b.footprints[ref]
-    out = {}
-    for nm in nets:
-        ids = {i for i, n in b.nets.items() if n.name and sb(n.name) == nm}
-        if not ids:
-            continue
-        nid = next(iter(ids))
-        ball = next((p for p in bf.pads if p.net_id == nid), None)
-        if ball is None:
-            continue
-        best = None
-        for s in b.segments:
-            if s.net_id != nid:
-                continue
-            a, c = (s.start_x, s.start_y), (s.end_x, s.end_y)
-            if ins(a) == ins(c):
-                continue
-            pin, pout = (a, c) if ins(a) else (c, a)
-            for d, (k, val) in (('left', (0, ex[0])), ('right', (0, ex[2])), ('up', (1, ex[1])), ('down', (1, ex[3]))):
-                if (pout[k] - val) * (pin[k] - val) > 0 or abs(pout[k] - pin[k]) < 1e-9:
-                    continue
-                t = (val - pin[k]) / (pout[k] - pin[k])
-                xpt = (pin[0] + t * (pout[0] - pin[0]), pin[1] + t * (pout[1] - pin[1]))
-                o = 1 - k
-                if not (ex[o] - 1e-6 <= xpt[o] <= ex[o + 2] + 1e-6):
-                    continue
-                dist = math.hypot(pin[0] - ball.global_x, pin[1] - ball.global_y)
-                if best is None or dist < best[0]:
-                    best = (dist, xpt, d, s.layer)
-        if best is None:
-            # (the end that stands FARTHEST OUT of the array's own box -- half a pitch round its outer balls -- by
-            # whichever face: the copper farthest from the ball is a dog-bone's via where the stub comes back past the
-            # ball to the face, and read there an outer ball's escape had no tooth)
-            far = None
-            for s in b.segments:
-                if s.net_id != nid:
-                    continue
-                for q_ in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
-                    if not ins(q_):
-                        continue
-                    over = {'left': (x0 - grid.pitch_x / 2) - q_[0], 'right': q_[0] - (x1 + grid.pitch_x / 2),
-                            'up': (y0 - grid.pitch_y / 2) - q_[1], 'down': q_[1] - (y1 + grid.pitch_y / 2)}
-                    d = max(over, key=over.get)
-                    if far is None or over[d] > far[0]:
-                        far = (over[d], q_, d, s.layer)
-            if far is None or far[0] < -1e-6:
-                continue                # (no copper, or it ends inside the array: no tooth)
-            q_, d = far[1], far[2]
-            xpt = {'left': (ex[0], q_[1]), 'right': (ex[2], q_[1]), 'up': (q_[0], ex[1]), 'down': (q_[0], ex[3])}[d]
-            best = (math.hypot(q_[0] - ball.global_x, q_[1] - ball.global_y), xpt, d, far[3])
-        site = None
-        for v in b.vias:
-            if v.net_id == nid and x0 - grid.pitch_x / 2 - 1e-6 <= v.x <= x1 + grid.pitch_x / 2 + 1e-6 and \
-                    y0 - grid.pitch_y / 2 - 1e-6 <= v.y <= y1 + grid.pitch_y / 2 + 1e-6 and \
-                    math.hypot(v.x - ball.global_x, v.y - ball.global_y) < 1.5 * grid.pitch_x:
-                site = (v.x, v.y)
-        kind = 'surface' if site is None else \
-            ('via_in_pad' if math.hypot(site[0] - ball.global_x, site[1] - ball.global_y) < 0.05 else 'dogbone')
-        out[nm] = {'tooth': best[1], 'direction': best[2], 'layer': best[3], 'kind': kind}
-    return out
-
-
-def field_teeth(board, ref, nets):
-    """{net: (x, y)}: where each of `nets` (short names) leaves `ref`'s array on a shared field `board` -- its escape's
-    copper (a stub's end, a dog-bone's via) farthest from its ball within the array's box grown escape_plan.PAST
-    pitches: the shared field's escapes stop at the face, short of the exit line solo_teeth reads"""
-    import escape_moves as em
-    import escape_plan as ep
-    from coherent_nets import namer
-    from kicad_parser import parse_kicad_pcb
-    with contextlib.redirect_stdout(io.StringIO()):
-        b = parse_kicad_pcb(board)
-    sn = namer(b)
-    grid = em.grid_of(b.footprints[ref])
-    x0, y0, x1, y1 = grid.bbox
-    ex = (x0 - ep.PAST * grid.pitch_x, y0 - ep.PAST * grid.pitch_y, x1 + ep.PAST * grid.pitch_x,
-          y1 + ep.PAST * grid.pitch_y)
-    ins = lambda q: ex[0] <= q[0] <= ex[2] and ex[1] <= q[1] <= ex[3]   # noqa: E731
-    want = set(nets)
-    out = {}
-    for p in b.footprints[ref].pads:
-        nm = sn(p.net_name or '')
-        if nm not in want or nm in out:
-            continue
-        pts = [q for s in b.segments if s.net_id == p.net_id for q in ((s.start_x, s.start_y), (s.end_x, s.end_y))]
-        pts += [(v.x, v.y) for v in b.vias if v.net_id == p.net_id]
-        pts = [q for q in pts if ins(q)]
-        if pts:
-            out[nm] = max(pts, key=lambda q: math.hypot(q[0] - p.global_x, q[1] - p.global_y))
-    return out
-
-
-def lay_field(board, out, ref, buses, reserve, clearance, work, log=print, avoid=None):
-    """The shared array `ref` on `board` planned once for every bus off it and laid to `out`, the passives beneath it
-    nudged off it and the nets of the buses `reserve` names reserved in `out`'s project. `buses` [(dest, nets, teeth)]:
-    each bus's routed nets (short names) and their solo teeth (solo_teeth). `avoid` {net: [(x, y), ..]}: teeth the
-    buses' rounds found crowded -- such a net prefers no tooth, and an exit near one is paid (joint_escape.C_AVOID).
-    Under the run's rules and step policy (route_bus.step_policy). Returns the plan's report"""
-    import joint_escape as je
-    import route_bus as rb
-    import whole_route as wr
-    from coherent_nets import namer
-    from kicad_parser import parse_kicad_pcb
-    from protected_nets import persist_protected_nets, pro_path_for_board
-    with contextlib.redirect_stdout(io.StringIO()):
-        pcb = parse_kicad_pcb(board)
-    sn = namer(pcb)
-    foot = pcb.footprints[ref]
-    bus_all = sorted({n for _d, ns, _t in buses for n in ns})
-    # (each bus net escaping toward ITS part: a bus to several parts, DEST 'A+B' -- one whole route, a trunk to the
-    # first and a branch to each other -- has its nets going to each)
-    import flow_frame as ff
-    part_of = {}
-    for d, ns, _t in buses:
-        for P_ in ff.dest_refs(d):
-            for q in pcb.footprints[P_].pads:
-                if q.net_name and sn(q.net_name) in ns:
-                    part_of.setdefault(sn(q.net_name), P_)
-    escape_to = {n: part_of.get(n, ff.dest_refs(d)[0]) for d, ns, _t in buses for n in ns}
-    far = {n: je.far_face(pcb, ref, escape_to[n]) for n in escape_to}
-    prefer = {n: g for _d, _ns, t in buses for n, g in t.items() if n not in (avoid or {})}
-    zone = {z.net_id for z in (pcb.zones or []) if z.net_id}
-    others = sorted(n for n in rb.array_others(pcb, ref, []) if sn(n) not in set(bus_all))
-    drops = sorted({p.net_name for p in foot.pads if p.net_id in zone})
-    full = {sn(n.name): n.name for n in pcb.nets.values() if n.name}
-    bus_full = [full[n] for n in bus_all if n in full]
-    layers = list(pcb.board_info.copper_layers)
-    t0 = time.time()
-    lines = []
-    hints, rep = je.plan_array(pcb, ref, bus_full, others, layers, far=far, prefer=prefer, drops=drops,
-                               log=lines.append, escape_to=escape_to, exit_rays=True, stack_bus=True, sweep=True,
-                               avoid=avoid)
-    log(f'  the shared field of {ref}: planned for {len(buses)} buses in {time.time() - t0:.0f} s, {rep.get("status")} '
-        f'-- bus {rep.get("bus_escaped")}/{rep.get("bus_balls")} escaped, others {rep.get("others_escaped")} escaped + '
-        f'{rep.get("others_strapped")} strapped of {rep.get("others_balls")}, plane {rep.get("dropped")} dropped + '
-        f'{rep.get("plane_strapped")} strapped of {rep.get("plane_balls")}')
-    for ln in lines:
-        if any(w in ln for w in ('INFEASIBLE', 'let go', 'unplanned', 'uncoloured', 'held')):
-            log('  ' + ln.strip()[:220])
-    with open(os.path.join(work, 'shared_field.lay.log'), 'w', encoding='utf-8') as lf, \
-            contextlib.redirect_stdout(lf), contextlib.redirect_stderr(lf):
-        nt, nv, failed = je.lay(board, out, ref, bus_full, others, layers, hints)
-    log(f'  the shared field laid: {nt} tracks, {nv} vias' + (f', the engine left {failed}' if failed else ''))
-    # (the passives beneath the array nudged off the shared field, as an escape bus's step nudges them off its own;
-    # those beneath another array are another step's -- joint_escape.passives_beyond, locked)
-    lock_ = je.passives_beyond(out, [ref], bus_full)
-    caps = os.path.join(work, 'shared_field.caps.log')
-    rc = wr.run([os.path.join('..', 'py_router', 'place_fanout_clearance.py'), out, out, '--clearance', str(clearance),
-                 '--beneath-only'] + (['--lock'] + lock_ if lock_ else []), awx_settings.environ(), log_path=caps,
-                own_process=True)[0]
-    for ln in wr.grep(caps, r'^(Moved|Stuck|  Unresolved)'):
-        log('  caps: ' + ln.strip()[:200])
-    if rc != 0:
-        log(f'  caps: the nudge exited {rc} -- the passives stay where they were')
-    # (a ROW PART destination's passives moved off its pads' escapes on the shared field, once, as each bus's own step
-    # moves them: every bus then starts from the same shared field -- route_bus.clear_row_escapes)
-    import make_bench as mb
-    for d in [P_ for d_, _ns, _t in buses for P_ in ff.dest_refs(d_)]:
-        names_ = set(mb.pair_nets(pcb, ref, d))
-        names_ |= set(rb.pulled_nets(pcb, ref, d, sorted(names_)))
-        keep_ = {q.component_ref for n in pcb.nets.values() if n.name in names_ for q in n.pads} - {ref, d}
-        rb.clear_row_escapes(out, d, sorted(names_), sorted(keep_), work, log=log)
-    res = {full[n]: RESERVED for d, ns, _t in buses if d in reserve for n in ns if n in full}
-    with contextlib.redirect_stdout(io.StringIO()):
-        persist_protected_nets(pro_path_for_board(out), res)
-    if res:
-        log(f'  reserved on the shared field: {len(res)} nets of {", ".join(reserve)}')
-    return rep
-
-
-def plan_field(board, field, buses, solo, work, log=print, avoid=None, **sizes):
-    """The shared field of the buses' source on `board`, laid to `field` (lay_field), from each bus's solo run `solo`
-    [(board, summary) or None, as `buses`]: its routed nets and their solo teeth -- and `avoid`, the teeth the buses'
-    rounds found crowded (lay_field). Under the run's rules (the chain's `sizes`, route_bus.resolve_rules) and step
-    policy, the buses' routing layers. Returns the plan's report"""
-    import route_bus as rb
-    import rules as _rules
-    src, layers = buses[0][0], buses[0][3]
-    run_rules = rb.resolve_rules(board, log=lambda *a: None, **sizes)
-    prev = _rules.active()
-    _rules.install(run_rules)
-    try:
-        with rb.step_policy(run_rules, {'ROUTE_LAYERS': layers} if layers else None):
-            # (the shared field's modules imported under the step's policy: a module reads it when first imported)
-            import escape_moves as em
-            from kicad_parser import parse_kicad_pcb
-            with contextlib.redirect_stdout(io.StringIO()):
-                pcb_ = parse_kicad_pcb(board)
-            grid = em.grid_of(pcb_.footprints[src])
-            import flow_frame as ff
-            import make_bench as mb
-            from coherent_nets import namer
-            sn_ = namer(pcb_)
-            got_ = []
-            for b, got in zip(buses, solo):
-                routed = sorted(json.load(open(got[1])).get('routed') or []) if got else []
-                teeth = solo_teeth(got[0], src, routed, grid) if routed else {}
-                # (every net of the bus the shared field's, toward its parts -- those its run routed with their teeth
-                # to prefer, the rest with none: planned as the array's others, a net its run left open left by any
-                # face, never reserved for its bus. Its nets as its step takes them: the pairs and the nets pulled
-                # through a part between -- a memory bus's 48, 22 of them pairs)
-                nets = set(routed)
-                for P_ in ff.dest_refs(b[1]):
-                    pn_ = mb.pair_nets(pcb_, src, P_)
-                    nets |= {sn_(n) for n in list(pn_) + list(rb.pulled_nets(pcb_, src, P_, sorted(pn_)))}
-                nets = sorted(nets)
-                log(f'  {b[1]}: {len(nets)} net(s), {len(teeth)} with a tooth from its run'
-                    + (f' ({len(routed)} with ends there)' if got else ' -- no run: no tooth to prefer'))
-                got_.append((b[1], nets, teeth))
-            if avoid:
-                log(f'  the shared field again, {sum(len(v_) for v_ in avoid.values())} crowded teeth of {len(avoid)} '
-                    f'net(s) to avoid: {", ".join(sorted(avoid))}')
-            return lay_field(board, field, src, got_, [b[1] for b in buses if b[2] != 'whole-array'],
-                             run_rules.clearance, work, log=log, avoid=avoid)
-    finally:
-        _rules.install(prev)
 
 
 def _set_protected(pro, mapping):
@@ -649,7 +385,7 @@ def _capture_all(jobs, files, log):
 
 def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None, feedback_rounds=0,
                   t0=None, **sizes):
-    """The buses off one array routed from THE GROUP'S ENDS (GROUP_FLOW=1; awx/group_ends.py): each bus's ends model
+    """The buses off one array routed from THE GROUP'S ENDS (awx/group_ends.py): each bus's ends model
     captured by itself on `board` (work/caps, _capture_all), every bus's ends chosen in ONE model and the arrays
     fanned out once as chosen (work/group, its log work/group.log), then every bus routed negotiated on that field
     with no fanout and no end of its own (route_on_field, GROUP_ENDS), each a plain bus there, one round of its own.
@@ -667,7 +403,7 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
     t0 = time.time() if t0 is None else t0
     name_of = lambda d_: ''.join(c if c.isalnum() or c in '_.-' else '_' for c in d_)     # noqa: E731  (whole_ends.choose's)
     log(f'route_bus: {len(buses)} bus{"" if len(buses) == 1 else "es"} off {buses[0][0]} from the group\'s ends -- '
-        + ', '.join(f'{b[1]} ({b[2]})' for b in buses))
+        + ', '.join(b[1] for b in buses))
     got = _capture_all([_bus_job(work, 'capture', b, board, {**_env0(), 'ENDS_ONLY': '1', 'ENDS_CAPTURE': caps},
                                  k, 1, inproc, feedback_rounds, sizes) for b in buses],
                        {b[1]: os.path.join(caps, name_of(b[1]) + '.ends.pkl') for b in buses}, log)
@@ -675,7 +411,6 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
         log('route_bus: the group\'s ends: no capture of ' + ', '.join(sorted(n_ for n_, ok_ in got.items() if not ok_))
             + ' -- nothing routed')
         return 1, []
-    plain = [(b[0], b[1], 'plain', b[3]) for b in buses]
     R = max(1, int(rounds or 1))
     best, done, prev = None, [], None            # prev: (the round before's group, its buses' work)
     for r in range(1, R + 1):
@@ -700,7 +435,7 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
         # (one round alone: straight to `out`; more: each round's board in the work dir, the best one copied out)
         r_out = out if R == 1 else os.path.join(work, f'round{r}.kicad_pcb')
         r_json = json_out if R == 1 else os.path.join(work, f'round{r}.summary.json')
-        code, grades = route_on_field(board, os.path.join(group, 'shared_field.kicad_pcb'), r_out, plain, k, 1, inproc,
+        code, grades = route_on_field(board, os.path.join(group, 'shared_field.kicad_pcb'), r_out, buses, k, 1, inproc,
                                       log, r_json, feedback_rounds, t0=t0, settings={'GROUP_ENDS': group}, **sizes)
         if R == 1:
             return code, grades
@@ -732,52 +467,11 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
     return code, grades
 
 
-def route_negotiated(board, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None, feedback_rounds=0,
-                     solo=None, **sizes):
-    """The buses `buses` [(src, dest, mode, layers)], their modes resolved, routed negotiated on `board` (the module's
-    docstring), `out` the merged board. `solo` [(board, summary) or None, as `buses`]: each bus's run already made (a
-    bench's recorded ones), its teeth the shared field's, in place of the solo runs (an entry None: no teeth to
-    prefer). Returns (exit code, grade lines)"""
-    board, out = os.path.abspath(board), os.path.abspath(out)
-    if not out.endswith('.kicad_pcb'):
-        out += '.kicad_pcb'
-    why = check(buses)
-    if why:
-        log(f'route_bus: the buses off one array, not negotiated -- {why}')
-        return 2, []
-    work = out[:-len('.kicad_pcb')] + '.bus'
-    os.makedirs(work, exist_ok=True)
-    src, dests, modes = buses[0][0], [b[1] for b in buses], [b[2] for b in buses]
-    t0 = time.time()
-    if solo is None and awx_settings.get('GROUP_FLOW') == '1':
-        return route_grouped(board, out, buses, k, rounds, inproc, log, json_out, feedback_rounds, t0=t0, **sizes)
-
-    # 1. each bus's solo run -- or its run already made (`solo`)
-    log(f'route_bus: {len(buses)} buses off {src} negotiated -- {", ".join(f"{d} ({m})" for d, m in zip(dests, modes))}'
-        + ('; each bus\'s teeth from its run already made' if solo is not None
-           else '; each bus\'s ends chosen by itself first'))
-    if solo is None:
-        # (of its ENDS only: the fanout and the first plan -- whole_route.chain's ENDS_ONLY)
-        _run_all([_bus_job(work, 'solo', b, board, {**_env0(), 'ENDS_ONLY': '1'}, k, rounds, inproc, feedback_rounds,
-                           sizes) for b in buses], log)
-        solo = [_bus_out(work, 'solo', b) for b in buses]
-
-    # 2. the shared field
-    field = os.path.join(work, 'shared_field.kicad_pcb')
-    rep = plan_field(board, field, buses, solo, work, log=log, **sizes)
-
-    # 3, 4. every bus negotiated on the shared field, merged
-    code, grades = route_on_field(board, field, out, buses, k, rounds, inproc, log, json_out, feedback_rounds,
-                                  field_plan=rep, t0=t0, **sizes)
-    return code, grades
-
-
 def _env0():
     """the environment a bus's process takes: the run's, but none of a meeting's (a JOINT_DIR left over would have a
-    solo run wait for buses that never come) and not GROUP_FLOW (a bus's process is that bus's own step: the group's
-    flow is the step that started it, and one bus alone would start a group of its own there)"""
+    solo run wait for buses that never come)"""
     return {k_: v_ for k_, v_ in awx_settings.environ().items()
-            if not k_.startswith('JOINT_') and k_ not in ('SOURCE_SHARED', 'ENDS_ONLY', 'GROUP_FLOW')}
+            if not k_.startswith('JOINT_') and k_ != 'ENDS_ONLY'}
 
 
 def _bus_job(work, phase, bus, inp, env, k, rounds, inproc, feedback_rounds, sizes):
@@ -803,9 +497,9 @@ def _bus_out(work, phase, bus):
 
 
 def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None,
-                   feedback_rounds=0, field_plan=None, t0=None, settings=None, **sizes):
-    """Steps 3 and 4: the buses `buses` routed negotiated on the shared field `field` (lay_field's, from `board`), and
-    merged to `out`. `settings`: more for every bus's process (GROUP_ENDS: `field` a group's, every end on it the
+                   feedback_rounds=0, t0=None, settings=None, **sizes):
+    """The buses `buses` [(src, dest)] routed negotiated on the shared field `field` (the group's model's, from
+    `board`), and merged to `out`. `settings`: more for every bus's process (GROUP_ENDS: `field` a group's, every end on it the
     group's model's -- group_ends.py). ONE bus (a group's field for a bus alone on its array): routed by itself on
     the field, nothing to negotiate, graded and summed up the same way. Returns (exit code, grade lines)"""
     from copy_board import copy_board
@@ -821,17 +515,9 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     phase = 'solo' if one else 'neg'
     log(f'  {buses[0][1]} on the field, by itself' if one else
         f'  every bus on the shared field, negotiated (meeting in {os.path.relpath(jd, os.path.dirname(out))})')
-    # (a whole-array bus keeps the escapes the shared field laid it there too, as a plain bus does: the field planned
-    # them with every other bus's. Fanned again round the others' escapes, a memory bus's comb sent an address ball out
-    # by the face another bus's lanes leave by, among their exits, and split a strobe pair across two layers)
-    # (an ESCAPE bus is plain on the shared field: the shared field escaped its balls toward its destination with every
-    # other bus's, as its own escape fanout does in its solo run, and it keeps them there as a plain bus keeps its own;
-    # its solo run, which its solo teeth came of, was an escape bus's. Turned away, an escape bus off an array with
-    # three other buses was routed sequentially with them, and the two routed after it found their faces taken by its
-    # lanes)
-    jobs = [_bus_job(work, phase, (b[0], b[1], 'plain' if b[2] == 'escape' else b[2], b[3]), field,
-                     {**_env0(), **({} if one else {'SOURCE_SHARED': src, 'JOINT_DIR': jd,
-                                                    'JOINT_PEERS': ','.join(dests)}), **(settings or {})},
+    jobs = [_bus_job(work, phase, b, field,
+                     {**_env0(), **({} if one else {'JOINT_DIR': jd, 'JOINT_PEERS': ','.join(dests)}),
+                      **(settings or {})},
                      k, rounds, inproc, feedback_rounds, sizes)
             for b in buses]
     codes = _run_all(jobs, log, ended=lambda d: open(os.path.join(jd, f'{d}.finished'), 'w').close())
@@ -868,13 +554,11 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
         j = json.load(open(x[1])) if x else {}
         # (the step's own status is its summary's: the process exits 0 whenever it wrote OUT, #1738)
         ex = j.get('exit', codes.get(b[1])) if x else codes.get(b[1])
-        runs.append(dict(src=b[0], dest=b[1], mode=b[2], exit=ex, routed=len(j.get('routed') or []),
+        runs.append(dict(src=b[0], dest=b[1], exit=ex, routed=len(j.get('routed') or []),
                          grade=_grade_line(os.path.join(work, phase, b[1], 'bus.log')), summary=x[1] if x else None))
     code = max([1 if r['exit'] is None else r['exit'] for r in runs] + [0 if n_conf == 0 else 1])
     with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:
         json.dump(dict(board=board, out=out, negotiated=True, src=src, field=field,
-                       field_plan={k_: v_ for k_, v_ in (field_plan or {}).items()
-                                   if isinstance(v_, (int, float, str))},
                        buses=runs, conflicts=n_conf, given_back=given, grade=grade_, secs=int(time.time() - t0),
                        exit=code), f, indent=1)
     log(f'route_bus: {"on the field" if one else "negotiated"}, {sum(r["routed"] for r in runs)} nets routed by '

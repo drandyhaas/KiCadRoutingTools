@@ -68,15 +68,6 @@ C_MM = 20                  # a millimetre of escape
 # elsewhere for a shorter escape, 13 of them out of order along the face the lanes leave by
 C_DEV_MM = 1000            # a millimetre between a bus ball's exit and its preferred tooth's
 C_DEV_KIND = 3000          # ...another face, layer or kind than its preferred tooth's
-# a crossing the teeth of a SHARED array force between two buses' lanes (sweep_crossings): over a millimetre off the
-# preferred tooth, so a tooth that wraps round another bus's leaves the face its bus alone took
-C_SWEEP = 1500
-# ...and an OTHER ball's lane (no bus's) a via for every bus lane it crosses round to its net's far end, at most
-# SWEEP_OTHER_MAX of them -- under a dog-bone left to the router (C_STUB), which a ball with an escape at all keeps
-# out of the array's inner layers. Unpriced, 33 of a shared array's 70 other balls escaped a face turned away from
-# their far ends, each then wrapping round the array across the buses' routed lanes
-C_SWEEP_OTHER = 300
-SWEEP_OTHER_MAX = 10
 # a bus ball's exit within a pitch of a tooth its routed rounds found CROWDED (`avoid`: another bus's lane across the
 # tooth on the layer its own lane leaves by): the plan of a shared array again, each round, with every bus's crowded
 # teeth -- dearer than a millimetre off a preferred tooth and another face together, below serving another ball
@@ -99,10 +90,10 @@ SHARE_TOL = 1e-3           # two vias of one net this close, at one size, are on
 # CP-SAT interleaved batches, phase 2's budget, on SOLVE_WORKERS threads: a thread holds its own working copy, and a
 # batch is a task per thread. zynq three layers, U1 / U5: four threads and 20 batches 709 / 827 MB for the solve, two
 # and 60 batches 552 / 755 MB at the same cost (97 worse on U1's 73,631, 16 better on U5's 34,812) in 17 s more
-SOLVE_BATCHES = int(awx_settings.get('JOINT_SOLVE_BATCHES', '60'))
-# JOINT_LAYERS_EXACT=1: a plan that leaves a bus ball's run with no layer is asked again with each run's layer its own
-# choice (plan_array's `exact_layers`); 0: asked again with those runs' options out of the menus, as before
-LAYERS_EXACT = (awx_settings.get('JOINT_LAYERS_EXACT') or '1') == '1'
+SOLVE_BATCHES = 60
+# a plan that leaves a bus ball's run with no layer is asked again with each run's layer its own choice (plan_array's
+# `exact_layers`)
+LAYERS_EXACT = True
 # ...and where phase 2 starts from the array's last plan in the process (_LAST_PLAN), laid out whole: the search starts
 # at a plan's cost, not at phase 1's (any plan serving every ball, no cost: h616_lpddr4's U1 302,608 against 54,941
 # after 60 batches), and in 30 batches stands about where 60 from phase 1's do -- h616_lpddr4's bus step's six such
@@ -113,11 +104,11 @@ START_WORK = 30.0          # deterministic work to lay that start out whole (one
 SOLVE_WORKERS = 2
 # phase 1's deterministic time, per question asked. At 120 the zynq U1 plane tier ran out of it on three layers and
 # left six drops unplanned; at 240 it proved every drop (in 60 s)
-P1_DET = float(awx_settings.get('JOINT_P1_DET', '240'))
+P1_DET = 240.0
 # A climb's reach, in pitches. zynq U1's whole array (100 batches): uncapped (to 19) 21172 moves, objective 48280503;
 # capped at 8, 17356 and 48261318; at 4, 12582 and 48309493 -- the proved bound 48.44M in all three, and every climb
 # any of the solves chose 1 to 4 deep but one
-CLIMB = int(awx_settings.get('JOINT_CLIMB', '4'))
+CLIMB = 4
 # ...and the OTHER nets' (not the bus's): they need only leave, and their climbs were most of the model. zynq U1 for
 # the AD9364's LVDS bus on three layers: 18,635 of its 20,727 moves were the 152 other balls', and the solve past 1.5 GB.
 # At 1 the 10,667 moves served every ball of the 297 -- phase 1 proved all three tiers, where at 4 the plane tier ran
@@ -130,15 +121,11 @@ SUBSOLVERS = ['default_lp', 'quick_restart']
 # which the LP worker holds whole -- zynq U1 on four layers, 994 against 767 MB for the plan at a cost 0.5% higher (322
 # of 60,500: a via), U5 538 against 454 MB at 2.7% (665: two vias)
 SUBSOLVERS_RUNS = ['quick_restart']
-# ...and beside either, with JOINT_SOLVE_BOUND=1 (opt-in, to be judged: the README's TODO), the BOUND-RAISING workers the
-# whole solve's probe runs: taking their turns in the same threads' batches, they raise the bound, and a plan the bound
-# meets is proved and its search done
-SUBSOLVERS_BOUND = ['max_lp', 'core', 'objective_lb_search'] if awx_settings.get('JOINT_SOLVE_BOUND') == '1' else []
 HOLD_TOL = 0.05            # mm: (`hold`) an escape's exit this close to the held tooth's is that tooth
 # (escape_to / hold) another ball served by its DOG-BONE ALONE -- a stub and a via at a gap, no run out of the array,
-# the router's to take on, as the escape fanout leaves every ball not its bus's -- where no escape of its fits round the
-# bus's held teeth: dearer than any escape (one on a plane layer, C_PLANE_LAYER, included), never a ball left to the
-# engine's own phases, which lay it blind to the plan (zynq U1's FB_CLK pair across the LVDS field)
+# the router's to take on -- where no escape of its fits round the bus's held teeth: dearer than any escape (one on a
+# plane layer, C_PLANE_LAYER, included), never a ball left to the engine's own phases, which lay it blind to the plan
+# (zynq U1's FB_CLK pair across the LVDS field)
 C_STUB = 4000
 
 
@@ -610,99 +597,6 @@ def exit_ray_conflicts(opts, net_of, bus, vr, grid=None, bus_of=None):
     return out
 
 
-def fixed_lanes(pcb, ref, grid, planned):
-    """[((x, y), the angle of its far end)]: the LANES an earlier step laid out of array `ref` -- each net with a ball
-    there that the plan does not escape (`planned`: short names) and LOCKED copper (another bus's): the point where its
-    copper leaves the array's box (its nearest end outside it), and the angle round the array's centre of the centroid
-    of its pads off the array. A later bus's tooth planned by the sweep of this bus's lanes alone was put on a face
-    an earlier bus's lanes leave by on every layer, and no lane from it got across them"""
-    sn = namer(pcb)
-    bb = grid.bbox
-    cx, cy = (bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0
-    on = {p.net_id for p in pcb.footprints[ref].pads if p.net_id}
-    segs = collections.defaultdict(list)
-    for s in pcb.segments:
-        if s.net_id in on and getattr(s, 'locked', False):
-            segs[s.net_id].append(s)
-    out = []
-    for nid, ss in sorted(segs.items()):
-        net = pcb.nets.get(nid)
-        if net is None or sn(net.name or '') in planned:
-            continue
-        far = [q for q in net.pads if q.component_ref != ref]
-        if not far:
-            continue
-        ends = [(x, y) for s in ss for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y))
-                if not (bb[0] <= x <= bb[2] and bb[1] <= y <= bb[3])]
-        if not ends:
-            continue
-        t = min(ends, key=lambda q: max(bb[0] - q[0], q[0] - bb[2], bb[1] - q[1], q[1] - bb[3]))
-        fx, fy = sum(q.global_x for q in far) / len(far), sum(q.global_y for q in far) / len(far)
-        out.append((t, math.degrees(math.atan2(-(fy - cy), fx - cx)) % 360.0))
-    return out
-
-
-def sweep_crossings(pcb, grid, escape_to, refs, far_ang=None, fixed=()):
-    """n(net, exit point): how many lanes of OTHER buses the net's lane crosses when it leaves a shared array there --
-    what running the buses one after another cannot plan. Each lane leaves the array's ring at its tooth and SWEEPS
-    round it, the shorter way, to its destination's angle (the array's centre to the centroid of the destination's
-    pads of its bus); two lanes of different buses whose sweeps overlap cross where their order at the teeth and at
-    the sweeps' far ends differ. The bus run first lays its lane across the later one's way out, and the later one
-    finds no room for a via at its teeth: a bus ball on the east end of a north face sweeping west across a DDR bus's
-    north teeth, a DDR tooth on an east face sweeping north across an FFC bus's. `escape_to` {net: its bus's
-    destination}, `refs` {net: (x, y)} the teeth the other buses' lanes are taken to leave by (their preferred).
-    `far_ang` {net of no bus: the angle of its far end}: such a net's lane sweeps to there, across the lanes of EVERY
-    bus -- routed before it, their copper lies across its way. `fixed` [((x, y), the angle of its far end)]: the lanes
-    an earlier step LAID out of the array (fixed_lanes), each from where it leaves the array's box -- crossed by any
-    lane here whose sweep meets theirs, as another bus's are"""
-    sn = namer(pcb)
-    cx, cy = (grid.bbox[0] + grid.bbox[2]) / 2.0, (grid.bbox[1] + grid.bbox[3]) / 2.0
-
-    def ang(q):
-        return math.degrees(math.atan2(-(q[1] - cy), q[0] - cx)) % 360.0
-
-    def wrap(a):
-        return (a + 180.0) % 360.0 - 180.0
-    dang = {}
-    for d in sorted(set(escape_to.values())):
-        nets_ = {n for n, d_ in escape_to.items() if d_ == d}
-        fp_ = pcb.footprints.get(d)
-        if fp_ is None:
-            continue
-        ps = [p for p in fp_.pads if p.net_id and sn(p.net_name or '') in nets_] or list(fp_.pads)
-        dang[d] = ang((sum(p.global_x for p in ps) / len(ps), sum(p.global_y for p in ps) / len(ps)))
-    lanes = [(ang(t), dang[escape_to[n]], escape_to[n]) for n, t in sorted(refs.items())
-             if escape_to.get(n) in dang]
-    lanes += [(ang(t), fa, ('fixed', i)) for i, (t, fa) in enumerate(fixed)]
-    memo = {}
-
-    def n_cross(nm, pt):
-        d = escape_to.get(nm)
-        if d in dang:
-            to_ = dang[d]
-        elif far_ang and nm in far_ang:
-            d, to_ = None, far_ang[nm]
-        else:
-            return 0
-        k_ = (d if d is not None else ('far', nm), round(pt[0], 3), round(pt[1], 3))
-        if k_ not in memo:
-            a1 = ang(pt)
-            e1 = wrap(to_ - a1)
-            lo1, hi1 = min(0.0, e1), max(0.0, e1)
-            c_ = 0
-            for a2_, d2_, b2_ in lanes:
-                if b2_ == d:
-                    continue
-                a2 = wrap(a2_ - a1)
-                e2 = a2 + wrap(d2_ - a2_)
-                if max(a2, e2) < lo1 or min(a2, e2) > hi1:
-                    continue
-                c_ += (0.0 - a2) * (e1 - e2) < 0
-            memo[k_] = c_
-        return memo[k_]
-    return n_cross
-
-
 def zone_regions(pcb):
     """{layer: [(net id, priority, outline)]}: the board's pours, by layer -- and each KEEP-OUT rule area that forbids
     a pour on the layer, as a pour of no net (-1) that fills before every other: no plane is there. A plane ball's drop
@@ -754,37 +648,6 @@ def laid_pockets(pcb, grid, nets):
             if name_of.get(s.net_id) in legs]
     tooth = pt.teeth(segs, name_of, legs, grid.bbox)
     return [(pk[0], pk[2]) for pk in pt.pockets(prs, tooth, max(grid.pitch_x, grid.pitch_y) / 2.0).values()
-            if pk != 'apart']
-
-
-def lay_refuses(grid, m):
-    """would the fanout engine refuse planned move `m` (its plan-follow, underpad._dogbone_site_valid): a plain
-    dog-bone -- no walked path (source_realize.full_move) -- whose via stands within a quarter pitch of the array's
-    boundary line, not strictly in a gap between balls, its exit within a pitch of it: a via that is its own exit, no
-    tooth. Asked for one, the engine laid the ball none -- a bus ball unescaped"""
-    import source_realize as sr
-    if getattr(m, 'kind', None) != 'dogbone' or m.site is None:
-        return False
-    x0, y0, x1, y1 = grid.bbox
-    qx, qy = grid.pitch_x / 4.0, grid.pitch_y / 4.0
-    if x0 - qx < m.site[0] < x1 + qx and y0 - qy < m.site[1] < y1 + qy:
-        return False
-    if math.hypot(m.exit_pt[0] - m.site[0], m.exit_pt[1] - m.site[1]) > (grid.pitch_x + grid.pitch_y) / 2.0:
-        return False
-    return 'path' not in sr.full_move(m)
-
-
-def planned_pockets(grid, bus_s, teeth):
-    """[(layer, quad, (P leg, N leg))]: the POCKET of each pair among `bus_s` (short names) whose two PLANNED teeth --
-    `teeth` {leg: {'tooth', 'direction', 'layer'}}, as plan_array's `prefer` -- leave the array by one face on one
-    layer (pair_teeth.pockets), as laid_pockets has a laid pair's"""
-    import pair_teeth as pt
-    import pairs as _pairs
-    from escape_moves import DIRS
-    prs = _pairs.pair_names(sorted(bus_s), admit_all=True)
-    tooth = {nm: (tuple(g['tooth']), DIRS[g['direction']], g['layer']) for nm, g in teeth.items()
-             if g.get('tooth') and g.get('direction') in DIRS and g.get('layer')}
-    return [(pk[0], pk[2], prs[b]) for b, pk in pt.pockets(prs, tooth, max(grid.pitch_x, grid.pitch_y) / 2.0).items()
             if pk != 'apart']
 
 
@@ -882,48 +745,6 @@ def _drops(pcb, grid, p, obs, sz, foot=None, rays=(), regions=None, fine=False):
     if _via_clear(pcb, obs, p.net_id, pad, r, sz) and (regions is None or on_own_plane(regions, p.net_id, pad)):
         out.append(Drop(pad, None, home, True, r, dr))
     return out
-
-
-def reserve_ball_vias(pcb, spec=None):
-    """The whole-array fanout's promise to the arrays' OTHER nets, kept by the bus's own fanout: each of their balls
-    keeps the via in its own pad. `spec` the joint spec ({"arrays": [{"ref", "others", "drops"}]}), else the file
-    FANOUT_JOINT names; neither -- no whole-array fanout -- does nothing. A stand-in via, of the size the engine lays in
-    that pad and locked, is added to `pcb.vias` for each ball, so the bus's menus and the fanout engine leave the site
-    as they leave any via; nothing writes it (a fanout writes the board it read plus its own copper). Without it the
-    bus's fanout may run a track on B under a ball of another net and wall it in (zynq U1: DDR3_A4 under DDR3_CK_N's M2,
-    the A0/A2/A3 teeth round it on F -- no escape at any rung). A PLANE ball's (`drops`: a plane's, a rail's) is not
-    kept: it has a way down besides its pad -- a gap's via, a strap to its neighbour -- and kept, the zynq U2's 39 of
-    them walled the bus's berths in, its ends crossing 260 times to the chain's 202. Returns the number added."""
-    if spec is None:
-        path = awx_settings.get('FANOUT_JOINT')
-        if not path:
-            return 0
-        import json
-        with open(path, encoding='utf-8') as f:
-            spec = json.load(f)
-    if getattr(pcb, '_joint_reserved', False):
-        return 0
-    import braid as te
-    from kicad_parser import Via
-    from list_nets import escalation_rungs
-    from bga_fanout.geometry import clamp_via_to_pad
-    floors = escalation_rungs(len(pcb.board_info.copper_layers or ()) or 4)
-    sn = namer(pcb)
-    n = 0
-    for a in spec.get('arrays', ()):
-        foot = pcb.footprints.get(a['ref'])
-        if foot is None:
-            continue
-        want = {sn(x) for x in a.get('others', ())}
-        for p in foot.pads:
-            if not p.net_id or sn(p.net_name or '') not in want:
-                continue
-            size, drill = clamp_via_to_pad(te.VIA_SIZE, te.VIA_DRILL, p, floors)[:2]
-            pcb.vias.append(Via(x=p.global_x, y=p.global_y, size=size, drill=drill or te.VIA_DRILL,
-                                layers=['F.Cu', 'B.Cu'], net_id=p.net_id, locked=True))
-            n += 1
-    pcb._joint_reserved = True
-    return n
 
 
 def passives_fixed():
@@ -1153,7 +974,7 @@ def array_pairs(foot, nets, sn):
 
 
 def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=CLIMB, street=2, only=None,
-                vias_only=False, exit_rays=False, escape_to=None, hold=None, pocket_teeth=None, firm=None,
+                vias_only=False, exit_rays=False, escape_to=None, hold=None, firm=None,
                 all_faces=False, pattern=False, lines=False):
     """Every ball's OPTIONS for plan_array (its escapes, its straps, its drops, each with its copper as a Piece at its
     real size), and what they were built from: a namespace of foot, grid, bus_s, oth_s, drop_s, sz, items, menu (the
@@ -1242,9 +1063,9 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
     dest_of = (lambda nm: escape_to.get(nm)) if isinstance(escape_to, dict) else (lambda nm: escape_to)
     far_of = (lambda nm: far.get(nm)) if isinstance(far, dict) else (lambda nm: far)
     if escape_to:
-        # (`escape_to`, the other array's ref: the bus's menus are the ESCAPE FIELD's -- escape_field_moves --
-        # its faces escape_plan.plan_state's at a source: toward the other array, or one on the ball's own half -- the
-        # far face only for a ball whose tooth is HELD there, the bus's own ends' choice: whole_ends.FAR_TOOTH)
+        # (`escape_to`, the other array's ref: the bus's menus are the ESCAPE FIELD's -- escape_field_moves -- its
+        # faces a source's: toward the other array, or one on the ball's own half -- the far face only for a ball whose
+        # tooth is HELD there, the bus's own ends' choice: whole_ends.FAR_TOOTH)
         import escape_plan as ep
         esc_copper = ep.Copper(pcb, sz['tw'], sz['cl'])
         mid_ = ((grid.bbox[0] + grid.bbox[2]) / 2, (grid.bbox[1] + grid.bbox[3]) / 2)
@@ -1420,32 +1241,12 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
     if walls:
         for key in menu:
             menu[key] = keep_firm(menu[key], lambda m: not exit_walled(walls, m), firm_g.get(key))
-    # (...and, the buses PLANNED here rather than laid (`pocket_teeth`, the combined plan's preferred teeth), no other
-    # net's option into the pocket of a bus pair's two teeth -- a ball with no other option keeps its menu. Unheld, the
-    # plan dropped a +1V35 ball and a GND ball 0.14 mm past the face between a DDR bus's DQS pairs' teeth, where the bus
-    # alone had them half a pitch inside, and the bus left both pairs open, their ends crowded)
-    ppk = planned_pockets(grid, bus_s, pocket_teeth) if pocket_teeth else []
-    if pocket_teeth:
-        # (...and, there, no move the engine would refuse to lay as planned: lay_refuses)
-        for key in menu:
-            menu[key] = keep_firm(menu[key], lambda m: not lay_refuses(grid, m), firm_g.get(key))
-    if ppk:
-        def _free(nm_, legs_, vias_):
-            return not in_pockets([(L_, q_) for L_, q_, own_ in ppk if nm_ not in own_], legs_, vias_)
-        for key in menu:
-            nm_ = items[key][0]
-            menu[key] = keep_firm(menu[key], lambda m, _n=nm_: _free(_n, m.legs or [], [m.site] if m.site is not None
-                                                                       else []), firm_g.get(key))
-            dmenu[key] = [d for d in dmenu[key] if _free(nm_, [d.stub + (d.layer,)] if d.stub else [], [d.site])] \
-                or dmenu[key]
     t_menu = time.time() - t0
     # (a plane ball's straps too: the human's U5 A4 joins A5 down its column, A5 and A6 sharing one via off the
     # array's edge, the bus's lanes in every gap beside them)
     straps = _straps(pcb, grid, items, obs)
     if pockets:
         straps = {k: [s for s in v if not in_pockets(pockets, [(s.a, s.b, s.layer)], [])] for k, v in straps.items()}
-    if ppk:
-        straps = {k: [s for s in v if _free(items[k][0], [(s.a, s.b, s.layer)], [])] for k, v in straps.items()}
     # every ball's options, escapes first (their conflicts are the whole route's own, by index); each with its copper
     # at its real size: a via in the ball's own pad the engine's clamped one, any other the rung's
     opts = {}
@@ -1473,8 +1274,7 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
                     q_ = (p.global_x + sx * grid.pitch_x / 2.0, p.global_y + sy * grid.pitch_y / 2.0)
                     if not _via_clear(pcb, obs, p.net_id, q_, sz['vr'], sz) or \
                             not obs(p.net_id, home_).seg_clear(own[0], q_) or \
-                            (pockets and in_pockets(pockets, [(own[0], q_, home_)], [q_])) or \
-                            (ppk and not _free(nm, [(own[0], q_, home_)], [q_])):
+                            (pockets and in_pockets(pockets, [(own[0], q_, home_)], [q_])):
                         continue
                     s_ = Stub(q_, own[0], home_)
                     o.append(('stub', s_, Piece(nm, [(own[0], q_, home_)], [(q_, sz['vr'], sz['vdr'])], own)))
@@ -1589,7 +1389,7 @@ def _solved_key(mdl, ref, keys, served, items, bus_s, oth_s, drop_s, bm, rank, w
     h.update(repr((ref, [(k, k in served, items[k][0] in bus_s, items[k][0] in oth_s, items[k][0] in drop_s,
                           rank.get(k), wt.get(k), cvals[k], [x.Index() for x in v[k]]) for k in keys],
                    legs, [u.Index() for u in site_used], C_VIA, P1_DET, rls, batches or SOLVE_BATCHES,
-                   workers or SOLVE_WORKERS, SUBSOLVERS, SUBSOLVERS_RUNS, SUBSOLVERS_BOUND,
+                   workers or SOLVE_WORKERS, SUBSOLVERS, SUBSOLVERS_RUNS,
                    SOLVE_BATCHES_STARTED)).encode())
     return h.hexdigest()
 
@@ -1597,8 +1397,7 @@ def _solved_key(mdl, ref, keys, served, items, bus_s, oth_s, drop_s, bm, rank, w
 def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops=(), climb=CLIMB, street=2,
                batches=None, workers=None, time_limit=None, log=print, debug=False, only=None, hands=None,
                vias_only=False, exit_rays=False, escape_to=None, hold=None, executor=None, stack_bus=False,
-               sweep=None, avoid=None, ban=frozenset(), colour_tries=None, steer=None, firm=None,
-               exact_layers=False):
+               avoid=None, ban=frozenset(), colour_tries=None, firm=None, exact_layers=False):
     """(hints, report): one planned move for every signal ball of `ref` on `pcb` -- the bus's nets (`bus`, full or
     short names) escaping on F.Cu/B.Cu, never by the `far` face; `others` escaping on `other_layers`, or a multi-ball
     net's ball strapped to a neighbour of its net; and every ball of the plane nets `drops` dropped to its plane --
@@ -1616,16 +1415,12 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     destination's, fanout_from_plan): a plane ball's drop is held out of the bus's teeth's and berths' ways out
     (exit_ray_conflicts), each gap site offering a finer via too.
 
-    `escape_to` (the other array's ref): the bus's menus are the ESCAPE FIELD's (escape_field_moves: escape_plan's
-    escapes from every site a ball could take -- a gap point, its pad, none), so its dog-bones are chosen with every
-    other ball's escape and drop -- ONE fanout of a shared array for an escape bus, its other nets and its plane balls
-    (zynq U1: the AD9364's LVDS bus beside the routed DDR3's). `hold` {bus net: {'tooth', 'direction', 'layer'}}: each
-    such net's TOOTH held -- where its escape reaches the boundary, by which face, on which layer, as the bus's own ends
-    chose it -- HOW it gets there the plan's; the other nets' runs give up the layers a held run would meet them on.
-    `sweep` (several buses' `escape_to`, {net: destination}): each bus escape paid C_SWEEP for every lane of another
-    bus its own crosses round the array (sweep_crossings) -- against the teeth `sweep` names ({net: (x, y)}), or
-    True: the preferred ones; the other nets' escapes paid C_SWEEP_OTHER for each lane theirs crosses on its way to
-    their far end -- every other net's, or `steer`'s alone. `avoid` {bus net: [(x, y), ..]}: the teeth its rounds
+    `escape_to` (the other array's ref, or {bus net: its ref}): the bus's menus are the ESCAPE FIELD's
+    (escape_field_moves: escape_plan's escapes from every site a ball could take -- a gap point, its pad, none), so its
+    dog-bones are chosen with every other ball's escape and drop. `hold` {bus net: {'tooth', 'direction', 'layer'}}:
+    each such net's TOOTH held -- where its escape reaches the boundary, by which face, on which layer, as the bus's own
+    ends chose it -- HOW it gets there the plan's; the other nets' runs give up the layers a held run would meet them
+    on. `avoid` {bus net: [(x, y), ..]}: the teeth its rounds
     found crowded, each exit within a pitch of one paid C_AVOID -- of one given as (x, y, layer), each such exit
     leaving on that layer. `ban` {(ball, _opt_sig)}: options the menus leave
     out -- a bus ball's run no colouring held, planned again without it, and the plan that leaves fewer balls without
@@ -1646,8 +1441,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     t0 = time.time()
     bm = build_menus(pcb, ref, bus, others, other_layers, far=far, drops=drops, climb=climb, street=street,
                      only=only, vias_only=vias_only, exit_rays=exit_rays, escape_to=escape_to, hold=hold,
-                     pocket_teeth=prefer if isinstance(escape_to, dict) and len(set(escape_to.values())) > 1
-                     else None, firm=firm)
+                     firm=firm)
     bus_s, oth_s, drop_s, sz = bm.bus_s, bm.oth_s, bm.drop_s, bm.sz
     # FIRM teeth (`firm`, each ball's as build_menus kept it: bm.firm_g): a run on RUN at the tooth split in two -- PINNED
     # to the tooth's layer (on RUN still, so the capacity rows and the colouring weigh it as a held run's), and on its
@@ -1687,22 +1481,6 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
         for k_ in list(bm.opts):
             bm.opts[k_] = [x_ for x_ in bm.opts[k_] if (k_, _opt_sig(*x_)) not in ban]
             bm.menu[k_] = [o_ for kind_, o_, _pc in bm.opts[k_] if kind_ == 'escape']
-    sweep_n = None
-    if sweep and isinstance(escape_to, dict):
-        # (each other ball's far end: the centroid of its net's pads off the array, an angle round its centre)
-        sn_ = namer(pcb)
-        cx_, cy_ = (bm.grid.bbox[0] + bm.grid.bbox[2]) / 2.0, (bm.grid.bbox[1] + bm.grid.bbox[3]) / 2.0
-        far_ang = {}
-        for net_ in pcb.nets.values():
-            nm_ = sn_(net_.name or '')
-            ps_ = [q for q in net_.pads if q.component_ref != ref] \
-                if nm_ in oth_s and (steer is None or nm_ in steer) else []
-            if ps_:
-                far_ang[nm_] = math.degrees(math.atan2(-(sum(q.global_y for q in ps_) / len(ps_) - cy_),
-                                                       sum(q.global_x for q in ps_) / len(ps_) - cx_)) % 360.0
-        sweep_n = sweep_crossings(pcb, bm.grid, escape_to, sweep if isinstance(sweep, dict) else
-                                  {n: tuple(g['tooth']) for n, g in (prefer or {}).items()}, far_ang=far_ang,
-                                  fixed=fixed_lanes(pcb, ref, bm.grid, bus_s | oth_s | drop_s))
     avoid_r = max(bm.grid.pitch_x, bm.grid.pitch_y)          # (an exit this near a crowded tooth: C_AVOID)
     # a crowded tooth ON ITS LAYER (`avoid`'s (x, y, layer)): a bus ball's run on RUN leaving within a pitch of it gives
     # that layer up -- its other layers still the colouring's, as a held run's are (below) -- where the price alone
@@ -1909,10 +1687,6 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                                          and (len(a_) < 3 or not _off_layer(o, a_[2]))
                                          for a_ in avoid.get(nm, ())):
             c += C_AVOID
-        if sweep_n is not None and nm in bus_s:
-            c += C_SWEEP * sweep_n(nm, o.exit_pt)
-        elif sweep_n is not None and nm in oth_s:
-            c += C_SWEEP_OTHER * min(sweep_n(nm, o.exit_pt), SWEEP_OTHER_MAX)
         return int(round(c))
     mdl = cp_model.CpModel()
     keys = sorted(opts)
@@ -2530,7 +2304,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
         s_.parameters.max_num_deterministic_batches = batches or (SOLVE_BATCHES_STARTED if started else SOLVE_BATCHES)
         s_.parameters.share_glue_clauses = False
         s_.parameters.share_binary_clauses = False
-        s_.parameters.subsolvers.extend((SUBSOLVERS_RUNS if rls else SUBSOLVERS) + SUBSOLVERS_BOUND)
+        s_.parameters.subsolvers.extend(SUBSOLVERS_RUNS if rls else SUBSOLVERS)
         if time_limit:
             s_.parameters.max_time_in_seconds = time_limit
         st = s_.Solve(mdl)
@@ -2909,15 +2683,14 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     return res
 
 
-def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane_drop='auto', stand_in=(),
-        stand_in_tracks=()):
+def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane_drop='auto', stand_in=()):
     """The plan laid in ONE call of the under-pad engine's joint escape (py_router/bga_fanout/underpad.py,
     joint=True): the planned moves on their own legs and the straps first, each net held to its layers (the bus to
     its routing layers, the others to `other_layers`) and the bus first; then the balls the plan could not place, by the under-pad
     grid's generic phases; the plane balls dropped (`plane_drop` auto: every net the call leaves out that owns a zone
     or six balls; 'off': none). `stand_in`: vias to come (fanout_from_plan's tie vias), on the engine's board as its
-    own nets' copper -- not written -- so its rescues leave their sites as the plan does; `stand_in_tracks` the same
-    for runs to come (escape_field: the bus's planned runs past its dog-bones). Returns (tracks, vias, failed nets)."""
+    own nets' copper -- not written -- so its rescues leave their sites as the plan does. Returns (tracks, vias,
+    failed nets)."""
     import shutil
     from kicad_parser import parse_kicad_pcb
     from kicad_writer import add_tracks_and_vias_to_pcb
@@ -2955,7 +2728,6 @@ def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane
     # rescued by evicting a clock pair's leg and re-escaping it at the fab floor across its partner's tie site, and the
     # termination under the partner's ball was left open)
     pcb.vias.extend(stand_in)
-    pcb.segments.extend(stand_in_tracks)
     if passives_fixed():
         pcb._fanout_all_foreign_immovable = True
     spec = {'net_layers': {**{n: bus_route_layers(pcb) for n in bus}, **{n: list(other_layers) for n in others}},
@@ -2978,277 +2750,6 @@ def lay(board, out, ref, bus, others, other_layers, hints, other_pairs=(), plane
         shutil.copy(board, out)
     fp.copy_pro(board, out)
     return len(tracks), len(vias_add), sorted(set(failed))
-
-
-def laid_escapes(pcb0, ref, nets, sn):
-    """{ball key NET#PAD: escape}: the ESCAPE each ball of `nets` (short names) on `ref` already has on `pcb0` -- an
-    earlier step's field laid it -- where its net's copper leaves the array: `via` (x, y, size, drill) its net's via at
-    the ball (in its pad or a dog-bone's) or None, `run` [(a, b, layer, half width)] its tracks round the array, and
-    `tooth` its exit as a move's (escape_plan.PAST pitches past the outer balls, on its run's line): tooth, direction,
-    layer, kind"""
-    import escape_moves as em
-    from escape_plan import PAST
-    foot = pcb0.footprints[ref]
-    grid = em.grid_of(foot)
-    x0, y0, x1, y1 = grid.bbox
-    px, py = grid.pitch_x, grid.pitch_y
-    inbox = lambda q: x0 - 1.5 * px <= q[0] <= x1 + 1.5 * px and y0 - 1.5 * py <= q[1] <= y1 + 1.5 * py  # noqa: E731
-    out = {}
-    for p in foot.pads:
-        if not p.net_id or sn(p.net_name or '') not in nets:
-            continue
-        run = [((s_.start_x, s_.start_y), (s_.end_x, s_.end_y), s_.layer, s_.width / 2) for s_ in pcb0.segments
-               if s_.net_id == p.net_id and (inbox((s_.start_x, s_.start_y)) or inbox((s_.end_x, s_.end_y)))]
-        best = None
-        for a_, b_, L_, _h in run:
-            for q in (a_, b_):
-                dq, d = max((q[0] - x1, 'right'), (x0 - q[0], 'left'), (q[1] - y1, 'down'), (y0 - q[1], 'up'))
-                if dq > 0 and (best is None or dq > best[0]):
-                    best = (dq, q, d, L_)
-        if best is None:
-            continue                    # (no copper of its net leaves the array: no escape laid)
-        _dq, q, d, L_ = best
-        vs = [v for v in pcb0.vias if v.net_id == p.net_id and math.hypot(v.x - p.global_x, v.y - p.global_y)
-              <= 0.75 * max(px, py)]
-        via = (vs[0].x, vs[0].y, vs[0].size, vs[0].drill) if vs else None
-        kind = 'surface' if via is None else (
-            'via_in_pad' if math.hypot(via[0] - p.global_x, via[1] - p.global_y) < 1e-3 else 'dogbone')
-        tooth = {'right': (x1 + PAST * px, q[1]), 'left': (x0 - PAST * px, q[1]),
-                 'down': (q[0], y1 + PAST * py), 'up': (q[0], y0 - PAST * py)}[d]
-        out[f'{sn(p.net_name)}#{p.pad_number}'] = {
-            'via': via, 'run': run, 'tooth': {'tooth': tooth, 'direction': d, 'layer': L_, 'kind': kind}}
-    return out
-
-
-def _clears(esc, copper, clr):
-    """an escape `esc` (laid_escapes') stands its clearance `clr` off every piece of `copper` [(segments
-    [(a, b, layer, half width)], vias [(pt, radius)])]"""
-    vias_e = [((esc['via'][0], esc['via'][1]), esc['via'][2] / 2)] if esc['via'] else []
-    for segs, vias in copper:
-        for c, r in vias:
-            if any(math.hypot(c[0] - v[0], c[1] - v[1]) < r + rv + clr for v, rv in vias_e):
-                return False
-            if any(_pt_seg(c, a, b) < r + hw + clr for a, b, _L, hw in esc['run']):
-                return False
-        for a, b, L, hw in segs:
-            if any(_pt_seg(v, a, b) < rv + hw + clr for v, rv in vias_e):
-                return False
-            if any(L == L2 and _seg_seg(a, b, a2, b2) < hw + hw2 + clr for a2, b2, L2, hw2 in esc['run']):
-                return False
-    return True
-
-
-def later_hands(pcb, ref, later, sn):
-    """{P leg (short name): (hand, False)}: the HAND each pair of the later buses (`later` {net: its part}) is to leave
-    `ref` with -- P on the side of its travel its own part's pads have it, the travel taken from the array toward them
-    (pairs.hand): a pair route keeps P on one side from end to end, so a pair leaving with the other hand crosses its
-    legs over before its part. None for a pair whose two pads stand along that travel (no side to read). Each leg
-    escaped alone, a bus's field gave a later bus's pair's N leg the gap line on the far side of its P, and that
-    bus's step found no plan"""
-    import pairs as _pairs
-    foot = pcb.footprints[ref]
-    cx = sum(p.global_x for p in foot.pads) / len(foot.pads)
-    cy = sum(p.global_y for p in foot.pads) / len(foot.pads)
-    out = {}
-    for _b, (pn, nn) in sorted(_pairs.pair_names(list(later), admit_all=True).items()):
-        part = later.get(pn)
-        if part is None or later.get(nn) != part or part not in pcb.footprints:
-            continue
-        pads_ = {sn(q.net_name or ''): q for q in pcb.footprints[part].pads if q.net_id}
-        pp, np_ = pads_.get(pn), pads_.get(nn)
-        if pp is None or np_ is None:
-            continue
-        d = ((pp.global_x + np_.global_x) / 2 - cx, (pp.global_y + np_.global_y) / 2 - cy)
-        v = (pp.global_x - np_.global_x, pp.global_y - np_.global_y)
-        dn, vn = math.hypot(*d), math.hypot(*v)
-        if dn < 1e-9 or vn < 1e-9 or abs(d[0] * v[1] - d[1] * v[0]) < 0.5 * dn * vn:
-            continue                            # (its pads along the travel: no side)
-        out[pn] = (_pairs.hand((d[0] / dn, d[1] / dn), (pp.global_x, pp.global_y), (np_.global_x, np_.global_y)),
-                   False)
-    return out
-
-
-def escape_field(board, out, ref, dest, bus, others, drops, hold, log=print, passives_fixed=True, later=None):
-    """(route_bus --escape, ESCAPE_JOINT) ONE fanout of a shared array for an ESCAPE bus, its other nets and its plane
-    balls, laid as the escape step's FIELD. BOARD is the field the step's ends chose the bus's teeth on (`hold`, plan_array's
-    shape): every unprotected ball of the array dog-boned. Its copper of `bus`, `others` and `drops` inside the array's
-    box comes off, and the whole array is planned again in one solve round those teeth (plan_array escape_to=`dest`,
-    hold=) -- laid with each bus ball's dog-bone at the site the plan gave it (a via in the pad, or none for a surface
-    escape: the step's own lay runs the teeth from there), the other nets' escapes, straps and dog-bones alone and the
-    plane drops as planned (lay). The passives stand where they are (the step's cap nudge ran on the field). OUT is the
-    field; returns the plan's report, with `laid_sites` the bus vias laid and `bus_free` {net: tooth, as `hold`'s} the
-    escapes it chose for bus balls `hold` holds no tooth for. `later` {net: part}: the nets among `others` of the buses
-    routed after this one off the array (route_buses), which keep these escapes as their teeth -- each STEERED toward
-    its own part, paid for every lane of this bus its escape would sweep across round the array to get there (sweep:
-    C_SWEEP_OTHER, as the shared field prices its other nets), and otherwise planned as the array's other balls: every
-    layer, a strap, any face, asked after the bus's own"""
-    import make_bench as mb
-    import rules as _rules
-    import fanout_from_plan as fp
-    from kicad_parser import parse_kicad_pcb
-    from kicad_writer import add_tracks_and_vias_to_pcb
-    with contextlib.redirect_stdout(io.StringIO()):
-        pcb0 = parse_kicad_pcb(board)
-    foot = pcb0.footprints[ref]
-    xs, ys = [p.global_x for p in foot.pads], [p.global_y for p in foot.pads]
-    box = (min(xs) - 1.5, min(ys) - 1.5, max(xs) + 1.5, max(ys) + 1.5)
-    sn = namer(pcb0)
-    byname = {sn(n.name): (i, n) for i, n in pcb0.nets.items() if n.name}
-    nets = sorted({sn(n) for n in list(bus) + list(others) + list(drops)} & set(byname))
-    # (the escapes the bus's balls -- and the later buses' -- already have here: an earlier step's field laid them round
-    # that step's copper, which stands: the fallback below for a ball this plan leaves none)
-    # (read off the board as the step got it, ESCAPE_LAID_BEFORE -- route_bus strips the bus's own copper before the
-    # field is planned -- else off this one)
-    lb_ = awx_settings.get('ESCAPE_LAID_BEFORE')
-    was_ = {}
-    keep_s = {sn(n) for n in list(bus) + list(later or ())}
-    if lb_ and os.path.isfile(lb_):
-        with contextlib.redirect_stdout(io.StringIO()):
-            pcb_lb = parse_kicad_pcb(lb_)
-        if ref in pcb_lb.footprints:
-            was_ = laid_escapes(pcb_lb, ref, keep_s, namer(pcb_lb))
-    else:
-        was_ = laid_escapes(pcb0, ref, keep_s, sn)
-    stem = out[:-len('.kicad_pcb')] if out.endswith('.kicad_pcb') else out
-    bare = f'{stem}.bare.kicad_pcb'
-    with open(bare, 'w', encoding='utf-8') as f:
-        f.write(mb.strip_window(open(board, encoding='utf-8').read(), nets, byname, box))
-    fp.copy_pro(board, bare)
-    with contextlib.redirect_stdout(io.StringIO()):
-        pcb = parse_kicad_pcb(bare)
-    layers = list(pcb.board_info.copper_layers)
-    prefer = {nm: dict(g) for nm, g in hold.items()}
-    with awx_settings.given({**awx_settings.environ(), 'FANOUT_PASSIVES_FIXED': '1' if passives_fixed else '0'}):
-        later_s = {sn(n): d for n, d in (later or {}).items()}
-        # (exit_rays: the plane drops planned again here kept out of the held teeth's ways out, as the whole-array
-        # plans keep them -- a GND drop laid 0.44 mm into a lane's way out of its held tooth, the round's every
-        # attempt to move it short, and the lane open)
-        if later_s:
-            log(f'  whole-array field of {ref}: {sum(1 for n in others if sn(n) in later_s)} net(s) of the buses after '
-                f'this one steered toward their own parts')
-            l_hands = later_hands(pcb, ref, later_s, sn)
-            hints, rep = plan_array(pcb, ref, list(bus), list(others), layers, far=far_face(pcb, ref, dest),
-                                    drops=drops, prefer=prefer, log=log, debug=True, exit_rays=True,
-                                    escape_to={sn(n): dest for n in bus}, hold=hold, sweep=True, steer=set(later_s),
-                                    hands=l_hands or None)
-        else:
-            hints, rep = plan_array(pcb, ref, list(bus), list(others), layers, far=far_face(pcb, ref, dest),
-                                    drops=drops, prefer=prefer, log=log, debug=True, exit_rays=True, escape_to=dest,
-                                    hold=hold)
-        chosen = (rep.pop('debug', None) or {}).get('chosen') or {}
-        bus_s = {sn(n) for n in bus}
-        # (a bus ball the plan escaped with no tooth held -- its lane the step's ends gave none, or one whose held tooth
-        # had no option here, escaped by its whole menu: its escape as the plan chose it, the tooth the step may hold
-        # it to on this field, `bus_free`)
-        held_s = {sn(n) for n in hold} - {k.split('#')[0] for k in rep.get('unheld') or ()}
-        rep['bus_free'] = {k.split('#')[0]: {'tooth': tuple(o.exit_pt), 'direction': o.direction, 'layer': o.layer,
-                                             'kind': o.kind}
-                           for k, (kind, o) in sorted(chosen.items())
-                           if kind == 'escape' and k.split('#')[0] in bus_s and k.split('#')[0] not in held_s}
-        sz = _sizes(pcb, pcb.footprints[ref])
-        r = _rules.active()
-        pads = {f'{sn(p.net_name)}#{p.pad_number}': p for p in pcb.footprints[ref].pads if p.net_id}
-        tracks, vias = [], []
-        for k, (kind, o) in sorted(chosen.items()):
-            if k.split('#')[0] not in bus_s or kind != 'escape' or o.site is None:
-                continue
-            p = pads[k]
-            c, s = (p.global_x, p.global_y), tuple(o.site)
-            if math.hypot(s[0] - c[0], s[1] - c[1]) < 1e-3:
-                rr, dr = sz['inpad'](p)
-                vias.append({'x': s[0], 'y': s[1], 'size': 2 * rr, 'drill': 2 * dr, 'layers': ['F.Cu', 'B.Cu'],
-                             'net_id': p.net_id})
-            else:
-                home = next((L for L in layers if L in p.layers), 'F.Cu')
-                tracks.append({'start': c, 'end': s, 'width': r.fan_track, 'layer': home, 'net_id': p.net_id})
-                vias.append({'x': s[0], 'y': s[1], 'size': 2 * sz['vr'], 'drill': 2 * sz['vdr'],
-                             'layers': ['F.Cu', 'B.Cu'], 'net_id': p.net_id})
-        # (FALLBACK: a bus ball the plan escaped by none of its options keeps the escape the EARLIER step's field laid
-        # it, where that escape clears every piece the plan chose -- its via laid here as the bus's are, its run stood
-        # in for the engine below, its exit the tooth the step may hold it to, `bus_free`. That field planned the ball
-        # round the earlier bus's copper, which stands; planned again here round this bus's held teeth, six balls the
-        # earlier bus's escapes had walled on every other way kept none, and never became lanes)
-        kept_ = []
-        cop_ = []
-        for k_, (kind_, o_) in chosen.items():
-            hw_ = r.fan_track / 2
-            if kind_ == 'escape':
-                vr_ = sz['inpad'](pads[k_])[0] if o_.site is not None and pads.get(k_) is not None and math.hypot(
-                    o_.site[0] - pads[k_].global_x, o_.site[1] - pads[k_].global_y) < 1e-3 else sz['vr']
-                cop_.append(([(a_, b_, L_, hw_) for a_, b_, L_ in (o_.legs or ())],
-                             [(tuple(o_.site), vr_)] if o_.site is not None else []))
-            elif kind_ == 'stub':
-                cop_.append(([(o_.a, o_.site, o_.layer, hw_)], [(tuple(o_.site), sz['vr'])]))
-            elif kind_ == 'drop':
-                cop_.append(([(o_.stub[0], o_.stub[1], o_.layer, hw_)] if o_.stub else [], [(tuple(o_.site), o_.r)]))
-            elif kind_ == 'strap':
-                cop_.append(([(o_.a, o_.b, o_.layer, hw_)], []))
-        for k_, esc_ in sorted(was_.items()):
-            if k_ in chosen or k_.split('#')[0] not in bus_s or k_.split('#')[0] in rep['bus_free'] \
-                    or k_ not in pads or not _clears(esc_, cop_, r.fan_clear):
-                continue
-            p_ = pads[k_]
-            if esc_['via']:
-                vx_, vy_, vs_, vd_ = esc_['via']
-                vias.append({'x': vx_, 'y': vy_, 'size': vs_, 'drill': vd_, 'layers': ['F.Cu', 'B.Cu'],
-                             'net_id': p_.net_id})
-                if esc_['tooth']['kind'] == 'dogbone':
-                    home_ = next((L for L in layers if L in p_.layers), 'F.Cu')
-                    tracks.append({'start': (p_.global_x, p_.global_y), 'end': (vx_, vy_), 'width': r.fan_track,
-                                   'layer': home_, 'net_id': p_.net_id})
-            rep['bus_free'][k_.split('#')[0]] = dict(esc_['tooth'])
-            cop_.append((esc_['run'], [((esc_['via'][0], esc_['via'][1]), esc_['via'][2] / 2)] if esc_['via'] else []))
-            kept_.append(k_)
-        if kept_:
-            log(f'  whole-array field of {ref}: {len(kept_)} bus ball(s) the plan left no escape keep the one laid '
-                f'here before: {", ".join(kept_)}')
-        rep['kept_laid'] = kept_
-        # (...and a LATER bus's ball the plan escaped by none of its options keeps its earlier escape the same way, after
-        # the bus's: laid WHOLE here, via and run, as the field lays the other nets -- that bus keeps it as its tooth,
-        # and the engine below leaves a ball carrying its own copper. Planned again here, a bus's field left a later
-        # bus's two balls nothing, the engine escaped one, and that bus went to its fanout with the other bare)
-        later_kept = []
-        for k_, esc_ in sorted(was_.items()):
-            nm_ = k_.split('#')[0]
-            if k_ in chosen or nm_ in bus_s or nm_ not in later_s or k_ not in pads \
-                    or not _clears(esc_, cop_, r.fan_clear):
-                continue
-            p_ = pads[k_]
-            if esc_['via']:
-                vx_, vy_, vs_, vd_ = esc_['via']
-                vias.append({'x': vx_, 'y': vy_, 'size': vs_, 'drill': vd_, 'layers': ['F.Cu', 'B.Cu'],
-                             'net_id': p_.net_id})
-            tracks += [{'start': a_, 'end': b_, 'width': 2 * hw_, 'layer': L_, 'net_id': p_.net_id}
-                       for a_, b_, L_, hw_ in esc_['run'] if L_ in layers]
-            cop_.append((esc_['run'], [((esc_['via'][0], esc_['via'][1]), esc_['via'][2] / 2)] if esc_['via'] else []))
-            later_kept.append(k_)
-        if later_kept:
-            log(f'  whole-array field of {ref}: {len(later_kept)} later bus ball(s) the plan left no escape keep the '
-                f'one laid here before: {", ".join(later_kept)}')
-        rep['later_kept'] = later_kept
-        sited = f'{stem}.sited.kicad_pcb'
-        with contextlib.redirect_stdout(sys.stderr):
-            add_tracks_and_vias_to_pcb(bare, sited, tracks, vias, net_id_to_name={i: n.name for i, n in pcb.nets.items()})
-        fp.copy_pro(bare, sited)
-        bus_at = {(round(p.global_x, 3), round(p.global_y, 3)) for k, p in pads.items() if k.split('#')[0] in bus_s}
-        # (the bus's planned RUNS -- each escape's legs on its layer, past the dog-bone laid here -- stand in on the
-        # engine's board, not written: the step lays them, and the engine laying the balls the plan could not place
-        # saw none of them. A ball it escaped alone put its via and its run on a held tooth's run line, and the field
-        # that escaped every bus ball was read back with that tooth unreachable)
-        from kicad_parser import Segment
-        runs_in = [Segment(start_x=float(a_[0]), start_y=float(a_[1]), end_x=float(b_[0]), end_y=float(b_[1]),
-                           width=r.fan_track, layer=L_, net_id=pads[k].net_id)
-                   for k, (kind, o) in sorted(chosen.items())
-                   if k.split('#')[0] in bus_s and kind == 'escape'
-                   for a_, b_, L_ in o.legs if L_ == o.layer and L_ in layers]
-        runs_in += [Segment(start_x=float(a_[0]), start_y=float(a_[1]), end_x=float(b_[0]), end_y=float(b_[1]),
-                            width=2 * hw_, layer=L_, net_id=pads[k].net_id)
-                    for k in kept_ for a_, b_, L_, hw_ in was_[k]['run'] if L_ in layers]
-        with contextlib.redirect_stdout(sys.stderr):
-            lay(sited, out, ref, [], list(others), layers, {at: h for at, h in hints.items() if at not in bus_at},
-                plane_drop='off', stand_in_tracks=runs_in)
-    rep['laid_sites'] = len(vias)
-    return rep
 
 
 def _cross(p, q, a, b):
@@ -3316,126 +2817,6 @@ def bare_balls(board, ref, nets, track_width):
               for s in pcb.segments]
     return [f'{sn(p.net_name)}#{p.pad_number}' for p in pcb.footprints[ref].pads
             if p.net_id and sn(p.net_name or '') in want and not ball_has_copper(p, vias, tracks, track_width)]
-
-
-def carry(prev, cur, out, ref, others, drops, grow=1.5, release_near=(), in_place=False):
-    """A later round of the whole route keeps the array's other nets and plane balls as the previous round laid them,
-    as it keeps its own held teeth: each ball's PIECE on PREV -- its net's tracks and vias joined to it through their
-    ends, inside the array's box grown by `grow` (an escape ends past the boundary line; a strap's piece reaches both
-    its balls) -- is put on CUR, the round's board, if it still stands there: every track clear on its layer and every
-    via on every layer, checked as plan_array checks an option (braid obstacles at the round's sizes, the movable
-    passives skipped). OUT is CUR with the standing pieces. Returns (the ball keys NET#PAD to plan again -- a piece
-    the round's bus copper now meets, or a ball that had none -- , pieces kept, pieces moved). `release_near` (ball
-    keys): a piece whose balls stand within a pitch and a half of one of these is released too, so a ball left with
-    no way down or out is planned again with its neighbours rather than round their held copper. `in_place`: the
-    pieces are on CUR already (PREV is CUR) -- OUT is CUR with the pieces that do NOT stand taken off it: the first
-    round's own copper held to the parts its cap step has just put back over it (fanout_from_plan.joint_hold)."""
-    import braid as te
-    import fanout_from_plan as fp
-    import ship_vias
-    from kicad_parser import parse_kicad_pcb
-    from kicad_writer import add_tracks_and_vias_to_pcb
-    with contextlib.redirect_stdout(io.StringIO()):
-        old, now = parse_kicad_pcb(prev), parse_kicad_pcb(cur)
-    sn, sn_now = namer(old), namer(now)
-    want = {sn(n) for n in list(others) + list(drops)}
-    name_of = {i: sn(n.name) for i, n in old.nets.items()}
-    id_now = {sn_now(n.name): i for i, n in now.nets.items()}
-    foot = old.footprints[ref]
-    xs, ys = [p.global_x for p in foot.pads], [p.global_y for p in foot.pads]
-    box = (min(xs) - grow, min(ys) - grow, max(xs) + grow, max(ys) + grow)
-    inside = lambda x, y: box[0] <= x <= box[2] and box[1] <= y <= box[3]     # noqa: E731
-    segs, vias = collections.defaultdict(list), collections.defaultdict(list)
-    for s in old.segments:
-        if name_of.get(s.net_id) in want and inside(s.start_x, s.start_y) and inside(s.end_x, s.end_y):
-            segs[s.net_id].append(s)
-    for v in old.vias:
-        if name_of.get(v.net_id) in want and inside(v.x, v.y):
-            vias[v.net_id].append(v)
-    near = lambda a, b: abs(a[0] - b[0]) < 1e-3 and abs(a[1] - b[1]) < 1e-3    # noqa: E731
-    balls = [p for p in foot.pads if p.net_id and name_of.get(p.net_id) in want]
-    key_of = lambda p: f'{name_of[p.net_id]}#{p.pad_number}'                  # noqa: E731
-    pieces, claimed = [], set()
-    for p in balls:
-        if key_of(p) in claimed:
-            continue
-        nid, got_s, got_v = p.net_id, [], []
-        frontier = [(p.global_x, p.global_y)]
-        while frontier:
-            q = frontier.pop()
-            for s in segs[nid]:
-                if any(s is t for t in got_s):
-                    continue
-                a, b = (s.start_x, s.start_y), (s.end_x, s.end_y)
-                if near(a, q) or near(b, q):
-                    got_s.append(s)
-                    frontier += [a, b]
-            for v in vias[nid]:
-                if not any(v is w for w in got_v) and near((v.x, v.y), q):
-                    got_v.append(v)
-        pts = [(s.start_x, s.start_y) for s in got_s] + [(s.end_x, s.end_y) for s in got_s] + [(v.x, v.y) for v in got_v]
-        keys = sorted({key_of(b) for b in balls if b.net_id == nid
-                       and any(near((b.global_x, b.global_y), q) for q in pts)} | {key_of(p)})
-        claimed.update(keys)
-        if got_s or got_v:
-            pieces.append((keys, got_s, got_v))
-    sz = _sizes(now, now.footprints[ref])
-    skip = movable_refs(now, ref)
-    cache = {}
-    pos = {key_of(b): (b.global_x, b.global_y) for b in balls}
-    stuck = [pos[k] for k in release_near if k in pos]
-    if stuck:
-        import escape_moves as em
-        _g = em.grid_of(foot)
-        reach = 1.5 * min(_g.pitch_x, _g.pitch_y)
-    near_stuck = lambda keys: any(math.hypot(pos[k][0] - c[0], pos[k][1] - c[1]) < reach   # noqa: E731
-                                  for k in keys if k in pos for c in stuck) if stuck else False
-
-    def obs(nid, layer):
-        if (nid, layer) not in cache:
-            cache[(nid, layer)] = te.build_obstacles(now, nid, {nid}, layer, margin=sz['cl'] + sz['tw'] / 2,
-                                                     skip_refs=skip)
-        return cache[(nid, layer)]
-    stand, moved = [], []
-    for keys, ss, vv in pieces:
-        nid = id_now.get(name_of[(ss or vv)[0].net_id])
-        ok = nid is not None and not near_stuck(keys) \
-            and all(obs(nid, s.layer).seg_clear((s.start_x, s.start_y), (s.end_x, s.end_y)) for s in ss) \
-            and all(not (obs(nid, L).point_violation((v.x, v.y), pad=v.size / 2 - sz['tw'] / 2) or [0])[0]
-                    for v in vv for L in now.board_info.copper_layers)
-        (stand if ok else moved).append((keys, ss, vv))
-    if in_place:
-        from kicad_writer import remove_segments_from_content, remove_vias_from_content
-        n2n = {i: n.name for i, n in now.nets.items()}
-        content = open(cur, encoding='utf-8').read()
-        content, _n = remove_segments_from_content(content, [s for _k, ss, _v in moved for s in ss], n2n)
-        content, _n = remove_vias_from_content(content, [v for _k, _s, vv in moved for v in vv], n2n)
-        with open(out, 'w', encoding='utf-8') as f:
-            f.write(content)
-        fp.copy_pro(cur, out)
-        kept = {k for keys, _s, _v in stand for k in keys}
-        return sorted(key_of(p) for p in balls if key_of(p) not in kept), len(stand), len(moved)
-    # (a piece CUR has already is not laid again: the obstacles above are other nets', so a track or via of the net's
-    # own on CUR reads clear, and a round whose board came with the array's other balls fanned -- an earlier bus's
-    # field on the shared array -- had each carried twice: sdi_mipi_conv's DDR3 bus after the SDI bus, 168 vias
-    # stacked on their own copies)
-    rk = lambda x, y: (round(x, 3), round(y, 3))                                 # noqa: E731
-    have_s = {(s.net_id, s.layer, frozenset((rk(s.start_x, s.start_y), rk(s.end_x, s.end_y)))) for s in now.segments}
-    have_v = {(v.net_id, rk(v.x, v.y)) for v in now.vias}
-    tracks = [{'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y), 'width': s.width, 'layer': s.layer,
-               'net_id': id_now[name_of[s.net_id]]} for _k, ss, _v in stand for s in ss
-              if (id_now[name_of[s.net_id]], s.layer,
-                  frozenset((rk(s.start_x, s.start_y), rk(s.end_x, s.end_y)))) not in have_s]
-    new_vias = [{'x': v.x, 'y': v.y, 'size': v.size, 'drill': v.drill, 'layers': list(v.layers),
-                 'net_id': id_now[name_of[v.net_id]]} for _k, _s, vv in stand for v in vv
-                if (id_now[name_of[v.net_id]], rk(v.x, v.y)) not in have_v]
-    with contextlib.redirect_stdout(sys.stderr):
-        add_tracks_and_vias_to_pcb(cur, out, tracks, new_vias, [],
-                                   net_id_to_name={i: n.name for i, n in now.nets.items()})
-        ship_vias.stamp(out, 'joint escape (carried)', print)
-    fp.copy_pro(cur, out)
-    kept = {k for keys, _s, _v in stand for k in keys}
-    return sorted(key_of(p) for p in balls if key_of(p) not in kept), len(stand), len(moved)
 
 
 def undropped_balls(board, ref, drops, track_width):

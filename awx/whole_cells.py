@@ -10,7 +10,7 @@ the board alone, known before the solve.
 The solve (whole_solve.py) orders the lanes and gives each run a layer along one route coordinate; it does not see
 that a layer is shut across a lane's way. walls() reads it off the pieces for each lane and layer and says it in the
 solve's own form, a LAYER CUT (whole_route.layer_cut: the lane off that layer across a stretch of its route) --
-whole_solve takes them with its own built-in cuts under SOLVE_LAYER_WALLS."""
+whole_solve takes them with its own built-in cuts."""
 import math
 
 import numpy as np
@@ -161,7 +161,7 @@ def mouth(P, pt, d, reach, step):
     return int(pc[hit[0]]) if len(hit) else -1
 
 
-def walls(ctx, Fr, LNAME, refs, entry, end, ends, trk, clr, via, pitch, band=None, log=None):
+def walls(ctx, Fr, LNAME, refs, entry, end, ends, trk, clr, via, pitch, band, log=None):
     """the layer cuts the pieces give a bus's lanes BEFORE any plan: [{'lane', 'island', 'layer', 'box', 'blocked',
     'span', 'firm'}] -- whole_route.layer_cut's form with the lane's own stretch of route u, as whole_solve reads a
     round's.
@@ -176,11 +176,10 @@ def walls(ctx, Fr, LNAME, refs, entry, end, ends, trk, clr, via, pitch, band=Non
     where its line leaves its piece for good -- at the end itself where nothing is free in front of it -- and a
     lane cannot run from that end on that layer past it.
 
-    `band` None: the pieces of the WHOLE BOARD -- two of them have no way between them anywhere on the layer, and
-    a wall is exact. `band` a length: the pieces of the lane's own BAND, its line and that far either side: a way
-    round farther off its line than that counts as none. (An earlier bus's tracks fanning out of the source shut a
-    layer across every lane that leaves beside them; the way round the far end of those tracks is on the board, and
-    no lane's.) That is a judgement of how far the geometry takes a lane off its line, not a fact of the board.
+    `band` a length: the pieces of the lane's own BAND, its line and that far either side: a way round farther off
+    its line than that counts as none. (An earlier bus's tracks fanning out of the source shut a layer across every
+    lane that leaves beside them; the way round the far end of those tracks is on the board, and no lane's.) That is
+    a judgement of how far the geometry takes a lane off its line, not a fact of the board.
 
     `entry` / `end`: each lane's route u at its ends. A cut's `span` is the COPPER's own stretch, as a round's cut
     gives an island's: whole_solve holds the lane off the layer a track's bar either side of it (to the two free
@@ -218,16 +217,15 @@ def walls(ctx, Fr, LNAME, refs, entry, end, ends, trk, clr, via, pitch, band=Non
             ms = {e: mouth(P, pt, d, reach, step) for e, (pt, d) in stub.items()}
             if (pc >= 0).all() and len(set(pc.tolist()) | set(ms.values())) == 1:
                 continue                    # (the line itself is a free way, its ends in the same piece: no wall)
-            if band is not None:
-                # (the lane's band: its line, and its stubs' mouths, `band` either side)
-                parts = [LineString(xy)]
-                for pt, d in stub.values():
-                    dl = math.hypot(*d) if d is not None else 0.0
-                    if dl > 1e-9:
-                        parts.append(LineString([pt, (pt[0] + d[0] / dl * reach, pt[1] + d[1] / dl * reach)]))
-                P = F.pieces(L, unary_union(parts).buffer(band))
-                pc = P.at(xy)
-                ms = {e: mouth(P, pt, d, reach, step) for e, (pt, d) in stub.items()}
+            # (the lane's band: its line, and its stubs' mouths, `band` either side)
+            parts = [LineString(xy)]
+            for pt, d in stub.values():
+                dl = math.hypot(*d) if d is not None else 0.0
+                if dl > 1e-9:
+                    parts.append(LineString([pt, (pt[0] + d[0] / dl * reach, pt[1] + d[1] / dl * reach)]))
+            P = F.pieces(L, unary_union(parts).buffer(band))
+            pc = P.at(xy)
+            ms = {e: mouth(P, pt, d, reach, step) for e, (pt, d) in stub.items()}
             # the line's places in turn: (route u, piece, its point) -- an end with nothing free in front of it a
             # piece of its own
             seq = []

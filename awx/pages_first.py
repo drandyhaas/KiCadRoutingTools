@@ -35,7 +35,7 @@ This planner chooses BOTH ends and the page of every net in ONE CP-SAT:
     net the braid did not key (the braid's nesting: front face by position
     across the bundle, side faces nested first-exiter innermost, the far
     face outermost). A net may still be left to swim, at a price
-    of PLAN_PAGES_SWIM vias, so an infeasible instance answers with the
+    of PAGES_SWIM vias, so an infeasible instance answers with the
     fewest swimmers instead of nothing;
   * two moves that cannot both be laid (select_moves._conflict) exclude
     each other; berths a caller holds `fixed` are one-move menus; `learned`
@@ -43,7 +43,7 @@ This planner chooses BOTH ends and the page of every net in ONE CP-SAT:
 The braid then verifies the plan with its own planner (judge_by_braid): a
 net it still swims is a disagreement between these keys and its order,
 printed by name. Deterministic: CP-SAT under a deterministic-time budget
-with interleaved search (PLAN_PAGES_DET), never wall-clock.
+with interleaved search (PAGES_DET), never wall-clock.
 """
 from __future__ import annotations
 
@@ -120,20 +120,17 @@ class Frame:
             return sg * (self.Ht + 0.5 + (a + self.Hu))
         return sg * (self.Ht + 0.5 + 2 * self.Hu + 1.0 + (self.Ht - sg * x))
 
-PAGES_DET = float(awx_settings.get('PLAN_PAGES_DET', '40'))     # CP-SAT deterministic time. 40 (2026-09-14): at 20 the K41 solve stops FEASIBLE with 4 swimmers, at 40 with 2-3, 80 adds nothing; on the ladder 20 -> 40 took K41 87 -> 79/81 and K51 125 -> 115 complete, within the time budget (K41 92 s)
-PAGES_WORKERS = int(awx_settings.get('PLAN_PAGES_WORKERS', '4'))
-PAGES_SWIM = float(awx_settings.get('PLAN_PAGES_SWIM', '100'))  # vias: the price of a net left to swim
-PAIR_SWIM = float(awx_settings.get('PLAN_PAIR_SWIM', '3') or 3)   # a pair leg's swim price, times PAGES_SWIM (2026-09-20: SDQS1 planned as a swimmer weaved 6 page crossings)
+PAGES_DET = 40.0      # CP-SAT deterministic time. 40 (2026-09-14): at 20 the K41 solve stops FEASIBLE with 4 swimmers, at 40 with 2-3, 80 adds nothing; on the ladder 20 -> 40 took K41 87 -> 79/81 and K51 125 -> 115 complete, within the time budget (K41 92 s)
+PAGES_WORKERS = 4
+PAGES_SWIM = 100.0    # vias: the price of a net left to swim
+PAIR_SWIM = 3.0       # a pair leg's swim price, times PAGES_SWIM (2026-09-20: SDQS1 planned as a swimmer weaved 6 page crossings)
 PAGES_LOG = int(awx_settings.get('PLAN_PAGES_LOG', '0'))        # 1 = per-net choice printed
-PAGES_ITERS = int(awx_settings.get('PLAN_PAGES_ITERS', '3'))    # re-key on the chosen plan, at most this often
-PAGES_SIDEKEY = int(awx_settings.get('PLAN_PAGES_SIDEKEY', awx_settings.get('PLAN_PAGES_SIDERS', '1')))
+PAGES_ITERS = 3       # re-key on the chosen plan, at most this often
+# a destination candidate's key on a side face (braid_slots): 0 its own slot (_alt_slot); 1 its side's comb where it
+# tests a side exit; 2 the comb for every stub across the spine, head-on or not (braid.PAGES_SIDERS reads the same)
 PAGES_SIDERS_MODE = int(awx_settings.get('PLAN_PAGES_SIDERS', '1'))
-PAGES_STRICT = int(awx_settings.get('PLAN_PAGES_STRICT', '1'))   # destination exclusions by the STRICT conflict test (the engine lays the geometry asked; non-strict let 14 verbatim berths collide at K41)
-PAGES_HINT = int(awx_settings.get('PLAN_PAGES_HINT', '1'))      # 1 = the seed plan (the greedy's berths, the teeth as they stand) as the CP-SAT's solution hint. At DET 20 it measured WORSE standalone (K41 obj 2359.8 / 4 swimmers -> 2659.4 / 5); at DET 40 on the LADDER it is worth 2 vias at K41 (81 -> 79) and completion at K51 (106 / SA2 open -> 115 complete), 2026-09-14 pg2 vs pg3. On, with DET 40.
-PAGES_JOINKEY = int(awx_settings.get('PLAN_PAGES_JOINKEY', '1'))  # 1 = a side exit's slot depends on its SOURCE class: lanes whose tooth is a joiner sit outermost of the block, by tooth position (the braid's exit-block rule)
-# PLAN_PAGES_MISMATCH: the price of an end whose layer is not its page, as
-# a multiple of a via (1 = as it was).
-PAGES_MISMATCH = float(awx_settings.get('PLAN_PAGES_MISMATCH', '1') or 1)
+PAGES_STRICT = 1      # destination exclusions by the STRICT conflict test (the engine lays the geometry asked; non-strict let 14 verbatim berths collide at K41)
+PAGES_MISMATCH = 1.0  # the price of an end whose layer is not its page, as a multiple of a via
 # THE INSTANCE, WRITTEN OUT (2026-09-15, session 9): PLAN_PAGES_DUMP=<dir>
 # writes every CP-SAT model this module solves, as built and hinted, to
 # <dir>/<board>_solve<n>.pb (binary CpModelProto) beside a .json naming the
@@ -352,7 +349,7 @@ def braid_slots(st, board, names, seed, src_seed, D, S, log):
         return te.other_layer(L) if _M is not None else L
     def _fr_dir(d):
         return [d[0], -d[1]] if _M is not None else list(d)
-    errs: Dict[str, list] = {}       # net -> [(end, candidate, exception)] for the candidates no key could be built for          # PAGES_JOINKEY: the joined variant of each dest key; joiner flag per source candidate
+    errs: Dict[str, list] = {}       # net -> [(end, candidate, exception)] for the candidates no key could be built for
     for c in corridors:
         if not hasattr(c, 'launch_o') or not hasattr(c, 'target_o'):
             continue
@@ -387,7 +384,7 @@ def braid_slots(st, board, names, seed, src_seed, D, S, log):
                     # or not it tests head-on on the seed -- among a face's
                     # stubs the order is by position either way, and the one
                     # the braid makes head-on (the most upstream) is innermost
-                    if PAGES_SIDEKEY and (not g.get('head') or (PAGES_SIDERS_MODE == 2 and abs(along) < 0.5)):
+                    if PAGES_SIDERS_MODE and (not g.get('head') or (PAGES_SIDERS_MODE == 2 and abs(along) < 0.5)):
                         # a SIDE-FACE stub (its direction across the spine).
                         # The braid's relative head-on test makes the most
                         # upstream stub of the face head-on and every other
@@ -451,7 +448,6 @@ def braid_slots(st, board, names, seed, src_seed, D, S, log):
                     errs.setdefault(nm, []).append(('src', sr.fmt_ask(s), repr(e)))
             lkeys[nm] = lk
     braid_slots.extra = (jkeys, joiner)
-    braid_slots.errors = errs
     # for the instance dump: the seed plan's corridors and each net's taut
     # arrival at its destination (what cluster_corridors groups on)
     try:
@@ -487,33 +483,6 @@ def verify(st, board, names, dst_choice, src_choice):
     return swim, bp, cost
 
 
-def _pairs_off(names, bp):
-    """The model-vs-braid KEY disagreement on a verified plan (section E's
-    instrument): over the pairs the braid put in one corridor, how many
-    the last solve's keys (L, T) order differently from the braid's slots
-    (launch_idx, target_idx). Returns (off, pairs) or None."""
-    keys = getattr(_solve, 'last_keys', None)
-    if not keys:
-        return None
-    L, T = keys['L'], keys['T']
-    ns = [n for n in names if n in L and bp.get(n, {}).get('launch_idx') is not None
-          and bp[n].get('target_idx') is not None]
-    off = tot = 0
-    for i, a in enumerate(ns):
-        for b in ns[i + 1:]:
-            if bp[a]['corridor'] != bp[b]['corridor']:
-                continue
-            tot += 1
-            # does the MODEL think the pair crosses where the braid does not,
-            # or the reverse? (orientation-invariant: a mirrored frame flips
-            # every order and no crossing)
-            x_model = (L[a] < L[b]) != (T[a] < T[b])
-            x_braid = (bp[a]['launch_idx'] < bp[b]['launch_idx']) != (bp[a]['target_idx'] < bp[b]['target_idx'])
-            if x_model != x_braid:
-                off += 1
-    return off, tot
-
-
 def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=None):
     """The pages-first choice, re-keyed on its own answer until the braid's
     planner agrees (at most PAGES_ITERS solves). `src_free` False: the tooth
@@ -525,7 +494,7 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
     seed_d = dict(seed or {})
     seed_s: Dict[str, Move] = {}
     hold_d, hold_s, avoid = None, None, None
-    for it in range(max(1, PAGES_ITERS)):
+    for it in range(PAGES_ITERS):
         fx = dict(fixed or {})
         if hold_d:
             fx.update(hold_d)
@@ -699,12 +668,14 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
         missing = [n for n in names if corr[n] == -1]
         if missing:
             log(f'  pages-first: {len(missing)} net(s) keyed by the frame, not the braid: {missing}')
+        # a side exit's slot depends on its SOURCE class: lanes whose tooth is a joiner sit outermost of the block, by
+        # tooth position (the braid's exit-block rule) -- the joined key of each destination candidate, and the joiner
+        # flag of each source candidate
         jkeys_b, joiner_b = getattr(braid_slots, 'extra', ({}, {}))
-        if PAGES_JOINKEY:
-            for n in names:
-                if corr[n] != -1 and n in jkeys_b and all(v is not None for v in jkeys_b[n]):
-                    jkey[n] = [int(round(v * 1000)) for v in jkeys_b[n]]
-                    jflag[n] = list(joiner_b.get(n, []))
+        for n in names:
+            if corr[n] != -1 and n in jkeys_b and all(v is not None for v in jkeys_b[n]):
+                jkey[n] = [int(round(v * 1000)) for v in jkeys_b[n]]
+                jflag[n] = list(joiner_b.get(n, []))
 
     # ---- the model
     m = cp_model.CpModel()
@@ -920,7 +891,7 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     excl_d = []
     Sreal = {n: [mv for mv in S[n] if mv.legs] for n in names}
     idx_real = {n: [i for i, mv in enumerate(S[n]) if mv.legs] for n in names}
-    excl_d = _conflicts(D, strict=bool(PAGES_STRICT), xing=PAGES_XING)
+    excl_d = _conflicts(D, strict=True, xing=PAGES_XING)
     for (a, i, b, j) in excl_d:
         m.AddBoolOr([xd[a][i].Not(), xd[b][j].Not()]); nconf += 1
     for (a, i, b, j) in _conflicts(Sreal, strict=True, xing=PAGES_XING):
@@ -949,10 +920,13 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                         for j, sb in enumerate(sig_d[b]):
                             if {sa, sb} == set(pair):
                                 m.AddBoolOr([xd[a][i].Not(), xd[b][j].Not()]); nconf += 1
-    if PAGES_HINT and seed:
+    if seed:
         # the seed as a hint: its berth per net (the greedy's, or the cheapest
         # for a net it left unplaced) and the tooth as it stands; the pages
-        # and the rest are the solver's to complete
+        # and the rest are the solver's to complete. At DET 20 it measured
+        # WORSE standalone (K41 obj 2359.8 / 4 swimmers -> 2659.4 / 5); at
+        # DET 40 on the LADDER it is worth 2 vias at K41 (81 -> 79) and
+        # completion at K51 (106 / SA2 open -> 115 complete), 2026-09-14
         sig_seed = {n: sr.move_sig(seed[n]) for n in names if n in seed}
         for n in names:
             js_ = [j for j, mv in enumerate(D[n]) if sr.move_sig(mv) == sig_seed.get(n)]
@@ -971,7 +945,7 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
         m.export_to_file(_stem + '.pb')
         with open(_stem + '.json', 'w', encoding='utf-8') as _f:
             _json.dump({'board': board, 'names': names, 'det': PAGES_DET, 'workers': PAGES_WORKERS,
-                        'hint': bool(PAGES_HINT and seed), 'held': sorted(hold_s) if hold_s else [],
+                        'hint': bool(seed), 'held': sorted(hold_s) if hold_s else [],
                         'n_berth': sum(len(v) for v in D.values()), 'n_tooth': sum(len(v) for v in S.values()),
                         'pairs': npairs, 'exclusions': nconf,
                         'via_w': VIA_W, 'chan_w': CHAN_W, 'swim': PAGES_SWIM, 'mismatch': PAGES_MISMATCH, 'scale': SCALE,
@@ -1085,8 +1059,6 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
         for n in sorted(names, key=lambda n: solver.Value(L[n])):
             rep.append(f'     {n:6s} page {pages[n][0]}  L {solver.Value(L[n]) / 1000:7.2f}  T {solver.Value(T[n]) / 1000:7.2f}'
                        f'  tooth {sr.fmt_ask(src_choice[n]) if n in src_choice else "(as is)"}  berth {sr.fmt_ask(dst_choice[n])}')
-    _solve.last_keys = {'L': {n: solver.Value(L[n]) for n in names}, 'T': {n: solver.Value(T[n]) for n in names},
-                        'corr': dict(corr)}
     return dst_choice, src_choice, rep, {'vias': vias, 'swim': len(swim), 'ff': ff, 'pages': pages, 'value': value,
                                          'moved': [], 'status': solver.StatusName(status),
                                          'obj': solver.ObjectiveValue() / SCALE, 'cap': None}

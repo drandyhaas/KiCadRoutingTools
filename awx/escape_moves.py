@@ -104,8 +104,17 @@ def _row_pads(footprint):
     if len(inner) > 1 or len(rows) < 4 or \
             any(max(p.size_x, p.size_y) < 1.5 * min(p.size_x, p.size_y) for p in rows):
         return None
-    pitch = min(min(((p.global_x - q.global_x) ** 2 + (p.global_y - q.global_y) ** 2) ** 0.5
-                    for q in rows if q is not p) for p in rows)
+    # (the nearest pad on a copper layer of its own: a TWO-SIDED row -- an edge connector's fingers, one on each face
+    # -- read its pitch as the step between its two faces' fingers, 0 where they stand on each other)
+    def cu(p):
+        got = {L for L in (getattr(p, 'layers', None) or ['*.Cu']) if L.endswith('.Cu')}
+        return None if '*.Cu' in got else got
+
+    def share(p, q):
+        a, b = cu(p), cu(q)
+        return a is None or b is None or bool(a & b)
+    pitch = min(min((((p.global_x - q.global_x) ** 2 + (p.global_y - q.global_y) ** 2) ** 0.5
+                     for q in rows if q is not p and share(p, q)), default=float('inf')) for p in rows)
     return rows, pitch
 
 

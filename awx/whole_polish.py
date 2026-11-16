@@ -288,7 +288,7 @@ for ref_, fp in ctx.pcb.footprints.items():            # (labelled by the board'
 for s in ctx.base_segments:
     STATIC.append(('seg', {s.layer}, s.net_id, (s.start_x, s.start_y, s.end_x, s.end_y, s.width / 2), 'copper'))
 for v in ctx.base_vias:
-    # (its radius for a via's bar, and its reach for a lane's: the router's ring, SVIA_RING -- pairs.svia_reach)
+    # (its radius for a via's bar, and its reach for a lane's: the router's ring -- pairs.svia_reach)
     STATIC.append(('circ', set(RL), v.net_id, (v.x, v.y, v.size / 2, _pairs.svia_reach(cfg, v.x, v.y, v.size)),
                    whole_ctx.joint_via_island(ctx, v) or 'via'))
 # a held pair's END LEGS are laid where they are drawn: copper the singles are fitted round -- and a crossed pair's
@@ -511,7 +511,7 @@ def static_seg(p0, p1, L, own, cut=math.inf, pair=False):
         if L not in Ls or net in own:
             continue
         if kind == 'circ':
-            r_ = d[3] if len(d) > 3 else d[2]          # (a via on the board: its reach for a lane, SVIA_RING)
+            r_ = d[3] if len(d) > 3 else d[2]          # (a via on the board: its reach for a lane, pairs.svia_reach)
             if far(d[0], d[1], d[0], d[1], r_):
                 continue
             c = np.array([d[0], d[1]])

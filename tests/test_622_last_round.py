@@ -37,7 +37,7 @@ def main():
             argv = argv[argv.index('--') + 1:]
         script, args = argv[0], list(argv[1:])
         out, rc = '', 0
-        if script == 'whole_geo.py':
+        if script in ('whole_geo.py', 'whole_embed.py'):
             json.dump({'cuts': [], 'vcuts': []}, open(args[1], 'w'))
         elif script == 'whole_polish.py':
             json.dump({'flips': [], 'vcuts': []}, open(args[1], 'w'))

@@ -113,16 +113,12 @@ def admissible(pcb, net):
     so a net the bench fans out is one the ladder admits."""
     import pairs as _pairs
     import rules as _rules
-    import awx_settings
-    # (a pull pad the bus step's escape fanout joined to the lane -- BUS_ATTACHED, route_bus.attach_pulls -- is none
-    # of the net's ends: its stub stands on the board, connected when the lane is)
-    attached = {h for h in (awx_settings.get('BUS_ATTACHED') or '').split(',') if h}
     keys = net_keys(pcb)
     prs = _pairs.pair_names(list(set(keys.values())), admit_all=True)   # admission ignores BRAID_PAIR_ONLY
     partner = {}
     for _b, (_pn, _nn) in prs.items():
         partner[_pn], partner[_nn] = _nn, _pn
-    pads = [p for p in net.pads if f'{p.component_ref}.{p.pad_number}' not in attached]
+    pads = list(net.pads)
     if len({p.component_ref for p in pads}) < 2:
         return False
     if len(pads) == 2:
@@ -150,16 +146,11 @@ def admissible(pcb, net):
     return len(ends) == 2 and len({p.component_ref for p in ends}) == 2
 
 
-def coherent_nets(K, board=BENCH, bare_ok=None):
+def coherent_nets(K, board=BENCH, bare_ok=False):
     """The first K routable nets of the coherent ladder: two-pad nets
     between two components that are fanned out on `board` (a free
-    stub end exists at the source) -- or, with `bare_ok` (default: the
-    escape fanout, FANOUT_ESCAPE), bare at both (braid.bare_lane: the
-    escape fanout lays both of its ends from the pads)."""
-    if bare_ok is None:
-        sys.path.insert(0, HERE)
-        import awx_settings
-        bare_ok = awx_settings.get('FANOUT_ESCAPE') == '1'
+    stub end exists at the source) -- or, with `bare_ok`, bare at both
+    (braid.bare_lane: a fanout that lays both of its ends from the pads)."""
     flat = [n for r in _rivers(board) for n in r]
     sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
     sys.path.insert(0, HERE)

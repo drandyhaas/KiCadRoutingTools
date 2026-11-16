@@ -716,51 +716,31 @@ python3 tests/stress/placement_survey.py report rows.jsonl
 
 ## The bus boards check (`bus_boards.py`, not run by default)
 
-`python3 tests/stress/bus_boards.py [--cases A,B] [--out DIR] [-j N] [--set K=V]`
-routes every bus of each board in `tests/fixtures/bus_boards` (pre-bus inputs, planes
-poured, gzipped with their `.kicad_pro`/`.kicad_dru`; `manifest.json` holds each
-board's `route_bus.py` arguments -- all its buses in one call, so the step routes them
-in turn or negotiates as it decides) with `--rounds 1`, and grades the board the step
-hands on against its input (`awx/route_bus.board_grade`, read off the board, not the
+`python3 tests/stress/bus_boards.py [--cases A,B] [--out DIR] [-j N] [--rounds R] [--set K=V]`
+runs the bus step (`awx/route_bus.py`, `--inproc`, `--rounds 1` by default) on each
+board in `tests/fixtures/bus_boards` (pre-bus inputs, planes poured, gzipped with their
+`.kicad_pro`/`.kicad_dru`). `manifest.json` holds each board's SIZES alone -- the
+routing CLIs' flags of its chain (`--clearance-ceiling`, `--track-width`,
+`--fanout-track-width`, `--via-size`, `--via-drill`, and a floor such as
+`--hole-to-hole-clearance` where the chain set one) -- and no `--bus`: the step finds the
+buses itself (`route_bus.bus_plan`, at those sizes) and routes them all in one call, each
+source's buses one group (one model chooses every bus's ends and the arrays' fanout, and
+every bus is routed on that shared field at the same time). `python3 awx/route_bus.py
+BOARD --find SIZES` prints the plan the step will take -- the buses, the parts it leaves
+to the router, each with why -- before an hour is spent on it. The board the step hands
+on is graded against its input (`awx/route_bus.board_grade`, read off the board, not the
 step's own count) for three things: every bus net's pads on the bus's own parts one
 piece of copper (`check_connected.check_net_connectivity`, zones credited; a net's pads
 elsewhere -- a termination, a test point -- are left to the chain's later steps), no DRC
-violation the step made (the bus nets' own and the board's past those it came with),
-and no ball of the buses' arrays walled in. Exit 0 when every board is clean on all
-three; the table and `OUT/report.json` name the open nets, the DRC count, the walled
-balls, each bus's grade, and the time.
+violation the step made (the bus nets' own and the board's past those it came with), and
+no ball of the buses' arrays walled in. Exit 0 when every board is clean on all three;
+the table and `OUT/report.json` name the open nets, the DRC count, the walled balls,
+each bus's grade, and the time.
 It is an hour or more of routing, so `tests/run_all.py` does not collect it (it lives
 under `tests/stress/`); run it before committing a change to the bus step (`awx/`),
-and `--set K=V` runs an arm of a change behind a setting. A negotiated board starts a
+and `--set K=V` runs every board under a setting. A group of several buses starts a
 routing process per bus: keep `-j` so the processes at once stay within the machine's
 routing budget.
-
-### Bus by bus (`bus_steps.py`): isolate a change, minutes not hours
-
-The boards' buses route in turn, so a change to one bus moves every bus after it, and a
-board is an hour or more. `tests/stress/bus_steps.py` takes a bus boards run apart:
-
-- `bus_steps.py record RUN_DIR STEPS_DIR` -- each bus a STEP: the board the buses before
-  it left in that run, and the settings route_bus gave it (an escape bus on an array an
-  earlier bus went through: the shared array planned whole with it, its ends on the
-  board before, the later buses' nets). Record once, from a run you trust.
-- `bus_steps.py run STEPS_DIR -j 6` -- every step routed alone, at once, on its recorded
-  board, graded as `bus_boards.py` grades a board. A later bus is judged on the same input
-  whatever an earlier bus does now. For a change to the fanout, the ends or the solve.
-  `--after RUN_OUT` starts each step on the board its previous step left in that run
-  instead: a later bus on this tree's earlier bus (an escape bus plans the later buses'
-  teeth on a shared array, so a fix there shows only in the bus after it).
-- `bus_steps.py replay STEPS_DIR -j 6` -- every step's recorded round again
-  (`awx/replay_round.py`: its fanout as recorded, the solve, the loop, the geometry and
-  the lay by this tree), with its round-1 audit and its laid open count beside the
-  recorded run's own: 25 s to 12 min a bus, the eleven recorded ones in about 13 min at
-  `-j 5`. For a change to the solve, the loop, the geometry, the polish or the lay.
-  `--keep-solve` takes the recorded first solve too -- only while the frame code is the
-  recording run's: a recorded solve on a frame changed since gave the loop's re-solve
-  no plan its warm start had.
-
-Judge one change at a time this way -- `replay` or `run` first, then the boards
-(`bus_boards.py`) before a commit.
 
 ## Replaying & A/B (no LLM)
 

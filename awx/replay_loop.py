@@ -38,7 +38,7 @@ def main():
         with open(os.path.join(outd, 'loop.log'), 'w') as lf:
             say = wr.Log(lf)
             wr.relayed(outd, env['BENCH'], json.load(open(plan)), env, say)
-            rc = wr.loop(plan, os.path.join(outd, 'loop'), wr.loop_rounds(), env, say)
+            rc = wr.loop(plan, os.path.join(outd, 'loop'), wr.LOOP_ROUNDS, env, say)
     for ln in open(os.path.join(outd, 'loop.log'), errors='replace'):
         if ln.startswith('===') or 'smooth:' in ln:
             print(ln.rstrip()[:200])

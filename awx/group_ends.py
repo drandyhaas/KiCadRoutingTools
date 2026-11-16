@@ -17,7 +17,7 @@ model with no state names the lanes its rules cannot hold together, those lanes'
 it is built again -- until a state stands, or the lanes named have their whole menus already (then that is the answer,
 and the run stops). --full: every ball its whole menu from the start.
 
-THE TIERS (GROUP_TIERS, the default): every BUS ball's whole menu is built, each move tagged with the first tier that
+THE TIERS: every BUS ball's whole menu is built, each move tagged with the first tier that
 holds it -- 0 the pattern, 1 the pattern from the next gap point that stands clear (a pair's balls: the lines too), 2
 the straight moves toward the bus's other part from every clear gap point and from a via in the pad, 3 those by every
 face, 4 the lines, 5 the rest. THE MENUS BY NEED AND BY USE: the model is offered a bus ball's first TIER_MENU tiers
@@ -91,7 +91,8 @@ boards -- but never all at once: on its whole menus at once, a four-bus group's 
 when it was stopped.
 Each solve bounded by deterministic batches, never a clock. A model solved again after a check or a lesson of the
 field laid (a repair, holding most lanes) that leaves a costly ball searches the lanes nearest it once more, as an
-epoch (COSTLY_TRIES). (GROUP_TIERS=0: the weighted search, then the rest alone under the upper rank it reached.)
+epoch (COSTLY_TRIES). (No bus ball tiered -- --full, every ball on its whole menu from the start: the weighted search,
+then the rest alone under the upper rank it reached.)
 Its state is CHECKED BY THE WHOLE
 SOLVE, bus by bus, as a bus's own ends were (whole_ends.joint_choose): a refusal teaches -- lanes held to one layer,
 crossings held apart, the lanes' state refused -- the lanes named get their whole menus, and the model is solved again
@@ -138,7 +139,7 @@ import awx_settings  # noqa: E402
 
 # CP-SAT's interleaved batches (reproducible): a four-bus model's search fell to an eighth of its 80th batch's objective
 # between its 80th and 130th, and stood still from there to its 320th
-BATCHES = int(awx_settings.get('GROUP_BATCHES') or '160')
+BATCHES = 160
 # the search's full workers: none with the linear relaxation -- that one found none of 146 improvements and took 130 s
 # of a 195 s search's wall time, each of its batches 8.7 s for a second of work -- and TWO of them, so that two of
 # the four workers are the neighbourhood searches (CP-SAT gives those what the full workers leave): with three full
@@ -149,7 +150,7 @@ SEARCH_STALL = 8    # a search from a searched state: stopped at this many model
 WIDE_A_ROUND = 16   # a large set of rules that cannot hold together: its balls widened this many a round, at most
 ROWS = 2           # the pattern's surface escapes: from this many outer rows (build_menus `pattern`)
 OTHER = 'array'     # an array's balls that are no bus's, in the model's names: lanes at the array alone
-START_WORK = float(awx_settings.get('GROUP_START_WORK') or '120')   # the start's deterministic seconds, one worker
+START_WORK = 120.0  # the start's deterministic seconds, one worker
 BARE = 2.0          # mm round an array's balls: a bus's own fanout's copper there is not the group's
 EPS = 1e-4
 # two lanes of two buses that meet with their exits nearer than this round the array (mm) leave on two layers: the
@@ -172,9 +173,7 @@ DROP_CELL = 1.0     # mm: drop_hits' grid, a drop tested against the escapes who
 # 1 the pattern from the next clear site (a pair's balls: the lines too), 2 the straight moves toward the bus's other
 # part from every clear site and from a via in the pad, 3 those by every face, 4 the lines, 5 the rest -- the model
 # offered its first TIER_MENU tiers (below), and the search's start (tier_search) each lane on its first TIER_START
-# tiers where a state allows. 0 = the pattern and a refusal's widening, the start nearest the ends wanted and the
-# search, as before
-GROUP_TIERS = (awx_settings.get('GROUP_TIERS') or '1') == '1'
+# tiers where a state allows
 TIER_START = 1      # the start: each lane on its first tiers up to this one wherever a state allows
 TIER_OVER = 50.0    # ...a lane past them priced this many vias in the start alone
 # THE MENUS BY NEED AND BY USE: a bus ball is offered its first TIER_MENU tiers in the model; its whole menu where a
@@ -184,7 +183,7 @@ TIER_OVER = 50.0    # ...a lane past them priced this many vias in the start alo
 # took, and the next stretch. Every lane on its whole menu at once, the tiers' four-bus model was 371k variables and
 # 1.24M rows (some 4 GB built) where its first three tiers are 137k and 389k; the lanes' wide moves earned most of the
 # search's gain on two boards (capped at the third tier, 372 -> 366 and 545 -> 523 where they reached 339 and 469)
-TIER_MENU = int(awx_settings.get('GROUP_TIER_MENU') or '3')     # 5: every bus ball on its whole menu in every model
+TIER_MENU = 3
 EPOCH_LANES = 16
 EPOCH_STALL = 12
 EPOCH_SWEEPS = 12   # a sweep that gained a hundredth of the objective is followed by another, its stretches drawn
@@ -201,7 +200,7 @@ LNS_HOT = 3         # rounds about one costly ball (fanned out, walled) with no 
 # Ranked above everything below it, one change outweighed any number of crossings and any length
 CHANGE_VIAS = 2.0
 # (a bus's own run's settings that name ITS fanout: not the group's)
-OWN_KEYS = ('FANOUT_JOINT', 'FANOUT_ESCAPE', 'FANOUT_NETS', 'DEST', 'ENDS_CAPTURE', 'ENDS_ONLY')
+OWN_KEYS = ('FANOUT_NETS', 'DEST', 'ENDS_CAPTURE', 'ENDS_ONLY')
 
 
 def option_tier(b, k_, l_, i_, tier_of):
@@ -250,7 +249,7 @@ def stretch_balls(buses, stretch):
 
 
 def tier_search(m, meta, log, seed=1, hint=None, pool=None):
-    """THE SEARCH ON TIERED MENUS (GROUP_TIERS) of model `m`, its objective set. `meta`: 'lanes' [{'x': [the option
+    """THE SEARCH ON TIERED MENUS of model `m`, its objective set. `meta`: 'lanes' [{'x': [the option
     variables of each end], 'tier': [their tiers], 'at': [the places of its balls at each end]}], 'others' [{'vars',
     'at'}] (the arrays' other balls), 'W_TOP' (a walled ball's, or a plane ball fanned out's, price).
     THE START: the whole model, each lane priced TIER_OVER vias past its first TIER_START tiers -- a state as near the
@@ -1027,7 +1026,6 @@ def place_round(box, d, p):
     return int(round(s * 1000))
 
 
-FAR_W = None                # (main: GROUP_FAR) a far-face tooth's price a leg in vias; None: whole_ends.FAR_TOOTH
 CHECK_DUMP = None           # (main: GROUP_CHECK_DUMP) a directory each check's bench is written to, or None
 ROW_STAGGERS = 1            # a fine-pitch row part's fan-out zone: this many rows of vias past the stubs' ends
 
@@ -1356,9 +1354,8 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, cutvar=False, feedbac
         # (what the group prices beside a bus's own ends, for its descents: a tooth on the shared source's FAR FACE --
         # the bus's own ends price it as a side face there, the group past any count of vias (main: `far`). Without
         # it the descents' ends put nine lanes of a four-bus group on far-face teeth, the start's with them)
-        fw_ = we.FAR_TOOTH if FAR_W is None else FAR_W
-        B.dear = {(lane, 0): {i: fw_ * len(lg) for i, o in enumerate(E.T[lane])
-                              if o[0] and o[0][0].direction == 'left'} for lane, lg in E.lanes} if fw_ else {}
+        B.dear = {(lane, 0): {i: we.FAR_TOOTH * len(lg) for i, o in enumerate(E.T[lane])
+                              if o[0] and o[0][0].direction == 'left'} for lane, lg in E.lanes}
         if arr[1] is not None:
             # (THE START, as a bus's own ends chose theirs: its own run's ends DESCENDED at the cut
             # (whole_ends.joint_descent). THE CUT round a ball array destination: its far face's middle -- each lane
@@ -2529,7 +2526,6 @@ def bus_stage(out_path, base, log=print):
     if bare:
         raise SystemExit(f'group ends: {dest}: no copper of its net at the end the group\'s model laid for '
                          + ', '.join(bare))
-    import shutil
     shutil.copyfile(base, out_path)
     fp.copy_pro(base, out_path)
     side = {k: {n: plan[k][n] for n in names} for k in ('ends', 'tooth_layer', 'dest_layer', 'tooth_dir', 'stub_dir')}
@@ -2566,6 +2562,9 @@ def bus_stage(out_path, base, log=print):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     flags = [a for a in sys.argv[1:] if a.startswith('--')]
+    if '--help' in flags or '-h' in sys.argv[1:] or len(args) < 2:
+        print('usage: ' + __doc__.split(' -- ', 1)[0].strip())
+        sys.exit(0 if '--help' in flags or '-h' in sys.argv[1:] else 2)
     cap_dir, out = args[0], args[1]
     board = next((a.split('=', 1)[1] for a in flags if a.startswith('--board=')), None)
     if not board:
@@ -2616,7 +2615,6 @@ def main():
         # one escape, straight out of its row, and a cap standing across it leaves its lane no end) -- once, for the
         # group, on a copy (OUT/prepared.kicad_pcb), which is then the board the menus are measured on and the field
         # is laid on. Left where they stood, a three-part bus's berths' vias were laid onto a connector's decaps
-        import shutil
         import route_bus as rb
         with contextlib.redirect_stdout(io.StringIO()):
             pcb0 = parse_kicad_pcb(board)
@@ -2757,93 +2755,88 @@ def main():
     if wide:
         log(f'  {len(wide)} balls offered their whole menu from the start')
         whole(wide)
-    # THE TIERS (GROUP_TIERS): every bus ball on its WHOLE menu, each move tagged with the first tier that holds it --
+    # THE TIERS: every bus ball on its WHOLE menu, each move tagged with the first tier that holds it --
     # 0 the pattern, 1 the pattern from the next clear site (a pair's balls: the lines too), 2 the straight moves toward
     # the bus's other part from every clear site and from a via in the pad, 3 those by every face, 4 the lines, 5 the
     # rest of the whole menu. The search starts on the first tiers and widens where it pays (tier_search). A ball
     # whose pattern's gap point stood blocked by a part on the other side had no dog-bone at all; on the pattern alone
     # a bus's lanes ran down inside an FPGA to its far face, a pair round the back of the memory across the whole bus
     tier_of = {}                # (array, ball) -> the tier of each move of its menu
-    if GROUP_TIERS:
-        def tbox_(ref_):
-            if ref_ in arrays:
-                return arrays[ref_].box
-            xs_ = [p_.global_x for p_ in bpcb.footprints[ref_].pads]
-            ys_ = [p_.global_y for p_ in bpcb.footprints[ref_].pads]
-            return (min(xs_), min(ys_), max(xs_), max(ys_))
 
-        def tface_(ref_, other_):
-            # (the face of `ref_` turned toward `other_`)
-            a_, b_ = tbox_(ref_), tbox_(other_)
-            cx_, cy_ = (b_[0] + b_[2] - a_[0] - a_[2]) / 2, (b_[1] + b_[3] - a_[1] - a_[3]) / 2
-            return ('right' if cx_ > 0 else 'left') if abs(cx_) >= abs(cy_) else ('down' if cy_ > 0 else 'up')
-        tsig_ = lambda o_: (o_.kind, o_.direction, tuple(round(v_, 4) for v_ in (o_.site or ())),     # noqa: E731
-                            tuple((tuple(round(v_, 4) for v_ in a_), tuple(round(v_, 4) for v_ in b_))
-                                  for a_, b_, _l in o_.legs))
-        for ref in sorted(arrays):
-            A_ = arrays[ref]
-            ks_ = sorted(set(A_.ball_of.values()) - {k for r_, k in wide if r_ == ref})
-            if not ks_:
-                continue
-            t0 = time.time()
-            net_of_ = {k: n_ for n_, k in A_.ball_of.items()}
-            pr_ = je.array_pairs(bpcb.footprints[ref], set(A_.bus_of), je.namer(bpcb))
-            pk_ = {A_.ball_of[leg] for legs_ in pr_.values() for leg in legs_ if leg in A_.ball_of}
-            face_ = {}
+    def tbox_(ref_):
+        if ref_ in arrays:
+            return arrays[ref_].box
+        xs_ = [p_.global_x for p_ in bpcb.footprints[ref_].pads]
+        ys_ = [p_.global_y for p_ in bpcb.footprints[ref_].pads]
+        return (min(xs_), min(ys_), max(xs_), max(ys_))
+
+    def tface_(ref_, other_):
+        # (the face of `ref_` turned toward `other_`)
+        a_, b_ = tbox_(ref_), tbox_(other_)
+        cx_, cy_ = (b_[0] + b_[2] - a_[0] - a_[2]) / 2, (b_[1] + b_[3] - a_[1] - a_[3]) / 2
+        return ('right' if cx_ > 0 else 'left') if abs(cx_) >= abs(cy_) else ('down' if cy_ > 0 else 'up')
+    tsig_ = lambda o_: (o_.kind, o_.direction, tuple(round(v_, 4) for v_ in (o_.site or ())),     # noqa: E731
+                        tuple((tuple(round(v_, 4) for v_ in a_), tuple(round(v_, 4) for v_ in b_))
+                              for a_, b_, _l in o_.legs))
+    for ref in sorted(arrays):
+        A_ = arrays[ref]
+        ks_ = sorted(set(A_.ball_of.values()) - {k for r_, k in wide if r_ == ref})
+        if not ks_:
+            continue
+        t0 = time.time()
+        net_of_ = {k: n_ for n_, k in A_.ball_of.items()}
+        pr_ = je.array_pairs(bpcb.footprints[ref], set(A_.bus_of), je.namer(bpcb))
+        pk_ = {A_.ball_of[leg] for legs_ in pr_.values() for leg in legs_ if leg in A_.ball_of}
+        face_ = {}
+        for k in ks_:
+            dref_ = caps[A_.bus_of[net_of_[k]]]['st']['dref']
+            face_[k] = tface_(ref, dref_ if ref != dref_ else sref)
+        S_ = {k: {tsig_(o_): 0 for o_ in A_.bm.menu[k]} for k in ks_}
+        ent_ = {k: {tsig_(x_[1]): x_ for x_ in A_.bm.opts[k] if x_[0] == 'escape'} for k in ks_}
+
+        def tadd_(ns_, t_, only_=None, toward_=False):
             for k in ks_:
-                dref_ = caps[A_.bus_of[net_of_[k]]]['st']['dref']
-                face_[k] = tface_(ref, dref_ if ref != dref_ else sref)
-            S_ = {k: {tsig_(o_): 0 for o_ in A_.bm.menu[k]} for k in ks_}
-            ent_ = {k: {tsig_(x_[1]): x_ for x_ in A_.bm.opts[k] if x_[0] == 'escape'} for k in ks_}
-
-            def tadd_(ns_, t_, only_=None, toward_=False):
-                for k in ks_:
-                    if only_ is not None and k not in only_:
+                if only_ is not None and k not in only_:
+                    continue
+                for x_ in ns_.opts[k]:
+                    if x_[0] != 'escape' or (toward_ and x_[1].direction != face_[k]):
                         continue
-                    for x_ in ns_.opts[k]:
-                        if x_[0] != 'escape' or (toward_ and x_[1].direction != face_[k]):
-                            continue
-                        S_[k].setdefault(tsig_(x_[1]), t_)
-                        ent_[k].setdefault(tsig_(x_[1]), x_)
-            try:
-                je.PATTERN_NEXT_SITE = True
-                with awx_settings.given(genv):
-                    tadd_(_menus(bpcb, ref, A_.nets, only=set(ks_)), 1)
-                    n4_ = _menus(bpcb, ref, A_.nets, only=set(ks_), lines=True)
-                    tadd_(n4_, 1, only_=pk_)
-                    je.PATTERN_ALL_SITES = True
-                    n3_ = _menus(bpcb, ref, A_.nets, only=set(ks_))
-                    je.PATTERN_ALL_SITES = False
-                    tadd_(n3_, 2, toward_=True)
-                    tadd_(n3_, 3)
-                    tadd_(n4_, 4)
-            finally:
-                je.PATTERN_ALL_SITES = je.PATTERN_NEXT_SITE = False
-            more_ = {(ref, k) for k in ks_}
-            whole(more_)
-            wide |= more_
-            n_miss = 0
-            for k in ks_:
-                # (a narrower tier's move the whole menu does not hold -- its site from another gap point -- added)
-                have_ = {tsig_(x_[1]) for x_ in A_.bm.opts[k] if x_[0] == 'escape'}
-                add_ = [x_ for sg_, x_ in ent_[k].items() if sg_ not in have_]
-                if add_:
-                    A_.bm.opts[k] = list(A_.bm.opts[k]) + add_
-                    A_.bm.menu[k] = [o_ for kd_, o_, _pc in A_.bm.opts[k] if kd_ == 'escape']
-                    n_miss += len(add_)
-            for k in ks_:
-                tier_sig[(ref, k)] = (S_[k], tsig_)
-                whole_opts[(ref, k)] = list(A_.bm.opts[k])
-            cnt_ = collections.Counter(S_[k].get(tsig_(o_), 5) for k in ks_ for o_ in A_.bm.menu[k])
-            if TIER_MENU < 5:
-                narrow({(ref, k) for k in ks_})
-            else:
-                array_rules(bpcb, A_)
-                retier(ref, ks_)
-            log(f'  {ref}: {len(ks_)} bus balls, their whole menus\' moves by tier {dict(sorted(cnt_.items()))}'
-                + (f' -- the first {TIER_MENU + 1} tiers offered, {sum(len(A_.bm.menu[k]) for k in ks_)} moves'
-                   if TIER_MENU < 5 else '')
-                + f'; {n_miss} of the narrower tiers\' moves the whole menu lacked, added ({time.time() - t0:.0f} s)')
+                    S_[k].setdefault(tsig_(x_[1]), t_)
+                    ent_[k].setdefault(tsig_(x_[1]), x_)
+        try:
+            je.PATTERN_NEXT_SITE = True
+            with awx_settings.given(genv):
+                tadd_(_menus(bpcb, ref, A_.nets, only=set(ks_)), 1)
+                n4_ = _menus(bpcb, ref, A_.nets, only=set(ks_), lines=True)
+                tadd_(n4_, 1, only_=pk_)
+                je.PATTERN_ALL_SITES = True
+                n3_ = _menus(bpcb, ref, A_.nets, only=set(ks_))
+                je.PATTERN_ALL_SITES = False
+                tadd_(n3_, 2, toward_=True)
+                tadd_(n3_, 3)
+                tadd_(n4_, 4)
+        finally:
+            je.PATTERN_ALL_SITES = je.PATTERN_NEXT_SITE = False
+        more_ = {(ref, k) for k in ks_}
+        whole(more_)
+        wide |= more_
+        n_miss = 0
+        for k in ks_:
+            # (a narrower tier's move the whole menu does not hold -- its site from another gap point -- added)
+            have_ = {tsig_(x_[1]) for x_ in A_.bm.opts[k] if x_[0] == 'escape'}
+            add_ = [x_ for sg_, x_ in ent_[k].items() if sg_ not in have_]
+            if add_:
+                A_.bm.opts[k] = list(A_.bm.opts[k]) + add_
+                A_.bm.menu[k] = [o_ for kd_, o_, _pc in A_.bm.opts[k] if kd_ == 'escape']
+                n_miss += len(add_)
+        for k in ks_:
+            tier_sig[(ref, k)] = (S_[k], tsig_)
+            whole_opts[(ref, k)] = list(A_.bm.opts[k])
+        cnt_ = collections.Counter(S_[k].get(tsig_(o_), 5) for k in ks_ for o_ in A_.bm.menu[k])
+        narrow({(ref, k) for k in ks_})
+        log(f'  {ref}: {len(ks_)} bus balls, their whole menus\' moves by tier {dict(sorted(cnt_.items()))}'
+            + f' -- the first {TIER_MENU + 1} tiers offered, {sum(len(A_.bm.menu[k]) for k in ks_)} moves'
+            + f'; {n_miss} of the narrower tiers\' moves the whole menu lacked, added ({time.time() - t0:.0f} s)')
     # THE LINES are a bus's when the whole solve refuses its pattern ends (the check below), and with them its cut
     # round its destination ranked (load_bus): the pattern alone ties a ball's exit to its own row or column, the
     # exits' order round the array then the balls' own -- a bus whose balls stand in another order than its berths
@@ -3067,13 +3060,9 @@ def main():
     # layers are what keeps them apart, and stay the model's (the plan's `held_layers`). A bus alone on its arrays has
     # none held. GROUP_CUT=model: each ball array destination's CUT is the model's to choose with the ends)
     FREE = awx_settings.get('GROUP_LAYERS') == 'free'
-    global FAR_W, CHECK_DUMP
-    FAR_W = float(awx_settings.get('GROUP_FAR')) if awx_settings.get('GROUP_FAR') not in (None, '') else None
+    global CHECK_DUMP
     CHECK_DUMP = awx_settings.get('GROUP_CHECK_DUMP') or None
     CUTVAR = awx_settings.get('GROUP_CUT') == 'model'
-    if awx_settings.get('GROUP_CUT_BEST'):        # (a bench's: how many of the guess's best counts the cuts offered span)
-        import whole_ends as _we
-        _we.CUT_BEST = int(awx_settings.req('GROUP_CUT_BEST'))
     # (a check's refusal of a bus's PATTERN ends, which gives it the lines, is none of its JOINT_TRIES: those are its
     # ends' on the lines, as a bus's own ends had them)
     chk_try, spent, n_taught, adopts = -1, 0, 0, 0
@@ -3312,10 +3301,7 @@ def main():
             # any count of vias, yet no refusal -- for a lane with no other way out): in the lower rank it was taken to save
             # one change of layer, eighteen of one bus's teeth where its own run alone had two, its lanes round the array
             # through the other buses' fanout
-            # (GROUP_FAR=<vias a leg>: the far face at that price -- 0: at its way round's length and its crossings
-            # alone, the rule on the pattern below off -- once the route carries a lane round its source: the
-            # geometry's bound over the source follows the lead-in's side, whole_geo)
-            far_w = we.FAR_TOOTH if FAR_W is None else FAR_W
+            far_w = we.FAR_TOOTH
             far = []
             for b in buses:
                 if b.arr[0] is None:
@@ -3379,8 +3365,8 @@ def main():
                 for l_ in b.J.lanes:
                     fx = [x_ for i, x_ in b.J.xs[0][l_].items()
                           if b.E.T[l_][i][0] and b.E.T[l_][i][0][0].direction == 'left']
-                    if fx and far_w >= we.FAR_TOOTH and not {(b.arr[0].ref, b.arr[0].ball_of[leg])
-                                                             for leg in (b.E.legs_of.get(l_) or (l_,))} <= wide:
+                    if fx and not {(b.arr[0].ref, b.arr[0].ball_of[leg])
+                                   for leg in (b.E.legs_of.get(l_) or (l_,))} <= wide:
                         m.Add(sum(fx) == 0).OnlyEnforceIf(gate('far', b.name, l_, lanes={(b.name, l_, 0)}))
             # THE WAY ROUND an array, with the vias (the ends model's ride, at its one exchange rate -- select_moves.VIA_MM
             # of track a via): a lane that leaves an array by a face turned from its other end, or arrives by one, travels
@@ -4177,10 +4163,10 @@ def main():
                 json.dump(meta_, open(os.path.join(out, 'tiers.json'), 'w'))
             # (THE EPOCHS, at the first check: the start alone on the first tiers, then each stretch's rounds)
             pool_ = None
-            if TIER_MENU < 5 and in_epoch and narrow_vals is not None:
+            if in_epoch and narrow_vals is not None:
                 st_ = set(stretches[epoch])
                 pool_ = [j_ for j_, e_ in enumerate(meta_['lanes']) if (e_['bus'], e_['lane']) in st_]
-            elif TIER_MENU < 5 and chk_try == 0:
+            elif chk_try == 0:
                 pool_ = []
             vals_, line_ = tier_search(m, meta_, log, hint=narrow_vals, pool=pool_)
             if vals_ is None:
@@ -4589,7 +4575,7 @@ def main():
             # menus it was built on, so two builds' whole objectives differ by it where one such ball stands in both)
             n_ = sum(sv.Value(w_) for w_ in walls)
             return n_, sv.ObjectiveValue() - W_TOP * n_ + more_last
-        if TIER_MENU < 5 and chk_try == 0 and tier_of and not repaired:
+        if chk_try == 0 and tier_of and not repaired:
             if stretches is None:
                 stretches, sweep_v0 = lane_stretches(buses), sweep_value()
             if 0 <= epoch < len(stretches):
@@ -4649,7 +4635,7 @@ def main():
             in_epoch = False
         elif in_epoch:
             in_epoch = False            # (a costly ball's stretch searched: on to the checks)
-        elif TIER_MENU < 5 and tier_of and costly_tries < COSTLY_TRIES:
+        elif tier_of and costly_tries < COSTLY_TRIES:
             # ---- A COSTLY BALL LEFT by a later model -- a repair after a check, the model solved again for a lesson
             # of the field laid, each holding most lanes on their ends: the lanes nearest it, one stretch, their balls
             # and the balls round it offered their whole menus, and searched from this state as an epoch is. A repair
@@ -4693,7 +4679,7 @@ def main():
             # (a bench's: the search's state and, on two layers, its estimate -- no check, no field)
             est_ = None if not est_parts or any(v_ is None for v_ in est_parts.values()) else sum(est_parts.values())
             with open(os.path.join(out, 'search.json'), 'w', encoding='utf-8') as fh:
-                json.dump({'estimate': est_, 'seed': os.environ.get('BUS_SEED'), 'buses': est_parts}, fh)
+                json.dump({'estimate': est_, 'seed': awx_settings.get('BUS_SEED'), 'buses': est_parts}, fh)
             log(f'group ends: the search alone -- its estimate ' + ('none' if est_ is None else f'{est_} vias'))
             return
         unplanned, taught, more, newly, n_taught, adopted = [], False, set(), False, 0, False

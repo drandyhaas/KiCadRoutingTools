@@ -3,18 +3,18 @@
 
   python3 tests/test_622_walled_balls.py
 
-Under the whole-array fanout the whole route's ends price a state that leaves a plane ball no way down (WALLED): each
-ball's ways are its drops and its straps, and each end option kills the ways its copper, its via, its lane past its exit
-or -- a pair's -- its pocket stands on. Unmeasured, the zynq DDR's ends ran the bus over every way down three of U1's
-VCC_1V5 balls had.
+The whole route's ends price a state that leaves a plane ball no way down (WALLED): each ball's ways are its drops and
+its straps, read off the board without the run's copper, and each end option kills the ways its copper, its via, its
+lane past its exit or -- a pair's -- its pocket stands on. A plane ball is a ball of either array on a net with a pour.
+Unmeasured, the zynq DDR's ends ran the bus over every way down three of U1's VCC_1V5 balls had.
 
 walled_balls, on hand-made ways and kills:
 1. a ball whose every drop a chosen option kills is walled; another option leaves it a drop;
 2. a ball whose drops are killed but whose strap is not, to a ball with a drop left, is served; the strap's ball
    walled too, it is not -- one strap, not a chain.
 
-plane_ways, on kicad_files/ulx3s.kicad_pcb U1 with GND its plane net (a joint spec naming it), two of U1's signal nets
-as the run:
+plane_ways, on kicad_files/ulx3s.kicad_pcb U1 with a GND pour under it (so GND is a plane net there), two of U1's
+signal nets as the run:
 3. LIVENESS: a GND ball with a via in its pad and a gap drop among its ways; else the checks below test nothing;
 4. an option whose leg runs on B.Cu under the ball kills its pad's via; one a millimetre off does not;
 5. a pair whose two exits by one face on one layer stand either side of the gap drop's site kills it -- the site is
@@ -23,10 +23,8 @@ as the run:
 """
 import contextlib
 import io
-import json
 import os
 import sys
-import tempfile
 import types
 
 try:
@@ -84,10 +82,6 @@ sigs = sorted({short(p.net_name) for p in foot.pads if p.net_id and short(p.net_
                and not short(p.net_name).startswith(('+', 'VCC', 'Net-'))})[:2]
 byname = {short(n.name): (i, n) for i, n in pcb.nets.items() if n.name}
 pad_of = {short(p.net_name): p for p in foot.pads if p.net_id}
-spec = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)
-json.dump({'layers': ['F.Cu', 'B.Cu'], 'arrays': [{'ref': 'U1', 'others': [], 'drops': ['GND']}]}, spec)
-spec.close()
-os.environ['FANOUT_JOINT'] = spec.name
 st = dict(pcb=pcb, byname=byname, src_pad={n: pad_of[n] for n in sigs}, dst_pad={}, sref='U1', dref='NONE')
 
 
@@ -101,10 +95,13 @@ def ways_of(T, lanes_):
         return we.plane_ways(st, lanes_, T, {ln: [] for ln, _lg in lanes_}, {n: None for n in sigs})
 
 
-# 3. liveness: a GND ball with an in-pad way and a gap way, on the board with no run copper of ours
+# 3. liveness: a GND ball with an in-pad way and a gap way, on the board with no run copper of ours (the array's other
+# balls with a pad elsewhere have ways too -- a via and a channel out -- but the checks below are a plane ball's)
 probe = ways_of({'S': []}, [('S', (sigs[0],))])
 ball = inpad = gap = None
 for b, dw, _sw in probe.balls if probe else ():
+    if not b[1].startswith('GND#'):
+        continue
     ip = [w for w in dw if probe.ways[w].get('stub') is None]
     gp = [w for w in dw if probe.ways[w].get('stub') is not None]
     if ip and gp:
@@ -116,12 +113,23 @@ if len(sigs) < 2 or ball is None:
 c, s = inpad['site'], gap['site']
 check(True, f'liveness: {ball[1]} at {tuple(round(q, 2) for q in c)}, its gap drop at {tuple(round(q, 2) for q in s)}')
 
+
+def own(pw, at, in_pad):
+    """the GND ball's OWN drop at site `at` in `pw` -- the via in its pad (`in_pad`), else a gap drop: a diagonal gap
+    is the corner of four balls, and the signal balls among them have ways at the same site"""
+    dw = next((dw for b, dw, _sw in pw.balls if b == ball), ())
+    w = next((w for w in dw if (pw.ways[w].get('stub') is None) == in_pad and pw.ways[w].get('site') == at), None)
+    if w is None:
+        print(f'BROKEN TEST: {ball[1]} has no {"pad via" if in_pad else "gap drop"} at {at} on this run')
+        sys.exit(2)
+    return w
+
 # 4. a B.Cu leg under the ball, and one a millimetre off
 under = mv([((c[0] - 2.0, c[1]), (c[0] + 2.0, c[1]), 'B.Cu')], (c[0] - 2.0, c[1]), 'left', 'B.Cu')
 off = mv([((c[0] - 2.0, c[1] + 1.0), (c[0] + 2.0, c[1] + 1.0), 'B.Cu')], (c[0] - 2.0, c[1] + 1.0), 'left', 'B.Cu')
 T = {'S': [((under,), under.exit_pt, 'B.Cu', 0, False), ((off,), off.exit_pt, 'B.Cu', 0, False)]}
 pwb = ways_of(T, [('S', (sigs[0],))])
-w_in = next(i for i, w in enumerate(pwb.ways) if w.get('stub') is None and w['site'] == c)
+w_in = own(pwb, c, True)
 check(w_in in pwb.kill.get(('S', 0, 0), ()), 'a leg on B.Cu under the ball kills its pad\'s via')
 check(w_in not in pwb.kill.get(('S', 0, 1), ()), 'one a millimetre off does not')
 
@@ -136,16 +144,15 @@ def pair(dy):
 
 T = {'P': [pair(0.0), pair(1.0)]}
 pwp = ways_of(T, [('P', tuple(sigs))])
-w_gap = next(i for i, w in enumerate(pwp.ways) if w.get('stub') is not None and 'site' in w and w['site'] == s)
+w_gap = own(pwp, s, False)
 # (neither leg's own copper reaches it: the same two legs as two singles kill nothing there)
 Ts = {'A': [((pair(0.0)[0][0],), s, 'F.Cu', 0, False)], 'B': [((pair(0.0)[0][1],), s, 'F.Cu', 0, False)]}
 pws = ways_of(Ts, [('A', (sigs[0],)), ('B', (sigs[1],))])
-w_gs = next(i for i, w in enumerate(pws.ways) if w.get('stub') is not None and 'site' in w and w['site'] == s)
+w_gs = own(pws, s, False)
 single = w_gs in pws.kill.get(('A', 0, 0), ()) or w_gs in pws.kill.get(('B', 0, 0), ())
 check(not single, 'control: neither leg alone -- its copper, its lane past its exit -- kills the gap drop')
 check(w_gap in pwp.kill.get(('P', 0, 0), ()), 'the pair whose exits stand either side of it kills it: its pocket')
 check(w_gap not in pwp.kill.get(('P', 0, 1), ()), 'the same pair a millimetre aside does not')
-os.unlink(spec.name)
 
 print(f'\n{"PASS" if not BAD else "FAIL"}: {len(BAD)} failure(s)' + (': ' + '; '.join(BAD) if BAD else ''))
 sys.exit(1 if BAD else 0)

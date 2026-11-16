@@ -16,8 +16,8 @@ On boards stood in for, this pins:
 4. Group.arrange: the ways and the cut that cross the fewest -- the best of every valid split of each pocket's lanes
    (in their order along it), Group.score's every-cut count the count cut by cut, the cut off the front;
 5. braid.net_dest: a net's end at the part it reaches, the first named when it reaches none;
-6. route_buses: --bus U1:U4+U3 parses, and a bus handed on through several parts records each as gone through -- a
-   later escape bus on U3 plans it whole (ESCAPE_JOINT).
+6. route_buses: --bus U1:U4+U3 parses (SRC:DEST, nothing more), and the buses off one source are one group, the
+   groups in the order their first bus comes.
 """
 import os
 import shutil
@@ -150,32 +150,37 @@ n0 = types.SimpleNamespace(pads=[pad('U1', 0, 0), pad('R1', 1, 1)])
 check(bd.net_dest(n3, 'U4+U3') == 'U3' and bd.net_dest(n0, 'U4+U3') == 'U4' and bd.net_dest(n3, 'U3') == 'U3',
       '5: net_dest')
 
-# 6. route_buses, the step stood in for
-check(rb.parse_bus('U1:U4+U3:plain:F.Cu,B.Cu') == ('U1', 'U4+U3', 'plain', 'F.Cu,B.Cu'), '6: parse_bus U4+U3')
+# 6. route_buses, the group step stood in for
+check(rb.parse_bus('U1:U4+U3') == ('U1', 'U4+U3'), '6: parse_bus U4+U3')
+try:
+    rb.parse_bus('U1:U4:plain')
+    check(False, '6: parse_bus refuses a third field')
+except ValueError:
+    pass
 calls = []
+import negotiated_buses as nb  # noqa: E402
 
 
-def step(board, out, src, dest, *a, whole_array=False, escape=False, settings=None, **kw):
-    calls.append(dict(src=src, dest=dest, escape=escape, settings=dict(settings or {})))
+def group(board, out, buses, *a, **kw):
+    calls.append(list(buses))
     shutil.copy(board, out)
     shutil.copy(board[:-len('.kicad_pcb')] + '.kicad_pro', out[:-len('.kicad_pcb')] + '.kicad_pro')
-    return 0, f'BUS {src}->{dest}'
+    return 0, [f'BUS {s_}->{d_}' for s_, d_ in buses]
 
 
-real = rb.route_bus
-rb.route_bus = step
+real = nb.route_grouped
+nb.route_grouped = group
 try:
     with tempfile.TemporaryDirectory() as td:
         b0 = os.path.join(td, 'b.kicad_pcb')
         open(b0, 'w').write('(kicad_pcb)\n')
         open(os.path.join(td, 'b.kicad_pro'), 'w').write('{}\n')
-        rb.route_buses(b0, os.path.join(td, 'o.kicad_pcb'), [('U1', 'U4+U3', 'plain', None), ('U3', 'U9', 'escape', None)],
+        rb.route_buses(b0, os.path.join(td, 'o.kicad_pcb'), [('U1', 'U4+U3'), ('U2', 'U7'), ('U1', 'U9')],
                        log=lambda *a: None)
 finally:
-    rb.route_bus = real
-check([(c_['src'], c_['dest']) for c_ in calls] == [('U1', 'U4+U3'), ('U3', 'U9')], f'6: the buses: {calls}')
-check(calls[1]['settings'].get('ESCAPE_JOINT') == 'U3' and calls[1]['settings'].get('ESCAPE_JOINT_ENDS') == b0,
-      f'6: U3, gone through by U1:U4+U3, planned whole by the escape bus on it: {calls[1]["settings"]}')
+    nb.route_grouped = real
+check(calls == [[('U1', 'U4+U3'), ('U1', 'U9')], [('U2', 'U7')]],
+      f'6: the buses off each source one group, the groups in the order their first bus comes: {calls}')
 
 print('two_end: ' + ('FAIL' if fails else 'PASS: DEST names several parts, one GROUP: its outline, front, ways in '
                      'and arrangement'))

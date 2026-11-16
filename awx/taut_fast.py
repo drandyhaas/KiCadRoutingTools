@@ -1,6 +1,5 @@
 """taut_fast.py -- the taut-string relaxation, vectorised and convergent.
-The DEFAULT relaxation of detect_buses.taut_paths since 2026-09-08
-(TAUT_FAST=0 selects the old per-string topo_strings.relax).
+The relaxation of detect_buses.taut_paths.
 
 The same model as topo_strings.relax (curve shortening on a densified
 polyline against discs and capsules, the ends frozen, a shortcut every
