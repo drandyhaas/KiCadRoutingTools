@@ -21,11 +21,12 @@ land on the pads are delivered as asked and are not a row.
     fallback members, nets outside the pairs and via rows are untouched;
   * routed: an in-repo board with a 2-layer stackup, --impedance 80 over a
     0.25 --track-width and a wall of another net's pads the pair routes
-    around, so one member necks against its partner at the launch bend:
-    exit 3 under --strict-sizes, one row for that member whose length and width
-    match the WRITTEN board, and none for the partner, which ships at the
-    layer width plus its connectors (FAILS on 95e6dc1d: the member carries
-    `terminal neck` rows with no length, and the new site is absent).
+    around, so it arrives at the 2.54 mm-pitch header J1 at the layer width
+    and one member necks against its partner's connector there: exit 3 under
+    --strict-sizes, one row for that member whose length and width match the
+    WRITTEN board, and none for the partner, which ships nothing under width.
+    (The launch-bend neck this case used to stand on was a leg doubling back
+    on itself, #1441, which no longer ships.)
 
     python3 tests/test_1725_coupled_pair_width_disclosed.py
 """
@@ -58,7 +59,7 @@ STACKUP = ('\t\t(stackup\n'
 
 
 def _wall():
-    """Another net's 0.5 mm pads on both layers in a column at x = 14, from
+    """Another net's 0.5 mm pads on both layers in a column at x = 13.6, from
     y = 17 up to the board's top half, which the pair routes around."""
     pads, y, k = [], 17.0, 0
     while y > 5.5:
@@ -68,7 +69,7 @@ def _wall():
                         f'(layers "{lay}") (net "DPB_P") (uuid "{uuid.uuid4()}"))')
         y -= 0.55
     return ('\t(footprint "T:Wall"\n\t\t(layer "F.Cu")\n'
-            f'\t\t(uuid "{uuid.uuid4()}")\n\t\t(at 14 10)\n'
+            f'\t\t(uuid "{uuid.uuid4()}")\n\t\t(at 13.6 10)\n'
             f'\t\t(property "Reference" "W1" (at 0 -1.5 0) (layer "F.SilkS") '
             f'(uuid "{uuid.uuid4()}")\n\t\t\t(effects (font (size 1 1) (thickness 0.15))))\n'
             '\t\t(attr smd)\n' + '\n'.join(pads) + '\n\t)\n')
@@ -198,13 +199,13 @@ def t_routed(td):
     assert abs(row['length_mm'] - meas[nar]['under']) <= 0.02, (row, meas)
     assert abs(row['delivered'] - round(meas[nar]['min'], 4)) <= 1e-4, (row, meas)
     assert row['delivered'] < row['requested'] and row['requested'] > TW, row
-    # the partner: connectors at the track width, the rest at the layer width
-    assert meas[other]['under'] == 0 and meas[other]['drawn'] > 0 \
-        and meas[other]['full'] > 0, meas
+    # the partner: nothing under width (its connectors, if drawn at the track
+    # width, are delivered as asked: t_rule holds that), the rest full width
+    assert meas[other]['under'] == 0 and meas[other]['full'] > 0, meas
     print(f"  ok  routed: exit 3, one row for {nar}: {row['length_mm']} mm at "
           f"{row['delivered']:g} of {row['requested']:g} (the written board: "
-          f"{meas[nar]['under']:.2f} mm); {other} at full width with "
-          f"{meas[other]['drawn']:.2f} mm of connectors at {TW}: no row")
+          f"{meas[nar]['under']:.2f} mm); {other} ships nothing under width: "
+          f"no row")
 
 
 CASES = [t_rule, t_routed]

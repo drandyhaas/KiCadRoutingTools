@@ -5,7 +5,7 @@ The compiled half of KiCad Routing Tools: the Python extension module
 searches and obstacle map, the placer's per-move kernels, and the grid searches
 of the `awx/` whole-route bus router. The rest is Python that calls in here.
 
-**Current Version: 0.23.7** (the crate version in `Cargo.toml`)
+**Current Version: 0.24.1** (the crate version in `Cargo.toml`)
 
 > **Release note:** the newest published release is
 > [v0.23.7](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.23.7)
@@ -451,6 +451,16 @@ src/
 - **Placement kernels**: the trees and gap trees keep the Python's float expressions in order; the crossing and pad-hit kernels skip pairs whose boxes cannot meet; the congestion kernels sum a move's change over the cells it reaches, so their totals can differ from a whole-window Python sum in the last bits
 
 ## Version History
+
+### 0.24.1 (2026-11-16)
+- **The pose router's Dubins heuristic reads headings in the grid's frame**
+  (`types.rs`, #1441): `PoseState::theta_radians` returned `theta_idx * pi/4`,
+  a y-up angle, while `DIRECTIONS` and the heuristic's coordinates are y-down,
+  so every heading with a vertical component was mirrored and a pose heading
+  straight at its goal north or south was priced at 2.9x the straight line.
+  It is now `-theta_idx * pi/4`; a unit test holds the straight-ahead case to
+  the straight-line length for all 8 headings. Every coupled diff pair routes
+  through it.
 
 ### 0.23.7 (2026-10-18)
 - **Congestion priced only where it can change** (`placement_kernels.rs`):
