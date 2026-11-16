@@ -106,7 +106,9 @@ def admissible(pcb, net):
     via-in-pad (pairs.under_pad: a back-side termination resistor under a
     DDR clock ball) or is a pad of a two-pad part whose other pad is on the
     PARTNER leg of a differential pair (the pair's termination, which the
-    pair passes through: pairs.pair_waypoints -- the zynq's R20 on CK).
+    pair passes through: pairs.pair_waypoints -- the zynq's R20 on CK), or,
+    past two ends still, a two-pad part's pad the net's own copper already
+    touches (pairs.wired).
     make_bench selects the bench's nets by it and coherent_nets keeps them,
     so a net the bench fans out is one the ladder admits."""
     import pairs as _pairs
@@ -133,9 +135,18 @@ def admissible(pcb, net):
             return False
         other = [q for q in fp.pads if q is not p][0]
         return keys.get(pcb.nets[other.net_id].name) == mate if other.net_id in pcb.nets else False
+    def reached(p):
+        # (a two-pad part's pad its own net's copper already touches -- a termination's pad a laid escape runs over,
+        # the part's other pad a stub off its net for the step (route_bus.waypoint_pairs): part of the end whose
+        # copper reaches it, none of the net's two. Read as a third end, the leg was no net of the bus at all, and
+        # its pair was laid as a single)
+        fp = pcb.footprints.get(p.component_ref)
+        return fp is not None and len(fp.pads) == 2 and _pairs.wired(pcb, p)
     via_size = _rules.active().via_size
     ends = [p for p in pads if not waypoint(p)
             and not any(_pairs.under_pad(q, p, via_size) for q in pads if q is not p)]
+    if len(ends) > 2:
+        ends = [p for p in ends if not reached(p)]
     return len(ends) == 2 and len({p.component_ref for p in ends}) == 2
 
 

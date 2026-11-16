@@ -2620,7 +2620,8 @@ def lock_lanes(txt, net_ids, net_names=()):
 
 def waypoint_pairs(pcb, names, src, dest):
     """{leg: [its pads on them]} for the pairs among `names` that pass through a termination part between the arrays
-    (pairs.pair_waypoints: a two-pad part with one pad on each leg, neither array, not under a ball)"""
+    (pairs.pair_waypoints: a two-pad part with one pad on each leg, neither array) -- each pad of it nothing serves
+    yet, a pad under its own leg's ball or touched by its net's copper left on its net"""
     import pairs as _pairs
     from coherent_nets import by_key, net_keys
     by = {k: i for k, (i, _n) in by_key(pcb).items()}
@@ -2629,9 +2630,10 @@ def waypoint_pairs(pcb, names, src, dest):
     out = {}
     for _b, (pn, nn) in _pairs.pair_names(short, admit_all=True).items():
         if pn in by and nn in by:
-            for pp, qn in _pairs.pair_waypoints(pcb, by[pn], by[nn], src, dest):
-                out.setdefault(pn, []).append(pp)
-                out.setdefault(nn, []).append(qn)
+            for pp, qn in _pairs.pair_waypoints(pcb, by[pn], by[nn], src, dest, each=True):
+                for leg_, pad_ in ((pn, pp), (nn, qn)):
+                    if pad_ is not None:
+                        out.setdefault(leg_, []).append(pad_)
     return out
 
 
