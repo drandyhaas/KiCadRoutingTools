@@ -443,6 +443,52 @@ def _record_ripped_ghost(result, net_ids, config, layer_map,
                 ripped_route_via_positions[rid] = via_positions
 
 
+class _BoxIndex:
+    """A uniform-cell index of axis-aligned boxes, each grown by `reach`.
+
+    `near(box)` returns, in insertion order, the indices of every added box
+    whose grown box overlaps `box` (and possibly a few more that only share a
+    cell). Two items whose gap exceeds the grown box's reach are never
+    returned, so a caller testing `dist < thr` with `thr <= reach + half size`
+    (the half size already in the added box) loses no pair. A small slack
+    keeps rounding at a cell edge on the returned side."""
+
+    __slots__ = ('reach', 'cell', 'cells', 'n')
+
+    def __init__(self, reach: float):
+        self.reach = reach + 1e-6
+        self.cell = max(1.0, 4.0 * reach)
+        self.cells: Dict[Tuple[int, int], List[int]] = {}
+        self.n = 0
+
+    def add(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        r, c = self.reach, self.cell
+        cells = self.cells
+        idx = self.n
+        for cx in range(int((x0 - r) // c), int((x1 + r) // c) + 1):
+            for cy in range(int((y0 - r) // c), int((y1 + r) // c) + 1):
+                lst = cells.get((cx, cy))
+                if lst is None:
+                    cells[(cx, cy)] = [idx]
+                else:
+                    lst.append(idx)
+        self.n = idx + 1
+
+    def near(self, x0: float, y0: float, x1: float, y1: float) -> List[int]:
+        c, cells = self.cell, self.cells
+        cx0, cx1 = int(x0 // c), int(x1 // c)
+        cy0, cy1 = int(y0 // c), int(y1 // c)
+        if cx0 == cx1 and cy0 == cy1:
+            return cells.get((cx0, cy0), ())
+        out = set()
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                lst = cells.get((cx, cy))
+                if lst:
+                    out.update(lst)
+        return sorted(out)
+
+
 def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
                           own_net_ids: List[int], clearance: float,
                           config: Optional[GridRouteConfig] = None) -> bool:
@@ -574,10 +620,29 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             hits.append((kind, obj))
         return True
 
+    # A cell index over the foreign copper, each item under its box grown by
+    # the widest threshold any pair with it can have (`margin` plus its own
+    # half size): a restored item tests only the foreign items whose grown
+    # box shares a cell with its own box. A pair farther apart than that
+    # cannot collide, so the pairs tested, their order and the verdict are
+    # the full scan's (the loops below keep each list's original order).
+    seg_idx = _BoxIndex(margin)
+    for o in o_segs:
+        h = o.width / 2.0
+        seg_idx.add(min(o.start_x, o.end_x) - h, min(o.start_y, o.end_y) - h,
+                    max(o.start_x, o.end_x) + h, max(o.start_y, o.end_y) + h)
+    via_idx = _BoxIndex(margin)
+    for v in o_vias:
+        h = max(v.size, v.drill) / 2.0
+        via_idx.add(v.x - h, v.y - h, v.x + h, v.y + h)
+
     # Restored segments vs other-net segments (same layer) and vias (all layers).
     for s in segs:
         hw = s.width / 2.0
-        for o in o_segs:
+        sx0, sx1 = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
+        sy0, sy1 = min(s.start_y, s.end_y), max(s.start_y, s.end_y)
+        for i in seg_idx.near(sx0, sy0, sx1, sy1):
+            o = o_segs[i]
             if o.layer != s.layer:
                 continue
             thr = hw + o.width / 2.0 + _clr(s.net_id, o, s.layer, 'track')
@@ -585,7 +650,8 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
                                 o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
                 if _hit('segment', o, s) and first_only:
                     return hits
-        for v in o_vias:
+        for i in via_idx.near(sx0, sy0, sx1, sy1):
+            v = o_vias[i]
             thr = hw + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
             if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
                                s.end_x, s.end_y) < thr * thr:
@@ -595,7 +661,8 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     # Restored vias (span layers) vs other-net vias and segments.
     for vv in vias:
         vr = vv.size / 2.0
-        for v in o_vias:
+        for i in via_idx.near(vv.x, vv.y, vv.x, vv.y):
+            v = o_vias[i]
             thr = vr + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
             if h2h > 0 and vv.drill > 0 and v.drill > 0 \
                     and not (id(vv) in inp_all and id(v) in inp_all):
@@ -603,7 +670,8 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
                 if _hit('via', v, vv) and first_only:
                     return hits
-        for o in o_segs:
+        for i in seg_idx.near(vv.x, vv.y, vv.x, vv.y):
+            o = o_segs[i]
             thr = vr + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
             if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
                                o.end_x, o.end_y) < thr * thr:
