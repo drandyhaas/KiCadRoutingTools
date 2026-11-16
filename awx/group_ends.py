@@ -123,6 +123,7 @@ import json
 import math
 import os
 import pickle
+import shutil
 import random
 import re
 import sys
@@ -845,6 +846,30 @@ def drop_hits(A, offered):
     return out
 
 
+def wayout_runs(wayouts, layers, reach=None):
+    """THE LANES' WAYS OUT as copper: [{'start', 'end', 'width', 'layer', 'net_id'}], one for each of `wayouts`
+    [(net id, an exit, its direction, its layer)] on one of the board's copper `layers` -- the exit's straight run out
+    to where its lane can turn, two lanes' bars on, of the lane's own net; or `reach` mm on"""
+    import rules as _rules
+    from escape_moves import DIRS
+    import pairs as _pairs
+    R_ = _rules.active()
+    # (as wide as the bar the loop's audit holds a lane to beside a pad -- plan_audit.check_static: the lay's own
+    # clearance, the hug, where the nudge keeps the spec's; half a grid step either side for a piece off the grid;
+    # and the router's corner buffer in a pad's corner zone. A track and a grid step wide, a decap was parked
+    # 0.017 mm inside that bar beside a berth, and the bus's loop stopped at once on a finding no solve moves)
+    w_wo = R_.track + R_.grid + 2 * (R_.hug - R_.clearance) + 2 * _pairs.corner_buffer(R_.grid)
+    reach_wo = 2 * (R_.track / 2 + R_.clearance + R_.grid / 2) if reach is None else reach
+    wo = []
+    for nid_, (ex_, ey_), dir_, L_ in sorted(set(wayouts)):
+        d_ = DIRS.get(dir_)
+        if d_ is None or L_ not in layers:
+            continue
+        wo.append({'start': (round(ex_, 4), round(ey_, 4)), 'width': w_wo, 'layer': L_, 'net_id': nid_,
+                   'end': (round(ex_ + d_[0] * reach_wo, 4), round(ey_ + d_[1] * reach_wo, 4))})
+    return wo
+
+
 def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()):
     """the arrays FANNED OUT as the model chose them, on a copy of the bare `board` (its project beside it): each
     piece of `laid` [(its net's id, its copper: joint_escape.Piece, the layer its run takes, the fan track)] as its own
@@ -915,23 +940,8 @@ def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()
     # out of the next ball's exit, which the ends had been chosen clear of -- the lane stood 0.021 mm short of its bar
     # there, in every round of its bus's loop. Held off the whole front a single lane's end is priced on, 1.2 mm, a
     # decap under the array had nowhere to go but onto the next balls' stubs: five lessons, a field laid six times)
-    import rules as _rules
-    from escape_moves import DIRS
-    R_ = _rules.active()
-    # (as wide as the bar the loop's audit holds a lane to beside a pad -- plan_audit.check_static: the lay's own
-    # clearance, the hug, where the nudge keeps the spec's; half a grid step either side for a piece off the grid;
-    # and the router's corner buffer in a pad's corner zone. A track and a grid step wide, a decap was parked
-    # 0.017 mm inside that bar beside a berth, and the bus's loop stopped at once on a finding no solve moves)
-    import pairs as _pairs
-    w_wo = R_.track + R_.grid + 2 * (R_.hug - R_.clearance) + 2 * _pairs.corner_buffer(R_.grid)
-    reach_wo = 2 * (R_.track / 2 + R_.clearance + R_.grid / 2)
-    wo = []
-    for nid_, (ex_, ey_), dir_, L_ in sorted(set(wayouts)):
-        d_ = DIRS.get(dir_)
-        if d_ is None or L_ not in pcb.board_info.copper_layers:
-            continue
-        wo.append({'start': (round(ex_, 4), round(ey_, 4)), 'width': w_wo, 'layer': L_, 'net_id': nid_,
-                   'end': (round(ex_ + d_[0] * reach_wo, 4), round(ey_ + d_[1] * reach_wo, 4))})
+    wo = wayout_runs(wayouts, pcb.board_info.copper_layers)
+    w_wo = wo[0]['width'] if wo else None
     with contextlib.redirect_stdout(io.StringIO()):
         add_tracks_and_vias_to_pcb(board, out, tracks + wo, vias, [],
                                    net_id_to_name={i: n.name for i, n in pcb.nets.items()})
@@ -4346,6 +4356,7 @@ def main():
         rep = {'buses': {}, 'arrays': {ref: {'exits': {}, 'drops': []} for ref in arrays}, 'status': sv.StatusName(r)}
         laid = []                   # (a net's id, its copper, its run's layer, the fan track, its array)
         wayouts = []                # (a net's id, an exit at an array, its direction, its lane's layer there)
+        row_ways = []               # (...the same of a row part's berths: the ties' to keep clear, no nudge's)
         for b in buses:
             s = {l_: (next(i for i, v in b.J.xs[0][l_].items() if sv.Value(v)),
                       next(j for j, v in b.J.xs[1][l_].items() if sv.Value(v))) for l_ in b.J.lanes}
@@ -4384,6 +4395,11 @@ def main():
                     laid.append((b.to_bare[nid], je.Piece(None, [(b.F.pt(p_), b.F.pt(q_), L_) for p_, q_, L_ in legs_],
                                                [(b.F.pt(site), bd.VIA_SIZE / 2, bd.VIA_DRILL / 2)] if site is not None
                                                else [], []), None, _rules.active().fan_track, b.E.st['dref']))
+                if b.arr[1] is None:
+                    for l_, lg in b.E.lanes:
+                        for leg, mv in zip(lg, b.E.B[l_][s[l_][1]][0]):
+                            row_ways.append((b.to_bare[b.E.st['byname'][leg][0]], tuple(b.F.pt(mv.exit_pt)),
+                                             b.F.dirn(mv.direction), RL[lay[l_][1]]))
             nx = sum(1 if isinstance(x_, int) else sv.Value(x_) for x_ in b.J.X.values())
             prev_x[b.name] = {pr_ for pr_, x_ in b.J.X.items() if (x_ if isinstance(x_, int) else sv.Value(x_))}
             nchg = sum(sv.Value(c_) for c_ in b.J.chg.values())
@@ -4919,6 +4935,8 @@ def main():
             wide |= more
             whole(more)
         log(f'  check {chk_try + 1}: {", ".join(unplanned)} refused -- the model solved again')
+    # (every lane's way out of its exit, arrays' and row parts': a bench's, to lay the field's ties again)
+    rep['ways_out'] = [[n_, list(e_), d_, L_] for n_, e_, d_, L_ in wayouts + row_ways]
     json.dump(rep, open(os.path.join(out, 'group.json'), 'w'), indent=1, default=str)
     TR.rec('done', checks=chk_try + 1, no_plan=no_plan or [], secs=round(time.time() - t_all, 1))
     # (the run as it ends, for a run FROM it: --from)
@@ -4940,6 +4958,34 @@ def main():
     for it in M_['items'][:40]:
         log('    ' + ', '.join(f'{k_} {it[k_]}' for k_ in ('type', 'layer', 'net1', 'net2', 'pad_ref')
                                if it.get(k_) is not None)[:260])
+    # ---- THE FIELD'S TIES: the power pads beneath the group's parts tied before a lane is planned (field_ties)
+    if not field_bad and not no_plan:
+        import field_ties
+        fpath_ = os.path.join(out, 'shared_field.kicad_pcb')
+        parts_ = {sref} | {d_ for cap in caps.values() for d_ in (cap['st'].get('dests') or [cap['st']['dref']])}
+        shutil.copy(fpath_, fpath_ + '.untied')
+        with awx_settings.given(genv):
+            # (the ways out as far as the model reads an exit's front, EXIT_REACH: at the nudge's two bars a tie left
+            # an array round the end of a tooth's way out and back in, across the lane's own run on its layer)
+            T_ = field_ties.lay(fpath_, parts_, wayout_runs(wayouts + row_ways, bpcb.board_info.copper_layers,
+                                                            reach=EXIT_REACH), log=log)
+            d_t = field_drc(fpath_, 'tied')[0] if T_ and (T_['segments'] or T_['vias']) else M_['d_f']
+        if T_ is None:
+            log('  field ties: no pad on a poured net beneath the group\'s parts')
+        elif d_t is None or M_['d_f'] is None or d_t > M_['d_f']:
+            # (ties that break a rule are no ties: the field goes on as it was measured, and the run says so)
+            shutil.copy(fpath_ + '.untied', fpath_)
+            log(f'  field ties: {T_["segments"]} tracks and {T_["vias"]} vias laid for {len(T_["tied"])} pad(s) measured '
+                f'DRC {d_t} against the field\'s {M_["d_f"]} -- TAKEN OUT AGAIN, the field goes on untied '
+                f'(field_drc_tied.json)')
+        else:
+            json.dump({'tracks': T_['tracks'], 'vias': T_['vs']}, open(os.path.join(out, 'field_ties.json'), 'w'))
+            log(f'  field ties: {len(T_["tied"])} of the {len(T_["pads"])} pad(s) on a poured net beneath '
+                f'{", ".join(sorted(parts_))} tied before the lanes -- {T_["segments"]} tracks, {T_["vias"]} vias, '
+                f'{T_["secs"]:.0f} s; DRC {d_t}'
+                + (f'; {T_["strayed"]} tie(s) that left their part\'s fan or the outer layers not kept'
+                   if T_.get('strayed') else ''))
+        os.remove(fpath_ + '.untied')
     if '--source-field' in flags:
         # (a bench's: the shared array alone fanned out, each bus's own step to fan out its destination from it)
         with awx_settings.given(genv):
