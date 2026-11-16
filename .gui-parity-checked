@@ -1,3 +1,29 @@
+e94a7677cd5c4b711878a8cd291af13a904ce42c 2026-11-16 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 33c52e0a..e94a7677: the #1840-#1952 rounds (352 commits), macOS,
+KiCad 10.0.6.
+(A) Flags: added, none removed -- route.py --via-span / --via-span-type /
+  --via-span-escape / --mask-keepouts, route_diff.py --via-span /
+  --via-span-type / --diff-pair-intra-lane. Each has a dialog control,
+  settings_persistence keys, a reset_params_to_defaults entry, a
+  manifest_to_plan mapping, and is passed at the GUI call sites (swig_gui
+  batch_route, differential_gui batch_route_diff_pairs, fanout_gui's BGA and
+  QFN calls); MASK_KEEPOUTS is one routing_defaults constant on both fronts.
+  Signatures: batch_route / batch_route_diff_pairs gain those kwargs only;
+  generate_bga_fanout, generate_qfn_fanout and repair_planes are now span
+  wrappers over the unchanged `_..._all` engines (QFN's gains via_from_class,
+  passed by both fronts; repair_planes' `_span` args are the wrapper's own,
+  and the in-run finalize reads the span from route_knobs on both fronts).
+(B) Post-passes and results data: the shipped design-rule grade (bc2a75e69)
+  and the via-span plane finalize are inside batch_route. 092a955e6 moves
+  place_fanout_clearance's hole-clearance writeback onto the engine's own
+  resolve_via_hole_clearance; the fanout tab still writes no project for
+  that step (the known, documented #782 asymmetry, unchanged).
+  #1931/#1952 are engine/grader-only.
+GATES: tests/gui_parity/run_gui_parity.py on e94a7677, 92 passed, 0 failed,
+0 declared SKIP; test_gui_engine_parity copper sets IDENTICAL (799 segments,
+128 vias, 0 DRC both fronts). Modal suite on the identical tree (465c1af86)
+1385 passed / 0 failed (+36 self-skipped). No corpus A/B run for this audit.
+
 33c52e0a22be4ff4f63b33f7eb839ee934f021b0 2026-11-12 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of 4f7f512f..33c52e0a: the #1828-#1838 issue round, the Autorouter
 GUI tab and the autoplan -> autoroute rename (28 commits), macOS, KiCad 10.0.6.
