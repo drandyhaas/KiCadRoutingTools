@@ -11,7 +11,13 @@ On both, SIG must pass the slot the rule's distance from the via's hole (the
 row 0.45 mm from its centre is legal at the ring's clearance alone), with the
 same copper, and check_drc must be clean.
 
-Needs KiCad's python (pcbnew + wx): launched under any other, it re-execs
+ipc-migration: the dialog runs over the fake IPC board
+(`tests/gui_parity/fake_ipc_board.py`, which `headless_plan.run_plan`
+installs), as an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`): the copper
+the steps commit lives in a copy, and the board file the writebacks read
+keeps the copper from before the run until the run ends, as in a real KiCad.
+
+Needs KiCad's python (wx + kipy on this branch): launched under any other, it re-execs
 into KiCad's (`headless_plan.reexec_into_kicad`), and exits 77 only when
 there is none.
 
@@ -38,9 +44,18 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
+# ipc-migration: `run_plan.py` run as a child installs the fake IPC board, as
+# an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`), as in a real KiCad: the
+# file the writebacks read holds the copper from before the step, which the
+# default harness, flushing every commit to it, hides.
+PLAN_ENV = dict(os.environ, KRT_FAKE_IPC_UNSAVED='1')
+
+
 def run(argv, what):
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', cwd=REPO, timeout=1800)
+                       errors='replace', cwd=REPO, timeout=1800,
+                       env=PLAN_ENV if any(a.endswith('run_plan.py') for a in argv)
+                       else None)
     text = (r.stdout or '') + (r.stderr or '')
     if r.returncode != 0 or 'Traceback' in text:
         raise AssertionError(f"BROKEN TEST: {what} did not run (exit {r.returncode})\n"
@@ -59,12 +74,12 @@ def facts(path):
 
 def main():
     try:
-        import pcbnew  # noqa: F401
         import wx      # noqa: F401
+        import kipy    # noqa: F401
     except Exception as e:                                     # noqa: BLE001
         from headless_plan import reexec_into_kicad
         reexec_into_kicad(__file__)
-        print(f"SKIP: needs KiCad's python (pcbnew + wx), and none was found: {e}")
+        print(f"SKIP: needs KiCad's python (wx + kipy), and none was found: {e}")
         return 77
     py = [sys.executable, '-X', 'utf8']
     with tempfile.TemporaryDirectory() as td:

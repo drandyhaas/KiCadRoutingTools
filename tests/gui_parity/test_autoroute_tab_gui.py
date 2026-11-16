@@ -38,6 +38,24 @@ part and poured a zone, so poses and zones are really applied.
 
 --apply-check skips the runs: it applies a CLI output to its input loaded as
 the live board and compares as above, for a board too slow to run twice.
+
+ipc-migration: the live board is the fake-IPC board (tests/gui_parity/
+fake_ipc_board.py) -- a kipy Board stand-in over a COPY of the input, which
+every commit flushes back to, so "saved as KiCad saves it" is the fake's
+save_as (the file and its project). It proves everything above the socket,
+not KiCad's own handling of the commit. Needs pcbnew, wx and kipy (KiCad's
+python with kicad-python installed). What this front cannot do, and what the
+gate grades instead (result_apply's docstring lists the gaps):
+  - created tracks and vias take new uuids and go on in parse order, so the
+    two uuid / track-order checks against the applied result are DROPPED;
+  - pours are rebuilt from the result and KiCad refills them
+    (`board.refill_zones()`, which the fake serves with pcbnew's own
+    ZONE_FILLER), not copied with their fill: "the same zone fill as saved"
+    against the CLI's file is ADAPTED to "the applied board's fill is KiCad's
+    fill of the result" (the result refilled after a KiCad save), and Apply
+    is checked to have asked for the refill;
+  - the rules go into the project FILE (kipy cannot write the live design
+    settings); the saved project is graded, which is that file.
 """
 import glob
 import json
@@ -77,11 +95,12 @@ def _reexec_into_kicad():
     for cand in KICAD_PYTHONS:
         if cand == sys.executable or not os.path.exists(cand):
             continue
-        r = subprocess.run([cand, '-c', 'import pcbnew, wx'], capture_output=True)
+        r = subprocess.run([cand, '-c', 'import pcbnew, wx, kipy'], capture_output=True)
         if r.returncode == 0:
             sys.exit(subprocess.run([cand, os.path.abspath(__file__)]
                                     + sys.argv[1:]).returncode)
-    print("SKIP: no python with pcbnew + wx found (this gate needs KiCad's)")
+    print("SKIP: no python with pcbnew + wx + kipy found (this gate needs KiCad's, "
+          "with kicad-python installed)")
     sys.exit(77)
 
 
@@ -239,24 +258,28 @@ def terminal_states(evs):
             if tok == 'AUTOROUTE_STEP' and p['state'] != 'running'}
 
 
-def compare_saved(board, cli_out, gui_out, own_result=None):
+def compare_saved(board, cli_out, gui_out, own_result=None, stats=None):
     """Save the live BOARD as KiCad saves it (project included) to GUI_OUT.
 
     Against the CLI's own run, CLI_OUT: the project floors, check_connected,
-    check_drc, the zones and their fill as saved, the poses, tracks and vias,
-    to the nanometre.
+    check_drc, the zones, the poses, tracks and vias, to the nanometre.
 
     Against OWN_RESULT, the result file this Apply applied (the tab's own
-    run's output; CLI_OUT itself for --apply-check): the same track, via and
-    zone uuids, the live board holding its tracks in that file's order, and
-    the same fill after a KiCad save and a refill. Two separate runs cannot
-    meet these three: every run of the router gives its new copper fresh
-    random uuids, KiCad saves tracks sorted by uuid, and its zone filler is
-    not order-free at the nanometre. So across the two runs the refill is
-    printed with its difference, and asserted only on one file."""
-    import pcbnew
+    run's output; CLI_OUT itself for --apply-check): the same fill after a
+    KiCad save and a refill. Two separate runs cannot meet it: every run of
+    the router gives its new copper fresh random uuids, KiCad saves tracks
+    sorted by uuid, and its zone filler is not order-free at the nanometre.
+    So across the two runs the refill is printed with its difference, and
+    asserted only on one file.
+
+    ipc-migration: BOARD is the fake-IPC board, saved by kipy's save_as. The
+    fill the live board holds is KiCad's refill of the pours Apply built (not
+    the result's fill copied), so it is graded against the result's own fill
+    after a KiCad refill; the uuid and track-order checks are dropped (new
+    uuids, parse order: result_apply's documented IPC gaps). STATS is the
+    Apply's own return (run_apply), which says how many pours it built."""
     os.makedirs(os.path.dirname(gui_out), exist_ok=True)
-    pcbnew.SaveBoard(gui_out, board)        # as KiCad saves: project too
+    board.save_as(gui_out, overwrite=True, include_project=True)   # kipy's save
     check("the saved board has its project",
           os.path.isfile(gui_out[:-len('.kicad_pcb')] + '.kicad_pro'))
     cli_rules, gui_rules = project_rules(cli_out), project_rules(gui_out)
@@ -276,10 +299,14 @@ def compare_saved(board, cli_out, gui_out, own_result=None):
           cf['zones'] == gf['zones'] and len(cf['zones']) > 0,
           f"{sum(cf['zones'].values())} cli, {sum(gf['zones'].values())} gui; "
           f"only cli {list((cf['zones'] - gf['zones']).keys())[:2]}")
-    check("the same zone fill as saved, per net and layer (area nm^2 and vertices)",
-          cf['fills'] == gf['fills'],
-          f"cli {[(k, v[0]) for k, v in cf['fills'].items()]} "
-          f"gui {[(k, v[0]) for k, v in gf['fills'].items()]}")
+    # ipc-migration: main checks `cf['fills'] == gf['fills']` here, the fill
+    # copied with the zone. This front builds the pours and KiCad refills
+    # them, so the live fill is graded below against the result's refill.
+    added = ((stats or {}).get('zones') or {}).get('added')
+    check("Apply asked KiCad to refill the pours it built",
+          added is not None and (getattr(board, 'refill_calls', 0) > 0 or not added),
+          f"{added} zone(s) added, refill_zones called "
+          f"{getattr(board, 'refill_calls', 0)} time(s)")
     moved = [k for k in cf['poses'] if cf['poses'][k] != gf['poses'].get(k)]
     check("the same footprint poses, to the nm", not moved and len(cf['poses']) == len(gf['poses']),
           f"{len(moved)} differ: " + "; ".join(f"{k} cli {cf['poses'][k]} gui {gf['poses'].get(k)}"
@@ -297,26 +324,41 @@ def compare_saved(board, cli_out, gui_out, own_result=None):
 
     own = own_result or cli_out
     of = cf if own == cli_out else board_facts(own)
-    only_own = sorted(set(of['uuids']) - set(gf['uuids']))
-    check("the same track, via and zone uuids as the applied result",
-          of['uuids'] == gf['uuids'],
-          f"{len(only_own)} only in the result, "
-          f"{len(set(gf['uuids']) - set(of['uuids']))} only in the applied board")
-    opened = pcbnew.LoadBoard(own)
-    live_seq = [it.m_Uuid.AsString() for it in board.GetTracks()]
-    own_seq = [it.m_Uuid.AsString() for it in opened.GetTracks()]
-    first = next((i for i, (x, y) in enumerate(zip(live_seq, own_seq)) if x != y), None)
-    check("the live board holds its tracks and vias in the result file's order",
-          live_seq == own_seq, f"{len(live_seq)} vs {len(own_seq)}, first difference at {first}")
+    # ipc-migration: DROPPED "the same track, via and zone uuids as the
+    # applied result" and "the live board holds its tracks and vias in the
+    # result file's order": kipy gives a created item a new uuid and takes
+    # no insertion order (result_apply's first IPC gap). Shown, not graded:
+    print(f"  uuids: {len(set(of['uuids']) & set(gf['uuids']))} of "
+          f"{len(of['uuids'])} of the result's kept (IPC gives created items new "
+          f"uuids)", flush=True)
+    # ipc-migration: KiCad refills the pours at the LIVE board's rules -- the
+    # result's go into the project file and take effect on a project reload
+    # (result_apply's last IPC gap) -- so the fill as saved is only graded to
+    # be there; the result's fill is graded after the reload and a refill.
+    check("the live board's pours are filled (KiCad's refill)",
+          set(gf['fills']) == set(of['refills'])
+          and all(v[0] > 0 for v in gf['fills'].values()),
+          f"live {[(k, v[0]) for k, v in gf['fills'].items()]} "
+          f"result's pours {sorted(of['refills'])}")
+    # Main asserts this one to the nm and vertex. Here the created copper has
+    # new uuids (the first IPC gap), so KiCad's save orders it differently
+    # from the result file and its filler is not order-free at the nm (the
+    # cross-run case above): graded per net and layer on area, to a part in
+    # 1e6 -- a pour filled at other rules, or not at all, is percents off.
+    rel = {k: (abs(gf['refills'].get(k, (0,))[0] - v[0]) / v[0] if v[0] else 1.0)
+           for k, v in of['refills'].items()}
     check("the same fill as the applied result after a KiCad save and a refill, per "
-          "net and layer (area nm^2 and vertices)",
-          of['refills'] == gf['refills'] and any(v[0] for v in of['refills'].values()),
+          "net and layer (area, to 1e-6)",
+          set(of['refills']) == set(gf['refills']) and rel
+          and all(r <= 1e-6 for r in rel.values())
+          and any(v[0] for v in of['refills'].values()),
           f"result {[(k, v[0]) for k, v in of['refills'].items()]} "
-          f"applied {[(k, v[0]) for k, v in gf['refills'].items()]}")
+          f"applied {[(k, v[0]) for k, v in gf['refills'].items()]} rel {rel}")
     PARITY.update({'zones': sum(cf['zones'].values()),
                    'fill_saved_mm2': round(sum(v[0] for v in cf['fills'].values()) / 1e12, 3),
                    'refill_cli_nm2': cli_refill, 'refill_gui_nm2': gui_refill,
                    'refill_vs_own_result_equal': of['refills'] == gf['refills'],
+                   'refill_vs_own_result_rel': {'/'.join(k): r for k, r in rel.items()},
                    'issues': (cli_g[0], gui_g[0]), 'drc': (cli_g[2], gui_g[2]),
                    'tracks': (sum(cf['tracks'].values()), sum(gf['tracks'].values())),
                    'vias': (sum(cf['vias'].values()), sum(gf['vias'].values())),
@@ -328,21 +370,29 @@ def compare_saved(board, cli_out, gui_out, own_result=None):
 def apply_check(src, cli_out, tmp):
     """--apply-check: no run, Apply alone. Load SRC as the live board, apply
     the CLI's CLI_OUT to it through result_apply (what the tab's Apply
-    calls), save and compare -- for a board too slow to run here twice."""
-    import pcbnew
+    calls), save and compare -- for a board too slow to run here twice.
+
+    ipc-migration: the live board is the fake-IPC board over a COPY of SRC
+    (it writes every commit back to its file)."""
     import wx
     sys.path.insert(0, REPO)
     sys.path.insert(0, os.path.join(REPO, 'py_router'))
+    sys.path.insert(0, os.path.join(REPO, 'tests', 'gui_parity'))
+    from copy_board import copy_board
+    from fake_ipc_board import install as install_fake_board
     app = wx.App(False)  # noqa: F841
     wx.Log.SetActiveTarget(wx.LogStderr())
-    board = pcbnew.LoadBoard(src)
-    pcbnew.GetBoard = lambda: board
+    live = os.path.join(tmp, 'live', 'board.kicad_pcb')
+    os.makedirs(os.path.dirname(live), exist_ok=True)
+    copy_board(src, live)
+    board = install_fake_board(live)
     from kicad_routing_plugin.result_apply import plan_apply, run_apply
-    plan = plan_apply(board, cli_out, pcbnew)
+    plan = plan_apply(board, cli_out)
     print("\n\n".join(plan.lines()), flush=True)
-    stats = run_apply(board, plan, pcbnew)
+    stats = run_apply(board, plan)
     print(f"  applied: {stats}", flush=True)
-    compare_saved(board, cli_out, os.path.join(tmp, 'gui', 'applied.kicad_pcb'))
+    compare_saved(board, cli_out, os.path.join(tmp, 'gui', 'applied.kicad_pcb'),
+                  stats=stats)
     if FAILS:
         print(f"VERDICT: FAIL ({len(FAILS)}): " + "; ".join(FAILS))
         return 1
@@ -353,13 +403,13 @@ def apply_check(src, cli_out, tmp):
 # --------------------------------------------------------------------- run
 
 def run(keep, board_file=BOARD, require_moves=False):
-    import pcbnew
     import wx
     sys.path.insert(0, REPO)
     sys.path.insert(0, os.path.join(REPO, 'py_router'))
     sys.path.insert(0, os.path.join(REPO, 'tests', 'gui_parity'))
     from copy_board import copy_board
-    from kicad_parser import build_pcb_data_from_board
+    from fake_ipc_board import (install as install_fake_board,
+                                build_pcb_data_like_ipc)
     import autoroute as AR
 
     tmp = keep or tempfile.mkdtemp(prefix='krt_autoroute_gate_')
@@ -395,12 +445,17 @@ def run(keep, board_file=BOARD, require_moves=False):
         asked_styles.append(a[1] if len(a) > 1 else k.get('style', 0))
         return wx.YES
     wx.MessageBox = _yes
-    board = pcbnew.LoadBoard(src)
-    pcbnew.GetBoard = lambda: board
-    from kicad_routing_plugin.swig_gui import RoutingDialog
+    # ipc-migration: the open board is the fake-IPC board over a COPY of the
+    # input (every commit is written back to its file, so SRC stays the
+    # input the CLI routed), and the dialog is routing_dialog's.
+    live = os.path.join(tmp, 'live', 'board.kicad_pcb')
+    os.makedirs(os.path.dirname(live), exist_ok=True)
+    copy_board(src, live)
+    board = install_fake_board(live)
+    from kicad_routing_plugin.routing_dialog import RoutingDialog
     from kicad_routing_plugin.tab_names import MAIN_PAGES, AUTO_SUBTABS
     from wx_pump import run_until
-    dlg = RoutingDialog(None, build_pcb_data_from_board(board), src)
+    dlg = RoutingDialog(None, build_pcb_data_like_ipc(live), live)
     try:
         print("layout", flush=True)
         nb = dlg.notebook
@@ -481,7 +536,7 @@ def run(keep, board_file=BOARD, require_moves=False):
 
         print("tab: apply", flush=True)
         from kicad_routing_plugin.result_apply import plan_apply
-        unticked = "\n".join(plan_apply(board, s['output'], pcbnew, fix_drc=False).lines())
+        unticked = "\n".join(plan_apply(board, s['output'], fix_drc=False).lines())
         check("with 'Fix DRC settings' unticked, Apply says it leaves the rules (#693)",
               'Design rules: not changed' in unticked, unticked[-300:])
         check("the dialog's box is ticked, so this Apply lowers the rules",
@@ -493,7 +548,7 @@ def run(keep, board_file=BOARD, require_moves=False):
         # Applied, the board IS the result: a second Apply has nothing to do,
         # says so, and offers OK alone rather than a Continue? question.
         from kicad_routing_plugin.result_apply import NOTHING_TO_CHANGE
-        again = plan_apply(board, s['output'], pcbnew)
+        again = plan_apply(board, s['output'])
         check("after Apply, the same result has nothing to change",
               not again.has_changes and again.lines() == [NOTHING_TO_CHANGE],
               "\n".join(again.lines())[:300])
@@ -503,7 +558,7 @@ def run(keep, board_file=BOARD, require_moves=False):
               and not (asked_styles[-1] & wx.YES_NO) and (asked_styles[-1] & wx.OK),
               f"{asked[-1][:120]!r} style={asked_styles[-1]}")
         compare_saved(board, cli_out, os.path.join(tmp, 'gui', 'routed.kicad_pcb'),
-                      own_result=s['output'])
+                      own_result=s['output'], stats=getattr(tab, 'last_apply_stats', None))
         before = board_facts(src)['poses']
         after = board_facts(cli_out)['poses']
         moved_by_run = sorted(k for k in after if after[k] != before.get(k))
@@ -578,6 +633,7 @@ def main():
     try:
         import pcbnew  # noqa: F401
         import wx  # noqa: F401
+        import kipy  # noqa: F401
     except ImportError:
         _reexec_into_kicad()
     keep = None

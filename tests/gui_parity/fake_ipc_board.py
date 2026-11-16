@@ -103,13 +103,78 @@ class _FakeNetMap:
 
 
 class _FakeFootprint:
-    """Minimal movable footprint: reference + position + orientation."""
+    """Minimal movable footprint: reference + position + orientation.
 
-    def __init__(self, reference, x_mm, y_mm, rotation_deg):
+    Also, for the result_apply / Labels appliers (all optional, so a caller
+    that passes only the first four arguments gets what it always got):
+    `layer` (the side, a BoardLayer, which kipy's footprint carries and a
+    flip sets), `locked` (a PROPERTY with a setter, as kicad-python 0.7.1's
+    FootprintInstance has -- `set_item_locked` writes only through a class
+    property, so a plain attribute would swallow the lock), and
+    `reference_field`, a REAL kipy Field (write-through protobuf, as kipy's
+    `FootprintInstance.reference_field` hands out) seeded from the file's
+    Reference label: world position, the stored angle, size and thickness.
+    `push_commit` writes back whichever of side, lock and label changed.
+    """
+
+    def __init__(self, reference, x_mm, y_mm, rotation_deg, layer_name=None,
+                 locked=False, ref_label=None):
         from kipy.geometry import Vector2
         self.reference = reference
         self.position = Vector2.from_xy_mm(x_mm, y_mm)
         self.orientation = _Deg(rotation_deg or 0.0)
+        from kipy.board_types import BoardLayer
+        self._back = str(layer_name or 'F.Cu').startswith('B')
+        self.layer = BoardLayer.BL_B_Cu if self._back else BoardLayer.BL_F_Cu
+        self._locked = bool(locked)
+        self._seed_locked = self._locked
+        try:
+            self.reference_field = _reference_field(x_mm, y_mm, rotation_deg,
+                                                    ref_label)
+            self._seed_label = self.reference_field.proto.SerializeToString()
+        except Exception as e:                                  # noqa: BLE001
+            # An older kicad-python shapes Field differently: no label to
+            # write, rather than no fake board at all.
+            print(f"  FakeIpcBoard: {reference}'s Reference field not "
+                  f"modelled on this kipy ({e})")
+            self.reference_field = None
+            self._seed_label = None
+
+    @property
+    def locked(self):
+        return self._locked
+
+    @locked.setter
+    def locked(self, value):
+        self._locked = bool(value)
+
+    def label_changed(self):
+        """Did the applier write the Reference field (position, angle, size,
+        thickness, alignment)?"""
+        if self.reference_field is None:
+            return False
+        return self.reference_field.proto.SerializeToString() != self._seed_label
+
+
+def _reference_field(fp_x, fp_y, fp_rot, label):
+    """A kipy Field seeded the way KiCad reports a Reference over IPC: the
+    text's WORLD position (the file stores it in the footprint frame;
+    `local_to_global` is the parser's own transform), its stored angle, its
+    size (x = width, y = height) and stroke. No label: an empty field."""
+    from kipy.board_types import Field
+    from kipy.geometry import Vector2
+    f = Field()
+    if label is None:
+        return f
+    from kicad_parser import local_to_global, mm_to_iu
+    wx_, wy_ = local_to_global(fp_x, fp_y, fp_rot or 0.0, label.at_x, label.at_y)
+    t = f.text
+    t.position = Vector2.from_xy(mm_to_iu(wx_), mm_to_iu(wy_))
+    a = t.attributes
+    a.angle = float(label.rotation or 0.0)
+    a.size = Vector2.from_xy(mm_to_iu(label.size_w), mm_to_iu(label.size_h))
+    a.stroke_width = mm_to_iu(label.thickness)
+    return f
 
 
 class _FakeZone:
@@ -126,7 +191,7 @@ class _FakeZone:
     """
 
     def __init__(self, net_name, layer_names, uuid='', teardrop=False,
-                 name=''):
+                 name='', parsed=None):
         from kicad_ipc_adapter import layer_maps
         from kipy.proto.board.board_types_pb2 import ZoneType
         if isinstance(layer_names, str):
@@ -138,6 +203,176 @@ class _FakeZone:
         self.type = ZoneType.ZT_TEARDROP if teardrop else ZoneType.ZT_COPPER
         self.name = name
         self.uuid = uuid
+        # The zone's geometry and fill settings as KiCad reports them over
+        # IPC, so a reader of the live pours (`kicad_parser.
+        # _kipy_zone_entries`, which result_apply reads them with) sees the
+        # pour the file holds. Built from the PARSED zone here, never by the
+        # plugin's own zone builder, so the two sides of a comparison are
+        # not one function. Without it every live pour read as no pour.
+        self._kz = None
+        if parsed is not None:
+            try:
+                self._kz = _kipy_zone_from_parsed(parsed, layer_names, net_name,
+                                                  self.type, teardrop)
+            except Exception as e:                              # noqa: BLE001
+                print(f"  FakeIpcBoard: zone {uuid or '?'} not readable as a "
+                      f"kipy zone ({e}); readers see no pour there")
+
+    # kipy Zone reads, served from `_kz` (absent -> AttributeError, as before)
+
+    def _k(self):
+        if self._kz is None:
+            raise AttributeError('zone built without its parsed geometry')
+        return self._kz
+
+    @property
+    def proto(self):
+        return self._k().proto
+
+    @property
+    def outline(self):
+        return self._k().outline
+
+    @property
+    def priority(self):
+        return self._k().priority
+
+    @property
+    def clearance(self):
+        return self._k().clearance
+
+    @property
+    def min_thickness(self):
+        return self._k().min_thickness
+
+    @property
+    def island_mode(self):
+        return self._k().island_mode
+
+    @property
+    def min_island_area(self):
+        return self._k().min_island_area
+
+    @property
+    def teardrop(self):
+        return self._k().teardrop
+
+    def is_rule_area(self):
+        return self._k().is_rule_area()
+
+
+#: Zone.pad_connection -> kipy ZoneConnectionStyle, and the parser's island
+#: mode -> IslandRemovalMode (KiCad's file values: 0 always, 1 never, 2 area).
+_FAKE_CONNECT = {'none': 'ZCS_NONE', 'thermal': 'ZCS_THERMAL',
+                 'solid': 'ZCS_FULL', 'thru_hole_only': 'ZCS_PTH_THERMAL'}
+_FAKE_ISLAND = {0: 'IRM_ALWAYS', 1: 'IRM_NEVER', 2: 'IRM_AREA'}
+
+
+def _kipy_zone_from_parsed(z, layer_names, net_name, zone_type, teardrop):
+    """A real kipy Zone carrying parsed zone Z's outline, holes, layers, net,
+    priority, clearance, minimum thickness, pad connection and spokes, and
+    island removal -- what KiCad hands back for the zone over IPC."""
+    from kipy.board_types import Zone
+    from kipy.geometry import PolyLine, PolyLineNode, PolygonWithHoles
+    from kipy.proto.board.board_types_pb2 import (ZoneConnectionStyle,
+                                                   IslandRemovalMode,
+                                                   TeardropType)
+    from kicad_ipc_adapter import layer_id_for
+    from kicad_parser import mm_to_iu
+
+    def polyline(points):
+        pl = PolyLine()
+        for x, y in points or ():
+            pl.append(PolyLineNode.from_xy(mm_to_iu(x), mm_to_iu(y)))
+        return pl
+    kz = Zone()
+    kz.type = zone_type
+    pwh = PolygonWithHoles()
+    pwh.outline = polyline(z.polygon)
+    for h in getattr(z, 'holes', None) or ():
+        pwh.proto.holes.append(polyline(h).proto)
+    kz.proto.outline.polygons.append(pwh.proto)
+    kz.layers = [layer_id_for(n) for n in layer_names]
+    kz.priority = int(getattr(z, 'priority', 0) or 0)
+    cs = kz.proto.copper_settings
+    if getattr(z, 'clearance', None) is not None:
+        cs.clearance.value_nm = mm_to_iu(z.clearance)
+    if getattr(z, 'min_thickness', None) is not None:
+        cs.min_thickness.value_nm = mm_to_iu(z.min_thickness)
+    pc = getattr(z, 'pad_connection', None)
+    if pc in _FAKE_CONNECT:
+        cs.connection.zone_connection = ZoneConnectionStyle.Value(_FAKE_CONNECT[pc])
+    if getattr(z, 'thermal_gap', None) is not None:
+        cs.connection.thermal_spokes.gap.value_nm = mm_to_iu(z.thermal_gap)
+    if getattr(z, 'thermal_bridge_width', None) is not None:
+        cs.connection.thermal_spokes.width.value_nm = mm_to_iu(z.thermal_bridge_width)
+    cs.island_mode = IslandRemovalMode.Value(
+        _FAKE_ISLAND.get(int(getattr(z, 'island_removal_mode', 0) or 0), 'IRM_ALWAYS'))
+    # The file carries `(island_area_min ...)` for an area-mode pour alone;
+    # any other pour reports KiCad's default, which kipy's Zone() holds
+    # (10 mm^2), as a live KiCad does.
+    if getattr(z, 'island_area_min', None):
+        cs.min_island_area = int(round(float(z.island_area_min) * 1e12))
+    if teardrop:
+        cs.teardrop.type = TeardropType.Value('TDT_VIA_PAD')
+    if net_name:
+        kz.net = _net_obj(net_name)
+    return kz
+
+
+def _zone_sexpr_from_kipy(zone, net_id, use_net_name):
+    """The `(zone ...)` block KiCad would save for a copper Zone the plugin
+    CREATED over IPC (result_apply.make_pour builds it directly, so
+    install()'s make_zone recording never sees it). Read back through the
+    plugin's own kipy zone reader (`_kipy_zone_entries`, the IPC builder's),
+    and written with every field that reader returns: net, every copper
+    layer, outline and holes (each further `(polygon ...)` is a hole, as
+    KiCad loads it), priority, pad connection and clearance, minimum
+    thickness, spokes and island removal. Unfilled: KiCad fills it when the
+    plugin asks (`refill_zones`). None when it is not a copper pour."""
+    import uuid as _uuid
+    from kicad_parser import _kipy_zone_entries
+    from kicad_writer import _escape_net_name
+    entries = _kipy_zone_entries(
+        zone, lambda n: (net_id, (getattr(n, 'name', '') or '') if n is not None else ''))
+    if not entries:
+        return None
+    z = entries[0]
+    layers = [e.layer for e in entries]
+    name = _escape_net_name(z.net_name or '')
+    net = (f'(net "{name}")' if use_net_name
+           else f'(net {net_id})\n\t\t(net_name "{name}")')
+    lay = (f'(layer "{layers[0]}")' if len(layers) == 1
+           else '(layers ' + ' '.join(f'"{n}"' for n in layers) + ')')
+    conn = {'solid': ' yes', 'none': ' no', 'thru_hole_only': ' thru_hole_only'}.get(
+        z.pad_connection, '')
+    clr = z.clearance if z.clearance is not None else 0.2
+    fill = []
+    if z.thermal_gap is not None:
+        fill.append(f'(thermal_gap {z.thermal_gap:g})')
+    if z.thermal_bridge_width is not None:
+        fill.append(f'(thermal_bridge_width {z.thermal_bridge_width:g})')
+    fill.append(f'(island_removal_mode {int(z.island_removal_mode or 0)})')
+    if z.island_area_min:
+        fill.append(f'(island_area_min {z.island_area_min:g})')
+
+    def poly(points):
+        return ('\t\t(polygon\n\t\t\t(pts\n\t\t\t\t'
+                + ' '.join(f'(xy {x:.6f} {y:.6f})' for x, y in points)
+                + '\n\t\t\t)\n\t\t)')
+    body = [f'\t\t{net}', f'\t\t{lay}', f'\t\t(uuid "{_uuid.uuid4()}")',
+            '\t\t(hatch edge 0.5)']
+    if z.priority:
+        body.append(f'\t\t(priority {int(z.priority)})')
+    body.append(f'\t\t(connect_pads{conn}\n\t\t\t(clearance {clr:g})\n\t\t)')
+    if z.min_thickness is not None:
+        body.append(f'\t\t(min_thickness {z.min_thickness:g})')
+    if not use_net_name:
+        body.append('\t\t(filled_areas_thickness no)')
+    body.append('\t\t(fill ' + ' '.join(fill) + ')')
+    body.append(poly(z.polygon))
+    body.extend(poly(h) for h in (getattr(z, 'holes', None) or ()))
+    return '\t(zone\n' + '\n'.join(body) + '\n\t)'
 
 
 class _NamedNet:
@@ -205,7 +440,10 @@ class FakeIpcBoard:
             self._vias.append(k)
 
         self._footprints = [
-            _FakeFootprint(ref, fp.x, fp.y, fp.rotation)
+            _FakeFootprint(ref, fp.x, fp.y, fp.rotation,
+                           layer_name=getattr(fp, 'layer', None),
+                           locked=bool(getattr(fp, 'locked', False)),
+                           ref_label=getattr(fp, 'ref_label', None))
             for ref, fp in self.pcb_data.footprints.items()
         ]
         # One stand-in per physical zone (see _FakeZone): the parser's
@@ -222,7 +460,8 @@ class FakeIpcBoard:
         self._zones = [
             _FakeZone(self._name_of.get(z.net_id, ''), layers,
                       uuid=getattr(z, 'uuid', ''),
-                      teardrop=bool(getattr(z, 'teardrop', False)))
+                      teardrop=bool(getattr(z, 'teardrop', False)),
+                      parsed=z)
             for z, layers in by_zone.values()
         ]
 
@@ -313,6 +552,7 @@ class FakeIpcBoard:
         """
         from placement.writer import write_placed_output
         placements = []
+        locks, unlocks, labelled = [], [], []
         for fp in self._updated:
             ref = getattr(fp, 'reference', None)
             pos = getattr(fp, 'position', None)
@@ -325,11 +565,82 @@ class FakeIpcBoard:
             if ang is not None:
                 rot = getattr(ang, 'degrees', None)
                 rot = rot if rot is not None else 0.0
-            placements.append({'reference': ref, 'new_x': x, 'new_y': y,
-                               'new_rotation': rot})
+            p = {'reference': ref, 'new_x': x, 'new_y': y, 'new_rotation': rot}
+            # Side, lock and label: only what the applier CHANGED, so a plain
+            # pose update writes exactly the placement it always wrote.
+            side_changed = lock_changed = label_changed = False
+            if isinstance(fp, _FakeFootprint):
+                from kipy.board_types import BoardLayer
+                back = fp.layer == BoardLayer.BL_B_Cu
+                if back != fp._back:
+                    p['new_side'] = 'B' if back else 'F'
+                    side_changed = True
+                if fp.locked != fp._seed_locked:
+                    (locks if fp.locked else unlocks).append(ref)
+                    lock_changed = True
+                if fp.label_changed():
+                    labelled.append((fp, x, y, rot))
+                    label_changed = True
+            parsed = self.pcb_data.footprints.get(ref)
+            pose_same = (parsed is not None and not side_changed
+                         and abs(parsed.x - x) < 1e-6 and abs(parsed.y - y) < 1e-6
+                         and abs(((parsed.rotation or 0) - rot + 180) % 360 - 180) < 1e-6)
+            if not (pose_same and (lock_changed or label_changed)):
+                placements.append(p)
         if placements:
             write_placed_output(self.path, self.path, placements)
+        if locks or unlocks:
+            from placement.seeder import stamp_locked, stamp_unlocked
+            if locks:
+                stamp_locked(self.path, locks)
+            if unlocks:
+                stamp_unlocked(self.path, unlocks)
+        if labelled:
+            self._flush_labels(labelled)
         return len(placements)
+
+    def _flush_labels(self, labelled):
+        """Write the Reference fields an applier changed into the file.
+
+        KiCad takes the field's position in BOARD coordinates and stores it in
+        the footprint's frame; this inverts it with the parser's own
+        transform (`_global_to_local`, against the footprint's pose after this
+        commit) and writes it with the CLI's label writer, which writes a
+        centred label of one size (height). What it does NOT model: KiCad's
+        own handling of the angle, alignment and a B-side mirror over IPC --
+        only a live KiCad proves those."""
+        from types import SimpleNamespace
+        from kicad_parser import _global_to_local
+        from placement.writer import write_label_output
+        from kicad_ipc_adapter import _vec_xy_mm
+        results = []
+        for fp, x, y, rot in labelled:
+            t = fp.reference_field.text
+            a = t.attributes
+            wx_, wy_ = _vec_xy_mm(t.position)
+            lx, ly = _global_to_local(x, y, rot, wx_, wy_)
+            results.append(SimpleNamespace(
+                reference=fp.reference, changed=True,
+                at_x=round(lx, 6), at_y=round(ly, 6),
+                file_rotation=float(a.angle or 0.0),
+                size=a.size.y / 1e6, thickness=a.stroke_width / 1e6))
+        write_label_output(self.path, self.path, results)
+
+    def refill_zones(self, *_a, **_k):
+        """kipy's `Board.refill_zones`: KiCad's own zone filler over every
+        zone, as pressing B does. Here pcbnew's ZONE_FILLER on the file, saved
+        through `tool_records.save_board` (#1906), so a pour the plugin
+        created is filled as KiCad fills it after the commit. Raises without
+        pcbnew -- a fake that cannot fill must not pass for one that did."""
+        import pcbnew
+        import tool_records
+        self.refill_calls = getattr(self, 'refill_calls', 0) + 1
+        b = pcbnew.LoadBoard(self.path)
+        zones = list(b.Zones())
+        if zones:
+            pcbnew.ZONE_FILLER(b).Fill(zones)
+        tool_records.save_board(pcbnew.SaveBoard, self.path, b, aSkipSettings=True)
+        self._reseed()
 
     def drop_commit(self, _handle):
         self._added, self._removed, self._updated = [], [], []
@@ -392,6 +703,19 @@ class FakeIpcBoard:
         for it in self._added:
             zd = _ZONE_SRC.get(id(it))
             if zd is None:
+                # A zone built without make_zone (result_apply.make_pour):
+                # written from the kipy object itself. It used to be dropped
+                # here in silence, so an Apply's pours never reached the file.
+                if type(it).__name__ == 'Zone':
+                    net = getattr(it, 'net', None)
+                    sx = _zone_sexpr_from_kipy(
+                        it, _nid(getattr(net, 'name', '') if net is not None else ''),
+                        _k10)
+                    if sx is None:
+                        print("  FakeIpcBoard: a created zone that is no copper "
+                              "pour was NOT written")
+                    else:
+                        self._zone_sexprs.append(sx)
                 continue
             if zd.get('keepout'):
                 from kicad_writer import generate_keepout_zone_sexpr
@@ -544,11 +868,15 @@ def install(board_path):
     Returns the board. This is the IPC analogue of the SWIG harness's
     `pcbnew.GetBoard = lambda: board`: the plugin keeps calling
     `get_board()` / `build_pcb_data_from_board()` exactly as in production.
+
+    With `UNSAVED_ENV` set to 1 the board is an UNSAVED document, as in a
+    real KiCad: see `_unsaved_live_copy`.
     """
     import kicad_ipc_adapter as adapter
     import kicad_parser
 
-    board = FakeIpcBoard(board_path)
+    unsaved = os.environ.get(UNSAVED_ENV) == '1'
+    board = FakeIpcBoard(_unsaved_live_copy(board_path) if unsaved else board_path)
 
     # Record what each kipy Zone was BUILT from. Reading a protobuf-backed Zone
     # back (outline nodes, layer enum, net, clearance) is fiddly and version
@@ -603,7 +931,71 @@ def install(board_path):
         return _real_build(b, *a, **k)
 
     kicad_parser.build_pcb_data_from_board = _build
+
+    if unsaved:
+        # The document is `board_path`: the adapter's path (every writeback
+        # and the plan's end-of-plan write read the board FILE there, which
+        # holds the copper from before the run) and PCBData.source_path (the
+        # real builder's `_ipc_board_path`). The copper lives in board.path.
+        doc = os.path.abspath(board_path)
+        board.document_path = doc
+        adapter.get_board_full_path = lambda *a, **k: doc
+
+        def _build_unsaved(b, *a, **k):
+            pcb = _build(b, *a, **k)
+            if isinstance(b, FakeIpcBoard):
+                pcb.source_path = doc
+            return pcb
+
+        kicad_parser.build_pcb_data_from_board = _build_unsaved
+        import atexit
+        atexit.register(_save_unsaved_document, board)
     return board
+
+
+#: Opt-in: `install` makes the board an UNSAVED document.
+UNSAVED_ENV = 'KRT_FAKE_IPC_UNSAVED'
+
+
+def _unsaved_live_copy(board_path):
+    """The file a FakeIpcBoard edits when the document is unsaved.
+
+    A real KiCad holds the routed copper in memory and leaves the board FILE
+    as it was opened until the user saves, so whatever the plugin reads off
+    the file (`fix_project_for_output`'s scan behind each writeback, the
+    plan's end-of-plan write) sees the copper from BEFORE the run. The
+    default harness flushes every commit to the document itself, so such a
+    read sees the step's copper and a writeback that only works on a saved
+    file passes here. Opt-in (`UNSAVED_ENV`): the commits go to a copy in a
+    `.fake_ipc_live` directory beside the board, whose project siblings are
+    symlinks to the document's, so a rule the plugin writes beside the
+    document is the one the engines read; the document is overwritten with
+    the copy at exit (`_save_unsaved_document`, the user's save)."""
+    import shutil
+    from copy_board import SIBLING_EXTS
+    doc = os.path.abspath(board_path)
+    live_dir = os.path.join(os.path.dirname(doc), '.fake_ipc_live')
+    os.makedirs(live_dir, exist_ok=True)
+    live = os.path.join(live_dir, os.path.basename(doc))
+    shutil.copy(doc, live)
+    doc_stem, live_stem = os.path.splitext(doc)[0], os.path.splitext(live)[0]
+    for ext in SIBLING_EXTS:
+        if os.path.lexists(live_stem + ext):
+            os.remove(live_stem + ext)
+        os.symlink(doc_stem + ext, live_stem + ext)
+    print(f"FakeIpcBoard: unsaved document {os.path.basename(doc)}; the "
+          f"commits go to {live}")
+    return live
+
+
+def _save_unsaved_document(board):
+    """The user's File > Save at the end of an unsaved run: the board file
+    only (KiCad's own project save is not modelled)."""
+    import shutil
+    doc = getattr(board, 'document_path', None)
+    if doc and os.path.isfile(board.path):
+        shutil.copy(board.path, doc)
+        print(f"FakeIpcBoard: saved the unsaved document to {doc}")
 
 
 def build_pcb_data_like_ipc(path):

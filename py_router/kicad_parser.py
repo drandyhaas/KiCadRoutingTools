@@ -10904,6 +10904,22 @@ def _extract_stackup_kipy(board) -> List[StackupLayer]:
     return stackup
 
 
+#: The memos on a PCBData derived from its copper, which a live re-sync (and
+#: via_span's set-aside) must drop when the copper changes under them.
+#: Most self-invalidate on the copper lists' identity, but not all:
+#: `_protection_map_memo` is not keyed at all (KiCad locks and `sense:` holds
+#: decide it), and `_foreign_via_arr_cache` is keyed on the via count and the
+#: TAIL via only, so a via moved in the editor kept its old position. Each is
+#: rebuilt on first use. (main keeps this beside its SWIG builder, which the
+#: port deleted; via_span.py imports it on both branches.)
+LIVE_COPPER_MEMOS = (
+    '_protection_map_memo', '_locked_net_ids_memo',
+    '_foreign_seg_arr_cache', '_foreign_seg_arr_trust',
+    '_foreign_via_arr_cache', '_gopn_cache', '_net_graph_cache',
+    '_pourable_anchor_cache', '_tap_spatial_index_cache', '_attach_pts_memo',
+    '_blockid_geom_memo', '_via_place_fail_memo')
+
+
 def _general_thickness_kipy() -> Optional[float]:
     """The board file's ``(general (thickness ...))``, as the text parser reads
     it (#502), from the file the adapter names (kipy has no GetFileName). Not

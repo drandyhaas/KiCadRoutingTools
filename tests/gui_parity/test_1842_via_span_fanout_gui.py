@@ -12,9 +12,23 @@ vias (count, type, layer pair, size, drill), the layers the tracks are on,
 how many nets got copper, and the output project's via and drilled-hole
 minimums, which must be the board's own.
 
-Needs KiCad's python (pcbnew + wx): exit 77 without it.
+ipc-migration: the dialog reaches the board through kicad_ipc_adapter, and
+run_plan.py (headless_plan) points it at tests/gui_parity/fake_ipc_board (the
+board FILE, commits flushed back), so the GUI leg needs wx + kipy, not pcbnew.
+Main's gate skipped unless launched under KiCad's python; here it re-execs
+into a python with wx + kipy (headless_plan.reexec_into_kicad, the one
+run_plan.py uses), and exits 77 only when there is none.
 
-    <KiCad python> tests/gui_parity/test_1842_via_span_fanout_gui.py
+ipc-migration: the project-minimums checks bind HERE. This front's writeback
+is the sibling .kicad_pro itself (apply_drc_settings_fix), so the GUI leg's
+project is what the tab wrote. On main the tab writes the LIVE board's design
+settings, which a headless pcbnew SaveBoard does not write to the .kicad_pro,
+so there those two checks read the copied input project (measured: main's tab
+lowers the live via floors 0.4 -> 0.25 and 0.15 -> 0.1 under the span, and its
+gate passes). The fanout tab now leaves the via floors alone under a micro
+span, as both fanout mains do (`_micro_span`).
+
+    python3 tests/gui_parity/test_1842_via_span_fanout_gui.py
 """
 import contextlib
 import io
@@ -74,11 +88,10 @@ def facts(path):
 
 
 def main():
-    try:
-        import pcbnew  # noqa: F401
-        import wx      # noqa: F401
-    except Exception as e:                                     # noqa: BLE001
-        print(f"SKIP: needs KiCad's python (pcbnew + wx): {e}")
+    import headless_plan
+    if not headless_plan.have_kicad_python():
+        headless_plan.reexec_into_kicad(__file__)
+        print(f"SKIP: needs a python with wx + kipy ({headless_plan.PLUGIN_IMPORTS})")
         return 77
     py = [sys.executable, '-X', 'utf8']
     with tempfile.TemporaryDirectory() as td:

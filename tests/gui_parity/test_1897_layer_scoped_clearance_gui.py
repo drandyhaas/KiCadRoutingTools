@@ -12,7 +12,14 @@ On both, A1 must pass the slot, which is open only at the 0.1 mm the rule
 gives In1.Cu (the classes ask 0.3 mm), with the same copper, and check_drc
 must be clean.
 
-Needs KiCad's python (pcbnew + wx): exit 77 without it.
+ipc-migration: the dialog runs over the fake IPC board
+(`tests/gui_parity/fake_ipc_board.py`, which `headless_plan.run_plan`
+installs), as an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`): the copper
+the steps commit lives in a copy, and the board file the writebacks read
+keeps the copper from before the run until the run ends, as in a real KiCad.
+
+Needs KiCad's python (wx + kipy on this branch); re-execs into it, and exits
+77 only when no interpreter has both.
 
     <KiCad python> tests/gui_parity/test_1897_layer_scoped_clearance_gui.py
 """
@@ -37,9 +44,18 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
+# ipc-migration: `run_plan.py` run as a child installs the fake IPC board, as
+# an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`), as in a real KiCad: the
+# file the writebacks read holds the copper from before the step, which the
+# default harness, flushing every commit to it, hides.
+PLAN_ENV = dict(os.environ, KRT_FAKE_IPC_UNSAVED='1')
+
+
 def run(argv, what):
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', cwd=REPO, timeout=1800)
+                       errors='replace', cwd=REPO, timeout=1800,
+                       env=PLAN_ENV if any(a.endswith('run_plan.py') for a in argv)
+                       else None)
     text = (r.stdout or '') + (r.stderr or '')
     if r.returncode != 0 or 'Traceback' in text:
         raise AssertionError(f"BROKEN TEST: {what} did not run (exit {r.returncode})\n"
@@ -58,10 +74,14 @@ def facts(path):
 
 def main():
     try:
-        import pcbnew  # noqa: F401
         import wx      # noqa: F401
+        import kipy    # noqa: F401
     except Exception as e:                                     # noqa: BLE001
-        print(f"SKIP: needs KiCad's python (pcbnew + wx): {e}")
+        # ipc-migration: the gate used to SKIP here, never re-execing, so it
+        # tested nothing under plain python3; it re-execs as the siblings do.
+        from headless_plan import reexec_into_kicad
+        reexec_into_kicad(__file__)
+        print(f"SKIP: needs KiCad's python (wx + kipy), and none was found: {e}")
         return 77
     py = [sys.executable, '-X', 'utf8']
     with tempfile.TemporaryDirectory() as td:

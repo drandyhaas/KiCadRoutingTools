@@ -1919,7 +1919,7 @@ class FanoutTab(wx.Panel):
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
         # #1842: under a micro via span, a via nobody asked for is the Default
         # class's MICRO via (the CLI's `via_span.resolve_cli`)
-        from via_span import micro_via_for_span
+        from via_span import micro_via_for_span, laser_drilled
         _micro1842 = (micro_via_for_span(self.pcb_data, shared.get('via_span'),
                                          shared.get('via_span_type'), self.board_filename)
                       if shared.get('via_from_class') else None)
@@ -2071,6 +2071,11 @@ class FanoutTab(wx.Panel):
                 'fix_drc_settings': shared.get('fix_drc_settings', True),
                 # #581: recorded at the step boundary, as bga_fanout records it.
                 'same_net_pad_clearance': shared.get('same_net_pad_clearance', -1.0),
+                # #1842: a micro span's via is no statement about the board's
+                # via or hole minimums (bga_fanout's main: `_micro_span`)
+                'micro_span': laser_drilled(
+                    self.pcb_data.board_info.copper_layers,
+                    shared.get('via_span'), shared.get('via_span_type')),
             },
             optimize_caps=config.get('optimize_caps', False),
         )
@@ -2121,7 +2126,7 @@ class FanoutTab(wx.Panel):
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
         # #1842: under a micro via span, a via nobody asked for is the Default
         # class's MICRO via (the CLI's `via_span.resolve_cli`)
-        from via_span import micro_via_for_span
+        from via_span import micro_via_for_span, laser_drilled
         _micro1842 = (micro_via_for_span(self.pcb_data, shared.get('via_span'),
                                          shared.get('via_span_type'), self.board_filename)
                       if shared.get('via_from_class') else None)
@@ -2200,6 +2205,11 @@ class FanoutTab(wx.Panel):
                 'fix_drc_settings': shared.get('fix_drc_settings', True),
                 # #581: recorded at the step boundary, as qfn_fanout records it.
                 'same_net_pad_clearance': shared.get('same_net_pad_clearance', -1.0),
+                # #1842: a micro span's via is no statement about the board's
+                # via or hole minimums (qfn_fanout's main: `_micro_span`)
+                'micro_span': laser_drilled(
+                    self.pcb_data.board_info.copper_layers,
+                    shared.get('via_span'), shared.get('via_span_type')),
                 # the part, for the completion message's failure split
                 'footprint_ref': footprint.reference,
             },
@@ -2434,7 +2444,12 @@ class FanoutTab(wx.Panel):
             fanout_kind, tracks, vias,
             clearance=_cl.effective(_fclr) if _fclr is not None else None,
             track_width=_fcfg.get('track_width'),
-            via_size=_fcfg.get('via_size'), via_drill=_fcfg.get('via_drill'),
+            # #1842: under a micro span the via floors are left alone, as
+            # bga_fanout's / qfn_fanout's mains pass None there: the step's
+            # via is the class's MICRO via, held by the micro via rule
+            # (live_micro_via_rule_dicts below), not the through-via floors.
+            via_size=None if _fcfg.get('micro_span') else _fcfg.get('via_size'),
+            via_drill=None if _fcfg.get('micro_span') else _fcfg.get('via_drill'),
             clearance_ceiling=min(_ceilings) if _ceilings else None)
         if _fix_kw is not None:
             # #1568: the copper-to-hole floor this step HELD, lowered only to

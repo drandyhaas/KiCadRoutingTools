@@ -18,7 +18,17 @@ step as a plan through the REAL headless dialog and plan executor
 project's via and drilled-hole minimums, which must be the board's own. A
 second pair gives both the via 0.25/0.1 explicitly and must lay it as asked.
 
-Needs KiCad's python (pcbnew + wx): exit 77 without it.
+ipc-migration: the dialog runs over the fake IPC board
+(`tests/gui_parity/fake_ipc_board.py`, which `headless_plan.run_plan`
+installs), as an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`): the copper
+the steps commit lives in a copy, and the board file the writebacks read
+keeps the copper from before the run until the run ends, as in a real KiCad.
+That is what makes the micro via rule check bite: the rule's writer
+(`gui_utils.live_micro_via_rule`) must read the step's copper off the routed
+PCBData, since the file's scan behind `fix_project_for_output` cannot see it.
+
+Needs KiCad's python (wx + kipy on this branch); re-execs into it, and exits
+77 only when no interpreter has both.
 
     <KiCad python> tests/gui_parity/test_1842_via_span_gui.py
 """
@@ -45,9 +55,18 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
+# ipc-migration: `run_plan.py` run as a child installs the fake IPC board, as
+# an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`), as in a real KiCad: the
+# file the writebacks read holds the copper from before the step, which the
+# default harness, flushing every commit to it, hides.
+PLAN_ENV = dict(os.environ, KRT_FAKE_IPC_UNSAVED='1')
+
+
 def run(argv, what):
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', cwd=REPO, timeout=1800)
+                       errors='replace', cwd=REPO, timeout=1800,
+                       env=PLAN_ENV if any(a.endswith('run_plan.py') for a in argv)
+                       else None)
     text = (r.stdout or '') + (r.stderr or '')
     if r.returncode != 0 or 'Traceback' in text:
         raise AssertionError(f"BROKEN TEST: {what} did not run (exit {r.returncode})\n"
@@ -79,10 +98,14 @@ def facts(path):
 
 def main():
     try:
-        import pcbnew  # noqa: F401
         import wx      # noqa: F401
+        import kipy    # noqa: F401
     except Exception as e:                                     # noqa: BLE001
-        print(f"SKIP: needs KiCad's python (pcbnew + wx): {e}")
+        # ipc-migration: the gate used to SKIP here, never re-execing, so it
+        # tested nothing under plain python3; it re-execs as the siblings do.
+        from headless_plan import reexec_into_kicad
+        reexec_into_kicad(__file__)
+        print(f"SKIP: needs KiCad's python (wx + kipy), and none was found: {e}")
         return 77
     py = [sys.executable, '-X', 'utf8']
     with tempfile.TemporaryDirectory() as td:
@@ -106,6 +129,8 @@ def main():
 
         cli, gui = facts(cli_out), facts(gui_out)
         print("via span F.Cu-In1.Cu, CLI vs the real dialog")
+        ok('FakeIpcBoard: unsaved document' in gui_log,
+           "ipc-migration: the GUI leg ran on an unsaved document [precondition]")
         ok('36/36 routed' in cli_log and '36/36 routed' in gui_log,
            "both fronts route every net")
         ok('micro via span: drawing the board Default net-class micro via 0.25/0.1'

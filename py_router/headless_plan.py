@@ -185,7 +185,7 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
     # dialog, plan executor and engines all run UNMODIFIED and each step leaves
     # a real .kicad_pcb to grade. See tests/gui_parity/fake_ipc_board.py for
     # what this does and does not prove.
-    sys.path.insert(0, os.path.join(ROOT_DIR, 'tests', 'gui_parity'))
+    sys.path.insert(0, os.path.join(_REPO_DIR, 'tests', 'gui_parity'))
     from fake_ipc_board import install as _install_fake_board
     board = _install_fake_board(board_path)
 

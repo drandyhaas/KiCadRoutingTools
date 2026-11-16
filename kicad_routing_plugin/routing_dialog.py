@@ -505,6 +505,14 @@ class RoutingDialog(wx.Dialog):
             # answer for the board the user has edited since.
             from pcb_modification import bump_copper_epoch
             bump_copper_epoch(self.pcb_data)
+            # ...and the memos the epoch does not key: `_protection_map_memo`
+            # is keyed on nothing (locks and `sense:` holds decide it), and
+            # `_foreign_via_arr_cache` on the via count and the tail via, so a
+            # via moved in the editor kept its old position. Dropped as main's
+            # resync_live_copper drops them; each is rebuilt on first use.
+            from kicad_parser import LIVE_COPPER_MEMOS
+            for _memo in LIVE_COPPER_MEMOS:
+                vars(self.pcb_data).pop(_memo, None)
             # #980: the input-copper mark names the objects just replaced;
             # the next engine run marks the board it is handed.
             from rip_up_reroute import forget_input_copper

@@ -23,6 +23,15 @@ KiCad save and a refill.
 Needs KiCad python (wx + pcbnew); re-execs into it, and exits 77 with a
 SKIP: reason when there is none.
 
+ipc-migration: the live board is the fake-IPC board (tests/gui_parity/
+fake_ipc_board.py) over a COPY of the unrouted board, so the gate needs kipy
+too, and "saved as KiCad saves it" is kipy's save_as on that file. The
+comparison is test_autoroute_tab_gui's IPC one: the uuid and track-order
+checks are dropped (created items take new uuids, in parse order), and the
+fill is graded as KiCad's refill of the pours Apply built rather than the
+result's fill copied -- result_apply's documented IPC gaps; its header says
+which check stands in for which.
+
     python3 tests/gui_parity/test_placement_apply_zones_gui.py
 """
 import glob
@@ -53,11 +62,12 @@ def _reexec_into_kicad():
     for cand in KICAD_PYTHONS:
         if cand == sys.executable or not os.path.exists(cand):
             continue
-        r = subprocess.run([cand, '-c', 'import pcbnew, wx'], capture_output=True)
+        r = subprocess.run([cand, '-c', 'import pcbnew, wx, kipy'], capture_output=True)
         if r.returncode == 0:
             sys.exit(subprocess.run([cand, os.path.abspath(__file__)]
                                     + sys.argv[1:]).returncode)
-    print("SKIP: no python with pcbnew + wx found (this gate needs KiCad's)")
+    print("SKIP: no python with pcbnew + wx + kipy found (this gate needs KiCad's, "
+          "with kicad-python installed)")
     sys.exit(77)
 
 
@@ -70,13 +80,14 @@ def _run(argv, what):
 
 
 def run():
-    import pcbnew
     import wx
     sys.path.insert(0, REPO)
     sys.path.insert(0, os.path.join(REPO, 'py_router'))
     sys.path.insert(0, HERE)
     from copy_board import copy_board
-    from kicad_parser import build_pcb_data_from_board, parse_kicad_pcb
+    from kicad_parser import parse_kicad_pcb, kipy_locked
+    from fake_ipc_board import (install as install_fake_board,
+                                build_pcb_data_like_ipc)
     import test_autoroute_tab_gui as T
 
     tmp = tempfile.mkdtemp(prefix='krt_placement_zones_')
@@ -110,26 +121,34 @@ def run():
         asked.append(msg)
         return wx.YES
     wx.MessageBox = _yes
-    board = pcbnew.LoadBoard(live_in)
-    pcbnew.GetBoard = lambda: board
-    from kicad_routing_plugin.swig_gui import RoutingDialog
-    dlg = RoutingDialog(None, build_pcb_data_from_board(board), live_in)
+    # ipc-migration: the open board is the fake-IPC board over a COPY of the
+    # unrouted board (every commit is written back to its file).
+    live = os.path.join(tmp, 'live', 'board.kicad_pcb')
+    os.makedirs(os.path.dirname(live))
+    copy_board(live_in, live)
+    board = install_fake_board(live)
+    from kicad_routing_plugin.routing_dialog import RoutingDialog
+    from kicad_routing_plugin.result_apply import live_footprints_by_key
+    dlg = RoutingDialog(None, build_pcb_data_like_ipc(live), live)
     try:
         tab = dlg.placement_tab
         tab._pending_result = {'board': result}
         tab._mode = 'place_route'
-        T.check("the live board has no zone before Apply", len(list(board.Zones())) == 0)
+        T.check("the live board has no zone before Apply", len(list(board.get_zones())) == 0)
         tab._on_apply(None)
         msg = asked[-1] if asked else ''
         T.check("Apply asked first, naming the zones, the copper and the moved part",
                 'Zones:' in msg and 'Tracks and vias:' in msg and PART in msg, msg[:300])
         T.check("the old 'zones are NOT imported' warning is gone",
                 'NOT imported' not in tab.status_text.GetLabel())
-        T.check("Apply brought the result's zone", len(list(board.Zones())) == len(res.zones),
-                f"{len(list(board.Zones()))} vs {len(res.zones)}")
+        T.check("Apply brought the result's zone",
+                len(list(board.get_zones())) == len(res.zones),
+                f"{len(list(board.get_zones()))} vs {len(res.zones)}")
+        fp = live_footprints_by_key(board).get(PART)
         T.check(f"{PART} is locked on the live board, as the result has it",
-                board.FindFootprintByReference(PART).IsLocked())
-        T.compare_saved(board, result, os.path.join(tmp, 'gui', 'applied.kicad_pcb'))
+                fp is not None and kipy_locked(fp))
+        T.compare_saved(board, result, os.path.join(tmp, 'gui', 'applied.kicad_pcb'),
+                        stats=getattr(tab, 'last_apply_stats', None))
     finally:
         dlg.Destroy()
         try:
@@ -148,6 +167,7 @@ def main():
     try:
         import pcbnew  # noqa: F401
         import wx  # noqa: F401
+        import kipy  # noqa: F401
     except ImportError:
         _reexec_into_kicad()
     sys.exit(run())

@@ -315,16 +315,25 @@ def _zone_signature(entries):
     """What makes two pours the same pour: net, copper layers, outline and
     holes to the nanometre, priority and the fill settings, over the per-layer
     Zone entries of ONE zone (both readers emit one entry per copper layer).
-    Fills are not compared."""
+    Fills are not compared.
+
+    The island area counts only for a pour that removes islands BY AREA
+    (mode 2): KiCad saves `(island_area_min ...)` for that mode alone, so the
+    text parse reads 0 for any other pour while a live one reports KiCad's
+    10 mm^2 default over IPC -- compared always, no pour the result kept
+    unchanged ever matched its live twin, and every Apply removed and rebuilt
+    every pour."""
     z = entries[0]
 
     def mm(v):
         return None if v is None else round(float(v), 6)
+    mode = int(z.island_removal_mode or 0)
     return (z.net_name or "", tuple(sorted(e.layer for e in entries)),
             _nm_ring(z.polygon),
             tuple(sorted(_nm_ring(h) for h in (getattr(z, 'holes', None) or ()))),
-            int(z.priority or 0), int(z.island_removal_mode or 0),
-            mm(z.island_area_min), mm(z.clearance), mm(z.min_thickness),
+            int(z.priority or 0), mode,
+            mm(z.island_area_min) if mode == 2 else None,
+            mm(z.clearance), mm(z.min_thickness),
             z.pad_connection, mm(z.thermal_gap), mm(z.thermal_bridge_width))
 
 
@@ -510,7 +519,19 @@ def apply_rules(result_path, fix_drc=True, board_path=None):
         return []
     pro = os.path.splitext(board_path)[0] + '.kicad_pro'
     if not os.path.isfile(pro):
-        return []
+        # A board KiCad opened without a project file has none on disk until
+        # the user saves. Seed the minimal valid project every IPC writeback
+        # seeds (fix_project_for_output) rather than dropping the result's
+        # rules: returning here left the live board grading the result's fine
+        # copper against KiCad's stock floors.
+        if not os.path.isfile(os.path.splitext(result_path)[0] + '.kicad_pro'):
+            return []           # the result has no project: nothing to carry
+        with open(pro, 'w', encoding='utf-8') as f:
+            json.dump({"board": {"design_settings": {"rules": {},
+                                                     "rule_severities": {}}},
+                       "meta": {"filename": os.path.basename(pro), "version": 1},
+                       "net_settings": {"classes": [], "meta": {"version": 0}}},
+                      f, indent=2)
     import tool_records
     changes = []
     try:
@@ -634,10 +655,15 @@ class ApplyPlan:
                               "and teardrops are left as they are)"
                               if z['add'] else "") + ".")
         if self.rules and self.fix_drc:
+            # KiCad refills right after the change, at the rules it holds
+            # until the project is reloaded.
+            refill = (", then refill the zones (B): the refill after this "
+                      "change still uses the old ones"
+                      if self.zones is not None and self.zones['add'] else "")
             out.append("Design rules: the project's floors and net classes are "
                        "lowered to the result project's, as a routing step does "
                        "(written to the project file; reload the project so "
-                       "KiCad uses them).")
+                       f"KiCad uses them{refill}).")
         elif self.rules:
             out.append("Design rules: not changed -- 'Fix DRC settings after "
                        "routing' is unticked, so the live board keeps its floors "

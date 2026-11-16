@@ -11,7 +11,9 @@ same step as a plan through the REAL headless dialog and plan executor
 (`py_router/run_plan.py`). On both, `ROOM_NET` must pass the gap in the room,
 `OPEN_NET` must stay open, the copper (widths included) must be the same,
 check_drc must be clean, and the output project must keep the same
-`min_track_width` -- the GUI measures it off the live board.
+`min_track_width` -- the GUI measures it off the live board (ipc-migration:
+off the board FILE, which kipy leaves unsaved, so here with the copper from
+before the step).
 
 A second leg routes tests/fixtures/1843/room_tight with the room moved onto
 OPEN_NET's first pad (x 15-18): its straight route leaves the tightened room
@@ -19,8 +21,14 @@ and passes the wall's gap outside it, which is legal only for a piece that is
 not in the room. Both fronts must split it at the same point, half a width
 plus the split margin past the edge, and ship the same clean copper.
 
-Needs KiCad's python (pcbnew + wx); re-execs into it automatically, and
-exits 77 when no interpreter on this machine has both.
+ipc-migration: the dialog runs over the fake IPC board
+(`tests/gui_parity/fake_ipc_board.py`, which `headless_plan.run_plan`
+installs), as an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`): the copper
+the steps commit lives in a copy, and the board file the writebacks read
+keeps the copper from before the run until the run ends, as in a real KiCad.
+
+Needs KiCad's python (wx + kipy on this branch); re-execs into it
+automatically, and exits 77 when no interpreter on this machine has both.
 
     python3 tests/gui_parity/test_1843_area_clearance_gui.py
 """
@@ -41,21 +49,21 @@ FAILS = []
 
 
 def _reexec_into_kicad():
-    """Run this gate under KiCad's own python (pcbnew + wx), found the way
+    """Run this gate under KiCad's own python (wx + kipy), found the way
     the other gates find it (`kicad_exact_fill.kicad_python_candidates`);
     exit 77 when there is none."""
     from kicad_exact_fill import kicad_python_candidates
     for cand in kicad_python_candidates():
         if cand == sys.executable or not os.path.exists(cand):
             continue
-        if subprocess.run([cand, '-c', 'import pcbnew, wx'],
+        if subprocess.run([cand, '-c', 'import wx, kipy'],
                           capture_output=True).returncode == 0:
             argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
             if os.name == 'nt':
                 # os.execv re-splits argv on spaces on Windows ("Program Files")
                 sys.exit(subprocess.run(argv).returncode)
             os.execv(cand, argv)
-    print("SKIP: needs KiCad's python (pcbnew + wx); none found")
+    print("SKIP: needs KiCad's python (wx + kipy); none found")
     sys.exit(77)
 
 
@@ -65,9 +73,18 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
+# ipc-migration: `run_plan.py` run as a child installs the fake IPC board, as
+# an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`), as in a real KiCad: the
+# file the writebacks read holds the copper from before the step, which the
+# default harness, flushing every commit to it, hides.
+PLAN_ENV = dict(os.environ, KRT_FAKE_IPC_UNSAVED='1')
+
+
 def run(argv, what):
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', cwd=REPO, timeout=1800)
+                       errors='replace', cwd=REPO, timeout=1800,
+                       env=PLAN_ENV if any(a.endswith('run_plan.py') for a in argv)
+                       else None)
     text = (r.stdout or '') + (r.stderr or '')
     if r.returncode != 0 or 'Traceback' in text:
         raise AssertionError(f"BROKEN TEST: {what} did not run (exit {r.returncode})\n"
@@ -119,8 +136,8 @@ def one(py, td, name):
 
 def main():
     try:
-        import pcbnew  # noqa: F401
         import wx      # noqa: F401
+        import kipy    # noqa: F401
     except ImportError:
         _reexec_into_kicad()
     py = [sys.executable, '-X', 'utf8']

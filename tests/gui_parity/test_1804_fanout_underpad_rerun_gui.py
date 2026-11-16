@@ -12,7 +12,15 @@ via-in-pad, GND of kicad_files/tigard.kicad_pcb's U3:
      the tab lays no track and no via, the ledger names all 28 pads served,
      as the CLI's own second lap does, and the completion message says so.
 
-Needs KiCad python (wx + pcbnew); re-execs into it, skips without it.
+ipc-migration: the plugin has no in-process board, so the dialog reaches it
+through kicad_ipc_adapter, which this gate points at
+tests/gui_parity/fake_ipc_board (the board FILE, commits flushed back), as
+test_1641_fanout_filter_misses_gui does. Each run works on a fresh temp copy
+of the board and its siblings -- what a fresh pcbnew.LoadBoard per run gave
+main's gate -- so the tab's apply never touches the input or the CLI's lap-1
+output it is compared with.
+
+Needs KiCad python (wx + kipy); re-execs into it, skips without it.
 Under a minute.
 
 Run:  python3 tests/gui_parity/test_1804_fanout_underpad_rerun_gui.py
@@ -46,13 +54,13 @@ KICAD_PYTHONS = [
 def _reexec_into_kicad():
     for cand in KICAD_PYTHONS:
         if cand != sys.executable and os.path.exists(cand):
-            if subprocess.run([cand, '-c', 'import wx, pcbnew'],
+            if subprocess.run([cand, '-c', 'import wx, kipy'],
                               capture_output=True).returncode == 0:
                 argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
                 if os.name == 'nt':
                     sys.exit(subprocess.run(argv).returncode)
                 os.execv(cand, argv)
-    print("SKIP: no python with wx + pcbnew found")
+    print("SKIP: no python with wx + kipy found")
     sys.exit(0)
 
 
@@ -61,15 +69,22 @@ def _ok(name, cond, detail=''):
     return bool(cond)
 
 
-def run_tab(pcbnew, wx, board_path):
+def run_tab(wx, board_path):
     """The tab's underpad via-drop of U3's GND; (apply kwargs, message)."""
-    from kicad_parser import build_pcb_data_from_board
-    from kicad_routing_plugin import swig_gui
+    from copy_board import copy_siblings
+    from fake_ipc_board import install as install_fake_board, build_pcb_data_like_ipc
+    # routing_dialog.py is this branch's swig_gui.py (renamed by the IPC port).
+    from kicad_routing_plugin import routing_dialog
 
-    board = pcbnew.LoadBoard(board_path)
-    pcbnew.GetBoard = lambda: board
-    pcb_data = build_pcb_data_from_board(board)
-    dialog = swig_gui.RoutingDialog(None, pcb_data, board_path)
+    # A fresh copy per run: the fake live board flushes the apply's commit
+    # back into its file.
+    tmp = tempfile.mkdtemp(prefix='t1804gui_run_')
+    live = os.path.join(tmp, os.path.basename(board_path))
+    shutil.copyfile(board_path, live)
+    copy_siblings(board_path, live)
+    install_fake_board(live)
+    pcb_data = build_pcb_data_like_ipc(live)
+    dialog = routing_dialog.RoutingDialog(None, pcb_data, live)
     messages = []
     wx.MessageBox = lambda msg, *a, **k: messages.append(msg) or wx.OK
     seen = {}
@@ -89,16 +104,16 @@ def run_tab(pcbnew, wx, board_path):
         run_until(lambda: not getattr(tab, '_running', False), 300)
     finally:
         dialog.Destroy()
+        shutil.rmtree(tmp, ignore_errors=True)
     return seen, '\n'.join(messages)
 
 
 def main():
     try:
-        import wx, pcbnew  # noqa: F401
+        import wx, kipy  # noqa: F401
     except ImportError:
         _reexec_into_kicad()
     import wx
-    import pcbnew
 
     sys.path.insert(0, REPO)
     sys.path.insert(0, os.path.join(REPO, 'py_router'))
@@ -111,7 +126,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix='t1804gui_')
     try:
         print("[1] the tracked board")
-        seen, _msg = run_tab(pcbnew, wx, BOARD)
+        seen, _msg = run_tab(wx, BOARD)
         led = seen.get('underpad_pads') or {}
         r.append(_ok("28 pads escaped, none dropped, the ledger reaches the apply step",
                      led.get('pads_requested') == led.get('pads_escaped') == 28
@@ -133,7 +148,7 @@ def main():
                              capture_output=True, text=True).stdout
         m = re.search(r'^JSON_SUMMARY: (.*)$', out, re.M)
         cli_served = json.loads(m.group(1)).get('pads_already_served') if m else None
-        seen, msg = run_tab(pcbnew, wx, b1)
+        seen, msg = run_tab(wx, b1)
         led = seen.get('underpad_pads') or {}
         r.append(_ok("no track and no via", not seen.get('tracks') and not seen.get('vias'),
                      f"{len(seen.get('tracks') or [])} track(s), {len(seen.get('vias') or [])} via(s)"))

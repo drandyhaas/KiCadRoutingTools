@@ -13,6 +13,18 @@ no label control any more.
 Needs KiCad python (wx + pcbnew); re-execs into it, and exits 77 with a SKIP:
 reason when there is none.
 
+ipc-migration: the live board is the fake-IPC board (tests/gui_parity/
+fake_ipc_board.py) over a COPY of the input, so the gate needs kipy too. The
+tab writes each label onto the footprint's REAL kipy Reference field
+(`labels_gui.apply_label_results`: world position, angle, size, stroke,
+alignment) in one commit; the fake writes the changed fields back into its
+file -- world position into the footprint frame by the parser's own inverse
+transform, through the CLI's label writer, which writes a centred label of
+one size. So this gate grades that the button runs the engine and hands its
+values to the kipy fields, and that they reach the file. It does NOT grade
+how KiCad itself stores a field set over IPC (the angle, the alignment, a
+B-side mirror): only a live KiCad proves that. "Saved" is kipy's save_as.
+
     python3 tests/gui_parity/test_labels_tab_gui.py
 """
 import glob
@@ -50,11 +62,12 @@ def _reexec_into_kicad():
     for cand in KICAD_PYTHONS:
         if cand == sys.executable or not os.path.exists(cand):
             continue
-        r = subprocess.run([cand, '-c', 'import pcbnew, wx'], capture_output=True)
+        r = subprocess.run([cand, '-c', 'import pcbnew, wx, kipy'], capture_output=True)
         if r.returncode == 0:
             sys.exit(subprocess.run([cand, os.path.abspath(__file__)]
                                     + sys.argv[1:]).returncode)
-    print("SKIP: no python with pcbnew + wx found (this gate needs KiCad's)")
+    print("SKIP: no python with pcbnew + wx + kipy found (this gate needs KiCad's, "
+          "with kicad-python installed)")
     sys.exit(77)
 
 
@@ -63,9 +76,8 @@ def labels(path):
     label, in board coordinates to 1 um."""
     import pcbnew
     b = pcbnew.LoadBoard(path)
-    from kicad_routing_plugin.gui_utils import live_footprints_by_key
     out = {}
-    for key, fp in live_footprints_by_key(b).items():
+    for key, fp in _pcbnew_footprints_by_key(b).items():
         t = fp.Reference()
         p = t.GetPosition()
         out[key] = (round(pcbnew.ToMM(p.x), 3), round(pcbnew.ToMM(p.y), 3),
@@ -75,14 +87,25 @@ def labels(path):
     return out
 
 
+def _pcbnew_footprints_by_key(b):
+    """{PCBData key: pcbnew footprint} of pcbnew board B (#726): the bare
+    reference, `TP4~2` for a repeat -- main's gui_utils.live_footprints_by_key,
+    which this branch's IPC plugin does not have (its twin,
+    result_apply.live_footprints_by_key, walks a kipy board)."""
+    from kicad_parser import disambiguate_references
+    live = list(b.GetFootprints())
+    raw = [f.GetReference() or ('#' + f.m_Uuid.AsString()) for f in live]
+    return dict(zip(disambiguate_references(raw), live))
+
+
 def run():
-    import pcbnew
     import wx
     sys.path.insert(0, REPO)
     sys.path.insert(0, os.path.join(REPO, 'py_router'))
     sys.path.insert(0, os.path.join(REPO, 'tests', 'gui_parity'))
     from copy_board import copy_board
-    from kicad_parser import build_pcb_data_from_board
+    from fake_ipc_board import (install as install_fake_board,
+                                build_pcb_data_like_ipc)
     from wx_pump import run_until
 
     tmp = tempfile.mkdtemp(prefix='krt_labels_gate_')
@@ -102,10 +125,14 @@ def run():
     app = wx.App(False)  # noqa: F841
     wx.Log.SetActiveTarget(wx.LogStderr())
     wx.MessageBox = lambda *a, **k: wx.OK
-    board = pcbnew.LoadBoard(src)
-    pcbnew.GetBoard = lambda: board
-    from kicad_routing_plugin.swig_gui import RoutingDialog
-    dlg = RoutingDialog(None, build_pcb_data_from_board(board), src)
+    # ipc-migration: the open board is the fake-IPC board over a COPY of the
+    # input (every commit is written back to its file).
+    live = os.path.join(tmp, 'live', 'board.kicad_pcb')
+    os.makedirs(os.path.dirname(live))
+    copy_board(src, live)
+    board = install_fake_board(live)
+    from kicad_routing_plugin.routing_dialog import RoutingDialog
+    dlg = RoutingDialog(None, build_pcb_data_like_ipc(live), live)
     try:
         sub = [dlg.ai_notebook.GetPageText(i) for i in range(dlg.ai_notebook.GetPageCount())]
         check("Labels is the Auto page's fourth sub-tab",
@@ -132,7 +159,7 @@ def run():
               status.startswith('Labels:') and 'applied' in status, status)
         check("the button is armed again", tab.action_btn.IsEnabled())
         gui_out = os.path.join(tmp, 'gui.kicad_pcb')
-        pcbnew.SaveBoard(gui_out, board, aSkipSettings=True)
+        board.save_as(gui_out, overwrite=True, include_project=False)  # kipy's save
     finally:
         dlg.Destroy()
         try:
@@ -159,6 +186,7 @@ def main():
     try:
         import pcbnew  # noqa: F401
         import wx  # noqa: F401
+        import kipy  # noqa: F401
     except ImportError:
         _reexec_into_kicad()
     sys.exit(run())

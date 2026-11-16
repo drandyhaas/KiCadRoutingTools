@@ -16,7 +16,13 @@ parameter, absent without. (`run_plan.py -o` writes a board that carries no
 `kicad_routing_tools` record at all, lane or not, so the GUI leg cannot be
 read off the output's records.)
 
-Needs KiCad's python (pcbnew + wx). Run under any python, it re-execs into
+ipc-migration: the dialog runs over the fake IPC board
+(`tests/gui_parity/fake_ipc_board.py`, which `headless_plan.run_plan`
+installs), as an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`): the copper
+the steps commit lives in a copy, and the board file the writebacks read
+keeps the copper from before the run until the run ends, as in a real KiCad.
+
+Needs KiCad's python (wx + kipy on this branch). Run under any python, it re-execs into
 the first KiCad interpreter `kicad_locate.kicad_python_candidates` finds
 that imports both; exit 77 only when there is none.
 
@@ -41,9 +47,18 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
+# ipc-migration: `run_plan.py` run as a child installs the fake IPC board, as
+# an UNSAVED document (`fake_ipc_board.UNSAVED_ENV`), as in a real KiCad: the
+# file the writebacks read holds the copper from before the step, which the
+# default harness, flushing every commit to it, hides.
+PLAN_ENV = dict(os.environ, KRT_FAKE_IPC_UNSAVED='1')
+
+
 def run(argv, what):
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', cwd=REPO, timeout=1800)
+                       errors='replace', cwd=REPO, timeout=1800,
+                       env=PLAN_ENV if any(a.endswith('run_plan.py') for a in argv)
+                       else None)
     text = (r.stdout or '') + (r.stderr or '')
     if r.returncode != 0 or 'Traceback' in text:
         raise AssertionError(f"BROKEN TEST: {what} did not run (exit {r.returncode})\n"
@@ -64,25 +79,25 @@ def lane(board):
 
 def _reexec_into_kicad(why):
     """Run this gate under KiCad's python, as the other gates do; 77 when no
-    interpreter on this machine has pcbnew and wx."""
+    interpreter on this machine has wx and kipy."""
     from kicad_locate import kicad_python_candidates
     here = os.path.realpath(sys.executable)
     for cand in kicad_python_candidates():
         if not os.path.exists(cand) or os.path.realpath(cand) == here:
             continue
-        if subprocess.run([cand, '-c', 'import pcbnew, wx'],
+        if subprocess.run([cand, '-c', 'import wx, kipy'],
                           capture_output=True).returncode == 0:
             print(f"(re-running under KiCad's python: {cand})", flush=True)
             return subprocess.run([cand, os.path.abspath(__file__)]
                                   + sys.argv[1:]).returncode
-    print(f"SKIP: needs KiCad's python (pcbnew + wx), and none was found: {why}")
+    print(f"SKIP: needs KiCad's python (wx + kipy), and none was found: {why}")
     return 77
 
 
 def main():
     try:
-        import pcbnew  # noqa: F401
         import wx      # noqa: F401
+        import kipy    # noqa: F401
     except Exception as e:                                     # noqa: BLE001
         return _reexec_into_kicad(e)
     py = [sys.executable, '-X', 'utf8']
