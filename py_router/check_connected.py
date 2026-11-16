@@ -773,9 +773,9 @@ def classify_unconnected_link(pcb_data, net_id, pt_a, pt_b,
                    and deletion is the fix (remove_orphan_islands).
       'graphic' -- the cluster holds net-tagged copper ART (#337) and
                    reaches no pad or pour. KiCad conducts through art, so the
-                   open is real, but the art is immutable and the router never
-                   targets it: neither weld nor delete applies, and joining it
-                   is a board-authoring fix. A cluster that reaches a pad
+                   open is real; the art is immutable, so no pass deletes it,
+                   and the weld is the route step's (it gives the island a
+                   terminal, art_terminals). A cluster that reaches a pad
                    THROUGH art is 'live'.
       'unknown' -- no copper of this net located at the point (a shape the
                    parser models differently, e.g. a filled gr_circle whose
@@ -834,6 +834,22 @@ def classify_unconnected_link(pcb_data, net_id, pt_a, pt_b,
             d = math.hypot(px - (s.start_x + t * dx), py - (s.start_y + t * dy))
             if d < bd:
                 best, bd = i, d
+        if best is None:
+            # KiCad anchors a FILLED graphic's link at a point inside it -- a
+            # filled circle at its centre, out of reach of its outline's
+            # chords (a 1.5 mm art disc read 'unknown'). A point inside a
+            # filled shape on the end's layer is that shape.
+            for i, s in enumerate(segs):
+                if lay is not None and s.layer != lay:
+                    continue
+                circ = getattr(s, 'graphic_circle', None)
+                ring = getattr(s, 'graphic_ring', None)
+                if not getattr(s, 'graphic_filled', False):
+                    continue
+                if (circ is not None and math.hypot(px - circ[0], py - circ[1]) <= circ[2]) \
+                        or (ring and point_in_polygon(px, py, list(ring))):
+                    best = i
+                    break
         if best is not None:
             root = uf.find(2 * best)
         else:
@@ -2240,9 +2256,10 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     skipped_off_board = []
     # #659: a net KiCad reports open only where net-tagged copper ART touches
     # none of its other copper. KiCad conducts through art and links every
-    # cluster, so the open is real, but the art is immutable and no routing
-    # pass targets it: joining it is a board-authoring fix. Named apart.
-    skipped_art = []
+    # cluster, so the open is real; a route step gives such an island a
+    # terminal (art_terminals), so it is ROUTABLE and counts as open. Named on
+    # a line of its own, as the shape of open it is.
+    open_art = []
 
     def _on_board(pads):
         return pads if _off_board is None else [
@@ -2710,11 +2727,11 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                         print(f"  {_name}: KiCad link(s) span board "
                               f"outlines only (board-to-board) -- exempt")
                         continue
-                    if all('graphic' in classify_unconnected_link(
-                            pcb_data, _nid, lk[1], lk[2], lk[1][3], lk[2][3])
-                           for lk in _nl):
-                        skipped_art.append(_name)
-                        continue
+                    _art_only = all('graphic' in classify_unconnected_link(
+                        pcb_data, _nid, lk[1], lk[2], lk[1][3], lk[2][3])
+                        for lk in _nl)
+                    if _art_only:
+                        open_art.append(_name)
 
                     def _ep(e):
                         _lyr = f" {e[2]}" if e[2] else ""
@@ -2729,6 +2746,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                         'num_components': len(_nl) + 1,
                         'disconnected_pads': _kicad_stranded_pads(_nid, _name),
                         'kicad_only': True,
+                        'art_only': _art_only,
                         'message': ("KiCad refill reports "
                                     f"{len(_nl)} unconnected link(s) copper "
                                     "grading missed: "
@@ -2736,11 +2754,11 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                                                 f"{_ep(lk[2])}"
                                                 for lk in _nl[:4])),
                     })
-                if skipped_art and not quiet:
-                    print(f"  {len(skipped_art)} net(s) open in KiCad only "
-                          f"where net-tagged copper art reaches none of "
-                          f"their pads (#659, a board-authoring fix): "
-                          f"{', '.join(sorted(skipped_art))}")
+                if open_art and not quiet:
+                    print(f"  {len(open_art)} net(s) open in KiCad only where "
+                          f"net-tagged copper art no route has reached (#659: "
+                          f"a route step gives such an island a terminal, so "
+                          f"they count as open): {', '.join(sorted(open_art))}")
                 if _rev:
                     _recon['kicad_only'] = len(_rev)
                     issues.extend(_rev)

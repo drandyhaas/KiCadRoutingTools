@@ -6634,7 +6634,9 @@ def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
     inductor pad inside its net's own filled B.Cu gr_poly read
     open to the grader and to the route step while KiCad called it
     connected. They parse as ``Segment(graphic=True)``, immovable art (#337)
-    the router routes around and never targets. Returns the number of
+    the router routes around; an island of it that reaches none of its net's
+    pads is a routing terminal of the net (#659, art_terminals). Returns the
+    number of
     net-tagged graphic segments found. Called by BOTH parse paths (file text
     and pcbnew build)."""
     tagged = [s for s in segments
@@ -6647,18 +6649,18 @@ def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
     print(f"WARNING: {len(tagged)} NET-TAGGED copper graphic segment(s) on "
           f"{len(nets)} net(s) ({preview}). KiCad conducts through them (a "
           f"stroke joins the copper it touches, a filled shape its whole "
-          f"interior) and so does our connectivity grading, but they are "
-          f"immovable art the router routes around and never targets (#337).")
+          f"interior) and so does our connectivity grading. They are "
+          f"immovable art (#337); an island of them no pad reaches is a "
+          f"routing terminal of its net (#659, art_terminals).")
     # ...and say what it will look like AFTERWARDS, which is the part people
     # actually hit (#659): art that touches none of its net's other copper is
-    # an island KiCad's DRC demands a link to, and #337 makes it immutable, so
-    # no routing pass welds to it or deletes it. Measured over 31 recorded
-    # boards it was 36 of 51 KiCad-only open links on zone-less signal nets.
-    # Nobody should spend a retry on it.
-    print(f"         A net whose art touches none of its other copper stays "
-          f"UNCONNECTED in KiCad's DRC on every run: no routing pass welds "
-          f"to art, so joining it is a board-authoring fix, not a routing "
-          f"failure (#659).")
+    # an island KiCad's DRC demands a link to. #337 makes it immutable, so no
+    # pass deletes it; a route step gives the island a terminal and joins it
+    # (art_terminals). Measured over 31 recorded boards it was 36 of 51
+    # KiCad-only open links on zone-less signal nets.
+    print(f"         A net whose art touches none of its other copper is "
+          f"UNCONNECTED in KiCad's DRC until a route step joins it: route.py "
+          f"routes the net to the art island as to a pad (#659).")
     return len(tagged)
 
 

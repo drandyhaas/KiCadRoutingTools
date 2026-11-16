@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""check_connected names two more unroutable opens apart, outside the open tally.
+"""check_connected names an unroutable open apart, and labels an open at art.
 
 A net the BOARD makes unroutable is no routing failure, so it does not count
 as an open net; it is named in a line of its own instead:
@@ -13,14 +13,14 @@ as an open net; it is named in a line of its own instead:
      to (a Kelvin tie on its shunt) is the tie's purpose: both nets still
      count (controls). check_drc grades the short itself.
   2. ART ISLAND (#659) -- KiCad links every copper cluster, and net-tagged
-     copper art reaching none of the net's pads is one: the open is real but
-     the art is immutable and no routing pass targets it. A net whose every
-     KiCad-only link has such an art end is named apart; a link between two
-     LIVE ends (copper our grade joins and KiCad does not) still counts
-     (control). The KiCad oracle is stubbed here, as the suite image has none.
+     copper art reaching none of the net's pads is one. A route step gives
+     such an island a terminal (art_terminals), so the net is ROUTABLE: it
+     counts as open, on a line of its own naming it as an art open. A link
+     between two LIVE ends counts too, unlabelled (control). The KiCad oracle
+     is stubbed here, as the suite image has none.
 
-`ab_replay_grade` records the two as `nets_overlap` and `nets_art`, outside
-`nets_incomplete`.
+`ab_replay_grade` records `nets_overlap` outside `nets_incomplete`, and
+`nets_art` inside it.
 
     python3 tests/test_unroutable_open_buckets.py
 """
@@ -193,10 +193,14 @@ def check_art(td):
     text = buf.getvalue()
     names = sorted(i['net_name'] for i in issues)
     line = next((ln for ln in text.splitlines() if 'net-tagged copper art' in ln), '')
-    ok('ART is named in the art bucket', line.strip().startswith('1 net(s)')
+    ok('ART is named on the art line', line.strip().startswith('1 net(s)')
        and line.rstrip().endswith('ART'), line.strip())
-    ok('LIVE (two live ends) stays an open net, ART does not',
-       names == ['LIVE'], f'issues={names}')
+    ok('ART and LIVE are both open nets (art is routable)',
+       names == ['ART', 'LIVE'], f'issues={names}')
+    art = next((i for i in issues if i['net_name'] == 'ART'), {})
+    ok('the ART issue carries art_only, LIVE does not',
+       art.get('art_only') is True and not next(
+           i for i in issues if i['net_name'] == 'LIVE').get('art_only'))
     ok('ab_replay_grade reads nets_art = 1', ab_replay_grade._bucket_count(
         text, r"net\(s\) open in KiCad only where net-tagged copper art") == 1)
 

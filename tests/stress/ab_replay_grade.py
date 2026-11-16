@@ -461,9 +461,10 @@ def grade(pcb, clearance, baseline=None):
            # #291: nets complete on the board whose only missing pads lie OFF
            # its outline -- named apart by check_connected, in no count above.
            "nets_offboard": _offboard_count(ctext),
-           # Two more unroutable buckets check_connected names apart: an open
-           # only where net-tagged art reaches no pad (#659), and an open only
-           # at pads the design shorts to another net (unroutable as designed).
+           # An open only at pads the design shorts to another net (unroutable as
+           # designed, outside nets_incomplete); and, counted IN nets_incomplete
+           # (a route step targets the art, #659), the nets KiCad reports open
+           # only where net-tagged art no route reached.
            "nets_art": _bucket_count(ctext, r"net\(s\) open in KiCad only where net-tagged copper art"),
            "nets_overlap": _bucket_count(ctext, r"net\(s\) open only at pads the design shorts")}
     out.update(_kicad_grade(pcb, clearance, baseline=baseline))
