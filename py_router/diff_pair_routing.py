@@ -23,6 +23,7 @@ from obstacle_map import check_line_clearance
 from geometry_utils import simplify_path, segments_intersect_tuple
 from net_queries import resolve_gnd_net_id, resolve_return_net_id
 from net_keepouts import stamping as _nk_stamping
+from via_span import via_layer_pair as _via_layer_pair, via_kind as _via_kind
 # Note: Layer switching is now done upfront in route.py, not during routing
 
 # Import Rust router
@@ -1602,9 +1603,10 @@ def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gn
                     x=gx, y=gy,
                     size=config.via_size,
                     drill=config.via_drill,
-                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    layers=_via_layer_pair(config),   # through, or the step's span (#1842)
                     net_id=gnd_net_id,
-                    free=True
+                    free=True,
+                    via_type=_via_kind(config)
                 ))
 
     return gnd_vias
@@ -1938,8 +1940,9 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                 x=x1, y=y1,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=["F.Cu", "B.Cu"],  # Always through-hole
-                net_id=net_id
+                layers=_via_layer_pair(config),   # through, or the step's span (#1842)
+                net_id=net_id,
+                via_type=_via_kind(config)
             ))
         elif abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
             # Always use actual layer for segment
@@ -2042,9 +2045,11 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
         # clearance. Neck such a segment where it does, the same way.
         wide = [s for s in segs if s.width > config.track_width + 1e-9]
         if wide and getattr(config, 'layer_widths', None):
+            # (a subset of segs, already necked to a rule area's width by
+            # the call above: the area neck splits, so it runs on segs only)
             _neck_terminal_grazes(
                 wide, [p for s in wide for p in ((s.start_x, s.start_y), (s.end_x, s.end_y))],
-                pcb_data, net_id, config)
+                pcb_data, net_id, config, area_neck=False)
 
     return segs, vias, connector_lines
 
@@ -3317,6 +3322,65 @@ def _pn_tracks_cross_full(new_segments, pcb_data, p_net_id, n_net_id,
 _DRC_CLEARANCE_MARGIN = 0.05
 
 
+def _pending_swap(pcb_data, swap_info):
+    """A pending polarity pad swap (`apply_polarity_swap`, run later by the
+    caller), read before it is applied: (P positions, N positions, view).
+
+    The stub copper at the P positions takes N's net and the reverse. `view`
+    is a shallow copy of `pcb_data` showing the board as the swap leaves it --
+    that copper and the two target pads carry their post-swap nets, as
+    copies, and the view owns its run caches -- so a check that judges the
+    swap route's copper against foreign copper reads the nets the board will
+    have (#1830). None when the route carries no swap."""
+    if not swap_info:
+        return None
+    import copy
+    from polarity_swap import pending_swap_targets
+    from bga_fanout.rotate_frame import _is_run_cache
+    p_net_id, n_net_id = swap_info['p_net_id'], swap_info['n_net_id']
+    pp, nn, pad_p, pad_n = pending_swap_targets(pcb_data, swap_info)
+
+    def _after(item, net_id):
+        out = copy.copy(item)
+        out.net_id = net_id
+        return out
+
+    def _seg_net(s):
+        if s.net_id == p_net_id and (pos_key(s.start_x, s.start_y) in pp
+                                     or pos_key(s.end_x, s.end_y) in pp):
+            return n_net_id
+        if s.net_id == n_net_id and (pos_key(s.start_x, s.start_y) in nn
+                                     or pos_key(s.end_x, s.end_y) in nn):
+            return p_net_id
+        return s.net_id
+
+    def _via_net(v):
+        if v.net_id == p_net_id and pos_key(v.x, v.y) in pp:
+            return n_net_id
+        if v.net_id == n_net_id and pos_key(v.x, v.y) in nn:
+            return p_net_id
+        return v.net_id
+
+    view = copy.copy(pcb_data)
+    for k in [k for k in vars(view) if _is_run_cache(k)]:
+        delattr(view, k)
+    view.segments = [s if _seg_net(s) == s.net_id else _after(s, _seg_net(s))
+                     for s in pcb_data.segments]
+    view.vias = [v if _via_net(v) == v.net_id else _after(v, _via_net(v))
+                 for v in pcb_data.vias]
+    if pad_p is not None and pad_n is not None:
+        pads_by_net = dict(pcb_data.pads_by_net)
+        for net in (p_net_id, n_net_id):
+            pads_by_net[net] = [q for q in pads_by_net.get(net, ())
+                                if q is not pad_p and q is not pad_n]
+        for pad, other in ((pad_p, pad_n), (pad_n, pad_p)):
+            after = _after(pad, other.net_id)
+            after.net_name = other.net_name
+            pads_by_net[other.net_id].append(after)
+        view.pads_by_net = pads_by_net
+    return pp, nn, view
+
+
 def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id, config):
     """Issue #165: the pair's connector/setback segments are clearance-checked
     during routing against an obstacle map that excludes BOTH halves of the pair,
@@ -3337,6 +3401,12 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     TRACK excludes BOTH pair nets (the pair's own P/N legitimately run at diff_pair_gap,
     tighter than clearance); the pad/via checks instead exclude only the segment's own
     net so the PARTNER's pad/via is still caught (#165/#241).
+
+    A pad-swap route is judged on the board its pending swap leaves (#1830):
+    pass `_pending_swap`'s view as `pcb_data`. P lands on the pad that is N's
+    until the swap, so judged on the board as it stands every such route
+    grazed the partner's pad; on the view P passing the pad N will own still
+    grazes.
 
     Returns (kind, obj, segment, overlap_mm) where kind is 'pad', 'via' or 'track',
     or None.
@@ -3474,12 +3544,35 @@ def _pad_obstacle_segments(pad, layer_names):
     # a square pad that DOUBLES its footprint, and on ecp5_mini's 1.27mm header
     # a partner 1.7x1.7 pin pad sealed the only escape corridor, failing every
     # hybrid leg, #289.)
+    # The cap must reach the pad's farthest corner copper. A corner of radius r
+    # (roundrect: rratio * short; rect: 0; circle/oval: short/2) has its centre
+    # (short/2 - r) from the spine end along both axes, so the enclosing cap
+    # radius is sqrt(2)*(short/2 - r) + r. Sharp rect keeps the short*sqrt(2)
+    # of #289; a 0.25-rratio roundrect gets 1.21*short, not 1.41*short (the
+    # 1.41 bulge of the partner pad of a 0.5 mm pitch QFN closed the only
+    # exit of the other member's single-ended leg on the neighbouring pin).
     half = max(long_ / 2.0 - short / 2.0, 0.0)
-    w = short if pad.shape in ('circle', 'oval') else short * math.sqrt(2.0)
-    if sx >= sy:
-        a = (cx - half, cy, cx + half, cy, w)
+    if pad.shape in ('circle', 'oval'):
+        r = short / 2.0
+    elif pad.shape == 'roundrect':
+        r = min(max(getattr(pad, 'roundrect_rratio', 0.0) or 0.0, 0.0), 0.5) * short
     else:
-        a = (cx, cy - half, cx, cy + half, w)
+        r = 0.0
+    w = 2.0 * max(short / 2.0, math.sqrt(2.0) * (short / 2.0 - r) + r)
+    if sx >= sy:
+        a = [cx - half, cy, cx + half, cy, w]
+    else:
+        a = [cx, cy - half, cx, cy + half, w]
+    # A pad with a drawn outline (a chamfered rect, #1450, keeps shape
+    # 'roundrect' and its rratio on the uncut corners; a custom pad) is not
+    # the rounded box above: a shallow chamfer reaches past the roundrect
+    # corner. Distance to the spine is convex, so the outline's farthest
+    # copper is a vertex; its arcs are inscribed at 1 um sagitta, added back.
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        reach = max(_pt_seg_dist(px, py, a[0], a[1], a[2], a[3])
+                    for poly in polys for px, py in poly)
+        a[4] = 2.0 * max(short / 2.0, reach + 0.001)
     cu = [L for L in (pad.layers or []) if L.endswith('.Cu')]
     if (getattr(pad, 'drill', 0) or 0) > 0 or not cu:
         cu = list(layer_names)  # THT / unknown copper -> block every routing layer
@@ -4103,6 +4196,17 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                     return None, (f"{bypassed} leg plan(s) joined the terminals "
                                   f"without the coupled middle")
                 return None, _LEGS_UNATTACHED
+            # #1873: a leg that ran back along its own middle joins it where
+            # the two first meet
+            mid_segs, leg_segs, _folded = _fold_legs_onto_middle(
+                mid_segs, leg_segs, p_vias + n_vias + leg_vias + list(pair_vias),
+                (p_net_id, n_net_id))
+            if _folded:
+                print("      leg fold (#1873): "
+                      + ", ".join(f"net {_n} joins its coupled middle {_mm:.3f} mm "
+                                  f"short of the middle's end" for _n, _mm in
+                                  sorted(_folded.items()))
+                      + "; the doubled copper is not laid")
             all_segs = mid_segs + leg_segs
             all_vias = p_vias + n_vias + leg_vias
             # The legs are single-ended grid routes attracted to each other:
@@ -4661,6 +4765,151 @@ def _terminal_island_taps(term_xy, own_segs, own_vias, coord, layer_names):
         return []
     from single_ended_routing import get_all_segment_tap_points
     return get_all_segment_tap_points(isl_s, coord, layer_names, vias=isl_v)
+
+
+#: #1873: two pieces of one net run along each other when they are within
+#: this sine of parallel (5 degrees, `net_queries.net_self_overlap`'s reading).
+_FOLD_SIN = 0.0872
+
+
+def _fold_legs_onto_middle(mid_segs, leg_segs, own_vias, net_ids):
+    """#1873: where a terminal leg runs back along its own coupled middle to
+    reach the middle's end, join the two where they first meet instead.
+
+    A leg is routed to the END of its net's coupled middle. When the terminal
+    lies beside the middle short of that end, the cheapest path runs beside
+    the middle, on the same layer and inside its copper, up to the end: one
+    strip of copper laid twice (measured: 0.85 mm of an N member, 0.05 mm
+    off a 0.2 mm track). The net's length counts that stretch twice, so the
+    pair's skew reads matched while the signal's path is that much shorter.
+
+    For each net in `net_ids` and each free end of its middle: the middle is
+    walked back from that end. A leg segment that overlaps a middle segment
+    there (same layer, within `_FOLD_SIN` of parallel, centre lines closer
+    than half the two widths together, over more than the narrower width),
+    from that segment's end nearest the free end, marks the doubled stretch.
+    The middle is cut where the overlap stops, the leg is cut at the same
+    place, and a join the width of their offset connects them; the middle's
+    tail and the leg copper lying on it (the turn back) are not laid. Only
+    the end's first `2 x reach` of middle may lie before the overlap (the
+    middle's own end stub). Left alone: a tail that carries one of the net's
+    vias, and any fold that would leave the net's copper in more pieces.
+
+    Returns (mid_segs, leg_segs, {net_id: mm of doubled copper removed})."""
+    from dataclasses import replace as _rep
+    folded = {}
+
+    def _k(x, y):
+        return (round(x, 4), round(y, 4))
+
+    def _pieces(segs, vias):
+        par = {}
+
+        def find(k):
+            while par.setdefault(k, k) != k:
+                par[k] = par[par[k]]
+                k = par[k]
+            return k
+        for s in segs:
+            par[find(_k(s.start_x, s.start_y))] = find(_k(s.end_x, s.end_y))
+        for v in vias:
+            find(_k(v.x, v.y))
+        return len({find(k) for k in list(par)})
+
+    for nid in net_ids:
+        mine_v = [v for v in own_vias if v.net_id == nid]
+        for _round in range(4):
+            M = [s for s in mid_segs if s.net_id == nid]
+            L = [s for s in leg_segs if s.net_id == nid]
+            at = {}
+            for s in M:
+                at.setdefault(_k(s.start_x, s.start_y), []).append(s)
+                at.setdefault(_k(s.end_x, s.end_y), []).append(s)
+            best = None
+            for end, touching in at.items():
+                if len(touching) != 1:
+                    continue                      # not a free end of the middle
+                # walk the middle back from this end: (segment, its end nearest
+                # the free end, the path length from the free end to that point)
+                walk, cur, seg, d0 = [], end, touching[0], 0.0
+                seen = set()
+                while seg is not None and id(seg) not in seen:
+                    seen.add(id(seg))
+                    a, b = _k(seg.start_x, seg.start_y), _k(seg.end_x, seg.end_y)
+                    near = (seg.start_x, seg.start_y) if a == cur else (seg.end_x, seg.end_y)
+                    far = (seg.end_x, seg.end_y) if a == cur else (seg.start_x, seg.start_y)
+                    walk.append((seg, near, far, d0))
+                    d0 += math.hypot(far[0] - near[0], far[1] - near[1])
+                    cur = _k(*far)
+                    nxt = [s for s in at.get(cur, ()) if id(s) not in seen]
+                    seg = nxt[0] if len(nxt) == 1 else None
+                for idx, (m, near, far, lead) in enumerate(walk):
+                    lm = math.hypot(far[0] - near[0], far[1] - near[1])
+                    if lm < 1e-9:
+                        continue
+                    ux, uy = (far[0] - near[0]) / lm, (far[1] - near[1]) / lm
+                    for l in L:
+                        if l.layer != m.layer:
+                            continue
+                        lx, ly = l.end_x - l.start_x, l.end_y - l.start_y
+                        ll = math.hypot(lx, ly)
+                        if ll < 1e-9 or abs(ux * ly - uy * lx) / ll > _FOLD_SIN:
+                            continue
+                        reach = ((m.width or 0.0) + (l.width or 0.0)) / 2.0
+                        w = min(m.width or 0.0, l.width or 0.0)
+                        if w <= 0 or lead > 2.0 * reach:
+                            continue
+                        t0 = (l.start_x - near[0]) * ux + (l.start_y - near[1]) * uy
+                        t1 = (l.end_x - near[0]) * ux + (l.end_y - near[1]) * uy
+                        o0 = (l.start_x - near[0]) * uy - (l.start_y - near[1]) * ux
+                        o1 = (l.end_x - near[0]) * uy - (l.end_y - near[1]) * ux
+                        if max(abs(o0), abs(o1)) >= reach - 1e-9:
+                            continue
+                        lo, hi = max(0.0, min(t0, t1)), min(lm, max(t0, t1))
+                        if hi - lo <= w or lo > reach:
+                            continue
+                        if best is None or lead + hi > best[0]:
+                            best = (lead + hi, walk[:idx], m, near, (ux, uy), lm, hi,
+                                    l, t0, t1, reach)
+            if best is None:
+                break
+            total, before_m, m, near, (ux, uy), lm, hi, l, t0, t1, reach = best
+            jx, jy = near[0] + ux * hi, near[1] + uy * hi      # the join, on the middle
+            tail = [(s_near, s_far) for _s, s_near, s_far, _d in before_m] + [(near, (jx, jy))]
+
+            def _to_tail(px, py):
+                return min(_pt_seg_dist(px, py, a[0], a[1], b[0], b[1]) for a, b in tail)
+            if any(_to_tail(v.x, v.y) < (v.size or 0.0) / 2.0 for v in mine_v):
+                break                             # the tail carries a via: leave it
+            # the leg: keep the part beyond the overlap, cut where it stops
+            far_is_start = t0 >= t1
+            fx, fy = (l.start_x, l.start_y) if far_is_start else (l.end_x, l.end_y)
+            t_far, t_near = max(t0, t1), min(t0, t1)
+            f = 0.0 if t_far - t_near < 1e-12 else (t_far - hi) / (t_far - t_near)
+            nx_, ny_ = (l.end_x, l.end_y) if far_is_start else (l.start_x, l.start_y)
+            cx, cy = fx + (nx_ - fx) * f, fy + (ny_ - fy) * f      # the cut, on the leg
+            gone_m = {id(s) for s, _n, _f, _d in before_m} | {id(m)}
+            new_mid = [s for s in mid_segs if id(s) not in gone_m]
+            if lm - hi > 1e-6:
+                far_pt = (near[0] + ux * lm, near[1] + uy * lm)
+                new_mid.append(_rep(m, start_x=jx, start_y=jy,
+                                    end_x=far_pt[0], end_y=far_pt[1]))
+            new_leg = [s for s in leg_segs
+                       if s is not l and not (
+                           s.net_id == nid and s.layer == m.layer
+                           and _to_tail(s.start_x, s.start_y) < reach
+                           and _to_tail(s.end_x, s.end_y) < reach)]
+            if math.hypot(cx - fx, cy - fy) > 1e-6:
+                new_leg.append(_rep(l, start_x=fx, start_y=fy, end_x=cx, end_y=cy))
+            if math.hypot(cx - jx, cy - jy) > 1e-6:
+                new_leg.append(_rep(l, start_x=cx, start_y=cy, end_x=jx, end_y=jy))
+            before = _pieces(M + L, mine_v)
+            after = _pieces([s for s in new_mid + new_leg if s.net_id == nid], mine_v)
+            if after > before:
+                break                             # the fold would open the net
+            mid_segs, leg_segs = new_mid, new_leg
+            folded[nid] = folded.get(nid, 0.0) + hi
+    return mid_segs, leg_segs, folded
 
 
 # Net-filtered keep-outs (net_keepouts.py): a hybrid leg is ONE net's track,
@@ -5850,23 +6099,25 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
             # could not, in ladder order: the verdict line below (#1576)
             not_made = []
 
-            if diff_pair.polarity_swap_allowed:
-                # No-swap candidate: the natural geometry, valid when its P/N
-                # (incl. bare-pad target stubs) do not actually cross.
-                no_swap = route_diff_pair_with_obstacles(
-                    pcb_data, diff_pair, config, obstacles, base_obstacles,
-                    unrouted_stubs, endpoints=endpoints,
-                    forced_source_dir=forced_source_dir,
-                    forced_target_dir=forced_target_dir,
-                    swap_allowed_ends=swap_allowed_ends, force_no_swap=True)
-                if not no_swap or no_swap.get('failed') or no_swap.get('probe_blocked'):
-                    not_made.append(('no swap', _ladder_failure_text(no_swap, pcb_data)))
-                elif _pn_tracks_cross_full(no_swap.get('new_segments', []),
-                                           pcb_data, p_net_id, n_net_id):
-                    not_made.append(('no swap', 'P/N tracks cross'))
-                else:
-                    spent_iterations += no_swap.get('iterations', 0)
-                    candidates.append(('no swap', no_swap))
+            # No-swap candidate: the natural geometry, valid when its P/N
+            # (incl. bare-pad target stubs) do not actually cross. It lays
+            # the pair as the schematic has it, so the swap policy has
+            # nothing to forbid here: a pair whose swap is denied gets it too,
+            # or a false-positive verdict sends it single-ended (#1802).
+            no_swap = route_diff_pair_with_obstacles(
+                pcb_data, diff_pair, config, obstacles, base_obstacles,
+                unrouted_stubs, endpoints=endpoints,
+                forced_source_dir=forced_source_dir,
+                forced_target_dir=forced_target_dir,
+                swap_allowed_ends=swap_allowed_ends, force_no_swap=True)
+            if not no_swap or no_swap.get('failed') or no_swap.get('probe_blocked'):
+                not_made.append(('no swap', _ladder_failure_text(no_swap, pcb_data)))
+            elif _pn_tracks_cross_full(no_swap.get('new_segments', []),
+                                       pcb_data, p_net_id, n_net_id):
+                not_made.append(('no swap', 'P/N tracks cross'))
+            else:
+                spent_iterations += no_swap.get('iterations', 0)
+                candidates.append(('no swap', no_swap))
 
             if swap_allowed:
                 # Swap candidate: same centerline, completed with the pad swap
@@ -5881,7 +6132,7 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
                     candidates.append(('pad swap', swap_result))
                 else:
                     not_made.append(('pad swap', _ladder_failure_text(swap_result, pcb_data)))
-            elif not diff_pair.polarity_swap_allowed:
+            elif swap_end in swap_allowed_ends:
                 not_made.append(('pad swap', 'not allowed for this pair (--polarity-swap-nets)'))
             else:
                 not_made.append(('pad swap', f'not possible at the {swap_end} end '
@@ -5936,9 +6187,38 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
                                         for name, r in candidates)
                     print(f"  Using {best_name} route ({lengths})")
                 best['iterations'] = spent_iterations
-                if policy_denied:
+                # The no-swap route winning shows the detector's verdict was
+                # a false positive: no swap was wanted, so none was denied.
+                if policy_denied and best_name != 'no swap':
                     best['polarity_swap_denied'] = True
                 return best
+
+            if policy_denied and swap_end in swap_allowed_ends:
+                # Every candidate the policy allows failed. Whether the
+                # denied swap is what is missing is a question of geometry,
+                # so route it as a probe, never shipped: the pair is reported
+                # polarity-swap-denied only when the swap would have coupled
+                # it, and a polarity mismatch when it fails like the rest
+                # (#1802).
+                probe = route_diff_pair_with_obstacles(
+                    pcb_data, diff_pair, config, obstacles, base_obstacles,
+                    unrouted_stubs, endpoints=endpoints,
+                    forced_source_dir=forced_source_dir,
+                    forced_target_dir=forced_target_dir,
+                    swap_allowed_ends=swap_allowed_ends, force_swap=True)
+                spent_iterations += (probe or {}).get('iterations', 0)
+                probe_ok = bool(probe and not probe.get('failed')
+                                and not probe.get('probe_blocked'))
+                not_made = [
+                    (name, (why + ('; probed, the swap would route' if probe_ok else
+                                   '; probed, the swap fails too: '
+                                   + _ladder_failure_text(probe, pcb_data)))
+                     if name == 'pad swap' else why)
+                    for name, why in not_made]
+                policy_denied = probe_ok
+            else:
+                # No swap is possible at that end whatever the policy says.
+                policy_denied = False
 
             # Every candidate failed: say which ran and why each did not make
             # it, rather than a cause the lines above contradict (#1576). The
@@ -5992,6 +6272,24 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
         p_sign, n_sign, spacing_mm, p_net_id, n_net_id
     )
 
+    # A pad-swap route: the pads to swap are at the ROUTING target end (the
+    # original target routing forward, the original source routing backward).
+    # Its copper is judged against foreign copper -- the terminal neck, the
+    # widening and the #165 graze check -- on the board as the swap will
+    # leave it (#1830): judged on the board as it stands, P landing on the pad
+    # the swap gives it read as grazing the partner's pad.
+    swap_target_pads = None
+    if polarity_fixed:
+        routing_tgt_end = sources[0] if routing_backwards else targets[0]
+        swap_target_pads = {
+            'p_pos': (routing_tgt_end[5], routing_tgt_end[6]),  # P target stub position
+            'n_pos': (routing_tgt_end[7], routing_tgt_end[8]),  # N target stub position
+            'p_net_id': p_net_id,  # P net ID to find target pad
+            'n_net_id': n_net_id,  # N net ID to find target pad
+        }
+    pending_swap = _pending_swap(pcb_data, swap_target_pads)
+    swap_view = pending_swap[2] if pending_swap else pcb_data
+
     # #1742: a pair narrowed to fit goes back to full width wherever it fits
     p_edge_w = n_edge_w = None
     _widen = _PAIR_WIDEN.get()
@@ -6002,7 +6300,7 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
         _wd = _widen_where_full_fits(
             _widen, centerline_float, simplified_path, coord, config, p_sign, n_sign,
             start_stub_dir, end_stub_dir, p_float_path, n_float_path,
-            p_net_id, n_net_id, pcb_data)
+            p_net_id, n_net_id, swap_view)
         if _wd is not None:
             p_float_path, n_float_path, p_edge_w, n_edge_w = _wd
 
@@ -6051,7 +6349,7 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
     p_segs, p_vias, p_conn_lines = _float_path_to_geometry(
         p_float_path, p_net_id, p_start, p_end, p_sign,
         src_stub_dir_tuple, tgt_stub_dir_tuple, src_p_ext, tgt_p_ext,
-        config, layer_names, pcb_data=pcb_data, edge_widths=p_edge_w,
+        config, layer_names, pcb_data=swap_view, edge_widths=p_edge_w,
         edge_segs=p_edge_segs
     )
     new_segments.extend(p_segs)
@@ -6062,7 +6360,7 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
     n_segs, n_vias, n_conn_lines = _float_path_to_geometry(
         n_float_path, n_net_id, n_start, n_end, n_sign,
         src_stub_dir_tuple, tgt_stub_dir_tuple, src_n_ext, tgt_n_ext,
-        config, layer_names, pcb_data=pcb_data, edge_widths=n_edge_w,
+        config, layer_names, pcb_data=swap_view, edge_widths=n_edge_w,
         edge_segs=n_edge_segs
     )
     new_segments.extend(n_segs)
@@ -6207,34 +6505,15 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
     # If polarity was fixed, include info about which target pads need net swaps
     if polarity_fixed:
         result['polarity_fixed'] = True
-        # The pads to swap are at the ROUTING target end
-        # When routing forward: routing target = original target (targets[0])
-        # When routing backward: routing target = original source (sources[0])
-        if routing_backwards:
-            # Routing target is original source
-            routing_tgt_end = sources[0]
-        else:
-            # Routing target is original target
-            routing_tgt_end = targets[0]
-        orig_p_tgt = (routing_tgt_end[5], routing_tgt_end[6])
-        orig_n_tgt = (routing_tgt_end[7], routing_tgt_end[8])
-        result['swap_target_pads'] = {
-            'p_pos': orig_p_tgt,  # P target stub position (routing target end)
-            'n_pos': orig_n_tgt,  # N target stub position (routing target end)
-            'p_net_id': p_net_id,  # P net ID to find target pad
-            'n_net_id': n_net_id,  # N net ID to find target pad
-        }
+        result['swap_target_pads'] = swap_target_pads
 
     def _swap_positions(swap_info):
         """Positions a pending polarity swap (apply_polarity_swap) will relabel,
         so the crossing check can evaluate the FINAL (post-swap) net assignment."""
         if not swap_info:
             return None, None
-        from polarity_swap import find_connected_segment_positions
-        pp = find_connected_segment_positions(pcb_data, swap_info['p_pos'][0],
-                                              swap_info['p_pos'][1], swap_info['p_net_id'])
-        nn = find_connected_segment_positions(pcb_data, swap_info['n_pos'][0],
-                                              swap_info['n_pos'][1], swap_info['n_net_id'])
+        from polarity_swap import pending_swap_targets
+        pp, nn, _pad_p, _pad_n = pending_swap_targets(pcb_data, swap_info)
         return pp, nn
 
     # Issue #102 / #142: never report a pair routed whose P and N copper crosses.
@@ -6243,7 +6522,7 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
     # is caught here, before apply_polarity_swap touches the segments. Without the
     # bare-pad stubs + virtual swap, such pairs shipped as claimed-good output with
     # genuine P-to-N shorts (neo6502 /D_P //D_N; eis /DDMI_CK #142).
-    res_pp, res_nn = _swap_positions(result.get('swap_target_pads'))
+    res_pp, res_nn = (pending_swap[0], pending_swap[1]) if pending_swap else (None, None)
     if _pn_tracks_cross_full(result.get('new_segments', []), pcb_data, p_net_id, n_net_id,
                              p_swap_positions=res_pp, n_swap_positions=res_nn):
         print("  P/N tracks cross in final geometry - rejecting pair route")
@@ -6304,7 +6583,7 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
     # tolerance as check_drc, so a reject here is a graze check_drc would also flag
     # (not tight-but-legal packing). Honest minimum: don't emit a known short.
     graze = _connector_grazes_foreign_copper(result.get('new_segments', []),
-                                             pcb_data, p_net_id, n_net_id, config)
+                                             swap_view, p_net_id, n_net_id, config)
     if graze:
         kind, obj, seg, overlap = graze
         if kind == 'pad':

@@ -12,7 +12,7 @@ self-sizing step and the GUI fanout tab go through):
   1. under `board` the self-sized via is raised to min_through_hole_diameter,
      min_via_diameter and the ring round its drill (0.51/0.25 here), with or
      without the writeback, and check_drc finds no annular violation;
-  2. under the default `fab` it keeps 0.45/0.25; with the writeback off the
+  2. under the default `fab` it keeps its size; with the writeback off the
      step prints a WARNING naming the Board Setup minimum and JSON_SUMMARY
      `board_setup_vias` carries the row (8 vias below 0.13);
   3. with the writeback on the row is absent (the writeback lowers the
@@ -20,15 +20,22 @@ self-sizing step and the GUI fanout tab go through):
   4. units: the GUI's policy setter (set_fab_tier_from_config) reaches the
      same raise and records the writeback; `board_setup=False` and an
      explicit policy other than board leave the via alone; annular_grade
-     grades a fanout's via dicts against the Board Setup ring only when asked.
+     grades a fanout's via dicts against the Board Setup ring only when asked;
+  5. the self-sized via starts at the board's Default net-class via (#1795), as on
+     route.py and the GUI fanout tab: a class via that holds the ring is laid
+     as declared under `fab`, and nothing is named;
+  6. bga_fanout's does too (glasgow U30, class via 0.45/0.25).
 
 The fixture is the issue's: qfn_csi_underpad_diff plus J9, a 2-row 0.5 mm
 socket with two un-netted mounting tabs (so row B reads interior and is
 via-dropped), and a partner J10, with a project declaring ring 0.13, via 0.25,
-hole 0.15 and a Default class via 0.5/0.2.
+hole 0.15 and a Default class via of 0.45/0.25 (ring 0.10, as the GUI half
+uses) for 1-3, and the issue's 0.5/0.2 (ring 0.15) for 5.
 
     python3 tests/test_1775_self_sized_via_board_setup.py
 """
+import contextlib
+import io
 import json
 import os
 import re
@@ -56,7 +63,7 @@ def ok(label, cond, detail=''):
 
 def make_board(base, class_via=(0.5, 0.2)):
     """The issue's board at BASE.kicad_pcb + .kicad_pro (CLASS_VIA: the
-    Default class via, which the GUI fanout tab starts from)."""
+    Default class via, which qfn_fanout and the GUI fanout tab start from)."""
     src = open(SRC, encoding='utf-8').read()
 
     def pad(num, x, y, w, h, net):
@@ -125,7 +132,7 @@ def drc_annular(out):
 
 
 def end_to_end(tmp):
-    board = make_board(os.path.join(tmp, 'b'))
+    board = make_board(os.path.join(tmp, 'b'), class_via=(0.45, 0.25))
     print('1. --escalation board raises the self-sized via')
     for wb in (False, True):
         out = os.path.join(tmp, f'board_{int(wb)}.kicad_pcb')
@@ -142,7 +149,7 @@ def end_to_end(tmp):
     print('2. default escalation, writeback off: kept and named')
     out = os.path.join(tmp, 'fab_0.kicad_pcb')
     log, s = run_fanout(board, out, 'fab', False)
-    ok('the via keeps its built-in size', via_sizes(out) == [(0.45, 0.25)],
+    ok('the via keeps the class size', via_sizes(out) == [(0.45, 0.25)],
        repr(via_sizes(out)))
     ok('a WARNING names the Board Setup minimum',
        'WARNING: Board Setup min_via_annular_width' in log and '8 BELOW it' in log)
@@ -157,6 +164,14 @@ def end_to_end(tmp):
     ok('no board_setup_vias row', s.get('board_setup_vias') == [],
        repr(s.get('board_setup_vias')))
     ok('FAB FLOOR RELAXED printed', 'FAB FLOOR RELAXED' in log)
+    print('5. the default escalation starts at the Default class via')
+    board = make_board(os.path.join(tmp, 'c'))
+    out = os.path.join(tmp, 'class_0.kicad_pcb')
+    log, s = run_fanout(board, out, 'fab', False)
+    ok('the vias laid are the class via', via_sizes(out) == [(0.5, 0.2)],
+       repr(via_sizes(out)))
+    ok('no board_setup_vias row', s.get('board_setup_vias') == [],
+       repr(s.get('board_setup_vias')))
 
 
 def units():
@@ -189,11 +204,43 @@ def units():
         fab_tiers.set_escalation_policy(*prev)
 
 
+def bga_class_via(tmp):
+    """6. bga_fanout's self-sized via starts at the Default class via too
+    (#1795), as the GUI's BGA panel does: glasgow U30 with its class via set
+    to 0.45/0.25 lays its first-rung vias at 0.45/0.25, never the old 0.5/0.3."""
+    print('6. bga_fanout starts at the Default class via')
+    sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+    from copy_board import copy_board
+    board = os.path.join(tmp, 'glasgow.kicad_pcb')
+    with contextlib.redirect_stdout(io.StringIO()):
+        copy_board(os.path.join(ROOT, 'kicad_files', 'glasgow_revC.kicad_pcb'), board)
+    pro = os.path.splitext(board)[0] + '.kicad_pro'
+    proj = json.load(open(pro, encoding='utf-8'))
+    for c in proj['net_settings']['classes']:
+        if c['name'] == 'Default':
+            c['via_diameter'], c['via_drill'] = 0.45, 0.25
+    json.dump(proj, open(pro, 'w', encoding='utf-8'), indent=2)
+    out = os.path.join(tmp, 'glasgow_out.kicad_pcb')
+    r = run_utils.check([sys.executable, '-B', '-X', 'utf8', 'py_router/bga_fanout.py', board,
+                         '--output', out, '--component', 'U30',
+                         '--layers', 'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu',
+                         '--nets', '*', '!GND', '!+3V3', '!+1V2', '--track-width', '0.12'],
+                        accept=True)
+    run_utils.evidence(out, 'bga fanout output')
+    log = r.stdout + r.stderr
+    ok('it says where the via came from',
+       '--via-size not given; using the board Default net-class 0.45mm.' in log)
+    sizes = via_sizes(out)
+    ok('the class via is laid, the old constant is not',
+       (0.45, 0.25) in sizes and (0.5, 0.3) not in sizes, repr(sizes))
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix='t1775_')
     try:
         units()
         end_to_end(tmp)
+        bga_class_via(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:

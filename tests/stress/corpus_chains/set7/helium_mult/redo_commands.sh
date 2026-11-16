@@ -1,0 +1,8 @@
+#!/bin/bash
+# Auto-recorded stress-test command manifest (issue #132).
+# Replay with redo_stress_test.py.
+set -e
+# cwd=/Users/andy/Documents/kicad_stress_test/runs_set7/helium_mult
+python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/py_router/route.py /Users/andy/Documents/kicad_stress_test/boards_unrouted_set7/helium_mult.kicad_pcb step1_route.kicad_pcb --nets '*' --power-nets GND +12V -12V --power-nets-widths 0.3 0.4 0.4 --layers F.Cu B.Cu --clearance-ceiling 0.2 --track-width 0.2 --via-size 0.5 --via-drill 0.3 --max-ripup 5
+# cwd=/Users/andy/Documents/kicad_stress_test/runs_set7/helium_mult
+python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/py_router/route_planes.py step1_route.kicad_pcb step2_planes.kicad_pcb --nets GND --plane-layers B.Cu

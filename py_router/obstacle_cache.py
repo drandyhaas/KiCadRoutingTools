@@ -776,6 +776,76 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                               extra_clearance: float = 0.0,
                               diagonal_margin: float = defaults.DIAGONAL_MARGIN,
                               _small_pass: bool = False) -> NetObstacleData:
+    _area = getattr(config, 'area_clearance', None)
+    if _area is not None:
+        return _compose_area_cache(_area, pcb_data, net_id, config, extra_clearance,
+                                   diagonal_margin, _small_pass)
+    return _precompute_net_obstacles(pcb_data, net_id, config, extra_clearance,
+                                     diagonal_margin, _small_pass)
+
+
+def _compose_area_cache(area, pcb_data, net_id, config, extra_clearance,
+                        diagonal_margin, _small_pass) -> NetObstacleData:
+    """#1843: a net's keep-out on a board with a clearance rule scoped by a
+    rule area -- the rows at the class values outside the areas and the rows
+    at each area's value inside it, as ONE entry, so every add and remove of
+    it balances."""
+    from area_clearance import compose_rows
+    data = _precompute_net_obstacles(pcb_data, net_id, area.outside_config(config),
+                                     extra_clearance, diagonal_margin, _small_pass)
+    near = area.regions_near(area.net_bounds(pcb_data, net_id),
+                             area.stamp_reach(config, extra_clearance))
+    if not near:
+        # no row of this net can reach an area: the class-value rows are
+        # the composition (every row is outside, no region keeps any)
+        return data
+    inner = [_precompute_net_obstacles(pcb_data, net_id, area.region_config(config, i),
+                                       extra_clearance, diagonal_margin, _small_pass)
+             if i in near else None
+             for i in range(len(area.regions))]
+    from types import SimpleNamespace
+    inner = [d if d is not None else SimpleNamespace(blocked_vias_rungs={})
+             for d in inner]
+    # the #568 small rung is the SAME array as blocked_vias_small
+    _alias = data.blocked_vias_rungs.get(1) is data.blocked_vias_small
+    for name, kind in (('blocked_cells', 'cells'), ('blocked_vias', 'vias'),
+                       ('blocked_vias_small', 'vias'),
+                       ('blocked_cell_spans', 'cell_spans'),
+                       ('blocked_via_spans', 'via_spans')):
+        rows = compose_rows(area, config, kind, getattr(data, name, None),
+                            [getattr(d, name, None) for d in inner])
+        if kind in ('cells', 'vias') and len(rows):
+            rows = _unique_rows(rows)
+        setattr(data, name, rows)
+    for r in list(data.blocked_vias_rungs):
+        if r == 1 and _alias:
+            data.blocked_vias_rungs[r] = data.blocked_vias_small
+            continue
+        rows = compose_rows(area, config, 'vias', data.blocked_vias_rungs[r],
+                            [d.blocked_vias_rungs.get(r) for d in inner])
+        data.blocked_vias_rungs[r] = _unique_rows(rows) if len(rows) else rows
+    return data
+
+
+class _CellCollector:
+    """A map stand-in that collects a stamp's batches into a per-net cache's
+    cell lists (#1853), so a stamp written against the map serves both."""
+    __slots__ = ('cells', 'vias')
+
+    def __init__(self, cells: list, vias: list):
+        self.cells, self.vias = cells, vias
+
+    def add_blocked_cells_batch(self, cells):
+        self.cells.append(np.asarray(cells, dtype=np.int32).reshape(-1, 3))
+
+    def add_blocked_vias_batch(self, vias):
+        self.vias.append(np.asarray(vias, dtype=np.int32).reshape(-1, 2))
+
+
+def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                              extra_clearance: float = 0.0,
+                              diagonal_margin: float = defaults.DIAGONAL_MARGIN,
+                              _small_pass: bool = False) -> NetObstacleData:
     """Pre-compute obstacle cells for a single net.
 
     Returns cached data that can be quickly added to obstacle maps via batch operations.
@@ -790,6 +860,12 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     Returns:
         NetObstacleData with blocked_cells and blocked_vias lists
     """
+    # #1842: under a via span this reads the board as the span sees it
+    # (via_span.obstacle_board), at every call -- the run's first build and
+    # each rebuild after a rip or a route alike.
+    if getattr(config, 'via_span', None):
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)
     layer_map = build_layer_map(config.layers)
@@ -841,7 +917,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         # true perpendicular clearance, so off-grid / diagonal tracks are covered.
         expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
         # Segment via-block: future ROUTE via (config.via_size) near this net's copper.
-        via_block_mm = config.via_size / 2 + layer_width / 2 + clr_l + extra_clearance
+        via_block_mm = (config.via_size / 2 + layer_width / 2 + clr_l + extra_clearance
+                        + config.via_hole_extra(clr_l))
         via_block_mm_by_layer[layer_name] = via_block_mm
 
     # Process segments. Keep-out from the segment's ACTUAL width in BOTH
@@ -868,7 +945,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                     else config.track_width
                 via_block_mm = (config.via_size / 2 + seg_w / 2
                                 + config.layer_clearance(seg.layer, obs_clearance, net_id)  # #498
-                                + extra_clearance)
+                                + extra_clearance
+                                + config.via_hole_extra(config.layer_clearance(seg.layer, obs_clearance, net_id)))
                 _vs = segment_blocked_spans(          # #815
                     seg.start_x, seg.start_y, seg.end_x, seg.end_y,
                     via_block_mm, coord.grid_step)
@@ -888,7 +966,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                                own_half + _trk_l
                                + config.route_reserve_width(seg.layer) / 2
                                + extra_on_layer(extra_clearance, seg.layer))
-            via_block_mm = config.via_size / 2 + own_half + _clr_l + extra_clearance
+            via_block_mm = (config.via_size / 2 + own_half + _clr_l + extra_clearance
+                            + config.via_hole_extra(_clr_l))
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm,
                                    blocked_cell_spans_set, blocked_via_spans_set,
                                    via_block_mm)
@@ -928,11 +1007,22 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             vs / 2 + lw / 2 + config.layer_clearance(ln, obs_clearance, net_id)
             + extra_on_layer(extra_clearance, ln)))
             for ln, lw in zip(config.layers, layer_widths)]
+        if getattr(config, 'hole_rules', None) is not None:
+            # #1853: a hole_clearance rule holds a track off this via's HOLE
+            from hole_rule_routing import via_track_reach
+            for _i, (ln, lw) in enumerate(zip(config.layers, layer_widths)):
+                _reach = via_track_reach(config, via, ln, lw,
+                                         extra_on_layer(extra_clearance, ln))
+                if _reach is not None:
+                    via_track_list[_i] = max(via_track_list[_i],
+                                             coord.to_grid_dist_safe(_reach))
         # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
         # Float radius (no floor) so the disc threshold blocks the true clearance.
         # #498: barrels meet on every stack layer -> stack max.
         via_via_radius = max(1.0, (vs / 2 + config.via_size / 2
-                                   + config.stack_clearance(obs_clearance, net_id)) * coord.inv_step)
+                                   + config.stack_clearance(obs_clearance, net_id)
+                                   + config.via_hole_extra(config.stack_clearance(obs_clearance, net_id), via)
+                                   ) * coord.inv_step)
         _collect_via_obstacles(via, coord, num_layers, via_track_list,
                                 via_via_radius, diagonal_margin,
                                 blocked_cells_set, blocked_vias_set,
@@ -973,6 +1063,12 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                                 blocked_cells_set, blocked_vias_set,
                                 obs_clearance=(obs_clearance if config.scoped_clearance is None
                                                else config.pad_obstacle_clearance(pad)))
+    if getattr(config, 'hole_rules', None) is not None:
+        # #1853: the pads' HOLES at a hole_clearance rule, as the base map
+        # holds the pads of the nets a step does not route
+        from obstacle_map import stamp_hole_rule_pad_holes
+        stamp_hole_rule_pad_holes(_CellCollector(blocked_cells_set, blocked_vias_set),
+                                  pads, config, extra_clearance)
 
     # Concatenate and deduplicate (the Rust map refcounts batch adds, so
     # each cell must appear once per net - same as the old set semantics)
@@ -1210,7 +1306,8 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         expanded_layers = expand_pad_layers(pad.layers, config.layers)
         clr_groups = _clr_groups(expanded_layers)
         on_copper = any(l.endswith('.Cu') for l in expanded_layers)
-        via_margin = config.via_size / 2 + _via_clr(expanded_layers) + config.grid_step / 2
+        via_margin = (config.via_size / 2 + _via_clr(expanded_layers) + config.grid_step / 2
+                      + config.via_hole_extra(_via_clr(expanded_layers), pad=pad))
         for poly in pad_polys:
             for (g_clr, g_ex), g_idxs in clr_groups.items():
                 margin = g_clr + g_ex
@@ -1263,7 +1360,8 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # Via blocking around pads
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         # Add half grid step buffer to account for grid quantization errors
-        via_margin = config.via_size / 2 + _via_clr(expanded_layers) + config.grid_step / 2
+        via_margin = (config.via_size / 2 + _via_clr(expanded_layers) + config.grid_step / 2
+                      + config.via_hole_extra(_via_clr(expanded_layers), pad=pad))
         blocked_vias.append(pad_blocked_cells_array(gx, gy, half_width, half_height,
                                                     via_margin, config.grid_step, corner_radius,
                                                     off_x=off_x, off_y=off_y,
@@ -1288,6 +1386,9 @@ def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: 
     Returns:
         Dict mapping net_id to NetObstacleData
     """
+    if getattr(config, 'via_span', None):                # #1842: the span's view
+        from via_span import obstacle_board as _span_board
+        pcb_data = _span_board(pcb_data, config)
     cache: Dict[int, NetObstacleData] = {}
     for net_id in net_ids:
         cache[net_id] = precompute_net_obstacles(pcb_data, net_id, config,
@@ -1465,6 +1566,35 @@ def precompute_via_placement_obstacles(
     all_copper_layers: List[str],
     exclude_net_id: Optional[int] = None,
 ) -> ViaPlacementObstacleData:
+    """`_precompute_via_placement_obstacles`, composed over the board's area
+    clearance rules (#1843) exactly as the builders it mirrors compose their
+    stamps (`area_clearance.composed_builder`), so a net's removal from a
+    shared map takes what its add stamped."""
+    _area = getattr(config, 'area_clearance', None)
+    if _area is None:
+        return _precompute_via_placement_obstacles(pcb_data, net_id, config,
+                                                    all_copper_layers, exclude_net_id)
+    from area_clearance import compose_via_placement
+    outer = _precompute_via_placement_obstacles(pcb_data, net_id, _area.outside_config(config),
+                                                all_copper_layers, exclude_net_id)
+    near = _area.regions_near(_area.net_bounds(pcb_data, net_id),
+                              _area.stamp_reach(config))
+    if not near:
+        return outer
+    inner = [_precompute_via_placement_obstacles(pcb_data, net_id,
+                                                 _area.region_config(config, i),
+                                                 all_copper_layers, exclude_net_id)
+             if i in near else None for i in range(len(_area.regions))]
+    return compose_via_placement(_area, config, all_copper_layers, outer, inner)
+
+
+def _precompute_via_placement_obstacles(
+    pcb_data: PCBData,
+    net_id: int,
+    config: GridRouteConfig,
+    all_copper_layers: List[str],
+    exclude_net_id: Optional[int] = None,
+) -> ViaPlacementObstacleData:
     """
     Pre-compute via placement obstacle positions for a single net.
 
@@ -1525,7 +1655,8 @@ def precompute_via_placement_obstacles(
         # #543: the net's class clearance under the seg's layer rule (#434/#498),
         # exactly as build_via_obstacle_map prices this segment.
         via_margin = (config.via_size / 2 + seg.width / 2
-                      + config.layer_clearance(seg.layer, obs_clr, _obs_net) + grid_cushion)
+                      + config.layer_clearance(seg.layer, obs_clr, _obs_net) + grid_cushion
+                      + config.via_hole_extra(config.layer_clearance(seg.layer, obs_clr, _obs_net)))
         via_chunks.append(segment_blocked_cells_array(
             seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_margin, config.grid_step))
         # Routing map: capsule at the per-layer track width, NO cushion (== _add_segment_routing_obstacle).
@@ -1546,7 +1677,8 @@ def precompute_via_placement_obstacles(
         # #543: stack-max class clearance for foreign vias, run clearance for the
         # exclude net's own -- exactly the builder's (size, clearance) grouping.
         vv_mm = (via.size / 2 + config.via_size / 2
-                 + config.stack_clearance(obs_clr, _obs_net) + grid_cushion)
+                 + config.stack_clearance(obs_clr, _obs_net) + grid_cushion
+                 + config.via_hole_extra(config.stack_clearance(obs_clr, _obs_net), via))
         vv_sq = (vv_mm / config.grid_step) ** 2
         via_chunks.append(center + circle_offsets(max(1, int(math.ceil(math.sqrt(vv_sq)))), vv_sq))
         # Via map: drill hole-to-hole keepout, stamped IN ADDITION to the via-via

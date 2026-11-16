@@ -47,15 +47,17 @@ def _row(pcb, pad, kind, item, net_id, at, overlap, clearance, layer=None):
     }
 
 
-def pad_contacts(pcb, segments=None, vias=None, clearance=0.0) -> List[dict]:
+def pad_contacts(pcb, segments=None, vias=None, clearance=0.0, area=None) -> List[dict]:
     """Every via and track in contact with the copper of a pad of another net,
     sorted by pad; `item` is the copper object. `segments` / `vias` measure a
     copper list other than the board's own (the GUI's write model). A net tie's
     partner pad is exempt, as check_drc and KiCad exempt it. With a `clearance`
     a row also covers copper inside it (`short` false), at the 10% margin
     check_drc takes to filter grid quantization, and `overlap_mm` is measured
-    from it."""
+    from it. `area` (#1843, `config.area_clearance`) holds copper a rule
+    area binds to the area's clearance."""
     margin = 0.1 if clearance else 0.0
+    base_clearance = clearance
     from check_drc import (_pad_has_no_copper, check_pad_segment_overlap,
                            check_pad_via_overlap)
     segments = pcb.segments if segments is None else segments
@@ -84,6 +86,8 @@ def pad_contacts(pcb, segments=None, vias=None, clearance=0.0) -> List[dict]:
         if not v.net_id:
             continue    # an orphan barrel: no net for a contact to short
         exempt = pcb.net_tie_exempt_pad_ids(v.net_id)
+        clearance = (area.via_clearance(v, base_clearance)
+                     if area is not None and base_clearance else base_clearance)
         for p in near(v.x, v.y, v.x, v.y, v.size / 2.0 + clearance):
             if p.net_id == v.net_id or id(p) in exempt:
                 continue
@@ -95,6 +99,8 @@ def pad_contacts(pcb, segments=None, vias=None, clearance=0.0) -> List[dict]:
         if not s.net_id or getattr(s, 'graphic', False):
             continue
         exempt = pcb.net_tie_exempt_pad_ids(s.net_id)
+        clearance = (area.segment_clearance(s, base_clearance)
+                     if area is not None and base_clearance else base_clearance)
         for p in near(min(s.start_x, s.end_x), min(s.start_y, s.end_y),
                       max(s.start_x, s.end_x), max(s.start_y, s.end_y),
                       s.width / 2.0 + clearance):
@@ -254,23 +260,23 @@ def format_rows(rows: List[dict], limit: int = 8) -> List[str]:
     return out
 
 
-def shipped_report(pcb, segments=None, vias=None, clearance=0.0) -> List[dict]:
+def shipped_report(pcb, segments=None, vias=None, clearance=0.0, area=None) -> List[dict]:
     """`pad_contacts` as JSON-ready rows. A row whose copper's NET a route
     step will not rip carries `net_protected`, the reason (`locked`, a
     `sense:` group, or a .kicad_pro protection), #1766."""
-    rows = pad_contacts(pcb, segments, vias, clearance)
+    rows = pad_contacts(pcb, segments, vias, clearance, area)
     prot = net_protection(pcb) if rows else {}
     return [{k: v for k, v in r.items() if k not in ('net_id', 'item')}
             | ({'net_protected': prot[r['net']]} if r['net'] in prot else {})
             for r in rows]
 
 
-def audit_shipped(pcb, segments=None, vias=None, clearance=0.0):
+def audit_shipped(pcb, segments=None, vias=None, clearance=0.0, area=None):
     """The end of a route run's audit: says what it found and returns (shorts,
     grazes), each [] when clean. An audit that cannot run says so and returns
     ([], []), since it only reports."""
     try:
-        rows = shipped_report(pcb, segments, vias, clearance)
+        rows = shipped_report(pcb, segments, vias, clearance, area)
     except Exception as exc:                                    # noqa: BLE001
         print(f"  WARNING: pad-contact audit skipped "
               f"({type(exc).__name__}: {exc})")

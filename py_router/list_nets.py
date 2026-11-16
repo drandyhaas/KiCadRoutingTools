@@ -890,7 +890,8 @@ def _print_relaxing_dru_rules(pcb_path, constraints):
         return
     try:
         from design_rules import parse_dru, relaxing_rules
-        rows = relaxing_rules(parse_dru(open(dru, encoding='utf-8').read())[0], constraints)
+        with open(dru, encoding='utf-8') as fh:
+            rows = relaxing_rules(parse_dru(fh.read())[0], constraints)
     except Exception as e:                                     # noqa: BLE001
         print(f"  (.kicad_dru rules not read: {e})")
         return
@@ -901,11 +902,62 @@ def _print_relaxing_dru_rules(pcb_path, constraints):
     for r in rows:
         where = (f" if {r['condition']}" if r['condition'] else ' (no condition: every item)')
         layer = f" on {r['layer']}" if r['layer'] else ''
+        how = ''
+        if r['courtyard']:
+            how = (f" -- bound by POSITION: inside the courtyard of "
+                   f"{', '.join(r['courtyard'])} only")
+        elif r['unresolved']:
+            how = f" -- condition not read ({r['unresolved']}): it MAY relax"
         print(f"  - '{r['rule']}': {r['kind']} min {r['min']:g} "
-              f"(board {r['board_key']} {r['board']:g}){layer}{where}")
+              f"(board {r['board_key']} {r['board']:g}){layer}{where}{how}")
     print("  A size below the board minimum is legal only on those items: request it on a "
           "step of its own whose --nets are the nets the rule names; on any other net it "
           "ships below the board minimum (check_drc grades it).")
+    _print_relaxed_via_nets(pcb_path, rows)
+
+
+def _print_relaxed_via_nets(pcb_path, rows):
+    """#1805: the nets each relaxing via-size rule binds, so a plan can give
+    them the smaller via where the project allows it (an under-pad escape)."""
+    from design_rules import VIA_SIZE_KINDS
+    if not any(r['kind'] in VIA_SIZE_KINDS for r in rows):
+        return
+    try:
+        import contextlib
+        import io
+        from design_rules import DesignRules, relaxed_via_nets
+        with contextlib.redirect_stdout(io.StringIO()):
+            pcb = parse_kicad_pcb(pcb_path)
+            nets = relaxed_via_nets(DesignRules.from_project(pcb, pcb_path), pcb, rows)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  (nets of the via rules not resolved: {e})")
+        return
+    union = set()
+    lines = []
+    for r in rows:
+        got = nets.get(r['rule'])
+        if got is None or r['kind'] not in VIA_SIZE_KINDS:
+            continue
+        nets.pop(r['rule'])
+        kinds = ', '.join(x['kind'] for x in rows if x['rule'] == r['rule'])
+        if got['how'] == 'every':
+            lines.append(f"  - '{r['rule']}' ({kinds}): every via of the board")
+            continue
+        names = got['nets']
+        union |= set(names)
+        note = {'courtyard': (f"; its via inside the courtyard of "
+                              f"{', '.join(r['courtyard'])} only (the nets with a pad "
+                              f"there), held to the board minimum elsewhere"),
+                'may': "; the condition is not read, so these are the nets it MAY bind",
+                'condition': ''}[got['how']]
+        shown = ', '.join(names[:20]) + (f", ... ({len(names) - 20} more)"
+                                         if len(names) > 20 else '')
+        lines.append(f"  - '{r['rule']}' ({kinds}): {len(names)} net(s){note}: "
+                     f"{shown or '(none)'}")
+    print(f"Nets with a relaxed via rule ({len(union)}): candidates for a smaller via, "
+          f"such as an under-pad escape:")
+    for line in lines:
+        print(line)
 
 
 def print_design_rules(pcb_path):
@@ -1237,21 +1289,99 @@ def power_net_order(item):
     return (-pads, leaf not in ('GND', 'VSS'), name)
 
 
+# Supply-name rules of `power_name_kind` (#1835), read on the net's LAST
+# hierarchical path part only: a sheet path (`/VBUS_SWITCH/SET`) names a
+# place, not the net.
+#: Ground and supply stems, matched inside one alphanumeric chunk of the leaf,
+#: so the compound spellings still read: AGND, GNDA, GNDPLL, CPVSS, AVDD,
+#: DVDD, VDDQ, VDDIO, VCCINT, VCCAUX, MGTAVCC, INTVCC, VBATT.
+_GND_STEMS = ('GND', 'VSS')
+_RAIL_STEMS = ('VCC', 'VDD', 'VBUS', 'VBAT')
+#: VIN is also inside ordinary words (DRIVING, MOVING, SAVING), so it reads
+#: only at the start or the end of its chunk: VIN, VIN1, VINT, AVIN, 3V3VIN.
+_EDGE_RAIL_STEMS = ('VIN',)
+#: Plus-signed voltages read anywhere in the leaf: HDMI_+5V, BMS.+5V.
+_SIGNED_RAILS = ('+3.3', '+5', '+12', '+1.8', '+2.5')
+#: Rail-shaped WHOLE leaf: +5V, -12V, 5V, 3V3, 1V8, 12V0, 3.3V ...
+_RAIL_LEAF_RE = re.compile(r'^[+-]?(\d+(\.\d+)?V\d*|\d+V\d+)$')
+#: Words that make a supply-named net a signal ABOUT that supply: an enable,
+#: a power-good, a sense or detect line, a feedback node, a flag, a bus line.
+#: Matched as a whole token of the leaf (split on every non-alphanumeric and
+#: on a lower-to-upper case step), or as what follows the stem inside its
+#: chunk (VBUSDET, VBUSEN, VCCOEN). SEN takes no digit: SEN1_VCC is a
+#: sensor's supply, VDDQ_SEN_+ a sense line.
+_SIGNAL_WORD_RE = re.compile(
+    r'(?:EN|ENA|ENABLE|NEN|PEN|PG|PGOOD|PGD|PWRGD|PWRGOOD|BAD|SENSE|SNS|DET'
+    r'|DETECT|MON|ALERT|OK|CTRL|FLG|FLAG|FAULT|FB|OV|UV|DISCH|SEL|ON'
+    r'|OFF|OVERRIDE|SCL|SDA|IRQ)\d*|SEN')
+_CHUNK_RE = re.compile(r'[A-Za-z0-9]+')
+#: Words inside a mixed-case chunk (GNDDetect -> GND, Detect). An all-caps
+#: chunk is one word: SEN1 is not SEN, 1.
+_CAMEL_RE = re.compile(r'[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+')
+
+
+def _signal_word(token):
+    return bool(_SIGNAL_WORD_RE.fullmatch(token))
+
+
+def power_name_kind(name):
+    """'gnd', 'vcc' or None: what a net NAME alone says it is (#1835).
+
+    Read on the last path part. Ground: a chunk holding GND or VSS. Rail: a
+    chunk holding VCC, VDD, VBUS or VBAT, or starting or ending with VIN; a
+    plus-signed voltage (`HDMI_+5V`); a rail-shaped whole leaf (`3V3`,
+    `-12V`); or a name starting with `+`/`-` that holds a digit (#91). Either
+    is refused when the leaf also holds a signal word (`VBUS_EN`,
+    `VBAT_SENSE`, `PG_+3.3VA`, `GND_SCL`, `VBUSDET`): such a net is a line
+    about a supply, not the supply. Matching is by chunk, never across the
+    whole name, so `/DRIVING_LED` holds no VIN and `/VBUS_SWITCH/SET` is
+    read as `SET`."""
+    if not name:
+        return None
+    leaf = name.rsplit('/', 1)[-1]
+    up = leaf.upper()
+    chunks = [c.upper() for c in _CHUNK_RE.findall(leaf)]
+    tokens = set(chunks)
+    for c in _CHUNK_RE.findall(leaf):
+        if c != c.upper():
+            tokens.update(p.upper() for p in _CAMEL_RE.findall(c))
+    if any(_signal_word(t) for t in tokens):
+        return None
+
+    def stem_in(chunk, stems, edge=False):
+        for s in stems:
+            i = chunk.find(s)
+            if i < 0:
+                continue
+            if edge and not (i == 0 or i + len(s) == len(chunk)):
+                continue
+            rest = chunk[i + len(s):]
+            # A signal word after the stem in the same chunk (VBUSDET).
+            if rest and any(_signal_word(rest[k:]) for k in range(len(rest))
+                            if len(rest) - k >= 2):
+                return False
+            return True
+        return False
+
+    if any(stem_in(c, _GND_STEMS) for c in chunks):
+        return 'gnd'
+    if (any(stem_in(c, _RAIL_STEMS) or stem_in(c, _EDGE_RAIL_STEMS, edge=True)
+            for c in chunks)
+            or any(v in up for v in _SIGNED_RAILS)
+            or (name[0] in '+-' and any(ch.isdigit() for ch in name))
+            or _RAIL_LEAF_RE.match(up)):
+        return 'vcc'
+    return None
+
+
 def find_power_nets(pcb_data):
     """Find power and ground nets by name patterns and connection count.
 
-    Returns (gnd_nets, vcc_nets, candidate_nets) - candidates are unmatched
-    nets whose pad count rivals the detected power rails (issue #91: rails
-    like '-12V', '/5V', '/3V3', and bare 'VDC' defeat prefix patterns; pad
-    count catches them).
+    The name rule is `power_name_kind` (#1835). Returns (gnd_nets, vcc_nets,
+    candidate_nets) - candidates are unmatched nets whose pad count rivals
+    the detected power rails (issue #91: rails like '-12V', '/5V', '/3V3',
+    and bare 'VDC' defeat prefix patterns; pad count catches them).
     """
-    import re
-    gnd_patterns = ['GND', 'VSS', 'AGND', 'DGND', 'PGND', 'GNDA', 'GNDD']
-    vcc_patterns = ['VCC', 'VDD', '+3.3', '+5', '+12', '+1.8', '+2.5', 'VBUS', 'VBAT', 'VIN']
-    # Rail-shaped names, checked against the LAST hierarchical path component:
-    # +5V, -12V, 5V, 3V3, 1V8, 12V0, 3.3V ...
-    rail_re = re.compile(r'^[+-]?(\d+(\.\d+)?V\d*|\d+V\d+)$')
-
     gnd_nets = []
     vcc_nets = []
     matched = set()
@@ -1259,16 +1389,12 @@ def find_power_nets(pcb_data):
     for net in pcb_data.nets.values():
         if not net.name:
             continue
-        name_upper = net.name.upper()
-        leaf = name_upper.rsplit('/', 1)[-1]
         pad_count = len(net.pads)
-
-        if any(g in name_upper for g in gnd_patterns):
+        kind = power_name_kind(net.name)
+        if kind == 'gnd':
             gnd_nets.append((net.name, pad_count))
             matched.add(net.name)
-        elif (any(v in name_upper for v in vcc_patterns)
-              or (net.name[0] in '+-' and any(c.isdigit() for c in net.name))
-              or rail_re.match(leaf)):
+        elif kind == 'vcc':
             vcc_nets.append((net.name, pad_count))
             matched.add(net.name)
 
@@ -1294,18 +1420,20 @@ def find_power_nets(pcb_data):
 
 def power_pin_parts(net):
     """The parts with a `power_in` / `power_out` pin on NET. Two or more is
-    autoplan's rail rule for a net no name pattern catches: one part's power
+    autoroute's rail rule for a net no name pattern catches: one part's power
     pins are its own supply tap, an enable or a misdeclared connector pin."""
     return {p.component_ref for p in net.pads
             if p.pintype in ('power_in', 'power_out')}
 
 
-def power_net_evidence(pcb_data):
+def power_net_evidence(pcb_data, zones=None):
     """{net_id: why} for each net the general rules read as power or ground,
-    the rules autoplan builds a chain's --power-nets from: a ground or rail
+    the rules autoroute builds a chain's --power-nets from: a ground or rail
     NAME (`find_power_nets`, not its pad-count candidates), power pins on two
     or more parts (`power_pin_parts`), and a pour the board draws for it.
-    A disclosure input (#1743): it decides no width."""
+    A disclosure input (#1743): it decides no width. ZONES stands in for
+    `pcb_data.zones` when the caller's board does not hold its pours yet
+    (the Planes tab's, before they are applied)."""
     from kicad_parser import pour_zones
     gnd, vcc, _cand = find_power_nets(pcb_data)
     by_name = {}
@@ -1323,7 +1451,8 @@ def power_net_evidence(pcb_data):
             parts = power_pin_parts(net)
             if len(parts) >= 2:
                 why[nid] = f"power pins on {len(parts)} parts"
-    for z in pour_zones(getattr(pcb_data, 'zones', None)):
+    for z in pour_zones(zones if zones is not None
+                        else getattr(pcb_data, 'zones', None)):
         nid = getattr(z, 'net_id', 0)
         if nid and nid not in why and not getattr(z, 'in_footprint', False):
             why[nid] = 'the board pours it'

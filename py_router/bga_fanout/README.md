@@ -91,8 +91,8 @@ board written, as `route.py` refuses one.
 | `--layers`, `-l` | Routing layers | F.Cu B.Cu |
 | `--track-width`, `--width`, `-w` | Track width (mm) | 0.3 |
 | `--clearance` | Track clearance (mm) | 0.25 |
-| `--via-size` | Via outer diameter (mm) | 0.5 |
-| `--via-drill` | Via drill size (mm) | 0.3 |
+| `--via-size` | Via outer diameter (mm) | the board's Default class, else 0.5 |
+| `--via-drill` | Via drill size (mm) | the board's Default class, else 0.3 |
 | `--nets`, `-n` | Net patterns to include | All nets |
 | `--diff-pairs`, `-d` | Differential pair patterns | None |
 | `--diff-pair-gap` | Gap between P/N traces (mm) | 0.1 |

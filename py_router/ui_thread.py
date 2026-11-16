@@ -122,6 +122,8 @@ def save_board_on_ui_thread_ex(path, board, timeout_s=SAVE_BOARD_UI_TIMEOUT_S,
     thread. ``(True, ok-status)`` on success; ``(False, status)`` naming WHY
     otherwise -- ``status.reason`` is ``'timeout'`` (the main thread never ran
     it: retryable) or ``'save_failed'`` (``SaveBoard`` threw: it will again).
+    The save goes through ``tool_records.save_board``, so the saved file keeps
+    the board's ``kicad_routing_tools`` record on KiCad 10.0.7+ too (#1906).
 
     ``aSkipSettings`` is not optional: KiCad 10's implicit project-settings save
     merges the pre-migration on-disk project JSON with its migrated in-memory
@@ -145,7 +147,10 @@ def save_board_on_ui_thread_ex(path, board, timeout_s=SAVE_BOARD_UI_TIMEOUT_S,
         if abandoned.is_set():
             return           # caller stopped waiting; do not do dead work
         try:
-            pcbnew.SaveBoard(path, board, aSkipSettings=True)
+            # tool_records.save_board keeps the record on the file (#1906)
+            import tool_records
+            tool_records.save_board(pcbnew.SaveBoard, path, board,
+                                    aSkipSettings=True)
             box['ok'] = True
         except Exception as e:      # reported to the caller, never raised here
             box['err'] = e

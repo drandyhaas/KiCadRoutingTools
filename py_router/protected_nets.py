@@ -52,6 +52,13 @@ POWER_WIDTHS_KEY = "power_widths"
 #: | 'dru' | 'default'} -- what the graders hold a pair to when no
 #: .kicad_dru skew rule binds it (`kicad_dru.recorded_intra_pair_rules`).
 INTRA_KEY = "intra_pair_tolerance"
+#: #1799: the same map carries each AC-coupled chain a route_diff step
+#: matched end to end, keyed AC_CHAIN_PREFIX + its pairs joined by '+':
+#: {'p_nets': [...], 'n_nets': [...] (each side's nets in lane order),
+#: 'bridges': [refs], 'tolerance_mm', 'source'} -- graded end to end
+#: (`kicad_dru.recorded_ac_chains`, check_drc). No 'n' key, so the pair
+#: reader passes over it.
+AC_CHAIN_PREFIX = "ac-chain:"
 
 _GLOB_CHARS = set('*?[')
 
@@ -256,6 +263,50 @@ def _persist_map(pro_path: str, key: str, mapping: Dict[str, object],
         return False
 
 
+def persist_lap_history(pro_path: str, history: Optional[list],
+                        verbose: bool = True, board=None) -> bool:
+    """#1807: store the improvement gate's record of the recent route steps'
+    trades (improvement_gate.LAP_KEY), REPLACING the previous list -- the
+    gate built it from that list plus this step's entry. FILE (``board``
+    None) into the project, LIVE into the live board's records, as
+    _persist_map. None (the step traded nothing, or no gate ran) is a
+    no-op."""
+    if not history:
+        return False
+    from improvement_gate import LAP_KEY
+    value = json.loads(json.dumps(history))
+    try:
+        if board is not None:
+            def _apply(ns):
+                if ns.get(LAP_KEY) == value:
+                    return False
+                ns[LAP_KEY] = value
+                return True
+            changed = tool_records.update_live_namespace(board, _apply)
+        else:
+            if not pro_path or not os.path.isfile(pro_path):
+                return False
+            proj = tool_records.load_project(pro_path)
+            ns = proj.setdefault(PRO_NAMESPACE, {})
+            if ns.get(LAP_KEY) == value:
+                return False
+            ns[LAP_KEY] = value
+            tool_records.stamp_revision(proj)
+            with open(pro_path, 'w', encoding='utf-8') as f:
+                json.dump(proj, f, indent=2)
+            changed = True
+        if changed and verbose:
+            last = value[-1]
+            print(f"  Route-step trade recorded for the next step's gate: "
+                  f"lost {len(last['lost'])}, gained {len(last['gained'])} "
+                  f"({last.get('verdict')})")
+        return changed
+    except Exception as e:
+        if verbose:
+            print(f"  (skipped route-step trade record: {e})")
+        return False
+
+
 def persist_protected_nets(pro_path: str, mapping: Dict[str, str],
                            verbose: bool = True, board=None) -> bool:
     return _persist_map(pro_path, PRO_KEY, mapping,
@@ -439,9 +490,15 @@ def read_pour_served_for_pcb_data(pcb_data, input_file: Optional[str] = None
 def locked_net_names(pcb_data) -> Set[str]:
     """Nets with any KiCad-locked segment or via. The user pinned that copper;
     rip machinery must never strip the net (a partial rip would strand the
-    locked fragments). Read straight from the board -- no .kicad_pro entry."""
-    ids = {s.net_id for s in pcb_data.segments if getattr(s, 'locked', False)}
-    ids |= {v.net_id for v in pcb_data.vias if getattr(v, 'locked', False)}
+    locked fragments). Read straight from the board -- no .kicad_pro entry --
+    including copper a via-span step has set aside for a call (#1842,
+    `via_span.set_aside`): that copper is still the net's."""
+    from via_span import set_aside
+    aside = set_aside(pcb_data)
+    ids = {s.net_id for s in list(pcb_data.segments) + aside.get('segments', [])
+           if getattr(s, 'locked', False)}
+    ids |= {v.net_id for v in list(pcb_data.vias) + aside.get('vias', [])
+            if getattr(v, 'locked', False)}
     ids.discard(0)
     return {pcb_data.nets[i].name for i in ids
             if i in pcb_data.nets and pcb_data.nets[i].name}
@@ -467,10 +524,18 @@ def cached_protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[st
 
 def held_net_reasons(pcb_data) -> Dict[str, str]:
     """{net name: `sense:<REF>.<PAD>`} for nets carrying copper a `sense:`
-    group holds (#1279, Segment.held_by). Read straight from the board."""
+    group holds (#1279, Segment.held_by). Read straight from the board,
+    including copper a via-span step has set aside for a call (#1842)."""
     out: Dict[str, str] = {}
-    for it in list(pcb_data.segments) + list(pcb_data.vias):
+    from via_span import HELD_OUTSIDE_SPAN, set_aside
+    aside = set_aside(pcb_data)
+    for it in (list(pcb_data.segments) + list(pcb_data.vias)
+               + aside.get('segments', []) + aside.get('vias', [])):
         held = getattr(it, 'held_by', '')
+        if held == HELD_OUTSIDE_SPAN:
+            # #1842: a via-span step holds the COPPER it could not lay again;
+            # the net's routes on the span stay rippable
+            continue
         net = pcb_data.nets.get(it.net_id) if held and it.net_id else None
         if net is not None and net.name:
             out.setdefault(net.name, held)

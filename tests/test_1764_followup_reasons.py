@@ -12,7 +12,7 @@ command whose outcome was not known yet.
 
 Now:
   1. `single_ended_followup_reasons` ({net: why}) sits next to
-     `single_ended_followup_nets`, whose contents are unchanged (autoplan
+     `single_ended_followup_nets`, whose contents are unchanged (autoroute
      reads it, failed pairs included);
   2. the banner groups the nets by why, prints after the fallback, gives a
      by-design net still open the route.py command and a failed pair a

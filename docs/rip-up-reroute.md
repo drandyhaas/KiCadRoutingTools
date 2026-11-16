@@ -111,9 +111,9 @@ union-find `check_connected` uses:
 - **lost** — connected before, broken after
 - **gained** — broken (or bare) before, connected after
 
-The run is **rejected** when it ends worse on **either** axis — more nets broken
-than it connected, *or* more disconnected pads than it started with. Both must
-be non-worse to ship. A rejected run's output file is replaced by the input
+The run is **rejected** when it ends worse on **any** axis — more nets broken
+than it connected, *or* more disconnected pads than it started with, *or* more
+joins needed than it started with. All three must be non-worse to ship. A rejected run's output file is replaced by the input
 board, because in every recorded case the pre-rip board was the better
 artifact, and the chain keeps a board to continue from.
 
@@ -124,6 +124,17 @@ far larger than the ones it closed. An earlier version of this gate compared
 the two lexicographically with the net count first and shipped that board. Pad
 count is the honest measure of how much of the board is unreachable, so a run
 that raises it is worse regardless of the net tally.
+
+**The joins axis (#1808)** covers what the pad count cannot see. Disconnected
+pads are the pads outside a net's largest piece, so cutting an already-open
+net's other piece into more pieces moves nothing: an open net taken from 2
+pieces to 6, the same 5 pads stranded, used to grade as no change while
+`board_score`'s `broken` rose by 4. Each net's entry now carries the joins it
+still needs (its pad pieces minus one, within each board outline: the unit of
+`board_score`'s `broken` and `joins_needed`), the run is rejected when their
+sum rises, and a net that stayed open in more pieces is named in `fragmented`
+(and on the head line, `cut N open net(s) into more pieces [net 2->6]`) even
+when the sum does not rise.
 
 This is still not an "any regression" test: a pass that closes five nets and
 breaks one ships, provided the pad count did not rise — the recovered pads
@@ -172,8 +183,9 @@ With no refill to be had, such a net that the re-grade charges to this run
 summary agree.
 
 The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
-(`lost`, `gained`, `worsened`,
-`disconnected_pads_before/after`, `nets_compared`, `verdict`, and, when a
+(`lost`, `gained`, `worsened`, `fragmented`,
+`disconnected_pads_before/after`, `joins_needed_before/after`,
+`nets_compared`, `verdict`, `rip_cycle` when there is one (below), and, when a
 poured net outside `--nets` got worse, `excluded_plane_nets` /
 `rejected_on_excluded_plane_nets_alone`), so a chain can
 assert on it instead of grepping prose. The `--json-out` file carries the
@@ -204,6 +216,27 @@ rejected.** Re-running it with *more* rip authority is the one response
 guaranteed not to help; change the approach instead (thinner, finer grid,
 different layer budget, or accept the open net and report it) -- unless the
 report says the verdict rests on excluded plane nets alone, above.
+
+**A RIP CYCLE is named across steps (#1807).** Each route step is its own
+process, so a retry that broke what the step before it connected could not
+tell, and a rejected trade was run again step after step with the same
+report. Every gated step that lost or gained a net appends its trade (`lost`,
+`gained`, `verdict`, and `attackers`: each lost net's rippers) to the board's
+records, `kicad_routing_tools.route_laps` (the last four, the newest accepted
+one always among them however many rejected retries follow it, through
+`tool_records` on both fronts; a REJECTED step writes it too, into the
+reverted output's project, because what it tried is news to the next step).
+The next step's gate compares its own trade with the newest accepted entry --
+the step that made its input board -- and prints `RIP CYCLE:` with the
+contested set when it broke nets that step connected, or connected nets that
+step broke by breaking others, or repeats a trade already rejected since. The
+same goes into `JSON_IMPROVEMENT_GATE` as `rip_cycle` (`undone`, `redone`,
+`contested`, `previous`, `repeats_rejected`, `attackers`). The contested nets
+compete for the same room: route them together in one step's `--nets` with a
+changed approach rather than repeating the retry. `JSON_SUMMARY`'s
+`rip_attackers` (`{victim: [nets it was ripped for, in order]}`) is the
+structured twin of `preexisting_rips`' `[was blocking ...]` text, which names
+only the last.
 
 `KICAD_IMPROVEMENT_GATE=0` disables the gate — for A/B measurement, or when you
 deliberately want the regressed board on disk to inspect it.
@@ -257,6 +290,8 @@ A net still failed or open once the main pass, the reroute loop and Phase 3 are 
 0. **Own-requirement retry** (`net_rescue.own_requirement_retry`, #1618): a routing call prices every foreign obstacle at the widest requirement over its routed nets -- the class floor, and the class/type-scoped `.kicad_dru` stamps -- so a Default-class net routed beside a net held at 0.5 mm by its class or a rule is fenced out of gaps that are legal for it. When the net's own requirement differs from that shared one, it gets one whole-net retry at the run's own track and via sizes on a board-global map whose foreign copper is priced as THIS net requires. It is kept only when the net then grades fully connected, and it has no rip authority. It runs before the rescue, so a net that fits once its own clearance is honoured ships at full width instead of being narrowed. On a call whose routed nets share one requirement it has no candidate and does nothing; the outcome is `own_requirement_retry` in `JSON_SUMMARY`.
 1. **Net rescue** (`net_rescue.py`, #331/#371): a scoped retry in a small window around the net's remaining gap, first at the run's own sizes on a finer grid, then at the fab-floor track width with the clearance stepped down toward the fab floor and smaller vias, never below the net's own class or rule floors and only as far as `--escalation` allows (under `off`, the finer grid is the only retry). Each below-nominal clearance is recorded in the clearance ledger, so `check_drc` grades at it. It never rips: a committed edge must reduce the net's component count or it is removed again. `KICAD_NET_RESCUE=0` disables it.
 2. **Terminal escalation**: a whole-net retry with track width and via size stepping down together toward the fab-tier floor, clearance never reduced. A rung is kept only when the net then grades fully connected; no rip authority. Every edge it (and the own-requirement retry) lays passes the rescue's own net-tie gate: a route that runs alongside a net-tie partner pad within clearance, beyond KiCad's waiver (the contact must lie on the net's own pad), is refused, so the net stays open and is reported failed rather than shipped with clearance violations (#1697). Nothing narrows under `--escalation off`; `KICAD_TERMINAL_ESCALATION=0` disables it.
+
+The rescue, the terminal escalation and the own-requirement retry print one line per gap attempt (#1806): the gap's two ends and length, its outcome (`joined (N -> M parts)`, `no route`, or `routed but joined nothing (undone)`), the searches it ran, their iterations and its seconds -- `gap 2/8 (131.400, 96.400) -> (133.630, 93.000), 4.07 mm: no route; 7 search(es), 1051944 iterations, 0.3s` -- and the whole-net retries report the same step to the GUI's progress callback; an escalation net's result line carries its total iterations. A long retry lap can then be told from a hung one. These passes have no bound of their own beyond their per-gap and per-rung structure (up to 8 gaps per net, the rescue's rung ladder or the escalation's up to 3 rungs, each search budgeted at `max(--max-iterations, RESCUE_MAX_ITERATIONS)`), and every reconciliation lap, being a nested `batch_route`, runs them again for the nets it retries.
 3. **End-of-run reconciliation**: a nested `batch_route` (`final_reconcile=False`) retries every incomplete net, and every rip victim still in custody, against the finished board, with the #103 rip authority above. Inside it, once the reroute queue has drained, a victim that would ship as only its escape stub because copper routed since its rip took its corridor gets that corridor back: the squatting nets are ripped and requeued, and the victim restored whole and protected from re-ripping (#622 victim-priority restore; `KICAD_VICTIM_RESTORE=0` disables it). The reconciliation runs up to three laps, and a lap's own rip victims have no later pass to retry them: a victim a lap leaves open becomes a target of the next lap, which routes it with the same authority on the updated board (#1554). After the laps, a net still open on the static box-in verdict (its search died with nothing rippable, typically a fine-pitch pad off the run's grid) gets one more lap at half the run's grid, with rip authority over the blockers the last lap named for it; the authority passes the same guard as #103's (protected, negated-by-plan and plane-backed nets are never granted, locked copper is never ripped). The lap is whole-board, so it is skipped, and says so, when that map would exceed `routing_defaults.FINER_GRID_RUNG_MAX_CELLS` summed over the routing layers (#1763; `finer_grid_rung.py`). The per-net rescue's finer grid cannot do this: it routes through free space only, and the walls around such a pad are usually copper this same run laid.
 
 A rip victim that ends the run without a successful reroute is restored at terminal failure; `terminal_restores` in `JSON_SUMMARY` names each with its outcome (`full` is the only success, `full_open` and `stub` ship broken). The [improvement gate](#improvement-gate-600) then judges the whole run.

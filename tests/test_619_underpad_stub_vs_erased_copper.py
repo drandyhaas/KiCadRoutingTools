@@ -662,8 +662,14 @@ BOARD_ROWS = [
     # (check_drc's own test, not a square-cornered box), which adds 3
     # escapes on orangecrab U3 (was (28, 28, 57)) and 2 on rp2350 U6 (was
     # (7, 4, 40)), every one graded clean.
-    (ORANGE, "U3", (31, 31, 54), (1, 14, 11)),   # (27, 27, 58)
-    (RP2350, "U6", (9, 6, 38), (2, 11, 1)),      # (6, 3, 41)
+    # #1804: a pad that already has its via escape is not escaped again.
+    # orangecrab U3.U2 (GND) holds the centre of the via this run lays for
+    # U3.T2, so it is served, not dropped (54 -> 53). rp2350 U6.8/.25/.35
+    # each have an input F.Cu stub into a same-net via, which the reuse
+    # branch bridged a second time (9 -> 6 tracks, the same 6 vias), and
+    # U6.24 (SWCLK), joined to its via the same way, is no longer dropped.
+    (ORANGE, "U3", (31, 31, 53), (1, 14, 11)),   # (27, 27, 58)
+    (RP2350, "U6", (6, 6, 37), (2, 11, 1)),      # (6, 3, 41)
     (TIGARD, "U3", (43, 43, 5), (0, 0, 4)),     # pad half only
     (WATCHY, "J3", (12, 12, 7), (0, 0, 9)),     # pad half only
 ]

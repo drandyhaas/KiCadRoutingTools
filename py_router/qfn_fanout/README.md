@@ -96,18 +96,26 @@ via-drops an interior or exposed pad and lists nothing.
 `--power-nets` widens only a surface stub (where it fits, #1318). So `JSON_SUMMARY`'s `power_stubs_at_width`
 lists each escape stub drawn at the track width on a net that reads as power or ground -- `pad` (`"U1.5"`),
 `net`, `width` (as drawn), `escape` (`surface` or `via-drop`) and `why` -- with a console `NOTE` saying what
-widens it. A net reads as power by the rules autoplan builds `--power-nets` from (`list_nets.
+widens it. A net reads as power by the rules autoroute builds `--power-nets` from (`list_nets.
 power_net_evidence`): a ground or rail name, power pins on two or more parts, or a pour the board draws for it.
 A surface stub of a net `--power-nets` names is not listed; a via-drop stub is, while its named width is wider
 than drawn. Disclosure only: the copper is unchanged.
 
-**The via a run sizes itself (#1775):** with no `--via-size`/`--via-drill` the via-drop's via starts at
-0.45/0.25, raised to the board's `.kicad_dru` via rules (#1676) and, under `--escalation board` only, to its
+**The via a run sizes itself (#1775, #1795):** with no `--via-size`/`--via-drill` the via-drop's via starts at the
+board's Default net-class via, as on `route.py` and the GUI fanout tab (0.45/0.25 when the board declares
+none), raised to the board's `.kicad_dru` via rules (#1676) and, under `--escalation board` only, to its
 Board Setup `min_through_hole_diameter`, `min_via_diameter` and `min_via_annular_width` round the drill (a
-0.13 ring makes it 0.51/0.25). Under the default `fab` it keeps its size; with `--no-fix-drc-settings` a via
+0.13 ring raises 0.45/0.25 to 0.51/0.25). Under the default `fab` it keeps its size; with `--no-fix-drc-settings` a via
 laid below a Board Setup minimum is named in a `WARNING` line and in `JSON_SUMMARY`'s `board_setup_vias`
-(`rule`, `min`, `vias`, `below`, `smallest_ring` / `smallest`). bga_fanout.py does the same with its 0.5/0.3.
-The GUI fanout tab starts from the Default-class via instead and goes through the same raise and grade.
+(`rule`, `min`, `vias`, `below`, `smallest_ring` / `smallest`). bga_fanout.py does the same, from the
+same class via (0.5/0.3 when the board declares none).
+
+A class via can be too large for the part's pitch (KiCad's stock Default class via is 0.6/0.3, against a
+0.5 mm pitch QFN). So when the underpad via-drop still drops pads at every rung of its clearance ladder
+(#1328) and the via was sized by the run, it steps the via down the fab via rungs, re-running the clearance
+ladder at each, and keeps the run that drops fewest (`Via escalation (#1795)` on the console; every via laid
+below the class via is a `via_diameter` row of `JSON_SUMMARY.design_rules`). An asked-for `--via-size` (or
+the GUI's ticked via override) is drawn as asked. Nothing steps under `--escalation off`.
 
 ## Options
 
@@ -122,8 +130,8 @@ The GUI fanout tab starts from the Default-class via instead and goes through th
 | `--nets`, `-n` | Net patterns to include | All nets |
 | `--grid-step` | Routing grid step (mm); stub ends are snapped to it (#149). Match the `--grid-step` you give `route.py` | 0.1 |
 | `--escape-method` | `stub` (surface 45° fan) or `underpad` (via-drop); with `--nets`, `underpad` also escapes **interior (under-body) pads** (issue #410) | stub |
-| `--via-size` | Underpad escape via outer diameter (mm) | 0.45 |
-| `--via-drill` | Underpad escape via drill diameter (mm) | 0.25 |
+| `--via-size` | Underpad escape via outer diameter (mm) | the board's Default class, else 0.45 |
+| `--via-drill` | Underpad escape via drill diameter (mm) | the board's Default class, else 0.25 |
 | `--board-edge-clearance` | Stub/via copper to the Edge.Cuts outline (mm); stubs are shortened or dropped, underpad vias near the edge rejected (#288) | the board's `min_copper_edge_clearance`, else `--clearance` |
 | `--allow-via-in-pad` | Underpad escape: let the via overlap its **own** pad so it can stagger *inward* (via-in-pad) | off |
 | `--same-net-pad-clearance` | `> 0` forbids via-in-pad (overrides `--allow-via-in-pad`) and is recorded in the sibling `.kicad_pro` for later steps (#581); `-1` allows it | the project's record, else allowed |
@@ -250,6 +258,20 @@ past it (#202), and needs IPC-4761 Type VII (filled + capped + plated) — the r
 prints a FAB NOTE naming the pads. `JSON_SUMMARY` carries `allow_via_in_pad`,
 `via_in_pad`, `via_in_pad_clamped`, `via_in_pad_offcentre` and `max_stub_mm`.
 Name and behaviour match the "Allow via-in-pad" option elsewhere in the tools.
+
+A pad that already has its via escape gets no second one (#1804): a same-net
+via reaching the escape layer either overlaps the pad's copper or is joined to
+it by one same-net track on the pad's layer (`pad_has_via_escape`). Such a pad
+on the input is left out before the escape runs (the run prints `N pad(s)
+already have a via escape, skipped`), so the step re-run on its own output adds
+nothing and a retry tries only the pads still unserved; a pad stacked with
+another (an exposed pad's rectangle and the thermal hole at its centre) whose
+copper a via of the same run already overlaps is served by it, not dropped.
+The via-drop's PADS are in `JSON_SUMMARY` beside the per-net counts:
+`pads_requested` = `pads_escaped` + `pads_already_served` + the dropped pads,
+named in `dropped_pads` (`"U1.57"`); `pads_reused` (bridged to an existing
+via) and `vias_placed`. A net whose selected pads were all served counts as
+escaped.
 Example:
 
 ```bash
@@ -311,8 +333,11 @@ escape counts as escaped), `clearance`, `track_width`, `escape_method`,
 `via_size`, `via_drill`, `layer`, `drc_grazes` (a `check_drc` pass over the
 output at `--clearance`: `pad_via`, `via_segment`, `pad_segment`,
 `segment_segment`, `total`; #179), `min_clearance_used`, `allow_via_in_pad`
-(plus `via_in_pad`, `via_in_pad_clamped`, `via_in_pad_offcentre` and
-`max_stub_mm` for an underpad run), `env_knobs`, and `design_rules` when a
+(plus `via_in_pad`, `via_in_pad_clamped`, `via_in_pad_offcentre`,
+`max_stub_mm` for a run that via-dropped), the per-pad `pads_requested` =
+`pads_escaped` + `pads_already_served` + the pads named in `dropped_pads`,
+with `pads_reused` and `vias_placed` (the surface fan's pads and the
+via-drop's together), `env_knobs`, and `design_rules` when a
 feature was delivered below its requested size. Unless `--no-fix-drc-settings`,
 the output's `.kicad_pro` DRC floors are lowered to what the fanout drew (#160);
 a run that drew no copper writes no floors, and the via floors are written only
@@ -329,6 +354,20 @@ when it drew a via.
      position along the edge (0 at the edge midpoint, full length and a 45°
      angle at the outermost/corner pad)
 5. **Collision Check** - Validate endpoint spacing meets minimum spacing requirements
+
+A pad that already has its surface escape gets no second stub (#1834): same-net
+track copper on the pad's layer that starts on the pad's copper and, through
+tracks that touch, reaches a same-net via or ENDS outside the hull of the
+part's pads (a track end no other track continues: a stub's tip, a route's far
+end) -- or a via escape (`pad_has_via_escape`, #1804) -- serves it
+(`pad_has_stub_escape`). Such a pad is left out before the fan is planned (the
+run prints `N pad(s) already have their surface escape, skipped`) and counted
+in `pads_already_served`; its stub stays on the board, where the new stubs of
+other nets clear it. So the step re-run on its own output, with the same or
+other parameters, adds nothing, and a pad whose copper stays inside the hull (a
+stub cut back to the pad, a track inward, a tie to the next pin), or is a
+closed outline of tracks drawn round the pad, is escaped again. The fan angles are ramped over every selected pad, served or not, so a
+pad still to escape gets the stub a first run would have given it.
 
 ## Stub Pattern
 

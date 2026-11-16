@@ -60,8 +60,21 @@ LAST_ERASED_SETS: Dict = {}
 # what the IPC-4761 note counts and what #202's clamp is for; it is NOT the
 # 0.001mm centre coincidence this loop used to decide it by. Keys: `via_in_pad`,
 # `via_in_pad_offcentre` (the subset #846 was about, which used to ship
-# unclamped), `clamped`, `max_stub_mm`, `allow_via_in_pad`.
+# unclamped), `clamped`, `max_stub_mm`, `allow_via_in_pad`. #1804, per PAD:
+# `pads_tried`, `pads_reused` (bridged to an existing same-net via, no new
+# drill), `vias_placed`, `dropped_pads` [(pad number, net)], and
+# `already_served_pads` [(pad number, net)] -- left out before the escape ran
+# because each already has its via (`pad_has_via_escape`). Refreshed by every
+# generate_qfn_fanout call; EMPTY when the run via-dropped nothing.
 LAST_UNDERPAD_REPORT: Dict = {}
+
+# #1834: the surface stub fan's per-PAD ledger, as LAST_UNDERPAD_REPORT is
+# the via-drop's: `pads_tried` (stubs planned), `dropped_pads` [(pad number,
+# net)] (the straight escape itself could not clear), and
+# `already_served_pads` [(pad number, net)] -- left out before the fan was
+# planned because each already has its surface escape (`pad_has_stub_escape`).
+# Refreshed by every generate_qfn_fanout call; EMPTY when no surface fan ran.
+LAST_STUB_REPORT: Dict = {}
 
 # #1328: the surface-fan stubs the last run escaped BELOW its clearance, one
 # dict per stub -- `net`, `pad` ("U1.5") and `clearance` (the rung it cleared
@@ -94,6 +107,191 @@ LAST_SKIPPED_INTERIOR: List[str] = []
 # EMPTY when every via meets them. The CLI's JSON_SUMMARY `board_setup_vias`
 # and the fanout tab's completion message read it.
 LAST_BOARD_SETUP_VIAS: List[Dict] = []
+# #1853: the .kicad_dru hole_clearance rules the last generate_qfn_fanout
+# call's copper breaks, per rule (`check_drc.hole_rule_step_grade`), the
+# escape kept and disclosed. JSON_SUMMARY `design_rules.hole_rules` and the
+# fanout tab read it.
+LAST_HOLE_RULES: List[Dict] = []
+
+
+def pad_has_via_escape(pad, segments, vias, escape_layer, copper_layers) -> bool:
+    """Does this pad already have the escape a via-drop would give it (#1804)?
+
+    Served means a same-net via that reaches ``escape_layer`` and either
+    overlaps the pad's copper with its barrel, or is joined to the pad by one
+    same-net track on a layer the pad has copper on (one end on the pad's
+    copper, the other on the via's). That is the copper a via-drop lays --
+    a via in the pad, or a stub to a via just past it -- so a re-run on its
+    own output finds every pad it escaped served. ``segments`` and ``vias``
+    are the pad's net's own (the caller filters by net)."""
+    from bga_fanout.geometry import endpoint_on_pad
+    from fab_notes import via_overlaps_pad
+    from geometry_utils import via_on_layer
+    from net_queries import expand_pad_layers
+    reach = [v for v in vias if via_on_layer(v, escape_layer)]
+    if not reach:
+        return False
+    if any(via_overlaps_pad(pad, v.x, v.y, v.size) for v in reach):
+        return True
+    pad_layers = set(expand_pad_layers(list(pad.layers or []), list(copper_layers)))
+
+    def _on_via(x, y):
+        return any(math.hypot(x - v.x, y - v.y) <= (v.size or 0.0) / 2 + 1e-6
+                   for v in reach)
+    for s in segments:
+        if s.layer not in pad_layers:
+            continue
+        for (ax, ay), (bx, by) in (((s.start_x, s.start_y), (s.end_x, s.end_y)),
+                                   ((s.end_x, s.end_y), (s.start_x, s.start_y))):
+            if endpoint_on_pad(pad, ax, ay, POSITION_TOLERANCE) and _on_via(bx, by):
+                return True
+    return False
+
+
+def part_pad_hull(footprint):
+    """The convex hull of a part's pad copper (shapely), the region a
+    surface escape must leave (#1834): every copper pad's rectangle, at its
+    residual tilt. None for a part with no copper pad."""
+    from shapely.geometry import MultiPoint
+    from check_drc import _pad_has_no_copper
+    pts = []
+    for p in footprint.pads:
+        if _pad_has_no_copper(p):
+            continue
+        hx, hy = (p.size_x or 0.0) / 2, (p.size_y or 0.0) / 2
+        rr = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
+        c, s = math.cos(rr), math.sin(rr)
+        for dx, dy in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)):
+            pts.append((p.global_x + dx * c - dy * s, p.global_y + dx * s + dy * c))
+    return MultiPoint(pts).convex_hull if pts else None
+
+
+def pad_has_stub_escape(pad, segments, vias, part_hull, layer, copper_layers) -> bool:
+    """Does this pad already have the surface escape a stub fan on ``layer``
+    would give it (#1834)? Served means same-net track copper on a layer the
+    pad has copper on, starting with a track end on the pad's copper and
+    running on through tracks that touch (an end within the other's
+    half-width, as KiCad joins them), either reaches a same-net via or ENDS
+    outside the part's pad hull (`part_pad_hull`): a track end there that no
+    other track of the net continues -- a stub's tip, a route's far end on
+    its pad -- or the pad already has its via escape (`pad_has_via_escape`).
+    Copper that stays inside the hull without a via -- a stub cut back to the
+    pad, a tie to the next pin, a track inward -- does not serve the pad, nor
+    does a closed outline of tracks drawn round the pad that only crosses the
+    hull, so it is escaped again. ``segments`` and ``vias`` are the pad's
+    net's own (the caller filters by net)."""
+    from bga_fanout.geometry import endpoint_on_pad
+    from geometry_utils import via_on_layer, point_to_segment_distance
+    from net_queries import expand_pad_layers
+    from shapely.geometry import Point
+    if pad_has_via_escape(pad, segments, vias, layer, copper_layers):
+        return True
+    pad_layers = set(expand_pad_layers(list(pad.layers or []), list(copper_layers)))
+    segs = [s for s in segments if s.layer in pad_layers]
+
+    def _ends(s):
+        return ((s.start_x, s.start_y), (s.end_x, s.end_y))
+
+    def _on(x, y, o):
+        return point_to_segment_distance(x, y, o.start_x, o.start_y, o.end_x, o.end_y) \
+            <= (getattr(o, 'width', 0.0) or 0.0) / 2 + POSITION_TOLERANCE
+
+    def _escapes(s):
+        for x, y in _ends(s):
+            if any(via_on_layer(v, s.layer)
+                   and math.hypot(x - v.x, y - v.y) <= (v.size or 0.0) / 2 + 1e-6
+                   for v in vias):
+                return True
+            if part_hull is not None and not part_hull.covers(Point(x, y)) \
+                    and part_hull.distance(Point(x, y)) > POSITION_TOLERANCE \
+                    and not any(o is not s and o.layer == s.layer and _on(x, y, o)
+                                for o in segs):
+                return True
+        return False
+
+    def _touch(a, b):
+        return a.layer == b.layer and (any(_on(x, y, b) for x, y in _ends(a))
+                                       or any(_on(x, y, a) for x, y in _ends(b)))
+
+    frontier = [s for s in segs
+                if any(endpoint_on_pad(pad, x, y, POSITION_TOLERANCE) for x, y in _ends(s))]
+    seen = {id(s) for s in frontier}
+    while frontier:
+        s = frontier.pop()
+        if _escapes(s):
+            return True
+        for o in segs:
+            if id(o) not in seen and _touch(s, o):
+                seen.add(id(o))
+                frontier.append(o)
+    return False
+
+
+#: `_underpad_via_escape`'s placement for a pad a via of the same run
+#: already sits in (#1804): no copper of its own, not dropped.
+SERVED_IN_RUN = ('served-in-run',)
+
+
+def underpad_pad_counts(ref: str) -> Dict:
+    """The last via-drop's per-PAD ledger (#1804), as the CLI's JSON_SUMMARY
+    and the fanout tab's completion message carry it; {} when the run
+    via-dropped nothing. ``pads_requested`` = ``pads_escaped`` (a new via, a
+    reused one, or one this run laid in a stacked pad's copper) +
+    ``pads_already_served`` (skipped, the via was on the input) +
+    ``len(dropped_pads)`` (no clear via offset, named "REF.PAD")."""
+    r = LAST_UNDERPAD_REPORT
+    if not r:
+        return {}
+    dropped = [f"{ref}.{num}" for num, _name in r.get('dropped_pads', ())]
+    served = len(r.get('already_served_pads', ()))
+    tried = r.get('pads_tried', 0)
+    return {'pads_requested': tried + served,
+            'pads_escaped': tried - len(dropped),
+            'pads_reused': r.get('pads_reused', 0),
+            'pads_already_served': served,
+            'vias_placed': r.get('vias_placed', 0),
+            'dropped_pads': dropped}
+
+
+def stub_pad_counts(ref: str) -> Dict:
+    """The last surface stub fan's per-PAD ledger (#1834), the same keys as
+    :func:`underpad_pad_counts`; {} when no surface fan ran. ``pads_escaped``
+    counts the stubs laid (one escalated or cut back included),
+    ``pads_already_served`` the pads skipped because each had its escape."""
+    r = LAST_STUB_REPORT
+    if not r:
+        return {}
+    dropped = [f"{ref}.{num}" for num, _name in r.get('dropped_pads', ())]
+    served = len(r.get('already_served_pads', ()))
+    tried = r.get('pads_tried', 0)
+    return {'pads_requested': tried + served,
+            'pads_escaped': tried - len(dropped),
+            'pads_reused': 0,
+            'pads_already_served': served,
+            'vias_placed': 0,
+            'dropped_pads': dropped}
+
+
+def pad_counts(ref: str) -> Dict:
+    """The last run's per-PAD ledger, as the CLI's JSON_SUMMARY carries it:
+    the surface fan's (#1834) and the via-drop's (#1804, the underpad
+    escape or a stub run's interior pads), summed key by key. {} when the
+    run escaped no pad either way."""
+    parts = [c for c in (stub_pad_counts(ref), underpad_pad_counts(ref)) if c]
+    if not parts:
+        return {}
+    out = dict(parts[0])
+    for c in parts[1:]:
+        for k, v in c.items():
+            out[k] = out[k] + v
+    return out
+
+
+def served_pad_net_names() -> set:
+    """The nets of every pad the last run left out because it already had
+    its escape (#1804's via-drop, #1834's surface fan)."""
+    return {n for r in (LAST_UNDERPAD_REPORT, LAST_STUB_REPORT)
+            for _num, n in r.get('already_served_pads', ())}
 
 
 def skipped_interior_line(pads: List[str]) -> str:
@@ -795,7 +993,8 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
 def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                          track_width, clearance, via_size, via_drill, grid_step,
                          allow_via_in_pad=False, board_edge_clearance=0.0,
-                         progress_callback=None, net_clearances=None):
+                         progress_callback=None, net_clearances=None,
+                         fanned_net_ids=None, same_net_pad_clearance=0.0):
     """Via-drop escape (issue #164): instead of a surface 45-degree fan, run a
     short stub from each pad to a through-via just past the pad edge and let
     signal routing pick the net up on an inner/back layer. This escapes a
@@ -831,11 +1030,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
 
     ``net_clearances`` (``{net_id: class clearance}``, #1529) prices every
     pair the via and its stub make at KiCad's max(clearance, class A,
-    class B), as the surface fan does; empty or None is the one clearance."""
+    class B), as the surface fan does; empty or None is the one clearance.
+
+    ``fanned_net_ids`` (#1804) adds to the nets the obstacle map treats as
+    being escaped: the caller's whole selection, when it has left out pads
+    already served, so that leaving a pad out changes which pads are tried
+    and nothing about how the rest are measured."""
     from obstacle_map import (build_base_obstacle_map, build_layer_map,
                               point_to_segment_distance)
     from geometry_utils import segment_to_segment_distance
-    from bga_fanout.geometry import clamp_via_to_pad
+    from bga_fanout.geometry import clamp_via_to_pad, endpoint_on_pad
     from fab_notes import via_overlaps_pad
     from list_nets import fab_floor_min, warn_fab_escalation
     from routing_config import GridRouteConfig
@@ -848,13 +1052,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # escalation_rungs: empty under --escalation off, raised to the board's
     # own minimums under board (#857).
     floors = escalation_rungs(_copper)
-    clamp_n = floor_n = escalated_n = offcentre_n = vip_n = 0
+    clamp_n = floor_n = escalated_n = offcentre_n = vip_n = reused_n = 0
     _esc_vias, _floor_vias = [], []    # #1579: what the warnings state
 
     # Only the nets we're escaping right now are exempt from the obstacle map --
     # the chip's OTHER nets (a routed neighbour pair, a crossing track) must
     # block, so we don't exclude all of the footprint's nets (issue #161).
-    fanned_nets = {pi.pad.net_id for pi in pad_infos}
+    fanned_nets = {pi.pad.net_id for pi in pad_infos} | set(fanned_net_ids or ())
     cfg = GridRouteConfig(layers=list(pcb_data.board_info.copper_layers or [layer]),
                           track_width=track_width, clearance=clearance)
     _ref = getattr(footprint, 'reference', '?')
@@ -1113,8 +1317,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from check_drc import _point_on_board as _pt_on_board
     # #1682: a filled graphic's interior, on the nets this run erases from its
     # map too (a fanned net's shape is foreign to the part's other pins).
-    from check_drc import FilledCopperGate
+    from check_drc import FilledCopperGate, HoleRuleGate
     _filled_gate = FilledCopperGate(pcb_data)
+    _hole_gate = HoleRuleGate(pcb_data)        # #1853
 
     # #1568: each pad with the radius about its centre that holds all its
     # copper, so `via_clears` calls the grader only on a pad the via's
@@ -1134,6 +1339,21 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # relaxed; 0 when it declares none).
     from obstacle_map import resolve_hole_clearance
     _hole_clr = resolve_hole_clearance(pcb_data, cfg)
+    # #581/#962: under an active same-net pad via clearance the net's solder
+    # paste OPENINGS are kept clear too, as on the routing path
+    # (`same_net_pad_via_keepout_cells`): a graphic opening, a paste-only
+    # window or an opening larger than its pad is not seen by the pad test.
+    _paste_aps = {}
+
+    def _paste_hit(vx, vy, net_id):
+        if same_net_pad_clearance <= 0:
+            return False
+        if net_id not in _paste_aps:
+            from obstacle_map import paste_keepout_apertures
+            _paste_aps[net_id] = paste_keepout_apertures(pcb_data, net_id)
+        from paste_apertures import aperture_distance
+        return any(aperture_distance(vx, vy, ap) < via_size / 2 + same_net_pad_clearance - 1e-6
+                   for ap in _paste_aps[net_id])
 
     def via_clears(vx, vy, net_id, placed, px=None, py=None):
         """Is a via at (vx, vy) legal, given the board AND this run's own output?
@@ -1164,6 +1384,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         if _filled_gate and _filled_gate.via_hit(
                 vx, vy, via_size, net_id, lambda sh: _pc(net_id, sh.net_id)) is not None:
             return False
+        if _hole_gate and _hole_gate.via_why(
+                vx, vy, via_size, via_drill, net_id,
+                # #1853: and this run's own vias and stubs so far
+                extra_vias=[{'x': qx, 'y': qy, 'size': via_size, 'drill': via_drill,
+                             'net_id': qn} for qx, qy, qn, _qpx, _qpy in placed],
+                extra_segments=[{'start': (qpx, qpy), 'end': (qx, qy), 'width': track_width,
+                                 'layer': layer, 'net_id': qn}
+                                for qx, qy, qn, qpx, qpy in placed
+                                if qpx is not None and (qpx, qpy) != (qx, qy)]):
+            return False
         for fx, fy, fs, fn, fd in foreign_vias:
             # The DRILLS are an obstacle whatever the net: hole-to-hole is
             # net-independent (#282/#479 audit gap 2), and on a board whose
@@ -1182,8 +1412,17 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
         _cand = _Via(x=vx, y=vy, size=via_size, drill=via_drill,
                      layers=list(_via_cu), net_id=net_id)
+        if _paste_hit(vx, vy, net_id):
+            return False
         for pad, gx, gy, reach, hole in _pad_discs:
             if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
+                # #581: an active same-net pad via clearance keeps the via that far off every
+                # same-net SMD pad (an open via beside a pad wicks solder), not only out of it.
+                if (same_net_pad_clearance > 0
+                        and not (pad.drill and pad.drill > 0)
+                        and check_pad_via_overlap(pad, _cand, same_net_pad_clearance,
+                                                  _via_cu, 0.0)[0]):
+                    return False
                 continue
             if _pad_has_no_copper(pad):
                 # An NPTH hole: the via's copper is held off the hole wall at
@@ -1418,6 +1657,17 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         placed = list(committed)
         results = {}
         for idx in order:
+            # #1804: a pad whose copper holds the centre of a same-net via
+            # of this run (stacked pads of one exposed pad: its rect and the
+            # thermal hole at its centre) has its escape; a second drill
+            # there is refused on hole-to-hole and read as a dropped pad.
+            # The CENTRE, not the barrel: the commit loop may clamp that via
+            # to its own pad's edge, and any size of it still lands here.
+            _p = pis[idx].pad
+            if any(n == _p.net_id and endpoint_on_pad(_p, vx, vy, POSITION_TOLERANCE)
+                   for vx, vy, n, _px, _py in placed):
+                results[idx] = SERVED_IN_RUN
+                continue
             pos = place_pin(pis[idx], mode_fn(idx), placed)
             results[idx] = pos
             if pos is not None:
@@ -1479,6 +1729,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 dropped.append(pi.pad.net_name)
                 dropped_pads.append((pi.pad.pad_number, pi.pad.net_name))
                 continue
+            if pos is SERVED_IN_RUN:
+                continue
             vx, vy = pos
             px, py = pi.pad.global_x, pi.pad.global_y
             # Committed across SIDES: side 2's candidates must see side 1's
@@ -1488,6 +1740,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             # the bridging stub, never a duplicate drill.
             if any(abs(vx - ox) < 1e-4 and abs(vy - oy) < 1e-4
                    for ox, oy in _own_via_pos.get(pi.pad.net_id, ())):
+                reused_n += 1
                 if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:
                     tracks.append({'start': (px, py), 'end': (vx, vy),
                                    'width': track_width,
@@ -1577,6 +1830,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                                   for t in tracks), default=0.0), 4),
         'allow_via_in_pad': bool(allow_via_in_pad),
         'dropped_pads': list(dropped_pads),
+        # #1804: per pad, not per net
+        'pads_tried': len(pad_infos),
+        'pads_reused': reused_n,
+        'vias_placed': len(vias),
     })
     if offcentre_n:
         # Disclosed separately, not folded into the line above: these are the
@@ -1818,7 +2075,61 @@ def _widen_power_stub_legs(stubs, power_w, track_width, clearance, seg_grazes,
     return {k: tuple(v) for k, v in cur.items()}
 
 
-def generate_qfn_fanout(footprint: Footprint,
+def generate_qfn_fanout(footprint: Footprint, pcb_data: PCBData, *args,
+                        via_span: Optional[List[str]] = None,
+                        via_span_type: Optional[str] = None, **kwargs):
+    """`_generate_qfn_fanout_all`, on a via span when one is given (#1842):
+    the via drops join exactly that run of neighbouring copper layers, and
+    for the call the board carries only the copper the span has
+    (`via_span.only_span_copper`), so a pad or track on another layer blocks
+    no via site. The escape layer must be one end of the span."""
+    import inspect
+    bound = inspect.signature(_generate_qfn_fanout_all).bind(
+        footprint, pcb_data, *args, **kwargs)
+    bound.apply_defaults()
+    asked_via = bound.arguments.get('via_size')
+    if not via_span:
+        return _hole_rule_pass(footprint, pcb_data,
+                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs),
+                               asked_via)
+    from types import SimpleNamespace
+    from via_span import apply_span, only_span_copper, board_span
+    span, kind = board_span(pcb_data, via_span, via_span_type)
+    if kind is None:
+        return _hole_rule_pass(footprint, pcb_data,
+                               _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs),
+                               asked_via)
+    layer = bound.arguments.get('layer') or footprint.layer
+    if layer not in (span[0], span[-1]):
+        from via_span import SpanError
+        raise SpanError(f"--via-span {span[0]} {span[-1]}: the escape layer {layer} of "
+                         f"{footprint.reference} is not an end of the span")
+    print(f"Via span (#1842): {kind} vias {span[0]}-{span[-1]}; only copper on "
+          f"{', '.join(span)} (and drilled pads) blocks a via site")
+    with only_span_copper(pcb_data, span, kind):
+        result = _generate_qfn_fanout_all(footprint, pcb_data, *args, **kwargs)
+    n = apply_span(result[1], SimpleNamespace(via_span=list(span), via_span_type=kind))
+    if n:
+        print(f"  Via span: {n} fan-out via(s) written as {kind} {span[0]}-{span[-1]}")
+    return _hole_rule_pass(footprint, pcb_data, result, asked_via)
+
+
+def _hole_rule_pass(footprint, pcb_data, result, asked_via=None):
+    """#1853: the fan-out's own tracks and vias graded against the board's
+    .kicad_dru hole_clearance rules, against the board and each other; what
+    they break is named per rule and kept in LAST_HOLE_RULES, the escape
+    kept (fanout_hole_rule.hole_disclose). Free without such a rule.
+    #1914: and the vias under ``asked_via`` that ring less than the board's
+    hole clearance needs, named (fab_tiers.disclose_hole_ring_vias)."""
+    from fanout_hole_rule import hole_disclose
+    LAST_HOLE_RULES[:] = hole_disclose(pcb_data, result[0], result[1])
+    from fab_tiers import disclose_hole_ring_vias
+    disclose_hole_ring_vias(pcb_data, result[1], asked_via,
+                            f"QFN fanout {footprint.reference}")
+    return result
+
+
+def _generate_qfn_fanout_all(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
                         layer: str = "F.Cu",
@@ -1847,6 +2158,10 @@ def generate_qfn_fanout(footprint: Footprint,
                         # board's .kicad_pro), capped at clearance_ceiling.
                         net_clearances: Optional[Dict[int, float]] = None,
                         clearance_ceiling: Optional[float] = None,
+                        # #1795: the via was not asked for (the board's
+                        # Default class via, or the fallback), so the
+                        # underpad ladder may step it down.
+                        via_from_class: bool = False,
                         ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
@@ -1881,6 +2196,14 @@ def generate_qfn_fanout(footprint: Footprint,
             fanned net's copper, a neighbouring chip's reserved escape, this
             run's own stubs -- is priced at KiCad's max(clearance, class A,
             class B), and no stub escalates below its own class (#1529).
+        via_from_class: the via was not asked for -- the CLI was given no
+            --via-size/--via-drill, the GUI's via override is unticked -- so
+            it is the board's Default class via (#1795). When the underpad
+            via-drop still drops pads at every rung of its clearance ladder,
+            it then steps the via down the fab via rungs (#1328's ladder
+            again at each), as a class via too large for the part's pitch
+            would otherwise drop pads a smaller via escapes. An asked-for
+            via is drawn as asked.
 
     Returns:
         (tracks, vias, failed_nets) - tracks are the segments, vias is empty.
@@ -1908,8 +2231,11 @@ def generate_qfn_fanout(footprint: Footprint,
     LAST_ESCALATED.clear()          # #1328
     LAST_FILTER_MISSES.clear()      # #1641
     LAST_SKIPPED_INTERIOR.clear()   # #1717
+    LAST_UNDERPAD_REPORT.clear()    # #1804: a run with no via-drop reports none
+    LAST_STUB_REPORT.clear()        # #1834: nor one with no surface fan
     LAST_POWER_STUBS_AT_WIDTH.clear()   # #1743
     LAST_BOARD_SETUP_VIAS.clear()   # #1775
+    LAST_HOLE_RULES.clear()         # #1853
     _RULES_SAID.clear()             # #1565: said once per call
     # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
     # returns early on several paths that never reach `_underpad_via_escape`
@@ -2106,14 +2432,47 @@ def generate_qfn_fanout(footprint: Footprint,
     def _via_drop(infos, board=pcb_data):
         """The underpad via-drop of INFOS, down #1328's clearance ladder.
         BOARD is the copper it clears (#1717: with the surface fan's stubs on
-        it). Returns (tracks, vias, dropped net names)."""
-        def _drop_run(cl):
+        it). Returns (tracks, vias, dropped net names).
+
+        #1804: a pad that already has its via escape (pad_has_via_escape --
+        a re-run on this step's own output, or a retry after a dropped pad)
+        is left out, so the run drills only for the pads still unserved."""
+        _cu = list(board.board_info.copper_layers or [layer])
+        _nets = {pi.pad.net_id for pi in infos}
+        _segs = defaultdict(list)
+        for s in board.segments:
+            if s.net_id in _nets:
+                _segs[s.net_id].append(s)
+        _vias = defaultdict(list)
+        for v in board.vias:
+            if v.net_id in _nets:
+                _vias[v.net_id].append(v)
+        served = [pi for pi in infos if pad_has_via_escape(
+            pi.pad, _segs[pi.pad.net_id], _vias[pi.pad.net_id], layer, _cu)]
+        if served:
+            _sid = {id(pi) for pi in served}
+            infos = [pi for pi in infos if id(pi) not in _sid]
+            print(f"  {len(served)} pad(s) already have a via escape, skipped "
+                  f"(#1804); {len(infos)} left to via-drop")
+
+        def _with_served(res_):
+            LAST_UNDERPAD_REPORT['already_served_pads'] = [
+                (pi.pad.pad_number, pi.pad.net_name) for pi in served]
+            return res_
+        if not infos:
+            LAST_UNDERPAD_REPORT.clear()
+            LAST_UNDERPAD_REPORT.update({'pads_tried': 0, 'pads_reused': 0,
+                                         'vias_placed': 0, 'dropped_pads': []})
+            return _with_served(([], [], []))
+
+        def _drop_run(cl, vs=via_size, vd=via_drill):
             return _underpad_via_escape(footprint, board, infos, layout, layer,
-                                        track_width, cl, via_size, via_drill, grid_step,
+                                        track_width, cl, vs, vd, grid_step,
                                         allow_via_in_pad=allow_via_in_pad,
                                         board_edge_clearance=board_edge_clearance,
                                         progress_callback=progress_callback,
-                                        net_clearances=_nc)
+                                        net_clearances=_nc, fanned_net_ids=_nets,
+                                        same_net_pad_clearance=same_net_pad_clearance or 0.0)
         res = _drop_run(clearance)
         res_pads = list(LAST_UNDERPAD_REPORT.get('dropped_pads', ()))
         # #1328: the underpad escape escalates as the surface stub does. Its
@@ -2126,17 +2485,42 @@ def generate_qfn_fanout(footprint: Footprint,
         _ladder = ([] if _lcl_498.get(layer) is not None else
                    qfn_clearance_ladder(clearance,
                                         len(pcb_data.board_info.copper_layers or ()) or 2))
-        if res[2] and _ladder:
-            best, best_cl, last_cl = res, clearance, clearance
-            for cl in _ladder:
-                r = _drop_run(cl)
-                last_cl = cl
-                if len(r[2]) < len(best[2]):
-                    best, best_cl = r, cl
-                if not r[2]:
+        # #1795: a via nobody asked for may step down the fab via rungs when
+        # every clearance rung still drops pads, each rung re-running the
+        # clearance ladder; the run that drops fewest is kept (the larger via,
+        # then the higher clearance, on a tie).
+        _vias = [(via_size, via_drill)]
+        if via_from_class:
+            from fab_tiers import escalation_rungs as _vrungs
+            for _r in _vrungs(len(pcb_data.board_info.copper_layers or ()) or 2):
+                _vd, _vh = _r.get('via_diameter'), _r.get('via_drill')
+                if (_vd and _vh and _vd < _vias[-1][0] - 1e-9
+                        and _vh < _vd - 1e-9):
+                    _vias.append((_vd, _vh))
+        best_via = (via_size, via_drill)
+        if res[2] and (_ladder or len(_vias) > 1):
+            best, best_cl, last = res, clearance, (clearance, via_size, via_drill)
+            for vi, (vs, vd) in enumerate(_vias):
+                for cl in ([] if vi == 0 else [clearance]) + list(_ladder):
+                    r = _drop_run(cl, vs, vd)
+                    last = (cl, vs, vd)
+                    if len(r[2]) < len(best[2]):
+                        best, best_cl, best_via = r, cl, (vs, vd)
+                    if not r[2]:
+                        break
+                if not best[2]:
                     break
-            if best_cl != last_cl:
-                best = _drop_run(best_cl)      # LAST_UNDERPAD_REPORT is per run
+            if (best_cl, best_via[0], best_via[1]) != last:
+                best = _drop_run(best_cl, *best_via)  # LAST_UNDERPAD_REPORT is per run
+            if best_via != (via_size, via_drill):
+                from fab_tiers import note_narrowing
+                for _v in best[1]:
+                    note_narrowing(_v.get('net_id'), 'via_diameter', via_size,
+                                   _v.get('size', best_via[0]), 'qfn underpad escape')
+                print(f"  Via escalation (#1795): underpad escape still dropped pads at the "
+                      f"class via {via_size:g}/{via_drill:g} mm at every clearance; at "
+                      f"{best_via[0]:g}/{best_via[1]:g} mm it drops {len(best[2])} "
+                      f"(at {len(res[2])} before)")
             if best_cl < clearance - 1e-9:
                 from fab_tiers import note_narrowing, warn_fab_escalation, escalation_rungs
                 import clearance_ledger
@@ -2166,7 +2550,7 @@ def generate_qfn_fanout(footprint: Footprint,
         # #1775: every via this fanout lays comes through here
         from design_rules import disclose_board_setup_vias
         LAST_BOARD_SETUP_VIAS.extend(disclose_board_setup_vias(pcb_data, res[1]))
-        return res
+        return _with_served(res)
 
     if escape_method == "underpad":
         print(f"  Escape method: underpad (via-drop), via {via_size:.2f}/{via_drill:.2f} mm"
@@ -2237,6 +2621,39 @@ def generate_qfn_fanout(footprint: Footprint,
         off = abs((pi.pad.global_x - layout.center_global_x) * tan_x +
                   (pi.pad.global_y - layout.center_global_y) * tan_y)
         side_max_off[pi.side] = max(side_max_off.get(pi.side, 0.0), off)
+
+    # #1834: a pad that already has its surface escape (pad_has_stub_escape --
+    # a re-run on this step's own output, a retry with other parameters) is
+    # left out, as the via-drop leaves out a pad with its via (#1804), so the
+    # run lays copper only for the pads still unserved. Its existing stub
+    # stays on the board, where every new stub of another net clears it
+    # (`_fanned_existing_segs`, #257). The fan angles above are ramped over
+    # every selected pad, served or not, so a pad still to escape gets the
+    # stub a first run would have given it.
+    _hull = part_pad_hull(footprint)
+    _cu_1834 = list(pcb_data.board_info.copper_layers or [layer])
+    _fan_nets = {pi.pad.net_id for pi in pad_infos}
+    _net_segs, _net_vias = defaultdict(list), defaultdict(list)
+    for s in pcb_data.segments:
+        if s.net_id in _fan_nets:
+            _net_segs[s.net_id].append(s)
+    for v in pcb_data.vias:
+        if v.net_id in _fan_nets:
+            _net_vias[v.net_id].append(v)
+    _stub_served = [pi for pi in pad_infos if pad_has_stub_escape(
+        pi.pad, _net_segs[pi.pad.net_id], _net_vias[pi.pad.net_id], _hull,
+        layer, _cu_1834)]
+    LAST_STUB_REPORT.update({'pads_tried': 0, 'dropped_pads': [],
+                             'already_served_pads': [
+                                 (pi.pad.pad_number, pi.pad.net_name)
+                                 for pi in _stub_served]})
+    if _stub_served:
+        _sid = {id(pi) for pi in _stub_served}
+        pad_infos = [pi for pi in pad_infos if id(pi) not in _sid]
+        print(f"  {len(_stub_served)} pad(s) already have their surface escape, "
+              f"skipped (#1834); {len(pad_infos)} left to fan")
+        if not pad_infos:
+            return _serve_interior([], [])
 
     for pad_info in pad_infos:
         # Straight stub length = pad_width / 2 + extension (to clear the pad before bending)
@@ -2616,6 +3033,8 @@ def generate_qfn_fanout(footprint: Footprint,
             # at the run clearance or at any rung escalation allows.
             if stub.pad.net_name and stub.pad.net_name not in qfn_dropped:
                 qfn_dropped.append(stub.pad.net_name)
+            LAST_STUB_REPORT['dropped_pads'].append(               # #1834
+                (stub.pad.pad_number, stub.pad.net_name))
             continue
         if stub_cl < clearance - 1e-9:
             _escalated.append((stub, stub_cl))
@@ -2665,6 +3084,8 @@ def generate_qfn_fanout(footprint: Footprint,
               f"{n_ext_short} straight escape(s) near the board edge (#513); "
               f"dropped {len(qfn_dropped)} stub(s) grazing a foreign pad (issue #123)")
     _record_escalations(footprint, pcb_data, _escalated, clearance)
+    LAST_STUB_REPORT['pads_tried'] = (len(kept_stubs)                    # #1834
+                                      + len(LAST_STUB_REPORT['dropped_pads']))
     stubs = kept_stubs
 
     # A stub that REACHES a same-net pad ends there (#1332). Every check above
@@ -2835,10 +3256,13 @@ def main():
                              "With --nets either method via-drops the interior pads the filter "
                              "selects (stub: after its fan, #1717); a run without --nets never "
                              "via-drops the exposed/thermal pad.")
+    __import__('via_span').add_cli_flags(parser, "Drop the escape vias")
     parser.add_argument('--via-size', type=float, default=None,
-                        help='Underpad escape via outer diameter (mm, default 0.45)')
+                        help="Underpad escape via outer diameter (mm, default the board's "
+                             "Default net-class via, else 0.45)")
     parser.add_argument('--via-drill', type=float, default=None,
-                        help='Underpad escape via drill diameter (mm, default 0.25)')
+                        help="Underpad escape via drill diameter (mm, default the board's "
+                             "Default net-class drill, else 0.25)")
     parser.add_argument('--board-edge-clearance', type=float, default=defaults.BOARD_EDGE_CLEARANCE,
                         help='Min clearance from stub/via copper to the Edge.Cuts '
                              'outline in mm (default 0 = use --clearance). Stubs '
@@ -2924,10 +3348,21 @@ def main():
     # stock 0.2 mm board minimum pinned 0.1 mm escape stubs up to 0.2.
     if getattr(args, 'track_width', None) is None:
         args.track_width = args.width
-    # #1676: a via nobody asked for starts at the board's own .kicad_dru rules
+    # #1795: a via nobody asked for starts at the board's Default net-class via,
+    # as on route.py and the GUI's QFN panel; #1676: raised to its .kicad_dru rules
+    # #1842: --via-span against the board's own stack
+    _span_layers, _span_type, _micro_span = __import__('via_span').resolve_cli(
+        parser, args, args.pcb)
     _vs_explicit = args.via_size is not None or args.via_drill is not None
-    args.via_size = 0.45 if args.via_size is None else args.via_size
-    args.via_drill = 0.25 if args.via_drill is None else args.via_drill
+    from list_nets import board_default_netclass_param
+    for _pname, _nckey, _fallback in (('via_size', 'via_diameter', 0.45),
+                                      ('via_drill', 'via_drill', 0.25)):
+        if getattr(args, _pname) is None:
+            _v = board_default_netclass_param(args.pcb, _nckey)
+            setattr(args, _pname, _v if _v else _fallback)
+            print(f"--{_pname.replace('_', '-')} not given; using "
+                  f"{'the board Default net-class' if _v else 'the fallback'} "
+                  f"{getattr(args, _pname)}mm.")
     if not _vs_explicit:
         from design_rules import run_via_for_rules
         args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,
@@ -2942,8 +3377,8 @@ def main():
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
-        via_size=getattr(args, 'via_size', None),
-        via_drill=getattr(args, 'via_drill', None),
+        via_size=None if _micro_span else getattr(args, 'via_size', None),
+        via_drill=None if _micro_span else getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
         # #513 item 15: the resolved edge keep-out must be manufacturable too
         # (a board declaring 0.025mm is pinned up to the 0.2 fab edge floor,
@@ -3025,27 +3460,34 @@ def main():
     # the GUI's (its Cancel button / the plan executor's Stop); a CLI-side
     # wall-clock budget was removed deliberately -- no result this tool produces
     # may depend on timing, or the same command stops producing the same board.
-    tracks, vias, _failed_nets = generate_qfn_fanout(
-        footprint,
-        pcb_data,
-        net_filter=args.nets,
-        layer=layer,
-        track_width=args.width,
-        extension=args.extension,
-        clearance=args.clearance,
-        grid_step=args.grid_step,
-        board_edge_clearance=args.board_edge_clearance,
-        escape_method=args.escape_method,
-        via_size=args.via_size,
-        via_drill=args.via_drill,
-        allow_via_in_pad=args.allow_via_in_pad,
-        same_net_pad_clearance=args.same_net_pad_clearance,  # #581
-        power_nets=args.power_nets or None,                  # #1318
-        power_nets_widths=args.power_nets_widths or None,
-        # #1529: the board's classes (read from pcb_data.source_path), capped
-        # at the ceiling when one was given, as route.py's map is.
-        clearance_ceiling=getattr(args, 'clearance_ceiling', None),
-    )
+    from via_span import SpanError as _SpanError
+    try:
+        tracks, vias, _failed_nets = generate_qfn_fanout(
+            footprint,
+            pcb_data,
+            via_span=args.via_span, via_span_type=args.via_span_type,
+            net_filter=args.nets,
+            layer=layer,
+            track_width=args.width,
+            extension=args.extension,
+            clearance=args.clearance,
+            grid_step=args.grid_step,
+            board_edge_clearance=args.board_edge_clearance,
+            escape_method=args.escape_method,
+            via_size=args.via_size,
+            via_drill=args.via_drill,
+            allow_via_in_pad=args.allow_via_in_pad,
+            same_net_pad_clearance=args.same_net_pad_clearance,  # #581
+            power_nets=args.power_nets or None,                  # #1318
+            power_nets_widths=args.power_nets_widths or None,
+            # #1529: the board's classes (read from pcb_data.source_path), capped
+            # at the ceiling when one was given, as route.py's map is.
+            clearance_ceiling=getattr(args, 'clearance_ceiling', None),
+            via_from_class=not _vs_explicit,                     # #1795
+        )
+    except _SpanError as exc:
+        print(f"Error: {exc}")
+        return 1
     # #1641: a --nets list naming no net on the board is an input error (a
     # typo, a stale list), refused as route.py refuses one; a pattern that
     # names a net but selects no pad here is disclosed in `unmatched`.
@@ -3093,6 +3535,11 @@ def main():
     # escapes too -- tracks alone undercounts and grades those pads as failed.
     escaped_net_ids = ({t['net_id'] for t in tracks if t.get('net_id') is not None}
                        | {v['net_id'] for v in vias if v.get('net_id') is not None})
+    # #1804/#1834: and a net whose selected pads already had their escape
+    # (the via-drop or the surface fan left them out), so a re-run counts the
+    # same nets as the first
+    _served = served_pad_net_names()
+    escaped_net_ids |= {nid for nid, net in pcb_data.nets.items() if net.name in _served}
     # A net is UNESCAPED only while one of its pads has no copper. The engine
     # also names nets whose stubs escaped but end too close to a neighbour's
     # (the GUI's "stubs too close" list), or a multi-pad net with one pad's
@@ -3128,8 +3575,10 @@ def main():
     # given -- as route.py's writeback does.
     _fix_kw = fanout_fix_kwargs('qfn', tracks, vias, clearance=eff_clearance,
                                 track_width=args.width,
-                                via_size=getattr(args, 'via_size', None),
-                                via_drill=getattr(args, 'via_drill', None),
+                                # #1842: a micro via's size is no statement
+                                # about the board's via minimums
+                                via_size=None if _micro_span else getattr(args, 'via_size', None),
+                                via_drill=None if _micro_span else getattr(args, 'via_drill', None),
                                 clearance_ceiling=getattr(args, 'clearance_ceiling', None))
     if out_path and os.path.isfile(out_path) and _fix_kw is None:
         # #1195: a run that changed no copper writes no floors -- the board
@@ -3233,6 +3682,9 @@ def main():
         summary['via_in_pad_offcentre'] = LAST_UNDERPAD_REPORT.get(
             'via_in_pad_offcentre', 0)
         summary['max_stub_mm'] = LAST_UNDERPAD_REPORT.get('max_stub_mm', 0.0)
+    # #1804/#1834: the run's PADS, surface fan and via-drop together
+    # (requested/escaped/failed count NETS)
+    summary.update(pad_counts(footprint.reference))
     try:                       # #653: env knobs into the machine-readable
         import env_knobs as _ek653   # summary, so a harness can detect a
         summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
@@ -3244,6 +3696,8 @@ def main():
     _dr857 = narrowed_summary()
     if _dr857 is not None:
         summary['design_rules'] = _dr857
+    if LAST_HOLE_RULES:        # #1853: copper kept below its hole_clearance rule
+        summary.setdefault('design_rules', {})['hole_rules'] = list(LAST_HOLE_RULES)
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
     return finish_design_rules(args, 0)
 

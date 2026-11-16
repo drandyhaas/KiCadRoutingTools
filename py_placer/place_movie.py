@@ -664,6 +664,9 @@ def film_routes(a, movie, work, judged, scores, best, full, filmed):
 
 
 def main(argv=None):
+    # each line reaches a pipe or a log when it is printed, not at exit (#1829)
+    import cli_banner
+    cli_banner.line_buffer_streams()
     from route_movie import FPS, SIZE, MovieWriter
     from place_simple import ANCHORED_SEEDS, CLUSTERED_SEEDS, JUDGED_SEEDS, SCATTERED_SEEDS
     ap = argparse.ArgumentParser(

@@ -21,6 +21,14 @@ render reported 1315 crossings where the truth was 357. It hits `--nets`,
 so `~/Documents/...` then arrives as an unusable `/c/Users/...`. Pass
 Windows-style paths (`C:/Users/...`) in the same command.
 
+## Routing a board
+
+**Asked to route a whole board, use one of the two full-route ways:** run
+`python3 py_router/autoroute.py board.kicad_pcb out.kicad_pcb` (no agent: it plans
+and runs the whole chain from the board itself; read its `AUTOROUTE_*` lines and
+`<out>.autoroute/`, and grade the result), or the `/plan-pcb-routing` skill (an agent
+analyzes the board and plans the chain step by step).
+
 ## Commit only what worked
 
 **Do not commit unsuccessful knobs or code, and do not document unsuccessful
@@ -278,6 +286,12 @@ Validate routed boards against the *real* spec, with the right checker — most
   `.kicad_pro` from its load-time copy and drops whatever a GUI run wrote after
   load. Every reader takes the newer copy by `records_rev` and every writer
   goes through `py_router/tool_records.py`, never straight to the project JSON.
+  **The board copy does not survive a plain `SaveBoard` on newer KiCad (#1906)**:
+  it replaces a board's properties with the project's text variables before
+  saving. So every pcbnew save in this repo goes through
+  `tool_records.save_board`, which writes the namespace back to the file and
+  the live board (an AST check holds every `SaveBoard` call to it); the
+  user's own save in such a KiCad is not covered.
   Rationale: a retry step once ripped a whole DDR match group and rerouted it
   unmatched (allwinner_h3_ddr3, 40/41 nets unmatched, one net stranded).
   **KiCad-LOCKED copper** (`segment.locked`/`via.locked`, both parse paths) makes
@@ -529,10 +543,13 @@ make them trustworthy -- notably: the baseline is the RECORDED RUNS re-graded
 (not an archived wave), grade both sides on the same terms, compare only boards
 that replayed an IDENTICAL chain, and **a two-board result is not a default
 change** (per-board spread is +-2..3 nets).
+The corpus itself is not redistributed: anyone builds it with
+`tests/stress/build_corpus.py`, from each set's pinned manifest and the
+recorded chains in `tests/stress/corpus_chains/` (RUNBOOK, "Building the
+corpus yourself").
 **Arc outlines barely run in those replays**: the ordinary prep rebuilds Edge.Cuts
-as chained lines. A change to how an arc outline is read adds `--sets set1arc`, 6
-chains whose inputs keep their arcs, which no range includes (RUNBOOK, "Arc
-outlines: `set1arc`").
+as chained lines, so a change to how an arc outline is read needs boards of its
+own.
 **Per-net via sizes (#530) never run in those replays**: they are live only when
 route.py is given no `--via-size`, and 396 of the 403 recorded route steps pass
 one. A change that touches per-net vias is A/B'd with
@@ -826,6 +843,13 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `pcb.board_info.board_bounds` - (min_x, min_y, max_x, max_y) or None. Copper
   and poses are laid out from it, so it keeps its coarser reading of an arc
   (`BOUNDS_CHORD_EPS`, #1700) and a ring can stand up to 5 um past it
+- `pcb.board_info.board_thickness` - mm a through via is drilled through: the
+  stackup summed, else `(general (thickness ...))`, else None (#502; never a
+  1.6 default). More than 10% past the thickness a rung's drill is legal at
+  (1.76 mm for the stock rungs: a fab holds thickness to +-10%) `fab_tiers`
+  raises that drill to thickness / ratio (8:1 standard, 10.67:1 advanced);
+  past 3.2 mm, the thickest standard board, the declaration is taken for an
+  unset stackup and nothing is raised, with a warning
 - `pcb.board_info.stackup` - List[StackupLayer], ordered top to bottom
   (NOT `pcb.stackup`). Empty list if the board has no stackup section.
 - StackupLayer fields: `name`, `layer_type` ('copper', 'core', 'prepreg', ...),

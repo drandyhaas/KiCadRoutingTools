@@ -59,7 +59,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field, replace
-from typing import Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
 __all__ = [
     'Constraint', 'RuleItem', 'Rule', 'DesignRules', 'Unsupported',
@@ -103,6 +103,14 @@ SIZE_KINDS = frozenset({
     'track_width', 'via_diameter', 'hole_size', 'annular_width',
     'diff_pair_width', 'connection_width',
 })
+#: The kinds a via is sized by (`relaxed_via_nets`, `CourtyardIndex`, #1805)
+VIA_SIZE_KINDS = ('annular_width', 'via_diameter', 'hole_size')
+#: The kinds check_drc grades by where each item stands when a courtyard
+#: term binds them: a via's size (#1805), a track's width and the clearance
+#: of tracks, vias and pads (#1832). The router reads none of them.
+COURTYARD_GRADED_KINDS = VIA_SIZE_KINDS + ('track_width', 'clearance')
+#: #1843: the kinds a rule scoped by a rule area is graded for, by position
+AREA_GRADED_KINDS = ('clearance', 'track_width')
 # The kinds a rule may carry without being reported as "parsed, not
 # consumed". WIDER than what is read today: the resolver's callers ask only
 # for track_width / via_diameter / hole_size (draw_size, floor), copper
@@ -112,7 +120,8 @@ SIZE_KINDS = frozenset({
 # rule no step honours is named by `Rule.router_unhonoured`, #1527). A rule
 # built only on the other kinds listed here is reported neither "NOT
 # honoured" nor "not consumed", except a ROUTER_UNHONOURED_KINDS kind
-# (`annular_width`, `via_count`), which `unsupported()` names NOT honoured.
+# (`annular_width`, `via_count`, `hole_clearance`), which `unsupported()`
+# names NOT honoured.
 CONSUMED_KINDS = CLEARANCE_KINDS | SIZE_KINDS | {'disallow', 'via_count'}
 # Kinds no routing step honours but a grader does: check_drc grades every
 # `length` window (kicad_dru.read_board_length_rules, #1313) and every
@@ -126,8 +135,12 @@ GRADED_ONLY_KINDS = frozenset({'length', 'skew', 'diff_pair_uncoupled'})
 # route.py's `design_rules.unsupported_rules` -- rather than passing as consumed.
 # `via_count` (#1707) likewise: no step counts a net's vias against it -- a
 # net is routed with the vias it needs, completion first -- and check_drc
-# grades it as KiCad's too_many_vias does.
-ROUTER_UNHONOURED_KINDS = frozenset({'annular_width', 'via_count'})
+# grades it as KiCad's too_many_vias does. `hole_clearance` too, unless the
+# step that installs the rules routes to it (#1853,
+# `hole_rule_routing.mark_honoured`: the route step does, for every rule
+# whose condition it reads), and check_drc grades it
+# (`check_drc.hole_rule_grade`).
+ROUTER_UNHONOURED_KINDS = frozenset({'annular_width', 'via_count', 'hole_clearance'})
 #: why each ROUTER_UNHONOURED_KINDS kind is not honoured, as `unsupported()` says it
 _ROUTER_UNHONOURED_WHY = {
     'annular_width': ("a via a step sizes itself holds it, an explicit via size and a "
@@ -137,6 +150,10 @@ _ROUTER_UNHONOURED_WHY = {
     'via_count': ("no routing step counts a net's vias against it (a net is routed "
                   "with the vias it needs, completion first); check_drc grades the "
                   "board's vias per net against it, as KiCad's too_many_vias does"),
+    'hole_clearance': ("this step does not route to this rule: copper is kept off "
+                       "another net's NPTH holes at the board's min_hole_clearance (or "
+                       "the fab floor) and off plated holes at the copper clearance, not "
+                       "at this rule's value; check_drc grades the board against it"),
 }
 # `disallow` item tokens (#1527). The router lays tracks and THROUGH vias
 # only, so a rule forbidding only blind, buried or micro vias asks nothing of
@@ -146,6 +163,12 @@ _ROUTER_UNHONOURED_WHY = {
 # reported NOT honoured -- check_drc grades the track and via ones.
 DISALLOW_NOT_LAID = frozenset({'micro_via', 'blind_via', 'buried_via'})
 DISALLOW_GRADED = frozenset({'track', 'via', 'through_via'}) | DISALLOW_NOT_LAID
+#: The via `disallow` tokens and the via types each forbids (None: every via),
+#: as KiCad's items_not_allowed reads them (#1527, `DesignRules.via_disallow_rule`)
+DISALLOW_VIA_TYPES = {'via': None, 'through_via': {'through'},
+                      'micro_via': {'micro'},
+                      'blind_via': {'blind', 'blind_buried'},
+                      'buried_via': {'buried', 'blind_buried'}}
 
 
 def disallow_router_reason(tokens, honoured_tokens=frozenset()) -> Optional[str]:
@@ -181,6 +204,34 @@ BOARD_MIN_KEYS = {
     'edge_clearance': 'min_copper_edge_clearance',
     'connection_width': 'min_connection',
 }
+# #1844: kind -> the Board Setup key KiCad's "board setup micro-via constraints"
+# rule reads for a via typed micro, in place of the through-via key above.
+MICROVIA_BOARD_MIN_KEYS = {
+    'via_diameter': 'min_microvia_diameter',
+    'hole_size': 'min_microvia_drill',
+}
+# kind -> the net-class field of a micro via (KiCad's "netclass (uvia)" rule).
+MICROVIA_NETCLASS_KEYS = {
+    'via_diameter': 'microvia_diameter',
+    'hole_size': 'microvia_drill',
+}
+# Board Setup's micro via drill minimum when the project does not carry the
+# key, or when there is no project at all (KiCad's built-in value; measured on
+# kicad-cli 10.0.6 and 10.0.8).
+KICAD_DEFAULT_MIN_MICROVIA_DRILL = 0.1
+
+
+def laser_drilled_span(via_type: Optional[str], span: Iterable[str],
+                       copper_layers: Sequence[str]) -> bool:
+    """A via typed micro whose copper ``span`` is two adjacent layers of a
+    board with more than two: a laser drill, which the fab profile's via
+    floor (a mechanical-drill number) does not bind. A via typed micro that
+    spans more than that, or the whole stack, is a mechanically drilled hole
+    whatever its type word, and keeps the physical floor (KiCad still grades
+    it at the micro via minimums)."""
+    span = list(span)
+    return (via_type == 'micro' and len(span) == 2
+            and len(copper_layers) > 2 and set(span) <= set(copper_layers))
 # kind -> the net-class field KiCad loads as SetOpt (a draw default).
 NETCLASS_OPT_KEYS = {
     'track_width': 'track_width',
@@ -270,6 +321,17 @@ class RuleItem:
     local_clearance: Optional[float] = None
     # the rule areas the item lies in, for an areas=True condition only
     areas: FrozenSet[str] = frozenset()
+    # #1843: the rule areas the item's copper was MEASURED against
+    # (`AreaIndex`), as (area name, copper layer) pairs: `area_layers` the
+    # ones it overlaps, `area_enclosed` the ones it lies wholly inside. None =
+    # not measured: a rule's `area_scoped_condition` is then not read for it.
+    area_layers: Optional[FrozenSet[Tuple[str, str]]] = None
+    area_enclosed: Optional[FrozenSet[Tuple[str, str]]] = None
+    # #1805: the courtyards the item's copper overlaps, as (reference, library
+    # id, 'front' | 'back' of that part), for a rule's `courtyard_condition`
+    # (`CourtyardIndex`). None = not measured: a courtyard term then reads as
+    # unknown and the rule stays unread, as it always was.
+    courtyards: Optional[FrozenSet[Tuple[str, Optional[str], str]]] = None
 
 
 @dataclass
@@ -287,6 +349,18 @@ class Rule:
     # (parse_condition(areas=True)); `condition` stays None and `unsupported`
     # stays set, so the resolver never evaluates it. net_keepouts reads it.
     area_condition: object = None
+    # #1805: the condition parsed WITH its courtyard predicates
+    # (parse_condition(courtyards=True)) when they are all it does not read.
+    # `unsupported` stays set: only an item whose `courtyards` were measured
+    # (check_drc's vias, and #1832 its tracks and pads) is resolved against
+    # it, by position. No routing step measures one, so none reads the rule.
+    courtyard_condition: object = None
+    # #1843: a clearance / track_width rule's condition parsed WITH its
+    # rule-area predicates (parse_condition(areas=True)) when they are all it
+    # does not read. `unsupported` stays set: only an item measured against
+    # the board's rule areas (`DesignRules.area_index`) is resolved against
+    # it, by position. No routing step measures one, so none reads the rule.
+    area_scoped_condition: object = None
     # set by net_keepouts.derive_area_keepouts when the router honours the
     # rule as a net-filtered keep-out: what it honours, for the report
     honoured: Optional[str] = None
@@ -451,6 +525,18 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                 rule.coupled, rule.keep_apart = _coupled_terms(rule.condition)
             except Unsupported as e:
                 rule.unsupported = f"condition: {e}"
+                try:
+                    rule.courtyard_condition = parse_condition(rule.condition_src,
+                                                               courtyards=True)
+                except Unsupported:
+                    pass
+                if rule.courtyard_condition is None and (
+                        set(rule.constraints) & set(AREA_GRADED_KINDS)):
+                    try:
+                        rule.area_scoped_condition = parse_condition(
+                            rule.condition_src, areas=True)
+                    except Unsupported:
+                        pass
                 # A rule that only disallows, on a rule area: the routing
                 # steps read it as a net-filtered keep-out (net_keepouts);
                 # the resolver and every other step still do not.
@@ -464,10 +550,15 @@ def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
                         rule.unsupported = (f"condition: {e} here; route.py, "
                                             f"route_diff.py and repair_planes.py "
                                             f"read it as a net-filtered keep-out")
-        if rule.layer_clause is not None and rule.unsupported is None:
+        if rule.layer_clause is not None and (rule.unsupported is None
+                                              or rule.courtyard_condition is not None):
             lc = rule.layer_clause
             if not (lc in ('outer', 'inner', '*.Cu', '*') or lc.endswith('.Cu')):
-                rule.unsupported = f"layer clause {lc!r} (non-copper)"
+                rule.unsupported = rule.unsupported or f"layer clause {lc!r} (non-copper)"
+                rule.courtyard_condition = None
+        # An area rule (#1843) keeps its condition under a non-copper layer
+        # clause: `layers_for` is then empty, so it binds no copper, which is
+        # how kicad-cli 10.0.6 grades a clearance rule on F.SilkS.
         rule.unconsumed_kinds = sorted(k for k in rule.constraints
                                        if k not in CONSUMED_KINDS)
         if 'clearance' in rule.constraints and rule.unsupported is None:
@@ -505,10 +596,13 @@ def _via_attr(v, key):
 # Condition expressions
 # --------------------------------------------------------------------------
 # Grammar (the KiCad rule language subset we evaluate):
-#   expr   := or
-#   or     := and ('||' and)*
-#   and    := not ('&&' not)*
+#   expr   := and
+#   and    := or ('&&' or)*
+#   or     := not ('||' not)*
 #   not    := '!' not | atom
+# '||' binds TIGHTER than '&&', as in KiCad (#1797): its grammar declares
+#   `%left G_BOOL_AND.` before `%left G_BOOL_OR.`, and kicad-cli 10.0.6 reads
+#   `X && Y || Z` as `X && (Y || Z)` and `X || Y && Z` as `(X || Y) && Z`.
 #   atom   := '(' expr ')' | cmp
 #   cmp    := term (('=='|'!=') term)?
 #   term   := ITEM '.' NAME '(' args ')' | ITEM '.' NAME | STRING | NUMBER | 'L'
@@ -550,6 +644,16 @@ _SUPPORTED_FUNCS = {'hasnetclass', 'hasexactnetclass', 'onlayer', 'existsonlayer
 #: Rule-area predicates. KiCad's insideArea() is the older spelling of
 #: intersectsArea() and KiCad 10 still grades it.
 _AREA_FUNCS = {'insidearea', 'intersectsarea', 'enclosedbyarea'}
+#: Courtyard predicates (#1805) -> which of the part's courtyards they read:
+#: None either, 'front' the one on the part's own side, 'back' the other.
+#: Measured on kicad-cli 10.0.6 with a via: insideCourtyard() and
+#: intersectsCourtyard() read alike, and hold when the via's disc OVERLAPS
+#: the courtyard (centre outside by less than its radius: yes; tangent: no);
+#: insideFrontCourtyard() holds on a back part's B.CrtYd and
+#: insideBackCourtyard() on neither part's own courtyard.
+_COURTYARD_FUNCS = {'insidecourtyard': None, 'intersectscourtyard': None,
+                    'insidefrontcourtyard': 'front', 'intersectsfrontcourtyard': 'front',
+                    'insidebackcourtyard': 'back', 'intersectsbackcourtyard': 'back'}
 _KNOWN_UNSUPPORTED_FUNCS = {
     'insidearea', 'intersectsarea', 'enclosedbyarea', 'intersectscourtyard',
     'intersectsfrontcourtyard', 'intersectsbackcourtyard',
@@ -696,7 +800,7 @@ class _KiCadCompile:
     def run(self):
         if not self.toks:
             return
-        kind = self._or()
+        kind = self._and()
         if self.i != len(self.toks):
             raise Unsupported(f"it does not expect {self._peek()[1]!r} there")
         if kind == self.PLAIN:
@@ -717,11 +821,11 @@ class _KiCadCompile:
             a = self._pair(a, down(), op)
         return a
 
-    def _or(self):
-        return self._chain(('||',), self._and)
-
     def _and(self):
-        return self._chain(('&&',), self._cmp)
+        return self._chain(('&&',), self._or)
+
+    def _or(self):
+        return self._chain(('||',), self._cmp)
 
     def _cmp(self):
         a = self._add()
@@ -763,7 +867,7 @@ class _KiCadCompile:
                 raise Unsupported(f"{v}{nv}: {nv!r} is not a unit it knows")
             return self.UNIT
         if k == 'op' and v == '(':
-            kind = self._or()
+            kind = self._and()
             if not self._is_op(')'):
                 raise Unsupported("an unclosed parenthesis")
             self._next()
@@ -810,7 +914,7 @@ class _KiCadCompile:
                 continue
             props += k == 'name'
             others += 1
-            if self._or() == self.PLAIN:
+            if self._and() == self.PLAIN:
                 raise Unsupported(f"{item}.{name}() with a plain number")
         self._next()
         if need and props and not strings:
@@ -903,10 +1007,12 @@ def dru_refusals(text: str, rules: Sequence['Rule']) -> List[dict]:
 
 
 class _Parser:
-    def __init__(self, src: str, areas: bool = False, unknown: bool = False):
+    def __init__(self, src: str, areas: bool = False, unknown: bool = False,
+                 courtyards: bool = False):
         self.toks = _tokens(src)
         self.i = 0
         self.areas = areas
+        self.courtyards = courtyards
         # parse_condition_maybe: a construct outside the modelled subset
         # becomes an ('unknown',) leaf instead of raising
         self.unknown = unknown
@@ -941,23 +1047,23 @@ class _Parser:
         return v
 
     def parse(self):
-        node = self.or_()
+        node = self.and_()
         if self.i != len(self.toks):
             raise Unsupported(f"trailing {self.peek()[1]!r}")
         return node
 
-    def or_(self):
-        node = self.and_()
-        while self.peek() == ('op', '||'):
-            self.take()
-            node = ('or', node, self.and_())
-        return node
-
     def and_(self):
-        node = self.not_()
+        node = self.or_()
         while self.peek() == ('op', '&&'):
             self.take()
-            node = ('and', node, self.not_())
+            node = ('and', node, self.or_())
+        return node
+
+    def or_(self):
+        node = self.not_()
+        while self.peek() == ('op', '||'):
+            self.take()
+            node = ('or', node, self.not_())
         return node
 
     def not_(self):
@@ -969,7 +1075,7 @@ class _Parser:
     def atom(self):
         if self.peek() == ('op', '('):
             self.take()
-            node = self.or_()
+            node = self.and_()
             self.take('op', ')')
             return node
         return self.cmp()
@@ -1033,12 +1139,19 @@ class _Parser:
                     else:
                         raise Unsupported(f"argument {av!r} to {name}()")
                 self.take('op', ')')
-                if item_u == 'AB' and lname == 'iscoupleddiffpair' and not args:
+                if lname == 'iscoupleddiffpair' and not args:
+                    # KiCad's isCoupledDiffPairFunc reads the PAIR whichever
+                    # item it is called on: A., B. and AB. are one predicate
+                    # (measured on kicad-cli 10.0.8)
                     return ('coupled',)
                 if self.areas and lname in _AREA_FUNCS:
                     if len(args) != 1:
                         raise Unsupported(f"{name}() with {len(args)} arguments")
                     return ('area', item_u, lname, args[0])
+                if self.courtyards and lname in _COURTYARD_FUNCS and item_u != 'AB':
+                    if len(args) != 1:
+                        raise Unsupported(f"{name}() with {len(args)} arguments")
+                    return ('courtyard', item_u, _COURTYARD_FUNCS[lname], args[0])
                 if lname in _KNOWN_UNSUPPORTED_FUNCS or lname not in _SUPPORTED_FUNCS:
                     return self._unmodelled(f"predicate {name}() not modelled")
                 if lname == 'indiffpair' and (item_u == 'AB' or len(args) != 1
@@ -1054,7 +1167,7 @@ class _Parser:
         raise Unsupported(f"unexpected token {v!r}")
 
 
-def parse_condition(src: str, areas: bool = False):
+def parse_condition(src: str, areas: bool = False, courtyards: bool = False):
     """AST for a rule condition, or raise Unsupported. With ``areas`` the
     rule-area predicates parse too, as ('area', item, fn, name) nodes that
     `_eval` answers from RuleItem.areas. Only net_keepouts asks for that, on
@@ -1062,13 +1175,18 @@ def parse_condition(src: str, areas: bool = False):
     so a `!A.intersectsArea()` clearance rule is not read as matching
     every item on the board.
 
+    With ``courtyards`` (#1805) the courtyard predicates parse too, as
+    ('courtyard', item, side, pattern) nodes that `_eval` answers from
+    RuleItem.courtyards, and raises Unsupported on an item whose courtyards
+    were not measured (`Rule.courtyard_condition`).
+
     AB.isCoupledDiffPair() parses only as a term of an AND, positive (#1293,
     the form that gives a pair its own P<->N clearance) or negated (#1295,
     KiCad's "keep pairs apart" rule, which binds everything but the pair's
     own partner). OR'ed or compared it raises Unsupported, so such a rule
     stays unread rather than half-read."""
     try:
-        node = _Parser(src, areas=areas).parse()
+        node = _Parser(src, areas=areas, courtyards=courtyards).parse()
     except Unsupported as e:
         # a condition this reader does not read that KiCad refuses as well: the
         # second is the one a user has to act on (and "KiCad will still enforce
@@ -1320,7 +1438,28 @@ def _eval(node, a: RuleItem, b: Optional[RuleItem], layer: Optional[str],
         return bool(_call(node, a, b, layer, ctx))
     if op == 'area':
         it = _item(node[1], a, b)
-        return it is not None and node[3] in it.areas
+        if it is None:
+            return False
+        if it.area_layers is None:
+            return node[3] in it.areas
+        # #1843: measured by position, as kicad-cli 10.0.8 reads them.
+        # insideArea() is intersectsArea(), read on the layer the constraint
+        # is asked on (a through via inside an F.Cu area is not in it on
+        # B.Cu). enclosedByArea() is the item lying wholly inside an area it
+        # shares a layer with, whichever layer is asked about.
+        if node[2] == 'enclosedbyarea':
+            return any(name == node[3] for name, _l in it.area_enclosed or ())
+        if layer is not None:
+            return (node[3], layer) in it.area_layers
+        return any(name == node[3] for name, _l in it.area_layers)
+    if op == 'courtyard':
+        it = _item(node[1], a, b)
+        if it is None:
+            return False
+        if it.courtyards is None:
+            raise Unsupported("courtyard not measured for this item")
+        return any((node[2] is None or node[2] == side) and _footprint_named(node[3], ref, lib)
+                   for ref, lib, side in it.courtyards)
     if op == 'prop':
         v = _value(node, a, b, layer)
         # a string alone is false in KiCad, whatever it holds: measured on
@@ -1475,10 +1614,8 @@ def _call(node, a, b, layer, ctx=None):
         # the library id too, measured on kicad-cli 10.0.6 (#1690): 'Device:*'
         # binds that library's parts, '*0402*' does not, 'a:b' binds a part
         # whose reference is spelled so. A second argument makes it false.
-        return len(args) == 1 and it.footprint_ref is not None and (
-            _wx_matches(args[0], it.footprint_ref)
-            or (':' in args[0] and it.footprint_lib is not None
-                and _wx_matches(args[0], it.footprint_lib)))
+        return (len(args) == 1 and it.footprint_ref is not None
+                and _footprint_named(args[0], it.footprint_ref, it.footprint_lib))
     if fn == 'memberofgroup':
         return bool(args) and args[0] in it.groups
     if fn == 'indiffpair':
@@ -1486,22 +1623,71 @@ def _call(node, a, b, layer, ctx=None):
     raise Unsupported(f"predicate {fn}()")
 
 
+def _footprint_named(pattern: str, ref: Optional[str], lib: Optional[str]) -> bool:
+    """Does a memberOfFootprint() / courtyard argument name this part: its
+    reference by wxString::Matches and, for a name with a ':' in it, its
+    library id too (#1690)."""
+    return ref is not None and (_wx_matches(pattern, ref) or (
+        ':' in pattern and lib is not None and _wx_matches(pattern, lib)))
+
+
+#: #1805: the first kicad-cli release that tests a `via_diameter` rule's
+#: (layer ...) clause for a via (against F.Cu, as every release measured tests
+#: an `annular_width` rule's). 10.0.6 does not test it, as no release measured
+#: tests a `hole_size` rule's. Measured on 10.0.6 and 10.0.7 only.
+_VIA_DIAMETER_CLAUSE_FROM = '10.0.7'
+
+
+#: Set only inside `DesignRules.resolve_for_copper`: the via_diameter
+#: reading to resolve under, in place of the installed release's.
+_via_diameter_reading: Optional[bool] = None
+
+
+def _via_clause_tested(kind: str) -> bool:
+    """Whether KiCad tests the (layer ...) clause of a ``kind`` rule
+    (`VIA_SIZE_KINDS`) for a via, as the release the tool reproduces
+    (`net_queries.length_measure_release`: the installed kicad-cli's, the
+    newest modelled without one) grades it. That is the GRADERS' reading;
+    copper reads every release's at once (`DesignRules.resolve_for_copper`)."""
+    if kind == 'annular_width':
+        return True
+    if kind != 'via_diameter':
+        return False
+    if _via_diameter_reading is not None:
+        return _via_diameter_reading
+    from net_queries import length_measure_release, _release_key
+    return _release_key(length_measure_release()) >= _release_key(_VIA_DIAMETER_CLAUSE_FROM)
+
+
 def _rule_matches(rule: Rule, a: RuleItem, b: Optional[RuleItem],
                   layer: Optional[str], copper_layers: Sequence[str],
-                  ctx=None) -> bool:
+                  ctx=None, condition=None) -> bool:
+    """``condition``: the AST to read instead of ``rule.condition`` (a
+    `courtyard_condition`).
+
+    A rule with a (layer ...) clause binds on the layers it names, so not
+    without ``layer`` -- except a via-size rule on a via (#1805), read as
+    kicad-cli grades a via, through, blind, buried and micro alike: where the
+    clause is tested (`_via_clause_tested`) it is tested against F.Cu, whatever
+    layers the via spans and whichever layer is asked about. Every reader of a
+    via's size -- check_drc's grade, `via_floors`, the step grades,
+    `draw_size`, `rule_floors` -- so binds the vias KiCad binds."""
     lay = rule.layers_for(copper_layers)
     if lay is not None:
-        if layer is None:
+        kind = ctx[0] if ctx else None
+        if a.type == 'via' and kind in VIA_SIZE_KINDS:
+            if 'F.Cu' not in lay and _via_clause_tested(kind):
+                return False
+        elif layer is None or layer not in lay:
             return False
-        if layer not in lay:
-            return False
-    if rule.condition is None:
+    condition = rule.condition if condition is None else condition
+    if condition is None:
         return True
     # KiCad's DRC_RULE_CONDITION::EvaluateFor: "Conditions are commutative" --
     # a two-item condition that fails as (A, B) is tried again as (B, A).
     for x, y in ((a, b), (b, a)) if b is not None else ((a, b),):
         try:
-            if _eval(rule.condition, x, y, layer, ctx):
+            if _eval(condition, x, y, layer, ctx):
                 return True
         except Unsupported:
             pass
@@ -1584,6 +1770,10 @@ def project_class_membership(net_settings) -> Tuple[Dict[str, List[str]],
 @dataclass
 class DesignRules:
     board_min: Dict[str, float] = field(default_factory=dict)      # rules.min_* (only >0)
+    # #1844: neither the project file nor a live board carries
+    # rules.min_microvia_drill (or there is no project), so KiCad grades a
+    # micro via's drill at its built-in value
+    microvia_drill_undeclared: bool = True
     classes: Dict[str, dict] = field(default_factory=dict)        # name -> {clearance, track_width, ..., priority}
     memberships: Dict[int, FrozenSet[str]] = field(default_factory=dict)  # net_id -> classes
     # footprint key -> (its reference as the file spells it, its library id)
@@ -1599,8 +1789,12 @@ class DesignRules:
     source: str = ''
     dru_path: str = ''
     notes: List[str] = field(default_factory=list)
-    # `dru_refusals`: why KiCad enforces no rule of this board's .kicad_dru
-    kicad_refused: List[dict] = field(default_factory=list)
+    # `dru_refusals` of this board's .kicad_dru: the model's answer, which
+    # `kicad_refused` reads only when KiCad cannot be asked (#1852)
+    model_refused: List[dict] = field(default_factory=list)
+    # the .kicad_dru's text as read (None: no rules file), for asking KiCad
+    dru_text: Optional[str] = field(default=None, repr=False)
+    _kicad_refused: Optional[List[dict]] = field(default=None, repr=False)
     # net_keepouts.derive_area_keepouts' regions (install_design_rules)
     net_keepouts: List[dict] = field(default_factory=list)
     # the project's rule_severities: {KiCad error key: severity}
@@ -1643,9 +1837,34 @@ class DesignRules:
                 else:
                     dr.rules, notes = parse_dru(text)
                     dr.notes.extend(notes)
-                    dr.kicad_refused = dru_refusals(text, dr.rules)
+                    dr.dru_text = text
+                    dr.model_refused = dru_refusals(text, dr.rules)
         dr._finish()
         return dr
+
+    @property
+    def kicad_refused(self) -> List[dict]:
+        """Why KiCad enforces no rule of the board's `.kicad_dru`, [] when it
+        loads it (#1690, #1852): KiCad's own answer when kicad-cli is
+        installed (`dru_load.refusals`, a stub-board DRC, cached), the
+        refusal model's (`model_refused`) otherwise. Asked on first use, so
+        a table built only to resolve sizes starts no kicad-cli.
+
+        DISCLOSURE ONLY: nothing that reads or routes the rules asks this, so
+        no copper depends on whether kicad-cli is installed."""
+        if self._kicad_refused is None:
+            try:
+                from dru_load import refusals
+                self._kicad_refused = refusals(
+                    self.dru_text, self.model_refused,
+                    board_path=self.source or None, copper_layers=self.copper_layers)
+            except Exception:                                  # noqa: BLE001
+                self._kicad_refused = list(self.model_refused)
+        return self._kicad_refused
+
+    @kicad_refused.setter
+    def kicad_refused(self, value: List[dict]) -> None:
+        self._kicad_refused = list(value)
 
     @classmethod
     def from_pcbnew(cls, board, pcb_data, *, fab_floor: Optional[dict] = None,
@@ -1670,6 +1889,8 @@ class DesignRules:
                           ('min_track_width', 'm_TrackMinWidth'),
                           ('min_via_diameter', 'm_ViasMinSize'),
                           ('min_through_hole_diameter', 'm_MinThroughDrill'),
+                          ('min_microvia_diameter', 'm_MicroViasMinSize'),
+                          ('min_microvia_drill', 'm_MicroViasMinDrill'),
                           ('min_via_annular_width', 'm_ViasMinAnnularWidth'),
                           ('min_hole_to_hole', 'm_HoleToHoleMin'),
                           ('min_hole_clearance', 'm_HoleClearance'),
@@ -1680,6 +1901,8 @@ class DesignRules:
                 live_min[key] = v / 1e6           # divide, never multiply (#493)
         if live_min:
             dr.board_min = live_min
+        # a live board always carries its micro via drill minimum
+        dr.microvia_drill_undeclared = False
         # Net classes live: default + non-default (KiCad 10's GetNetclasses
         # omits Default, #782).
         try:
@@ -1740,6 +1963,7 @@ class DesignRules:
             for k, v in rules.items():
                 if k.startswith('min_') and isinstance(v, (int, float)) and v > 0:
                     self.board_min[k] = float(v)
+            self.microvia_drill_undeclared = 'min_microvia_drill' not in rules
             self.rule_severities = {str(k): str(v) for k, v in
                                     (ds.get('rule_severities') or {}).items()}
         if not self.classes:
@@ -1864,12 +2088,35 @@ class DesignRules:
     def resolve(self, kind: str, a: RuleItem, b: Optional[RuleItem] = None,
                 layer: Optional[str] = None) -> Constraint:
         kind = canonical_kind(kind)
-        key = (kind, a, b, layer)
+        key = (kind, a, b, layer, _via_diameter_reading if kind == 'via_diameter' else None)
         c = self._cache.get(key)
         if c is None:
             c = self._resolve(kind, a, b, layer)
             self._cache[key] = c
         return c
+
+    def resolve_for_copper(self, kind: str, a: RuleItem, b: Optional[RuleItem] = None,
+                           layer: Optional[str] = None) -> Constraint:
+        """`resolve` for what decides COPPER, which must not depend on the
+        installed kicad-cli: a via's `via_diameter` is resolved under every
+        modelled release's reading of a (layer ...) clause (`_via_clause_tested`)
+        and the strictest minimum kept, so a via sized by it passes on each
+        release, and a relaxation one release does not grant is not taken.
+        Every other kind and item reads the same on every release."""
+        global _via_diameter_reading
+        kind = canonical_kind(kind)
+        if kind != 'via_diameter' or a.type != 'via':
+            return self.resolve(kind, a, b, layer)
+        found = []
+        try:
+            for tested in (False, True):
+                _via_diameter_reading = tested
+                found.append(self.resolve(kind, a, b, layer))
+        finally:
+            _via_diameter_reading = None
+        return max(found, key=lambda c: (c.min or 0.0,
+                                         (c.kicad_min if c.fab_bound else c.min) or 0.0,
+                                         c.min_rule is not None))
 
     def _resolve(self, kind: str, a: RuleItem, b: Optional[RuleItem],
                  layer: Optional[str]) -> Constraint:
@@ -1892,9 +2139,19 @@ class DesignRules:
 
         # 2a. board minimum -- the first rule in KiCad's vector.
         bkey = BOARD_MIN_KEYS.get(kind)
+        # #1844: a via typed micro is graded at the micro via minimums (KiCad's
+        # "board setup micro-via constraints" rule); a blind or buried via
+        # keeps the through-via ones
+        micro = (a.type == 'via' and a.via_type == 'micro'
+                 and kind in MICROVIA_BOARD_MIN_KEYS)
+        if micro:
+            bkey = MICROVIA_BOARD_MIN_KEYS[kind]
         if bkey and self.board_min.get(bkey):
             cur['min'] = self.board_min[bkey]
             source = 'board minimum'
+        elif micro and kind == 'hole_size' and self.microvia_drill_undeclared:
+            cur['min'] = KICAD_DEFAULT_MIN_MICROVIA_DRILL
+            source = 'board minimum (KiCad default)'
 
         # 2b. net-class implicit rules.
         implicit_rule = None
@@ -1910,6 +2167,18 @@ class DesignRules:
             if dp is not None:
                 cur['min'], implicit_rule = dp
                 source = implicit_rule
+        elif micro:
+            # measured on kicad-cli 10.0.8: a micro via's diameter minimum is
+            # its net class's microvia_diameter, which REPLACES Board Setup's
+            # (above or below it); the class drill is a draw default only
+            v = self.class_value(a.net_id, MICROVIA_NETCLASS_KEYS[kind])
+            if v is not None:
+                cur['opt'] = v
+                if kind == 'via_diameter':
+                    # the source names what set the minimum: for the drill
+                    # that stays Board Setup
+                    cur['min'] = v
+                    source = f'netclass {self.effective_class(a.net_id)}'
         elif kind in NETCLASS_OPT_KEYS:
             v = self.class_value(a.net_id, NETCLASS_OPT_KEYS[kind])
             # KiCad's "netclass (diff pair)" implicit rule, conditioned on
@@ -1929,9 +2198,23 @@ class DesignRules:
         min_rule = None
         ctx = (kind, self._net_name_set())
         for rule in self.rules:
-            if rule.unsupported or kind not in rule.constraints:
+            if kind not in rule.constraints:
                 continue
-            if not _rule_matches(rule, a, b, layer, self.copper_layers, ctx):
+            cond = None
+            if rule.unsupported:
+                # #1805: a courtyard rule binds only an item measured by
+                # position; #1843: so does a rule-area rule
+                cond = rule.courtyard_condition
+                if cond is not None:
+                    if a.courtyards is None or (b is not None and b.courtyards is None):
+                        continue
+                else:
+                    cond = rule.area_scoped_condition
+                    if (cond is None or kind not in AREA_GRADED_KINDS
+                            or a.area_layers is None
+                            or (b is not None and b.area_layers is None)):
+                        continue
+            if not _rule_matches(rule, a, b, layer, self.copper_layers, ctx, cond):
                 continue
             spec = rule.constraints[kind]
             if kind == 'disallow':
@@ -1983,6 +2266,10 @@ class DesignRules:
         c = Constraint(kind, min=cur['min'], opt=cur['opt'], max=cur['max'],
                        source=source, kicad_min=cur['min'],
                        min_rule=rule_name, min_rule_coupled=rule_coupled)
+        if micro and laser_drilled_span(a.via_type, a.other_layers, self.copper_layers):
+            # the fab profile's via floor is a mechanical-drill number; a via
+            # typed micro over more than two adjacent layers is drilled so
+            return c
         return self._fab(kind, c)
 
     def pair_gap_clearance(self, a: Optional[RuleItem], b: Optional[RuleItem]
@@ -2090,7 +2377,7 @@ class DesignRules:
         """The smallest value DRC accepts for ``kind`` on this net/layer (with
         the fab floor applied). None when nothing declares one."""
         a = self.item_for_net(net_id or 0, type, layer)
-        return self.resolve(kind, a, b, layer).min
+        return self.resolve_for_copper(kind, a, b, layer).min
 
     def draw_size(self, kind: str, net_id: int, layer: Optional[str] = None,
                   default: Optional[float] = None, type: Optional[str] = None,
@@ -2104,7 +2391,7 @@ class DesignRules:
         if type is None:
             type = 'via' if kind in ('via_diameter', 'hole_size') else 'track'
         a = self.item_for_net(net_id, type, layer, diff_pair=diff_pair)
-        c = self.resolve(kind, a, None, layer)
+        c = self.resolve_for_copper(kind, a, None, layer)
         v = self.cli.get(kind)
         if v is None:
             v = c.opt
@@ -2141,6 +2428,132 @@ class DesignRules:
         the project ignores is one KiCad flags nothing for."""
         return self.rule_severities.get(_SEVERITY_KEY.get(kind, kind), 'error')
 
+    def courtyard_index(self, pcb_data, board_path: Optional[str] = None,
+                        kinds: Iterable[str] = VIA_SIZE_KINDS) -> Optional['CourtyardIndex']:
+        """#1805: a `CourtyardIndex` when a rule of one of ``kinds`` binds by
+        courtyard (`Rule.courtyard_condition`) and the outlines were read,
+        else None: then nothing is resolved by position."""
+        kinds = set(kinds)
+        if not any(r.courtyard_condition is not None and kinds & set(r.constraints)
+                   for r in self.rules):
+            return None
+        idx = CourtyardIndex(self, pcb_data, board_path)
+        return idx if idx.available else None
+
+    def area_index(self, pcb_data) -> Optional['AreaIndex']:
+        """#1843: measure the board's named rule areas for the rules that
+        bind by one (`Rule.area_scoped_condition`), and from then on fill
+        every `via_item` / `track_item` / `pad_item` with the areas its
+        copper stands in, so those rules resolve by position. A rule naming
+        an area the board does not draw as a rule area is left unread (its
+        `area_scoped_condition` is cleared). Returns the index, or None when
+        no rule is left to read that way. Built once per board: asked again
+        for the same board (and the same rule areas), it returns the index
+        it holds and keeps the resolved items it has cached."""
+        board = getattr(pcb_data, 'board_info', None)
+        sig = (id(pcb_data), id(getattr(board, 'keepouts', None)),
+               len(getattr(board, 'keepouts', None) or ()))
+        held = getattr(self, '_area_index_of', None)
+        if held is not None and held[0] == sig and held[1] is pcb_data:
+            return self._area_index
+        idx = AreaIndex(self, pcb_data)
+        self._area_index_of = (sig, pcb_data)
+        self._area_index = idx if idx.names else None
+        self._cache.clear()
+        return self._area_index
+
+    def _in_areas(self, item: RuleItem, measure) -> RuleItem:
+        idx = getattr(self, '_area_index', None)
+        if idx is None:
+            return item
+        over, inside = measure(idx)
+        return replace(item, area_layers=over, area_enclosed=inside)
+
+    def via_item(self, via, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
+        """The RuleItem of one via of the board; with ``courtyards``, the
+        courtyards its disc overlaps measured (#1805), so a rule bound by a
+        courtyard term resolves for it."""
+        vt = getattr(via, 'via_type', None) or 'through'
+        facts = {'via_type': vt}
+        if vt != 'through':
+            # #1844: a partial-span via is on the layers it joins only
+            from geometry_utils import via_copper_layers
+            facts['other_layers'] = frozenset(
+                via_copper_layers(via, self.copper_layers))
+        item = self.item_for_net(int(getattr(via, 'net_id', 0) or 0), 'via', **facts)
+        item = self._in_areas(item, lambda idx: idx.of_via(via, self.copper_layers))
+        if courtyards is None:
+            return item
+        return replace(item, courtyards=courtyards.of_disc(
+            float(via.x), float(via.y), float(via.size) / 2.0))
+
+    def via_laser_drilled(self, via) -> bool:
+        """#1844: the via is typed micro and joins two adjacent copper
+        layers (`laser_drilled_span`)."""
+        if (getattr(via, 'via_type', None) or 'through') != 'micro':
+            return False
+        from geometry_utils import via_copper_layers
+        return laser_drilled_span('micro', via_copper_layers(via, self.copper_layers),
+                                  self.copper_layers)
+
+    def track_item(self, seg, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
+        """#1832: `via_item`'s twin for a track segment on its own layer
+        (a footprint's graphic copper is typed 'graphic'); with
+        ``courtyards``, the courtyards its capsule overlaps measured."""
+        item = self.item_for_net(int(getattr(seg, 'net_id', 0) or 0),
+                                 'graphic' if getattr(seg, 'graphic', False) else 'track',
+                                 getattr(seg, 'layer', None))
+        item = self._in_areas(item, lambda idx: idx.of_track(seg))
+        if courtyards is None:
+            return item
+        return replace(item, courtyards=courtyards.of_capsule(
+            float(seg.start_x), float(seg.start_y), float(seg.end_x), float(seg.end_y),
+            float(seg.width or 0.0) / 2.0))
+
+    def pad_item(self, pad, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
+        """#1832: `item_for_pad` with, given ``courtyards``, the courtyards
+        the pad's copper overlaps measured."""
+        item = self.item_for_pad(pad)
+        item = self._in_areas(item, lambda idx: idx.of_pad(pad, self.copper_layers))
+        if courtyards is None:
+            return item
+        return replace(item, courtyards=courtyards.of_pad(pad))
+
+    def via_disallow_rule(self, net_id: int, via_type: str = 'through',
+                          layers: Optional[Sequence[str]] = None) -> Optional['Rule']:
+        """The `disallow` rule KiCad's items_not_allowed names for a via of
+        ``net_id`` and ``via_type`` with copper on ``layers`` (default every
+        copper layer), or None: the LAST rule in file order whose tokens
+        forbid that via type (`DISALLOW_VIA_TYPES`) and that binds the via on
+        one of the layers it has copper on (`_rule_matches`), so a rule a
+        `(layer ...)` clause scopes to one of them forbids it. Rules the
+        resolver does not evaluate (a rule area, an unread condition) are not
+        read here. check_drc's grade and `net_keepouts.planar_nets` both ask
+        this, so a no-via net is the one check_drc flags a via on."""
+        on = tuple(layers if layers is not None else self.copper_layers)
+        key = ('_via_disallow', net_id, via_type, on)
+        if key in self._cache:
+            return self._cache[key]
+        item = self.item_for_net(
+            net_id, 'via', None, layers=frozenset(on),
+            via_type=via_type if via_type in ('through', 'micro', 'blind', 'buried')
+            else 'blind_buried')
+        ctx = ('disallow', self._net_name_set())
+        hit = None
+        for r in reversed(self.rules):
+            if r.unsupported or r.area_condition is not None or 'disallow' not in r.constraints:
+                continue
+            tokens = r.constraints['disallow'].get('disallow', ())
+            if not any(t in DISALLOW_VIA_TYPES and (DISALLOW_VIA_TYPES[t] is None
+                                                    or via_type in DISALLOW_VIA_TYPES[t])
+                       for t in tokens):
+                continue
+            if any(_rule_matches(r, item, None, l, self.copper_layers, ctx) for l in on):
+                hit = r
+                break
+        self._cache[key] = hit
+        return hit
+
     def via_floors(self, net_id: int = 0) -> Dict[str, float]:
         """#1676: the minimums `.kicad_dru` rules set on a via of ``net_id``, in
         fab_tiers FLOOR_KEYS vocabulary (`via_diameter`, `via_drill`,
@@ -2160,7 +2573,7 @@ class DesignRules:
                                 ('annular_width', 'annular')):
             if self.severity_of(kind) == 'ignore':
                 continue
-            c = self.resolve(kind, item, None, None)
+            c = self.resolve_for_copper(kind, item, None, None)
             v = c.kicad_min if c.fab_bound else c.min
             if c.min_rule is not None and v is not None and v > 0:
                 out[floor_key] = float(v)
@@ -2200,7 +2613,7 @@ class DesignRules:
                 continue
             item = self.item_for_net(int(_via_attr(v, 'net_id')), 'via')
             for kind, have in (('via_diameter', size), ('hole_size', drill)):
-                c = self.resolve(kind, item, None, None)
+                c = self.resolve_for_copper(kind, item, None, None)
                 need = c.kicad_min if c.fab_bound else c.min
                 rule, setup = c.min_rule, False
                 if rule is None:
@@ -2321,16 +2734,24 @@ class DesignRules:
 
 def kicad_refusal_lines(refused: Sequence[dict]) -> List[str]:
     """The finding `dru_refusals` is, for a console: about the file, and first,
-    because KiCad itself says nothing (exit 0, no message). One line per cause."""
+    because KiCad itself says nothing (exit 0, no message). One line per cause.
+    A row KiCad's own answer stands behind (#1852) says which kicad-cli."""
     return [".kicad_dru: KiCad ENFORCES NO RULE OF THIS FILE"
+            + (f" (kicad-cli {r['kicad_version']} does not load it)"
+               if r.get('kicad_version') else '')
             + (f": rule '{r['rule']}': " if r['rule'] else ': ') + r['reason']
             + ". This tool still reads the file's other rules, so it routes and "
               "grades by rules KiCad's own DRC is not applying" for r in refused]
 
 
-def read_board_kicad_refusals(board_path: Optional[str]) -> List[dict]:
-    """`dru_refusals` of the `.kicad_dru` beside a board, [] without one, for a
-    tool with no DesignRules in hand."""
+def read_board_kicad_refusals(board_path: Optional[str], ask_kicad: bool = True) -> List[dict]:
+    """Why KiCad enforces no rule of the `.kicad_dru` beside a board, [] when
+    it loads it or there is none, for a tool with no DesignRules in hand.
+
+    KiCad's own answer when kicad-cli is installed (`dru_load.refusals`, a
+    stub-board DRC, #1852), with the refusal model's reasons (`dru_refusals`)
+    when it names one; the model's answer alone without kicad-cli, or with
+    ``ask_kicad=False`` (a caller that asks KiCad itself and wants only WHY)."""
     dru = os.path.splitext(board_path)[0] + '.kicad_dru' if board_path else ''
     if not dru or not os.path.isfile(dru):
         return []
@@ -2338,20 +2759,46 @@ def read_board_kicad_refusals(board_path: Optional[str]) -> List[dict]:
         text = open(dru, encoding='utf-8').read()
     except OSError:
         return []
-    return dru_refusals(text, parse_dru(text)[0])
+    model = dru_refusals(text, parse_dru(text)[0])
+    if not ask_kicad:
+        return model
+    try:
+        from dru_load import refusals
+        return refusals(text, model, board_path=board_path)
+    except Exception:                                          # noqa: BLE001
+        return model
 
 
 def relaxing_rules(rules, board_min) -> List[dict]:
     """#1649: the `.kicad_dru` rules that set a minimum BELOW the board-wide
     one Board Setup declares for the same kind (``board_min``: the
     ``min_*`` keys of `BOARD_MIN_KEYS`), each ``{rule, kind, min, board,
-    board_key, condition, layer}``. Such a rule licenses a smaller size only on the
+    board_key, condition, layer, courtyard, unresolved}``. Such a rule licenses a smaller size only on the
     items its condition binds, so a request below the board minimum belongs
-    on a step scoped to them. In file order."""
+    on a step scoped to them. In file order.
+
+    #1805: a rule whose condition is not fully read is listed too.
+    ``courtyard`` names the parts its courtyard terms name, when they are all
+    it does not read: it binds by POSITION, inside those courtyards only.
+    ``unresolved`` is why it could not be read otherwise (it may relax). A
+    rule its courtyard terms do not CONFINE to the parts (`_courtyard_confines`:
+    a negated term, `!A.insideCourtyard('U1')`, or one ORed with another,
+    `A.insideCourtyard('U1') || A.NetName == 'X'`) binds outside them, so it
+    names no courtyard and is ``unresolved``.
+    A rule unread for anything but its condition (an ignored severity, a
+    value, a non-copper layer clause) relaxes nothing and is left out."""
     out = []
     for r in rules or ():
-        if r.unsupported:
+        if r.unsupported and not r.unsupported.startswith('condition'):
             continue
+        cy = sorted(_courtyard_patterns(r.courtyard_condition))
+        unresolved = r.unsupported if r.unsupported and not cy else None
+        if cy and not _courtyard_confines(r.courtyard_condition):
+            cy, unresolved = [], (
+                'a negated courtyard term: it binds by position, outside the part'
+                if _courtyard_negated(r.courtyard_condition) else
+                'a courtyard term another term stands in for (||): it binds '
+                'outside the part too')
         for kind, spec in sorted(r.constraints.items()):
             key = BOARD_MIN_KEYS.get(kind)
             v, b = spec.get('min'), (board_min or {}).get(key)
@@ -2359,7 +2806,64 @@ def relaxing_rules(rules, board_min) -> List[dict]:
                     and v < b - 1e-9:
                 out.append({'rule': r.name, 'kind': kind, 'min': v, 'board': b,
                             'board_key': key, 'condition': r.condition_src,
-                            'layer': r.layer_clause})
+                            'layer': r.layer_clause, 'courtyard': cy,
+                            'unresolved': unresolved})
+    return out
+
+
+def relaxed_via_nets(dr: 'DesignRules', pcb_data, rows) -> Dict[str, Dict[str, object]]:
+    """#1805: for each `relaxing_rules` row of a via kind (`VIA_SIZE_KINDS`),
+    the nets whose via the rule binds, ``{rule: {'nets': [names], 'how': ...}}``
+    keyed by rule name. ``how`` is 'condition' (read exactly), 'courtyard'
+    (an UPPER BOUND: a courtyard term read as "the net has a pad on that
+    part"; KiCad binds the via by where it stands, so the same net's via
+    outside the courtyard is held to the board minimum), 'may' (nets the
+    unread condition does not rule out), or 'every' (no condition).
+
+    A `(layer ...)` clause is read as KiCad reads it for a via
+    (`_rule_matches`): it does not empty the list where KiCad binds the via
+    through it (outer, "F.Cu"), and does where KiCad binds none."""
+    out: Dict[str, Dict[str, object]] = {}
+    by_name = {r.name: r for r in dr.rules}
+    pads_on: Dict[int, Set[str]] = {}
+    for key, fp in (getattr(pcb_data, 'footprints', None) or {}).items():
+        for pad in getattr(fp, 'pads', ()) or ():
+            if getattr(pad, 'net_id', 0):
+                pads_on.setdefault(int(pad.net_id), set()).add(key)
+    ctx_names = dr._net_name_set()
+    copper = list(dr.copper_layers or ())
+    for row in rows:
+        r = by_name.get(row['rule'])
+        if r is None or row['kind'] not in VIA_SIZE_KINDS or r.name in out:
+            continue
+        ctx = (row['kind'], ctx_names)
+        if not _rule_matches(replace(r, condition=None), dr.item_for_net(0, 'via'),
+                             None, None, copper, ctx):
+            # its layer clause binds no via, whatever the condition names
+            out[r.name] = {'nets': [], 'how': 'condition'}
+            continue
+        if r.condition_src is None:
+            out[r.name] = {'nets': [], 'how': 'every'}
+            continue
+        nets = []
+        maybe = parse_condition_maybe(r.condition_src) if row.get('unresolved') else None
+        for nid, name in sorted(dr.net_names.items(), key=lambda kv: kv[1]):
+            if not nid or not name:
+                continue
+            item = dr.item_for_net(nid, 'via')
+            if row.get('courtyard'):
+                cy = frozenset((dr.footprint_ids.get(k, (k, None)) + (s,))
+                               for k in pads_on.get(nid, ()) for s in ('front', 'back'))
+                hit = _rule_matches(r, replace(item, courtyards=cy), None, None,
+                                    copper, ctx, r.courtyard_condition)
+            elif maybe is not None:
+                hit = _eval3(maybe, item, None, None, ctx) is not False
+            else:
+                hit = _rule_matches(r, item, None, None, copper, ctx)
+            if hit:
+                nets.append(name)
+        out[r.name] = {'nets': nets, 'how': ('courtyard' if row.get('courtyard') else
+                                             'may' if maybe is not None else 'condition')}
     return out
 
 
@@ -2473,7 +2977,7 @@ def board_setup_via_grade(pcb_data, vias, board_path: Optional[str] = None,
 
 
 def disclose_board_setup_vias(pcb_data, vias, board_path: Optional[str] = None,
-                              rules=None) -> List[dict]:
+                              rules=None, echo: bool = True) -> List[dict]:
     """`board_setup_via_grade`, printed one line per row: the end-of-step
     disclosure of vias laid below the board's own Board Setup minimum, which
     a self-sized via is under any policy but ``board`` (#1775). Returns the
@@ -2481,7 +2985,8 @@ def disclose_board_setup_vias(pcb_data, vias, board_path: Optional[str] = None,
     rows = board_setup_via_grade(pcb_data, vias, board_path, rules)
     ring = [r for r in rows if 'smallest_ring' in r]
     size = [r for r in rows if 'smallest_ring' not in r]
-    for line in annular_grade_lines(ring) + via_size_grade_lines(size):
+    for line in (annular_grade_lines(ring) + via_size_grade_lines(size)
+                 if echo else ()):
         print(f"  WARNING: {line}; the project writeback is off, so the minimum "
               f"ships as declared (--escalation board sizes a self-sized via to it)")
     return rows
@@ -2573,13 +3078,17 @@ def edge_rule_grade_lines(rows) -> List[str]:
     return out
 
 
-def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = None) -> dict:
+def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = None,
+                        echo: bool = True) -> dict:
     """The rule grades of one routing step's own copper, printed per rule and
     returned as `JSON_SUMMARY.design_rules` keys: `annular_rules` (#1649),
-    `via_rules` (#1676), `edge_rules` (#1678) and `board_setup_vias` (#1775,
+    `via_rules` (#1676), `edge_rules` (#1678), `hole_rules` (#1853) and
+    `board_setup_vias` (#1775,
     the vias below a Board Setup minimum the writeback will not lower). A rule broken by a descent is
     named here whatever the policy that allowed the descent. A disclosure only:
-    it changes no copper. Both routing engines call it, so both fronts get it."""
+    it changes no copper. Both routing engines call it, so both fronts get it.
+    ``echo`` False grades without printing (the outermost route run's grade
+    of the copper it ships, `route_summary.STEP_RULE_KEYS`)."""
     vias = [v for r in results for v in (r.get('new_vias') or [])]
     segs = [s for r in results for s in (r.get('new_segments') or [])]
     out = {}
@@ -2592,9 +3101,16 @@ def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = No
     eg = edge_rule_grade(pcb_data, segs, vias, board_path or rules.source or None)
     if eg:
         out['edge_rules'] = eg
-    for line in annular_grade_lines(ag) + via_size_grade_lines(vg) + edge_rule_grade_lines(eg):
+    from check_drc import hole_rule_step_grade, hole_rule_grade_lines
+    hg = hole_rule_step_grade(pcb_data, rules, segs, vias)     # #1853
+    if hg:
+        out['hole_rules'] = hg
+    for line in (annular_grade_lines(ag) + via_size_grade_lines(vg)
+                 + edge_rule_grade_lines(eg) + hole_rule_grade_lines(hg)
+                 if echo else ()):
         print(f"  {line}")
-    bs = disclose_board_setup_vias(pcb_data, vias, board_path or rules.source or None, rules)
+    bs = disclose_board_setup_vias(pcb_data, vias, board_path or rules.source or None, rules,
+                                   echo=echo)
     if bs:
         out['board_setup_vias'] = bs
     return out
@@ -2690,6 +3206,301 @@ def _has_unknown(node) -> bool:
     if not isinstance(node, tuple) or not node:
         return False
     return node[0] == 'unknown' or any(_has_unknown(c) for c in node[1:])
+
+
+def _courtyard_patterns(node) -> Set[str]:
+    """Every footprint pattern the courtyard terms of an AST name."""
+    if not isinstance(node, tuple) or not node:
+        return set()
+    if node[0] == 'courtyard':
+        return {node[3]}
+    out: Set[str] = set()
+    for c in node[1:]:
+        out |= _courtyard_patterns(c)
+    return out
+
+
+def _courtyard_confines(node) -> bool:
+    """The condition AST is false wherever every courtyard term is false: the
+    rule binds an item only inside a courtyard it names. A term under a `!`
+    (`!A.insideCourtyard('U1')`) or beside an `||` that another term can
+    satisfy does not confine it."""
+    def false_without(n):           # false when every courtyard term is false
+        if not isinstance(n, tuple) or not n:
+            return False
+        op = n[0]
+        if op == 'courtyard':
+            return True
+        if op == 'and':
+            return any(false_without(c) for c in n[1:])
+        if op == 'or':
+            return all(false_without(c) for c in n[1:])
+        if op == 'not':
+            return true_without(n[1])
+        return False
+
+    def true_without(n):            # true when every courtyard term is false
+        if not isinstance(n, tuple) or not n:
+            return False
+        op = n[0]
+        if op == 'and':
+            return all(true_without(c) for c in n[1:])
+        if op == 'or':
+            return any(true_without(c) for c in n[1:])
+        if op == 'not':
+            return false_without(n[1])
+        return False
+    return false_without(node)
+
+
+def _courtyard_negated(node, odd: bool = False) -> bool:
+    """A courtyard term of an AST stands under an odd number of negations: it
+    holds for an item OUTSIDE the part it names."""
+    if not isinstance(node, tuple) or not node:
+        return False
+    if node[0] == 'courtyard':
+        return odd
+    if node[0] == 'not':
+        odd = not odd
+    return any(_courtyard_negated(c, odd) for c in node[1:])
+
+
+def _pad_copper_geometry(pad):
+    """(shape, radius) of a pad's copper as check_drc measures it
+    (`_pad_copper_core`: custom polygons, round corners, tilt): the copper is
+    ``shape`` grown by ``radius``. (None, 0.0) for a pad with no shape."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+    from check_drc import _pad_copper_core
+    polys, r = _pad_copper_core(pad)
+    parts = []
+    for poly in polys:
+        pts = list(dict.fromkeys((float(x), float(y)) for x, y in poly))
+        if len(pts) == 1:
+            parts.append(Point(pts[0]))
+        elif len(pts) == 2 or Polygon(pts).area <= 1e-12:
+            parts.append(LineString(pts))
+        else:
+            parts.append(Polygon(pts))
+    if not parts:
+        return None, 0.0
+    return (parts[0] if len(parts) == 1 else unary_union(parts)), r
+
+
+def _ast_area_names(node, out: set) -> set:
+    """Every rule-area name an areas=True condition AST mentions."""
+    if isinstance(node, tuple) and node:
+        if node[0] == 'area':
+            out.add(node[3])
+        else:
+            for x in node[1:]:
+                _ast_area_names(x, out)
+    return out
+
+
+def _area_copper_layers(tokens, copper: List[str]) -> FrozenSet[str]:
+    """A rule area's `(layers ...)` tokens as the board's copper layers: the
+    composite tokens KiCad reads on a zone (`*.Cu`, `F&B.Cu`, `*In.Cu`)
+    expanded as the keep-out reader expands them (`net_keepouts`), so an area
+    spelled with one holds items on every layer it stands for. The tokens as
+    written are kept too: an item's layer is never a composite name."""
+    from net_keepouts import _expand_layers
+    toks = set(tokens or ())
+    if not toks:
+        return frozenset()
+    if '*In.Cu' in toks:
+        toks |= {l for l in copper if l not in ('F.Cu', 'B.Cu')}
+    return frozenset(_expand_layers(toks, copper)) | frozenset(toks)
+
+
+class AreaIndex:
+    """#1843:which of the board's named rule areas an item's copper stands
+    in, for the rules that bind by one (`Rule.area_scoped_condition`), as
+    kicad-cli 10.0.8 reads the area predicates (measured on probe boards):
+    an item partly inside an area is in it (`insideArea()` is
+    `intersectsArea()`), `enclosedByArea()` wants the whole item inside, and
+    an area holds an item only on the copper layers the area is drawn on.
+
+    The areas are the parser's (`board_info.keepouts`, every rule area with
+    a name). `names` is the areas found; a rule naming one the board does
+    not have is cleared of its `area_scoped_condition`, so it stays unread
+    and named rather than read as binding nothing."""
+
+    def __init__(self, rules: 'DesignRules', pcb_data):
+        from shapely.geometry import Polygon
+        wanted: Set[str] = set()
+        for r in rules.rules:
+            if r.area_scoped_condition is not None:
+                wanted |= _ast_area_names(r.area_scoped_condition, set())
+        # (name, layers, polygon, bounds, polygon grown by 1e-9 for `contains`)
+        self.areas: List[tuple] = []
+        board = getattr(pcb_data, 'board_info', None)
+        copper = list(rules.copper_layers or getattr(board, 'copper_layers', None) or ())
+        for ko in (getattr(board, 'keepouts', None) or []) if wanted else []:
+            name = ko.get('name')
+            pts = ko.get('polygon') or []
+            if name not in wanted or len(pts) < 3:
+                continue
+            try:
+                g = Polygon(pts, [h for h in (ko.get('holes') or []) if len(h) >= 3])
+                if not g.is_valid:
+                    g = g.buffer(0)
+            except Exception:                                  # noqa: BLE001
+                continue
+            if g.is_empty:
+                continue
+            self.areas.append((name, _area_copper_layers(ko.get('layers'), copper),
+                               g, g.bounds, g.buffer(1e-9)))
+        self.names = frozenset(a[0] for a in self.areas)
+        for r in rules.rules:
+            if r.area_scoped_condition is not None and not (
+                    _ast_area_names(r.area_scoped_condition, set()) <= self.names):
+                r.area_scoped_condition = None
+
+    def _of(self, geom, r: float, layers):
+        """(overlapped, enclosing) (name, layer) pairs for copper ``geom``
+        grown by ``r`` on ``layers``. Copper that only reaches an area's
+        edge does not overlap it."""
+        over, inside = set(), set()
+        layers = set(layers)
+        gx0, gy0, gx1, gy1 = geom.bounds
+        shape = None
+        for name, alayers, g, (x0, y0, x1, y1), grown in self.areas:
+            on = layers & alayers
+            if not on or gx1 + r < x0 or gx0 - r > x1 or gy1 + r < y0 or gy0 - r > y1:
+                continue
+            if r > 0:
+                if g.distance(geom) >= r - 1e-9:
+                    continue
+            elif not g.intersects(geom) or g.intersection(geom).area <= 1e-12:
+                continue
+            for layer in on:
+                over.add((name, layer))
+            if shape is None:
+                shape = geom.buffer(r) if r > 0 else geom
+            if grown.contains(shape):
+                for layer in on:
+                    inside.add((name, layer))
+        return frozenset(over), frozenset(inside)
+
+    def of_track(self, seg):
+        from shapely.geometry import LineString, Point
+        a = (float(seg.start_x), float(seg.start_y))
+        b = (float(seg.end_x), float(seg.end_y))
+        geom = Point(a) if a == b else LineString([a, b])
+        return self._of(geom, float(seg.width or 0.0) / 2.0, (seg.layer,))
+
+    def of_via(self, via, copper_layers):
+        from shapely.geometry import Point
+        from geometry_utils import via_copper_layers
+        try:
+            layers = via_copper_layers(via, list(copper_layers))
+        except Exception:                                      # noqa: BLE001
+            layers = list(copper_layers)
+        return self._of(Point(float(via.x), float(via.y)), float(via.size) / 2.0, layers)
+
+    def of_pad(self, pad, copper_layers):
+        from check_drc import pad_copper_layers
+        geom, r = _pad_copper_geometry(pad)
+        if geom is None:
+            return frozenset(), frozenset()
+        return self._of(geom, r, pad_copper_layers(pad, list(copper_layers)))
+
+
+class CourtyardIndex:
+    """#1805: the part courtyards a via overlaps (#1832: a track or a pad,
+    `of_capsule` / `of_pad`), as KiCad's courtyard
+    predicates read them (`_COURTYARD_FUNCS`): its disc against each drawn
+    courtyard of the parts the board's courtyard rules name, tagged 'front'
+    for the courtyard on the part's own side and 'back' for the other. The
+    outlines are placement's (`placement.parser.extract_courtyard_shapes`,
+    nested contours even-odd, as KiCad assembles a courtyard).
+
+    `available` is False when the outlines could not be read: an item then
+    gets no `courtyards` and its courtyard rules stay unread, as before."""
+
+    def __init__(self, rules: 'DesignRules', pcb_data, board_path: Optional[str]):
+        self.parts: List[tuple] = []
+        self.available = False
+        patterns: Set[str] = set()
+        for r in rules.rules:
+            patterns |= _courtyard_patterns(r.courtyard_condition)
+        path = board_path or getattr(pcb_data, 'source_path', '') or ''
+        if not patterns or not path:
+            return
+        try:
+            import _placer_path  # noqa: F401  (placement lives in py_placer/)
+            from placement.parser import extract_courtyard_shapes
+            from placement.legality import footprint_side
+            from shapely import affinity
+            shapes = extract_courtyard_shapes(path)
+        except Exception:                                      # noqa: BLE001
+            return
+        self.available = True
+        for key, fp in (getattr(pcb_data, 'footprints', None) or {}).items():
+            ref, lib = rules.footprint_ids.get(key, (key, None))
+            if not any(_footprint_named(p, ref, lib) for p in patterns):
+                continue
+            own = footprint_side(fp)
+            rot = (getattr(fp, 'rotation', 0.0) or 0.0) % 360
+            for side, (geom, _how) in (shapes.get(key) or {}).items():
+                g = geom if abs(rot) < 0.01 else affinity.rotate(geom, -rot, origin=(0, 0))
+                g = affinity.translate(g, fp.x, fp.y)
+                self.parts.append((ref, lib, 'front' if side == own else 'back', g, g.bounds))
+
+    def of_disc(self, x: float, y: float, r: float) -> FrozenSet[Tuple[str, Optional[str], str]]:
+        """The courtyards a disc of radius ``r`` at (x, y) overlaps (a
+        tangent disc does not, as in KiCad)."""
+        from shapely.geometry import Point
+        out = set()
+        p = None
+        for ref, lib, side, g, (x0, y0, x1, y1) in self.parts:
+            if x < x0 - r or x > x1 + r or y < y0 - r or y > y1 + r:
+                continue
+            p = p or Point(x, y)
+            if g.distance(p) < r - 1e-9:
+                out.add((ref, lib, side))
+        return frozenset(out)
+
+    def of_capsule(self, x0: float, y0: float, x1: float, y1: float,
+                   r: float) -> FrozenSet[Tuple[str, Optional[str], str]]:
+        """#1832: the courtyards a track of half-width ``r`` overlaps, its
+        capsule against each outline as `of_disc` reads a via's disc. Measured
+        on kicad-cli 10.0.6: a track partly inside binds, one whose capsule
+        only reaches the courtyard's edge does not, and the track's own layer
+        does not matter (a B.Cu track under a front part's F.CrtYd binds
+        insideFrontCourtyard())."""
+        from shapely.geometry import LineString, Point
+        geom = (Point(x0, y0) if (x0, y0) == (x1, y1)
+                else LineString([(x0, y0), (x1, y1)]))
+        return self._of(geom, r)
+
+    def of_pad(self, pad) -> FrozenSet[Tuple[str, Optional[str], str]]:
+        """#1832: the courtyards a pad's copper overlaps -- its shape as
+        check_drc measures it (`_pad_copper_core`: custom polygons, round
+        corners, tilt). Measured on kicad-cli 10.0.6: a pad straddling the
+        courtyard's edge binds."""
+        geom, r = _pad_copper_geometry(pad)
+        if geom is None:
+            return frozenset()
+        return self._of(geom, r)
+
+    def _of(self, geom, r: float) -> FrozenSet[Tuple[str, Optional[str], str]]:
+        """The courtyards ``geom`` grown by ``r`` overlaps: within less than
+        ``r`` of the outline, or, at ``r`` 0, sharing area with it (a shape
+        that only touches the outline does not, as in KiCad)."""
+        bx0, by0, bx1, by1 = geom.bounds
+        out = set()
+        for ref, lib, side, g, (x0, y0, x1, y1) in self.parts:
+            if bx1 < x0 - r or bx0 > x1 + r or by1 < y0 - r or by0 > y1 + r:
+                continue
+            if r > 0:
+                hit = g.distance(geom) < r - 1e-9
+            else:
+                hit = g.intersects(geom) and g.intersection(geom).area > 1e-12
+            if hit:
+                out.add((ref, lib, side))
+        return frozenset(out)
 
 
 class PadEdgeRules:
@@ -2969,6 +3780,8 @@ def _netclass_dict(nc) -> dict:
          'track_width': g('GetTrackWidth', 'HasTrackWidth'),
          'via_diameter': g('GetViaDiameter', 'HasViaDiameter'),
          'via_drill': g('GetViaDrill', 'HasViaDrill'),
+         'microvia_diameter': g('GetuViaDiameter', 'HasuViaDiameter'),
+         'microvia_drill': g('GetuViaDrill', 'HasuViaDrill'),
          'diff_pair_width': g('GetDiffPairWidth', 'HasDiffPairWidth'),
          'diff_pair_gap': g('GetDiffPairGap', 'HasDiffPairGap')}
     try:
@@ -3103,6 +3916,26 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
                 config.edge_floors, pcb_data)
         except Exception as e:                                 # noqa: BLE001
             rules.notes.append(f"per-net edge bands not derived ({e})")
+    if net_keepouts and pcb_data is not None:
+        # #1843: and the clearance rules scoped by a rule area
+        from area_clearance import mark_honoured
+        mark_honoured(rules, pcb_data, config)
+        # #1116: no via in an edge connector's contact finger
+        try:
+            from net_keepouts import derive_contact_fingers
+            rules.net_keepouts = list(rules.net_keepouts) + derive_contact_fingers(pcb_data)
+        except Exception as e:                                 # noqa: BLE001
+            rules.notes.append(f"contact-finger via keep-outs not derived ({e})")
+    if net_keepouts and pcb_data is not None:
+        # #1853: the hole_clearance rules the route steps read
+        from hole_rule_routing import mark_honoured as _mark_holes
+        _mark_holes(rules, pcb_data)
+    try:
+        from hole_rule_routing import install as _install_holes
+        _install_holes(config, pcb_data)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  ERROR: hole_clearance rules not installed ({e}); this run routes "
+              f"WITHOUT them")
     key = (os.path.abspath(rules.source) if rules.source else '',
            tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
                  for r in rules.rules))

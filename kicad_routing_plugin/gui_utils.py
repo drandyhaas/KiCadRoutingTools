@@ -377,10 +377,81 @@ def persist_live_tool_records(board=None, same_net_pad_clearance=None):
         persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances())
         persist_power_widths(_pro, consume_power_widths())
         persist_pour_served_pads(_pro, consume_pour_served_pads())
+        # #1807: the improvement gate's record of this step's trade.
+        from improvement_gate import consume_lap_history
+        from protected_nets import persist_lap_history
+        persist_lap_history(_pro, consume_lap_history())
         if same_net_pad_clearance is not None and same_net_pad_clearance > 0:
             persist_same_net_pad_clearance(_pro, same_net_pad_clearance)
     except Exception:
         pass
+
+
+def _live_step_board(pcb_data, results_data):
+    """``(board, segs, vias)``: the board the step's copper was drawn on --
+    the routed PCBData without the copper this step removed, as a namespace
+    the copper-to-hole census reads -- and the copper the step drew."""
+    segs, vias = [], []
+    for result in results_data.get('results', []):
+        segs.extend(result.get('new_segments', []))
+        vias.extend(result.get('new_vias', []))
+    segs.extend(results_data.get('all_swap_segments', []))
+    vias.extend(results_data.get('all_swap_vias', []))
+    from types import SimpleNamespace
+
+    def _sk(s):
+        a = (round(s.start_x, 4), round(s.start_y, 4))
+        b = (round(s.end_x, 4), round(s.end_y, 4))
+        return (min(a, b), max(a, b), s.layer, s.net_id)
+
+    def _vk(v):
+        return (round(v.x, 4), round(v.y, 4), v.net_id)
+    _gone_s = {_sk(s) for s in results_data.get('segments_to_remove') or ()}
+    _gone_v = {_vk(v) for v in results_data.get('vias_to_remove') or ()}
+    pcb = SimpleNamespace(
+        segments=[s for s in pcb_data.segments if _sk(s) not in _gone_s],
+        vias=[v for v in pcb_data.vias if _vk(v) not in _gone_v],
+        footprints=pcb_data.footprints,
+        board_info=pcb_data.board_info)
+    return pcb, segs, vias
+
+
+def live_micro_via_rule(pcb_data, board, results_data, clearance):
+    """#1842: the GUI twin of fix_project_for_output's micro via rule: the
+    micro vias of the board as this step leaves it (the routed PCBData and
+    the copper the step drew) held by `fix_kicad_drc_settings.
+    MICRO_VIA_RULE` in the `.kicad_dru` beside the board file, against the
+    minimums the project declares before this step's writeback --
+    `write_micro_via_rule`, the writer both fronts call. The IPC twin of
+    main's helper: the board path comes from the adapter (`board` unused),
+    and the declared minimums from the project file, read the way the
+    writeback reads them (`declared_project_rule`), since kipy cannot read
+    the live design settings. The file on disk still holds the copper from
+    before this step, so fix_project_for_output's own file read cannot see
+    this step's micro vias. Called before `apply_drc_settings_fix`, under
+    the same "Fix DRC settings" gate."""
+    try:
+        from kicad_ipc_adapter import get_board_full_path
+        path = get_board_full_path() or ''
+        if not path:
+            return None
+        from fix_kicad_drc_settings import declared_project_rule, write_micro_via_rule
+        pcb, segs, vias = _live_step_board(pcb_data, results_data)
+        if not any(getattr(v, 'via_type', None) == 'micro' for v in list(pcb.vias) + vias):
+            return None
+        from types import SimpleNamespace
+        after = SimpleNamespace(segments=list(pcb.segments) + segs,
+                                vias=list(pcb.vias) + vias,
+                                footprints=pcb.footprints, board_info=pcb.board_info)
+        rules = {}
+        for key in ('min_via_annular_width', 'min_hole_clearance'):
+            v = declared_project_rule(path, key)
+            if v is not None:
+                rules[key] = v
+        return write_micro_via_rule(after, path, rules, clearance)
+    except Exception as e:                                  # noqa: BLE001
+        print(f"(micro via rule not written: {e})")
+        return None
 
 
 def held_hole_clearance_live(pcb_data, board, results_data, clearance):
@@ -402,30 +473,8 @@ def held_hole_clearance_live(pcb_data, board, results_data, clearance):
                                              get_board_full_path() or None)
         if not held or clearance is None or held <= clearance:
             return None
-        segs, vias = [], []
-        for result in results_data.get('results', []):
-            segs.extend(result.get('new_segments', []))
-            vias.extend(result.get('new_vias', []))
-        segs.extend(results_data.get('all_swap_segments', []))
-        vias.extend(results_data.get('all_swap_vias', []))
-        # The board the copper was drawn on: the routed PCBData without the
-        # copper this step removed.
-        from types import SimpleNamespace
-
-        def _sk(s):
-            a = (round(s.start_x, 4), round(s.start_y, 4))
-            b = (round(s.end_x, 4), round(s.end_y, 4))
-            return (min(a, b), max(a, b), s.layer, s.net_id)
-
-        def _vk(v):
-            return (round(v.x, 4), round(v.y, 4), v.net_id)
-        _gone_s = {_sk(s) for s in results_data.get('segments_to_remove') or ()}
-        _gone_v = {_vk(v) for v in results_data.get('vias_to_remove') or ()}
-        pcb = SimpleNamespace(
-            segments=[s for s in pcb_data.segments if _sk(s) not in _gone_s],
-            vias=[v for v in pcb_data.vias if _vk(v) not in _gone_v],
-            footprints=pcb_data.footprints,
-            board_info=pcb_data.board_info)
+        pcb, segs, vias = _live_step_board(pcb_data, results_data)
+        # (#1842: a micro via's pairs are left out -- their rule's)
         step_min = step_copper_to_hole(pcb, segs, vias, held, clearance)
         v = held_hole_clearance(held, clearance, step_min)
         # #1493: a floor written under the one held is ledgered, as the CLI's
@@ -441,20 +490,34 @@ def held_hole_clearance_live(pcb_data, board, results_data, clearance):
         return None
 
 
-def held_hole_clearance_dicts(pcb_data, board, tracks, vias, clearance):
-    """:func:`held_hole_clearance_live` for a tab whose copper is the
-    engine's track and via DICTS (the fanout tab, #1568; the Planes tab,
-    #1577) rather than routing results."""
+def _dict_results(tracks, vias):
+    """An engine's track and via DICTS as the results_data the live
+    helpers read."""
     from kicad_parser import Segment, Via
     segs = [Segment(start_x=t['start'][0], start_y=t['start'][1],
                     end_x=t['end'][0], end_y=t['end'][1], width=t['width'],
                     layer=t['layer'], net_id=t['net_id']) for t in tracks]
     new_vias = [Via(x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
                     layers=list(v.get('layers') or ['F.Cu', 'B.Cu']),
-                    net_id=v['net_id']) for v in vias]
-    return held_hole_clearance_live(
-        pcb_data, board,
-        {'results': [{'new_segments': segs, 'new_vias': new_vias}]}, clearance)
+                    net_id=v['net_id'],
+                    # #1842: a via of a span keeps its type (a micro via's
+                    # pairs are its rule's, micro_via_floors)
+                    via_type=v.get('via_type') or 'through') for v in vias]
+    return {'results': [{'new_segments': segs, 'new_vias': new_vias}]}
+
+
+def live_micro_via_rule_dicts(pcb_data, board, tracks, vias, clearance):
+    """:func:`live_micro_via_rule` for a tab whose copper is the engine's
+    track and via DICTS (the fanout and Planes tabs)."""
+    return live_micro_via_rule(pcb_data, board, _dict_results(tracks, vias), clearance)
+
+
+def held_hole_clearance_dicts(pcb_data, board, tracks, vias, clearance):
+    """:func:`held_hole_clearance_live` for a tab whose copper is the
+    engine's track and via DICTS (the fanout tab, #1568; the Planes tab,
+    #1577) rather than routing results."""
+    return held_hole_clearance_live(pcb_data, board, _dict_results(tracks, vias),
+                                    clearance)
 
 
 class StdoutRedirector:

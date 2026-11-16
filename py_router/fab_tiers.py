@@ -136,6 +136,25 @@ _FAB_FLOORS = {
     },
 }
 
+#: #502: the drill aspect ratio (board thickness / finished hole) each tier's
+#: through via is plated at: the tier's own floor drill at the 1.6 mm board a
+#: fab quotes its minimum drill for (1.6 / 0.20, 1.6 / 0.15). It raises
+#: nothing on a board up to 1.6 mm thick; on a thicker one a rung's smallest
+#: hole is thickness / ratio (:func:`min_drill_for_thickness`).
+ASPECT_REFERENCE_THICKNESS = 1.6
+MAX_ASPECT_RATIO = {'standard': 8.0, 'advanced': 10.67}
+#: A fab holds a board's finished thickness to +-10%, so a board is drilled as
+#: the nominal it is within 10% of: a drill legal at a thickness T stays legal
+#: up to T * 1.1 (a 1.6 mm board whose stackup sums to 1.63 is a 1.6 mm board,
+#: and its 0.15 drill is the one a fab quotes for it). Past that the drill is
+#: raised to the full thickness / ratio.
+ASPECT_THICKNESS_TOLERANCE = 0.10
+#: The thickest standard fab board (mm). A declared thickness past it is taken
+#: for a stackup that was never set (KiCad gives every dielectric a layer adds
+#: 1.51 mm, so a 4-layer board left at its 2-layer stackup reads 4.67 mm), not
+#: for the board the fab drills: the aspect floor stays inert and the run warns.
+MAX_STANDARD_THICKNESS = 3.2
+
 TIERS = ('standard', 'advanced', 'auto')
 ESCALATION_POLICIES = ('off', 'board', 'fab')
 # The defaults live in routing_defaults (ONE place, read by the CLIs and the
@@ -198,10 +217,21 @@ _BOARD_FLOORS = {}
 # writeback off): the board minimum KiCad grades such a clearance at, which
 # the Default class does not bind. None = no such raise this run.
 _BOARD_RULE_CLEARANCE = None
+# #1914: the copper-to-hole floor the descent ladder PREFERS a via's ring to
+# hold, as a (hole_clearance, clearance) pair in mm, set per run the same way
+# and cleared at the start of each run (set_escalation_policy). None = not
+# installed: the ladder is the tier's, unchanged.
+_VIA_HOLE_CLEARANCE = None
 # #1775: whether this run's DRC-floor writeback will run (--no-fix-drc-settings
 # / the GUI's "Fix DRC settings" box unticked = False): a via below a Board
 # Setup minimum the writeback will not lower ships graded against it.
 _WRITEBACK = True
+
+# #502: the board's thickness in mm (``BoardInfo.board_thickness``), set per
+# run the same way; None = unknown, and the aspect-ratio floor is inert.
+_BOARD_THICKNESS = None
+# "the installed thickness", for the functions that also take one explicitly
+_INSTALLED = object()
 
 #: The key :func:`floor_board_clearance_at_class` carries that floor under in
 #: the floors dict it returns; :func:`set_escalation_policy` reads it off.
@@ -234,7 +264,11 @@ def set_escalation_policy(policy, board_floors=None, writeback=True):
     clearances (:func:`rule_fab_floors`, #1630). ``writeback`` is whether the
     run's DRC-floor writeback will run (:func:`project_writeback`, #1775)."""
     global _ESCALATION, _BOARD_FLOORS, _BOARD_RULE_CLEARANCE, _WRITEBACK
+    global _VIA_HOLE_CLEARANCE
     _WRITEBACK = bool(writeback)
+    # #1914: a run installs its own copper-to-hole pair after this call (the
+    # two fronts' setters do); one run's pair never carries into the next.
+    _VIA_HOLE_CLEARANCE = None
     policy = policy or DEFAULT_ESCALATION
     if policy not in ESCALATION_POLICIES:
         raise ValueError(f"unknown escalation policy {policy!r} "
@@ -245,6 +279,33 @@ def set_escalation_policy(policy, board_floors=None, writeback=True):
     rc = (board_floors or {}).get(RULE_CLEARANCE_KEY)
     _BOARD_RULE_CLEARANCE = float(rc) if rc is not None else None
     reset_ledger()
+
+
+def set_board_thickness(thickness):
+    """Install this run's board thickness in mm (#502), or None for unknown.
+    A thickness past :data:`MAX_STANDARD_THICKNESS` is installed (it is what
+    the board declares) but raises nothing, and is warned about here."""
+    global _BOARD_THICKNESS
+    _BOARD_THICKNESS = float(thickness) if thickness and float(thickness) > 0 else None
+    warning = aspect_inert_warning(_BOARD_THICKNESS)
+    if warning:
+        print(f"WARNING: {warning}")
+
+
+def aspect_inert_warning(thickness):
+    """#502: why the drill aspect-ratio floor is not applied to a board
+    ``thickness`` mm thick, or None when it is (or the thickness is unknown)."""
+    if not thickness or thickness <= MAX_STANDARD_THICKNESS + 1e-9:
+        return None
+    return (f"the board declares a {thickness:g} mm thickness, past the "
+            f"{MAX_STANDARD_THICKNESS:g} mm thickest standard board: the drill "
+            f"aspect-ratio floor is not applied. Check the Board Setup stackup "
+            f"(a dielectric left at KiCad's 1.51 mm default reads this way) and "
+            f"set the thickness the board is made at (#502).")
+
+
+def get_board_thickness():
+    return _BOARD_THICKNESS
 
 
 def get_escalation_policy():
@@ -588,8 +649,70 @@ def fab_floor_bucket(copper_layer_count):
                      fine_via_rung=len(fab_floor_ladder(n, 'auto', {})) > 2)
 
 
-def _tier_rungs(copper_layer_count, tier, overrides):
-    """The tier's rungs BEFORE the escalation policy is applied."""
+def aspect_ratio_for_drill(drill, copper_layer_count):
+    """The aspect ratio a rung of via ``drill`` is held to (#502): the
+    advanced tier's for a drill at or below the advanced floor drill, else the
+    standard's -- or, for a smaller drill a ``--fab-overrides`` file declares,
+    the ratio that drill makes at the reference thickness, so an override
+    never raises a drill on a board up to 1.6 mm thick either."""
+    import math
+    adv = _layer_floors(copper_layer_count)['advanced']['via_drill']
+    tier = MAX_ASPECT_RATIO['advanced' if drill <= adv + 1e-9 else 'standard']
+    return max(tier, math.ceil(ASPECT_REFERENCE_THICKNESS / drill * 100 - 1e-6) / 100)
+
+
+def min_drill_for_thickness(thickness, ratio):
+    """The smallest through hole (mm) a board ``thickness`` mm thick can be
+    plated at ``ratio``:1, rounded UP to the micron (#502)."""
+    import math
+    return math.ceil(round(thickness / ratio, 6) * 1000.0 - 1e-6) / 1000.0
+
+
+def aspect_raised_drill(drill, copper_layer_count, thickness):
+    """The drill (mm) a rung of ``drill`` is raised to on a board
+    ``thickness`` mm thick (#502), or None when it stays: the thickness is
+    unknown, past :data:`MAX_STANDARD_THICKNESS`, or within
+    :data:`ASPECT_THICKNESS_TOLERANCE` of the thickness ``drill`` is legal at."""
+    if (not drill or not thickness
+            or thickness > MAX_STANDARD_THICKNESS + 1e-9):
+        return None
+    ratio = aspect_ratio_for_drill(drill, copper_layer_count)
+    if thickness <= drill * ratio * (1.0 + ASPECT_THICKNESS_TOLERANCE) + 1e-9:
+        return None
+    need = min_drill_for_thickness(thickness, ratio)
+    return need if need > drill + 1e-9 else None
+
+
+def _aspect_raised(rungs, copper_layer_count, thickness):
+    """``rungs`` with each via drill raised to the board thickness's aspect
+    floor (#502, :func:`aspect_raised_drill`), the diameter grown to keep the
+    rung's own annular ring (:func:`_via_holding_ring`). Unchanged when no
+    rung's drill is raised."""
+    if not thickness:
+        return rungs
+    out = []
+    for r in rungs:
+        d = r.get('via_drill')
+        if d:
+            need = aspect_raised_drill(d, copper_layer_count, thickness)
+            if need:
+                r = dict(r, via_drill=need, via_diameter=_via_holding_ring(
+                    r['via_diameter'], need, (r['via_diameter'] - d) / 2.0))
+        out.append(r)
+    return out
+
+
+def _tier_rungs(copper_layer_count, tier, overrides, thickness=_INSTALLED):
+    """The tier's rungs BEFORE the escalation policy is applied, each via
+    drill raised to the board thickness's aspect floor (#502; ``thickness``
+    in mm, else the installed one, :func:`set_board_thickness`)."""
+    return _aspect_raised(_table_rungs(copper_layer_count, tier, overrides),
+                          copper_layer_count,
+                          _BOARD_THICKNESS if thickness is _INSTALLED else thickness)
+
+
+def _table_rungs(copper_layer_count, tier, overrides):
+    """The tier's rungs as the floor table states them."""
     base = _layer_floors(copper_layer_count)
     if tier not in TIERS:
         raise ValueError(f"unknown fab tier {tier!r} (expected one of {TIERS})")
@@ -630,6 +753,192 @@ def _via_holding_ring(diameter, drill, ring):
     if diameter >= need - 1e-9:
         return diameter
     return math.ceil(round(need, 6) * 1000.0 - 1e-6) / 1000.0
+
+
+def set_via_hole_clearance(hole_clearance, clearance):
+    """Install this run's copper-to-hole pair (#1914): ``hole_clearance`` is
+    the board's min_hole_clearance in mm (:func:`board_hole_clearance`) and
+    ``clearance`` the run's copper clearance. Either may be None (a front
+    that has no value to install), which clears the pair."""
+    global _VIA_HOLE_CLEARANCE
+    if hole_clearance is None or clearance is None:
+        _VIA_HOLE_CLEARANCE = None
+    else:
+        _VIA_HOLE_CLEARANCE = (float(hole_clearance), float(clearance))
+
+
+def get_via_hole_clearance():
+    """The installed ``(hole_clearance, clearance)`` pair, or None."""
+    return _VIA_HOLE_CLEARANCE
+
+
+def via_hole_ring():
+    """The annular ring a via must hold so another net's copper, kept at the
+    run's clearance off the via's copper, sits at the hole clearance off its
+    hole: ``max(0, hole_clearance - clearance)``. 0.0 when nothing is
+    installed, or the pair asks for no ring (a board declaring hole clearance
+    0, KiCad's "no check")."""
+    if not _VIA_HOLE_CLEARANCE:
+        return 0.0
+    hole_clearance, clearance = _VIA_HOLE_CLEARANCE
+    return max(0.0, hole_clearance - clearance)
+
+
+#: The ``kicad_routing_tools`` record that says ``rules.min_hole_clearance``
+#: holds a value a DRC-floor writeback wrote under the hole clearance the
+#: descent ladder preferred a ring for:
+#: ``{"rule": <the min_hole_clearance the writeback left, mm>,
+#:    "hole_clearance": <what the ladder resolved before it, mm>}``.
+#: Written by the writebacks (fix_kicad_drc_settings
+#: ``apply_targets_to_project`` / ``apply_targets_to_board``, through
+#: tool_records); read by :func:`board_hole_clearance` only, so what KiCad
+#: and check_drc grade the board at is untouched.
+HOLE_RING_RECORD_KEY = "via_ring_hole_clearance"
+
+
+def ring_hole_clearance(rule, origin=None, records=None):
+    """The hole clearance (mm) the descent ladder prefers a via's ring for,
+    from what the board holds: ``rule`` its ``min_hole_clearance`` (None when
+    it declares none), ``origin`` the chain's ``fab_floor_origin`` value
+    (None when absent), ``records`` its ``kicad_routing_tools`` namespace.
+
+    While ``rule`` still holds the value :data:`HOLE_RING_RECORD_KEY` says a
+    writeback left, the rule is the writeback's, not the author's, and the
+    record's ``hole_clearance`` stands. Any other rule value -- one the user
+    set, or a board no writeback touched -- is read as declared: a declared 0
+    is KiCad's "no check" (0, no ring), and nothing declared reads as KiCad's
+    factory 0.25 (``plane_fill_model.KICAD_FACTORY_HOLE_CLEARANCE``), which
+    KiCad grades such a board at. Raised to ``origin`` when that is larger."""
+    from plane_fill_model import KICAD_FACTORY_HOLE_CLEARANCE
+    v = None
+    rec = (records or {}).get(HOLE_RING_RECORD_KEY)
+    if isinstance(rec, dict) and isinstance(rule, (int, float)) \
+            and not isinstance(rule, bool):
+        try:
+            r, hc = float(rec.get("rule")), float(rec.get("hole_clearance"))
+        except (TypeError, ValueError):
+            r = hc = None
+        # 5 nm: a live rule is held in whole nm (as
+        # board_declared_min_clearance matches its record)
+        if r is not None and hc >= 0 and abs(float(rule) - r) <= 5e-6:
+            v = hc
+    if v is None:
+        v = (float(KICAD_FACTORY_HOLE_CLEARANCE) if rule is None
+             else max(0.0, float(rule)))
+    if origin and origin > v:
+        v = float(origin)
+    return v
+
+
+def board_hole_clearance(pcb_data=None, pcb_file=None):
+    """The copper-to-hole clearance (mm) KiCad grades this board's vias at,
+    which the descent ladder prefers a via's ring to hold (#1914). One
+    resolver for both fronts, :func:`ring_hole_clearance` over:
+
+    * the rule the board declares: the LIVE board's ``m_HoleClearance`` when
+      ``pcb_data`` was built from pcbnew and the board declares it, else the
+      sibling project's ``rules.min_hole_clearance`` (``pcb_file``, else
+      ``pcb_data.source_path``);
+    * the chain's ``fab_floor_origin`` -- the declaration before a writeback
+      lowered it (:func:`fix_kicad_drc_settings.declared_fab_floor`);
+    * the board's records (the live board's, else the file's, through
+      tool_records), whose :data:`HOLE_RING_RECORD_KEY` says when the rule is
+      a value a writeback wrote. A board whose input declared nothing has no
+      origin, and a step's writeback writes ``min_hole_clearance`` at the
+      clearance it routed: without the record a later step read that value
+      as the author's and preferred no ring (#1914 follow-up)."""
+    try:
+        from obstacle_map import _file_hole_floor, _live_hole_rule
+        path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
+        rule, origin = _file_hole_floor(path) if path else (None, None)
+        records = getattr(pcb_data, 'live_records_provider', None)
+        if callable(records):
+            ns = records() or {}
+            _o = (ns.get('fab_floor_origin') or {}).get('min_hole_clearance')
+            origin = (float(_o) if isinstance(_o, (int, float))
+                      and not isinstance(_o, bool) and _o > 0 else None)
+        else:
+            import tool_records
+            ns = tool_records.effective_namespace(path) if path else {}
+        live = _live_hole_rule(pcb_data) if pcb_data is not None else None
+    except Exception:                                           # noqa: BLE001
+        rule = origin = live = None
+        ns = {}
+    return ring_hole_clearance(live if live is not None else rule, origin, ns)
+
+
+def _apply_hole_ring(rungs, ring):
+    """Raise every rung's via diameter to hold ``ring`` round its drill
+    (#1914) and collapse the duplicates that raising makes -- the same
+    shape as :func:`_apply_board_floors`' ring raise, without a floor
+    dict: the hole clearance is a KiCad DRC floor, not a fab floor."""
+    out = []
+    for r in rungs:
+        rr = dict(r)
+        if rr.get('via_diameter') and rr.get('via_drill'):
+            rr['via_diameter'] = _via_holding_ring(rr['via_diameter'],
+                                                   rr['via_drill'], ring)
+            if rr.get('annular') is not None and rr['annular'] < ring:
+                rr['annular'] = ring
+        if not out or rr != out[-1]:
+            out.append(rr)
+    return out
+
+
+#: The key each rung of a hole-ring ladder carries (#1914): the index of the
+#: tier rung it was made from, 0 = the nominal. See :func:`rung_tier`.
+TIER_RUNG_KEY = 'tier_rung'
+
+
+def _prefer_hole_ring(rungs, ring):
+    """#1914: the ladder ``rungs`` with the copper-to-hole ring PREFERRED, not
+    required: each tier rung raised to hold ``ring`` round its drill comes
+    immediately before the rung itself (duplicates dropped, so a rung that
+    already holds the ring appears once). The ring is preferred WITHIN a tier
+    rung and never causes a fab-tier escalation by itself: a smaller tier is
+    tried only after the rung above it, raised and as it is, did not fit.
+    Completion first: a via only an unraised rung fits still ships, and the
+    run's census of its shipped vias names it (:func:`replace_hole_ring_rows`).
+
+    Each rung carries :data:`TIER_RUNG_KEY`, its index in ``rungs``, so a
+    site that tells a fab-tier escalation by the rung (:func:`rung_tier`,
+    :func:`ladder_escalates`) reads the nominal rung's raised and unraised
+    vias as the nominal, not as an escalation."""
+    def _key(r):
+        return {k: v for k, v in r.items() if k != TIER_RUNG_KEY}
+    out, seen = [], []
+    for i, r in enumerate(rungs):
+        tagged = dict(r, **{TIER_RUNG_KEY: i})
+        for cand in (_apply_hole_ring([tagged], ring)[0], tagged):
+            if _key(cand) not in seen:
+                seen.append(_key(cand))
+                out.append(cand)
+    return out
+
+
+def rung_tier(ladder, i):
+    """The tier rung ``ladder[i]`` was made from: its :data:`TIER_RUNG_KEY`,
+    else ``i`` (a ladder with no hole ring is the tier's own). >0 is a
+    fab-tier escalation."""
+    return ladder[i].get(TIER_RUNG_KEY, i)
+
+
+def ladder_escalates(ladder, diameter, drill=None):
+    """True when a via of ``diameter`` (and ``drill``) taken off ``ladder``
+    went below the ladder's nominal rung -- a fab-tier escalation. Without a
+    hole ring this is ``diameter < ladder[0]['via_diameter']``, as every
+    descent site read it; with one (:func:`_prefer_hole_ring`) the nominal
+    is the smaller of the nominal rung's raised and unraised vias, and a
+    drill below the nominal's is an escalation too (a raised fine rung keeps
+    the advanced drill at the nominal diameter)."""
+    if not ladder:
+        return False
+    nominal = [r for i, r in enumerate(ladder) if rung_tier(ladder, i) == 0] or ladder[:1]
+    if diameter < min(r['via_diameter'] for r in nominal) - 1e-9:
+        return True
+    if drill is not None and any(TIER_RUNG_KEY in r for r in ladder):
+        return drill < min(r['via_drill'] for r in nominal) - 1e-9
+    return False
 
 
 def _apply_board_floors(rungs, floors=None):
@@ -790,6 +1099,18 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     if want and rungs:
         rungs = (_apply_board_floors(rungs, want) if _ESCALATION == 'board'
                  else _first_choice_meets(rungs, want))
+    # #1914: a descended via PREFERS a ring that holds the copper-to-hole
+    # floor, so another net's copper, kept at the run's clearance off the
+    # via's copper, sits at the hole clearance off its hole. Each tier rung's
+    # ring-holding version comes just before the rung itself, so the ring
+    # never forces a fab-tier step (completion first; what ships below the
+    # ring is disclosed by the run's via census, replace_hole_ring_rows). Under every policy that descends
+    # at all (``off`` returned [] above). It is a KiCad DRC floor, not a
+    # board minimum the writeback lowers, so it is not a FLOOR_KEYS floor and
+    # not in _BOARD_FLOORS.
+    ring = via_hole_ring()
+    if ring and rungs:
+        rungs = _prefer_hole_ring(rungs, ring)
     return rungs
 
 
@@ -860,7 +1181,7 @@ _PARAM_FLOOR_KEY = {
 }
 
 
-def physical_fab_floor(copper_layer_count, overrides=None):
+def physical_fab_floor(copper_layer_count, overrides=None, thickness=_INSTALLED):
     """The smallest geometry the fab can PHYSICALLY make, whatever tier is
     selected: the override file when one is given (it states the user's exact
     limits), else the advanced rung. The TIER bounds what the router may
@@ -869,15 +1190,17 @@ def physical_fab_floor(copper_layer_count, overrides=None):
     tier is accepted as asked (and announced as below the tier), not pinned up
     to 0.45 -- the request is the operator declaring their fab can do it, the
     same reading the stale-board-minimum rule gives a request below a stock
-    Board Setup minimum. Grading (check_drc) uses the same floor."""
+    Board Setup minimum. Grading (check_drc) uses the same floor. Its via
+    drill is held to the board thickness's aspect floor (#502)."""
     if overrides is None:
         overrides = _DEFAULT_OVERRIDES
     if overrides:
-        return _tier_rungs(copper_layer_count, 'standard', overrides)[0]
-    return _tier_rungs(copper_layer_count, 'advanced', None)[0]
+        return _tier_rungs(copper_layer_count, 'standard', overrides, thickness)[0]
+    return _tier_rungs(copper_layer_count, 'advanced', None, thickness)[0]
 
 
-def fab_floor_for_param(param_name, copper_layer_count, tier=None, overrides=None):
+def fab_floor_for_param(param_name, copper_layer_count, tier=None, overrides=None,
+                        thickness=_INSTALLED):
     """The PHYSICAL fab floor for a routing parameter (physical_fab_floor), or
     None if the parameter has no fab floor. Deliberately neither the tier's
     nor the board-raised floor: a board's declared minimum bounds automatic
@@ -888,7 +1211,7 @@ def fab_floor_for_param(param_name, copper_layer_count, tier=None, overrides=Non
         return None
     if overrides is None and tier is None:
         overrides = _DEFAULT_OVERRIDES
-    return physical_fab_floor(copper_layer_count, overrides).get(key)
+    return physical_fab_floor(copper_layer_count, overrides, thickness).get(key)
 
 
 def count_copper_layers_in_file(pcb_path):
@@ -1284,6 +1607,87 @@ def replace_via_rows(shipped, site):
             })
 
 
+#: The ledger kind of a via that ships below the copper-to-hole ring (#1914).
+HOLE_RING_KIND = 'hole_clearance'
+
+
+def hole_ring_short(diameter, drill):
+    """True when a via of ``diameter``/``drill`` rings less than
+    :func:`via_hole_ring` (0.1 um tolerance): other-net copper kept at the
+    run's clearance off its copper can sit under the hole clearance off its
+    hole."""
+    ring = via_hole_ring()
+    if not ring or not diameter or not drill:
+        return False
+    return (float(diameter) - float(drill)) / 2.0 < ring - 1e-4
+
+
+def replace_hole_ring_rows(shipped, site):
+    """#1914: name the vias a step SHIPS below the copper-to-hole ring, from
+    the step's census of its own vias (like :func:`replace_via_rows`).
+
+    ``shipped`` is [(net_id, net_name, {(diameter, drill): count}), ...] --
+    the vias the step laid smaller than the size its net asked for (a via
+    drawn as asked is the caller's choice, not a descent). Each pair ringing
+    less than :func:`via_hole_ring` -- a via only the ladder's last-resort
+    rungs fitted -- is one ledger row of kind :data:`HOLE_RING_KIND`:
+    ``requested`` the hole clearance, ``delivered`` the copper-to-hole
+    distance at the run's clearance (``clearance + ring``), ``via`` the pair.
+    Rows of this ``site`` are replaced, so a census run twice counts once.
+    Prints one line when there is any. Returns the rows added."""
+    _LEDGER['narrowed'] = [r for r in _LEDGER['narrowed']
+                           if not (r.get('kind') == HOLE_RING_KIND
+                                   and r.get('site') == site)]
+    if not via_hole_ring():
+        return []
+    hc, clr = _VIA_HOLE_CLEARANCE
+    rows = []
+    for nid, name, pairs in shipped or ():
+        for (dia, drill), n in sorted((pairs or {}).items()):
+            if not hole_ring_short(dia, drill):
+                continue
+            ring = (float(dia) - float(drill)) / 2.0
+            rows.append({
+                'net': int(nid) if nid is not None else None, 'net_name': name,
+                'kind': HOLE_RING_KIND, 'requested': round(hc, 4),
+                'delivered': round(clr + ring, 4), 'site': site,
+                'count': int(n), 'via': [round(float(dia), 4), round(float(drill), 4)],
+            })
+    _LEDGER['narrowed'].extend(rows)
+    if rows:
+        n = sum(r['count'] for r in rows)
+        worst = min(rows, key=lambda r: r['delivered'])
+        print(f"  WARNING: {site}: {n} via(s) on "
+              f"{len({r['net'] for r in rows})} net(s) fitted only below the "
+              f"{via_hole_ring():g} mm ring the board's {hc:g} mm hole clearance "
+              f"needs at the {clr:g} mm clearance (smallest "
+              f"{worst['via'][0]:g}/{worst['via'][1]:g} mm: copper at the "
+              f"clearance sits {worst['delivered']:g} mm from its hole); the "
+              f"ring-holding vias did not fit there (#1914)")
+    return rows
+
+
+def disclose_hole_ring_vias(pcb_data, vias, requested, site):
+    """:func:`replace_hole_ring_rows` for a step whose own vias are in hand
+    (the fan-outs: dicts with ``size``/``drill``/``net_id``, or Via objects)
+    and whose request is one via diameter ``requested``."""
+    if not via_hole_ring() or requested is None:
+        return []
+    per = {}
+    for v in vias or ():
+        get = v.get if isinstance(v, dict) else (lambda k, _v=v: getattr(_v, k, None))
+        size, drill, nid = get('size'), get('drill'), get('net_id')
+        if not size or not drill or size >= float(requested) - 1e-3:
+            continue
+        pair = (round(float(size), 4), round(float(drill), 4))
+        per.setdefault(nid, {})
+        per[nid][pair] = per[nid].get(pair, 0) + 1
+    nets = getattr(pcb_data, 'nets', None) or {}
+    return replace_hole_ring_rows(
+        [(nid, getattr(nets.get(nid), 'name', None), pairs)
+         for nid, pairs in per.items()], site)
+
+
 def escalation_summary():
     """The per-run ledger as JSON-ready data (the JSON_SUMMARY ``design_rules``
     block). ``count`` is the number of recorded narrowings; ``fab_tier_escalations``
@@ -1311,19 +1715,49 @@ def escalation_summary():
         'fab_tier_target': escalation_target(),
         **({'ceiling_lowered_classes': ceiling_lowered_classes()}
            if _LEDGER['ceiling_lowered'] else {}),
+        **({'aspect_floor': aspect_floor_summary()}
+           if aspect_floor_summary() else {}),
     }
+
+
+def aspect_floor_summary():
+    """#502: what this run's board thickness raised, or None: the thickness
+    and, per raised rung of the active tier, its aspect ratio, the via drill
+    floor it makes and the table's drill it replaced. A thickness past the
+    standard range raises nothing and says so (``not_applied``)."""
+    if not _BOARD_THICKNESS:
+        return None
+    if aspect_inert_warning(_BOARD_THICKNESS):
+        return {'board_thickness_mm': _BOARD_THICKNESS, 'rungs': [],
+                'not_applied': 'thicker_than_standard',
+                'max_standard_thickness_mm': MAX_STANDARD_THICKNESS}
+    rows = []
+    # The multilayer bucket carries every rung; both buckets' drills agree.
+    for r in _table_rungs(4, _DEFAULT_TIER, _DEFAULT_OVERRIDES):
+        d = r.get('via_drill')
+        if not d or any(x['table_via_drill'] == d for x in rows):
+            continue
+        need = aspect_raised_drill(d, 4, _BOARD_THICKNESS)
+        if need:
+            rows.append({'max_aspect_ratio': aspect_ratio_for_drill(d, 4),
+                         'via_drill': need, 'table_via_drill': d})
+    return ({'board_thickness_mm': _BOARD_THICKNESS, 'rungs': rows}
+            if rows else None)
 
 
 def escalation_report_line():
     """The ONE end-of-run line a reader can act on, or '' when nothing moved."""
     s = escalation_summary()
-    if not s['count'] and not s['fab_tier_escalations']:
+    if not s['count'] and not s['fab_tier_escalations'] and not s.get('aspect_floor'):
         return ''
     parts = []
     # A row with no net is run-wide (#1210: the run's clearance below the
     # board's minimum clearance), not a feature on a net.
-    run_wide = [r for r in s['narrowed'] if r['net'] is None]
-    per_net = [r for r in s['narrowed'] if r['net'] is not None]
+    run_wide = [r for r in s['narrowed'] if r['net'] is None
+                and r['kind'] != HOLE_RING_KIND]
+    per_net = [r for r in s['narrowed'] if r['net'] is not None
+               and r['kind'] != HOLE_RING_KIND]
+    hole_ring = [r for r in s['narrowed'] if r['kind'] == HOLE_RING_KIND]
     for r in run_wide:
         parts.append(f"{r['kind'].replace('_', ' ')} {r['delivered']:g} mm, below the "
                      f"{r['site']} {r['requested']:g} mm")
@@ -1335,12 +1769,30 @@ def escalation_report_line():
         kinds = ', '.join(f"smallest {k.replace('_', ' ')} {v:g} mm"
                           for k, v in sorted(mins.items()))
         parts.append(f"{sum(r['count'] for r in per_net)} feature(s) on "
-                     f"{len(s['nets'])} net(s) delivered below "
+                     f"{len({r['net'] for r in per_net})} net(s) delivered below "
                      f"the requested size ({kinds})")
+    if hole_ring:
+        parts.append(f"{sum(r['count'] for r in hole_ring)} via(s) below the "
+                     f"copper-to-hole ring (hole clearance "
+                     f"{max(r['requested'] for r in hole_ring):g} mm, held only to "
+                     f"{min(r['delivered'] for r in hole_ring):g} mm at the clearance)")
     if s['fab_tier_escalations']:
         _where = ("the board's own declared floors"
                   if s['fab_tier_target'] == 'board_floors' else 'advanced')
         parts.append(f"{s['fab_tier_escalations']} fab-tier escalation(s) to {_where}")
+    if s.get('aspect_floor', {}).get('not_applied'):
+        a = s['aspect_floor']
+        parts.append(f"drill aspect ratio not applied: the declared "
+                     f"{a['board_thickness_mm']:g} mm thickness is past the "
+                     f"{a['max_standard_thickness_mm']:g} mm thickest standard "
+                     f"board (check the stackup)")
+    elif s.get('aspect_floor'):
+        a = s['aspect_floor']
+        raised = ', '.join(f"{r['via_drill']:g} mm at {r['max_aspect_ratio']:g}:1"
+                           for r in a['rungs'])
+        table = ', '.join(f"{r['table_via_drill']:g}" for r in a['rungs'])
+        parts.append(f"via drill floor {raised} drill aspect ratio on this "
+                     f"{a['board_thickness_mm']:g} mm thick board (was {table} mm)")
     return (f"Design rules [--escalation {s['escalation_policy']}, --fab-tier "
             f"{s['fab_tier']}]: " + '; '.join(parts) +
             ". Details: JSON_SUMMARY design_rules.")
@@ -1353,7 +1805,8 @@ def narrowed_summary():
     in it, so a run that narrowed nothing prints what it always printed."""
     s = escalation_summary()
     return (s if (s['count'] or s['fab_tier_escalations']
-                  or s.get('ceiling_lowered_classes')) else None)
+                  or s.get('ceiling_lowered_classes') or s.get('aspect_floor'))
+            else None)
 
 
 def finish_design_rules(args, rc=0, *, print_line=True):
@@ -1374,7 +1827,10 @@ def finish_design_rules(args, rc=0, *, print_line=True):
     line = escalation_report_line()
     if line and print_line:
         print(f"  {line}")
-    if line and not rc and getattr(args, 'strict_sizes', False):
+    s = escalation_summary()
+    # #502: an aspect-ratio floor raises sizes; it narrows nothing
+    narrowed = s['count'] or s['fab_tier_escalations']
+    if narrowed and not rc and getattr(args, 'strict_sizes', False):
         print(f"  --strict-sizes: {line}")
         return 3
     return rc
@@ -1580,6 +2036,8 @@ def set_fab_tier_from_config(config):
         except OSError as exc:
             print(f"WARNING: could not read fab overrides {path}: {exc}")
     set_default_fab_tier(tier, overrides)
+    # #502: the live board's thickness (BoardInfo.board_thickness)
+    set_board_thickness(config.get('board_thickness'))
     policy = config.get('escalation') or DEFAULT_ESCALATION
     declared = config.get('board_floors') or {}
     requested = {k: config.get(k) for k in ('track_width', 'clearance', 'via_size',
@@ -1597,6 +2055,12 @@ def set_fab_tier_from_config(config):
         floors = drop_stale_board_floors(declared, requested)
     set_escalation_policy(policy, floors,
                           writeback=bool(config.get('fix_drc_settings', True)))
+    # #1914: the board's copper-to-hole clearance, which the GUI resolves off
+    # its PCBData with the CLI's resolver (board_hole_clearance) into the
+    # derived 'hole_clearance' key -- not a FLOOR_KEYS floor: the ladder
+    # prefers it as a ring. set_escalation_policy cleared the last run's
+    # pair, so a config without the key installs none.
+    set_via_hole_clearance(config.get('hole_clearance'), config.get('clearance'))
 
 
 def fab_tier_from_args(args):
@@ -1708,7 +2172,28 @@ def set_policy_from_args(args, pcb_path=None):
                        if pcb_path and policy == 'board' and not writeback
                        else None))
     set_escalation_policy(policy, floors, writeback=writeback)
+    set_board_thickness(board_thickness_of_file(pcb_path))      # #502
+    # #1914: the copper-to-hole clearance the descent ladder prefers a via's
+    # ring to hold (board_hole_clearance, the resolver the GUI uses too),
+    # paired with the run's clearance, resolved by the caller before this.
+    _hc = board_hole_clearance(pcb_file=pcb_path)
+    set_via_hole_clearance(_hc, getattr(args, 'clearance', None))
     return floors
+
+
+def board_thickness_of_file(pcb_path):
+    """#502: ``BoardInfo.board_thickness`` of the board at ``pcb_path``,
+    read with the parser's own helpers (imported here: this module stays
+    stdlib-only at import), or None when it cannot be read."""
+    if not pcb_path:
+        return None
+    try:
+        from kicad_parser import board_thickness_mm, extract_stackup, general_thickness
+        with open(pcb_path, encoding='utf-8') as f:
+            content = f.read()
+        return board_thickness_mm(extract_stackup(content), general_thickness(content))
+    except Exception:                                           # noqa: BLE001
+        return None
 
 
 def board_policy_floors(policy, floors, requested, graded_clearance,

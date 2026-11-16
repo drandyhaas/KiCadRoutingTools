@@ -194,7 +194,9 @@ def t_the_three_consumers_use_one_rule():
     calls = [re.compile(r'\bplated_drill_exposed\('), re.compile(r'\bflush_drill_peg\(')]
     inline = re.compile(r'max\((\w+)\.size_x,\s*\1\.size_y\)\s*[<>]=?\s*\1\.drill')
     # obstacle_map: the signal map and the plane via maps (#1514);
-    # single_ended_routing: the movers and the neck's exact standoffs.
+    # single_ended_routing: the movers and the neck's exact standoffs;
+    # check_drc: the one copper-to-hole pass, board minimum and rules alike
+    # (#1850).
     for fname, who, sites in (('obstacle_map.py', 'the router\'s maps', 2),
                               ('check_drc.py', 'the grader', 1),
                               ('single_ended_routing.py', 'the copper-movers', 2)):

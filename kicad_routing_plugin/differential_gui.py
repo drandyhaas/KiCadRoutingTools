@@ -655,6 +655,24 @@ class DifferentialTab(wx.Panel):
         self.intra_match_check.SetToolTip("Add meanders to shorter track of each pair for P/N matching")
         options_sizer.Add(self.intra_match_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # #1869: the lane a matched pair is measured on (route_diff's
+        # --diff-pair-intra-lane). Named after the engine parameter, so a
+        # plan step sets it by name.
+        lane_row = wx.BoxSizer(wx.HORIZONTAL)
+        lane_row.Add(wx.StaticText(self, label="Intra-pair lane:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.diff_pair_intra_lane = wx.TextCtrl(self, value="", size=(180, -1))
+        self.diff_pair_intra_lane.SetToolTip(
+            "Match, record and grade each intra-matched pair on its lane -- the "
+            "copper path between two pads -- instead of total copper, so a branch "
+            "to a third pad counts as a stub (#1869). 'auto' (the two terminals "
+            "the pair step routes) or P_NET=REF.PAD:REF.PAD ..., space separated. "
+            "Needs intra-pair matching; a pair a .kicad_dru skew rule binds is "
+            "matched on total copper, as KiCad grades the rule. "
+            "Empty: total copper, as KiCad's skew DRC measures.")
+        lane_row.Add(self.diff_pair_intra_lane, 1, wx.ALIGN_CENTER_VERTICAL)
+        options_sizer.Add(lane_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.ac_couple_check = wx.CheckBox(self, label="AC-coupled end-to-end matching")
         self.ac_couple_check.SetValue(False)
         self.ac_couple_check.SetToolTip("Length-match diff pairs split by series DC-blocking caps "
@@ -1083,6 +1101,9 @@ class DifferentialTab(wx.Panel):
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 via_from_class=config.get('via_from_class', False),
+                # #1842: the route tab's Via Span, as route_diff.py --via-span
+                via_span=config.get('via_span'),
+                via_span_type=config.get('via_span_type'),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance',
                                                   defaults.HOLE_TO_HOLE_CLEARANCE),
                 board_edge_clearance=config.get('board_edge_clearance',
@@ -1104,6 +1125,7 @@ class DifferentialTab(wx.Panel):
                 polarity_swap_nets=config.get('polarity_swap_nets'),
                 gnd_via_enabled=config.get('gnd_via_enabled', True),
                 diff_pair_intra_match=config.get('diff_pair_intra_match', False),
+                diff_pair_intra_lane=config.get('diff_pair_intra_lane') or None,
                 ac_couple_match=config.get('ac_couple_match', False),
                 enable_layer_switch=config.get('enable_layer_switch', True),
                 debug_lines=config.get('debug_lines', False),
@@ -1331,6 +1353,14 @@ class DifferentialTab(wx.Panel):
         if _intra_bad:
             msg += (f"Intra-pair skew NOT matched on the board: "
                     f"{', '.join(_intra_bad)}\n")
+        # #1799: a chain's member pairs read `skipped` above (the chain is
+        # matched end to end instead), so the chain's own verdict is named
+        # here, worded as the engine's "AC-coupled chain NOT matched" line.
+        from length_matching import ac_chains_not_matched
+        _chain_bad = ac_chains_not_matched(results_data.get('ac_coupled_xnets'))
+        if _chain_bad:
+            msg += (f"AC-coupled chain NOT matched end to end: "
+                    f"{', '.join(_chain_bad)}\n")
         msg += f"Time: {wall_time:.1f}s\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
@@ -1419,14 +1449,18 @@ class DifferentialTab(wx.Panel):
             from .gui_utils import apply_drc_settings_fix
             import clearance_ledger
             _clr = (_dcfg or {}).get('clearance')
+            _eff = clearance_ledger.effective(_clr) if _clr else _clr
+            if _dcfg and _dcfg.get('fix_drc_settings', True):
+                # #1842: the micro vias' own rule, as fix_project_for_output
+                # writes it -- before the floors, against the rules before them
+                from .gui_utils import live_micro_via_rule
+                live_micro_via_rule(self.pcb_data, None, results_data, _eff)
             # #1369: the copper-to-hole floor this step HELD, lowered only
             # to what the copper it just drew needs -- route_diff.py's
             # step_hole_clearance, from the tab's applied lists.
             apply_drc_settings_fix(
                 _dcfg, diff_pair=True,
-                hole_clearance=self._held_hole_clearance(
-                    None, results_data,
-                    clearance_ledger.effective(_clr) if _clr else _clr))
+                hole_clearance=self._held_hole_clearance(None, results_data, _eff))
         # The tool records (protected pairs, impedance, #1503's matched skews,
         # same-net pad clearance) at this step boundary, whatever the floors
         # did (#1415, as route_diff.py --no-fix-drc-settings).
@@ -1478,6 +1512,8 @@ class DifferentialTab(wx.Panel):
             'polarity_swap_nets': self.get_polarity_swap_nets(),
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
+            # #1869: 'auto' or P_NET=REF.PAD:REF.PAD ..., None when empty
+            'diff_pair_intra_lane': self.diff_pair_intra_lane.GetValue().split() or None,
             'ac_couple_match': self.ac_couple_check.GetValue(),
         }
 

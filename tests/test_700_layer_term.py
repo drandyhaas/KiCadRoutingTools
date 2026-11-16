@@ -7,7 +7,7 @@ layers could take -- bounded by the via slots in the escape band, which is the
 issue's own suggestion -- under NEW keys, with `supply` and `deficit` untouched.
 
 The first test is the one that matters most. Several independent places depend
-on `deficit == demand - supply` (`FaceLedger.deficit`, `options.deficit_totals`,
+on `deficit == lane_demand - supply` (#1836; `FaceLedger.deficit`, `options.deficit_totals`,
 `routability`'s `escape_worst_deficit`, `board_brief`'s POSITION_DEPENDENT
 allowlist). Additive keys are the only safe shape, and "additive" has to be
 measured rather than intended.
@@ -28,10 +28,9 @@ RUN_ALL_TIMEOUT = 600
 BOARDS = ('rp2350_fpga_eensy_prePlane', 'glasgow_revC', 'tigard', 'watchy',
           'ulx3s', 'esp_prog', 'kit-dev-coldfire-xilinx_5213',
           'interf_u_plane', 'lvds_converter_dualclk', 'qfn_csi_underpad_diff',
-          # #841: the ONLY board carrying a part whose worst face differs by
-          # the two fields, once the ledger charges pad copper. Without it
-          # `t_worst_floor_selects_by_the_FLOOR_deficit_not_the_own_layer_one`
-          # has nothing to tell the two rules apart and says so.
+          # #841: was the only board carrying a part whose worst face differs
+          # by the two fields; since #1836 none is, and that test builds its
+          # witness instead. Kept for the population the other tests read.
           'orangecrab_ext_pll')
 
 
@@ -60,8 +59,13 @@ def t_supply_and_deficit_are_untouched_on_every_board():
             continue
         for pe in escape.escape_ledger(pcb, pcb_file=path):
             for f in pe.faces:
-                # The identity every downstream consumer relies on.
-                assert f.deficit == max(0, f.demand - f.supply), (name, pe.ref)
+                # The identity every downstream consumer relies on. Against
+                # `lane_demand` since #1836: a net ending on a neighbour
+                # across the band is served there and needs no lane.
+                assert f.deficit == max(0, f.lane_demand - f.supply), (name,
+                                                                       pe.ref)
+                assert f.lane_demand == f.demand - len(f.served_nets), \
+                    (name, pe.ref, f.face)
                 assert f.supply == (int((f.span_mm - f.blocked_mm)
                                         // f.lane_pitch_mm)
                                     if f.lane_pitch_mm > 0 else 0), \
@@ -224,9 +228,14 @@ def t_the_other_layer_term_survives_a_fully_blocked_face():
     assert all(f.deficit_floor < f.deficit for f in u3.faces), \
         [(f.face, f.deficit, f.deficit_floor) for f in u3.faces]
     # ...and the part this arm used to name is still the board's worst, which
-    # is what says the instrument was corrected rather than quieted.
+    # is what says the instrument was corrected rather than quieted. (Its
+    # deficit was 11 here until #1836 stopped charging a face for the parts
+    # its nets end on -- its decaps, inductor and crystal -- and is 7 now;
+    # the ORDER is the claim, so the order is what is asserted.)
     u6 = escape.escape_ledger(pcb, pcb_file=path, refs=['U6'])[0]
-    assert u6.worst is not None and u6.worst.deficit >= 11, u6.to_dict()
+    first = escape.escape_ledger(pcb, pcb_file=path)[0]
+    assert u6.worst is not None and first.ref == 'U6', (first.ref,
+                                                        u6.to_dict())
     assert any(f.supply > 0 for f in u6.faces), \
         'U6 is fully blocked again -- the container exemption regressed'
     print(f"  PASS: U3 supply 0 on 4 faces, layer term still "
@@ -346,44 +355,43 @@ def t_worst_floor_selects_by_the_FLOOR_deficit_not_the_own_layer_one():
             seen += 1
     assert seen, 'no part is short at the floor anywhere; fixtures went missing'
     # ...and the two fields really can disagree, or the check above is vacuous.
-    split = [(n, pe.ref) for n in BOARDS
-             for pe in (escape.escape_ledger(_board(n)[0], pcb_file=_board(n)[1])
-                        if _board(n)[0] is not None else [])
-             if pe.worst_floor and pe.worst
-             and pe.worst.face != pe.worst_floor.face]
-    assert split, ('no part has a different worst face by the two fields, so '
-                   'this test cannot tell them apart')
-
+    # The witness is BUILT, not found. It was a corpus part twice -- tigard
+    # RN5 until #841 charged pad copper, then orangecrab_ext_pll U1 -- and
+    # #1836 (a net ending on the part across the face needs no lane) left no
+    # tracked board with a part whose worst face differs by the two fields.
+    # What has to stay true is the SELECTION, so the witness is the four
+    # faces that exercise it:
+    #     north  deficit 10  deficit_floor 0   (10 via slots shed it all)
+    #     east   deficit  8  deficit_floor 2
+    #     south  deficit  6  deficit_floor 4
+    #     west   deficit  6  deficit_floor 4
+    # Selecting among the floor-short faces by `deficit` picks east (floor 2);
+    # by `deficit_floor` it is the south/west tie.
+    def _face(face, span, demand):
+        return escape.FaceLedger(
+            ref='W1', face=face, span_mm=span, lane_pitch_mm=0.5, supply=0,
+            demand=demand, blocked_mm=span, blockers=('X1',),
+            nets=tuple(range(demand)), via_pitch_mm=1.0, signal_layers=2)
+    w = escape.PartEscape(ref='W1', pitch_mm=0.5, faces=(
+        _face('north', 10.0, 10), _face('east', 6.0, 8),
+        _face('south', 2.0, 6), _face('west', 2.0, 6)),
+        interior_pads=0, interior_nets=())
+    got = {f.face: (f.deficit, f.deficit_floor) for f in w.faces}
+    assert got == {'north': (10, 0), 'east': (8, 2), 'south': (6, 4),
+                   'west': (6, 4)}, got
+    split = [('built', w.ref)] if w.worst.face != w.worst_floor.face else []
+    assert split, ('the built witness no longer has a different worst face by '
+                   'the two fields, so this test cannot tell them apart')
     # The VALUE assertion above is not enough on its own: where two faces TIE
     # on deficit_floor, selecting by the own-layer `deficit` returns the same
     # value and a DIFFERENT face -- and `worst_face_floor` is a published
-    # board_brief key. Pinned by its ANSWER, not by re-deriving the selection
-    # expression, which would only compare the code with itself.
-    #
-    # The witness is orangecrab_ext_pll U1 (#841). It USED to be tigard RN5:
-    #     north  deficit 2  deficit_floor 1
-    #     east   deficit 3  deficit_floor 1
-    # Once the ledger charges pad COPPER rather than the bbox of pad centres,
-    # RN5 is north (2,0) / east (3,1) / south (1,0) / west (2,0) -- one face
-    # short at the floor and therefore no tie at all. It is replaced rather
-    # than re-recorded, because what moved is whether it is a witness, not
-    # what its numbers are.
-    pcb, path = _board('orangecrab_ext_pll')
-    if pcb is not None:
-        u1 = [q for q in escape.escape_ledger(pcb, pcb_file=path)
-              if q.ref == 'U1']
-        assert u1, 'orangecrab_ext_pll U1 is not in the ledger any more'
-        d = u1[0].to_dict()
-        faces = {f.face: (f.deficit, f.deficit_floor) for f in u1[0].faces}
-        assert faces == {'north': (3, 1), 'east': (1, 0),
-                         'south': (3, 1), 'west': (2, 1)}, (
-            f'the U1 fixture moved: {faces}')
-        # Three faces tie at deficit_floor 1, and the own-layer deficit picks a
-        # different one of them. `max` keys on `(value, face)`, so a tie breaks
-        # to the LAST face name: floor -> west, own-layer -> south.
-        assert d['worst_face_floor'] == 'west', d['worst_face_floor']
-        assert d['worst_deficit_floor'] == 1, d['worst_deficit_floor']
-        assert u1[0].worst.face == 'south', u1[0].worst.face
+    # board_brief key. `max` keys on `(value, face)`, so a tie breaks to the
+    # LAST face name: floor -> west (south and west tie at 4), own-layer ->
+    # north.
+    d = w.to_dict()
+    assert w.worst.face == 'north', w.worst.face
+    assert d['worst_face_floor'] == 'west', d['worst_face_floor']
+    assert d['worst_deficit_floor'] == 4, d['worst_deficit_floor']
 
     print(f"  PASS: {seen} parts selected by deficit_floor; {len(split)} "
           f"disagree with the own-layer worst face, and a tie resolves by "

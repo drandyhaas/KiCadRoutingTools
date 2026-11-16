@@ -65,9 +65,15 @@ def selection(td):
     write_board(b, classes=[{'name': 'CSI', 'clearance': 0.2, 'priority': 0}],
                 patterns=[('A', 'CSI'), ('B', 'CSI')], dru=dru)
     sc = ScopedClearanceRules.for_board(pcb_data_for(b), b)
-    check('the class-pair, the Type and (#1528) the NetName rules, and no other',
-          sc is not None and sorted(sc.names) == ['csi gap', 'hs pad', 'nm'],
+    check('the class-pair, the Type, (#1528) the NetName and (#1897) the layered '
+          'class rules, and no other',
+          sc is not None and sorted(sc.names) == ['csi gap', 'hs pad', 'lay', 'nm'],
           f'{sc and sc.names}')
+    check('#1897: the layered rule binds on its layer and not when asked without one',
+          sc.layered_layers == frozenset(['B.Cu'])
+          and (sc.layer_pair_value(1, 'track', 3, 'track', None, None, 'B.Cu') or (0,))[0] == 0.4
+          and sc.layer_pair_value(1, 'track', 3, 'track', None, None, 'F.Cu') is None,
+          f'{sc.layered_layers}')
     got = sc.pair_value(1, 'track', 2, 'track')
     check('A/B commutative: CSI track vs CSI track -> 0.3', got and got[0] == 0.3, f'{got}')
     got = sc.pair_value(1, 'track', 3, 'track')

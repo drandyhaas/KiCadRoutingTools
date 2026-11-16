@@ -1018,7 +1018,7 @@ def sense_obstacle_rows(b: SenseBranch, config, coord, layer_map, clearance: flo
             continue                    # a via on the join pad is the join
         vs = v.size if v.size > 0 else config.via_size
         full = _via_track_expansion_per_layer(vs, config, coord, clearance, extra_clearance,
-                                              net_id=b.net_id)
+                                              net_id=b.net_id, via=v)
         # Per layer of THIS map (a plane tap map has one layer).
         vte = [full[config.layers.index(n)] if n in config.layers else max(full)
                for n in names]

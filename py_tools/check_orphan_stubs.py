@@ -9,9 +9,12 @@ An orphan stub is a trace endpoint that:
    through-hole pad on every layer, an SMD pad on its own), another
    same-net track's body (a T-junction tap), or a same-net zone outline on
    that layer (#513)
-3. Is not a reverse T (#1167): no other same-net track vertex or via lands
-   on the stub's own body with at most a short nib (3 x the track width)
-   left past it
+
+A track that runs on past a tee or a via on its own body (a reverse T, #1167)
+is judged by rule 2 alone: its end is no orphan while that tee's or via's
+copper still overlaps its end cap. A nib of up to 3 track widths past the
+anchor used to be excused as well; KiCad's DRC reports such an end
+`track_dangling`, and check_weird names it (#1870).
 
 These represent traces that end without a proper connection point.
 
@@ -154,47 +157,10 @@ def _endpoint_connected(pt: Tuple[float, float], segments: List[Dict],
         if math.hypot(px - (sx + t * dx), py - (sy + t * dy)) < \
                 s.get('width', 0.0) / 2 + margin:
             return True
-    return _reverse_t_anchored(pt, segments, vias, tol)
-
-
-def _reverse_t_anchored(pt, segments, vias, tol) -> bool:
-    """Reverse T (#1167): another same-net track's VERTEX, or a via barrel,
-    landing on the BODY of the stub that owns ``pt`` anchors it -- check_weird's
-    mid-body-anchor rule. A tap smoothing re-anchored on a trunk's old diagonal
-    overlaps the trunk along its body while its free end overhangs; every other
-    checker calls that connected. The tail past the anchor must be a
-    sub-visible nib (at most 3 x the track width, check_weird's allowance): a
-    longer tail is still a dead end."""
-    px, py = pt
-    own = next((s for s in segments if s['start'] == pt or s['end'] == pt), None)
-    if own is None:
-        return False
-    (sx, sy), (ex, ey) = own['start'], own['end']
-    free_is_start = own['start'] == pt
-    dx, dy = ex - sx, ey - sy
-    L2 = dx * dx + dy * dy
-    if L2 < 1e-9:
-        return False
-    w = own.get('width', 0.0)
-    probes = [(vx, vy, vsize) for vx, vy, vsize in (vias or ())]
-    for o in segments:
-        if o is own:
-            continue
-        for v in (o['start'], o['end']):
-            probes.append((v[0], v[1], o.get('width', 0.0)))
-    from connectivity import lands_on_interior
-    cands = []
-    for ox, oy, osize in probes:
-        t = ((ox - sx) * dx + (oy - sy) * dy) / L2
-        if not lands_on_interior(t, L2):                # #1186, as check_weird
-            continue
-        if math.hypot(ox - (sx + t * dx), oy - (sy + t * dy)) < (osize + w) / 2 - 1e-6:
-            cands.append(t)
-    if not cands:
-        return False
-    t = min(cands) if free_is_start else max(cands)
-    tail = (t if free_is_start else 1.0 - t) * math.sqrt(L2)
-    return tail <= max(tol, 3 * w)
+    # No reverse-T allowance past this point (#1870): a vertex or a via on
+    # the stub's own body anchors its end only by touching it, which the
+    # loops above have just asked.
+    return False
 
 
 def find_orphan_stubs(filename: str, net_name: Optional[str] = None,

@@ -163,6 +163,9 @@ REGISTRY = {
     'py_router/route.py': ('reporting', 'phase timing prints'),
     'py_placer/placement/decap_repair.py': (
         'reporting', "the repair's elapsed seconds in its record (#1382)"),
+    'py_placer/placement/escape_flow.py': (
+        'reporting', "a part's flow seconds in its result and the "
+        "check_reachability --part line (#1817); the flow reads no clock"),
     'py_tools/board_score.py': ('reporting', "per-tool wall seconds, SCORE_JSON "
                                 "tool_seconds (#1202)"),
     'py_router/route_diff.py': ('reporting', 'phase timing prints'),
@@ -230,6 +233,18 @@ REGISTRY = {
         'multipad_unconnected_to_route keys its cache of a board\'s jumper '
         'declarations on (path, os.path.getmtime) so a re-saved board is read '
         'afresh (#1405); the mtime decides only whether the file is re-read'),
+    'py_router/check_drc.py': (
+        'file_mtime',
+        'keys its memos of a board\'s sibling .kicad_dru / .kicad_pro on '
+        '(path, os.path.getmtime) so a re-saved file is read afresh (#1853 '
+        'board_design_rules, #1869 recorded lanes); the mtime decides only '
+        'whether the file is re-read'),
+    'py_router/dru_load.py': (
+        'file_mtime',
+        'keys its on-disk cache of `kicad-cli version` on the binary\'s '
+        '(realpath, size, st_mtime_ns) so an upgraded kicad-cli is asked '
+        'afresh (#1852); the mtime decides only whether the version is '
+        're-read, and the answer is disclosure only'),
     'py_router/route_planes.py': (
         'file_mtime',
         'compares the output file st_mtime before/after to detect that a '
@@ -243,12 +258,29 @@ REGISTRY = {
         'only when neither a redo manifest nor step numbers give the chain '
         'order; discovery matches `getmtime(`.'),
 
+    # --- the autorouter and its tab -----------------------------------------
+    'py_router/autoroute.py': (
+        'record',
+        "each AUTOROUTE_STEP event's `t` timestamp and each step's and the "
+        "run's `seconds`, as data in its event lines and plan.json. Which "
+        'pass ships is decided by its grade (open nets, then real DRC), '
+        'never by a clock.'),
+    'kicad_routing_plugin/autoroute_gui.py': (
+        'hang_detector',
+        "Stop sends SIGTERM to the autoroute child's process group and, if it "
+        'has not exited 3 s later (_kill_at, read on the UI tick), SIGKILL; '
+        'the run then reads Stopped with no result to apply, never a result. '
+        'The rest is elapsed time shown in the step rows and the status.'),
+
     # --- an event-loop yield ------------------------------------------------
     'kicad_routing_plugin/differential_gui.py': (
         'reporting', "the run's wall_time shown after a routing run (#1780), "
         'and time.sleep(0.01) yielding to the wx event loop'),
     'kicad_routing_plugin/planes_gui.py': (
         'throttle', '_time.sleep(0.01) yielding to the wx event loop'),
+    'kicad_routing_plugin/labels_gui.py': (
+        'throttle', "time.sleep(0.01) in Beautify Labels' progress callback, "
+        'yielding to the wx event loop so the bar paints'),
 
     # --- no clock at all ----------------------------------------------------
     'py_router/routing_common.py': (

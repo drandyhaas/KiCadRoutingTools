@@ -128,8 +128,11 @@ def main():
         ok('S1 the placed member\'s template pose is forbidden: WARNED, and in the report',
            "WARNING: keep-out 'low-parts-only' binds L1" in r.stdout
            and [f['ref'] for f in rep['template_keepout']] == ['L1'], r.stdout[-900:])
+        # past 5 x the tolerance it is #1821's `template_broken`, warned as such
         ok('S2 the member left past the tolerance is WARNED and in the report',
-           'WARNING: off its datasheet template past the tolerance: L1 (U1)' in r.stdout
+           ('WARNING: off its datasheet template past the tolerance: L1 (U1)' in r.stdout
+            or 'WARNING: pulled off its datasheet template, past 5 x the tolerance: '
+               'L1 (U1)' in r.stdout)
            and [d['ref'] for d in rep['template_off']] == ['L1']
            and rep['template_off'][0]['tolerance_mm'] == 0.3, rep['template_off'])
         lid = os.path.join(td, 'i_lid_fits.json')

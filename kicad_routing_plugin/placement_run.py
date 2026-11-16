@@ -604,7 +604,10 @@ def scan_candidates(workdir, active=None):
     among the seeds `judge.json` names for the skill to fast-route),
     "illegal" (its report lists illegal parts, so it is never judged),
     "routed" (scored, with blocking nets), "clean" (scored, blocking 0),
-    "best" (the best scored row). `active` = the seeds the run is placing
+    "best" (the best scored row); where every scored seed leaves many nets
+    blocked at the judging level, the seeds judge_seeds cannot separate
+    there read "not separable" and the best of them "best, not separable"
+    (#1826). `active` = the seeds the run is placing
     right now (`active_candidates`), shown as "placing" before their boards
     exist.
     """
@@ -645,10 +648,45 @@ def scan_candidates(workdir, active=None):
                        "status": "placing", "mtime": time.time()}
     out = [rows[k] for k in sorted(rows)]
     _mark_unjudged(out)
-    scored = [r for r in out if r["blocking"] is not None]
+    scored = sorted((r for r in out if r["blocking"] is not None), key=candidate_key)
     if scored:
-        min(scored, key=candidate_key)["status"] = "best"
+        scored[0]["status"] = "best"
+        # #1826: where every scored seed leaves many nets blocked at the
+        # judging level, the seeds judge_seeds cannot separate are said so
+        apart = _not_separable(scored)
+        for r in scored:
+            if r["seed"] in apart:
+                r["status"] = ("best, not separable" if r is scored[0]
+                               else "not separable")
     return out
+
+
+def _not_separable(ranked):
+    """The seeds of `ranked` (scored rows, best first) judge_seeds says
+    level 2 cannot separate (#1826): the close seeds of a widened band, two
+    or more, else an empty set. judge_seeds is the authority
+    (`level2_close`); the import is guarded like `_seed_defaults` and the
+    fallback is a copy."""
+    entries = [{"seed": r["seed"], "defects": r.get("floorplan") or 0,
+                "blocking": r["blocking"], "joins": r.get("joins"),
+                "copper": r.get("copper_mm")} for r in ranked]
+    try:
+        from judge_seeds import level2_close
+        close, widened = level2_close(entries)
+    except Exception:                                      # noqa: BLE001
+        import math
+
+        def band(n):
+            return max(1, math.ceil(round(0.15 * n, 9))) if n else 1
+        e0 = entries[0]
+        widened = band(e0["blocking"]) > 1
+        close = [e0["seed"]] + [
+            e["seed"] for e in entries[1:]
+            if e["defects"] == e0["defects"]
+            and e["blocking"] <= e0["blocking"] + band(e0["blocking"])
+            and (e0["joins"] is None or e["joins"] is None
+                 or e["joins"] <= e0["joins"] + band(e0["joins"]))]
+    return set(close) if widened and len(close) > 1 else set()
 
 
 def _seed_defaults():

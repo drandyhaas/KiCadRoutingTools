@@ -16,6 +16,9 @@ the floor the step wrote back).
      summary's own `unsupported_rules`, prints a JSON_SHIPPED_RULES record only
      when a printed summary said something else, and the log merge applies it,
      so --json-out and merge_route_summaries(log) stay one document (#830).
+  A2. the grades of a step's own copper (`STEP_RULE_KEYS`: hole_rules and
+     the rest) survive a ledger re-stamp, and the outermost run's grade of
+     the copper it ships replaces them in --json-out and the log merge.
   B. end to end on the kit board: the pour, then route.py `--nets GND`. The
      run must descend (else this fixture tests nothing -- BROKEN), and every
      channel must then report the floor the .kicad_pro says.
@@ -111,6 +114,60 @@ def row_a_restamp_and_merge():
     rs.reset_run_state()
 
 
+def row_a2_step_rule_grades():
+    print('A2. the grades of the step\'s own copper survive the re-stamp')
+    import route_summary as rs
+    from route_summary import (restamp_shipped_rules, sink_summary,
+                               merge_route_summaries, merge_summaries,
+                               stamp_design_rules, STEP_RULE_KEYS)
+    check('STEP_RULE_KEYS are the keys disclose_step_rules returns',
+          set(STEP_RULE_KEYS) == {'annular_rules', 'via_rules', 'edge_rules',
+                                  'hole_rules', 'board_setup_vias'}, str(STEP_RULE_KEYS))
+    ledger = {'count': 0, 'narrowed': [], 'min_delivered': {}}
+    lap_rows = [{'rule': 'h', 'min': 0.6, 'rows': 6, 'worst_mm': 0.34, 'nets': ['A', 'B']}]
+    ship_rows = [{'rule': 'h', 'min': 0.6, 'rows': 4, 'worst_mm': 0.34, 'nets': ['A', 'B']}]
+    pass1 = {'min_clearance_used': 0.2,
+             'design_rules': dict(ledger, unsupported_rules=[])}
+    lap = {'min_clearance_used': 0.2,
+           'design_rules': dict(ledger, unsupported_rules=[], hole_rules=lap_rows)}
+
+    # a ledger re-stamp (the shipped width / via rows) keeps each summary's grade
+    doc = {'design_rules': dict(lap['design_rules'])}
+    stamp_design_rules(doc, dict(ledger, count=1))
+    check('a ledger re-stamp keeps hole_rules and takes the new ledger',
+          doc['design_rules'].get('hole_rules') == lap_rows
+          and doc['design_rules']['count'] == 1, str(doc))
+    stamp_design_rules(doc, ledger, {})
+    check('a shipped grade that breaks nothing removes the stale rows',
+          'hole_rules' not in doc['design_rules'], str(doc))
+
+    rs.reset_run_state()
+    log = ''
+    for s in (pass1, lap):
+        log += 'JSON_SUMMARY: ' + json.dumps(s) + '\n'
+        sink_summary(s)
+    # control: with no shipped grade the ledger re-stamp changes nothing
+    check('control: an unchanged ledger and no shipped grade print no record',
+          restamp_shipped_rules(0.2, ledger) is None)
+    check('...and the merge keeps the last pass\'s rows (the old --json-out lost them)',
+          merge_summaries(list(rs.SUMMARY_SINK))['design_rules'].get('hole_rules')
+          == lap_rows)
+    rec = restamp_shipped_rules(0.2, ledger, {'hole_rules': ship_rows})
+    check('the shipped grade is a record of its own',
+          rec is not None and rec.get('step_rules') == {'hole_rules': ship_rows},
+          str(rec))
+    from_file = json.loads(json.dumps(merge_summaries(list(rs.SUMMARY_SINK))))
+    check('--json-out carries the grade of the shipped copper',
+          from_file['design_rules'].get('hole_rules') == ship_rows,
+          str(from_file['design_rules']))
+    log += 'JSON_SHIPPED_RULES: ' + json.dumps(rec) + '\n'
+    from_log = merge_route_summaries(log)
+    check('the log merge applies it too, one document (#830)',
+          from_log['design_rules'] == from_file['design_rules'],
+          f"log {from_log['design_rules']}\n        file {from_file['design_rules']}")
+    rs.reset_run_state()
+
+
 BASE = ['--track-width', '0.2', '--clearance', '0.2', '--via-size', '0.5',
         '--via-drill', '0.4', '--hole-to-hole-clearance', '0.3',
         '--layers', 'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
@@ -176,6 +233,7 @@ def row_b_kit_board():
 
 if __name__ == '__main__':
     row_a_restamp_and_merge()
+    row_a2_step_rule_grades()
     row_b_kit_board()
     print()
     if FAILS:

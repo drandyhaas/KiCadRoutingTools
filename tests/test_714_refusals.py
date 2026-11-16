@@ -167,10 +167,12 @@ def main():
                                        lambda: flip(p, 'J7')))
         p = _inject(tg, os.path.join(tmp, 'zonefill.kicad_pcb'), 'J7',
                     extra='(zone (layer "F.Cu") (uuid "0") (polygon (pts '
-                          '(xy 0 0) (xy 1 0) (xy 1 1))) (filled_polygon '
-                          '(layer "F.Cu") (pts (xy 0 0) (xy 1 0) (xy 1 1))))')
-        results.append(_expect_refusal('a footprint zone carrying a fill',
-                                       'J7', ['filled_polygon'],
+                          '(xy 0 0) (xy 1 0) (xy 1 1))) (fill_segments '
+                          '(pts (xy 0 0) (xy 1 1))))')
+        # a (filled_polygon ...) is mirrored with its outline (#1927); KiCad
+        # 5's (fill_segments ...) is not
+        results.append(_expect_refusal('a footprint zone carrying KiCad 5 '
+                                       'fill segments', 'J7', ['fill_segments'],
                                        lambda: flip(p, 'J7')))
         p = _inject(tg, os.path.join(tmp, 'fandb.kicad_pcb'), 'J7',
                     pad_layers='(layers "F&B.Cu" "F.Mask" "F.Paste")')

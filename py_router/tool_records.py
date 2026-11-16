@@ -4,7 +4,10 @@ THE RECORDS. Everything this repo carries down a chain beside the DRC floors
 sits in one namespace: ``fab_floor_origin`` (ad7f24de), ``protected_nets`` and
 ``net_impedance`` (#521), ``pour_served_pads`` (#678),
 ``same_net_pad_clearance`` (#581), ``class_clearance_relaxed`` (#1160),
-``pad_override_min_clearance`` (#1369) and ``saved_severities`` (#856). The CLI keeps it in the sibling ``.kicad_pro``
+``pad_override_min_clearance`` (#1369), ``via_ring_hole_clearance`` (#1914,
+the hole clearance the via descent ladder preferred a ring for, under the
+rule a writeback left), ``saved_severities`` (#856) and
+``route_laps`` (#1807, the improvement gate's record of recent net trades). The CLI keeps it in the sibling ``.kicad_pro``
 under ``"kicad_routing_tools"``, and every chain step carries the project.
 
 WHY A SECOND HOME. KiCad's own project save rewrites the ``.kicad_pro`` from
@@ -22,6 +25,15 @@ reloads with the board, and survives the project rewrite -- measured the same
 way. The project's text variables, the other candidate, live on a PROJECT
 object SWIG does not wrap. So the GUI keeps the whole namespace on the board
 as well as in the project, and every reader takes the newer of the two.
+
+KICAD 10.0.7 AND LATER (#1906) replace a board's properties with its
+project's text variables before every ``SaveBoard`` (``BOARD::
+SynchronizeProperties``), so a pcbnew save drops the board copy, from the
+file and from memory. Every save THIS repo's code makes goes through
+:func:`save_board`, which writes the record back to both
+(:func:`write_board_namespace` for the file). The user's own save in KiCad
+does not, and on those versions loses the board copy as it loses the
+project's in-session records.
 
 WHICH COPY WINS. Each copy carries ``records_rev``. A writer starts from the
 winning copy and stores it with ``records_rev + 1``; the newer copy wins, a
@@ -283,6 +295,105 @@ def update_live_namespace(board, update) -> bool:
         return False
     write_live_namespace(board, ns)
     return True
+
+
+# --- the board FILE, after a pcbnew save (#1906) ------------------------------
+
+# A depth-1 (setup ...) node, the one KiCad writes the board properties after.
+_SETUP_RE = re.compile(r'^(\t| {2})\(setup\b', re.M)
+
+
+def _node_end(text: str, i: int) -> int:
+    """The index just past the s-expression opening at ``text[i]`` ('('),
+    reading KiCad strings (``"..."``, backslash escapes) as atoms; -1 when it
+    does not close."""
+    depth, n, in_str = 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def write_board_namespace(pcb_path: str, ns: dict) -> bool:
+    """Put ``ns`` on the board FILE at ``pcb_path`` as its top-level
+    ``(property "kicad_routing_tools" ...)``, as pcbnew writes it: replacing
+    the one there, else right after ``(setup ...)``, else last in the board.
+    The rest of the file is kept byte for byte. True when the file changed;
+    False when it already carried ``ns`` or could not be read or written."""
+    try:
+        with open(pcb_path, 'r', encoding='utf-8', newline='') as f:
+            text = f.read()
+    except OSError:
+        return False
+    node = board_property_sexpr(ns)
+    m = _PROP_RE.search(text)
+    if m:
+        at = m.start() + len(m.group(0)) - len(m.group(0).lstrip(' \t'))
+        new = text[:at] + node + text[m.end():]
+    else:
+        s = _SETUP_RE.search(text)
+        end = _node_end(text, s.start(1) + len(s.group(1))) if s else -1
+        if end > 0:
+            new = text[:end] + '\n' + s.group(1) + node + text[end:]
+        else:
+            close = text.rstrip().rfind(')')
+            if not text.lstrip().startswith('(kicad_pcb') or close < 0:
+                return False
+            indent = '\t' if '\n\t(' in text else '  '
+            head = text[:close].rstrip()
+            new = head + '\n' + indent + node + '\n' + text[close:]
+    if new == text:
+        return False
+    tmp = pcb_path + '.records.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8', newline='') as f:
+            f.write(new)
+        os.replace(tmp, pcb_path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def save_board(save, path: str, board, **kwargs):
+    """``save(path, board, **kwargs)`` -- ``pcbnew.SaveBoard``, passed in so
+    nothing here imports pcbnew -- with the board's record kept on the board
+    FILE and on the live board (#1906). Every save of a board THIS repo's code
+    makes goes through here.
+
+    KiCad 10.0.7 and later synchronise a board's properties to its project's
+    text variables before every ``SaveBoard`` (``BOARD::
+    SynchronizeProperties``, which REPLACES the properties), so the record
+    the GUI keeps on the board was dropped from the file it saved, and from
+    the board in memory. What the board held before the save is written back
+    to both, which is what KiCad before 10.0.7 saved. The user's own save in
+    KiCad (Ctrl+S) does not come here and is not covered. Returns what
+    ``save`` returned; raises what it raised, before touching anything."""
+    before = live_board_namespace(board)
+    out = save(path, board, **kwargs)
+    if before:
+        if live_board_namespace(board) != before:
+            set_live_board_namespace(board, before)
+        if board_namespace(path) != before:
+            write_board_namespace(path, before)
+    return out
 
 
 def mirror_project_to_live_board(board) -> bool:

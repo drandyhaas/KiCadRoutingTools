@@ -1,11 +1,11 @@
 """
-KiCad Routing Tools - Placement sub-tab (AI tab notebook).
+KiCad Routing Tools - AI Placement sub-tab (Auto tab notebook).
 
 Two Claude-Code-driven actions ("Place" via /plan-pcb-placement place, "Place +
-Route" via /plan-pcb-placement full) plus
-the non-AI "Beautify Labels" action. The layout follows the Routing sub-tab:
-a large pane on the left (here the run's candidates table and the preview,
-with the labels options under them), the "AI" control column on the right,
+Route" via /plan-pcb-placement full); the non-AI "Beautify Labels" action has
+its own Labels sub-tab (labels_gui). The layout follows the AI Routing sub-tab:
+a large pane on the left (here the run's candidates table and the preview),
+the "AI" control column on the right,
 then the progress gauge, a status row and the transcript across the full
 width.
 
@@ -78,102 +78,6 @@ def _fmt_elapsed(seconds):
     if h:
         return f"{h}h {m:02d}m {s:02d}s"
     return f"{m}m {s:02d}s"
-
-
-class LabelsOptionsPanel(wx.Panel):
-    """Options for Beautify Labels: two rows of label/control pairs with the
-    two checkboxes beside them, a strip under the run preview.
-
-    Control attribute names deliberately equal the future plan-step param
-    names (label_size, label_orientation, ...) - the AI plan executor applies
-    snake_case params by control attribute name.
-    """
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        grid = wx.FlexGridSizer(cols=6, vgap=4, hgap=6)
-
-        def row(label, ctrl, tooltip):
-            grid.Add(wx.StaticText(self, label=label), 0,
-                     wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
-            ctrl.SetToolTip(tooltip)
-            grid.Add(ctrl, 0, wx.EXPAND)
-            return ctrl
-
-        self.label_size = row(
-            "Text size:",
-            wx.SpinCtrlDouble(self, min=0.3, max=3.0, initial=1.0, inc=0.05, size=(78, -1)),
-            "Uniform reference-label font height (and width).")
-        self.label_thickness = row(
-            "Thickness:",
-            wx.SpinCtrlDouble(self, min=0.05, max=0.5, initial=0.15, inc=0.01, size=(78, -1)),
-            "Uniform stroke thickness.")
-        self.label_min_size = row(
-            "Min size:",
-            wx.SpinCtrlDouble(self, min=0.3, max=3.0, initial=0.7, inc=0.05, size=(78, -1)),
-            "Shrink floor when the uniform size does not fit; equal to the "
-            "text size disables shrinking.")
-        self.label_orientation = row(
-            "Orientation:", wx.Choice(self, choices=["horizontal", "vertical"], size=(118, -1)),
-            "Preferred label direction; the other direction is a fallback "
-            "when the preferred one does not fit.")
-        self.label_orientation.SetSelection(0)
-        self.label_max_distance = row(
-            "Max dist:",
-            wx.SpinCtrlDouble(self, min=0.5, max=10.0, initial=2.0, inc=0.25, size=(78, -1)),
-            "How far beyond the part's courtyard a label may be pushed.")
-        self.label_include_hidden = wx.CheckBox(self, label="Include hidden labels")
-        self.label_include_hidden.SetToolTip(
-            "Also place labels that are currently hidden (they stay hidden; "
-            "only their pose and size are tidied).")
-        self.label_skip_locked = wx.CheckBox(self, label="Skip locked parts")
-        self.label_skip_locked.SetToolTip(
-            "Leave the labels of KiCad-locked footprints untouched.")
-        checks = wx.BoxSizer(wx.VERTICAL)
-        checks.Add(self.label_include_hidden, 0, wx.BOTTOM, 4)
-        checks.Add(self.label_skip_locked, 0)
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
-        sizer.Add(grid, 0, wx.ALIGN_CENTER_VERTICAL)
-        sizer.Add(checks, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
-        self.SetSizer(sizer)
-
-    def get_config(self):
-        """Engine LabelConfig kwargs (keys = LabelConfig field names)."""
-        return {
-            'size': self.label_size.GetValue(),
-            'thickness': self.label_thickness.GetValue(),
-            'min_size': self.label_min_size.GetValue(),
-            'orientation': self.label_orientation.GetStringSelection() or 'horizontal',
-            'max_distance': self.label_max_distance.GetValue(),
-            'include_hidden': self.label_include_hidden.GetValue(),
-            'skip_locked': self.label_skip_locked.GetValue(),
-        }
-
-    def set_config(self, config):
-        try:
-            if 'size' in config:
-                self.label_size.SetValue(float(config['size']))
-            if 'thickness' in config:
-                self.label_thickness.SetValue(float(config['thickness']))
-            if 'min_size' in config:
-                self.label_min_size.SetValue(float(config['min_size']))
-            if 'orientation' in config:
-                idx = self.label_orientation.FindString(str(config['orientation']))
-                if idx != wx.NOT_FOUND:
-                    self.label_orientation.SetSelection(idx)
-            if 'max_distance' in config:
-                self.label_max_distance.SetValue(float(config['max_distance']))
-            if 'include_hidden' in config:
-                self.label_include_hidden.SetValue(bool(config['include_hidden']))
-            if 'skip_locked' in config:
-                self.label_skip_locked.SetValue(bool(config['skip_locked']))
-        except (TypeError, ValueError):
-            pass  # a malformed saved dict must not break dialog restore
-
-    def reset_to_defaults(self):
-        self.set_config({'size': 1.0, 'thickness': 0.15, 'min_size': 0.7,
-                         'orientation': 'horizontal', 'max_distance': 2.0,
-                         'include_hidden': False, 'skip_locked': False})
 
 
 class BoardPreview(wx.Panel):
@@ -331,7 +235,11 @@ def _cand_caption(row):
         text = f"{head} — placed; fast route pending"
     else:
         text = f"{head} — placing"
-    tag = {"KEPT": "kept", "best": "best fast route"}.get(row["status"])
+    tag = {"KEPT": "kept", "best": "best fast route",
+           "best, not separable": "best fast route, not separable from the "
+           "seeds marked so: confirm with a full route",
+           "not separable": "not separable from the best fast route: "
+           "confirm with a full route"}.get(row["status"])
     return f"{text} ({tag})" if tag else text
 
 
@@ -351,11 +259,14 @@ class _StatusField(wx.TextCtrl):
 
 
 class PlacementTab(wx.Panel):
-    """Placement sub-tab of the AI notebook (see module docstring)."""
+    """AI Placement sub-tab of the Auto notebook (see module docstring)."""
 
     def __init__(self, parent, pcb_data, board_filename, on_complete=None,
-                 append_log=None, sync_pcb_data_callback=None):
+                 append_log=None, sync_pcb_data_callback=None, get_fix_drc=None):
         super().__init__(parent)
+        # The dialog's "Fix DRC settings after routing" box: a Place + Route
+        # Apply lowers the live floors to the result's only when ticked (#693).
+        self.get_fix_drc = get_fix_drc or (lambda: True)
         self.pcb_data = pcb_data
         self.board_filename = board_filename
         self.on_complete = on_complete
@@ -375,10 +286,7 @@ class PlacementTab(wx.Panel):
                                 for bid in BACKEND_IDS}
         self._last_backend = self.backend
 
-        # Plan-executor contract (ai_plan.PlanExecutor): the beautify action
-        # is the plan-drivable non-AI action on this tab.
         self._cancel_requested = False
-        self._routing_thread = None
 
         self._runner = None
         self._monitor = None
@@ -409,8 +317,7 @@ class PlacementTab(wx.Panel):
         top = wx.BoxSizer(wx.HORIZONTAL)
 
         # Left: the run's candidates (where the Routing tab lists its planned
-        # steps) with the selected one's board beside them, and the Beautify
-        # Labels options as a strip under both.
+        # steps) with the selected one's board beside them.
         left = wx.BoxSizer(wx.VERTICAL)
         cand_box = wx.StaticBox(self, label="Candidates")
         cand_sizer = wx.StaticBoxSizer(cand_box, wx.HORIZONTAL)
@@ -424,26 +331,15 @@ class PlacementTab(wx.Panel):
             "One row per seed: its fast route's blocking nets, vias, "
             "copper and segments. 'best' is the best fast route, 'clean' a "
             "fast route with no blocking net, 'KEPT' the board the run "
-            "returned. Select a row to see its board.")
+            "returned. 'not separable': every seed leaves many nets blocked "
+            "in the fast route, and these seeds lie within its spread of the "
+            "best, so it cannot rank them. Select a row to see its board.")
         self.cand_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_cand_selected)
         cand_sizer.Add(self.cand_list, 1, wx.EXPAND | wx.ALL, 3)
         self.preview = BoardPreview(self)
         cand_sizer.Add(self.preview, 1, wx.EXPAND | wx.ALL, 3)
         left.Add(cand_sizer, 1, wx.EXPAND)
 
-        labels_box = wx.StaticBox(self, label="Beautify Labels (no AI)")
-        labels_sizer = wx.StaticBoxSizer(labels_box, wx.HORIZONTAL)
-        self.labels_options = LabelsOptionsPanel(self)
-        labels_sizer.Add(self.labels_options, 0,
-                         wx.ALIGN_CENTER_VERTICAL | wx.ALL, 3)
-        labels_sizer.AddStretchSpacer(1)
-        self.action_btn = wx.Button(self, label="Beautify Labels")
-        self.action_btn.SetToolTip(
-            "Uniform, non-overlapping reference-designator silkscreen. "
-            "Moves and restyles only the labels, never the parts.")
-        labels_sizer.Add(self.action_btn, 0,
-                         wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        left.Add(labels_sizer, 0, wx.EXPAND | wx.TOP, 6)
         top.Add(left, 1, wx.EXPAND | wx.RIGHT, 8)
 
         # Right: the "AI" column, built the way the Routing tab builds its.
@@ -510,8 +406,8 @@ class PlacementTab(wx.Panel):
                        wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         self.stop_btn = wx.Button(self, label="Cancel")
         self.stop_btn.SetToolTip(
-            "Cancel the running placement or label job; a placement run's "
-            "partial artifacts are kept in its folder.")
+            "Cancel the running placement run; its partial artifacts are "
+            "kept in its folder.")
         self.stop_btn.Disable()
         ctrl_sizer.Add(self.stop_btn, 0,
                        wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
@@ -524,8 +420,9 @@ class PlacementTab(wx.Panel):
         self.apply_btn.Enable(False)
         self.apply_btn.SetToolTip(
             "Apply the finished run's board back to the live board "
-            "(footprint poses; Place + Route also replaces all tracks/vias). "
-            "Asks for confirmation first.")
+            "(footprint poses; Place + Route also makes its tracks, vias, "
+            "poured zones and design rules the run's). Asks for confirmation "
+            "first.")
         ctrl_sizer.Add(self.apply_btn, 0,
                        wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
@@ -579,7 +476,6 @@ class PlacementTab(wx.Panel):
         self.place_btn.Bind(wx.EVT_BUTTON, lambda e: self._start_ai_run("place"))
         self.place_route_btn.Bind(wx.EVT_BUTTON,
                                   lambda e: self._start_ai_run("place_route"))
-        self.action_btn.Bind(wx.EVT_BUTTON, self._on_action)
         self.apply_btn.Bind(wx.EVT_BUTTON, self._on_apply)
         self.stop_btn.Bind(wx.EVT_BUTTON, self._on_stop)
         self.close_btn.Bind(wx.EVT_BUTTON, self._on_close)
@@ -670,9 +566,7 @@ class PlacementTab(wx.Panel):
     # ------------------------------------------------------------- AI runs
 
     def _busy(self):
-        return ((self._runner is not None and self._runner.is_running())
-                or (self._routing_thread is not None
-                    and self._routing_thread.is_alive()))
+        return self._runner is not None and self._runner.is_running()
 
     def _start_ai_run(self, mode):
         if self._busy():
@@ -772,7 +666,6 @@ class PlacementTab(wx.Panel):
         self.place_btn.Enable(not running and self.backend.find_cli() is not None)
         self.place_route_btn.Enable(
             not running and self.backend.find_cli() is not None)
-        self.action_btn.Enable(not running)
         self.apply_btn.Enable(not running and self._pending_result is not None
                               and self._pending_result.get("board") is not None)
         self.stop_btn.Enable(running)
@@ -1033,6 +926,9 @@ class PlacementTab(wx.Panel):
             wx.MessageBox("Board is no longer open.", "Placement",
                           wx.OK | wx.ICON_ERROR)
             return
+        if self._mode == "place_route":
+            self._apply_routed(board, outputs["board"])
+            return
         from kicad_parser import parse_kicad_pcb
         try:
             result_pcb = parse_kicad_pcb(outputs["board"])
@@ -1043,176 +939,130 @@ class PlacementTab(wx.Panel):
 
         moves = self._pose_moves(board, result_pcb)
         locks = self._lock_changes(board, result_pcb)
-        with_copper = self._mode == "place_route"
 
         def _refs(refs):
             return ", ".join(refs[:30]) + (", ..." if len(refs) > 30 else "")
-        lines = [f"{len(moves)} footprint(s) will move."]
+        lines = []
         if moves:
-            lines.append(_refs([r for r, _fp, _p in moves]))
+            lines.append(f"{len(moves)} footprint(s) will move: "
+                         f"{_refs([r for r, _fp, _p in moves])}")
         # #1054: the run's locks are part of its result (`place_pose
         # lock/unlock` stamps and strips them), so Apply mirrors them -- and
         # NAMES them first, an unlock above all.
         to_lock = [r for r, _fp, want in locks if want]
         to_unlock = [r for r, _fp, want in locks if not want]
         if to_lock:
-            lines.append(f"{len(to_lock)} footprint(s) will be LOCKED, as the "
+            lines.append(f"{len(to_lock)} footprint(s) will be locked, as the "
                          f"result board has them: {_refs(to_lock)}")
         if to_unlock:
-            lines.append(f"{len(to_unlock)} footprint(s) will be UNLOCKED, as "
+            lines.append(f"{len(to_unlock)} footprint(s) will be unlocked, as "
                          f"the result board has them: {_refs(to_unlock)}")
         # #829: say what was NOT applied. A skip the dialog does not mention is
         # a live board that silently disagrees with the result board.
         _skipped = getattr(self, '_outline_skipped', None)
         if _skipped:
             lines.append(
-                f"NOT applied: {', '.join(_skipped)} -- these draw the board "
+                f"Not applied: {', '.join(_skipped)} -- these draw the board "
                 f"outline, so moving them would resize the board. Their poses "
                 f"in the result board are left alone here; edit part and "
                 f"outline together in KiCad if one really must move (#829).")
-        if with_copper:
-            lines.append("Place + Route additionally makes the live board's "
-                         "tracks and vias the run's routing: copper the run "
-                         "kept unchanged stays as it is (groups included), "
-                         "the rest is replaced. Replaced arc tracks come "
-                         "back as short straight segments (the parser "
-                         "linearizes arcs) - if the run changed any, open "
-                         "the result board file instead.")
+        if not moves and not locks:
+            lines.insert(0, "Nothing to change: the open board already has the "
+                            "result's part poses and locks.")
+            wx.MessageBox("\n\n".join(lines), "Apply Placement Result",
+                          wx.OK | wx.ICON_INFORMATION)
+            return
         lines.append("The live board may have changed since the run started - "
                      "this diff is against its state right now. Continue?")
         if wx.MessageBox("\n\n".join(lines), "Apply Placement Result",
                          wx.YES_NO | wx.ICON_WARNING) != wx.YES:
             return
 
-        tracks_added, vias_added = self._apply_ipc(
-            board, result_pcb, moves, with_copper, locks)
+        self._apply_ipc(board, result_pcb, moves, False, locks)
 
         # BuildConnectivity / refill / Refresh are NOT needed under IPC:
-        # KiCad rebuilds and fills server-side on each commit (same doctrine
-        # as routing_dialog's apply and planes_gui's).
+        # KiCad rebuilds connectivity server-side on each commit (same
+        # doctrine as routing_dialog's apply and planes_gui's).
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
         if self.on_complete:
             self.on_complete()
-        parsed_zones = len(getattr(result_pcb, "zones", []) or [])
-        live_zones = len(list(board.get_zones()))
-        if parsed_zones > live_zones:
-            self.append_log(
-                f"WARNING: result board has {parsed_zones} zones, live board "
-                f"{live_zones} - new zones are NOT imported by Apply; open "
-                "the result board file to get them.\n")
         msg = f"Applied: {len(moves)} footprint pose(s)"
         if locks:
             msg += (f", {len(to_lock)} lock(s) set and {len(to_unlock)} "
                     f"cleared")
-        if with_copper:
-            msg += (f", {tracks_added} track(s), {vias_added} via(s) added "
-                    f"(unchanged copper kept)")
         msg += ". Use Edit -> Undo in KiCad to revert."
         self.set_status(msg)
         self.append_log("Placement apply: " + msg + "\n")
 
+    def _apply_routed(self, board, result_path):
+        """Place + Route: make the live board the run's routed board through
+        result_apply, as the Autorouter tab does -- poses and locks, tracks and
+        vias, the zones the run poured (rebuilt from the result and refilled
+        by KiCad on this front), and the result project's design rules when
+        "Fix DRC settings after routing" is ticked (#693). Every change is
+        listed first."""
+        from .result_apply import plan_apply, run_apply
+        try:
+            plan = plan_apply(board, result_path,
+                              fix_drc=bool(self.get_fix_drc()))
+        except Exception as e:                                  # noqa: BLE001
+            wx.MessageBox(f"Could not read the result board: {e}",
+                          "Placement", wx.OK | wx.ICON_ERROR)
+            return
+        self._outline_skipped = plan.outline_skipped
+        if not plan.has_changes:
+            self.last_apply_message = "\n\n".join(plan.lines())
+            wx.MessageBox(self.last_apply_message, "Apply Placement Result",
+                          wx.OK | wx.ICON_INFORMATION)
+            return
+        lines = plan.lines()
+        lines.append("Place + Route makes the live board the run's routed "
+                     "board. The live board may have changed since the run "
+                     "started - this list is against its state right now. "
+                     "Continue?")
+        self.last_apply_message = "\n\n".join(lines)
+        if wx.MessageBox(self.last_apply_message, "Apply Placement Result",
+                         wx.YES_NO | wx.ICON_WARNING) != wx.YES:
+            return
+        stats = run_apply(board, plan)
+        self.last_apply_stats = stats
+        if self.sync_pcb_data_callback:
+            self.sync_pcb_data_callback()
+        if self.on_complete:
+            self.on_complete()
+        c = stats.get('copper') or {}
+        z = stats.get('zones') or {}
+        msg = (f"Applied: {stats['moved']} footprint pose(s), {stats['locks']} "
+               f"lock change(s), {c.get('tracks_added', 0)} track(s) and "
+               f"{c.get('vias_added', 0)} via(s) added, {c.get('removed', 0)} "
+               f"removed, {z.get('added', 0)} zone(s) added and "
+               f"{z.get('removed', 0)} removed. Use Edit -> Undo in KiCad to "
+               f"revert.")
+        self.set_status(msg)
+        self.append_log("Placement apply: " + msg + "\n")
+
+    # The appliers are result_apply's, shared with the Autorouter tab; these
+    # keep the names the tab and its gates call.
+
     @staticmethod
     def _fp_is_back(fp) -> bool:
-        """True when the live footprint sits on the back side.
-
-        kipy models the side as the footprint's `layer` (BL_F_Cu / BL_B_Cu),
-        the IPC analogue of SWIG's IsFlipped().
-        """
-        from kicad_ipc_adapter import _ensure_kipy
-        try:
-            return fp.layer == _ensure_kipy().BoardLayer.BL_B_Cu
-        except Exception:
-            return False
+        """result_apply.fp_is_back: the kipy footprint's side."""
+        from .result_apply import fp_is_back
+        return fp_is_back(fp)
 
     @staticmethod
     def _live_by_key(board):
-        """{PCBData key: live kipy footprint}, in one enumeration.
-
-        One enumeration, not a lookup per part: kipy has no
-        FindFootprintByReference and each get_footprints() is a round trip.
-
-        Keyed the way PCBData keys are (#726): two blocks sharing a reference
-        are `TP4` and `TP4~2`, so a map keyed on the bare reference finds
-        neither -- `live.get('TP4~2')` is None and the part is silently
-        skipped. `disambiguate_references` over the board's own footprint
-        order is the same function both parse paths use, which is the whole
-        contract between them. (The IPC twin of main's
-        `gui_utils.live_footprints_by_key`, which the port deleted along with
-        the rest of the pcbnew live-board helpers.)
-        """
-        from kicad_parser import _fp_reference, disambiguate_references
-        live_fps = list(board.get_footprints())
-        raw = []
-        for fp in live_fps:
-            r = _fp_reference(fp)
-            if not r:
-                try:
-                    r = "#" + str(fp.id.value)
-                except Exception:
-                    r = "?"
-            raw.append(r)
-        return dict(zip(disambiguate_references(raw), live_fps))
+        """result_apply.live_footprints_by_key (#726)."""
+        from .result_apply import live_footprints_by_key
+        return live_footprints_by_key(board)
 
     def _pose_moves(self, board, result_pcb):
-        """[(ref, live_fp, parsed_fp)] for every footprint whose pose differs.
-
-        #829: a footprint that draws the board's own outline is skipped here.
-        This applier is a SECOND mover -- it writes poses onto the live board
-        through the IPC commit and never goes through
-        `placement.writer.write_placed_output`, so the CLI-side guard does not
-        reach it. And it cannot be assumed safe because the CLI already
-        refused: the move list is a diff of the RESULT board against the LIVE
-        board, not a replay of what the CLI decided, so a live board that has
-        drifted from the staged input (the user nudged something in KiCad while
-        the run was going) produces moves the CLI never proposed. A side change
-        is the worst of them -- it MIRRORS the owned geometry, which no amount
-        of inspection recovers.
-
-        NOTE (IPC): `owns_board_outline` is filled by the TEXT parse path only.
-        The kipy builder does not yet call `footprint_outline_owners`, so on
-        this front the attribute is absent and the guard below is inert -- it
-        is written against the field so it starts working the moment the
-        builder fills it, rather than being a second, divergent rule. See the
-        IPC GAPS note in the merge commit.
-        """
-        from kicad_ipc_adapter import _vec_xy_mm
-        live = self._live_by_key(board)
-
-        moves = []
-        unreachable = []
-        self._outline_skipped = []
-        for ref, parsed in sorted(result_pcb.footprints.items()):
-            if getattr(parsed, 'owns_board_outline', False):
-                # #829, and it goes BEFORE the lookup: an outline owner is not
-                # ours to move, so whether the live board can be made to find
-                # it is beside the point.
-                #
-                # DISCLOSED, not silent. The confirmation dialog is built from
-                # `moves`, so a footprint dropped here would otherwise appear
-                # nowhere at all and the live board would diverge from the
-                # result board the user can open beside it. The CLI writer
-                # raises for the same reason; this front cannot raise mid-apply
-                # without leaving the board half-updated, so it reports.
-                self._outline_skipped.append(ref)
-                continue
-            fp = live.get(ref)
-            if fp is None:
-                # Part exists only in the result; never invent parts. Collected
-                # rather than dropped in silence, for the same reason the CLI
-                # writer reports an unapplied placement (#726): a pose the run
-                # produced and the board never received is the failure nobody
-                # looks at.
-                unreachable.append(ref)
-                continue
-            live_x, live_y = _vec_xy_mm(fp.position)
-            live_rot = float(getattr(fp.orientation, "degrees", 0.0)) % 360
-            live_back = self._fp_is_back(fp)
-            parsed_back = str(parsed.layer or "F.Cu").startswith("B")
-            if (abs(live_x - parsed.x) > 1e-4 or abs(live_y - parsed.y) > 1e-4
-                    or abs((live_rot - (parsed.rotation or 0) % 360 + 180) % 360 - 180) > 1e-3
-                    or live_back != parsed_back):
-                moves.append((ref, fp, parsed))
+        """[(ref, live_fp, parsed_fp)] for every footprint whose pose differs
+        (result_apply.pose_moves); an outline owner (#829) is left out and
+        named in self._outline_skipped, a part only in the result reported."""
+        from .result_apply import pose_moves
+        moves, self._outline_skipped, unreachable = pose_moves(board, result_pcb)
         if unreachable:
             print("WARNING: %d part(s) in the result are not on the live "
                   "board, so their poses were not applied: %s"
@@ -1220,389 +1070,30 @@ class PlacementTab(wx.Panel):
         return moves
 
     def _lock_changes(self, board, result_pcb):
-        """[(ref, live_fp, want_locked)] for every footprint whose KiCad lock
-        differs from the result board's (#1054).
-
-        A SEPARATE pass from `_pose_moves`, because a lock is not a pose:
-        `place_pose lock` stamps `(locked yes)` on a part and changes nothing
-        else, so a pose diff never sees it. The result board is mirrored in
-        BOTH directions. Placement
-        unlocks on purpose -- `place_pose unlock` is the only way to move a
-        KiCad-locked part, and make_unplaced strips each moved part's lock --
-        so keeping the live lock would ship a part locked at a pose nobody
-        locked it at. The caller names every change before applying any.
-
-        An outline owner (#829) is included: `_pose_moves` skips it because
-        moving it would resize the board, and a lock moves nothing. A part
-        missing from the live board was already reported by `_pose_moves`.
-        """
-        from kicad_parser import kipy_locked
-        live = self._live_by_key(board)
-        changes = []
-        for ref, parsed in sorted(result_pcb.footprints.items()):
-            fp = live.get(ref)
-            if fp is None:
-                continue
-            want = bool(getattr(parsed, 'locked', False))
-            if kipy_locked(fp) != want:
-                changes.append((ref, fp, want))
-        return changes
+        """result_apply.lock_changes (#1054)."""
+        from .result_apply import lock_changes
+        return lock_changes(board, result_pcb)
 
     def _apply_ipc(self, board, result_pcb, moves, with_copper, locks=()):
-        """Apply poses, locks and (optionally) copper in ONE IPC commit.
-
-        Poses, locks and copper ride the SAME commit so the board is never
-        left half-applied and the whole apply is one undo step (parity with
-        kicad_ipc_adapter.apply_footprint_moves).
-
-        The result board is the authority: a Place + Route run's contract is
-        that placement invalidates prior copper, so live copper the result
-        does not carry is removed and copper it adds is created. A live
-        track, arc or via the result carries UNCHANGED -- same geometry,
-        layer, width and net, and for a via the same size, drill, layer pair
-        and type -- is KEPT rather than removed and recreated (#1279).
-        Recreating gave every item a new uuid, which took it out of any KiCad
-        group: a `sense:<REF>.<PAD>` group lost its members, KiCad dropped the
-        emptied group on save, and the Kelvin branch it declared was no longer
-        protected; an unchanged arc also came back as chords. A kept via takes
-        the result's protection spec. A created item takes its KiCad lock from
-        the result's `locked`, the file's own `(locked ...)` token (#521) -- a
-        sense hold is `held_by`, never a lock, so Apply never writes one.
-        Returns (tracks_added, vias_added).
-        """
-        from kicad_ipc_adapter import (begin_commit, make_track, make_via,
-                                       vec_mm, _ensure_kipy, layer_name_for,
-                                       set_item_locked, _vec_xy_mm)
-        from kicad_parser import (mm_to_iu, _arc_to_segments, kipy_via_type,
-                                  kipy_set_via_protection)
-        try:
-            from kipy.geometry import Angle
-        except Exception:
-            Angle = None
-
-        # Result-board net ids are PCBData's synthetic ids; kipy resolves nets
-        # by NAME (net_map), so translate here rather than passing ids through.
-        def name_for(net_id):
-            net = result_pcb.nets.get(net_id)
-            return net.name if net is not None else None
-
-        def live_net_name(item):
-            net = getattr(item, "net", None)
-            return (getattr(net, "name", "") or "") if net is not None else ""
-
-        # Keys compare in integer nanometres, the resolution both boards hold.
-        def seg_key(a, b, width_nm, layer, net_name):
-            return (min(a, b), max(a, b), width_nm, layer, net_name)
-
-        def via_key(x, y, size, drill, layers, vtype, net_name):
-            return (mm_to_iu(x), mm_to_iu(y), mm_to_iu(size), mm_to_iu(drill),
-                    tuple(layers or ()), vtype or 'through', net_name)
-
-        tracks_added = vias_added = 0
-        with begin_commit(board, "KiCadRoutingTools: apply placement") as commit:
-            BoardLayer = _ensure_kipy().BoardLayer
-            updated = {}
-            for _ref, fp, parsed in moves:
-                parsed_back = str(parsed.layer or "F.Cu").startswith("B")
-                if self._fp_is_back(fp) != parsed_back:
-                    # kipy has no Flip(); the side IS the footprint's layer.
-                    fp.layer = (BoardLayer.BL_B_Cu if parsed_back
-                                else BoardLayer.BL_F_Cu)
-                fp.position = vec_mm(parsed.x, parsed.y)
-                if Angle is not None:
-                    try:
-                        fp.orientation = Angle.from_degrees(
-                            float(parsed.rotation or 0))
-                    except Exception:
-                        pass  # leave orientation if the API shape differs
-                updated[id(fp)] = fp
-            # #1054: the result board's KiCad locks, in both directions.
-            for _ref, fp, want in locks:
-                set_item_locked(fp, want)
-                updated[id(fp)] = fp
-            for fp in updated.values():
-                commit.update(fp)
-
-            if not with_copper:
-                return 0, 0
-
-            # The result's copper, by key. Copper GRAPHICS parse into segments
-            # too (#337 board gr_*, #908 footprint fp_*): they are drawings,
-            # not tracks. The live board keeps its own (a footprint's travel
-            # with its pose), and as a track each would be a net-0 track over
-            # its own pads.
-            want_segs, want_vias = {}, {}
-            for seg in result_pcb.segments:
-                if getattr(seg, "graphic", False):
-                    continue
-                k = seg_key((mm_to_iu(seg.start_x), mm_to_iu(seg.start_y)),
-                            (mm_to_iu(seg.end_x), mm_to_iu(seg.end_y)),
-                            mm_to_iu(seg.width), seg.layer,
-                            name_for(seg.net_id) or "")
-                want_segs.setdefault(k, []).append(seg)
-            for via in result_pcb.vias:
-                k = via_key(via.x, via.y, via.size, via.drill, via.layers,
-                            getattr(via, 'via_type', 'through'),
-                            name_for(via.net_id) or "")
-                want_vias.setdefault(k, []).append(via)
-
-            # The live copper, keyed the way the kipy builder reads it: an
-            # arc's pieces chorded by the same _arc_to_segments the result's
-            # parse chords it with.
-            items = []
-            for t in list(board.get_tracks()):
-                net = live_net_name(t)
-                width = int(getattr(t, "width", 0) or 0)
-                layer = layer_name_for(getattr(t, "layer", None))
-                sx, sy = _vec_xy_mm(t.start)
-                ex, ey = _vec_xy_mm(t.end)
-                mid = getattr(t, "mid", None)
-                if mid is not None:
-                    mx, my = _vec_xy_mm(mid)
-                    keys = [seg_key((mm_to_iu(p0[0]), mm_to_iu(p0[1])),
-                                    (mm_to_iu(p1[0]), mm_to_iu(p1[1])),
-                                    width, layer, net)
-                            for p0, p1 in _arc_to_segments((sx, sy), (mx, my),
-                                                           (ex, ey))]
-                else:
-                    keys = [seg_key((mm_to_iu(sx), mm_to_iu(sy)),
-                                    (mm_to_iu(ex), mm_to_iu(ey)),
-                                    width, layer, net)]
-                items.append((t, 'seg', keys))
-            for v in list(board.get_vias()):
-                vx, vy = _vec_xy_mm(v.position)
-                drill = getattr(getattr(v, "padstack", None), "drill", None)
-                top = layer_name_for(getattr(drill, "start_layer", None)) or "F.Cu"
-                bot = layer_name_for(getattr(drill, "end_layer", None)) or "B.Cu"
-                items.append((v, 'via', [via_key(
-                    vx, vy, (getattr(v, "diameter", 0) or 0) / 1e6,
-                    (getattr(v, "drill_diameter", 0) or 0) / 1e6,
-                    [top, bot], kipy_via_type(v), live_net_name(v))]))
-
-            kept = 0
-            for it, kind, keys in items:
-                pool = want_segs if kind == 'seg' else want_vias
-                need = {}
-                for k in keys:
-                    need[k] = need.get(k, 0) + 1
-                if keys and all(len(pool.get(k, ())) >= n
-                                for k, n in need.items()):
-                    taken = [pool[k].pop() for k in keys]
-                    kept += 1
-                    spec = getattr(taken[0], "tenting_attrs", None)
-                    if kind == 'via' and spec:
-                        # Keep the result's tenting/plugging spec (#489 s8);
-                        # an empty spec leaves the via inheriting, as it was.
-                        kipy_set_via_protection(it, spec)
-                        commit.update(it)
-                else:
-                    commit.remove(it)
-
-            for seg in (s for segs in want_segs.values() for s in segs):
-                t = make_track(commit.net_map, seg.start_x, seg.start_y,
-                               seg.end_x, seg.end_y, seg.width, seg.layer,
-                               net_name=name_for(seg.net_id))
-                # #521: user-pinned copper must come back pinned - the whole
-                # protection chain (never-rippable, no override) rests on it.
-                set_item_locked(t, bool(getattr(seg, "locked", False)))
-                commit.add(t)
-                tracks_added += 1
-            for via in (v for vias in want_vias.values() for v in vias):
-                layers = getattr(via, "layers", None) or ["F.Cu", "B.Cu"]
-                v = make_via(commit.net_map, via.x, via.y, via.size, via.drill,
-                             top_layer=layers[0], bottom_layer=layers[-1],
-                             net_name=name_for(via.net_id),
-                             # #489 s8 / #962: the via's own protection spec,
-                             # as the result board declares it.
-                             tenting_attrs=getattr(via, "tenting_attrs", None),
-                             via_type=getattr(via, "via_type", None))
-                set_item_locked(v, bool(getattr(via, "locked", False)))  # #521
-                commit.add(v)
-                vias_added += 1
-            print(f"Placement apply: {kept} unchanged track(s)/via(s) kept, "
-                  f"{len(items) - kept} removed, {tracks_added} track(s) and "
-                  f"{vias_added} via(s) added")
-        from kicad_ipc_adapter import disclose_unwritten_via_protection
-        disclose_unwritten_via_protection(
-            result_pcb.vias, name_for, result_pcb, "placement apply")
-        return tracks_added, vias_added
-
-    # ------------------------------------------------------ beautify labels
-
-    def _on_action(self, event):
-        """Beautify Labels: canonical worker-thread pattern (plan-drivable)."""
-        if self._busy():
-            wx.MessageBox("A placement operation is already running.",
-                          "Placement", wx.OK | wx.ICON_WARNING)
-            return
-        try:
-            from placement.labels import beautify_labels, LabelConfig  # noqa: F401
-        except ImportError:
-            self.set_status(
-                "Beautify Labels: the label engine (placement.labels) could "
-                "not be imported.")
-            return
-        if self.sync_pcb_data_callback:
-            self.sync_pcb_data_callback()
-        self._cancel_requested = False
-        self.action_btn.Disable()
-        self.stop_btn.Enable()
-        self.set_status("Beautifying labels...")
-        config = self.labels_options.get_config()
-        self._routing_thread = threading.Thread(
-            target=self._run_beautify, args=(config,), daemon=True)
-        self._routing_thread.start()
-
-    def run_beautify_labels(self, log=None):
-        """Programmatic entry. NOT synchronous (unlike run_cap_optimization):
-        it starts the worker thread and returns - a future plan action must
-        use a busy predicate that polls action_btn, never `lambda: False`."""
-        self._on_action(None)
-
-    def _run_beautify(self, config):
-        from .gui_utils import StdoutRedirector
-        original_stdout = sys.stdout
-        sys.stdout = StdoutRedirector(self.append_log, original_stdout)
-        result = None
-        error = None
-        try:
-            from placement.labels import beautify_labels, LabelConfig
-            from kicad_ipc_adapter import get_board
-            from kicad_parser import build_pcb_data_from_board
-            board = get_board()
-            if board is not None:
-                pcb_data = build_pcb_data_from_board(board)
-            else:
-                pcb_data = self.pcb_data  # headless tests
-            def progress(current, total, label=""):
-                wx.CallAfter(self._update_progress, current, total, label)
-                time.sleep(0.01)  # let the main thread paint
-            result = beautify_labels(
-                pcb_data, self.board_filename,
-                LabelConfig(**config),
-                cancel_check=lambda: self._cancel_requested,
-                progress_callback=progress)
-        except Exception as e:
-            error = str(e)
-        finally:
-            sys.stdout = original_stdout
-        wx.CallAfter(self._beautify_finished, result, error)
-
-    def _update_progress(self, current, total, label):
-        if not self:
-            return
-        if total:
-            self.progress_bar.SetValue(min(100, int(current * 100 / total)))
-        else:
-            self.progress_bar.Pulse()
-        if label:
-            self.set_status(f"Beautify: {label}")
-
-    def _beautify_finished(self, result, error):
-        if not self:
-            return
-        self._routing_thread = None
-        self.progress_bar.SetValue(0)
-        self.action_btn.Enable()
-        self.stop_btn.Disable()
-        if self._cancel_requested:
-            self.set_status("Beautify cancelled.")
-            return
-        if error is not None:
-            self.set_status(f"Beautify failed: {error}")
-            self.append_log(f"Beautify labels failed: {error}\n")
-            return
-        applied = self._apply_labels_to_board(result)
-        summary = result.get("summary", {})
-        counts = {k: summary.get(k, 0)
-                  for k in ("placed", "shrunk", "rotated", "shrunk_rotated")}
-        unchanged_refs = summary.get("unchanged_refs", [])
-        status = (f"Labels: {sum(counts.values())} placed "
-                  f"({counts['shrunk'] + counts['shrunk_rotated']} shrunk, "
-                  f"{counts['rotated'] + counts['shrunk_rotated']} rotated), "
-                  f"{len(unchanged_refs)} unplaceable, {applied} applied")
-        self.set_status(status)
-        self.append_log("Beautify labels: " + status + "\n")
-        for ref in unchanged_refs[:20]:
-            self.append_log(f"  unplaceable: {ref}\n")
-        if self.on_complete:
-            self.on_complete()
-
-    def _apply_labels_to_board(self, result):
-        """Apply LabelResults to the live board's Reference fields.
-
-        Writes the FILE-frame values the CLI writer would emit (position is
-        absolute; the angle is the node's own (at) rotation, which KiCad
-        stores verbatim on the text item) - so CLI and GUI outputs match by
-        construction, whatever the angle-storage semantics turn out to be.
-        """
-        try:
-            from kicad_ipc_adapter import (get_board, begin_commit, vec_mm,
-                                           _mm_to_nm)
-            from kicad_parser import _fp_reference
-            from kipy.geometry import Vector2
-            from kipy.proto.common import types as ktypes
-        except Exception:
-            return 0
-        board = get_board()
-        if board is None:
-            return 0
-        # Same #726 resolution as _pose_moves: a label result names a PCBData
-        # key, which for a duplicated reference is `TP4~2` -- a map keyed on
-        # the bare reference finds neither twin, and a None here is a silent
-        # `continue`, i.e. a label the run produced and the board never got.
-        from kicad_parser import disambiguate_references
-        _label_fps = list(board.get_footprints())
-        _label_raw = []
-        for fp in _label_fps:
-            _r = _fp_reference(fp)
-            if not _r:
-                try:
-                    _r = "#" + str(fp.id.value)
-                except Exception:
-                    _r = "?"
-            _label_raw.append(_r)
-        live = dict(zip(disambiguate_references(_label_raw), _label_fps))
-        applied = 0
-        with begin_commit(board, "KiCadRoutingTools: beautify labels") as commit:
-            for r in result.get("results", []):
-                action = getattr(r, "action", None) or (
-                    r.get("action") if isinstance(r, dict) else None)
-                if action not in ("placed", "shrunk", "rotated", "shrunk_rotated"):
-                    continue
-                get = (lambda k, _r=r: getattr(_r, k, None)) \
-                    if not isinstance(r, dict) else r.get
-                fp = live.get(get("reference"))
-                if fp is None:
-                    continue
-                text = fp.reference_field.text
-                attrs = text.attributes          # write-through proto ref
-                size_nm = _mm_to_nm(get("size"))
-                attrs.size = Vector2.from_xy(size_nm, size_nm)
-                attrs.stroke_width = _mm_to_nm(get("thickness"))
-                # file_rotation is the stored (at ...) angle, ABSOLUTE rather
-                # than footprint-relative (the KiCad 10 probe behind #481).
-                attrs.angle = float(get("file_rotation") or 0)
-                attrs.horizontal_alignment = \
-                    ktypes.HorizontalAlignment.HA_CENTER
-                attrs.vertical_alignment = ktypes.VerticalAlignment.VA_CENTER
-                text.position = vec_mm(get("world_x"), get("world_y"))
-                commit.update(fp)
-                applied += 1
-        # No Refresh() under IPC: KiCad redraws server-side on commit.
-        return applied
+        """Poses, locks and (optionally) the result's tracks and vias in ONE
+        IPC commit (result_apply.apply_poses_and_copper), so the board is
+        never left half-applied and the whole apply is one undo step. Returns
+        (tracks_added, vias_added)."""
+        from .result_apply import apply_poses_and_copper, copper_plan
+        plan = copper_plan(board, result_pcb) if with_copper else None
+        c, _z = apply_poses_and_copper(board, result_pcb, moves, locks,
+                                       copper=plan,
+                                       message="KiCadRoutingTools: apply placement")
+        return (c['tracks_added'], c['vias_added']) if c else (0, 0)
 
     # -------------------------------------------------------- cancel/close
 
     def _on_stop(self, event):
-        """Cancel the running placement run or label job (Routing: Cancel)."""
+        """Cancel the running placement run (Routing: Cancel)."""
         if self._runner is not None and self._runner.is_running():
             self._runner.cancel()
             self.set_status(
                 "Cancelling — partial artifacts are kept in the workdir...")
-        elif self._routing_thread is not None and self._routing_thread.is_alive():
-            self._cancel_requested = True
-            self.set_status("Cancelling...")
         self.stop_btn.Disable()
 
     def _on_close(self, event):

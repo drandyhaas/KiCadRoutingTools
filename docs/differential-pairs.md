@@ -442,6 +442,12 @@ The router also detects if polarity differs between source and target (P on the 
 The swap changes pad net assignments on the **board only** - update the
 schematic to match (the CLI can do this with `--schematic-dir`).
 
+A pad-swap route is judged on the board as the swap will leave it (#1830):
+its terminal neck, its widening and the foreign-copper graze check (#165)
+read the two target pads, and the stub copper the swap relabels, under their
+post-swap nets. P landing on the pad it will own is therefore not a graze of
+the partner's pad; P passing the pad N will own still is.
+
 There is a second, purely geometric resolution: re-routing with the
 connectors taken out the **opposite side at one end** (flipping one end flips
 its P/N handedness; flipping both would reintroduce the mismatch). Only
@@ -449,15 +455,17 @@ bare-pad endpoints can flip - stub directions are fixed by existing copper.
 Flipped attempts get a full-loop turn budget since they must wrap around
 their endpoint, and every candidate is validated for P/N track crossings.
 
-For a pair with swaps allowed (`--polarity-swap-nets`), the pad-swap and
-connector-flip
-candidates **compete by routed length** and the shortest clean route wins; if
-only one mechanism succeeds, it is used. (When no end can flip - e.g. both
-ends have stubs - the swap is committed directly without re-routing.)
+The mismatch verdict is a suspicion: it compares P's side at the first and
+last centreline segments, so a route that turns can trip it. Every pair
+therefore also routes the **no-swap** candidate -- the pair as the schematic
+has it, rejected if its P and N tracks really cross -- whatever its swap
+policy (#1802). For a pair with swaps allowed (`--polarity-swap-nets`), the
+no-swap, pad-swap and connector-flip candidates **compete by routed length**
+and the shortest clean route wins; if only one succeeds, it is used.
 
 For a pair NOT matching `--polarity-swap-nets` (or with the flag absent
-entirely - the default), pad swaps never
-happen: only the flip resolution is tried.
+entirely - the default), pad swaps never ship: the no-swap and flip
+candidates compete.
 
 When no candidate produces a clean route (no crossing tracks are ever
 written), the coupled route gives up and the log names every candidate with
@@ -474,10 +482,22 @@ and if that fails too, the single-ended follow-up:
   COUPLED ROUTE FAILED - polarity mismatch, and no candidate routed clean; trying the hybrid escape
 ```
 
-A pair whose swap the policy denies reads `pad swap: not allowed for this pair
-(--polarity-swap-nets)` there, and its last line says so; such a pair is listed in
-`JSON_SUMMARY.polarity_swap_denied_pairs`. `no opposite-side option` is printed
-only when neither end can flip.
+For a pair whose swap the policy denies, the pad swap is then routed once as a
+probe, never shipped, to learn whether the swap is what is missing. Its row
+reads `pad swap: not allowed for this pair (--polarity-swap-nets); probed, the
+swap would route` or `...; probed, the swap fails too: <reason>`. Only in the
+first case is the pair reported `polarity-swap-denied` (its last line says so,
+and it is listed in `JSON_SUMMARY.polarity_swap_denied_pairs`); in the second
+it is a `polarity-mismatch`, which allowing the swap would not fix.
+`no opposite-side option` is printed only when neither end can flip.
+
+A pair whose ladder failed and whose hybrid escape was rejected as well
+(it is deferred to the single-ended follow-up) prints a
+`Retry hint:` line and carries it as `retry_hint` in its `pair_reports` row:
+the candidates and the hybrid's middle and legs are all laid on the routing
+grid, and whether one of them fits a tight terminal can change with
+`--grid-step`, in either direction, so one grid A/B (coarser and finer) comes
+before re-planning the pair.
 
 ## Via Placement
 
@@ -804,7 +824,29 @@ the GUI diff tab gets the same answer:
   `coupled_mm`, `uncoupled_mm`, `length_p_mm` / `length_n_mm`, `layers_p` /
   `layers_n`, `skew_mm`, the gap window, `coupled_floor_mm`, `coupled_share`
   (coupled run over the pair's length, capped at 1), `coupled_share_floor` and
-  `coupled`.
+  `coupled`. A member whose copper runs back along itself (#1873: a hybrid
+  terminal leg laid beside its own coupled middle) adds `self_overlap_mm`
+  (`{p, n}`, `net_queries.net_self_overlap`: two same-layer passes within 5
+  degrees of parallel whose copper overlaps over more than a width, counted
+  where it does, so two passes that converge count from where they meet and a
+  narrow pass inside a wider track counts too) and every such overlap in
+  `self_overlaps` (`member`, `layer`, the two passes, `centre_gap_mm`,
+  `along_mm`, `width_mm`). A `Self-overlap:` line names a pair with one longer
+  than twice its track width: `skew_mm` and the intra-pair status count all of
+  a member's copper, as KiCad's skew rule does, so that stretch is in them
+  twice. The pair's `intra_pair_matching` record carries the totals beside its
+  `status`, so a `matched` there can be read with them. A member with more
+  segments than the search takes is listed in `self_overlap_not_searched`
+  (and reads `null`, not 0, in `self_overlap_mm` beside a partner that has
+  some), and a search that failed is `self_overlap_error`: none of the three
+  keys means both members were searched and have none.
+  The direct hybrid no longer lays the shape it was found on: a terminal leg
+  that ran beside its own coupled middle up to the middle's end is joined to
+  the middle where the two first meet, and the doubled stretch (the middle's
+  tail and the leg copper on it) is not laid
+  (`diff_pair_routing._fold_legs_onto_middle`; the step prints `leg fold
+  (#1873): net N joins its coupled middle X mm short of the middle's end`). A
+  tail that carries the net's own via is left as it was.
 - **A pair routed but not coupled** is outcome `uncoupled`, listed in
   `JSON_SUMMARY.uncoupled_diff_pairs` (and the GUI's completion dialog), and is
   **not** counted in `routed_diff_pairs` / `successful`. The end-of-run summary
@@ -863,6 +905,7 @@ This helps visualize the routing structure without affecting the actual routed c
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--via-span TOP BOTTOM` | none (through vias) | Route the pairs on this run of neighbouring copper layers and lay vias that join exactly it (micro, blind or buried, by where it sits in the stack; `--via-span-type` overrides), as `route.py --via-span` does. See [Configuration](configuration.md#via-span) (#1842) |
 | `--diff-pair-gap` | board class, else 0.101 | Gap between P and N traces (mm). Omitted (the GUI: override unchecked), each pair takes its net class's `diff_pair_gap` and the call the Default class's; a class that leaves it unset inherits Default's, and a 0 is unset, falling back to the class clearance (the same rule makes an omitted `--track-width` the class `diff_pair_width`, else the class track width). Raised, never lowered, to the clearance (#441), the pair's net class (#530) and any `.kicad_dru` clearance rule that binds the pair on a layer it routes on (#1145): KiCad grades P against N as two nets. A pair a coupled-pair rule grades -- a clearance rule whose condition ANDs in `AB.isCoupledDiffPair()`, e.g. `AB.isCoupledDiffPair() && A.hasNetclass('USB')` -- keeps the gap asked for, floored at that rule alone (#1293). So does a pair whose net class has a `diff_pair_gap` below its clearance -- KiCad then grades P against N at that gap (its implicit "netclass '...' (diff pair)" rule, floored at the board minimum clearance; #1542) -- and a pair a class-scoped clearance rule binds, e.g. `A.NetClass == 'CSI' && B.NetClass == 'CSI'` (floored at the board minimum clearance too, which KiCad's coupling check grades the gap at; #1526). Under `--escalation board --no-fix-drc-settings` such a rule still floors at the board minimum, not at the Default class the clearance base descends to there (#1630), and the post-route graze passes price P against N at the same rule, so the cleanup no longer moves the pair off its gap. A "keep pairs apart" rule (`!AB.isCoupledDiffPair()`) never raises it: KiCad exempts a pair's own partner, by name (#1295) |
 | `--track-width` | board class, else 0.3 | Each leg's width (mm). Omitted, the net class's `diff_pair_width` (see above). With `--impedance` it is the min-width floor and the no-stackup fallback |
 | `--impedance` | - | Target differential impedance (ohms, e.g. 100): solves each layer's leg width from the board stackup at the gap the pairs are BUILT at -- `--diff-pair-gap` after every floor above, or, with it omitted, each pair's own class gap -- and records that gap with the declaration (#1630). Pairs of one call built at different gaps get one width per layer, which is said; route each gap in its own call. `check_impedance.py` reads the declared ohms back off the shipped width and P/N gap (disclosure) |
@@ -887,6 +930,7 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |
 | `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
 | `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair (meander shorter track) |
+| `--diff-pair-intra-lane` | - | Match, record and grade each intra-matched pair on its **lane**, the copper path between two pads, instead of total copper (#1869): `auto`, or `P_NET=REF.PAD:REF.PAD ...` |
 | `--ac-couple-match` | false | Match an AC-coupled pair end to end across its series caps (see [Length Matching](length-matching.md#differential-pairs)) |
 
 ## Track Proximity Avoidance
@@ -995,6 +1039,44 @@ python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" 
 
 **Execution order**: Inter-pair matching runs first (on centerline), then intra-pair matching adds meanders to individual P/N tracks. This order is intentional - inter-pair regenerates P/N from the meandered centerline, so intra-pair must run last to preserve its meanders.
 
+**A pair with a branch (`--diff-pair-intra-lane`, #1869).** KiCad's skew DRC, and
+so the default here, sums ALL of a member's copper. A pair whose members each
+branch to a third pad -- a protection part, a termination -- cannot be matched in
+both senses: matched pad to pad, its total copper differs by the branches and
+`check_drc.py` fails it against the tolerance the pair step recorded; matched in
+total copper, the signal paths differ. With a lane the pair is matched, recorded
+and graded on the copper path between two pads, and a branch is a stub:
+
+```bash
+# the two terminals the pair step routes the pair between
+python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "/DATA*" \
+    --diff-pair-intra-match --diff-pair-intra-lane auto
+
+# or name the P member's two pads; the N member's are its pads on the same parts
+python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "/DATA*" \
+    --diff-pair-intra-match --diff-pair-intra-lane "/DATA+=J1.5:IC4.10"
+```
+
+The pads are recorded with the tolerance (`kicad_routing_tools.intra_pair_tolerance`,
+`lane: {p: [...], n: [...]}`), so later steps and graders read the same path.
+`check_drc.py` prints `Recorded lane (route_diff, #1869): ... skew 0.1050 mm on the
+lane` with each member's stub length, carries the rows in `--json` under
+`recorded_lanes`, and `board_score.py` adds `lane` and `lane_skew_mm` to the pair's
+record beside the total-copper `skew_mm`.
+
+`auto` is the pair step's own two end terminals: a two-terminal pair's two, a
+multi-point pair's coupled legs' ends (a branch the step leaves for a later step
+is not the lane, however long). N's lane ends on the same two parts as P's; a
+pair whose coupled legs do not form one path, or whose P and N end on different
+parts, gets no lane, is matched on total copper, and the step says why. A lane
+applies only to a pair the step intra-matches (with no `--diff-pair-intra-match`
+the step says the lane is unused) and that no `.kicad_dru` skew rule binds: KiCad
+grades such a rule on total copper, so that pair is matched on total copper, and
+the console line, the record and the step's `intra_pair_matching` row say so
+(`lane_ignored`). A lane naming a net no pair of the step has, or pads its nets
+lack, refuses with the reason (exit 2). In the GUI it is the differential tab's
+**Intra-pair lane** field.
+
 ### Time Matching
 
 Use `--time-matching` as an alternative to length matching when routes traverse layers with different dielectric properties. Time matching accounts for the different signal propagation speeds:
@@ -1014,7 +1096,7 @@ python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" 
 
 ## Limitations
 
-1. **Polarity swap** - Off by default; allow it per pair with `--polarity-swap-nets <patterns>` (`'*'` = every pair; the GUI's "Polarity-swap allowed nets" field, empty by default). Only allow pairs an endpoint can compensate (FPGA generic I/O, polarity-tolerant SerDes) - never USB/MIPI/TMDS (#279). For a denied pair, a mismatch is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible; denied-but-wanted swaps are listed in `polarity_swap_denied_pairs` in the JSON summary
+1. **Polarity swap** - Off by default; allow it per pair with `--polarity-swap-nets <patterns>` (`'*'` = every pair; the GUI's "Polarity-swap allowed nets" field, empty by default). Only allow pairs an endpoint can compensate (FPGA generic I/O, polarity-tolerant SerDes) - never USB/MIPI/TMDS (#279). For a denied pair, a suspected mismatch is routed as laid (no swap, rejected if P and N cross) and with the connectors out the opposite side at one end (bare-pad endpoints only); a pair a flip resolved, or (when none of those routes, the swap is probed) one the swap alone would have coupled, is listed in `polarity_swap_denied_pairs` in the JSON summary (#1802)
 2. **Fixed spacing** - Spacing is constant along each layer of the route (no tapering); with per-layer widths each layer keeps its own pitch
 3. **Grid snapping** - Centerline endpoints snap to grid for the search; the
    terminal endpoints of the generated geometry are un-snapped back to the

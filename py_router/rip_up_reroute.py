@@ -649,7 +649,7 @@ def select_force_reroute_nets(pcb_data: PCBData, net_ids, overrides,
     override. A net with no copper routes normally anyway; a plane
     (zone-owning) net belongs to route_planes; a protected net (length-matched
     group, routed diff pair) is skipped unless named EXACTLY (no glob) in
-    ``overrides``; KiCad-locked copper is never stripped. The exact-name
+    ``overrides``; KiCad-locked or held copper is never stripped. The exact-name
     overrides are stashed on ``pcb_data`` so the in-run ladders honour the
     ones this pre-run filter did (run-6 z2).
 
@@ -686,11 +686,19 @@ def select_force_reroute_nets(pcb_data: PCBData, net_ids, overrides,
         keep = set(filter_rippable_names(
             [n for n, _ in cand], prot, override_patterns=overrides,
             context="--force-reroute"))
+    # Copper held immutable stays where it is (kicad_parser.is_immutable_copper):
+    # a net carrying it can still be ripped -- a via-span step's hold on an
+    # earlier step's escape (#1842) keeps the net's routes rippable -- but the
+    # held items are not this net's to strip, and the caller strips exactly
+    # what is listed here.
+    from kicad_parser import is_immutable_copper
     for name, nid in cand:
         if name not in keep:
             continue
-        ripped[nid] = ([s for s in pcb_data.segments if s.net_id == nid],
-                       [v for v in pcb_data.vias if v.net_id == nid])
+        ripped[nid] = ([s for s in pcb_data.segments
+                        if s.net_id == nid and not is_immutable_copper(s)],
+                       [v for v in pcb_data.vias
+                        if v.net_id == nid and not is_immutable_copper(v)])
     return ripped
 
 

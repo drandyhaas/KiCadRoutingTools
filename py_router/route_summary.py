@@ -39,7 +39,8 @@ __all__ = ['merge_summaries', 'merge_route_summaries', 'summary_min',
            'named_nets', 'regrade_record', 'GATE_RE',
            'apply_improvement_gate', 'SHIPPED_RULES_RE',
            'sink_summary', 'restamp_shipped_rules',
-           'apply_shipped_rules', 'SHIPPED_AUDIT_RE']
+           'apply_shipped_rules', 'SHIPPED_AUDIT_RE',
+           'DESIGN_RULES_PER_RUN', 'STEP_RULE_KEYS', 'stamp_design_rules']
 
 SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
 # #962: `fab_notes`' ship-time via_in_pad record, printed after the summaries
@@ -54,7 +55,8 @@ GATE_RE = re.compile(r'JSON_IMPROVEMENT_GATE: (\{.*\})')
 # every JSON_SUMMARY of that run when they differ from what a printed summary
 # carried (see restamp_shipped_rules).
 SHIPPED_RULES_RE = re.compile(r'JSON_SHIPPED_RULES: (\{.*\})')
-# The outermost run's audits of the board it SHIPS (#1760: rule_area_keepouts),
+# The outermost run's audits of the board it SHIPS (#1760: rule_area_keepouts;
+# #1896: tap_vias),
 # measured after every JSON_SUMMARY of that run, as {summary key: value}.
 # route.py sets the same keys on the merged `--json-out` document, so a reader
 # of the log alone (merge_route_summaries) must apply them too.
@@ -124,20 +126,46 @@ def sink_summary(summary: Dict) -> None:
 
 #: The keys of `design_rules` that come from one run's config, not the ledger
 DESIGN_RULES_PER_RUN = ('unsupported_rules', 'scoped_clearance', 'kicad_refuses_file')
+#: The keys of `design_rules` that grade a step's OWN copper against the
+#: board's rules (`design_rules.disclose_step_rules`). Each summary grades the
+#: copper its own pass laid, so a re-stamp of the ledger keeps them; the
+#: outermost run re-grades them once on the copper it SHIPS and passes that
+#: grade as `step_rules`, which replaces them.
+STEP_RULE_KEYS = ('annular_rules', 'via_rules', 'edge_rules', 'hole_rules',
+                  'board_setup_vias')
 
 
-def _stamp_rules(doc: Dict, min_clearance_used, design_rules) -> None:
+def stamp_design_rules(doc: Dict, design_rules, step_rules=None) -> None:
+    """Set the process-wide ledger `design_rules` on `doc`'s `design_rules`.
+
+    The ledger keys (`escalation_summary`: the narrowed rows, which the
+    outermost run re-measures on the board it ships) are replaced; each
+    summary's own `DESIGN_RULES_PER_RUN` keys are kept; the `STEP_RULE_KEYS`
+    are kept too, unless `step_rules` (the grade of the shipped copper, a
+    dict, {} when it breaks no rule) is given, which replaces them."""
+    if not isinstance(design_rules, dict):
+        return
+    _old = doc.get('design_rules')
+    _old = _old if isinstance(_old, dict) else {}
+    _kept = DESIGN_RULES_PER_RUN + (() if isinstance(step_rules, dict)
+                                    else STEP_RULE_KEYS)
+    _new = dict(design_rules)
+    for k in STEP_RULE_KEYS:
+        _new.pop(k, None)
+    if isinstance(step_rules, dict):
+        _new.update({k: v for k, v in step_rules.items() if k in STEP_RULE_KEYS})
+    _new.update({k: _old[k] for k in _kept if k in _old})
+    doc['design_rules'] = _new
+
+
+def _stamp_rules(doc: Dict, min_clearance_used, design_rules,
+                 step_rules=None) -> None:
     doc['min_clearance_used'] = min_clearance_used
-    if isinstance(design_rules, dict):
-        # `unsupported_rules` is per summary (its own run's config); the rest
-        # of the block is the process-wide fab_tiers ledger.
-        _old = doc.get('design_rules')
-        _keep = ({k: _old[k] for k in DESIGN_RULES_PER_RUN
-                  if k in _old} if isinstance(_old, dict) else {})
-        doc['design_rules'] = dict(design_rules, **_keep)
+    stamp_design_rules(doc, design_rules, step_rules)
 
 
-def restamp_shipped_rules(min_clearance_used, design_rules) -> Optional[Dict]:
+def restamp_shipped_rules(min_clearance_used, design_rules,
+                          step_rules=None) -> Optional[Dict]:
     """Make every summary of this run say the floor the run SHIPS.
 
     `min_clearance_used` and `design_rules` are measured when a summary is
@@ -145,9 +173,12 @@ def restamp_shipped_rules(min_clearance_used, design_rules) -> Optional[Dict]:
     finalize's fine-pitch taps descend below the requested clearance, and
     every descent is a `clearance` row in the ledger. main()'s .kicad_pro
     writeback reads the LIVE ledger, so the project said 0.15 while
-    --json-out and JSON_SUMMARY_MIN said 0.2 (kit-dev-coldfire, `--nets GND
-    +3.3V`), and a grader working "at min_clearance_used" graded the board
-    stricter than it was routed.
+    --json-out and JSON_SUMMARY_MIN said 0.2, and a grader working "at
+    min_clearance_used" graded the board stricter than it was routed.
+
+    `step_rules` is the outermost run's grade of the copper it ships against
+    the board's rules (the `STEP_RULE_KEYS`), or None when it was not graded:
+    each summary then keeps the grade of its own pass.
 
     Stamps every sink summary in place (both values are run-scoped, like
     `board_scoped_keys` says) and returns the record to print as
@@ -159,8 +190,10 @@ def restamp_shipped_rules(min_clearance_used, design_rules) -> Optional[Dict]:
     record = {'min_clearance_used': min_clearance_used}
     if isinstance(design_rules, dict):
         record['design_rules'] = design_rules
+        if isinstance(step_rules, dict):
+            record['step_rules'] = step_rules
     for s in SUMMARY_SINK:
-        _stamp_rules(s, min_clearance_used, design_rules)
+        _stamp_rules(s, min_clearance_used, design_rules, step_rules)
     if [_rules_text(s) for s in SUMMARY_SINK] == PRINTED_RULES:
         return None
     return record
@@ -171,7 +204,7 @@ def apply_shipped_rules(merged: Optional[Dict], record: Optional[Dict]):
     if merged is None or not record:
         return merged
     _stamp_rules(merged, record.get('min_clearance_used'),
-                 record.get('design_rules'))
+                 record.get('design_rules'), record.get('step_rules'))
     return merged
 
 # The one-line compact tally route.py prints at the end of every OUTERMOST
@@ -329,7 +362,9 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False,
         # sub-run's own summary has none. A sub-run that ever measured one
         # would be measuring a slice, so first always wins.
         for _k in ('power_widths', 'power_widths_measured_on',
-                   'power_widths_run_scope'):
+                   'power_widths_run_scope',
+                   # #1843: the necks, measured the same way
+                   'area_necks'):
             if _k in first:
                 merged[_k] = first[_k]
         # The length-match groups (#1247) are the RUN's: pass 1 formed them

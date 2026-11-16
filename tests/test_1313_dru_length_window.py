@@ -250,7 +250,7 @@ def main():
         check('the unrouted net is reported not measured, not graded',
               UNROUTED not in got and 'not measured' in log and UNROUTED in log)
         check("the rule it cannot model is named NOT GRADED",
-              re.search(r"NOT GRADED: rule 'unmodelled' \(.+\) -- \d+ net", log)
+              re.search(r"NOT GRADED \(length\): rule 'unmodelled' \(.+\) -- \d+ net", log)
               is not None)
         check('the severity-ignore rule is skipped with a note',
               "rule 'ignored': length window, severity ignore" in log)

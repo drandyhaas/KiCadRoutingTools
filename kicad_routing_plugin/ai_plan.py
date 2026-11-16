@@ -334,6 +334,9 @@ _PARAM_CONTROL_ALIASES = {
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
 _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
+                  # #1842: --via-span's two layer names -> one text field,
+                  # --via-span-type -> the choice beside it
+                  'via_span', 'via_span_type', 'via_span_escape',
                   # #530: --clearance-ceiling -> Min Clearance + the ceiling box
                   'clearance_ceiling',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
@@ -590,6 +593,22 @@ def apply_step_params(step, dialog):
                 ctl.SetValue(' '.join(str(v) for v in value) or 'ALL')
             else:
                 ctl.SetValue('ALL' if value else '')
+            return True
+        if name == 'via_span':
+            ctl = getattr(dialog, 'via_span', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(' '.join(str(v) for v in value)
+                         if isinstance(value, (list, tuple)) else str(value or ''))
+            return True
+        if name in ('via_span_type', 'via_span_escape'):
+            ctl = getattr(dialog, name, None)
+            if ctl is None:
+                return False
+            _i = ctl.FindString(str(value or ('auto' if name == 'via_span_type' else 'off')))
+            if _i < 0:
+                return False
+            ctl.SetSelection(_i)
             return True
         if name == 'power_nets' and isinstance(value, (list, tuple)):
             ctl = getattr(dialog, 'power_nets_ctrl', None)
@@ -1489,7 +1508,7 @@ class PlanExecutor:
         me = threading.current_thread()
         owners = [self.dialog]
         for attr in ('differential_tab', 'planes_tab', 'fanout_tab',
-                     'placement_tab'):
+                     'labels_tab'):
             owner = getattr(self.dialog, attr, None)
             if owner is not None:
                 owners.append(owner)
@@ -1727,6 +1746,10 @@ class PlanExecutor:
                     persist_power_widths(_pro, consume_power_widths())
                     # #678: the plan's fanout steps' pour-served balls.
                     persist_pour_served_pads(_pro, consume_pour_served_pads())
+                    # #1807: the improvement gate's record of the last trade.
+                    from improvement_gate import consume_lap_history
+                    from protected_nets import persist_lap_history
+                    persist_lap_history(_pro, consume_lap_history())
                 except Exception as _pe:
                     self.log(f"AI plan: protected-nets record skipped: {_pe}")
                 if _fixdrc693:

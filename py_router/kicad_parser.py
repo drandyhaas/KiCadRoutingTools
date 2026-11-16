@@ -862,6 +862,10 @@ class BoardInfo:
     copper_layers: List[str]
     board_bounds: Optional[Tuple[float, float, float, float]] = None  # min_x, min_y, max_x, max_y
     stackup: List[StackupLayer] = field(default_factory=list)  # ordered top to bottom
+    # #502: the drilled board thickness in mm (board_thickness_mm): the stackup
+    # entries summed, else the declared (general (thickness ...)), else None
+    # (unknown -- the drill aspect-ratio floor is then inert).
+    board_thickness: Optional[float] = None
     board_outline: List[Tuple[float, float]] = field(default_factory=list)  # Polygon vertices for non-rectangular boards
     board_cutouts: List[List[Tuple[float, float]]] = field(default_factory=list)  # Interior cutout polygons
     # ALL outer boundary rings (issue #304). A board can carry several disjoint
@@ -880,6 +884,13 @@ class BoardInfo:
     # inside the panel frame -- dropping it outright let the router lay copper
     # straight across the milled gap between the two keyboard halves (85 items).
     board_edge_contours: List[List[Tuple[float, float]]] = field(default_factory=list)
+    # F.Mask/B.Mask artwork (mask openings) as keep-out dicts of the same
+    # shape, kept apart from the rule areas: read on first use by a router
+    # (mask_artwork.board_mask_artwork); None = not read yet.
+    mask_artwork: Optional[List[dict]] = None
+    # Whether routing keeps new copper out of mask_artwork (route.py
+    # --no-mask-keepouts opts out); None = routing_defaults.MASK_KEEPOUTS.
+    mask_keepouts: Optional[bool] = None
     keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed, pads_allowed, footprints_allowed, owner, name}
     # Smallest copper clearance any routing step actually used on this board this
     # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
@@ -2480,7 +2491,8 @@ def extract_layers(content: str) -> BoardInfo:
 
     return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds,
                      stackup=stackup, board_outline=(outers[0] if outers else []),
-                     board_outlines=outers, board_cutouts=cutouts)
+                     board_outlines=outers, board_cutouts=cutouts,
+                     board_thickness=board_thickness_mm(stackup, general_thickness(content)))
 
 
 def _layer_table(content: str) -> Tuple[Dict[int, str], List[str]]:
@@ -2577,6 +2589,32 @@ def _combine_stackup_sheets(sheets: List[Tuple[float, float, float, str]]
     names = [s[3] for s in sheets if s[3]]
     material = names[0] if len(set(names)) == 1 else " + ".join(names)
     return thickness, epsilon_r, loss_tangent, material
+
+
+def general_thickness(content: str) -> Optional[float]:
+    """The board's declared ``(general (thickness T))`` in mm, or None."""
+    m = re.search(r'\(general(?=[\s)])', content)
+    if not m:
+        return None
+    t = _stackup_number(content[m.start():find_matching_paren(content, m.start())],
+                        'thickness')
+    return t if t > 0 else None
+
+
+def board_thickness_mm(stackup: List[StackupLayer],
+                       general: Optional[float] = None) -> Optional[float]:
+    """#502: the board thickness a through via is drilled through, in mm.
+
+    The sum of the stackup's entries (copper and dielectric, each already
+    combined across its sheets) when the board declares a stackup, else
+    ``general`` (its ``(general (thickness ...))``), else None. Never a
+    default: an unknown thickness leaves the drill aspect-ratio floor inert.
+    The two sources can differ by the solder masks, which the stackup leaves
+    out (a stock 1.6 mm board sums to 1.58)."""
+    total = sum(l.thickness or 0.0 for l in stackup or ())
+    if total > 0:
+        return round(total, 6)
+    return general if general and general > 0 else None
 
 
 def extract_stackup(content: str) -> List[StackupLayer]:
@@ -8755,6 +8793,7 @@ def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
         copper_layers=copper_layers,
         board_bounds=board_bounds,
         stackup=stackup,
+        board_thickness=board_thickness_mm(stackup, _general_thickness_kipy()),
         board_outline=board_outline,
         board_outlines=board_outlines,
         board_cutouts=board_cutouts
@@ -10865,6 +10904,22 @@ def _extract_stackup_kipy(board) -> List[StackupLayer]:
     return stackup
 
 
+def _general_thickness_kipy() -> Optional[float]:
+    """The board file's ``(general (thickness ...))``, as the text parser reads
+    it (#502), from the file the adapter names (kipy has no GetFileName). Not
+    the stackup's board thickness: KiCad answers its 1.6 mm default for a
+    board that declares none, which this must not invent."""
+    try:
+        from kicad_ipc_adapter import get_board_full_path
+        board_file = get_board_full_path()
+        if board_file:
+            with open(board_file, 'r', encoding='utf-8') as f:
+                return general_thickness(f.read(8192))
+    except Exception:
+        pass
+    return None
+
+
 def _kipy_enum_name(enum_cls, value) -> str:
     """A proto enum value's NAME ('PSS_CIRCLE'), '' when it has none. kipy
     returns enum fields as bare ints, so `getattr(value, 'name')` -- which
@@ -11677,6 +11732,8 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
 
     if len(bi_b.stackup) != len(bi_f.stackup):
         diffs.append(f"Stackup layer count: board={len(bi_b.stackup)} file={len(bi_f.stackup)}")
+    if bi_b.board_thickness != bi_f.board_thickness:
+        diffs.append(f"Board thickness: board={bi_b.board_thickness} file={bi_f.board_thickness}")
     # Layer by layer (#1222): the impedance width solver and the via barrel
     # length read thickness, epsilon_r and loss_tangent, so a front that
     # combines a multi-sheet dielectric or reads a locked thickness differently

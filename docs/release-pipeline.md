@@ -57,7 +57,7 @@ The dependency tables live in `py_router/startup_checks.py`, shared by the CLI g
 
 1. Append it to `requirements.txt` with a floor (e.g. `mypkg>=1.2`).
 2. If its import name differs from its pip name (Pillow imports as `PIL`), add it to `IMPORT_TESTS` and `VERSION_MODULES`; otherwise the check runs `import <pip name>`. `IMPORT_TESTS` can also name a submodule the code uses, which catches a broken compiled install better than a bare import (the existing `scipy` and `shapely` entries do).
-3. If routing needs it, add it to `ROUTING_PACKAGES`, which the CLI gate checks. If the plugin can run without it, add it to `OPTIONAL_PACKAGES` in `deps_check.py` with the feature it turns off (as Pillow is).
+3. If routing needs it, add it to `ROUTING_PACKAGES`, which the CLI gate checks. If the plugin can run without it, add it to `OPTIONAL_PACKAGES` in `deps_check.py` with the feature it turns off (as Pillow is). If only standalone scripts use it and it must never load inside KiCad's process, add it to `CLI_ONLY_PACKAGES` instead (as ortools is: its Windows DLLs clash with KiCad's, #1937); the script's own gate checks it.
 
 You do **not** need to update `metadata.json` — Python deps live entirely outside the PCM manifest.
 

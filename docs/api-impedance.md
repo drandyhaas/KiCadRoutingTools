@@ -284,7 +284,7 @@ layers (microstrip, part of the field in air) than inner ones (stripline).
 
 ```python
 get_layer_epsilon_eff(pcb, layer_name, width=0.0, side_gap=0.0) -> float
-get_layer_ps_per_mm(pcb, layer_name) -> float
+get_layer_ps_per_mm(pcb, layer_name, net_id=None) -> float
 get_via_barrel_epsilon_eff(pcb, layer1, layer2) -> float
 calculate_route_propagation_time_ps(segments, vias=None,
                                     pcb_data=None) -> float
@@ -301,6 +301,21 @@ every length/time-matching call site does, it gives the flat answer.
 via barrel delays (a through via's barrel is the whole stack, whatever layer
 pair it carries). Without `pcb_data` it assumes FR4 microstrip
 (eps_eff ≈ 2.65) everywhere.
+
+**Tuning profiles (#1846).** When the net's class names a KiCad 10 tuning
+profile with time-domain tuning on and no via overrides
+(`tuning_profiles.net_time_profile`, read from the board's sibling
+`.kicad_pro`), both functions use the profile instead of the stackup, which
+is how KiCad's DRC times the net. `get_layer_ps_per_mm` given a `net_id`
+returns the profile's delay for the layer, 0.0 for a layer the profile has
+no entry for; without a `net_id`, or for a net with no such profile, it is
+the stackup's, as before. `calculate_route_propagation_time_ps` does the
+same for copper of ONE net (`tuning_profiles.route_delay_ps`: each layer's
+track length times its delay, plus the via length as the length DRC charges
+it -- the span the via joins, not the whole stack -- times the via delay).
+Copper of several nets, or of a net with no such profile, is timed from the
+stackup. Pad-to-die delays are added by the caller in both cases. The
+functions are listed under [Time domain: tuning profiles](api-net-analysis.md#time-domain-tuning-profiles-1846).
 
 ```python
 from kicad_parser import parse_kicad_pcb
