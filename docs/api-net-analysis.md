@@ -573,6 +573,11 @@ at one width per pair: the profile's where it gives one geometry on every
 layer the pair's pads and stubs are on, else the net class's, which the run
 says.
 
+`geometry_profiles(pcb_data, board_path)` gives `{net id: TuningProfile}` for
+the nets whose class names a profile with widths; `check_impedance.py` reads
+it to report shipped copper that is off its profile's width or pair gap
+([Impedance API](api-impedance.md)).
+
 ```python
 from kicad_parser import parse_kicad_pcb
 from net_queries import kicad_net_length_parts_nm

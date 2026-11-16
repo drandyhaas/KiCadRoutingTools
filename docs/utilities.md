@@ -3260,6 +3260,13 @@ gap, never their ohms), with `ohms_off_pct` for both (#1673). A record a
 step wrote with `--impedance-declare-only` (`declare_only`: the copper is
 the project's, only the ohms were recorded) is graded the same way and
 marked declare-only; any other record left `applied: false` is skipped.
+A net whose class names a KiCad 10 tuning profile also reports its copper
+against the width, and a pair the P/N gap, the profile stores for each layer
+(#1936): the length drawn at another width, the length parallel to its
+partner at another gap, and the length on layers the profile gives no width
+(not graded). A net with more than 0.01 mm off is marked `OFF PROFILE`
+(`nets_off_profile`, each net's `profile_*` keys). Disclosure too, never in
+the exit code.
 Plane nets are skipped unless `--include-plane-nets`. Exit 1
 when any reference-plane crossing is found, or when a net misses its declared
 gap -- no ground beside it, or a gap off the declaration -- over more than

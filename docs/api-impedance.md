@@ -432,6 +432,22 @@ It reports, per net: length over a reference-plane void, plane-split crossings,
 the measured coplanar side-gap distribution, and the implied Z0 error against
 what the route call assumed.
 
+For a net whose class names a KiCad 10 tuning profile it also reports the
+shipped copper against the profile's own geometry (#1936), which KiCad's DRC
+has no row for: the length on layers the profile gives a width and how much of
+it is drawn at another width (past 0.001 mm), the length on layers it gives
+none (not graded), and for a differential profile the length running parallel
+to the partner and how much of that is at another gap (past 0.005 mm). A member fanning in to
+its pads is not parallel to its partner and is graded on width alone. A net
+with more than 0.01 mm off is marked `OFF PROFILE` with the layer, the drawn
+value, the profile's and the length; the JSON has `totals.nets_off_profile`
+and each net's `profile_*` keys. It is a disclosure and never changes the exit
+code: a route step pins a profile width up at the fab floor and a gap up at
+the clearance, and draws a pair's pad connectors at one width, so copper it
+routed can be listed here by design. The measurement is
+`check_impedance.profile_geometry(segs, partner_segs, profile)`, the profiles
+come from `tuning_profiles.geometry_profiles(pcb_data, board_path)`.
+
 A split is a move from one piece of reference copper to another: a different
 fill component, or another net's pour. Two pours of the same net that overlap
 on a layer fill as one sheet of copper, so their overlapping components count
