@@ -89,7 +89,8 @@ def ids_by_name(pcb):
 # own footprint; tracks end at pad centres.
 #   /A  routed, 10.0 mm        /B  routed, 10.4 mm (a 0.2 mm jog each end)
 #   /C  no copper              /D  a 2 mm stub off its first pad only
-#   /E  three pads, a track joins the first two only
+#   /E  three pads (P9 at x 10, P10 at 20, P11 at 30), a track joins the
+#       first two only
 # The pads are 0.1 mm: KiCad's length DRC cuts a run where it leaves the pad its
 # track ends at (every release; modelled since #1432), so a 0.2 mm jog inside a
 # 1 mm pad would not count as 0.2 mm.
@@ -204,9 +205,14 @@ def test_group_rules(tmp):
           (net_match_length(pcb, sid['/C']), net_match_length(pcb, sid['/D'])))
     check(abs(net_copper_length(pcb, sid['/D']) - 2.0) < 1e-6,
           'witness: /D does carry 2.0 mm of stub copper')
+    # #1866: unnamed, pin_pair measures the pair farthest apart (in a
+    # straight line, the net not being joined): P9-P11, which no track joins
     check(net_match_length(pcb, sid['/E']) is None
-          and abs(net_match_length(pcb, sid['/E'], mode='pin_pair') - 10.0) < 1e-6,
-          '/E (3 pads, 2 joined): total None, pin_pair 10.0')
+          and net_match_length(pcb, sid['/E'], mode='pin_pair') is None
+          and abs(net_match_length(pcb, sid['/E'], mode='pin_pair',
+                                   pads=('P9.1', 'P10.1')) - 10.0) < 1e-6,
+          '/E (3 pads, 2 joined): total None, pin_pair None (P9-P11), '
+          'pin_pair P9-P10 named 10.0')
 
     r = board_score.score_length(syn, write_groups(tmp, 'syn_mixed.json', {
         'AB': group(['/A', '/B'], 0.5),
@@ -216,10 +222,12 @@ def test_group_rules(tmp):
         'ABC': group(['/A', '/B', '/C'], 0.5),
         'AE': group(['/A', '/E'], 0.5),
         'AE_pp': group(['/A', '/E'], 0.5, pin_pair=True),
+        'AE_pp_named': dict(group(['/A', '/E'], 0.5, pin_pair=True),
+                            pads={'/E': ['P9.1', 'P10.1']}),
     }))
     g = r.get('groups', {})
-    check(r['ran'] is True and r['count'] == 1 and r['unmeasured_groups'] == 4,
-          'mixed file: graded, ONE failure (AB_tight), four unmeasured', r)
+    check(r['ran'] is True and r['count'] == 1 and r['unmeasured_groups'] == 5,
+          'mixed file: graded, ONE failure (AB_tight), five unmeasured', r)
     check(g['AB'].get('pass') is True and abs(g['AB']['spread_mm'] - 0.4) < 1e-6,
           'AB: spread 0.4 passes at 0.5', g['AB'])
     check(g['AB_tight'].get('pass') is False,
@@ -227,8 +235,14 @@ def test_group_rules(tmp):
     for name, unj in (('AC', ['/C']), ('AD', ['/D']), ('ABC', ['/C']), ('AE', ['/E'])):
         check(g[name].get('unjoined_nets') == unj and 'pass' not in g[name],
               '%s: unmeasured, unjoined %s' % (name, unj), g[name])
-    check(g['AE_pp'].get('pass') is True and g['AE_pp'].get('spread_mm') == 0.0,
-          'AE_pp: pin_pair measures /E on its first pad pair', g['AE_pp'])
+    check(g['AE_pp'].get('unjoined_nets') == ['/E'] and 'pass' not in g['AE_pp']
+          and g['AE_pp'].get('ambiguous_pair') == {'/E': ['P9.1', 'P11.1']},
+          'AE_pp: pin_pair, unnamed, measures /E between its farthest pads '
+          '(P9-P11, not joined): unmeasured, the pair flagged', g['AE_pp'])
+    check(g['AE_pp_named'].get('pass') is True
+          and g['AE_pp_named'].get('spread_mm') == 0.0,
+          'AE_pp_named: pin_pair measures /E on the named joined pair',
+          g['AE_pp_named'])
 
     r = board_score.score_length(syn, write_groups(tmp, 'syn_none.json', {
         'AC': group(['/A', '/C'], 0.5), 'AD': group(['/A', '/D'], 0.5)}))

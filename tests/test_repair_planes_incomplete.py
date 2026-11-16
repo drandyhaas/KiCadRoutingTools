@@ -97,7 +97,7 @@ def pad_labels():
     """An open pad's number, resolved off the graded point."""
     from types import SimpleNamespace as P
     sys.path.insert(0, os.path.join(ROOT, 'py_router'))
-    from repair_planes import _pad_label
+    from check_connected import pad_label
     pads = [P(component_ref='U1', pad_number='33', global_x=5.0,
               global_y=5.0, size_x=3.0, size_y=3.0),
             P(component_ref='U1', pad_number='34', global_x=5.0,
@@ -108,14 +108,14 @@ def pad_labels():
               global_y=5.0, size_x=1.0, size_y=1.0)]
     print('C. pad labels')
     check('stacked pads at one point are all named, not the first one',
-          _pad_label(pads, 'U1', 5.0, 5.0) == '33/34',
-          str(_pad_label(pads, 'U1', 5.0, 5.0)))
+          pad_label(pads, 'U1', 5.0, 5.0) == '33/34',
+          str(pad_label(pads, 'U1', 5.0, 5.0)))
     check('a point off the centre is named by the pad that holds it',
-          _pad_label(pads, 'U1', 1.2, 2.5) == '1',
-          str(_pad_label(pads, 'U1', 1.2, 2.5)))
+          pad_label(pads, 'U1', 1.2, 2.5) == '1',
+          str(pad_label(pads, 'U1', 1.2, 2.5)))
     check("another part's pad is never borrowed",
-          _pad_label(pads, 'C1', 5.0, 5.0) == '2'
-          and _pad_label(pads, 'U1', 9.0, 9.0) is None)
+          pad_label(pads, 'C1', 5.0, 5.0) == '2'
+          and pad_label(pads, 'U1', 9.0, 9.0) is None)
 
 
 def main():

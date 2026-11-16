@@ -158,6 +158,48 @@ def split(tmp):
           f'{before} -> {connected(pcb)}')
 
 
+def mixed_contacts(tmp):
+    """A one-end neighbour must not hide the trunk's ambiguous contact."""
+    print('2b. a short inner-layer joint with a one-end neighbour')
+    for rise, expected in ((0.1, 1), (0.2, 0)):
+        rb = RoutingBoard(w=20, h=20,
+                          layers=('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'))
+        for ref, x, y in (('P1', 10, 10), ('P2', 17.2, 4.9),
+                          ('P3', 11.8, 13)):
+            rb.pad(ref, x, y, NET, tht=True)
+        spans = ((10, 10, 12.1, 10), (12.1, 10, 17.2, 4.9),
+                 (11.7, 10, 11.8, 10 + rise),
+                 (11.8, 10 + rise, 11.8, 13))
+        for span in spans:
+            rb.seg(*span, NET, w=0.127, layer='In1.Cu')
+        path = os.path.join(tmp, f'mixed_{rise}.kicad_pcb')
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(rb.text())
+        pcb = parse_kicad_pcb(evidence(path, 'the mixed-contact board'))
+        findings = kd(pcb)
+        # KiCad 10 reports the 0.1 mm rise at (11.7, 10): the trunk
+        # touches both joint ends but counts for the far end, as does the
+        # vertical (which touches ONLY that end). At 0.2 mm the trunk
+        # touches only the T end, so each end has its own contact.
+        check(f'rise {rise}: KiCad-dangling count is {expected}',
+              len(findings) == expected, f'{findings}')
+        before = connected(pcb)
+        pairs = split_kicad_dangling_hosts(pcb)
+        check(f'rise {rise}: host-split count is {expected}',
+              len(pairs) == expected, f'splits {len(pairs)}')
+        check(f'rise {rise}: no KiCad-dangling joint after the split',
+              not kd(pcb))
+        check(f'rise {rise}: all pads remain connected',
+              connected(pcb) == before == (True, 0))
+    # A physically free end is a dead-end sweep's job, not this joint test.
+    free = copy.copy(pcb.segments[2])
+    free.start_x, free.start_y = 11.7, 10
+    free.end_x, free.end_y = 11.7, 10.5
+    check('a physically free end is not a KiCad-dangling joint',
+          kicad_dangling_end(free, pcb.segments[:2], [], [], [],
+                             pcb.board_info.copper_layers) is None)
+
+
 def two_joints(tmp):
     print('3. two joints on one host: cut at both')
     rb = RoutingBoard(w=40, h=30)
@@ -200,6 +242,8 @@ def exposed_tail(tmp):
     # grp_ft A_s3's /OSCO (a routed corpus board): the 0.15 host runs on
     # 0.43 mm past the joint to nothing. Whole, no removal can take that
     # stretch (the host carries the joint); split, it is a separate segment.
+    # That stretch is 2.9 track widths past the joint and no copper touches
+    # its end, so it is a dangling end of its own (#1870) beside the joint.
     rb = RoutingBoard(w=160, h=120)
     rb.pad('U4', 115.758, 99.952, '/OSCO', sx=1.55, sy=0.3)
     rb.pad('Y1', 113.2, 100.8, '/OSCO', sx=0.4, sy=0.4)
@@ -213,14 +257,15 @@ def exposed_tail(tmp):
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write(rb.text())
     pcb = parse_kicad_pcb(path)
-    check('flagged once before', [f['category'] for f in
-                                  check_weird(pcb, tolerance=0)[0]] == ['kicad-dangling'])
+    check('the joint and the dead stretch are flagged before',
+          sorted(f['category'] for f in check_weird(pcb, tolerance=0)[0])
+          == ['dangling-end', 'kicad-dangling'])
     pcb = parse_kicad_pcb(path)
     collapse_strict_redundant([], pcb, None)
     split_kicad_dangling_hosts(pcb, None)
     w = [f['category'] for f in check_weird(pcb, tolerance=0)[0]]
     check('witness: collapse THEN split leaves the exposed stretch removable',
-          w == ['removable-segment'], f'{w}')
+          w == ['dangling-end', 'removable-segment'], f'{w}')
     pcb = parse_kicad_pcb(path)
     split_kicad_dangling_hosts(pcb, None)
     n, _strip = collapse_strict_redundant([], pcb, None)
@@ -357,6 +402,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         shape(tmp)
         split(tmp)
+        mixed_contacts(tmp)
         two_joints(tmp)
         exposed_tail(tmp)
         controls(tmp)

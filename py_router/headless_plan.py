@@ -100,6 +100,23 @@ def step_labels(steps):
 SNAPSHOT_FORMAT = '{prefix}{n:02d}_{action}.kicad_pcb'
 
 
+def exit_main_loop(app, retry_ms=20):
+    """End ``app``'s MainLoop from a timer or callback, safely.
+
+    Called while the UI thread is inside a nested ``wx.Yield`` (a tab's
+    progress pump, the dialog's connectivity check), ``app.ExitMainLoop()``
+    stops the YIELD's run of the platform loop on macOS, not the MainLoop's:
+    the MainLoop then blocks forever at 0 CPU with no timer left to end it
+    (measured: a headless fanout gate hung 3 runs in 25). So the exit waits
+    until the active loop is not yielding."""
+    import wx
+    loop = wx.EventLoopBase.GetActive()
+    if loop is not None and loop.IsYielding():
+        wx.CallLater(retry_ms, exit_main_loop, app, retry_ms)
+        return
+    app.ExitMainLoop()
+
+
 def run_plan(board_path, steps, indices=None, snapshot_dir=None,
              snapshot_prefix='step', snapshot_format=SNAPSHOT_FORMAT,
              timeout=7200, on_status=None, quiet=True, save=True):
@@ -125,6 +142,7 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
     """
     import wx
     import pcbnew
+    import tool_records
 
     board_path = os.path.abspath(board_path)
     indices = list(range(len(steps))) if indices is None else list(indices)
@@ -207,7 +225,10 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
                 # on-disk project JSON with its migrated in-memory view;
                 # an uncaught type_error aborts the process on any
                 # pre-KiCad-10 project).
-                pcbnew.SaveBoard(snap, board, aSkipSettings=True)
+                # tool_records.save_board: the record stays on the file
+                # (KiCad 10.0.7+ drops it at save, #1906)
+                tool_records.save_board(pcbnew.SaveBoard, snap, board,
+                                        aSkipSettings=True)
                 result['snapshots'].append(snap)
             except Exception as e:
                 result['log'].append(f"snapshot step {index + 1} failed: {e}")
@@ -226,15 +247,18 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
                 # and on pre-KiCad-10 projects it aborts the process outright
                 # (uncaught type_error merging the pre-migration file with
                 # the migrated in-memory settings).
-                pcbnew.SaveBoard(board_path, board, aSkipSettings=True)
+                # The board copy of the records too (#1906: KiCad 10.0.7+
+                # drops it at save; tool_records.save_board writes it back).
+                tool_records.save_board(pcbnew.SaveBoard, board_path, board,
+                                        aSkipSettings=True)
             except Exception as e:
                 result['log'].append(f"final save failed: {e}")
-        app.ExitMainLoop()
+        exit_main_loop(app)
 
     def _on_timeout():
         result['timed_out'] = True
         result['log'].append(f"plan exceeded timeout {timeout}s")
-        app.ExitMainLoop()
+        exit_main_loop(app)
 
     executor = PlanExecutor(dialog, steps, indices, _status, _finished,
                             log=lambda m: result['log'].append(m), quiet=quiet)

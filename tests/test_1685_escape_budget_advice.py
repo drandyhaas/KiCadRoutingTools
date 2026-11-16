@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """#1685: a fanout that knows its escapes graze says what can fix it, and
-autoplan does not take a grazing rung over a clean one.
+autoroute does not take a grazing rung over a clean one.
 
 The half-pitch warning advised a --via-size the fab floor pins straight back
-up, the summary said nothing of why, and autoplan stopped at the first rung
+up, the summary said nothing of why, and autoroute stopped at the first rung
 that escaped every ball however it did so.
 
 1. escape_budget against the floors: None when it fits; nothing named that a
@@ -13,7 +13,7 @@ that escaped every ball however it did so.
    names) clears them and has no budget to report.
 3. The advice taken literally under a --fab-overrides file that allows it:
    each value it names runs unpinned, with no graze left.
-4. autoplan.fan_ladder: a clean rung beats a grazing one; a clean first rung
+4. autoroute.fan_ladder: a clean rung beats a grazing one; a clean first rung
    runs alone; the earliest of equals; escaping more outranks grazing less;
    a graze the decap step clears does not count; a failed grade counts none.
 
@@ -33,7 +33,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 sys.path.insert(0, os.path.join(ROOT, 'tests'))
 
-import autoplan as AP                                              # noqa: E402
+import autoroute as AP                                              # noqa: E402
 import fab_tiers                                                   # noqa: E402
 from bga_fanout import escape_budget                               # noqa: E402
 from run_utils import check as run_check, evidence                 # noqa: E402
@@ -168,13 +168,13 @@ def test_advice_takes_effect(work):
            (r['escape_budget'], r['drc_grazes']))
 
 
-class Scripted:
+class Scripted(AP.ChainEvents):
     """Chain.run scripted: the summary of each rung, by its index."""
 
     def __init__(self, rows):
         self.rows, self.runs = rows, []
 
-    def run(self, kind, args, tag):
+    def run(self, kind, args, tag, **kw):
         i = len(self.runs)
         self.runs.append(tag)
         return f'r{i}', self.rows[i], {}
@@ -187,7 +187,7 @@ def _ladder(rows):
 
 
 def test_fan_ladder():
-    print("4. autoplan.fan_ladder")
+    print("4. autoroute.fan_ladder")
 
     def s(esc, fail, total=None, deferred=None):
         g = {} if total is None else {'total': total}

@@ -76,7 +76,11 @@ never names a face alone: a marker that agrees makes the body's face STRONG
 and no marker leaves today's reading. Calibrated on KiCad 10's 154 marked
 stock footprints: it agrees with all
 73 strong body faces at every quarter turn, agrees with 75 weak ones and
-vetoes one (the Pico W module's RF-edge marker). The wrong jacks above draw
+vetoes one (the Pico W module's RF-edge marker). Since #1770 a line only the
+stored angle chose may confirm any face but veto only a WEAK one: the Pico W's
+is such a line (its text stands 5 mm from lines along both axes) and its
+face is weak, so the veto holds, while a text turned to 0 on a DVI or USB-C
+receptacle no longer vetoes its strong face. The wrong jacks above draw
 no marker, so for them the weak tier and a declared `mating_face` are the
 guards.
 
@@ -130,6 +134,17 @@ MARKER_NEARER_RATIO = 2.0
 #: The same two decide whether the nearest lines along the two AXES are a tie
 #: the text's angle breaks (#1715).
 MARKER_NEARER_MM = 1.0
+#: #1770: a line the text sits no more than this (mm) past the end of is
+#: scored on the text's gap OFF its run alone when the two axes are
+#: compared; one it sits further past is scored on the gap plus that
+#: overshoot, as before. A text on one line's extension, 1.2 mm past its end,
+#: is 0 mm off that line, and was scored 1.2 mm against a body line 2.25 mm
+#: across it -- a "tie" the stored angle then broke. Measured on KiCad 10's
+#: 154 marked stock footprints at four turns and the 192 marked parts of the
+#: tracked and corpus boards: 1.25 to 1.5 reads every marker face as #1715
+#: did; at 2.0 the stock GCT USB4105 USB-C footprint, whose text stands 2 mm
+#: off its edge line and 2 mm past the end of its body's side, reads the side.
+MARKER_PAST_CAP_MM = 1.5
 #: A drawn line this far (mm) off an axis is not straight along it.
 _MARKER_STRAIGHT_MM = 1e-3
 #: A marker text whose baseline is more than this far (degrees) off both axes
@@ -145,6 +160,10 @@ class MarkerFace(NamedTuple):
     # (axis of the line 'x' | 'y', its position, its layer, how near the
     # text it is, mm), or None when no line was chosen.
     line: Optional[Tuple] = None
+    # #1770: True when the text's stored angle chose the line's axis (a tie
+    # between the two axes): such a reading may CONFIRM any face, and veto
+    # only a WEAK one.
+    by_angle: bool = False
 
 
 class LocalFace(NamedTuple):
@@ -233,10 +252,35 @@ def mating_face_local(fp, geom) -> LocalFace:
         # The library's own word for where the board edge goes, read off a
         # different drawing than the body: a weak face it confirms is strong.
         return lf._replace(strong=True, basis=lf.basis + '+marker', marker=mk)
+    if mk.by_angle and lf.strong:
+        # #1770: a line the text's stored angle chose rests on an on-screen
+        # value any tool can turn: it may confirm any face, but veto only a
+        # weak one, never a strong reading.
+        return lf._replace(marker=mk)
     return LocalFace(None, 0.0, '',
                      'its PCB-edge marker puts the board edge on its %s side, '
                      'against the %s face its body reads' % (mk.face, lf.face),
                      votes, marker=mk)
+
+
+#: #1769: `edge_connectors[].opens`, which way a seated edge part's opening
+#: faces: `outward` (the default: out of its edge) or `inward` (into the
+#: board, its back to the edge -- an M.2 or SO-DIMM socket whose card lies
+#: over the board).
+OPENS = ('outward', 'inward')
+OPENS_INWARD = 'inward'
+_OPPOSITE_FACE = {'+x': '-x', '-x': '+x', '+y': '-y', '-y': '+y'}
+
+
+def edge_side(face: Optional[str], opens=None) -> Optional[str]:
+    """#1769: the side of a part, in its own frame, an edge seat turns to its
+    edge and the facing conjunct grades there: the side its opening `face` is
+    on, or for a part declared to open INTO the board (`opens` 'inward') the
+    side opposite it. The opening's face stays what the body reads (or the
+    entry declares): only which side meets the edge changes."""
+    if face in _OPPOSITE_FACE and opens == OPENS_INWARD:
+        return _OPPOSITE_FACE[face]
+    return face
 
 
 def face_with_declaration(lf: LocalFace, declared) -> Tuple[Optional[str], str, str]:
@@ -330,9 +374,10 @@ def _arrow_shafts(lines):
 def _marker_lines(tx, ty, lines, pcx, pcy):
     """{axis: the straight lines along it a marker text at (tx, ty) may label,
     nearest first}, axis 'y' for a line y = const, each `(near, face, off,
-    pos, layer)`, `near` its distance off the line's run plus how far past
-    either end the text sits. Not a courtyard or copper line, nor an arrow's
-    shaft (`_arrow_shafts`): it points at the edge, across it."""
+    pos, layer, gap, past)`, `gap` the text's distance off the line's run,
+    `past` how far past either end of it the text sits, and `near` their sum.
+    Not a courtyard or copper line, nor an arrow's shaft (`_arrow_shafts`):
+    it points at the edge, across it."""
     eps = _MARKER_STRAIGHT_MM
     shafts = _arrow_shafts(lines)
     out = {'x': [], 'y': []}
@@ -345,11 +390,30 @@ def _marker_lines(tx, ty, lines, pcx, pcy):
             axis, (lo, hi), pos, perp, along, off = 'x', sorted((y1, y2)), x1, abs(tx - x1), ty, x1 - pcx
         else:
             continue
-        out[axis].append((perp + max(0.0, lo - along, along - hi),
-                          ('+' if off > 0 else '-') + axis, off, pos, layer))
+        past = max(0.0, lo - along, along - hi)
+        out[axis].append((perp + past, ('+' if off > 0 else '-') + axis, off, pos,
+                          layer, perp, past))
     for c in out.values():
         c.sort(key=lambda c: c[0])
     return out
+
+
+def _marker_axis(by_axis) -> Tuple[Optional[str], bool]:
+    """`(axis, tie)`: the axis whose nearest line a marker text labels, and
+    whether the two axes are a TIE its stored angle must break (#1715).
+
+    #1770: each line scores its OFF-LINE gap when the text sits no more than
+    `MARKER_PAST_CAP_MM` past its end, else that gap plus the overshoot
+    (`_marker_lines`'s `near`), as before: a text on one line's extension
+    is 0 mm off it, and its overshoot is a reading WITHIN that axis, not
+    one to weigh against a line across it."""
+    use = {a: min(x[5] if x[6] <= MARKER_PAST_CAP_MM + _TOL_MM else x[0] for x in c)
+           for a, c in by_axis.items() if c}
+    if not use:
+        return None, False
+    axis = min(use, key=use.get)
+    other = 'x' if axis == 'y' else 'y'
+    return axis, len(use) == 2 and not _clearly_nearer(use[axis], use[other])
 
 
 def _clearly_nearer(a, b) -> bool:
@@ -384,16 +448,21 @@ def marker_face_local(fp, geom) -> Optional[MarkerFace]:
     mating face is the side of the line away from the pad bbox's centre.
 
     Which line is read off the DRAWING (#1715): the straight line nearest
-    the text along either axis (its distance off the line's run plus how far
-    past either end the text sits), on any layer but a courtyard or copper,
-    and never an arrow's shaft. The text's stored angle is an on-screen angle
-    any tool or hand can turn -- a pile wrote every text at 0, and a vertical
-    edge line was then read against the horizontal lines across it -- so it
-    decides only a TIE: where the nearest lines along the two axes are not
-    one clearly nearer than the other (`MARKER_NEARER_RATIO` times and
-    `MARKER_NEARER_MM`), a text sitting at a corner where the edge line meets
-    the body's side, the line runs along the text's baseline, as before. On
-    the line's axis it abstains when:
+    the text along either axis, on any layer but a courtyard or copper, and
+    never an arrow's shaft. The axes are compared on the text's gap off each
+    line's run, among the lines it sits no more than `MARKER_PAST_CAP_MM`
+    past the end of (#1770: a text on the edge line's extension is not a tie
+    with a body line across it), and within the axis the nearest line is the
+    one whose gap plus overshoot past its end is least. The text's stored
+    angle is an on-screen angle any tool or hand can turn -- a pile wrote
+    every text at 0, and a vertical edge line was then read against the
+    horizontal lines across it -- so it decides only a TIE: where the two
+    axes are not one clearly nearer than the other (`MARKER_NEARER_RATIO`
+    times and `MARKER_NEARER_MM`), a text sitting at a corner where the edge
+    line meets the body's side, the line runs along the text's baseline, as
+    before, and the reading is marked `by_angle`: it may confirm the body's
+    face, and veto it only when that face is weak (#1770). On the line's
+    axis it abstains when:
 
     * the text is at such a corner and its baseline is off both axes;
     * the line runs within `FACE_MIN_OFFSET_MM` of the pad row's centre --
@@ -415,25 +484,25 @@ def marker_face_local(fp, geom) -> Optional[MarkerFace]:
     pcx, pcy = _centre(pads)
     rot = float(getattr(fp, 'rotation', 0.0) or 0.0)
     faces = []
+    angled = []
     best_line = None
     for tx, ty, angle, _layer, _text in marker.texts:
         by_axis = _marker_lines(tx, ty, marker.lines, pcx, pcy)
-        near = {a: c[0][0] for a, c in by_axis.items() if c}
-        if not near:
+        axis, tie = _marker_axis(by_axis)
+        if axis is None:
             return MarkerFace(None, 'no straight line is drawn beside its '
                                     'PCB-edge marker')
-        axis = min(near, key=near.get)
-        if len(near) == 2 and not _clearly_nearer(near[axis], near['x' if axis == 'y' else 'y']):
+        if tie:
             axis = _text_axis(angle, rot)
             if axis is None:
                 return MarkerFace(None, 'its PCB-edge marker sits between lines '
                                         'along both axes, and its text runs '
                                         'along neither')
-            if axis not in near:
+            if not by_axis.get(axis):
                 return MarkerFace(None, 'no straight line beside its PCB-edge '
                                         'marker runs along the text')
         cands = by_axis[axis]
-        n, face, off, pos, layer = cands[0]
+        n, face, off, pos, layer = cands[0][:5]
         line = (axis, round(pos, 4), layer, round(n, 4))
         if abs(off) < FACE_MIN_OFFSET_MM - _TOL_MM:
             return MarkerFace(None, 'the line its PCB-edge marker labels runs '
@@ -443,10 +512,15 @@ def marker_face_local(fp, geom) -> Optional[MarkerFace]:
             return MarkerFace(None, 'two lines beside its PCB-edge marker '
                                     'name different faces', line)
         faces.append(face)
+        angled.append(tie)
         best_line = best_line or line
     if len(set(faces)) > 1:
         return MarkerFace(None, 'its PCB-edge markers disagree: '
                           + ', '.join(sorted(set(faces))))
+    if all(angled):
+        return MarkerFace(faces[0], "its text's stored angle chose the line: it sits "
+                                    "between lines along both axes", best_line,
+                          by_angle=True)
     return MarkerFace(faces[0], '', best_line)
 
 

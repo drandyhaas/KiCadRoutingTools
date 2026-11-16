@@ -71,15 +71,22 @@ def _res(seed, blk, cu, fp=0, asm=0):
 
 
 def test_close_seeds():
-    ranked = [_res(4, 55, 100.0), _res(2, 55, 109.0), _res(1, 56, 104.0),
-              _res(5, 55, 111.0), _res(0, 58, 101.0), _res(3, 55, 100.0, fp=1)]
+    # where every seed routes at level 2: the 1-net band, copper within 10%
+    ranked = [_res(4, 0, 100.0), _res(2, 0, 109.0), _res(1, 1, 104.0),
+              _res(5, 0, 111.0), _res(0, 3, 101.0), _res(3, 0, 100.0, fp=1)]
     got = judge_seeds.close_seeds(ranked)
     assert got == [4, 2, 1], got           # 5: copper +11%, 0: blocking +3, 3: a defect
     assert judge_seeds.close_seeds([]) == []
     assert judge_seeds.close_seeds(ranked[:1]) == [4]
     lone = [_res(7, None, None), _res(8, None, None)]
     assert judge_seeds.close_seeds(lone) == [7], 'an unscored blocking is never close'
-    print('  PASS: close = same defects, blocking within 1, copper within 10% of the best')
+    # #1826: at 55 blocked the band is ceil(0.15 x 55) = 9 nets and copper is
+    # not compared; a defect still parts them
+    ranked = [_res(4, 55, 100.0), _res(5, 55, 111.0), _res(0, 58, 101.0),
+              _res(6, 65, 100.0), _res(3, 55, 100.0, fp=1)]
+    assert judge_seeds.close_seeds(ranked) == [4, 5, 0], judge_seeds.close_seeds(ranked)
+    print('  PASS: close = same defects, blocking within 1, copper within 10% of the best; '
+          'a widened band at 55 blocked')
 
 
 def make_run(td, seeds):

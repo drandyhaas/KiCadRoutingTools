@@ -253,6 +253,89 @@ def _fab_wrap(board, floors, tier=None, overrides=None):
     return {n: floors[n]['value'] for n in _FAB_KEYS if n in floors}, fab
 
 
+def _resolve_floors(pcb, args):
+    """`({name: {'value', 'source'}}, design_rules)` for clearance, track and
+    via -- `escape.lane_rules`, the one resolver `--pad`, `--part` and the
+    lane ledger share (#1837). Until then `--pad` fell back to 0.2 / 0.15 /
+    0.6 of its own on a board that declares nothing, while `--part` used the
+    ledger's 0.25 / 0.3 / 0.5 and did not say so."""
+    from placement import escape
+    r = escape.lane_rules(pcb, args.board, track_width=args.track,
+                          clearance=args.clearance, via_diameter=args.via)
+    d = r.to_dict()
+    # the knobs line's order, which predates the shared resolver
+    return ({k: dict(d[k]) for k in ('clearance', 'track_width',
+                                     'via_diameter')}, r.design_rules)
+
+
+def _part_main(args, pcb, tier=None, overrides=None):
+    """`--part REF` (#1817): the part's simultaneous escape, one line, or the
+    JSON document. Exit 0 no deficit, 1 a positive deficit (a proof), 2 a ref
+    this board does not have. Priced at `--pad`'s rules: the same resolver,
+    the same fab wrap (#1837)."""
+    from placement import escape, escape_flow, reachability
+    if args.part not in pcb.footprints:
+        print(f"cannot resolve: no part {args.part!r} on this board",
+              file=sys.stderr)
+        print("(exit 2 -- this is an argument that names nothing on this board, "
+              "NOT a deficit, which is exit 1)", file=sys.stderr)
+        return 2
+    floors, _dr = _resolve_floors(pcb, args)
+    vals, _fab = _fab_wrap(args.board, floors, tier, overrides)
+    try:
+        f = escape_flow.part_flow(
+            pcb, args.part, args.board,
+            margin_mm=(args.margin if args.margin is not None
+                       else escape_flow.DEFAULT_MARGIN_MM),
+            track_width=vals['track_width'], clearance=vals['clearance'],
+            via_diameter=vals['via_diameter'],
+            rule_sources={k: floors[k]['source'] for k in floors},
+            layers=args.layers.split(',') if args.layers else None)
+    except reachability.ScipyRequired as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    d = f.to_dict()
+    if args.json_out:
+        with open(args.json_out, 'w', encoding='utf-8') as fh:
+            json.dump(d, fh, indent=2)
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return 1 if f.deficit else 0
+    ru = f.rules
+    print(f"{f.ref}: demand {f.demand} net(s), flow {f.flow}, deficit "
+          f"{f.deficit} -- at " + escape.format_rules(
+              {'track_width': {'value': ru['track_mm'],
+                               'source': f.rule_sources.get('track_width')},
+               'clearance': {'value': ru['clearance_mm'],
+                             'source': f.rule_sources.get('clearance')},
+               'via_diameter': {'value': ru['via_mm'],
+                                'source': f.rule_sources.get('via_diameter')}})
+          + f", window {ru['margin_mm']:g} mm round its pads, "
+          f"{len(f.layers)} layer(s)")
+    if f.deficit:
+        print(f"  PROVEN SHORT at these rules: at most {f.flow} of its "
+              f"{f.demand} nets can leave at once (the lattice over-states "
+              f"capacity)"
+              + (f"; the cut runs past {', '.join(f.cut_refs[:8])}"
+                 if f.cut_refs else '')
+              + (" -- its own pads: at this track and via no path leaves "
+                 "them, so narrower geometry (a finer class, smaller vias) "
+                 "is the other answer" if f.cut_refs == (f.ref,)
+                 else " -- no lattice cell is saturated: their copper closes "
+                 "the stranded nets in where they start (in front of a pad, "
+                 "or on another layer where its via would land)"
+                 if f.cut_refs and not f.cut_cells else ''))
+    else:
+        print("  not proven short: the lattice over-states capacity, so this "
+              "is no promise the router finds every exit")
+    if f.unstartable:
+        print(f"  counted as escaping, no legal start at this track width: "
+              f"{', '.join(f.unstartable)}")
+    if f.ignored:
+        print(f"  plane nets, no demand: {', '.join(f.ignored)}")
+    return 1 if f.deficit else 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -260,6 +343,17 @@ def main(argv=None):
     p.add_argument('board')
     p.add_argument('--pad', help="REF.PADNUM, e.g. U3.23 -- sets --at and "
                                  "--net from the pad itself")
+    p.add_argument('--part', metavar='REF',
+                   help="how many of REF's signal nets can leave it AT ONCE "
+                        "(#1817): a maximum flow over a lattice that "
+                        "over-states capacity, so a positive deficit is a "
+                        "proof and 0 is 'not proven short'. Prices lanes at "
+                        "the rules --pad and the lane ledger resolve (wrapped "
+                        "at the fab floor, as --pad is), each named with its "
+                        "source; --track/--clearance/"
+                        "--via override them, --margin is the window round "
+                        "the part's pads (default 3). Exit 1 only for a "
+                        "positive deficit")
     p.add_argument('--at', help="x,y of the stranded pad (mm)")
     p.add_argument('--net', help="net name; inferred from --pad when given")
     p.add_argument('--layers', default=None,
@@ -267,22 +361,26 @@ def main(argv=None):
                         "(default: the board's copper layers)")
     p.add_argument('--track', type=float, default=None,
                    help="track width to test (default: the board's Default "
-                        "netclass track width)")
+                        "netclass track width, else its min_track_width, else "
+                        "routing_defaults' 0.3, as the lane ledger)")
     p.add_argument('--via', type=float, default=None,
                    help="via diameter for layer changes (default: the board's "
-                        "Default netclass via)")
+                        "Default netclass via, else its min_via_diameter, else "
+                        "routing_defaults' 0.5)")
     p.add_argument('--clearance', type=float, default=None,
                    help="base clearance (default: the board's Default "
-                        "netclass clearance). Per-net classes are read from "
+                        "netclass clearance, else routing_defaults' 0.25). "
+                        "Per-net classes are read from "
                         "the sibling .kicad_pro on top of this")
     p.add_argument('--step', type=float, default=0.01,
                    help="raster step in mm (default 0.01). A throat is only "
                         "resolved to +/- one step, so halve it if the margin "
                         "comes out inside a step of zero")
-    p.add_argument('--margin', type=float, default=4.0,
+    p.add_argument('--margin', type=float, default=None,
                    help="half-size of the view around the seed, mm "
-                        "(default 4.0). Reachability is LOCAL; a whole board "
-                        "at 10um costs memory for nothing")
+                        "(default 4.0; with --part, the window round the "
+                        "part's pads, default 3.0). Reachability is LOCAL; a "
+                        "whole board at 10um costs memory for nothing")
     p.add_argument('--view', default=None, help="x0,y0,x1,y1 to override")
     p.add_argument('--json', action='store_true',
                    help="print the result as JSON on stdout, and nothing else "
@@ -335,6 +433,11 @@ def main(argv=None):
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
+    if args.part:
+        return _part_main(args, pcb, _tier, _tier_over)
+    if args.margin is None:
+        args.margin = 4.0
+
     # EVERY argument-resolution failure below leaves here as exit 2. None of
     # them is a statement about the board's geometry, and 1 is reserved for the
     # one statement that is (CAGED). See Unresolvable.
@@ -365,32 +468,14 @@ def main(argv=None):
 
     # Knobs from the BOARD, not from round numbers.
     import list_nets
-    try:
-        dr = list_nets.read_design_rules(args.board)
-    except Exception:                             # noqa: BLE001
-        dr = None
-    # `board_floor` rather than a local closure: it returns the SOURCE beside
-    # the value ('cli' | 'board netclass' | 'board constraint' | 'fixed
-    # default' | 'fab floor'), which is what lets the defect record say where
-    # each floor came from instead of publishing three bare numbers a reader
-    # cannot audit.
-    # One precedence step the old closure did not have: on a board with no
-    # Default-netclass value, track and via now fall through to the board's
-    # `min_track_width` / `min_via_diameter` constraint before the fixed
-    # default (clearance has no constraint key, so it is unchanged). And one
-    # step NEITHER had: the fab floor on top of all of it. The knobs line names
-    # each source so both differences are visible in the text.
-    floors = {}
-
-    def _board(key, explicit, fallback):
-        v, src = list_nets.board_floor(args.board, key, explicit=explicit,
-                                       fallback=fallback, design_rules=dr)
-        floors[key] = {'value': v, 'source': src}
-        return v
-
-    _board('clearance', args.clearance, 0.2)
-    _board('track_width', args.track, 0.15)
-    _board('via_diameter', args.via, 0.6)
+    # #1837: through `escape.lane_rules`, the resolver `--part` and the lane
+    # ledger use too, so one board is priced at one set of rules by every
+    # escape instrument. It is `list_nets.board_floor` per rule -- explicit,
+    # Default netclass, board constraint, then the fixed default -- and keeps
+    # the SOURCE beside each value ('cli' | 'board netclass' | 'board
+    # constraint' | 'fixed default'; 'fab floor' below), which is what lets
+    # the defect record say where each floor came from.
+    floors, dr = _resolve_floors(pcb, args)
     # ...and then wrapped at the fab floor, because this tool PREDICTS.
     _floors, _fab = _fab_wrap(args.board, floors, _tier, _tier_over)
     clearance = _floors['clearance']
@@ -657,6 +742,8 @@ def main(argv=None):
     _doc['routed_copper'] = routed
     # #1625: what priced a foreign object at other than the base clearance
     _doc['clearance_sources'] = r.pricing_sources
+    # #1837: the base rules and where each came from, as the knobs line
+    _doc['floors'] = floors
     if args.json_out:
         try:
             with open(args.json_out, 'w', encoding='utf-8') as fh:

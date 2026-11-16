@@ -234,14 +234,18 @@ def imported_version(pip_name):
 
 
 class Problem(object):
-    """One dependency that is absent, or present and too old."""
+    """One dependency that is absent, present and too old, or present and
+    failing to load (`broken`: its import raised something other than
+    ImportError -- a native library that will not load, #1937)."""
 
-    def __init__(self, name, state, installed=None, floor=None, path=None):
+    def __init__(self, name, state, installed=None, floor=None, path=None,
+                 error=None):
         self.name = name
-        self.state = state            # 'absent' | 'outdated'
+        self.state = state            # 'absent' | 'outdated' | 'broken'
         self.installed = installed
         self.floor = floor
         self.path = path
+        self.error = error
 
     @property
     def requirement(self):
@@ -251,6 +255,12 @@ class Problem(object):
     def describe(self):
         if self.state == 'absent':
             return f"  {self.name}: not installed"
+        if self.state == 'broken':
+            lines = [f"  {self.name}: installed but fails to load "
+                     f"({self.error})"]
+            if self.path:
+                lines.append(f"      found at {self.path}")
+            return "\n".join(lines)
         lines = [f"  {self.name}: {self.installed} is too old "
                  f"(need >= {self.floor})"]
         if self.path:
@@ -291,6 +301,16 @@ def _module_present(module_name):
         return False
 
 
+def _found_at(pip_name):
+    """Where this interpreter finds `pip_name`'s top-level package, without
+    executing it -- the path a `broken` problem names. None if not found."""
+    try:
+        spec = importlib.util.find_spec(probed_module(pip_name).split('.')[0])
+    except Exception:                                          # noqa: BLE001
+        return None
+    return getattr(spec, 'origin', None) if spec else None
+
+
 def dependency_problems(names=ROUTING_PACKAGES, floors=None, load=True):
     """Return [Problem] for `names`: what cannot be imported, and what is stale.
 
@@ -310,18 +330,29 @@ def dependency_problems(names=ROUTING_PACKAGES, floors=None, load=True):
     half the CPU of a `route.py --help` (1.64 s -> 0.83 s) and no routing
     module imports it at module scope. An absent package, or a top level that will not import, is
     `absent` either way, with the same message.
+
+    Any OTHER exception from loading is `broken`, never raised (#1937): on
+    Windows a package's native library can fail with `OSError: [WinError 127]`
+    (a same-named DLL already loaded in this process), and that used to escape
+    the probe and stop the plugin before its dialog opened.
     """
     floors = requirement_floors() if floors is None else floors
     problems = []
     for name in names:
-        if load:
-            try:
+        try:
+            if load:
                 exec(IMPORT_TESTS.get(name, f"import {name}"), {})
-            except ImportError:
-                problems.append(Problem(name, 'absent',
-                                        floor=floors.get(name)))
-                continue
-        elif not _module_present(probed_module(name)):
+                present = True
+            else:
+                present = _module_present(probed_module(name))
+        except ImportError:
+            present = False
+        except Exception as exc:                               # noqa: BLE001
+            problems.append(Problem(name, 'broken', floor=floors.get(name),
+                                    path=_found_at(name),
+                                    error=f"{type(exc).__name__}: {exc}"))
+            continue
+        if not present:
             problems.append(Problem(name, 'absent', floor=floors.get(name)))
             continue
         floor = floors.get(name)
@@ -330,6 +361,14 @@ def dependency_problems(names=ROUTING_PACKAGES, floors=None, load=True):
             problems.append(Problem(name, 'outdated', installed=installed,
                                     floor=floor, path=path))
     return problems
+
+
+# What a `broken` package needs, which `pip install --upgrade` does not do: pip
+# leaves an up-to-date copy alone however badly it loads.
+BROKEN_ADVICE = (
+    "A package that is installed but fails to load is either a damaged install "
+    "(reinstall it: pip install --force-reinstall <package>) or a native library "
+    "clashing with one already loaded in this process.")
 
 
 def format_problems(problems, header):
@@ -341,6 +380,8 @@ def format_problems(problems, header):
     """
     lines = [header]
     lines += [p.describe() for p in problems]
+    if any(p.state == 'broken' for p in problems):
+        lines += ["", BROKEN_ADVICE]
     lines += ["", f"Python: {sys.executable or '(embedded)'}",
               "", "Install with:",
               "  \"" + (sys.executable or 'python3') + "\" -m pip install "

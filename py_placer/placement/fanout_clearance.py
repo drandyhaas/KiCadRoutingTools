@@ -11,7 +11,9 @@ usually only escapes *signal* balls; GND/power balls are connected later by
 dropping vias straight down. That gives two complementary goals:
 
   * AVOID  - a cap pad must clear, by `clearance`, every real fanout via of a
-             DIFFERENT net (these are the #130 violations), plus any foreign
+             DIFFERENT net (these are the #130 violations) -- and its DRILL by
+             the copper-to-hole clearance KiCad grades the pair at
+             (`check_drc.pad_via_hole_required`) -- plus any foreign
              escape track on the cap's own copper side (escapes can land on the
              bottom; the under-pad fanout deliberately routes through movable
              caps' zones expecting THIS step to move them, #278), plus any
@@ -41,6 +43,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from kicad_parser import (PCBData, Segment, find_components_by_type,
                           is_immutable_copper)
 import routing_defaults as defaults
+from net_queries import pad_on_layer
 from bga_fanout.grid import analyze_bga_grid
 from placement.parser import extract_courtyard_bboxes, extract_locked_refs
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
@@ -256,6 +259,43 @@ def resolve_pair_clearance(pcb_file, clearance=None):
     if declared is not None:
         return min(float(declared), float(clearance)), 'cli'
     return float(clearance), 'cli'
+
+
+def resolve_via_hole_clearance(pcb_data, pcb_file=None):
+    """The copper-to-hole clearance a cap pad is held off a via's DRILL at,
+    and the value the step's project writeback declares. ``(mm, source)``.
+
+    KiCad grades a pad's copper against a via's hole at the project's own
+    ``min_hole_clearance`` (check_drc grades the same value, #1914 -- never
+    the fab-floor origin), and the step's writeback leaves that declaration as
+    it is. A project that declares none gets the NPTH floor written in
+    (`legality.resolve_npth_floor`), so that is the value KiCad will grade
+    the output at. ``pcb_file``: the caller's path, else
+    ``pcb_data.source_path`` (#498). A board built from pcbnew (the GUI) is
+    read through its live design settings first (#1187's channel, as
+    `obstacle_map` reads it), since mid-plan the file beside it is the
+    original project. A ``.kicad_dru`` hole_clearance rule that binds a pair
+    replaces this value for it (`check_drc.pad_via_hole_required`).
+    """
+    from list_nets import board_constraint
+    from obstacle_map import _live_hole_rule
+    live = _live_hole_rule(pcb_data)
+    if live is not None:
+        return max(0.0, float(live)), 'live board min_hole_clearance'
+    path = pcb_file or getattr(pcb_data, 'source_path', None)
+    try:
+        declared = board_constraint(path, 'min_hole_clearance') if path else None
+    except Exception:                                          # noqa: BLE001
+        declared = None
+    if declared is not None:
+        return max(0.0, float(declared)), 'project min_hole_clearance'
+    from placement.legality import resolve_npth_floor
+    try:
+        return float(resolve_npth_floor(pcb_data, pcb_file)), \
+            'NPTH floor, written to the project'
+    except Exception:                                          # noqa: BLE001
+        return float(defaults.NPTH_TO_TRACK_CLEARANCE), \
+            'NPTH floor, written to the project'
 
 
 def fab_pair_clearance_floor(pcb_data):
@@ -915,11 +955,17 @@ class _Cap:
         # whose copper is a box to one side of it (Pad.copper_box): its box is
         # all this pass knows of it, and it turns as a box.
         self.pad_geom = []
+        # The parser Pad behind each entry, index-aligned like self.pads: the
+        # copper-to-hole requirement against a via's drill is the checker's
+        # per-pad answer (`check_drc.pad_via_hole_required`), which reads the
+        # pad itself -- its override, its layers, the rules that bind it.
+        self.pad_objs = []
         for p in fp.pads:
             if not any(str(l).endswith('.Cu') for l in p.layers):
                 continue  # paste/mask-only aperture, not copper
             cx, cy, half_x, half_y = pad_copper_box(p)
             self.pads.append((cx - fp.x, cy - fp.y, half_x, half_y, p.net_id))
+            self.pad_objs.append(p)
             _hx, _hy = p.size_x / 2.0, p.size_y / 2.0
             self.pad_geom.append(
                 None if getattr(p, 'copper_box', None) is not None else
@@ -1251,6 +1297,41 @@ class _Repair:
         # the membership test. Keeping both means `*.Cu` never resolves through
         # a set whose iteration order varies run to run.
         self._all_cu_ordered = list(_cu)
+        # COPPER-TO-HOLE against a via's DRILL: KiCad holds another net's pad
+        # copper off a via's hole at the project's min_hole_clearance, which
+        # can bind where the copper clearance does not -- a via whose ring is
+        # narrower than (hole clearance - copper clearance). A cap pad held
+        # only off the via's copper sat inside that band (a 0.35/0.2 via at a
+        # 0.1 clearance leaves the pad 0.175 from the drill under a 0.187
+        # project). Each (cap pad, via) pair is priced at the checker's own
+        # answer, `check_drc.pad_via_hole_required` (a pad override, a
+        # .kicad_dru hole_clearance rule replacing the board value, the via's
+        # own copper span), so the step holds a pair where check_drc grades it.
+        from check_drc import HoleRuleBinder, board_design_rules
+        self.via_hole_clearance, self.via_hole_source = \
+            resolve_via_hole_clearance(pcb_data, pcb_file)
+        try:
+            _binder = HoleRuleBinder(board_design_rules(pcb_data))
+        except Exception:                                      # noqa: BLE001
+            _binder = None
+        self._hole_binder = _binder if _binder is not None and _binder.walk else None
+        self._hole_on = (self.via_hole_clearance > 0.0
+                         or self._hole_binder is not None)
+        # the widest requirement any pair can be priced at, but a pad
+        # override (the prunes add the cap's own)
+        self._hole_reach = max(self.via_hole_clearance,
+                               self._hole_binder.reach if self._hole_binder else 0.0)
+        # id(via 4-tuple) -> (tuple, parser Via): which barrel a tuple grades,
+        # filed by _register_via like the radius map, for the hole channel
+        self._via_obj_by_id: Dict[int, Tuple[tuple, object]] = {}
+        # (id(pad), id(via)) -> (pad, via, keep-out): pose-independent
+        self._via_hole_ko: Dict[Tuple[int, int], Tuple[object, object, float]] = {}
+        self._cap_via_hole_eff: Dict[str, Tuple[list, list]] = {}
+        if self._hole_on:
+            print(f"Cap pads held off via drills at {self.via_hole_clearance:g}mm "
+                  f"({self.via_hole_source})"
+                  + (", or a .kicad_dru hole_clearance rule where one binds"
+                     if self._hole_binder is not None else ""))
         self._via_floor: Dict[int, PadFloor] = {}
         self._seg_floor: Dict[Tuple[int, str], PadFloor] = {}
         # #617: KiCad's copper-to-hole rule is the BOARD's `min_hole_clearance`
@@ -1391,7 +1472,8 @@ class _Repair:
         # be shaped, priced or filed differently from one present here.
         for v in pcb_data.vias:
             self.vias.append(self._register_via(v.x, v.y, v.net_id,
-                                                radius=self.via_radius(v)))
+                                                radius=self.via_radius(v),
+                                                via=v))
 
         # --- avoidance: foreign-net tracks the cap's pads can actually TOUCH ---
         # Fanout escapes can land on the bottom (cap) side; attraction could
@@ -1908,6 +1990,67 @@ class _Repair:
         are built from this same call, so they cannot drift from it either."""
         return self._pair_or_flat(pad_floor, self._via_floor_for(via_net))
 
+    def via_hole_keepout(self, pad, via) -> float:
+        """How far a via's CENTRE must stay from `pad`'s copper for its DRILL
+        to clear the pad at KiCad's copper-to-hole requirement: the drill
+        radius plus `check_drc.pad_via_hole_required`, or 0.0 where the
+        checker grades no such pair (or the hole channel is off). `pad` and
+        `via` are parser objects; the answer is pose-independent, so it is
+        memoised on the pair.
+
+        Every via-vs-cap-pad test in this module takes max(this, the copper
+        keep-out): the eff rows below, and nudge_vias_for_unresolved's
+        offender test and landing gate, so the grader and the nudger cannot
+        disagree about a hole any more than about copper."""
+        if not self._hole_on or pad is None or via is None:
+            return 0.0
+        key = (id(pad), id(via))
+        got = self._via_hole_ko.get(key)
+        if got is not None and got[0] is pad and got[1] is via:
+            return got[2]
+        from check_drc import pad_via_hole_required
+        req = pad_via_hole_required(pad, via, self.via_hole_clearance,
+                                    self._all_cu_ordered, self._hole_binder)
+        ko = 0.0 if req is None else _via_drill_radius(via) + req
+        self._via_hole_ko[key] = (pad, via, ko)
+        return ko
+
+    def _cap_hole_reach(self, cap) -> float:
+        """How far past a via's drill radius the via prune must reach for
+        the copper-to-hole term: the board value or the widest rule. 0.0
+        when the channel is off.
+
+        A pad override needs no term here. Where it binds the hole pair it
+        binds the copper pair too (the copper requirement is at least the
+        override), and a via's radius is at least its drill radius, so that
+        hole keep-out never passes the copper one, which the copper bound and
+        its cap-side slack already reach."""
+        return self._hole_reach if self._hole_on else 0.0
+
+    def _via_hole_effs(self, ref, cap, vias):
+        """[cap pad i][via j] copper-to-hole keep-out (`via_hole_keepout`),
+        0.0 where nothing binds -- or None when the channel is off for this
+        cap: no requirement anywhere, or a cap that carries no pad objects (a
+        test's duck-typed cap). Memoised on the via list's identity, like
+        _via_effs."""
+        objs = getattr(cap, 'pad_objs', None)
+        if (not self._hole_on or objs is None
+                or len(objs) != len(getattr(cap, 'pads', ()))):
+            return None
+        rec = self._cap_via_hole_eff.get(ref)
+        if rec is not None and rec[0] is vias:
+            return rec[1]
+        vobj = self._via_obj_by_id
+        rows = []
+        for p in objs:
+            row = []
+            for v in vias:
+                o = vobj.get(id(v))
+                row.append(0.0 if o is None else self.via_hole_keepout(p, o[1]))
+            rows.append(row)
+        self._cap_via_hole_eff[ref] = (vias, rows)
+        return rows
+
     def track_required(self, fa, fb, net_a, net_b):
         """The required clearance between two TRACKS: `required(fa, fb)` raised
         by any binding track-scoped `.kicad_dru` rule (#735).
@@ -2306,7 +2449,7 @@ class _Repair:
     # #733 and #736 have each fixed once already.
 
     def _register_via(self, x, y, net_id, radius=None,
-                      keepout=_DERIVE_KEEPOUT):
+                      keepout=_DERIVE_KEEPOUT, via=None):
         """Grade one via into the via view, and return its 4-tuple.
 
         THE only construction site for a via tuple, and the only writer of
@@ -2358,6 +2501,11 @@ class _Repair:
         than a default, and is unreachable from either caller. Named rather
         than left to surface as an arithmetic error on a None.
 
+        `via` is the parser Via the tuple grades, filed for the copper-to-hole
+        channel (its drill, net, type and span); None files nothing, and the
+        tuple is then priced off its copper alone, as before. A relocation
+        carries the barrel it was handed.
+
         It files the map entry BEFORE returning, but -- unlike
         _register_segment -- it does NOT append, and that difference is safe
         here for a reason the track channel does not have. THIS map's VALUE
@@ -2375,6 +2523,8 @@ class _Repair:
              if keepout is _DERIVE_KEEPOUT else keepout)
         if radius is not None:
             self._via_radius_by_id[id(t)] = (t, radius)
+        if via is not None:
+            self._via_obj_by_id[id(t)] = (t, via)
         return t
 
     def _prune_vias(self, cap, geom, source):
@@ -2438,9 +2588,22 @@ class _Repair:
         """
         ccx, ccy, span, _crect = geom
         via_slack = max(0.0, cap.max_floor - self.clearance)
+        # The copper-to-hole keep-out reaches drill radius + the widest hole
+        # requirement this cap can be priced at, which the copper bound
+        # above does not cover when the via's ring is narrower than the
+        # difference between the two clearances.
+        hole_reach = self._cap_hole_reach(cap)
+        vobj = self._via_obj_by_id
+
+        def hole_near(v):
+            if hole_reach <= 0.0:
+                return False
+            o = vobj.get(id(v))
+            return o is not None and math.hypot(v[0] - ccx, v[1] - ccy) <= (
+                self._max_disp_cap + span + _via_drill_radius(o[1]) + hole_reach)
         near_vias = []
         for v in source:
-            if math.hypot(v[0] - ccx, v[1] - ccy) <= (
+            if hole_near(v) or math.hypot(v[0] - ccx, v[1] - ccy) <= (
                     self._max_disp_cap + span + v[3] + via_slack):
                 near_vias.append(v)
         return near_vias
@@ -2534,10 +2697,12 @@ class _Repair:
                     # an alias is one refactor away from being taken before
                     # that assignment.
                     rec = self._via_radius_by_id.get(id(t))
+                    obj = self._via_obj_by_id.get(id(t))
                     moved = self._register_via(
                         nx, ny, t[2],
                         radius=None if rec is None else rec[1],
-                        keepout=t[3])
+                        keepout=t[3],
+                        via=None if obj is None else obj[1])
                     # #779: carry the SEED position forward. `.get` with
                     # the current tuple as the fallback is what makes a
                     # SECOND relocation of the same barrel keep its
@@ -2720,8 +2885,16 @@ class _Repair:
         """[cap pad i][via j] final KEEP-OUT for `vias` -- the via's radius plus
         that pair's required clearance -- or None for the flat path. The
         requirement is resolved through via_required, so this can never
-        disagree with the offender test in nudge_vias_for_unresolved."""
-        if not self._cap_floors_ok(cap):
+        disagree with the offender test in nudge_vias_for_unresolved.
+
+        Each cell is max(that copper keep-out, the pair's copper-to-HOLE
+        keep-out, `_via_hole_effs`), so the rows are built whenever either
+        channel is on for this cap. A cap with no usable floor list prices
+        its copper flat here, exactly as the flat path does; None (the flat
+        path) only when neither channel is."""
+        floors_ok = self._cap_floors_ok(cap)
+        holes = self._via_hole_effs(ref, cap, vias)
+        if not floors_ok and holes is None:
             return None
         rec = self._cap_via_eff.get(ref)
         if rec is not None and rec[0] is vias:
@@ -2732,18 +2905,24 @@ class _Repair:
         # graded flat, i.e. v[3] is used as-is.
         by_id = self._via_radius_by_id
         cl = self._cap_pad_layers(cap)
+        floors = (cap.pad_floors if floors_ok
+                  else [None] * len(getattr(cap, 'pads', ())))
         rows = []
-        for i, fa in enumerate(cap.pad_floors):
-            flat = self._flat_pad(cl, i)
+        for i, fa in enumerate(floors):
+            flat = not floors_ok or self._flat_pad(cl, i)
+            hrow = None if holes is None else holes[i]
             row = []
-            for v in vias:
+            for j, v in enumerate(vias):
                 rec = by_id.get(id(v))
                 if rec is None:
-                    row.append(v[3])
+                    ko = v[3]
                 elif flat:
-                    row.append(rec[1] + self.clearance)
+                    ko = rec[1] + self.clearance
                 else:
-                    row.append(rec[1] + self.via_required(fa, v[2]))
+                    ko = rec[1] + self.via_required(fa, v[2])
+                if hrow is not None and hrow[j] > ko:
+                    ko = hrow[j]
+                row.append(ko)
             rows.append(row)
         self._cap_via_eff[ref] = (vias, rows)
         return rows
@@ -4990,6 +5169,10 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # #735: whether a SECOND, relaxed sweep rung is worth running at all.
     _trk_on = bool(getattr(st, 'track_rules_active', False))
     _via_rad = getattr(st, 'via_radius', None)
+    # The copper-to-HOLE keep-out of a (pad, via) pair, from st's own resolver
+    # (the grader's eff rows read the same one); a duck-typed st has none and
+    # prices copper only, as before.
+    _hole_ko = getattr(st, 'via_hole_keepout', None)
     # #733: the board-edge requirement comes from st, so the two edge helpers
     # below cannot gate the copper this function EMITS more weakly than the cap
     # mover gates a cap pad.
@@ -5043,6 +5226,18 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             return req(fa, fb)
         return _trk_req(fa, fb, net_a, net_b)
 
+    def hole_ko(pad, v):
+        """How far `v`'s centre must stay from `pad`'s copper for its drill
+        to clear it (0.0: no requirement, or no resolver / no pad object)."""
+        if _hole_ko is None or pad is None:
+            return 0.0
+        return _hole_ko(pad, v)
+
+    def cap_pad_objs(cap, rects):
+        """This cap's parser pads, index-aligned with `rects`, or None."""
+        po = getattr(cap, 'pad_objs', None)
+        return po if po is not None and len(po) == len(rects) else None
+
     def via_rad(v):
         """This via's RADIUS, resolved by st when it can (#732), so the offender
         test, the candidate validation and the #313 connectivity tolerance below
@@ -5095,10 +5290,12 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         _rects = cap.pad_rects(cap.x, cap.y, cap.rot)
         pf = cap_floors_of(cap, _rects)
         _frs = _frames_of(cap, cap.x, cap.y, cap.rot)
+        _po = cap_pad_objs(cap, _rects)
         for i, (bx0, by0, bx1, by1, net) in enumerate(_rects):
             all_cap_rects.append((bx0, by0, bx1, by1, net, cl,
                                   None if pf is None else pf[i],
-                                  None if _frs is None else _frs[i]))
+                                  None if _frs is None else _frs[i],
+                                  None if _po is None else _po[i]))
 
     # Flatten the board's pads ONCE, in pads_by_net iteration order, resolving
     # each pad's floor and drill capsule here instead of inside the 16-angle x
@@ -5273,17 +5470,22 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         if override_holes and override_hole_gap(
                 v.net_id, nx, ny, nx, ny) < vr - 1e-4:
             return False
-        for (bx0, by0, bx1, by1, net, _cl, pfl, cfr) in all_cap_rects:
-            # via barrel spans all layers: no layer gate here
+        for (bx0, by0, bx1, by1, net, _cl, pfl, cfr, cpo) in all_cap_rects:
+            # via barrel spans all layers: no layer gate here (the hole term
+            # scopes itself to the via's own span)
             if net != v.net_id and _pad_point_dist(
-                    nx, ny, (bx0, by0, bx1, by1), cfr) < vr + via_req(pfl, v.net_id):
+                    nx, ny, (bx0, by0, bx1, by1), cfr) < max(
+                        vr + via_req(pfl, v.net_id), hole_ko(cpo, v)):
                 return False
         for p, pfl, has_cu, cap_ in board_pads:
             # rotation/shape-aware pad copper distance (#370 B3, #356
             # class: the axis-aligned size_x/size_y rect under-blocked
             # rotated pads). NPTH pads carry no copper -- drill-only.
+            # The relocated via's DRILL is held off the pad's copper at the
+            # copper-to-hole requirement too.
             if (p.net_id != v.net_id and has_cu
-                    and point_to_pad_distance(nx, ny, p) < vr + req(pfl, vfl)):
+                    and point_to_pad_distance(nx, ny, p) < max(
+                        vr + req(pfl, vfl), hole_ko(p, v))):
                 return False
             if cap_ is not None:
                 # slot/offset-aware drill capsule (net-INDEPENDENT floor, so
@@ -5350,7 +5552,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         if override_holes and override_hole_gap(
                 net_id, sx, sy, ex, ey) < hw - 1e-4:
             return False
-        for (bx0, by0, bx1, by1, net, cl, pfl, cfr) in all_cap_rects:
+        for (bx0, by0, bx1, by1, net, cl, pfl, cfr, _cpo) in all_cap_rects:
             if cl != layer:
                 continue  # cap pads only exist on the cap's own side
             if net != net_id and _pad_seg_dist(
@@ -5359,7 +5561,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         for p, pfl, has_cu, _cap in board_pads:
             if p.net_id == net_id:
                 continue
-            if not _pad_on_layer(p, layer):
+            if not pad_on_layer(p, layer):
                 continue
             if not has_cu:
                 continue  # NPTH: no copper; the hole check above covers it
@@ -5405,14 +5607,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         # nothing and report the cap unresolved forever.
         pfls = cap_floors_of(cap, rects)
         frs = _frames_of(cap, cap.x, cap.y, cap.rot)
+        pos = cap_pad_objs(cap, rects)
         offenders = []
         for v in pcb_data.vias:
             vr = via_rad(v)
             for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
                 if v.net_id != net and _pad_point_dist(
                         v.x, v.y, (bx0, by0, bx1, by1),
-                        None if frs is None else frs[i]) < vr + via_req(
-                            None if pfls is None else pfls[i], v.net_id) - EPS:
+                        None if frs is None else frs[i]) < max(
+                            vr + via_req(None if pfls is None else pfls[i],
+                                         v.net_id),
+                            hole_ko(None if pos is None else pos[i], v)) - EPS:
                     offenders.append(v)
                     break
         for v in offenders:
@@ -5643,6 +5848,3 @@ def _drill_gap_at(pcb_data, via, x, y) -> float:
     return min(gaps, default=float('nan'))
 
 
-def _pad_on_layer(pad, layer):
-    layers = getattr(pad, 'layers', None) or []
-    return layer in layers or '*.Cu' in layers

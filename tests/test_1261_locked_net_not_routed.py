@@ -106,7 +106,48 @@ def route(text, tmp, tag):
     return r.stdout + r.stderr, doc, inp, out
 
 
+def gate_rows():
+    """The gate itself, on the same geometry, per kind of immutable copper.
+    Copper a `sense:` group holds (#1279) is never written `(locked yes)`,
+    yet no pass may move or remove it either, so an all-held net is pinned
+    copper too (#1781). The unlocked row is the control: it must enroll."""
+    import contextlib
+    import io
+    from routing_common import filter_already_routed
+    from routing_config import GridRouteConfig
+    from synth import make_net, make_pad, make_pcb, make_seg
+    print("3. the fragment gate, per kind of copper")
+    pads = [make_pad(1, 10, 15, ref='P1', num='1', size_x=1.6, size_y=1.6),
+            make_pad(1, 30, 15, ref='P2', num='1', size_x=2.0, size_y=2.0)]
+    got = {}
+    for tag, kw in (('unlocked', {}), ('locked', {'locked': True}),
+                    ('sense-held', {'held_by': 'sense:P1.1'})):
+        segs = [make_seg(10, 15, 20, 15, net_id=1, width=1.0, **kw),
+                make_seg(20.97, 15, 29.5, 15, net_id=1, width=1.0, **kw)]
+        pcb = make_pcb(segments=segs, vias=[], pads_by_net={1: pads},
+                       nets={1: make_net(1, 'NET_A')})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            to_route, _done = filter_already_routed(
+                pcb, [('NET_A', 1)], GridRouteConfig(layers=['F.Cu', 'B.Cu']),
+                fragment_gate=True)
+        got[tag] = ([n for n, _i in to_route], buf.getvalue())
+    if got['unlocked'][0] != ['NET_A']:
+        print("  [BROKEN TEST] the unlocked row did not enroll: this geometry "
+              f"does not reach the gate (got {got['unlocked'][0]})")
+        failures.append('gate rows: unlocked control')
+        return
+    print("  [ok] control: the unlocked net enrolls")
+    for tag in ('locked', 'sense-held'):
+        to_route, log = got[tag]
+        check(f"an all-{tag} net is pinned copper, not routed",
+              to_route == [] and 'KiCad-locked or sense-held' in log,
+              f"to_route={to_route}; "
+              + '; '.join(l.strip() for l in log.splitlines() if 'NET_A' in l)[:200])
+
+
 def main():
+    gate_rows()
     tmp = tempfile.mkdtemp(prefix='t1261n_')
     try:
         print("2. control: NET_A unlocked")

@@ -132,11 +132,11 @@ REFUSED_TOOLS = {
         'that it verified, and the chain continues from that board; the plan '
         'format has no hand-join step. Run it on the CLI and start the plan '
         'from its output'),
-    'autoplan.py': (
+    'autoroute.py': (
         'builds its OWN chain of plane, fanout, decap, diff-pair and route '
         'steps from the board and runs it; the plan format has no step that '
         're-derives a chain. Run it on the CLI and start the plan from its '
-        'output (the steps it ran are in <output>.autoplan/plan.json)'),
+        'output (the steps it ran are in <output>.autoroute/plan.json)'),
     # Every board-writing KRT_TOOL (krt_registry `kind` actor or conditional)
     # is mapped, refused here, or in NOOP_TOOLS below: the parity gate reads
     # the registry and fails on one that is none of the three (#937).
@@ -352,6 +352,10 @@ FLAG_PARAMS = {
     # omitted-flag default). The fallthrough spelled it after the flag, which
     # no control matched, so a replay ran at the auto setback.
     '--diff-pair-centerline-setback': 'centerline_setback',
+    # #1842: the via type written for --via-span and its escape mode, each a
+    # word (the span itself is a LIST flag). Choices beside the span field.
+    '--via-span-type': 'via_span_type',
+    '--via-span-escape': 'via_span_escape',
     # (#856's --relax-drc-severities is a store_true switch and lives in
     # BOOL_FLAGS. It used to sit here, where the value branch consumed the
     # NEXT token as its value: `--relax-drc-severities --clearance 0.1`
@@ -360,6 +364,8 @@ FLAG_PARAMS = {
 }
 LIST_FLAGS = {
     '--layers': 'layers',
+    # #1842: route.py's via span (nargs=2: the top and bottom layer)
+    '--via-span': 'via_span',
     '--power-nets': 'power_nets',
     '--power-nets-widths': 'power_nets_widths',
     '--layer-costs': 'layer_costs',
@@ -368,6 +374,10 @@ LIST_FLAGS = {
     # allowlist survives as a list param that ai_plan's alias routes to the
     # diff tab's polarity_swap_nets_text field.
     '--polarity-swap-nets': 'polarity_swap_nets',
+    # #1869: route_diff's intra-pair lane ('auto' or P_NET=REF.PAD:REF.PAD ...,
+    # nargs='+'). The plan executor space-joins the list into the diff tab's
+    # `diff_pair_intra_lane` text control, which splits on whitespace again.
+    '--diff-pair-intra-lane': 'diff_pair_intra_lane',
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
@@ -401,6 +411,8 @@ BOOL_FLAGS = {
     # (--no-smoothing is in INVERTED_BOOL_FLAGS below: it used to be here as
     # `no_smoothing`, a name no control or alias matched.)
     '--add-gnd-vias': 'add_gnd_vias',
+    # route.py's mask-artwork keep-outs (a checkbox of the same name).
+    '--mask-keepouts': 'mask_keepouts',
     # #1630: route.py / route_diff.py record the --impedance target without
     # solving widths (a checkbox of the same name on each tab). A switch, so
     # here and not in FLAG_PARAMS, which would consume the next argument.
@@ -491,6 +503,8 @@ INVERTED_BOOL_FLAGS = {
     # writes back -- the CLI's per-step semantics, since reset_params_to_
     # defaults re-ticks the box before every step.
     '--no-fix-drc-settings': 'fix_drc_check',
+    # route.py's mask-artwork keep-outs, on by default (a checkbox).
+    '--no-mask-keepouts': 'mask_keepouts',
 }
 # Repeatable nargs='+' flags (argparse action='append'): each OCCURRENCE is one
 # group, so the plan param is a list of lists. route.py's --length-match-group
@@ -851,8 +865,9 @@ def parse_command(argv, cwd=None):
     # LIST_FLAGS row's own comment says a converted plan used to drop it, and
     # it still did (26 kept bga_fanout steps on 18 corpus boards).
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--plane-net-layers', '--keep-away'):
+              '--layers', '--via-span', '--polarity-swap-nets', '--coplanar-nets',
+              '--rip-existing-nets', '--plane-net-layers', '--keep-away',
+              '--diff-pair-intra-lane'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

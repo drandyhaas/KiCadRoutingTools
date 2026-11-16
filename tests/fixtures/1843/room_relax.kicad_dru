@@ -1,0 +1,4 @@
+(version 1)
+(rule "room"
+  (constraint clearance (min 0.1mm))
+  (condition "A.insideArea('ROOM')"))

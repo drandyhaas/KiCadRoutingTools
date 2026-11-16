@@ -22,7 +22,8 @@ Usage — two lines at the top of the ``__main__`` block, no re-indentation::
 - arranges for ``EXIT=<rc>`` to be printed as the process ends, whatever
   the path out: a ``sys.exit(n)`` (argparse errors included), falling off
   the end of the script (rc 0), or an unhandled exception (rc 1, the
-  traceback still prints).
+  traceback still prints). Given ``run_started`` (a ``time.monotonic()``
+  reading), ``Wall time: Ns (whole run)`` is printed just before it.
 
 Both lines go to stdout so a single ``> log 2>&1`` redirect captures the
 whole evidence unit. Set ``KRT_NO_BANNER=1`` to suppress (for consumers
@@ -33,6 +34,7 @@ from __future__ import annotations
 import atexit
 import os
 import sys
+import time
 
 _installed = False
 
@@ -105,26 +107,36 @@ def install_dash_hint() -> None:
     argparse.ArgumentParser.error = error
 
 
-def install() -> None:
+def line_buffer_streams() -> None:
+    """Line-buffer stdout and stderr when they are not a tty (run-7 A11).
+
+    Redirected to a file or a pipe, stdout is BLOCK-buffered, so a run that
+    is killed -- a timeout, a stall, a closed session -- loses whatever sits
+    in the 8KB buffer, and a reader on a pipe sees nothing until the run
+    exits. One run-7 board's legalize log ended at 200 bytes that way, and
+    the stage was read as a silent no-op when it had in fact repaired 7
+    parts. These are minute-scale tools whose logs are the evidence; a
+    syscall per line is the right trade. A tty is already line-buffered, so
+    this only changes the redirected case. Called by `install`, and on its
+    own by the tools that print no banner: place_simple and judge_seeds
+    (#1825), whose seed children run the same `main`; place_fanout_clearance,
+    run_plan, place_movie and the bga/qfn fanout fronts (#1829)."""
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            if not _stream.isatty():
+                _stream.reconfigure(line_buffering=True)
+        except Exception:      # non-reconfigurable wrapper (a test's StringIO)
+            pass
+
+
+def install(run_started: float | None = None) -> None:
     """Print the CMD banner now; print EXIT=<rc> when the process ends."""
     global _installed
     if _installed or os.environ.get('KRT_NO_BANNER'):
         return
     _installed = True
     install_dash_hint()
-    # Line-buffer the log (run-7 A11). Redirected to a file, stdout is
-    # BLOCK-buffered, so a run that is killed -- a timeout, a stall, a closed
-    # session -- loses whatever sits in the 8KB buffer. One run-7 board's
-    # legalize log ended at 200 bytes that way, and the stage was read as a
-    # silent no-op when it had in fact repaired 7 parts. These are minute-scale
-    # tools whose logs are the evidence; a syscall per line is the right trade.
-    # A tty is already line-buffered, so this only changes the redirected case.
-    for _stream in (sys.stdout, sys.stderr):
-        try:
-            if not _stream.isatty():
-                _stream.reconfigure(line_buffering=True)
-        except Exception:      # non-reconfigurable wrapper: keep the banner
-            pass
+    line_buffer_streams()
     print(f"CMD: {command_line()}", flush=True)
     # #653: the knobs that were actually in the environment. Printed next to
     # CMD because they are the OTHER half of "how was this invoked" -- a knob
@@ -169,6 +181,9 @@ def install() -> None:
     @atexit.register
     def _print_exit():  # pragma: no cover - exercised via subprocess tests
         try:
+            if run_started is not None:
+                print(f"Wall time: {time.monotonic() - run_started:.1f}s "
+                      f"(whole run)", flush=True)
             print(f"EXIT={state['rc']}", flush=True)
         except Exception:
             pass

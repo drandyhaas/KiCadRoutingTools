@@ -152,6 +152,14 @@ def _gui_arm(board_path, out_path, explicit=None):
                    quiet=True, timeout=ARM_WALL_S - 30)
     seen['completed'] = res['completed']
     seen['aborted'] = res['aborted']
+    # after the plan's end-of-plan floor write (PlanExecutor): the project's
+    # rule, which every later chain step and KiCad read
+    try:
+        with open(os.path.splitext(board_path)[0] + '.kicad_pro', encoding='utf-8') as f:
+            seen['after_plan'] = (json.load(f)['board']['design_settings']['rules']
+                                  .get('min_copper_edge_clearance'))
+    except (OSError, ValueError, KeyError):
+        seen['after_plan'] = None
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump(seen, f)
     sys.stdout.flush()
@@ -241,6 +249,11 @@ def main():
             check(f"[{name}] the tab leaves the CLI's copper-to-edge rule on the board",
                   abs(gui['at_done']['edge'] - cli) < 1e-6,
                   f"live {gui['at_done']['edge']} vs project {cli}")
+            check(f"[{name}] after the plan's own floor write, the project keeps the "
+                  f"CLI's rule, not the inset",
+                  gui.get('after_plan') is not None
+                  and abs(gui['after_plan'] - cli) < 1e-6,
+                  f"project {gui.get('after_plan')} vs CLI {cli}")
             check(f"[{name}] its castellated retract reads the CLI's floor, not the inset",
                   gui['retract_edge'] is not None
                   and abs(gui['retract_edge'] - cli_input_floor) < 1e-6,

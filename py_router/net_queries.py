@@ -254,6 +254,43 @@ def board_net_names(pcb_data) -> Set[str]:
     return names
 
 
+def account_net_patterns(patterns, pcb_data):
+    """Each INCLUSION pattern of PATTERNS on its own, against the board's
+    nets (#1815): (patterns naming no net of the board, {pattern: the nets it
+    names}). An exclusion selects nothing by itself, so it is not accounted.
+    Matched with `net_pattern_matches`, as `matches_net_filter` matches an
+    inclusion, so a pattern counted here selects the same nets there."""
+    names = sorted(board_net_names(pcb_data))
+    known = set(names)
+    no_net, matched = [], {}
+    for p in patterns:
+        inc = split_net_patterns([p], known)[0]
+        if not inc:
+            continue
+        hit = [n for n in names if net_pattern_matches(n, inc[0])]
+        if hit:
+            matched[p] = hit
+        else:
+            no_net.append(p)
+    return no_net, matched
+
+
+def no_net_patterns_note(no_net, flag: str, commas: bool = False) -> str:
+    """The line naming the NO_NET patterns of FLAG (`account_net_patterns`'
+    first answer), with the accepted spellings when one holds whitespace: it
+    was read as ONE pattern, since a net name may hold a space (#1553).
+    COMMAS says whether FLAG also splits a token at its commas."""
+    note = (f"{flag} pattern(s) matching no net of the board: "
+            + ', '.join(repr(p) for p in no_net))
+    spaced = [p for p in no_net if any(ch.isspace() for ch in p)]
+    if spaced:
+        note += (f" ({', '.join(repr(p) for p in spaced)} was read as one "
+                 f"pattern holding whitespace: give each pattern its own "
+                 f"argument" + (", or join them with commas" if commas else "")
+                 + ")")
+    return note
+
+
 def literal_net_patterns(patterns: Optional[List[str]],
                          known_net_names) -> Optional[List[str]]:
     """PATTERNS with each one that spells a board net verbatim made literal.
@@ -1074,11 +1111,15 @@ def _touched_via_layers(via, c, r, segments, copper):
 
 
 def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
-                    key) -> List[int]:
+                    key, spans: Optional[list] = None) -> List[int]:
     """The barrel KiCad charges each of `vias`, in nm, as release `key` does
-    (step 1 and 5 of the block comment above)."""
+    (step 1 and 5 of the block comment above). `spans`, when given, is
+    filled with one entry per via: the (upper, lower) copper layers the
+    charge was measured between, or None for a via charged nothing."""
     from geometry_utils import via_end_layers
     if not via_height_in_length(pcb_data):
+        if spans is not None:
+            spans.extend([None] * len(vias))
         return [0] * len(vias)       # #1731: Board Setup counts no via height
     copper = _copper_stack(pcb_data)
     rank = {l: i for i, l in enumerate(copper)}
@@ -1086,10 +1127,14 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
     off_centre = key >= (10, 0, 4)       # 19cc51bd
     pad_side = key >= (10, 0, 5)         # e4f5c357
 
+    _last = [None]
+
     def height(layers):
         span = sorted({l for l in layers if l in rank}, key=rank.get)
         if len(span) < 2:
+            _last[0] = None
             return 0
+        _last[0] = (span[0], span[-1])
         return _stackup_height_nm(pcb_data, span[0], span[-1], half)
 
     ends: Dict[Tuple[int, int], List[int]] = {}
@@ -1106,6 +1151,7 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
             grid.setdefault((p[0] // cell, p[1] // cell), []).append(p)
     out = []
     for v in vias:
+        _last[0] = None
         c = (_nm(v.x), _nm(v.y))
         r = _nm(v.size) // 2
         joined = set(ends.get(c, ()))
@@ -1126,6 +1172,8 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
             elif touched:
                 top = touched[0]
             out.append(height((top, bottom)))
+            if spans is not None:
+                spans.append(_last[0])
             continue
         layers = {items[i].layer for i in joined}
         if pad_side:
@@ -1145,6 +1193,8 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
                 out.append(0)
         else:
             out.append(height(layers))
+        if spans is not None:
+            spans.append(_last[0])
     return out
 
 
@@ -1216,6 +1266,16 @@ def kicad_net_length_nm(pcb_data, segments, vias, pads,
     KiCad `release` (default `length_measure_release()`) measures it (#1313,
     #1432): see the block comment above. `segments`, `vias` and `pads` are
     the net's. Pad-to-die is added by the caller."""
+    by_layer, via_nm = kicad_net_length_parts_nm(pcb_data, segments, vias, pads, release)
+    return sum(by_layer.values()) + via_nm
+
+
+def kicad_net_length_parts_nm(pcb_data, segments, vias, pads,
+                              release: Optional[str] = None
+                              ) -> Tuple[Dict[str, int], int]:
+    """`kicad_net_length_nm` in its parts (#1846): ({copper layer: track nm},
+    via barrel nm). What a time-domain delay is summed from -- each layer's
+    track length and the via length carry their own delay."""
     key = _release_key(length_measure_release(release))
     copper = _copper_stack(pcb_data)
     segments = _tracks(segments)
@@ -1225,7 +1285,23 @@ def kicad_net_length_nm(pcb_data, segments, vias, pads,
     if key >= (10, 0, 4):
         _clip_runs_at_vias(runs, vias)
     _clip_runs_in_pads(runs, pads, copper)
-    return sum(_chain_len(run.pts) for run in runs) + via_nm
+    by_layer: Dict[str, int] = {}
+    for run in runs:
+        by_layer[run.layer] = by_layer.get(run.layer, 0) + _chain_len(run.pts)
+    return by_layer, via_nm
+
+
+def kicad_net_via_parts_nm(pcb_data, segments, vias, pads,
+                           release: Optional[str] = None) -> List[Tuple[int, Optional[tuple]]]:
+    """Per via of `vias`, in their order: (the barrel nm KiCad charges it,
+    the (upper, lower) copper layers the signal joins it on, or None). What a
+    tuning profile's via override is looked up by: KiCad keys it on the
+    signal's two layers and the via's own two."""
+    key = _release_key(length_measure_release(release))
+    segments = _tracks(segments)
+    spans: list = []
+    nm = _via_charges_nm(pcb_data, vias, _line_items(segments), segments, pads, key, spans)
+    return list(zip(nm, spans))
 
 
 def kicad_via_length(via: Via, segments, pads, pcb_data,
@@ -1300,12 +1376,48 @@ def pin_pair_path_length(pcb_data: PCBData, net_id: int,
     via whose copper overlaps theirs, and each other where their copper
     touches (#1629).
 
+    When no track path joins the two pads, the net's other copper pads are
+    attached too (#1867), so a path that runs THROUGH one -- a lane that
+    enters an in-line part's pad at one point and leaves it at another, with
+    no track between the two -- is walked. Such a pad is charged in its
+    plane the way a via is (#1583): a track is measured up to where its
+    centreline crosses the pad's copper outline, and the walk is charged the
+    straight line from there to the pad's centre, then from the centre
+    straight to where it leaves (the outline crossing of the track it leaves
+    on). The track inside the pad is not counted on top of that hop. Where
+    no track crosses the outline the hop starts at the copper the walk does
+    meet: a track end inside the pad or whose round end touches it, the
+    centre of a via whose copper overlaps it, or -- for two passed pads whose
+    copper touches -- the other pad's centre. Changing layer in a drilled
+    pad's barrel costs nothing, as in an end pad. The two end pads stay
+    free, and so does a pad whose copper touches one of them (#1629: one
+    terminal with it, such as a module's overlapping twin of that pad). A
+    length the track copper alone gives is returned as it was: the other
+    pads are not attached then, so a pad's centre is never a short cut for
+    it.
+
     Returns None when the two pads are not joined by copper (an unrouted or
     broken net) -- distinguish that from 0.0, which means pad-to-pad direct
     contact. Zone/pour connections are NOT traversed: a net that reaches its
     pads only through a plane has no track path and returns None.
     """
-    graph = _net_track_graph(pcb_data, net_id, (pad_a, pad_b), tolerance)
+    length = _pin_pair_walk(pcb_data, net_id, pad_a, pad_b, (), tolerance)
+    if length is not None:
+        return length
+    passed = [p for p in _copper_pads(pcb_data, net_id)
+              if p is not pad_a and p is not pad_b]
+    if not passed:
+        return None
+    return _pin_pair_walk(pcb_data, net_id, pad_a, pad_b, passed, tolerance)
+
+
+def _pin_pair_walk(pcb_data: PCBData, net_id: int, pad_a: Pad, pad_b: Pad,
+                   passed, tolerance: float) -> Optional[float]:
+    """The shortest walk from `pad_a` to `pad_b` over `_net_track_graph`,
+    with the pads in `passed` attached as pads a walk only passes; None when
+    nothing joins the two."""
+    graph = _net_track_graph(pcb_data, net_id, [pad_a, pad_b] + list(passed),
+                             tolerance, through=frozenset(id(p) for p in passed))
     if graph is None:
         return None
     adjacency, pad_nodes = graph
@@ -1410,9 +1522,107 @@ def net_pad_to_die_delay(pcb_data: PCBData, net_id: int) -> float:
     return pad_to_die_delay((getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id))
 
 
+def pad_label(pad: Pad) -> str:
+    """A pad as a grade names it: `REF.PAD`."""
+    return f'{pad.component_ref}.{pad.pad_number}'
+
+
+def _pad_order(pad: Pad):
+    """A pad's place in the order `pin_pair_pads` breaks ties in: its
+    `REF.PAD` label in natural order (U1.9 before U1.10), then (for two pads
+    one label names) its position and layers -- never the order of the
+    board file."""
+    import re
+    label = pad_label(pad)
+    natural = [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', label)]
+    return (natural, label, pad.global_x, pad.global_y, tuple(pad.layers or ()))
+
+
+def pin_pair_pads(pcb_data: PCBData, net_id: int, pads=None,
+                  tolerance: float = 0.02, detail: Optional[dict] = None):
+    """The two pads `mode='pin_pair'` measures a net between (#1866).
+
+    `pads` names them: two of the net's copper pads, each a Pad or its
+    `REF.PAD` label. Without it they are chosen from the net's COPPER pads
+    (`_copper_pads`: an NPTH hole or a paste-only pad is no end of a lane),
+    whatever order the board file lists its footprints in:
+      - two copper pads: those two;
+      - three or more, all joined by track copper (`net_pads_joined`): the
+        two farthest apart ALONG the copper, by `pin_pair_path_length` over
+        every pair -- the ends of the lane, where the walk between any other
+        two is shorter;
+      - three or more, not all joined: the two whose centres are farthest
+        apart in a straight line. A copper length is not defined for a pad
+        no track reaches, and the farthest of the pairs that are joined
+        would grade a part of a broken lane as the whole of it; the
+        straight line names the pair the routed lane will have to join,
+        and its length reads None while that pair is apart.
+    Ties (lengths equal to the nanometre) go to the pair whose labels come
+    first in natural order (`_pad_order`: U1.9 before U1.10), and the pair
+    is returned in that order.
+
+    `detail`, when given, is filled with 'how' ('named', 'two_pads',
+    'farthest_along_copper' or 'farthest_straight_line') and 'ambiguous':
+    True when the pair was chosen from three or more copper pads, so a
+    grade can say that the net's lane ends were assumed, not stated
+    (board_score's `ambiguous_pair`).
+
+    -> (pad_a, pad_b), or None when the net has fewer than two copper pads.
+    Raises ValueError, with the reason, when `pads` is not two different
+    copper pads of the net, each named once."""
+    if detail is None:
+        detail = {}
+    detail.update(how='named', ambiguous=False)
+    if pads is None:
+        own = sorted(_copper_pads(pcb_data, net_id), key=_pad_order)
+        if len(own) < 2:
+            return None
+        if len(own) == 2:
+            detail['how'] = 'two_pads'
+            return own[0], own[1]
+        from itertools import combinations
+        pairs = list(combinations(own, 2))     # in label order: ties go first
+        detail['ambiguous'] = True
+        if net_pads_joined(pcb_data, net_id, tolerance=tolerance):
+            detail['how'] = 'farthest_along_copper'
+            lengths = [pin_pair_path_length(pcb_data, net_id, a, b,
+                                            tolerance=tolerance)
+                       for a, b in pairs]
+            if all(L is not None for L in lengths):
+                best = max(range(len(pairs)), key=lambda i: round(lengths[i], 6))
+                return pairs[best]
+        detail['how'] = 'farthest_straight_line'
+        best = max(range(len(pairs)), key=lambda i: round(math.hypot(
+            pairs[i][0].global_x - pairs[i][1].global_x,
+            pairs[i][0].global_y - pairs[i][1].global_y), 6))
+        return pairs[best]
+    name = getattr(pcb_data.nets.get(net_id), 'name', None) or str(net_id)
+    pads = list(pads)
+    if len(pads) != 2:
+        raise ValueError(f'net {name}: {len(pads)} pad(s) given, a pin pair is two')
+    own = _copper_pads(pcb_data, net_id)
+    out = []
+    for want in pads:
+        if isinstance(want, str):
+            hits = [p for p in own if pad_label(p) == want]
+            if len(hits) != 1:
+                raise ValueError(
+                    f'net {name}: {want} names {len(hits)} of its copper pads '
+                    f'({", ".join(sorted(pad_label(p) for p in own)) or "none"})')
+            want = hits[0]
+        elif not any(want is p for p in own):
+            raise ValueError(f'net {name}: {pad_label(want)} is not one of its '
+                             f'copper pads')
+        out.append(want)
+    if out[0] is out[1]:
+        raise ValueError(f'net {name}: {pad_label(out[0])} is named twice')
+    return out[0], out[1]
+
+
 def net_match_length(pcb_data: PCBData, net_id: int, mode: str = 'total',
                      tolerance: float = 0.02,
-                     include_pad_to_die: bool = True) -> Optional[float]:
+                     include_pad_to_die: bool = True,
+                     pads=None) -> Optional[float]:
     """The length a length-match group grades ONE net at, or None when it cannot be measured (#1246).
 
     One definition for every grader (`board_score --length-groups`, the
@@ -1424,10 +1634,15 @@ def net_match_length(pcb_data: PCBData, net_id: int, mode: str = 'total',
                        the net is joined by track copper (`net_pads_joined`),
                        plus every pad's pad-to-die length -- KiCad's
                        length/skew DRC.
-      mode 'pin_pair'  the copper path between the net's first two pads
+      mode 'pin_pair'  the copper path between two pads of the net
                        (`pin_pair_path_length`) plus those two pads'
                        pad-to-die lengths -- KiCad's tuner, which adds its
-                       start and end pads'.
+                       start and end pads'. The two pads are `pads` (#1866,
+                       `pin_pair_pads`: two Pads or `REF.PAD` labels; a
+                       ValueError when they are not two copper pads of the
+                       net), else the two copper pads `pin_pair_pads`
+                       chooses: on a net of three or more, the two farthest
+                       apart along the copper, whatever the file order.
 
     `include_pad_to_die=False` leaves the pad-to-die term out (copper only).
     Without it a board carrying `(die_length ...)` grades a spread KiCad does
@@ -1438,15 +1653,16 @@ def net_match_length(pcb_data: PCBData, net_id: int, mode: str = 'total',
     those are not the length of a signal, and grading them passed a copper-free
     group and failed a stub-only one.
     """
-    die = (net_match_pad_to_die(pcb_data, net_id, mode)
-           if include_pad_to_die else 0.0)
     if mode == 'pin_pair':
-        pads = pcb_data.pads_by_net.get(net_id) or []
-        if len(pads) < 2:
+        pair = pin_pair_pads(pcb_data, net_id, pads, tolerance=tolerance)
+        if pair is None:
             return None
-        path = pin_pair_path_length(pcb_data, net_id, pads[0], pads[1],
+        die = pad_to_die_length(pair) if include_pad_to_die else 0.0
+        path = pin_pair_path_length(pcb_data, net_id, pair[0], pair[1],
                                     tolerance=tolerance)
         return None if path is None else path + die
+    die = (net_match_pad_to_die(pcb_data, net_id, mode)
+           if include_pad_to_die else 0.0)
     if not net_pads_joined(pcb_data, net_id, tolerance=tolerance):
         return None
     return net_copper_length(pcb_data, net_id) + die
@@ -1672,17 +1888,18 @@ def _pad_pair_walk(adjacency, infos, pad_nodes, pad_a, pad_b, nodes=None):
 
 
 def net_match_pad_to_die(pcb_data: PCBData, net_id: int,
-                         mode: str = 'total', attr: str = 'die_length') -> float:
+                         mode: str = 'total', attr: str = 'die_length',
+                         pads=None) -> float:
     """The pad-to-die term `net_match_length` adds in `mode` (#1248), in mm:
-    every pad of the net for 'total' (KiCad's DRC), the first two pads for
-    'pin_pair' (the pads that path joins; KiCad's tuner adds its start and end
-    pads').
+    every pad of the net for 'total' (KiCad's DRC), the measured pad pair for
+    'pin_pair' (`pin_pair_pads(pcb_data, net_id, pads)`, the pads that path
+    joins; KiCad's tuner adds its start and end pads').
 
     `attr='die_delay'` sums the same pads' delays instead, in ps -- the time
     twin over the same pad choice, never a converted length."""
     _sum = pad_to_die_delay if attr == 'die_delay' else pad_to_die_length
     if mode == 'pin_pair':
-        return _sum((pcb_data.pads_by_net.get(net_id) or [])[:2])
+        return _sum(pin_pair_pads(pcb_data, net_id, pads) or ())
     if mode != 'total':
         raise ValueError(f"net_match_length: unknown mode {mode!r} "
                          f"(expected 'total' or 'pin_pair')")
@@ -1702,6 +1919,53 @@ def _track_reaches_pad_at(pad, x: float, y: float, half_width: float,
     if not getattr(pad, 'shape', None) or (pad.size_x <= 0 and pad.size_y <= 0):
         return _pad_holds_point(pad, x, y, tolerance)
     return _point_to_pad_distance()(x, y, pad) <= reach
+
+
+def _pad_outline_crossings(s, ux: float, uy: float, length: float, pad,
+                           tolerance: float) -> List[float]:
+    """The distances along segment `s` (unit direction (ux, uy), `length`
+    mm) where its centreline crosses `pad`'s copper outline (#1867), the
+    exact outline `check_drc.point_to_pad_distance` grades (rotation,
+    rounded corners, custom polygons): sampled every 5 um inside the pad's
+    bounding circle, each change from outside to inside bisected. A crossing
+    within `tolerance` of either end is left out, as every other cut is."""
+    dist = _point_to_pad_distance()
+    reach = math.hypot(pad.size_x, pad.size_y) / 2
+    for poly in getattr(pad, 'polygons', None) or ():
+        for (x, y) in poly:
+            reach = max(reach, math.hypot(x - pad.global_x, y - pad.global_y))
+    fx, fy = s.start_x - pad.global_x, s.start_y - pad.global_y
+    b = fx * ux + fy * uy
+    disc = b * b - (fx * fx + fy * fy - reach * reach)
+    if disc <= 0:
+        return []
+    lo = max(0.0, -b - math.sqrt(disc))
+    hi = min(length, -b + math.sqrt(disc))
+    if hi <= lo:
+        return []
+
+    def inside(t: float) -> bool:
+        return dist(s.start_x + ux * t, s.start_y + uy * t, pad) <= 0.0
+
+    out = []
+    steps = max(2, int(math.ceil((hi - lo) / 0.005)))
+    t_prev, in_prev = lo, inside(lo)
+    for k in range(1, steps + 1):
+        t = lo + (hi - lo) * k / steps
+        in_t = inside(t)
+        if in_t != in_prev:
+            a, z = t_prev, t                 # a has in_prev, z has in_t
+            for _ in range(50):
+                mid = (a + z) / 2
+                if inside(mid) == in_prev:
+                    a = mid
+                else:
+                    z = mid
+            cross = (a + z) / 2
+            if tolerance < cross < length - tolerance:
+                out.append(cross)
+        t_prev, in_prev = t, in_t
+    return out
 
 
 def _segment_crossings(segments) -> Dict[int, List[Tuple[float, float]]]:
@@ -1743,7 +2007,8 @@ def _segment_crossings(segments) -> Dict[int, List[Tuple[float, float]]]:
 
 
 def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
-                     tolerance: float = 0.02, detail: Optional[dict] = None):
+                     tolerance: float = 0.02, detail: Optional[dict] = None,
+                     through=frozenset()):
     """(adjacency, pad_nodes) over ONE net's track copper, with `pads` attached.
 
     The weighted graph `pin_pair_path_length` walks (see its docstring for the
@@ -1755,6 +2020,14 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
     exact outline, a via joins a pad its copper overlaps, two of `pads`
     whose copper touches on a shared layer join each other, and two tracks
     of a layer whose centrelines cross meet at the crossing (#1705).
+
+    `through` is the ids of the `pads` a walk only PASSES (#1867): a track
+    is cut where its centreline crosses such a pad's outline (as at a via's
+    edge), and each join to the pad -- a track node, a via, another passed
+    pad -- is charged its straight distance to the pad's centre, as a via's
+    is; a pad a walk starts or ends on joins at no cost, and so does a
+    passed pad whose copper touches one (directly or through other passed
+    pads: one terminal, #1629).
 
     `detail`, when given, is filled with what each edge IS, for a measure
     that reads the copper a walk selected (`_selected_copper_mm`):
@@ -1833,6 +2106,36 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                           _p, x, y, hw, tolerance),
                       'pad', pad))
 
+    # #1629: two of `pads` whose copper touches on a shared copper layer are
+    # one terminal (check_connected's _pads_join) -- a module's two
+    # overlapping same-number pads, a pad stacked on another.
+    pad_pad_contacts = []          # (pad, pad, [shared layers])
+    _pad_discs = [d for d in discs if d[5] == 'pad']
+    if len(_pad_discs) > 1:
+        from check_connected import _pads_join
+        for i, (ax, ay, ar, alayers, _ah, _ak, pa) in enumerate(_pad_discs):
+            for (bx, by, br, blayers, _bh, _bk, pb) in _pad_discs[i + 1:]:
+                if math.hypot(ax - bx, ay - by) > (math.hypot(pa.size_x, pa.size_y)
+                                                   + math.hypot(pb.size_x, pb.size_y)) / 2 + tolerance:
+                    continue
+                common = [l for l in alayers if l in blayers]
+                if common and _pads_join(pa, pb, tolerance):
+                    pad_pad_contacts.append((pa, pb, common))
+    if through:
+        # #1867 with #1629: a passed pad whose copper touches a pad the walk
+        # ends on -- directly or through other such pads -- is one terminal
+        # with it (a module's overlapping twin of that pad), so it is that
+        # end's copper and joins free, as the end pad does
+        through = set(through)
+        grew = True
+        while grew:
+            grew = False
+            for pa, pb, _common in pad_pad_contacts:
+                for passed_pad, other in ((pa, pb), (pb, pa)):
+                    if id(passed_pad) in through and id(other) not in through:
+                        through.discard(id(passed_pad))
+                        grew = True
+
     # Cut each segment at every T-junction (another segment's endpoint on its
     # interior), at every point where another segment of the layer CROSSES it,
     # and at every disc it passes through, then chain the pieces.
@@ -1869,6 +2172,12 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
             t = _project(cx, cy, radius + tolerance)
             if t is not None:
                 cuts.append(t)
+            if kind == 'pad' and id(_obj) in through:
+                # #1867: a passed pad is cut where the track crosses its
+                # outline, as a via is at its edge, so a walk across it is
+                # charged from that edge straight to the centre
+                cuts.extend(_pad_outline_crossings(s, ux, uy, length, _obj,
+                                                   tolerance))
             if kind == 'via':
                 # #1583: and where it crosses the via's edge, so a run ending
                 # inside the via reaches the centre in a straight line from
@@ -1931,22 +2240,6 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                 via_pad_contacts.append((via, pad, common))
                 via_contact_layers.setdefault(id(via), set()).update(common)
 
-    # #1629: two of `pads` whose copper touches on a shared copper layer are
-    # one terminal (check_connected's _pads_join) -- a module's two
-    # overlapping same-number pads, a pad stacked on another.
-    pad_pad_contacts = []          # (pad, pad, [shared layers])
-    _pad_discs = [d for d in discs if d[5] == 'pad']
-    if len(_pad_discs) > 1:
-        from check_connected import _pads_join
-        for i, (ax, ay, ar, alayers, _ah, _ak, pa) in enumerate(_pad_discs):
-            for (bx, by, br, blayers, _bh, _bk, pb) in _pad_discs[i + 1:]:
-                if math.hypot(ax - bx, ay - by) > (math.hypot(pa.size_x, pa.size_y)
-                                                   + math.hypot(pb.size_x, pb.size_y)) / 2 + tolerance:
-                    continue
-                common = [l for l in alayers if l in blayers]
-                if common and _pads_join(pa, pb, tolerance):
-                    pad_pad_contacts.append((pa, pb, common))
-
     track_nodes = list(adjacency.keys())
     pad_nodes: Dict[int, List[int]] = {}
     hubs_by_obj: Dict[int, Dict[str, int]] = {}
@@ -1967,7 +2260,8 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                                  ('via_join', obj, node))
                         joined = True
                 elif hit(nx, ny, half_w.get(node, 0.0)):
-                    add_edge(hub, node, 0.0, ('pad', obj))
+                    add_edge(hub, node, math.hypot(nx - cx, ny - cy)
+                             if id(obj) in through else 0.0, ('pad', obj))
                     hub_joins.setdefault(hub, []).append(node)
                     joined = True
             if joined or kind == 'pad' \
@@ -2009,12 +2303,18 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
         vh, ph = hubs_by_obj.get(id(via), {}), hubs_by_obj.get(id(pad), {})
         for layer in common:
             if layer in vh and layer in ph:
-                add_edge(vh[layer], ph[layer], 0.0, ('via_pad', via))
+                add_edge(vh[layer], ph[layer],
+                         math.hypot(via.x - pad.global_x, via.y - pad.global_y)
+                         if id(pad) in through else 0.0, ('via_pad', via))
     for pa, pb, common in pad_pad_contacts:
         ha, hb = hubs_by_obj.get(id(pa), {}), hubs_by_obj.get(id(pb), {})
         for layer in common:
             if layer in ha and layer in hb:
-                add_edge(ha[layer], hb[layer], 0.0, ('pad_pad',))
+                add_edge(ha[layer], hb[layer],
+                         math.hypot(pa.global_x - pb.global_x,
+                                    pa.global_y - pb.global_y)
+                         if id(pa) in through or id(pb) in through else 0.0,
+                         ('pad_pad',))
 
     if detail is not None:
         detail.update(edges=edge_infos, node_xy=_node_xy, hub_joins=hub_joins,
@@ -2328,6 +2628,90 @@ def diff_pair_coupling(pcb_data: PCBData, p_net_id: int, n_net_id: int,
             'layers_p': sorted({s.layer for s in p_tracks}),
             'layers_n': sorted({s.layer for s in n_tracks}),
             'arc_chords': arcs}
+
+
+#: above this many segments a net is not searched for self-overlap
+SELF_OVERLAP_MAX_SEGMENTS = 2000
+#: two passes count as running along each other within this angle (sine)
+_SELF_OVERLAP_SIN = 0.0872          # 5 degrees
+
+
+def net_self_overlap(pcb_data: PCBData, net_id: int):
+    """Where a net's track copper runs ALONG ITSELF (#1873): two same-layer
+    pieces, within 5 degrees of parallel, whose copper overlaps -- their
+    centre lines closer than half the two widths together -- over more than
+    the narrower track's width: one strip of copper laid twice. A leg that
+    comes back along its own coupled middle has it; a straight continuation,
+    a bend and a T-junction do not.
+
+    The stretch counted is where that holds, not the whole length the two
+    pieces run side by side: two passes that converge are counted from where
+    their copper meets. Tracks of one width overlap when their centre lines
+    are closer than that width; a narrow pass that lies inside a wider track
+    of the net, or only overlaps its edge, is counted too. Which way the
+    second piece runs does not matter: a branch that leaves the first at
+    under 5 degrees, or crosses it, is counted while the two overlap.
+
+    Returns (total mm laid twice, rows), each row {'layer', 'a', 'b' (the two
+    pieces' end points), 'centre_gap_mm' (at its narrowest over the stretch),
+    'along_mm', 'width_mm' (the narrower track's)}; (None, []) for a net with more than
+    SELF_OVERLAP_MAX_SEGMENTS segments (not searched). A length-match measure
+    that sums all of a net's copper, as KiCad's does, counts such a stretch
+    twice."""
+    segs = [s for s in pcb_data.segments
+            if s.net_id == net_id and not getattr(s, 'graphic', False)
+            and math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) > 1e-9]
+    if len(segs) > SELF_OVERLAP_MAX_SEGMENTS:
+        return None, []
+    rows, total = [], 0.0
+    for i, a in enumerate(segs):
+        ax, ay = a.end_x - a.start_x, a.end_y - a.start_y
+        la = math.hypot(ax, ay)
+        ux, uy = ax / la, ay / la
+        for b in segs[i + 1:]:
+            if b.layer != a.layer:
+                continue
+            bx, by = b.end_x - b.start_x, b.end_y - b.start_y
+            lb = math.hypot(bx, by)
+            vx, vy = bx / lb, by / lb
+            # how fast a point moving along `a` leaves `b`'s line: the sine
+            # of the angle between the two pieces
+            drift = vx * uy - vy * ux
+            if abs(drift) > _SELF_OVERLAP_SIN:
+                continue
+            w = min(a.width or 0.0, b.width or 0.0)
+            if w <= 0.0:
+                continue
+            reach = ((a.width or 0.0) + (b.width or 0.0)) / 2.0
+            t0 = (b.start_x - a.start_x) * ux + (b.start_y - a.start_y) * uy
+            t1 = (b.end_x - a.start_x) * ux + (b.end_y - a.start_y) * uy
+            lo, hi = max(0.0, min(t0, t1)), min(la, max(t0, t1))
+            if hi - lo <= w:
+                continue
+            # the point of `a` at t stands off0 + drift * t from `b`'s line;
+            # keep the part of [lo, hi] where that is inside `reach`
+            off0 = vx * (a.start_y - b.start_y) - vy * (a.start_x - b.start_x)
+            if abs(drift) < 1e-12:
+                if abs(off0) >= reach - 1e-9:
+                    continue
+            else:
+                ta, tb = sorted(((-reach - off0) / drift, (reach - off0) / drift))
+                lo, hi = max(lo, ta), min(hi, tb)
+                if hi - lo <= w:
+                    continue
+            e0, e1 = off0 + drift * lo, off0 + drift * hi
+            gap = 0.0 if e0 * e1 < 0 else min(abs(e0), abs(e1))
+            if gap >= reach - 1e-9:
+                continue
+            rows.append({'layer': a.layer,
+                         'a': [(round(a.start_x, 4), round(a.start_y, 4)),
+                               (round(a.end_x, 4), round(a.end_y, 4))],
+                         'b': [(round(b.start_x, 4), round(b.start_y, 4)),
+                               (round(b.end_x, 4), round(b.end_y, 4))],
+                         'centre_gap_mm': round(gap, 4), 'along_mm': round(hi - lo, 4),
+                         'width_mm': round(w, 4)})
+            total += hi - lo
+    return round(total, 4), rows
 
 
 def diff_pair_skew(pcb_data: PCBData, p_net_id: int, n_net_id: int,
@@ -3555,6 +3939,20 @@ def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[
     # and `unique` is a set of STRINGS, whose order CPython randomizes per
     # process. Layer order feeds pad expansion and per-layer passes.
     return sorted(unique, key=lambda l: (layer_order.get(l, len(routing_layers)), l))
+
+
+def pad_on_layer(pad, layer: str) -> bool:
+    """True when PAD stands on copper LAYER as an obstacle: a drilled pad (a
+    plated barrel, or an NPTH hole) on every layer, any other pad on the
+    copper layers its `layers` names, the wildcards read as
+    `expand_pad_layers` reads them (``*.Cu`` every layer, ``F&B.Cu`` front
+    and back). Cheap enough for a per-pad, per-candidate loop."""
+    if (getattr(pad, 'drill', 0) or 0) > 0:
+        return True
+    layers = getattr(pad, 'layers', None) or ()
+    return (layer in layers or '*.Cu' in layers
+            or (layer in ('F.Cu', 'B.Cu')
+                and ('F&B.Cu' in layers or 'F&B' in layers)))
 
 
 def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:

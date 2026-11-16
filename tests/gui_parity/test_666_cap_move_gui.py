@@ -63,7 +63,11 @@ spells it: C1, 0.7 mm east.
           apply leaves C1.
        b. shipped: the escape via is on the CLI's board AND C1 is at its
           relocation; the GUI posts the same move, its change-set carries the
-          via, and its apply moves C1 to the same place.
+          via, and its apply moves C1 to the same place. SIG cannot close
+          here by construction, so #1778's withdrawal of an escape that
+          bought nothing is held off in this arm alone (both fronts).
+       c. withdrawn (#1778, the real withdrawal): the escape bought nothing,
+          so neither front ships its via or moves C1.
 
 Needs pcbnew; exits 2 when no python with pcbnew+wx is found -- it does NOT
 self-skip, so it cannot report a gap it never looked at as closed.
@@ -736,7 +740,19 @@ def arm_6(d, mods, swig_gui):
 
     print("-- 6. the real bare-ball rung on a synthetic 12-ball part --")
     results = {}
-    for case, blocker in (('a. declined', True), ('b. shipped', False)):
+    def hold_1778(real):
+        # the terrain-only withdrawal (#1778) passes the escapes back as they
+        # are; the whole-net one (with_traces False) runs as it is
+        def wrapped(pcb_data, net_id, tap_results, config, with_traces=False):
+            if with_traces:
+                return tap_results
+            return real(pcb_data, net_id, tap_results, config,
+                        with_traces=with_traces)
+        return wrapped
+
+    for case, blocker, hold in (('a. declined', True, False),
+                                ('b. shipped', False, True),
+                                ('c. withdrawn', False, False)):
         sub = os.path.join(d, 'rung_' + case[0])
         os.makedirs(sub)
         src = os.path.join(sub, 'b.kicad_pcb')
@@ -752,24 +768,39 @@ def arm_6(d, mods, swig_gui):
             queued.extend(getattr(state.pcb_data, '_pending_cap_moves', None)
                           or [])
             return o
-        with _patches(arm, mods, rescue=False), \
-                _Patched(mods['net_rescue'], 'rescue_failed_nets', watch), \
-                _Patched(plane_pad_tap, 'tap_pad_with_escalation',
-                         lambda *a, **k: None), \
-                _Patched(bga_fanout, 'generate_bga_fanout', fanout):
-            _, lines = _quiet(lambda: batch_route(src, out, ['SIG'], **RUNG_KW))
-        print(f"   {case} -- CLI")
-        _show(lines)
-        reached = any('relocation to' in ln for ln in lines)
-        check(f"6{case[0]} CLI: the rung reached the permissive retry and "
-              f"verified a relocation (non-vacuity)", reached)
-        w = parse_kicad_pcb(out)
-        c1 = (w.footprints[CAP].x, w.footprints[CAP].y)
-        site = via_at_site(w.vias, w.nets)
-        gui_out = _rung_gui(src, d, swig_gui, mods, fanout, plane_pad_tap,
-                            bga_fanout)
+        nr = mods['net_rescue']
+        with contextlib.ExitStack() as held:
+            if hold:
+                held.enter_context(_Patched(
+                    nr, '_withdraw_unused_escapes',
+                    hold_1778(nr._withdraw_unused_escapes)))
+            with _patches(arm, mods, rescue=False), \
+                    _Patched(nr, 'rescue_failed_nets', watch), \
+                    _Patched(plane_pad_tap, 'tap_pad_with_escalation',
+                             lambda *a, **k: None), \
+                    _Patched(bga_fanout, 'generate_bga_fanout', fanout):
+                _, lines = _quiet(lambda: batch_route(src, out, ['SIG'], **RUNG_KW))
+            print(f"   {case} -- CLI")
+            _show(lines)
+            reached = any('relocation to' in ln for ln in lines)
+            check(f"6{case[0]} CLI: the rung reached the permissive retry and "
+                  f"verified a relocation (non-vacuity)", reached)
+            w = parse_kicad_pcb(out)
+            c1 = (w.footprints[CAP].x, w.footprints[CAP].y)
+            site = via_at_site(w.vias, w.nets)
+            gui_out = _rung_gui(src, d, swig_gui, mods, fanout, plane_pad_tap,
+                                bga_fanout)
         results[case] = (c1, site, queued, gui_out)
-        if blocker:
+        if case[0] == 'c':
+            check("6c CLI: the escape that bought nothing ships no via",
+                  not site, f"{[(v.x, v.y) for v in site]}")
+            check("6c CLI: C1 stays put", _near(c1, C1_AT), f"{c1}")
+            check("6c GUI: no move posted",
+                  not gui_out['posted'], f"{gui_out['posted']}")
+            check("6c GUI: the apply leaves C1 where it was",
+                  _near(gui_out['live_c1'], C1_AT, 1e-5),
+                  f"{gui_out['live_c1']}")
+        elif blocker:
             check("6a CLI: the declined escape queued no move",
                   not queued, f"{queued}")
             check("6a CLI: C1 stays put on the written board",

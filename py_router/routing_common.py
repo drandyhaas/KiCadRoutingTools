@@ -307,7 +307,8 @@ def new_via_shortfall(vias, name_of, input_keys, requested_of):
 
     Returns {net_name: {requested_mm, min_mm, count, sizes}} for every net
     with at least one new via more than 1 um under its request -- `count`
-    those vias, `sizes` {diameter: how many}."""
+    those vias, `sizes` {diameter: how many}, `pairs` {(diameter, drill):
+    how many} (#1914: what fab_tiers.replace_hole_ring_rows reads)."""
     out: Dict[str, Dict] = {}
     for v in vias:
         if not v.net_id:
@@ -319,10 +320,15 @@ def new_via_shortfall(vias, name_of, input_keys, requested_of):
         if v.size >= req - 1e-3:
             continue
         r = out.setdefault(name, {'requested_mm': round(float(req), 4),
-                                  'min_mm': None, 'count': 0, 'sizes': {}})
+                                  'min_mm': None, 'count': 0, 'sizes': {},
+                                  'pairs': {}})
         d = round(float(v.size), 4)
         r['count'] += 1
         r['sizes'][d] = r['sizes'].get(d, 0) + 1
+        drill = getattr(v, 'drill', None)
+        if drill:
+            pair = (d, round(float(drill), 4))
+            r['pairs'][pair] = r['pairs'].get(pair, 0) + 1
         r['min_mm'] = d if r['min_mm'] is None else min(r['min_mm'], d)
     return out
 
@@ -702,7 +708,8 @@ def filter_already_routed(
             # ...but ROUTING only helps when there is live copper to join
             # (#659). Dead copper -- a cluster tied to no pad and no pour --
             # cannot improve connectivity no matter what the router welds to
-            # it, and the late orphan sweep deletes it at the end of the run.
+            # it, and the late orphan sweep deletes it at the end of the run
+            # (unless it holds locked or sense-held copper, which is kept).
             # Measured on spartan6_4layer, three such nets cost 448s, 2.0M A*
             # iterations on one link and 28 neighbours pulled in by the rip
             # escalation, fixed NONE of them, and bred three more debris nets.
@@ -715,19 +722,21 @@ def filter_already_routed(
             # authoritative graph which copper is dead, drop it, and re-count:
             # only if the REMAINDER is whole is there nothing left to route.
             #
-            # A net whose copper is ALL KiCad-locked is not a route either
-            # (#1261). Its pads grade connected; the strict fragments are the
+            # A net whose copper is ALL KiCad-locked or sense-held is not a
+            # route either (#1261, #1781). Its pads grade connected; the strict
+            # fragments are the
             # designer's pinned copper, which no pass may move or remove, so
             # "routing to join them" can only lay new copper beside it, and
             # puts a net the user pinned in front of every rip ladder and
             # stub-switch rung of the run.
             if n > 1 and _all_copper_locked(net_segments, net_vias):
                 print(f"  {net_name}: pads grade connected and every segment "
-                      f"and via is KiCad-locked -- its {n} strict fragment(s) "
+                      f"and via is KiCad-locked or sense-held -- its {n} "
+                      f"strict fragment(s) "
                       f"are pinned copper, not a route to finish (#1261)")
                 n = 1
             if n > 1:
-                from check_connected import net_dead_copper
+                from check_connected import net_dead_copper, dead_copper_fate
                 _dead_s, _dead_v = net_dead_copper(
                     pcb_data, net_id, net_segments, net_vias, net_pads,
                     net_zones)
@@ -746,7 +755,8 @@ def filter_already_routed(
                               f"extra fragment is DEAD copper "
                               f"({len(_dead_s)} segment(s), {len(_dead_v)} "
                               f"via(s) tied to no pad or pour) -- not a route "
-                              f"(#659); the late orphan sweep removes it")
+                              f"(#659); "
+                              f"{dead_copper_fate(_dead_s, _dead_v)}")
                         n = _n2
             if n > 1:
                 print(f"  {net_name}: pads grade connected, but its copper "
@@ -788,10 +798,13 @@ def filter_already_routed(
 
 def _all_copper_locked(segments, vias) -> bool:
     """True when a net has copper and every track and via of it is
-    KiCad-locked (graphics are not the net's track copper)."""
+    immutable: KiCad-locked, or held by a `sense:` group (#1279), which no
+    pass may move or remove either (is_immutable_copper; graphics are not
+    the net's track copper)."""
+    from kicad_parser import is_immutable_copper
     items = [s for s in segments if not getattr(s, 'graphic', False)]
     items += list(vias)
-    return bool(items) and all(getattr(x, 'locked', False) for x in items)
+    return bool(items) and all(is_immutable_copper(x) for x in items)
 
 
 def _max_fragments_within_one_outline(pcb_data, anchors):
@@ -983,6 +996,123 @@ def run_length_matching(
                 g['member_status'] = _ms
         report['groups'] = formed_groups
     return net_name_to_result
+
+
+def regrade_late_group_members(
+    report: Dict,
+    length_match_groups: List[List[str]],
+    routed_results: Dict[int, Dict],
+    config: GridRouteConfig,
+    pcb_data: PCBData,
+    scope_net_ids: Optional[Set[int]] = None,
+    recovered_by: Optional[Dict[str, str]] = None,
+) -> List[Dict]:
+    """#1801: route.py matches its length groups ONCE, before the phases that
+    recover nets its main loop failed (own-requirement retry, rescue,
+    terminal escalation). A member one of them routed was not routed when
+    the groups formed, so it was in no group, unmatched and unnamed.
+
+    Form every configured group again from the run's results now -- the same
+    inputs as `run_length_matching` (a pattern group's matches among routed
+    and board-copper nets, the `auto` grouper over the call's scope) -- and
+    for each group that gained a member whose copper now connects its pads,
+    match it when that is safe (#1828, `rematch_late_member`: one late 2-pad
+    member, and no member the first pass finished is lengthened -- the
+    record then carries `rematched`, and the caller must sync pcb_data with
+    the meandered results); otherwise grade every member from the board
+    (`grade_late_group_members`), changing no copper and noting no
+    protection, and record why in `not_rematched`. Either way the late ones join `members`, and one line names
+    them, the phase that routed each (`recovered_by`, name -> phase) and the
+    verdict. Updates `report['groups']` in place; returns the records it
+    changed."""
+    from length_matching import (grade_late_group_members, _board_net_connected,
+                                 rematch_late_member, LATE_MEMBER_REASON)
+    records = report.get('groups')
+    if records is None:
+        return []
+    recovered_by = recovered_by or {}
+    nets = pcb_data.nets
+    names_now = [nets[nid].name for nid in routed_results
+                 if nid in nets and nets[nid].name]
+    have = set(names_now)
+    with_copper = ({s.net_id for s in pcb_data.segments}
+                   | {v.net_id for v in pcb_data.vias})
+    board_names = sorted(nets[nid].name for nid in with_copper
+                         if nid in nets and nets[nid].name
+                         and nets[nid].name not in have)
+    nid_of = {n.name: i for i, n in nets.items() if n.name}
+
+    def routed_now(name):
+        nid = nid_of.get(name)
+        r = routed_results.get(nid)
+        if r is None or r.get('failed') or r.get('is_existing_route'):
+            return False
+        return _board_net_connected(
+            pcb_data, nid, [s for s in pcb_data.segments if s.net_id == nid],
+            [v for v in pcb_data.vias if v.net_id == nid])
+
+    current = []          # (name, source, patterns, members now)
+    for group in length_match_groups:
+        if len(group) == 1 and group[0].lower() == 'auto':
+            auto_in = [nets[nid].name for nid, r in routed_results.items()
+                       if nid in nets and nets[nid].name
+                       and (nid in scope_net_ids if scope_net_ids is not None
+                            else not (r and r.get('is_existing_route')))]
+            _rep: Dict = {}
+            auto_group_ddr4_nets(auto_in, context_names=[
+                n.name for n in nets.values() if n.name], report=_rep)
+            for key, members in _rep.get('groups', {}).items():
+                current.append((key, 'auto', None, set(members)))
+        else:
+            current.append((' '.join(group), 'patterns', list(group),
+                            set(find_nets_matching_patterns(
+                                names_now + board_names, group))))
+    by_name = {(g['name'], g['source']): g for g in records}
+    changed = []
+    laid: List = []       # meanders re-matched groups lay before the sync
+    for name, source, patterns, members in current:
+        rec = by_name.get((name, source))
+        before = set(rec['members']) if rec else set()
+        late = {m: recovered_by.get(m, 'a late phase')
+                for m in sorted(members - before) if routed_now(m)}
+        if not late:
+            continue
+        if rec is None:
+            rec = {'name': name, 'source': source, 'members': []}
+            if patterns is not None:
+                rec['patterns'] = patterns
+            records.append(rec)
+        # #1828: one late 2-pad member the group takes without lengthening a
+        # member the first pass finished is matched now; anything else is
+        # graded and named as it stands (#1801).
+        why_not = rematch_late_member(rec, late, routed_results, config,
+                                      pcb_data, laid=laid)
+        if not why_not:
+            changed.append(rec)
+            ms = rec['member_status']
+            ok = all((ms.get(m) or {}).get('status') == 'matched'
+                     for m in rec['members'])
+            print(f"  Length match group '{name}': "
+                  + ', '.join(f"{m} {ms[m]['length_mm']:.2f}mm"
+                              for m in rec['members'] if m in ms)
+                  + (" -- all within tolerance" if ok else " -- NOT matched"))
+            continue
+        ok = grade_late_group_members(rec, late, config, pcb_data)
+        rec['not_rematched'] = why_not
+        changed.append(rec)
+        ms = rec.get('member_status') or {}
+        lens = ', '.join(f"{m} {ms[m]['length_mm']:.2f}mm" for m in rec['members']
+                         if m in ms and 'length_mm' in ms[m])
+        tgt = next((r['target_mm'] for r in ms.values() if 'target_mm' in r), None)
+        print(f"  Length match group '{name}': "
+              + ', '.join(f"{m} (routed by {p})" for m, p in late.items())
+              + f" joined it after matching ran, so it was not matched (#1801; "
+              + f"{why_not}). "
+              + (f"Graded from the board against target {tgt:.2f}mm: " if tgt
+                 is not None else "Lengths: ")
+              + lens + (" -- all within tolerance" if ok else
+                        f" -- NOT matched ({LATE_MEMBER_REASON})"))
+    return changed
 
 
 def sync_pcb_data_segments(

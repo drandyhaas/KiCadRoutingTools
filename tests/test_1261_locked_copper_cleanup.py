@@ -7,6 +7,8 @@ island pass, the cycle prune, the dangle trim and the three graze passes
 (prune, octolinear re-bend, micro-shift) treated a locked input segment like
 any other and deleted or rewrote it. Measured on the whole-board case below
 (`--nets "*"`): 6 of its 9 locked items gone from the output.
+The KiCad oracle's stranded-fragment deleter, which runs inside the plane
+finalize, did the same to a locked lone via (a block's "port" via).
 
 Each case builds one small board twice -- copper UNLOCKED (the control: the
 pass must act on it, or the fixture tests nothing and the case is reported as
@@ -157,6 +159,17 @@ def run_pass(name, pcb):
             pm.nudge_grazing_octolinear([], pcb, scope, clearance=0.25)
         elif name == 'nudge_grazing_microshift':
             pm.nudge_grazing_microshift([], pcb, scope, clearance=0.25)
+        elif name == 'oracle_delete_stranded_fragment':
+            import kicad_oracle
+            # KiCad's link report: pad (0, 0) to the island, and to the via.
+            for end in ((4, 5), (8, 7)):
+                hit = kicad_oracle._delete_stranded_link_fragment(
+                    pcb, 1, (0, 0), end)
+                if hit:
+                    gone = {id(x) for x in hit[0] + hit[1]}
+                    pcb.segments[:] = [s for s in pcb.segments
+                                       if id(s) not in gone]
+                    pcb.vias[:] = [v for v in pcb.vias if id(v) not in gone]
         else:
             raise KeyError(name)
 
@@ -169,11 +182,29 @@ CASES = [
     ('prune_grazing_segments', fx_graze_redundant),
     ('nudge_grazing_octolinear', fx_graze_jog),
     ('nudge_grazing_microshift', fx_graze_vertex),
+    ('oracle_delete_stranded_fragment', fx_orphan),
 ]
 
 
 def board_sigs(pcb):
     return {_sig(x) for x in list(pcb.segments) + list(pcb.vias)}
+
+
+def oracle_sense_held():
+    """Copper a `sense:` group holds (#1279) is immutable too, though it is
+    never written `(locked yes)`: the oracle's deleter must ask
+    is_immutable_copper, not `locked` alone. The unlocked control above
+    already showed the deleter acts on this fixture."""
+    print("oracle_delete_stranded_fragment, sense-held:")
+    segs, vias, pads, nets, watched = fx_orphan(False)
+    for x in watched:
+        x.held_by = 'sense:U0.1'
+    pcb = _board(segs, vias, pads, nets)
+    before = {_sig(x) for x in watched}
+    run_pass('oracle_delete_stranded_fragment', pcb)
+    lost = sorted(before - board_sigs(pcb))
+    check("oracle_delete_stranded_fragment leaves sense-held copper in place",
+          not lost, f"changed or removed: {lost[:3]}")
 
 
 def cleanup_board(lock):
@@ -257,6 +288,7 @@ def main():
         lost = sorted(before - after)
         check(f"{name} leaves locked copper exactly in place", not lost,
               f"changed or removed: {lost[:3]}")
+    oracle_sense_held()
     whole_board()
 
     if broken:

@@ -87,6 +87,11 @@ REGISTRY = {
     ('py_router/obstacle_map.py', 'build_base_obstacle_map'): (
         NOT_ROUTED, 'the per-net via-rung sub-build: only its blocked-via '
                     'cells are read back, the map itself is dropped'),
+    ('py_router/obstacle_map.py', '_compose_area_passes'): (
+        NOT_ROUTED, 'the #1843 sub-build of a rule area: its rows are written '
+                    "into the parent's map as it stamps, its own map is "
+                    'dropped, and its lift records are composed with the '
+                    "parent's so the lifters above read rows the map holds"),
     ('py_router/obstacle_cache.py', 'run_obstacle_audit'): (
         NOT_ROUTED, 'audit clone, measured not routed'),
     ('py_router/obstacle_cache.py', 'run_obstacle_content_audit'): (
@@ -125,7 +130,9 @@ REGISTRY = {
     ('py_router/bga_fanout/__init__.py', '_generate_bga_fanout_core'): (
         NO_LIFT, 'BGA fanout escapes; built for every fanned net at once, so '
                  'the old bake never fired here either'),
-    ('py_router/qfn_fanout/__init__.py', 'generate_qfn_fanout'): (
+    # #1842: the engine body; `generate_qfn_fanout` is now the wrapper that
+    # runs it on a via span
+    ('py_router/qfn_fanout/__init__.py', '_generate_qfn_fanout_all'): (
         NO_LIFT, 'QFN fanout; as for BGA fanout'),
     ('py_router/qfn_fanout/__init__.py', '_obstacles_for'): (
         NO_LIFT, 'QFN under-pad escape, one map per stub net-class floor '

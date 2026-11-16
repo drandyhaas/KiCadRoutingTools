@@ -312,6 +312,15 @@ class GridRouteConfig:
     # against the run's via, so a rung-1 retry from that clone must ship the
     # pair the map was stamped at, not one derived from the net's own via.
     run_via: Optional[Tuple[float, float]] = None
+    # #1842: the copper layers, top to bottom, that every via this step lays
+    # joins -- a contiguous run of the board's stack, and the only layers the
+    # step routes on. None = through vias over the whole stack. The obstacle
+    # builders then read the board through `via_span.SpanView`, so only
+    # copper on these layers (and drilled pads) blocks a via site.
+    via_span: Optional[Tuple[str, ...]] = None
+    # `Via.via_type` of those vias: 'micro', 'blind' or 'buried'
+    # (`via_span.resolve_via_span`).
+    via_span_type: Optional[str] = None
     neckdown_length: float = 2.5  # mm pad-entry zone (pad-capped width where it fits, #1318)
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
@@ -339,6 +348,10 @@ class GridRouteConfig:
     # every pair under diff_pair_intra_match, else those a .kicad_dru P/N skew
     # rule binds; None: none (`length_matching.intra_pair_on`)
     intra_pair_tolerances: Optional[Dict[int, float]] = None
+    # #1869: {net id: 'auto' or (pad, pad)} for both members of each pair
+    # matched, recorded and graded on its LANE -- the path between two named
+    # pads (`intra_pair_lane`) -- instead of total copper. None: total copper.
+    intra_pair_lanes: Optional[Dict[int, object]] = None
     # P and N of those same pairs: the nets whose shipped skew is graded, so
     # the post-route cleanup lays them a via-centre bridge (#1583)
     skew_graded_net_ids: FrozenSet[int] = frozenset()
@@ -497,6 +510,16 @@ class GridRouteConfig:
     # The legacy per-channel maps above are being migrated onto it; consumers
     # that resolve through it must treat None as "no rules declared".
     rules: Optional[object] = None
+    # #1853: the board's .kicad_dru hole_clearance rules as the route steps
+    # read them (hole_rule_routing.RoutedHoleRules), installed with `rules`.
+    # None (no such rule) leaves every hole keep-out as it was.
+    hole_rules: Optional[object] = None
+    # #1843: the board's clearance rules scoped by a rule area
+    # (area_clearance.AreaClearance), installed with `rules`. The base map,
+    # the per-net caches and the stamp functions compose every keep-out over
+    # it: class values outside the areas, the rule's value inside. None (no
+    # such rule) leaves every stamp as it was. No CLI flag, no GUI control.
+    area_clearance: Optional[object] = None
     # #530 decision 4: per-net VIA geometry {net_id: (diameter, drill)} for
     # nets whose resolved draw size differs from via_size/via_drill (their
     # net class or a .kicad_dru via_diameter/hole_size rule). Filled by
@@ -628,6 +651,16 @@ class GridRouteConfig:
         over it for the routed nets it binds (#1491, KiCad's last match);
         without one, or with no such rule, the layer rule replaces as
         before."""
+        s1897 = self.scoped_clearance
+        if (s1897 is not None and layer in s1897.layered_layers
+                and (net_id is not None or pad is not None)):
+            # #1897: a scoped rule with a (layer ...) clause naming this layer
+            got = s1897.stamp_layered(
+                int((net_id if net_id is not None else getattr(pad, 'net_id', 0)) or 0),
+                (getattr(pad, 'pad_type', None) or 'smd') if pad is not None else None,
+                layer, self)
+            if got is not None:
+                return got
         if self.layer_clearances:
             v = self.layer_clearances.get(layer)
             if v is not None:
@@ -643,6 +676,20 @@ class GridRouteConfig:
                 return v
         return fallback
 
+    def via_hole_extra(self, clearance: float, other_via=None, pad=None) -> float:
+        """#1853: the mm a NEW via's keep-out from another net's copper grows
+        by under the board's `.kicad_dru` hole_clearance rules, on top of the
+        ring-to-copper distance priced at ``clearance``. KiCad measures those
+        rules from the HOLE, so they bind where they exceed the annular ring
+        plus the clearance. The copper is a track unless ``pad`` (that pad)
+        or ``other_via`` (an existing via, whose own hole the new via's copper
+        is held off the same way) is given, each read as the item it is.
+        0.0 with no such rule."""
+        if self.hole_rules is None:
+            return 0.0
+        from hole_rule_routing import via_hole_extra
+        return via_hole_extra(self, clearance, other_via, pad)
+
     def stack_clearance(self, fallback: float, net_id: Optional[int] = None,
                         pad=None) -> float:
         """#498 clearance for STACK-SPANNING pairs (via barrels, TH drills):
@@ -652,11 +699,17 @@ class GridRouteConfig:
         ruled lower, since the board may have copper on layers outside
         config.layers. `net_id` / `pad` order each layer's rule against the
         scoped channel as `layer_clearance` does."""
-        if not self.layer_clearances:
+        s1897 = self.scoped_clearance
+        layered = (s1897.layered_layers if s1897 is not None
+                   and (net_id is not None or pad is not None) else ())
+        if not self.layer_clearances and not layered:
             return fallback
         if self.scoped_clearance is not None and (net_id is not None or pad is not None):
+            # #1897: and the layers a scoped rule's (layer ...) clause names
             return max([fallback] + [self.layer_clearance(l, fallback, net_id, pad)
-                                     for l in self.layer_clearances])
+                                     for l in (list(self.layer_clearances or ())
+                                               + [l for l in sorted(layered)
+                                                  if l not in (self.layer_clearances or ())])])
         return max([fallback] + list(self.layer_clearances.values()))
 
     def obstacle_clearance(self, net_id: int) -> float:
@@ -1000,6 +1053,19 @@ class GridRouteConfig:
         3.0). Correctness wins there; an undershoot is a clearance violation,
         an overshoot only costs some routability."""
         reserve = self.route_reserve_width(layer)
+        margin = self._margin_over_reserve(layer, net_width, reserve)
+        # #1843: a room that narrows the track reserves its own width in its
+        # keep-outs. A net wider than the run's reserve keeps its width in
+        # the room, so its margin must cover the room's reserve as well.
+        area = self.area_clearance
+        if margin > 0.0 and area is not None:
+            room = area.min_width(layer)
+            if room is not None and room < reserve:
+                margin = max(margin, self._margin_over_reserve(layer, net_width, room))
+        return margin
+
+    def _margin_over_reserve(self, layer: str, net_width: float, reserve: float) -> float:
+        """`_phase_exact_margin` against stamps that reserve ``reserve``."""
         e = (net_width - reserve) / 2.0 / self.grid_step
         if e <= 1e-9:
             return 0.0

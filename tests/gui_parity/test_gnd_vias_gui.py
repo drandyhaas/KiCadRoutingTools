@@ -417,6 +417,52 @@ def main():
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
+    print('--- net keep-out')
+    # A NET-FILTERED keep-out (a named area plus a .kicad_dru rule naming the
+    # nets it binds): both fronts read it at the plane step's own entry, the
+    # CLI off a fresh parse, the tab off its one long-lived PCBData.
+    d = tempfile.mkdtemp(prefix='gndgui_nk_')
+    try:
+        board, _ = _stage(d, ARMS[0])
+        base, _cfg = _gui(board)
+        check('[net keep-out] with no rule the tab places return vias (non-vacuity)',
+              bool(base), f'{sorted(base)}')
+        r = 0.9
+        x0 = min(p[0] for p in base) - r if base else 0
+        x1 = max(p[0] for p in base) + r if base else 0
+        y0 = min(p[1] for p in base) - r if base else 0
+        y1 = max(p[1] for p in base) + r if base else 0
+        area = ('  (zone (net 0) (net_name "") (layers "F.Cu" "B.Cu") (name "GNDKO")\n'
+                '    (hatch edge 0.5) (connect_pads (clearance 0)) (min_thickness 0.25)\n'
+                '    (keepout (tracks allowed) (vias allowed) (pads allowed)\n'
+                '      (copperpour allowed) (footprints allowed))\n'
+                '    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))\n'
+                f'    (polygon (pts (xy {x0:.3f} {y0:.3f}) (xy {x1:.3f} {y0:.3f}) '
+                f'(xy {x1:.3f} {y1:.3f}) (xy {x0:.3f} {y1:.3f}))))\n')
+        with open(board, encoding='utf-8') as f:
+            text = f.read()
+        with open(board, 'w', encoding='utf-8') as f:
+            f.write(text[:text.rstrip().rfind(')')] + area + ')\n')
+        with open(os.path.join(d, 'b.kicad_dru'), 'w', encoding='utf-8') as f:
+            f.write('(version 1)\n(rule "gnd_ko" (constraint disallow via)\n'
+                    '  (condition "A.intersectsArea(\'GNDKO\') && A.NetName == \'GND\'"))\n')
+
+        def inside(pts):
+            return sorted(p for p in pts if x0 < p[0] < x1 and y0 < p[1] < y1)
+        gui, _cfg = _gui(board)
+        cli = _cli(d, board)
+        check('[net keep-out] the tab still places return vias', bool(gui), f'{sorted(gui)}')
+        check('[net keep-out] none inside the area the rule keeps GND vias out of',
+              not inside(gui), f'{inside(gui)}')
+        check('[net keep-out] route_planes.py keeps them out too',
+              cli is not None and bool(cli) and not inside(cli),
+              f'{sorted(cli or ())}')
+        check('[net keep-out] the GUI places the same GND vias as the CLI',
+              cli is not None and set(gui) == set(cli),
+              f'GUI {sorted(gui)} vs CLI {sorted(cli or ())}')
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
     print('=' * 60)
     if FAILS:
         print(f"FAILED ({len(FAILS)}):")
@@ -424,8 +470,9 @@ def main():
             print(f"  - {f}")
         return 1
     print("PASS: the Planes tab's GND return vias keep class, .kicad_dru and "
-          "every-layer clearance, take a Net Clearances File as given, and "
-          "match route_planes.py, on two GND layers and on one")
+          "every-layer clearance, take a Net Clearances File as given, keep "
+          "out of net-filtered keep-outs, and match route_planes.py, on two "
+          "GND layers and on one")
     return 0
 
 

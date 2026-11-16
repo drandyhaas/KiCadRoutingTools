@@ -23,24 +23,11 @@ the routed originals in `boards_setN/`, the stripped inputs in
 ## Step 1: Prepare the corpus (skip parts that already exist)
 
 Check `$STRESS_DIR/boards_unrouted_set*/*.kicad_pcb` first — if the sets you
-want exist, skip to Step 2. Set 1 is built by its own scripts:
-
-```bash
-cd tests/stress
-: "${STRESS_DIR:=$HOME/Documents/kicad_stress_test}"
-python3 fetch_boards.py            # -> sources/github_set1/ (needs `gh` auth)
-
-KIPY=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
-$KIPY normalize_boards.py          # pcbnew round-trip -> boards_set1/
-for f in "$STRESS_DIR"/boards_set1/*.kicad_pcb; do   # ONE board per process
-  $KIPY strip_routing.py "$(basename "${f%.kicad_pcb}")"
-done                               # -> boards_unrouted_set1/
-python3 validate_boards.py         # the set-1 SOURCES parse, with complexity stats
-```
-
-Every other set has a manifest and two generated scripts:
+want exist, skip to Step 2. Every set has a manifest and two scripts:
 `python3 fetch_setN.py && bash prep_setN.sh` (from `manifest_setN.json`;
 `prep_setN.sh` runs KiCad's python one board per process).
+`python3 build_corpus.py --sets setN` runs both and installs the set's
+recorded chains from `corpus_chains/` too.
 
 Platform note: on Linux/Windows find the KiCad-bundled python equivalent, or
 any python with a working `pcbnew` module of KiCad 9+.

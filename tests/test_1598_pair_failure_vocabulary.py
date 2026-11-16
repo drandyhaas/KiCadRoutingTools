@@ -165,7 +165,8 @@ def cited_pair_keys(text):
     """Backticked summary-looking keys: `*_pairs`, `*_followup_nets`, and the
     two route_diff record names."""
     return set(re.findall(
-        r'`((?:[a-z_]+_pairs)|single_ended_followup_nets|single_ended_fallback|'
+        r'`((?:[a-z_]+_pairs)|single_ended_followup_nets|single_ended_followup_reasons|'
+        r'single_ended_fallback|'
         r'casualty_reconcile)`', text))
 
 
@@ -241,7 +242,7 @@ def problems(diag, routing, keys, fields, outcomes, codes):
         body = sect[1].split('\n## ', 1)[0]
         for f in ('outcome', 'failure_reason', 'failure_stage',
                   'incomplete_members', 'blocking_nets', 'casualty',
-                  'se_fallback', 'copper', 'no_coupled_trunk'):
+                  'se_fallback', 'copper', 'no_coupled_trunk', 'retry_hint'):
             if f'`{f}`' in body and f not in fields:
                 out.append(f'cites pair_reports field `{f}`, which '
                            f'build_pair_reports does not write')

@@ -192,7 +192,8 @@ def import_(pcbnew, board, in_path, ses, out, want):
             kept += 1
     print(f'other nets: {len(dropped)} session items dropped, {added} bench items restored; '
           f'rung: {kept} vias at a bench via of their own net restored as the bench\'s')
-    pcbnew.SaveBoard(out, board)
+    import tool_records       # the record stays on the file (#1906)
+    tool_records.save_board(pcbnew.SaveBoard, out, board)
     print('saved', out)
     return ok
 

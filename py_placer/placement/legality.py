@@ -2040,6 +2040,29 @@ def courtyard_pair(a: GradedPart, b: GradedPart
         overlap_rect=tuple(round(v, 4) for v in ix))
 
 
+#: #1822: what a through-hole part is graded on in a courtyard pair on its
+#: FAR side, where it draws no courtyard: the boxes of its drilled pads
+#: (`rect_on`, `far_side_local`). Beside `body.SOURCES`, which name what its
+#: own side was graded on.
+FAR_SOURCE_PADS = 'drilled_pads'
+
+
+def courtyard_source_on(part: GradedPart, side: str,
+                        far_drawn: bool = False) -> str:
+    """What `part` is graded on in a courtyard-channel pair on `side`
+    (#1822): its occupancy `source` on its own side, where `rect_on` hands
+    out its courtyard or the stand-in for one; on the far side of a
+    through-hole part the boxes of its drilled pads (`FAR_SOURCE_PADS`),
+    which is no courtyard KiCad tests whatever the part draws on its own
+    side. `far_drawn`: the footprint draws that face too
+    (`far_courtyard_of`), so its far side is that courtyard with the pads
+    outside it (`far_side_local`) and stays `courtyard`."""
+    if side == part.side:
+        return part.source
+    from placement.body import SOURCE_COURTYARD
+    return SOURCE_COURTYARD if far_drawn else FAR_SOURCE_PADS
+
+
 class LocalBounds(NamedTuple):
     """One part's UNROTATED local geometry, before any pose is applied.
 
@@ -3862,6 +3885,20 @@ def grade_body_overlap(pcb_data, clearance: float,
             # so a reader can tell a housing outline from a fab outline
             # rather than being told only that something was judged.
             'body_sources': dict(body_sources),
+            # #1822. The courtyard channel's own: what each part was graded
+            # on, by the side of the pair (`courtyard_source_on`) --
+            # `GradedPart.source` on its own side and, for a through-hole
+            # part, the boxes of its drilled pads on the far one. A pair with
+            # a member that is not `courtyard` on the pair's side was graded
+            # on a stand-in (.Fab body, silk, pad box, drilled pads) and is
+            # not a KiCad courtyards_overlap finding.
+            'courtyard_sources': {
+                r: {s: courtyard_source_on(
+                        gp, s, getattr(_census.bodies.get(r),
+                                       'far_court_local', None) is not None)
+                    for s in sorted(gp.sides)
+                    if s == gp.side or gp.tht_rect is not None}
+                for r, gp in _cg.parts.items()},
             'fab_rejected_refs': fab_rejected_refs,
             # #896. The tightest DRAWN-body seam on the board, signed
             # (negative = overlap). `body_overlap_pairs` reports a depth only
@@ -4190,31 +4227,26 @@ class PadFloor(NamedTuple):
 def _channel_notes(notes, channels):
     """The `.kicad_dru` parse notes, saying "handled" only of a rule this
     model prices (#1575). The parser files a class/type-scoped rule as
-    "handled by the scoped channel" and a coupled-pair rule as "skipped,
-    KiCad will still enforce it" whatever the reader does with them; here
-    each is said as it is for THIS model: a scoped rule its channel did not
-    read is not priced, and a coupled-pair rule its channel reads is. The
-    class's implicit diff-pair rule (#1542) has no parse note, so it gets
-    one when it is priced."""
+    "handled by the scoped channel" whatever the reader does with it; here a
+    scoped rule its channel did not read is said to be not priced. A
+    coupled-pair rule needs no rewrite: the parser names it handled by the
+    coupled-pair channel by the test that channel reads it by (#1293,
+    `r.coupled and not r.unsupported`). The class's implicit diff-pair rule
+    (#1542) has no parse note, so it gets one when it is priced."""
     import re
     scoped = (frozenset(channels.scoped.names)
               if channels is not None and channels.scoped is not None else frozenset())
     cdr = (channels.coupled_dr
            if channels is not None and channels.coupled_nets else None)
-    coupled = (frozenset(r.name for r in cdr.rules if r.coupled and not r.unsupported)
-               if cdr is not None else frozenset())
     out = []
+    # the parser's "handled" tail, with or without a layer clause's issue
+    # number: "(#1491)" or "(#1491, #1897)"
+    handled = re.compile(r"handled by the scoped channel \(#1491[^)]*\)$")
     for n in notes:
         m = re.match(r"\.kicad_dru: rule '(.*?)': clearance ([0-9.eE+-]+)mm ", n)
-        if m and n.endswith('handled by the scoped channel (#1491)') \
-                and m.group(1) not in scoped:
-            n = n.replace('handled by the scoped channel (#1491)',
-                          'NOT priced here (the scoped channel did not read it); '
-                          'KiCad will still enforce it')
-        elif m and m.group(1) in coupled and n.endswith('skipped, KiCad will still enforce it'):
-            n = (".kicad_dru: rule '%s': clearance %smm between a diff pair's P "
-                 "and its N -- handled by the coupled-pair channel (#1293)"
-                 % (m.group(1), m.group(2)))
+        if m and handled.search(n) and m.group(1) not in scoped:
+            n = handled.sub('NOT priced here (the scoped channel did not read it); '
+                            'KiCad will still enforce it', n)
         out.append(n)
     if cdr is not None and cdr.has_pair_gap_classes():
         out.append("net-class diff-pair gaps below the class clearance price a "

@@ -268,8 +268,15 @@ counts, as does one in this call.
 | `--gnd-via-distance` | 2.0 | Maximum distance from signal via to place GND via (mm) |
 
 The algorithm:
-1. Finds all signal vias (nets that are not a ground net)
-2. Skips signal vias that already have a **same-domain** GND via or through-hole GND pad within the distance threshold
+1. Finds all signal vias: nets that are neither a ground net nor a power net
+   (`list_nets.power_net_evidence`: a rail name, power pins on two or more
+   parts, or a pour the board draws for the net). A supply rail's via needs no
+   return via of its own (#1816)
+2. Skips signal vias that already have a **same-domain** GND via or drilled GND pad within the distance threshold
+
+Steps 1 and 2 are `return_vias.ReturnViaModel`, the same test
+`py_tools/check_return_vias.py` reports coverage with, so the step and the
+check cannot disagree.
 3. For each remaining signal via, searches outward from the minimum viable distance (via-to-via clearance) in 24 angles (every 15°)
 4. Places the GND via at the closest valid position that respects track clearances, on the signal's own ground net
 
@@ -801,6 +808,22 @@ re-grade), and its `JSON_SUMMARY` says what is left: `status:
 `multipoint_pads_connected`, and `unconnected_pads` (`"REF.PAD (NET)"`). A
 shortfall still exits 0, as on `route.py`; exit 4 means rip casualties ship
 open.
+
+**Pads per tap via (#1896).** A pad may reach its plane through a
+neighbour's via, joined by a surface track, rather than through a via of its
+own. On the board a step ships, every SMD pad of a plane net is followed
+through the copper on its own layer (tracks, pads, vias; no zone fill) to the
+vias it reaches that have copper on a layer the net is poured on, whoever laid
+them: a fan-out dogbone, a via in the pad, a repair tap, a strap to another
+pad, the join gate's track, the oracle's reconnect. `JSON_SUMMARY.tap_vias`
+counts them: `pads` (pads that reach a tap via), `vias`, `shared_vias` (vias
+reached by more than one pad), `max_pads_per_via`, `pads_on_shared_vias` and
+`shared` (`{net, at, pads}` per shared via, most pads first), and a
+`Tap vias:` line says the same. `repair_planes.py` measures the plane nets it
+processed on the board it wrote, after the oracle's reconnect; the route step
+measures the zone nets its plane finalize served on the board it ships, in
+`--json-out` and the GUI's `results_data` (`tap_via_census.py`). Report-only:
+nothing limits sharing.
 
 **`route_planes.py` taps nothing** (#562, see the note at the top),
 so it is the ROUTE step's in-run plane finalize that runs this repair —

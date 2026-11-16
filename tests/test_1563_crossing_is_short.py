@@ -5,7 +5,7 @@
 no `overlap_mm` -- two tracks crossing on one layer are in contact by
 definition -- so every different-net crossing read `short: false`, and was
 left out of `contacts_by_type` and the console's `in CONTACT` count. The
-chain's re-fan (autoplan `_shorts`) and the routing skill act on unaccepted
+chain's re-fan (autoroute `_shorts`) and the routing skill act on unaccepted
 `short: true` items, so a crossing short was invisible to them.
 
 On a synthetic board (two 0.2 mm tracks on F.Cu, clearance 0.1):

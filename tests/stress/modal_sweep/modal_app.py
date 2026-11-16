@@ -429,6 +429,12 @@ def _replay_one(task: dict) -> dict:
     if spec.get("manifest_sed"):
         text = sweep_lib.patch_manifest(text, spec["manifest_sed"])
         manifest_path.write_text(text)
+    if spec.get("autoroute"):
+        # The autorouter arm: the recorded chain becomes ONE autoroute.py run
+        # on the same input, at this container's repo (so no remap applies).
+        text = sweep_lib.autoroute_manifest(
+            text, f"{REPO}/py_router/autoroute.py")
+        manifest_path.write_text(text)
 
     # 3. Remap the recorded repo prefix onto this container's repo.
     extra = []

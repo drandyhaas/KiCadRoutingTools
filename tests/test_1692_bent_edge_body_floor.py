@@ -232,9 +232,13 @@ def main():
         s, notes, why, _pcb, _h, _b, _p = seat(boards['an arc'], x0=2.54,
                                                band={'min': 9.0, 'max': 20.0})
         text = ' '.join(n for n in notes if 'J3' in n)
+        # #1773: the pad that stops it, read where the body would clear: there
+        # it leaves the board, which no edge_clearance rule can free
         check('a pad floor that stops a cleared line: a seat, and the warning names it',
-              s is not None and 'WARNING' in text and "its pad copper's edge clearance stops it" in text
-              and 'the fab edge floor' in text and '.kicad_dru edge_clearance rule' in text, text)
+              s is not None and 'WARNING' in text and "its pad copper's edge clearance stops it: "
+              "pad 2, 0.20mm from the fab edge floor" in text
+              and 'where it clears, pad 2 would leave the board by' in text
+              and 'No edge_clearance rule frees a pad on or past the outline' in text, text)
 
         print('no model read:')
         s, notes, *_r = seat(boards['an arc'], read=False, band={'min': 10.83, 'max': 11.43})

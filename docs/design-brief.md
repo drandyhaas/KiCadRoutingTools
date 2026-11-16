@@ -48,7 +48,7 @@ already grade, and that `place_simple` reads wherever it reads the intent
 
 | brief | becomes | provenance |
 |---|---|---|
-| `interfaces[]` with an `edge` | an `edge_connectors[]` entry — `edge`, `overhang_mm`, `center_on_edge` / `along_edge_band`, `mating_face` (with its `mating_face_source`), and `class: "edge_receptacle"` when `user_facing` is true | `source: "brief"` |
+| `interfaces[]` with an `edge` | an `edge_connectors[]` entry — `edge`, `overhang_mm`, `center_on_edge` / `along_edge_band`, `mating_face` (with its `mating_face_source`), `opens` (`min_reader` 25), and `class: "edge_receptacle"` when `user_facing` is true | `source: "brief"` |
 | `interfaces[]` with `edge: "unknown"` | an entry with **no** `edge` key | `source: "brief"`, a `note` naming the unknown |
 | `keepouts[]` | `keepouts[]`, verbatim; `kind` and `why` move into `context` | `context.source` |
 | `proximity[]` | `proximity[]`, one row per member of a list `ref`; `why` and `requirement` move into `context` | `source: "brief"`, `context.proximity_note` |
@@ -57,7 +57,7 @@ already grade, and that `place_simple` reads wherever it reads the intent
 | `mount_mode`, `cable_entry`, `cable_envelope_mm`, `product.user_top_side` | compiled by `connector_consequences` into `max_setback_mm`, `side` and cable `keepouts[]` -- see [below](#connector-declarations-compile-to-clauses) | `context.basis`, `context.compiled_from` |
 | `assembly.body_edge_mm` | `assembly.body_edge_mm`, merged into the emitted `assembly` block; `why` and `requirement` move into `assembly.context.body_edge_mm`. Graded by check_assembly's `body_edge_band`, not by a floorplan rule (see [below](#assemblybody_edge_mm-the-assemblers-edge-rule)) | `context.basis`: `declared`, `min_reader` 9 |
 | `keep_away` | `keep_away[]`, one intent row per rule, in its canonical spelling; `why` and `requirement` move into `context`. Graded by `keep_away`, and read by the routing engines too (see [below](#keep_away-two-net-groups-apart)) | `source: "brief"`, `context.keep_away_note`, `min_reader` 10 |
-| `covers[]`, `heights[]` | `covers[]` / `heights[]`, one intent row per brief row, validated by the intent's own loader; the row's `source` (its datasheet) is kept. Graded by the `cover` rule, check_assembly's `height` pairs and the placer (see [below](#covers-and-heights-what-stands-over-the-board)) | `context.brief_row`, `context.from: "brief"`, `min_reader` 15 (20 with a `heights[].under_cover`, 21 with a cover's `top_mm`, `insertion` or a standoff's `off_mm`, 22 with a cover's `holes`, 23 with a cover's `start_mm` or a hole or standoff behind the connector's origin) |
+| `covers[]`, `heights[]` | `covers[]` / `heights[]`, one intent row per brief row, validated by the intent's own loader; the row's `source` (its datasheet) is kept. Graded by the `cover` rule, check_assembly's `height` pairs and the placer (see [below](#covers-and-heights-what-stands-over-the-board)) | `context.brief_row`, `context.from: "brief"`, `min_reader` 15 (20 with a `heights[].under_cover`, 21 with a cover's `top_mm`, `insertion` or a standoff's `off_mm`, 22 with a cover's `holes`, 23 with a cover's `start_mm` or a hole or standoff behind the connector's origin, 28 with a hole's `mount`) |
 | `cans[]` | per listed face, a `blocks[]` row (`can:<name>:<face>`, the `in` parts, tolerance 0) and a `keepouts[]` row over the zone allowing the can's own parts; on the can's face, a `heights[]` underside for a drawn can or a `fence_mm` and a `max_height_mm` keep-out for one not drawn yet (see [below](#cans-a-shield-can-as-one-row)) | `context.derived_from: "cans[<name>]"`, `min_reader` 16 |
 | `product`, `unknown[]` | `context` | — |
 
@@ -106,6 +106,8 @@ board alone gives.
       "mating_face": "+y",                   // +x|-x|+y|-y in the footprint's own frame, or "unknown":
                                              // the side it opens on, for a body that names none
       "mating_face_source": "3D model",      // what that face was read off (free text, #1652)
+      "opens": "outward",                    // "inward": the opening faces into the board, its
+                                             // back to the edge (an M.2 socket, #1769), or "unknown"
       "mount_mode": "edge_mount",            // compiled -- see below
       "cable_entry": "in_plane",             // compiled -- see below
       "cable_envelope_mm": { "depth": 2.0 }, // or "unknown"; NO default
@@ -581,6 +583,8 @@ whether a test point may stand under it. A module screwed down through its
 own holes declares them as `holes[]` (`{length_mm, off_mm, diameter_mm}`,
 from its drawing) even before any standoff is on the board, and
 check_assembly's `mountable` row names what stands at each hole site. A
+hole that screws into the enclosure, past the board edge, says `"mount":
+"enclosure"`, and is reported there rather than held on the board. A
 hole or standoff behind the connector's origin takes a negative
 `length_mm`, and a body that reaches behind it a negative `start_mm`, so a
 module with holes on both sides of its connector is one row.

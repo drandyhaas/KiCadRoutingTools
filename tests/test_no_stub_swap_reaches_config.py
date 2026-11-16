@@ -157,7 +157,7 @@ def rescue_route():
         con, board = outs["no_swap"]
         hit = [l.strip() for l in con.splitlines() if RESCUE in l]
         check("--no-stub-layer-swap: no rescue switch", not hit, "; ".join(hit))
-        stub = re.findall(r'\(segment \(start 10\.05 15\.05\) \(end 14\.05 15\.05\)'
+        stub = re.findall(r'\(segment \(start 10\.025 15\.025\) \(end 14\.025 15\.025\)'
                           r'[^\n]*\(layer "([^"]+)"\)', board)
         check("and the input stub ships on F.Cu", stub == ["F.Cu"], stub)
     finally:

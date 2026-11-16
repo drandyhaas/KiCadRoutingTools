@@ -38,6 +38,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from grid_router import GridObstacleMap, GridRouter
 from single_ended_routing import _track_margin_for_width
+from area_clearance import (composed_builder as _area_composed_builder,
+                            compose_route_stamp as _area_compose_route_stamp)
 import routing_defaults as defaults
 
 
@@ -3245,11 +3247,14 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
     copper -- callers reject it on any conflict and keep the narrow route.
     Checks (same geometry as check_drc): foreign vias (all layers), foreign
     same-layer segments, pads (exact rotated-rect distance + local
-    override), Edge.Cuts rings incl. cutouts, NPTH drill floors."""
+    override), Edge.Cuts rings incl. cutouts, NPTH drill floors, and (#1782)
+    the keep-outs `check_drc.copper_keepout_gate` judges: a board rule area
+    forbidding tracks and a net-filtered keep-out binding `net_id`. Every
+    leg is measured, the ones anchored on a seed cell included."""
     import math
     from check_drc import (segment_to_rect_distance, _into_pad_frame,
                            board_edge_geometry,
-                           _segment_to_rings_distance)
+                           _segment_to_rings_distance, copper_keepout_gate)
     from kicad_parser import pad_drill_circles
     half = width / 2.0
     EPS = 1e-4
@@ -3276,6 +3281,18 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
         legs.append((x1, y1, x2, y2, l1))
     if not legs:
         return True
+
+    # #1782: the keep-outs. The map stamps them, but a seed cell is exempt
+    # from the stamp and a widened leg's corner can cut past a stamped cell
+    # on a diagonal; the copper as it would be written is what KiCad grades.
+    _ko_refuses = copper_keepout_gate(pcb_data)
+    if _ko_refuses is not None:
+        from kicad_parser import Segment
+        if _ko_refuses(segments=[
+                Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
+                        width=width, layer=l1, net_id=net_id)
+                for (x1, y1, x2, y2, l1) in legs]):
+            return False
 
     # rect_ring: a plain rectangle has no outline ring, and without one this
     # gate measured no edge at all (an oracle strap widened into the edge band)
@@ -3454,6 +3471,7 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
     return True
 
 
+@_area_composed_builder(layers_of=lambda a: list(a['routing_layers']), via_band=True)
 def build_base_obstacles(
     exclude_net_ids: Set[int],
     routing_layers: List[str],
@@ -3463,7 +3481,8 @@ def build_base_obstacles(
     track_via_clearance: float,
     hole_to_hole_clearance: float = 0.3,
     proximity_radius: float = 3.0,
-    proximity_cost: float = 2.0
+    proximity_cost: float = 2.0,
+    _into=None,
 ) -> Tuple[GridObstacleMap, Dict[str, int]]:
     """
     Build base obstacle map with all static obstacles, excluding specified nets.
@@ -3493,7 +3512,8 @@ def build_base_obstacles(
     num_layers = len(routing_layers)
     layer_map = {layer: idx for idx, layer in enumerate(routing_layers)}
 
-    obstacles = GridObstacleMap(num_layers)
+    # #1843: `_into` is the composition's filtered view of the real map
+    obstacles = _into if _into is not None else GridObstacleMap(num_layers)
 
     # Block other nets' vias (issue #173 parity with route.py): a foreign via
     # blocks TRACK routing within foreign_via_radius + our_track_half + clearance
@@ -3740,6 +3760,12 @@ def build_base_obstacles(
     # keep-out rule areas (#25), on the plane routing layers.
     add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
     add_rule_area_keepout_obstacles(obstacles, pcb_data, config, layers=routing_layers)
+    # and the .kicad_dru's net-filtered keep-outs (net_keepouts) that bind
+    # the nets this map is built for
+    from dataclasses import replace
+    from net_keepouts import block as block_net_keepouts
+    block_net_keepouts(obstacles, pcb_data, exclude_net_ids,
+                       replace(config, layers=list(routing_layers), track_width=track_width))
 
     # #1279: the excluded nets' own copper is free to this map, so a protected
     # Kelvin sense branch of one of them is stamped back in as foreign copper
@@ -3749,6 +3775,15 @@ def build_base_obstacles(
     for _nid in sorted(exclude_net_ids):
         stamp_plane_obstacles(obstacles, pcb_data, config, _nid, routing_layers,
                               tracks=True, vias=True, extra_clearance=cushion)
+
+    # Excluded nets remain reachable by tracks, but their SMD pads/paste
+    # still forbid NEW vias when the same-net clearance is active. This
+    # shared map serves region joins and every oracle routing rung.
+    from obstacle_map import same_net_pad_via_keepout_cells
+    for net_id in exclude_net_ids:
+        cells = same_net_pad_via_keepout_cells(pcb_data, net_id, config)
+        if len(cells):
+            obstacles.add_blocked_vias_batch(cells)
 
     return obstacles, layer_map
 
@@ -3765,6 +3800,15 @@ def add_route_to_obstacles(
     hole_to_hole_clearance: float = 0.3
 ):
     """Add a completed route (segments and vias) to the obstacle map for subsequent routes to avoid."""
+    if getattr(config, 'area_clearance', None) is not None:
+        # #1843: `clearance` outside the rule areas, each area's value inside
+        return _area_compose_route_stamp(
+            add_route_to_obstacles, obstacles, config,
+            sorted(layer_map, key=layer_map.get), clearance,
+            route_points=route_points, via_positions=via_positions,
+            layer_map=layer_map, track_width=track_width,
+            via_clearance=via_clearance,
+            hole_to_hole_clearance=hole_to_hole_clearance)
     coord = GridCoord(config.grid_step)
     num_layers = len(layer_map)
     cushion = config.grid_step / 2  # half-cell discretization margin (issue #173)

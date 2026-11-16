@@ -57,6 +57,9 @@ def parse_step_selection(spec, count):
 
 
 def main():
+    # each line reaches a pipe or a log when it is printed, not at exit (#1829)
+    import cli_banner
+    cli_banner.line_buffer_streams()
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('board', help='input .kicad_pcb (never modified)')

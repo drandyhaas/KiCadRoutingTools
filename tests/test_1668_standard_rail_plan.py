@@ -3,14 +3,14 @@
 
 Step 5a-tuned pours the dominant rail and lets up to six rails share a split
 layer; Step 10 rule 8 and the multi-layer section's precedence note said wide
-traces "no matter how many pads a rail has". autoplan follows Step 5a-tuned, so
+traces "no matter how many pads a rail has". autoroute follows Step 5a-tuned, so
 the two passages now say what it says, and keep what rule 8 measured: outer
 floods against the inner-only map. "Rail co-pours" stay DENSE-only because the
 term means a rail sharing an OUTER flood, which a split on an inner layer is not.
 
 A split layer's price was 2.5 in the STANDARD recipe and 1.0-1.5 in Step 2.
 
-Static: reads the skill and autoplan's source, runs nothing.
+Static: reads the skill and autoroute's source, runs nothing.
 
     python3 -X utf8 tests/test_1668_standard_rail_plan.py
 """
@@ -20,7 +20,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILL = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing', 'SKILL.md')
-AUTOPLAN = os.path.join(ROOT, 'py_router', 'autoplan.py')
+AUTOROUTE = os.path.join(ROOT, 'py_router', 'autoroute.py')
 FAILS = []
 
 
@@ -54,9 +54,9 @@ def main():
     check('the aggressive map no longer lists many-rail splits', 'many-rail splits' not in flat)
 
     print('B. it is the plan the tool follows')
-    with open(AUTOPLAN, encoding='utf-8') as f:
+    with open(AUTOROUTE, encoding='utf-8') as f:
         tool = f.read()
-    check('autoplan pours the dominant rail', 'nets[1] = rails[0][0]' in tool)
+    check('autoroute pours the dominant rail', 'nets[1] = rails[0][0]' in tool)
     check('Step 5a-tuned pours the dominant rail, up to six on a split',
           'the dominant rail (most pads) on the second inner (price 2.5)' in flat
           and 'up to six rails share a split layer' in flat)

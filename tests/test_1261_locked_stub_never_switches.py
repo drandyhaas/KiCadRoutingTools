@@ -91,9 +91,12 @@ def rescue_board(lock=True):
     """NET_A: P1's locked F.Cu stub sits inside a locked B.Cu ring of NET_C
     that admits a via only at P1's exact (off-grid) centre -- where the
     rescue's own pad via goes, and where the router's grid cannot -- and the
-    route is restricted to In1/In2, so the F.Cu stub must leave F.Cu."""
+    route is restricted to In1/In2, so the F.Cu stub must leave F.Cu. The
+    centre is off the HALF grid too: the final reconciliation's finer-grid
+    rung (#1763) re-routes a boxed-in net at grid 0.05, where a centre on
+    x.x5 is reachable without any switch of this stub."""
     b = RoutingBoard(layers=('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'))
-    px, py, ex = 10.05, 15.05, 14.05
+    px, py, ex = 10.025, 15.025, 14.025
     b.pad('P1', px, py, 'NET_A')
     b.pad('P2', 30, 15, 'NET_A')
     b.seg(px, py, ex, py, 'NET_A', locked=lock)

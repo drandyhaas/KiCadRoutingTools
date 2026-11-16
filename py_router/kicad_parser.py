@@ -866,6 +866,10 @@ class BoardInfo:
     copper_layers: List[str]
     board_bounds: Optional[Tuple[float, float, float, float]] = None  # min_x, min_y, max_x, max_y
     stackup: List[StackupLayer] = field(default_factory=list)  # ordered top to bottom
+    # #502: the drilled board thickness in mm (board_thickness_mm): the stackup
+    # entries summed, else the declared (general (thickness ...)), else None
+    # (unknown -- the drill aspect-ratio floor is then inert).
+    board_thickness: Optional[float] = None
     board_outline: List[Tuple[float, float]] = field(default_factory=list)  # Polygon vertices for non-rectangular boards
     board_cutouts: List[List[Tuple[float, float]]] = field(default_factory=list)  # Interior cutout polygons
     # ALL outer boundary rings (issue #304). A board can carry several disjoint
@@ -884,6 +888,13 @@ class BoardInfo:
     # inside the panel frame -- dropping it outright let the router lay copper
     # straight across the milled gap between the two keyboard halves (85 items).
     board_edge_contours: List[List[Tuple[float, float]]] = field(default_factory=list)
+    # F.Mask/B.Mask artwork (mask openings) as keep-out dicts of the same
+    # shape, kept apart from the rule areas: read on first use by a router
+    # (mask_artwork.board_mask_artwork); None = not read yet.
+    mask_artwork: Optional[List[dict]] = None
+    # Whether routing keeps new copper out of mask_artwork (route.py
+    # --no-mask-keepouts opts out); None = routing_defaults.MASK_KEEPOUTS.
+    mask_keepouts: Optional[bool] = None
     keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed, pads_allowed, footprints_allowed, owner, name}
     # Smallest copper clearance any routing step actually used on this board this
     # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
@@ -2088,6 +2099,49 @@ def pad_is_plated_through(pad) -> bool:
             and getattr(pad, 'pad_type', '') != 'np_thru_hole')
 
 
+def plated_drill_exposed(pad) -> bool:
+    """True when a drilled pad WITH copper has copper SMALLER than its drill
+    (#441, vfo_ctrl's U4 "MH": 0.001mm over 2.5mm). The pad-copper obstacle is
+    then a speck inside the hole, so only a hole keep-out stops a track
+    crossing the drill: the map, the grader and the copper-movers treat it as
+    an NPTH hole, and all ask this so they cannot drift apart.
+
+    The caller has already decided the pad carries copper (an NPTH pad, or one
+    with no copper layer, is a hole by that test, not this one).
+    """
+    drill = getattr(pad, 'drill', 0.0) or 0.0
+    return drill > 0 and max(pad.size_x, pad.size_y) < drill
+
+
+def flush_drill_peg(pad) -> bool:
+    """True for a PLATED pad whose copper EQUALS its drill and which has NO
+    net (#1753): an unnamed locating peg, such as a connector's 0.6mm pad over
+    a 0.6mm drill.
+
+    Its copper outlines the hole exactly, so the copper clearance already holds
+    every track off the wall; what it does not hold is the board's
+    copper-to-hole clearance, which KiCad grades on every hole and which binds
+    here because there is no ring to stand behind. So such a hole is held at
+    ``max(copper clearance, board hole clearance)`` -- KiCad's rule, NOT the
+    NPTH track fab floor, which KiCad does not apply.
+
+    Net-less only: the router waives a hole keep-out for a net it routes
+    (``add_drill_hole_obstacles``), and net 0 is never routed, so these are
+    the holes every route step keeps clear and the grade asks no more than the
+    route was held to.
+
+    Decides the copper itself: an NPTH pad (whose size is its mask opening,
+    commonly equal to its drill) or a pad on no copper layer is a bare hole
+    with its own keep-outs, never this.
+    """
+    drill = getattr(pad, 'drill', 0.0) or 0.0
+    if drill <= 0 or max(pad.size_x, pad.size_y) != drill:
+        return False
+    if getattr(pad, 'net_id', 0) or getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return False
+    return any(l == '*.Cu' or l.endswith('.Cu') for l in (pad.layers or ()))
+
+
 def pad_is_aperture_only(pad) -> bool:
     """True for a pad that is ONLY an aperture: not NPTH, no drill, and no
     copper layer -- a paste or mask window, e.g. a thermal pad's split paste
@@ -2435,7 +2489,8 @@ def extract_layers(content: str) -> BoardInfo:
 
     return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds,
                      stackup=stackup, board_outline=(outers[0] if outers else []),
-                     board_outlines=outers, board_cutouts=cutouts)
+                     board_outlines=outers, board_cutouts=cutouts,
+                     board_thickness=board_thickness_mm(stackup, general_thickness(content)))
 
 
 def _layer_table(content: str) -> Tuple[Dict[int, str], List[str]]:
@@ -2532,6 +2587,32 @@ def _combine_stackup_sheets(sheets: List[Tuple[float, float, float, str]]
     names = [s[3] for s in sheets if s[3]]
     material = names[0] if len(set(names)) == 1 else " + ".join(names)
     return thickness, epsilon_r, loss_tangent, material
+
+
+def general_thickness(content: str) -> Optional[float]:
+    """The board's declared ``(general (thickness T))`` in mm, or None."""
+    m = re.search(r'\(general(?=[\s)])', content)
+    if not m:
+        return None
+    t = _stackup_number(content[m.start():find_matching_paren(content, m.start())],
+                        'thickness')
+    return t if t > 0 else None
+
+
+def board_thickness_mm(stackup: List[StackupLayer],
+                       general: Optional[float] = None) -> Optional[float]:
+    """#502: the board thickness a through via is drilled through, in mm.
+
+    The sum of the stackup's entries (copper and dielectric, each already
+    combined across its sheets) when the board declares a stackup, else
+    ``general`` (its ``(general (thickness ...))``), else None. Never a
+    default: an unknown thickness leaves the drill aspect-ratio floor inert.
+    The two sources can differ by the solder masks, which the stackup leaves
+    out (a stock 1.6 mm board sums to 1.58)."""
+    total = sum(l.thickness or 0.0 for l in stackup or ())
+    if total > 0:
+        return round(total, 6)
+    return general if general and general > 0 else None
 
 
 def extract_stackup(content: str) -> List[StackupLayer]:
@@ -9161,6 +9242,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         copper_layers=copper_layers,
         board_bounds=board_bounds,
         stackup=stackup,
+        board_thickness=board_thickness_mm(stackup, _general_thickness_from_pcbnew(board)),
         board_outline=board_outline,
         board_outlines=board_outlines,
         board_cutouts=board_cutouts
@@ -10551,6 +10633,20 @@ def _extract_stackup_from_pcbnew(board, to_mm):
     return stackup
 
 
+def _general_thickness_from_pcbnew(board) -> Optional[float]:
+    """The board file's ``(general (thickness ...))``, as the text parser reads
+    it (#502). Not ``GetBoardThickness()``: that answers KiCad's 1.6 mm default
+    for a board that declares none, which this must not invent."""
+    try:
+        board_filename = board.GetFileName()
+        if board_filename:
+            with open(board_filename, 'r', encoding='utf-8') as f:
+                return general_thickness(f.read(8192))
+    except Exception:
+        pass
+    return None
+
+
 def _extract_zones_from_pcbnew(board, to_mm, get_layer_name):
     """Extract filled zones from pcbnew board."""
     zones = []
@@ -10832,6 +10928,8 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
 
     if len(bi_b.stackup) != len(bi_f.stackup):
         diffs.append(f"Stackup layer count: board={len(bi_b.stackup)} file={len(bi_f.stackup)}")
+    if bi_b.board_thickness != bi_f.board_thickness:
+        diffs.append(f"Board thickness: board={bi_b.board_thickness} file={bi_f.board_thickness}")
     # Layer by layer (#1222): the impedance width solver and the via barrel
     # length read thickness, epsilon_r and loss_tangent, so a front that
     # combines a multi-sheet dielectric or reads a locked thickness differently

@@ -947,6 +947,8 @@ def manage_vias(
                            laid_copper_edge_clearance)
     _edge_gate = BoardEdgeGate(pcb_data, laid_copper_edge_clearance(pcb_data, clearance))
     _filled_gate = FilledCopperGate(pcb_data)
+    from check_drc import HoleRuleGate
+    _hole_gate = HoleRuleGate(pcb_data)        # #1853
 
     def via_in_pad_conflict(x, y, v_size, v_drill, net_id):
         """Reason a via physically cannot go at (x, y), or None (#370 B4):
@@ -980,6 +982,8 @@ def manage_vias(
             return "via ring vs the board edge"
         if _filled_gate.via_hit(x, y, v_size, net_id, clearance) is not None:
             return "via in a foreign filled graphic"
+        if _hole_gate and _hole_gate.via_why(x, y, v_size, v_drill or 0.0, net_id):
+            return "via vs a hole_clearance rule"
         for s in pcb_data.segments:
             if s.net_id == net_id:
                 continue
@@ -1005,6 +1009,8 @@ def manage_vias(
     vias_to_add: List[Dict] = []
     vias_to_remove: List[Dict] = []
     via_blocked_routes: List['FanoutRoute'] = []
+    if _hole_gate:
+        _hole_gate.watch(vias=vias_to_add)     # #1853: a later via sees their holes
 
     # Pads no later step can move (locked parts, connectors, test points --
     # #253): a via-in-pad must clear them on EVERY layer, because a through
@@ -4916,6 +4922,18 @@ LAST_FILTER_MISSES: List[Dict] = []
 # (escape_budget's dict, {} when none). JSON_SUMMARY `escape_budget` reads it.
 LAST_ESCAPE_BUDGET: Dict = {}
 
+# #1775: the vias the last generate_bga_fanout call laid below the board's own
+# Board Setup via minimums with the project writeback off
+# (`design_rules.board_setup_via_grade` rows); EMPTY when every via meets them.
+# JSON_SUMMARY `board_setup_vias` and the fanout tab read it.
+LAST_BOARD_SETUP_VIAS: List[Dict] = []
+
+# #1853: the .kicad_dru hole_clearance rules the last generate_bga_fanout
+# call's copper breaks, per rule (`check_drc.hole_rule_step_grade`): an
+# escape kept below its rule as the last rung. EMPTY when it breaks none.
+# JSON_SUMMARY `design_rules.hole_rules` and the fanout tab read it.
+LAST_HOLE_RULES: List[Dict] = []
+
 
 def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
                           net_filter: Optional[List[str]] = None,
@@ -5252,7 +5270,45 @@ def _resolve_classes(pcb_data, net_clearances, ceiling):
     return nc
 
 
-def generate_bga_fanout(footprint: Footprint,
+def generate_bga_fanout(footprint: Footprint, pcb_data: PCBData, *args,
+                        via_span: Optional[List[str]] = None,
+                        via_span_type: Optional[str] = None, **kwargs):
+    """`_generate_bga_fanout_all`, on a via span when one is given (#1842):
+    ``via_span`` (top and bottom layer) makes the fan-out escape on that run
+    of neighbouring copper layers, with vias that join exactly it. The part's
+    own layer must be one end of the span. Every engine measures its via
+    sites off the board, so for the call the board carries only the copper
+    the span has (`via_span.only_span_copper`): a pad or track on another
+    layer blocks no site, drilled pads still do."""
+    if not via_span:
+        return _generate_bga_fanout_all(footprint, pcb_data, *args, **kwargs)
+    import inspect
+    from types import SimpleNamespace
+    from via_span import apply_span, step_span, only_span_copper
+    bound = inspect.signature(_generate_bga_fanout_all).bind(
+        footprint, pcb_data, *args, **kwargs)
+    asked = bound.arguments.get('layers') or ['F.Cu', 'B.Cu']
+    span, kind, layers, costs = step_span(
+        pcb_data, list(asked), bound.arguments.get('layer_costs'), via_span, via_span_type)
+    if not span:
+        return _generate_bga_fanout_all(footprint, pcb_data, *args, **kwargs)
+    if footprint.layer not in (span[0], span[-1]):
+        from via_span import SpanError
+        raise SpanError(f"--via-span {span[0]} {span[-1]}: {footprint.reference} is on "
+                         f"{footprint.layer}, which is not an end of the span")
+    # the part's layer first: the engines read layers[0] as the ball layer
+    layers = [footprint.layer] + [l for l in layers if l != footprint.layer]
+    bound.arguments['layers'] = layers
+    if 'layer_costs' in bound.arguments:
+        bound.arguments['layer_costs'] = None if costs is None else costs
+    with only_span_copper(pcb_data, span, kind):
+        result = _generate_bga_fanout_all(*bound.args, **bound.kwargs)
+    n = apply_span(result[1], SimpleNamespace(via_span=list(span), via_span_type=kind))
+    print(f"  Via span: {n} fan-out via(s) written as {kind} {span[0]}-{span[-1]}")
+    return result
+
+
+def _generate_bga_fanout_all(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
                         diff_pair_patterns: Optional[List[str]] = None,
@@ -5409,8 +5465,13 @@ def generate_bga_fanout(footprint: Footprint,
     # -- even below an explicit via size, and disclosed as they are.
     from plane_lattice import plane_web_via
     _ncu_pw = len(pcb_data.board_info.copper_layers or []) or 4
+    # #1842: a laser-drilled micro via of a span (the board is set aside to
+    # it for this call) has no mechanical fab ladder to step down
+    from via_span import laser_drilled as _laser1842, set_aside as _aside1842
+    _laser_pw = _laser1842(pcb_data.board_info.copper_layers,
+                           _aside1842(pcb_data).get('span'), _aside1842(pcb_data).get('type'))
     _pw = plane_web_via(footprint, pcb_data, via_size, via_drill, clearance,
-                        escalation_rungs(_ncu_pw))
+                        [] if _laser_pw else escalation_rungs(_ncu_pw))
     if _pw is not None and _pw['threads']:
         print(f"  Plane web under {_ref} ({_pw['pitch']:g}mm pitch; "
               f"{', '.join(_pw['nets'])} poured at clearance {_pw['clearance']:g}, "
@@ -5422,9 +5483,11 @@ def generate_bga_fanout(footprint: Footprint,
     elif _pw is not None:
         print(f"  WARNING: plane web under {_ref} ({_pw['pitch']:g}mm pitch; "
               f"{', '.join(_pw['nets'])} poured at clearance {_pw['clearance']:g}, "
-              f"min width {_pw['min_width']:g}): no via on the fab ladder lets "
-              f"the plane pass between its vias -- its drops there may be "
-              f"islands; lower the pour's clearance")
+              f"min width {_pw['min_width']:g}): "
+              + (f"the {via_size:g}mm micro via does not let "
+                 if _laser_pw else "no via on the fab ladder lets ")
+              + "the plane pass between its vias -- its drops there may be "
+              "islands; lower the pour's clearance")
     if progress_callback:
         _nballs = sum(1 for _p in footprint.pads if _p.net_id)
         progress_callback(0, 0, f"BGA fanout {_ref}: escaping {_nballs} ball(s)...")
@@ -5432,6 +5495,8 @@ def generate_bga_fanout(footprint: Footprint,
     # pattern that spells a board net verbatim is made literal, so a bus
     # member 'D[3]' fans out itself rather than 'D3' in every pass below.
     LAST_ESCAPE_BUDGET.clear()
+    LAST_BOARD_SETUP_VIAS.clear()   # #1775
+    LAST_HOLE_RULES.clear()         # #1853
     LAST_FILTER_MISSES.clear()
     LAST_FILTER_MISSES.extend(net_filter_misses(footprint, pcb_data, net_filter))
     for _line in filter_miss_lines(LAST_FILTER_MISSES):
@@ -5451,8 +5516,8 @@ def generate_bga_fanout(footprint: Footprint,
                 return True
             return False
 
-    tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
-        footprint, pcb_data, net_filter=net_filter,
+    _core_kw = dict(
+        footprint=footprint, pcb_data=pcb_data, net_filter=net_filter,
         diff_pair_patterns=diff_pair_patterns, layers=layers,
         track_width=track_width, clearance=clearance,
         diff_pair_gap=diff_pair_gap, exit_margin=exit_margin,
@@ -5470,6 +5535,11 @@ def generate_bga_fanout(footprint: Footprint,
         same_net_pad_clearance=same_net_pad_clearance,
         hole_to_hole_clearance=hole_to_hole_clearance,
         bus=bus, net_clearances=net_clearances)
+    # the footprint and board go positionally, as they always have (tests
+    # wrap the core and read them as a[0], a[1])
+    tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
+        footprint, pcb_data, **{k: v for k, v in _core_kw.items()
+                                if k not in ('footprint', 'pcb_data')})
 
     # #621 partial ledger, computed ONLY when a cancel actually fired (so an
     # ordinary run does not even build the sets). A candidate ball that carries
@@ -5638,6 +5708,21 @@ def generate_bga_fanout(footprint: Footprint,
         tracks = tracks + d_tracks
         vias_to_add = vias_to_add + d_vias
         LAST_PLANE_DROP_REPORT.update(rep)
+    # #1853: a .kicad_dru hole_clearance rule. The engines ask the via gate
+    # before they drill; the tracks they lay, and every via, are graded here
+    # with the grader against the board and each other. A ball whose escape
+    # falls short is escaped again at a copper clearance that holds the rule,
+    # and keeps its first escape, disclosed, where that does not escape it
+    # (fanout_hole_rule). Free without such a rule.
+    if _pad_filter is None and not _single_pass and not _fired[0]:
+        from check_drc import board_design_rules, _hole_rule_reach
+        _dr1853 = board_design_rules(pcb_data)
+        if _hole_rule_reach(_dr1853) > 0.0:
+            from fanout_hole_rule import hole_reescape
+            tracks, vias_to_add, vias_to_remove, failed_nets, _hg1853 = hole_reescape(
+                _generate_bga_fanout_core, _core_kw,
+                (tracks, vias_to_add, vias_to_remove, failed_nets), _dr1853)
+            LAST_HOLE_RULES[:] = _hg1853
     if _pw is not None and _pw['threads']:
         from fab_tiers import note_narrowing
         note_narrowing(None, 'via_diameter', _pw['asked'], _pw['via'],
@@ -5658,6 +5743,14 @@ def generate_bga_fanout(footprint: Footprint,
     _st962, _rec962 = via_protection_stamps(vias_to_add, [], pcb_data)
     apply_stamps_in_memory(_st962)
     print_via_protection_record(_rec962, "BGA fanout")
+    # #1775: the vias laid below the board's Board Setup via minimums
+    from design_rules import disclose_board_setup_vias
+    LAST_BOARD_SETUP_VIAS[:] = disclose_board_setup_vias(pcb_data, vias_to_add)
+    # #1914: and the vias only the ladder's last-resort rungs fitted, below
+    # the copper-to-hole ring the board's hole clearance needs
+    from fab_tiers import disclose_hole_ring_vias
+    disclose_hole_ring_vias(pcb_data, vias_to_add, via_size,
+                            f"BGA fanout {footprint.reference}")
     # What both fronts report (the CLI's failed / unescaped_nets, the GUI
     # tab's failed list) is the nets still unescaped, not every route the
     # passes gave up: those per-route lists drove the retries above and stay
@@ -5704,10 +5797,13 @@ def main():
                              f'--width is an alias)')
     parser.add_argument('--clearance', type=float, default=defaults.BGA_CLEARANCE,
                         help=f'Track clearance in mm (default: {defaults.BGA_CLEARANCE})')
+    __import__('via_span').add_cli_flags(parser, "Escape the part")
     parser.add_argument('--via-size', type=float, default=None,
-                        help=f'Via outer diameter in mm (default: {defaults.BGA_VIA_SIZE})')
+                        help="Via outer diameter in mm (default: the board's Default "
+                             f"net-class via, else {defaults.BGA_VIA_SIZE})")
     parser.add_argument('--via-drill', type=float, default=None,
-                        help=f'Via drill size in mm (default: {defaults.BGA_VIA_DRILL})')
+                        help="Via drill size in mm (default: the board's Default "
+                             f"net-class drill, else {defaults.BGA_VIA_DRILL})")
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
     parser.add_argument('--diff-pairs', '-d', nargs='*',
@@ -5813,23 +5909,39 @@ def main():
     # number nothing routed to. This front registers --clearance-ceiling and
     # used to ignore it.
     __import__('fab_tiers').apply_clearance_ceiling(args, 'bga_fanout')
-    # #1676: a via nobody asked for starts at the board's own .kicad_dru rules
+    # #1795: a via nobody asked for starts at the board's Default net-class via,
+    # as on route.py and the GUI's BGA panel; #1676: raised to its .kicad_dru rules
+    # #1842: --via-span against the board's own stack; a micro span draws the
+    # class's micro via, which the mechanical fab floor does not pin
+    _span_layers, _span_type, _micro_span = __import__('via_span').resolve_cli(
+        parser, args, args.pcb)
     _vs_explicit = args.via_size is not None or args.via_drill is not None
-    args.via_size = defaults.BGA_VIA_SIZE if args.via_size is None else args.via_size
-    args.via_drill = defaults.BGA_VIA_DRILL if args.via_drill is None else args.via_drill
+    from list_nets import board_default_netclass_param
+    for _pname, _nckey, _fallback in (('via_size', 'via_diameter', defaults.BGA_VIA_SIZE),
+                                      ('via_drill', 'via_drill', defaults.BGA_VIA_DRILL)):
+        if getattr(args, _pname) is None:
+            _v = board_default_netclass_param(args.pcb, _nckey)
+            setattr(args, _pname, _v if _v else _fallback)
+            print(f"--{_pname.replace('_', '-')} not given; using "
+                  f"{'the board Default net-class' if _v else 'the fallback'} "
+                  f"{getattr(args, _pname)}mm.")
     if not _vs_explicit:
         from design_rules import run_via_for_rules
         args.via_size, args.via_drill = run_via_for_rules(args.pcb, None, args.via_size,
-                                                          args.via_drill)
+                                                          args.via_drill, board_setup=False)
     set_default_fab_tier(*fab_tier_from_args(args))
     __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
+    if not _vs_explicit:
+        # #1775: and, under --escalation board, at its Board Setup minimums
+        from design_rules import via_for_board_setup
+        args.via_size, args.via_drill = via_for_board_setup(args.via_size, args.via_drill)
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
-        via_size=getattr(args, 'via_size', None),
-        via_drill=getattr(args, 'via_drill', None),
+        via_size=None if _micro_span else getattr(args, 'via_size', None),
+        via_drill=None if _micro_span else getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps
     # (#513 item 1: discarding this dict shipped sub-floor vias after the warning).
@@ -5903,9 +6015,15 @@ def main():
     # the GUI's (its Cancel button / the plan executor's Stop); a CLI-side
     # wall-clock budget was removed deliberately -- no result this tool produces
     # may depend on timing, or the same command stops producing the same board.
+    # #1842: a part on neither end of the span is refused before any work
+    if _span_layers and footprint.layer not in (_span_layers[0], _span_layers[-1]):
+        print(f"Error: --via-span {args.via_span[0]} {args.via_span[1]}: {args.component} "
+              f"is on {footprint.layer}, which is not an end of the span")
+        return 1
     tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
         footprint,
         pcb_data,
+        via_span=args.via_span, via_span_type=args.via_span_type,   # #1842
         same_net_pad_clearance=args.same_net_pad_clearance,  # #581
         net_filter=args.nets,
         diff_pair_patterns=args.diff_pairs,
@@ -6021,8 +6139,10 @@ def main():
                 **fanout_fix_kwargs('bga', None, None,
                                     clearance=eff_clearance,
                                     track_width=args.track_width,
-                                    via_size=getattr(args, 'via_size', None),
-                                    via_drill=getattr(args, 'via_drill', None),
+                                    # #1842: a micro via's size is no statement
+                                    # about the board's via minimums
+                                    via_size=None if _micro_span else getattr(args, 'via_size', None),
+                                    via_drill=None if _micro_span else getattr(args, 'via_drill', None),
                                     clearance_ceiling=getattr(args, 'clearance_ceiling',
                                                               None),
                                     # #1568: the copper-to-hole floor this step
@@ -6090,6 +6210,9 @@ def main():
         'failed': len(unescaped),
         'unescaped_nets': unescaped,
         'skipped_nc': len(single_pad_net_ids(footprint, pcb_data)),
+        # #1775: the vias laid below the board's own Board Setup via
+        # minimums, with the project writeback off. Disclosure only.
+        'board_setup_vias': list(LAST_BOARD_SETUP_VIAS),
         # #1641: each --nets pattern that selected no ball, with its reason
         'unmatched': list(LAST_FILTER_MISSES),
         'clearance': args.clearance,
@@ -6126,6 +6249,8 @@ def main():
     _dr857 = narrowed_summary()
     if _dr857 is not None:
         summary['design_rules'] = _dr857
+    if LAST_HOLE_RULES:        # #1853: an escape kept below its hole_clearance rule
+        summary.setdefault('design_rules', {})['hole_rules'] = list(LAST_HOLE_RULES)
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
     return finish_design_rules(args, 0)
 

@@ -48,6 +48,7 @@ except ImportError:  # pragma: no cover - stale checkout
 from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector, board_minima_from_live, note_for_the_log
 from .settings_persistence import get_dialog_settings, restore_dialog_settings
+from .tab_names import AUTO_PAGE, AUTO_SUBTABS, page_index
 
 
 def _build_layer_mappings():
@@ -365,34 +366,38 @@ class RoutingDialog(wx.Dialog):
         # Create notebook for tabs
         self.notebook = wx.Notebook(main_panel)
 
-        # Tab 1: Route (the basic routing parameters)
+        # Tab 1: Auto -- the hands-off front door, first so a fresh dialog
+        # opens on it. A nested notebook: "Autorouter" (autoroute.py on a
+        # snapshot of the board), "AI Routing" (the route-only AI assistant,
+        # issue #40), "AI Placement" (Claude-driven placement runs, issue
+        # #481) and "Labels" (Beautify Labels). self.ai_tab /
+        # self.placement_tab / self.labels_tab / self.autoroute_tab point at
+        # the PANELS inside the nested notebook, so every consumer (settings
+        # persistence, _ai_params, resets) reaches them by attribute, never
+        # by page index; the page added here is the container.
+        ai_container = self._create_ai_tab()
+        self.notebook.AddPage(ai_container, AUTO_PAGE)
+
+        # Tab 2: Route (the basic routing parameters)
         config_panel = self._create_config_tab()
+        self.route_page = config_panel
         self.notebook.AddPage(config_panel, "Route")
 
-        # Tab 2: Advanced options (swappable nets + advanced parameters + options)
+        # Tab 3: Advanced (swappable nets + advanced parameters + options)
         advanced_panel = self._create_advanced_tab()
-        self.notebook.AddPage(advanced_panel, "Advanced options")
+        self.notebook.AddPage(advanced_panel, "Advanced")
 
-        # Tab 3: Differential
+        # Tab 4: Differential
         differential_panel = self._create_differential_tab()
         self.notebook.AddPage(differential_panel, "Differential")
 
-        # Tab 4: Fanout
+        # Tab 5: Fanout
         self.fanout_tab = self._create_fanout_tab()
         self.notebook.AddPage(self.fanout_tab, "Fanout")
 
-        # Tab 5: Planes
+        # Tab 6: Planes
         self.planes_tab = self._create_planes_tab()
         self.notebook.AddPage(self.planes_tab, "Planes")
-
-        # Tab 6: AI (AI skills, issue #40) - a nested notebook: "Routing"
-        # (the original route-only assistant) + "Placement" (Claude-driven
-        # placement runs, issue #481). self.ai_tab keeps pointing at the
-        # AITab PANEL inside the nested notebook, so every existing consumer
-        # (settings persistence, _ai_params, resets) is unaffected; the page
-        # added here is the container.
-        ai_container = self._create_ai_tab()
-        self.notebook.AddPage(ai_container, "AI Drive")
 
         # Tab 7: Log
         log_panel = self._create_log_tab()
@@ -455,10 +460,9 @@ class RoutingDialog(wx.Dialog):
         self._append_log("=== Validation Complete ===\n\n")
 
         # Switch to log tab to show results
-        for i in range(self.notebook.GetPageCount()):
-            if self.notebook.GetPageText(i) == "Log":
-                self.notebook.SetSelection(i)
-                break
+        i = page_index(self.notebook, "Log")
+        if i is not None:
+            self.notebook.SetSelection(i)
 
     def _on_transparency_changed(self, value):
         """Handle transparency slider change from About tab."""
@@ -769,6 +773,28 @@ class RoutingDialog(wx.Dialog):
             return defaults.ESCALATION
         return ctrl.GetString(ctrl.GetSelection()) or defaults.ESCALATION
 
+    def _board_thickness(self):
+        """The live board's thickness in mm (BoardInfo.board_thickness), for
+        the drill aspect-ratio floor (#502); None when unknown."""
+        return getattr(getattr(getattr(self, 'pcb_data', None), 'board_info', None),
+                       'board_thickness', None)
+
+    def _board_hole_clearance(self):
+        """The board's copper-to-hole clearance in mm (#1914), for the
+        descent ladder's preferred via ring: ``fab_tiers.board_hole_clearance``
+        on this dialog's PCBData -- the resolver the CLI's set_policy_from_args
+        uses, reading the live board's declared rule (its records' origin
+        too), else the board file's project, else KiCad's factory 0.25. None
+        without a PCBData, so the front installs nothing."""
+        pcb_data = getattr(self, 'pcb_data', None)
+        if pcb_data is None:
+            return None
+        try:
+            from fab_tiers import board_hole_clearance
+            return board_hole_clearance(pcb_data)
+        except Exception:                                       # noqa: BLE001
+            return None
+
     def _board_floor_dict(self):
         """The live board's Board Setup minimums in fab_tiers FLOOR_KEYS
         vocabulary (only keys declared > 0), for --escalation board."""
@@ -841,12 +867,13 @@ class RoutingDialog(wx.Dialog):
         if event is not None:
             event.Skip()
 
-    def _fab_floored(self, ctrl_name, val):
+    def _fab_floored(self, ctrl_name, val, laser=False):
         """Pin ``val`` UP to the physical fab floor for ``ctrl_name`` (the fab
         can't make sub-floor geometry) -- parity with the CLI's enforce_fab_floors:
         the advanced rung, or the fab-overrides file. Idempotent for a control
-        value that was already fab-floored interactively."""
-        floor = self._fab_floor_for_ctrl(ctrl_name)
+        value that was already fab-floored interactively. ``laser``: the value
+        is a laser-drilled micro via's (#1842), which that floor does not bind."""
+        floor = self._fab_floor_for_ctrl(ctrl_name, laser=laser)
         if floor is not None and val is not None and val < floor:
             return floor
         return val
@@ -884,7 +911,7 @@ class RoutingDialog(wx.Dialog):
         return self._fab_floored('board_edge_clearance', val)
 
 
-    def _effective_geometry_floor(self, name):
+    def _effective_geometry_floor(self, name, laser=False):
         """Geometry floor to route/grade with (#439 parity with the CLI):
         the dedicated control when its override checkbox is checked; otherwise
         the board's own value -- Default net-class for track/clearance/via,
@@ -930,7 +957,7 @@ class RoutingDialog(wx.Dialog):
             if board_val is not None and board_val <= 0:
                 board_val = None
             val = board_val if board_val is not None else getattr(self, name).GetValue()
-        return self._fab_floored(name, val)
+        return self._fab_floored(name, val, laser=laser)
 
     def _board_clearance(self):
         """The clearance a run naming none starts from, as the routing CLIs
@@ -953,15 +980,19 @@ class RoutingDialog(wx.Dialog):
             return -1.0
         return self.same_net_pad_clearance.GetValue()
 
-    def _effective_via_size(self):
+    def _effective_via_size(self, laser=False):
         """Pinned up so the via keeps the fab floor's annular ring around the
         effective drill (#1433) -- parity with the CLI's enforce_fab_floors,
         through the same fab_tiers.via_size_for_annular_ring. Like the CLI,
         which pins only when --via-size AND --via-drill are both given, this
         pins only when both override checkboxes are checked; a board-derived
-        value is the board's own and is left as it is."""
-        val = self._effective_geometry_floor('via_size')
-        if not (self.via_size_check.GetValue() and self.via_drill_check.GetValue()):
+        value is the board's own and is left as it is. ``laser`` (the route
+        tab's via span is a laser-drilled micro via's, `_via_span_laser`):
+        neither the floor nor the ring pins it, as route.py's main passes
+        enforce_fab_floors no via for one (#1842)."""
+        val = self._effective_geometry_floor('via_size', laser=laser)
+        if laser or not (self.via_size_check.GetValue()
+                         and self.via_drill_check.GetValue()):
             return val
         from fab_tiers import via_size_for_annular_ring, parse_fab_overrides
         ncu = len(self.pcb_data.board_info.copper_layers) or 2
@@ -971,8 +1002,22 @@ class RoutingDialog(wx.Dialog):
         return via_size_for_annular_ring(val, self._effective_via_drill(),
                                          ncu, tier, ovr)
 
-    def _effective_via_drill(self):
-        return self._effective_geometry_floor('via_drill')
+    def _effective_via_drill(self, laser=False):
+        return self._effective_geometry_floor('via_drill', laser=laser)
+
+    def _via_span_laser(self):
+        """Is the route tab's Via Span a laser-drilled micro via's (#1842)?
+        The same `via_span.laser_drilled` route.py's main reads for
+        --via-span / --via-span-type, so both fronts leave the same via
+        unpinned by the mechanical fab floor."""
+        try:
+            from via_span import laser_drilled
+            names = self.via_span.GetValue().replace(',', ' ').split()
+            kind = self.via_span_type.GetStringSelection()
+            return laser_drilled(self.pcb_data.board_info.copper_layers, names or None,
+                                 kind if kind in ('micro', 'blind', 'buried') else None)
+        except Exception:                                      # noqa: BLE001
+            return False
 
     def _effective_hole_to_hole_clearance(self):
         return self._effective_geometry_floor('hole_to_hole_clearance')
@@ -1314,17 +1359,24 @@ class RoutingDialog(wx.Dialog):
         self.fab_overrides_path.SetValue(path)
         self._revalidate_fab_floors()
 
-    def _fab_floor_for_ctrl(self, ctrl_name):
+    def _fab_floor_for_ctrl(self, ctrl_name, laser=None):
         """Physical fab floor (mm) for a Basic-tab spin control (fab_floor_for_param:
         the advanced rung, or the override file -- the selected tier does not move
-        it), or None if the control has no fab floor / no board loaded."""
+        it), or None if the control has no fab floor / no board loaded.
+        ``laser``: the via controls hold a laser-drilled micro via (#1842), which
+        that floor does not bind -- None reads it off the route tab's Via Span,
+        so the controls can hold the micro via route.py would take."""
+        if ctrl_name in ('via_size', 'via_drill') and (
+                self._via_span_laser() if laser is None else laser):
+            return None
         try:
             from fab_tiers import fab_floor_for_param, parse_fab_overrides
             ncu = len(self.pcb_data.board_info.copper_layers) or 2
             tier = self.fab_tier.GetString(self.fab_tier.GetSelection())
             path = self.fab_overrides_path.GetValue().strip()
             ovr = parse_fab_overrides(path) if path and os.path.isfile(path) else {}
-            return fab_floor_for_param(ctrl_name, ncu, tier, ovr)
+            return fab_floor_for_param(ctrl_name, ncu, tier, ovr,
+                                       thickness=self._board_thickness())
         except Exception:
             return None
 
@@ -1453,6 +1505,15 @@ class RoutingDialog(wx.Dialog):
             "can draw new ones. Only acts when 'Follow User-layer guide path' is enabled.")
         options_inner.Add(self.clear_guide_layer_check, 0, wx.ALL, 3)
 
+        # Mask artwork keep-outs (route.py --mask-keepouts)
+        self.mask_keepouts = wx.CheckBox(options_scroll, label="Keep out of mask artwork")
+        self.mask_keepouts.SetValue(defaults.MASK_KEEPOUTS)
+        self.mask_keepouts.SetToolTip(
+            "Keep new copper out from under F.Mask/B.Mask graphics and footprint mask "
+            "shapes on the same side (pad openings excepted). On by default; the artwork "
+            "is read from the saved board file.")
+        options_inner.Add(self.mask_keepouts, 0, wx.ALL, 3)
+
         # Keepout zone: keep tracks out of a user-drawn polygon (issue #27)
         self.keepout_check = wx.CheckBox(options_scroll, label="Keep out of User-layer polygon(s)")
         self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
@@ -1528,6 +1589,23 @@ class RoutingDialog(wx.Dialog):
         self.no_bga_zones_ctrl.SetToolTip("Disable BGA exclusion zones: component refs (e.g., U1 U3), ALL, or leave empty (default) to keep all BGA zones")
         bga_sizer.Add(self.no_bga_zones_ctrl, 1, wx.EXPAND)
         options_inner.Add(bga_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Via span (#1842): empty == CLI route.py's --via-span default (None:
+        # through vias). Two layer names == the CLI's two values.
+        span_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        span_sizer.Add(wx.StaticText(options_scroll, label="Via Span:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.via_span = wx.TextCtrl(options_scroll, value="")
+        self.via_span.SetToolTip("Lay vias that join only this run of copper layers and route on those layers only: the top and bottom layer, e.g. 'F.Cu In1.Cu' (micro vias) or 'In1.Cu In6.Cu' (buried vias). Leave empty (default) for through vias.")
+        span_sizer.Add(self.via_span, 1, wx.EXPAND)
+        self.via_span_type = wx.Choice(options_scroll, choices=['auto', 'micro', 'blind', 'buried'])
+        self.via_span_type.SetSelection(0)
+        self.via_span_type.SetToolTip("The via type written for the span: auto reads it off the span (micro for two neighbouring layers one of which is an outer layer, blind for a longer span reaching one outer layer, buried otherwise).")
+        span_sizer.Add(self.via_span_type, 0, wx.LEFT, 5)
+        self.via_span_escape = wx.Choice(options_scroll, choices=['off', 'route', 'only'])
+        self.via_span_escape.SetSelection(0)
+        self.via_span_escape.SetToolTip("Escapes for a via span: 'route' first lays a via of the span and a short track at each surface pad of the selected nets, then routes; 'only' lays the escapes and routes nothing, leaving the nets for the next sub-stack's step. 'off' (default) lays none.")
+        span_sizer.Add(self.via_span_escape, 0, wx.LEFT, 5)
+        options_inner.Add(span_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
         # Rip pre-existing nets (issue #103): make tracks committed by a
         # previous run eligible for rip-up during retry. Mirrors the CLI
@@ -1987,6 +2065,11 @@ class RoutingDialog(wx.Dialog):
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
+                'board_thickness': self._board_thickness(),  # #502
+                # #1914: derived from the board (no control): the
+                # copper-to-hole clearance the descent ladder prefers a
+                # via's ring to hold (fab_tiers.set_via_hole_clearance).
+                'hole_clearance': self._board_hole_clearance(),
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -2045,6 +2128,12 @@ class RoutingDialog(wx.Dialog):
                 # #581: one via-in-pad policy for every step (Basic tab).
                 # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
+                # #1842: the route tab's Via Span, as bga_fanout.py /
+                # qfn_fanout.py --via-span
+                'via_span': (self.via_span.GetValue().replace(',', ' ').split() or None),
+                'via_span_type': (self.via_span_type.GetStringSelection()
+                                  if self.via_span_type.GetStringSelection()
+                                  in ('micro', 'blind', 'buried') else None),
             }
 
         return FanoutTab(
@@ -2118,6 +2207,11 @@ class RoutingDialog(wx.Dialog):
                 'net_clearances_path': self.net_clearances_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
+                'board_thickness': self._board_thickness(),  # #502
+                # #1914: derived from the board (no control): the
+                # copper-to-hole clearance the descent ladder prefers a
+                # via's ring to hold (fab_tiers.set_via_hole_clearance).
+                'hole_clearance': self._board_hole_clearance(),
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -2157,23 +2251,36 @@ class RoutingDialog(wx.Dialog):
         )
 
     def _create_ai_tab(self):
-        """Create the AI tab: a nested notebook hosting "Routing" (the
-        original AI-skills tab, issue #40 - route-only by design) and
-        "Placement" (Claude-driven placement runs). Returns the container
-        panel; sets self.ai_tab / self.placement_tab / self.ai_notebook."""
+        """Create the Auto tab: a nested notebook hosting, left to right,
+        "Autorouter" (autoroute.py run on a snapshot of the board), "AI
+        Routing" (the AI-skills tab, issue #40 - route-only by design), "AI
+        Placement" (Claude-driven placement runs) and "Labels" (Beautify
+        Labels). Returns the container panel; sets self.autoroute_tab /
+        self.ai_tab / self.placement_tab / self.labels_tab / self.ai_notebook."""
         from .ai_gui import AITab
         from .placement_gui import PlacementTab
+        from .labels_gui import LabelsTab
+        from .autoroute_gui import AutorouteTab
 
         container = wx.Panel(self.notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.ai_notebook = wx.Notebook(container)
+        self.autoroute_tab = AutorouteTab(
+            self.ai_notebook,
+            self.board_filename,
+            on_complete=self._on_tab_operation_complete,
+            append_log=self._append_log,
+            sync_pcb_data_callback=self._sync_pcb_data_from_board,
+            get_fix_drc=lambda: self.fix_drc_check.GetValue(),
+        )
+        self.ai_notebook.AddPage(self.autoroute_tab, AUTO_SUBTABS[0])
         self.ai_tab = AITab(
             self.ai_notebook,
             self.board_filename,
             log_callback=self._append_log,
             routing_dialog=self,
         )
-        self.ai_notebook.AddPage(self.ai_tab, "Routing")
+        self.ai_notebook.AddPage(self.ai_tab, AUTO_SUBTABS[1])
         self.placement_tab = PlacementTab(
             self.ai_notebook,
             self.pcb_data,
@@ -2181,8 +2288,18 @@ class RoutingDialog(wx.Dialog):
             on_complete=self._on_tab_operation_complete,
             append_log=self._append_log,
             sync_pcb_data_callback=self._sync_pcb_data_from_board,
+            get_fix_drc=lambda: self.fix_drc_check.GetValue(),
         )
-        self.ai_notebook.AddPage(self.placement_tab, "Placement")
+        self.ai_notebook.AddPage(self.placement_tab, AUTO_SUBTABS[2])
+        self.labels_tab = LabelsTab(
+            self.ai_notebook,
+            self.pcb_data,
+            self.board_filename,
+            on_complete=self._on_tab_operation_complete,
+            append_log=self._append_log,
+            sync_pcb_data_callback=self._sync_pcb_data_from_board,
+        )
+        self.ai_notebook.AddPage(self.labels_tab, AUTO_SUBTABS[3])
         sizer.Add(self.ai_notebook, 1, wx.EXPAND)
         container.SetSizer(sizer)
         return container
@@ -2361,9 +2478,13 @@ class RoutingDialog(wx.Dialog):
         """Handle main notebook tab change - validate settings when switching tabs."""
         event.Skip()  # Allow normal tab switching
 
-        # Switching to the Basic tab (index 0): refresh the net list so short
-        # (deferred) pairs reflect the current Differential-tab params/toggle.
-        if event.GetSelection() == 0 and getattr(self, 'differential_tab', None):
+        # Switching to the Route tab: refresh the net list so short (deferred)
+        # pairs reflect the current Differential-tab params/toggle. By page,
+        # never by index: the Auto tab sits before it.
+        sel = event.GetSelection()
+        if (getattr(self, 'route_page', None) is not None and sel >= 0
+                and self.notebook.GetPage(sel) is self.route_page
+                and getattr(self, 'differential_tab', None)):
             self.net_panel.refresh()
 
         # (Planes tab needs no cross-validation since #562: its repair
@@ -2790,7 +2911,11 @@ class RoutingDialog(wx.Dialog):
         except Exception:
             pass
         try:
-            self.placement_tab.labels_options.reset_to_defaults()
+            self.labels_tab.labels_options.reset_to_defaults()
+        except Exception:
+            pass
+        try:
+            self.autoroute_tab.reset_to_defaults()
         except Exception:
             pass
         try:
@@ -2918,6 +3043,9 @@ class RoutingDialog(wx.Dialog):
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
+        self.via_span.SetValue("")  # empty == CLI default (None: through vias)
+        self.via_span_type.SetSelection(0)
+        self.via_span_escape.SetSelection(0)
         self.rip_existing_nets_ctrl.SetValue("")
         self.force_reroute.SetValue(False)  # match creation default + CLI (store_true)
         self.layer_costs_ctrl.SetValue("")
@@ -3012,6 +3140,7 @@ class RoutingDialog(wx.Dialog):
         self.guide_corridor_spacing_ctrl.SetValue(str(defaults.GUIDE_CORRIDOR_SPACING))
         self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
         self.keepout_layer_ctrl.SetValue(defaults.KEEPOUT_LAYER)
+        self.mask_keepouts.SetValue(defaults.MASK_KEEPOUTS)
         # "Fix DRC settings after routing" (#160/#693), ticked as the
         # constructor ticks it. A plan replays route.py's per-step semantics:
         # a step without --no-fix-drc-settings writes the DRC floors back, a
@@ -3115,6 +3244,7 @@ class RoutingDialog(wx.Dialog):
         # a silent SI regression, since a manifest records nothing when ON.
         self.differential_tab.gnd_via_check.SetValue(True)
         self.differential_tab.intra_match_check.SetValue(False)
+        self.differential_tab.diff_pair_intra_lane.SetValue("")     # #1869
         self.differential_tab.impedance_declare_only.SetValue(False)
         self.differential_tab.ac_couple_check.SetValue(False)
 
@@ -3305,10 +3435,11 @@ class RoutingDialog(wx.Dialog):
             'clearance': self._effective_clearance(),
             # #581: via-in-pad policy (Basic tab; -1 = allowed)
             'same_net_pad_clearance': self._same_net_pad_clearance_value(),
-            'via_size': self._effective_via_size(),
+            # #1842: a laser-drilled micro via span is not pinned to the fab floor
+            'via_size': self._effective_via_size(laser=self._via_span_laser()),
             'via_from_class': not (self.via_size_check.GetValue()
                                     or self.via_drill_check.GetValue()),
-            'via_drill': self._effective_via_drill(),
+            'via_drill': self._effective_via_drill(laser=self._via_span_laser()),
             'grid_step': self.grid_step.GetValue(),
             'via_cost': self.via_cost.GetValue(),
             'move_copper_text': self.move_text_check.GetValue(),
@@ -3338,6 +3469,11 @@ class RoutingDialog(wx.Dialog):
             'net_clearances_path': self.net_clearances_path.GetValue().strip(),
             'escalation': self._escalation_policy(),
             'board_floors': self._board_floor_dict(),
+            'board_thickness': self._board_thickness(),  # #502
+            # #1914: derived from the board (no control): the
+            # copper-to-hole clearance the descent ladder prefers a
+            # via's ring to hold (fab_tiers.set_via_hole_clearance).
+            'hole_clearance': self._board_hole_clearance(),
             # #1262: what KiCad grades a Default net at when the DRC
             # settings writeback is off (fix_drc_settings False).
             'default_class_clearance': self._default_class_clearance(),
@@ -3379,6 +3515,7 @@ class RoutingDialog(wx.Dialog):
             'guide_corridor_spacing': self._safe_float(self.guide_corridor_spacing_ctrl.GetValue(), defaults.GUIDE_CORRIDOR_SPACING),
             # Keepout zone (issue #27)
             'keepout_enabled': self.keepout_check.GetValue(),
+            'mask_keepouts': self.mask_keepouts.GetValue(),
             'keepout_layer': self.keepout_layer_ctrl.GetValue().strip() or defaults.KEEPOUT_LAYER,
             # Clear User-layer graphics after a successful route (plugin-only)
             'clear_guide_layer': self.clear_guide_layer_check.GetValue(),
@@ -3444,6 +3581,14 @@ class RoutingDialog(wx.Dialog):
             config['no_bga_zones'] = _split_net_list(no_bga_text)
         else:
             config['no_bga_zones'] = None  # None means use BGA zones
+
+        # #1842: the via span, as route.py's --via-span / --via-span-type
+        _span_names = self.via_span.GetValue().replace(',', ' ').split()
+        config['via_span'] = _span_names or None
+        _span_type = self.via_span_type.GetStringSelection()
+        config['via_span_type'] = _span_type if _span_type in ('micro', 'blind', 'buried') else None
+        _span_escape = self.via_span_escape.GetStringSelection()
+        config['via_span_escape'] = _span_escape if _span_escape in ('route', 'only') else None
 
         # Parse rip-pre-existing-nets (issue #103): empty -> None (keep
         # pre-existing tracks fixed), ALL -> ["*"], else fnmatch patterns.
@@ -3951,10 +4096,14 @@ class RoutingDialog(wx.Dialog):
                     guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
                     guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
                     keepout_enabled=config.get('keepout_enabled', False),
+                    mask_keepouts=config.get('mask_keepouts', defaults.MASK_KEEPOUTS),
                     keepout_layer=config.get('keepout_layer', 'User.2'),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
+                    via_span=config.get('via_span'),
+                    via_span_type=config.get('via_span_type'),
+                    via_span_escape=config.get('via_span_escape'),
                     rip_existing_nets=config.get('rip_existing_nets'),
                     force_reroute=config.get('force_reroute', False),
                     # RAW patterns (pre-expansion), like the CLI main: the #521
@@ -4046,9 +4195,12 @@ class RoutingDialog(wx.Dialog):
     def _update_progress(self, current, total, step_name):
         """Update progress bar and status."""
         if total > 0:
-            percent = int(100 * current / total)
-            self.progress_bar.SetValue(percent)
+            # Range first, then a clamped value (#1751): wx asserts on a
+            # position past the range, and this bar's range is the net count
+            # after a cache pass.
             self.progress_bar.SetRange(100)
+            self.progress_bar.SetValue(
+                max(0, min(100, int(100 * current / total))))
             self.status_text.SetLabel(f"{step_name} ({current}/{total})")
         else:
             # Setup phase - no count, just show the step name
@@ -4412,7 +4564,9 @@ class RoutingDialog(wx.Dialog):
                 # #1493: the copper-to-hole floor this step HELD, lowered
                 # only to what the copper it drew needs -- route.py's
                 # step_hole_clearance, as the differential tab writes it (#1369)
-                from .gui_utils import held_hole_clearance_live
+                from .gui_utils import held_hole_clearance_live, live_micro_via_rule
+                # #1842: the micro vias' own rule, as fix_project_for_output writes it
+                live_micro_via_rule(self.pcb_data, board, results_data, eff_clearance)
                 targets = compute_targets(
                     clearance=eff_clearance,
                     hole_clearance=held_hole_clearance_live(
@@ -4467,6 +4621,11 @@ class RoutingDialog(wx.Dialog):
                                         persist_intra_pair_tolerances)
             persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances(),
                                           board=board)
+            # #1807: the improvement gate's record of this step's trade, for
+            # the next step's gate (a rejected step's too).
+            from improvement_gate import consume_lap_history
+            from protected_nets import persist_lap_history
+            persist_lap_history(_pro, consume_lap_history(), board=board)
         except Exception:
             pass
 

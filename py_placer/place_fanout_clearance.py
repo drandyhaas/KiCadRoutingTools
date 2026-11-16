@@ -381,9 +381,7 @@ Examples:
             from fix_kicad_drc_settings import (fix_project_for_output,
                                                 copper_minima,
                                                 pad_clearance_override_minimum)
-            from list_nets import board_constraint
             from placement.fanout_clearance import resolve_pair_clearance
-            from placement.legality import resolve_npth_floor
             _priced, _ = resolve_pair_clearance(args.input_file, args.clearance)
             # GIVEN, the value to clamp to is the CEILING, not the base. The
             # writeback is lower-only, so passing the ceiling leaves every class
@@ -402,13 +400,12 @@ Examples:
             # defaults this key to the copper clearance and `apply_targets`
             # CREATES the rule when the project has none -- so a board that
             # declared nothing got `--clearance` written in as its copper-to-hole
-            # rule while the pass had priced that geometry at 0.2.
-            _hc = board_constraint(args.input_file, 'min_hole_clearance')
-            if _hc is None:
-                try:
-                    _hc = resolve_npth_floor(pcb_data, args.input_file)
-                except Exception:                              # noqa: BLE001
-                    _hc = None
+            # rule while the pass had priced that geometry at 0.2. It is also
+            # the value the pass held cap pads off via DRILLS at -- the engine
+            # resolves both from this one function, so the project never
+            # declares a copper-to-hole clearance the moved caps break.
+            from placement.fanout_clearance import resolve_via_hole_clearance
+            _hc, _ = resolve_via_hole_clearance(pcb_data, args.input_file)
             # #1578: the size floors of the copper this pass laid or moved
             # only, and the #530 pad-override cap on the clearance family.
             _minima = copper_minima(
@@ -479,4 +476,8 @@ Examples:
 if __name__ == "__main__":
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
+    # each line reaches a pipe or a log when it is printed, not at exit
+    # (#1829); no CMD/EXIT banner, so its stdout reads as it always has
+    import cli_banner
+    cli_banner.line_buffer_streams()
     sys.exit(main())

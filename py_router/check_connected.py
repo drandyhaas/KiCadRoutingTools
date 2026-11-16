@@ -636,6 +636,23 @@ def raster_unconnected(pcb_data, net_names=None, tolerance: float = 0.02):
     return out
 
 
+def dead_copper_fate(dead_segments, dead_vias) -> str:
+    """What the late orphan sweep does with copper net_dead_copper reported
+    dead, as a clause for a log line (#1781). remove_orphan_islands keeps
+    every island holding locked or sense-held copper whole (#1261), so a
+    lone locked port via is NOT removed and the message must not say so."""
+    from kicad_parser import is_immutable_copper
+    items = list(dead_segments) + list(dead_vias)
+    held = sum(1 for x in items if is_immutable_copper(x))
+    if not held:
+        return "the late orphan sweep removes it"
+    if held == len(items):
+        return ("it is locked or sense-held copper, which the late orphan "
+                "sweep keeps")
+    return (f"{held} item(s) of it are locked or sense-held, and the late "
+            f"orphan sweep keeps every cluster holding one whole")
+
+
 def net_dead_copper(pcb_data, net_id, segments, vias, pads, zones=None):
     """The net's copper that reaches NO pad and NO zone of its own net (#659).
 
@@ -654,6 +671,12 @@ def net_dead_copper(pcb_data, net_id, segments, vias, pads, zones=None):
 
     Graphics clusters (#337 immutable art) are never reported: they are not
     ours to delete, so they are not "dead copper" for a caller's purposes.
+
+    Locked and sense-held copper (#1261, #1279) IS reported when it is dead:
+    it is no route either, so a caller deciding whether routing helps must
+    see it. But the late sweep KEEPS any cluster holding such copper, so a
+    caller saying what becomes of dead copper words it with
+    dead_copper_fate, never "the sweep removes it" (#1781).
 
     Returns (dead_segments, dead_vias) as object lists.
     """
@@ -934,6 +957,32 @@ def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25,
     return validate
 
 
+def pad_label(pads, ref, x, y):
+    """The pad number(s) of `ref` at a graded point, or None.
+
+    Pads whose copper centre IS the point first, every one of them: stacked
+    pads (a multi-number thermal pad) share the copper, so the grade cannot
+    tell them apart and the label names them all, `33/34`. Failing that, the
+    pads whose copper box holds the point, so a point off the exact centre is
+    still named rather than left `?`."""
+    mine = [p for p in pads if p.component_ref == ref]
+    hits = [p for p in mine
+            if abs(p.global_x - x) < 1e-3 and abs(p.global_y - y) < 1e-3]
+    if not hits:
+        hits = [p for p in mine
+                if abs(p.global_x - x) <= p.size_x / 2 + 1e-3
+                and abs(p.global_y - y) <= p.size_y / 2 + 1e-3]
+    nums = list(dict.fromkeys(str(p.pad_number) for p in hits))
+    return '/'.join(nums) if nums else None
+
+
+def failed_pad(pads, point):
+    """A `disconnected_pads` point as a failed_pads entry."""
+    ref = point[3] if len(point) > 3 else '?'
+    return {'x': point[0], 'y': point[1], 'component_ref': ref,
+            'pad_number': pad_label(pads, ref, point[0], point[1]) or '?'}
+
+
 def net_break_within_outlines(pcb_data, result):
     """Multi-board files (#479, len42_filter2): with >=2 outer Edge.Cuts
     outlines, a net is BROKEN only when some single outline's pads span more
@@ -1023,7 +1072,8 @@ def reconcile_status_line(recon: dict) -> str:
     cross-check exists.
 
     `recon` keys: state (ran | did_not_run | disabled | not_applicable |
-    error), links, reclass, kicad_only, detail. Kept a pure function of that
+    error), links, reclass, kicad_only, count_differs, recounted, detail.
+    Kept a pure function of that
     dict so the wording is testable without a board.
     """
     st = recon.get('state')
@@ -1035,7 +1085,15 @@ def reconcile_status_line(recon: dict) -> str:
         if recon.get('kicad_only'):
             parts.append(f"flagged {recon['kicad_only']} net(s) KiCad-only "
                          "UNCONNECTED")
-        if not recon.get('reclass') and not recon.get('kicad_only'):
+        # #1811: agreement is in NUMBER as well as in name -- a listed net
+        # whose piece count differs from KiCad's link count + 1 does not agree.
+        if recon.get('count_differs'):
+            parts.append(f"counted {recon['count_differs']} listed net(s) "
+                         f"in a different number of pieces"
+                         + (f" ({recon['recounted']} raised to KiCad's count)"
+                            if recon.get('recounted') else ""))
+        if not recon.get('reclass') and not recon.get('kicad_only') \
+                and not recon.get('count_differs'):
             parts.append("agrees with copper grading")
         return "KiCad refill cross-check: " + ", ".join(parts)
     if st == 'did_not_run':
@@ -2590,6 +2648,35 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                     print(f"  {len(_rev)} net(s) UNCONNECTED per KiCad "
                           f"refill though copper grading passed them: "
                           f"{_names}")
+                # #1811: a poured net the copper grade ALREADY lists kept its
+                # pads-only piece count, whatever KiCad's refill said -- and
+                # KiCad links every copper cluster of the net, a via-only fill
+                # island included (test_island_link_semantics). So 3 KiCad
+                # links read as 1 join, and joining the open pad (3 clusters
+                # left, read through the KiCad-only path above) RAISED the
+                # count to 2. Take KiCad's count where it is larger, keep the
+                # pads-only one beside it, and say so.
+                for _i in issues:
+                    if (_i.get('unrouted') or _i.get('kicad_only')
+                            or _i['net_id'] not in _zone_net_ids):
+                        continue
+                    _nl = [lk for lk in _links if lk[0] == _i['net_name']
+                           and not _link_cross_board(lk)]
+                    _was = _i.get('num_components') or 0
+                    if len(_nl) + 1 == _was:
+                        continue
+                    _recon['count_differs'] = _recon.get('count_differs', 0) + 1
+                    if len(_nl) + 1 < _was:
+                        continue
+                    _i['pad_components'] = _was
+                    _i['num_components'] = len(_nl) + 1
+                    _note = (f"KiCad refill reports {len(_nl)} unconnected "
+                             f"link(s), {len(_nl) + 1} copper piece(s); "
+                             f"copper grading counted {_was} by pads alone "
+                             f"(a fill island holding no pad is a piece too)")
+                    _i['message'] = (f"{_i['message']}; {_note}"
+                                     if _i.get('message') else _note)
+                    _recon['recounted'] = _recon.get('recounted', 0) + 1
         except Exception as _re:
             _recon['state'] = 'error'
             _recon['detail'] = str(_re)

@@ -236,13 +236,13 @@ ROWS = [
      '            _target = _priced',
      (T768,), 'KILLED'),
     ('hole-clearance-invented-from-the-ceiling', 'cli',
-     '''            if _hc is None:
-                try:
-                    _hc = resolve_npth_floor(pcb_data, args.input_file)
-                except Exception:                              # noqa: BLE001
-                    _hc = None
+     '''            _hc, _ = resolve_via_hole_clearance(pcb_data, args.input_file)
 ''',
-     '',
+     '''            _hc, _ = resolve_via_hole_clearance(pcb_data, args.input_file)
+            if __import__('list_nets').board_constraint(
+                    args.input_file, 'min_hole_clearance') is None:
+                _hc = None
+''',
      (T768,), 'KILLED'),
     ('nan-ceiling-accepted', 'cli',
      '    if args.clearance is not None and not math.isfinite(args.clearance):',

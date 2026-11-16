@@ -92,6 +92,21 @@ class FaceLedger:
     escape_band_mm: float = 0.0
     escape_band_source: str = 'unknown'
     escape_band_basis: str = 'unknown'
+    # --- #1836. The face nets that END in the escape band: a charged
+    # neighbour has a pad of the net there (`_served_nets`). Such a net is
+    # served by reaching that pad and needs no lane past anything, so it is
+    # taken out of what the supply must carry -- and its neighbour is named
+    # in `served_by`, not left to read as a part to move. `demand` keeps
+    # counting it: demand is a fact about the part's pins and its rotation,
+    # this is a fact about where its neighbours stand.
+    served_nets: Tuple[int, ...] = ()
+    served_by: Tuple[str, ...] = ()
+
+    @property
+    def lane_demand(self) -> int:
+        """The face nets that need a LANE: `demand` less the ones served
+        directly by a neighbour across the band (#1836)."""
+        return max(0, self.demand - len(self.served_nets))
 
     @property
     def deficit(self) -> int:
@@ -99,9 +114,11 @@ class FaceLedger:
 
         OWN-LAYER, and it stays that way. `deficit_floor` is the layer-aware
         number; this one is what `health_escape_worst_deficit` and
-        board_brief's POSITION_DEPENDENT keys have always meant.
+        board_brief's POSITION_DEPENDENT keys have always meant. Counted
+        against `lane_demand` since #1836: a net that ends on the part
+        across the face is not short of a way past it.
         """
-        return max(0, self.demand - self.supply)
+        return max(0, self.lane_demand - self.supply)
 
     @property
     def via_slots(self) -> int:
@@ -209,7 +226,7 @@ class FaceLedger:
         than `deficit > 0`; `deficit_floor == 0` proves nothing at all, which
         is why nothing gates on it.
         """
-        return max(0, self.demand - self.supply - self.supply_other_max)
+        return max(0, self.lane_demand - self.supply - self.supply_other_max)
 
     def to_dict(self):
         return {'ref': self.ref, 'face': self.face,
@@ -219,6 +236,11 @@ class FaceLedger:
                 'deficit': self.deficit,
                 'blocked_mm': round(self.blocked_mm, 3),
                 'blockers': list(self.blockers), 'nets': len(self.nets),
+                # #1836: the nets that end on a neighbour across the band,
+                # and who; `deficit == max(0, lane_demand - supply)`.
+                'served': len(self.served_nets),
+                'served_by': list(self.served_by),
+                'lane_demand': self.lane_demand,
                 # The layer term. The board-wide values (via_pitch_mm,
                 # signal_layers, signal_layers_source) live on PartEscape
                 # rather than being repeated on all four faces.
@@ -262,6 +284,11 @@ class PartEscape:
     #: `interior_pads + face_corridor_escapes + through_row_pads ==
     #: interior_pads_box`.
     through_row_pads: int = 0
+    #: #1837: the track / clearance / via this part was priced at, each with
+    #: its source (`LaneRules.to_dict()`), as `((name, value, source), ...)`
+    #: so the dataclass stays hashable. Empty for a direct caller that passed
+    #: a bare `pitch_mm` and named no rules.
+    lane_rules: Tuple[Tuple[str, float, str], ...] = ()
 
     @property
     def worst(self) -> Optional[FaceLedger]:
@@ -326,6 +353,10 @@ class PartEscape:
                 # board has no signal layer left" is a fact a reader should
                 # see rather than infer from a clamped 1.
                 'plane_layers_found': list(self.plane_layers_found),
+                # #1837: the rules, and where each came from -- a number
+                # priced at a fixed default says so.
+                'lane_rules': {k: {'value': round(v, 4), 'source': s}
+                               for k, v, s in self.lane_rules},
                 'worst_deficit_floor': (self.worst_floor.deficit_floor
                                         if self.worst_floor else 0),
                 'worst_face_floor': (self.worst_floor.face
@@ -718,37 +749,113 @@ def lane_pitch(pcb_data, pcb_file: Optional[str] = None,
     feeds is a hard verdict: at 0.2mm a face passes and at 0.35mm the same
     face is in deficit, and picking the wrong one manufactures or hides a
     structural finding. Explicit arguments win, then the board's Default
-    netclass, then the repo defaults.
+    netclass, then its board constraint, then the repo defaults -- one call to
+    `lane_rules`, which also says which of those each value came from.
     """
     tw, clr, _dr = _lane_parts(pcb_data, pcb_file, track_width, clearance)
     return tw + clr
 
 
-def _lane_parts(pcb_data, pcb_file, track_width, clearance):
-    """``(track_width, clearance, design_rules_or_None)``.
+class LaneRules(NamedTuple):
+    """The rules an escape is priced at, each with WHERE it came from (#1837).
 
-    The rules come back so the VIA half can be priced off the same read.
+    `sources` maps `track_width` / `clearance` / `via_diameter` to
+    `list_nets.board_floor`'s vocabulary -- 'cli' (or the label a caller
+    passed for a value it resolved itself), 'board netclass', 'board
+    constraint', 'fixed default', 'unreadable project'.
+    """
+    track_width: float
+    clearance: float
+    via_diameter: float
+    sources: Dict[str, str]
+    design_rules: Optional[dict]
+
+    def to_dict(self) -> Dict[str, Dict[str, object]]:
+        """`{name: {'value': mm, 'source': str}}` -- the shape
+        `check_reachability --pad` has always published its floors in."""
+        return {k: {'value': round(getattr(self, k), 4),
+                    'source': self.sources.get(k, 'unknown')}
+                for k in RULE_KEYS}
+
+
+#: The three rules `lane_rules` resolves, in print order.
+RULE_KEYS = ('track_width', 'clearance', 'via_diameter')
+
+
+def lane_rules(pcb_data, pcb_file: Optional[str] = None, *,
+               track_width: Optional[float] = None,
+               clearance: Optional[float] = None,
+               via_diameter: Optional[float] = None,
+               sources: Optional[Dict[str, str]] = None) -> LaneRules:
+    """THE resolver for every escape instrument (#1837): the lane ledger
+    (`check_floorplan --health`, `board_brief`), `check_reachability --part`
+    and `check_reachability --pad` all price a board through this one call.
+
+    Each rule is `list_nets.board_floor`: an explicit value, then the board's
+    Default net class, then its board constraint, then the fallback --
+    `routing_defaults` TRACK_WIDTH / CLEARANCE / VIA_SIZE, the values route.py
+    routes a board at when it declares nothing and is given no flag, and the
+    clearance the placement grades fall back to (`board_floor_knobs`). Until
+    #1837 `--pad` fell back to 0.15 / 0.2 / 0.6 of its own while the ledger
+    and `--part` used these, so one board with no `.kicad_pro` was priced at
+    two sets of rules by one tool, and only `--pad` said so.
+
+    An explicit value that is not positive is unset, as it always was here.
+    `sources` labels explicit values a caller resolved itself (board_brief
+    passes the grading clearance it read); unlabelled ones are 'cli'. No fab
+    wrap: a tool that PREDICTS wraps the result itself (`--pad`, `--part`),
+    and the ledger deliberately does not (`via_pitch`).
     """
     import routing_defaults as defaults
-    dr = None
     path = pcb_file or getattr(pcb_data, 'source_path', None)
-    if path and (track_width is None or clearance is None):
+    fallback = {'track_width': defaults.TRACK_WIDTH,
+                'clearance': defaults.CLEARANCE,
+                'via_diameter': defaults.VIA_SIZE}
+    explicit = {'track_width': track_width, 'clearance': clearance,
+                'via_diameter': via_diameter}
+    labels = dict(sources or {})
+    dr = None
+    if path and any(not explicit[k] or explicit[k] <= 0 for k in RULE_KEYS):
         try:
             import list_nets
             dr = list_nets.read_design_rules(path)
-            if clearance is None:
-                clearance = list_nets.board_default_netclass_param(
-                    path, 'clearance', dr)
-            if track_width is None:
-                track_width = list_nets.board_default_netclass_param(
-                    path, 'track_width', dr)
-        except Exception:                       # noqa: BLE001 - best effort
-            pass
-    if not clearance:
-        clearance = defaults.CLEARANCE
-    if not track_width:
-        track_width = getattr(defaults, 'TRACK_WIDTH', 0.25)
-    return float(track_width), float(clearance), dr
+        except Exception:                       # noqa: BLE001 - disclosed
+            dr = None
+    vals: Dict[str, float] = {}
+    srcs: Dict[str, str] = {}
+    for key in RULE_KEYS:
+        v = explicit[key]
+        if v is not None and v > 0:
+            vals[key], srcs[key] = float(v), labels.get(key, 'cli')
+        elif path:
+            import list_nets
+            vals[key], srcs[key] = list_nets.board_floor(
+                path, key, None, fallback[key], dr)
+        else:
+            vals[key], srcs[key] = float(fallback[key]), 'fixed default'
+    return LaneRules(vals['track_width'], vals['clearance'],
+                     vals['via_diameter'], srcs, dr)
+
+
+def format_rules(rules: Dict[str, Dict[str, object]]) -> str:
+    """`track 0.3 [fixed default] / clearance 0.25 [fixed default] / via 0.5
+    [fixed default] mm` -- one line for a `LaneRules.to_dict()`, so every
+    escape report names its rules the same way."""
+    short = {'track_width': 'track', 'clearance': 'clearance',
+             'via_diameter': 'via'}
+    parts = [f"{short[k]} {rules[k]['value']:g} [{rules[k]['source']}]"
+             for k in RULE_KEYS if k in rules]
+    return ' / '.join(parts) + ' mm' if parts else 'rules unknown'
+
+
+def _lane_parts(pcb_data, pcb_file, track_width, clearance):
+    """``(track_width, clearance, design_rules_or_None)`` from `lane_rules`.
+
+    The rules come back so the VIA half can be priced off the same read.
+    """
+    r = lane_rules(pcb_data, pcb_file, track_width=track_width,
+                   clearance=clearance)
+    return r.track_width, r.clearance, r.design_rules
 
 
 def _part_rect(fp) -> Tuple[float, float, float, float]:
@@ -1487,7 +1594,8 @@ def face_band(rect, face, reach):
 
 
 def _blocked_span(pcb_data, ref, rect, face, reach,
-                  sides=None, containers=None, obstruction_rects=None):
+                  sides=None, containers=None, obstruction_rects=None,
+                  neighbours=None):
     """How much of a face's span is unusable, and WHO took it.
 
     A neighbour parked off a face does not merely crowd it -- its own body
@@ -1533,12 +1641,40 @@ def _blocked_span(pcb_data, ref, rect, face, reach,
     hand-built fixtures in `tests/test_escape_ledger.py` are `_Fp` objects with
     no `PartPads` behind them, and their recorded numbers are pad-centre
     numbers by construction.
+
+    `neighbours` is `_face_neighbours`' list, which `part_escape` builds once
+    per part rather than once per face; None builds it here.
     """
     from .legality import rect_on_sides as _rect_on_sides
     lo, hi, band, horizontal = face_band(rect, face, reach)
-    own = None if sides is None else sides.get(ref)
+    if neighbours is None:
+        neighbours = _face_neighbours(pcb_data, ref, sides, containers,
+                                      obstruction_rects)
+    # #848: charge the SHARED sides, not the whole part (see
+    # `_face_neighbours`, which keeps `shared` for exactly this).
+    obstacles = [(other, _rect_on_sides(g, shared)
+                  if g is not None else _part_rect(ofp))
+                 for other, ofp, g, shared in neighbours]
 
-    obstacles = []
+    blocked, order = span_eaten(lo, hi, band, horizontal, obstacles)
+    return blocked, tuple(r for r, _mm in order)
+
+
+def _face_neighbours(pcb_data, ref, sides=None, containers=None,
+                     obstruction_rects=None):
+    """`[(ref, footprint, CopperGeometry-or-None, shared-sides-or-None)]`:
+    the parts `_blocked_span` may charge against `ref`'s faces, by the two
+    filters its docstring gives (#835) -- a shared board side, not a
+    container.
+
+    `shared` is `own & other` over `sides_occupied`. #848 charges a neighbour
+    the SHARED sides only, not its whole pad box, which would bill the
+    escaping part for copper on a face it never shares. `None` when either
+    side is unknown keeps the whole-part answer -- a caller with a partial
+    map must not silently lose an obstruction, the same rule the three
+    `.get`s here follow."""
+    own = None if sides is None else sides.get(ref)
+    out = []
     for other in sorted(pcb_data.footprints):
         if other == ref:
             continue
@@ -1553,19 +1689,82 @@ def _blocked_span(pcb_data, ref, rect, face, reach,
             continue
         g = (None if obstruction_rects is None
              else obstruction_rects.get(other))
-        # #848: charge the SHARED sides, not the whole part. `own & oth` is
-        # the intersection this loop already computed to decide WHETHER the
-        # neighbour is in the way; charging its whole pad box afterwards bills
-        # the escaping part for copper on a face it never shares. `None` when
-        # either side is unknown keeps today's whole-part answer -- a caller
-        # with a partial map must not silently lose an obstruction, the same
-        # rule the three `.get`s above follow.
         shared = None if (own is None or oth is None) else (own & oth)
-        obstacles.append((other, _rect_on_sides(g, shared)
-                          if g is not None else _part_rect(ofp)))
+        out.append((other, ofp, g, shared))
+    return out
 
-    blocked, order = span_eaten(lo, hi, band, horizontal, obstacles)
-    return blocked, tuple(r for r, _mm in order)
+
+def _pad_on_sides(pad, shared) -> bool:
+    """Does `pad` carry copper on one of the board sides in `shared`? A
+    drilled pad is on every layer; `shared=None` (a side unknown) and a pad
+    with no layer list answer True, losing no served net to a missing map."""
+    if shared is None or (getattr(pad, 'drill', 0) or 0) > 0:
+        return True
+    layers = getattr(pad, 'layers', None)
+    if not layers:
+        return True
+    return any(l in ('*.Cu', 'F&B.Cu') or (l.endswith('.Cu') and l[:1] in shared)
+               for l in layers)
+
+
+def _served_nets(rect, face, reach, nets, neighbours, pad_spans=None):
+    """`{net_id: (neighbour refs, ...)}` for the face nets that END in the
+    escape band (#1836): a charged neighbour has a pad of the net whose
+    copper lies in the band, ACROSS from one of the net's own pads on this
+    face, on a side the two parts share.
+
+    "Across" is along-axis, twice: the target's copper overlaps the face's
+    own span (a pad past the corner is not across this face), and it comes
+    within `reach` -- the band's depth -- of the face pad's own copper, so
+    the track to it is no shallower than 45 degrees. A same-net pad at the
+    far end of a long face is not served this way: getting there runs along
+    the band across every escape in between. `pad_spans` is
+    `{net_id: [(lo, hi), ...]}`, the along-extent of the net's pads on this
+    face; without it (a direct caller) only the span test applies.
+
+    Such a net is served by reaching that pad -- the textbook case is a
+    series resistor array straight across from the IC pins it terminates --
+    so it needs no lane past the neighbour, or past anything. `_blocked_span`
+    used to charge the neighbour against it all the same, and `--health`
+    then named the part the nets are MEANT to reach as the one to move.
+
+    A neighbour's pad of the net that lies BEYOND the band (the far terminal
+    of a two-pad part whose near pad is another net) serves nothing: getting
+    there means passing the near pad. A rail that touches many parts is
+    served only where one of them has a pad of it in this face's band, which
+    is a real place for the rail to land. The test is the pad's own copper
+    box (`legality.pad_box`), the pad centre for a part with no pad model.
+    The neighbour's span stays charged: it is still in the way of every net
+    that does NOT end on it.
+    """
+    if not nets or not neighbours:
+        return {}
+    from .legality import pad_box as _pad_box
+    lo, hi, band, horizontal = face_band(rect, face, reach)
+    want = set(nets)
+    out: Dict[int, List[str]] = {}
+    for other, ofp, g, shared in neighbours:
+        for pad in _pads(ofp):
+            nid = getattr(pad, 'net_id', 0)
+            if nid not in want or other in out.get(nid, ()):
+                continue
+            box = _pad_box(g, pad) if g is not None else None
+            if box is None:
+                box = (pad.global_x, pad.global_y, pad.global_x, pad.global_y)
+            across = (box[1], box[3]) if horizontal else (box[0], box[2])
+            along = (box[0], box[2]) if horizontal else (box[1], box[3])
+            if across[1] < band[0] or across[0] > band[1]:
+                continue
+            if along[1] < lo or along[0] > hi:
+                continue                  # not across this face at all
+            mine = (pad_spans or {}).get(nid)
+            if mine and not any(along[1] >= a - reach and along[0] <= b + reach
+                                for a, b in mine):
+                continue                  # across the face, not from its pin
+            if not _pad_on_sides(pad, shared):
+                continue
+            out.setdefault(nid, []).append(other)
+    return {n: tuple(sorted(r)) for n, r in out.items()}
 
 
 def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
@@ -1580,8 +1779,12 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                 obstruction_rects: Optional[Dict[str, Tuple]] = None,
                 clearance: Optional[float] = None,
                 track_width: Optional[float] = None,
-                pcb_file: Optional[str] = None) -> PartEscape:
+                pcb_file: Optional[str] = None,
+                lane_rules_used: Optional[LaneRules] = None) -> PartEscape:
     """The full per-face ledger for one part.
+
+    `lane_rules_used` is the `LaneRules` the caller priced `pitch_mm` from,
+    published on the row (#1837); `escape_ledger` passes it.
 
     `ignore_net_ids` drops plane-routed rails, exactly as elsewhere in this
     module: a GND pad does not need a lane, it needs a via to the plane, and
@@ -1661,6 +1864,8 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     asg = assign_faces(fp, own, lane_mm=lane, fallback_rect=rect,
                        clearance=clr, track_width=tw, through_row=True)
     demand: Dict[str, List[int]] = {f: [] for f in FACES}
+    spans: Dict[str, Dict[int, list]] = {f: {} for f in FACES}
+    from .legality import pad_box as _own_pad_box
     interior: List[int] = []
     interior_box = 0
     through = 0
@@ -1679,17 +1884,27 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
             interior.append(nid)
         else:
             demand[face].append(nid)
+            # #1836: where along the face this pad stands, for `_served_nets`
+            box = None if own is None else _own_pad_box(own, pad)
+            if box is None:
+                box = (pad.global_x, pad.global_y, pad.global_x, pad.global_y)
+            along = ((box[0], box[2]) if face in ('north', 'south')
+                     else (box[1], box[3]))
+            spans[face].setdefault(nid, []).append(along)
 
     faces: List[FaceLedger] = []
+    neighbours = _face_neighbours(pcb_data, ref, sides, containers,
+                                  obstruction_rects)
     for f in FACES:
         x1, y1, x2, y2 = _face_geometry(rect, f)
         span = math.hypot(x2 - x1, y2 - y1)
         blocked, blockers = _blocked_span(pcb_data, ref, rect, f, reach,
-                                          sides=sides,
-                                          containers=containers,
-                                          obstruction_rects=obstruction_rects)
+                                          neighbours=neighbours)
         usable = max(0.0, span - blocked)
         nets = tuple(sorted(set(demand[f])))
+        # #1836: nets that end on a neighbour across the band need no lane.
+        served = _served_nets(rect, f, reach, nets, neighbours,
+                              pad_spans=spans[f])
         faces.append(FaceLedger(
             ref=ref, face=f, span_mm=span, lane_pitch_mm=lane,
             supply=int(usable // lane) if lane > 0 else 0,
@@ -1700,7 +1915,14 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
             signal_layers_source=signal_layers_source,
             escape_band_mm=band.mm,
             escape_band_source=band.source,
-            escape_band_basis=band.basis))
+            escape_band_basis=band.basis,
+            served_nets=tuple(sorted(served)),
+            served_by=tuple(sorted({r for rs in served.values()
+                                    for r in rs}))))
+    rules = (() if lane_rules_used is None else tuple(
+        (k, getattr(lane_rules_used, k), lane_rules_used.sources.get(k,
+                                                                     'unknown'))
+        for k in RULE_KEYS))
     return PartEscape(ref=ref, pitch_mm=pitch, faces=tuple(faces),
                       interior_pads=len(interior),
                       interior_nets=tuple(sorted(set(interior))),
@@ -1711,7 +1933,8 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                       corridor_track_mm=asg.corridor_track_mm,
                       face_pitch_mm=asg.pitch_mm,
                       face_pitch_source=asg.pitch_source,
-                      through_row_pads=through)
+                      through_row_pads=through,
+                      lane_rules=rules)
 
 
 def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
@@ -1725,7 +1948,8 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
                   hole_to_hole: Optional[float] = None,
                   signal_layers: Optional[int] = None,
                   plane_layers: Optional[Sequence[str]] = None,
-                  fine_at_board_rules: bool = False
+                  fine_at_board_rules: bool = False,
+                  rule_sources: Optional[Dict[str, str]] = None
                   ) -> List[PartEscape]:
     """Ledgers for every fine-pitch part, worst deficit first.
 
@@ -1745,14 +1969,20 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
     reported so a reader can see which answer they got. `reach_mm` reaches
     `part_escape`'s escape-band depth, which was previously unreachable
     through this entry point at all.
+
+    The rules are `lane_rules` (#1837), published on every row with their
+    sources; `rule_sources` labels an explicit value the caller resolved
+    itself, which is otherwise reported as 'cli'.
     """
-    tw, clr, dr = lane_pitch_parts(pcb_data, pcb_file, track_width, clearance,
-                                   return_rules=True)
+    rules = lane_rules(pcb_data, pcb_file, track_width=track_width,
+                       clearance=clearance, via_diameter=via_diameter,
+                       sources=rule_sources)
+    tw, clr, dr = rules.track_width, rules.clearance, rules.design_rules
     lane = tw + clr
     # The via half is priced at the SAME clearance the lane half resolved, so
     # the two numbers on one row cannot come from different rules.
     vpitch = via_pitch(pcb_data, pcb_file, clearance=clr,
-                       via_diameter=via_diameter, via_drill=via_drill,
+                       via_diameter=rules.via_diameter, via_drill=via_drill,
                        hole_to_hole=hole_to_hole, design_rules=dr)
     nsig, source, planes = signal_layer_count(
         pcb_data, signal_layers=signal_layers, plane_layers=plane_layers)
@@ -1773,7 +2003,8 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
                        signal_layers_source=source, plane_layers_found=planes,
                        sides=sides, containers=containers,
                        obstruction_rects=orects,
-                       clearance=clr, track_width=tw)
+                       clearance=clr, track_width=tw,
+                       lane_rules_used=rules)
            for r in targets if r in pcb_data.footprints]
     # Sorted by the OWN-LAYER deficit, unchanged. It selects `escape_lanes[:10]`
     # and board_brief's `worst[:WORST_N]`, and feeds

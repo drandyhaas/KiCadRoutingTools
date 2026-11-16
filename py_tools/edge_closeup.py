@@ -26,7 +26,10 @@ How the camera is set, measured on kicad-cli 10 (orthographic view):
 Each REF is rendered from outside the outline edge its pads are nearest
 (`REF:north|south|east|west` names it instead): `back` stands outside the
 north edge, `front` the south, `left` the west, `right` the east. Prints one
-line per part and, with `--json PATH`, the same as JSON. A part whose
+line per part and, with `--json PATH`, the same as JSON. A part read on its
+nearest edge whose next-nearest edge is within CORNER_MARGIN_MM of it (a
+corner) says so -- "corner: also N mm from <edge>" (`corner` in the JSON) --
+since the nearest edge is then no guide to the one it faces (#1771). A part whose
 3D model is not declared or does not resolve is listed as such: the render
 shows its pads only and says nothing about its mouth.
 """
@@ -52,6 +55,14 @@ import tempfile
 DEFAULT_PX_PER_MM = 40.0
 #: Which `--side` stands outside which outline edge.
 SIDES = {'north': 'back', 'south': 'front', 'west': 'left', 'east': 'right'}
+#: #1771: a part read on its nearest edge is called a CORNER part when the
+#: next-nearest edge's gap is within this of the nearest one's. An edge part
+#: is seated about 0.75 mm in from its edge (the setback check_floorplan
+#: compiles `edge_mount` to), so a part seated to EITHER of two edges sits
+#: within about 1 mm of both: below that difference the pads' gaps do not
+#: say which edge it faces (tigard's J7 in a corner, mouth south: 0.255 mm
+#: from west, 0.400 mm from south, rendered side-on from the west).
+CORNER_MARGIN_MM = 1.0
 
 
 def _cli():
@@ -109,11 +120,26 @@ def _pads_rect(fp):
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def edge_gaps(rect, bounds):
+    """{edge: the rect's gap to that outline edge (mm)}."""
+    return {'west': rect[0] - bounds[0], 'north': rect[1] - bounds[1],
+            'east': bounds[2] - rect[2], 'south': bounds[3] - rect[3]}
+
+
 def nearest_edge(rect, bounds):
     """The outline edge (north/south/east/west) the rect is nearest."""
-    d = {'west': rect[0] - bounds[0], 'north': rect[1] - bounds[1],
-         'east': bounds[2] - rect[2], 'south': bounds[3] - rect[3]}
+    d = edge_gaps(rect, bounds)
     return min(d, key=d.get)
+
+
+def corner_edge(rect, bounds, margin=CORNER_MARGIN_MM):
+    """#1771: (the next-nearest edge, its gap in mm) when that gap is within
+    `margin` of the nearest edge's -- a corner part, or one as long as the
+    board's side, whose nearest edge is no guide to the edge it faces --
+    else None."""
+    d = sorted(edge_gaps(rect, bounds).items(), key=lambda kv: kv[1])
+    (_e1, g1), (e2, g2) = d[0], d[1]
+    return (e2, g2) if g2 - g1 <= margin else None
 
 
 def _model_states(board, refs):
@@ -166,16 +192,17 @@ def closeups(board, specs, out_dir, px_per_mm=DEFAULT_PX_PER_MM,
         if edge not in SIDES:
             raise RuntimeError(f'{spec}: the edge is one of '
                                f'{", ".join(SIDES)}')
-        parts.append((ref, rect, basis, edge))
+        corner = corner_edge(rect, bounds) if basis == 'nearest' else None
+        parts.append((ref, rect, basis, edge, corner))
     cli = cli or _cli()
     if not cli:
         raise RuntimeError('kicad-cli not found (set KICAD_CLI)')
     cx, cy = (bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0
     os.makedirs(out_dir, exist_ok=True)
-    models = _model_states(board, {ref for ref, _, _, _ in parts})
+    models = _model_states(board, {p[0] for p in parts})
     scale1, rows = {}, []
     with tempfile.TemporaryDirectory() as tmp:
-        for ref, rect, basis, edge in parts:
+        for ref, rect, basis, edge, corner in parts:
             side = SIDES[edge]
             if side not in scale1:
                 scale1[side] = px_per_mm_at_zoom1(cli, board, side, width,
@@ -195,7 +222,10 @@ def closeups(board, specs, out_dir, px_per_mm=DEFAULT_PX_PER_MM,
                          'zoom': round(zoom, 4),
                          'pivot_cm': [round(v, 4) for v in pivot],
                          'pads_span_px': round(span * px_per_mm),
-                         'model': models.get(ref, 'none')})
+                         'model': models.get(ref, 'none'),
+                         'corner': ({'edge': corner[0],
+                                     'gap_mm': round(corner[1], 3)}
+                                    if corner else None)})
     return rows
 
 
@@ -229,7 +259,11 @@ def main(argv=None) -> int:
                  ' -- its 3D model %s: the render shows its pads only, and '
                  'nothing about its mouth'
                  % ('is not declared' if r['model'] == 'none'
-                    else 'does not resolve')))
+                    else 'does not resolve'))
+              + ('' if not r.get('corner') else
+                 ' -- corner: also %.2f mm from %s; name the edge it faces '
+                 '(%s:<edge>, from its intent row)'
+                 % (r['corner']['gap_mm'], r['corner']['edge'], r['ref'])))
     if args.json:
         with open(args.json, 'w', encoding='utf-8') as fh:
             json.dump(rows, fh, indent=1)

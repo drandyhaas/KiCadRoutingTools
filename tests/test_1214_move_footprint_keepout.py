@@ -18,6 +18,9 @@ KiCad's rotation sense. A test that re-derives the rotation itself would
 share any sign mistake in the writer and pass it: the first version of this
 fix turned zones the opposite way to their pads, and its test agreed.
 
+A stored `(filled_polygon ...)` is absolute too and goes with the outline
+(#1927), on a move, a turn and a flip.
+
 No case rotates by 180 degrees, because both rotation senses give the same
 answer there.
 
@@ -190,7 +193,6 @@ def _run_case(base, tmp, ref, dx, dy, delta_rot):
 
 def main():
     from kicad_parser import parse_kicad_pcb
-    from placement.writer import SideFlipUnsupported, write_placed_output
 
     if not os.path.isfile(BOARD):
         print(f"ERROR: board not found: {BOARD}")
@@ -206,24 +208,11 @@ def main():
             problems.extend(got)
             srcs.setdefault(ref, src)
 
-        # A fill is absolute too and this move does not carry it, so a zone
-        # with one must refuse and say why rather than leave the fill behind.
-        fp = base.footprints['J7']
-        filled = os.path.join(tmp, 'filled.kicad_pcb')
-        text = open(srcs['J7'], encoding='utf-8').read().replace(
-            "\t\t\t(polygon (pts ",
-            "\t\t\t(filled_polygon (layer \"B.Cu\") (pts (xy 0 0) (xy 1 0) (xy 1 1)))\n"
-            "\t\t\t(polygon (pts ", 1)
-        with open(filled, 'w', encoding='utf-8') as fh:
-            fh.write(text)
-        try:
-            write_placed_output(filled, os.path.join(tmp, 'filled-out.kicad_pcb'), [{
-                'reference': 'J7', 'new_x': fp.x + 5.0, 'new_y': fp.y + 3.0,
-                'new_rotation': ((fp.rotation or 0.0) + 90.0) % 360}])
-            problems.append("a zone with a (filled_polygon ...) moved without refusing")
-        except SideFlipUnsupported as e:
-            if 'filled_polygon' not in str(e):
-                problems.append(f"the fill refusal does not name its construct: {e}")
+        # A stored fill is absolute too, and pcbnew carries it with the
+        # outline (#1927). The fill is drawn on the outline's own points, so
+        # wherever the outline goes -- onto its pads on a move, mirrored on a
+        # flip -- the fill must go point for point.
+        problems.extend(_fill_cases(base, tmp, srcs['J7']))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -233,8 +222,74 @@ def main():
             print("  " + p)
         return 1
     print(f"PASS: {len(CASES)} moves and rotations carry the keep-out zone "
-          f"and the point with the footprint's pads")
+          f"and the point with the footprint's pads; a stored fill goes with "
+          f"the outline on a move, a turn and a flip")
     return 0
+
+
+def _fill_pts(path, ref):
+    """(outline pts, [(layer, fill pts), ...]) of the first zone in `ref`."""
+    from kicad_parser import iter_footprint_blocks
+    text = open(path, encoding='utf-8').read()
+    for _s, _e, fp_text, _raw, key in iter_footprint_blocks(text):
+        if key != ref:
+            continue
+        rd = lambda s: [(float(x), float(y)) for x, y in
+                        re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', s)]
+        o = re.search(r'\(polygon\s+\(pts(.*?)\)\s*\)', fp_text, re.S)
+        fills = re.findall(r'\(filled_polygon\s+\(layer\s+"([^"]+)"\)\s*'
+                           r'(?:\(island\)\s*)?\(pts(.*?)\)\s*\)', fp_text, re.S)
+        return (rd(o.group(1)) if o else None), [(lay, rd(p)) for lay, p in fills]
+    return None, []
+
+
+def _fill_cases(base, tmp, src):
+    from placement.writer import (SideFlipUnsupported, move_refusals,
+                                  write_placed_output)
+    problems = []
+    fp = base.footprints['J7']
+    text = open(src, encoding='utf-8').read()
+    m = re.search(r'\t\t\t\(polygon \(pts ([^\n]*)\)\)\n', text)
+    filled = os.path.join(tmp, 'filled.kicad_pcb')
+    with open(filled, 'w', encoding='utf-8') as fh:
+        fh.write(text[:m.end()] + f'\t\t\t(filled_polygon (layer "B.Cu") (island) '
+                 f'(pts {m.group(1)}))\n' + text[m.end():])
+    if move_refusals(filled, {'J7'}):
+        problems.append(f"move_refusals refuses a zone with a stored fill: "
+                        f"{move_refusals(filled, {'J7'})}")
+    rot = fp.rotation or 0.0
+    for tag, place, layer in (
+            ('move', {'new_x': fp.x + 5.0, 'new_y': fp.y + 3.0, 'new_rotation': rot}, 'B.Cu'),
+            ('turn', {'new_x': fp.x - 2.0, 'new_y': fp.y + 4.0,
+                      'new_rotation': (rot + 30.0) % 360}, 'B.Cu'),
+            ('flip', {'new_x': fp.x + 1.0, 'new_y': fp.y, 'new_rotation': (-rot) % 360,
+                      'new_side': 'B'}, 'F.Cu')):
+        out = os.path.join(tmp, f'filled-{tag}.kicad_pcb')
+        try:
+            write_placed_output(filled, out, [{'reference': 'J7', **place}])
+        except SideFlipUnsupported as e:
+            problems.append(f"fill {tag}: the writer refused: {e}")
+            continue
+        outline, fills = _fill_pts(out, 'J7')
+        if len(fills) != 1:
+            problems.append(f"fill {tag}: {len(fills)} filled_polygon(s) came out, not 1")
+            continue
+        lay, pts = fills[0]
+        if lay != layer:
+            problems.append(f"fill {tag}: the fill is on {lay}, not {layer}")
+        if outline is None or len(pts) != len(outline) or max(
+                math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(pts, outline)) > TOL:
+            problems.append(f"fill {tag}: the fill did not go with the outline")
+    # KiCad 5's (fill_segments ...) is not carried: refused, and said before
+    # a placement run starts, not when it writes
+    seg = os.path.join(tmp, 'segments.kicad_pcb')
+    with open(seg, 'w', encoding='utf-8') as fh:
+        fh.write(text[:m.end()] + '\t\t\t(fill_segments (pts (xy 0 0) (xy 1 1)))\n'
+                 + text[m.end():])
+    why = move_refusals(seg, {'J7'}).get('J7', '')
+    if 'fill_segments' not in why:
+        problems.append(f"move_refusals does not name a (fill_segments ...): {why!r}")
+    return problems
 
 
 if __name__ == '__main__':

@@ -645,6 +645,24 @@ class DifferentialTab(wx.Panel):
         self.intra_match_check.SetToolTip("Add meanders to shorter track of each pair for P/N matching")
         options_sizer.Add(self.intra_match_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # #1869: the lane a matched pair is measured on (route_diff's
+        # --diff-pair-intra-lane). Named after the engine parameter, so a
+        # plan step sets it by name.
+        lane_row = wx.BoxSizer(wx.HORIZONTAL)
+        lane_row.Add(wx.StaticText(self, label="Intra-pair lane:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.diff_pair_intra_lane = wx.TextCtrl(self, value="", size=(180, -1))
+        self.diff_pair_intra_lane.SetToolTip(
+            "Match, record and grade each intra-matched pair on its lane -- the "
+            "copper path between two pads -- instead of total copper, so a branch "
+            "to a third pad counts as a stub (#1869). 'auto' (the two terminals "
+            "the pair step routes) or P_NET=REF.PAD:REF.PAD ..., space separated. "
+            "Needs intra-pair matching; a pair a .kicad_dru skew rule binds is "
+            "matched on total copper, as KiCad grades the rule. "
+            "Empty: total copper, as KiCad's skew DRC measures.")
+        lane_row.Add(self.diff_pair_intra_lane, 1, wx.ALIGN_CENTER_VERTICAL)
+        options_sizer.Add(lane_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.ac_couple_check = wx.CheckBox(self, label="AC-coupled end-to-end matching")
         self.ac_couple_check.SetValue(False)
         self.ac_couple_check.SetToolTip("Length-match diff pairs split by series DC-blocking caps "
@@ -946,9 +964,11 @@ class DifferentialTab(wx.Panel):
     def _update_progress(self, current, total, step_name):
         """Update progress bar and status."""
         if total > 0:
-            percent = int(100 * current / total)
-            self.progress_bar.SetValue(percent)
+            # Range first, then a clamped value (#1751): wx asserts on a
+            # position past the range.
             self.progress_bar.SetRange(100)
+            self.progress_bar.SetValue(
+                max(0, min(100, int(100 * current / total))))
             self.status_text.SetLabel(f"{step_name} ({current}/{total})")
         else:
             # Setup phase - no count, just show the step name
@@ -959,6 +979,9 @@ class DifferentialTab(wx.Panel):
         """Run differential pair routing in a background thread."""
         import sys
         import time
+        # The run's wall time, as the Route tab reports it (#1780): the
+        # engine's total_time is the net search alone.
+        t0 = time.time()
 
         # Fresh clearance ledger so a prior op's fine-pitch clearance doesn't
         # leak into this board's DRC floor.
@@ -1068,6 +1091,9 @@ class DifferentialTab(wx.Panel):
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 via_from_class=config.get('via_from_class', False),
+                # #1842: the route tab's Via Span, as route_diff.py --via-span
+                via_span=config.get('via_span'),
+                via_span_type=config.get('via_span_type'),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance',
                                                   defaults.HOLE_TO_HOLE_CLEARANCE),
                 board_edge_clearance=config.get('board_edge_clearance',
@@ -1089,6 +1115,7 @@ class DifferentialTab(wx.Panel):
                 polarity_swap_nets=config.get('polarity_swap_nets'),
                 gnd_via_enabled=config.get('gnd_via_enabled', True),
                 diff_pair_intra_match=config.get('diff_pair_intra_match', False),
+                diff_pair_intra_lane=config.get('diff_pair_intra_lane') or None,
                 ac_couple_match=config.get('ac_couple_match', False),
                 enable_layer_switch=config.get('enable_layer_switch', True),
                 debug_lines=config.get('debug_lines', False),
@@ -1181,6 +1208,7 @@ class DifferentialTab(wx.Panel):
                 'successful': successful,
                 'failed': failed,
                 'total_time': total_time,
+                'wall_time': time.time() - t0,
                 'results_data': results_data,
                 'config': config,
             }
@@ -1249,7 +1277,7 @@ class DifferentialTab(wx.Panel):
 
         successful = result.get('successful', 0)
         failed = result.get('failed', 0)
-        total_time = result.get('total_time', 0)
+        wall_time = result.get('wall_time', 0)
         results_data = result.get('results_data', {})
 
         # Apply results to the board
@@ -1259,7 +1287,7 @@ class DifferentialTab(wx.Panel):
         from .gui_utils import mark_plan_step_produced
         mark_plan_step_produced(self)
 
-        self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed in {total_time:.1f}s")
+        self.status_text.SetLabel(f"Complete: {successful} routed, {failed} failed in {wall_time:.1f}s")
 
         single_ended_pairs = results_data.get('single_ended_diff_pairs', [])
         skipped_bad_fanout = results_data.get('skipped_bad_fanout', [])
@@ -1271,11 +1299,21 @@ class DifferentialTab(wx.Panel):
             # The CLI summary's wording: a deferred pair is electrically
             # short, or its coupled route failed (#165, and a 2-terminal
             # pair's fallback defer), which is not the same thing.
-            from diff_pair_custody import deferred_reasons_text
+            # #1764: only the electrically short ones are routed single-ended
+            # next by design; a failed pair is retried as a pair.
+            from diff_pair_custody import deferred_reasons_text, split_deferred_pairs
             _why = deferred_reasons_text(results_data.get('pair_reports'),
                                          single_ended_pairs)
-            msg += (f"Deferred to single-ended: {len(single_ended_pairs)} "
-                    f"({_why} - route these single-ended next)\n")
+            _design, _failed = split_deferred_pairs(
+                results_data.get('pair_reports'), single_ended_pairs)
+            msg += f"Deferred to single-ended: {len(single_ended_pairs)} ({_why})\n"
+            if _design:
+                msg += (f"  by design, route these single-ended next: "
+                        f"{', '.join(_design)}\n")
+            if _failed:
+                msg += (f"  coupled route failed, retry these as pairs "
+                        f"(Force re-route), not single-ended: "
+                        f"{', '.join(_failed)}\n")
         if skipped_bad_fanout:
             msg += (f"Skipped: {len(skipped_bad_fanout)} "
                     f"(fanout stubs self-overlap - fix the fanout first)\n")
@@ -1305,7 +1343,15 @@ class DifferentialTab(wx.Panel):
         if _intra_bad:
             msg += (f"Intra-pair skew NOT matched on the board: "
                     f"{', '.join(_intra_bad)}\n")
-        msg += f"Time: {total_time:.1f}s\n\n"
+        # #1799: a chain's member pairs read `skipped` above (the chain is
+        # matched end to end instead), so the chain's own verdict is named
+        # here, worded as the engine's "AC-coupled chain NOT matched" line.
+        from length_matching import ac_chains_not_matched
+        _chain_bad = ac_chains_not_matched(results_data.get('ac_coupled_xnets'))
+        if _chain_bad:
+            msg += (f"AC-coupled chain NOT matched end to end: "
+                    f"{', '.join(_chain_bad)}\n")
+        msg += f"Time: {wall_time:.1f}s\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
         msg += f"  {vias_added} vias\n"
@@ -1475,6 +1521,9 @@ class DifferentialTab(wx.Panel):
                 # step_hole_clearance, from the tab's applied lists.
                 _hole_clr = self._held_hole_clearance(board, results_data,
                                                       eff_clearance)
+                # #1842: the micro vias' own rule, as fix_project_for_output writes it
+                from .gui_utils import live_micro_via_rule
+                live_micro_via_rule(self.pcb_data, board, results_data, eff_clearance)
                 targets = compute_targets(
                     clearance=eff_clearance,
                     hole_clearance=_hole_clr,
@@ -1616,6 +1665,8 @@ class DifferentialTab(wx.Panel):
             'polarity_swap_nets': self.get_polarity_swap_nets(),
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
+            # #1869: 'auto' or P_NET=REF.PAD:REF.PAD ..., None when empty
+            'diff_pair_intra_lane': self.diff_pair_intra_lane.GetValue().split() or None,
             'ac_couple_match': self.ac_couple_check.GetValue(),
         }
 

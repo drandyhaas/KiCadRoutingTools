@@ -172,10 +172,29 @@ def t_resolver(d):
           any("'hs_gap'" in n and 'handled by the scoped channel' in n for n in m.notes)
           and getattr(m, 'channels', None) is not None
           and 'hs_gap' in m.channels.scoped.names, f'{m.notes}')
+    # a scoped rule the channel did not read is "NOT priced here", with a
+    # (layer ...) clause too (#1897: that note ends "(#1491, #1897)")
+    from types import SimpleNamespace
+    from placement.legality import _channel_notes
+    unread = SimpleNamespace(scoped=SimpleNamespace(names=()), coupled_dr=None,
+                             coupled_nets=())
+    for tag, note in (
+            ('no clause', ".kicad_dru: rule 'r': clearance 0.3mm scoped by net class / "
+                          "item type / net name -- handled by the scoped channel (#1491)"),
+            ('a layer clause', ".kicad_dru: rule 'r': clearance 0.3mm scoped by net class / "
+                               "item type / net name on In1.Cu -- handled by the scoped "
+                               "channel (#1491, #1897)")):
+        got = _channel_notes([note], unread)
+        # MUTATION: match the tail with endswith('... (#1491)') -> the layered
+        # note keeps "handled" for a rule nothing here prices
+        check(f'{tag}: an unread scoped rule is NOT priced here',
+              len(got) == 1 and 'NOT priced here' in got[0]
+              and 'handled by' not in got[0], f'{got}')
     m = PadClearanceModel.for_board(parse_kicad_pcb(stage(d, 'coupled')), 0.15,
                                     stage(d, 'coupled'))
-    # MUTATION: `_channel_notes` returns `notes` unchanged -> "skipped, KiCad
-    # will still enforce it" for a rule the model prices
+    # MUTATION: kicad_dru._parse_dru_full's coupled branch dropped -> "skipped,
+    # KiCad will still enforce it" for a rule the model prices (#1293: the
+    # parser names the channel, and placement passes the note through)
     check('coupled: the P/N rule is named handled, not skipped',
           any("'pn'" in n and 'coupled-pair channel' in n for n in m.notes)
           and not any("'pn'" in n and 'skipped' in n for n in m.notes), f'{m.notes}')

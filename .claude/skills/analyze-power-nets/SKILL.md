@@ -156,6 +156,16 @@ OUTPUTS (a buck's switch node -- its output rail is reached through the
 inductor, classified PASS_THROUGH), and `input_nets` its input rail when its
 pins do not say: `classify_component(components, 'U3', ComponentRole.POWER_SOURCE,
 current_rating_ma=2000, supply_nets=['/power/L1'], input_nets=['+5V'])`.
+`input_nets` is authoritative: when given, the part's IN-named and `power_in`
+pins are not read as inputs at all, so name EVERY rail that carries the
+part's current and leave out a bias or sense pin on another rail. That is how
+to classify an eFuse, hot-swap or ideal-diode controller whose bias pin sits
+on the raw input while its IN is behind a series FET: name the IN net
+(`input_nets=['PWR_FET']`), or the trace reaches the raw rail straight through
+the bias pin and the net between the FET and the part carries none of the
+load. Without `input_nets`, `get_power_net_recommendations` warns when two
+inputs of one classified source are joined through pass-through parts, naming
+the net that got no width and the `input_nets` that fixes it (#1774).
 Without an input it is a root source, and the load behind it never reaches its
 input rail: `get_power_net_recommendations` warns for each source that is a
 root with pads on two or more rails (#1496). A classified part that still reaches no

@@ -66,14 +66,18 @@ def _locked_net_ids(pcb_data: PCBData) -> frozenset:
     """Nets holding KiCad-locked copper, or copper a `sense:` group holds
     (#1279, is_immutable_copper). Memoized against the copper lists'
     identity and length: get_stub_info runs per stub per candidate layer, and
-    a board without locked copper must not pay a walk for each call."""
+    a board without locked copper must not pay a walk for each call.
+    Copper a via-span step has set aside for a call is the net's too (#1842,
+    `via_span.set_aside`; the set-aside drops this memo going in and out)."""
     key = (id(pcb_data.segments), len(pcb_data.segments),
            id(pcb_data.vias), len(pcb_data.vias))
     memo = getattr(pcb_data, '_locked_net_ids_memo', None)
     if memo is None or memo[0] != key:
-        ids = frozenset({s.net_id for s in pcb_data.segments
+        from via_span import set_aside
+        aside = set_aside(pcb_data)
+        ids = frozenset({s.net_id for s in list(pcb_data.segments) + aside.get('segments', [])
                          if is_immutable_copper(s)}
-                        | {v.net_id for v in pcb_data.vias
+                        | {v.net_id for v in list(pcb_data.vias) + aside.get('vias', [])
                            if is_immutable_copper(v)})
         memo = (key, ids)
         try:
@@ -907,12 +911,13 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
     # A keep-out rule area forbidding vias, as check_drc grades it, and the
     # interior of a filled graphic (#1683): the track loop above measures to
     # its strokes only, and a graphic never moves with a swap partner.
-    from check_drc import filled_graphic_refusal, keepout_refusal
+    from check_drc import filled_graphic_refusal, hole_rule_refusal, keepout_refusal
     probe = [Via(x=pad_x, y=pad_y, size=2 * via_r, drill=config.via_drill,
                  layers=['F.Cu', 'B.Cu'], net_id=net_id)]
-    why = keepout_refusal(pcb_data, vias=probe) or filled_graphic_refusal(
+    why = (keepout_refusal(pcb_data, vias=probe) or filled_graphic_refusal(
         pcb_data, vias=probe,
         clearance=lambda sh: config.pair_clearance(net_id, sh.net_id, sh.layer))
+        or hole_rule_refusal(pcb_data, getattr(config, 'rules', None), vias=probe))
     if why:
         return False, f"pad via at ({pad_x:.2f},{pad_y:.2f}): {why}"
     return True, ""
@@ -1013,7 +1018,8 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
 
     Deterministic pure function of board state: validate_swap and
     apply_stub_layer_switch both call it and get the same answer."""
-    from fab_tiers import escalation_rungs, warn_fab_escalation, note_narrowing
+    from fab_tiers import (escalation_rungs, warn_fab_escalation, note_narrowing,
+                           ladder_escalates)
     # `or 2` is the documented "layer count unknown -> assume 2" default, but
     # it was only reachable for an EMPTY copper_layers list: a PCBData whose
     # board_info is absent raised AttributeError instead (c5509b7 gave this
@@ -1035,7 +1041,7 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
             via_size=v_dia)
         if clear:
             if i > 0:
-                if ladder and v_dia < ladder[0]['via_diameter'] - 1e-9:
+                if ladder_escalates(ladder, v_dia, v_drill):
                     warn_fab_escalation(f"layer-switch pad via (net {net_id})")
                 note_narrowing(net_id, 'via_diameter', config.via_size, v_dia,
                                'layer-switch pad via')

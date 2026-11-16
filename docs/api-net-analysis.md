@@ -355,6 +355,32 @@ through the barrel (#1314; before, the pad met only track ends and such a net
 read as not joined). Two of the pads whose copper touches on a shared layer
 join each other (#1629: a module's two overlapping same-number pads).
 
+When no track path joins the two pads, the net's other copper pads are
+attached as well (#1867), so a path that runs **through** one is walked: a
+lane that enters an in-line part's pad (an ESD device, a test point) at one
+point and leaves it at another, with no track between the two. A pad the
+path only passes is charged in its plane **the way a via is** (#1583): each
+track is measured up to where its centreline crosses the pad's copper
+outline (the exact outline: rotation, rounded corners, custom shapes), and
+the walk is charged the straight line from that edge point to the pad's
+centre, then from the centre straight to the edge point it leaves at. The
+track inside the pad is not counted on top of that hop. Where no track
+crosses the outline the hop starts at the copper the walk does meet: a
+track end inside the pad or whose round end touches it, the centre of a via
+whose copper overlaps it, or the centre of another passed pad whose copper
+touches it. Changing layer in a drilled pad's barrel costs nothing, as in
+an end pad. The two end pads stay free, and so does a pad whose copper
+touches one of them (#1629: one terminal, such as a module's overlapping
+twin of that pad). Before, such a path read `None` on a connected net. A
+length the track copper alone gives is unchanged: the other pads are not
+attached for it.
+
+For example, a lane that enters a 1.06 x 0.65 mm roundrect pad on a
+45-degree run and leaves it off its centre line through a rounded corner
+is charged 0.546 + 0.562 = 1.108 mm across the pad, where the 0.184 + 0.326
+mm of track inside it plus two hops from the track ends to the centre
+(0.400 + 0.283 mm) read 1.192 mm.
+
 Returns `None` when no track path joins the two pads: an unrouted or broken
 net, or one whose pads meet only through a **zone** (pours are not traversed).
 `0.0` means the pads' copper touches directly.
@@ -377,7 +403,9 @@ print(f"{net.name}: {total:.2f} mm total copper, "
 ```python
 net_pads_joined(pcb_data, net_id, pads=None, tolerance=0.02) -> bool
 net_match_length(pcb_data, net_id, mode='total', tolerance=0.02,
-                 include_pad_to_die=True) -> Optional[float]
+                 include_pad_to_die=True, pads=None) -> Optional[float]
+pin_pair_pads(pcb_data, net_id, pads=None, tolerance=0.02, detail=None)
+    -> Optional[Tuple[Pad, Pad]]
 ```
 
 `net_copper_length` reports whatever copper a net has, routed or not: a net
@@ -391,8 +419,52 @@ not traversed)?
 `net_match_length` is the one measurement every length-match grader uses
 (`board_score.py --length-groups`, the review-routed-board recipe): total net
 copper (`mode='total'`) only once `net_pads_joined` holds, or the path between
-the net's first two pads (`mode='pin_pair'`). `None` in either mode means "not
+two pads of the net (`mode='pin_pair'`). `None` in either mode means "not
 routed yet" (unrouted, stub-only, broken or plane-only), never `0.0`.
+
+Which two pads `'pin_pair'` measures is `pin_pair_pads(pcb, net_id, pads)`
+(#1866): `pads` when given -- two of the net's copper pads, each a `Pad` or
+its `REF.PAD` label, a `ValueError` saying why when they are not. Without
+it the pair is chosen from the net's **copper** pads (an NPTH hole or a
+paste-only pad is no end of a lane), whatever order the board file lists
+its footprints in:
+
+- two copper pads: those two;
+- three or more, all joined by track copper (`net_pads_joined`): the two
+  **farthest apart along the copper** (`pin_pair_path_length` over every
+  pair), the lane's ends;
+- three or more, not all joined: the two whose centres are farthest apart
+  in a **straight line**. A copper length is not defined for a pad no track
+  reaches, and the farthest of the pairs that are joined would grade part
+  of a broken lane as the whole of it; the straight line names the pair the
+  routed lane will have to join, and its length reads `None` while that
+  pair is apart.
+
+Ties (lengths equal to the nanometre) go to the pair whose `REF.PAD` labels
+come first in natural order (`U1.9` before `U1.10`), and the pair comes back
+in that order. `detail`, when given, is
+filled with `how` (`named`, `two_pads`, `farthest_along_copper`,
+`farthest_straight_line`) and `ambiguous`: True when the pair was chosen
+from three or more copper pads, where the lane's ends were assumed rather
+than stated. `net_match_length`, `net_match_pad_to_die` and `measure_chain`
+take `pads`; `board_score --length-groups` reads a group's `"pads": {net:
+["REF.PAD", "REF.PAD"]}`, names the pair each net was measured between in
+`measured_pads`, and names each net whose pair was chosen from three or more
+copper pads, with that pair, in `ambiguous_pair` (absent when there is
+none). On a net of three or more pads, name the lane's two pads.
+
+A lane that runs through a **series part** (an AC-coupling capacitor, a series
+resistor) is two or more nets, and every per-net grade measures each alone.
+`chain_length.measure_chain(pcb, nets)` is the one end-to-end measurement
+(#1799, #1812): each net by `net_match_length`, summed in `track_mm` (None
+until every net is joined), each joint's part
+(`series_part_between`: one footprint with exactly two copper pads, one on
+each net) and its pad-centre `span_mm` reported apart and never added, and a
+joint no such part bridges listed in `unbridged`. `pair_chain_skew(pcb,
+p_nets, n_nets)` is a split differential signal's end-to-end skew.
+`board_score --length-groups` grades a group's `chains` with it (and
+`min_mm` / `max_mm` on any member), and `check_drc` grades a recorded
+AC-coupled chain with it.
 
 Both modes add the pads' **pad-to-die** length, as KiCad does (#1248): every
 pad of the net in `'total'` mode (KiCad's length/skew DRC), the measured pad
@@ -420,6 +492,83 @@ print(f"{net_copper_length(pcb, nid):.2f} mm of copper, "
       f"match length {net_match_length(pcb, nid)}")
 # 3.64 mm of copper, match length None
 # -> fanout stubs only: the net is not routed, so it has no length to match.
+```
+
+### Time domain: tuning profiles (#1846)
+
+```python
+# net_queries
+kicad_net_length_parts_nm(pcb_data, segments, vias, pads, release=None)
+    -> Tuple[Dict[str, int], int]     # ({copper layer: track nm}, via nm)
+# tuning_profiles
+read_tuning_profiles(board_path) -> (Dict[str, TuningProfile],
+                                     List[(priority, class, profile)])
+DelayModel(board_path, pcb_data, memberships=None)
+DelayModel.profile_of(net_id) -> Optional[TuningProfile]
+DelayModel.net_delay(net_id) -> (Optional[float] ps, str why)
+net_time_profile(pcb_data, net_id) -> Optional[TuningProfile]
+route_delay_ps(pcb_data, prof, segments, vias) -> float
+```
+
+KiCad 10 times a net with the tuning profile its net class names
+(`.kicad_pro`: `tuning_profiles.tuning_profiles_impedance_geometric[]`, and
+`net_settings.classes[].tuning_profile`): a delay per signal layer and one
+per mm of via, each stored in attoseconds per mm. `read_tuning_profiles`
+reads them as a `TuningProfile` (`name`, `time_domain`, `layer_ps_per_mm`,
+`via_ps_per_mm`, and `via_overrides`: `{(signal layer from, signal layer to,
+via layer from, via layer to): ps}`, each entry as the project stores it),
+with the classes that name each profile. A missing project gives
+none; one that cannot be parsed gives none with a warning. The profiles are
+the ones KiCad loads: a profile with a field missing or of another type (its
+own five, a layer entry's six, a via override's five) ends KiCad's load of
+the list, so that profile and every one after it are left out, with a
+warning that names the profile and the field, and a net whose class names
+one measures 0 ps as in KiCad. `unread_tuning_profiles` gives
+`{profile name: why}`.
+
+`kicad_net_length_parts_nm` is `kicad_net_length_nm` (above) in its parts:
+each layer's track length and the via length, measured the same way, so a
+delay can be summed per layer. `DelayModel.net_delay` is the delay check_drc
+grades a `ps` length or skew rule against, as kicad-cli measures it: each
+layer's track times its delay, the via length times the via delay, plus the
+pads' pad-to-die delays. A layer the profile has no entry for adds nothing.
+A net whose class names no profile measures 0 ps; one whose profile has
+time-domain tuning off gets only its pads' pad-to-die delays. The `why`
+string says which. It is None for a net whose pads are not joined by track
+copper. Under a profile with via overrides, a via whose signal joins it on an
+override's two signal layers, and whose own two end layers are the
+override's, takes the override's delay whole in place of barrel length times
+the via delay; KiCad looks an override up with each pair upper layer first,
+so an entry stored the other way round never matches (`DelayModel._via_delay`;
+`net_queries.kicad_net_via_parts_nm` gives each via's charged length and the
+two layers it was measured between).
+
+`net_time_profile` is the router's side (`--time-matching`): the profile of
+the net when the router can time it as KiCad does (time-domain tuning on, no
+via overrides), else None and the stackup is used. The board's model is
+built once and kept on `pcb_data`, from `pcb_data.source_path`'s project --
+on the GUI front, the project file next to the board as last saved.
+`route_delay_ps` times one net's copper with a profile, without pad-to-die.
+
+```python
+from kicad_parser import parse_kicad_pcb
+from net_queries import kicad_net_length_parts_nm
+from tuning_profiles import DelayModel, net_time_profile, route_delay_ps
+
+board = 'tests/fixtures/1846/time_rule.kicad_pcb'
+pcb = parse_kicad_pcb(board)
+nid = next(i for i, n in pcb.nets.items() if n.name == 'Q')
+segs = [s for s in pcb.segments if s.net_id == nid]
+vias = [v for v in pcb.vias if v.net_id == nid]
+print(kicad_net_length_parts_nm(pcb, segs, vias, pcb.pads_by_net.get(nid, [])))
+prof = net_time_profile(pcb, nid)
+print(prof.name, prof.layer_ps_per_mm, prof.via_ps_per_mm)
+print(f"{route_delay_ps(pcb, prof, segs, vias):.2f} ps")
+print(DelayModel(board, pcb).net_delay(nid))
+# ({'F.Cu': 21000000}, 0)
+# PROF6 {'F.Cu': 6.0} 6.0
+# 126.00 ps
+# (126.0, '')
 ```
 
 ### Differential-pair copper: coupling and skew (#1303)

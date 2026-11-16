@@ -110,13 +110,12 @@ def main():
            ga.get('hole_clearance_source') == 'fab_floor_origin', ga)
         ok('graded_at discloses the scope per arm and the via value',
            ga.get('hole_clearance_scope') == {
-               'tracks': 'npth+uncovered_plated', 'vias': 'npth'}
+               'tracks': 'all_holes', 'vias': 'all_holes', 'pads': 'all_holes'}
            and abs(ga.get('hole_clearance_via', 0) - 0.25) < 1e-9, ga)
-        ok('the console states the scope, including what is NOT graded',
+        ok('the console states the scope: every hole, and the tool\'s own floor',
            'copper-to-hole scope:' in _r.stdout
-           and 'ring does not cover the drill' in _r.stdout
-           and 'NPTH holes only' in _r.stdout
-           and 'not graded against it' in _r.stdout, _r.stdout[-600:])
+           and 'every via drill, plated and NPTH hole' in _r.stdout
+           and 'ring does not cover the drill' in _r.stdout, _r.stdout[-600:])
 
         doc, _r = _grade(_stage(tmp, 'plain', None), tmp, 'plain', False)
         ga = doc.get('graded_at', {})

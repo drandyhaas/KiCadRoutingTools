@@ -17,8 +17,10 @@ from terminal_colors import YELLOW, GREEN, RESET
 from routing_defaults import PAD_ENTRY_NECK_MM
 
 from dataclasses import replace
-from kicad_parser import PCBData, Segment, Via, pad_is_plated_through
+from kicad_parser import (PCBData, Segment, Via, pad_is_plated_through,
+                          plated_drill_exposed, flush_drill_peg)
 from routing_config import GridRouteConfig, GridCoord
+from via_span import via_layer_pair, via_kind
 from routing_utils import build_layer_map, pad_rect_halfspan
 from connectivity import (
     get_net_endpoints,
@@ -30,6 +32,7 @@ from connectivity import (
 from obstacle_map import get_same_net_through_hole_positions, same_net_partial_via_spans
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
+from area_clearance import narrow_tracks as _area_narrow_tracks
 
 # Import Rust router
 import sys
@@ -128,7 +131,7 @@ def _foreign_pad_arrays(pcb_data, layer):
     # the iteration boards). Mirror the seg/via caches: signature tuple +
     # setattr REBIND on mismatch, so each pcb_data view owns its arrays.
     _sig = (id(pcb_data.pads_by_net),
-            sum(len(v) for v in pcb_data.pads_by_net.values()))
+            sum(map(len, pcb_data.pads_by_net.values())))
     cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
     if cache is None or not isinstance(cache, tuple) or cache[0] != _sig:
         cache = (_sig, {})
@@ -184,17 +187,58 @@ def _foreign_pad_arrays(pcb_data, layer):
 
 
 def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
-                         net_clearances=None):
+                         net_clearances=None, area=None):
     """Exact min edge distance from sample points to the CUSTOM pads of other
     nets (check_drc.point_to_pad_distance -- the model kicad-cli agrees with to
     ~0.1um). Windowed by each pad's bbox + _FOREIGN_PAD_WINDOW; same
     base_clearance local-override and #436 net-class excess adjustments as
-    the vectorized kernels."""
+    the vectorized kernels.
+
+    Vectorised per pad: every windowed sample point against every
+    polygon edge in one broadcast (the scalar point_to_segment_distance's
+    formula, so the value is the walk's), the even-odd inside test the same
+    way, so the answer is the per-point walk's minimum without visiting the
+    points one by one (the per-sample loop dominated the smoothing pass on a
+    board with custom pads: 20k calls, 8.4M abs() and 20k polygon walks for
+    eight custom pads). A single point (the point
+    callers) keeps the scalar path: numpy set-up costs more than one walk."""
     if not custom:
         return 1e9
-    from check_drc import point_to_pad_distance
+    from check_drc import point_to_pad_distance, _polys_edge_arrays
+
+    def _area_adj(pad, adj):
+        # #1843: `area` = (AreaClearance, the moving copper's region, layer)
+        if area is None or base_clearance is None:
+            return adj
+        a, own, layer = area
+        ex_ = a.pair_excess(own, np.array([a.pad_index(pad, layer)]), base_clearance, layer)[0]
+        if math.isnan(ex_):
+            return adj
+        lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+        return lc - base_clearance if lc > 0 else ex_
     R = _FOREIGN_PAD_WINDOW
     best = 1e9
+    if len(pts) <= 2:
+        for nid, pad in custom:
+            if nid == net_id:
+                continue
+            ex = pad.size_x / 2.0
+            ey = pad.size_y / 2.0
+            adj = 0.0
+            if base_clearance is not None:
+                adj = max((getattr(pad, 'local_clearance', 0.0) or 0.0) - base_clearance, 0.0)
+                if net_clearances:
+                    adj = max(adj, net_clearances.get(nid, base_clearance)
+                              - base_clearance)
+                adj = _area_adj(pad, adj)
+            for (px, py) in pts:
+                if abs(px - pad.global_x) > R + ex or abs(py - pad.global_y) > R + ey:
+                    continue
+                d = point_to_pad_distance(px, py, pad) - adj
+                if d < best:
+                    best = d
+        return best
+    PX = PY = None
     for nid, pad in custom:
         if nid == net_id:
             continue
@@ -206,42 +250,50 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
             if net_clearances:
                 adj = max(adj, net_clearances.get(nid, base_clearance)
                           - base_clearance)
-        # Branch-and-bound prune (exact-result-preserving): the polygons are
-        # stored in GLOBAL coordinates, so the distance from a sample point to
-        # the polygon's bounding BOX is a valid lower bound on its edge
-        # distance (a bbox is tighter than a bounding radius on the elongated
-        # connector/thermal polygons that dominate real boards). Points are
-        # visited lowest-bound first; once the bound can no longer beat
-        # `best`, no later point can either. Cuts the exact polygon walk from
-        # every windowed sample point (the 5mm window is generous) to the few
-        # that matter -- it dominated the #536 smoothing pass.
-        bb = getattr(pad, '_poly_bbox', None)
-        if bb is None:
-            vs = [v for poly in (getattr(pad, 'polygons', None) or ()) for v in poly]
-            if vs:
-                bb = (min(v[0] for v in vs), min(v[1] for v in vs),
-                      max(v[0] for v in vs), max(v[1] for v in vs))
-            else:
-                bb = (pad.global_x - ex, pad.global_y - ey,
-                      pad.global_x + ex, pad.global_y + ey)
-            try:
-                pad._poly_bbox = bb
-            except Exception:
-                pass
-        cand = []
-        for (px, py) in pts:
-            if abs(px - pad.global_x) > R + ex or abs(py - pad.global_y) > R + ey:
+            adj = _area_adj(pad, adj)
+        if PX is None:
+            P = np.asarray(pts, dtype=float).reshape(-1, 2)
+            PX, PY = P[:, 0], P[:, 1]
+        near = (np.abs(PX - pad.global_x) <= R + ex) & (np.abs(PY - pad.global_y) <= R + ey)
+        if not near.any():
+            continue
+        qx, qy = PX[near], PY[near]
+        polys = getattr(pad, 'polygons', None)
+        arrays = _polys_edge_arrays(polys) if polys else None
+        if arrays is None:
+            for px, py in zip(qx, qy):
+                d = point_to_pad_distance(float(px), float(py), pad) - adj
+                if d < best:
+                    best = d
+            continue
+        ex1, ey1, edx, edy, el2 = arrays
+        qx2, qy2 = qx[:, None], qy[:, None]
+        degenerate = (el2 < 1e-10)[None, :]
+        safe = np.where(degenerate, 1.0, el2[None, :])
+        t = ((qx2 - ex1[None, :]) * edx[None, :] + (qy2 - ey1[None, :]) * edy[None, :]) / safe
+        t = np.where(degenerate, 0.0, np.clip(t, 0.0, 1.0))
+        ddx = qx2 - (ex1[None, :] + t * edx[None, :])
+        ddy = qy2 - (ey1[None, :] + t * edy[None, :])
+        d = np.sqrt(ddx * ddx + ddy * ddy).min(axis=1)
+        for poly in polys:
+            if len(poly) == 1:  # the walk measures a one-vertex polygon as a point; the edge arrays skip it
+                d = np.minimum(d, np.sqrt((qx - poly[0][0]) ** 2 + (qy - poly[0][1]) ** 2))
+        # inside any polygon = 0 (check_drc._point_in_poly's even-odd test over the vertex pairs (i, i-1))
+        inside = np.zeros(qx.shape[0], dtype=bool)
+        for poly in polys:
+            Pp = np.asarray(poly, dtype=float)
+            if len(Pp) < 2:
                 continue
-            lo = math.hypot(max(bb[0] - px, px - bb[2], 0.0),
-                            max(bb[1] - py, py - bb[3], 0.0))
-            cand.append((lo, px, py))
-        cand.sort()
-        for lo, px, py in cand:
-            if lo - adj >= best:
-                break
-            d = point_to_pad_distance(px, py, pad) - adj
-            if d < best:
-                best = d
+            xi, yi = Pp[:, 0][None, :], Pp[:, 1][None, :]
+            xj, yj = np.roll(Pp[:, 0], 1)[None, :], np.roll(Pp[:, 1], 1)[None, :]
+            cond = (yi > qy2) != (yj > qy2)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                xint = (xj - xi) * (qy2 - yi) / (yj - yi) + xi
+            inside |= (np.count_nonzero(cond & (qx2 < xint), axis=1) & 1).astype(bool)
+        d = np.where(inside, 0.0, d) - adj
+        m = float(d.min())
+        if m < best:
+            best = m
     return best
 
 
@@ -270,7 +322,8 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
     best_custom = _custom_pad_min_dist(custom, net_id, ((x, y),), base_clearance,
-                                       net_clearances)
+                                       net_clearances,
+                                       area=_custom_area_ctx(config, x, y, x, y, layer))
     if cx.size == 0:
         return best_custom
     R = _FOREIGN_PAD_WINDOW
@@ -294,11 +347,12 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
     if base_clearance is not None:
         excess = np.maximum(plc[near] - base_clearance, 0.0)
         if net_clearances:
-            fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
-                             for f in nids[near]], dtype=float)
+            fcls = _net_excess(nids[near], net_clearances, None, base_clearance)
             excess = np.maximum(excess, fcls)
         excess = _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids,
                                          plc, excess, base_clearance, own_type)
+        excess = _fold_area_pad_excess(config, pcb_data, net_id, x, y, x, y, layer,
+                                       near, plc, excess, base_clearance, own_type)
         d = d - excess
     return min(float(np.min(d)), best_custom)
 
@@ -325,7 +379,7 @@ def _foreign_pad_types(pcb_data, layer):
 
 
 def _scoped_excess(config, net_id, nids, foreign_type, base_clearance, layer=None,
-                   pad_types=None, own_type='track'):
+                   pad_types=None, own_type='track', orders=None):
     """#1491: per foreign item of `foreign_type` ('track', 'via' or 'pad',
     with `pad_types` per row for pads), the scoped rule's requirement for the
     moving net's `own_type` item against it, minus `base_clearance` (negative
@@ -342,13 +396,127 @@ def _scoped_excess(config, net_id, nids, foreign_type, base_clearance, layer=Non
         if int(nid) == own:
             continue
         pt = pad_types[i] if pad_types is not None else None
+        if layer is not None and layer in s.sc.layered_layers:
+            # #1897: a scoped rule whose (layer ...) clause names this layer,
+            # where it is the pair's last match there
+            lv = s.sc.layer_pair_value(own, own_type, int(nid), foreign_type,
+                                       None, pt, layer)
+            if lv is not None and layer in getattr(s.sc.resolve_pair(
+                    own, own_type, int(nid), foreign_type, None, pt, 0.0, lmap,
+                    s.fab_floor)[1], 'names', ()):
+                out[i] = max(lv[0], s.fab_floor) - base_clearance
+                if orders is not None:
+                    orders[i] = lv[2]
+                continue
         got = s.sc.pair_value(own, own_type, int(nid), foreign_type, None, pt)
         if got is None:
             continue
         if layer is not None and layer in s.sc.layer_rules_after(lmap, got[2]):
             continue
         out[i] = max(got[0], s.fab_floor) - base_clearance
+        if orders is not None:
+            orders[i] = got[2]
     return out
+
+
+def _area_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, kind, arrays,
+                 near, base_clearance, foreign_type, own_type='track',
+                 pad_types=None, plc=None):
+    """#1843: per `near` row of one of the cached foreign arrays (`kind`
+    'seg', 'pad' or 'via', see `AreaClearance.rows_index`), the clearance a
+    rule area binds the pair at minus `base_clearance` -- the moving copper
+    (x1,y1)-(x2,y2) on `layer` or the row standing in the area -- else NaN.
+    A class/type-scoped rule LATER in the file than the area's still binds
+    its own pairs (NaN there, so its fold stands), and a pad's own override
+    outranks every rule (`plc`). None without an area rule or when none
+    binds, so callers stay on their own path."""
+    area = getattr(config, 'area_clearance', None) if config is not None else None
+    if area is None or base_clearance is None:
+        return None
+    own = area.own_index(x1, y1, x2, y2, layer)
+    rows = area.rows_index(kind, layer, arrays)[near]
+    if own < 0 and not (rows >= 0).any():
+        return None
+    ax = area.pair_excess(own, rows, base_clearance, layer)
+    bound = ~np.isnan(ax)
+    if not bound.any():
+        return None
+    if getattr(config, 'scoped_clearance', None) is not None:
+        nids = np.asarray(arrays[0])[near]
+        orders = np.full(len(nids), -1, dtype=np.int64)
+        _scoped_excess(config, net_id, nids, foreign_type, base_clearance, layer,
+                       pad_types=pad_types, own_type=own_type, orders=orders)
+        pair = np.maximum(rows, own)
+        ax = np.where(orders > area.order_of(pair), np.nan, ax)
+    if plc is not None:
+        ax = np.where(bound & (plc > 0), plc - base_clearance, ax)
+    return ax
+
+
+def _hole_rule_via_reach(pcb_data, hr, layer):
+    """#1853: per row of `_foreign_via_arrays`, how far from the via's BODY
+    another net's track must stand on `layer` for the board's hole_clearance
+    rules: the rule's value less the via's ring, NaN where no rule binds its
+    hole. Cached with the arrays' own signature."""
+    vt = pcb_data.vias[-1] if pcb_data.vias else None
+    sig = (len(pcb_data.vias), (vt.x, vt.y, vt.net_id) if vt is not None else None,
+           id(hr))
+    cache = getattr(pcb_data, '_hole_rule_via_cache', None)
+    if cache is None or cache[0] != sig:
+        cache = pcb_data._hole_rule_via_cache = (sig, {})
+    got = cache[1].get(layer)
+    if got is None:
+        vals = []
+        for v in pcb_data.vias:
+            drill = float(getattr(v, 'drill', 0.0) or 0.0)
+            rule = hr.via_value(v, layer) if drill > 0 else None
+            size = float(getattr(v, 'size', 0.0) or 0.0)
+            vals.append(math.nan if rule is None
+                        else rule - max(0.0, (size - drill) / 2.0))
+        got = cache[1][layer] = np.asarray(vals, dtype=float)
+    return got
+
+
+def _hole_via_excess(config, pcb_data, near, base_clearance, layer, own_type='track'):
+    """#1853: per `near` row of the foreign via arrays, what the board's
+    hole_clearance rules ask between the moving copper and the via's body
+    over `base_clearance`; NaN where they ask no more. The router holds a
+    track off another net's via hole at the rule (`hole_rule_routing`), so a
+    pass that measures the pair at the copper clearance alone moves the track
+    back inside it. A moving VIA (`own_type` 'via') brings a hole of its own:
+    the foreign via's copper stands off it at the rule too. None without such
+    a rule, so callers stay on their own path."""
+    hr = getattr(config, 'hole_rules', None) if config is not None else None
+    if hr is None or base_clearance is None:
+        return None
+    out = _hole_rule_via_reach(pcb_data, hr, layer)[near] - base_clearance
+    own = _own_via_hole_excess(config, hr, base_clearance) if own_type == 'via' else None
+    if own is not None:
+        out = np.fmax(out, own)
+    out = np.where(out > 0, out, np.nan)
+    return out if (~np.isnan(out)).any() else None
+
+
+def _own_via_hole_excess(config, hr, base_clearance):
+    """#1853: what the rules ask between the body of a via this run lays and
+    another net's copper over `base_clearance` (its hole to that copper at
+    the rule, less its own ring), or None."""
+    rule = hr.new_via_value()
+    if rule is None or base_clearance is None:
+        return None
+    ring = max(0.0, (float(config.via_size) - float(config.via_drill)) / 2.0)
+    more = rule - ring - base_clearance
+    return more if more > 0 else None
+
+
+def _raise_excess(excess, more):
+    """#1853: a hole rule is one more floor on the pair, beside its copper
+    clearance: where `more` binds (not NaN) the larger of it and `excess`
+    stands. `excess` unchanged for `more` None."""
+    if more is None:
+        return excess
+    base = excess if excess is not None else np.zeros(len(more))
+    return np.where(np.isnan(more), base, np.maximum(base, more))
 
 
 def _coupled_excess(config, net_id, nids, kind, base_clearance, layer=None):
@@ -405,9 +573,34 @@ def _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids, plc,
     return np.where(bound, scoped_x, excess)
 
 
+def _fold_area_pad_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, near,
+                          plc, excess, base_clearance, own_type='track'):
+    """#1843: `_area_excess` over the foreign pads (`near` rows of the pad
+    arrays), folded into `excess`: the area's value replaces the class term
+    where it binds. `excess` unchanged without an area rule."""
+    if config is None or getattr(config, 'area_clearance', None) is None:
+        return excess
+    types = None
+    if getattr(config, 'scoped_clearance', None) is not None:
+        types = np.asarray(_foreign_pad_types(pcb_data, layer), dtype=object)[near]
+    ax = _area_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, 'pad',
+                      _foreign_pad_arrays(pcb_data, layer), near, base_clearance, 'pad',
+                      own_type=own_type, pad_types=types, plc=plc[near])
+    return excess if ax is None else _fold_scoped_excess(excess, ax)
+
+
+def _custom_area_ctx(config, x1, y1, x2, y2, layer):
+    """#1843: what `_custom_pad_min_dist` needs to hold a custom pad to a
+    rule area's value: (the area, the moving copper's region, layer)."""
+    area = getattr(config, 'area_clearance', None) if config is not None else None
+    if area is None:
+        return None
+    return (area, area.own_index(x1, y1, x2, y2, layer), layer)
+
+
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           base_clearance=None, net_clearances=None, config=None,
-                          own_type='track'):
+                          own_type='track', need=None):
     """Min foreign-pad edge distance sampled along a (short, terminal) segment.
     Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
@@ -427,7 +620,8 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     sx = x1 + (x2 - x1) * _t
     sy = y1 + (y2 - y1) * _t
     best_custom = _custom_pad_min_dist(
-        custom, net_id, list(zip(sx, sy)), base_clearance, net_clearances)
+        custom, net_id, list(zip(sx, sy)), base_clearance, net_clearances,
+        area=_custom_area_ctx(config, x1, y1, x2, y2, layer))
     if cx.size == 0:
         return best_custom
     R = _FOREIGN_PAD_WINDOW
@@ -444,16 +638,71 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     if base_clearance is not None:
         excess = np.maximum(plc[near] - base_clearance, 0.0)
         if net_clearances:
-            fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
-                             for f in nids[near]], dtype=float)
+            fcls = _net_excess(nids[near], net_clearances, None, base_clearance)
             excess = np.maximum(excess, fcls)
         excess = _fold_scoped_pad_excess(config, pcb_data, net_id, layer, near, nids,
                                          plc, excess, base_clearance, own_type)
+        excess = _fold_area_pad_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer,
+                                       near, plc, excess, base_clearance, own_type)
         # #1630: the partner's pad at the rule binding the pair; a pad's own
         # override still outranks it
         cx_ = _coupled_excess(config, net_id, nids[near], 'pad', base_clearance, layer)
         excess = _fold_scoped_excess(
             excess, np.where(plc[near] > 0, np.nan, cx_))
+    if need is not None:
+        # A caller that only compares with `need` (see _seg_dist_need): a pad whose exact lower bound (the bound of
+        # the prune below) is need + 1e-9 or more cannot take the minimum below need, so only the others are swept;
+        # below need the value is bit-identical to the full sweep's.
+        vx, vy = x2 - x1, y2 - y1
+        L2 = vx * vx + vy * vy
+        if L2 > 0.0:
+            t = np.clip(((fcx - x1) * vx + (fcy - y1) * vy) / L2, 0.0, 1.0)
+            lb = np.hypot(fcx - (x1 + t * vx), fcy - (y1 + t * vy))
+        else:
+            lb = np.hypot(fcx - x1, fcy - y1)
+        lb = lb - (np.hypot(np.maximum(fhx - fcr, 0.0), np.maximum(fhy - fcr, 0.0)) + fcr)
+        if excess is not None:
+            lb = lb - excess
+        keep = lb < need + 1e-9
+        if not keep.any():
+            return min(float(np.min(lb)), best_custom)
+        fcx, fcy, fhx, fhy, fcr = fcx[keep], fcy[keep], fhx[keep], fhy[keep], fcr[keep]
+        frc, frs = frc[keep], frs[keep]
+        if excess is not None:
+            excess = excess[keep]
+    elif fcx.size > 4 and sx.size > 4:
+        # Exact prune: a
+        # pad's rounded rect lies within hypot(hx-r, hy-r) + r of its centre
+        # (inner extents floored at 0), so the segment-to-centre distance
+        # minus that radius (minus its excess) is
+        # a lower bound on every sampled distance to it. Evaluate the pad of
+        # least bound in full; a pad whose bound exceeds that pad's sampled
+        # minimum cannot hold the minimum, so the result is unchanged.
+        vx, vy = x2 - x1, y2 - y1
+        L2 = vx * vx + vy * vy
+        if L2 > 0.0:
+            t = np.clip(((fcx - x1) * vx + (fcy - y1) * vy) / L2, 0.0, 1.0)
+            lb = np.hypot(fcx - (x1 + t * vx), fcy - (y1 + t * vy))
+        else:
+            lb = np.hypot(fcx - x1, fcy - y1)
+        lb = lb - (np.hypot(np.maximum(fhx - fcr, 0.0), np.maximum(fhy - fcr, 0.0)) + fcr)
+        if excess is not None:
+            lb = lb - excess
+        j = int(np.argmin(lb))
+        ddx = sx - fcx[j]
+        ddy = sy - fcy[j]
+        lx = np.abs(ddx * frc[j] + ddy * frs[j])
+        ly = np.abs(-ddx * frs[j] + ddy * frc[j])
+        dj = np.hypot(np.maximum(lx - (fhx[j] - fcr[j]), 0.0),
+                      np.maximum(ly - (fhy[j] - fcr[j]), 0.0)) - fcr[j]
+        if excess is not None:
+            dj = dj - excess[j]
+        keep = lb <= float(np.min(dj)) + 1e-9
+        keep[j] = True
+        fcx, fcy, fhx, fhy, fcr = fcx[keep], fcy[keep], fhx[keep], fhy[keep], fcr[keep]
+        frc, frs = frc[keep], frs[keep]
+        if excess is not None:
+            excess = excess[keep]
     # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
     # rotated by R(-rot); identity for axis-aligned pads): shrink the
     # half-extents by the corner radius, take the outside distance to that
@@ -524,38 +773,61 @@ def _foreign_seg_arrays(pcb_data, layer):
     per_layer = cache[1]
     arr = per_layer.get(layer)
     if arr is None:
-        nid, ax, ay, bx, by, hw = [], [], [], [], [], []
-        _row_segs = []
-        _own_pad_nets = _cached_own_pad_nets(pcb_data)
-        for s in pcb_data.segments:
-            if s.layer == layer:
-                _row_segs.append(s)
-                nid.append(s.net_id); ax.append(s.start_x); ay.append(s.start_y)
-                bx.append(s.end_x); by.append(s.end_y)
-                hw.append((s.width if s.width > 0 else 0.0) / 2.0)
-        # A via spans its drilled layers; treat every via as present on this copper
-        # layer (a conservative over-approximation -- it only ever necks MORE).
-        for v in pcb_data.vias:
-            r = (v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0
-            nid.append(v.net_id); ax.append(v.x); ay.append(v.y)
-            bx.append(v.x); by.append(v.y); hw.append(r)
-        # #908: which rows are a FOOTPRINT'S OWN copper, and which nets that
-        # copper is the intended conductor for. A net tie's bridge is net 0, so
-        # the plain `nid != net_id` test below calls it foreign to the very
-        # nets it exists to join -- and the terminal SHORT gate then rejects
-        # every rescue that lands on the tie pad ("terminal copper would
-        # OVERLAP a foreign track/via"). Recorded here so the mask is built
-        # once per (layer, net) and dies with these arrays.
-        _g_rows, _g_nets = [], []
-        for _i, _s in enumerate(_row_segs):
-            if getattr(_s, 'graphic', False):
-                _lift = _own_pad_nets.get(id(_s))
-                if _lift:
-                    _g_rows.append(_i); _g_nets.append(_lift)
+        # One pass over the copper per cache drop, every layer's rows at once:
+        # the smoothing pass drops the cache at every splice and
+        # then asks for the layers of the chain it moved one by one, so each
+        # splice paid one full Python pass over the segments PER LAYER (777
+        # rebuilds, 6.4M list appends, about a third of a dense board's
+        # smoothing pass). The rows of a layer are its segments in list
+        # order, then every via, exactly as before.
+        snap = per_layer.get('_all')
+        if snap is None:
+            segs = pcb_data.segments
+            lay = np.asarray([s.layer for s in segs], dtype=object)
+            s_nid = np.asarray([s.net_id for s in segs], dtype=np.int64)
+            s_ax = np.asarray([s.start_x for s in segs], dtype=float)
+            s_ay = np.asarray([s.start_y for s in segs], dtype=float)
+            s_bx = np.asarray([s.end_x for s in segs], dtype=float)
+            s_by = np.asarray([s.end_y for s in segs], dtype=float)
+            s_hw = np.asarray([(s.width if s.width > 0 else 0.0) / 2.0 for s in segs], dtype=float)
+            vias = pcb_data.vias
+            v_nid = np.asarray([v.net_id for v in vias], dtype=np.int64)
+            v_x = np.asarray([v.x for v in vias], dtype=float)
+            v_y = np.asarray([v.y for v in vias], dtype=float)
+            # A via spans its drilled layers; treat every via as present on every copper
+            # layer (a conservative over-approximation -- it only ever necks MORE).
+            v_hw = np.asarray([(v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0
+                               for v in vias], dtype=float)
+            # #908: which rows are a FOOTPRINT'S OWN copper, and which nets that
+            # copper is the intended conductor for. A net tie's bridge is net 0, so
+            # the plain `nid != net_id` test below calls it foreign to the very
+            # nets it exists to join -- and the terminal SHORT gate then rejects
+            # every rescue that lands on the tie pad ("terminal copper would
+            # OVERLAP a foreign track/via"). Recorded per layer as the row
+            # indices of the lifted graphic segments, and dies with these arrays.
+            g_idx = [i for i, s in enumerate(segs) if getattr(s, 'graphic', False)]
+            g_lift = []
+            if g_idx:
+                _own_pad_nets = _cached_own_pad_nets(pcb_data, (id(segs), id(getattr(pcb_data, 'footprints', None)),
+                                                                len(g_idx), sum(id(segs[i]) for i in g_idx)))
+                for i in g_idx:
+                    _lift = _own_pad_nets.get(id(segs[i]))
+                    if _lift:
+                        g_lift.append((i, _lift))
+            snap = (lay, s_nid, s_ax, s_ay, s_bx, s_by, s_hw, v_nid, v_x, v_y, v_hw, g_lift)
+            per_layer['_all'] = snap
+        lay, s_nid, s_ax, s_ay, s_bx, s_by, s_hw, v_nid, v_x, v_y, v_hw, g_lift = snap
+        mask = (lay == layer) if lay.size else np.zeros(0, dtype=bool)
+        if g_lift:
+            pos = np.cumsum(mask) - 1
+            _g_rows = [int(pos[i]) for i, _ in g_lift if mask[i]]
+            _g_nets = [_lift for i, _lift in g_lift if mask[i]]
+        else:
+            _g_rows, _g_nets = [], []
         per_layer[(layer, 'giftrows')] = (_g_rows, _g_nets)
-        arr = (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
-               np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
-               np.asarray(by, dtype=float), np.asarray(hw, dtype=float))
+        arr = (np.concatenate((s_nid[mask], v_nid)), np.concatenate((s_ax[mask], v_x)),
+               np.concatenate((s_ay[mask], v_y)), np.concatenate((s_bx[mask], v_x)),
+               np.concatenate((s_by[mask], v_y)), np.concatenate((s_hw[mask], v_hw)))
         per_layer[layer] = arr
         # the per-item bounding boxes _seg_foreign_seg_dist windows on,
         # once per rebuild instead of four array ops per query (23.6k
@@ -568,10 +840,13 @@ def _foreign_seg_arrays(pcb_data, layer):
     return arr
 
 
-def _cached_own_pad_nets(pcb_data):
-    """`graphic_own_pad_nets` memoised on pcb_data, keyed with the segment
-    cache signature so it dies exactly when that does."""
-    sig = getattr(pcb_data, '_foreign_seg_arr_cache', (None,))[0]
+def _cached_own_pad_nets(pcb_data, sig):
+    """`graphic_own_pad_nets` memoised on pcb_data, keyed on the graphic
+    segments and the footprints it reads (`sig`: the segment list's identity,
+    the footprints' identity, the graphic segments' count and the sum of
+    their ids). Routing never adds, removes or moves a footprint's own copper,
+    so the lift survives the splices that drop the segment arrays (it was
+    keyed on their signature and recomputed after every splice)."""
     hit = getattr(pcb_data, '_gopn_cache', None)
     if hit is not None and hit[0] == sig:
         return hit[1]
@@ -623,10 +898,88 @@ def _foreign_seg_bboxes(pcb_data, layer, validated=False):
     return pcb_data._foreign_seg_arr_cache[1][(layer, 'bbox')]
 
 
+_NET_EXCESS_CACHE = {}
+
+
+def _net_excess(fnid, net_clearances, track_clearances, base_clearance):
+    """Per-row #436/#735 excess max(0, max(nc.get(f, base), tc.get(f, 0)) - base) for the foreign net ids fnid.
+    The values are the per-row Python expression, evaluated once per net id and looked up (the per-row
+    list was a hot spot of the smoothing pass). An entry holds copies of the two maps it was built from and is
+    used only while both maps still equal them, so a map edited in place (same object, same length, new value)
+    rebuilds the table instead of returning the old one."""
+    _nc = net_clearances or {}
+    _tc = track_clearances or {}
+    if fnid.size == 0 or int(fnid.min()) < 0:
+        return np.array([max(0.0, max(_nc.get(int(f), base_clearance), _tc.get(int(f), 0.0)) - base_clearance)
+                         for f in fnid], dtype=float)
+    key = (id(_nc), len(_nc), id(_tc), len(_tc), base_clearance)
+    hit = _NET_EXCESS_CACHE.get(key)
+    top = int(fnid.max())
+    if hit is None or hit[0] != _nc or hit[1] != _tc or hit[2].size <= top:
+        try:
+            size = max(top + 1, max((int(k) for k in _nc), default=0) + 1, max((int(k) for k in _tc), default=0) + 1)
+        except (TypeError, ValueError):     # a non-integer key: the per-row expression
+            return np.array([max(0.0, max(_nc.get(int(f), base_clearance), _tc.get(int(f), 0.0)) - base_clearance)
+                             for f in fnid], dtype=float)
+        arr = np.array([max(0.0, max(_nc.get(f, base_clearance), _tc.get(f, 0.0)) - base_clearance)
+                        for f in range(size)], dtype=float)
+        if len(_NET_EXCESS_CACHE) > 256:
+            _NET_EXCESS_CACHE.clear()
+        hit = _NET_EXCESS_CACHE[key] = (dict(_nc), dict(_tc), arr)
+    return hit[2][fnid]
+
+
+def _seg_dist_need(x1, y1, x2, y2, sx, sy, ax, ay, bx, by, abx, aby, L2, safe_L2, hw, excess, need):
+    """_seg_foreign_seg_dist's sampled sweep for a caller that only compares the result with `need`: the value is
+    exact whenever it is below need, and some value >= need otherwise. A column whose exact segment-to-segment lower
+    bound (every sample lies on the moving segment, so no sampled distance is below it) is need + 1e-9 or more
+    cannot take the minimum below need, so only the other columns are swept, each computed as in the full sweep:
+    `result < need` and the value below need are bit-identical to the full sweep's."""
+    pax_ = x1 - ax; pay_ = y1 - ay
+    tt_ = np.where(L2 > 0, np.clip((pax_ * abx + pay_ * aby) / safe_L2, 0.0, 1.0), 0.0)
+    lb = np.hypot(x1 - (ax + tt_ * abx), y1 - (ay + tt_ * aby))
+    pax_ = x2 - ax; pay_ = y2 - ay
+    tt_ = np.where(L2 > 0, np.clip((pax_ * abx + pay_ * aby) / safe_L2, 0.0, 1.0), 0.0)
+    lb = np.minimum(lb, np.hypot(x2 - (ax + tt_ * abx), y2 - (ay + tt_ * aby)))
+    ux, uy = x2 - x1, y2 - y1
+    UL2 = ux * ux + uy * uy
+    if UL2 > 0:
+        for qx, qy in ((ax, ay), (bx, by)):
+            tt_ = np.clip(((qx - x1) * ux + (qy - y1) * uy) / UL2, 0.0, 1.0)
+            lb = np.minimum(lb, np.hypot(qx - (x1 + tt_ * ux), qy - (y1 + tt_ * uy)))
+        c1 = ux * (ay - y1) - uy * (ax - x1)
+        c2 = ux * (by - y1) - uy * (bx - x1)
+        c3 = abx * (y1 - ay) - aby * (x1 - ax)
+        c4 = abx * (y2 - ay) - aby * (x2 - ax)
+        lb = np.where((c1 * c2 < 0) & (c3 * c4 < 0), 0.0, lb)
+    lb = lb - hw - (excess if excess is not None else 0.0)
+    keep = lb < need + 1e-9
+    if not keep.any():
+        return float(np.min(lb))
+    ax, ay, abx, aby, L2, safe_L2, hw = ax[keep], ay[keep], abx[keep], aby[keep], L2[keep], safe_L2[keep], hw[keep]
+    if excess is not None:
+        excess = excess[keep]
+    rows = max(1, _SWEEP_CHUNK // ax.size)
+    best = math.inf
+    for r0 in range(0, sx.size, rows):
+        sxc, syc = sx[r0:r0 + rows], sy[r0:r0 + rows]
+        pax = sxc[:, None] - ax[None, :]
+        pay = syc[:, None] - ay[None, :]
+        tt = (pax * abx[None, :] + pay * aby[None, :]) / safe_L2[None, :]
+        tt = np.where(L2[None, :] > 0, np.clip(tt, 0.0, 1.0), 0.0)
+        projx = ax[None, :] + tt * abx[None, :]
+        projy = ay[None, :] + tt * aby[None, :]
+        dist = np.hypot(sxc[:, None] - projx, syc[:, None] - projy) - hw[None, :]
+        if excess is not None:
+            dist = dist - excess[None, :]
+        best = min(best, float(np.min(dist)))
+    return best
+
+
 def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           net_clearances=None, base_clearance=0.0,
                           track_clearances=None, exact=None, config=None,
-                          own_type='track'):
+                          own_type='track', need=None):
     """Min edge distance from a (short, terminal) segment to any OTHER-net segment or
     via on `layer` -- the segment analogue of _seg_foreign_pad_dist. Distance is from
     the terminal centreline to the foreign copper EDGE (point-to-segment distance to
@@ -681,13 +1034,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     if net_clearances or track_clearances:
         # #436: fold each foreign net's class-excess into its distance.
         # The track-rule value raises the same per-foreign requirement (#735).
-        fnid = nid[near]
-        _nc = net_clearances or {}
-        _tc = track_clearances or {}
-        excess = np.array([max(0.0,
-                               max(_nc.get(int(f), base_clearance),
-                                   _tc.get(int(f), 0.0)) - base_clearance)
-                           for f in fnid], dtype=float)
+        excess = _net_excess(nid[near], net_clearances, track_clearances, base_clearance)
     if config is not None and getattr(config, 'scoped_clearance', None) is not None:
         # #1491/#1561: a class/type-scoped rule REPLACES the class term for
         # the foreign tracks it binds; a track rule (#735) still raises it.
@@ -699,10 +1046,25 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                 sx_, np.array([track_clearances.get(int(f), -math.inf)
                                for f in fnid], dtype=float) - base_clearance))
         excess = _fold_scoped_excess(excess, sx_)
+    if config is not None and getattr(config, 'area_clearance', None) is not None:
+        # #1843: a rule area binding the moving track or the foreign copper
+        _ax = _area_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, 'seg',
+                           (nid, fax, fay, fbx, fby, fhw), near, base_clearance,
+                           'track', own_type=own_type)
+        if _ax is not None:
+            excess = _fold_scoped_excess(excess, _ax)
     if config is not None and getattr(config, 'coupled_pair_clearances', None):
         # #1630: the pair's own partner at the rule binding the pair
         excess = _fold_scoped_excess(excess, _coupled_excess(
             config, net_id, nid[near], 'track', base_clearance, layer))
+    if (own_type == 'via' and config is not None
+            and getattr(config, 'hole_rules', None) is not None):
+        # #1853: the moving via's hole against the foreign tracks
+        _own = _own_via_hole_excess(config, config.hole_rules, base_clearance)
+        if _own is not None:
+            excess = _raise_excess(excess, np.full(int(near.sum()), _own))
+    if need is not None and not exact:
+        return _seg_dist_need(x1, y1, x2, y2, sx, sy, ax, ay, bx, by, abx, aby, L2, safe_L2, hw, excess, need)
     if exact:
         # The exact segment-to-segment distance (2026-09-11): the minimum
         # between two segments is attained at an endpoint of one of them
@@ -732,6 +1094,41 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         if excess is not None:
             dist = dist - excess
         return float(np.min(dist))
+    if ax.size > 4 and sx.size > 4:
+        # Prune, value-identical: a column's sampled minimum is never below the exact
+        # segment-to-segment distance (every sample lies on the moving segment), so a column whose exact lower
+        # bound exceeds one column's sampled value cannot hold the minimum. Columns are computed independently,
+        # so the kept ones give bit-identical values.
+        def _p2ab_lb(px, py):
+            pax_ = px - ax; pay_ = py - ay
+            tt_ = np.where(L2 > 0, np.clip((pax_ * abx + pay_ * aby) / safe_L2, 0.0, 1.0), 0.0)
+            return np.hypot(px - (ax + tt_ * abx), py - (ay + tt_ * aby))
+        lb = np.minimum(_p2ab_lb(x1, y1), _p2ab_lb(x2, y2))
+        ux, uy = x2 - x1, y2 - y1
+        UL2 = ux * ux + uy * uy
+        if UL2 > 0:
+            for qx, qy in ((ax, ay), (bx, by)):
+                tt_ = np.clip(((qx - x1) * ux + (qy - y1) * uy) / UL2, 0.0, 1.0)
+                lb = np.minimum(lb, np.hypot(qx - (x1 + tt_ * ux), qy - (y1 + tt_ * uy)))
+            c1 = ux * (ay - y1) - uy * (ax - x1)
+            c2 = ux * (by - y1) - uy * (bx - x1)
+            c3 = abx * (y1 - ay) - aby * (x1 - ax)
+            c4 = abx * (y2 - ay) - aby * (x2 - ax)
+            lb = np.where((c1 * c2 < 0) & (c3 * c4 < 0), 0.0, lb)
+        lb = lb - hw - (excess if excess is not None else 0.0)
+        j = int(np.argmin(lb))
+        tj = (((sx - ax[j]) * abx[j] + (sy - ay[j]) * aby[j]) / safe_L2[j])
+        tj = np.clip(tj, 0.0, 1.0) if L2[j] > 0 else np.zeros_like(tj)
+        dj = np.hypot(sx - (ax[j] + tj * abx[j]), sy - (ay[j] + tj * aby[j])) - hw[j]
+        if excess is not None:
+            dj = dj - excess[j]
+        keep = lb <= float(np.min(dj)) + 1e-9
+        keep[j] = True
+        if not keep.all():
+            ax, ay, abx, aby, L2, safe_L2, hw = (ax[keep], ay[keep], abx[keep], aby[keep], L2[keep],
+                                                 safe_L2[keep], hw[keep])
+            if excess is not None:
+                excess = excess[keep]
     rows = max(1, _SWEEP_CHUNK // ax.size)      # see _SWEEP_CHUNK
     best = math.inf
     for r0 in range(0, sx.size, rows):
@@ -799,15 +1196,24 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     excess = None
     if net_clearances:
         fnid = nids[near]
-        excess = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
-                           for f in fnid], dtype=float)
+        excess = _net_excess(fnid, net_clearances, None, base_clearance)
     if config is not None and getattr(config, 'scoped_clearance', None) is not None:
         excess = _fold_scoped_excess(excess, _scoped_excess(
             config, net_id, nids[near], 'via', base_clearance, layer, own_type=own_type))
+    if config is not None and getattr(config, 'area_clearance', None) is not None:
+        # #1843: a rule area binding the moving copper or the foreign via
+        _ax = _area_excess(config, pcb_data, net_id, x1, y1, x2, y2, layer, 'via',
+                           (nids, cx, cy, rad), near, base_clearance, 'via',
+                           own_type=own_type)
+        if _ax is not None:
+            excess = _fold_scoped_excess(excess, _ax)
     if config is not None and getattr(config, 'coupled_pair_clearances', None):
         # #1630: the partner's via at the rule binding the pair
         excess = _fold_scoped_excess(excess, _coupled_excess(
             config, net_id, nids[near], 'layer', base_clearance, layer))
+    # #1853: the hole of the foreign via (and of a moving via) at its rule
+    excess = _raise_excess(excess, _hole_via_excess(
+        config, pcb_data, near, base_clearance, layer, own_type))
     if excess is not None:
         d = d - excess
     return float(np.min(d))
@@ -820,8 +1226,11 @@ def _foreign_hole_capsules(pcb_data):
 
       * no copper at all -- np_thru_hole mechanical / mounting holes, or a pad
         declaring no copper layer; and
-      * #441 RING-UNCOVERED PLATED pads, whose copper ring is SMALLER than their
-        drill (vfo_ctrl's U4 "MH": 0.001mm of copper over a 2.5mm drill). These
+      * #441 RING-UNCOVERED PLATED pads (``plated_drill_exposed``), whose
+        copper ring is SMALLER than their drill (vfo_ctrl's U4 "MH": 0.001mm
+        of copper over a 2.5mm drill), and #1753's net-less pegs whose copper
+        equals it (``flush_drill_peg``; a caller's flat NPTH floor holds them
+        at least as far as the router does). These
         have copper, so `_pad_has_no_copper` is False and the copper distance
         functions "see" them -- as a ~1um speck that keeps nothing off the real
         2.5mm hole. They were therefore invisible to every caller of this
@@ -850,7 +1259,7 @@ def _foreign_hole_capsules(pcb_data):
     the 0.0 that every other corpus NPTH pad carries."""
     from check_drc import _pad_has_no_copper
     from kicad_parser import pad_drill_capsule
-    sig = sum(len(p) for p in pcb_data.pads_by_net.values())
+    sig = sum(map(len, pcb_data.pads_by_net.values()))
     cache = getattr(pcb_data, '_foreign_hole_cap_cache', None)
     if cache is None or cache[0] != sig:
         nid, ax, ay, bx, by, r, lc = [], [], [], [], [], [], []
@@ -862,8 +1271,8 @@ def _foreign_hole_capsules(pcb_data):
                 # same test add_drill_hole_obstacles and check_drc use, so the
                 # map, the grader and the movers agree on what an exposed drill
                 # is.
-                if not (_pad_has_no_copper(pad)
-                        or max(pad.size_x, pad.size_y) < pad.drill):
+                if not (_pad_has_no_copper(pad) or plated_drill_exposed(pad)
+                        or flush_drill_peg(pad)):
                     continue
                 (p1x, p1y), (p2x, p2y), hr = pad_drill_capsule(pad)
                 nid.append(pad_net)
@@ -1242,6 +1651,28 @@ def _terminal_room(s, term_pts, pcb_data, net_id, config):
     return own_l, d, d_edge - edge_clr, sense_d
 
 
+def _terminal_short_by(s, term_pts, pcb_data, net_id, config):
+    """(short_by, own_l, d, edge_room, sense_d) of terminal segment `s`, the
+    worst over the pieces it ships as (#1843: a track that leaves a tightened
+    rule area is split at its edge, and each piece is the item KiCad grades;
+    the distance helpers fold the area per piece). One piece, `s` itself,
+    without such an area."""
+    area = getattr(config, 'area_clearance', None)
+    pieces = [s]
+    if area is not None:
+        from area_clearance import split_run_copper
+        got = split_run_copper(area, [s])
+        if got:
+            pieces = got[0][1]
+    worst = None
+    for p in pieces:
+        own_l, d, edge_room, sense_d = _terminal_room(p, term_pts, pcb_data, net_id, config)
+        short_by = max(own_l - (d - s.width / 2.0), s.width / 2.0 - edge_room)
+        if worst is None or short_by > worst[0]:
+            worst = (short_by, own_l, d, edge_room, sense_d)
+    return worst
+
+
 def terminal_graze(segments, term_pts, pcb_data, net_id, config):
     """The worst clearance graze a route's terminal copper still has, AFTER
     its neck: ``(short_by mm, segment)``, or None when every terminal segment
@@ -1258,15 +1689,14 @@ def terminal_graze(segments, term_pts, pcb_data, net_id, config):
     for s in segments:
         if not _touches_terminal(s, term_pts):
             continue
-        own_l, d, edge_room, _sd = _terminal_room(s, term_pts, pcb_data,
-                                                  net_id, config)
-        short_by = max(own_l - (d - s.width / 2.0), s.width / 2.0 - edge_room)
+        short_by = _terminal_short_by(s, term_pts, pcb_data, net_id, config)[0]
         if short_by > NECK_GRAZE_TOL and (worst is None or short_by > worst[0]):
             worst = (short_by, s)
     return worst
 
 
-def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=None):
+def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=None,
+                          area_neck=True):
     """Neck a TERMINAL-connection segment that grazes foreign copper, down to `floor`.
 
     A route's terminal connects to an off-grid pad / fanout escape: the
@@ -1296,23 +1726,32 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     that merely violates clearance (which stays a visible DRC flag).
 
     `floor` defaults to the board's fab track-width minimum (issue #176): necking
-    to the grid step (0.05 mm) used to emit sub-fab-floor copper."""
+    to the grid step (0.05 mm) used to emit sub-fab-floor copper.
+
+    ``area_neck`` (#1843) first necks ``segments`` to a rule area's track
+    width (`area_clearance.narrow_tracks`), which SPLITS tracks and rewrites
+    the list: pass False when ``segments`` is a subset of the route's list
+    (the pieces would land in the subset only), after necking the whole."""
     if floor is None:
         # #530: the fab floor raised to this net's own rule / board minimum.
         floor = config.track_floor(net_id, None, _fab_track_floor(pcb_data)) \
             if hasattr(config, 'track_floor') else _fab_track_floor(pcb_data)
     necked = 0
     hard = []
+    # #1843: the width passes before this one rebuild every width
+    if area_neck:
+        _area_narrow_tracks(segments, config, net_id, pcb_data)
     for s in segments:
         if not _touches_terminal(s, term_pts):
             continue
-        own_l, d, edge_room, _sense_d = _terminal_room(s, term_pts, pcb_data,
-                                                       net_id, config)
+        # #1843: a terminal in a rule area is held to the area's rule, per
+        # piece it ships as (the helpers fold the area)
+        short_by, own_l, d, edge_room, _sense_d = _terminal_short_by(
+            s, term_pts, pcb_data, net_id, config)
         # #1159: a graze is an edge gap BELOW the rule. Copper exactly at the
         # rule is legal (the writer emits 1 nm coordinates, so 1 nm is the
         # only tolerance the test needs); the 1e-4 margin belongs to the neck
         # TARGET, once a real graze exists, and never to the trigger.
-        short_by = max(own_l - (d - s.width / 2.0), s.width / 2.0 - edge_room)
         if short_by > NECK_GRAZE_TOL:
             # 1e-4: stay just inside the rule
             allowed_half = min(d - own_l, edge_room) - 1e-4
@@ -2150,6 +2589,19 @@ def _free_on_pad_cells(pad, layer_idx, config, obstacles, coord,
     return cells
 
 
+def _keepout_clear_cells(cells, gate, net_id, config, layer, coord):
+    """The (gx, gy) of `cells` whose grid point takes a track end of the net
+    on `layer` without reaching into a keep-out forbidding it (#1777)."""
+    if gate is None:
+        return list(cells)
+    out = []
+    for cgx, cgy in cells:
+        pt = coord.to_float(cgx, cgy)
+        if not _track_refused(gate, net_id, config, layer, pt, pt):
+            out.append((cgx, cgy))
+    return out
+
+
 def _augment_blocked_pad_terminals(endpoints, pcb_data, net_id, config,
                                    obstacles):
     """#479 (kbic65 stabilizer NPTH): when a PAD endpoint's grid cell is
@@ -2157,8 +2609,13 @@ def _augment_blocked_pad_terminals(endpoints, pcb_data, net_id, config,
     add the pad's FREE on-copper cells as extra endpoint cells, so the route
     can terminate on copper it is allowed to touch instead of failing at an
     unsteppable start. No-op for the overwhelmingly common case of a free
-    endpoint cell. Endpoint rows are (gx, gy, layer_idx, orig_x, orig_y)."""
+    endpoint cell. Endpoint rows are (gx, gy, layer_idx, orig_x, orig_y).
+    A seeded cell welds to its own grid point, and is offered only where a
+    track end there stays out of every keep-out forbidding tracks on the
+    layer (#1777): the map's stamps can leave a cell free whose disc still
+    reaches into the area."""
     coord = GridCoord(config.grid_step)
+    gate = _keepout_gate(pcb_data)
     out = list(endpoints)
     seen = set()
     for ep in endpoints:
@@ -2176,6 +2633,8 @@ def _augment_blocked_pad_terminals(endpoints, pcb_data, net_id, config,
                 seen.add(key)
                 free = _free_on_pad_cells(pad, layer_idx, config, obstacles,
                                           coord, skip_cell=(gx, gy))
+                free = _keepout_clear_cells(free, gate, net_id, config,
+                                            config.layers[layer_idx], coord)
                 if free:
                     print(f"    endpoint cell blocked for {pad.component_ref}."
                           f"{pad.pad_number} -- seeded {len(free)} free "
@@ -2187,11 +2646,14 @@ def _augment_blocked_pad_terminals(endpoints, pcb_data, net_id, config,
     return out
 
 
-def _augment_all_blocked_pad_side(cells, pad, config, obstacles):
+def _augment_all_blocked_pad_side(cells, pad, config, obstacles,
+                                  pcb_data=None, net_id=None):
     """Multipoint-edge variant of the #479 blocked-terminal seeding: `cells`
     is one side's (gx, gy, layer_idx) set for a pad (possibly island-widened).
     Only when EVERY cell is blocked -- the route cannot start anywhere -- seed
-    the pad's free on-copper cells on each candidate layer."""
+    the pad's free on-copper cells on each candidate layer, each one clear of
+    the keep-outs forbidding tracks there (#1777; the route welds to the
+    seeded cell itself, see route_multipoint_main)."""
     if pad is None or not cells:
         return cells
     try:
@@ -2200,10 +2662,14 @@ def _augment_all_blocked_pad_side(cells, pad, config, obstacles):
     except Exception:
         return cells
     coord = GridCoord(config.grid_step)
+    gate = _keepout_gate(pcb_data)
+    if net_id is None:
+        net_id = getattr(pad, 'net_id', None)
     extra = []
     for li in sorted({li for _, _, li in cells}):
-        extra.extend((cgx, cgy, li) for cgx, cgy in
-                     _free_on_pad_cells(pad, li, config, obstacles, coord))
+        extra.extend((cgx, cgy, li) for cgx, cgy in _keepout_clear_cells(
+            _free_on_pad_cells(pad, li, config, obstacles, coord),
+            gate, net_id, config, config.layers[li], coord))
     if extra:
         print(f"    endpoint cell blocked for {pad.component_ref}."
               f"{pad.pad_number} -- seeded {len(extra)} free on-pad cell(s)")
@@ -2884,6 +3350,7 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
     new_segments = []
     new_vias = []
 
+    start_bridge = None
     if start_original:
         first_grid_x, first_grid_y = coord.to_float(path_start[0], path_start[1])
         orig_x, orig_y, orig_layer = start_original
@@ -2895,6 +3362,9 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
                 layer=orig_layer,
                 net_id=net_id
             )
+            # judged again once the path's own vias exist (the keep-out
+            # drop below counts a via this path drills at its start)
+            start_bridge = seg
             new_segments.append(seg)
 
     for i in range(len(path) - 1):
@@ -2917,7 +3387,8 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
                     x=_vx, y=_vy,
                     size=_vsz,
                     drill=_vdr,
-                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    layers=via_layer_pair(config),  # #1842: the step's span
+                    via_type=via_kind(config),
                     net_id=net_id
                 )
                 new_vias.append(via)
@@ -2933,10 +3404,24 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
                 )
                 new_segments.append(seg)
 
+    # #1777: a terminal bridge reaching into a keep-out that forbids it,
+    # from a grid end already on the terminal's own copper, adds nothing.
+    _gate = _keepout_gate(pcb_data)
+    if start_bridge is not None and _bridge_adds_nothing_in_keepout(
+            pcb_data, net_id, config, start_bridge.layer,
+            (start_bridge.end_x, start_bridge.end_y),
+            (start_bridge.start_x, start_bridge.start_y),
+            path_vias=new_vias, gate=_gate):
+        new_segments = [sg for sg in new_segments if sg is not start_bridge]
+
     if end_original:
         last_grid_x, last_grid_y = coord.to_float(path_end[0], path_end[1])
         orig_x, orig_y, orig_layer = end_original
-        if abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001:
+        if (abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001) \
+                and not _bridge_adds_nothing_in_keepout(
+                    pcb_data, net_id, config, orig_layer,
+                    (last_grid_x, last_grid_y), (orig_x, orig_y),
+                    path_vias=new_vias, gate=_gate):
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
@@ -2969,8 +3454,14 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
     # #589: a plan probe's result is a hint, never shipped copper -- its
     # terminals legitimately overlap future nets' stubs (the probe map
     # excluded them), so the short gate must not veto the prediction.
-    if _hard157 and not config.plan_probe:
-        _why, _ships = _hard_terminal_why(_hard157[0])
+    # Keep-outs are the board's own and stand for a probe too (#1777).
+    _hard157 = _hard157 if not config.plan_probe else []
+    _ko157 = None if _hard157 else _route_keepout_refusal(
+        pcb_data, list(new_segments) + list(unblock_segments),
+        list(new_vias) + list(unblock_vias))
+    if _hard157 or _ko157:
+        _why, _ships = (_hard_terminal_why(_hard157[0]) if _hard157
+                        else _ko157)
         print(f"  {YELLOW}{_why} -- rejecting the route rather than shipping "
               f"{_ships}{RESET}")
         # The rejected route's #189 unblock copper goes with it: it is already
@@ -3454,6 +3945,16 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
     placement legality WITHOUT an epoch bump, so a failure under inflight
     state must not be trusted later. Likewise when the caller hands
     ``pending_vias`` (this net's own uncommitted vias, see the impl)."""
+    # #1842: a via-span step lays copper on its span only. This via and its
+    # stub start on the PAD's layer, so a pad with copper outside the span
+    # (an F.Cu ball in an In1-In6 step) is not this step's to escape.
+    _span = getattr(config, 'via_span', None)
+    if _span:
+        from check_drc import pad_copper_layers
+        _on = set(pad_copper_layers(pad_obj, list(pcb_data.board_info.copper_layers)))
+        if not _on <= set(_span):
+            return None
+
     from plane_pad_tap import inflight_copper_dicts
     _iv, _isg = inflight_copper_dicts(pcb_data)
     _inflight = bool(_iv) or bool(_isg) or bool(pending_vias)
@@ -3586,10 +4087,12 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     # rung; nothing under --escalation off; raised to the board's own minimums
     # under board). The advanced rung is the more-costly small via 'auto'
     # escalates to (#237/#857).
-    from fab_tiers import escalation_rungs, note_narrowing
+    from fab_tiers import escalation_rungs, note_narrowing, rung_tier
     ladder = escalation_rungs(ncu, extra_floors=config.rule_floors(net_id))
     candidates = [(config.via_size, config.via_drill, False)]
-    candidates += [(f['via_diameter'], f['via_drill'], i > 0)
+    # rung_tier: the tier rung each was made from (#1914), so the nominal
+    # rung's ring-holding and last-resort vias are not escalations
+    candidates += [(f['via_diameter'], f['via_drill'], rung_tier(ladder, i) > 0)
                    for i, f in enumerate(ladder)]
     via_pairs, seen_dia, escalated_pair = [], set(), set()
     for vd, dr, is_esc in candidates:
@@ -4503,6 +5006,28 @@ def _track_forbidden_layers(config, layer_names):
                      if name in config.layers and name not in routable)
 
 
+def _keepout_gate(pcb_data):
+    """`check_drc.copper_keepout_gate` for this board (#1777), or None when
+    nothing on it forbids copper (or there is no board): the one "may this
+    copper be laid" keep-out test, so a terminal the router lays is refused
+    exactly where check_drc and KiCad's items_not_allowed would flag it."""
+    if pcb_data is None:
+        return None
+    from check_drc import copper_keepout_gate
+    return copper_keepout_gate(pcb_data)
+
+
+def _track_refused(gate, net_id, config, layer, a, b) -> str:
+    """Why a track a->b on `layer` at the net's width may not be laid ('' when
+    it may; a == b is the disc a track end puts at a point)."""
+    if gate is None:
+        return ''
+    return gate(segments=[Segment(
+        start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
+        width=config.get_net_track_width(net_id, layer),
+        layer=layer, net_id=net_id)])
+
+
 def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
     """Whether a fill launch cell's TERMINAL copper clears foreign copper.
 
@@ -4519,6 +5044,12 @@ def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
     fill model is a raster at the zone clearance, so a weld point at its rim
     puts half a track width past it.
 
+    The same terminal copper -- the grid point and the bridge, at the width
+    the converter lays -- must also stay out of every keep-out that forbids
+    tracks on the layer (#1777, `copper_keepout_gate`): the override exempts
+    the cell from the map's keep-out stamps too, and a launch cell inside a
+    rule area laid a GND stub KiCad grades items_not_allowed.
+
     Returns ok(fx, fy, layer_idx) -> bool, memoised per weld point. A layer
     the config forbids track on draws no bridge (#1292), so it always passes.
     """
@@ -4527,6 +5058,7 @@ def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
     nc = getattr(config, 'net_clearances', None) or None
     own = (config.obstacle_clearance(net_id)
            if hasattr(config, 'obstacle_clearance') else config.clearance)
+    gate = _keepout_gate(pcb_data)
     memo = {}
 
     def ok(fx, fy, li):
@@ -4546,9 +5078,43 @@ def _launch_weld_test(pcb_data, net_id, config, coord, layer_names, forbid):
                 _seg_foreign_seg_dist(pcb_data, net_id, gx, gy, fx, fy, layer,
                                       net_clearances=nc, base_clearance=own_l,
                                       exact=True, config=config))
-        memo[key] = res = own_l - (d - floor / 2.0) <= NECK_GRAZE_TOL
+        res = own_l - (d - floor / 2.0) <= NECK_GRAZE_TOL
+        if res and gate is not None:
+            res = not _track_refused(gate, net_id, config, layer, (gx, gy),
+                                     (fx, fy))
+        memo[key] = res
         return res
     return ok
+
+
+def _terminal_layer_test(pcb_data, net_id, layer_names):
+    """`on(row, layer)`: whether a terminal row `(gx, gy, layer_idx, x, y
+    [, obj])` has copper on `layer`, the layer a pour-coverage probe reads
+    (#1777).
+
+    A fill model is one zone on ONE layer, and query_component answers for
+    the point alone: probed at an F.Cu pad's centre, the B.Cu pour under it
+    credited that pad's component with a region the pad does not touch. The
+    launch cells keyed to it then sat next to the pad on its own layer, and
+    Phase 1 "routed" a 0.03 mm stub that joined nothing, reporting success.
+    A terminal is on `layer` when its row is, when its pad's (or stub's)
+    copper layers include it, or when a plated barrel of the net -- a
+    through-hole pad or a via spanning `layer` -- stands at its point."""
+    from net_queries import expand_pad_layers
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None)
+                  or layer_names)
+    own_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+
+    def on(row, layer):
+        if layer_names[row[2]] == layer:
+            return True
+        obj = row[5] if len(row) > 5 else None
+        if obj is not None and getattr(obj, 'layers', None) and \
+                layer in expand_pad_layers(obj.layers, copper):
+            return True
+        return _terminal_copper_on_layer(pcb_data, net_id, row[3], row[4],
+                                         layer, vias=own_vias)
+    return on
 
 
 def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
@@ -4643,14 +5209,18 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     _DEEP_MM = 0.5
     out = {}
     _bare_kept = 0
+    _on_layer = _terminal_layer_test(pcb_data, net_id, layer_names)
     try:
         for _z, _m in zip(_zones, _models):
             if _m is None:
                 continue
             _li = layer_names.index(_z.layer)
-            # region -> covered terminal indices
+            # region -> covered terminal indices; a terminal covers a region
+            # only on a layer it has copper on (#1777)
             _cov = {}
             for _idx, _info in enumerate(pad_info):
+                if not _on_layer(_info, _z.layer):
+                    continue
                 _c = _m.query_component(_info[3], _info[4])
                 if _c and _c > 0:
                     _cov.setdefault(_c, []).append(_idx)
@@ -4804,12 +5374,17 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
                 return max(_p.size_x, _p.size_y)
         return config.track_width
 
+    _on_layer = _terminal_layer_test(pcb_data, net_id, layer_names)
+
     def _regions(rows):
         got = set()
         for _zi, _m in enumerate(_models):
             if _m is None:
                 continue
             for _row in rows:
+                # only on a layer the terminal has copper on (#1777)
+                if not _on_layer(_row, _zones[_zi].layer):
+                    continue
                 _c = _m.query_component(_row[3], _row[4],
                                         size=_probe_size(_row[3], _row[4]))
                 if _c and _c > 0:
@@ -5439,10 +6014,13 @@ def _route_multipoint_main_impl(
         # #479: a pad centre hard-blocked on every candidate layer (foreign
         # stabilizer-NPTH keep-out over the pad) cannot take the first step;
         # seed the pad's free on-copper cells as extra terminals.
+        _pre = set(sources) | set(targets)
         sources = _augment_all_blocked_pad_side(sources, pad_a_obj, config,
-                                                obstacles)
+                                                obstacles, pcb_data, net_id)
         targets = _augment_all_blocked_pad_side(targets, pad_b_obj, config,
-                                                obstacles)
+                                                obstacles, pcb_data, net_id)
+        # the seeded cells weld to their own grid point (below, #1777)
+        _seeded = (set(sources) | set(targets)) - _pre
 
         # Mark source/target cells -- THIS attempt's only. An override lets
         # the A* enter a cell another net's clearance blocks, so it belongs to
@@ -5630,9 +6208,18 @@ def _route_multipoint_main_impl(
         _own = _island_cells.get(pad_components.get(idx_a, idx_a), {}).get(tuple(path[0]))
         if _own is not None:
             _start_orig = (_own[0], _own[1], layer_names[path[0][2]])
+        elif tuple(path[0]) in _seeded:
+            # a #479 seeded on-pad cell: its grid point is on the pad's
+            # copper, so it welds there -- the bridge back to the pad centre
+            # crossed the keep-out that blocked the centre (#1777)
+            _start_orig = (*coord.to_float(path[0][0], path[0][1]),
+                           layer_names[path[0][2]])
         _own = _island_cells.get(pad_components.get(idx_b, idx_b), {}).get(tuple(path[-1]))
         if _own is not None:
             _end_orig = (_own[0], _own[1], layer_names[path[-1][2]])
+        elif tuple(path[-1]) in _seeded:
+            _end_orig = (*coord.to_float(path[-1][0], path[-1][1]),
+                         layer_names[path[-1][2]])
     # Barrel-in-fill completion (#562), Phase-1 parity with the tap edges.
     path, _fill_end = _trim_after_fill_via(path, coord, layer_names,
                                            pcb_data, net_id)
@@ -5655,11 +6242,17 @@ def _route_multipoint_main_impl(
     _hard_p1 = _neck_route_terminal_grazes(segments, path, coord,
                                            _start_orig[:2], _end_orig[:2],
                                            pcb_data, net_id, config)
-    if _hard_p1:
+    # ...and the keep-out backstop (#1777): copper inside a keep-out that
+    # forbids it fails the edge the same way.
+    _ko_p1 = None if _hard_p1 else _route_keepout_refusal(
+        pcb_data, list(segments) + list(main_unblock_segments),
+        list(vias) + list(main_unblock_vias))
+    if _hard_p1 or _ko_p1:
         # Terminal-bridge SHORT gate (ux pf9): the main edge's terminal copper
         # overlaps a foreign track/via at any width -- fail the edge so the
         # rip/retry ladder finds another approach instead of shipping a short.
-        _why, _ships = _hard_terminal_why(_hard_p1[0])
+        _why, _ships = (_hard_terminal_why(_hard_p1[0]) if _hard_p1
+                        else _ko_p1)
         print(f"  {YELLOW}Phase 1 {_why} -- failing the edge rather than "
               f"shipping {_ships}{RESET}")
         # The discarded attempt's #189 unblock copper goes with it: it was
@@ -6645,7 +7238,11 @@ def _route_multipoint_taps_impl(
         _hard_tap = _neck_route_terminal_grazes(segments, path, coord,
                                                 (tap_x, tap_y), (tgt_x, tgt_y),
                                                 pcb_data, net_id, config)
-        if _hard_tap:
+        # ...and the keep-out backstop (#1777), failed the same way.
+        _ko_tap = None if _hard_tap else _route_keepout_refusal(
+            pcb_data, list(segments) + list(unblock_segments),
+            list(vias) + list(unblock_vias))
+        if _hard_tap or _ko_tap:
             # Terminal-bridge SHORT gate (ux pf9: GND's tap edge into C61 --
             # the anchor cell was blocked, the A* ended a cell short, and the
             # bridge slashed across SDRAM_A2's In1.Cu trunk; the #157 neck
@@ -6653,7 +7250,8 @@ def _route_multipoint_taps_impl(
             # copper overlapping a foreign track/via at any width is a short
             # no neck can fix: fail the edge like an unroutable one so the
             # rip/retry ladder finds another approach.
-            _why, _ships = _hard_terminal_why(_hard_tap[0])
+            _why, _ships = (_hard_terminal_why(_hard_tap[0]) if _hard_tap
+                            else _ko_tap)
             print(f"      {YELLOW}{_why} -- failing the MST edge rather than "
                   f"shipping {_ships}{RESET}")
             # The edge's #189 unblock copper (and a pad-via rescue's) goes
@@ -6781,7 +7379,8 @@ def _drop_segments_already_present(segments: List[Segment],
     return [s for s in segments if _key(s) not in existing_keys]
 
 
-def _terminal_copper_on_layer(pcb_data, net_id, x, y, layer) -> bool:
+def _terminal_copper_on_layer(pcb_data, net_id, x, y, layer,
+                              vias=None) -> bool:
     """True if this net already has copper at (x, y) on `layer`.
 
     The terminal connectors below project the ORIGINAL endpoint XY onto the
@@ -6805,7 +7404,7 @@ def _terminal_copper_on_layer(pcb_data, net_id, x, y, layer) -> bool:
         if abs(x - p.global_x) <= hw + tol and abs(y - p.global_y) <= hh + tol:
             return True
     copper_layers = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
-    for v in pcb_data.vias:
+    for v in (pcb_data.vias if vias is None else vias):
         if v.net_id != net_id or len(v.layers or ()) < 2:
             continue
         radius = max((getattr(v, 'size', 0) or 0) / 2.0, tol)
@@ -6848,6 +7447,94 @@ def _tap_target_layer(tgt_pad, layer_names, path_end_layer) -> str:
     if 0 <= li < len(layer_names):
         return layer_names[li]
     return path_end_layer
+
+
+def _on_terminal_copper(pcb_data, net_id, layer, grid_pt, orig_pt,
+                        path_vias=()) -> bool:
+    """Whether `grid_pt` already lies on the copper that holds the terminal
+    point `orig_pt` on `layer`: one pad, via (on the board or drilled by the
+    same path), track or fill region of the net holding both. A terminal
+    bridge between the two then joins nothing that copper does not."""
+    from geometry_utils import point_to_segment_distance, via_on_layer
+    from net_queries import expand_pad_layers
+    tol = 1e-6
+    pts = (grid_pt, orig_pt)
+    for v in list(pcb_data.vias) + list(path_vias):
+        if v.net_id == net_id and via_on_layer(v, layer):
+            r = (getattr(v, 'size', 0) or 0) / 2.0 + tol
+            if all(math.hypot(x - v.x, y - v.y) <= r for x, y in pts):
+                return True
+    cu = list(getattr(pcb_data.board_info, 'copper_layers', None) or [layer])
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        if (getattr(p, 'rect_rotation', 0.0) or 0.0) or \
+                layer not in expand_pad_layers(p.layers, cu) or \
+                getattr(p, 'pad_type', '') == 'np_thru_hole':
+            continue    # a tilted pad is not measured here: under-claim
+        hx, hy = p.size_x / 2.0, p.size_y / 2.0
+        if getattr(p, 'shape', '') == 'rect':
+            inside = all(abs(x - p.global_x) <= hx + tol
+                         and abs(y - p.global_y) <= hy + tol for x, y in pts)
+        else:
+            # the capsule inscribed in the pad: exact for a circle or an
+            # oval, inside a rounded rectangle's corners
+            r = min(hx, hy)
+            ax, ay = hx - r, hy - r
+            inside = all(point_to_segment_distance(
+                x, y, p.global_x - ax, p.global_y - ay,
+                p.global_x + ax, p.global_y + ay) <= r + tol for x, y in pts)
+        if inside:
+            return True
+    for sg in pcb_data.segments:
+        if sg.net_id == net_id and sg.layer == layer and all(
+                point_to_segment_distance(x, y, sg.start_x, sg.start_y,
+                                          sg.end_x, sg.end_y) <= sg.width / 2.0 + tol
+                for x, y in pts):
+            return True
+    try:
+        from plane_fill_model import get_fill_models
+        models = get_fill_models(pcb_data, net_id).get(layer, [])
+    except Exception:
+        models = []
+    for m in models:
+        c = m.query_component(*orig_pt) or 0
+        if c > 0 and (m.query_component(*grid_pt) or 0) == c:
+            return True
+    return False
+
+
+def _bridge_adds_nothing_in_keepout(pcb_data, net_id, config, layer, grid_pt,
+                                    orig_pt, path_vias=(), gate=None) -> bool:
+    """True when a terminal bridge grid_pt->orig_pt on `layer` would reach
+    into a keep-out forbidding tracks there (`copper_keepout_gate`) while its
+    grid end already sits on the terminal's own copper (#1777): the bridge
+    adds nothing, so it is dropped rather than shipped as items_not_allowed.
+    A refused bridge that DOES join something is kept, and the route's
+    keep-out backstop (`_route_keepout_refusal`) fails the edge instead."""
+    if pcb_data is None or layer not in config.routable_layers():
+        return False
+    if gate is None:
+        gate = _keepout_gate(pcb_data)
+    if gate is None or not _track_refused(gate, net_id, config, layer,
+                                          grid_pt, orig_pt):
+        return False
+    return _on_terminal_copper(pcb_data, net_id, layer, grid_pt, orig_pt,
+                               path_vias)
+
+
+def _route_keepout_refusal(pcb_data, segments, vias):
+    """The keep-out backstop of a converted route (#1777): why its copper
+    (`copper_keepout_gate`) may not be laid, as ``(why, ships)`` for the
+    refusal message, or None when it may. The launch and seeded cells are
+    gated before the search, but the A* may still step between two endpoint
+    overrides inside an area (a 0.1 mm grid step on the issue's board), so
+    the edge FAILS here and the caller's rip/retry ladder runs."""
+    gate = _keepout_gate(pcb_data)
+    if gate is None:
+        return None
+    why = gate(segments=list(segments), vias=list(vias))
+    if not why:
+        return None
+    return (f"route copper: {why}", "items_not_allowed")
 
 
 def _bridge_inside_own_through_via(pcb_data, net_id, config, layer, a, b,
@@ -7129,7 +7816,8 @@ def _path_to_segments_vias(
                         x=vx, y=vy,
                         size=_vsz,
                         drill=_vdr,
-                        layers=["F.Cu", "B.Cu"],  # Always through-hole
+                        layers=via_layer_pair(config),  # #1842: the step's span
+                    via_type=via_kind(config),
                         net_id=net_id
                     )
                     vias.append(via)
@@ -7145,9 +7833,13 @@ def _path_to_segments_vias(
                 )
                 segments.append(seg)
 
+    _gate = _keepout_gate(pcb_data)
     if start_bridge is not None and not _bridge_inside_own_through_via(
             pcb_data, net_id, config, start_bridge[1], start_bridge[2],
-            start_bridge[3], path_vias=vias):
+            start_bridge[3], path_vias=vias) and \
+            not _bridge_adds_nothing_in_keepout(
+                pcb_data, net_id, config, start_bridge[1], start_bridge[3],
+                start_bridge[2], path_vias=vias, gate=_gate):
         segments.insert(0, start_bridge[0])
 
     # Add connecting segment from last path point to original end if needed
@@ -7166,7 +7858,11 @@ def _path_to_segments_vias(
                 and not _bridge_inside_own_through_via(
                     pcb_data, net_id, config, path_end_layer,
                     (last_grid_x, last_grid_y), (orig_x, orig_y),
-                    path_vias=vias)):
+                    path_vias=vias)
+                and not _bridge_adds_nothing_in_keepout(
+                    pcb_data, net_id, config, path_end_layer,
+                    (last_grid_x, last_grid_y), (orig_x, orig_y),
+                    path_vias=vias, gate=_gate)):
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
@@ -7191,6 +7887,7 @@ def _path_to_segments_vias(
         # the authoritative short gate.
         _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config)
 
+    _area_narrow_tracks(segments, config, net_id, pcb_data)   # #1843: a room's track width
     return segments, vias
 
 
@@ -7310,7 +8007,7 @@ def _neck_exact_pads(pcb_data, layer):
 def _neck_exact_standoffs(pcb_data):
     """What _neck_zone_exact_fits does NOT measure, as bounding boxes
     ``(layer or None, x0, y0, x1, y1)`` (None = every layer): drill holes no
-    copper ring covers (NPTH, slots, a plated ring smaller than its drill --
+    copper ring covers (NPTH, slots, plated_drill_exposed / flush_drill_peg pads --
     the hole keep-outs of add_drill_hole_obstacles), keep-out rule areas,
     drawn keep-outs, and filled copper graphics (#1181 interiors). Fixed for
     a board, so cached on it."""
@@ -7331,7 +8028,8 @@ def _neck_exact_standoffs(pcb_data):
         for p in plist:
             if (p.drill or 0) <= 0:
                 continue
-            if _pad_has_copper(p) and max(p.size_x, p.size_y) >= p.drill:
+            if (_pad_has_copper(p) and not plated_drill_exposed(p)
+                    and not flush_drill_peg(p)):
                 continue
             (ax, ay), (bx, by), r = pad_drill_capsule(p)
             boxes.append((None, min(ax, bx) - r, min(ay, by) - r,

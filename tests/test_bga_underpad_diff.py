@@ -25,6 +25,7 @@ issue, 11x11 / 0.8mm pitch, 13 Z* IO pairs in the bottom-left corner) through:
     escape is DRC-clean;
   - route_diff end-to-end: every Z-pair is coupled-routed (the real pickup test).
 """
+import json
 import os
 import subprocess
 import sys
@@ -126,8 +127,17 @@ def main():
         capopt = _tmp("glasgow_cap_")
         _run(["py_placer/place_fanout_clearance.py", fan, capopt, "--clearance", "0.1"],
              verbose)
-        drc = _run(["py_router/check_drc.py", capopt, "--clearance", "0.1"], verbose)
-        check("under-pad escape + cap-opt is DRC-clean", "NO DRC VIOLATIONS" in drc)
+        drc_json = capopt + ".drc.json"
+        tmp.append(drc_json)
+        _run(["py_router/check_drc.py", capopt, "--clearance", "0.1",
+              "--json", drc_json], verbose)
+        with open(drc_json, encoding="utf-8") as fh:
+            by_type = json.load(fh).get("by_type") or {}
+        # Clean includes the pad-to-via-HOLE rows (#1914): the cap step holds
+        # a cap's pads off a via's drill at the project's copper-to-hole
+        # clearance, not only off its copper at the copper clearance -- the
+        # under-pad vias' narrow ring left cap pads inside that band.
+        check("under-pad escape + cap-opt is DRC-clean", not by_type, f"{by_type}")
         fan = capopt  # route_diff consumes the pipeline state, as in production
 
         nets = []

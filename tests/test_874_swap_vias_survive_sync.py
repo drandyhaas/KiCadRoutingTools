@@ -152,10 +152,13 @@ def t_both_callers_pass_the_union():
         path = os.path.join(root, fname)
         calls = _sync_calls(path)
         check(f't_{fname.replace(".", "_")}_calls_the_sync',
-              len(calls) == 1,
+              len(calls) >= 1,
               f'{len(calls)} sync_pcb_data_segments call(s) found')
-        ok = False
+        # EVERY call site: a second sync (route.py's re-sync after a late
+        # length-group match, #1828) drops the swap vias just the same.
+        bare = []
         for call in calls:
+            ok = False
             for kw in call.keywords:
                 if kw.arg != 'original_via_ids':
                     continue
@@ -163,9 +166,12 @@ def t_both_callers_pass_the_union():
                          if isinstance(n, ast.Name)}
                 if 'all_swap_vias' in names:
                     ok = True
+            if not ok:
+                bare.append(call.lineno)
         check(f't_{fname.replace(".", "_")}_unions_all_swap_vias',
-              ok,
-              'all_swap_vias reaches original_via_ids at the sync call site')
+              calls and not bare,
+              'all_swap_vias reaches original_via_ids at every sync call site'
+              + (f' -- not at line(s) {bare}' if bare else ''))
 
 
 def t_the_writer_really_ships_that_channel():

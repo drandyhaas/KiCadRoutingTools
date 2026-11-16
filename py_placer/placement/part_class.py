@@ -327,6 +327,16 @@ def is_card_fingers(fp) -> bool:
         getattr(p, 'pad_type', '') == 'connect' for p in pads)
 
 
+def _is_unpinned_hole(pad) -> bool:
+    """A through-hole pad (plated or not) with no pad number and no net: a
+    hole, not a pin (#1750). An ABSENT number is not an empty one: a pad
+    that carries no number field at all says nothing."""
+    number = getattr(pad, 'pad_number', None)
+    return (getattr(pad, 'pad_type', '') in ('thru_hole', 'np_thru_hole')
+            and isinstance(number, str) and not number.strip()
+            and (getattr(pad, 'net_id', 0) or 0) <= 0)
+
+
 def classify_part(fp, ref: str) -> PartClass:
     """Pose-independent classification from footprint name, ref prefix and
     pin functions. Never reads a coordinate."""
@@ -344,6 +354,15 @@ def classify_part(fp, ref: str) -> PartClass:
                      if getattr(p, 'pad_type', '') != 'np_thru_hole']
     if npth and not plated_or_smd:
         return PartClass('mount_hole', 'high', ('npth-only pad set',))
+    # A PLATED hole is a hole too when no pad is a pin (#1750): every pad is
+    # through-hole, unnumbered and on no net. A pad with no number answers to
+    # no schematic pin, so the part is mechanical (a plated screw hole, a
+    # standoff, a solder nut) whatever its library calls it. A numbered pad
+    # (`MountingHole_..._Pad`'s "1", a THT test pad) or a netted one (a
+    # stitching-via footprint) is left to the rules below.
+    if pads and all(_is_unpinned_hole(p) for p in pads):
+        return PartClass('mount_hole', 'high',
+                         ('unnumbered, unnetted through-hole pad set',))
     if is_mount_hole_name(name):
         return PartClass('mount_hole', 'medium', ('footprint name',))
     if 'fiducial' in name or pref == 'FID':

@@ -102,7 +102,9 @@ VIA_PASTE_TYPES = frozenset({'via-in-paste'})
 # (check_drc's pair-rule pass, KiCad's skew_out_of_range and
 # diff_pair_uncoupled_length_too_long). Split out of `drc` into the
 # `diff_pairs` component, which carries each pair's measurement beside them.
-PAIR_RULE_TYPES = frozenset({'skew-out-of-range', 'diff-pair-uncoupled'})
+# #1799: and a recorded AC-coupled chain's end-to-end skew (no KiCad rule).
+PAIR_RULE_TYPES = frozenset({'skew-out-of-range', 'diff-pair-uncoupled',
+                             'chain-skew-out-of-range'})
 
 _DRC_TOTAL = re.compile(r'^FOUND (\d+) DRC VIOLATIONS', re.M)
 # The per-type header carries an OPTIONAL suffix between the count and the
@@ -688,8 +690,9 @@ def ungraded_entries(parts: dict) -> list:
         # declaration nothing grades.
         + (['undersized.dru_rules']
            if (parts.get('undersized') or {}).get('ungraded_rules') else [])
-        # #1490: the clearance half -- a NetClass- / Type-scoped .kicad_dru
-        # clearance rule check_drc does not model.
+        # #1490: every other kind -- a .kicad_dru clearance, disallow,
+        # via_count, length, skew or diff_pair_uncoupled rule (#1813) check_drc
+        # does not model.
         + (['drc.dru_rules']
            if (parts.get('drc') or {}).get('ungraded_rules') else [])
         # #1629: a pair whose members connectivity passes but whose pads its
@@ -797,14 +800,23 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     rc, out = run_tool(root, 'check_drc.py', *args)
     # #1390: .kicad_dru size rules check_drc could not model. The copper they
     # bind is ungraded, whatever `undersized` says about the rest.
-    _unsz = sorted(set(re.findall(r"NOT GRADED \(size\): rule '([^']*)'", out)))
+    # #1490: and every other kind it does not grade -- a clearance rule it
+    # does not model, a `disallow` rule (#1527), a `via_count` (#1707),
+    # `length`, `skew` or `diff_pair_uncoupled` (#1813) rule whose condition
+    # it does not read. EVERY kind check_drc prints is read, never a list of
+    # known ones: a kind this scrape did not know was a rule nothing graded
+    # and the board read DONE.
+    _ng = re.findall(r"NOT GRADED \(([A-Za-z_]+)\): rule '([^']*)'", out)
+    _unsz = sorted({nm for kind, nm in _ng if kind == 'size'})
     _size_extra = {'ungraded_rules': _unsz} if _unsz else {}
-    # #1490: and the .kicad_dru clearance rules it does not model; #1527: and
-    # the `disallow` rules (or tokens) it does not grade; #1707: and the
-    # `via_count` rules whose condition it does not read.
-    _uncl = sorted(set(re.findall(
-        r"NOT GRADED \((?:clearance|disallow|via_count)\): rule '([^']*)'", out)))
-    _clr_extra = {'ungraded_rules': _uncl} if _uncl else {}
+    _kinds = {}
+    for kind, nm in _ng:
+        if kind != 'size':
+            _kinds.setdefault(nm, set()).add(kind)
+    _uncl = sorted(_kinds)
+    _clr_extra = ({'ungraded_rules': _uncl,
+                   'ungraded_rule_kinds': {nm: sorted(k) for nm, k in sorted(_kinds.items())}}
+                  if _uncl else {})
     # #1528: of `count`, the violations such a rule may make legal -- graded
     # at the class value, which KiCad may not report.
     _unv = re.search(r'UNVERIFIED \(clearance\): (\d+) violation', out)
@@ -1030,7 +1042,7 @@ def score_diff_pairs(board: str, drc: dict, pcb=None) -> dict:
         names = {nid: n.name for nid, n in pcb.nets.items() if nid and n.name}
         pairs = coupled_net_pairs(names)
         measured, unjoined = {}, []
-        index = dr = None
+        index = dr = lanes = None
         for p, n in sorted(pairs, key=lambda pn: names[pn[0]]):
             if len(pcb.pads_by_net.get(p) or ()) < 2 or len(pcb.pads_by_net.get(n) or ()) < 2:
                 continue
@@ -1043,6 +1055,21 @@ def score_diff_pairs(board: str, drc: dict, pcb=None) -> dict:
             gmin = gap.kicad_min if gap.kicad_min is not None else gap.min
             rec = diff_pair_copper(pcb, p, n, gmin, gap.max, index=index)
             rec.update(n_net=names[n], gap_window_mm=[gmin, gap.max])
+            # #1869: a pair recorded with a lane is graded between its pads;
+            # `skew_mm` above stays KiCad's, over all the copper
+            if lanes is None:
+                from kicad_dru import recorded_intra_pair_lanes
+                lanes = recorded_intra_pair_lanes(board)
+            if names[p] in lanes and names[n] in lanes:
+                from net_queries import net_match_length
+                try:
+                    _lp = net_match_length(pcb, p, 'pin_pair', pads=lanes[names[p]])
+                    _ln = net_match_length(pcb, n, 'pin_pair', pads=lanes[names[n]])
+                except ValueError:
+                    _lp = _ln = None
+                rec['lane'] = {names[p]: lanes[names[p]], names[n]: lanes[names[n]]}
+                rec['lane_skew_mm'] = (None if _lp is None or _ln is None
+                                       else round(abs(_lp - _ln), 4))
             measured[names[p]] = rec
     except Exception as exc:                                 # noqa: BLE001
         return {'ran': True, 'count': None,
@@ -1067,7 +1094,16 @@ def score_diff_pairs(board: str, drc: dict, pcb=None) -> dict:
     if unbound:
         detail['unbound_rules'] = [r.name for r in unbound]
     live = [r for r in rules if all(r is not u for u in unbound)]
-    if not live:
+    # #1799: an AC-coupled chain a route_diff step matched end to end is
+    # recorded with its tolerance, and check_drc grades it: a declaration.
+    try:
+        from check_drc import recorded_chain_groups
+        chains = [ch['name'] for ch, _p, _n in recorded_chain_groups(board, pcb)]
+    except Exception:                                        # noqa: BLE001
+        chains = []
+    if chains:
+        detail['ac_coupled_chains'] = chains
+    if not live and not chains:
         why = ('no .kicad_dru skew / diff_pair_uncoupled rule declares what '
                'the pairs must meet' if not rules else
                f"the .kicad_dru rule(s) {', '.join(repr(r.name) for r in unbound)} "
@@ -1116,7 +1152,7 @@ def _glob_literal(name: str) -> str:
     return '\\' + lit if lit.startswith('!') else lit
 
 
-def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
+def score_impedance(root: str, board: str, nets, tmp: str, pcb=None) -> dict:
     """check_impedance -- reference-plane continuity and declared-gap audit.
 
     Graded: the nets named by ``--impedance-nets``. `count` is the nets that
@@ -1138,7 +1174,16 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
     ``--nets <--impedance-nets>``: the selection is check_impedance's own
     matcher (`net_queries.matches_net_filter`), so a sheet-path net
     (``USB_D*`` names ``/USB_DP``) and ``!`` exclusions select the same nets
-    here as there."""
+    here as there.
+
+    Each asked pattern is accounted on its own (#1815). One naming no net of
+    the board is a finding about the spec: the component is UNKNOWN and the
+    reason names it, also when other patterns graded nets
+    (`patterns_matching_no_net`). One whose nets exist but were not analysed
+    is disclosed (`patterns_matching_no_routed_net`). When nothing was
+    analysed because no named net has track copper yet, the component is
+    UNGRADED, not unknown (#1814): "not routed yet" is what `unrouted` and
+    `broken` measure, as `length` does since #1246."""
     from net_queries import matches_net_filter, split_net_patterns
     declared = declared_impedance_nets(board)
     asked = list(nets or [])
@@ -1192,15 +1237,47 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
                             '(the project\'s impedance declarations are measured '
                             'in declared_failing, not graded)'), **extra)
     graded = [r for r in rows if named(r['net_name'])]
+    graded_names = {r['net_name'] for r in graded}
+    # #1815: each pattern accounted on its own, matched as `named` matches
+    # (check_impedance's own matcher), so it selects the same nets here.
+    from net_queries import account_net_patterns, no_net_patterns_note
+    no_net, matched = (account_net_patterns(asked, pcb)
+                       if pcb is not None else ([], {}))
+    extra['patterns_matching_no_net'] = no_net
+    extra['patterns_matching_no_routed_net'] = [
+        p for p, hit in matched.items() if not graded_names.intersection(hit)]
+    if no_net:
+        # A pattern naming no net of the board is a FINDING about the spec,
+        # not a pass, even beside patterns that graded (#1815: "A, B" used to
+        # grade A alone, one blocker better than the board). ran=True with
+        # count=None routes this to UNKNOWN (blocking None, exit 4), never to
+        # `ungraded`: the comma-joined form of --impedance-nets silently
+        # zero-matched for four whole runs on one board while blocking summed
+        # without the component and the exit code read 0 (test-board run 5).
+        return {'ran': True, 'count': None, 'reason': no_net_patterns_note(
+                    no_net, '--impedance-nets', commas=True),
+                **extra}
     if not graded:
-        # Asked for, but nothing matched -- that is a FINDING (the globs are
-        # wrong, or the nets are unrouted), not a pass. ran=True with count=None
-        # routes this to UNKNOWN (blocking None, exit 4), never to `ungraded`:
-        # the comma-joined form of --impedance-nets silently zero-matched for
-        # four whole runs on one board while blocking summed without the
-        # component and the exit code read 0 (test-board run 5, journal [11]).
+        if pcb is not None:
+            # check_impedance analyses only a net with a track segment, so a
+            # named net with none is "not routed yet" (#1814), which `unrouted`
+            # and `broken` already count: ungraded, as `length` does (#1246).
+            from net_queries import board_net_names
+            selected = {n for n in board_net_names(pcb) if named(n)}
+            tracked = {pcb.nets[s.net_id].name for s in pcb.segments
+                       if s.net_id and s.net_id in pcb.nets}
+            if selected and not selected & tracked:
+                return dict(skipped(f'{len(selected)} net(s) named by '
+                                    f'--impedance-nets have no track copper '
+                                    f'yet'), **extra)
+        # Nets named, with track copper, and none analysed (a net that owns a
+        # pour is a plane net, which check_impedance skips; or an exclusion
+        # removed every one): a finding, UNKNOWN as above.
+        notes = '; '.join(d.get('notes') or ())
         return {'ran': True, 'count': None,
-                'reason': 'no routed nets matched --impedance-nets', **extra}
+                'reason': 'no routed nets matched --impedance-nets'
+                          + (f' (check_impedance: {notes})' if notes else ''),
+                **extra}
     broken = sorted(r['net_name'] for r in graded if _broken(r))
     crossing = sorted(r['net_name'] for r in graded if r.get('crossings'))
     return {'ran': True, 'count': len(set(broken) | set(crossing)),
@@ -1217,6 +1294,180 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
             **extra}
 
 
+#: The keys a `--length-groups` group may carry (#1812); any other is named
+#: in the group's detail as `unknown_keys`.
+LENGTH_GROUP_KEYS = frozenset({'nets', 'chains', 'tolerance_mm', 'min_mm',
+                               'max_mm', 'mode', 'pads'})
+
+
+def _length_group_pads(pcb, by_name, spec, mode):
+    """A group's `"pads"` (#1866): {net: ["REF.PAD", "REF.PAD"]}, the two pads
+    `"mode": "pin_pair"` measures that net between.
+
+    -> ({net: (pad_a, pad_b)}, None), or (None, why) when the key cannot be
+    read as that: a finding about the spec, which fails the group. A net of
+    the group that the board lacks is left to the group's own
+    `missing_nets`. A `chains` group checks that each named net is in one of
+    its chains itself (`_length_group_chains`), once it knows them."""
+    from net_queries import pin_pair_pads
+    given = spec.get('pads')
+    if given is None:
+        return {}, None
+    if mode != 'pin_pair':
+        return None, ('"pads" names the two pads a "mode": "pin_pair" group '
+                      'measures a net between; this group measures total copper')
+    if not isinstance(given, dict) or not all(
+            isinstance(v, list) and len(v) == 2
+            and all(isinstance(x, str) for x in v) for v in given.values()):
+        return None, '"pads" must be {net: ["REF.PAD", "REF.PAD"]}'
+    members = (None if spec.get('chains') is not None
+               else set(spec.get('nets') or ()))
+    out = {}
+    for net, pair in sorted(given.items()):
+        if members is not None and net not in members:
+            return None, f'"pads" names {net!r}, which is not a net of this group'
+        if net not in by_name:
+            continue
+        try:
+            out[net] = pin_pair_pads(pcb, by_name[net], pair)
+        except ValueError as exc:
+            return None, f'"pads": {exc}'
+    return out, None
+
+
+def _length_bounds(lengths: dict, lo, hi) -> list:
+    """The members of `lengths` ({label: mm}) outside [lo, hi] (#1812):
+    [{'member', 'length_mm', 'bound', 'limit_mm'}]."""
+    out = []
+    for m, L in sorted(lengths.items()):
+        if hi is not None and L > hi + 1e-6:
+            out.append({'member': m, 'length_mm': round(L, 4), 'bound': 'max',
+                        'limit_mm': hi})
+        elif lo is not None and L < lo - 1e-6:
+            out.append({'member': m, 'length_mm': round(L, 4), 'bound': 'min',
+                        'limit_mm': lo})
+    return out
+
+
+def _auto_chains(pcb) -> list:
+    """`"chains": "auto"`: the AC-coupled chains `diff_xnet` finds among the
+    board's pairs (KiCad's pairing, `kicad_dru.coupled_net_pairs`), each
+    pair's P side and N side as two chains. Only junctions where BOTH
+    polarities are bridged are found; any other lane is written out."""
+    from diff_xnet import find_ac_coupled_xnets
+    from kicad_dru import coupled_net_pairs
+    from routing_config import DiffPairNet
+    names = {nid: n.name for nid, n in pcb.nets.items() if nid and n.name}
+    dp = {}
+    for p, n in coupled_net_pairs(names):
+        key = f'{names[p]}/{names[n]}'
+        dp[key] = DiffPairNet(base_name=key, p_net_id=p, n_net_id=n,
+                              p_net_name=names[p], n_net_name=names[n])
+    xnets, _warnings = find_ac_coupled_xnets(pcb, dp)
+    chains = []
+    for xn in xnets:
+        chains.append([names[i] for i in xn.p_net_ids])
+        chains.append([names[i] for i in xn.n_net_ids])
+    return chains
+
+
+def _length_group_chains(pcb, chains, mode, tol, lo, hi, pads=None,
+                         pad_nets=()) -> dict:
+    """One `--length-groups` group whose members are CHAINS (#1812): lanes
+    through series parts, each a list of nets in order, measured end to end
+    by `chain_length.measure_chain` -- the sum of its nets' lengths, each
+    series part's own span reported apart (`series_span_mm`), not added.
+    `tolerance_mm` is the spread across chains; `min_mm` / `max_mm` bound
+    each chain. A joint no 2-pad part bridges, or a net the board lacks, is
+    a finding about the spec (the group fails); a chain with a net not yet
+    joined by track copper leaves the group unmeasured (`unmeasured` True).
+    In `pin_pair` mode `pads` is the group's named pad pairs and each chain
+    carries `measured_pads`, the pair each of its nets was measured between
+    (#1866), and the group's `ambiguous_pair` names the nets whose pair was
+    chosen from three or more copper pads; `pad_nets` is every net the
+    group's `"pads"` names, and one that is in none of the chains fails the
+    group."""
+    from chain_length import measure_chain, chain_label
+    if chains == 'auto':
+        try:
+            chains = _auto_chains(pcb)
+        except Exception as exc:                             # noqa: BLE001
+            return {'skipped': f'"chains": "auto" could not read the board\'s '
+                               f'AC-coupled chains: {type(exc).__name__}: {exc}',
+                    'pass': False}
+        if not chains:
+            return {'skipped': '"chains": "auto" found no AC-coupled chain on '
+                               'the board', 'pass': False}
+    if not isinstance(chains, list) or not chains or not all(
+            isinstance(c, list) and c and all(isinstance(n, str) for n in c)
+            for c in chains):
+        return {'skipped': '"chains" must be "auto" or a list of lists of net '
+                           'names', 'pass': False}
+    stray = sorted(set(pad_nets) - {n for c in chains for n in c})
+    if stray:
+        return {'skipped': f'"pads" names {stray[0]!r}, which is not a net of '
+                           f'this group', 'pass': False}
+    measured = {chain_label(c): measure_chain(pcb, c, mode=mode, pads=pads)
+                for c in chains}
+    out = {'chains': {k: {'nets': m['nets'], 'track_mm': m['track_mm'],
+                          'net_mm': m['net_mm'], 'series_parts': m['joints'],
+                          'series_span_mm': m['span_mm'],
+                          **({'measured_pads': m['pads']} if 'pads' in m else {})}
+                      for k, m in measured.items()},
+           'tolerance_mm': tol}
+    ambiguous = {n: pr for m in measured.values()
+                 for n, pr in (m.get('ambiguous_pair') or {}).items()}
+    if ambiguous:
+        out['ambiguous_pair'] = ambiguous
+    if lo is not None or hi is not None:
+        out.update(min_mm=lo, max_mm=hi)
+    missing = sorted({n for m in measured.values() for n in m['missing_nets']})
+    unbridged = {k: m['unbridged'] for k, m in measured.items() if m['unbridged']}
+    if missing or unbridged:
+        out['pass'] = False
+        if missing:
+            out['missing_nets'] = missing
+        if unbridged:
+            out['unbridged'] = {k: [f'{j}: no part with two copper pads, one '
+                                    f'on each net, joins them' for j in v]
+                                for k, v in unbridged.items()}
+        return out
+    unjoined = sorted({n for m in measured.values() for n in m['unjoined_nets']})
+    if unjoined:
+        out.update(skipped=f'{len(unjoined)} net(s) have pads not joined by '
+                           f'track copper (unrouted, stub-only, broken or '
+                           f'plane-only)', unjoined_nets=unjoined, unmeasured=True)
+        return out
+    lengths = {k: m['track_mm'] for k, m in measured.items()}
+    spread = max(lengths.values()) - min(lengths.values())
+    bounds = _length_bounds(lengths, lo, hi)
+    out.update(spread_mm=round(spread, 4), out_of_bounds=bounds,
+               worst=max(lengths, key=lengths.get))
+    out['pass'] = spread <= tol and not bounds
+    return out
+
+
+def score_return_vias(pcb, nets) -> dict:
+    """Ground return-via coverage of the nets ``--impedance-nets`` names
+    (#1816): `count` is their signal vias with no via or drilled pad of their
+    own ground domain within `routing_defaults.GND_VIA_DISTANCE`, by the test
+    the --add-gnd-vias step itself uses (`return_vias`). ADVISORY: published
+    beside `drc_rule_pairs`, never summed into `blocking` -- the chain adds
+    return vias only where the board's ground is poured on two layers."""
+    if pcb is None:
+        return skipped('the board did not parse')
+    from net_queries import board_net_names, matches_net_filter
+    from return_vias import return_via_coverage
+    from routing_defaults import GND_VIA_DISTANCE
+    want = {n for n in board_net_names(pcb) if matches_net_filter(n, nets)}
+    rep = return_via_coverage(
+        pcb, GND_VIA_DISTANCE,
+        net_ids={nid for nid, n in pcb.nets.items() if n.name in want})
+    if rep['uncovered'] is None:
+        return dict(skipped(rep['reason']), **rep)
+    return {'ran': True, 'count': rep['uncovered'], **rep}
+
+
 def score_length(board: str, groups_file: str) -> dict:
     """Length-match spread per declared group, via net_queries (no new geometry).
 
@@ -1226,9 +1477,36 @@ def score_length(board: str, groups_file: str) -> dict:
          "USB":   {"nets": ["/USB_DP", "/USB_DM"], "tolerance_mm": 0.05,
                    "mode": "pin_pair"}}
 
-    `mode: "pin_pair"` measures the driver->receiver PATH instead of total net
-    copper. Use it for any multipoint or stubbed net: total copper sums every
-    branch and matches no real signal path.
+    `mode: "pin_pair"` measures the PATH between two pads of each net instead
+    of total net copper. Use it for any multipoint or stubbed net: total copper
+    sums every branch and matches no real signal path. `"pads"` (#1866) names
+    the two pads, `{"/USB_DP": ["U3.6", "J1.A6"], ...}`. A net it does not
+    name is measured between the pair `net_queries.pin_pair_pads` chooses
+    from its copper pads, whatever order the board file lists them in: its
+    two pads, or on a net of three or more the two farthest apart along the
+    copper (by straight line while the net is not joined), ties to the
+    labels first in natural order. Either way the group's `measured_pads`
+    names the pair each net was measured between, and `ambiguous_pair`
+    names, with its pair, each net whose pair was chosen from three or more
+    copper pads: its lane ends were assumed, so name them in `"pads"`. A
+    `"pads"` entry that is not two copper pads of a net of the group fails
+    the group and says why.
+
+    `min_mm` / `max_mm` (#1812) bound each member's length; a member outside
+    fails the group and is named in `out_of_bounds`. With a bound, one net is
+    a group. A per-net limit KiCad grades belongs in a `.kicad_dru` length
+    rule (check_drc grades it); these keys are for a spec written here.
+
+    `chains` (#1812) replaces `nets` with lanes through series parts:
+    `[["/A_P", "/B_P"], ...]`, each chain's nets in order, joined by a part
+    with two copper pads, or `"auto"` for the board's AC-coupled pairs. A
+    chain's length is its nets' lengths summed (`chain_length.measure_chain`,
+    the measurement check_drc grades a recorded AC-coupled chain with); the
+    series parts' own spans are reported apart, never added. `tolerance_mm`
+    is then the spread across chains, and the bounds apply to each chain.
+
+    A key this function does not read is listed in the group's
+    `unknown_keys`.
 
     BOTH modes measure a member only once its pads are joined by track copper
     (`net_queries.net_match_length`), and a member that is not makes its whole
@@ -1249,7 +1527,8 @@ def score_length(board: str, groups_file: str) -> dict:
     if not os.path.isfile(groups_file):
         return skipped(f'length-groups file not found: {groups_file}')
     from kicad_parser import parse_kicad_pcb
-    from net_queries import net_match_length, net_match_pad_to_die
+    from net_queries import (net_match_length, net_match_pad_to_die, pad_label,
+                             pin_pair_pads)
 
     with open(groups_file, encoding='utf-8') as f:
         groups = json.load(f)
@@ -1257,21 +1536,63 @@ def score_length(board: str, groups_file: str) -> dict:
     by_name = {n.name: nid for nid, n in pcb.nets.items()}
     failures, unmeasured, detail = 0, 0, {}
     for gname, spec in groups.items():
-        names = [n for n in spec.get('nets', [])]
+        # #1812: a key this function does not read is named, never passed
+        # over -- an unread `max_mm` graded a lane over its limit a pass.
+        unknown = sorted(k for k in spec if k not in LENGTH_GROUP_KEYS)
         tol = float(spec.get('tolerance_mm', 0.1))
+        lo, hi = spec.get('min_mm'), spec.get('max_mm')
+        lo = None if lo is None else float(lo)
+        hi = None if hi is None else float(hi)
+        mode = 'pin_pair' if spec.get('mode') == 'pin_pair' else 'total'
+        pads_of, bad_pads = _length_group_pads(pcb, by_name, spec, mode)
+        if bad_pads:
+            detail[gname] = {'skipped': bad_pads, 'pass': False}
+            if unknown:
+                detail[gname]['unknown_keys'] = unknown
+            failures += 1          # a finding about the spec, not a pass
+            continue
+        if spec.get('chains') is not None:
+            res = _length_group_chains(pcb, spec['chains'], mode, tol, lo, hi,
+                                       pads=pads_of,
+                                       pad_nets=sorted(spec.get('pads') or ()))
+            if unknown:
+                res['unknown_keys'] = unknown
+            detail[gname] = res
+            if res.pop('unmeasured', False):
+                unmeasured += 1
+            elif not res.get('pass', True):
+                failures += 1
+            continue
+        names = [n for n in spec.get('nets', [])]
         ids = [by_name[n] for n in names if n in by_name]
         missing = [n for n in names if n not in by_name]
-        if len(ids) < 2:
-            detail[gname] = {'skipped': f'fewer than 2 of its nets exist on the '
+        # a bound is graded per member, so one net is a group then
+        need = 1 if (lo is not None or hi is not None) else 2
+        if len(ids) < need:
+            detail[gname] = {'skipped': f'fewer than {need} of its nets exist on the '
                                         f'board (missing: {missing})'}
+            if unknown:
+                detail[gname]['unknown_keys'] = unknown
             failures += 1          # a group naming nets that do not exist is a
             continue               # finding about the spec, not a pass
-        mode = 'pin_pair' if spec.get('mode') == 'pin_pair' else 'total'
-        lengths, unjoined = {}, []
+        lengths, unjoined, measured_pads, ambiguous = {}, [], {}, {}
         for n in names:
             if n not in by_name:
                 continue
-            L = net_match_length(pcb, by_name[n], mode=mode)
+            if mode == 'pin_pair':
+                # the pair resolved once, so the length, its pad-to-die term
+                # and the name it is reported under are one pair
+                how = {}
+                pads_of[n] = pin_pair_pads(pcb, by_name[n], pads_of.get(n),
+                                           detail=how)
+                if pads_of[n]:
+                    measured_pads[n] = [pad_label(p) for p in pads_of[n]]
+                    if how.get('ambiguous'):
+                        ambiguous[n] = measured_pads[n]
+                L = (net_match_length(pcb, by_name[n], mode=mode, pads=pads_of[n])
+                     if pads_of[n] else None)
+            else:
+                L = net_match_length(pcb, by_name[n], mode=mode)
             if L is None:
                 unjoined.append(n)
             else:
@@ -1287,18 +1608,39 @@ def score_length(board: str, groups_file: str) -> dict:
                                         f'(unrouted, stub-only, broken or '
                                         f'plane-only)',
                              'unjoined_nets': unjoined, 'missing_nets': missing}
+            if mode == 'pin_pair':
+                detail[gname]['measured_pads'] = measured_pads
+                if ambiguous:
+                    detail[gname]['ambiguous_pair'] = ambiguous
+            if unknown:
+                detail[gname]['unknown_keys'] = unknown
             unmeasured += 1
             continue
         spread = max(lengths.values()) - min(lengths.values())
-        ok = spread <= tol
+        bounds = _length_bounds(lengths, lo, hi)
+        ok = spread <= tol and not bounds
         failures += 0 if ok else 1
         detail[gname] = {'spread_mm': round(spread, 4), 'tolerance_mm': tol,
                          'pass': ok, 'missing_nets': missing,
                          'worst': max(lengths, key=lengths.get)}
+        if mode == 'pin_pair':
+            # #1866: the pair each net was measured between -- the named one,
+            # else the one pin_pair_pads chose; `ambiguous_pair` names the
+            # nets whose pair was chosen from three or more copper pads
+            detail[gname]['measured_pads'] = measured_pads
+            if ambiguous:
+                detail[gname]['ambiguous_pair'] = ambiguous
+        if lo is not None or hi is not None:
+            detail[gname].update(min_mm=lo, max_mm=hi, out_of_bounds=bounds,
+                                 lengths_mm={n: round(v, 4)
+                                             for n, v in lengths.items()})
+        if unknown:
+            detail[gname]['unknown_keys'] = unknown
         # #1248: the lengths include each member's pad-to-die term, as KiCad's
         # DRC does. Disclosed only where a pad declares one, so a grade moved
         # by a term no copper shows says which term moved it.
-        die = {n: net_match_pad_to_die(pcb, by_name[n], mode) for n in lengths}
+        die = {n: net_match_pad_to_die(pcb, by_name[n], mode,
+                                       pads=pads_of.get(n)) for n in lengths}
         if any(die.values()):
             detail[gname]['pad_to_die_mm'] = {n: round(v, 4)
                                               for n, v in die.items() if v}
@@ -1575,9 +1917,16 @@ def declared_net_names(score: dict) -> dict:
         'components.broken.poured_nets': list(broken.get('poured_nets') or ()),
         'components.broken.nets': list((broken.get('nets') or {}).keys()),
         'components.net_widths.nets': list((widths.get('nets') or {}).keys()),
+        # A group of chains (#1812) names its `worst` by the chain's LABEL
+        # ("A + B"), which is no net; the nets it measured are in `net_mm`.
         'components.length.groups[].worst':
             [g['worst'] for g in (length.get('groups') or {}).values()
-             if isinstance(g, dict) and g.get('worst')],
+             if isinstance(g, dict) and g.get('worst') and not g.get('chains')],
+        'components.length.groups[].chains[].net_mm':
+            [n for g in (length.get('groups') or {}).values()
+             if isinstance(g, dict) and isinstance(g.get('chains'), dict)
+             for ch in g['chains'].values() if isinstance(ch, dict)
+             for n in (ch.get('net_mm') or {})],
         'components.length.groups[].unjoined_nets':
             [n for g in (length.get('groups') or {}).values()
              if isinstance(g, dict) for n in (g.get('unjoined_nets') or ())],
@@ -1706,10 +2055,13 @@ def build_parser():
     g.add_argument('--size-margin', type=float, metavar='MM',
                    help='absolute tolerance on the size checks (default: exact floor)')
     p.add_argument('--impedance-nets', nargs='+', action='extend', metavar='GLOB',
-                   help='route.py --nets glob syntax, SPACE separated; commas '
-                        'inside a token are split too (a comma-joined list used '
-                        'to become one impossible glob that silently matched '
-                        'nothing). Enables the impedance component')
+                   help='route.py --nets glob syntax, one pattern per argument; '
+                        'commas inside an argument are split too and each piece '
+                        'stripped ("A, B" is A and B). A space inside an '
+                        'argument is part of the pattern, since a net name may '
+                        'hold one. A pattern naming no net of the board makes '
+                        'impedance UNKNOWN and is named. Enables the impedance '
+                        'component')
     p.add_argument('--net-min-widths', metavar='JSON',
                    help='JSON FILE of {"<net glob>": <min mm>} -- per-net width '
                         'requirements. `undersized` only sees BOARD-WIDE floors, '
@@ -1721,7 +2073,17 @@ def build_parser():
                         'pattern covers (requested_under), not graded')
     p.add_argument('--length-groups', metavar='JSON',
                    help='JSON FILE of {"group": {"nets": [...], '
-                        '"tolerance_mm": 0.1, "mode": "pin_pair"}} -- enables '
+                        '"tolerance_mm": 0.1, "mode": "pin_pair", "min_mm": .., '
+                        '"max_mm": ..}} ("pads": {net: ["REF.PAD", "REF.PAD"]} '
+                        'names the two pads pin_pair measures a net between; '
+                        'unnamed, its two copper pads farthest apart along '
+                        'the copper, flagged in ambiguous_pair on a net of '
+                        '3+ copper pads) '
+                        '-- or "chains": [[net, net, ...], ...] '
+                        'in place of "nets" for lanes through series parts '
+                        '(a chain is its nets summed; "chains": "auto" takes '
+                        'the AC-coupled pairs). A per-net limit KiCad grades '
+                        'belongs in a .kicad_dru length rule. Enables '
                         'the length component. A PATH, like --net-min-widths: '
                         'anything that is not an existing file leaves length '
                         'matching UNGRADED (ran: false) and the board scoring '
@@ -1775,6 +2137,15 @@ def main():
              '--min-via-diameter': args.min_via_diameter,
              '--min-via-drill': args.min_via_drill,
              '--size-margin': args.size_margin}
+    # ONE in-process parse for the in-process readers below (#1194): each
+    # parsed the board itself, so a parser warning (the two-line NET-TAGGED
+    # copper graphic notice) printed once per reader. Read-only for all. A
+    # board that will not parse leaves each to parse and report for itself.
+    try:
+        from kicad_parser import parse_kicad_pcb
+        _pcb = parse_kicad_pcb(args.board)
+    except Exception:                                        # noqa: BLE001
+        _pcb = None
     # A real temp dir, NOT a dotfile beside the board: these are intermediate
     # JSONs nobody reads twice, and scoring a board must leave nothing behind in
     # the user's project. `--json` is the copy you keep.
@@ -1785,9 +2156,11 @@ def main():
         floorplan = score_floorplan(root, args.board, args.intent, tmp)
         assembly = score_assembly(root, args.board, args.intent, tmp,
                                   args.clearance, baseline=args.baseline)
-        _imp_nets = ([g for tok in args.impedance_nets for g in tok.split(',') if g]
+        # #1815: each comma token is stripped, so "A, B" names B, not " B"
+        _imp_nets = ([g.strip() for tok in args.impedance_nets
+                      for g in tok.split(',') if g.strip()]
                      if args.impedance_nets else args.impedance_nets)
-        imped = score_impedance(root, args.board, _imp_nets, tmp)
+        imped = score_impedance(root, args.board, _imp_nets, tmp, pcb=_pcb)
         length = score_length(args.board, args.length_groups)
         net_widths = score_net_widths(args.board, args.net_min_widths)
 
@@ -1796,15 +2169,6 @@ def main():
     # counts and the stranded pads, or 9.1a's lever 2 has nothing to act on.
     # ...and `unrouted` carries its SHAPE. `count` is deliberately untouched, so
     # `blocking` below is unchanged by construction.
-    # ONE in-process parse for the three readers below (#1194): each parsed
-    # the board itself, so a parser warning (the two-line NET-TAGGED copper
-    # graphic notice) printed three times. Read-only for all three. A board
-    # that will not parse leaves each to parse and report for itself.
-    try:
-        from kicad_parser import parse_kicad_pcb
-        _pcb = parse_kicad_pcb(args.board)
-    except Exception:                                        # noqa: BLE001
-        _pcb = None
     shape = unrouted_shape(args.board, conn.get('unrouted_net_names', []),
                            pcb=_pcb)
     diff_pairs = score_diff_pairs(args.board, drc, pcb=_pcb)
@@ -1837,6 +2201,10 @@ def main():
     advisory = {'drc_rule_pairs': rule_pairs,
                 'drc_via_in_paste': drc.get('via_in_paste')
                 or {'ran': drc.get('ran'), 'count': None, 'by_type': {}}}
+    # #1816: the return-via coverage of the impedance nets, measured only
+    # when they are named, and never in `blocking`.
+    if _imp_nets:
+        advisory['return_vias'] = score_return_vias(_pcb, _imp_nets)
     # #1171: with --baseline, check_drc has already accepted every via the
     # input had under solder (`inherited-via-in-paste`), so what is left is a
     # site THIS run made -- a via it laid or re-laid there, or a part it moved
@@ -1898,7 +2266,7 @@ def main():
           f"joins_needed={score['joins_needed']}")
     _adv_bits = ' '.join(f'{k}={v}' for k, v in score['advisory'].items() if v)
     if _adv_bits:
-        print(f"ADVISORY (floor-governed, not blocking): {_adv_bits}")
+        print(f"ADVISORY (not blocking): {_adv_bits}")
     # #1626: findings KiCad itself reports as warnings, or does not check, at
     # the board's own severities -- disclosed, never counted.
     _drc_c = score['components'].get('drc') or {}
@@ -1965,6 +2333,32 @@ def main():
               + (', ...' if len(_ru) > 6 else '')
               + " -- name a net in --net-min-widths to grade it")
     _imp = score['components'].get('impedance') or {}
+    # #1815: each --impedance-nets pattern accounted on its own
+    _pnn = _imp.get('patterns_matching_no_net') or []
+    _pnr = _imp.get('patterns_matching_no_routed_net') or []
+    if _pnn or _pnr:
+        print("IMPEDANCE PATTERNS: " + '; '.join(
+            [f"matching no net of the board (impedance is unknown): "
+             f"{', '.join(repr(p) for p in _pnn)}"] * bool(_pnn)
+            + [f"naming nets none of which was analysed (no track copper "
+               f"yet, or a plane net): {', '.join(repr(p) for p in _pnr)}"]
+            * bool(_pnr)))
+    _rv = score['components'].get('return_vias') or {}
+    _rvp = _rv.get('power_nets') or {}
+    # Printed when a via is uncovered, and also when a named net's vias were
+    # left out as power: its 0 would otherwise read as full coverage.
+    if _rv.get('count') is not None and (_rv['count'] or _rvp):
+        _line = (f"RETURN VIAS (measured, not blocking): {_rv['count']} of "
+                 f"{_rv['signal_vias']} signal via(s) on the --impedance-nets "
+                 f"nets have no {_rv['gnd_net']}-domain via or drilled pad "
+                 f"within {_rv['distance_mm']:g} mm")
+        if _rvp:
+            _line += (f"; {_rv['power_vias']} via(s) on --impedance-nets "
+                      f"net(s) were left out as power, not examined: "
+                      + ', '.join(f"{n} ({r['why']})"
+                                  for n, r in list(_rvp.items())[:8])
+                      + (', ...' if len(_rvp) > 8 else ''))
+        print(_line + " -- check_return_vias.py lists them")
     _df = _imp.get('declared_failing') or []
     if _df:
         print(f"DECLARED IMPEDANCE (measured, not graded): {len(_df)} net(s) the "

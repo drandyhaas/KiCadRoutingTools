@@ -212,6 +212,10 @@ GUIDE_CORRIDOR_ENABLED = False
 GUIDE_CORRIDOR_LAYER = "User.1"  # User layer the guide polyline is drawn on
 GUIDE_CORRIDOR_SPACING = 0.0  # mm; 0 = waypoints only at drawn segment endpoints (else subdivide long segments)
 
+# Mask artwork (F.Mask/B.Mask graphics, footprint mask shapes) as keep-outs
+# for new copper on its side (mask_artwork.py).
+MASK_KEEPOUTS = True
+
 # Keepout zone - keep routed tracks out of a user-drawn polygon (issue #27)
 KEEPOUT_ENABLED = False
 KEEPOUT_LAYER = "User.2"  # User layer the keepout polygon is drawn on
@@ -352,6 +356,11 @@ RESCUE_MAX_ITERATIONS = 1_000_000  # per-rung A* backstop. Deliberately generous
                                    # time and cost 7 recoveries - fine grid needs
                                    # ~4x the coarse iteration count), so this only
                                    # guards degenerate --max-iterations values.
+
+# Final reconciliation's finer-grid rung (#1763, finer_grid_rung.py): one more
+# whole-board lap at half the run's grid for nets still boxed in, skipped when
+# that map would exceed this many cells summed over the routing layers.
+FINER_GRID_RUNG_MAX_CELLS = 40_000_000
 
 
 # GUI-specific ranges (min, max, increment, digits)

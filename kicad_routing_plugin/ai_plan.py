@@ -10,7 +10,6 @@ Turns /plan-pcb-routing output into GUI state and executes it:
 """
 
 import json
-import fnmatch
 
 import wx
 
@@ -335,6 +334,9 @@ _PARAM_CONTROL_ALIASES = {
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
 _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
+                  # #1842: --via-span's two layer names -> one text field,
+                  # --via-span-type -> the choice beside it
+                  'via_span', 'via_span_type', 'via_span_escape',
                   # #530: --clearance-ceiling -> Min Clearance + the ceiling box
                   'clearance_ceiling',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
@@ -591,6 +593,22 @@ def apply_step_params(step, dialog):
                 ctl.SetValue(' '.join(str(v) for v in value) or 'ALL')
             else:
                 ctl.SetValue('ALL' if value else '')
+            return True
+        if name == 'via_span':
+            ctl = getattr(dialog, 'via_span', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(' '.join(str(v) for v in value)
+                         if isinstance(value, (list, tuple)) else str(value or ''))
+            return True
+        if name in ('via_span_type', 'via_span_escape'):
+            ctl = getattr(dialog, name, None)
+            if ctl is None:
+                return False
+            _i = ctl.FindString(str(value or ('auto' if name == 'via_span_type' else 'off')))
+            if _i < 0:
+                return False
+            ctl.SetSelection(_i)
             return True
         if name == 'power_nets' and isinstance(value, (list, tuple)):
             ctl = getattr(dialog, 'power_nets_ctrl', None)
@@ -1100,10 +1118,14 @@ def apply_step_selection(step, dialog, all_steps=None):
         # a name-per-half plan selected NO pairs and the signal step later
         # routed the pair single-ended/uncoupled (set11 USB D+/D-).
         nets_by_id = {i: n.name for i, n in dialog.pcb_data.nets.items()}
+        # The CLI's matcher (#1641): with the board's names a pattern that
+        # spells a net ('D[3]+') selects only that net, never a glob of it.
+        from net_queries import net_pattern_matches
+        known_names = {n for n in nets_by_id.values() if n}
         matched_display = set()
         for display_name, base_name, p_id, n_id in tab.pair_panel.all_pairs:
             cands = [base_name, nets_by_id.get(p_id, ""), nets_by_id.get(n_id, "")]
-            if any(fnmatch.fnmatchcase(c, w) or c == w
+            if any(net_pattern_matches(c, w, known_names)
                    for w in wanted for c in cands if c):
                 matched_display.add(display_name)
         if not matched_display:
@@ -1191,6 +1213,8 @@ def _match_net_names(pcb_data, globs):
             continue
         # Sheet-path aware, like the CLI's expand_net_patterns (#493): an
         # unqualified '!GND' must exclude the board's '/GND'.
+        # #1641: with the board's names, a pattern that spells a net
+        # ('D[3]') selects only that net, as expand_net_patterns does.
         if any(net_pattern_matches(net.name, g, known_names) for g in includes) and \
                 not any(net_pattern_matches(net.name, g, known_names) for g in excludes):
             names.append(net.name)
@@ -1490,7 +1514,7 @@ class PlanExecutor:
         me = threading.current_thread()
         owners = [self.dialog]
         for attr in ('differential_tab', 'planes_tab', 'fanout_tab',
-                     'placement_tab'):
+                     'labels_tab'):
             owner = getattr(self.dialog, attr, None)
             if owner is not None:
                 owners.append(owner)
@@ -1606,6 +1630,15 @@ class PlanExecutor:
                     # Converted plans now spell it
                     # cap_board_edge_clearance, which is not a floor key at
                     # all; this covers plans converted before that.
+                    _keys = tuple(k for k in _FLOOR_KEYS
+                                  if k != 'board_edge_clearance')
+                elif step.get('action') == 'route_planes':
+                    # #338/#1698: a plane step's --board-edge-clearance is the
+                    # pour's INSET, not a copper floor. route_planes' main
+                    # records the project's own rule (read_project_edge_
+                    # clearance), and the Planes tab's writeback passes none;
+                    # harvested here it became the rule every later chain
+                    # step and KiCad grade at.
                     _keys = tuple(k for k in _FLOOR_KEYS
                                   if k != 'board_edge_clearance')
                 for k in _keys:
@@ -1797,6 +1830,10 @@ class PlanExecutor:
                 # #678: the plan's fanout steps' pour-served balls.
                 persist_pour_served_pads(_pro, consume_pour_served_pads(),
                                          board=_live)
+                # #1807: the improvement gate's record of the last trade.
+                from improvement_gate import consume_lap_history
+                from protected_nets import persist_lap_history
+                persist_lap_history(_pro, consume_lap_history(), board=_live)
             except Exception as _pe:
                 self.log(f"AI plan: protected-nets record skipped: {_pe}")
             if board_file and os.path.isfile(board_file):

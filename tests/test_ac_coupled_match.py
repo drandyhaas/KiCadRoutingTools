@@ -214,7 +214,8 @@ def run():
 
     # 11. overshooting meanders (3x the ask -> added 9.0 >= 2*delta 6.0) are
     # reverted: new_segments restored to the exact original objects and the
-    # ORIGINAL delta is returned so JSON skew_mm matches the restored board.
+    # ORIGINAL delta is returned so JSON skew_mm matches the restored board,
+    # and the record says it is not matched (#1799).
     def _overshoot(segments, net_id, paired_net_id, vias, stub_length,
                    current_length, target_length, delta, config, pcb_data):
         extra = 3 * (target_length - current_length)
@@ -231,8 +232,11 @@ def run():
             xnet, rr, cfg, fake_pcb)
     finally:
         length_matching._lengthen_net_with_meanders = real_fn
-    if not (isinstance(skew, float) and abs(skew - 3.0) < 1e-6):
-        fails.append(f"guard: expected original delta 3.0 returned, got {skew}")
+    if not (isinstance(skew, dict) and abs(skew['skew_mm'] - 3.0) < 1e-6
+            and skew['status'] == 'unmatched'
+            and skew['reason'] == 'meanders-would-worsen'):
+        fails.append(f"guard: expected original delta 3.0 returned, unmatched "
+                     f"(meanders-would-worsen), got {skew}")
     if res_a["new_segments"] != orig_a or res_b["new_segments"] != orig_b:
         fails.append("guard: new_segments not restored after revert")
     elif not all(a is b for a, b in zip(res_a["new_segments"], orig_a)):
@@ -253,7 +257,8 @@ def run():
             xnet, rr, cfg, fake_pcb)
     finally:
         length_matching._lengthen_net_with_meanders = real_fn
-    if not (isinstance(skew, float) and skew < 1e-6):
+    if not (isinstance(skew, dict) and skew['skew_mm'] < 1e-6
+            and skew['status'] == 'matched'):
         fails.append(f"guard-positive: expected matched skew ~0.0, got {skew}")
     if len(res_a["new_segments"]) != 3 or len(res_b["new_segments"]) != 3:
         fails.append(

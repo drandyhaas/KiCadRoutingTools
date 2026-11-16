@@ -9,7 +9,11 @@ Categories:
                      pcb_modification._point_anchored). Includes the
                      half-segment variant: a tail dangling PAST a mid-body
                      anchor (trim_dangles_past_body_anchor geometry,
-                     report-only). Reports the dangling length.
+                     report-only). Reports the dangling length. A tail is
+                     named once no anchor's copper touches its end, the test
+                     KiCad's DRC reports `track_dangling` by
+                     (connectivity.end_touches, #1870), not after a flat
+                     3 track widths.
   soft-joint         same-net endpoints whose caps overlap but are not
                      coincident (check_drc's 'segment-endpoint-gap' class;
                      reuses routing_constants.SOFT_JOINT_MIN_GAP and approach).
@@ -121,7 +125,8 @@ from check_connected import (matches_any_pattern, check_net_connectivity,
                              analyze_conn_excluding, point_in_polygon,
                              _point_in_pad)
 from check_drc import point_to_pad_distance
-from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad, strict_joint_roots,
+from connectivity import (COINCIDENCE_TOL, end_touches, endpoint_reaches_pad,
+                          strict_joint_roots,
                           endpoint_reaches_via, lands_on_interior,
                           off_centre_via_ends,
                           span_endpoint_degree, via_copper_layers)
@@ -444,7 +449,7 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
         # Mid-body anchors (trim_dangles_past_body_anchor geometry): a same-net
         # via barrel overlapping the centerline, or another same-net segment
         # endpoint teeing into the body.
-        cands = []
+        cands = []      # (t, the free end's distance to the anchor, its width)
         if L2 >= 1e-9:
             for vx, vy, vsize in via_pts_on(s.layer):
                 t = ((vx - s.start_x) * dx + (vy - s.start_y) * dy) / L2
@@ -452,7 +457,7 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                     continue
                 cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                 if math.hypot(vx - cx_, vy - cy_) < (vsize + s.width) / 2 - 1e-6:
-                    cands.append(t)
+                    cands.append((t, math.hypot(vx - fx, vy - fy), vsize))
             for o in net_segs:
                 if o is s or o.layer != s.layer:
                     continue
@@ -462,13 +467,19 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                         continue
                     cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                     if math.hypot(ox - cx_, oy - cy_) < (o.width + s.width) / 2 - 1e-6:
-                        cands.append(t)
+                        cands.append((t, _pt_seg_dist(fx, fy, o.start_x, o.start_y,
+                                                      o.end_x, o.end_y), o.width))
         if cands:
-            t_anchor = min(cands) if free_is_start else max(cands)
+            t_anchor = (min if free_is_start else max)(c[0] for c in cands)
             nx, ny = s.start_x + t_anchor * dx, s.start_y + t_anchor * dy
             tail = math.hypot(fx - nx, fy - ny)
-            if tail <= max(tol, 3 * s.width):
-                continue  # sub-visible nib past the anchor (as the trim pass)
+            # #1870: a nib is a tail whose end an anchor's copper still
+            # touches, KiCad's own test (`end_touches`), as the trim pass has
+            # it. A flat 3 track widths was allowed here, and KiCad's DRC
+            # reports `track_dangling` from about one.
+            if tail <= tol or any(end_touches(d, s.width, w)
+                                  for _t, d, w in cands):
+                continue
             findings.append(_finding(
                 'dangling-end', name, s.layer, fx, fy,
                 f"half-segment tail dangling {tail:.3f}mm past body anchor "
@@ -525,7 +536,8 @@ def _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
 
 
 def _strict_removable(net_id, name, net_segs, net_vias, net_pads, has_zone,
-                      copper_layers, thorough, skipped_nets, web_floor=0.0):
+                      copper_layers, thorough, skipped_nets, web_floor=0.0,
+                      keep_centre_stubs=False):
     """The removal pass's own verdict on this net (#1063): the segment indices
     ``collapse_strict_redundant`` would remove from the board as it stands,
     graded by the SAME StrictRemovalModel. None when the model does not grade
@@ -549,7 +561,8 @@ def _strict_removable(net_id, name, net_segs, net_vias, net_pads, has_zone,
         skipped_nets.append((name, len(net_segs)))
         return None
     model = StrictRemovalModel(net_id, net_segs, net_vias, net_pads,
-                               copper_layers, web_floor=web_floor)
+                               copper_layers, web_floor=web_floor,
+                               keep_centre_stubs=keep_centre_stubs)
     if not model.valid:
         return None
     return strict_removable_segments(model)
@@ -585,11 +598,15 @@ def kicad_dangling_end(s, others, net_vias, net_pads, net_zones,
     -- its far end mid-body, its root in that track's copper -- dangles in
     KiCad, while check_weird's T-junction rule credits both ends.
 
-    Reported only in that unambiguous shape: every item touching the segment
-    is a same-net TRACK, each one touches both ends, and no via, pad or zone
-    touches it. Where a via, pad or zone is involved KiCad's verdict turns on
-    zone-fill and anchor details this model does not reproduce, so it says
-    nothing rather than guess. Never size-filtered: KiCad warns at any length.
+    Reported only when both ends touch same-net TRACK copper, and no via,
+    pad or zone touches either end. A track touching just one end counts
+    for that end; it does not exempt a joint whose other contacts all count
+    for the same end. Where a via, pad or zone is involved KiCad's verdict
+    turns on zone-fill and anchor details this model does not reproduce, so
+    it says nothing rather than guess. Never size-filtered: KiCad warns at
+    any length. The touch test is a superset of KiCad's connectivity graph,
+    and an extra toucher only adds a count, so the model can miss a joint
+    but never invents one.
 
     ``others`` is the same-net track copper to judge against (``s`` itself is
     skipped by identity): every segment of the net, or any subset that still
@@ -611,7 +628,7 @@ def kicad_dangling_end(s, others, net_vias, net_pads, net_zones,
                 <= o.width / 2.0 + acc + 1e-9 for x, y in ends]
         if any(hits):
             touchers.append((o, hits))
-    if not touchers or not all(h[0] and h[1] for _o, h in touchers):
+    if not all(any(h[end] for _o, h in touchers) for end in (0, 1)):
         return None
     if any(s.layer in via_copper_layers(v, copper_layers)
            and min(math.hypot(v.x - x, v.y - y) for x, y in ends)
@@ -624,10 +641,13 @@ def kicad_dangling_end(s, others, net_vias, net_pads, net_zones,
            and any(point_in_polygon(x, y, z.polygon) for x, y in ends)
            for z in net_zones):
         return None
-    # Every toucher holds both ends, so each is counted once, at the end
-    # nearer one of its own endpoints; the other end is never counted.
+    # KiCad counts a one-end toucher for that end. A track touching both
+    # ends counts only for the nearer one, even beside a one-end neighbour.
     counts = [0, 0]
-    for o, _h in touchers:
+    for o, hits in touchers:
+        if hits[0] != hits[1]:
+            counts[0 if hits[0] else 1] += 1
+            continue
         d0, d1 = (min(math.hypot(o.start_x - x, o.start_y - y),
                       math.hypot(o.end_x - x, o.end_y - y)) for x, y in ends)
         counts[0 if d0 < d1 else 1] += 1
@@ -648,8 +668,9 @@ def _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
             'kicad-dangling', name, s.layer, free[0], free[1],
             f"segment ({s.start_x:.3f}, {s.start_y:.3f})-({s.end_x:.3f}, "
             f"{s.end_y:.3f}) w{s.width:.3f}: both ends lie on other {name} "
-            f"track(s) that hold the other end too -- KiCad's DRC reports "
-            f"track_dangling at ({free[0]:.3f}, {free[1]:.3f})",
+            f"track(s), but those contacts count for only one end -- "
+            f"KiCad's DRC reports track_dangling at "
+            f"({free[0]:.3f}, {free[1]:.3f})",
             size=None))
 
 
@@ -1092,6 +1113,9 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
     # verdict. A board with no project falls back to its thinnest track.
     from fix_kicad_drc_settings import connection_width_floor
     min_track_w = connection_width_floor(pcb_data)
+    # #1798: the nets the removal pass keeps via-centre stubs on.
+    from cleanup_pipeline import _centre_stub_net_ids
+    stub_ids = _centre_stub_net_ids(pcb_data)
 
     net_ids = set(segs_by_net) | set(vias_by_net)
     check_ids = []
@@ -1124,7 +1148,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                               net_zones, findings)
         removable = _strict_removable(net_id, name, net_segs, net_vias,
                                       net_pads, has_zone, copper_layers,
-                                      thorough, skipped_nets, min_track_w)
+                                      thorough, skipped_nets, min_track_w,
+                                      keep_centre_stubs=net_id in stub_ids)
         _check_cycles(net_id, name, net_segs, net_vias, net_pads, has_zone,
                       findings, removable)
         _check_removable(net_id, name, net_segs, removable, findings)

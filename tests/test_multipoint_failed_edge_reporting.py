@@ -92,6 +92,18 @@ def main():
         checks.append(("successful == len(routed_single)",
                        s.get("successful") == len(routed)))
 
+        # The final grade names each open pad by its number, as the
+        # per-net "NOT CONNECTED (so far)" lines do, never `pad ?`.
+        unnamed = [(x["net_name"], p["component_ref"])
+                   for x in s.get("failed_multipoint", [])
+                   for p in x["failed_pads"]
+                   if p["component_ref"] != "?" and p["pad_number"] == "?"]
+        checks.append(("every failed pad of a part is named by its number",
+                       not unnamed
+                       and not re.search(r"[^?\s] pad \? at \(", txt)))
+        if unnamed:
+            print(f"    unnamed: {unnamed[:5]}")
+
     for name, ok in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
     n_pass = sum(1 for _, ok in checks if ok)

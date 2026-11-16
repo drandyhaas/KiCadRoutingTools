@@ -299,8 +299,10 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
     distance (the fold, below): both parts in one group, the intent's
     `proximity[]`; across groups, a `links[]` row (`a` the subject, `b` its
     partner), which keeps both groups. A link measures courtyard to
-    courtyard and has no `pads`, so a note at another group's pin is held
-    only to that part. When the subject belongs with that pin's part (a
+    courtyard unless it names pads: for a note at another group's pin, add
+    `pads` (`{"J1": ["7", "8"]}`, as on `proximity[]`; `min_reader` 26), so
+    the subject is held to that pin and not to the nearest point of a long
+    part. When the subject belongs with that pin's part (a
     cap at its supply pin), move it into that group and write the
     `proximity[]` row with `pads` instead. With nobody to ask, use
     2.0 mm for a part named at a pin (a row with `pads`) and 5.0 mm for a
@@ -332,6 +334,13 @@ Write `wk/<run>/groups.json` (the format is in `py_placer/placement/grouping.py`
   make it an error-graded claim. Each limit is priced, not guaranteed: a
   seed can leave a crystal past it, so read the grade's `proximity`
   warnings (the judge ranks only errors).
+- **A differential pair's series parts are graded, not placed.** The
+  emitted intent carries a `pair_series[]` row for each pair joined through
+  one series part per leg (AC caps, USB series resistors; `min_reader` 27),
+  and the grade warns (`pair_series`) when the two are not side by side on
+  one face with their pads parallel -- split, `route_diff` may route that
+  side single-ended. `place_simple` does not read the row, so put such a
+  pair's two parts in one group, and read the `pair_series` warnings.
 - **Hints, each a soft term of the objective:** `near` (a list of groups to
   sit against), `apart` (groups to keep 3 mm from), `edge` (`N`/`S`/`E`/`W`,
   a group that belongs on a board side; a group holding an edge connector
@@ -520,6 +529,14 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   seat lays the header with its long side along the edge and the cable runs
   off the board. Without it, a 2x05 header lay across its edge on most
   seeds, its cable along the edge.
+- **A socket that opens into the board.** An M.2 or SO-DIMM socket at an
+  edge has its back on the edge and its card lying over the board. Leave
+  `mating_face` as the side its OPENING is on (the body's reading, or
+  declared as above) and write `"opens": "inward"` on its row: the seat
+  puts its back at the edge and the facing clause reads `back to <edge>
+  (<side>), opens into the board (<face>)`. Declaring its back as
+  `mating_face` instead seats it the same way but grades the back as its
+  opening (#1769).
 - **The pin rows of a plug-in module** (a DIP or breadboard module, rows
   that go into a socket): the socket sets their spacing, so declare each row
   in `fixed_poses[]` (`basis: derived_default`), not on its edge: parallel,
@@ -584,6 +601,13 @@ first placed seeds (§3.6); a locked part reads them now. Then decide, from the 
   band, and the way out is the same, or a larger `max_setback_mm` where the
   drawing allows (#1713). It offers `overhang_mm.max` only where the band's
   maximum is what holds the body back.
+  Its figures can be copied into the band as printed: a reach it falls short
+  of is rounded down, a least reading rounded up, and the pads are placed to
+  0.001 mm, beside the seat's own 0.005 mm copper slack (#1772).
+  It names the pads that stop the seat, each at its own clearance and the
+  rule that sets it, and where they would stand at the minimum; when that is
+  on or past the outline it says no rule can free them, as the roster does
+  (#1773).
 - **Where the part's own model ends.** Where a 3D model resolves,
   check_floorplan's line says `model end -2.07mm` beside the overhang (from
   the edge's line, negative short of it) and warns when the courtyard reads
@@ -698,14 +722,16 @@ under a card, and a tall part can be placed there.
    row puts it: fix the row, or move the standoff. A `mountable` warning
    names why a body cannot go on (a standoff off the board, a part too tall
    under it, another body in its way, a part, pad or track at one of its
-   hole sites); check_assembly prints the same per
+   hole sites, a hole site past the outline); check_assembly prints the same per
    cover, with the order the cards go in.
 
 `place_simple` then holds each standoff at its length from the connector.
 A standoff that cannot move (a locked boss, one at a declared pose) holds
 the connector instead: each seed seats it at the next legal quarter turn
 that puts the standoff at its length, and refuses before placing when no
-turn is legal. The `cover` rule is a warning unless the intent's `severity`
+turn is legal. It keeps each `holes[]` site's drill on the board too: a
+connector no pose of which does so is left illegal, the hole named. The
+`cover` rule is a warning unless the intent's `severity`
 makes it an error. `place_simple` also
 admits a part under the body only when its height is known and its top is
 0.5 mm or more under the underside; check_assembly gates one that is not. A
@@ -777,6 +803,15 @@ in the vocabulary of `docs/floorplan-intent.md`:
   ... --preview` places one seed and draws each group's box over it (with
   `--draft-zones` written as draft `blocks[]`, never applied). It is a
   review, not a step: the groups place the board.
+- **To fix a mostly-good placement without re-annealing** (a placed board
+  with a few overlaps or a part off the outline, a seed after a hand edit):
+  `place_simple.py ... --legalise-only [--seed S]` keeps every part that is
+  legal by KiCad's standard (check_assembly, check_drc's pad clearance, the
+  intent's keep-outs and zones -- not place_simple's own spacing) exactly
+  where it stands and moves only the illegal ones to their nearest legal
+  pose; its log names each move and its distance. It is not a
+  placement: it never improves an arrangement, so a board that needs one is
+  placed with the seeds (§3.6).
 
 ### 3.5 Datasheet layouts (your judgement)
 
@@ -1073,8 +1108,9 @@ leaving that pose expensive.
 7. **The rest is automatic.** `place_simple` seats and carries the template
    (`--template-weight`, default 100 per mm of drift), and `check_floorplan`
    grades each member's drift from its template pose (`template`, a WARN,
-   past 0.3 mm by default, the row's `tolerance_mm`). On the unplaced board
-   every member reads off its pose; that is expected. Report each template
+   past 0.3 mm by default, the row's `tolerance_mm`; `template_broken`, an
+   ERROR the judge ranks a seed last for, past 5 x that). On the unplaced
+   board every member reads off its pose, most past 5 x; that is expected. Report each template
    in REPORT.md: the datasheet and figure, the parts matched, and the drift
    graded on the final board.
 
@@ -1354,7 +1390,12 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    copper reads -2% to +8% off the full route's per seed, and when every seed
    routes its blocking is decided by one open net. Seeds that lie within that
    spread of the best (the same defects, blocking within 1, copper within 10%)
-   are NOTEd; settle them with `--confirm close`, which routes those seeds
+   are NOTEd. When the best leaves many nets blocked at level 2 the chain does
+   not route the board at that level: the band grows to 15% of the best's
+   blocking (joins_needed compared the same way, copper not), and the run says
+   `every judged seed leaves N-M nets blocked at level 2` and names the seeds
+   it cannot separate (`not_separable`; the GUI marks them `not separable`).
+   Settle close seeds with `--confirm close`, which routes those seeds
    again at the full level (`--quick` off every route step, into
    `s<S>_full.kicad_pcb` and `s<S>_full.score.json`) and names the best of
    them by the same key (`--confirm K` confirms the K best instead).
@@ -1377,14 +1418,18 @@ python3 -X utf8 py_placer/place_simple.py wk/<run>/fixed.kicad_pcb 'wk/<run>/s{s
    show a mouth. A whole-board render cannot either: it frames the board, so
    a ~155 mm board renders at ~5.6 px/mm, where a 1.00 mm side-entry
    header's contacts are 1 px specks and its mouth out and mouth in look the
-   same. Render each listed part close up, a few seconds each:
+   same. Render each listed part close up, a few seconds each, NAMING the
+   edge its facing clause reads (`facing south` -> `J7:south`), so the camera
+   stands on the edge the part is declared to face:
    ```bash
-   python3 py_tools/edge_closeup.py wk/<run>/final.kicad_pcb J7 J3 --out-dir wk/<run>/edges
+   python3 py_tools/edge_closeup.py wk/<run>/final.kicad_pcb J7:south J3:north --out-dir wk/<run>/edges
    ```
-   Each part is centred, seen from outside the edge its pads are nearest
-   (`J3:north` names the edge), at 40 px/mm (`--px-per-mm`), and the line
-   it prints names the image, the edge and the scale. In each image you
-   stand outside that edge (from the north, west is on the right), so the
+   A bare `REF` is seen from the edge its pads are nearest, which for a part
+   in a corner is not always the one it faces: the tool then prints
+   `corner: also N mm from <edge>`, and that render is side-on, not the
+   mouth. Each part is centred, at 40 px/mm (`--px-per-mm`), and the line it
+   prints names the image, the edge and the scale. In each image you stand
+   outside the edge you named (from the north, west is on the right), so the
    part is nearest the camera: a jack's or USB socket's mouth must face
    you; its back wall means it opens into the board. Fix the declaration
    (`mating_face`, and the source you read it off) and place again. A part
@@ -1502,8 +1547,14 @@ Routing Completes): run them once, here, not again inside the routing.
     board/fab floor: parameters (grid, ripup budget, width).
   - Geometry already at the floor, failures clustered at one part's escape
     face, or `py_tools/check_reachability.py --pad REF.PAD` says CAGED:
-    placement. Itemise it in the report with that measurement (§6). A finer
-    grid alone never widens a gap. First, if that part is a fine-pitch
+    placement. Itemise it in the report with that measurement (§6). Before
+    that, at the floor, run ONE grid A/B (plan-pcb-routing, "A boxed-in net"):
+    the default `--grid-step 0.1` against `0.05` (`0.025` at ≤0.4 mm pitch),
+    sizes unchanged, keeping the better-graded result. A finer grid never
+    widens a gap, but 0.1 can miss one that exists (a 0.4 mm-pitch QFN: 0.05 routed
+    9 of 11 nets boxed in at 0.1, #1765); below 0.05 the gain shrinks (0.025
+    routed one more net there, and none on run 20's board). Only what stays
+    boxed in after that is placement. First, if that part is a fine-pitch
     perimeter part and the chain fanned nothing out for it, route that arm
     (plan-pcb-routing Step 3, rule 3): it costs one route, and re-placing
     costs a whole pass.
@@ -1561,11 +1612,19 @@ Routing Completes): run them once, here, not again inside the routing.
    placement, the first routed board, the first DONE, the
    final board, and tried-and-worse boards with `--rejected`.
    ```bash
-   python3 -X utf8 py_tools/board_score.py <board> --intent <i> --baseline <input> --json <board>.score.json --quiet
+   python3 -X utf8 py_tools/board_score.py <board> --intent <i> <spec flags> --baseline <input> --json <board>.score.json --quiet
    python3 -X utf8 py_placer/converge.py record --ledger wk/<run>/ledger.jsonl \
        --board <board> --kind placement --parent <the board it was made from> \
        --lever "<what you changed, one line>" --score-file <board>.score.json
    ```
+   `<spec flags>` are the ones DONE is measured with (§1: `--net-min-widths`,
+   `--impedance-nets`, `--length-groups`, `--min-track-width` /
+   `--min-via-diameter` / `--min-via-drill`), the same on every row and the
+   same the verifier passes (`references/verifier.md`). A row scored without
+   them leaves those specs `ungraded`: its `blocking` is not DONE's, the
+   plateau rule compares the wrong number, and converge calls the first
+   flagged row INCOMMENSURABLE with it. On a board that declares no spec they
+   are empty.
    Use `--kind completion` for a routed board, and close the ledger with one
    `record --final --stop-condition <1|2|3|4>` row, passing the verifier's
    per-lens files as `--lens-file`. The stop conditions: 1 done, 2 budget

@@ -111,12 +111,12 @@ _DECLARED = {
     ('py_router/kicad_parser.py', 'flip_layer_token'):
         (1, "a layer-NAME transform on 'B.' WITH the dot, not a side rule; "
             'and py_router again.'),
-    ('kicad_routing_plugin/placement_gui.py', 'PlacementTab._pose_moves'):
+    ('kicad_routing_plugin/result_apply.py', 'pose_moves'):
         (1, 'runs inside KiCad pcbnew, where py_placer is imported only '
             'lazily inside try blocks and is not guaranteed importable. Its '
             'or-F.Cu default is behaviour-identical to side_of_layer.'),
-    ('kicad_routing_plugin/placement_gui.py', 'PlacementTab._apply_pose'):
-        (1, 'same as _pose_moves above -- the GUI half, not importable from '
+    ('kicad_routing_plugin/result_apply.py', 'apply_pose'):
+        (1, 'same as pose_moves above -- the GUI half, not importable from '
             'a py_placer-less pcbnew session.'),
 }
 

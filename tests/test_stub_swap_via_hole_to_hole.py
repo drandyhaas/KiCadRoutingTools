@@ -172,14 +172,20 @@ def diff_terminal():
           f"{len(switched)} switch(es), stubs {layers}, {nvias} via(s)")
 
 
+P1_X, P1_Y = 10.025, 15.025
+HOLE_D = 0.25 + 0.25 + 0.15 + 0.01      # the ring's offset from P1
+
+
 def rescue_board(rip, hole):
     """#1261's STUB-SWAP RESCUE board: NET_A's F.Cu stub inside a locked B.Cu
     ring of NET_C that admits a via only at P1's off-grid centre, the route
     restricted to In1/In2. `hole` adds a NET_C via on the ring 0.66 mm from
     P1 (P1 is 0.5 mm so the via clears the pad); `rip` puts an unlocked
-    NET_B under the stub on both inner layers (test_1261_stub_swap_rescue_rip)."""
+    NET_B under the stub on both inner layers (test_1261_stub_swap_rescue_rip).
+    P1's centre is off the HALF grid too, so the final reconciliation's
+    finer-grid rung (#1763, grid 0.05) cannot reach it either."""
     b = RoutingBoard(layers=('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'))
-    px, py, ex = 10.05, 15.05, 14.05
+    px, py, ex = P1_X, P1_Y, P1_X + 4
     b.pad('P1', px, py, 'NET_A', sx=0.5, sy=0.5)
     b.seg(px, py, ex, py, 'NET_A')
     if rip:
@@ -236,7 +242,8 @@ def _route(tmp, tag, text):
 def _h2h_ok(board):
     """Every NET_A via clears the NET_C hole by the routed floor."""
     vias = _vias(board)
-    net_c = [v for v in vias if abs(v[0] - 9.39) < 1e-6 and abs(v[1] - 15.05) < 1e-6]
+    net_c = [v for v in vias if abs(v[0] - round(P1_X - HOLE_D, 4)) < 1e-6
+             and abs(v[1] - P1_Y) < 1e-6]
     if len(net_c) != 1:
         return False, f"the NET_C hole is not in the output: {vias}"
     hx, hy, hd, hn = net_c[0]

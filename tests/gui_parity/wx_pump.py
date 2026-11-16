@@ -9,9 +9,17 @@ the QFN fanout worker done at 0.5 s, `_running` still set 120 s later). macOS
 delivers timers either way, which is why such gates were green there. This is
 the loop test_placement_fake_run and headless_plan already use.
 """
+import os
+import sys
 import time
 
 import wx
+
+_PY_ROUTER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), 'py_router')
+if _PY_ROUTER not in sys.path:
+    sys.path.insert(0, _PY_ROUTER)
+from headless_plan import exit_main_loop  # noqa: E402
 
 
 def run_until(pred, timeout_s, poll_ms=50):
@@ -28,9 +36,9 @@ def run_until(pred, timeout_s, poll_ms=50):
     def _poll():
         if pred():
             state['ok'] = True
-            app.ExitMainLoop()
+            exit_main_loop(app)
         elif time.monotonic() >= deadline:
-            app.ExitMainLoop()
+            exit_main_loop(app)
         else:
             wx.CallLater(poll_ms, _poll)
 

@@ -228,7 +228,9 @@ def classify_component(components: Dict[str, ComponentInfo],
             reached through the inductor, a PASS_THROUGH).
         input_nets: a POWER_SOURCE's input rails (#1496) -- a regulator whose
             pins say nothing, so the load behind it reaches its input. Never
-            taken as one of its outputs.
+            taken as one of its outputs. Authoritative (#1774): when given,
+            the part's IN-named and power_in pins are not read as inputs, so
+            a bias or sense pin on another rail can be left out.
     """
     if ref in components:
         known = set(components[ref].net_connections.values())
@@ -299,10 +301,14 @@ def _regulator_terminals(comp: ComponentInfo) -> Tuple[List[str], List[str]]:
     """(output nets, input nets) of a POWER_SOURCE part.
 
     Outputs are the `supply_nets` the agent named, else power_out pins or
-    OUT-named pins; inputs are the `input_nets` the agent named and IN-named
+    OUT-named pins. Inputs are the `input_nets` the agent named, else IN-named
     pins or power_in pins on a non-ground net, read only when the part has
     outputs -- naming its outputs no longer drops a typed regulator's input
-    (#1496). A net named as an input is never an output. A part with no output
+    (#1496). Named inputs REPLACE the pins' reading, as `supply_nets` replaces
+    the outputs (#1774): an eFuse's bias pin on the raw rail is a power_in pin
+    but carries none of the load, and read beside the IN behind its series FET
+    it gave the trace a shortcut past the FET. A net named as an input is
+    never an output. A part with no output
     and no named input (a connector, a battery holder, a regulator whose
     footprint carries no pintypes) offers its supply rails as outputs and has
     no input, so it is a root source (`root_regulator_warnings` names the ones
@@ -326,7 +332,7 @@ def _regulator_terminals(comp: ComponentInfo) -> Tuple[List[str], List[str]]:
                     and net not in outs and net not in named_in):
                 outs.append(net)
     for pad, net in comp.net_connections.items():
-        if (not outs or not _is_connected(net) or is_ground_net_name(net)
+        if (not outs or named_in or not _is_connected(net) or is_ground_net_name(net)
                 or net in outs or net in ins):
             continue
         fn = comp.pin_functions.get(pad, '').upper()
@@ -370,6 +376,88 @@ def root_regulator_warnings(components: Dict[str, ComponentInfo]) -> List[str]:
     return out
 
 
+def _pass_through_links(components: Dict[str, ComponentInfo]
+                        ) -> Dict[str, List[Tuple[str, str]]]:
+    """net -> [(PASS_THROUGH ref, other net)]: the conduction a pass-through
+    part gives between its non-ground nets, both directions (a clique, #1378)."""
+    links: Dict[str, List[Tuple[str, str]]] = {}
+    for ref, comp in components.items():
+        if comp.role != ComponentRole.PASS_THROUGH:
+            continue
+        nets = []
+        for net in comp.net_connections.values():
+            if _is_connected(net) and not is_ground_net_name(net) and net not in nets:
+                nets.append(net)
+        for a in nets:
+            for b in nets:
+                if a != b:
+                    links.setdefault(a, []).append((ref, b))
+    return links
+
+
+def joined_input_warnings(components: Dict[str, ComponentInfo],
+                          paths: List[PowerPath]) -> List[str]:
+    """#1774: one line per input net a classified POWER_SOURCE loses to a
+    shortcut. When two of a source's inputs, read off its pins (no
+    ``input_nets``), are joined through PASS_THROUGH parts -- an eFuse's bias
+    pin on the raw rail and its IN behind a series FET -- the trace enters the
+    raw rail straight from the source's output, so the net between the
+    pass-through and the other input carries none of the load behind the
+    source. Named only when a traced path crosses the source and leaves that
+    input out; the fix is to name the input that carries the current."""
+    links = _pass_through_links(components)
+
+    def joining(a: str, b: str) -> Optional[List[str]]:
+        prev = {a: None}
+        queue = [a]
+        while queue:
+            net = queue.pop(0)
+            if net == b:
+                parts = []
+                while prev[net] is not None:
+                    net, via = prev[net]
+                    parts.append(via)
+                return parts[::-1]
+            for via, other in links.get(net, ()):
+                if other not in prev:
+                    prev[other] = (net, via)
+                    queue.append(other)
+        return None
+
+    out = []
+    for ref, comp in sorted(components.items()):
+        if (comp.role != ComponentRole.POWER_SOURCE or not comp.classified
+                or comp.input_nets):
+            continue
+        outs, ins = _regulator_terminals(comp)
+        if len(ins) < 2:
+            continue
+        on_path = set()
+        for path in paths:
+            if ref in path.components_in_path:
+                on_path.update(path.nets_in_path)
+        reached = [n for n in ins if n in on_path]
+        if not reached:
+            continue
+        for net in ins:
+            if net in on_path:
+                continue
+            for other in reached:
+                parts = joining(net, other)
+                if parts is None:
+                    continue
+                out.append(
+                    f"{ref}'s inputs {net} and {other} are joined through "
+                    f"{', '.join(dict.fromkeys(parts))}: the trace reaches {other} "
+                    f"straight from {ref}, so {net} carries none of the load behind "
+                    f"{ref} and gets no width from it. If {net} carries {ref}'s "
+                    f"current (its IN behind a series FET, with a bias pin on "
+                    f"{other}), name it with classify_component(..., "
+                    f"input_nets=['{net}'])")
+                break
+    return out
+
+
 def trace_power_paths(pcb_data: PCBData,
                       components: Dict[str, ComponentInfo]) -> List[PowerPath]:
     """
@@ -396,22 +484,10 @@ def trace_power_paths(pcb_data: PCBData,
     # Pass-through conduction. A FET or load switch has three nets (the gate
     # being a control net); a clique over the non-ground nets is safe because
     # a dead-end net never lies on the route to a source.
-    upstream: Dict[str, List[Tuple[str, str]]] = {}   # net -> [(via_ref, net)]
+    upstream = _pass_through_links(components)   # net -> [(via_ref, net)]
 
     def link(ref: str, a: str, b: str) -> None:
         upstream.setdefault(a, []).append((ref, b))
-
-    for ref, comp in components.items():
-        if comp.role != ComponentRole.PASS_THROUGH:
-            continue
-        nets = []
-        for net in comp.net_connections.values():
-            if _is_connected(net) and not is_ground_net_name(net) and net not in nets:
-                nets.append(net)
-        for a in nets:
-            for b in nets:
-                if a != b:
-                    link(ref, a, b)
 
     # Source terminals; a regulator with an input continues the search.
     sources_at: Dict[str, List[str]] = {}
@@ -527,7 +603,7 @@ def get_power_net_recommendations(pcb_data: PCBData,
             f"classified part(s) {', '.join(sorted(lost))} reach no power net, so "
             f"they contribute no width; name their nets with "
             f"classify_component(..., supply_nets=[...])", stacklevel=2)
-    for line in root_regulator_warnings(components):
+    for line in root_regulator_warnings(components) + joined_input_warnings(components, paths):
         warnings.warn(line, stacklevel=2)
 
     net_currents: Dict[str, float] = {}
