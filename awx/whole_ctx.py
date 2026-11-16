@@ -4,7 +4,7 @@ lanes as the router and the audit take them.
 The whole-route tools read one bench from the environment, like the rest of the chain: BENCH (the board, fanned out:
 teeth and berths laid), NETS (N1,N2,.. or @FILE) and DEST (the destination part's reference). plan() reads it --
 braid.setup's reading of the board (its ends, layers, escape directions, pairs and taut paths, a board of the other
-pair chirality turned over), under the braid's plan environment (BRAID_PAIRS=1 BRAID_EXACT_PAGES=0
+pair chirality turned over, a pair one member), under the braid's plan environment (BRAID_EXACT_PAGES=0
 PLAN_PAGES_SIDERS=2, which whole_route.py sets); none of the braid's own planning. The whole route's frame is built on
 it (whole_frame.py).
 
@@ -320,10 +320,7 @@ def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
     import pairs as _pairs
     from kicad_parser import Segment
     chi = int(plan.get('chi') or 1)
-    names = list(names)
-    prs = {}
-    if bd.PAIRS:
-        names, prs = _pairs.members(names)
+    names, prs = _pairs.members(list(names))
     from coherent_nets import by_key, namer
     byname = by_key(pcb)
     for b_, (pn_, _nn) in prs.items():
@@ -425,7 +422,7 @@ def _plan(board, nets, dest, quiet):
     import braid as bd
     cm = contextlib.redirect_stdout(io.StringIO()) if quiet else contextlib.nullcontext()
     with cm:
-        ctx, groups = bd.setup(board, list(nets), dest, print, pairs=bool(bd.PAIRS))
+        ctx, groups = bd.setup(board, list(nets), dest, print, pairs=True)
     return ctx, groups
 
 

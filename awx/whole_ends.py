@@ -1,7 +1,6 @@
 """whole_ends.py -- the whole route's own choice of ENDS: each net's tooth at the source and its berth at the
 destination, chosen together from the fanout's escape menus (fanout_from_plan.plan_state: the destination menu, the
-source menu, the teeth as laid), so the braid they make is cheap. fanout_from_plan's PLAN_JUDGE=ends chooses and
-judges with it.
+source menu, the teeth as laid), so the braid they make is cheap. fanout_from_plan chooses and judges with it.
 
 The ends decide the braid: the order of the teeth round the source and of the berths round the destination (read as
 the whole frame reads them: whole_frame's boxes, cut and unrolled perimeters) fix every crossing, and the layers at
@@ -43,7 +42,7 @@ frame has no way round the source); a pair with another lane's end on its layer 
 the fanout refused.
 
 usage: whole_ends.py BOARD NETS|@FILE  -- the ends on the teeth as laid, and with the teeth free, the objective's parts
-for each (the fanout's menus as PLAN_JUDGE=ends builds them)
+for each (the fanout's menus as fanout_from_plan builds them)
 """
 import collections
 import contextlib
@@ -343,7 +342,6 @@ class Ends:
     """the lanes of one plan state (a pair one lane) with their tooth and berth options, and the objective"""
 
     def __init__(self, st, src_free=True, fixed=None, learned=None, free_teeth=None):
-        import pages_first as pf
         import source_realize as sr
         self.st = st
         # (`src_shared`, the GROUP's ends -- group_ends.py: the source is an array several buses leave, its teeth chosen
@@ -355,9 +353,7 @@ class Ends:
         self.dst_shared = bool(st.get('dst_shared'))
         # (a lane with no berth option is no lane -- the run leaves it out, and names it)
         names = [n for n in st['launch'] if st['dmenu'].get(n)]
-        prs = {}
-        if int(awx_settings.get('PLAN_PAIRS', awx_settings.get('BRAID_PAIRS', '0')) or 0):
-            prs = {b: pr for b, pr in _pairs.pair_names(names).items() if pr[0] in names and pr[1] in names}
+        prs = {b: pr for b, pr in _pairs.pair_names(names).items() if pr[0] in names and pr[1] in names}
         legs = {l_ for pr in prs.values() for l_ in pr}
         self.lanes = [(n, (n,)) for n in names if n not in legs] + [(b, pr) for b, pr in prs.items()]
         self.legs_of = dict(self.lanes)
@@ -384,7 +380,7 @@ class Ends:
         # (a far-face tooth still inside the source's array -- a ball's via, its lane not out of the field -- has no way
         # round the source: the frame refuses it, whole_frame.FarFace)
         far_in = lambda m: m.direction == far_dir and m.exit_pt[0] >= sb[0] - 1e-6
-        cur = {n: pf.current_tooth(st, n) for n in names}
+        cur = {n: sr.current_tooth(st, n) for n in names}
         # ---- each lane's options at each end: (moves per leg, point, layer, vias)
         rt = 1.3 * max(st['sgrid'].pitch_x, st['sgrid'].pitch_y)
         rb = 1.3 * max(st['dgrid'].pitch_x, st['dgrid'].pitch_y)
@@ -675,7 +671,7 @@ class Ends:
                 continue
             # stacked: the whole route orders each layer's lanes on their own, so an F exit over a B one is
             # no conflict
-            for (a, i, b, j) in pf._conflicts(cands, True, stack=True, via_reach=self.via_reach[end_]):
+            for (a, i, b, j) in _sm_c._conflicts(cands, True, stack=True, via_reach=self.via_reach[end_]):
                 conf[(a, id(cands[a][i]))].add((b, id(cands[b][j])))
                 conf[(b, id(cands[b][j]))].add((a, id(cands[a][i])))
             # ...and two nets' vias nearer than a via and a clearance apart (vias_clash), found by their sites' cells
@@ -4065,7 +4061,6 @@ def _fmt(p):
 
 
 if __name__ == '__main__':
-    os.environ.setdefault('PLAN_JUDGE', 'ends')      # (read by fanout_from_plan at import: the menus the ends model takes)
     from kicad_parser import parse_kicad_pcb
     import fanout_from_plan as F
     board, nets = sys.argv[1], sys.argv[2]

@@ -89,8 +89,8 @@ TRACK = ts.TRACK         # ONE source: topo_strings
 CLEAR = _rules.active().hug
                          # 0.1 spec + 5um so hugs don't sit exactly at 0.1
 SPEC_CLEARANCE = _rules.active().clearance
-                         # the spec itself: what the fanout lays at, what grade_k
-                         # grades at, and what the output PROJECT records (CLEAR
+                         # the spec itself: what the fanout lays at, what the
+                         # checks grade at, and what the output PROJECT records (CLEAR
                          # is the router's private margin over it, not a rule)
 VIA_SIZE = _rules.active().via_size
 GRID = _rules.active().grid        # the routing grid (rules.GRID)
@@ -145,15 +145,9 @@ W_XING = 0.02                  # two-page: pitch of a column with no layer
 SLOPE_W = 0.02                 # extra band half-width per unit |do/ds|:
                                # a steep diagonal's +-0.03 tube holds no
                                # connected cell path on the 0.025 grid
-# PROBE knobs (replan.py, 2026-09-10): a local re-braid of a few nets on a
-# frozen board is a SCREEN -- a refusal there is unjudged whatever the
-# budget -- and its cost is failing searches repeated: three identical
-# attempts (nothing changes between them when the refused set repeats)
-# and last-call searches at 1.6 M iterations for a net that will not
-# route. BRAID_ATTEMPTS caps the attempt ladder, BRAID_BUDGET_X the
-# rescue / last-call budget multiplier. Defaults = the braid as it was
-# (measured: one attempt gives the same board 22% faster; a halved
-# budget loses nets, so the probe keeps the full one).
+# BRAID_ATTEMPTS caps the attempt ladder (three identical attempts change
+# nothing when the refused set repeats), BRAID_BUDGET_X the rescue /
+# last-call budget multiplier (a halved budget loses nets).
 ATTEMPTS = int(awx_settings.get('BRAID_ATTEMPTS', '6'))
 LADDER_MODE = awx_settings.get('BRAID_LADDER', 'full')   # full | open (connect_ladder)
 BUDGET_X = int(awx_settings.get('BRAID_BUDGET_X', '4'))
@@ -211,7 +205,6 @@ PAGES_SIDERS = int(awx_settings.get('PLAN_PAGES_SIDERS', '1') or 0)   # default 
 # behaviour, byte-identical); '0' forces it off; anything else forces it on.
 EXACT_PAGES_ENV = awx_settings.get('BRAID_EXACT_PAGES')
 import pairs as _pairs  # noqa: E402  the bus's differential pairs as members (#622, 2026-09-20)
-PAIRS = int(awx_settings.get('BRAID_PAIRS', '0') or 0)   # 1: a differential pair is ONE lane, routed coupled by the production pair router (pairs.py, connect_pair); 0: its legs are singles -- byte-identical
 PROX_TRACK = 0.25              # two same-layer lines nearer than this: a short (pinch_gate.py reads it)
 ECON_LONG = 3.0                # econ re-lay: a lane this far (mm) over its airline is a candidate
 # ECON_MM_PER_VIA (mm): the most copper the econ re-lay may buy a via
@@ -4449,7 +4442,7 @@ class Corridor:
         return [c for c in cand_a if c], [c for c in cand_b if c]
 
     def route_pair_lane(self, nm, virt, virt_vias=None, slack=None, free=None):
-        """A PAIR member's lane (pairs.py, BRAID_PAIRS): the production pair
+        """A PAIR member's lane (pairs.py): the production pair
         router between the two teeth and the two berths, inside the
         member's band widened by half the pair pitch a side, against the
         same virtual copper a single sees. Returns (segments, vias) of
@@ -5925,7 +5918,7 @@ def _apply_source_splice(ctx, nm, lane, chain, verts, path, j, pr, run, saving, 
     if n1 > n0:
         pcb.segments = before
         # the nets the new violations name, other than this one: what a
-        # coupled re-lay (pack_board) would have to lift for this splice
+        # coupled re-lay would have to lift for this splice
         _blk = set()
         from coherent_nets import net_keys
         _keys = net_keys(pcb)
@@ -6349,7 +6342,7 @@ def plan_corridors(board, names, dest, log):
     corridor PLANNED, the board's copper reset to its base. (ctx,
     corridors): what run() routes, and what the plan tools (plan_audit.py,
     route_lanes.py) audit, so a tool never plans differently from the run."""
-    ctx, groups = setup(board, names, dest, log, pairs=bool(PAIRS))
+    ctx, groups = setup(board, names, dest, log, pairs=True)
     ctx.pre_segs, ctx.pre_vias, ctx.protected = {}, {}, set()
     corridors = []
     for ci, members in enumerate(groups):
@@ -6387,14 +6380,10 @@ def plan_corridors(board, names, dest, log):
 
 
 def run(board, nets, dest, out):
-    """The braid as a FUNCTION (2026-09-18): what `main` does for one
-    command line, callable in-process -- a resident probe worker
-    (probe_worker.py) braids one probe after another without paying the
-    interpreter, the imports, the solver priming and the taut memo's
-    load each time (~1 s of a 4 s probe braid, measured). The knobs a
-    probe sets through the environment (BRAID_ATTEMPTS, BRAID_BUDGET_X)
-    are module globals here, so a caller sets ATTEMPTS / BUDGET_X
-    itself; BRAID_SMOOTH is read at write time from the environment."""
+    """The braid as a FUNCTION: what `main` does for one command line,
+    callable in-process. BRAID_ATTEMPTS and BRAID_BUDGET_X are module
+    globals here (ATTEMPTS / BUDGET_X), read at import; BRAID_SMOOTH is
+    read at write time."""
     import types as _types
     a = _types.SimpleNamespace(board=board, nets=nets, dest=dest, out=out)
     names = [n.strip() for n in a.nets.split(',') if n.strip()]
@@ -6433,7 +6422,7 @@ def run(board, nets, dest, out):
         f'via {VIA_SIZE}/{VIA_DRILL}, via_need {VIA_NEED:.4f}  '
         f'[{_r.source}]')
     ctx, corridors = plan_corridors(a.board, names, a.dest, log)
-    if PAIRS and getattr(ctx, 'pairs', None):
+    if getattr(ctx, 'pairs', None):
         route_pairs_planned(ctx, corridors, log)
     for c in corridors:
         c.run()
@@ -6551,7 +6540,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
         import joint_lanes
         joint_lanes.foreign(pcb)
     byname = by_key(pcb)
-    # PAIR MEMBERS (BRAID_PAIRS, pairs.py): the two legs of a differential
+    # PAIR MEMBERS (pairs.py): the two legs of a differential
     # pair become ONE member named after the pair. The P leg's net stands
     # in wherever a member needs a net id (the obstacle models, the
     # source reference); both legs' ids are the run's (kids), so neither
@@ -6560,7 +6549,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     # braid_slots) keeps the legs as the singles its model plans, and the
     # dicts it reads back stay keyed by the plan's own names
     _pairs_here = {}
-    if PAIRS and pairs:
+    if pairs:
         names, _pairs_here = _pairs.members(names)
         if _pairs_here:
             log('pair members: ' + ', '.join(f'{b} = {p} + {n}' for b, (p, n) in _pairs_here.items()))
@@ -6676,7 +6665,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     # (...and the layers each end has room on, where that model read them: a via end's layer is chosen among them)
     ctx.end_layers = dict((plan or {}).get('end_layers') or {})
     if ctx.pages_first and EXACT_PAGES_ENV != '0':
-        # a PAGES-FIRST plan (fanout_from_plan PLAN_PAGES): its two chains
+        # a PAGES-FIRST plan (its sidecar's `pages_first`): its two chains
         # were chosen to cover every lane, so the schedule pages it exactly
         import schedule as _sch
         _sch.EXACT_PAGES = 1
@@ -6987,72 +6976,6 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     return ctx, groups
 
 
-
-def _poly_crossings(pa, pb):
-    """Proper intersections of two polylines, as board points."""
-    def d(a, b, c):
-        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-    out = []
-    for p1, p2 in zip(pa, pa[1:]):
-        for p3, p4 in zip(pb, pb[1:]):
-            d1, d2 = d(p3, p4, p1), d(p3, p4, p2)
-            d3, d4 = d(p1, p2, p3), d(p1, p2, p4)
-            if d1 * d2 < 0 and d3 * d4 < 0:
-                t = d1 / (d1 - d2)
-                out.append((p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])))
-    return out
-
-
-def cross_corridor_vias(corridors):
-    """Vias a lane pays for crossing EARLIER corridors' lanes. Corridors
-    route in index order, so a later corridor meets the earlier ones'
-    lanes as real copper on whatever layer their schedules allowed
-    there; where that includes the layer this lane is on by its own
-    profile it must dive: ONE dive, two vias, however many crossings --
-    the lane takes the other layer through the earlier corridor's
-    copper and stays there (K35: SA9 / SA13 / SA8 of the 3-lane second
-    corridor cross the 32-lane corridor's planned lanes 2-3 mm-clusters
-    apart each and the copper pays 2 each; priced per cluster the judge
-    said 6). The planned polylines also carry block excursions the real
-    lanes do not (K15 SA9 crossed the plan's SRAS three times and the
-    copper once). Unpriced, the judge preferred a K15 plan that made SA9
-    a corridor of its own (predicted 0) which then crossed the main
-    corridor's exit legs on F for 2."""
-    def layer_at(c, nm, s):
-        L = None
-        for (sa, La) in c.layer_profile(nm):
-            if sa <= s or L is None:
-                L = La
-        return L
-    out = {}
-    for j, cj in enumerate(corridors):
-        scj = getattr(cj, 'sched_cur', None)
-        if scj is None or not hasattr(cj, 'req'):
-            continue
-        for nm in cj.members:
-            poly = getattr(cj, 'lane_xy', {}).get(nm)
-            if scj.page.get(nm) is None or not poly:
-                continue
-            hits = []
-            for ci in corridors[:j]:
-                sci = getattr(ci, 'sched_cur', None)
-                if sci is None or not hasattr(ci, 'req'):
-                    continue
-                for om in ci.members:
-                    po = getattr(ci, 'lane_xy', {}).get(om)
-                    if not po:
-                        continue
-                    for pt in _poly_crossings(poly, po):
-                        s_n = cj.spine.project_pt(pt)[0]
-                        s_o = ci.spine.project_pt(pt)[0]
-                        L = layer_at(cj, nm, s_n)
-                        if sci.page.get(om) is None or ci.allowed(om, s_o, L):
-                            hits.append(s_n)
-            if hits:
-                out[nm] = 2
-    return out
-
-
 def _write_layer_jumps(board_path, names):
     """Nets whose own copper meets on two layers with no barrel and no
     plated pad there -- a layer change with nothing to make it. Returns
@@ -7089,127 +7012,6 @@ def _write_layer_jumps(board_path, names):
                 continue
             if not any((hx - x) * (hx - x) + (hy - y) * (hy - y) < 0.04 for hx, hy in holes.get(n, ())):
                 out.append((n, x, y))
-    return out
-
-
-def plan_braid(board, names, dest, plan, log=None):
-    """THE PLANNER, callable on a plan before any destination copper
-    exists: the braid's own setup (corridors as it forms them, spines)
-    and plan-only run (offsets, launch and target orders, the schedule's
-    pages and swimmers) on the plan's ends. Returns
-    {net: {'corridor': i, 'launch_idx', 'target_idx', 'page': 'F.Cu' |
-    'B.Cu' | None, 'birth_b': bool, 'joiner': bool, 'side_exit': bool}}.
-    What the fanout loop judges every round on, and what the braid then
-    computes again -- identically -- from the same plan beside its board."""
-    _log = log or (lambda msg='': None)
-    ctx, groups = setup(board, names, dest, _log, plan=plan)
-    corridors = []
-    for ci, members in enumerate(groups):
-        corridors.append(Corridor(ci, members, ctx, _log))
-    ctx.corridors = corridors
-    out = {}
-    for c in corridors:
-        try:
-            c.run(plan_only=True)
-            ctx.laid.extend(c.lane_xy[nm] for nm in c.members
-                            if nm in getattr(c, 'lane_xy', {}))
-            if getattr(c, 'spine_core', None) is not None:
-                ctx.laid_tubes.append((c.spine_core.pts, c.H))
-        except Exception as e:
-            _log(f'  plan phase: corridor {c.idx} not planned ({e})')
-    cross = cross_corridor_vias(corridors)
-
-    def _chord_islands(c, nm, page):
-        """The static islands (corridor parts) on `page` that the lane's
-        region chord -- launch slot at s0 to target slot at s1 -- passes
-        through. The plan-side ISLAND PRICE reads it (pages_first
-        PLAN_PAGES_ISLAND): a berth whose lane must cross a part on its
-        own layer is dearer by what the bend round it costs (2026-09-15,
-        the C5-deflected DQ group refused in band at every K >= 35)."""
-        try:
-            isl = c.static_islands().get(page, ())
-            a = (c.s0, c.launch_o[nm])
-            b = (c.s1, c.target_o[nm])
-        except Exception:
-            return []
-        hit = []
-        own = {ctx.src_ref.get(nm), ctx.ends[nm][2]} if nm in ctx.ends else set()
-        for (s_lo, s_hi, o_lo, o_hi, what) in isl:
-            if what.split('.')[0] in own:
-                continue            # the run's own arrays are not corridor parts (SZQ's chord through U1)
-            # segment a-b against the box, Liang-Barsky
-            t0, t1 = 0.0, 1.0
-            dx, dy = b[0] - a[0], b[1] - a[1]
-            ok = True
-            for pq, qv in ((-dx, a[0] - s_lo), (dx, s_hi - a[0]), (-dy, a[1] - o_lo), (dy, o_hi - a[1])):
-                if abs(pq) < 1e-12:
-                    if qv < 0:
-                        ok = False
-                        break
-                    continue
-                t = qv / pq
-                if pq < 0:
-                    t0 = max(t0, t)
-                else:
-                    t1 = min(t1, t)
-                if t0 > t1:
-                    ok = False
-                    break
-            if ok:
-                hit.append(what)
-        return hit
-    for c in corridors:
-        sc = getattr(c, 'sched_cur', None)
-        li = {nm: i for i, nm in enumerate(getattr(c, 'launch', []))}
-        ti = {nm: i for i, nm in enumerate(getattr(c, 'target', []))}
-        for nm in c.members:
-            pg_ = sc.page.get(nm) if sc else None
-            out[nm] = {'corridor': c.idx,
-                       'islands': (_chord_islands(c, nm, pg_) if pg_ else []),
-                       'launch_idx': li.get(nm), 'target_idx': ti.get(nm),
-                       'page': (sc.page.get(nm) if sc else ctx.tooth_layer[nm]),
-                       'birth_b': bool(sc and nm in sc.birth_b),
-                       'joiner': nm in getattr(c, 'joiners', ()),
-                       'side_exit': nm in getattr(c, 'siders', ()),
-                       # a side exiter's exit leg runs on its block's layer:
-                       # a via where that is not the lane's page, another
-                       # where it is not the berth's layer
-                       'exit_leg_layer': getattr(c, 'leg_layer', {}).get(nm),
-                       # the PLANNED lane polyline, so a caller can price
-                       # a lane the schedule gave no profile (a swimmer)
-                       # by the crossings it will actually have to make
-                       'lane': list(getattr(c, 'lane_xy', {}).get(nm, ()) or ()),
-                       # the layer changes the lane's whole profile needs
-                       # (tooth, page, tail stretches, exit leg, berth):
-                       # the vias the plan implies for a page lane. A
-                       # swimmer (page None) has no profile; its model
-                       # stays SWIM_VIAS.
-                       'changes': (len(c.layer_profile(nm)) - 1
-                                   if sc and sc.page.get(nm) is not None
-                                   and hasattr(c, 'req') else None),
-                       # a SWIMMER's: the changes its hold-then-run line
-                       # implies (lay_lanes' swimmer census), tooth to
-                       # berth; a swimmer crossing no page lane owes only
-                       # its tooth/berth mismatch. The judge reads it under
-                       # SWIM_CHANGES (plan_ends.vias_from_pages); the flat
-                       # SWIM_VIAS otherwise
-                       'swim_changes': (getattr(c, 'swim_changes', {}).get(
-                           nm, 1 if ctx.tooth_layer[nm] != ctx.dest_layer[nm] else 0)
-                                        if sc and sc.page.get(nm) is None else None),
-                       # dives under EARLIER corridors' lanes (2 each)
-                       'cross_vias': cross.get(nm, 0),
-                       # the planned (s, o) geometry: the lane's polyline,
-                       # its required-layer stretches and back-layer windows,
-                       # the corridor's region
-                       'mid': [tuple(q) for q in getattr(c, 'mid', {}).get(nm, ())],
-                       'req': [tuple(r) for r in getattr(c, 'req', {}).get(nm, ())],
-                       'bwin': [tuple(b) for b in getattr(c, 'bwin', {}).get(nm, ())],
-                       's0': getattr(c, 's0', None), 's1': getattr(c, 's1', None)}
-    if ctx.M is not None:
-        for d in out.values():
-            for k in ('page', 'exit_leg_layer'):
-                if d.get(k) is not None:
-                    d[k] = other_layer(d[k])
     return out
 
 
@@ -7333,46 +7135,10 @@ def write_out(a, ctx, corridors, names, log):
             [r for k, r in enumerate(_res_list) if names[k] not in _legs],
             pcb, kids, clearance=_rules.active().clearance, keep_input_copper=True)
     else:
-        # BRAID_SMOOTH=0 (2026-09-18): a PROBE braid skips the smoother. It
-        # never changes a via count, and it was ~3.7 s of a ~6 s two-lane
-        # local braid at K51 (it validates against the whole board's
-        # copper). The probe's judge is (open, drc, vias); the final board
-        # is smoothed once (replan / smooth_board.py).
+        # BRAID_SMOOTH=0: the smoother skipped. It never changes a via
+        # count, and it validates against the whole board's copper, the
+        # larger part of a small local braid's time.
         _n, _nets, _rm, _addl, stt = 0, 0, 0, 0, {}
-    if a.out != os.devnull:
-        # THE PACK SIDECAR (<out>.pack.json): what pack.py needs to pack
-        # this board again on its own -- each lane's copper as the pack
-        # would receive it (smoothed), every corridor's members and target
-        # order, its planned centrelines, each lane's tooth and stub end
-        # -- in the WRITTEN board's frame. `pack_board.py BOARD` packs a
-        # braided board in seconds where the braid took a minute
-        import json as _json_pk
-        _M = ctx.M if ctx.M is not None else (lambda x, y: (x, y))
-        _OL = other_layer if ctx.M is not None else (lambda L: L)
-        _side = {
-            'layers': [_OL(L) for L in ctx.cfg.layers],
-            'board_edge_clearance': float(getattr(ctx.cfg, 'board_edge_clearance', 0.0) or 0.0),
-            'corridors': [{
-                'members': list(c.members),
-                'target': list(getattr(c, 'target', c.members)),
-                'lane_xy': {nm: [list(_M(*p_)) for p_ in poly]
-                            for nm, poly in (getattr(c, 'lane_xy', {}) or {}).items()},
-            } for c in corridors],
-            'ends': {nm: [list(_M(*ends[nm][0])), list(_M(*ends[nm][1]))] for nm in names},
-            # the destination stub chain, tip-side first, as it stands on
-            # the written board (the trim above may have shortened it)
-            'dest_chain': {nm: [[*_M(*_t), *_M(*_p), _OL(s_.layer)]     # tip, pad
-                                for (s_, _t, _p) in (ctx.dest_chain.get(nm) or [])
-                                if s_ in pcb.segments]
-                           for nm in names},
-            'lanes': {nm: {
-                'segs': [[*_M(s.start_x, s.start_y), *_M(s.end_x, s.end_y), _OL(s.layer), s.width]
-                         for s in _res_list[k]['new_segments']],
-                'vias': [list(_M(v.x, v.y)) for v in out_vias.get(nm, [])],
-            } for k, nm in enumerate(names)},
-        }
-        with open(a.out + '.pack.json', 'w') as _f:
-            _json_pk.dump(_side, _f)
     if PACK_MODE:
         # PACK (README TODO 8) at write time: every corridor's smoothed
         # lanes packed into rivers (pack.py, opt-in: BRAID_PACK=1)

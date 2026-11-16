@@ -67,9 +67,9 @@ def move_sig(m):
 def move_class(m):
     """A menu move's CLASS: its signature without the site and legs, so every
     leg variant of one exit is one. A destination berth the fanout did not
-    lay as asked is banned by class (fanout_from_plan.ban_moves, under
-    PLAN_JUDGE=ends): its variants reach the same exit through the same
-    neighbourhood, and the engine refuses them for the same reason."""
+    lay as asked is banned by class (fanout_from_plan.ban_moves): its
+    variants reach the same exit through the same neighbourhood, and the
+    engine refuses them for the same reason."""
     return (m.kind, m.direction, m.layer, round(m.exit_pt[0], 2), round(m.exit_pt[1], 2))
 
 
@@ -188,13 +188,11 @@ def full_move(m):
     coordinate along the face is the gap), layer, kind, dog-bone site."""
     d = {'face': m.direction, 'exit': tuple(m.exit_pt), 'layer': m.layer,
          'kind': m.kind, 'site': (tuple(m.site) if m.site else None)}
-    if awx_settings.get('PLAN_PAGES', '0') not in ('', '0') and m.legs:
-        # the pages-first plan's berths are laid verbatim: the move's own
-        # legs, laid by underpad.attempt before its search -- the engine's
-        # "exact" is only the exact EXIT, and a stub audited exact once ran
-        # four rows down the neighbouring gap, taking the lane two other
-        # asks held (measured K41 122 -> 96 with the planner's own
-        # conflict test made complete)
+    if m.legs:
+        # the plan's berths are laid verbatim: the move's own legs, laid by
+        # underpad.attempt before its search -- the engine's "exact" is only
+        # the exact EXIT, and a stub audited exact once ran four rows down
+        # the neighbouring gap, taking the lane two other asks held
         d['legs'] = [(tuple(a), tuple(b), L) for (a, b, L) in m.legs]
     # a dog-bone whose via stands PAST its ball's diagonal cells (a stub along the ball's own line, or one that bends
     # into a gap first) carries that stub as the engine's walked `path` [ball, elbow, .., site]: the engine takes a
@@ -223,10 +221,9 @@ def measure_tooth(pcb, nm, pad, byname, dest_ref=None, which=None):
     destination array when both ends are fanned out (te.endpoints then
     attributes the two free ends by walking the copper); the DESTINATION
     end is measured then, unless `which='src'` asks for the source end
-    of that same attribution (replan.py measures both ends of a board
-    fanned out at both). A net with no free end -- bare, or fully
+    of that same attribution. A net with no free end -- bare, or fully
     routed -- measures as None: the callers print '(bare)' and audit it
-    as 'no copper' (replan.py re-fans a net it stripped to nothing)."""
+    as 'no copper'."""
     nid = byname[nm][0]
     try:
         ends = te.endpoints(pcb, [nm], byname, dest_ref=dest_ref)
@@ -281,6 +278,24 @@ def measure_tooth(pcb, nm, pad, byname, dest_ref=None, which=None):
             'direction': face,
             'bearing': snap_dir(tooth[0] - pad.global_x, tooth[1] - pad.global_y),
             'site': ((round(vias[0].x, 3), round(vias[0].y, 3)) if vias else None)}
+
+
+def current_tooth(st, nm):
+    """The tooth AS IT STANDS on the board as a Move: what the engine laid,
+    read off the copper (measure_tooth). None for a net
+    without a source pad on the source array or without copper there."""
+    p = st['src_pad'].get(nm)
+    if p is None or p.component_ref != st['sref'] or st.get('escape'):
+        # (an ESCAPE state, escape_plan: no tooth is laid on its dog-boned base -- the ball's dog-bone is no tooth)
+        return None
+    g = measure_tooth(st['pcb'], nm, p, st['byname'])
+    # (any routing layer: on three, a tooth laid on In2.Cu read as no tooth at all -- 17 of the zynq LVDS bus's
+    # 47, each then re-chosen off the menu every pass and its copper outside the ends' conflicts)
+    if not g or g.get('direction') not in DIRS or g.get('layer') not in route_layers.layers():
+        return None
+    return em.Move(net=nm, kind=g['kind'], direction=g['direction'], layer=g['layer'],
+                   exit_pt=tuple(g['tooth']), vias=g['vias'], legs=[],
+                   site=(tuple(g['site']) if g.get('site') else None))
 
 
 def fmt(m):
@@ -428,8 +443,7 @@ def drc_pairs(board, nets=None, pcb_data=None, keys=None):
                        capture_output=True, text=True, env=awx_settings.environ())
     out = r.stdout + r.stderr
     # A CHECKER THAT DID NOT REPORT IS NOT A CLEAN BOARD. This is the only
-    # copper gate on the board `realize` writes (and replan's probe-clean
-    # test), and `return []` on no output read a traceback -- bad path,
+    # copper gate on the board `realize` writes, and `return []` on no output read a traceback -- bad path,
     # import error -- as "no violations". Verified: drc_pairs on a
     # nonexistent board returned [].
     if 'NO DRC VIOLATIONS' not in out and 'DRC VIOLATION' not in out:

@@ -20,7 +20,6 @@ silent assignment is impossible to audit.
 from __future__ import annotations
 
 import math
-import awx_settings
 from typing import (Callable, Dict, List, Optional, Sequence,
                     Tuple)
 
@@ -65,7 +64,7 @@ def _lane_spans(m: Move) -> List[Tuple[Tuple, float, float]]:
 
 def _lane_spans_compute(m: Move) -> List[Tuple[Tuple, float, float]]:
     if not m.legs and m.site is None:
-        # a move synthesized from copper the engine laid (replan.synth_move)
+        # a move read off copper the engine laid (source_realize.current_tooth)
         # carries no legs: it occupies no lane the selector can price
         return []
     # (a ROW PART's via inside it, escape_moves._row_inward: its stub's legs on the pad's layer, behind the row, run
@@ -117,19 +116,15 @@ def _seg_hits_box(a: Pt, b: Pt, box) -> bool:
     return t0 < t1
 
 
-# SEL_XING (2026-09-10): a row-gap run and a column-gap run on one layer
-# that cross are a conflict (see _conflict). 1 = for pairs with a climbing
-# move, whose long legs cross the plain stubs' gaps (K28: 13 bans -> 0 with
-# it); 2 = every pair; 0 = off. This module's rule is the JUDGE's: 2 under
-# PLAN_JUDGE=ends (the whole route: every crossing of two escapes on one
-# layer is a stub the engine lays over another), 1 under the braid's judges
-# (where 2 reached the plain menu and changed the K28 chain for the worse:
-# 37 vias / 692 mm on the frozen source against 36 / 670). The whole
-# route's ends model (whole_ends, through pages_first._conflicts) and the
-# greedy berths it starts from both read it -- ONE rule for the seed and
-# the judge. A caller meaning another rule passes `xing` (pages_first's own
-# planner: 2); nothing sets this module value at import.
-SEL_XING = 2 if awx_settings.get('PLAN_JUDGE') == 'ends' else 1
+# SEL_XING: a row-gap run and a column-gap run on one layer that cross are
+# a conflict (see _conflict). 1 = for pairs with a climbing move, whose long
+# legs cross the plain stubs' gaps; 2 = every pair; 0 = off. The whole
+# route's rule is 2: every crossing of two escapes on one layer is a stub
+# the engine lays over another. The whole route's ends model (whole_ends,
+# through _conflicts) and the greedy berths it starts from both read it --
+# ONE rule for the seed and the judge. A caller meaning another rule passes
+# `xing`.
+SEL_XING = 2
 
 
 def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
@@ -667,6 +662,106 @@ def _site_in_lane(dm: Move, key, a, b, reach: Optional[float] = None) -> bool:
     if key[0] == 'row':
         return abs(sy - key[1]) < R and a - R < sx < b + R
     return abs(sx - key[1]) < R and a - R < sy < b + R
+
+
+def _conflicts(cands: Dict[str, List[Move]], strict: bool, stack: bool = False,
+               xing: Optional[int] = None, via_reach: Optional[float] = None) -> List[Tuple[str, int, str, int]]:
+    """Every (net a, index, net b, index) whose two moves cannot both be
+    laid, tested only between moves sharing a lane, a site or an exit
+    (bucketed: the all-pairs test is 10^6-10^7 calls at K41). `stack`:
+    two exits at one point on different layers do not conflict, and two on
+    one layer closer than _STACK_PITCH do (_conflict) -- so the exits are
+    bucketed at that pitch. `xing`: the crossing rule (SEL_XING when not
+    given -- the whole route's ends model, whose greedy seed reads the
+    same). `via_reach`: a via's reach for another move's run (_conflict's
+    `reach`)."""
+    import route_layers
+    buckets: Dict[tuple, List[Tuple[str, int]]] = {}
+    # a via keeps another move's run off it by the REACH (_site_in_lane), so every site is tested against
+    # every lane whose line lies within it, on any layer: bucketed by the lane cells alone (half a fine-pitch gap) a site
+    # half a pitch off a line was never tested -- at a 0.5 mm pitch with 0.25 mm vias every via in a pad beside a gap's
+    # run and every dog-bone beside a ball line's (17,634 source pairs of one bus's menus), the ends chose such pairs and
+    # the fanout laid them 0.08 apart or refused them
+    R = _VIA_REACH if via_reach is None else via_reach
+    site_cells: Dict[tuple, List[Tuple[str, int]]] = {}
+    lane_cells: Dict[tuple, List[Tuple[str, int]]] = {}
+
+    def rq(v):
+        c = int(math.floor(v / R))
+        return (c, c + 1)
+    for nm, ms in cands.items():
+        for i, m in enumerate(ms):
+            keys = set()
+
+            def q(v, tol=_EXIT_TOL):
+                # two values within `tol` of each other share at least one
+                # of these two cells (a single rounding can split them)
+                c = int(math.floor(v / tol))
+                return (c, c + 1)
+            for key, a_, b_ in _lane_spans(m):
+                cells = q(key[1]) if strict else (round(key[1], 3),)
+                for c in cells:
+                    keys.add(('lane', key[0], c, key[2]))
+                # a row run and a column run on ONE layer that CROSS share no
+                # lane, site or exit key, so bucket them by the 1 mm cells the
+                # row run spans and the cell the column run stands in
+                # (2026-09-14: 14 such pairs at K41 pass 0 were never tested)
+                if key[0] == 'row':
+                    for cx in range(int(math.floor(a_)), int(math.floor(b_)) + 1):
+                        keys.add(('xc', key[2], cx))
+                else:
+                    keys.add(('xc', key[2], int(math.floor(key[1]))))
+            for rk in sorted({(key[0], c, key[2]) for key, _a, _b in _lane_spans(m) for c in rq(key[1])}, key=repr):
+                lane_cells.setdefault(rk, []).append((nm, i))
+            if m.site is not None:
+                # a site in another move's lane: bucket the lane through the
+                # site by its line, on both layers (a via spans them all)
+                keys.add(('site', round(m.site[0], 2), round(m.site[1], 2)))
+                for axis, v in (('row', m.site[1]), ('col', m.site[0])):
+                    cells = q(v) if strict else (round(v, 3),)
+                    for c in cells:
+                        for L in route_layers.layers():
+                            keys.add(('lane', axis, c, L))
+                for rk in sorted({(axis, c, L) for axis, v in (('row', m.site[1]), ('col', m.site[0]))
+                                  for c in rq(v) for L in route_layers.layers()}, key=repr):
+                    site_cells.setdefault(rk, []).append((nm, i))
+            etol = max(_EXIT_TOL, _STACK_PITCH) if stack else _EXIT_TOL
+            for cx in q(m.exit_pt[0], etol):
+                for cy in q(m.exit_pt[1], etol):
+                    keys.add(('exit', cx, cy))
+            # SORTED: `keys` is a set of string-keyed tuples, whose iteration
+            # order follows the process's hash seed -- and the ORDER the
+            # exclusions reach the CP-SAT decides which FEASIBLE answer a
+            # deterministic-time solve lands on (measured 2026-09-14, K41:
+            # one process gave obj 1784, the next 1727, the next 1809 on
+            # one model; in one process three solves agreed). The model
+            # must be built in a canonical order.
+            for k in sorted(keys, key=repr):
+                buckets.setdefault(k, []).append((nm, i))
+    seen = set()
+    out = []
+    for members in buckets.values():
+        if len(members) < 2:
+            continue
+        for x in range(len(members)):
+            a, i = members[x]
+            for y in range(x + 1, len(members)):
+                b, j = members[y]
+                if a == b or (a, i, b, j) in seen or (b, j, a, i) in seen:
+                    continue
+                seen.add((a, i, b, j))
+                if _conflict(cands[a][i], cands[b][j], strict=strict, stack=stack, xing=xing, reach=via_reach):
+                    out.append((a, i, b, j))
+    # ...and each site against the lanes within the reach of it (the cells of one reach: a pair inside it shares one)
+    for rk, sites in site_cells.items():
+        for (a, i) in sites:
+            for (b, j) in lane_cells.get(rk, ()):
+                if a == b or (a, i, b, j) in seen or (b, j, a, i) in seen:
+                    continue
+                seen.add((a, i, b, j))
+                if _conflict(cands[a][i], cands[b][j], strict=strict, stack=stack, xing=xing, reach=via_reach):
+                    out.append((a, i, b, j))
+    return out
 
 
 def lanes_free(m: Move, sel: Dict[str, Move], me: str,

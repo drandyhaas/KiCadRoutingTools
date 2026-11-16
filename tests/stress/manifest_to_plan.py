@@ -180,9 +180,6 @@ REFUSED_TOOLS = {
     'braid.py': (
         'emits the awx braid for a fanned-out bus; the plan format has no bus '
         'step. Run it on the CLI and start the plan from its output'),
-    'pack_board.py': (
-        'packs a braided awx board again; the plan format has no bus step. Run '
-        'it on the CLI and start the plan from its output'),
     'baseline_freerouting.py': (
         'routes an awx rung with Freerouting, another router; no plan step '
         'runs it. Run it on the CLI'),

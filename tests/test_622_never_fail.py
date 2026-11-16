@@ -163,7 +163,7 @@ def main():
         fb2 = os.path.join(td, 'feedback2.json')
         r = subprocess.run([sys.executable, os.path.join(ROOT, 'awx', 'whole_feedback.py'), '--refused', side, fb2, ref],
                            capture_output=True, text=True, cwd=os.path.join(ROOT, 'awx'),
-                           env=dict(os.environ, PLAN_PAIRS='1', BRAID_PAIRS='1'))
+                           env=dict(os.environ))
         got = json.load(open(fb2)) if os.path.isfile(fb2) else {}
         items = got.get('pairs', [])
         want = {('SDQ3', 1), ('SDQS0', 1)}
@@ -187,7 +187,7 @@ def main():
             r = subprocess.run([sys.executable, os.path.join(ROOT, 'awx', 'whole_feedback.py'), '--name', side, fb3]
                                + (['SDQ3', 'SDQS0N'] if k_ == 0 else []),
                                capture_output=True, text=True, cwd=os.path.join(ROOT, 'awx'),
-                               env=dict(os.environ, PLAN_PAIRS='1', BRAID_PAIRS='1'))
+                               env=dict(os.environ))
             got = json.load(open(fb3)) if os.path.isfile(fb3) else {}
             seq.append((r.returncode, r.stdout.strip(), list(got.get('named', [])),
                         sorted((e['lane'], e['end']) for e in got.get('avoid', []))))

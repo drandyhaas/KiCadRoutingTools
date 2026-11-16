@@ -137,8 +137,7 @@ def _chain_env(round_dir, dest, bench=None):
     for k in ('HINT', 'CUTS', 'HIST', 'GEO_FLIPS_FROM', 'SEED_FLIPS', 'SEED_CUTS', 'SEED_HIST', 'SNAP_KEEP'):
         env.pop(k, None)
     env.update(OMP_NUM_THREADS='1', VECLIB_MAXIMUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
-               TAUT_MEMO=env.get('TAUT_MEMO', '1'), PROBE_MEMO=env.get('PROBE_MEMO', '1'),
-               PLAN_PAGES='1', PLAN_JUDGE='ends', BRAID_PAIRS='1', PLAN_PAIRS='1',
+               TAUT_MEMO=env.get('TAUT_MEMO', '1'),
                BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2', STAGE_CACHE=env.get('STAGE_CACHE', '1'),
                BENCH=bench or os.path.join(round_dir, 'fo.kicad_pcb'), NETS=','.join(nets), DEST=dest)
     return env

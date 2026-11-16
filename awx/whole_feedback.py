@@ -72,9 +72,8 @@ sidecar, out, hots = sys.argv[1], sys.argv[2], sys.argv[3:]
 S = json.load(open(sidecar))
 ends = dict(S['ends'])
 lay = {0: dict(S['tooth_layer']), 1: dict(S['dest_layer'])}
-# the lanes as whole_ends makes them: a pair one lane, under the same switch
-PAIRS = (_pairs.pair_names(list(ends)) if int(awx_settings.get('PLAN_PAIRS', awx_settings.get('BRAID_PAIRS', '0')) or 0)
-         else {})
+# the lanes as whole_ends makes them: a pair one lane
+PAIRS = _pairs.pair_names(list(ends))
 LANE = {leg: base for base, pr in PAIRS.items() for leg in pr}
 CY = None
 if int(S.get('chi', 1)) < 0:

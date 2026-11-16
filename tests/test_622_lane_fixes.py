@@ -162,7 +162,7 @@ def main():
         nets = [ln.strip() for ln in open(os.path.join(r1, 'nets.lines')) if ln.strip()]
         e = {k_: v_ for k_, v_ in os.environ.items() if not k_.startswith('_LANE')}
         e.update(_LANE_FIXES_CHILD='frame', BENCH=os.path.join(r1, 'fo.kicad_pcb'), NETS=','.join(nets),
-                 DEST='SD1', ROUTE_LAYERS=LAYERS, PLAN_PAGES='1', PLAN_JUDGE='ends', BRAID_PAIRS='1', PLAN_PAIRS='1')
+                 DEST='SD1', ROUTE_LAYERS=LAYERS)
         r = subprocess.run([sys.executable, os.path.abspath(__file__)], env=e, capture_output=True, text=True,
                            timeout=900)
         if r.returncode != 0:

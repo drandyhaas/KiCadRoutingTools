@@ -7,7 +7,7 @@ the others, and where each changes layer. It holds two routers:
 | | how it works | status |
 |---|---|---|
 | **The whole route**<br>`whole_route.py`, `whole_*.py`, `route_bus.py` | Chooses every net's ends, then plans every lane's **whole path before anything is routed** -- crossings, layer changes, geometry on the router's grid -- checks the plan against the router's own rules, and routes every lane in its band at once. | **The current router.** Every rung of both benches routes connected and DRC-clean on a Mac, with fewer vias and less copper than the human. |
-| The braid chain<br>`pages_first.py`, `braid.py`, `evolve.py` | A CP-SAT plan of both ends, a corridor braid routed stage by stage, then a population of routed boards improved by probes the real router judges. | The earlier router. The whole route reuses its fanout, router, benches and audits. |
+| The braid chain<br>`braid.py` | A corridor braid routed stage by stage on the fanout's ends. | The earlier router. The whole route reuses its fanout, router, benches and audits. |
 
 Two rules both keep:
 
@@ -208,7 +208,7 @@ Every stage reads the bench under the chain's plan environment
 (`whole_route.stage_env` sets it for a run):
 
 ```bash
-export PLAN_PAGES=1 BRAID_PAIRS=1 PLAN_PAIRS=1 BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2
+export BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2
 ```
 
 **1. A bench** -- the human's ends, or our own:
@@ -220,7 +220,7 @@ python3 human_ends_bench.py fb_t2q_human.kicad_pcb tmp/hp/HHe_k51.kicad_pcb "$NE
     --others bench:fb_t2q_pairs.kicad_pcb --ladder fb_t2q_pairs.ladder.txt --sidecar --marker
 # ... or our own
 mkdir -p tmp/e tmp/e2
-PLAN_JUDGE=ends python3 fanout_from_plan.py tmp/e/fo.kicad_pcb 51 --board=fb_t2q_pairs.kicad_pcb
+python3 fanout_from_plan.py tmp/e/fo.kicad_pcb 51 --board=fb_t2q_pairs.kicad_pcb
 export BENCH=tmp/hp/HHe_k51.kicad_pcb NETS DEST=DU1   # (or tmp/e/fo.kicad_pcb) the bench every whole_* tool reads
 ```
 
@@ -253,7 +253,7 @@ python3 ../py_router/check_drc.py ROUTED.kicad_pcb --nets $(echo "*/$NETS" | sed
 python3 whole_gate.py OUTDIR/p1.json OUTDIR/p1.audit --hot HOT.json
 python3 whole_feedback.py tmp/e/fo.plan.json FEEDBACK.json HOT.json          # the audits' crowded ends
 python3 whole_feedback.py --name tmp/e/fo.plan.json FEEDBACK.json [NET ...]  # or: lanes to move, by name
-FANOUT_NETS="$NETS" FEEDBACK=FEEDBACK.json INCREMENTAL=tmp/e/fo.plan.json PLAN_JUDGE=ends \
+FANOUT_NETS="$NETS" FEEDBACK=FEEDBACK.json INCREMENTAL=tmp/e/fo.plan.json \
     python3 fanout_from_plan.py tmp/e2/fo.kicad_pcb 51 --board=tmp/e/SOURCE_BOARD   # the 'source board:' its log names
 ```
 
@@ -975,7 +975,7 @@ own, with interactive demos:
 
 #### The ends (`whole_ends.py`)
 
-`fanout_from_plan.py` under `PLAN_JUDGE=ends`. Each net's tooth at the source
+`fanout_from_plan.py`. Each net's tooth at the source
 and berth at the destination are chosen together from the fanout's escape
 menus, because **the ends decide the braid**: the teeth's order round the
 source and the berths' round the destination fix every crossing, and the
@@ -990,9 +990,7 @@ a bench, or a bus run by itself (`--src`/`--dest`), chooses its own as below.
 
 **What can stand together.** One conflict test, the same in the planner that
 seeds the berths and in the ends model that judges them: two escapes conflict
-when they cross (every crossing counts: `select_moves.SEL_XING` is 2 under
-`PLAN_JUDGE=ends`, and 1 -- a crossing only where a move climbs -- for the
-braid's judges), or when two exits on one layer stand closer than a track and
+when they cross (every crossing counts: `select_moves.SEL_XING` is 2), or when two exits on one layer stand closer than a track and
 a clearance, or when one's via stands within another's run by less than the
 router keeps a track off a via (`rules.fan_via_reach`: its via-to-track
 clearance for a fanout track rounded up to whole grid cells, and a quarter
@@ -2578,38 +2576,24 @@ keeps a machine's answer, run a rung twice with two seeds and every cache off
 and compare the two OUTDIRs file for file:
 
 ```bash
-STAGE_CACHE=0 TAUT_MEMO=0 PROBE_MEMO=0 PYTHONHASHSEED=1 python3 whole_route.py 15 OUT1
-STAGE_CACHE=0 TAUT_MEMO=0 PROBE_MEMO=0 PYTHONHASHSEED=2 python3 whole_route.py 15 OUT2
+STAGE_CACHE=0 TAUT_MEMO=0 PYTHONHASHSEED=1 python3 whole_route.py 15 OUT1
+STAGE_CACHE=0 TAUT_MEMO=0 PYTHONHASHSEED=2 python3 whole_route.py 15 OUT2
 ```
 
 ---
 
 ## The braid chain
 
-The earlier router. One **plan** decides both ends of every net
-(`pages_first.py`: a destination move, a source move and a page per net, one
-CP-SAT); the **fanout** lays exactly the plan's moves and reports what it
-could not; the **braid** (`braid.py`) routes the lanes in corridors of two
-pages, every lane by the production grid router inside its band, with a
-rescue ladder and a blocker-directed rip for what is refused. A
-**population** of routed boards then evolves (`evolve.py`): each world
-descends by probing single moves with the real router as the judge
-(`replan.py`), jumps to nearby worlds, and exchanges ends with the others.
+The earlier router. The **fanout** lays the ends the whole route's ends
+model chooses and reports what it could not; the **braid** (`braid.py`)
+routes the lanes in corridors of two pages, every lane by the production grid
+router inside its band, with a rescue ladder and a blocker-directed rip for
+what is refused.
 
-Its stages are `fanout_from_plan.py OUT K --board=BENCH` (the plan, and the
-destination fanned out in the planned directions), `braid.py --board OUT
---nets NETS --dest REF --out STEM` (every lane routed in its band) and
-`grade_k.py` (the grade), run under the chain's own environment,
-`PLAN_PAGES=1 PLAN_JUDGE=count` (add `BRAID_PAIRS=1 PLAN_PAIRS=1` and the
-pairs bench, `fb_t2q_pairs.kicad_pcb`, for the pairs). Then:
-
-```bash
-python3 evolve.py TAG 51 --seeds=STEM,... --pop=4 --gens=3 \
-        --descend="--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --grade=inproc --par=4"
-python3 replan.py STEM 51 --from=STEM --out=OUT --mode=incremental --apply=strip ...   # one descent
-python3 evolve_movie.py TAG 51 --gif                # the movie of a run
-python3 pack_board.py BOARD.kicad_pcb --fanout BOARD_fo.kicad_pcb --nets NET,... --src U1   # every lane a taut string, vias fixed
-```
+Its stages are `fanout_from_plan.py OUT K --board=BENCH` (the ends, and the
+destination fanned out to them) and `braid.py --board OUT --nets NETS --dest
+REF --out STEM` (every lane routed in its band), run under the chain's own
+environment (`whole_route.stage_env`).
 
 `synth_bus.py` writes synthetic buses with a known optimum
 (`synth_bus.py --self-test` checks its truth model).
@@ -2620,9 +2604,7 @@ python3 pack_board.py BOARD.kicad_pcb --fanout BOARD_fo.kicad_pcb --nets NET,...
 
 ### Grading
 
-`grade_k.py BOARD NETS`: connectivity scoped to the run's nets, whole-board
-DRC at the routed floor with `--clearance-margin 0.1`, and the via census
-over the run's nets. `via_census.py` breaks a board down per net. Every write that can put a via in a pad declares IPC-4761
+`via_census.py` breaks a board down per net. Every write that can put a via in a pad declares IPC-4761
 Type VII on it (`ship_vias.stamp`), as the route step does (#962).
 
 ### One source for every routing number (`rules.py`)
@@ -2689,7 +2671,7 @@ With nothing supplied, as on the benches:
 | `joint_escape.py`, `conflict_groups.py` | an array's menus for the group's ends (`build_menus`: every ball's escapes, drops and straps; a drop at a finer rung's via: `tests/test_622_drop_fine_via.py`; nothing in a laid pair's pocket: `test_622_pair_teeth.py`; no escape between two laid lanes that close round it: `test_622_lane_walls.py`; a rule area that forbids pours read as a pour of no net, so no plane drop is planned where no plane will pour: `zone_regions`); an array's whole plan in one CP-SAT solve, laid by the under-pad engine's joint escape (`plan_array`, `fan_array`: a bus's own run escapes the balls its comb refused by it; `tests/test_622_plan_array.py`); the escapes' conflicts as cliques and bicliques (`tests/test_622_conflict_groups.py`) |
 | `whole_route.py`, `modal_whole.py` | one rung end to end -- fanout, solve, loop, route, checks, rounds under the next seed -- graded in one line (`WHOLE K=..`); the loop's layer cuts from the audit and the snap (`tests/test_622_layer_cuts.py`); a lane its fanout gave no end, or ran and did not lay, left out of the round, open (`with_ends`: `tests/test_622_whole_route_no_ends.py`); the ladder in the cloud, one container per rung |
 | `cp_seed.py` | the bus step's seed: every CP-SAT solve of a round under one seed (`BUS_SEED`, else CP-SAT's default), the next draw under the next and a feedback round under its draw's -- the same board and seed the same plan |
-| `whole_ends.py`, `ends_kernel.py`, `whole_frame.py`, `whole_feedback.py` | the choice of ends (the fanout's `PLAN_JUDGE=ends`; every plane ball kept a way down: `tests/test_622_walled_balls.py`; its estimate scored in Rust); the frame of a bench (a part on a ring's stack: `tests/test_622_ring_room.py`); what goes back to the fanout (`tests/test_622_ends_fixes.py`, `test_622_exit_front.py`, `test_622_feedback_rounds.py`; an item for a lane the round's ends have no option for keys nothing: `fb_tables`) |
+| `whole_ends.py`, `ends_kernel.py`, `whole_frame.py`, `whole_feedback.py` | the choice of ends (the fanout's ends model; every plane ball kept a way down: `tests/test_622_walled_balls.py`; its estimate scored in Rust); the frame of a bench (a part on a ring's stack: `tests/test_622_ring_room.py`); what goes back to the fanout (`tests/test_622_ends_fixes.py`, `test_622_exit_front.py`, `test_622_feedback_rounds.py`; an item for a lane the round's ends have no option for keys nothing: `fb_tables`) |
 | `ends_nudge.py`, `ends_reescape.py` | a crowded end repaired on the round's fanout bench (`whole_route.repair_ends`): a lane's via or tooth, or another net's via, nudged the smallest step clear of a finding; a ball escaped again from its menu, its first stretch clear of every other net's copper, laid alone by `source_realize.realize` |
 | `whole_solve.py`, `whole_geo.py`, `whole_polish.py`, `whole_snap.py` | the crossing and layer solve, the geometry LP (a part seen from several frames: `tests/test_622_part_frames.py`; islands made of pads: `tests/test_622_pad_islands.py`), the polish, the snap onto the router's grid |
 | `whole_cells.py`, `whole_passages.py` | each layer's free space cut into its pieces, and the layer walls they give a bus's lanes before any plan; the passages the fixed copper leaves the lanes layer by layer, the census the solve, the walls and the geometry all read (a group's part standing only on its pads' layers, `Census`) |
@@ -2712,18 +2694,16 @@ With nothing supplied, as on the benches:
 
 | | |
 |---|---|
-| `fanout_from_plan.py`, `pages_first.py` | the planner and both fanouts |
+| `fanout_from_plan.py` | both fanouts |
 | `select_moves.py`, `escape_moves.py`, `plan_ends.py` | menus, conflicts, plan cost; a row part's (a QFN's) one escape a pad, laid as planned (`fanout_from_plan.row_berths`: `tests/test_622_row_part.py`) |
 | `source_realize.py` | a source plan realised with the production engine, audited per dimension |
 | `connect.py`, `corridor.py`, `topo_strings.py`, `taut_fast.py` | the real router, corridors (a lane's layers on its two pieces: `tests/test_622_piece_u.py`; a ring wound round the destination from a bundle arriving at a slant: `tests/test_622_wrap_spine_slant.py`), the taut relaxation |
-| `pairs.py` | a differential pair's rules: its hand, end connectors, dive room, crossover, staircase; `harmonise` |
+| `pairs.py` | a differential pair's rules: its hand, end connectors, dive room, crossover, staircase |
 | `plan_audit.py`, `route_lanes.py` | a plan checked before routing; chosen lanes routed one at a time in band, with renders and a refused search's frontiers |
 | `human_ends_bench.py` | a bench on a human's ends, with the plan sidecar |
-| `ship_vias.py`, `rules.py`, `grade_k.py`, `via_census.py` | Type VII on a via in a pad; the routing numbers; the grade; the per-net census |
+| `ship_vias.py`, `rules.py`, `via_census.py` | Type VII on a via in a pad; the routing numbers; the per-net census |
 
-**The braid chain:** `braid.py`, `schedule.py`, `replan.py`, `evolve.py`,
-`evolve_movie.py`, `probe_memo.py`, `probe_worker.py`, `solve_memo.py`,
-`dedupe_boards.py`, `pack.py`, `pack_board.py`, `re_escape.py`.
+**The braid chain:** `braid.py`, `schedule.py`, `dedupe_boards.py`, `pack.py`, `re_escape.py`.
 
 **Benches, frames and comparisons:**
 
@@ -3266,7 +3246,5 @@ channels first, and the other escapes leave round it.
   1 mm hole, one TRACK-HOLE violation, and the bench is refused. The same
   code is on main.
 - **The braid chain, if it is picked up again:** one placement of every
-  layer change (`place_dives`); speculative probes inside a descent; stop the
-  evolution when it stalls; the evolution on the cloud; group moves for
-  K51's last vias; a pair's two ends moved together; `pages_first.py`'s
-  deterministic-time bound made a batch count, as the whole solve's.
+  layer change (`place_dives`); group moves for K51's last vias; a pair's two
+  ends moved together.

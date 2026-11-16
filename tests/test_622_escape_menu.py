@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The escapes of a dog-boned ball (escape_plan.escape_menu, own_via, Copper) -- the menu the arrays' plan and the
 group's ends offer a ball from its dog-bone via -- and the move conflicts the plans price (select_moves._conflict,
-pages_first._conflicts).
+select_moves._conflicts).
 
   python3 tests/test_622_escape_menu.py
 
@@ -22,7 +22,7 @@ the array's middle; the outer ring bare) -- at the zynq LVDS run's sizes (cleara
    that gap line; a ball whose two neighbouring gap lines carry vias has no street escape;
 7. a via keeps another lane's run off by the rule (rules.fan_via_clear), not the router's grid ring (fan_via_reach):
    at 0.45 mm vias, 0.12 escapes and 0.1 clearance the ring is past the 0.4 a dog-bone stands off the next ball line,
-   and every dog-bone met every neighbouring line's run; pages_first._conflicts passes the reach through.
+   and every dog-bone met every neighbouring line's run; select_moves._conflicts passes the reach through.
 """
 import contextlib
 import io
@@ -41,7 +41,6 @@ _rules.install(_rules.Rules(clearance=0.09, track=0.15, via_size=0.45, via_drill
 import escape_moves as em  # noqa: E402
 import escape_plan as ep  # noqa: E402
 import select_moves as sm  # noqa: E402
-import pages_first as pf  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 N, PITCH = 5, 0.8
@@ -170,7 +169,7 @@ r10 = _rules.Rules(clearance=0.1, track=0.15, via_size=0.45, via_drill=0.2, fan_
 ring, clear = _rules.fan_via_reach(r10), _rules.fan_via_clear(r10)
 check(clear < 0.4 < ring, f'7: at 0.45/0.12/0.1 the grid ring {ring:.5f} is past 0.4 and the rule {clear:.3f} short of it')
 # (A along the ball line y 0 on B.Cu past B's dog-bone via, 0.4 off it; B a STREET move on In1.Cu, which buckets every
-# move by a via's reach -- pages_first._conflicts)
+# move by a via's reach -- select_moves._conflicts)
 ra = em.Move('A', 'dogbone', 'left', 'B.Cu', (-1.2, 0.0), 1,
              [((2.4, 0.0), (2.8, 0.4), 'F.Cu'), ((2.8, 0.4), (2.8, 0.0), 'B.Cu'), ((2.8, 0.0), (-1.2, 0.0), 'B.Cu')],
              site=(2.8, 0.4), climb=1)
@@ -181,9 +180,9 @@ check(sm._conflict(ra, rb, strict=True, stack=True, xing=2, reach=ring),
       '7: under the grid ring, A\'s run beside B\'s via is a conflict')
 check(not sm._conflict(ra, rb, strict=True, stack=True, xing=2, reach=clear),
       '7: under the rule it is none')
-check(not pf._conflicts({'A': [ra], 'B': [rb]}, True, stack=True, xing=2, via_reach=clear),
-      '7: pages_first._conflicts passes the reach through (a street move among them)')
-check(pf._conflicts({'A': [ra], 'B': [rb]}, True, stack=True, xing=2, via_reach=ring) != [],
+check(not sm._conflicts({'A': [ra], 'B': [rb]}, True, stack=True, xing=2, via_reach=clear),
+      '7: select_moves._conflicts passes the reach through (a street move among them)')
+check(sm._conflicts({'A': [ra], 'B': [rb]}, True, stack=True, xing=2, via_reach=ring) != [],
       '7: ...and the ring\'s conflict with it')
 
 

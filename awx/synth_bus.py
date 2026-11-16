@@ -572,10 +572,10 @@ def lower_bound(order_src, order_dst):
 # --- the PLANNER'S OWN model, solved exactly ---------------------------------
 #
 # The three answers above price the PROBLEM. This prices the MODEL: the best
-# plan `pages_first.py` is able to express at all. Its variables are a page
-# per net and an end per net, and its one hard rule is that two nets on the
-# same page are never inverted; a net that fits neither page is left to SWIM
-# at a fixed price (`PLAN_PAGES_SWIM`, 100 vias as shipped).
+# plan the two-page model is able to express at all. Its variables are a
+# page per net and an end per net, and its one hard rule is that two nets on
+# the same page are never inverted; a net that fits neither page is left to
+# SWIM at a fixed price (100 vias).
 #
 # Two lanes are inverted exactly when they cross, so "a page" is a
 # crossing-free set is an INCREASING SUBSEQUENCE of the destination ranks in
@@ -603,7 +603,7 @@ def pages_model(order_src, order_dst, tooth_layer=None, berth_layer=None,
 
     `swim` is the model's price for a lane it cannot page (vias);
     `mismatch` the price of one end whose layer differs from its page --
-    both as `pages_first` spells them. Returns a dict:
+    both as the two-page model spells them. Returns a dict:
 
         cost      the model's objective at its optimum (vias)
         page      lane id -> 'F.Cu' | 'B.Cu' | 'swim'
@@ -1405,7 +1405,7 @@ def plan_pool(order_src, order_dst, tooth_layer=None, berth_layer=None,
 
 def plan_objective(plan, tooth_layer=None, berth_layer=None,
                    swim=100.0, mismatch=1.0):
-    """`pages_first`'s objective for one plan, in vias, with the ends fixed.
+    """The two-page model's objective for one plan, in vias, with the ends fixed.
 
     That is the whole of it on a peripheral bus: the per-net berth and tooth
     terms are constant when the ends cannot move, so what the solver is
@@ -1973,7 +1973,7 @@ def build(a):
     # source order and in the planted destination order -- named
     # SYPj_P / SYPj_N so pairs.pair_names finds them; spread along the bus.
     # The truth is unchanged (a pair is two nets of the pattern); what the
-    # chain must add is COUPLING, which grade_k's PAIR lines report.
+    # chain must add is COUPLING, which pair_census reports.
     if getattr(a, 'pairs', 0):
         cands = [i for i in range(K - 1) if abs(pi[i] - pi[i + 1]) == 1]
         chosen, used = [], set()

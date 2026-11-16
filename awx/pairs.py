@@ -13,8 +13,6 @@ production pair router (connect.connect_pair) between the real ends, and
 whose reservation as an unrouted lane is two lines a pitch apart. Nothing
 here knows a board or a net name: the pairing is the suffix rule, the
 pitch is the rules' track plus the pair gap.
-
-    BRAID_PAIRS=1     the pair member (default off: the braid byte-identical)
 """
 import bisect
 import math
@@ -1000,105 +998,6 @@ def pair_waypoints(pcb, p_id: int, n_id: int, src_ref: str, dst_ref: str, each: 
         cx = sum(q.global_x for q in src.pads) / len(src.pads)
         cy = sum(q.global_y for q in src.pads) / len(src.pads)
         out.sort(key=lambda w: math.hypot((w[0] or w[1]).global_x - cx, (w[0] or w[1]).global_y - cy))
-    return out
-
-
-def harmonise(choice: dict, menus: dict, names: Sequence[str], pitch: float,
-              conflict, log=print) -> List[str]:
-    """THE PAIR'S TWO BERTHS AS ONE MOVE, after a plan chose them one by one
-    (2026-09-20, Andy: "at the berth the two tracks of the pair should
-    stay on the same layer as much as possible"). For each pair whose two
-    chosen moves differ in face, layer or kind, or whose exits are not
-    neighbours (within 1.3 array pitches), one leg is moved onto the
-    other's class: the candidate from its menu with the partner's face,
-    layer and kind, the nearest neighbouring exit, in conflict with
-    neither the partner nor any other chosen move. Both directions are
-    tried and the cheaper stands (fewer vias: a surface pair over a
-    via-in-pad pair), so a pair leaves the array together and on one
-    layer. `menus` are the destination menus (net -> [Move]); `conflict`
-    is the selector's own pairwise test. Returns the log lines."""
-    out = []
-    reach = 1.3 * pitch
-
-    def same_class(a, b):
-        # the same FACE on the same LAYER is what makes two legs one lane;
-        # the kind (a via-in-pad beside a dog-bone) may differ
-        return (a.direction, a.layer) == (b.direction, b.layer)
-
-    def adjacent(a, b, others=()):
-        d = math.hypot(a.exit_pt[0] - b.exit_pt[0], a.exit_pt[1] - b.exit_pt[1])
-        if not (0.05 < d <= reach):
-            return False
-        # ...and no other chosen exit of the same face and layer between them
-        ax = 0 if a.direction in ('up', 'down') else 1
-        lo_, hi_ = sorted((a.exit_pt[ax], b.exit_pt[ax]))
-        return not any((o.direction, o.layer) == (a.direction, a.layer)
-                       and lo_ + 0.02 < o.exit_pt[ax] < hi_ - 0.02 for o in others)
-
-    for base, (pn, nn) in pair_names(names).items():
-        if pn not in choice or nn not in choice:
-            continue
-        mp, mn = choice[pn], choice[nn]
-        others = [m for k, m in choice.items() if k not in (pn, nn)]
-        if same_class(mp, mn) and adjacent(mp, mn, others):
-            continue
-
-        def fit(leg, ref):
-            cands = [m for m in menus.get(leg, ()) if same_class(m, ref) and adjacent(m, ref, others)
-                     and not conflict(m, ref, strict=False)
-                     and not any(conflict(m, o, strict=False) for o in others)]
-            if not cands:
-                return None
-            return min(cands, key=lambda m: math.hypot(m.exit_pt[0] - ref.exit_pt[0],
-                                                       m.exit_pt[1] - ref.exit_pt[1]))
-        opts = []
-        c = fit(nn, mp)
-        if c is not None:
-            opts.append((mp.vias + c.vias, nn, c, mp))
-        c = fit(pn, mn)
-        if c is not None:
-            opts.append((mn.vias + c.vias, pn, c, mn))
-        if not opts:
-            # neither leg can join the other's class: the JOINT search --
-            # every (P move, N move) of one face and layer, exits
-            # neighbouring, in conflict with neither each other nor any
-            # other chosen move; the fewest vias, then the fewest legs
-            # moved, then the nearest exits
-            best = None
-            for a in menus.get(pn, ()):
-                for b in menus.get(nn, ()):
-                    if not (same_class(a, b) and adjacent(a, b, others)):
-                        continue
-                    if conflict(a, b, strict=False):
-                        continue
-                    if any(conflict(a, o, strict=False) or conflict(b, o, strict=False) for o in others):
-                        continue
-                    moved = (a is not mp) + (b is not mn)
-                    d = math.hypot(a.exit_pt[0] - b.exit_pt[0], a.exit_pt[1] - b.exit_pt[1])
-                    key = (a.vias + b.vias, moved, d)
-                    if best is None or key < best[0]:
-                        best = (key, a, b)
-            if best is None:
-                line = (f'  pair {base}: berths differ ({describe(mp)} / {describe(mn)}) '
-                        f'and no joint move of one face and layer fits -- left as chosen')
-                out.append(line)
-                log(line)
-                continue
-            (v, moved, d), a, b = best
-            choice[pn], choice[nn] = a, b
-            line = (f'  pair {base}: berths harmonised JOINTLY -- {pn} {describe(mp)} -> {describe(a)}, '
-                    f'{nn} {describe(mn)} -> {describe(b)}; {v} via(s) for the pair, exits {d:.2f} mm apart')
-            out.append(line)
-            log(line)
-            continue
-        opts.sort(key=lambda t: t[0])
-        v, leg, m, ref = opts[0]
-        was = choice[leg]
-        choice[leg] = m
-        line = (f'  pair {base}: berths harmonised -- {leg} {describe(was)} -> {describe(m)} '
-                f'beside {describe(ref)}; {v} via(s) for the pair')
-        out.append(line)
-        log(line)
     return out
 
 

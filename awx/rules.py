@@ -7,7 +7,7 @@ Until this module the chain's geometry was written out five times:
 ``NEST_IN =
 0.232``, ``source_realize.FAN_TRACK`` / ``FAN_CLEAR = 0.1``, plus
 ``track_width=0.1, clearance=0.1`` hardcoded at six production-engine call
-sites and a literal ``--clearance 0.1`` in `chain_k.sh` and `grade_k.py`.
+sites and a literal ``--clearance 0.1`` in the chain's grading scripts.
 Nine of those were derived from another one by a formula that lived only in
 a comment, and two of them (``NEST_IN``, ``cut_ledger.NEED``) are the same
 quantity spelled two ways, one ULP apart.
@@ -32,7 +32,7 @@ boards. What the board asks for is the main router's business.
 THE QUANTITIES, and the formula that produced each literal
 -----------------------------------------------------------
     clearance  0.1     the spec clearance: what the fanout lays at, what
-                       `chain_k.sh` / `grade_k.py` grade at, and what the
+                       the bus's checks grade at, and what the
                        output project records.
     hug        0.105   = clearance + 5 um  (``braid.CLEAR``) -- the spec
                        plus a hair, so a hug does not sit exactly on it.

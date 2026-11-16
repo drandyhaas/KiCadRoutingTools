@@ -3,15 +3,15 @@
 
   python3 tests/test_622_ends_fixes.py
 
-whole_ends chooses every net's tooth and berth (fanout_from_plan under PLAN_JUDGE=ends), and the rest of the whole
+whole_ends chooses every net's tooth and berth (fanout_from_plan), and the rest of the whole
 route is only as good as those ends. This pins the rules it prices and bans by, without a bench to route:
 
 1. stacking (ends_kernel.stacked_exits, the table the kernel counts where either lane changes layer): two lanes' ends
    at one point on different layers stack, a pair's twice; two ends on one layer, or apart, are no stack;
 2. a move's class (source_realize.move_class): every leg variant of one exit is one class, and another exit another;
-3. bans by class (fanout_from_plan.ban_moves): under the ends judge a refused berth bans its class as well as its
-   signature, and a pair's two legs are banned jointly -- and under the braid's judges by signature alone;
-4. the crossing rule (select_moves.SEL_XING) is the judge's: 2 under PLAN_JUDGE=ends, 1 otherwise;
+3. bans by class (fanout_from_plan.ban_moves): a refused berth bans its class as well as its signature, and a pair's
+   two legs are banned jointly;
+4. the crossing rule (select_moves.SEL_XING) is the whole route's, 2, in a process whose environment says nothing;
 5. feedback by place (whole_ends.fb_weights): a pair is priced in full where EITHER leg's exit stands on the item's
    layer, so it cannot leave the price by moving one leg; FB_OTHER_LAYER of that on the other layer there; off the place
    less than the other layer there, the nearest other exit included, falling to nothing FB_RADIUS beyond; FB_ESCALATE
@@ -27,7 +27,6 @@ from types import SimpleNamespace as NS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AWX = os.path.join(ROOT, 'awx')
-os.environ['PLAN_JUDGE'] = 'ends'          # (fanout_from_plan and select_moves read it at import)
 sys.path.insert(0, AWX)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 
@@ -50,8 +49,6 @@ def opt(*moves, layer=None):
 def py(code, **env):
     """`code` run in a fresh process under `env` (the settings read at import), its stdout"""
     e = dict(os.environ)
-    e.pop('PLAN_JUDGE', None)
-    e.pop('SEL_XING', None)
     e.update(env)
     r = subprocess.run([sys.executable, '-c', code], cwd=AWX, env=e, capture_output=True, text=True)
     if r.returncode != 0:
@@ -91,24 +88,16 @@ def main():
     if sr.move_class(a) == sr.move_class(c):
         fails.append('move_class: two different exits are one class')
 
-    # 3. bans by class, and the braid's judges unchanged
+    # 3. bans by class
     banned = set()
     ffp.ban_moves(banned, {'SA1': a}, ['SA1'], ['SA1'])
     if ('SA1', sr.move_sig(a)) not in banned or ('SA1', 'class', sr.move_class(a)) not in banned:
-        fails.append(f'ban_moves (ends): {banned}, want SA1\'s signature and its class')
-    out = py("import fanout_from_plan as f, source_realize as sr\n"
-             "from types import SimpleNamespace as NS\n"
-             "m = NS(exit_pt=(1, 2), layer='F.Cu', kind='dogbone', direction='down', site=(1, 1), legs=[])\n"
-             "b = set(); f.ban_moves(b, {'SA1': m}, ['SA1'], ['SA1']); print(sorted(str(x[1]) for x in b))",
-             PLAN_JUDGE='count')
-    if 'class' in out:
-        fails.append(f'ban_moves (count judge): bans a class ({out}) -- the braid chain must ban by signature alone')
+        fails.append(f'ban_moves: {banned}, want SA1\'s signature and its class')
 
-    # 4. the crossing rule's default is the judge's
-    for judge, want in (('ends', '2'), ('count', '1')):
-        got = py('import select_moves as sm; print(sm.SEL_XING)', PLAN_JUDGE=judge)
-        if got != want:
-            fails.append(f'SEL_XING under PLAN_JUDGE={judge}: {got}, want {want}')
+    # 4. the crossing rule is the whole route's
+    got = py('import select_moves as sm; print(sm.SEL_XING)')
+    if got != '2':
+        fails.append(f'SEL_XING in a fresh process: {got}, want 2')
 
     # 5. feedback by place
     pair = [opt(mv(10, 0, 'F.Cu'), mv(10.5, 0, 'F.Cu')), opt(mv(20, 0, 'F.Cu'), mv(20.5, 0, 'F.Cu'))]
@@ -163,8 +152,8 @@ def main():
         print(f'  FAIL: {f}')
     if fails:
         return 1
-    print('PASS: stacks counted where a lane changes layer (a pair twice), classes and bans by class under the ends '
-          'judge only, the crossing rule the judge\'s, feedback by place and escalated, an exact failure ranked last')
+    print('PASS: stacks counted where a lane changes layer (a pair twice), classes and bans by class, the crossing '
+          'rule the whole route\'s, feedback by place and escalated, an exact failure ranked last')
     return 0
 
 

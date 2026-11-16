@@ -14,7 +14,7 @@ can price (#622, the pairs-in-the-bus work, 2026-09-20):
 Pairs are found by NAME, generally: two nets whose names differ only in a
 trailing P/N, _P/_N, +/-, p/n. Nothing here knows a board, a part or a bus.
 `--nets` restricts the census to pairs whose BOTH legs are in the list (the
-run's nets), as grade_k scopes its checks.
+run's nets), as a bus's grade scopes its checks.
 """
 
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door

@@ -7,7 +7,7 @@ process, given the environment and the arguments the shell scripts give it, in t
 What changes is only the driver, which no longer needs zsh.
 
 The chain (whole_chain.sh): the fanout choosing every net's tooth and berth with the whole route's ends model
-(fanout_from_plan, PLAN_JUDGE=ends), the solve (whole_solve), the loop (below) and the route all at once (route_lanes),
+(fanout_from_plan), the solve (whole_solve), the loop (below) and the route all at once (route_lanes),
 graded (check_connected, check_drc). A round that leaves nets open is followed by round 1 AGAIN under the next seed
 (cp_seed: every solve of the round searches under the step's seed plus the round less one) -- from the same board, the
 cap step again, nothing carried from the round before: another draw, not a repair of this one -- up to ROUNDS rounds
@@ -713,8 +713,8 @@ def loop(solve, out, rounds, env, log, try_lay=None):
     """whole_loop.sh SOLVE OUTDIR ROUNDS, its lines to LOG: 0 with OUTDIR/plan.json the snapped plan that passed, 1 when
     no round got there, 3 when it stopped not converging, 4 when it stopped at crowded ends"""
     env = dict(env)
-    # the braid's plan environment the planning reads (a pages-first sidecar's paging, its pairs)
-    env.update(BRAID_PAIRS='1', BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2')
+    # the braid's plan environment the planning reads (a pages-first sidecar's paging)
+    env.update(BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2')
     # every expensive stage through stage_cache.py -- on here, a harness's cache (STAGE_CACHE=0 runs them all)
     env['STAGE_CACHE'] = env.get('STAGE_CACHE') or '1'
     env['TAUT_MEMO'] = env.get('TAUT_MEMO') or '1'
@@ -2167,9 +2167,8 @@ def stage_env(env):
     the harness's caches, and the plan environment of the fanout on our own ends (resolve_round.py runs one stage
     under the same)"""
     env.update(OMP_NUM_THREADS='1', VECLIB_MAXIMUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
-               TAUT_MEMO=env.get('TAUT_MEMO') or '1', PROBE_MEMO=env.get('PROBE_MEMO') or '1')
-    env.update(PLAN_PAGES='1', PLAN_JUDGE='ends', BRAID_PAIRS='1', PLAN_PAIRS='1',
-               BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2')
+               TAUT_MEMO=env.get('TAUT_MEMO') or '1')
+    env.update(BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2')
     return env
 
 
@@ -2288,7 +2287,7 @@ def joint_sync(env, r, solve, say):
     # go round), and published, the other buses' stages planning round them from here
     gd = os.path.join(os.path.dirname(os.path.abspath(solve)), 'joint_geo')
     os.makedirs(gd, exist_ok=True)
-    genv = {**env, 'BRAID_PAIRS': '1', 'BRAID_EXACT_PAGES': '0', 'PLAN_PAGES_SIDERS': '2',
+    genv = {**env, 'BRAID_EXACT_PAGES': '0', 'PLAN_PAGES_SIDERS': '2',
             'STAGE_CACHE': env.get('STAGE_CACHE') or '1', 'TAUT_MEMO': env.get('TAUT_MEMO') or '1'}
     g0, p0 = os.path.join(gd, 'g0.json'), os.path.join(gd, 'p0.json')
     lanes = None
@@ -2794,10 +2793,10 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                     tag=tag)
 
     def lane_legs():
-        """{lane: its nets} as the ends model makes lanes: a pair one lane named by its base (pairs.pair_names, under
-        PLAN_PAIRS), every other net its own"""
+        """{lane: its nets} as the ends model makes lanes: a pair one lane named by its base (pairs.pair_names),
+        every other net its own"""
         import pairs as _pairs
-        prs = (_pairs.pair_names(nets_all) if int(env.get('PLAN_PAIRS', env.get('BRAID_PAIRS', '0')) or 0) else {})
+        prs = _pairs.pair_names(nets_all)
         legs = {l_ for pr in prs.values() for l_ in pr}
         return {**{n: (n,) for n in nets_all if n not in legs}, **{b: tuple(pr) for b, pr in prs.items()}}
 

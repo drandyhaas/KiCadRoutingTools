@@ -49,7 +49,7 @@ def round_env(work, round_dir, sizes, dest=None, layers=None, sets=()):
     env.update(BASE=frame, DEST=dest or env.get('DEST') or 'U1',
                ROUTE_LAYERS=layers or ','.join(['F.Cu', 'B.Cu'] + [L for L in cu if L not in ('F.Cu', 'B.Cu')]))
     wr.stage_env(env)
-    env.update(BRAID_PAIRS='1', BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2', STAGE_CACHE='0', TAUT_MEMO='1')
+    env.update(BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2', STAGE_CACHE='0', TAUT_MEMO='1')
     nets = [ln.strip() for ln in open(os.path.join(round_dir, 'nets.lines')) if ln.strip()]
     env.update(BENCH=os.path.join(round_dir, 'fo.kicad_pcb'), NETS=','.join(nets))
     for kv in sets:

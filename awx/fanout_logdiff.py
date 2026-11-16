@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """fanout_logdiff.py LOG_A LOG_B [--context N] -- where two runs of the fanout on our own ends first DECIDED differently:
-two fo.log files (fanout_from_plan.py under PLAN_JUDGE=ends -- a whole_route.py round's OUTDIR/rN/fo.log) compared on
+two fo.log files (fanout_from_plan.py -- a whole_route.py round's OUTDIR/rN/fo.log) compared on
 their decision lines only, the ends model's ('whole ends: ...'), the destination passes', the source realizes' and the
 plans', with N lines of each around the first that differs.
 

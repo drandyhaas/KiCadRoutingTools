@@ -13,15 +13,13 @@ What this asserts:
    pitch apart, which chain wider than the tolerance (zynq U2 in the flow frame; the tight-cluster grouping this
    replaced asserted there).
 2. On a real array's menus (the H3 bench's DDR3 DU1, a slice of its nets, every move kind: surface,
-   straight, dog-bones, vias-in-pad, climbs, streets): the groups expanded == pages_first._conflicts(strict, stack),
+   straight, dog-bones, vias-in-pad, climbs, streets): the groups expanded == select_moves._conflicts(strict, stack),
    pair for pair -- nothing missing, nothing extra -- at each crossing rule, the rule passed on both sides.
 3. Two plain escapes built to cross: no conflict at xing=1 (select_moves' own default, a crossing counted only
    where a move climbs), a conflict at xing=2 (every same-layer crossing, what a plan of a whole array needs) --
    the check is live, where a slice of a real array need not hold two plain escapes that cross.
-4. The rule is not the process's: importing pages_first leaves select_moves.SEL_XING as the environment set it (it
-   used to raise it to 2 for the whole process, so the fanout's first greedy choice ran at 1 and every later one, and
-   the whole route's ends model, at 2), and the ends model's test (pages_first._conflicts, no rule given) and the
-   greedy seed's (select_moves._conflict, no rule given) are one rule.
+4. The rule is the whole route's: select_moves.SEL_XING is 2, and the ends model's test (select_moves._conflicts, no
+   rule given) and the greedy seed's (select_moves._conflict, no rule given) are one rule.
 """
 import contextlib
 import io
@@ -39,7 +37,6 @@ FAIL = []
 
 import conflict_groups as cg  # noqa: E402
 import joint_escape as je  # noqa: E402
-import pages_first as pf  # noqa: E402
 import select_moves as sm  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 
@@ -90,7 +87,7 @@ check(len(menu) >= 15 and any(c for _k, c, _s in kinds) and any(st for _k, _c, s
 
 def reference(xing):
     with contextlib.redirect_stdout(io.StringIO()):
-        ref = pf._conflicts(menu, strict=True, stack=True, xing=xing)
+        ref = sm._conflicts(menu, strict=True, stack=True, xing=xing)
     out = set()
     for a, i, b, j in ref:
         x, y = (a, i), (b, j)
@@ -105,7 +102,7 @@ for xing in (1, 2):
     t = time.time()
     mine_x = cg.expand(*cg.conflict_groups(menu, stack=True, xing=xing))
     t_mine = time.time() - t
-    check(ref_x == mine_x, f'xing={xing}: the groups == pages_first._conflicts at SEL_XING {xing}, pair for pair: '
+    check(ref_x == mine_x, f'xing={xing}: the groups == select_moves._conflicts at SEL_XING {xing}, pair for pair: '
           f'{len(ref_x)} pairs (missing {len(ref_x - mine_x)}, extra {len(mine_x - ref_x)}; {t_ref:.1f} s pair by '
           f'pair, {t_mine:.1f} s grouped)')
 # live: two PLAIN escapes whose lanes cross on one layer -- a ball escaping left along the row gap y = 2.4 and
@@ -127,13 +124,12 @@ check(pair not in d1 and not r1, f'two plain escapes crossing: not a conflict at
 check(pair in d2 and r2, f'two plain escapes crossing: a conflict with xing=2 (groups {pair in d2}, select_moves at 2 '
       f'{r2})')
 
-# 4. the rule is the caller's, never the import's: pages_first was imported above, and the module value is still the
-# environment's; with no rule given, the ends model's test (pages_first._conflicts) and the greedy seed's
-# (select_moves._conflict) agree on the crossing pair -- one rule for the seed and the judge
-want = int(os.environ.get('SEL_XING', '2' if os.environ.get('PLAN_JUDGE') == 'ends' else '1'))
-check(sm.SEL_XING == want, f'importing pages_first leaves select_moves.SEL_XING at {want} (it is {sm.SEL_XING})')
+# 4. the rule is the whole route's: with no rule given, the ends model's test (select_moves._conflicts) and the greedy
+# seed's (select_moves._conflict) agree on the crossing pair -- one rule for the seed and the judge
+want = 2
+check(sm.SEL_XING == want, f'select_moves.SEL_XING is the whole route\'s {want} (it is {sm.SEL_XING})')
 judge = pair in {((a, i), (b, j)) if (a, i) < (b, j) else ((b, j), (a, i))
-                 for a, i, b, j in pf._conflicts(cross, strict=True, stack=True)}
+                 for a, i, b, j in sm._conflicts(cross, strict=True, stack=True)}
 seed = sm._conflict(A, B, strict=True, stack=True)
 check(judge == seed == (want >= 2), f'with no rule given, the ends model\'s test ({judge}) and the greedy seed\'s '
       f'({seed}) agree, at SEL_XING {want}')

@@ -16,7 +16,7 @@ CHOSEN together, then laid together:
    layers -- never an inner plane layer the run does not route on. On more routing layers than two a via move's run
    is planned on no one layer (RUN): K runs may share a lane, an exit cluster or a crossing, and each chosen run is
    given its layer after the solve (colour_runs).
-2. The moves that cannot both be laid are found as the whole route finds them (pages_first._conflicts, strict: a
+2. The moves that cannot both be laid are found as the whole route finds them (select_moves._conflicts, strict: a
    shared gap stretch on a layer, a shared site, a via in the other's lane) -- two balls of one net's too, since the
    engine lays every escape on its own. A net's balls share copper through STRAPS instead: a ball of a net with more
    than one ball may join an adjacent ball of its net by a straight track rather than escape, and every chain of
@@ -1410,7 +1410,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     the ball's own line), dog-bones and vias-in-pad, the CLIMBS -- a dog-bone or via-in-pad whose run first travels
     along a gap or the ball's own line, up to `climb` pitches (None: the whole array), before it leaves -- and the
     STREET dog-bones (a via in an empty band of the array, `street` sites along a lane; the whole route's 2). The
-    escapes' conflicts are the whole route's own (pages_first._conflicts as its ends take them: strict, an F exit
+    escapes' conflicts are the whole route's own (select_moves._conflicts as its ends take them: strict, an F exit
     stacked over a B one allowed). `exit_rays` (the whole route's whole-array plans: the source realize's and the
     destination's, fanout_from_plan): a plane ball's drop is held out of the bus's teeth's and berths' ways out
     (exit_ray_conflicts), each gap site offering a finer via too.
@@ -1571,7 +1571,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     _bd.forget_obstacles()           # (the menus were the models' last use here: their memory goes to the solve)
     n_moves = sum(len(v) for v in menu.values())
     # the escapes' conflicts, the whole route's own relation as groups that all conflict pairwise (conflict_groups:
-    # pages_first._conflicts pair by pair was 129 s and 3.1 million pairs for the bus alone with every move kind).
+    # select_moves._conflicts pair by pair was 129 s and 3.1 million pairs for the bus alone with every move kind).
     # Every crossing counts (xing 2, asked for here: select_moves' default counts one only where a move climbs) -- a
     # plan of every ball has plain escapes out of
     # the interior, and two of those cross (zynq U1, the plan at the default rule: 85 of 86 clashing pairs in the laid
@@ -1591,7 +1591,7 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     cap_g = {tuple(sorted(g)) for g in groups if on_run(g)}
     cap_b = {(tuple(sorted(a)), tuple(sorted(b))) for a, b in bigroups if on_run((a, b))}
     del tags
-    # built in a canonical order (pages_first's note: the order constraints reach the CP-SAT picks its answer)
+    # built in a canonical order (select_moves._conflicts' note: the order constraints reach the CP-SAT picks its answer)
     # (a group of one ball's moves alone says nothing its own AtMostOne does not)
     groups = sorted((sorted(g) for g in groups if len({m_[0] for m_ in g}) > 1), key=repr)
     bigroups = sorted(((sorted(a), sorted(b)) for a, b in bigroups if len({m_[0] for m_ in a | b}) > 1), key=repr)
@@ -1865,8 +1865,8 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     else:
         for a, i, b, j in pairs:
             mdl.AddBoolOr([v[a][i].Not(), v[b][j].Not()])
-    # a differential PAIR leaves the array together -- pairs.harmonise's rule, here a constraint of the one solve
-    # rather than a repair after a choice made ball by ball: its two legs served together, each by an escape whose
+    # a differential PAIR leaves the array together -- a constraint of the one solve rather than a repair after a
+    # choice made ball by ball: its two legs served together, each by an escape whose
     # partner's is of the same face and layer with its exit a neighbour (within 1.3 pitches), and no other ball's exit
     # of that face and layer between the two. Planned leg by leg, the zynq U1's array left 6 of its 19 pairs split by
     # another net's tooth and 7 with a leg on each layer
@@ -2541,8 +2541,8 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
             at = (round(balls[key][0], 3), round(balls[key][1], 3))
             if kind == 'escape':
                 h = sr.full_move(o)
-                # the move's own legs, always: the plan proved ITS legs clear of each other, and an exit alone is laid by
-                # a search that reaches it by any cells (full_move carries them only under PLAN_PAGES)
+                # the move's own legs, always (an empty list where it has none): the plan proved ITS legs clear of each
+                # other, and an exit alone is laid by a search that reaches it by any cells
                 h['legs'] = [(tuple(a), tuple(b), L) for (a, b, L) in o.legs]
             elif kind == 'strap':
                 h = {'kind': 'strap', 'to': tuple(o.b), 'layer': o.layer}

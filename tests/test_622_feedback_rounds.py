@@ -43,7 +43,7 @@ BOARD = '(kicad_pcb (version 20240108) (generator "test")\n  (net 0 "")\n  (net 
 
 def fb_run(td, args, **env):
     """whole_feedback ARGS under ENV, in its own process: its line, and the feedback file after"""
-    e = {k: v for k, v in os.environ.items() if not k.startswith('FB_') and k not in ('PLAN_PAIRS', 'BRAID_PAIRS')}
+    e = {k: v for k, v in os.environ.items() if not k.startswith('FB_')}
     e.update(env)
     r = subprocess.run([sys.executable, 'whole_feedback.py'] + args, cwd=AWX, env=e, capture_output=True, text=True)
     if r.returncode != 0 or not r.stdout.startswith('whole_feedback:'):

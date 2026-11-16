@@ -1,5 +1,5 @@
 """conflict_groups(menu) -- the whole route's move conflicts (select_moves._conflict, strict, stack: what
-pages_first._conflicts(menu, strict=True, stack=True) lists pair by pair) stated COMPACTLY, for a CP-SAT model:
+select_moves._conflicts(menu, strict=True, stack=True) lists pair by pair) stated COMPACTLY, for a CP-SAT model:
 
   cliques     sets of moves that all conflict pairwise -- one AtMostOne each
   bicliques   (A, B): every move of A conflicts with every move of B -- one auxiliary each (y_A + y_B + the moves in
@@ -19,7 +19,7 @@ The relation's five parts:
 
 Every part applies the relation's own test to its members, so the union states exactly its pairs. zynq U1's bus with
 every move escape_moves has (4848 moves, climbs across the array): 3,098,663 pairs either way, none missing, none
-extra; pages_first._conflicts listed them in 129 s."""
+extra; select_moves._conflicts listed them in 129 s."""
 import collections
 
 import select_moves as sm

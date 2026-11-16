@@ -29,8 +29,6 @@ FAIL = []
 
 # (module, the line's start): os.environ uses the whole route never runs
 NOT_THE_ROUTE = {
-    ('probe_memo', "    os.environ['PROBE_MEMO_DIR'] = d"),               # its own self-test
-    ('whole_ends', "    os.environ.setdefault('PLAN_JUDGE', 'ends')"),     # its own __main__, a research CLI
     # (route_bus's CLI main: the round edits file named for the step's own child processes, which it starts -- the
     # in-process route takes ROUND_EDITS from its caller's settings)
     ('route_bus', "        os.environ['ROUND_EDITS'] = os.path.abspath(a.round_edits)"),

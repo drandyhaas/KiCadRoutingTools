@@ -80,7 +80,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 from coherent_nets import block_net_name  # noqa: E402
 
 # the caches are a harness's (awx-caches-off-by-default): the step runs every stage without them
-STEP_SETTINGS = {'TAUT_MEMO': '0', 'PROBE_MEMO': '0', 'STAGE_CACHE': '0'}
+STEP_SETTINGS = {'TAUT_MEMO': '0', 'STAGE_CACHE': '0'}
 
 # the sizes route_bus takes, as the routing CLIs spell them (route.py's, and the escapes' own track)
 SIZE_ARGS = ('clearance', 'clearance_ceiling', 'track_width', 'fanout_track_width', 'via_size', 'via_drill',
@@ -89,10 +89,9 @@ SIZE_ARGS = ('clearance', 'clearance_ceiling', 'track_width', 'fanout_track_widt
 
 def step_policy(run_rules=None, settings=None):
     """The settings the step's awx modules are imported and run under: the chain's stage policy (whole_route.stage_env
-    -- a pair one lane, the ends' judge), the caches off, and the run's rules when given. A module reads its policy
-    when it is FIRST imported in a process (awx_settings), and the chain's in-process stages run on the modules the
-    step imported before them: imported under the shell's environment, braid read BRAID_PAIRS off, and every stage
-    planned and laid a pair as two single lanes (the zynq's DQS0 and DQS1, the AD9364's fourteen LVDS pairs).
+    -- the braid's paging), the caches off, and the run's rules when given. A module reads its policy when it is FIRST
+    imported in a process (awx_settings), and the chain's in-process stages run on the modules the step imported
+    before them -- so the step imports them under this policy, never under the shell's environment.
     `settings`: the step's own, over the environment (route_buses: a bus's ROUTE_LAYERS, a shared array's)"""
     import awx_settings
     import whole_route as wr
