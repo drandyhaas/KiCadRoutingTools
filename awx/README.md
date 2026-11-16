@@ -1142,7 +1142,7 @@ its moves. Its whole menu comes in two ways:
   Then the stretch goes back to its first four tiers, each ball keeping the
   move its lane took. A sweep is every stretch once; a sweep that gained a
   hundredth of the objective is followed by another, its stretches drawn at
-  random (three sweeps at most). The gain is read with the walled balls and
+  random (twelve sweeps at most). The gain is read with the walled balls and
   the plane balls fanned out as a count, and the rest of the objective
   apart: the weight on one such ball is each model's own and grows with the
   menus it was built on, so two builds' whole objectives are not comparable
@@ -1169,7 +1169,13 @@ together they take 60 s, and name the same rules.
 
 **The search** starts on the first tiers, a lane that takes a move past
 tier 1 priced 50 vias, so the start stays as near the pattern as the rules
-allow (160 deterministic batches); then it runs the epochs: rounds that free 8 lanes
+allow (160 deterministic batches). From it **the arrays are taken in turn**:
+one array's every choice is freed on its whole menus and the others' held,
+until a turn of the arrays gains less than a via (80 batches a solve at
+most). With the other array's ends a constant such a solve is an easy one,
+proved best in a second or two on a two-layer bus, and it does what no round
+of a few lanes can: slide a whole run of exits along a face. Then it runs the
+epochs: rounds that free 8 lanes
 of the stretch and the other balls near them (24 batches each), each other
 lane held at the best state, until 12 rounds in a row gain less than a via.
 A round that frees the lanes and balls a round has already freed since the
@@ -1182,6 +1188,19 @@ again after a check or a lesson (a repair, which holds most lanes on their
 ends) that leaves a costly ball has the lanes nearest it searched once more,
 as an epoch. Every solve is bounded by deterministic batches, never a clock,
 so a board and its settings give one answer.
+
+**On two routing layers** the model's count of vias misses some: it counts a
+lane's change of layer where its two ends' layers differ and nothing where
+they agree, yet a lane with both ends on one layer must go down and back
+under a lane it meets there. So a state is judged with the changes the
+*order* of its crossings forces (`whole_ends.route_floor`), a round's model is
+given the dives it can see (`dive_cuts`), and two rounds in three free a group
+by what crosses: the lanes most of the state's dives are owed to, together,
+or a lane and the lanes it crosses.
+
+**The cut** round a ball array destination, where the order of its exits
+starts and ends, is its far face's middle (`negotiated_buses.GROUP_SET`), no
+variable of the group's model.
 
 **What it costs,** the group's ends within each board's bus step below. Peak
 memory is as macOS counts it, the process's footprint, measured on the model

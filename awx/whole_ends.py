@@ -2560,8 +2560,219 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
     assert len(cost_tag) == len(cost), f'{len(cost_tag)} cost tags for {len(cost)} cost terms'
     return types.SimpleNamespace(m=m, lanes=lanes, LG=LG, npair=npair, idx=idx, OT=OT, OB=OB, O_=O_, xs=xs, y=y, chg=chg,
                                  cost=cost, cost_tag=cost_tag, chg_cost=chg_cost, walls=walls_, const=const, X=X,
-                                 held=held, dom=dom, pos=pos,
+                                 held=held, dom=dom, pos=pos, before=before, before1=before1,
                                  NL=NL, SB=SB, DB=DB, cut=cut, t0=t0, cutvar=CV)
+
+
+FLOOR_BATCHES = 40         # the order puzzle's search, in batches (route_floor): its optimum comes in the first few
+
+
+def route_floor(J, val, kmax=3):
+    """(changes, over, {lane: its changes}) -- (two routing layers) THE LEAST CHANGES OF LAYER a state of model `J`
+    (`val` its values) can be routed with, by the ORDER of its crossings alone -- no places, no room: each lane meets
+    its crossers in an order a braid allows (of two that do not cross each other, the nearer at the teeth first; three
+    that all cross, one of the two ways round), stands on its tooth's layer until its first change and on its berth's
+    after its last, at most `kmax` of them, and two lanes that cross stand on two layers where they do. `changes` by
+    nets (a pair's two), `over` the vias its lanes carry past two (an end on the back layer of a part on the front is
+    one). The model itself counts a lane's change where its two ends' layers differ and nothing where they agree: a
+    lane from the front to the front that must go under another and come back is two vias it does not see. None
+    where the layers are not two, or no order is found"""
+    if J.NL != 2:
+        return None
+    from ortools.sat.python import cp_model
+    import cp_seed
+    lanes = J.lanes
+    TQ = int(round(TIE_MM * 1000))
+    it = {l_: next(i for i, v in J.xs[0][l_].items() if val(v)) for l_ in lanes}
+    jb = {l_: next(j for j, v in J.xs[1][l_].items() if val(v)) for l_ in lanes}
+    tl = {l_: next(q for q in range(2) if val(J.y[0][l_][q])) for l_ in lanes}
+    dl = {l_: next(q for q in range(2) if val(J.y[1][l_][q])) for l_ in lanes}
+    wrap = {l_: int(val(w_)) for l_, w_ in J.cutvar[2].items()} if J.cutvar else {}
+    pt = {l_: J.pos[(0, l_, it[l_])] for l_ in lanes}
+    pb = {l_: (wrap.get(l_, 0), J.pos[(1, l_, jb[l_])]) for l_ in lanes}
+    b0 = lambda a, b: pt[a] + TQ < pt[b]                                             # noqa: E731
+    b1 = lambda a, b: pb[a][0] < pb[b][0] or (pb[a][0] == pb[b][0] and pb[a][1] + TQ < pb[b][1])   # noqa: E731
+    X = {frozenset((a, b)) for a, b in itertools.combinations(lanes, 2)
+         if (b0(a, b) and b1(b, a)) or (b0(b, a) and b1(a, b))}
+    C = {n: sorted((o for o in lanes if frozenset((n, o)) in X), key=lambda o: (pt[o], o)) for n in lanes}
+    m = cp_model.CpModel()
+    bef, tri = {}, {}
+    for n in lanes:
+        for j, k in itertools.combinations(C[n], 2):        # (j before k at the teeth)
+            if frozenset((j, k)) in X:
+                key = tuple(sorted((n, j, k), key=lambda o: (pt[o], o)))
+                if key not in tri:
+                    tri[key] = m.NewBoolVar('')
+                bef[(n, j, k)] = tri[key].Not()
+            else:
+                v = m.NewBoolVar('')
+                if b0(n, j) and b0(j, k):
+                    m.Add(v == 1)                               # (n before both: the nearer, j, first)
+                elif b0(j, k) and b0(k, n):
+                    m.Add(v == 0)                               # (n past both: k first)
+                bef[(n, j, k)] = v
+    ix = {n: {o: i for i, o in enumerate(C[n])} for n in lanes}
+    B = lambda n, j, k: bef[(n, j, k)] if ix[n][j] < ix[n][k] else bef[(n, k, j)].Not()     # noqa: E731
+    for n in lanes:
+        for i, j, k in itertools.combinations(C[n], 3):
+            m.AddBoolOr([B(n, i, j).Not(), B(n, j, k).Not(), B(n, i, k)])
+            m.AddBoolOr([B(n, i, j), B(n, j, k), B(n, i, k).Not()])
+    seg = {(n, o): m.NewIntVar(0, kmax, '') for n in lanes for o in C[n]}
+    par = {(n, o): m.NewBoolVar('') for n in lanes for o in C[n]}
+    tot = {n: m.NewIntVar(0, kmax, '') for n in lanes}
+    over = {n: m.NewIntVar(0, kmax + 2, '') for n in lanes}
+    for n in lanes:
+        for o in C[n]:
+            h = m.NewIntVar(0, kmax // 2, '')
+            m.Add(seg[(n, o)] == 2 * h + par[(n, o)])
+            m.Add(seg[(n, o)] <= tot[n])
+        for j, k in itertools.combinations(C[n], 2):
+            m.Add(seg[(n, j)] <= seg[(n, k)]).OnlyEnforceIf(B(n, j, k))
+            m.Add(seg[(n, k)] <= seg[(n, j)]).OnlyEnforceIf(B(n, j, k).Not())
+        h = m.NewIntVar(0, kmax // 2, '')
+        m.Add(tot[n] == 2 * h + (tl[n] ^ dl[n]))
+        m.Add(over[n] >= tl[n] + dl[n] + tot[n] - 2)
+    for x in sorted(X, key=sorted):
+        p_, q_ = sorted(x)
+        if tl[p_] == tl[q_]:
+            m.Add(par[(p_, q_)] != par[(q_, p_)])
+        else:
+            m.Add(par[(p_, q_)] == par[(q_, p_)])
+    m.Minimize(int(W_OVER) * sum(J.npair[n] * over[n] for n in lanes) + sum(J.npair[n] * tot[n] for n in lanes))
+    s = cp_seed.solver()
+    s.parameters.num_workers = 4
+    s.parameters.interleave_search = True
+    s.parameters.max_num_deterministic_batches = FLOOR_BATCHES
+    s.parameters.share_glue_clauses = False
+    s.parameters.share_binary_clauses = False
+    if s.Solve(m) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None
+    T = {n: int(s.Value(tot[n])) for n in lanes}
+    return sum(J.npair[n] * T[n] for n in lanes), sum(J.npair[n] * int(s.Value(over[n])) for n in lanes), T
+
+
+def dive_triples(J, val):
+    """[(e, p, q)] -- (two routing layers) THE DIVES a state of model `J` forces by three lanes alone (`val` its
+    values): e changes layer once, p and q do not, e crosses both and they do not cross each other -- so e meets the
+    nearer of them at the teeth, p, first -- and p stands on e's tooth layer, q on its berth layer: one of the three
+    goes down and back. The lanes most often the `e` of such threes are the ones a state's dives are owed to"""
+    if J.NL != 2:
+        return []
+    lanes = J.lanes
+    TQ = int(round(TIE_MM * 1000))
+    it = {l_: next(i for i, v in J.xs[0][l_].items() if val(v)) for l_ in lanes}
+    jb = {l_: next(j for j, v in J.xs[1][l_].items() if val(v)) for l_ in lanes}
+    lay = {l_: tuple(next(q for q in range(2) if val(J.y[k_][l_][q])) for k_ in (0, 1)) for l_ in lanes}
+    wrap = {l_: int(val(w_)) for l_, w_ in J.cutvar[2].items()} if J.cutvar else {}
+    pt = {l_: J.pos[(0, l_, it[l_])] for l_ in lanes}
+    pb = {l_: (wrap.get(l_, 0), J.pos[(1, l_, jb[l_])]) for l_ in lanes}
+    b0 = lambda a, b: pt[a] + TQ < pt[b]                                             # noqa: E731
+    b1 = lambda a, b: pb[a][0] < pb[b][0] or (pb[a][0] == pb[b][0] and pb[a][1] + TQ < pb[b][1])   # noqa: E731
+    still = {q: [l_ for l_ in lanes if lay[l_] == (q, q)] for q in (0, 1)}
+    out = []
+    for e in lanes:
+        if lay[e][0] == lay[e][1]:
+            continue
+        for p in still[lay[e][0]]:
+            for q in still[lay[e][1]]:
+                if (b0(e, p) and b0(p, q) and b1(p, q) and b1(q, e)) or \
+                        (b0(q, p) and b0(p, e) and b1(e, q) and b1(q, p)):
+                    out.append((e, p, q))
+    return out
+
+
+def dive_cover(triples, k, rng=None):
+    """up to `k` lanes that are, together, in the most of the forced threes `triples` (dive_triples'): taken one at a
+    time, the lane in the most threes no lane taken yet is in -- drawn by that count where `rng` is given, so that two
+    rounds of a search free two such sets. A dive stands while any one of the lanes that force it still does: no
+    round that moves one of them alone gains, and the lanes to move together are these, whatever the board"""
+    left, out = list(triples), []
+    while left and len(out) < k:
+        cnt = collections.Counter(l_ for t_ in left for l_ in t_)
+        ls = sorted(cnt, key=str)
+        l0 = max(ls, key=lambda l_: cnt[l_]) if rng is None else rng.choices(ls, weights=[cnt[l_] for l_ in ls])[0]
+        out.append(l0)
+        left = [t_ for t_ in left if l0 not in t_]
+    return out
+
+
+def dive_cuts(J, mc, free, vals, w_dive):
+    """(two routing layers) THE DIVES a round of the search can see, as rows of `mc` -- a copy of J's model, its
+    lanes not in `free` held on the ends `vals` gives them: lanes e, p, q where e changes layer once, p and q do
+    not, e crosses both and they do not cross each other -- so e meets the nearer of them at the teeth, p, first --
+    and p stands on e's tooth layer, q on its berth layer. e must be off its tooth layer where it meets p and on it
+    again where it meets q: one of the three goes down and back, two changes the model does not count -- a literal a
+    lane, priced `w_dive` a leg, one dive answering every such three its lane is in. The orders between two held lanes
+    read off their places; any with a free lane, the model's own literals. Returns the rows added"""
+    if J.NL != 2:
+        return 0
+    lanes = J.lanes
+    TQ = int(round(TIE_MM * 1000))
+    val = lambda v: v if isinstance(v, int) else vals[v.Index()]       # noqa: E731
+    held = [l_ for l_ in lanes if l_ not in free]
+    it = {l_: next(i for i, v in J.xs[0][l_].items() if val(v)) for l_ in held}
+    jb = {l_: next(j for j, v in J.xs[1][l_].items() if val(v)) for l_ in held}
+    wrap = {l_: int(val(w_)) for l_, w_ in J.cutvar[2].items()} if J.cutvar else {}
+    pt = {l_: J.pos[(0, l_, it[l_])] for l_ in held}
+    pb = {l_: (wrap.get(l_, 0), J.pos[(1, l_, jb[l_])]) for l_ in held}
+    lit = lambda v: (mc.GetBoolVarFromProtoIndex(v.Index()) if v.Index() >= 0          # noqa: E731
+                     else mc.GetBoolVarFromProtoIndex(-v.Index() - 1).Not())
+    O0, O1 = {}, {}             # (a, b) -> a before b at the teeth / the berths: True, or the model's literal
+    for a in lanes:
+        for b in lanes:
+            if a == b:
+                continue
+            if a in pt and b in pt:
+                if pt[a] + TQ < pt[b]:
+                    O0[(a, b)] = True
+                if pb[a][0] < pb[b][0] or (pb[a][0] == pb[b][0] and pb[a][1] + TQ < pb[b][1]):
+                    O1[(a, b)] = True
+            else:
+                for O_, v in ((O0, J.before(0, a, b)), (O1, J.before1(a, b))):
+                    if isinstance(v, int):
+                        if v:
+                            O_[(a, b)] = True
+                    else:
+                        O_[(a, b)] = lit(v)
+    nx0, nx1 = collections.defaultdict(list), collections.defaultdict(list)
+    for (a, b) in O0:
+        nx0[a].append(b)
+    for (a, b) in O1:
+        nx1[a].append(b)
+    Pc = mc.Proto()
+    dv = {}
+
+    def dive(l_):
+        if l_ not in dv:
+            dv[l_] = mc.NewBoolVar('')
+            Pc.objective.vars.append(dv[l_].Index())
+            Pc.objective.coeffs.append(int(w_dive) * J.npair[l_])
+        return dv[l_]
+    yl = {(k_, l_, q_): (J.y[k_][l_][q_] if isinstance(J.y[k_][l_][q_], int) else lit(J.y[k_][l_][q_]))
+          for k_ in (0, 1) for l_ in lanes for q_ in (0, 1)}
+    n = 0
+    seen = set()
+    # (e before p before q at the teeth, p before q before e at the berths; and its mirror, the three the other way)
+    for mirror in (False, True):
+        A0, A1 = (O0, O1) if not mirror else ({(b, a): v for (a, b), v in O0.items()}, {(b, a): v for (a, b), v in O1.items()})
+        n0 = collections.defaultdict(list)
+        for (a, b) in A0:
+            n0[a].append(b)
+        for e in lanes:
+            for p in n0[e]:
+                for q in n0[p]:
+                    if q == e or (p, q) not in A1 or (q, e) not in A1:
+                        continue
+                    ords = [A0[(e, p)], A0[(p, q)], A1[(p, q)], A1[(q, e)]]
+                    cond = [o_.Not() for o_ in ords if o_ is not True]
+                    for q1, q2 in ((0, 1), (1, 0)):
+                        lays = [yl[(0, e, q1)], yl[(1, e, q2)], yl[(0, p, q1)], yl[(1, p, q1)], yl[(0, q, q2)], yl[(1, q, q2)]]
+                        if any(isinstance(v, int) and v == 0 for v in lays) or (e, p, q, q1) in seen:
+                            continue
+                        seen.add((e, p, q, q1))
+                        mc.AddBoolOr([dive(e), dive(p), dive(q)] + cond + [v.Not() for v in lays if not isinstance(v, int)])
+                        n += 1
+    return n
 
 
 def nearest_start(m, want, ends, hints=(), work=None, lin=None, rest=True, then=None, export=None):

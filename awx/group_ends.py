@@ -72,7 +72,9 @@ ends at an array chosen from that array's menu, and at each array ONE set of rul
 EVERY rule is hard. Where no state holds them all the rules that cannot hold together are named, and the run stops.
 
 THE SEARCH (tier_search): THE START, the model on the first tiers, each lane priced past its first two -- the state
-nearest the pattern the rules allow. Then THE EPOCHS: the lanes round the source in STRETCHES of some EPOCH_LANES
+nearest the pattern the rules allow -- and from it THE ARRAYS IN TURN (end_turns): one array's every choice freed, the
+others' held, until a turn of them gains less than a via (a run of exits slid along a face, which no round of a few
+lanes does). Then THE EPOCHS: the lanes round the source in STRETCHES of some EPOCH_LANES
 (lane_stretches, by their balls' angles about the array's centre); a stretch's balls offered their whole menus, and
 the balls round each COSTLY BALL with them (a plane ball fanned out; the source ball of a lane with a tooth on its far
 face, the dearest end); the model built again from the state, which stands on it as it was (every lane keeps the move
@@ -80,6 +82,10 @@ it took; where a rebuilt bus model refuses a few ends, the state nearest it, the
 lanes of the stretch -- about a costly ball first, else at random or about one lane and its neighbours -- each other
 lane held at the best state, until EPOCH_STALL rounds gain less than a via. A SWEEP is every stretch once; one that
 gained a hundredth of the objective is followed by another, its stretches drawn at random (EPOCH_SWEEPS at most).
+ON TWO ROUTING LAYERS a state is judged with what the model does not count: the changes of layer the ORDER of its
+crossings forces (whole_ends.route_floor -- a lane with both ends on one layer goes down and back under one it meets
+there); a round's model is given the dives it can see (whole_ends.dive_cuts), and two rounds in three free a GROUP BY
+WHAT CROSSES -- the lanes most of the state's dives are owed to together (dive_cover), or a lane and those it crosses.
 Every lane's wide moves are worth the having -- the search held to the first four tiers ended 8 and 11 % dearer on two
 boards -- but never all at once: on its whole menus at once, a four-bus group's search took 12 GB and had not ended
 when it was stopped.
@@ -180,9 +186,10 @@ TIER_OVER = 50.0    # ...a lane past them priced this many vias in the start alo
 TIER_MENU = int(awx_settings.get('GROUP_TIER_MENU') or '3')     # 5: every bus ball on its whole menu in every model
 EPOCH_LANES = 16
 EPOCH_STALL = 12
-EPOCH_SWEEPS = 3    # a sweep that gained a hundredth of the objective is followed by another, its stretches drawn
+EPOCH_SWEEPS = 12   # a sweep that gained a hundredth of the objective is followed by another, its stretches drawn
 EPOCH_GAIN = 0.01
 COSTLY_TRIES = 2    # a costly ball left by a later model (a repair, a lesson of the field laid): its lanes searched again
+END_BATCHES = 80    # an array's ends in turn, after the start (tier_search.end_turns): a solve's batches at most
 LNS_K = 8           # a round of the search frees this many lanes on their whole menus
 LNS_NEAR = 2.5      # mm: another ball this near a freed lane's balls, or the costly ball a round is about, is freed too
 LNS_STALL = 12      # the search ends where this many rounds in a row gained less than a via's worth together
@@ -268,6 +275,8 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
 
     def value(vs):
         return sum(c * (vs[v] if v >= 0 else 1 - vs[-v - 1]) for v, c in obj)
+    more = meta.get('more')         # what the model does not count of a state: main's `true_more`
+    n_more = [0, 0]
     lanes, others, W_TOP = meta['lanes'], meta['others'], meta['W_TOP']
     pts_of = [[tuple(p) for k_ in (0, 1) for p in e['at'][k_]] for e in lanes]
     at_of = {}
@@ -317,6 +326,31 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
                     mc.AddImplication(mc.GetBoolVarFromProtoIndex(v), o)
                 Pc.objective.vars.append(o.Index())
                 Pc.objective.coeffs.append(int(round(1000 * TIER_OVER)))
+    def end_turns(inc, best):
+        """THE ARRAYS IN TURN, after the start: every lane's choice at ONE array freed on its whole menu with that
+        array's other balls, every choice at the other arrays held -- the crossings between two rows of ends lowered
+        a row at a time. With the other row a constant such a solve is an easy one (on a two-layer bus proved best in
+        a second or two); a round of LNS_K lanes cannot slide a long run of exits along a face -- each lane of the
+        run must move, and none gains alone -- and this can: a start whose address lanes left the source among its
+        data lanes, each crossing that whole group, kept every one of those crossings through three sweeps of the
+        rounds and ended with no plan. It ends where a turn of every array gained less than a via.
+        Returns (the state, its value, the solves)"""
+        refs_ = sorted({r_ for e in lanes for r_ in e['ref'] if r_})
+        n_, t1 = 0, time.time()
+        while refs_:
+            was_ = best
+            for ref_ in refs_:
+                fix = {v: inc[v] for e in lanes for k_ in (0, 1) if e['ref'][k_] != ref_
+                       for v in e['x'][k_] if v >= 0}
+                fix.update((v, inc[v]) for o in others if o['ref'] != ref_ for v in o['vars'])
+                got, st_ = run(fix, inc, END_BATCHES)
+                n_ += 1
+                if got is not None and value(got) < best:
+                    inc, best = got, value(got)
+                log(f'    {ref_}\'s ends, the others held [{st_}]: {best / 1000:.1f} ({time.time() - t1:.0f} s)')
+            if was_ - best < 1000:
+                break
+        return inc, best, n_
     t0 = time.time()
     if pool:
         # (the state before, every lane's ends and every other ball's choice held, the rest of it solved for the
@@ -326,6 +360,9 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
         got, _st = run(held, hint, LNS_BATCHES)
         inc = got if got is not None else list(hint)
         best = value(inc)
+        if more:
+            x_ = more(inc)
+            best_m = math.inf if x_ is None else x_
     else:
         inc, st = run({}, hint, BATCHES, extra=over)
         if inc is None:
@@ -335,6 +372,9 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
                                              if v >= 0 and t > TIER_START))
         log(f'  the start, each lane on its first {TIER_START + 1} tiers where a state allows ({n_past} of {len(lanes)} '
             f'past them) [{st}]: {best / 1000:.1f} ({time.time() - t0:.0f} s)')
+        t1, b0 = time.time(), best
+        inc, best, n_end = end_turns(inc, best)
+        log(f'  the arrays in turn, {n_end} round(s): {b0 / 1000:.1f} -> {best / 1000:.1f} ({time.time() - t1:.0f} s)')
         if pool is not None:
             return inc, f'the start alone: {best / 1000:.1f} ({time.time() - t0:.0f} s)'
     rng = random.Random(seed)
@@ -343,6 +383,8 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
     def nearest(ps, k, but=()):
         return [j for _d, j in sorted((dist(pts_of[j], ps), j) for j in range(len(lanes)) if j not in but)[:k]]
     hist, rnd, hot_n, n_hot = [best], 0, collections.Counter(), 0
+    groups, gcache, n_wise = (meta.get('groups') if pool else None), {'of': None, 'x': None, 'dv': None, 'cu': [],
+                                                                      'fx': []}, [0]
     # (a round asked again of the state it was asked of -- the same lanes freed about the same place -- is the same
     # solve with the same answer, which bettered nothing: counted as the round it is, not solved. A round about a
     # costly ball that gains nothing frees the same nearest lanes at its next two tries)
@@ -357,6 +399,32 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
             n_hot += 1
             centre = list(at_of[hot[0]])
             free = set(nearest(centre, LNS_K))
+        elif groups and rng.random() < 2 / 3:
+            # (two routing layers) A GROUP BY WHAT CROSSES: a lane the order of the crossings forces to dive, or a
+            # lane of the stretch drawn by how many it crosses -- and the lanes it crosses, as many as the round
+            # frees (drawn among them where they are more), the nearest by their balls where they are fewer
+            if gcache['of'] is not inc:
+                gcache['of'] = inc
+                gcache['x'], gcache['dv'], gcache['cu'], gcache['fx'] = groups(inc)
+            X_, dv_ = gcache['x'], [j for j in gcache['dv'] if gcache['x'].get(j)]
+            if gcache['cu'] and rng.random() < 0.5:
+                # (THE LANES THE DIVES ARE OWED TO, together: a dive stands while any one of the lanes that force it
+                # still does, so no round that moves one of them alone gains -- as many of them as the round frees,
+                # those in the most of the state's forced threes: whole_ends.dive_cover)
+                import whole_ends as we_
+                cov_ = we_.dive_cover(gcache['cu'], LNS_K, rng)
+                free, j0 = set(cov_), cov_[0]
+            else:
+                if dv_ and rng.random() < 0.5:
+                    j0 = rng.choice(dv_)
+                else:
+                    j0 = rng.choices(among, weights=[len(X_.get(j, ())) + 1 for j in among])[0]
+                xs_ = sorted(set(X_.get(j0, ())) - {j0})
+                rng.shuffle(xs_)
+                free = {j0} | set(xs_[:LNS_K - 1])
+            if len(free) < LNS_K:
+                free |= set(nearest(pts_of[j0], LNS_K - len(free), but=tuple(free)))
+            n_wise[0] += 1
         elif rng.random() < 0.5:
             free = set(rng.sample(among, min(LNS_K, len(among))))
         else:
@@ -379,19 +447,34 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
             got, n_same = None, n_same + 1
         else:
             asked.add(ask_)
-            got, _st = run(fix, inc, LNS_BATCHES)
-        if got is not None and value(got) < best:
+            xcut = meta.get('cuts') if pool else None      # (the dives a round can see: main's `dive_cuts`)
+            got, _st = run(fix, inc, LNS_BATCHES, extra=(
+                lambda mc_: xcut(mc_, {(lanes[j_]['bus'], lanes[j_]['lane']) for j_ in free}, inc)) if xcut else None)
+        if got is not None and more and pool:
+            # (a state is taken where it is better WITH what the model does not count)
+            if value(got) < best + (0 if best_m == math.inf else best_m):
+                x_ = more(got)
+                n_more[0] += 1
+                if x_ is not None and (best_m == math.inf or value(got) + x_ < best + best_m):
+                    inc, best, best_m = got, value(got), x_
+                    n_more[1] += 1
+                    hot_n.clear()
+                    asked.clear()
+        elif got is not None and value(got) < best:
             inc, best = got, value(got)
             hot_n.clear()
             asked.clear()
-        hist.append(best)
+        hist.append(best + (best_m if more and pool and best_m != math.inf else 0))
         stall = EPOCH_STALL if pool else LNS_STALL
         if len(hist) > stall and hist[-1 - stall] - hist[-1] < 1000:
             break
     n_top = sum(inc[v] for v in top)
     return inc, (f'{rnd} rounds of {LNS_K} lanes ({n_hot} about a costly ball'
                  + (f', {n_same} asked before and not solved again' if n_same else '') + f'): {hist[0] / 1000:.1f} -> '
-                 f'{best / 1000:.1f}, {n_top} costly balls left ({time.time() - t0:.0f} s)')
+                 f'{best / 1000:.1f}, {n_top} costly balls left ({time.time() - t0:.0f} s)'
+                 + (f'; with what the model does not count {hist[-1] / 1000:.1f}, {n_more[1]} of {n_more[0]} states '
+                    f'asked taken' if more and pool else '')
+                 + (f'; {n_wise[0]} rounds about a lane and what it crosses' if n_wise[0] else ''))
 
 
 def frame_map(pads_f, pads_c):
@@ -2479,6 +2562,7 @@ def main():
     off = {f[len('--no-'):] for f in flags if f.startswith('--no-')}       # (a rule left out: --no-vias/runs/region)
     os.makedirs(os.path.join(out, 'source'), exist_ok=True)
     log = lambda *a: print(*a, flush=True)   # noqa: E731
+    est_parts = {}              # (two routing layers) bus -> its state's estimate: its end vias and its forced changes
     caps = {}
     for f in sorted(os.listdir(cap_dir)):
         if f.endswith('.ends.pkl'):
@@ -2994,6 +3078,7 @@ def main():
     # (THE EPOCHS of the search -- TIER_MENU: `stretches` the lanes in stretches round the source, `epoch` the one on
     # its whole menus now, `in_epoch` a model built for one)
     stretches, epoch, in_epoch, sweep, sweep_v0, epoch_balls = None, -1, False, 0, None, set()
+    more_last = 0               # (two routing layers) what the model does not count of the search's last state
     costly_tries = 0
     mouth_said = None           # (the mouths offered to more lanes than they hold: said once a count)
     while True:
@@ -4014,6 +4099,7 @@ def main():
                 for l_ in b.J.lanes:
                     e_ = {'bus': b.name, 'lane': str(l_), 'npair': b.J.npair[l_], 'chg': ix_(b.J.chg[l_]),
                           'x': [[], []], 'tier': [[], []], 'at': [[], []],
+                          'ref': [b.arr[k_].ref if b.arr[k_] is not None else None for k_ in (0, 1)],
                           'y': [[ix_(v_) for v_ in b.J.y[k_][l_]] for k_ in (0, 1)]}
                     for k_ in (0, 1):
                         for i_, x_ in sorted(b.J.xs[k_][l_].items()):
@@ -4031,6 +4117,49 @@ def main():
                     vs_ = list(xs_o.values() if isinstance(xs_o, dict) else xs_o) + list(ys_o) + list(dv_o)
                     meta_['others'].append({'ref': ref_, 'ball': k, 'at': [p_.global_x, p_.global_y],
                                             'vars': [ix_(v_) for v_ in vs_ if ix_(v_) >= 0]})
+            true_more = None
+            if NL == 2:
+                # (two routing layers) what the model does not count of a state, in its objective's units: the changes
+                # of layer the order of its crossings forces past the model's own (whole_ends.route_floor), a change
+                # each; None where no order holds. The model counts a lane's change where its ends' layers differ
+                # and nothing where they agree; a search judged by it alone ended, by its seed, on states of 80 to
+                # 102 vias' worth that the route then laid with 86 to 132, or had no plan for
+                def true_more(vals__, buses=buses, W_LEX=W_LEX):
+                    tot_ = 0
+                    for b_ in buses:
+                        fl__ = we.route_floor(b_.J, lambda v_: v_ if isinstance(v_, int) else vals__[v_.Index()])
+                        if fl__ is None:
+                            return None
+                        tot_ += W_LEX * sum(b_.J.npair[l_] * (t_ - t_ % 2) for l_, t_ in fl__[2].items())
+                    return tot_
+                idx_ = {(e_['bus'], e_['lane']): j_ for j_, e_ in enumerate(meta_['lanes'])}
+
+                def groups_of(vals__, buses=buses, idx_=idx_):
+                    # (what each lane crosses in the state, the lanes its crossings' order forces to dive, and the
+                    # forced threes themselves -- whole_ends.dive_triples -- by the lanes' places in the search's list)
+                    X_, dv_, cu_, fx_ = collections.defaultdict(list), [], [], []
+                    for b_ in buses:
+                        val_ = lambda v_: v_ if isinstance(v_, int) else vals__[v_.Index()]     # noqa: E731
+                        for (a_, c_), x_ in b_.J.X.items():
+                            ja_, jc_ = idx_.get((b_.name, str(a_))), idx_.get((b_.name, str(c_)))
+                            if ja_ is not None and jc_ is not None and val_(x_):
+                                X_[ja_].append(jc_)
+                                X_[jc_].append(ja_)
+                        fl__ = we.route_floor(b_.J, val_)
+                        if fl__ is not None:
+                            dv_ += [idx_[(b_.name, str(l_))] for l_, t_ in sorted(fl__[2].items())
+                                    if t_ >= 2 and (b_.name, str(l_)) in idx_]
+                        for t_ in we.dive_triples(b_.J, val_):
+                            js_ = tuple(idx_.get((b_.name, str(l_))) for l_ in t_)
+                            if None not in js_:
+                                cu_.append(js_)
+                    return X_, dv_, cu_, fx_
+
+                def dive_cuts(mc_, free_, vals__, buses=buses, W_LEX=W_LEX):
+                    # (the dives a round of the search can see: whole_ends.dive_cuts, a dive two changes)
+                    return sum(we.dive_cuts(b_.J, mc_, {l_ for bn_, l_ in free_ if bn_ == b_.name}, vals__,
+                                            2 * W_LEX) for b_ in buses)
+                meta_['groups'], meta_['more'], meta_['cuts'] = groups_of, true_more, dive_cuts
             if '--model' in flags:
                 # (a bench's: the model the search takes, and which of its variables are which lane's and ball's)
                 m.ExportToFile(os.path.join(out, 'model.pb.txt'))
@@ -4046,6 +4175,8 @@ def main():
             if vals_ is None:
                 raise SystemExit(f'group_ends: no state on the tiers -- {line_}')
             log(f'  the search: {line_}')
+            if true_more is not None:
+                more_last = true_more(vals_) or 0
             # (the state as a solver's answer, every variable held at it)
             mh = m.Clone()
             for i_, v_ in enumerate(vals_):
@@ -4313,6 +4444,13 @@ def main():
                                   for l_, r_ in lanes_rec.items()}
             TR.rec('state', check=chk_try + 1, bus=b.name, cut=b.cut, crossings=int(nx), changes=int(nchg),
                    vias=int(vias), n_moved=len(moved_), moved=moved_, lanes=lanes_rec)
+            if NL == 2:
+                t0_ = time.time()
+                fl_ = we.route_floor(b.J, sv.Value)
+                est_parts[b.name] = None if fl_ is None else int(vias) + int(fl_[0])
+                log(f'  {b.name}: by the order of its crossings alone: ' + ('no order found' if fl_ is None else
+                    f'{fl_[0]} changes of layer at the least ({int(nchg)} the model\'s), {fl_[1]} via(s) past two')
+                    + f' ({time.time() - t0_:.1f} s)')
         if FREE:
             held_ = collections.defaultdict(set)
             for ref, bx_ in between.items():
@@ -4433,7 +4571,7 @@ def main():
             # rest of its objective apart -- the weight on one such ball, W_TOP, is each model's own, grown with the
             # menus it was built on, so two builds' whole objectives differ by it where one such ball stands in both)
             n_ = sum(sv.Value(w_) for w_ in walls)
-            return n_, sv.ObjectiveValue() - W_TOP * n_
+            return n_, sv.ObjectiveValue() - W_TOP * n_ + more_last
         if TIER_MENU < 5 and chk_try == 0 and tier_of and not repaired:
             if stretches is None:
                 stretches, sweep_v0 = lane_stretches(buses), sweep_value()
@@ -4470,6 +4608,15 @@ def main():
             if epoch < len(stretches):
                 more_ = stretch_balls(buses, stretches[epoch]) & narrowed
                 fan_ = costly_now()
+                if NL == 2:
+                    # ...and the balls of the lanes the state's dives are owed to (whole_ends.dive_triples):
+                    # on their first tiers alone outside their own stretch, they had nowhere else to go
+                    for b in buses:
+                        for l_ in we.dive_cover(we.dive_triples(b.J, sv.Value), LNS_K):
+                            for A_ in b.arr.values():
+                                if A_ is not None:
+                                    fan_ += [(A_.ref, A_.ball_of[leg]) for leg in (b.E.legs_of.get(l_) or (l_,))
+                                             if leg in A_.ball_of]
                 near_ = near_of(fan_)
                 log(f'  the search\'s stretch {epoch + 1} of {len(stretches)}: {len(stretches[epoch])} lanes, '
                     f'{len(more_)} balls offered their whole menus'
@@ -4525,6 +4672,13 @@ def main():
         # the solve under its strict rules, on the board as the model fanned it out; a refusal TEACHES -- the lanes no
         # change fits in held to one layer (and offered their whole menus), the crossings with no window held apart and
         # priced, the lanes' state refused -- and the model is solved again from the state it refused
+        if '--search-only' in flags:
+            # (a bench's: the search's state and, on two layers, its estimate -- no check, no field)
+            est_ = None if not est_parts or any(v_ is None for v_ in est_parts.values()) else sum(est_parts.values())
+            with open(os.path.join(out, 'search.json'), 'w', encoding='utf-8') as fh:
+                json.dump({'estimate': est_, 'seed': os.environ.get('BUS_SEED'), 'buses': est_parts}, fh)
+            log(f'group ends: the search alone -- its estimate ' + ('none' if est_ is None else f'{est_} vias'))
+            return
         unplanned, taught, more, newly, n_taught, adopted = [], False, set(), False, 0, False
         fresh, progressed = {}, False
         for b in buses:
