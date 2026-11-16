@@ -420,6 +420,177 @@ def _seg_seg_dist_sq(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> float:
     )
 
 
+# The restore test's broad phase (`_restore_pair_candidates`). Below
+# _RESTORE_BROAD_MIN_PAIRS pairs every pair is handed to the scalar test, since
+# building the arrays costs more than testing them. Above it, numpy measures
+# _RESTORE_BROAD_CHUNK pairs at a time and keeps each pair within its threshold
+# plus _RESTORE_BROAD_BAND (mm). The band is far above any last-digit
+# difference between the array arithmetic and the scalar kernels and far below
+# anything physical, so no pair the scalar test would refuse is dropped. (The
+# scalar test squares its threshold, so the band goes on its magnitude.)
+_RESTORE_BROAD_MIN_PAIRS = 1024
+_RESTORE_BROAD_CHUNK = 1 << 16
+_RESTORE_BROAD_BAND = 1e-6
+
+
+def _np_pt_seg_dist_sq(np, px, py, x1, y1, x2, y2):
+    """`point_to_segment_dist_sq` over broadcast arrays."""
+    dx = x2 - x1
+    dy = y2 - y1
+    length_sq = dx * dx + dy * dy
+    degenerate = length_sq < 1e-10
+    t = ((px - x1) * dx + (py - y1) * dy) / np.where(degenerate, 1.0, length_sq)
+    t = np.where(degenerate, 0.0, np.clip(t, 0.0, 1.0))
+    ex = px - (x1 + t * dx)
+    ey = py - (y1 + t * dy)
+    return ex * ex + ey * ey
+
+
+def _np_segs_near(np, ax0, ay0, ax1, ay1, bx0, by0, bx1, by1, thr):
+    """Mask of the segment pairs that cross or come within `thr`: the array
+    form of `_seg_seg_dist_sq(...) <= thr * thr`."""
+    d2 = np.minimum(
+        np.minimum(_np_pt_seg_dist_sq(np, ax0, ay0, bx0, by0, bx1, by1),
+                   _np_pt_seg_dist_sq(np, ax1, ay1, bx0, by0, bx1, by1)),
+        np.minimum(_np_pt_seg_dist_sq(np, bx0, by0, ax0, ay0, ax1, ay1),
+                   _np_pt_seg_dist_sq(np, bx1, by1, ax0, ay0, ax1, ay1)))
+    bdx = bx1 - bx0
+    bdy = by1 - by0
+    adx = ax1 - ax0
+    ady = ay1 - ay0
+    d1 = (ay0 - by0) * bdx - (ax0 - bx0) * bdy
+    d2c = (ay1 - by0) * bdx - (ax1 - bx0) * bdy
+    d3 = (by0 - ay0) * adx - (bx0 - ax0) * ady
+    d4 = (by1 - ay0) * adx - (bx1 - ax0) * ady
+    cross = ((d1 > 0) != (d2c > 0)) & ((d3 > 0) != (d4 > 0))
+    return (d2 <= thr * thr) | cross
+
+
+def _restore_pair_candidates(segs, vias, o_segs, o_vias, clr, flat, h2h):
+    """Yield `(restored item, code, foreign item)` for every pair the restore
+    test must judge, in the order it judges them: each restored segment
+    against the foreign segments ('ss') and then the foreign vias ('sv'), then
+    each restored via against the foreign vias ('vv') and then the foreign
+    segments ('vs'), foreign items in list order.
+
+    A pair that cannot be within its threshold is left out; a pair that is
+    yielded is only a candidate, and the caller's scalar test decides it.
+    `clr(own_net, foreign, layer, kind)` is the caller's pair clearance and
+    `flat` the one value every pair has when no pair is priced on its own
+    (else None); `h2h` is the hole-to-hole floor between two vias.
+    """
+    n_pairs = (len(segs) * (len(o_segs) + len(o_vias))
+               + len(vias) * (len(o_vias) + len(o_segs)))
+    if n_pairs < _RESTORE_BROAD_MIN_PAIRS:
+        for s in segs:
+            for o in o_segs:
+                if o.layer == s.layer:
+                    yield s, 'ss', o
+            for v in o_vias:
+                yield s, 'sv', v
+        for vv in vias:
+            for v in o_vias:
+                yield vv, 'vv', v
+            for o in o_segs:
+                yield vv, 'vs', o
+        return
+
+    import numpy as np          # per-function, as pcb_modification does
+    band = _RESTORE_BROAD_BAND
+    n_os, n_ov = len(o_segs), len(o_vias)
+    fs = np.array([(o.start_x, o.start_y, o.end_x, o.end_y, o.width / 2.0)
+                   for o in o_segs], dtype=float).reshape(-1, 5)
+    fv = np.array([(v.x, v.y, v.size / 2.0, v.drill)
+                   for v in o_vias], dtype=float).reshape(-1, 4)
+    fvx, fvy, fvh, fvd = fv[:, 0], fv[:, 1], fv[:, 2], fv[:, 3]
+    by_layer = {}
+    for j, o in enumerate(o_segs):
+        by_layer.setdefault(o.layer, []).append(j)
+    for layer, jj in by_layer.items():
+        jj = np.array(jj)
+        by_layer[layer] = (jj, fs[jj], [o_segs[j] for j in jj.tolist()])
+
+    reach_memo = {}
+
+    def _reach(own_net, items, layer, kind):
+        # each foreign item's clearance to `own_net` (layer False: its own layer)
+        if flat is not None:
+            return flat
+        got = reach_memo.get((own_net, layer, kind))
+        if got is None:
+            got = reach_memo[(own_net, layer, kind)] = np.array(
+                [clr(own_net, o, o.layer if layer is False else layer, kind)
+                 for o in items], dtype=float)
+        return got
+
+    rows = max(1, _RESTORE_BROAD_CHUNK // max(1, n_os + n_ov))
+
+    if segs and (n_os or n_ov):
+        mine = np.array([(s.start_x, s.start_y, s.end_x, s.end_y, s.width / 2.0)
+                         for s in segs], dtype=float).reshape(-1, 5)
+        for a in range(0, len(segs), rows):
+            groups = {}
+            for i in range(a, min(a + rows, len(segs))):
+                groups.setdefault((segs[i].layer, segs[i].net_id), []).append(i)
+            cand = []
+            for (layer, net), idx in groups.items():
+                ii = np.array(idx)
+                m = mine[ii]
+                x0, y0, x1, y1, hw = (m[:, k][:, None] for k in range(5))
+                g = by_layer.get(layer)
+                if g is not None:
+                    jj, f, items = g
+                    thr = np.abs(hw + f[:, 4] + _reach(net, items, layer, 'track')) + band
+                    r, c = np.nonzero(_np_segs_near(
+                        np, x0, y0, x1, y1, f[:, 0], f[:, 1], f[:, 2], f[:, 3], thr))
+                    cand.extend(zip(ii[r].tolist(), [0] * len(r), jj[c].tolist()))
+                if n_ov:
+                    thr = np.abs(hw + fvh + _reach(net, o_vias, layer, 'layer')) + band
+                    r, c = np.nonzero(_np_pt_seg_dist_sq(
+                        np, fvx, fvy, x0, y0, x1, y1) <= thr * thr)
+                    cand.extend(zip(ii[r].tolist(), [1] * len(r), c.tolist()))
+            cand.sort()
+            for i, is_via, j in cand:
+                if is_via:
+                    yield segs[i], 'sv', o_vias[j]
+                else:
+                    yield segs[i], 'ss', o_segs[j]
+
+    if vias and (n_os or n_ov):
+        mine = np.array([(v.x, v.y, v.size / 2.0, v.drill)
+                         for v in vias], dtype=float).reshape(-1, 4)
+        for a in range(0, len(vias), rows):
+            groups = {}
+            for i in range(a, min(a + rows, len(vias))):
+                groups.setdefault(vias[i].net_id, []).append(i)
+            cand = []
+            for net, idx in groups.items():
+                ii = np.array(idx)
+                m = mine[ii]
+                x, y, vr, vd = (m[:, k][:, None] for k in range(4))
+                if n_ov:
+                    thr = vr + fvh + _reach(net, o_vias, None, 'stack')
+                    if h2h > 0:
+                        thr = np.maximum(thr, np.where(
+                            (vd > 0) & (fvd > 0), vd / 2.0 + fvd / 2.0 + h2h, 0.0))
+                    thr = np.abs(thr) + band
+                    dx = x - fvx
+                    dy = y - fvy
+                    r, c = np.nonzero(dx * dx + dy * dy <= thr * thr)
+                    cand.extend(zip(ii[r].tolist(), [0] * len(r), c.tolist()))
+                if n_os:
+                    thr = np.abs(vr + fs[:, 4] + _reach(net, o_segs, False, 'layer')) + band
+                    r, c = np.nonzero(_np_pt_seg_dist_sq(
+                        np, x, y, fs[:, 0], fs[:, 1], fs[:, 2], fs[:, 3]) <= thr * thr)
+                    cand.extend(zip(ii[r].tolist(), [1] * len(r), c.tolist()))
+            cand.sort()
+            for i, is_seg, j in cand:
+                if is_seg:
+                    yield vias[i], 'vs', o_segs[j]
+                else:
+                    yield vias[i], 'vv', o_vias[j]
+
+
 def _record_ripped_ghost(result, net_ids, config, layer_map,
                          ripped_route_layer_costs, ripped_route_via_positions,
                          contention: bool) -> None:
@@ -574,37 +745,42 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             hits.append((kind, obj))
         return True
 
-    # Restored segments vs other-net segments (same layer) and vias (all layers).
-    for s in segs:
-        hw = s.width / 2.0
-        for o in o_segs:
+    # Restored segments vs other-net segments (same layer) and vias (all
+    # layers), then restored vias (span layers) vs other-net vias and
+    # segments. `_restore_pair_candidates` hands over, in that order, every
+    # pair that can be within its threshold; the verdict on each is the scalar
+    # test below.
+    for mine, code, o in _restore_pair_candidates(
+            segs, vias, o_segs, o_vias, _clr,
+            None if pairwise else clearance, h2h):
+        if code == 'ss':
+            s = mine
             if o.layer != s.layer:
                 continue
-            thr = hw + o.width / 2.0 + _clr(s.net_id, o, s.layer, 'track')
+            thr = s.width / 2.0 + o.width / 2.0 + _clr(s.net_id, o, s.layer, 'track')
             if _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
                                 o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
                 if _hit('segment', o, s) and first_only:
                     return hits
-        for v in o_vias:
-            thr = hw + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
+        elif code == 'sv':
+            s, v = mine, o
+            thr = s.width / 2.0 + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
             if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
                                s.end_x, s.end_y) < thr * thr:
                 if _hit('via', v, s) and first_only:
                     return hits
-
-    # Restored vias (span layers) vs other-net vias and segments.
-    for vv in vias:
-        vr = vv.size / 2.0
-        for v in o_vias:
-            thr = vr + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
+        elif code == 'vv':
+            vv, v = mine, o
+            thr = vv.size / 2.0 + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
             if h2h > 0 and vv.drill > 0 and v.drill > 0 \
                     and not (id(vv) in inp_all and id(v) in inp_all):
                 thr = max(thr, vv.drill / 2.0 + v.drill / 2.0 + h2h)
             if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
                 if _hit('via', v, vv) and first_only:
                     return hits
-        for o in o_segs:
-            thr = vr + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
+        else:
+            vv = mine
+            thr = vv.size / 2.0 + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
             if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
                                o.end_x, o.end_y) < thr * thr:
                 if _hit('segment', o, vv) and first_only:
