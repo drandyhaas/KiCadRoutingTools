@@ -945,7 +945,7 @@ Use the printed flags as-is:
 - **Non-Default classes:** no separate pass is needed for their clearance.
   `route.py` / `route_diff.py` / the plane scripts auto-read every net's class
   clearance from the `.kicad_pro` and price each pair at `max(classA, classB)`,
-  as KiCad grades it (`--net-clearances <json>` overrides the map,
+  as KiCad grades it (`--net-clearances FILE` replaces the map with a JSON file's values,
   `--clearance-ceiling` caps every class). Widths: with `--track-width` omitted
   each net routes at its own class width, but an explicit `--track-width`
   applies to every net, so carry a class that needs a wider track (current,
