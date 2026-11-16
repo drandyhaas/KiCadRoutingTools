@@ -533,6 +533,12 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     inp_all = _inp_all[0] if _inp_all else frozenset()
     if h2h > 0 and vias:
         margin = max(margin, max(v.drill for v in vias) / 2.0 + h2h)
+    # ... and a `.kicad_dru` hole_clearance rule, measured from either item's
+    # hole to the other's copper (`_hole_rule_colliders` names its culprit
+    # from the copper this box keeps).
+    if config is not None and getattr(config, 'hole_rules', None) is not None:
+        from check_drc import _hole_rule_reach
+        margin = max(margin, own_half + _hole_rule_reach(getattr(config, 'rules', None)))
     minx, maxx = min(xs) - margin, max(xs) + margin
     miny, maxy = min(ys) - margin, max(ys) + margin
 
@@ -604,7 +610,66 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
                 if _hit('segment', o, vv) and first_only:
                     return hits
 
+    if not hits and config is not None \
+            and getattr(config, 'hole_rules', None) is not None:
+        hits.extend(_hole_rule_colliders(segs, vias, pcb_data, config, held,
+                                         o_segs, o_vias))
     return hits
+
+
+def _hole_rule_colliders(segs, vias, pcb_data, config, held, o_segs, o_vias) -> list:
+    """The restore test under the board's `.kicad_dru` hole_clearance rules
+    (#1853, #1934): [(kind, the nearest foreign copper)] when a saved piece may not
+    be laid by `check_drc.hole_rule_refusal`, the gate every generator of the
+    step asks, else []. Those rules measure from a HOLE to another net's
+    copper, which is wider than the copper and drill tests above wherever a
+    board declares one, so a via put back beside a via routed since the rip
+    cleared both and shipped inside the rule.
+
+    A piece the step was handed, still where the input had it, is asked
+    against the copper laid or moved since: beside the rest it stood on the
+    input board (#1609, `input_pair_unmoved`)."""
+    from check_drc import hole_rule_refusal
+    dr = getattr(config, 'rules', None)
+    if dr is None:
+        return []
+
+    def _handed(item):
+        return held is not None and held(item, item)
+
+    new_s = [s for s in segs if not _handed(s)]
+    new_v = [v for v in vias if not _handed(v)]
+    old_s = [s for s in segs if _handed(s)]
+    old_v = [v for v in vias if _handed(v)]
+    refused = bool((new_s or new_v)
+                   and hole_rule_refusal(pcb_data, dr, new_s, new_v))
+    if not refused and (old_s or old_v):
+        from types import SimpleNamespace
+        since = SimpleNamespace(
+            nets=pcb_data.nets, footprints={},
+            board_info=getattr(pcb_data, 'board_info', None),
+            segments=[s for s in pcb_data.segments if not _handed(s)],
+            vias=[v for v in pcb_data.vias if not _handed(v)])
+        refused = bool(hole_rule_refusal(since, dr, old_s, old_v))
+    if not refused:
+        return []
+
+    def _gap_sq(o):
+        best = None
+        for p in list(segs) + list(vias):
+            px, py = ((p.x, p.y) if hasattr(p, 'x')
+                      else ((p.start_x + p.end_x) / 2.0, (p.start_y + p.end_y) / 2.0))
+            d = ((o.x - px) ** 2 + (o.y - py) ** 2 if hasattr(o, 'x')
+                 else _pt_seg_dist_sq(px, py, o.start_x, o.start_y, o.end_x, o.end_y))
+            best = d if best is None or d < best else best
+        return best
+
+    near = [('via', v) for v in o_vias] + [('segment', s) for s in o_segs]
+    if not near:
+        # the hole is a pad's: name the saved piece itself
+        p = (list(vias) + list(segs))[0]
+        return [('via' if hasattr(p, 'x') else 'segment', p)]
+    return [min(near, key=lambda ko: _gap_sq(ko[1]))]
 
 
 def restore_write_entry(pruned: dict, input_ids) -> Optional[dict]:
