@@ -59,6 +59,7 @@ FIRST_TWO = (awx_settings.get('SOLVE_FIRST_TWO') or '1') == '1'     # a fresh so
 FIRST_BATCHES = (100, 50, 100)          # ...its steps' batches: the layer rule off, the layer puzzle, the places
 SOLVE_WORKERS = 4
 CHECK_WORK = 30.0                       # a check's deterministic work limit (solve(check=True)): past it, no verdict
+CHECK_BATCHES = 60                    # ...and, with no verdict from it, the batches of the same question on the solve's own workers
 CHECK_RULES_MAX = 80                    # (rules=True) the core's rules dropped in turn to minimize it, at most
 CHECK_RULES_CORES = 4                   # (rules=True) the small cores sought after the first, at most
 CHECK_RULES_SMALL = 2                   # ...a small core: this many rules or fewer
@@ -2409,6 +2410,28 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, rel
         s_.parameters.stop_after_first_solution = True
         s_.parameters.max_deterministic_time = CHECK_WORK
         st_ = s_.Solve(m)
+        if st_ == cp_model.UNKNOWN and WLIT and not RLIT:
+            # NO VERDICT on the core's one worker: asked again as the solve itself searches -- its workers
+            # interleaved, every window held outright, no assumption -- for its first plan, in CHECK_BATCHES. A state
+            # the one worker could not decide was laid on in hope; this second question said "a plan" for every
+            # state of a two-layer bus the solve then planned
+            t2_ = time.time()
+            m2_ = m.clone()
+            m2_.ClearAssumptions()
+            m2_.AddBoolAnd([m2_.GetBoolVarFromProtoIndex(i_) for i_ in sorted(WLIT)])
+            s2_ = cp_seed.solver()
+            s2_.parameters.num_workers = SOLVE_WORKERS
+            s2_.parameters.interleave_search = True
+            s2_.parameters.max_num_deterministic_batches = CHECK_BATCHES
+            s2_.parameters.share_glue_clauses = False
+            s2_.parameters.share_binary_clauses = False
+            sa_, sta_ = cp_seed.solve_apart(m2_, s2_)
+            print(f'   check: no verdict on one worker ({s_.WallTime():.0f}s); on {SOLVE_WORKERS}, its windows held: '
+                  f'[{sa_.StatusName(sta_)}] {time.time() - t2_:.0f}s')
+            if sta_ in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                s_, st_ = sa_, sta_
+            elif sta_ == cp_model.INFEASIBLE:
+                st_ = sta_              # (no plan, proved with no assumption: no core to name)
         STATUS['plan'] = st_ in (cp_model.OPTIMAL, cp_model.FEASIBLE)
         out_ = {'plan': STATUS['plan'], 'status': s_.StatusName(st_), 'crossings': len(t), 'lanes': len(M)}
         # (the lanes with no room for a change on these ends -- each a fact of its own tooth and berth alone: those two
