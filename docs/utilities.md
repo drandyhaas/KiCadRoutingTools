@@ -2834,6 +2834,59 @@ python3 py_router/autoroute.py board.kicad_pcb board_routed.kicad_pcb
 python3 py_router/autoroute.py step9_route.kicad_pcb board_finished.kicad_pcb --finish
 ```
 
+## Route Portfolio (`route_portfolio.py`)
+
+Runs one route step several ways side by side and keeps the best board
+(#1941). A `route.py` run is deterministic and uses one core; this runs one
+`route.py` per **variant** -- the same arguments plus a few flags that change
+the search -- each as its own process, `--jobs` at a time, and ships the
+attempt the project's own score ranks best. It makes no attempt faster and
+changes no step: nothing calls it, and a chain uses it by naming it where it
+would name `route.py`.
+
+```bash
+# the built-in variants, the route.py arguments after `--`
+python3 py_router/route_portfolio.py in.kicad_pcb out.kicad_pcb -- --nets '*' --clearance-ceiling 0.15
+
+# pick built-in ones, add your own, three at a time, keep every attempt's board
+python3 py_router/route_portfolio.py in.kicad_pcb out.kicad_pcb \
+    --variants default mps_reverse --variant deep='--max-ripup 5' \
+    --jobs 3 --keep-losers -- --nets '*'
+```
+
+- **Variants.** `--list-variants` prints the built-in ones; all of them run
+  when none is named. `default` adds no flag, so the shipped board never
+  scores below the plain step's. `--variant NAME=FLAGS` adds one of your own
+  (route.py flags in one quoted string). A variant's flags follow the shared
+  arguments, so where both set a flag the variant's wins. The order given is
+  the run order and the last tie-break.
+- **One folder per attempt**, `<output>.portfolio/<NN>_<name>/`: `in.kicad_pcb`
+  (`copy_board`, siblings included), `out.kicad_pcb` with the project
+  `route.py` writes beside it, `route.log`, `score.json`. No two attempts read
+  or write one path: a shared argument naming a file `route.py` writes
+  (`--json-out`, `--preview-png`) must carry `{dir}`, which becomes the
+  attempt's folder, and `--output` is refused.
+- **The best.** Each board is scored by [`board_score.py`](#board-score-board_scorepy)
+  (`--baseline` the input; check_connected's KiCad cross-check off, so a board
+  always scores the same) and the attempts are ranked by
+  `quick_score.judge_key`: blocking, joins_needed, then vias, copper_mm,
+  segments, then the variant's place in the list -- never by which finished
+  first. An attempt that wrote no board is not a candidate; a board that could
+  not be scored ranks after every scored one. The winner and its siblings are
+  copied to the output path, so the shipped board is that attempt's own file.
+- **What is kept.** `<output>.portfolio/portfolio.json` and the
+  `PORTFOLIO_JSON:` line carry every attempt's command, exit code, seconds and
+  score, the ranking and the winner; `<output>.portfolio/redo_commands.sh` is
+  a manifest of every attempt as run. With `REDO_MANIFEST` set, the run's
+  manifest records the **winning** `route.py` command, input to output, so a
+  replay is one `route.py` call. Losers' boards are removed unless
+  `--keep-losers`; their logs and scores stay.
+- **`--jobs`** defaults to half the cores, no more than fit in memory at 5 GB
+  a route, no more than there are variants.
+
+Exit 0 a board shipped; 1 no attempt wrote a board (the output path is left
+alone); 2 bad arguments.
+
 ## Build Script (`build_router.py`)
 
 Builds the Rust router module.

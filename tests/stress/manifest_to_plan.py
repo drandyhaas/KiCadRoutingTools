@@ -137,6 +137,13 @@ REFUSED_TOOLS = {
         'steps from the board and runs it; the plan format has no step that '
         're-derives a chain. Run it on the CLI and start the plan from its '
         'output (the steps it ran are in <output>.autoroute/plan.json)'),
+    'route_portfolio.py': (
+        'runs several route.py attempts side by side and ships the best by '
+        'score (#1941); the plan format has no step that chooses among '
+        'attempts. With REDO_MANIFEST set it records the WINNING route.py '
+        'command itself, which converts as a route step; a line naming the '
+        'driver comes from a wrapper, so replace it with the winning_cmd in '
+        '<output>.portfolio/portfolio.json'),
     # Every board-writing KRT_TOOL (krt_registry `kind` actor or conditional)
     # is mapped, refused here, or in NOOP_TOOLS below: the parity gate reads
     # the registry and fails on one that is none of the three (#937).
