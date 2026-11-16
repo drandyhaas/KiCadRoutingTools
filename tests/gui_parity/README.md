@@ -87,6 +87,9 @@ Engine parameters and defaults:
   classes written, against `place_fanout_clearance.py`'s (#1699).
 - `test_zero_diff_pair_width_gui.py` — a 0 class diff-pair width/gap resolves
   the way `route_diff.py` resolves it.
+- `test_1936_profile_pair_gui.py` — a pair step through the Differential tab
+  takes a differential tuning profile's per-layer width and gap as
+  `route_diff.py` does, and the tab's width override outranks it (#1936).
 - `test_settings_roundtrip.py` — the dialog's settings save and restore.
 
 Planes tab: `test_plane_all_layers_parity.py`, `test_plane_layer_costs_gui.py`,
