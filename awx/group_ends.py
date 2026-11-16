@@ -666,8 +666,9 @@ def keep_outs(pcb):
     (board_info.keepouts) as two tests -- copper of a track from a to b on `layer`, or of a via at a point (a barrel
     through every layer), standing in an area that forbids it there"""
     import joint_escape as je
+    from mask_artwork import routing_keepouts
     areas = []
-    for k in (getattr(pcb.board_info, 'keepouts', None) or ()):
+    for k in routing_keepouts(pcb):         # (the router's: the rule areas and the mask artwork, plan_audit.keepout_areas)
         poly = [tuple(q[:2]) for q in (k.get('polygon') or ())]
         if len(poly) >= 3:
             xs, ys = [q[0] for q in poly], [q[1] for q in poly]

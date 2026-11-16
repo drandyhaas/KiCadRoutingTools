@@ -159,17 +159,9 @@ def to_front_frame(pcb_data: PCBData, ref: str, axis: float = None
             polys = getattr(bi, attr, None)
             if polys:
                 setattr(bi, attr, [[m(x, y) for (x, y) in poly] for poly in polys])
-        for k in list(getattr(bi, 'keepouts', None) or []):
-            if isinstance(k, dict):
-                for key in ('polygon', 'points'):
-                    if isinstance(k.get(key), list):
-                        k[key] = [m(x, y) for (x, y) in k[key]]
-                for key in ('layer', 'layers'):
-                    v = k.get(key)
-                    if isinstance(v, str):
-                        k[key] = other_layer(v)
-                    elif isinstance(v, list):
-                        k[key] = [other_layer(L) for L in v]
+        from .rotate_frame import transform_keepouts, carry_mask_artwork
+        transform_keepouts(getattr(bi, 'keepouts', None), m, other_layer)
+        carry_mask_artwork(pcb_data, rp, m, other_layer)
     return rp, m
 
 

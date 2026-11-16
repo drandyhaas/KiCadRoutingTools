@@ -819,8 +819,11 @@ def keepout_areas(pcb, layers):
     """the board's KEEP-OUT rule areas with tracks not allowed, on the routing layers `layers`: [(polygon, holes, the
     layers it keeps tracks off, its bbox)] -- resolved as the router's obstacle map resolves them (obstacle_map.
     add_rule_area_keepout_obstacles: '*.Cu' every layer, 'F&B.Cu' the outer two, none listed every layer)"""
+    # (the keep-outs the router stamps, mask_artwork.routing_keepouts: the rule areas AND the mask artwork -- the lay
+    # refuses a lane across an exposed-copper logo, so the plan must not put one there)
+    from mask_artwork import routing_keepouts
     out = []
-    for ko in getattr(pcb.board_info, 'keepouts', None) or []:
+    for ko in routing_keepouts(pcb):
         poly = ko.get('polygon') or []
         if ko.get('tracks_allowed', True) or len(poly) < 3:
             continue

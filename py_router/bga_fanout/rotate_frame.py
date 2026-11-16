@@ -249,11 +249,8 @@ def to_axis_aligned_frame(pcb_data: PCBData, ref: str
             polys = getattr(bi, attr, None)
             if polys:
                 setattr(bi, attr, [[fwd(x, y) for (x, y) in poly] for poly in polys])
-        for k in list(getattr(bi, 'keepouts', None) or []):
-            if isinstance(k, dict):
-                for key in ('polygon', 'points'):
-                    if isinstance(k.get(key), list):
-                        k[key] = [fwd(x, y) for (x, y) in k[key]]
+        transform_keepouts(getattr(bi, 'keepouts', None), fwd)
+        carry_mask_artwork(pcb_data, rp, fwd)
 
     # The target footprint is now axis-aligned, at its turned centre
     # (its own centre unless the quarter turn went about the lattice
@@ -263,6 +260,48 @@ def to_axis_aligned_frame(pcb_data: PCBData, ref: str
     tgt.rotation = 0.0
 
     return rp, back
+
+
+def transform_keepouts(keepouts, fn, layer_fn=None):
+    """Carry keep-out dicts (kicad_parser.extract_keepouts' rule areas,
+    mask_artwork's artwork) through a frame change, in place: `fn` maps the
+    outline, every hole and any point list; `layer_fn` (flip_frame.
+    other_layer on a board turned over) maps the layer or layers, in
+    whatever container they come -- the parser keeps a rule area's layers
+    in a SET, and a one-sided keep-out must change sides with the board."""
+    for k in keepouts or ():
+        if not isinstance(k, dict):
+            continue
+        for key in ('polygon', 'points'):
+            if isinstance(k.get(key), (list, tuple)):
+                k[key] = [fn(x, y) for (x, y) in k[key]]
+        if isinstance(k.get('holes'), (list, tuple)):
+            k['holes'] = [[fn(x, y) for (x, y) in h] for h in k['holes']]
+        if layer_fn is None:
+            continue
+        for key in ('layer', 'layers'):
+            v = k.get(key)
+            if isinstance(v, str):
+                k[key] = layer_fn(v)
+            elif isinstance(v, (list, tuple, set, frozenset)):
+                k[key] = type(v)(layer_fn(L) for L in v)
+
+
+def carry_mask_artwork(src_pcb, dst_pcb, fn, layer_fn=None):
+    """`dst_pcb` (a copy of `src_pcb` in another frame) given the source's
+    mask-artwork keep-outs carried into its frame (transform_keepouts).
+    Read lazily on the copy (mask_artwork.board_mask_artwork), the artwork
+    would take the copy's footprint poses but the FILE's mask side and the
+    file's board-level coordinates: on a board turned over, a logo's F.Mask
+    opening would keep tracks off the turned F.Cu -- the real B.Cu, bare
+    there -- and off nothing on the real F.Cu."""
+    bi = getattr(dst_pcb, 'board_info', None)
+    if bi is None or getattr(src_pcb, 'board_info', None) is None:
+        return
+    from mask_artwork import board_mask_artwork
+    art = copy.deepcopy(board_mask_artwork(src_pcb))
+    transform_keepouts(art, fn, layer_fn)
+    bi.mask_artwork = art
 
 
 def transform_graphic_shapes(segments, fn):
