@@ -2817,6 +2817,11 @@ follow it (the plugin's Autorouter sub-tab reads nothing else):
 `KRT_AUTOROUTE_FAIL_STEPS` (step tags, comma separated) makes those steps run
 a stand-in that exits 3, so a test can drive the failure path on a real board.
 
+A part's fan-out rungs are started side by side, at most three and no more than
+the cores and memory allow, and read in ladder order, so the rung kept, the step
+numbers, the files left and the lines above are those of running them one after
+another. `KRT_AUTOROUTE_JOBS=1` runs them one after another.
+
 Net names reach every tool as patterns that select that net alone through the
 tools' own selectors, which also match a pattern's last sheet component and
 read a leading `!` as an exclusion: `GND` is passed as `GN[D/]`, `-BATT` as
