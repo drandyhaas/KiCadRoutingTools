@@ -1177,8 +1177,8 @@ together they take 60 s, and name the same rules.
 tier 1 priced 50 vias, so the start stays as near the pattern as the rules
 allow (160 deterministic batches). From it **the arrays are taken in turn**:
 one array's every choice is freed on its whole menus and the others' held,
-until a turn of the arrays gains less than a via (80 batches a solve at
-most). With the other array's ends a constant such a solve is an easy one,
+until a turn of the arrays gains less than a via (24 batches a solve at
+most, a round's own). With the other array's ends a constant such a solve is an easy one,
 proved best in a second or two on a two-layer bus, and it does what no round
 of a few lanes can: slide a whole run of exits along a face. Then it runs the
 epochs: rounds that free 8 lanes

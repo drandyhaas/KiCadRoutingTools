@@ -189,7 +189,8 @@ EPOCH_STALL = 12
 EPOCH_SWEEPS = 12   # a sweep that gained a hundredth of the objective is followed by another, its stretches drawn
 EPOCH_GAIN = 0.01
 COSTLY_TRIES = 2    # a costly ball left by a later model (a repair, a lesson of the field laid): its lanes searched again
-END_BATCHES = 80    # an array's ends in turn, after the start (tier_search.end_turns): a solve's batches at most
+END_BATCHES = 24    # an array's ends in turn, after the start (tier_search.end_turns): a solve's batches at most, a
+#                     round's own (LNS_BATCHES)
 LNS_K = 8           # a round of the search frees this many lanes on their whole menus
 LNS_NEAR = 2.5      # mm: another ball this near a freed lane's balls, or the costly ball a round is about, is freed too
 LNS_STALL = 12      # the search ends where this many rounds in a row gained less than a via's worth together
