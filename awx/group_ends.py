@@ -834,7 +834,12 @@ def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()
     import rules as _rules
     from escape_moves import DIRS
     R_ = _rules.active()
-    w_wo = R_.track + R_.grid
+    # (as wide as the bar the loop's audit holds a lane to beside a pad -- plan_audit.check_static: the lay's own
+    # clearance, the hug, where the nudge keeps the spec's; half a grid step either side for a piece off the grid;
+    # and the router's corner buffer in a pad's corner zone. A track and a grid step wide, a decap was parked
+    # 0.017 mm inside that bar beside a berth, and the bus's loop stopped at once on a finding no solve moves)
+    import pairs as _pairs
+    w_wo = R_.track + R_.grid + 2 * (R_.hug - R_.clearance) + 2 * _pairs.corner_buffer(R_.grid)
     reach_wo = 2 * (R_.track / 2 + R_.clearance + R_.grid / 2)
     wo = []
     for nid_, (ex_, ey_), dir_, L_ in sorted(set(wayouts)):
