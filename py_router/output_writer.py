@@ -434,7 +434,8 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                 # via has none, emits no token and inherits the board's setup.
                 tenting_attrs=_via_attrs(via),
                 # ...and its blind/micro type word (a new via is through).
-                via_type=getattr(via, 'via_type', None)
+                via_type=getattr(via, 'via_type', None),
+                backdrills=getattr(via, 'backdrills', None)     # #1925
             ) + "\n"
 
     # Add vias from stub layer swapping
@@ -449,7 +450,8 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                 # via has none, emits no token and inherits the board's setup.
                 tenting_attrs=_via_attrs(via),
                 # ...and its blind/micro type word (a new via is through).
-                via_type=getattr(via, 'via_type', None)
+                via_type=getattr(via, 'via_type', None),
+                backdrills=getattr(via, 'backdrills', None)     # #1925
             ) + "\n"
 
     # Add stub segments synthesized by bare-pad target swaps

@@ -464,7 +464,8 @@ def pack_whole(a):
             add.append(generate_via_sexpr(round(v.x, 4), round(v.y, 4), v.size, v.drill,
                                           ['F.Cu', 'B.Cu'], v.net_id,
                                           tenting_attrs=v.tenting_attrs,
-                                          inherit_when_unspecified=True) + '\n')
+                                          inherit_when_unspecified=True,
+                                          backdrills=v.backdrills) + '\n')
     i = txt.rstrip().rfind(')')
     txt = txt[:i] + ''.join(add) + txt[i:]
     with open(out + '.kicad_pcb', 'w', encoding='utf-8') as f:
@@ -614,7 +615,8 @@ def main():
         add.append(generate_via_sexpr(round(v.x, 4), round(v.y, 4), v.size, v.drill,
                                       [layers[0], layers[-1]], v.net_id,
                                       tenting_attrs=v.tenting_attrs,
-                                      inherit_when_unspecified=True) + '\n')
+                                      inherit_when_unspecified=True,
+                                      backdrills=v.backdrills) + '\n')
     k = txt.rstrip().rfind(')')
     with open(out + '.kicad_pcb', 'w') as f:
         f.write(txt[:k] + ''.join(add) + txt[k:])
