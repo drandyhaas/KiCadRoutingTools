@@ -1,3 +1,47 @@
+501ec2a53f2ed6fa383621dab2969fe396c9a34e 2026-11-16 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of e94a7677..501ec2a5: #1441, the #1873 fold, #1949's docs (9 commits,
+merges included), macOS, KiCad 10.0.6.
+(A) Flags: none added or removed. No dialog control, settings key, default or
+  manifest_to_plan mapping changes; nothing under kicad_routing_plugin/
+  changed, and under py_placer/ one README line (#1949).
+(B) Engine: the Rust PoseRouter's heading (grid_router 0.24.1), the offset
+  path's reversed-segment collapse (create_parallel_path_from_float), the
+  pad-to-die re-measure after meandering, and the #1873 leg fold are all
+  inside batch_route_diff_pairs and the length-matching engine both fronts
+  call. No new results key and no post-pass in a CLI main().
+GATES: tests/gui_parity/run_gui_parity.py --filter 1248 1842 1869 zero_diff
+on the identical tree, 6 passed, 0 failed, 0 declared SKIP (the gates that
+run diff pairs and length matching; the rest saw no change). Modal suite on
+501ec2a5 1385 passed / 0 failed (+36 self-skipped). Corpus A/B sets 1-28 of
+67128dde (the #1441 change before the #1873 fold) against main 6ae347ba:
+398 boards, real DRC 13 -> 11, open nets 259 -> 269.
+
+e94a7677cd5c4b711878a8cd291af13a904ce42c 2026-11-16 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 33c52e0a..e94a7677: the #1840-#1952 rounds (352 commits), macOS,
+KiCad 10.0.6.
+(A) Flags: added, none removed -- route.py --via-span / --via-span-type /
+  --via-span-escape / --mask-keepouts, route_diff.py --via-span /
+  --via-span-type / --diff-pair-intra-lane. Each has a dialog control,
+  settings_persistence keys, a reset_params_to_defaults entry, a
+  manifest_to_plan mapping, and is passed at the GUI call sites (swig_gui
+  batch_route, differential_gui batch_route_diff_pairs, fanout_gui's BGA and
+  QFN calls); MASK_KEEPOUTS is one routing_defaults constant on both fronts.
+  Signatures: batch_route / batch_route_diff_pairs gain those kwargs only;
+  generate_bga_fanout, generate_qfn_fanout and repair_planes are now span
+  wrappers over the unchanged `_..._all` engines (QFN's gains via_from_class,
+  passed by both fronts; repair_planes' `_span` args are the wrapper's own,
+  and the in-run finalize reads the span from route_knobs on both fronts).
+(B) Post-passes and results data: the shipped design-rule grade (bc2a75e69)
+  and the via-span plane finalize are inside batch_route. 092a955e6 moves
+  place_fanout_clearance's hole-clearance writeback onto the engine's own
+  resolve_via_hole_clearance; the fanout tab still writes no project for
+  that step (the known, documented #782 asymmetry, unchanged).
+  #1931/#1952 are engine/grader-only.
+GATES: tests/gui_parity/run_gui_parity.py on e94a7677, 92 passed, 0 failed,
+0 declared SKIP; test_gui_engine_parity copper sets IDENTICAL (799 segments,
+128 vias, 0 DRC both fronts). Modal suite on the identical tree (465c1af86)
+1385 passed / 0 failed (+36 self-skipped). No corpus A/B run for this audit.
+
 33c52e0a22be4ff4f63b33f7eb839ee934f021b0 2026-11-12 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of 4f7f512f..33c52e0a: the #1828-#1838 issue round, the Autorouter
 GUI tab and the autoplan -> autoroute rename (28 commits), macOS, KiCad 10.0.6.

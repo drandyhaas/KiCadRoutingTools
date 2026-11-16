@@ -1064,9 +1064,9 @@ arm uploads the corpus to your `kicad-corpus` volume.
 ```bash
 SLOW=abn6502,covg_patchclamp,mez_rx,butterstick,zynq7020_som
 python3 tests/stress/cloud_replay_sets.py --sets set1-set28 --label base \
-    --no-baseline --no-local-regrade --limit 0 --exclude $SLOW    # from the base checkout
+    --no-baseline --limit 0 --exclude $SLOW    # from the base checkout
 python3 tests/stress/cloud_replay_sets.py --sets set1-set28 --label mine \
-    --no-baseline --no-local-regrade --limit 0 --exclude $SLOW    # from your branch
+    --no-baseline --limit 0 --exclude $SLOW    # from your branch
 python3 tests/stress/pair_arms.py $STRESS_DIR/cloud_base-kc_<sha> $STRESS_DIR/cloud_mine-kc_<sha>
 ```
 
@@ -1117,18 +1117,21 @@ keep serving the previous code.
    refuses a wave whose chains disagree.
 2. **Grade both sides on the same terms.** Comparing a row graded one way
    against a baseline graded another measures the GRADER, not the engine: it
-   once reported "DRC +40 worse" when the truth was "-37 better". Harvest
-   re-grades the kept boards locally by default (`--no-local-regrade` opts out).
+   once reported "DRC +40 worse" when the truth was "-37 better".
 
-   **On a KiCad image you can grade in the cloud and skip the regrade.** Since
+   **A KiCad wave is graded in the cloud, and harvest keeps that grade.** Since
    2026-08-23 `--with-kicad` is the default (now `kicad/kicad:10.0.6`), so the
    containers carry a `kicad-cli` grader of their own, checked to agree with a
-   local one of the same version (drandyhaas, 2026-08-31, both 10.0.0).
-   `--no-local-regrade` is therefore the faster path on such a wave, and it does
-   not violate this rule: the rule is same-TERMS, and same terms is exactly what
-   a shared grader gives. It is shared only while both arms were graded on one
-   KiCad version: a machine whose `kicad-cli` is older than the image grades
-   differently from the containers, so grade both arms in one place.
+   local one of the same version (drandyhaas, 2026-08-31, both 10.0.0). Keeping
+   the cloud grade does not violate this rule: the rule is same-TERMS, and same
+   terms is exactly what a shared grader gives. It is shared only while both
+   arms were graded on one KiCad version, so harvest re-grades the kept boards
+   locally when this machine's `kicad-cli` is a different version from the
+   image's, and always on a wave built without KiCad; its `grading:` line says
+   which it did. `--local-regrade` forces the local re-grade,
+   `--no-local-regrade` forbids it. A re-grade keeps what the RUN measured
+   (timing, steps, arm, and the diff-pair counts, which only the replay log
+   carries), so it never zeroes them.
 
    **The baseline arm can be re-graded in the cloud too.** `--regrade-baseline`
    re-grades on this machine; `modal_sweep/regrade_arm.py` runs the same

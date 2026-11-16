@@ -441,7 +441,7 @@ The tool classifies each pad on the target net (`identify_target_pads`):
 For each via those consumers place, the algorithm:
 
 1. **Check for nearby existing via** - If a via on the same net exists close by, reuse it
-2. **Try pad center first** - If the pad center is not blocked, place via there (no trace needed). Skipped when `--same-net-pad-clearance >= 0`, in which case same-net pads are treated as obstacles and vias are always placed outside the pad with the requested edge-to-edge clearance.
+2. **Try pad center first** - If the pad center is not blocked, place a via there with no trace. When same-net pad obstacles are enabled, skip this shortcut and search outside the pad at the requested edge-to-edge clearance.
 3. **Spiral search outward** - Search in expanding rings for a valid position that:
    - Has clearance from existing vias, tracks, and pads on ALL copper layers
    - Can be routed to the pad using A* pathfinding
@@ -449,7 +449,13 @@ For each via those consumers place, the algorithm:
 
 #### Same-net pad clearance / via-in-pad
 
-By default the CLI keeps the legacy "via-in-pad" behavior — `--same-net-pad-clearance -1` means same-net pads are not added as via-placement obstacles, so a via may sit on a same-net pad (a repair tap then lands on the pad center whenever possible, with no trace). Set `--same-net-pad-clearance` to a non-negative value to force vias outside same-net pads with that edge-to-edge clearance. For example, `--same-net-pad-clearance 0.25` keeps the same edge-to-edge gap as the global `--clearance`.
+When `--same-net-pad-clearance` is omitted, the CLI inherits the project's recorded
+positive value. With no positive record it resolves to `-1`, allowing via-in-pad.
+An explicit `-1` allows via-in-pad for this run. A positive value keeps all of the
+step's vias outside same-net SMD pads with that edge-to-edge clearance.
+For example, `--same-net-pad-clearance 0.25` requests a 0.25 mm gap. An explicit
+`0` keeps the legacy stitching-only behavior and does not enable the board-wide
+constraint for routing, fanout, or repair taps.
 
 **Board-wide semantics (#581).** A value `> 0` is a *board-wide assembly constraint*, not just a stitching option: it is recorded in the sibling `.kicad_pro` and every later chain step keeps **all** of its vias — routing escape vias, the #189 via-in-pad rescue (disabled), layer-swap pad vias (declined), plane tap/join/reconnect vias, and the sub-grid via nudge — at that clearance from same-net **SMD** pads. BGA fanout runs its under-pad escapes in dog-bone mode and QFN fanout refuses via-in-pad. The same flag is accepted by `route.py`, `route_diff.py`, `repair_planes.py`, `bga_fanout.py` and `qfn_fanout.py`; unset means "use the project's recorded value". `0` and `-1` reproduce the pre-#581 behavior exactly.
 

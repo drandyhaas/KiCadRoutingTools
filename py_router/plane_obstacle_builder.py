@@ -539,9 +539,11 @@ def build_via_obstacle_map(
         # Use actual segment width for clearance calculation (not config.track_width)
         # Include grid cushion for discretization; price the segment's net at its
         # netclass clearance (#434 cross-class).
+        _gr = getattr(seg, 'graphic', False)    # #1931: a Graphic to a scoped rule
         seg_expansion_mm = (config.via_size / 2 + seg.width / 2
                             + config.layer_clearance(  # #498: meet on seg.layer
-                                seg.layer, config.obstacle_clearance(seg.net_id), seg.net_id)
+                                seg.layer, config.obstacle_clearance(seg.net_id, graphic=_gr),
+                                seg.net_id, graphic=_gr)
                             + grid_cushion)
         # FFI batching (2026-08-14): accumulate the memoized capsule arrays
         # and stamp once after the loop -- concatenation preserves the exact
@@ -1346,11 +1348,13 @@ def build_routing_obstacle_map(
         # to leave connection traces within clearance of signal copper (#146/#173).
         # #498 layer rule (#434 cross-class), then the #735 track-to-track
         # rule (#1135): the route is a track, and so is this segment
+        _gr = getattr(seg, 'graphic', False)    # #1931: a Graphic to a scoped rule
         seg_expansion_mm = (route_track_w / 2 + seg.width / 2
                             + config.track_obstacle_clearance(
                                 seg.net_id, config.layer_clearance(
                                     route_layer,
-                                    config.obstacle_clearance(seg.net_id), seg.net_id)))
+                                    config.obstacle_clearance(seg.net_id, graphic=_gr),
+                                    seg.net_id, graphic=_gr), graphic=_gr))
         # FFI batching (2026-08-14): same pattern as the via loop above --
         # accumulate, then one Rust call for the whole (single-layer) set.
         # #815: SPAN form (789,803 calls / 10.4% on glasgow_revC). Same

@@ -16,9 +16,13 @@ it stays out. Every routed pair the record leaves out is a row of
 `JSON_SUMMARY.unprotected_pairs` and a console line.
 
 Rows:
-  1. end to end, orangecrab_ext_pll `/sheetIO/_USB_D*`: the fallback really
-     ran (`[least self-graze; no clean layer]`), both members are recorded
-     `diff-pair`, and `unprotected_pairs` is [];
+  1. end to end, the haasoscope test chain's fanned-out board
+     (`routed_output`), `*lvds_rx1_*`: the fallback really ran
+     (`[least self-graze; no clean layer]`, on three of the 13 pairs), both
+     members of every pair that took it are recorded `diff-pair`, and
+     `unprotected_pairs` is []. (orangecrab_ext_pll's USB pair was the witness
+     until #1441 corrected the coupled middle's search, which then finds that
+     pair a layer it couples on cleanly.)
   2. unit: a pair result carrying `selfgraze` whose P and N tracks stand
      0.1 mm apart under a 0.25 mm clearance stays out, and is listed with
      the reason `self-graze fallback` and its shortfall count;
@@ -49,7 +53,7 @@ from synth import make_pad, make_seg, make_via, make_net, make_pcb  # noqa: E402
 from kicad_parser import BoardInfo                     # noqa: E402
 
 PY = [sys.executable, '-X', 'utf8']
-BOARD = os.path.join(REPO, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
+BOARD = os.path.join(REPO, 'kicad_files', 'routed_output.kicad_pcb')
 FAILS = []
 
 
@@ -157,30 +161,44 @@ def units():
 
 
 def end_to_end():
-    print("1. orangecrab's USB pair through the self-graze fallback")
+    print("1. haasoscope's lvds_rx1 pairs through the self-graze fallback")
+    import re
     from protected_nets import read_protected_nets, pro_path_for_board
     with tempfile.TemporaryDirectory() as td:
         board, out, js = (os.path.join(td, n) for n in
-                          ('in.kicad_pcb', 'oc.kicad_pcb', 'oc.json'))
+                          ('in.kicad_pcb', 'hs.kicad_pcb', 'hs.json'))
         check(PY + [tool('copy_board.py'), evidence(BOARD, 'the bundled board'), board],
               accept=True)
-        r = check(PY + [tool('route_diff.py'), board, out, '--nets', '/sheetIO/_USB_D*',
+        r = check(PY + [tool('route_diff.py'), board, out,
+                        '--nets', '*lvds_rx1_*', '--swappable-nets', '*lvds_rx1_*',
+                        '--impedance', '100', '--proximity-heuristic-factor', '0.0',
+                        '--clearance', '0.1', '--via-size', '0.3', '--via-drill', '0.2',
+                        '--track-width', '0.1',
+                        '--layers', 'F.Cu', 'In1.Cu', 'In2.Cu', 'In3.Cu', 'B.Cu',
                         '--json-out', js], accept=True, timeout=1800)
         log = (r.stdout or '') + (r.stderr or '')
-        if '[least self-graze; no clean layer]' not in log:
+        fell, pair = [], None
+        for line in log.splitlines():
+            m = re.match(r'\[\d+/\d+\] Routing diff pair (\S+)', line)
+            if m:
+                pair = m.group(1)
+            elif '[least self-graze; no clean layer]' in line and pair:
+                fell.append(pair)
+        if not fell:
             print("  [BROKEN TEST] the self-graze fallback did not run: nothing here "
                   "exercises #1871\n" + log[-600:])
             return False
         prot = read_protected_nets(pro_path_for_board(evidence(out, 'the routed board')))
-        ok(prot.get('/sheetIO/_USB_D_P') == 'diff-pair'
-           and prot.get('/sheetIO/_USB_D_N') == 'diff-pair',
-           f"both members are recorded: {prot}")
+        ok(all(prot.get(p + '_P') == 'diff-pair' and prot.get(p + '_N') == 'diff-pair'
+               for p in fell),
+           f"both members of every fallback pair are recorded: {sorted(set(fell))}")
         with open(evidence(js, '--json-out'), encoding='utf-8') as fh:
             doc = json.load(fh)
         ok(doc.get('unprotected_pairs') == [],
            f"and no routed pair is left out: {doc.get('unprotected_pairs')}")
-        ok('Protected nets (not ripped by later steps): 2 recorded' in log,
-           "the run says it recorded them")
+        n = 2 * len(doc.get('routed_diff_pairs') or [])
+        ok(f'Protected nets (not ripped by later steps): {n} recorded' in log,
+           f"the run says it recorded all {n}")
     return True
 
 

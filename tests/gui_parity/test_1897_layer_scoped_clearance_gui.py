@@ -12,9 +12,11 @@ On both, A1 must pass the slot, which is open only at the 0.1 mm the rule
 gives In1.Cu (the classes ask 0.3 mm), with the same copper, and check_drc
 must be clean.
 
-Needs KiCad's python (pcbnew + wx): exit 77 without it.
+Needs KiCad's python (pcbnew + wx): launched under any other, it re-execs
+into KiCad's (`headless_plan.reexec_into_kicad`), and exits 77 only when
+there is none.
 
-    <KiCad python> tests/gui_parity/test_1897_layer_scoped_clearance_gui.py
+    python3 tests/gui_parity/test_1897_layer_scoped_clearance_gui.py
 """
 import contextlib
 import io
@@ -37,14 +39,23 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
-def run(argv, what):
+def run(argv, what, verdict=None):
+    """Run a step; BROKEN TEST unless it ran. ``verdict`` ({exit code: the
+    line that exit prints}) admits a non-zero exit that IS an answer:
+    check_drc exits 1 when it finds violations, which the caller's own check
+    grades as a FAIL, not as a step that did not run."""
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
                        errors='replace', cwd=REPO, timeout=1800)
     text = (r.stdout or '') + (r.stderr or '')
-    if r.returncode != 0 or 'Traceback' in text:
+    answered = r.returncode in (verdict or {}) and verdict[r.returncode] in text
+    if (r.returncode != 0 and not answered) or 'Traceback' in text:
         raise AssertionError(f"BROKEN TEST: {what} did not run (exit {r.returncode})\n"
                              f"{text[-1500:]}")
     return text
+
+
+# check_drc's two answers: clean (exit 0) and violations found (exit 1)
+DRC_VERDICT = {0: 'NO DRC VIOLATIONS FOUND', 1: 'DRC VIOLATIONS:'}
 
 
 def facts(path):
@@ -61,7 +72,9 @@ def main():
         import pcbnew  # noqa: F401
         import wx      # noqa: F401
     except Exception as e:                                     # noqa: BLE001
-        print(f"SKIP: needs KiCad's python (pcbnew + wx): {e}")
+        from headless_plan import reexec_into_kicad
+        reexec_into_kicad(__file__)
+        print(f"SKIP: needs KiCad's python (pcbnew + wx), and none was found: {e}")
         return 77
     py = [sys.executable, '-X', 'utf8']
     with tempfile.TemporaryDirectory() as td:
@@ -90,7 +103,7 @@ def main():
         ok(cli == gui, f"with the same copper: CLI {cli} GUI {gui}")
         for name, out in (('CLI', cli_out), ('GUI', gui_out)):
             text = run(py + [os.path.join(REPO, 'py_router', 'check_drc.py'), out,
-                             '--clearance-margin-mm', '0.0005'], 'check_drc')
+                             '--clearance-margin-mm', '0.0005'], 'check_drc', DRC_VERDICT)
             ok('NO DRC VIOLATIONS FOUND' in text, f"check_drc is clean on the {name} board")
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")

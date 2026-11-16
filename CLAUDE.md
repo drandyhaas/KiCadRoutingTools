@@ -137,7 +137,8 @@ Validate routed boards against the *real* spec, with the right checker — most
   pricing each foreign obstacle at `config.obstacle_clearance(net_id)` (see
   `docs/api-routing-config.md`). `route.py` / `route_diff.py` / the plane scripts
   **always auto-read** every net's class clearance from the sibling `.kicad_pro`
-  (override with `--net-clearances <json>`; all-Default boards are inert). On the
+  (override with `--net-clearances FILE`, a JSON map from net names to
+  millimeters). All-Default boards are inert. On the
   ROUTING CLIs and the GUI routing tabs:
   - **`--clearance X`** → the Default net class routes at X this run (above OR below
     the board's Default class; it is written back lower-only). Other classes route at
@@ -386,8 +387,8 @@ Validate routed boards against the *real* spec, with the right checker — most
   use the board's own value, checked = the entered value; a checked Min Clearance sets
   the Default class, the CLI's `--clearance`, and the separate **Clearance ceiling** box
   caps every class, the CLI's `--clearance-ceiling`). The old `--clamp-netclasses` **and**
-  `--no-clamp-netclasses` flags are **removed** (`--clearance-ceiling` replaces
-  both; `--net-clearances <json>` gives explicit per-net control). Grade multi-class
+  `--no-clamp-netclasses` flags were replaced by `--clearance-ceiling`.
+  `--net-clearances FILE` gives explicit per-net control. Grade multi-class
   boards at the netclasses that survived (`kicad_drc_compare._staged_copy`).
 
 - **The whole suite is `python3 tests/run_all.py`, and it fans out onto Modal.**
