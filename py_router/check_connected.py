@@ -15,7 +15,7 @@ import fnmatch
 import re
 from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
-from kicad_parser import (parse_kicad_pcb, Segment, Via, Pad, PCBData, Zone,
+from kicad_parser import (parse_kicad_pcb, Segment, Via, Pad, PCBData, Zone, pad_on_layer,
                           pad_drill_capsule)
 from net_queries import expand_pad_layers
 
@@ -238,6 +238,11 @@ def track_reaches_pad(seg, pad, tolerance: float = 0.02) -> bool:
     net). Tangency is not contact: the reach is the track's half-width less
     1 nm, KiCad's grid -- the endpoint-in-pad rule's own margin, floored at
     `tolerance` the same way."""
+    # The pad's copper on the TRACK's layer, and the copper KiCad's
+    # connectivity joins through (kicad_parser.pad_on_layer): a per-layer
+    # padstack's smaller layer, a custom pad's unfilled circle as its
+    # centreline. The max-over-layers model is clearance's, not a joint's.
+    pad = pad_on_layer(pad, getattr(seg, 'layer', None), joins=True)
     reach = max(seg.width / 2 - 1e-6, tolerance)
     from geometry_utils import point_to_segment_distance
     if point_to_segment_distance(pad.global_x, pad.global_y, seg.start_x, seg.start_y,
@@ -807,12 +812,20 @@ def classify_unconnected_link(pcb_data, net_id, pt_a, pt_b,
         if getattr(s, 'graphic', False):
             graphic_roots.add(uf.find(2 * i))
 
+    from geometry_utils import via_on_layer
+
     def _one(pt, kind):
         if kind in ('pad', 'zone'):
             return 'live'
         px, py = pt[0], pt[1]
+        # KiCad names the end's LAYER: match copper on it only. A coincident
+        # corner of the same art on another layer is not this end (a B.Cu art
+        # island read its F.Cu twin's live cluster and graded 'live').
+        lay = pt[2] if len(pt) > 2 and pt[2] else None
         best, bd = None, radius
         for i, s in enumerate(segs):
+            if lay is not None and s.layer != lay:
+                continue
             dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
             L2 = dx * dx + dy * dy
             t = (max(0.0, min(1.0, ((px - s.start_x) * dx
@@ -829,6 +842,8 @@ def classify_unconnected_link(pcb_data, net_id, pt_a, pt_b,
             vb, vd = None, None
             for j, v in enumerate(vias):
                 if via_repr.get(j) is None:
+                    continue
+                if lay is not None and not via_on_layer(v, lay):
                     continue
                 d = math.hypot(px - v.x, py - v.y)
                 if d <= max(radius, v.size / 2.0 + 0.05) and (vd is None or d < vd):
@@ -1558,7 +1573,9 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 if _shared <= pad_hole_only.get(pad_idx, set()):
                     if copper_reaches_pad_hole(vx, vy, _m, pad):
                         _union(pad_repr_id[pad_idx], via_repr_id[via_idx])
-                elif _point_in_pad(vx, vy, pad, margin=_m):
+                elif any(_point_in_pad(vx, vy, pad_on_layer(pad, _l, joins=True),
+                                       margin=_m)
+                         for _l in sorted(_shared - pad_hole_only.get(pad_idx, set()))):
                     _union(pad_repr_id[pad_idx], via_repr_id[via_idx])
 
     # A track that *ends inside* a pad's copper outline connects that pad even
@@ -1592,7 +1609,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                     if layer in pad_hole_only.get(pad_idx, ()):
                         if copper_reaches_pad_hole(ex, ey, _m, pad):
                             _union(pad_repr_id[pad_idx], eid)
-                    elif _point_in_pad(ex, ey, pad, margin=_m):
+                    elif _point_in_pad(ex, ey, pad_on_layer(pad, layer, joins=True),
+                                       margin=_m):
                         _union(pad_repr_id[pad_idx], eid)
 
     # Build spatial index for segments. Cell size = the widest credit reach

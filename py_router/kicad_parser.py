@@ -485,6 +485,202 @@ class Pad:
     # BEFORE its partner pad's (check_drc.kicad_tests_tie_waiver). Set by
     # BOTH parse paths.
     uuid: str = ""
+    # A KiCad 9+ PADSTACK's per-layer copper: {layer: (size_x, size_y, shape,
+    # rect_rotation, roundrect_rratio)}, board frame, for each copper layer
+    # whose own copper is SMALLER than `size_x`/`size_y` -- those are the max
+    # over the pad's layers, which clearance keeps (DRC-safe). A track on such
+    # a layer meets only that layer's copper: a DIP pad that is a 2.54 x 1.27
+    # oval on F.Cu and a 2.6416 x 1.778 custom pad on B.Cu took F.Cu tracks
+    # landing on B.Cu-only copper as joined, and KiCad graded them open.
+    # Read through `pad_on_layer`. None when every layer is the same. Set by
+    # BOTH parse paths.
+    layer_copper: Optional[Dict[str, Tuple[float, float, str, float, float]]] = None
+    # The copper KiCad's CONNECTIVITY joins a custom pad through, when it is
+    # not `polygons` (board frame): KiCad joins an UNFILLED circle primitive
+    # only along its centreline, not across its stroke (measured, kicad 10.0.6:
+    # a 1.5 mm-stroke spacer ring joins a track end at the stroke's centre
+    # radius and at none of the radii 0.1 mm either side). So the anchor, the
+    # filled discs and a hairline ring per unfilled circle. None = `polygons`.
+    # Read through `pad_on_layer`. Set by BOTH parse paths.
+    join_polygons: Optional[List[List[Tuple[float, float]]]] = None
+
+
+def pad_on_layer(pad, layer=None, joins=False):
+    """`pad` as its copper stands on `layer` (KiCad 9+ padstacks): a copy
+    carrying that layer's size and shape when they differ from the pad's
+    max-over-layers model (`Pad.layer_copper`), else the pad itself.
+    `joins=True` also swaps in the copper KiCad's connectivity joins through
+    (`Pad.join_polygons`). For CONNECTIVITY and pad LANDING only: clearance
+    keeps the max model."""
+    lc = getattr(pad, 'layer_copper', None)
+    entry = lc.get(layer) if (lc and layer is not None) else None
+    jp = getattr(pad, 'join_polygons', None) if joins else None
+    if entry is None and jp is None:
+        return pad
+    import dataclasses
+    kw = {'layer_copper': None, 'join_polygons': None}
+    if entry is not None:
+        sx, sy, shape, rr, rratio = entry
+        kw.update(size_x=sx, size_y=sy, shape=shape, rect_rotation=rr,
+                  roundrect_rratio=rratio, polygons=None, copper_box=None)
+    if jp is not None and (entry is None or pad.shape == 'custom'):
+        kw['polygons'] = jp
+    return dataclasses.replace(pad, **kw)
+
+
+def padstack_layer_copper(base_size, base_shape, base_rratio, layer_geom,
+                          pad_rotation, max_size, max_shape):
+    """`Pad.layer_copper` from per-layer padstack geometry, shared by both
+    parse paths. `layer_geom` = {layer: (frame_w, frame_h, shape, rratio)} for
+    each copper layer the pad is on (pad frame, KiCad's own per-layer values);
+    an entry whose board-frame copper differs from the max model
+    (`max_size`, `max_shape`) and is not custom (a custom layer keeps the
+    max model) becomes one row."""
+    out = {}
+    for layer, (fw, fh, shape, rratio) in layer_geom.items():
+        if shape == 'custom' or fw <= 0 or fh <= 0:
+            continue
+        sx, sy, rr = _resolve_pad_rect(fw, fh, pad_rotation)
+        if (abs(sx - max_size[0]) < 1e-6 and abs(sy - max_size[1]) < 1e-6
+                and shape == max_shape):
+            continue
+        out[layer] = (sx, sy, shape, rr,
+                      rratio if shape == 'roundrect' else 0.0)
+    return out or None
+
+
+def _pad_circle_n(R):
+    """Vertices of a custom-pad circle primitive of radius R: the inscribed
+    32-gon, refined only past pcbnew's own 5 um max error (see the circle
+    primitive in `_custom_pad_global_polygons`). The one tessellation rule,
+    shared by a pad's copper outline and its join outline."""
+    return _adaptive_circle_n(R, eps=0.005, lo=32, hi=128)
+
+
+def custom_pad_join_polygons(prims, anchor_shape, anchor_size, global_x,
+                             global_y, pad_rotation):
+    """`Pad.join_polygons` for a custom pad whose primitives are all circles,
+    at least one of them UNFILLED: the anchor, each filled disc, and a
+    hairline ring on each unfilled circle's centreline. `prims` = [(cx, cy,
+    r, width, filled)] in the pad frame; the anchor is `anchor_shape`
+    ('circle'/'rect') of `anchor_size` about the pad. None when any primitive
+    is not a circle, or none is unfilled (then `polygons` already is it).
+    Shared by both parse paths."""
+    if not prims or not any(not f and w > 0 for (_x, _y, _r, w, f) in prims):
+        return None
+    rad = math.radians(-pad_rotation)
+    cos_r, sin_r = math.cos(rad), math.sin(rad)
+
+    def g(vx, vy):
+        return (global_x + vx * cos_r - vy * sin_r,
+                global_y + vx * sin_r + vy * cos_r)
+
+    def ring(cx, cy, r_out, r_in):
+        n = _pad_circle_n(max(r_out, 1e-6))
+        outer = [g(cx + r_out * math.cos(2 * math.pi * k / n),
+                   cy + r_out * math.sin(2 * math.pi * k / n)) for k in range(n)]
+        if r_in <= 0:
+            return outer
+        inner = [g(cx + r_in * math.cos(-2 * math.pi * k / n),
+                   cy + r_in * math.sin(-2 * math.pi * k / n)) for k in range(n)]
+        return outer + [outer[0], inner[0]] + inner[1:] + [inner[0]]
+
+    polys = []
+    aw, ah = anchor_size
+    if aw > 0 and ah > 0:
+        if anchor_shape == 'circle':
+            polys.append(ring(0.0, 0.0, min(aw, ah) / 2.0, 0.0))
+        else:
+            polys.append([g(-aw / 2, -ah / 2), g(aw / 2, -ah / 2),
+                          g(aw / 2, ah / 2), g(-aw / 2, ah / 2)])
+    for (cx, cy, r, w, filled) in prims:
+        if filled:
+            polys.append(ring(cx, cy, r + w / 2.0, 0.0))
+        else:
+            polys.append(ring(cx, cy, r + 1e-4, max(r - 1e-4, 0.0)))
+    return polys
+
+
+def _custom_pad_circle_prims(pad_text):
+    """The (cx, cy, r, width, filled) of a custom pad's primitives when every
+    one is a gr_circle (pad frame), else None."""
+    pm = re.search(r'\(primitives\b', pad_text)
+    if not pm:
+        return None
+    prim = pad_text[pm.start():find_matching_paren(pad_text, pm.start()) - 1]
+    kinds = re.findall(r'\(gr_(\w+)\b', prim)
+    if not kinds or any(k != 'circle' for k in kinds):
+        return None
+    out = []
+    for m in re.finditer(r'\(gr_circle\b', prim):
+        block = prim[m.start():find_matching_paren(prim, m.start()) - 1]
+        c = re.search(r'\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
+        e = re.search(r'\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
+        wm = re.search(r'\(width\s+(-?[\d.]+)\)', block)
+        if not (c and e):
+            return None
+        cx, cy = float(c.group(1)), float(c.group(2))
+        r = math.hypot(float(e.group(1)) - cx, float(e.group(2)) - cy)
+        filled = not re.search(r'\(fill\s+(?:no|none)\b', block)
+        out.append((cx, cy, r, float(wm.group(1)) if wm else 0.0, filled))
+    return out
+
+
+_PCBNEW_PAD_TEXTS = {}
+
+
+def _pcbnew_pad_texts(fp):
+    """Each pad block of pcbnew footprint `fp` as KiCad formats it, in
+    `fp.Pads()` order (memoised per footprint object for the build)."""
+    key = id(fp)
+    got = _PCBNEW_PAD_TEXTS.get(key)
+    if got is not None and got[0] is fp:
+        return got[1]
+    import pcbnew
+    io = pcbnew.PCB_IO_KICAD_SEXPR()
+    io.Format(fp)
+    text = io.GetStringOutput(True)
+    blocks = []
+    for m in re.finditer(r'\(pad\s+"', text):
+        blocks.append(text[m.start():find_matching_paren(text, m.start())])
+    _PCBNEW_PAD_TEXTS[key] = (fp, blocks)
+    return blocks
+
+
+def _padstack_layer_geom(pad_text, base_size, base_shape, base_rratio,
+                         pad_layers, board_copper):
+    """{layer: (frame_w, frame_h, shape, rratio)} from a KiCad 9 `(padstack
+    ...)` for each copper layer the pad is on (the text path's half of
+    `padstack_layer_copper`), or None without a per-layer padstack."""
+    m = re.search(r'\(padstack\b', pad_text)
+    if not m:
+        return None
+    blk = pad_text[m.start():find_matching_paren(pad_text, m.start())]
+    mm = re.search(r'\(mode\s+(\w+)\)', blk)
+    mode = mm.group(1) if mm else 'normal'
+    if mode not in ('front_inner_back', 'custom'):
+        return None
+    per = {}
+    for lm in re.finditer(r'\(layer\s+"([^"]+)"', blk):
+        lb = blk[lm.start():find_matching_paren(blk, lm.start())]
+        sm = re.search(r'\(size\s+(%s)\s+(%s)\)' % (AT_NUM, AT_NUM), lb)
+        shm = re.search(r'\(shape\s+(\w+)\)', lb)
+        rm = re.search(r'\(roundrect_rratio\s+([\d.]+)\)', lb)
+        per[lm.group(1)] = (float(sm.group(1)) if sm else base_size[0],
+                            float(sm.group(2)) if sm else base_size[1],
+                            shm.group(1) if shm else base_shape,
+                            float(rm.group(1)) if rm else base_rratio)
+    on = [ln for ln in board_copper if '*.Cu' in pad_layers or ln in pad_layers]
+    base = (base_size[0], base_size[1], base_shape, base_rratio)
+    out = {}
+    for ln in on:
+        if ln == 'F.Cu':
+            out[ln] = base
+        elif mode == 'front_inner_back':
+            out[ln] = per.get('B.Cu' if ln == 'B.Cu' else 'Inner', base)
+        else:
+            out[ln] = per.get(ln, base)
+    return out
 
 
 _VIA_BIRTH_WATCH = None
@@ -1729,7 +1925,7 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                     # reterminal_em J6/J7). Every smaller circle keeps its
                     # 32-gon, so the geometry of most boards does not move
                     # (run-4 B6's 1 um adaptive version moved all of them).
-                    N = _adaptive_circle_n(R, eps=0.005, lo=32, hi=128)
+                    N = _pad_circle_n(R)
                     outer = [(c[0] + R * math.cos(2 * math.pi * k / N),
                               c[1] + R * math.sin(2 * math.pi * k / N))
                              for k in range(N)]
@@ -5377,6 +5573,24 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                                  or fp_zone_connection),
                 uuid=own_uuid_from_text(pad_text),
             )
+            # Per-layer padstack copper and the custom pad's join outline
+            # (Pad.layer_copper / join_polygons); the pcbnew path builds the
+            # same through the same two helpers.
+            if sizes:
+                _plg = _padstack_layer_geom(
+                    pad_text, (float(sizes[0][0]), float(sizes[0][1])),
+                    pad_shape, roundrect_rratio, pad_layers, board_copper)
+                if _plg:
+                    pad.layer_copper = padstack_layer_copper(
+                        None, pad_shape, roundrect_rratio, _plg, pad_rotation,
+                        (pad.size_x, pad.size_y), pad.shape)
+            if pad_shape == 'custom' and _anchor_size is not None:
+                _prims = _custom_pad_circle_prims(pad_text)
+                if _prims:
+                    _am = re.search(r'\(anchor\s+(\w+)\)', pad_text)
+                    pad.join_polygons = custom_pad_join_polygons(
+                        _prims, _am.group(1) if _am else 'rect', _anchor_size,
+                        global_x, global_y, pad_rotation)
 
             footprint.pads.append(pad)
 
@@ -8958,6 +9172,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         PCBData object containing all routing-relevant data
     """
     import pcbnew
+    _PCBNEW_PAD_TEXTS.clear()   # per build: never hold a board's footprints
 
     def to_mm(val):
         return pcbnew.ToMM(val)
@@ -9482,7 +9697,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         )
 
         # Extract pads
-        for pad in fp.Pads():
+        for _pad_index, pad in enumerate(fp.Pads()):
             pad_num = pad.GetNumber()
 
             # Global position
@@ -9773,6 +9988,40 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                                  or fp_zone_connection),
                 uuid=str(pad.m_Uuid.AsString()),        # #1737
             )
+            # Per-layer padstack copper and the custom pad's join outline,
+            # through the text path's two helpers (Pad.layer_copper /
+            # join_polygons), from pcbnew's own per-layer values.
+            try:
+                if pad.Padstack().Mode() != pcbnew.PADSTACK.MODE_NORMAL:
+                    _geom = {}
+                    for _lyr in pad.GetLayerSet().CuStack():
+                        _ln = copper_id_to_name.get(_lyr)
+                        if _ln not in _board_cu_names:
+                            continue
+                        _s = pad.GetSize(_lyr)
+                        _geom[_ln] = (to_mm(_s.x), to_mm(_s.y),
+                                      get_pad_shape_name(pad.GetShape(_lyr)),
+                                      pad.GetRoundRectRadiusRatio(_lyr))
+                    pad_obj.layer_copper = padstack_layer_copper(
+                        None, shape, roundrect_rratio, _geom, pad_rotation,
+                        (pad_obj.size_x, pad_obj.size_y), pad_obj.shape)
+            except Exception:
+                pass  # KiCad < 9: no padstack, one copper for every layer
+            if shape == 'custom':
+                # pcbnew's Python bindings do not expose a custom pad's
+                # primitives (KiCad 10.0.6: GetPrimitives returns an opaque
+                # vector), so read them from the footprint as KiCad formats it,
+                # with the text path's own helper. One format per footprint.
+                try:
+                    _ptxt = _pcbnew_pad_texts(fp)[_pad_index]
+                    _prims = _custom_pad_circle_prims(_ptxt)
+                    if _prims:
+                        _am = re.search(r'\(anchor\s+(\w+)\)', _ptxt)
+                        pad_obj.join_polygons = custom_pad_join_polygons(
+                            _prims, _am.group(1) if _am else 'rect',
+                            _anchor_size_b, global_x, global_y, pad_rotation)
+                except Exception:
+                    pass  # no s-expression IO: keep the copper outline
 
             footprint.pads.append(pad_obj)
 
@@ -11095,6 +11344,29 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 bzc = getattr(bp, 'zone_connection', None); fzc = getattr(fp, 'zone_connection', None)
                 if bzc != fzc:
                     diffs.append(f"Pad {ref}:{bp.pad_number} zone_connection: board={bzc} file={fzc}")
+                # Per-layer padstack copper and the join outline: what
+                # connectivity and pad landing read (`pad_on_layer`).
+                blc = getattr(bp, 'layer_copper', None) or {}
+                flc = getattr(fp, 'layer_copper', None) or {}
+                if set(blc) != set(flc) or any(
+                        not (close(blc[k][0], flc[k][0]) and close(blc[k][1], flc[k][1])
+                             and blc[k][2] == flc[k][2]) for k in blc):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} layer_copper: "
+                                 f"board={blc} file={flc}")
+                bjp = getattr(bp, 'join_polygons', None)
+                fjp = getattr(fp, 'join_polygons', None)
+                if (bjp is None) != (fjp is None):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} join_polygons: "
+                                 f"board={'set' if bjp else None} "
+                                 f"file={'set' if fjp else None}")
+                elif bjp:
+                    _bv = [v for _r in bjp for v in _r]
+                    _fv = [v for _r in fjp for v in _r]
+                    if len(_bv) != len(_fv) or any(
+                            not (close(a[0], b[0]) and close(a[1], b[1]))
+                            for a, b in zip(_bv, _fv)):
+                        diffs.append(f"Pad {ref}:{bp.pad_number} join_polygons "
+                                     f"differ")
                 # #1737: check_drc's net-tie verdict follows the uuid order.
                 # A pad the file gives no uuid gets a fresh one from pcbnew.
                 bu, fu = getattr(bp, 'uuid', ''), getattr(fp, 'uuid', '')
