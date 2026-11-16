@@ -35,6 +35,11 @@ pour's clearance of it, are reported apart and never counted (#1582). Exit 0
 otherwise, so it can gate a build the way check_drc.py does. ``--exit-zero``
 suppresses that.
 
+A net whose class names a KiCad 10 tuning profile is also reported against
+the width, and a pair the P/N gap, the profile stores for each layer (#1936):
+the length drawn at another width, and the coupled length at another gap.
+Disclosure only, like the declared-impedance rows: never in the exit code.
+
 The coplanar gap is read on KiCad's own fill at exact distance (#1624): the
 (filled_polygon ...) KiCad stored in the board, else the fill model at the
 project's net-class clearances (no refill is run). The report's
@@ -95,6 +100,18 @@ DECLARED_OHMS_TOLERANCE_PCT = 10.0
 # multiple of the declared pair gap: a breakout or a fan-out apart from its
 # partner is not a coupled line, and the formula does not apply there.
 COUPLED_GAP_FACTOR = 2.0
+
+# How far a track may sit off its tuning profile's width, and a coupled pair
+# off the profile's gap, before the audit counts that length (#1936), mm. A
+# width is a stored number: a board file keeps it to the nanometre and the
+# routers round to a tenth of a micron, so a micron is past both. A gap is
+# measured, between two members whose ends are each rounded and whose legs
+# beside a via or a corner converge by a fraction of a degree, so it gets
+# 5 um. A net is named when more than PROFILE_OFF_MM of it is off.
+# Disclosure only -- the exit code ignores it.
+PROFILE_WIDTH_TOLERANCE = 0.001
+PROFILE_GAP_TOLERANCE = 0.005
+PROFILE_OFF_MM = 0.01
 
 # A net's coplanar promise is broken when more than this length of it has no
 # ground beside it or misses the declared gap (mm). board_score reads the same
@@ -176,6 +193,26 @@ class NetImpedance:
     declare_only: bool = False          # the record changed no width (#1630)
     shipped_ohms: float = 0.0           # length-weighted over `ohms_length_mm`
     ohms_length_mm: float = 0.0         # length the reading covers (a pair: coupled)
+
+    # --- tuning-profile geometry (#1936, disclosure): the width, and for a
+    # pair the gap, the net's KiCad 10 tuning profile stores for each layer,
+    # against the shipped copper (`profile_geometry`).
+    profile_name: str = ''
+    profile_differential: bool = False
+    profile_length_mm: float = 0.0      # on layers the profile gives a width
+    profile_off_width_mm: float = 0.0   # of that, drawn at another width
+    profile_unsized_mm: float = 0.0     # on layers it gives none (not graded)
+    profile_coupled_mm: float = 0.0     # parallel to the partner, gap given
+    profile_off_gap_mm: float = 0.0     # of that, at another gap
+    # [{'layer', 'what': 'width'|'gap', 'drawn_mm', 'profile_mm', 'length_mm'}],
+    # a gap row with 'drawn_max_mm' too: the range of gaps on that layer
+    profile_off: List[dict] = field(default_factory=list)
+
+    @property
+    def off_profile(self) -> bool:
+        """Is more than PROFILE_OFF_MM of this net off its profile's width
+        or gap?"""
+        return max(self.profile_off_width_mm, self.profile_off_gap_mm) > PROFILE_OFF_MM
 
     @property
     def ohms_off_pct(self) -> Optional[float]:
@@ -722,6 +759,90 @@ def shipped_impedance(pcb, segs, partner_segs, spec: dict,
     return (total / length if length > 0 else 0.0), length
 
 
+def profile_geometry(segs, partner_segs, profile,
+                     sample_step: float = DEFAULT_SAMPLE_STEP) -> dict:
+    """A net's shipped copper against its tuning profile's geometry (#1936).
+
+    `profile` is the net's `tuning_profiles.TuningProfile`: per signal layer
+    the track width, and for a differential profile the P/N gap, that meet
+    its target impedance there. Returns the lengths (mm) `NetImpedance`
+    carries: `length` on layers the profile gives a width and `off_width` of
+    it drawn more than PROFILE_WIDTH_TOLERANCE off that width; `unsized` on
+    layers it gives none, which nothing is graded on; and for a differential
+    profile with `partner_segs`, `coupled` -- the length running parallel to
+    the partner on its layer, beside it, within COUPLED_GAP_FACTOR x the
+    profile's gap -- and `off_gap` of it more than PROFILE_GAP_TOLERANCE off
+    that gap. A member fanning in to its pads is not parallel to its partner,
+    so it is graded on width alone. `rows` lists what is off with its length,
+    longest first: each (layer, drawn width), and per layer the range of gaps
+    (`drawn_mm` to `drawn_max_mm`)."""
+    out = {'length': 0.0, 'off_width': 0.0, 'unsized': 0.0, 'coupled': 0.0,
+           'off_gap': 0.0}
+    rows: Dict[Tuple[str, float, float], float] = {}     # (layer, width, want)
+    gap_rows: Dict[str, List[float]] = {}                 # layer: [mm, min, max]
+    widths = profile.layer_width_mm
+    gaps = profile.layer_gap_mm if profile.differential else {}
+    for seg in segs:
+        dx, dy = seg.end_x - seg.start_x, seg.end_y - seg.start_y
+        seg_len = math.hypot(dx, dy)
+        if seg_len <= 0 or not seg.width:
+            continue
+        want = widths.get(seg.layer)
+        if want is None:
+            out['unsized'] += seg_len
+        else:
+            out['length'] += seg_len
+            if abs(seg.width - want) > PROFILE_WIDTH_TOLERANCE:
+                out['off_width'] += seg_len
+                key = (seg.layer, round(seg.width, 4), want)
+                rows[key] = rows.get(key, 0.0) + seg_len
+        gap_want = gaps.get(seg.layer)
+        if gap_want is None or not partner_segs:
+            continue
+        mates = []
+        for p in partner_segs:
+            px, py = p.end_x - p.start_x, p.end_y - p.start_y
+            p_len = math.hypot(px, py)
+            # parallel: under about one degree between the two directions
+            if (p.layer == seg.layer and p.width and p_len > 0
+                    and abs(dx * py - dy * px) <= 0.02 * seg_len * p_len):
+                mates.append(p)
+        if not mates:
+            continue
+        n_int = max(1, int(math.ceil(seg_len / sample_step)))
+        per = seg_len / n_int
+        for k in range(n_int):
+            # the middle of each step, read square across to the partner: a
+            # point past the partner's end has no partner beside it
+            t = (k + 0.5) / n_int
+            sx, sy = seg.start_x + t * dx, seg.start_y + t * dy
+            beside = [_point_seg_dist(sx, sy, p) - p.width / 2.0 for p in mates
+                      if 0.0 <= ((sx - p.start_x) * (p.end_x - p.start_x)
+                                 + (sy - p.start_y) * (p.end_y - p.start_y))
+                      <= (p.end_x - p.start_x) ** 2 + (p.end_y - p.start_y) ** 2]
+            if not beside:
+                continue
+            gap = min(beside) - seg.width / 2.0
+            if gap <= 0 or gap > COUPLED_GAP_FACTOR * gap_want:
+                continue
+            out['coupled'] += per
+            if abs(gap - gap_want) > PROFILE_GAP_TOLERANCE:
+                out['off_gap'] += per
+                row = gap_rows.setdefault(seg.layer, [0.0, gap, gap])
+                row[0] += per
+                row[1], row[2] = min(row[1], gap), max(row[2], gap)
+    out['rows'] = sorted(
+        [{'layer': layer, 'what': 'width', 'drawn_mm': drawn, 'profile_mm': want,
+          'length_mm': round(length, 4)}
+         for (layer, drawn, want), length in rows.items()]
+        + [{'layer': layer, 'what': 'gap', 'drawn_mm': round(lo, 4),
+            'drawn_max_mm': round(hi, 4), 'profile_mm': gaps[layer],
+            'length_mm': round(length, 4)}
+           for layer, (length, lo, hi) in gap_rows.items()],
+        key=lambda r: (-r['length_mm'], r['layer'], r['what'], r['drawn_mm']))
+    return out
+
+
 def publish_class_clearances(pcb) -> None:
     """Give the fill model the clearances KiCad fills at (#1624).
 
@@ -811,7 +932,8 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                       board_name: str = "",
                       net_declared_gaps: Optional[Dict[int, float]] = None,
                       fill_source: str = 'auto',
-                      net_declared_ohms: Optional[Dict[int, dict]] = None
+                      net_declared_ohms: Optional[Dict[int, dict]] = None,
+                      net_profiles: Optional[Dict[int, object]] = None
                       ) -> BoardImpedanceReport:
     """Walk every routed segment and measure what the pre-route model assumed.
 
@@ -850,6 +972,11 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             coplanar_gap), auto-read like the gaps. Each such net reports the
             model's impedance of its shipped copper against the declared one
             (#1630, `shipped_impedance`); disclosure only.
+        net_profiles: Per-net KiCad 10 tuning profiles that give a width
+            (net_id -> `TuningProfile`, `tuning_profiles.geometry_profiles`),
+            auto-read like the declarations. Each such net reports its
+            shipped widths, and a pair its P/N gap, against the profile's
+            for each layer (#1936, `profile_geometry`); disclosure only.
 
     Returns:
         BoardImpedanceReport. Diagnostic only; pcb's copper is not modified
@@ -1221,6 +1348,21 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             result.shipped_ohms, result.ohms_length_mm = shipped_impedance(
                 pcb, segments_by_net[net_id], mates, spec, sample_step)
 
+        # #1936: the tuning profile's width and gap against the copper
+        prof = (net_profiles or {}).get(net_id)
+        if prof is not None:
+            got = profile_geometry(
+                segments_by_net[net_id],
+                segments_by_net.get(partners.get(net_id), []), prof, sample_step)
+            result.profile_name = prof.name
+            result.profile_differential = bool(prof.differential)
+            result.profile_length_mm = got['length']
+            result.profile_off_width_mm = got['off_width']
+            result.profile_unsized_mm = got['unsized']
+            result.profile_coupled_mm = got['coupled']
+            result.profile_off_gap_mm = got['off_gap']
+            result.profile_off = got['rows']
+
         if result.routed_length_mm > 0:
             report.nets.append(result)
 
@@ -1385,6 +1527,40 @@ def format_report(report: BoardImpedanceReport, verbose: bool = False,
         lines.append(f"  {off} of {len(held)} declared net(s) off target or unread "
                      f"(not counted in the exit code).")
 
+    # --- tuning-profile geometry (#1936) ---
+    profiled = [n for n in report.nets if n.profile_name]
+    if profiled:
+        lines.append("")
+        lines.append(f"-- Tuning-profile width and pair gap vs the shipped copper "
+                     f"(disclosure; width +/-{PROFILE_WIDTH_TOLERANCE:g} mm, "
+                     f"gap +/-{PROFILE_GAP_TOLERANCE:g} mm) --")
+        lines.append(f"  {'net':<28} {'profile':<14} {'sized mm':>9} {'off width':>10} "
+                     f"{'coupled mm':>11} {'off gap':>9}")
+        ranked = sorted(profiled, key=lambda n: (
+            -(n.profile_off_width_mm + n.profile_off_gap_mm), n.net_name))
+        for n in ranked[:top]:
+            pair = n.profile_differential
+            lines.append(
+                f"  {n.net_name[:28]:<28} {n.profile_name[:14]:<14} "
+                f"{n.profile_length_mm:>9.2f} {n.profile_off_width_mm:>10.2f} "
+                + (f"{n.profile_coupled_mm:>11.2f} {n.profile_off_gap_mm:>9.2f}"
+                   if pair else f"{'-':>11} {'-':>9}")
+                + ('  OFF PROFILE' if n.off_profile else ''))
+            for row in (n.profile_off if n.off_profile else []):
+                drawn = f"{row['drawn_mm']:g}"
+                if row.get('drawn_max_mm', row['drawn_mm']) != row['drawn_mm']:
+                    drawn += f" to {row['drawn_max_mm']:g}"
+                lines.append(f"      {row['layer']}: {row['length_mm']:.2f} mm at "
+                             f"{row['what']} {drawn} (profile {row['profile_mm']:g})")
+            if n.profile_unsized_mm > PROFILE_OFF_MM:
+                lines.append(f"      {n.profile_unsized_mm:.2f} mm on layers the "
+                             f"profile gives no width (not graded)")
+        if len(ranked) > top:
+            lines.append(f"  ... and {len(ranked) - top} more nets")
+        lines.append(f"  {sum(1 for n in profiled if n.off_profile)} of {len(profiled)} "
+                     f"profiled net(s) off their profile's width or gap (not "
+                     f"counted in the exit code).")
+
     # --- side gap / CPW ---
     gaps = report.all_gaps
     lines.append("")
@@ -1456,6 +1632,10 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 n.net_name for n in report.nets if n.declared_ohms > 0 and (
                     n.ohms_off_pct is None
                     or abs(n.ohms_off_pct) > DECLARED_OHMS_TOLERANCE_PCT)),
+            # #1936: disclosure, not in the exit code
+            'nets_profiled': sum(1 for n in report.nets if n.profile_name),
+            'nets_off_profile': sorted(n.net_name for n in report.nets
+                                       if n.off_profile),
         },
         'nets': [
             {
@@ -1486,6 +1666,15 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 'ohms_length_mm': round(n.ohms_length_mm, 4),
                 'ohms_off_pct': (None if n.ohms_off_pct is None
                                  else round(n.ohms_off_pct, 3)),
+                'profile': n.profile_name,
+                'profile_differential': n.profile_differential,
+                'profile_length_mm': round(n.profile_length_mm, 4),
+                'profile_off_width_mm': round(n.profile_off_width_mm, 4),
+                'profile_unsized_mm': round(n.profile_unsized_mm, 4),
+                'profile_coupled_mm': round(n.profile_coupled_mm, 4),
+                'profile_off_gap_mm': round(n.profile_off_gap_mm, 4),
+                'off_profile': n.off_profile,
+                'profile_off': n.profile_off,
                 'crossing_detail': [
                     {'kind': c.kind, 'layer': c.layer, 'ref_layer': c.ref_layer,
                      'x': round(c.x, 4), 'y': round(c.y, 4),
@@ -1598,6 +1787,20 @@ def main() -> int:
     except Exception:
         pass
 
+    # #1936: the KiCad 10 tuning profile a net's class names stores the width
+    # (and a pair's gap) for each layer; auto-read like the declarations.
+    net_profiles = {}
+    try:
+        from tuning_profiles import geometry_profiles
+        net_profiles = geometry_profiles(pcb, args.input)
+        if net_profiles:
+            print(f"Auto-read the tuning profile of {len(net_profiles)} net(s) "
+                  f"from the sibling .kicad_pro ("
+                  + ", ".join(sorted({p.name for p in net_profiles.values()}))
+                  + ") -- their widths and pair gaps are reported per layer")
+    except (OSError, ValueError) as _pe:
+        print(f"Warning: tuning profiles unavailable ({_pe}).")
+
     report = analyze_impedance(
         pcb,
         net_patterns=args.nets,
@@ -1609,7 +1812,8 @@ def main() -> int:
         gap_tolerance=args.gap_tolerance,
         board_name=os.path.basename(args.input),
         net_declared_gaps=net_declared_gaps,
-        net_declared_ohms=net_declared_ohms)
+        net_declared_ohms=net_declared_ohms,
+        net_profiles=net_profiles)
 
     print(format_report(report, verbose=args.verbose, top=args.top))
 

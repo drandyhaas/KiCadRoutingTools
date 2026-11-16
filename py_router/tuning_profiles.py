@@ -405,6 +405,24 @@ def profile_pair_geometry(pcb_data, board_path: str = None, pairs=(),
     return out, raised
 
 
+def geometry_profiles(pcb_data, board_path: str = None) -> Dict[int, TuningProfile]:
+    """{net id: its tuning profile} for the nets whose class names a profile
+    that gives a width on some layer -- what a check of shipped copper
+    against the profile's geometry reads."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path:
+        return {}
+    model = DelayModel(path, pcb_data)
+    if not model.profiles:
+        return {}
+    out = {}
+    for nid in pcb_data.nets:
+        prof = model.profile_of(nid) if nid else None
+        if prof is not None and prof.layer_width_mm:
+            out[nid] = prof
+    return out
+
+
 def net_time_profile(pcb_data, net_id) -> Optional[TuningProfile]:
     """The tuning profile KiCad times ``net_id`` with, when the router can
     time the net the same way: its class names a profile, the profile has
