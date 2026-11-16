@@ -2220,6 +2220,11 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     from check_drc import make_off_board_test
     _off_board = make_off_board_test(pcb_data.board_info)
     skipped_off_board = []
+    # #659: a net KiCad reports open only where net-tagged copper ART touches
+    # none of its other copper. KiCad conducts through art and links every
+    # cluster, so the open is real, but the art is immutable and no routing
+    # pass targets it: joining it is a board-authoring fix. Named apart.
+    skipped_art = []
 
     def _on_board(pads):
         return pads if _off_board is None else [
@@ -2436,6 +2441,38 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
 
             issues.append(issue)
 
+    # A net the BOARD makes unroutable: a pad of it already shorted to another
+    # net as drawn (`check_pads.pads_shorted_as_drawn`, route.py's
+    # `unroutable_as_designed`: another net's pad on it, or another part's
+    # copper) can be joined by no copper without that short. A net complete
+    # without such pads, or holding fewer than two others, is named apart.
+    # check_drc grades the short itself, so one the router or a placement step
+    # made is still counted there.
+    skipped_overlap = []
+    if issues:
+        from check_pads import pads_shorted_as_drawn
+        _rows = pads_shorted_as_drawn(pcb_data, {i['net_id'] for i in issues})
+        _by_net = {}
+        for _r in _rows:
+            _by_net.setdefault(_r['net'], {}).setdefault(_r['pad'], _r['foreign'])
+        _kept = []
+        for _i in issues:
+            _shorted = _by_net.get(_i['net_name'])
+            if _shorted:
+                _nid = _i['net_id']
+                _rest = [p for p in _on_board(pads_by_net.get(_nid, []))
+                         if f"{p.component_ref}.{p.pad_number}" not in _shorted]
+                if len(_rest) < 2 or check_net_connectivity(
+                        _nid, segments_by_net.get(_nid, []),
+                        vias_by_net.get(_nid, []), _rest,
+                        zones_by_net.get(_nid, []), tolerance,
+                        pcb_data=pcb_data)['connected']:
+                    skipped_overlap.append((_i['net_name'], sorted(
+                        f"{a} x {b}" for a, b in _shorted.items())))
+                    continue
+            _kept.append(_i)
+        issues[:] = _kept
+
     if skipped_cross_board and not quiet:
         print(f"  {len(skipped_cross_board)} net(s) complete within each board "
               f"outline (only board-to-board links missing): "
@@ -2444,6 +2481,13 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         print(f"  {len(skipped_off_board)} net(s) complete on the board "
               f"(only pads OFF the board outline missing, #291): "
               f"{', '.join(sorted(skipped_off_board))}")
+    if skipped_overlap and not quiet:
+        print(f"  {len(skipped_overlap)} net(s) open only at pads the design "
+              f"shorts to another net (unroutable as designed: no route can "
+              f"join them without the short): "
+              + '; '.join(f"{n} ({', '.join(ps[:3])}"
+                          f"{', ...' if len(ps) > 3 else ''})"
+                          for n, ps in sorted(skipped_overlap)))
 
     # KiCad reconciliation for ZONE-BACKED nets, BOTH directions. Signal nets
     # keep pure copper grading; KICAD_NO_GRADE_RECONCILE=1 disables for A/B.
@@ -2619,7 +2663,8 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                         return []
 
                 _issue_names = {i['net_name'] for i in issues}
-                _skip_names = set(skipped_cross_board) | set(skipped_off_board)
+                _skip_names = (set(skipped_cross_board) | set(skipped_off_board)
+                               | {n for n, _ in skipped_overlap})
                 _zone_net_ids = {_z.net_id for _z in pcb_data.zones}
                 _eligible = {}
                 for _nid, _n in pcb_data.nets.items():
@@ -2647,6 +2692,11 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                         print(f"  {_name}: KiCad link(s) span board "
                               f"outlines only (board-to-board) -- exempt")
                         continue
+                    if all('graphic' in classify_unconnected_link(
+                            pcb_data, _nid, lk[1], lk[2], lk[1][3], lk[2][3])
+                           for lk in _nl):
+                        skipped_art.append(_name)
+                        continue
 
                     def _ep(e):
                         _lyr = f" {e[2]}" if e[2] else ""
@@ -2668,6 +2718,11 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                                                 f"{_ep(lk[2])}"
                                                 for lk in _nl[:4])),
                     })
+                if skipped_art and not quiet:
+                    print(f"  {len(skipped_art)} net(s) open in KiCad only "
+                          f"where net-tagged copper art reaches none of "
+                          f"their pads (#659, a board-authoring fix): "
+                          f"{', '.join(sorted(skipped_art))}")
                 if _rev:
                     _recon['kicad_only'] = len(_rev)
                     issues.extend(_rev)

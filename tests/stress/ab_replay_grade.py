@@ -101,6 +101,12 @@ def _offboard_count(text):
     return int(m.group(1)) if m else 0
 
 
+def _bucket_count(text, phrase):
+    """The count heading one of check_connected's unroutable-net lines."""
+    m = re.search(r"(\d+) " + phrase, text)
+    return int(m.group(1)) if m else 0
+
+
 def _completion(text):
     """Routing completion from check_connected output: a net is complete if it is
     neither unrouted nor has a connectivity issue. Returns (total, incomplete, pct)
@@ -454,7 +460,12 @@ def grade(pcb, clearance, baseline=None):
            "nets_total_basis": "gradeable",
            # #291: nets complete on the board whose only missing pads lie OFF
            # its outline -- named apart by check_connected, in no count above.
-           "nets_offboard": _offboard_count(ctext)}
+           "nets_offboard": _offboard_count(ctext),
+           # Two more unroutable buckets check_connected names apart: an open
+           # only where net-tagged art reaches no pad (#659), and an open only
+           # at pads the design shorts to another net (unroutable as designed).
+           "nets_art": _bucket_count(ctext, r"net\(s\) open in KiCad only where net-tagged copper art"),
+           "nets_overlap": _bucket_count(ctext, r"net\(s\) open only at pads the design shorts")}
     out.update(_kicad_grade(pcb, clearance, baseline=baseline))
     # raw `drc` is the full check_drc count (NOT baseline-subtracted -- it counts
     # pre-existing input copper like edge-connector pads and chassis-ground pours).
