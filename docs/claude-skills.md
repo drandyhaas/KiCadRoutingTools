@@ -1,6 +1,9 @@
 # Claude Code Skills
 
-The repository ships ten [Claude Code](https://claude.ai/claude-code) skills in `.claude/skills/`. They combine the project's deterministic Python tooling (`kicad_parser`, `list_nets.py`, `analyze_power_paths.py`, the checkers) with AI judgment where it's actually needed — reading datasheets, classifying components, planning workflows, and diagnosing failures. Outputs are formatted as ready-to-use CLI arguments so they feed straight back into the routing tools.
+The repository ships [Claude Code](https://claude.ai/claude-code) skills in `.claude/skills/`.
+They combine deterministic Python tools with AI judgment for datasheet research,
+component classification, placement, routing plans, and failure diagnosis.
+The table below lists each skill and its output.
 
 ## Using the Skills
 
@@ -40,8 +43,9 @@ The skills' RESULT/plan output contracts are tuned on Claude models; smaller mod
   <img src="claude_tab.png" alt="AI tab: planned steps, controls, and live transcript" width="700">
 </p>
 
-Nine of the ten skills are reachable from the plugin's routing dialog (all but
-`/stress-test-router`; the GUI spawns
+The plugin exposes the placement, routing, and analysis skills listed in the
+button map below. `/stress-test-router` and `/make-3d-movie` run from the checkout.
+The GUI spawns
 the selected agent CLI - Claude Code or opencode, per the **Backend**
 dropdown on the **Auto** tab; the placement runs need Claude Code - headless
 with the working directory set to the plugin root, streams a
@@ -136,6 +140,7 @@ what runs here is what the buttons run.
 | [`/diagnose-routing-failures`](#diagnose-routing-failures) | Root-cause failed routes from logs + board | Targeted retry command, or a hand-back to placement |
 | [`/review-routed-board`](#review-routed-board) | Post-route QA and sign-off | Pass/fail report with next actions |
 | [`/stress-test-router`](#stress-test-router) | Batch-test the router on real-world open-source boards | Completion/DRC summary table + GitHub issues for findings |
+| [`/make-3d-movie`](#make-3d-movie) | Film a placement, optionally followed by a recorded routing chain | A 3D movie made with `movie3d/make_movie.py` |
 
 ### /plan-pcb-placement
 
@@ -185,6 +190,13 @@ Post-route QA on any routed board (from this tool, by hand, or another router). 
 ### /stress-test-router
 
 A development/QA skill rather than a board-design skill: batch-tests the router against real-world open-source KiCad boards of varying complexity (simple keyboards up to 6-layer SoC carriers). Drives the `tests/stress/` harness — downloads the corpus from upstream GitHub projects (boards are never checked into the repo), normalizes via a `pcbnew` round-trip, strips all routing, then routes each board end-to-end with the `/plan-pcb-routing` workflow under strict resource limits (a ~12 GB per-step memory watchdog, boards admitted by load via the `run_queue.sh` manager). Aggregates per-board completion rates, DRC deltas vs the original routed board graded at the same floor, connectivity verdicts, and crash/hang findings into a summary table, deduplicates findings against existing GitHub issues, and files new issues after user approval. See `tests/README.md` and `tests/stress/README.md` for the harness internals.
+
+### /make-3d-movie
+
+Prepare fixed parts, groups, and intent as in `/plan-pcb-placement`, resolve missing
+3D models, and render the placement with `movie3d/make_movie.py`. Use `--route`
+for a stress-corpus chain or `--route-chain` for a placement run's `judge_chain.txt`.
+The [3D movie guide](../movie3d/README.md) lists the renderer's dependencies and outputs.
 
 ## How They Fit Together
 
