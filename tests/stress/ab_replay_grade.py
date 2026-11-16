@@ -93,6 +93,14 @@ def _conn_count(text):
     return int(m.group(1)) if m else 0
 
 
+def _offboard_count(text):
+    """Nets check_connected names complete on the board with only pads OFF the
+    outline missing (#291). It counts them neither as unrouted nor as a
+    connectivity issue, so `nets_incomplete` leaves them out."""
+    m = re.search(r"(\d+) net\(s\) complete on the board \(only pads OFF", text)
+    return int(m.group(1)) if m else 0
+
+
 def _completion(text):
     """Routing completion from check_connected output: a net is complete if it is
     neither unrouted nor has a connectivity issue. Returns (total, incomplete, pct)
@@ -443,7 +451,10 @@ def grade(pcb, clearance, baseline=None):
            # the unrouted nets and dropping those boards as "different chains".
            # "routed" (the pre-fix basis) never appears here -- only a legacy
            # row lacking the key is on it.
-           "nets_total_basis": "gradeable"}
+           "nets_total_basis": "gradeable",
+           # #291: nets complete on the board whose only missing pads lie OFF
+           # its outline -- named apart by check_connected, in no count above.
+           "nets_offboard": _offboard_count(ctext)}
     out.update(_kicad_grade(pcb, clearance, baseline=baseline))
     # raw `drc` is the full check_drc count (NOT baseline-subtracted -- it counts
     # pre-existing input copper like edge-connector pads and chassis-ground pours).

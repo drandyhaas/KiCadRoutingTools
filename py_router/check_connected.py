@@ -2213,6 +2213,17 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         return None
 
     skipped_cross_board = []
+    # #291: a pad off the board outline is unreachable -- every routing pass
+    # drops it (connectivity.drop_off_board_pads). A net whose on-board pads
+    # are complete is missing only links no copper can ever make, so it is
+    # named in its own bucket instead of counting as an open net.
+    from check_drc import make_off_board_test
+    _off_board = make_off_board_test(pcb_data.board_info)
+    skipped_off_board = []
+
+    def _on_board(pads):
+        return pads if _off_board is None else [
+            p for p in pads if not _off_board(p.global_x, p.global_y)]
 
     # Find unrouted nets (pads but no segments) unless routed_only
     unrouted_nets = []
@@ -2295,6 +2306,9 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                     if max(_counts.values()) <= 1:
                         skipped_cross_board.append(net_info.name)
                         continue
+                if len(_on_board(pads_by_net[net_id])) < 2:
+                    skipped_off_board.append(net_info.name)
+                    continue
                 unrouted_nets.append((net_id, net_info.name, len(pads_by_net[net_id])))
 
     # A scope that matched NOTHING is not a clean board. This printed
@@ -2393,6 +2407,15 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                 continue
 
         if not result['connected']:
+            _onb = _on_board(pads)
+            if len(_onb) < len(pads) and (
+                    len(_onb) < 2 or check_net_connectivity(
+                        net_id, segments, vias, _onb, zones, tolerance,
+                        pcb_data=pcb_data)['connected']):
+                skipped_off_board.append(net_name)
+                continue
+
+        if not result['connected']:
             issue = {
                 'net_id': net_id,
                 'net_name': net_name,
@@ -2417,6 +2440,10 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         print(f"  {len(skipped_cross_board)} net(s) complete within each board "
               f"outline (only board-to-board links missing): "
               f"{', '.join(sorted(skipped_cross_board))}")
+    if skipped_off_board and not quiet:
+        print(f"  {len(skipped_off_board)} net(s) complete on the board "
+              f"(only pads OFF the board outline missing, #291): "
+              f"{', '.join(sorted(skipped_off_board))}")
 
     # KiCad reconciliation for ZONE-BACKED nets, BOTH directions. Signal nets
     # keep pure copper grading; KICAD_NO_GRADE_RECONCILE=1 disables for A/B.
@@ -2592,7 +2619,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                         return []
 
                 _issue_names = {i['net_name'] for i in issues}
-                _skip_names = set(skipped_cross_board)
+                _skip_names = set(skipped_cross_board) | set(skipped_off_board)
                 _zone_net_ids = {_z.net_id for _z in pcb_data.zones}
                 _eligible = {}
                 for _nid, _n in pcb_data.nets.items():

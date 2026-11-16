@@ -1127,6 +1127,12 @@ keep serving the previous code.
    copper LEAVES the conn bucket for the unrouted one, so conn can fall while the
    board got worse. `rank_arms.py <sweep.json>` applies all of this — paired
    verdict per arm, W/L, DRC reported beside it rather than folded in.
+   A net whose only missing pads lie OFF the board outline (#291: no copper can
+   reach them) is in NEITHER bucket: check_connected names it apart and the
+   grade records it as `nets_offboard`. A wave graded before that counted it in
+   `nets_incomplete`, so against such a baseline the boards that park parts off
+   their outline read better by exactly that count; regrade the baseline
+   (`--regrade-baseline`) or compare `nets_incomplete + nets_offboard`.
 5. **A recorded RESCUE step biases the board against any change — 25% of the
    corpus has one.** Chains often end with `route.py ... --nets '/CM4
    GPIO/GPIO22' '/CM4 GPIO/SD_CMD'`: the nets that failed *in the run being
