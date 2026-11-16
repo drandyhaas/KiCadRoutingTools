@@ -554,8 +554,24 @@ pair gap) that meets its target impedance on each signal layer; the
 `--track-width` and no `--impedance` draws such a net at its profile's width
 on each layer (#1936), after a stored impedance declaration and a
 `.kicad_dru` rule's own layer widths, and prints how many nets took them. A
-layer the profile gives no width falls through to the class width. Pair
-geometry per layer is not applied yet.
+layer the profile gives no width falls through to the class width.
+
+A differential pair takes a differential profile's width and gap the same
+way. `profile_pair_geometry(pcb_data, board_path, pairs, layers, floor)`
+gives `{P net id: (profile name, {layer: (width mm, gap mm or None)})}` for
+the pairs whose two nets take one differential profile. The pair step, given
+no `--track-width`, no `--diff-pair-gap` and no `--impedance`, couples such
+pairs on each layer at the profile's width and gap for that layer, after a
+stored impedance declaration and a `.kicad_dru` rule's layer widths, and
+prints `Tuning-profile pair geometry: ...`. A gap below what KiCad grades P
+against N at (the clearance, the class, a rule) is built at that and named.
+The pair engine carries one width and one gap per layer per call, so the
+geometry applies when every pair of the call resolves the same one; when
+they do not, nothing is applied and the run names the pairs, to be routed a
+profile per call. The connectors from the pads to the coupled run are drawn
+at one width per pair: the profile's where it gives one geometry on every
+layer the pair's pads and stubs are on, else the net class's, which the run
+says.
 
 ```python
 from kicad_parser import parse_kicad_pcb
