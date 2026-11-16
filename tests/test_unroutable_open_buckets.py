@@ -8,8 +8,10 @@ as an open net; it is named in a line of its own instead:
      (`check_pads.pads_shorted_as_drawn`, route.py's `unroutable_as_designed`:
      another net's pad on it, two parts' pads touching) cannot be joined
      without the short. A net complete without such pads, or holding fewer
-     than two others, is named apart. A same-net overlap blocks nothing, so
-     its net still counts (control). check_drc grades the short itself.
+     than two others, is named apart. A same-net overlap blocks nothing, and
+     a net tie's pad on an ordinary part's copper of the net the tie joins it
+     to (a Kelvin tie on its shunt) is the tie's purpose: both nets still
+     count (controls). check_drc grades the short itself.
   2. ART ISLAND (#659) -- KiCad links every copper cluster, and net-tagged
      copper art reaching none of the net's pads is one: the open is real but
      the art is immutable and no routing pass targets it. A net whose every
@@ -80,6 +82,20 @@ def _pad(ref, x, y, net, size=1.0):
             % (x, y, ref, size, size, net_s))
 
 
+def _tie(ref, x, y, net1, net2):
+    """A two-pad net tie: pad 1 at (x, y), pad 2 1.5 mm to its left."""
+    return ('\t(footprint "Test:NetTie"\n\t\t(layer "F.Cu")\n\t\t(at %g %g)\n'
+            '\t\t(property "Reference" "%s"\n\t\t\t(at 0 0 0)\n'
+            '\t\t\t(layer "F.SilkS")\n\t\t\t(effects\n\t\t\t\t(font\n'
+            '\t\t\t\t\t(size 1 1)\n\t\t\t\t)\n\t\t\t)\n\t\t)\n'
+            '\t\t(net_tie_pad_groups "1, 2")\n'
+            '\t\t(pad "1" smd rect\n\t\t\t(at 0 0)\n\t\t\t(size 1 1)\n'
+            '\t\t\t(layers "F.Cu" "F.Mask")\n\t\t\t(net "%s")\n\t\t)\n'
+            '\t\t(pad "2" smd rect\n\t\t\t(at -1.5 0)\n\t\t\t(size 1 1)\n'
+            '\t\t\t(layers "F.Cu" "F.Mask")\n\t\t\t(net "%s")\n\t\t)\n\t)\n'
+            % (x, y, ref, net1, net2))
+
+
 def _track(x1, y1, x2, y2, net):
     return ('\t(segment\n\t\t(start %g %g)\n\t\t(end %g %g)\n\t\t(width 0.25)\n'
             '\t\t(layer "F.Cu")\n\t\t(net "%s")\n\t)\n' % (x1, y1, x2, y2, net))
@@ -125,6 +141,10 @@ def check_overlap(td):
         _pad('R1', 5, 4, 'OVL'), _pad('R2', 20, 4, 'OVL'), _pad('P1', 5.3, 4, 'OTHER'),
         # SAME: R3 overlaps a pad of its OWN net -> blocks nothing, still open
         _pad('R3', 5, 10, 'SAME'), _pad('R4', 20, 10, 'SAME'), _pad('R5', 5.3, 10, 'SAME'),
+        # SENSE: a Kelvin net tie NT1 (pads 1 SENSE, 2 PWR, tied) whose pad 1
+        # overlaps the shunt RS's PWR pad by design -> routable, still open
+        _tie('NT1', 5, 16, 'SENSE', 'PWR'), _pad('RS', 5.3, 16, 'PWR'),
+        _pad('R6', 20, 16, 'SENSE'), _pad('R7', 25, 16, 'PWR'),
     ])
     r = subprocess.run([sys.executable, '-X', 'utf8',
                         os.path.join(ROOT, 'py_router', 'check_connected.py'), board],
@@ -135,11 +155,14 @@ def check_overlap(td):
     ok('OVL is named in the overlap bucket, with the pad pair',
        line.strip().startswith('1 net(s)') and 'OVL (R1.1 x P1.1)' in line, line.strip())
     ok('SAME stays an open net', 'SAME' in text.split('FOUND')[-1] if 'FOUND' in text else False)
+    ok('SENSE (a net tie on its own partner net, by design) stays an open net',
+       'SENSE' in text.split('FOUND')[-1] and 'SENSE (' not in line, line.strip())
     ok('OVL is not reported open', 'OVL (' not in text.split('FOUND')[-1])
     ok('ab_replay_grade reads nets_overlap = 1', ab_replay_grade._bucket_count(
         text, r"net\(s\) open only at pads the design shorts") == 1)
     _, incomplete, _ = ab_replay_grade._completion(text)
-    ok('nets_incomplete counts SAME only', incomplete == 1, f'incomplete={incomplete}')
+    ok('nets_incomplete counts SAME and SENSE (and PWR) only', incomplete == 3,
+       f'incomplete={incomplete}')
 
 
 def check_art(td):
