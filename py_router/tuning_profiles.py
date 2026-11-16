@@ -363,6 +363,48 @@ def profile_layer_widths(pcb_data, board_path: str = None, net_ids=None,
     return out, used, raised
 
 
+def profile_pair_geometry(pcb_data, board_path: str = None, pairs=(),
+                          layers=None, floor: float = 0.0):
+    """({P net id: (profile name, {signal layer: (width mm, gap mm or None)})},
+    [(profile, layer, stored mm, floor mm)]) for the differential pairs
+    whose two nets take one differential tuning profile that gives a width.
+
+    ``pairs`` are (P net id, N net id). A differential profile stores, per
+    signal layer, the member width and the P/N gap of a coupled pair at its
+    target impedance. ``layers`` limits the answer to those layers; ``floor``
+    pins a width up (the fab's minimum track), and the second value lists
+    what it raised. A layer the profile stores no gap for answers None there,
+    and a layer it has no width for is absent: the caller's next source
+    decides. A pair of a single-ended profile, or whose members name two
+    profiles, is absent."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path or not pairs:
+        return {}, []
+    model = DelayModel(path, pcb_data)
+    if not model.profiles:
+        return {}, []
+    out, raised = {}, []
+    for p_id, n_id in pairs:
+        prof = model.profile_of(p_id)
+        other = model.profile_of(n_id)
+        if (prof is None or other is None or prof.name != other.name
+                or not prof.differential or not prof.layer_width_mm):
+            continue
+        got = {}
+        for layer, w in prof.layer_width_mm.items():
+            if layers is not None and layer not in layers:
+                continue
+            if floor and w < floor - 1e-9:
+                row = (prof.name, layer, w, floor)
+                if row not in raised:
+                    raised.append(row)
+                w = floor
+            got[layer] = (w, prof.layer_gap_mm.get(layer))
+        if got:
+            out[p_id] = (prof.name, got)
+    return out, raised
+
+
 def net_time_profile(pcb_data, net_id) -> Optional[TuningProfile]:
     """The tuning profile KiCad times ``net_id`` with, when the router can
     time the net the same way: its class names a profile, the profile has

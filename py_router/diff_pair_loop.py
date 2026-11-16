@@ -208,11 +208,12 @@ def _width_runs(segs):
 def narrowed_pair_config(config, width, gaps=None):
     """`config` with every layer's pair width capped at `width` (#1742); the
     call's track width (the connectors') too where it is wider. `gaps`
-    ({layer: gap}, #1747) sets the P/N gap of a narrowed layer."""
+    ({layer: gap}, #1747) sets the P/N gap of a narrowed layer; a layer it
+    does not name keeps the gap the config gives that layer."""
     return replace(config,
                    layer_widths={l: min(w, width) for l, w in config.layer_widths.items()},
                    track_width=min(config.track_width, width),
-                   pair_layer_gaps=dict(gaps or {}))
+                   pair_layer_gaps={**(config.pair_layer_gaps or {}), **(gaps or {})})
 
 
 def narrowed_pair_gaps(config, pcb_data, width, target, gap_floor):

@@ -1150,6 +1150,7 @@ def _layer_track_via_offset(config, pn_clr):
     if not getattr(config, 'layer_widths', None):
         return 0.0
     costs = config.get_layer_costs()
+    gaps = getattr(config, 'pair_layer_gaps', None) or {}
     need = 0.0
     for i, name in enumerate(config.layers):
         if i < len(costs) and costs[i] < 0:
@@ -1157,7 +1158,7 @@ def _layer_track_via_offset(config, pn_clr):
         w = config.get_track_width(name)
         need = max(need, (pn_clr + w / 2 + config.via_size / 2)
                    * config.routing_clearance_margin
-                   - (w + config.diff_pair_gap) / 2)
+                   - (w + gaps.get(name, config.diff_pair_gap)) / 2)
     return need
 
 
