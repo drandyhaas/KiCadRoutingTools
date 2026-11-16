@@ -342,6 +342,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         return bool(fp is not None and getattr(fp, 'net_tie_groups', None))
     _lift_hole_clr = (resolve_hole_clearance(pcb_data, config)
                       if _own_pad_nets else 0.0)
+    # ... or the board's `.kicad_dru` hole_clearance rules where they ask
+    # more (#1853): the bridge has no net, so a rule between different nets
+    # binds a tied net's via against it as it binds any other copper.
+    if _own_pad_nets and getattr(config, 'hole_rules', None) is not None:
+        _rule_hole = config.hole_rules.new_via_value('track')
+        if _rule_hole is not None and _rule_hole > _lift_hole_clr:
+            _lift_hole_clr = _rule_hole
     _own_pad_rows: Dict[int, list] = {}
     _own_pad_via_rows: Dict[int, list] = {}
     _n_segs = len(pcb_data.segments)
