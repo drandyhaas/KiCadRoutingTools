@@ -74,6 +74,7 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 <dt>u</dt><dd>a lane's route coordinate: distance along the trunk from its tooth (or from the end of its lead-in, for a tooth on the source's far side), then along its ring to its berth. Every crossing and layer change is a position in <code>u</code>.</dd>
 <dt>crossing</dt><dd>a pair of lanes whose order is swapped between source and destination. They must pass through each other, so at that point they sit on different layers.</dd>
 <dt>via</dt><dd>a layer change. Vias are what the discrete plan tries to minimise. Every via is a through via.</dd>
+<dt>free space / cell</dt><dd>(<a href="#sec-embed">section 2c</a>) a layer's <b>free space</b> is everywhere a lane's centreline may stand: the layer, less a zone round every piece of copper the lane must keep off. A <b>cell</b> is one triangle of it. An LP can hold a point inside a triangle. It cannot hold a point inside the free space as a whole, which has a hole at every pad.</dd>
 <dt>convex</dt><dd>a region with no dents, holes or separate pieces: every point between two allowed points is allowed too. An LP's region always is, which is why the LP finds the best answer overall and not just the best nearby (<a href="#sec-lp">section 2</a>).</dd>
 <dt>run</dt><dd>a lane's stretch on one layer, from one of its ends or vias to the next.</dd>
 <dt>free space, cell</dt><dd>(the second geometry stage, <a href="#sec-embed">2c</a>) a layer's free space is where a lane's centreline may stand: the board, less a keep-out zone round every piece of copper. A cell is one triangle of it, with its corners on the corners of those zones.</dd>
@@ -320,7 +321,29 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 <h3 id="sec-embed">2c &nbsp; The same plan in the board's own x and y: cells, and a lane's own points (<code>whole_embed.py</code>)</h3>
 <div class="callout warn"><b>Where this stands.</b> This second geometry stage is new and <b>off by default</b>. It is a stage of its own (<a href="https://github.com/drandyhaas/KiCadRoutingTools/blob/bus_take6/awx/whole_embed.py"><code>awx/whole_embed.py</code></a>, on the <code>bus_take6</code> branch), and the loop runs it, between the geometry above and the polish, only when the setting <code>GEO_EMBED=1</code> is given. It starts from the first geometry's layout, so the LP of section 2 still runs before it, and which side of each pad a lane passes is still the side that layout chose.</div>
 <p><b>Why fit the plan a second time.</b> The LP of section 2 is one-dimensional. A lane is a sideways offset from its road at fixed columns, and a via stands at the place along the road where CP-SAT put the layer change. CP-SAT chose that place without knowing how much room the board has there. So the first LP can push a lane sideways, but it cannot move a via along its lane to a roomier place. All it can do is pay, and send a cut back for another solve (<a href="#sec-loop">section 3</a>). This stage fits the <i>same</i> plan (the same layers, the same order of the lanes that share a layer, the same vias) into the board's own x and y, where a via is a point like any other and can move.</p>
-<p><b>Start with one layer and its copper.</b> Take everything on the layer that a lane must keep off: other parts' pads, other nets' tracks and vias, the board's edge. Grow each of them by the distance a lane's centreline has to keep from it (half a track, the clearance and half a grid step). What is left over is the layer's <b>free space</b>: a lane's centreline may stand anywhere in it, and nowhere else. In the figure below that distance is 0.15 mm. The two pads on the left are 0.80 mm apart, so the strip of free space between them is 0.80 &minus; 0.15 &minus; 0.15 = 0.50 mm wide: room for two centrelines a lane pitch (0.25 mm) apart, and even a comfortable 0.40 mm apart. Now cut the free space into triangles whose corners are the corners of those grown shapes. These triangles are the <b>cells</b>. No corner of a cell stands in open space, so the cells a lane passes through say one thing only: which side of each piece of copper it goes.</p>
+<p><b>What the cells are for.</b> Take one point of one lane, and one pad. The point must keep off the pad, so round the pad there is a zone it may not enter, and everywhere else on the layer is its <b>free space</b>. That sounds like a rule an LP could hold, and it is not. An LP can only keep a point inside a region with straight walls and no dents (<a href="#sec-lp">section 2</a>). Free space is a sheet with a hole in it: a place just above the pad is allowed, a place just below it is allowed, and the straight line between the two runs through the pad. No set of straight walls says "anywhere but the hole".</p>
+<p>A triangle <i>is</i> a region with straight walls and no dents. So the free space is cut into triangles, the <b>cells</b>, and each point is told something an LP can hold: <b>stay inside your cell</b>. That is three straight walls. Three things follow from it.</p>
+<ul>
+ <li><b>No rule has to name the copper.</b> A cell is free space all through. A point that stays in its cell is clear of every pad, track and via, without one rule about any of them.</li>
+ <li><b>A lane keeps its side of every pad.</b> The cells a lane runs through, in order, are exactly which side of each piece of copper it passes. The LP only moves points inside cells, so it cannot carry a lane across a pad.</li>
+ <li><b>A point can still travel.</b> A wall of a cell is one of two things. If it is the rim of a zone, the point stops there. If there is free space beyond it, a point that ends a round pressed against it is handed to the cell on the other side, and goes on from there in the next round.</li>
+</ul>
+<div class="card">
+  <p style="margin-top:0">One pad (grey), the zone round it that a centreline keeps out of (pale), and the free space cut into eight cells. <b>Drag the point.</b> The cell it is in is tinted, and its three walls are drawn: a dark wall is a rim and stops the point, a green dashed wall has free space beyond it. Those three walls are all that this point's part of the LP says.</p>
+  <svg id="cwhy" viewBox="0 0 900 300" style="touch-action:none"></svg>
+  <div class="row"><label><input type="checkbox" id="cwCells" checked> show the cells</label><label><input type="checkbox" id="cwLine"> join two allowed places with a straight line</label><button id="cwReset">Start again</button></div>
+  <div class="row"><span class="stat">walls that hold the point <b id="cwWalls">3</b></span><span class="stat">of them rims <b id="cwRims">-</b></span><span class="stat">moves into a next cell <b id="cwHop">0</b></span></div>
+  <div class="legend"><span><i style="background:#1d2330"></i>a wall that is a rim (the point stops)</span><span><i style="background:var(--ok)"></i>a wall with free space beyond (the point may go on)</span><span><i style="background:#e7defa"></i>the point's cell</span><span><i style="background:#d33"></i>inside the pad's zone</span></div>
+  <div class="log" id="cwLog" style="min-height:38px"></div>
+  <details><summary>Try this</summary>
+  <ul>
+   <li>Tick <b>join two allowed places</b>. Both ends of the line are in free space, and its middle is inside the pad's zone. A region an LP can hold contains the whole line between any two of its points, so the free space cannot be one such region. Each cell can.</li>
+   <li>Drag the point onto the pad. It stops at the dark wall: that wall is the zone's rim, and no cell lies beyond it.</li>
+   <li>Drag the point all the way round the pad, from the left of it to the right, over the top, and watch which cells it passes through. Now do it underneath. The two ways round are two different chains of cells, and that is the only difference between them: the cells record which side of the pad a lane goes.</li>
+   <li>Untick <b>show the cells</b> and drag again. The point still stops where it should. The cells were never part of the board, only the way "keep off the copper" is said to the LP.</li>
+  </ul></details>
+</div>
+<p><b>How the cells are cut.</b> Take everything on the layer that a lane must keep off: other parts' pads, other nets' tracks and vias, the board's edge. Grow each of them by the distance a lane's centreline has to keep from it (half a track, the clearance and half a grid step). What is left over is the layer's free space: a lane's centreline may stand anywhere in it, and nowhere else. In the figure below that distance is 0.15 mm. The two pads on the left are 0.80 mm apart, so the strip of free space between them is 0.80 &minus; 0.15 &minus; 0.15 = 0.50 mm wide: room for two centrelines a lane pitch (0.25 mm) apart, and even a comfortable 0.40 mm apart. Now cut the free space into triangles whose corners are the corners of those grown shapes. These triangles are the cells. No corner of a cell stands in open space, so every wall of a cell is either a rim or a straight line across open space from one zone to another, and the cells a lane passes through say one thing only: which side of each piece of copper it goes.</p>
 <p><b>A lane carries its own points.</b> A <b>run</b> is a lane's stretch on one layer, from one of its ends or vias to the next. It passes through a chain of cells, and it carries two kinds of point. Where it crosses the edge between two cells it has a point <i>on</i> that edge, free to slide along it: one number. Between those it has free points, each free to move <i>across</i> its lane inside its cell: one number again, because a point that slides along its own lane changes nothing. Two points in a row always share a cell, and a cell is free space all through, so the straight piece between them is free too. <b>However the points move, the lane cannot touch copper.</b></p>
 <div class="card">
   <p style="margin-top:0">A made-up corner of a board. Three pads (grey) each have a zone round them that a lane's centreline keeps out of (pale), and the free space is cut into cells (thin lines). Two lanes of one layer run left to right, A above B. The dashed lines are the layout this stage starts from: kinked, and in places closer than a lane pitch. <b>Drag a point.</b> A diamond slides along its cell edge. A round dot moves across its lane: it stops at a keep-out zone, goes on into the next cell at an edge with free space beyond, and cannot be dragged through the other lane. Then press <b>One round</b>, or <b>Run to the end</b>, and watch one LP place every point together, a short step each round.</p>
@@ -1008,6 +1031,53 @@ function simplex(cost,rows){
     const bt=$('#sxPar');bt.n=(bt.n||0);const j=bt.n++%A.length,[a,b]=A[j];
     ang=(Math.atan2(b,a)*180/Math.PI+360)%360;$('#sxA').value=Math.round(ang);$('#sxTie').checked=false;reset();
     say('The cheap direction now points straight out of one side of the polygon, so <b>that whole side is optimal</b> (see the star and the shading). Step both methods to the end and compare where they stop. Press this button again to try another side.')};
+  reset();
+})();
+
+/* ================= 2c (first). what a cell is for: one point, one pad ================= */
+(function(){
+  const svg=$('#cwhy'),SC=100,OX=10,OY=10,X=x=>OX+x*SC,Y=y=>OY+y*SC;
+  // the board's free rectangle, the pad's keep-out zone and the pad; the free space is the ring between the two,
+  // cut into eight triangles on their corners (V 0-3 the board's, 4-7 the zone's)
+  const O=[[0.3,0.2],[8.5,0.2],[8.5,2.6],[0.3,2.6]],Z=[[3.6,0.95],[5.2,0.95],[5.2,1.85],[3.6,1.85]],PAD=[3.85,1.2,4.95,1.6];
+  const V=[...O,...Z],TR=[[0,1,5],[0,5,4],[1,2,6],[1,6,5],[2,3,7],[2,7,6],[3,0,4],[3,4,7]];
+  const A=[4.75,0.5],B=[4.75,2.3],START=[1.9,1.4];
+  const cr=(a,b,p)=>(b[0]-a[0])*(p[1]-a[1])-(b[1]-a[1])*(p[0]-a[0]);
+  const inside=(t,p,tol)=>{const a=V[TR[t][0]],b=V[TR[t][1]],c=V[TR[t][2]],d=[cr(a,b,p),cr(b,c,p),cr(c,a,p)];return d.every(v=>v>=-tol)||d.every(v=>v<=tol)};
+  const locate=p=>{for(let t=0;t<TR.length;t++)if(inside(t,p,1e-9))return t;return -1};
+  const edges=t=>[0,1,2].map(i=>[TR[t][i],TR[t][(i+1)%3]]);
+  const rim=([a,b])=>(a<4&&b<4)||(a>=4&&b>=4);          // a board edge, or the zone's rim: nothing beyond
+  // the nearest place of cell t to p
+  function nearestIn(t,p){if(inside(t,p,0))return p;let best=null;for(const [a,b] of edges(t)){const P=V[a],Q=V[b],dx=Q[0]-P[0],dy=Q[1]-P[1],w=clamp(((p[0]-P[0])*dx+(p[1]-P[1])*dy)/(dx*dx+dy*dy),0,1),q=[P[0]+dx*w,P[1]+dy*w],d=Math.hypot(p[0]-q[0],p[1]-q[1]);if(!best||d<best.d)best={d,q}}
+    const c=[0,1,2].reduce((s,i)=>[s[0]+V[TR[t][i]][0]/3,s[1]+V[TR[t][i]][1]/3],[0,0]);return[best.q[0]+(c[0]-best.q[0])*0.004,best.q[1]+(c[1]-best.q[1])*0.004]}
+  let pt,cell,hops,drag=false;
+  function reset(){pt=START.slice();cell=locate(pt);hops=0;draw()}
+  function draw(){svg.innerHTML='';
+    S('rect',{x:X(O[0][0]),y:Y(O[0][1]),width:(O[1][0]-O[0][0])*SC,height:(O[3][1]-O[0][1])*SC,fill:'#fff',stroke:'#c3c9d6','stroke-width':1.5},svg);
+    S('polygon',{points:TR[cell].map(i=>X(V[i][0])+','+Y(V[i][1])).join(' '),fill:'#e7defa'},svg);
+    S('rect',{x:X(Z[0][0]),y:Y(Z[0][1]),width:(Z[1][0]-Z[0][0])*SC,height:(Z[3][1]-Z[0][1])*SC,fill:'#eceef3',stroke:'none'},svg);
+    S('rect',{x:X(PAD[0]),y:Y(PAD[1]),width:(PAD[2]-PAD[0])*SC,height:(PAD[3]-PAD[1])*SC,rx:4,fill:'#b7bdca',stroke:'#7d8697'},svg);
+    T(svg,X(PAD[0])+30,Y((PAD[1]+PAD[3])/2)+5,'pad',{'text-anchor':'middle',fill:'#fff','font-weight':700});
+    if($('#cwCells').checked)TR.forEach(t=>edges(TR.indexOf(t)).forEach(([a,b])=>{if(!rim([a,b]))S('line',{x1:X(V[a][0]),y1:Y(V[a][1]),x2:X(V[b][0]),y2:Y(V[b][1]),stroke:'#aab2c2','stroke-width':1},svg)}));
+    let nr=0;edges(cell).forEach(e=>{const [a,b]=e,r=rim(e);nr+=r;S('line',{x1:X(V[a][0]),y1:Y(V[a][1]),x2:X(V[b][0]),y2:Y(V[b][1]),stroke:r?'#1d2330':'#2e9d4c','stroke-width':r?4:3,'stroke-dasharray':r?'':'9 6','stroke-linecap':'round'},svg)});
+    if($('#cwLine').checked){const y0=Z[0][1],y1=Z[3][1];
+      S('line',{x1:X(A[0]),y1:Y(A[1]),x2:X(B[0]),y2:Y(B[1]),stroke:'#5b6577','stroke-width':2},svg);
+      S('line',{x1:X(A[0]),y1:Y(y0),x2:X(B[0]),y2:Y(y1),stroke:'#d33','stroke-width':4},svg);
+      for(const [q,n] of [[A,'allowed'],[B,'allowed']]){S('circle',{cx:X(q[0]),cy:Y(q[1]),r:6,fill:'#5b6577'},svg);T(svg,X(q[0])+11,Y(q[1])+5,n,{fill:'#5b6577'})}
+      T(svg,X(A[0])+11,Y((y0+y1)/2)-26,'not allowed',{fill:'#d33','font-weight':700})}
+    const h=S('circle',{cx:X(pt[0]),cy:Y(pt[1]),r:9,fill:'#fff',stroke:CF,'stroke-width':3,style:'cursor:grab'},svg);
+    h.addEventListener('pointerdown',e=>{drag=true;e.preventDefault()});
+    $('#cwRims').textContent=nr;$('#cwHop').textContent=hops;
+    const free=3-nr;
+    $('#cwLog').innerHTML='The point is told one thing: <b>stay inside the tinted cell</b>. '+(nr?`${nr} of its walls ${nr>1?'are rims':'is a rim'} (the board's edge or the pad's zone): the point stops there. `:'')+(free?`${free} ${free>1?'have':'has'} free space beyond: pressed against ${free>1?'one of them':'it'}, the point goes on into the next cell.`:'')}
+  function world(e){const b=svg.getBoundingClientRect();return[((e.clientX-b.left)/b.width*900-OX)/SC,((e.clientY-b.top)/b.height*300-OY)/SC]}
+  // the point follows the pointer along the straight line to it as far as that line stays in free space (changing
+  // cell at each wall it crosses), then slides along the wall of the cell it is in toward the pointer
+  svg.addEventListener('pointermove',e=>{if(!drag)return;const w=world(e),n=Math.max(1,Math.ceil(Math.hypot(w[0]-pt[0],w[1]-pt[1])/0.01));let p=pt;
+    for(let i=1;i<=n;i++){const q=[pt[0]+(w[0]-pt[0])*i/n,pt[1]+(w[1]-pt[1])*i/n],t=locate(q);if(t<0)break;if(t!==cell){hops++;cell=t}p=q}
+    const q=nearestIn(cell,w);pt=Math.hypot(q[0]-w[0],q[1]-w[1])<Math.hypot(p[0]-w[0],p[1]-w[1])-1e-9?q:p;draw()});
+  window.addEventListener('pointerup',()=>{drag=false});
+  $('#cwCells').onchange=draw;$('#cwLine').onchange=draw;$('#cwReset').onclick=reset;
   reset();
 })();
 
