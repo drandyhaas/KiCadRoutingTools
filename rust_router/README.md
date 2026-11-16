@@ -8,8 +8,9 @@ of the `awx/` whole-route bus router. The rest is Python that calls in here.
 **Current Version: 0.24.1** (the crate version in `Cargo.toml`)
 
 > **Release note:** the newest published release is
-> [v0.23.7](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.23.7)
-> (2026-10-23), and its binaries are crate 0.23.7 (the placement kernels).
+> [v0.24.1](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.24.1)
+> (2026-11-16), and its binaries are crate 0.24.1 (the pose router's heading,
+> #1441).
 >
 > A release's binaries are built from the crate at its tag, and `/VERSION` can
 > lead `Cargo.toml` (a Python-only release bumps only `/VERSION`), so a release
@@ -17,7 +18,8 @@ of the `awx/` whole-route bus router. The rest is Python that calls in here.
 >
 > | Release | Crate binaries |
 > |---|---|
-> | v0.23.7 | 0.23.7 |
+> | v0.24.1 | 0.24.1 |
+> | v0.23.7 to v0.24.0 | 0.23.7 |
 > | v0.23.1 | 0.23.1 |
 > | v0.23.0 | 0.23.0 |
 > | v0.22.0, v0.22.1 | 0.22.0 |
