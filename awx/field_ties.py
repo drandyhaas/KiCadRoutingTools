@@ -160,8 +160,10 @@ def _pass(field, nets, pads, wayouts, within=None, outer=False):
         cu = {s.net_id for s in a.segments if not getattr(s, 'graphic', False)} | {v.net_id for v in a.vias}
         persist_protected_nets(pro_path_for_board(src), {names[i]: 'bus' for i in cu if names.get(i) and
                                                          names[i] not in want}, verbose=False)
+        # (sizes held to the board's own minimums: left to narrow to the fab's floor, a tie came out thinner than the
+        # board allows and the field's measure threw every tie out)
         argv = [sys.executable, '-X', 'utf8', os.path.join(PYR, 'route.py'), src, '--output', out,
-                '--nets', *sorted(want), '--no-bga-zone', '--no-stub-layer-swap',
+                '--nets', *sorted(want), '--no-bga-zone', '--no-stub-layer-swap', '--escalation', 'board',
                 '--grid-step', str(2 * R.grid), '--track-width', str(R.fan_track),
                 '--clearance-ceiling', str(R.clearance), '--via-size', str(R.via_size),
                 '--via-drill', str(R.via_drill), '--layers', *layers]

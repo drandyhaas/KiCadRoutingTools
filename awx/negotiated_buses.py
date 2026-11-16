@@ -577,6 +577,33 @@ def give_back(out, board, path, log=print):
     return give
 
 
+def protect_laid(board, out, log=print):
+    """The POURED nets the step laid copper of on `out` -- a plane ball's stub and via, a tie beneath a bus's part:
+    copper `board`, the board as it came, has not -- recorded protected in `out`'s project beside the bus nets. A
+    later step that rips such a net to try one of its taps again takes that copper with it, beneath the buses'
+    lanes, where no later step can lay it again. Returns their names"""
+    from kicad_parser import parse_kicad_pcb
+    from protected_nets import persist_protected_nets, pro_path_for_board, read_protected_nets
+    with contextlib.redirect_stdout(io.StringIO()):
+        a, b = parse_kicad_pcb(board), parse_kicad_pcb(out)
+    poured = {z.net_id for z in (b.zones or []) if z.net_id}
+    nm = lambda p, i: p.nets[i].name if i in p.nets else ''        # noqa: E731
+    key = lambda p, s: (nm(p, s.net_id), s.layer, round(s.start_x, 3), round(s.start_y, 3),   # noqa: E731
+                        round(s.end_x, 3), round(s.end_y, 3))
+    had = {key(a, s) for s in a.segments if not getattr(s, 'graphic', False)}
+    hadv = {(nm(a, v.net_id), round(v.x, 3), round(v.y, 3)) for v in a.vias}
+    laid = {nm(b, s.net_id) for s in b.segments if s.net_id in poured and not getattr(s, 'graphic', False)
+            and key(b, s) not in had} | \
+        {nm(b, v.net_id) for v in b.vias if v.net_id in poured
+         and (nm(b, v.net_id), round(v.x, 3), round(v.y, 3)) not in hadv}
+    pro = pro_path_for_board(out)
+    new = sorted(laid - set(read_protected_nets(pro)))
+    if new:
+        persist_protected_nets(pro, {n: 'bus' for n in new}, verbose=False)
+        log(f'  protected with the bus nets: {len(new)} poured net(s) the step laid copper of ({", ".join(new)[:160]})')
+    return sorted(laid)
+
+
 # the group's ends, as its buses' runs take them. The CUT round a ball array destination is the ends model's own --
 # its far face's middle -- and no variable of the group's model: left to the model to choose with the ends, a
 # two-layer bus's search ended a quarter dearer over six seeds (and a hand's far face is cut within 26 degrees of
@@ -821,6 +848,7 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
             given = give_back(out, board, os.path.join(work, 'conflicts.json'), log=log)
             if given:
                 n_conf = conflicts(out, bus_of, os.path.join(work, 'conflicts.json'), log=log)
+        protect_laid(board, out, log=log)
     else:
         with contextlib.redirect_stdout(io.StringIO()):
             copy_board(board, out)

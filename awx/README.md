@@ -1029,6 +1029,10 @@ buses one after another only.
    as they came, whose escapes keep only the pieces its lanes still clear.
    Every routed net is protected and the reservations are lifted, so a
    reserved net its bus did not hand on is left to the rest of the chain.
+   The poured nets the step laid copper of -- a plane ball's stub and via,
+   a tie beneath a part -- are protected with them (`protect_laid`): a
+   later step that rips such a net to try one of its taps again takes that
+   copper too, beneath the buses' lanes, where nothing lays it again.
    Each DRC violation between two buses' nets, or between a bus's net and
    another net, is named in `conflicts.json`. One between a bus's net and
    another net gives the other net back (`give_back`): the copper the step
@@ -1118,7 +1122,8 @@ group of one. The step:
    is planned. The chain ties a plane's pads last, and beneath a bus's parts
    that is too late: the lanes have the layers under the pad and no later
    step moves a bus net. The pass is the chain's own (`route.py` on the
-   poured nets) on a copy of the field, every fanned net protected and each
+   poured nets, its sizes held to the board's own minimums) on a copy of
+   the field, every fanned net protected and each
    lane's way out laid as far as the model reads an exit's front
    (`EXIT_REACH`), arrays' and row parts' alike. A tie is a stub on an outer
    layer and a via, inside its part's fan; of what the pass lays only such
