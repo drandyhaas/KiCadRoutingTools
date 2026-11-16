@@ -4860,7 +4860,8 @@ def _fold_legs_onto_middle(mid_segs, leg_segs, own_vias, net_ids):
     tail and the leg copper lying on it (the turn back) are not laid. Only
     the end's first `2 x reach` of middle may lie before the overlap (the
     middle's own end stub). Left alone: a tail that carries one of the net's
-    vias, and any fold that would leave the net's copper in more pieces.
+    vias (a via beside the join is the leg's own, and its link to the leg is
+    kept), and any fold that would leave the net's copper in more pieces.
 
     Returns (mid_segs, leg_segs, {net_id: mm of doubled copper removed})."""
     from dataclasses import replace as _rep
@@ -4946,7 +4947,16 @@ def _fold_legs_onto_middle(mid_segs, leg_segs, own_vias, net_ids):
 
             def _to_tail(px, py):
                 return min(_pt_seg_dist(px, py, a[0], a[1], b[0], b[1]) for a, b in tail)
-            if any(_to_tail(v.x, v.y) < (v.size or 0.0) / 2.0 for v in mine_v):
+
+            def _at_via(px, py):
+                return any(math.hypot(px - v.x, py - v.y) < 1e-6 for v in mine_v)
+            # A via the tail runs over is the tail's: leave it. A via whose
+            # nearest point on the tail is the join is beside the copper that
+            # stays (the leg's own via, its link landing where the overlap
+            # began), and the fold does not take its copper.
+            if any(_to_tail(v.x, v.y) < (v.size or 0.0) / 2.0
+                   and _to_tail(v.x, v.y) < math.hypot(v.x - jx, v.y - jy) - 1e-6
+                   for v in mine_v):
                 break                             # the tail carries a via: leave it
             # the leg: keep the part beyond the overlap, cut where it stops
             far_is_start = t0 >= t1
@@ -4965,7 +4975,9 @@ def _fold_legs_onto_middle(mid_segs, leg_segs, own_vias, net_ids):
                        if s is not l and not (
                            s.net_id == nid and s.layer == m.layer
                            and _to_tail(s.start_x, s.start_y) < reach
-                           and _to_tail(s.end_x, s.end_y) < reach)]
+                           and _to_tail(s.end_x, s.end_y) < reach
+                           and not _at_via(s.start_x, s.start_y)
+                           and not _at_via(s.end_x, s.end_y))]
             if math.hypot(cx - fx, cy - fy) > 1e-6:
                 new_leg.append(_rep(l, start_x=fx, start_y=fy, end_x=cx, end_y=cy))
             if math.hypot(cx - jx, cy - jy) > 1e-6:

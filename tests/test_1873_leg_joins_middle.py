@@ -14,12 +14,17 @@ the doubled stretch stops and joins them there. Checked:
   1. the issue's geometry: the middle loses its end stub and the doubled
      segment, the leg stops where the overlap began and jogs 0.05 mm onto
      the middle, one piece of copper, 0.85 mm folded;
+  1b. a leg that leaves its own via beside where the overlap begins (Z0_P
+     on the same route): the doubled stretch is folded and the via keeps its
+     link to the leg;
   2. what is left alone: a leg that reaches the end without running along
      the middle, one on another layer, a middle whose tail carries the net's
      via, and an overlap that starts further up the middle than its end stub;
-  3. the issue's route end to end: Z9 has no copper laid along itself, its
-     skew is read on copper counted once and is inside the tolerance, and
-     the other pairs' records are what they were.
+  3. the issue's route end to end: no Z* net has copper laid along itself,
+     Z0's skew is read on copper counted once, and the other pairs' records
+     are what they were. Since #1441 corrected the coupled middle's search,
+     Z9 no longer routes as a pair here and its doubled leg is gone; Z0_P's,
+     beside its via, is the fold this route exercises.
 """
 import json
 import os
@@ -91,6 +96,23 @@ def the_fold():
        "the copper is one chain from the terminal to the middle's far end")
 
 
+def via_beside_the_join():
+    print("1b. a leg from its own via beside where the overlap begins")
+    from diff_pair_routing import _fold_legs_onto_middle as fold
+    from kicad_parser import Via
+    # glasgow_revC /IO_Banks/Z0_P: the leg leaves its fanout via 0.125 mm
+    # from the middle and runs 0.025 mm beside it to the middle's end.
+    mid = [seg((87.1, 91.9), (87.1, 90.0172))]
+    lg = [seg((87.2, 91.175), (87.125, 91.25)), seg((87.125, 91.25), (87.125, 91.875)),
+          seg((87.125, 91.875), (87.1, 91.9))]
+    via = Via(x=87.2, y=91.175, size=0.4, drill=0.2, layers=['F.Cu', 'B.Cu'], net_id=7)
+    m, l, got = fold(mid, lg, [via], (7,))
+    ok(abs(got.get(7, 0) - 0.65) < 1e-6, f"the doubled 0.65 mm is folded: {got}")
+    ok(pts(m) == [((87.1, 91.25), (87.1, 90.0172))], f"the middle starts at the join: {pts(m)}")
+    ok(pts(l) == [((87.125, 91.25), (87.1, 91.25)), ((87.2, 91.175), (87.125, 91.25))],
+       f"the via keeps its link and a jog joins it to the middle: {pts(l)}")
+
+
 def left_alone():
     print("2. what is left alone")
     from diff_pair_routing import _fold_legs_onto_middle as fold
@@ -125,25 +147,30 @@ def the_route(td):
     with open(evidence(summary, 'the summary'), encoding='utf-8') as fh:
         doc = json.load(fh)
     recs = {x['pair']: x for x in doc.get('intra_pair_matching') or []}
-    z9 = recs.get('/IO_Banks/Z9') or {}
-    ok('leg fold (#1873)' in log and '0.850 mm' in log, "the step says where it folded a leg")
-    ok('Self-overlap:' not in log and not z9.get('self_overlap_mm'),
+    ok('leg fold (#1873)' in log and 'net 114 joins its coupled middle 0.650 mm' in log,
+       "the step says where it folded a leg (Z0_P, off its own via)")
+    ok('Self-overlap:' not in log and not any(x.get('self_overlap_mm') for x in recs.values()),
        "no pair has copper laid along itself")
-    ok(z9.get('status') == 'matched' and 0.01 < (z9.get('delta_mm') or 0) <= 0.127,
-       f"Z9 is matched on copper counted once: {z9.get('status')} {z9.get('delta_mm')}")
-    want = {'/IO_Banks/Z0': ('unmatched', 1.4777), '/IO_Banks/Z5': ('matched', 0.0121),
-            '/IO_Banks/Z6': ('unmatched', 2.9049), '/IO_Banks/Z8': ('unmatched', 4.8205)}
+    z0 = recs.get('/IO_Banks/Z0') or {}
+    ok(z0.get('status') == 'unmatched' and abs((z0.get('delta_mm') or 0) - 0.1431) < 1e-4,
+       f"Z0's skew is read on copper counted once (1.31 mm with the stretch doubled): "
+       f"{z0.get('status')} {z0.get('delta_mm')}")
+    want = {'/IO_Banks/Z1': ('matched', 0.0006), '/IO_Banks/Z3': ('within-tolerance', 0.0155),
+            '/IO_Banks/Z6': ('matched', 0.0006), '/IO_Banks/Z8': ('unmatched', 0.1362)}
     got = {k: (recs.get(k, {}).get('status'), recs.get(k, {}).get('delta_mm')) for k in want}
     ok(got == want, f"the other pairs' records are what they were: {got}")
     from kicad_parser import parse_kicad_pcb
     from net_queries import net_self_overlap
     pcb = parse_kicad_pcb(evidence(out, 'the routed board'))
-    nid = next(n.net_id for n in pcb.nets.values() if n.name == '/IO_Banks/Z9_N')
-    ok(net_self_overlap(pcb, nid)[0] == 0.0, "and the shipped board's Z9_N reads none")
+    laid = {n.name: net_self_overlap(pcb, n.net_id)[0] for n in pcb.nets.values()
+            if n.name.startswith('/IO_Banks/Z')}
+    ok(laid and not any(laid.values()),
+       f"and no Z* net on the shipped board reads any: {[k for k, v in laid.items() if v]}")
 
 
 def main():
     the_fold()
+    via_beside_the_join()
     left_alone()
     with tempfile.TemporaryDirectory() as td:
         the_route(td)
