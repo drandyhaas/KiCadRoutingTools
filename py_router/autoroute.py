@@ -93,6 +93,7 @@ from __future__ import annotations
 KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import math
@@ -124,6 +125,11 @@ PLANE_LAYER_COST = -1.0      # inner planes stay solid; a positive price lets si
 PLANE_FALLBACK_COST = 3.0    # a later pass's price on a solid plane, the route step's in the plan skill
 ROUTE_PASSES = 3             # the first pass plus up to two on its result
 EFFORT_FACTOR = 2.0          # --effort-factor's default
+LADDER_JOBS = 3              # rungs of one fanout ladder run side by side, at most
+LADDER_CHILD_GB = 2.0        # memory allowed for per rung when holding that count to the machine
+#: The count itself, for a run that wants another: 1 runs a ladder's rungs
+#: one after another. The board is the same at every count.
+LADDER_JOBS_ENV = 'KRT_AUTOROUTE_JOBS'
 
 
 def _num(x):
@@ -682,6 +688,16 @@ class ChainEvents:
     def decisions(self):            # AUTOROUTE_DECISION payloads, in order
         return self.__dict__.setdefault('_decisions', [])
 
+    def run_each(self, kind, calls, jobs=1, done=None):
+        """What `run` returns for each of CALLS -- (args, tag, parent) -- in
+        order, each run when the caller asks for it, up to the first that
+        DONE(what `run` returned) names the last."""
+        for args, tag, parent in calls:
+            result = self.run(kind, args, tag, parent=parent)
+            yield result
+            if done and done(result):
+                return
+
     def skip(self, tag, reason):
         """A planned step that will not run, and why (emitted by main)."""
         self.skipped.setdefault(tag, reason)
@@ -821,41 +837,140 @@ class Chain(ChainEvents):
         not list belongs to (a fanout rung, a re-fan)."""
         self.end_step()
         self.n += 1
-        out = os.path.join(self.work, f'step{self.n:02d}_{tag}.kicad_pcb')
+        st = self._prepare(kind, args, tag, parent, self.n)
+        self._announce(st)
+        self._spawn(st)
+        self._read(st, st['proc'].wait())
+        return self._record(st, hold)
+
+    def run_each(self, kind, calls, jobs=1, done=None):
+        """What `run` returns for each of CALLS -- (args, tag, parent) -- in
+        order, all from the current board, as if each were run when the caller
+        asks for it: the same step numbers, files, events and lines.
+
+        With JOBS above 1 and more than one call (#1942), up to JOBS of them
+        run side by side ahead of the caller, so a step's `running` event may
+        come after its process started; `seconds` stays the process's own.
+        DONE(what `run` returns) tells the last step the caller reads: the
+        steps after it are not started, or are stopped, and are not given. A
+        caller that stops reading leaves nothing of the steps it did not
+        read: their processes are ended and reaped, their files removed,
+        their numbers free for the next step."""
+        if jobs <= 1 or len(calls) <= 1:
+            yield from ChainEvents.run_each(self, kind, calls, done=done)
+            return
+        self.end_step()
+        steps = [self._prepare(kind, args, tag, parent, self.n + j + 1)
+                 for j, (args, tag, parent) in enumerate(calls)]
+        last = len(steps)               # steps[last:] will not be read
+        given = 0
+        try:
+            for st in steps:
+                if given >= last:
+                    break
+                self.n = st['n']
+                self._announce(st)
+                while 'rc' not in st:
+                    live = 0
+                    for j, s in enumerate(steps[:last]):
+                        if 'proc' in s and 'rc' not in s:
+                            rc = s['proc'].poll()
+                            if rc is None:
+                                live += 1
+                                continue
+                            self._read(s, rc)
+                            if done and done(s['result']):
+                                last = min(last, j + 1)
+                    for s in steps[last:]:
+                        self._stop(s)
+                    for s in steps[:last]:
+                        if 'proc' not in s and live < jobs:
+                            self._spawn(s)
+                            live += 1
+                    if 'rc' not in st:
+                        time.sleep(0.02)
+                given += 1
+                yield self._record(st)
+        finally:
+            for s in steps[given:]:
+                self._stop(s)
+                self._remove(s)
+
+    def _prepare(self, kind, args, tag, parent, n):
+        """Step N of tool KIND from the current board, not yet started."""
+        out = os.path.join(self.work, f'step{n:02d}_{tag}.kicad_pcb')
         argv = [sys.executable, '-u', '-X', 'utf8', TOOLS[kind]] + \
             [a.replace('{IN}', self.cur).replace('{OUT}', out) for a in args]
         log = out[:-len('.kicad_pcb')] + '.log'
-        ev = {'n': self.n, 'tag': tag, 'tool': kind, 'parent': parent,
+        ev = {'n': n, 'tag': tag, 'tool': kind, 'parent': parent,
               'cmd': [os.path.basename(TOOLS[kind])] + argv[5:], 'log': log,
               'board': out, 'input': self.cur}
-        self.started.add(tag)
-        emit('AUTOROUTE_STEP', dict(ev, state='running', t=round(time.time(), 3)))
         if tag in _fail_steps():
             argv = [sys.executable, '-c', 'import sys; print("' + FAIL_STEP_MESSAGE
                     + '", file=sys.stderr); sys.exit(3)']
-        t0 = time.time()
-        with open(log, 'w') as fh:
-            rc = subprocess.run(argv, cwd=self.work, stdout=fh,
-                                stderr=subprocess.STDOUT, env=_child_env()).returncode
-        seconds = round(time.time() - t0, 1)
-        text = open(log, errors='replace').read()
+        return {'n': n, 'kind': kind, 'tag': tag, 'out': out, 'log': log,
+                'argv': argv, 'ev': ev}
+
+    def _announce(self, st):
+        """The step's `running` event."""
+        self.started.add(st['tag'])
+        emit('AUTOROUTE_STEP', dict(st['ev'], state='running', t=round(time.time(), 3)))
+
+    def _spawn(self, st):
+        st['t0'] = time.time()
+        with open(st['log'], 'w') as fh:
+            st['proc'] = subprocess.Popen(st['argv'], cwd=self.work, stdout=fh,
+                                          stderr=subprocess.STDOUT, env=_child_env())
+
+    @staticmethod
+    def _stop(st):
+        """End a started step nobody will read, and reap it."""
+        if 'proc' in st and st['proc'].poll() is None:
+            st['proc'].kill()
+            st['proc'].wait()
+
+    def _remove(self, st):
+        """Remove every file a step nobody read left: its board, the board's
+        siblings and its log."""
+        stem = os.path.basename(st['out'])[:-len('kicad_pcb')]
+        for name in os.listdir(self.work):
+            if name.startswith(stem):
+                try:
+                    os.remove(os.path.join(self.work, name))
+                except OSError:
+                    pass
+
+    def _read(self, st, rc):
+        """Read an ended step: its exit code, its log's summaries, and what
+        `run` returns for it."""
+        st['rc'] = rc
+        st['seconds'] = round(time.time() - st['t0'], 1)
+        st['text'] = text = open(st['log'], errors='replace').read()
         summary = summary_min = None
-        self.last_iterations = None
+        st['iterations'] = None
         for m in re.finditer(r'^JSON_SUMMARY: (\{.*\})$', text, re.M):
             try:
                 summary = json.loads(m.group(1))
             except ValueError:
                 continue
-            self.last_iterations = ((self.last_iterations or 0)
-                                    + int(summary.get('total_iterations') or 0))
+            st['iterations'] = ((st['iterations'] or 0)
+                                + int(summary.get('total_iterations') or 0))
         m = re.search(r'^JSON_SUMMARY_MIN: (\{.*\})$', text, re.M)
         if m:
             try:
                 summary_min = json.loads(m.group(1))
             except ValueError:
                 pass
-        ok = rc == 0 and os.path.exists(out)
-        compact, result = step_summary(kind, text, summary, summary_min)
+        st['ok'] = rc == 0 and os.path.exists(st['out'])
+        st['result'] = (st['out'] if st['ok'] else None), summary, summary_min
+
+    def _record(self, st, hold=False):
+        """Record an ended step in the chain and emit its ending (held when
+        HOLD and it produced a board); returns what `run` returns."""
+        kind, tag, rc, ok, ev = st['kind'], st['tag'], st['rc'], st['ok'], st['ev']
+        _out, summary, summary_min = st['result']
+        self.last_iterations = st['iterations']
+        compact, result = step_summary(kind, st['text'], summary, summary_min)
         if not ok:
             # A failed step's numbers describe no board the chain keeps.
             compact = {}
@@ -863,22 +978,22 @@ class Chain(ChainEvents):
                       + "; the chain continues from the board before it")
         self.steps.append({'tool': kind, 'tag': tag, 'rc': rc, 'ok': ok,
                            'iterations': self.last_iterations,
-                           'argv': argv[4:], 'log': os.path.basename(log),
-                           'seconds': seconds, 'summary': compact,
+                           'argv': st['argv'][4:], 'log': os.path.basename(st['log']),
+                           'seconds': st['seconds'], 'summary': compact,
                            'result': result})
-        print(f"  [{self.n:02d}] {tag}: rc={rc}{'' if ok else ' (skipped)'}",
+        print(f"  [{st['n']:02d}] {tag}: rc={rc}{'' if ok else ' (skipped)'}",
               flush=True)
-        end = dict(ev, state='done' if ok else 'failed', rc=rc, seconds=seconds,
+        end = dict(ev, state='done' if ok else 'failed', rc=rc, seconds=st['seconds'],
                    summary=compact, result=result, iterations=self.last_iterations,
                    t=round(time.time(), 3))
         if not ok:
             end['board'] = None
-            end['error_tail'] = _tail(text)
+            end['error_tail'] = _tail(st['text'])
         if hold and ok:
             self.held = dict(end, _index=len(self.steps) - 1)
         else:
             emit('AUTOROUTE_STEP', end)
-        return (out if ok else None), summary, summary_min
+        return st['result']
 
     def accept(self, out):
         if out:
@@ -1083,6 +1198,67 @@ def rung_grazes(summary):
     return int(g.get('total') or 0) - int(g.get('deferred_to_decap') or 0)
 
 
+def _physical_memory():
+    """The machine's memory in bytes, or None where it cannot be asked."""
+    try:
+        return os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+    except (AttributeError, ValueError, OSError):
+        pass
+    try:
+        import ctypes
+
+        class _Status(ctypes.Structure):
+            _fields_ = [('length', ctypes.c_ulong), ('load', ctypes.c_ulong)] + [
+                (k, ctypes.c_ulonglong) for k in ('total', 'avail', 'page_total',
+                                                  'page_avail', 'virt_total',
+                                                  'virt_avail', 'ext')]
+        status = _Status()
+        status.length = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.total)
+    except Exception:                                          # noqa: BLE001
+        pass
+    return None
+
+
+def _jobs_env():
+    """KRT_AUTOROUTE_JOBS as a count, None when unset; ValueError when it is
+    not a whole number of at least 1."""
+    text = os.environ.get(LADDER_JOBS_ENV, '').strip()
+    if not text:
+        return None
+    n = int(text)
+    if n < 1:
+        raise ValueError(text)
+    return n
+
+
+def ladder_jobs():
+    """How many rungs of one fanout ladder run side by side: the count in
+    KRT_AUTOROUTE_JOBS when it is set (1 runs them one after another), else
+    LADDER_JOBS, held to the machine's cores and to its memory at
+    LADDER_CHILD_GB a rung."""
+    try:
+        asked = _jobs_env()
+    except ValueError:
+        asked = None                    # main refuses it; a caller gets the default
+    if asked is not None:
+        return asked
+    jobs = min(LADDER_JOBS, os.cpu_count() or 1)
+    memory = _physical_memory()
+    if memory is not None:
+        jobs = min(jobs, int(memory / (LADDER_CHILD_GB * 2 ** 30)))
+    return max(1, jobs)
+
+
+def _rung_clean(result):
+    """Whether a fanout rung -- what `Chain.run` returned for it -- ends its
+    ladder: it produced a board, escaped every ball and left no graze."""
+    out, s, _ = result
+    return bool(out and s is not None and int(s.get('failed', 0) or 0) == 0
+                and rung_grazes(s) == 0)
+
+
 def fan_ladder(ch, fan, rungs=None, hold=(), tag=''):
     """Run FAN's fanout ladder (or the RUNGS of it named) until a rung escapes
     every ball and leaves no graze; returns the rung that escaped most, then
@@ -1091,21 +1267,26 @@ def fan_ladder(ch, fan, rungs=None, hold=(), tag=''):
     the parts the fanout keeps off as if locked (bga_fanout --immovable-refs)."""
     ref = fan['ref']
     best = None
-    for i in (range(len(fan['ladder'])) if rungs is None else rungs):
-        args = fan['ladder'][i] + (['--immovable-refs', *hold] if hold else [])
-        step = f'fanout_{ref}' + (f'_r{i}' if i else '') + tag
-        out, s, _ = ch.run('bga' if fan['tool'] == 'bga' else 'qfn', args, step,
-                           parent='refan' if tag else (f'fanout_{ref}' if i else None))
-        if not out:
-            continue
-        escaped = int((s or {}).get('escaped', 0))
-        failed = int((s or {}).get('failed', 0) or 0)
-        grazes = rung_grazes(s)
-        if best is None or (escaped, -grazes) > (best['escaped'], -best['grazes']):
-            best = {'escaped': escaped, 'failed': failed, 'grazes': grazes,
-                    'out': out, 'rung': i}
-        if s is not None and failed == 0 and grazes == 0:
-            break
+    order = list(range(len(fan['ladder'])) if rungs is None else rungs)
+    calls = [(fan['ladder'][i] + (['--immovable-refs', *hold] if hold else []),
+              f'fanout_{ref}' + (f'_r{i}' if i else '') + tag,
+              'refan' if tag else (f'fanout_{ref}' if i else None)) for i in order]
+    # The rungs are independent runs from one board, so they are started
+    # side by side (#1942); they are read here in ladder order, as before.
+    runs = ch.run_each('bga' if fan['tool'] == 'bga' else 'qfn', calls,
+                       jobs=ladder_jobs(), done=_rung_clean)
+    with contextlib.closing(runs):
+        for i, (out, s, _) in zip(order, runs):
+            if not out:
+                continue
+            escaped = int((s or {}).get('escaped', 0))
+            failed = int((s or {}).get('failed', 0) or 0)
+            grazes = rung_grazes(s)
+            if best is None or (escaped, -grazes) > (best['escaped'], -best['grazes']):
+                best = {'escaped': escaped, 'failed': failed, 'grazes': grazes,
+                        'out': out, 'rung': i}
+            if _rung_clean((out, s, _)):
+                break
     return best
 
 
@@ -1416,6 +1597,11 @@ def main():
                          '(the skill\'s route step uses 3.0), trading reference '
                          'integrity for routability')
     args = ap.parse_args()
+    try:
+        _jobs_env()
+    except ValueError:
+        ap.error(f"{LADDER_JOBS_ENV} must be a whole number of at least 1, "
+                 f"not {os.environ[LADDER_JOBS_ENV]!r}")
 
     t_start = time.time()
     a = analyze(args.input_file, finish=args.finish, plane_cost=args.plane_layer_cost)
