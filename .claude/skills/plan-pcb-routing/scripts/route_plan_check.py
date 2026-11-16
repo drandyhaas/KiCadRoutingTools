@@ -60,6 +60,7 @@ every run. An unchecked rule that says so is honest; one that is silently
 absent is the failure this whole issue is about.
 """
 import argparse
+import fnmatch
 import os
 import re
 import sys
@@ -207,6 +208,60 @@ class Plan:
                     and any('out' in placeholders(t) for t in a)]
         return [a for a in self.argvs if not is_check(a) and boards_in(a)
                 and tool_of(a)]
+
+
+def _plan_sizes(p):
+    """{route_bus size keyword: value} from the plan's last route.py step -- the chain's sizes, at which the bus step
+    decides its buses (a row part is a bus where no track passes between its pads at them)"""
+    want = {'--clearance': 'clearance', '--clearance-ceiling': 'clearance_ceiling', '--track-width': 'track_width',
+            '--via-size': 'via_size', '--via-drill': 'via_drill'}
+    got = {}
+    for argv in p.by_tool('route.py')[-1:]:
+        for i, a in enumerate(argv[:-1]):
+            if a in want:
+                try:
+                    got[want[a]] = float(argv[i + 1])
+                except ValueError:
+                    pass
+    return got
+
+
+def r_buses_routed_by_the_bus_step(p):
+    """SKILL.md Step 1a -- a board with a bus is routed with the topo bus step: where route_bus.bus_plan (at the plan's
+    route.py sizes, the board's own where it names none) finds one the board does not carry routed already, the plan
+    runs `awx/route_bus.py` -- not its `--find` form -- with no `--bus` (the step routes what it finds) or with a
+    `--bus` for every such bus."""
+    import contextlib
+    import io
+    awx = os.path.join(ROOT, 'awx')
+    if awx not in sys.path:
+        sys.path.insert(0, awx)
+    import route_bus as rb
+    with contextlib.redirect_stdout(io.StringIO()):
+        rules = rb.resolve_rules(p.board_path, log=lambda *a, **k: None, **_plan_sizes(p))
+        plan = rb.bus_plan(p.board, rules)
+        with rb.step_policy():
+            import make_bench as mb
+        # (a bus the board already carries routed -- most of its nets with copper -- is no bus for the step: it would
+        # strip that copper and lay the bus again)
+        wired = {s_.net_id for s_ in p.board.segments}
+        ids = {n_.name: i_ for i_, n_ in p.board.nets.items() if n_.name}
+
+        def unrouted(b):
+            names = {n for d in b['dest'].split('+') for n in mb.pair_nets(p.board, b['src'], d)}
+            return 2 * sum(1 for n in names if ids.get(n) in wired) < len(names)
+        want = [(b['src'], b['dest']) for b in plan['buses'] if unrouted(b)]
+    if not want:
+        return []
+    steps = [a for a in p.by_tool('route_bus.py') if '--find' not in a]
+    name = ', '.join(f'{s}:{d}' for s, d in want)
+    if not steps:
+        return [f'the board has bus(es) the bus step routes ({name}) but the plan runs no awx/route_bus.py']
+    if any('--bus' not in a for a in steps):
+        return []
+    named = {tuple(a[i + 1].split(':', 1)) for a in steps for i, v in enumerate(a[:-1]) if v == '--bus'}
+    missing = [f'{s}:{d}' for s, d in want if (s, d) not in named]
+    return [f'route_bus.py --bus leaves out bus(es) the step finds: {", ".join(missing)}'] if missing else []
 
 
 # ----------------------------------------------------------------- the rules
@@ -946,6 +1001,8 @@ RULES = (
      r_fanout_layers_exclude_planes),
     ('R18', 'every board a step reads is written before it', 'Step 9',
      r_every_board_read_is_written_first),
+    ('R19', 'a board with a bus runs the bus step [needs --board]', 'Step 1a',
+     r_buses_routed_by_the_bus_step),
 )
 
 

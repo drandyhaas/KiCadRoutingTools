@@ -246,6 +246,23 @@ for ref, fp in pcb.footprints.items():
         grid_cols, grid_rows = len(xs), len(ys)
 ```
 
+### Buses: ask the bus step (every board with a ball array)
+
+A board with a ball array (`route_bus.is_array`: a BGA, an LGA with interior
+balls) may carry buses the topo bus step routes whole (Step 1a). It decides
+which itself, at the chain's sizes -- run its `--find` (read-only, seconds) with
+the sizes Step 4 settles, and plan Step 1a when it lists a bus:
+
+```bash
+python3 -X utf8 awx/route_bus.py board.kicad_pcb --find \
+    --clearance-ceiling 0.1 --track-width 0.1 --via-size 0.35
+```
+
+Each line names a bus (source, destination or group, its nets, why it is one)
+or a part left to the router with why; the last line is the `--bus` list. Put
+the buses in the plan's report. The plan checker refuses a plan that runs no
+bus step on a board where `--find` lists one (R19, with `--board`).
+
 ### Does this part actually BENEFIT from fanout? (check before planning it)
 
 A name/pad-count match is a candidate, not a decision. Fanout (escape routing)
@@ -1087,9 +1104,9 @@ If DDR signals detected:
   under a prefix the board proves is DRAM (#1247). Preview it with
   `classify_ddr_nets` (snippet in the DDR section below). Any DDR net it
   lists as not grouped needs its own `--length-match-group` patterns
-- If the DDR runs between two ball arrays (a SoC and its memory), plan the
-  topo bus step for it (Step 1a, experimental) -- `awx/route_bus.py --find`
-  names the bus.
+- A DDR between two ball arrays (a SoC and its memory) is a bus for the topo
+  bus step (Step 1a, experimental) -- `awx/route_bus.py --find` (Step 3) lists
+  it with the board's other buses.
 
 Report to user:
 - List of detected differential pairs (or "none found")
@@ -1619,14 +1636,15 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    +3V3 pour ONE intact island, GND weld copper cut to a third, connectivity
    net-better, DRC clean. With planes poured signals-first style instead, the
    pour under a BGA arrives pre-shredded and every drop via needs repair welds.
-1a. **Buses between two ball arrays — the topo bus step (EXPERIMENTAL)** —
-   `awx/route_bus.py`, on the poured board, before any other fanout: each
-   array-to-array bus (DDR, LVDS, a QFN PHY's bus off a BGA) is planned and
-   laid whole -- its fanout at both arrays, the order and layers of every
-   lane, the vias -- and handed on protected. It is still experimental (the
-   `awx` research tree): **for now, use it on every such bus**, and check what
-   it hands on (Step 1a). The other arrays' fanouts follow it, round its
-   protected nets.
+1a. **Buses — the topo bus step (EXPERIMENTAL)** — `awx/route_bus.py`, on the
+   poured board, before any other fanout, on EVERY board with a ball array:
+   the step finds its buses itself (a ball array to another ball array -- a
+   DDR, an LVDS bus -- or to a fine-pitch row part: a QFN PHY, an FFC; `--find`
+   lists them, Step 3) and plans and lays each whole -- its fanout at both
+   ends, the order and layers of every lane, the vias -- handing it on
+   protected. It is still experimental (the `awx` research tree): check what it
+   hands on (Step 1a). The other arrays' fanouts follow it, round its protected
+   nets. A board where `--find` lists no bus skips it.
 1b. **Fanout** (if needed) - Escape routing on the poured board. Exclude the
    plane nets (`"*" "!GND" "!VCC"`) — that exclusion marks them for automatic
    **plane-drop vias** (#424), and because the pour already exists the drop
@@ -1814,105 +1832,77 @@ route step's pour-launch and in-run finalize (everything else). Grade plane
 connectivity after the Step 2 route.
 ```
 
-### Step 1a: Route the array-to-array buses (the topo bus step — EXPERIMENTAL)
+### Step 1a: Route the buses (the topo bus step — EXPERIMENTAL)
 
 **Experimental.** `awx/route_bus.py` is the topological bus router of the `awx`
-research tree: it plans a bus between two parts WHOLE -- the order of every
-lane, which layer each runs on, where each changes layer, both arrays' fanout
--- before laying any copper, instead of routing the nets one at a time. It is
-still being developed and its problems are being fixed so it always beats the
-A* router on a bus. **For now, advise it for every bus between two ball arrays
-(or a ball array and a QFN/QFP), and say in the plan that it is experimental.**
-Measured, each the same chain with and without it (KiCad's count of open nets
-on the finished board): zynq_ad9364 with four buses 10 against 30;
-sdi_mipi_conv 29 against 37; h616_lpddr4 2 to 4 against 5, with every LPDDR4
-net connected and 0 skew violations against 48. One run each -- per-board
-spread is 2 to 3 nets.
+research tree: it plans a bus WHOLE -- the order of every lane, which layer each
+runs on, where each changes layer, both ends' fanout -- before laying any copper,
+instead of routing the nets one at a time. It is still being developed and its
+problems are being fixed so it always beats the A* router on a bus. **Run it on
+every board that has a bus (it decides which), and say in the plan that it is
+experimental.** Measured, each the same chain with and without it (KiCad's count
+of open nets on the finished board): zynq_ad9364 with four buses 10 against 30;
+sdi_mipi_conv 29 against 37; h616_lpddr4 2 to 4 against 5, with every LPDDR4 net
+connected and 0 skew violations against 48. One run each -- per-board spread is 2
+to 3 nets.
 
-Find the buses first (read-only):
+**The step finds the buses itself** (`route_bus.bus_plan`), at the chain's sizes.
+See what it will route first (read-only, a second or two):
 
 ```bash
-python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb --find
+python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb --find \
+    --clearance-ceiling 0.1 --track-width 0.1 --via-size 0.35
 ```
 
-Then ONE call routes them all, one `--bus` each, largest first (a DDR before
-an LVDS bus off the same array), on the poured board:
+It prints each bus, in the order it routes them, with why it is one, the parts it
+leaves to the router with why, and the `--bus` line that names the buses. A bus is
+the nets between a BALL ARRAY and another part:
+
+- another ball array sharing 8 nets or more (a memory bus first, then the larger);
+- a ROW PART (a QFN, a fine-pitch connector or FFC) no track passes between the
+  pads of at the chain's sizes -- its lanes must arrive in its pins' order. The row
+  parts off one face of the source are ONE GROUP BUS (`U1:U4+U3`) when one of them
+  has 8 nets or more, each other 4 or more. A coarse-pitch connector (a track
+  passes between its pins) and a two-sided edge connector (fingers on both faces)
+  are the router's.
+
+Each source's buses are one GROUP: every bus's ends chosen in one model with the
+arrays' fanout -- every ball of the source and of each ball-array destination
+served -- and every bus routed on that field at the same time, their solves
+coupled. The lanes run on EVERY copper layer, the planes' included (a run on a
+plane's layer is priced, so lanes take one only where it saves a via).
+
+Then ONE call routes them, on the poured board -- no `--bus`: the step routes
+exactly what `--find` printed:
 
 ```bash
 python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
     --rounds 2 --inproc \
-    --bus U1:U2:whole-array:F.Cu,B.Cu,In1.Cu,In2.Cu \
     --clearance-ceiling 0.1 --track-width 0.1 --fanout-track-width 0.0975 \
-    --via-size 0.35 --via-drill 0.15 \
+    --via-size 0.35 --via-drill 0.15 --hole-to-hole-clearance 0.25 \
     2>&1 | tee /tmp/step1a_bus.txt
 ```
 
-- **LAYERS: name EVERY copper layer**, the planes' layers included. Unnamed,
-  the step routes on F.Cu and B.Cu alone (its `ROUTE_LAYERS` default), and
-  never narrow it by hand because the human routed the bus on two layers: on
-  h616_lpddr4 the LPDDR4 bus on F/B left lanes open in a corridor two 0402
-  pull-ups block on F.Cu, which the inner layers relieve. The step prices a
-  run on a plane's layer (a via per run), so lanes take a pour's layer only
-  where it saves one.
-- **MODE:** `whole-array` for a bus between two arrays (the default choice:
-  each round plans the arrays' other nets and plane drops round the bus, so
-  the later fanouts leave those arrays as they are -- do NOT run
-  `bga_fanout.py` on them). `escape` dog-bones both arrays the human's way:
-  use it for a second bus on an array an earlier bus already fanned out (an
-  LVDS bus after a DDR bus); on a memory bus by itself it handed on 23 of 45
-  nets against whole-array's 45. `plain` for a bus to a row part (a QFN), and
-  for a **group bus**, one source with several ends, `--bus U1:U4+U3:plain:...`
-  (two buses that interleave on one face, routed as one bus in one frame).
-- **Buses off one array are routed IN TURN first, NEGOTIATED where they
-  meet:** each bus in the order given on the board the one before handed on;
-  a bus after the first that leaves nets open is routed again alone, and the
-  nets it closes alone (its way out taken by the buses before it) start the
-  negotiation -- the array's escapes planned once for all of them (the shared
-  field, each bus's teeth from its run in turn), every bus at the same time,
-  each in its own frame, their plans one coupled solve, the boards merged --
-  and the step keeps whichever leaves fewer nets open (`route_bus: the buses
-  off U1 in turn: ... -- the N buses negotiated`). A conflict between two
-  buses is named in `OUT.bus/conflicts.json`; one between a bus's net and
-  another net gives the other net back to `route.py`. The first may be
-  `whole-array` or `plain`, the rest `plain` or `escape`. An escape bus first,
-  a whole-array bus after the first or to several parts, different LAYERS --
-  and `--sequential` -- route them SEQUENTIALLY only, and the log says why
-  (`route_bus: the N buses off U1 routed sequentially, not negotiated -- ...`).
-- **Every ball of a bus array must leave the step served -- the rule that
-  decides the rest of the chain.** A ball is served when it has an escape
-  (a dog-bone via or stub), is dropped to its plane, or is strapped. `route.py`
-  cannot reach a ball that has none: the pad sits inside the pad field with no
-  stub, no rip or retry authority applies, and the net fails as "boxed in by
-  static obstacles". A fanout run AFTER the bus step cannot repair it either:
-  the bus's lanes and dog-bones already fill the field (on one board,
-  fanning the shared array out after the bus step left MORE nets open, 43
-  against 35). So the fanout of a bus's arrays is the bus step's own, planned
-  with the bus (on one board every other ball of the source was served: 98
-  escaped, 12 strapped, 5 dog-boned alone of 115), and the parts no bus
-  touches are fanned out whole with `bga_fanout.py` before `route.py` (Step
-  1b), never left for the router.
-  - The step's log says what it served: `whole-array field of U1: FEASIBLE --
-    bus a/b, others N escaped + M strapped + K dog-boned alone of T, plane P
-    dropped`. Read it, then check the BOARD it hands on: count each bus
-    array's signal balls that carry no stub, via, plane link or strap. Every
-    ball counted is a net `route.py` will leave open.
-  - `escape` on a shared array does plan the array's other balls with the bus,
-    but on one board (a DDR3 bus `whole-array`, then an SDI bus `escape` off
-    the same array) the board it handed on still had 25 bare balls on that
-    array; the same two buses both `whole-array` left none. After `escape` or
-    `plain`, make the count above before going on, and fan the bare balls out
-    only if the bus left room.
-  - Both-`whole-array` is not free: on that board the fanout audit then
-    refused every SDI lane (their balls sit on the array's far side from the
-    SDI part), so the bus laid 2 lanes and `route.py` finished the rest -- 27
-    nets open against 29 with the escape bus and 37 with no bus step (one run
-    each).
-- **Sizes:** the chain's own (Step 4's design rules), with
-  `--clearance-ceiling` as everywhere in a chain; `--fanout-track-width` the
-  escapes' track under the arrays.
-- **Time:** minutes to an hour a bus on four layers (h616_lpddr4's 45-net
-  LPDDR4: 47 minutes; the first 40 nets of the zynq's LVDS bus: 3). It is the slowest step of
-  the chain; it uses four threads at most.
+- **Sizes:** the chain's own (Step 4's design rules), with `--clearance-ceiling`
+  as everywhere in a chain, `--fanout-track-width` the escapes' track under the
+  arrays, and the SAME `--hole-to-hole-clearance` the later steps pass: a bus
+  routed at a looser drill floor than the chain grades at ships drill-to-drill
+  violations the rest of the chain cannot fix.
+- `--bus SRC:DEST` (repeatable) names buses instead -- to route fewer than the
+  step finds, never to add a mode or layers (there are none to add).
+- **Time:** minutes to an hour a group (h616_lpddr4's 45-net LPDDR4: 15 minutes);
+  a group of four buses off one large array can take two. It is the slowest step
+  of the chain; it uses four threads a bus at most.
+
+**Every ball of a bus array leaves the step served** -- escaped, dropped to its
+plane, or strapped: the group's model plans every ball of the source and of each
+ball-array destination with the buses, so `route.py` is never left a bare ball
+inside a field the lanes fill (it cannot reach one: "boxed in by static
+obstacles", no rip or retry authority applies). Do NOT run `bga_fanout.py` on a
+bus's arrays after the step; the parts no bus touches are fanned out whole with
+`bga_fanout.py` before `route.py` (Step 1b), as always. The log's group lines say
+what the model served (`group ends: [OPTIMAL] ... 0 walled balls, 0 plane balls
+fanned out`); check the BOARD it hands on all the same (`walled=` below).
 
 **What it hands on, and how to check it.** The last line of its log is the
 grade -- `BUS U1->U2 K=.. lanes=../.. vias=.. ... | on the board: ...
@@ -1923,8 +1913,8 @@ the board as it came, when the rest of the chain routes the whole bus with A*.
 Carry on from OUT either way -- it is not a chain failure, so the plan file's
 `set -e` (Step 9) does not stop there. Read which it was from the summary's
 `exit` and the log's last line. That `exit` is the WORST bus's status (the
-max over every bus the step routed, each on the board the one before handed
-on): 0 every bus handed on routed; 1 one or more came through as they came,
+max over every bus the step routed, each source's group on the board the group
+before handed on): 0 every bus handed on routed; 1 one or more came through as they came,
 while OUT may still carry the others routed (protected and locked); 2 the
 step's own check refused a bus (the turn back failed, its pull pads were not
 found again) and handed it on as it came. So read each bus's own status in
@@ -2033,10 +2023,11 @@ instead.
 **Known limits (it is experimental):** a bus's pairs run at the step's own
 pitch, not the net class's diff-pair gap (DDR 0.093/0.093 on h616_lpddr4,
 routed at 0.24 mm centre to centre), so state it where impedance matters; a
-bus ball on the SOURCE's far face (the side away from the destination) is
-refused and left to `route.py`; a small pour on a routing layer can be cut, as
-above. None of these is a reason to skip it: what it refuses or leaves open
-goes back to the A* chain as it came.
+two-sided edge connector (fingers on both faces) and a coarse-pitch connector
+are left to the router (`--find` names them); a small pour on a routing layer
+can be cut, as above; a group of several buses off one large array can spend
+an hour or two in its ends model. None of these is a reason to skip it: what it
+refuses or leaves open goes back to the A* chain as it came.
 
 ### Step 1b: Fanout U9 (PGA120) - All Non-Plane Nets
 Generates escape routing for ALL nets on the component EXCEPT those that the
@@ -2733,10 +2724,10 @@ For high-speed signals with impedance requirements:
 
 ### Bus Detection
 
-A bus between two ball arrays (or an array and a QFN) is the topo bus step's
-(Step 1a, `awx/route_bus.py`, experimental) -- that is a different tool from
-the `route.py --bus` attraction below, which only pulls single routes
-together.
+A bus between a ball array and another ball array, or a fine-pitch row part,
+is the topo bus step's (Step 1a, `awx/route_bus.py`, experimental; `--find`
+lists the board's) -- a different tool from the `route.py --bus` attraction
+below, which only pulls single routes together.
 
 For parallel data/address buses with clustered endpoints:
 - `--bus` enables automatic bus detection and parallel routing
