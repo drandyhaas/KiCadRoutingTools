@@ -4393,8 +4393,52 @@ def main():
             mh = m.Clone()
             for i_ in sorted(hold_):
                 mh.Add(mh.GetBoolVarFromProtoIndex(i_) == 1)
-            sh = _search(stall=SEARCH_STALL)
-            rh = sh.Solve(mh)
+            # (...AND WHAT A ROUND OF THE SEARCH HOLDS BESIDE THEM, first: the layers of every lane but the free ones
+            # and the LNS_LAYERS nearest them, and every other ball farther than LNS_NEAR from them, where the state
+            # refused had them. With only the ends held the repair was the whole group's layers and other balls
+            # searched again for a few lanes' ends: a four-bus group's two repairs, of six and seven lanes, took 36
+            # and 48 s, one stopped where it stalled; held like this 4 and 3 s, both proved, and ended within a via
+            # of the same states. With no state that way, the ends alone held, as before)
+            hv_ = dict(zip(m.Proto().solution_hint.vars, m.Proto().solution_hint.values))
+            pts_ = {(b.name, l_): [tuple(p_) for e_ in lane_points(b, l_) for p_ in e_] for b in buses
+                    for l_ in b.J.lanes}
+            held_l = set(hold_.values())
+            fp_ = [p_ for key_ in sorted(pts_, key=repr) if key_ not in held_l for p_ in pts_[key_]]
+            dist_ = lambda ps, qs: min((math.hypot(p_[0] - q_[0], p_[1] - q_[1]) for p_ in ps for q_ in qs),   # noqa: E731
+                                       default=1e9)
+            near_l = set(sorted((key_ for key_ in pts_ if key_ in held_l),
+                                key=lambda key_: (dist_(pts_[key_], fp_), repr(key_)))[:LNS_LAYERS])
+            fixn = {}
+            for b in buses:
+                for l_ in b.J.lanes:
+                    if (b.name, l_) in held_l and (b.name, l_) not in near_l:
+                        fixn.update((v_.Index(), hv_[v_.Index()]) for k_ in (0, 1) for v_ in b.J.y[k_][l_]
+                                    if hasattr(v_, 'Index') and v_.Index() in hv_)
+            for ref, r_ in rows.items():
+                for k, (xo_, yo_, dv) in r_.others.items():
+                    p_ = arrays[ref].bm.items[k][1]
+                    if dist_([(p_.global_x, p_.global_y)], fp_) > LNS_NEAR:
+                        fixn.update((v_.Index(), hv_[v_.Index()])
+                                    for v_ in list(xo_.values() if isinstance(xo_, dict) else xo_) + list(yo_) + list(dv)
+                                    if hasattr(v_, 'Index') and v_.Index() in hv_)
+            sh = rh = None
+            if fp_ and fixn:
+                mn = mh.Clone()
+                Pn_ = mn.Proto()
+                for v_, x_ in fixn.items():
+                    d_ = Pn_.variables[v_].domain
+                    d_.clear()
+                    d_.extend([x_, x_])
+                sn = _search(stall=SEARCH_STALL)
+                rn = sn.Solve(mn)
+                if rn in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    sh, rh = sn, rn
+                else:
+                    log(f'  the repair with the far lanes\' layers and the far balls held too: no state that way '
+                        f'[{sn.StatusName(rn)}] ({time.time() - t0:.0f} s) -- the ends alone held')
+            if sh is None:
+                sh = _search(stall=SEARCH_STALL)
+                rh = sh.Solve(mh)
             repaired = rh in (cp_model.OPTIMAL, cp_model.FEASIBLE)
             log(f'  the repair: every lane held on its ends but the {n_free} the refusal named or that crossed one'
                 + (f' and {n_let} more that could not stand with what it taught' if n_let else '') + ': '
