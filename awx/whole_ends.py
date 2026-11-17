@@ -2098,13 +2098,15 @@ def cut_candidates(E, SB, DB, base):
     return tc, est
 
 
-def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=False, m=None, cutvar=False):
+def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=False, m=None, cutvar=False, only=None):
     """_joint_state's MODEL of the joint ends on `E`, built and not solved -- into `m`, where one is given (the GROUP's
     ends, group_ends.py: every bus off one array in one model), a model of its own otherwise. A namespace of the model's
     parts: its lanes and each one's options at the two ends (xs[end][lane][option]), each end's layer (y[end][lane], one-
     hot over the routing layers), each lane's change (chg), the crossings (X), the objective's terms (cost, const, the
     changes' chg_cost, the walled balls' walls) and, `core`, each conflict pair's assumption (held). (None, why) where a
     lane has no clean option.
+    `only` {lane: (its tooth option, its berth option)}: a lane HELD on those two ends -- offered no other, so every
+    row and term of its other options is never built (the group's search: the lanes a stretch's rounds cannot free).
     `cutvar` (a ball array destination's): THE CUT round the destination is the model's to choose with the ends -- among
     E.wcut (the base: the far face's middle) and one in each gap between two berths offered on the far face or the far
     half of a side (whole_frame.cut_gaps). The namespace's `cutvar`: (the candidates' places round the destination as
@@ -2126,6 +2128,9 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
     bare = [l_ for l_ in lanes if not OT[l_] or not OB[l_]]
     if bare:
         return None, f'no clean option for {bare}'
+    for l_, (i_, j_) in sorted((only or {}).items(), key=lambda kv: str(kv[0])):
+        if l_ in OT and i_ in OT[l_] and j_ in OB[l_]:
+            OT[l_], OB[l_] = [i_], [j_]
     SB, DB = boxes or joint_boxes(E, hint)
     cut = E.wcut
     if isinstance(cut, (tuple, list)) and cut[0] == 'E':
