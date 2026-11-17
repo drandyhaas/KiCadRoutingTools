@@ -529,7 +529,7 @@ def main():
                               f' room {r_[6] / C.PMIN:4.1f} need {r_[5] / C.PMIN:4.1f} lanes {len(r_[4])}: '
                               + ' '.join(n.replace('RAM_', '') for n in r_[4])
                               + (' vias: ' + ' '.join(n.replace('RAM_', '') for n in r_[10]) if r_[10] else ''))
-        print(f'CHANGES with no via room ({"the geometry\'s vias" if geo else "at the reference"}): {len(bad)}')
+        print('CHANGES with no via room (' + ("the geometry's vias" if geo else "at the reference") + f'): {len(bad)}')
         for b_ in bad:
             print('  ', b_)
 

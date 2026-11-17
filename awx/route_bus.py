@@ -374,8 +374,9 @@ def bus_plan(pcb, rules):
                 left.append(dict(src=s, dest=m['dest'], nets=m['nets'],
                                  why=f'{s} is in the buses off {owner[s]}: one group of buses an array'))
             continue
+        gaps = ', '.join(f"{m['dest']} {m['gap']:.3f} mm" for m in take)
         why = (f'the row part{"s" if len(take) > 1 else ""} off {s}\'s {FACE_NAMES[f]} face no track passes between '
-               f'the pads of ({", ".join(f"{m["dest"]} {m["gap"]:.3f} mm" for m in take)} between them, a track and '
+               f'the pads of ({gaps} between them, a track and '
                f'its clearances {need:.3f})' + (': one group bus' if len(take) > 1 else ''))
         rows.append(dict(src=s, dest='+'.join(m['dest'] for m in take), nets=sum(m['nets'] for m in take), why=why))
     for b in sorted(rows, key=lambda b: (-b['nets'], b['src'], b['dest'])):
