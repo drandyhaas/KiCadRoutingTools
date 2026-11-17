@@ -329,8 +329,12 @@ def endpoint_reaches_pad(x, y, radius, layers, pad, unflashed_hole_only=False) -
     flashed = on - hole_only
     if flashed:
         from check_connected import _point_in_pad
-        if _point_in_pad(x, y, pad, margin=margin):
-            out |= flashed
+        from kicad_parser import pad_on_layer
+        # Each layer's own copper (a per-layer padstack, a custom pad's join
+        # outline: kicad_parser.pad_on_layer).
+        out |= {ly for ly in flashed
+                if _point_in_pad(x, y, pad_on_layer(pad, ly, joins=True),
+                                 margin=margin)}
     return out
 
 

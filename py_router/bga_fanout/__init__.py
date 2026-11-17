@@ -125,6 +125,7 @@ def calculate_jog_ends_for_routes(
         diff_pair_gap: Gap between P and N traces
     """
     pair_spacing = track_width + diff_pair_gap  # Center-to-center spacing
+    outside_leg = {}
 
     for route in routes:
         is_outside = False
@@ -187,7 +188,37 @@ def calculate_jog_ends_for_routes(
         )
         route.jog_end = jog_end
         route.jog_extension = extension
+        outside_leg[id(route)] = is_outside
 
+    # A pair's two jog ends are snapped to the grid one at a time, so a pair
+    # at pair spacing -- closer together than a grid step -- can have its
+    # legs rounded toward each other. Such a pair keeps its exact jogs, whose
+    # spacing the outside leg's extension holds through the 45.
+    if grid_step > 0:
+        from geometry_utils import segment_to_segment_distance
+        from bga_fanout.reroute import route_segments
+        legs_by_pair = defaultdict(list)
+        for route in routes:
+            if route.pair_id and route.jog_end is not None:
+                legs_by_pair[route.pair_id].append(route)
+        for legs in legs_by_pair.values():
+            if len(legs) != 2 or legs[0].layer != legs[1].layer:
+                continue
+            gap = min(segment_to_segment_distance(*a['start'], *a['end'],
+                                                  *b['start'], *b['end'])
+                      for a in route_segments(legs[0])
+                      for b in route_segments(legs[1]))
+            if gap >= pair_spacing - 1e-6:
+                continue
+            for route in legs:
+                route.jog_end, route.jog_extension = calculate_jog_end(
+                    route.exit_pos, route.escape_dir, route.layer, layers,
+                    jog_length, is_diff_pair=True,
+                    is_outside_track=outside_leg[id(route)],
+                    pair_spacing=pair_spacing, grid_step=0.0)
+
+    for route in routes:
+        jog_end, extension = route.jog_end, route.jog_extension
         # Issue #149 part 2: validate the decorative end-jog against the FULL
         # obstacle map (foreign pads + existing copper + vias) AT CREATION, and
         # drop it if it would extend into a foreign obstacle. The jog does not
@@ -1816,8 +1847,13 @@ def build_converge_route(
         # Determine which pad is on the top vs bottom (smaller Y = top in KiCad)
         p_is_top = p_pad.global_y < n_pad.global_y
 
-        if use_adjacent_channels_h and escape_dir in ['left', 'right']:
-            # Adjacent-channel mode for cross-escape: use two ADJACENT channels
+        if use_adjacent_channels_h and escape_dir in ['left', 'right'] and not is_edge:
+            # Adjacent-channel mode for cross-escape: use two ADJACENT channels.
+            # Not for an EDGE pair: it leaves the array with no ball ahead of
+            # it, so it converges on its own pads' axes (below), as
+            # select_adjacent_channels already reads it. A channel beside an
+            # outermost pad is no wider than the gap between two pads, which
+            # a long perimeter pad leaves too narrow for a track.
             # Find the channel between the two pads, then use it and the next one
             # on the escape side (both tracks go same direction, different adjacent channels)
             h_channels = [c for c in channels if c.orientation == 'horizontal']

@@ -2554,6 +2554,13 @@ def _free_on_pad_cells(pad, layer_idx, config, obstacles, coord,
     # The landing rule is shared with placement's keep-out channel (#1031),
     # which must not accept a pose this function would find no cell on.
     from net_queries import pad_landing_extent
+    # The pad's copper on THIS layer (a per-layer padstack's smaller layer):
+    # a landing seeded from the max-over-layers model ends a track on copper
+    # only another layer has, which KiCad grades open.
+    from kicad_parser import pad_on_layer
+    _lname = (config.layers[layer_idx]
+              if 0 <= layer_idx < len(getattr(config, 'layers', ()) or ()) else None)
+    pad = pad_on_layer(pad, _lname, joins=True)
     # getattr: connectivity._EndpointStub (zero size, no `shape`) reaches
     # here from the end-of-run reconciliation; it must yield no cells, not
     # raise.

@@ -2999,6 +2999,8 @@ def _repair_planes_all(
                 via_pairs.append((_vd, _dr))
                 if _is_esc:
                     _escalated_pairs.add((_vd, _dr))
+        from check_drc import make_off_board_test
+        _off_board = make_off_board_test(pcb_data.board_info)
         for net_id, (net_name, net_zone_layers) in unique_nets.items():
             net_segs = [s for s in pcb_data.segments if s.net_id == net_id]
             net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
@@ -3057,6 +3059,12 @@ def _repair_planes_all(
                 if pp is None:
                     continue
                 pad, pad_cands = pp
+                # #291: an off-board pad is unreachable. This sweep holds no
+                # edge clearance (see tap_config), so a tap drawn to one runs
+                # straight off the board.
+                if _off_board is not None and _off_board(pad.global_x,
+                                                         pad.global_y):
+                    continue
                 # #527: the via ladder below (sizes x layers x full-radius
                 # searches) can take many seconds per pad -- report each one.
                 if progress_callback:

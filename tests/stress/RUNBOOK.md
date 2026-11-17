@@ -1155,6 +1155,16 @@ keep serving the previous code.
    copper LEAVES the conn bucket for the unrouted one, so conn can fall while the
    board got worse. `rank_arms.py <sweep.json>` applies all of this — paired
    verdict per arm, W/L, DRC reported beside it rather than folded in.
+   A net the BOARD makes unroutable is in NEITHER bucket: check_connected names
+   it apart, and the grade records it outside `nets_incomplete`. Two kinds:
+   only pads OFF the board outline missing (#291, `nets_offboard`); open only
+   at a pad the design shorts to another net (`check_pads.
+   pads_shorted_as_drawn`, `nets_overlap`). A wave graded before these counted
+   them in `nets_incomplete`, so against such a baseline those boards read
+   better by exactly that count; regrade the baseline (`--regrade-baseline`) or
+   add the two back. `nets_art` counts the opens KiCad reports only where
+   net-tagged copper art no route reached (#659): a route step gives such an
+   island a terminal, so they are routable and stay IN `nets_incomplete`.
 5. **A recorded RESCUE step biases the board against any change — 25% of the
    corpus has one.** Chains often end with `route.py ... --nets '/CM4
    GPIO/GPIO22' '/CM4 GPIO/SD_CMD'`: the nets that failed *in the run being

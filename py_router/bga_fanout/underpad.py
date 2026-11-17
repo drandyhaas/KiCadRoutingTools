@@ -140,6 +140,10 @@ class _Occ:
         # `owned_nets`, the nets that cell does not block. Index 1 blocks all.
         self.owned = None
         self.owned_nets = [None, frozenset()]
+        # The cells the board's edges block (#1677), apart from `grid`: a
+        # ball's home exemption lifts `grid`, and must not lift these past
+        # the copper KiCad lets reach the edge (see edge_cell).
+        self.edge = None
 
     # The lattice is a NODE lattice: cell (ix, iy) is the point
     # x0 + ix*res (see `xy`), and a coordinate is quantised by truncation.
@@ -600,14 +604,25 @@ class _Occ:
             spans.extend(self._capsule_spans(p, q, r))
         return spans
 
-    def block_all_spans(self, spans):
+    def block_all_spans(self, spans, edge=False):
         ny = self.ny
         ones = self._ones
+        if edge and self.edge is None:
+            self.edge = bytearray(self.nx * ny)
         for a, b0, b1 in spans:
             s = a * ny
             run = ones[:b1 - b0 + 1]
             for li in range(self.nl):
                 self.grid[li][s + b0:s + b1 + 1] = run
+            if edge:
+                self.edge[s + b0:s + b1 + 1] = run
+
+    def edge_cell(self, c) -> bool:
+        """True when the board's edges block cell `c` (block_off_board, and
+        block_all_spans with edge=True)."""
+        ix, iy = c
+        return (self.edge is not None and 0 <= ix < self.nx
+                and 0 <= iy < self.ny and self.edge[ix * self.ny + iy] != 0)
 
     def block_off_board(self, rings):
         """Block every cell outside all of `rings` (the board's outer
@@ -631,9 +646,14 @@ class _Occ:
         for ring in rings:
             for a, b0, b1 in self.ring_spans(ring):
                 on[a * self.ny + b0:a * self.ny + b1 + 1] = 1
+        off = (on == 0).astype(np.uint8)
         for li in range(self.nl):
             g = np.frombuffer(self.grid[li], dtype=np.uint8)
-            g |= (on == 0).astype(np.uint8)
+            g |= off
+        if self.edge is None:
+            self.edge = bytearray(self.nx * self.ny)
+        e = np.frombuffer(self.edge, dtype=np.uint8)
+        e |= off
 
     def mark_soft_layer(self, li, x, y, r, net_id):
         g = self.soft[li]
@@ -1393,13 +1413,13 @@ def generate_underpad_escape(footprint: Footprint,
         if edge_gate.outer:
             occ.block_off_board(edge_gate.outer)
         for _ring in edge_gate.cutouts:
-            occ.block_all_spans(occ.ring_keep_spans(_ring, _ek))
+            occ.block_all_spans(occ.ring_keep_spans(_ring, _ek), edge=True)
         for _ring in edge_gate.rings:
             if _ring in edge_gate.cutouts:
                 continue
             for _i in range(len(_ring)):
                 occ.block_all_spans(occ._capsule_spans(
-                    _ring[_i], _ring[(_i + 1) % len(_ring)], _ek))
+                    _ring[_i], _ring[(_i + 1) % len(_ring)], _ek), edge=True)
     for _s in _graphic_of_fanned:
         _li = layer_idx.get(_s.layer)
         exact_segs.append((_s.start_x, _s.start_y, _s.end_x, _s.end_y,
@@ -2176,6 +2196,8 @@ def generate_underpad_escape(footprint: Footprint,
             cells |= occ.disk_cells(x1 + dx * t, y1 + dy * t, r)   # #864 memo; same disks
         return cells
 
+    _pad_edge_d = {}
+
     def home_of(p):
         # Exempt the ball's OWN pad+via keepout so the track can break out of its
         # own pad (the keepout ring is wider than the pad and would otherwise
@@ -2193,7 +2215,32 @@ def generate_underpad_escape(footprint: Footprint,
             for pts in _home_stubs(p):
                 for (ax, ay), (bx, by) in zip(pts, pts[1:]):
                     cells |= _stub_cells_seg(ax, ay, bx, by)
+        if occ.edge is not None:
+            cells = {c for c in cells
+                     if not occ.edge_cell(c) or _edge_cell_on_own_pad(p, c)}
         return cells
+
+    def _edge_cell_on_own_pad(p, c):
+        """May a track centred on edge-blocked cell `c` leave ball `p`? Only
+        as check_drc's edge exemption reads it: the track touches the pad's
+        copper and comes no closer to the outline than that copper does. The
+        rest of the home disk lies in the band like any other cell, so a ball
+        on the outline escapes away from it (#1677)."""
+        from check_drc import _point_to_rings_distance, _pad_perimeter_points
+        x, y = occ.xy(*c)
+        hw = track_width / 2.0
+        if _pt_pad_d(x, y, p) > hw:
+            return False
+        key = id(p)
+        pad_edge = _pad_edge_d.get(key)
+        if pad_edge is None:
+            pad_edge = _pad_edge_d[key] = min(
+                (_point_to_rings_distance(px, py, edge_gate.rings)
+                 for px, py in _pad_perimeter_points(p)),
+                default=_point_to_rings_distance(p.global_x, p.global_y,
+                                                 edge_gate.rings))
+        return (_point_to_rings_distance(x, y, edge_gate.rings) - hw
+                >= pad_edge - 1e-6)
 
     def _home_stubs(*pads):
         """The dog-bone stub polylines home_of(p) runs along, one per pad of
