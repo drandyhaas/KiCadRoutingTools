@@ -506,6 +506,24 @@ def bridge_of(boxes, pitch):
     return far + pitch
 
 
+def group_of_one(pcb, dests):
+    """a bus's ONE destination that is a row part with rows on more than one line (escape_moves._row_pads: a QFN, a
+    two-row connector) -- the frame reads it as a group of one part, whose 'under' way takes a lane over its rows to a
+    via at a berth on a row turned from the source. A single row of pins (an FFC) has every pin on its own face, no
+    row beyond it, and stays a destination of its own: a group's lanes land on its front at one place, which a pair
+    on such a part cannot"""
+    import escape_moves as em
+    if len(dests) != 1 or dests[0] not in pcb.footprints:
+        return False
+    rp = em._row_pads(pcb.footprints[dests[0]])
+    if rp is None:
+        return False
+    pads = rp[0]
+    reach = sorted(max(p.size_x, p.size_y) for p in pads)[len(pads) // 2]
+    return min(max(p.global_x for p in pads) - min(p.global_x for p in pads),
+               max(p.global_y for p in pads) - min(p.global_y for p in pads)) > reach
+
+
 class Group:
     """the destination GROUP's shape and walk (see above): parts `refs` of `pcb`, the source's centre `sc`. The walk's
     coordinate s runs round the outline in perim_d's sense -- along the front from north to south"""
@@ -644,13 +662,15 @@ class Group:
         seg = LineString([a, b])
         return [r for r, bx in self.boxes.items() if seg.intersection(_box(*bx)).length > 1e-6]
 
-    def _straight(self, p):
-        """(exit point, the parts crossed) of the straight from p toward the source through the outline: its first
+    def _straight(self, p, back=None):
+        """(exit point, the parts crossed) of the straight from p toward the source through the outline -- or, `back` (a
+        unit vector), straight back against it: a far-face berth's own stub line, square across its part -- its first
         stretch inside it -- from p, or from where it enters just past p (a berth on a far face, outside the outline) --
         out to where it leaves"""
         from shapely.geometry import LineString, Point
         far = 2.0 * math.hypot(self.bbox[2] - self.bbox[0], self.bbox[3] - self.bbox[1]) + 1.0
-        seg = LineString([p, (p[0] - far * self.d[0], p[1] - far * self.d[1])])
+        d_ = self.d if back is None else back
+        seg = LineString([p, (p[0] - far * d_[0], p[1] - far * d_[1])])
         ins = seg.intersection(self.U)
         parts = [ins] if ins.geom_type == 'LineString' else [g for g in getattr(ins, 'geoms', [])
                                                              if g.geom_type == 'LineString']
@@ -692,7 +712,11 @@ class Group:
             if sd is not None and math.hypot(*sd) > 1e-9:
                 k = math.hypot(*sd)
                 if (sd[0] * self.d[0] + sd[1] * self.d[1]) / k >= FRONT_COS:
-                    q, crossed = self._straight(p)
+                    # (straight back along its own stub, square across its part, to the front beside its own pin:
+                    # toward the source's middle instead, a far row's lane on a long part at an angle to the source
+                    # would come out at the front a pin or two along, past its near-row neighbours -- crossings the
+                    # pins' order never asks for, in the strip between the parts where they have no room)
+                    q, crossed = self._straight(p, (sd[0] / k, sd[1] / k))
                     if part in crossed and under_ok(crossed):
                         qs = self.s(q)
                         # (out into the open: a notch's wall or the front -- not a pocket behind another part)
@@ -901,7 +925,10 @@ def build(ctx, dest, _trunk=frozenset()):
     # parts' copper's, its shape and order the group's walk -- Group)
     F.DBs = {r: grown(box_of(pcb, r), [F.bend[n] for n in F.M if F.dest_of[n] == r]) for r in dests}
     _sraw = box_of(pcb, src)
-    F.group = Group(pcb, dests, ((_sraw[0] + _sraw[2]) / 2, (_sraw[1] + _sraw[3]) / 2)) if len(dests) > 1 else None
+    # (...and ONE ROW PART a group of one: a lane to its far row may run UNDER it, on a layer its pads leave open,
+    # to a via at its berth -- Group's 'under' way -- where the part's box alone sends it round the part's end)
+    F.group = Group(pcb, dests, ((_sraw[0] + _sraw[2]) / 2, (_sraw[1] + _sraw[3]) / 2)) \
+        if len(dests) > 1 or group_of_one(pcb, dests) else None
     DB = F.group.bbox if F.group else F.DBs[dest]
     F.SB, F.DB = SB, DB                     # the arrays' pad boxes, grown to the line their stubs end on
     F.dpads = [(p.global_x, p.global_y) for r in dests for p in pcb.footprints[r].pads]   # the destination's pads

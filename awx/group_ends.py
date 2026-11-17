@@ -1403,6 +1403,51 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, cutvar=False, feedbac
         return B
 
 
+def group_walk(E, edge, bar, pitch, step=0.25):
+    """A row-part GROUP's WALK off its front (whole_frame.Group: from the front's south end f1 round to its north end
+    f0), read for its LENGTH and its ROOM: (gl, way_mm, rooms). `gl` the walk's length off the front; `way_mm(o)` the
+    length a berth option `o` (its way its sixth element) adds -- an 'on' berth off the front its walk from the front's
+    nearer end, as the bus's own model rides it (Ends.ride), any other way its own length; `rooms` [(u, lanes)] at each
+    `step` of the walk (u from f1): the lanes that stand a `pitch` apart between the parts' copper -- `bar` off it --
+    and the board's edge (braid._on_board, `edge` in), round to their berths there"""
+    import braid as bd
+    from shapely.geometry import Point
+    G, pcb = E.group, E.st['pcb']
+    gl = (G.f0 - G.f1) % G.L
+
+    def way_mm(o):
+        w_ = o[5]
+        if w_[0] != 'on':
+            return float(w_[3])
+        if G.in_front(w_[1]):
+            return 0.0
+        u_ = (w_[1] - G.f1) % G.L
+        return min(u_, gl - u_)
+    rooms = []
+    for i in range(int(gl / step) + 1):
+        u = min(gl, i * step)
+        p, a, c = G.pt(G.f1 + u), G.pt(G.f1 + u - 0.05), G.pt(G.f1 + u + 0.05)
+        tl = math.hypot(c[0] - a[0], c[1] - a[1]) or 1.0
+        nx, ny = -(c[1] - a[1]) / tl, (c[0] - a[0]) / tl
+        if G.U.contains(Point(p[0] + 0.1 * nx, p[1] + 0.1 * ny)):
+            nx, ny = -nx, -ny                       # (outward)
+        r = 0.0
+        while r < 3.0 and bd._on_board(pcb, p[0] + (r + 0.05) * nx, p[1] + (r + 0.05) * ny, edge):
+            r += 0.05
+        rooms.append((u, int(math.floor((r - bar) / pitch + 1e-9)) + 1 if r >= bar else 0))
+    return gl, way_mm, rooms
+
+
+def walk_lanes(E, o, gl):
+    """the stretch (u0, u1) of a GROUP's walk off its front (u from f1) that a berth option `o` rides to its place -- an
+    'on' berth off the front, from the front's nearer end -- or None"""
+    G, w_ = E.group, o[5]
+    if w_[0] != 'on' or G.in_front(w_[1]):
+        return None
+    u_ = (w_[1] - G.f1) % G.L
+    return (0.0, u_) if u_ <= gl - u_ else (u_, gl)
+
+
 def way_round(E, k_, pos, boxes, cut):
     """the length (thousandths of a mm) a lane travels ROUND an array from an end at `pos` -- its place round the box as
     the bus's own model unrolls it (whole_frame.perim_s at the source, perim_c at the cut round the destination) -- to
@@ -3082,6 +3127,7 @@ def main():
     more_last = 0               # (two routing layers) what the model does not count of the search's last state
     costly_tries = 0
     mouth_said = None           # (the mouths offered to more lanes than they hold: said once a count)
+    walk_said = None            # (the places on a group's walk offered to more lanes than they hold: the same)
     while True:
         chk_try += 0 if in_epoch else 1
         rnd = 0
@@ -3402,6 +3448,51 @@ def main():
                             if c_:
                                 ride.append((c_, x_))
                                 n_stub += 1
+            # ...and THE WAY INTO A GROUP OF ROW PARTS, its length at the same rate (group_walk: an 'on' berth off the
+            # group's front its walk round the outline, any other way its own length) -- and the lanes walking past
+            # each place held to the ROOM beside the outline there, to the board's edge, a lane pitch apart. Unpriced
+            # and unheld, a connector's far-row berth by a surface stub on its own layer costs nothing beside a via at
+            # the pin, and lanes go round its end along a strip at the board's edge that holds fewer of them
+            n_walk = 0
+            for b in buses:
+                if b.arr[1] is not None or getattr(b.E, 'group', None) is None:
+                    continue
+                with awx_settings.given(b.env):
+                    import braid as bd
+                    cfg_ = bd.run_config(b.E.st['pcb'], b.E.st.get('base'))
+                    pitch_ = bd.LPITCH
+                g2_ = cfg_.grid_step / 2
+                edge_ = (float(getattr(cfg_, 'board_edge_clearance', 0.0) or 0.0) or cfg_.clearance) + \
+                    cfg_.track_width / 2 + g2_
+                gl_, way_mm_, rooms_ = group_walk(b.E, edge_, cfg_.track_width / 2 + cfg_.clearance + g2_, pitch_)
+                on_ = collections.defaultdict(list)     # u -> [(npair, literal, lane)] of the options walking past it
+                for l_ in b.J.lanes:
+                    for j, x_ in b.J.xs[1][l_].items():
+                        o_ = b.E.B[l_][j]
+                        c_ = int(round(b.J.npair[l_] * 1000 * way_mm_(o_) / sm_.VIA_MM))
+                        if c_:
+                            ride.append((c_, x_))
+                        st_ = walk_lanes(b.E, o_, gl_)
+                        if st_ is not None:
+                            for u_, _k in rooms_:
+                                if st_[0] - 1e-9 <= u_ <= st_[1] + 1e-9:
+                                    on_[u_].append((b.J.npair[l_], x_, l_))
+                seen_ = set()
+                for u_, k_ in rooms_:
+                    mem_ = on_.get(u_) or []
+                    if sum(n_ for n_, _x, _l in mem_) <= k_:
+                        continue
+                    key_ = (k_, frozenset(id(x_) for _n, x_, _l in mem_))
+                    if key_ in seen_:
+                        continue
+                    seen_.add(key_)
+                    m.Add(sum(n_ * x_ for n_, x_, _l in mem_) <= k_).OnlyEnforceIf(
+                        gate('walk', b.name, round(u_, 2), lanes={(b.name, l_, 1) for _n, _x, l_ in mem_}))
+                    n_walk += 1
+            if n_walk and n_walk != walk_said:
+                walk_said = n_walk
+                log(f'  a group\'s walk holds the lanes the room beside it does: {n_walk} place(s) offered to more '
+                    f'lanes than they hold')
             for b in buses:
                 if getattr(b.J, 'cutvar', None):
                     nz_ = cut_ride(m, b, ride, sm_.VIA_MM)

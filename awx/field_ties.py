@@ -199,8 +199,14 @@ def _pass(field, nets, pads, wayouts, within=None, outer=False):
         if within is not None:
             inb = lambda x, y: any(x0 - 1e-6 <= x <= x1 + 1e-6 and y0 - 1e-6 <= y <= y1 + 1e-6      # noqa: E731
                                    for x0, y0, x1, y1 in within)
-            strayed |= {pc for k, o, pc in its if pc in keep and not (
-                inb(o.x, o.y) if k == 'v' else inb(o.start_x, o.start_y) and inb(o.end_x, o.end_y))}
+
+            def run_in(o):
+                # (every point of a run, not its two ends: a straight run from one part's fan to another's has both
+                # ends in a fan and its middle across the strip between the parts, where the lanes run)
+                n_ = max(1, int(math.ceil(math.hypot(o.end_x - o.start_x, o.end_y - o.start_y) / 0.1)))
+                return all(inb(o.start_x + (o.end_x - o.start_x) * i / n_, o.start_y + (o.end_y - o.start_y) * i / n_)
+                           for i in range(n_ + 1))
+            strayed |= {pc for k, o, pc in its if pc in keep and not (inb(o.x, o.y) if k == 'v' else run_in(o))}
             keep -= strayed
         if strayed:
             tied = {(p.component_ref, p.pad_number) for k, o, pc in its if pc in keep

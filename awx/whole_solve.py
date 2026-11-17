@@ -496,7 +496,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
     _under = []
     for n_ in (M if Fr.group is not None else ()):
         if Fr.way[n_][0] in ('straight', 'under'):
-            for r_ in Fr.group._straight(Fr.bend[n_])[1]:
+            # (an 'under' way runs back along its berth's own stub, as Group.options lays it)
+            sd_ = ctx.stub_dir.get(n_) if Fr.way[n_][0] == 'under' else None
+            k_sd = math.hypot(*sd_) if sd_ else 0.0
+            for r_ in Fr.group._straight(Fr.bend[n_], (sd_[0] / k_sd, sd_[1] / k_sd) if k_sd > 1e-9 else None)[1]:
                 blk_ = [LAYN.index(L_) for L_ in LAYN if L_ not in Fr.group.open[r_]]
                 if blk_:
                     # (a cut's 'layer' is, on two layers, the one the lane is held ON -- whole_route.layer_cut's -- and
