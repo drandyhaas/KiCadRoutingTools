@@ -23,6 +23,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -58,11 +59,29 @@ def route(case, spec, out, rounds, sets, timeout):
     with open(os.path.join(d, 'run.log'), 'w', encoding='utf-8') as log:
         log.write(' '.join(cmd) + '\n' + ''.join(f'{k}={v}\n' for k, v in sorted(sets.items())))
         log.flush()
+        # (in a process group of its own, so a timeout stops it whole: a multi-bus call runs a route_bus per bus,
+        # and those outlive their parent when it alone is killed)
+        kw = ({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt'
+              else {'start_new_session': True})
+        p = subprocess.Popen(cmd, cwd=d, env=env, stdout=log, stderr=subprocess.STDOUT, **kw)
         try:
-            rc = subprocess.run(cmd, cwd=d, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=timeout).returncode
+            rc = p.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            stop_tree(p)
             rc = 'timeout'
     return d, rc, round(time.time() - t0)
+
+
+def stop_tree(p):
+    """the run's process and everything it started"""
+    if os.name == 'nt':
+        subprocess.run(['taskkill', '/T', '/F', '/PID', str(p.pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    p.wait()
 
 
 def bus_summaries(d):
