@@ -509,6 +509,11 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
     # its own part from its far side): held off that part's pad layers across its box, firm -- the geometry lets it pass
     # under the part on the layers left open there (whole_geo's per-layer boxes)
     _under = []
+
+    def _ubox(r_):
+        # (the box the geometry bounds a lane by: the part's pads' grown to its lanes' terminals -- whole_frame's DBs)
+        b_, d_ = Fr.group.boxes[r_], (getattr(Fr, 'DBs', None) or {}).get(r_)
+        return list(b_) if d_ is None else [min(b_[0], d_[0]), min(b_[1], d_[1]), max(b_[2], d_[2]), max(b_[3], d_[3])]
     for n_ in (M if Fr.group is not None else ()):
         if Fr.way[n_][0] in ('straight', 'under'):
             # (an 'under' way runs back along its berth's own stub, as Group.options lays it)
@@ -522,7 +527,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                     # on the very layer its pads stand on)
                     _under.append({'lane': n_, 'island': f'under {r_}',
                                    'layer': (1 - blk_[0]) if NL == 2 else blk_[0],
-                                   'box': list(Fr.group.boxes[r_]), 'blocked': blk_, 'firm': True})
+                                   'box': _ubox(r_), 'blocked': blk_, 'firm': True, 'under': True})
     # ...and the board's KEEP-OUTS and the AREAS the agent driving the step asked the lanes to keep out of (whole_route's
     # ROUND EDITS, BUS_AREAS: plan_audit.bus_areas), held firm off their layers along the stretch of each lane's
     # REFERENCE route that comes within a lane's bar of one -- the audit holds every lane to them as to a keep-out, and
@@ -604,6 +609,14 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                     spans_.append((max(min(us_), Hn[n_]), max(us_)))
             for s0_, s1_ in spans_:
                 t_, v_ = TRK / 2 + CLR, VIA / 2 + CLR
+                if c_.get('under'):
+                    # (a change before a part the lane then passes UNDER: where the geometry reads the lane clear of that
+                    # part's box -- it takes a lane as on both layers within a via's need of its change, and bounds it
+                    # by the box grown to the terminals while it stands on a layer the part's pads are on. A via's
+                    # clearance off the pads' own box, a lane changed 0.09 mm before a two-row connector; the geometry
+                    # read four of its columns as inside the box on the pads' layer, held it to the connector's far
+                    # end 9 mm off, and two nets of the bus shipped open)
+                    v_ = VNEED + TRK / 2 + G
                 lo_c, hi_c, w0_, w1_ = s0_ - v_, s1_ + v_, None, None
                 # (an island so near the lane's tooth -- or a trunk lane's berth -- that its end room leaves no change
                 # before it -- after it: the change from the stub's end to the island, its end room and the face band
