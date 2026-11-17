@@ -1080,10 +1080,15 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   the side from `start_layer`. Pass it back via
   `generate_via_sexpr(..., backdrills=...)` (via dicts: a `'backdrills'` key;
   GUI: `gui_utils.apply_via_backdrills`) for any via that already existed, as
-  `tenting_attrs` is passed; a via the tool adds has none, and no step decides
-  one. `tests/test_1925_backdrill_read_keep.py` walks the AST for a site that
-  forgets. Measured by `py_tools/check_via_stubs.py` (report-only); the
-  router, the fill model and `check_drc` do not read them
+  `tenting_attrs` is passed; a via the tool adds has none unless the route
+  step was asked (`--backdrill-nets` with its three fab numbers, opt-in).
+  `tests/test_1925_backdrill_read_keep.py` walks the AST for a site that
+  forgets. Measured by `py_tools/check_via_stubs.py` (report-only). A via's
+  declared back-drill is an OBSTACLE on the layers it removes
+  (`py_router/backdrill.py`: other nets' copper off its wall at max(pair
+  clearance, copper-to-hole floor), no flag; a pad's is not one yet), and
+  `check_drc` grades it as KiCad 10.0.8 does (a disc of the back-drill's
+  diameter at the copper clearance). The fill model does not read them. `docs/configuration.md` "Back-drills" has the rules
 - `via.tenting_attrs` - Protection spec `{token: raw inner s-expr}` for
   `tenting`/`covering`/`plugging`/`capping`/`filling` (#489 §8); `{}` = the board
   specified nothing. Read by BOTH parse paths in the same normalized form. Pass it

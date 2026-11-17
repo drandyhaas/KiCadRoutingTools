@@ -175,6 +175,10 @@ python3 py_router/route_diff.py in.kicad_pcb out.kicad_pcb --nets "/DQS_P" "/DQS
 | `--via-span TOP BOTTOM` | none (through vias) | `route.py`: lay vias that join only this run of neighbouring copper layers, and route on those layers only. See [Via span](#via-span) |
 | `--via-span-type` | read off the span | The via type written for `--via-span`: `micro`, `blind` or `buried` |
 | `--via-span-escape` | off | With `--via-span`: `route` first lays an escape (a via of the span beside each surface pad of the selected nets, and the short track to it), then routes; `only` lays the escapes and routes nothing |
+| `--backdrill-nets PATTERN ...` | none (no via is back-drilled) | `route.py`: back-drill the vias this step adds for the nets matching these patterns (`!pattern` excludes). Needs the three numbers below. See [Back-drills](#back-drills) |
+| `--backdrill-oversize` | none: required with `--backdrill-nets` | mm the back-drill's diameter exceeds the via's drill by (the fabricator's number) |
+| `--backdrill-margin` | none: required with `--backdrill-nets` | mm of dielectric the back-drill stops short of the last layer the net uses; a stub layer nearer than that is left |
+| `--backdrill-min-stub` | none: required with `--backdrill-nets` | mm; a stub shorter than this is not drilled |
 | `--grid-step` | 0.1 | Grid resolution in mm |
 | `--same-net-pad-clearance` | the project's recorded value, else -1 | Edge-to-edge clearance (mm) between every via the run places and same-net pads (#581). `> 0` keeps vias off same-net SMD pads and off the net's solder-paste openings (#962), i.e. no via-in-pad, and is recorded in the sibling `.kicad_pro` so later chain steps inherit it; `-1` allows via-in-pad. On every routing CLI (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`) |
 
@@ -419,6 +423,58 @@ step and is listed NOT honoured in `design_rules.unsupported_rules`, as is any
 other token (`pad`, `zone`, `hole`, ...); a `micro_via`, `blind_via` or
 `buried_via` ban asks nothing of a step that lays through vias, which is every step but a `route.py --via-span` one ([Via span](#via-span)); a `--via-span` step does not read such a ban either.
 check_drc grades every track and via token (`items-not-allowed`).
+
+<a id="back-drills"></a>
+**Back-drills (#1925).** KiCad 10 lets a via or a drilled pad carry a
+back-drill: a wider drill that removes the barrel over a run of layers from one
+face (`Via.backdrills`). Two things follow, and only the second is an option.
+
+- **A back-drill a via of the board declares is an obstacle, with no flag.** On each
+  layer it removes, the hole is the back-drill's diameter and has no copper, so
+  the route steps hold other nets' tracks and new vias off its wall as they
+  hold them off an unplated hole: the larger of the pair's clearance and the
+  board's copper-to-hole floor (`rules.min_hole_clearance`, never under the
+  0.20 mm NPTH-to-track value). A new via's drill keeps the hole-to-hole
+  minimum from the wider hole. The passes that move copper after a route read
+  the same wall. A board with no back-drill is routed exactly as before.
+- **`route.py --backdrill-nets` defines them** on the vias the step adds for
+  the nets named, and only there. `--backdrill-oversize`, `--backdrill-margin`
+  and `--backdrill-min-stub` are the fabricator's numbers: none has a default,
+  and the step refuses to start without all three. For each new via the layers
+  past the outermost layer its net joins it on are the stub; the drill removes
+  them from the board face inward, leaving any layer nearer than the margin to
+  the layer the net uses (distances from the stackup, so a board without one is
+  drilled only with a margin and a shortest stub of 0). The size is the via's
+  drill plus the oversize.
+
+  Such a net is searched with a via site legal only where the back-drill's
+  hole would clear other nets' copper on **every** layer: the span is known
+  only after the search has picked its layers, and the router's via map holds
+  one answer per site. A net that does not route that way (for a net of three
+  or more pads: its main edge, or any of its tap edges) is routed as it would
+  be without the flag (completion first), and the log says so. Each new via is marked as its net is routed, so the nets after it keep
+  off its wall on the layers it removes. At the end of the step every such via
+  is judged again on the board that ships: its span from the copper its net
+  really joins it on, kept only if the wall clears every other net there. The
+  summary line `BACK-DRILL (route): N of M ...`, `BACKDRILL_JSON:` and the
+  `backdrill` key of `--json-out` count the vias drilled, those with nothing to
+  drill, and those left undrilled because the wall would stand too close
+  (`conflict`, with the first twenty named).
+
+  Not covered: the diff-pair step and the plane steps define no back-drill; a
+  drilled pad's back-drill is read and kept but is not an obstacle yet; a
+  via an earlier step added is left as it is; pours are not read by the judge
+  (KiCad's own fill clears a back-drill); KiCad's post-machining tokens are not
+  read. The GUI's route tab has the same four fields (Back-drill Nets,
+  Oversize, Margin, Min stub).
+- **What KiCad grades, and `check_drc` with it.** Measured with kicad-cli
+  10.0.8: on a layer a back-drill removes, a via is a disc of the back-drill's
+  diameter (wider or narrower than its pad) held to the pair's copper
+  clearance, the end layer included; another via's hole is held to the hole
+  clearance from that disc; a track is not held to the hole clearance from the
+  wall. `check_drc` grades the via-to-track, via-to-via and via-to-pad pairs on
+  that disc. The route steps hold the wider copper-to-hole floor above because
+  the wall is a hole.
 
 <a id="via-span"></a>
 **Via span (#1842).** `route.py --via-span TOP BOTTOM` makes one route step lay

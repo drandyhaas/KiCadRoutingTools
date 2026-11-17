@@ -640,6 +640,11 @@ pass. Run any directly:
   too; and the class map the step published to the fill model is gone, as it
   is on the CLI, where the next step is a fresh process. On the code before
   that fix it fails 6 checks.
+- `test_1925_backdrill_gui.py` -- the route tab's **Back-drill Nets** field
+  and its three numbers (#1925): one route step through `route.py` and through
+  the real dialog and plan executor must back-drill the same vias the same
+  way, the tokens must survive pcbnew's own save, and with the fields empty
+  neither front writes one. Seconds to run.
 - `test_gnd_vias_gui.py` -- the Planes tab's **Add GND vias** step, run for
   real (nothing mocked) against `route_planes.py --add-gnd-vias` on the same
   files: return vias keep a net-class clearance (#1030), a `.kicad_dru` layer

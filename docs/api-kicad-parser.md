@@ -292,9 +292,12 @@ order, anywhere in the block; a token with no `(layers ...)`, no `(size ...)`
 or a size of 0 is no drill (KiCad's own save drops it); a size that is not one
 number makes KiCad refuse the board, and the parser names it in a WARNING and
 carries nothing. `via_stubs.drilled_layers(via.backdrills, copper_layers)`
-gives the layers removed. Nothing in the tools decides a back-drill: they are
-read, carried by every writer that re-emits an existing via, and measured by
-`check_via_stubs.py`. The router, the fill model and `check_drc` do not read
+gives the layers removed. They are read, carried by every writer that re-emits
+an existing via, measured by `check_via_stubs.py`, and a via's are held as
+obstacles by the route steps and graded by `check_drc` on the layers they
+remove (a pad's are not yet); a route step
+defines them only under `--backdrill-nets` (see
+[Back-drills](configuration.md#back-drills)). The fill model does not read
 them. KiCad's post-machining tokens (`front_post_machining`,
 `back_post_machining`) are not read.
 

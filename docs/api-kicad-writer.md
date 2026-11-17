@@ -217,8 +217,12 @@ re-saves it as its own). `None` or `{}` writes nothing, so a via with no
 back-drill is written exactly as before. Every site that puts an EXISTING via
 back passes the via's own, as it passes `tenting_attrs` and `via_type`: the
 sites of the table under [Which sites pass what](#which-sites-pass-what), and
-the via dicts they are fed (`'backdrills'`). A via the tool adds passes `None`:
-no step decides a back-drill. A net that is ripped and routed again gets new
+the via dicts they are fed (`'backdrills'`). A via the tool adds has none unless
+the route step was asked for them (`--backdrill-nets`), which sets the via's
+`backdrills` before it is written and, at the end of the step, rewrites the
+shipped file's vias through `set_via_backdrills_in_content(content, {uuid:
+backdrills})` (an empty dict clears; a via that already reads as asked is left
+byte for byte). A net that is ripped and routed again gets new
 vias, so a back-drill on a via the reroute removed goes with that via. On the
 plugin side `gui_utils.apply_via_backdrills(pcb_via, backdrills)` is the twin
 of `apply_via_protection`, called next to it wherever a tab re-creates a via.
