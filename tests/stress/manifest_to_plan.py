@@ -31,6 +31,8 @@ TOOL_ACTIONS = {
     'repair_planes.py': 'repair_planes',
     'bga_fanout.py': 'fanout',
     'qfn_fanout.py': 'fanout',
+    # the bus step (awx/route_bus.py): the GUI's Bus tab runs it as a child
+    'route_bus.py': 'bus',
 }
 
 # Board-mutating tools with NO plan representation (#431). They are RECORDED in
@@ -164,22 +166,21 @@ REFUSED_TOOLS = {
     'run_plan.py': (
         'runs a whole GUI plan on the CLI (#507); a plan step cannot hold a '
         'plan. Load that plan in the AI tab instead'),
-    # The awx bus router and its benches. route_bus is the one that sits in a
-    # board's chain (the bus step); the rest build or replay research benches.
-    'route_bus.py': (
-        'routes an array pair\'s bus with the awx bus router (the bus step); '
-        'the plan format has no bus step. Run it on the CLI and start the plan '
-        'from its output'),
+    # The awx bus router's stages and benches. route_bus.py, the one that sits
+    # in a board's chain (the bus step), converts to a `bus` step; these build
+    # or replay research benches, or are a stage of it.
     'route_lanes.py': (
-        'routes chosen lanes of an awx bus plan one at a time; the plan format '
-        'has no bus step. Run it on the CLI'),
+        'routes chosen lanes of an awx bus plan one at a time, a stage of '
+        'route_bus; the plan\'s bus step is route_bus.py, not this. Run it on '
+        'the CLI'),
     'joint_escape.py': (
         'plans and lays one awx escape for every signal ball of an array; the '
         'plan\'s fanout step is bga_fanout / qfn_fanout, not this. Run it on '
         'the CLI and start the plan from its output'),
     'braid.py': (
-        'emits the awx braid for a fanned-out bus; the plan format has no bus '
-        'step. Run it on the CLI and start the plan from its output'),
+        'emits the awx braid for a fanned-out bus, a stage of route_bus; the '
+        'plan\'s bus step is route_bus.py, not this. Run it on the CLI and '
+        'start the plan from its output'),
     'baseline_freerouting.py': (
         'routes an awx rung with Freerouting, another router; no plan step '
         'runs it. Run it on the CLI'),
@@ -202,8 +203,8 @@ REFUSED_TOOLS = {
         'generates awx many-layer whole-route cases (#622), not a step of a '
         'board\'s chain. Run it on the CLI'),
     'whole_route.py': (
-        'runs the awx whole route on a bench rung end to end; the plan format '
-        'has no bus step. Run it on the CLI'),
+        'runs the awx whole route on a bench rung end to end; the plan\'s bus '
+        'step is route_bus.py, not this. Run it on the CLI'),
     'whole_ladder.py': (
         'runs the awx whole route over a ladder of benches; a research driver, '
         'not a board-chain step. Run it on the CLI'),
@@ -218,11 +219,12 @@ REFUSED_TOOLS = {
         'step. Run it on the CLI'),
     'group_ends.py': (
         'chooses the ends of every awx bus off one array in one model, a '
-        'stage of route_bus; the plan format has no bus step. Run it on the '
-        'CLI'),
+        'stage of route_bus; the plan\'s bus step is route_bus.py, not this. '
+        'Run it on the CLI'),
     'whole_joint.py': (
         'the coupled solve of the awx buses off one array, a stage of '
-        'route_bus; the plan format has no bus step. Run it on the CLI'),
+        'route_bus; the plan\'s bus step is route_bus.py, not this. Run it on '
+        'the CLI'),
     'whole_passages.py': (
         'reads the passages a bus\'s lanes take through an awx bench and '
         'checks a plan against them; a research tool, not a board-chain step. '
@@ -494,6 +496,9 @@ BOOL_FLAGS = {
     # #856: opt-in severity relaxation (ai_plan aliases it onto its checkbox).
     # A switch, so it must not consume the next token -- see FLAG_PARAMS.
     '--relax-drc-severities': 'relax_drc_severities',
+    # route_bus.py: every bus's stages in its own process (the Bus tab's
+    # checkbox of that name).
+    '--inproc': 'inproc',
     # Found by the flag enumeration over route_diff.py and bga_fanout.py:
     # each has a control, reset per step, under another name.
     '--diff-pair-intra-match': 'intra_match_check',     # route_diff
@@ -593,6 +598,32 @@ TOOL_FLAG_PARAMS = {
     # diff tab's diff_pair_gap that the global row targets (#493: that one
     # resolves to the net-class gap).
     'bga_fanout.py': {'--diff-pair-gap': 'bga_diff_pair_gap'},
+    # route_bus.py's own options: the Bus tab's controls of these names (its
+    # sizes are the global rows, the shared panel's).
+    'route_bus.py': {'--rounds': 'rounds', '--feedback-rounds': 'feedback_rounds',
+                     '--k': 'k', '--fanout-track-width': 'fanout_track_width',
+                     '--round-edits': 'round_edits'},
+}
+
+# Per-tool REPEATED flags (argparse action='append', one value each) that land
+# as a TOP-LEVEL step key, a list in the order given. route_bus.py's --bus
+# SRC:DEST names a bus, in routing order -- the step's `buses` (route.py's
+# --bus is a switch, BOOL_FLAGS' bus_enabled).
+TOOL_APPEND_FLAGS = {
+    'route_bus.py': {'--bus': 'buses'},
+}
+
+# Per-tool flags whose presence makes the command no plan step, with why.
+TOOL_REFUSED_FLAGS = {
+    'route_bus.py': {
+        '--find': ('prints the buses the step would route and stops; it routes '
+                   'nothing, and converting it would ROUTE them'),
+        '--src': ('routes one bus BY ITSELF, with ends of its own outside its '
+                  'group (a group\'s bus\'s own process, or a debugging aid); '
+                  'a chain\'s bus step names its buses with --bus'),
+        '--dest': ('goes with --src: one bus by itself (a debugging aid); a '
+                   'chain\'s bus step names its buses with --bus'),
+    },
 }
 
 # Per-tool list flags (nargs='*' / '+') whose GUI home is one text field.
@@ -637,7 +668,7 @@ def _num(v):
 # absolute against the command's recorded cwd -- what #1067 does for a cap
 # step's --intent. (--fab-overrides was carried raw: a relative override file
 # then went unread, and the replay ran at the bare tier with escalation on.)
-PATH_PARAMS = {'net_clearances_path', 'fab_overrides_path'}
+PATH_PARAMS = {'net_clearances_path', 'fab_overrides_path', 'round_edits'}
 
 
 def _long_form(argv):
@@ -686,6 +717,9 @@ def parse_command(argv, cwd=None):
                                    'would ROUTE those nets instead')):
         if _flag in argv:
             return {'_refused': f"{tool} {_flag}: {_why}"}
+    for _flag, _why in TOOL_REFUSED_FLAGS.get(tool, {}).items():
+        if any(a_ == _flag or a_.startswith(_flag + '=') for a_ in argv):
+            return {'_refused': f"{tool} {_flag}: {_why}"}
     action = TOOL_ACTIONS[tool]
     step = {'action': action, 'params': {}}
     step['_files'] = []  # positional .kicad_pcb args (input/output), for pruning
@@ -703,9 +737,15 @@ def parse_command(argv, cwd=None):
     tool_params = TOOL_FLAG_PARAMS.get(tool, {})
     tool_optional_lists = TOOL_OPTIONAL_LIST_FLAGS.get(tool, {})
     tool_lists = TOOL_LIST_FLAGS.get(tool, {})
+    tool_appends = TOOL_APPEND_FLAGS.get(tool, {})
     while i < len(argv):
         a = aliases.get(argv[i], argv[i])
-        if a in tool_optional_lists or a in tool_lists:
+        if a in tool_appends:
+            # one value each time, kept in the order given
+            if i + 1 < len(argv):
+                step.setdefault(tool_appends[a], []).append(str(argv[i + 1]))
+            i += 2
+        elif a in tool_optional_lists or a in tool_lists:
             # Stop at a positional board file, like --component below.
             vals = []
             i += 1

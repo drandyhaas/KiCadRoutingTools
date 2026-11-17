@@ -265,6 +265,50 @@ def main():
         dlg.autoroute_tab.reset_to_defaults()
         restore_dialog_settings(dlg, settings)
 
+    # 8. The Bus tab: the page right after Fanout, restored by name, and its
+    #    options -- route_bus.py's own and the step's python -- by value; the
+    #    per-step reset puts every run option back to the CLI's default and
+    #    keeps the python (a setting of the machine, not of a step).
+    if settings is not None:
+        from kicad_routing_plugin.tab_names import MAIN_PAGES
+        import routing_defaults as rd
+        bad = []
+        pages = [dlg.notebook.GetPageText(i) for i in range(dlg.notebook.GetPageCount())]
+        if pages != list(MAIN_PAGES) or pages.index('Bus') != pages.index('Fanout') + 1:
+            bad.append(f"pages {pages}, want {list(MAIN_PAGES)} with Bus after Fanout")
+        restore_dialog_settings(dlg, dict(settings, active_tab_name='Bus', active_tab=0))
+        if dlg.notebook.GetPageText(dlg.notebook.GetSelection()) != 'Bus':
+            bad.append("the Bus page is not restored by name")
+        want = {'rounds': 1, 'feedback_rounds': 2, 'k': 12, 'inproc': True,
+                'round_edits': '/x/edits.json', 'fanout_track_width_check': True,
+                'fanout_track_width': 0.0975, 'bus_python': '/x/python3'}
+        dlg.bus_tab.set_config(want)
+        saved = get_dialog_settings(dlg)
+        dlg2 = RoutingDialog(None, parse_kicad_pcb(board), board)
+        try:
+            restore_dialog_settings(dlg2, saved)
+            got = dlg2.bus_tab.get_config()
+            got['fanout_track_width'] = round(got['fanout_track_width'], 4)
+            if got != want:
+                bad.append(f"bus options: restored {got}, want {want}")
+            dlg2.reset_params_to_defaults()
+            got = dlg2.bus_tab.get_config()
+            reset_want = dict(want, rounds=rd.BUS_ROUNDS, feedback_rounds=rd.BUS_FEEDBACK_ROUNDS,
+                              k=0, inproc=False, round_edits='', fanout_track_width_check=False)
+            got['fanout_track_width'] = round(got['fanout_track_width'], 4)
+            if got != reset_want:
+                bad.append(f"after reset_params_to_defaults: {got}, want {reset_want}")
+        finally:
+            dlg2.Destroy()
+        if bad:
+            failures.append("Bus tab: " + "; ".join(bad))
+        else:
+            print("  Bus tab: OK (after Fanout, restored by name, options by value, the "
+                  "per-step reset to the CLI's defaults keeping the python)")
+        dlg.bus_tab.set_config({'bus_python': ''})
+        dlg.bus_tab.reset_to_defaults()
+        restore_dialog_settings(dlg, settings)
+
     dlg.Destroy()
 
     print()

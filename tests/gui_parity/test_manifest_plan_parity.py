@@ -562,8 +562,7 @@ def _gui_control_attrs():
     files -- the universe of control attributes an alias may target."""
     attrs = set()
     gui_dir = REPO / "kicad_routing_plugin"
-    for fn in ("swig_gui.py", "differential_gui.py", "fanout_gui.py",
-               "planes_gui.py"):
+    for fn in _GUI_FILES:
         tree = ast.parse((gui_dir / fn).read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign):
@@ -598,6 +597,8 @@ _OWNER_CLASSES = {
     'bga_options': 'BGAOptionsPanel',
     'qfn_options': 'QFNOptionsPanel',
     'create_options': 'CreatePlanesOptionsPanel',
+    'bus_tab': 'BusTab',
+    'options': 'BusOptionsPanel',
     '<dialog>': 'RoutingDialog',
 }
 
@@ -632,6 +633,8 @@ _MUST_RESOLVE_ON = {
     # coupling gate for a commit marked SEPARABLE rather than a delivery
     # gate, which an adversarial review called out.
     'fanout': {'exit_margin', 'extension'},
+    # the bus step's own options, on the Bus tab's options panel
+    'bus': {'rounds', 'feedback_rounds', 'k', 'inproc', 'round_edits'},
 }
 
 
@@ -643,8 +646,7 @@ def _class_control_attrs():
     """
     out = {}
     gui_dir = REPO / "kicad_routing_plugin"
-    for fn in ("swig_gui.py", "differential_gui.py", "fanout_gui.py",
-               "planes_gui.py"):
+    for fn in _GUI_FILES:
         tree = ast.parse((gui_dir / fn).read_text(encoding='utf-8'))
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef):
@@ -751,8 +753,7 @@ def check_owner_scoping():
     # resolves every cap param through BGAOptionsPanel and reports OK.
     # Measured by mutation before this check existed: exit 0.
     _gui_src = {}
-    for _fn in ('swig_gui.py', 'differential_gui.py', 'fanout_gui.py',
-                'planes_gui.py'):
+    for _fn in _GUI_FILES:
         _gui_src[_fn] = (REPO / 'kicad_routing_plugin' / _fn).read_text(
             encoding='utf-8')
     _all_gui = '\n'.join(_gui_src.values())
@@ -917,6 +918,16 @@ BGA_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in ('--enable-used-layers',
 # _set_control learned to set a RadioBox by label and the reset restored it.
 BGA_KNOWN_GAPS = {}
 
+BUS_CLI_ONLY = {
+    '--json-out': ROUTE_CLI_ONLY['--json-out'],
+    # The converter REFUSES the whole command for each of these.
+    '--find': "prints the buses and stops, routing nothing; the converter "
+              "refuses the command",
+    '--src': "one bus by itself, outside its group (a debugging aid); the "
+             "converter refuses the command",
+    '--dest': "goes with --src; the converter refuses the command",
+}
+
 QFN_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in ('--enable-used-layers',
                                                '--keep-thermal', '--output',
                                                '--strict-sizes')}
@@ -955,7 +966,15 @@ FLAG_COVERAGE = {
         probe=['python3', 'py_router/qfn_fanout.py', 'in.kicad_pcb',
                'out.kicad_pcb', '--component', 'U1', '--nets', 'PROBE_NET'],
         cli_only=QFN_CLI_ONLY, known_gaps={}, reset_gaps={}),
+    'route_bus.py': dict(
+        action='bus',
+        probe=['python3', 'awx/route_bus.py', 'in.kicad_pcb', 'out.kicad_pcb',
+               '--bus', 'U1:U2'],
+        cli_only=BUS_CLI_ONLY, known_gaps={}, reset_gaps={}),
 }
+
+_GUI_FILES = ("swig_gui.py", "differential_gui.py", "fanout_gui.py",
+              "planes_gui.py", "bus_gui.py")
 
 # The wx classes that reach the executor's `hasattr(ctrl, "SetValue")`
 # branch. A Button, a StaticText, a custom panel or the `layer_checks` dict
@@ -997,8 +1016,6 @@ def _settable_wx():
             fallback = True
     return frozenset(out | (_SETVALUE_WX if fallback else set()))
 
-_GUI_FILES = ("swig_gui.py", "differential_gui.py", "fanout_gui.py",
-              "planes_gui.py")
 
 
 def _wx_class(node):
@@ -1280,7 +1297,10 @@ def tool_flags(tool):
     test_798 holds exact against the parsers."""
     sys.path.insert(0, str(REPO))
     import krt_capabilities as caps
-    return caps.script_flags(caps._tool_path(caps.ROOT, tool))
+    path = caps._tool_path(caps.ROOT, tool)
+    if not os.path.isfile(path) and os.path.isfile(os.path.join(caps.ROOT, 'awx', tool)):
+        path = os.path.join(caps.ROOT, 'awx', tool)      # the bus step, awx/route_bus.py
+    return caps.script_flags(path)
 
 
 def converter_arity(tool, flag):
@@ -1290,6 +1310,8 @@ def converter_arity(tool, flag):
     fallthrough, which takes whatever tokens follow and is the coverage
     check's business, not this one's)."""
     a = m2p.TOOL_FLAG_ALIASES.get(tool, {}).get(flag, flag)
+    if a in m2p.TOOL_APPEND_FLAGS.get(tool, {}):
+        return 'value'
     if (a in m2p.TOOL_OPTIONAL_LIST_FLAGS.get(tool, {})
             or a in m2p.TOOL_LIST_FLAGS.get(tool, {})):
         return 'list'
@@ -1809,6 +1831,7 @@ _MAINS = {
     'bga_fanout.py': ('py_router/bga_fanout/__init__.py', 'main'),
     'qfn_fanout.py': ('py_router/qfn_fanout/__init__.py', 'main'),
     'place_fanout_clearance.py': ('py_placer/place_fanout_clearance.py', 'main'),
+    'route_bus.py': ('awx/route_bus.py', 'main'),
 }
 #: Helpers a main calls that END the run on a bad argument or named file
 #: (raise SystemExit / return an exit code) -- the AST below cannot see into
@@ -1973,6 +1996,18 @@ _POST_PARSE_WITNESSES = (
      '--clearance 0.1', None),
     ('_cap_intent_unreadable', 'place_fanout_clearance.py a.kicad_pcb '
      '--intent {tmp}/missing.intent.json', 'cannot load intent'),
+    ('_bus_usage', 'route_bus.py a.kicad_pcb', 'OUT is needed'),
+    ('_bus_usage', 'route_bus.py a.kicad_pcb --find', None),
+    ('_bus_usage', 'route_bus.py a.kicad_pcb b.kicad_pcb --src U1',
+     '--src and --dest go together'),
+    ('_bus_usage', 'route_bus.py a.kicad_pcb b.kicad_pcb --bus U1:U2 --src U1 '
+     '--dest U2', 'no --src/--dest with it'),
+    ('_bus_usage', 'route_bus.py a.kicad_pcb b.kicad_pcb --bus U1', 'SRC:DEST'),
+    ('_bus_usage', 'route_bus.py a.kicad_pcb b.kicad_pcb --bus U1:U4+U3', None),
+    ('_bus_round_edits_missing', 'route_bus.py a.kicad_pcb b.kicad_pcb '
+     '--round-edits {tmp}/missing.json', 'no round edits file'),
+    ('_bus_round_edits_missing', 'route_bus.py a.kicad_pcb b.kicad_pcb '
+     '--round-edits {tmp}/fab.txt', None),
 )
 
 

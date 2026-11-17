@@ -77,11 +77,12 @@ WORKDIR_PREFIX = 'krt_autoroute_'
 KEEP_RUNS = 5
 
 
-def _prune_workdirs(keep):
+def _prune_workdirs(keep, prefix=WORKDIR_PREFIX):
+    """The newest KEEP temp work folders named PREFIX* kept, the rest removed."""
     try:
         root = tempfile.gettempdir()
         dirs = [os.path.join(root, d) for d in os.listdir(root)
-                if d.startswith(WORKDIR_PREFIX)]
+                if d.startswith(prefix)]
         dirs = [d for d in dirs if os.path.isdir(d)]
         dirs.sort(key=lambda d: os.path.getmtime(d), reverse=True)
         for d in dirs[keep:]:
@@ -361,38 +362,9 @@ class AutorouteTab(wx.Panel):
 
     def _snapshot(self, workdir):
         """Write the board to WORKDIR/input.kicad_pcb with its project
-        siblings; returns the path, or raises."""
-        staged = os.path.join(workdir, 'input.kicad_pcb')
-        try:
-            from copy_board import SIBLING_EXTS
-        except Exception:                                       # noqa: BLE001
-            SIBLING_EXTS = ('.kicad_pro', '.kicad_prl', '.kicad_dru',
-                            '.design-brief.json')
-        board = None
-        try:
-            import pcbnew
-            board = pcbnew.GetBoard()
-        except Exception:                                       # noqa: BLE001
-            board = None
-        if board is not None:
-            # aSkipSettings: a snapshot; writing a .kicad_pro beside it crashes
-            # on pre-KiCad-10 projects (see swig_gui._stage_live_board). The
-            # siblings come from the board's own files, as the AI tabs stage.
-            import pcbnew
-            # tool_records.save_board keeps the record on the file (#1906)
-            import tool_records
-            tool_records.save_board(pcbnew.SaveBoard, staged, board,
-                                    aSkipSettings=True)
-        elif self.board_filename and os.path.isfile(self.board_filename):
-            shutil.copyfile(self.board_filename, staged)
-        else:
-            raise RuntimeError("no open board and no board file to route")
-        if self.board_filename:
-            stem = os.path.splitext(os.path.abspath(self.board_filename))[0]
-            for ext in SIBLING_EXTS:
-                if os.path.isfile(stem + ext):
-                    shutil.copyfile(stem + ext, os.path.join(workdir, 'input' + ext))
-        return staged
+        siblings; returns the path, or raises (child_run.snapshot_board)."""
+        from .child_run import snapshot_board
+        return snapshot_board(workdir, self.board_filename)
 
     def _on_run(self, event):
         if self.is_running():
@@ -484,17 +456,8 @@ class AutorouteTab(wx.Panel):
         self.stop_btn.Disable()
 
     def _signal(self, sig):
-        p = self._proc
-        if p is None or p.poll() is not None:
-            return
-        try:
-            if os.name == 'nt':
-                subprocess.run(['taskkill', '/T', '/F', '/PID', str(p.pid)],
-                               capture_output=True)
-            else:
-                os.killpg(os.getpgid(p.pid), sig)
-        except (OSError, ProcessLookupError):
-            pass
+        from .child_run import signal_group
+        signal_group(self._proc, sig)
 
     def _on_tick(self, event):
         if not self:

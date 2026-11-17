@@ -164,6 +164,17 @@ tracks and vias; a step made to fail (`KRT_AUTOROUTE_FAIL_STEPS`) must show in
 its row and the detail pane, a run that fails outright must say FAILED, and
 Stop must end a run mid-route. About two minutes.
 
+Bus tab: `test_bus_tab_gui.py` -- the REAL tab on a 12-net synthetic pair of
+ball arrays (`awx/synth_bus.py`): the page after Fanout; the step's python
+probed in a child (KiCad's own reported with why it is not ready, where it is
+not); `--find` lists the bus; the tab's command equals the CLI's argument for
+argument and, with REDO_MANIFEST set, is recorded as one manifest line; its
+events fill the rows and the gauges; its output grades as the CLI run's (the
+step's summary, check_connected, check_drc, the bus copper and locks to the
+nm); Apply, a one-step AI plan `bus` step through the real PlanExecutor, and
+Stop. Needs a python with OR-Tools for the step (`--python`, else
+`$KRT_BUS_PYTHON`, else python3 on PATH); exits 77 without one. About 90 s.
+
 AI Placement tab: `test_placement_apply_locks.py` (below),
 `test_placement_apply_graphics.py` (Apply lays tracks, never the result's
 copper graphics), `test_placement_apply_zones_gui.py` (a Place + Route Apply

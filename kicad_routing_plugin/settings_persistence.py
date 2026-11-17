@@ -318,6 +318,9 @@ def get_dialog_settings(dialog):
         'labels_options': dialog.labels_tab.labels_options.get_config(),
         # Autorouter sub-tab: its options, keyed by the CLI's param names.
         'autoroute_options': dialog.autoroute_tab.get_config(),
+        # Bus tab: its options, keyed by route_bus.py's param names, and the
+        # python the step runs under.
+        'bus_options': dialog.bus_tab.get_config(),
 
         # Log content
         'log_content': dialog.log_text.GetValue(),
@@ -921,6 +924,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.labels_tab.labels_options.set_config(_labels)
     if isinstance(settings.get('autoroute_options'), dict):
         dialog.autoroute_tab.set_config(settings['autoroute_options'])
+    if isinstance(settings.get('bus_options'), dict):
+        dialog.bus_tab.set_config(settings['bus_options'])
     if 'placement_last_workdir' in settings and settings['placement_last_workdir']:
         dialog.placement_tab.restore_last_workdir(
             settings['placement_last_workdir'])

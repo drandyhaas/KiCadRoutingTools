@@ -9,7 +9,7 @@ would silently re-point; LEGACY_* map such an index back to its page.
 #: The main notebook's pages, left to right.
 AUTO_PAGE = "Auto"
 MAIN_PAGES = (AUTO_PAGE, "Route", "Advanced", "Differential", "Fanout",
-              "Planes", "Log", "About")
+              "Bus", "Planes", "Log", "About")
 
 #: The Auto page's sub-tabs, left to right.
 AUTO_SUBTABS = ("Autorouter", "AI Routing", "AI Placement", "Labels")

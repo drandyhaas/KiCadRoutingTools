@@ -13,8 +13,9 @@ traceback or an import failure as a broken test rather than a held guard:
   * only the alias removed -> the legacy `bus` name resolves nowhere;
   * only the row removed -> the fixture's --bus expectation fails;
   * a made-up flag added to route.py's parser and to nothing else, and one
-    each in route_diff.py's, route_planes.py's, bga_fanout.py's and
-    qfn_fanout.py's parsers, each named on its own tool's owners;
+    each in route_diff.py's, route_planes.py's, bga_fanout.py's,
+    qfn_fanout.py's and awx/route_bus.py's parsers, each named on its own
+    tool's owners;
   * a --no-X flag "fixed" with a plain alias onto its POSITIVE checkbox;
   * a stale CLI-only entry for a flag that reaches the GUI;
   * the route selection no longer reading --component's refs;
@@ -40,7 +41,7 @@ import run_utils                                              # noqa: E402
 
 # The tools the gate enumerates; the precondition checks each one.
 TOOLS = ('route.py', 'route_diff.py', 'route_planes.py', 'bga_fanout.py',
-         'qfn_fanout.py')
+         'qfn_fanout.py', 'route_bus.py')
 
 
 def _src(path):
@@ -57,13 +58,14 @@ def _src(path):
 # or an import failure as a broken test, not a held guard), and restores the
 # copy. The repository is never written.
 
-_COPY_DIRS = ('py_router', 'py_tools', 'py_placer', 'tests/stress')
+_COPY_DIRS = ('py_router', 'py_tools', 'py_placer', 'tests/stress', 'awx')
 _COPY_FILES = ('krt_capabilities.py',
                'kicad_routing_plugin/ai_plan.py',
                'kicad_routing_plugin/swig_gui.py',
                'kicad_routing_plugin/differential_gui.py',
                'kicad_routing_plugin/fanout_gui.py',
                'kicad_routing_plugin/planes_gui.py',
+               'kicad_routing_plugin/bus_gui.py',
                'tests/gui_parity/test_manifest_plan_parity.py',
                'tests/gui_parity/fixtures/sample_redo_commands.sh')
 
@@ -75,6 +77,7 @@ ROUTE_DIFF = 'py_router/route_diff.py'
 ROUTE_PLANES = 'py_router/route_planes.py'
 BGA_FANOUT = 'py_router/bga_fanout/__init__.py'
 QFN_FANOUT = 'py_router/qfn_fanout/__init__.py'
+ROUTE_BUS = 'awx/route_bus.py'
 GATE_REL = 'tests/gui_parity/test_manifest_plan_parity.py'
 
 
@@ -193,7 +196,10 @@ class NegativeControls(unittest.TestCase):
                  '--zz-bga-probe', "fanout owners ['bga_options'"),
                 (QFN_FANOUT,
                  "parser.add_argument('--layer', '-l', default=None,",
-                 '--zz-qfn-probe', "fanout owners ['bga_options'")):
+                 '--zz-qfn-probe', "fanout owners ['bga_options'"),
+                (ROUTE_BUS,
+                 "ap.add_argument('--inproc', action='store_true',",
+                 '--zz-bus-probe', "bus owners ['options'")):
             with self.subTest(tool=path):
                 restore = self._mutate(
                     path, anchor,
