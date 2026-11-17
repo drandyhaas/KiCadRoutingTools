@@ -128,6 +128,9 @@ def main():
         print('usage: ' + __doc__.split(' -- ', 1)[0].strip())
         sys.exit(0 if len(sys.argv) > 1 else 2)
     d, rnd = sys.argv[1], sys.argv[2]
+    # (the round as an event names it: a round's first plans by its number, a loop's re-solves by their whole key --
+    # read as a number, a loop's key ended every coupled re-solve at its event, its search done and nothing written)
+    key = int(rnd) if rnd.isdigit() else rnd
     rd = os.path.join(d, f'r{rnd}')
     reqs = {}
     for f in sorted(os.listdir(rd)):
@@ -325,7 +328,7 @@ def main():
         print(f'  coupled search: none -- the buses\' own plans break no coupling and cramp no change: each bus\'s own '
               'is the coupled plan',
               flush=True)
-        bus_events.emit('coupled', 'search', bus=None, round=int(rnd), status='NONE', secs=round(time.time() - t0),
+        bus_events.emit('coupled', 'search', bus=None, round=key, status='NONE', secs=round(time.time() - t0),
                         couplings=len(cpl), broken=0, buses=sorted(parts))
         json.dump({'round': rnd, 'couplings': len(cpl), 'secs': round(time.time() - t0, 1), 'all': cpl,
                    'broken_alone': [], 'broken': [], 'own': True}, open(os.path.join(rd, 'joint.json'), 'w'), indent=1)
@@ -343,7 +346,7 @@ def main():
     bus_events.watch_solve(s_, 'coupled', 'the coupled search', W_V, bus=None)
     st = s_.Solve(m)
     secs = time.time() - t0
-    bus_events.emit('coupled', 'search', bus=None, round=int(rnd), status=s_.StatusName(st), secs=round(secs),
+    bus_events.emit('coupled', 'search', bus=None, round=key, status=s_.StatusName(st), secs=round(secs),
                     couplings=len(brk), buses=sorted(parts),
                     **({'cost': round(s_.ObjectiveValue() / W_V, 1), 'bound': round(s_.BestObjectiveBound() / W_V, 1),
                         'broken': sum(s_.Value(k_) for k_ in brk)} if st in ok else {}))
