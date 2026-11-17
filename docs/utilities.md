@@ -2747,7 +2747,9 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
 5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`. A
    pair net the step leaves in a track or via DRC violation (by `check_drc`,
    against the board before the step) is ripped and routed again on its own with
-   `route.py --force-reroute`, single-ended; a net that route lays no copper
+   `route.py --force-reroute`, single-ended, named exactly where that name
+   selects it alone (`route_diff.py` records the pairs it routes protected,
+   #521, and only an exact name lifts that); a net that route lays no copper
    for keeps its pair copper.
 6. **Route**: `route.py` over every net, with the poured nets and rails as
    power nets, a finer grid around fine-pitch parts and deeper rip-up on

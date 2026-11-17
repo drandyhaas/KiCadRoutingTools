@@ -17,6 +17,8 @@
    the best so far, fewer open nets first, then fewer DRC; --finish keeps the input
    unless a pass beats it; the iteration budget is a forecast from reported
    counts, and a pass that reports none starts no other.
+   The pair re-route names a net exactly where that name selects it alone,
+   the only way route.py lifts route_diff's protection of the pair.
 5. --effort-factor refuses a non-finite or negative value.
 6. Real runs on splitflap_driver: end to end, --finish, and --finish on a
    board inside the output's own work directory with a stale sibling at the
@@ -339,6 +341,34 @@ def test_passes():
            "an input that cannot be graded runs no pass")
 
 
+class RecordingChain(ScriptedChain):
+    """ScriptedChain that keeps each run's arguments."""
+
+    def run(self, kind, args, tag, **kw):
+        self.calls = getattr(self, 'calls', []) + [(tag, list(args))]
+        return super().run(kind, args, tag, **kw)
+
+
+def test_reroute_names():
+    print("the pair re-route names a net exactly where that selects it alone")
+    names = ['USB_P', 'USB_N', '/x/USB_N', 'GND']
+    a = dict(clearance=0.1, track=0.1, via=0.45, drill=0.2, grid=0.1, power_nets=[],
+             congested=False, globs={n: AP._glob(n) for n in names})
+    saved = AP._net_names
+    AP._net_names = lambda board: names
+    try:
+        ch = RecordingChain([(G(0), 100), (G(0), 100)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            AP.route_passes(ch, a, ['F.Cu', 'B.Cu'], ['1', '1.5'], reroute=['USB_P', 'USB_N'])
+    finally:
+        AP._net_names = saved
+    tag, args = ch.calls[0]
+    sel = args[args.index('--nets') + 1:args.index('--force-reroute')]
+    expect(tag == 'reroute_pairs' and sel == ['USB_P', AP._glob('USB_N')],
+           f"USB_P by its name (lifts route_diff's protection), USB_N, whose name also "
+           f"selects /x/USB_N, by its pattern ({sel})")
+
+
 def _events(text):
     """[(token, payload)] for the AUTOROUTE_* JSON lines of TEXT, in order."""
     out = []
@@ -552,6 +582,7 @@ def main():
     test_fanout_parts()
     test_analyze()
     test_passes()
+    test_reroute_names()
     test_plane_layers()
     test_effort_factor()
     test_skip_reasons()

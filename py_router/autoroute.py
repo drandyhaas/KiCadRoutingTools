@@ -39,7 +39,9 @@ congestion before the router starts:
                    fewer shorts, then fewer dropped escapes
   5. diff pairs    name-detected pairs routed first with route_diff; a pair
                    net it leaves in a DRC violation is ripped and routed
-                   again single-ended
+                   again single-ended, named exactly where that selects it
+                   alone (route_diff records its pairs protected, #521, and
+                   only an exact name lifts that)
   6. route         route.py over every net with the poured nets and rails as
                    power nets, a first pass that keeps signals off the planes,
                    a finer grid around fine-pitch parts, deeper rip-up on
@@ -1206,6 +1208,13 @@ def refan(ch, fans, decap):
               held=held, board=out if after and after < before else kept)
 
 
+def _net_names(board):
+    """Every net name of BOARD."""
+    from kicad_parser import parse_kicad_pcb
+    with contextlib.redirect_stdout(sys.stderr):
+        return sorted({n.name for n in parse_kicad_pcb(board).nets.values() if n.name})
+
+
 def _improves(g, best):
     """G ranks above BEST completion first: fewer open nets, then, at the same
     open count, fewer DRC violations. A pass that closes nets at the cost of
@@ -1268,8 +1277,13 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), rerou
             return ch, ch.cur, g
     if reroute:
         # A net whose new route lays no copper gets its old copper back, and
-        # the passes below route whatever is left open.
-        out, _, _ = ch.run('route', ['{IN}', '{OUT}', '--nets', *[a['globs'][n] for n in reroute],
+        # the passes below route whatever is left open. route_diff records the
+        # pairs it routes protected (#521), and only a net named exactly lifts
+        # that, so each goes by its own name where that selects it alone.
+        names = _net_names(ch.cur)
+        sel = [n if _exact_ok(n) and _selects_exactly(n, n, names) else a['globs'][n]
+               for n in reroute]
+        out, _, _ = ch.run('route', ['{IN}', '{OUT}', '--nets', *sel,
                                      '--force-reroute', *base[4:], '--layers', *L,
                                      '--layer-costs', *costs], 'reroute_pairs',
                            parent='diffpairs')
