@@ -1880,7 +1880,9 @@ def pull_runs():
                         continue
                     if any(p['k'] in ('X', 'D') for p in r['pts'][i:j - 1]):     # (never a breach, nor a dive's end)
                         continue
-                    hull = shapely.MultiPoint(xy[i:j + 1]).convex_hull
+                    # (the hull built from the coordinates at once: a MultiPoint of a list of points made each one
+                    # a Python object, 97 % of the embedding's time on a 32-lane group bus)
+                    hull = shapely.convex_hull(shapely.multipoints(np.asarray(xy[i:j + 1], dtype=float)))
                     if hull.geom_type != 'Polygon':
                         hull = hull.buffer(1e-4)
                     if not in_free(L_, hull):
