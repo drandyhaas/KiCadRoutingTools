@@ -639,11 +639,14 @@ def active_env_knobs() -> dict:
 #: the recording machine (an interpreter, kicad-cli, a directory) or belongs
 #: to a harness (the cloud sweep, a timing ledger, a GUI-gate save log) says
 #: nothing about the copper, and replayed on another machine it points at a
-#: path that is not there.
+#: path that is not there. KICAD_FORCE_COLOR is the console's colour, which
+#: the plugin sets in KiCad's process for its Log tab (kicad_routing_plugin/
+#: __init__.py): a CLI the GUI runs as a child inherits it, and its recorded
+#: line would carry it where the same command typed in a terminal does not.
 _NOT_REPLAYED = __import__('re').compile(
     r'^(KICAD|KRT)_(\w*PYTHON\w*|CLI(_\w+)?|SWEEP_\w+|\w+_DIR)$')
 _NOT_REPLAYED_NAMES = frozenset({'KICAD_SAVELOG', 'KICAD_IMAGE',
-                                 'KRT_CMD_TIMING_LEDGER'})
+                                 'KRT_CMD_TIMING_LEDGER', 'KICAD_FORCE_COLOR'})
 
 
 def is_replay_knob(name: str) -> bool:

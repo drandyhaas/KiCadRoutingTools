@@ -71,14 +71,17 @@ def main():
 
     print('2. a run with REDO_MANIFEST: its own line, and its events')
     man = os.path.join(td, 'redo_commands.sh')
-    env = dict(os.environ, REDO_MANIFEST=man, REDO_RUNDIR=td)
+    # (KICAD_FORCE_COLOR: the plugin sets it in KiCad's process, so the Bus tab's child inherits it -- a console
+    # colour, no knob a replay needs, so the line carries no prefix for it)
+    env = dict(os.environ, REDO_MANIFEST=man, REDO_RUNDIR=td, KICAD_FORCE_COLOR='1')
     env.pop('BUS_EVENTS', None)
     out = os.path.join(td, 'none.kicad_pcb')
     check([sys.executable, '-X', 'utf8', TOOL, NO_BUS, out], accept=True, timeout=600, env=env, cwd=td)
     cmds = commands(man)
     ok('exactly one command recorded', len(cmds) == 1, cmds)
-    ok('...route_bus.py with its board and OUT', bool(cmds) and 'route_bus.py' in cmds[0]
-       and 'none.kicad_pcb' in cmds[0] and cmds[0].startswith('python3 -u -X utf8'), cmds)
+    ok('...route_bus.py with its board and OUT, no env prefix (KICAD_FORCE_COLOR is no replay knob)',
+       bool(cmds) and 'route_bus.py' in cmds[0] and 'none.kicad_pcb' in cmds[0]
+       and cmds[0].startswith('python3 -u -X utf8'), cmds)
     evs = [json.loads(ln) for ln in open(evidence(os.path.join(td, 'none.bus', 'events.jsonl'), 'events'),
                                          encoding='utf-8')]
     ok('events: step start, plan, end', [(e['stage'], e['kind']) for e in evs]
