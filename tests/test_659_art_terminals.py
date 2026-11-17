@@ -16,7 +16,10 @@ the net open on every run. This pins, on a board shaped like it:
      leaves the board as it found it;
   3. route.py --nets '*' joins the pad and both discs (KiCad's links, by our
      grade: none), and the written board carries no terminal footprint;
-  4. a run whose --nets leaves the net out adds no terminal for it.
+  4. a run whose --nets leaves the net out adds no terminal for it;
+  5. a via the route lands inside a FILLED island (a rectangle, no stroke
+     reaching the barrel) is joined there: check_weird's via support credits
+     the fill, so the end-of-run dangling-via sweep keeps it and its track.
 
     python3 tests/test_659_art_terminals.py
 """
@@ -80,14 +83,20 @@ def _disc(x, y, r, net, layer):
             % (x, y, x + r, y, layer, net))
 
 
+def _rect(x1, y1, x2, y2, net, layer):
+    return ('\t(gr_rect\n\t\t(start %g %g)\n\t\t(end %g %g)\n\t\t(stroke\n\t\t\t(width 0.2)\n'
+            '\t\t\t(type solid)\n\t\t)\n\t\t(fill yes)\n\t\t(layer "%s")\n\t\t(net "%s")\n\t)\n'
+            % (x1, y1, x2, y2, layer, net))
+
+
 def _edge(x1, y1, x2, y2):
     return ('\t(gr_line\n\t\t(start %g %g)\n\t\t(end %g %g)\n\t\t(stroke\n\t\t\t(width 0.1)\n'
             '\t\t\t(type default)\n\t\t)\n\t\t(layer "Edge.Cuts")\n\t)\n' % (x1, y1, x2, y2))
 
 
-def write_board(path):
-    parts = [HEAD, _fp('J2', 10, 5, 'TP'),
-             _disc(10, 15, 0.75, 'TP', 'F.Cu'), _disc(10, 15, 0.75, 'TP', 'B.Cu'),
+def write_board(path, art=None):
+    parts = [HEAD, _fp('J2', 10, 5, 'TP')] + (art or [
+             _disc(10, 15, 0.75, 'TP', 'F.Cu'), _disc(10, 15, 0.75, 'TP', 'B.Cu')]) + [
              _fp('R1', 20, 5, 'OTHER'), _fp('R2', 20, 15, 'OTHER')]
     c = [(0, 0), (30, 0), (30, 20), (0, 20)]
     parts += [_edge(*c[i], *c[(i + 1) % 4]) for i in range(4)]
@@ -168,6 +177,29 @@ def main():
         print('4. a run whose --nets leaves TP out adds no terminal:')
         r2 = route(board, os.path.join(td, 'out2.kicad_pcb'), ['OTHER'])
         ok('no art terminal announced', 'Art islands' not in r2.stdout, r2.stdout[-200:])
+
+        print('5. a via landing inside a filled island is kept:')
+        board5 = write_board(os.path.join(td, 'in5.kicad_pcb'),
+                             [_rect(9, 14, 11, 15.2, 'TP', 'B.Cu')])
+        out5 = os.path.join(td, 'out5.kicad_pcb')
+        r5 = route(board5, out5, ['*'])
+        ok('route.py ran', r5.returncode == 0 and 'Traceback' not in r5.stdout + r5.stderr,
+           (r5.stdout + r5.stderr)[-300:])
+        if os.path.exists(out5):
+            got = parse(out5)
+            tp5 = next(k for k, n in got.nets.items() if n.name == 'TP')
+            vias = [v for v in got.vias if v.net_id == tp5]
+            tracks = [s for s in got.segments if s.net_id == tp5 and not s.graphic]
+            ok('the via and its track ship', len(vias) == 1 and tracks,
+               f'{len(vias)} via(s), {len(tracks)} track(s)')
+            from check_weird import via_support_parts
+            if vias:
+                segs = [s for s in got.segments if s.net_id == tp5]
+                span, fixed, by_seg = via_support_parts(
+                    vias[0], segs, got.pads_by_net[tp5], [], got.board_info.copper_layers)
+                ok('its support is two layers, the fill one of them',
+                   set(fixed) | set(by_seg.values()) == {'F.Cu', 'B.Cu'},
+                   f'{sorted(set(fixed) | set(by_seg.values()))}')
     print('PASS' if not failures else f'FAIL ({len(failures)}): {failures}')
     return 1 if failures else 0
 

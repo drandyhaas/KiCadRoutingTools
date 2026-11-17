@@ -95,8 +95,12 @@ def add_art_terminals(pcb_data, net_filter=None):
     if not art_nets:
         return []
     off = make_off_board_test(pcb_data.board_info)
+    # A poured net's art is the pour's to join: the fill reaches the art it
+    # covers, so a terminal there routes copper the plane already supplies
+    # and crowds the nets around it.
+    poured = {z.net_id for z in (getattr(pcb_data, 'zones', None) or []) if z.net_id}
     added = []
-    for nid in sorted(art_nets):
+    for nid in sorted(art_nets - poured):
         net = pcb_data.nets.get(nid)
         if net is None or not net.name:
             continue

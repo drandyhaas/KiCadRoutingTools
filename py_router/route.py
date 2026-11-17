@@ -2894,9 +2894,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _sense_report(pcb_data)
     # #659: net-tagged copper art reaching none of its net's pads is an open
     # net in KiCad's DRC; give each such island a routing terminal for this
-    # run (taken back by `_art_terminals_scoped`).
+    # run (taken back by `_art_terminals_scoped`). A --rip-existing-nets net
+    # is re-routed when ripped, so it needs its terminal too.
     from art_terminals import add_art_terminals
-    if add_art_terminals(pcb_data, net_names or None):
+    if add_art_terminals(pcb_data, (list(net_names) + list(rip_existing_nets or []))
+                         if net_names else None):
         _ART_TERMINAL_BOARDS.append(pcb_data)
     if final_reconcile:
         from rip_up_reroute import reset_run_ledgers
