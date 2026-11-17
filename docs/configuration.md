@@ -1007,6 +1007,7 @@ Detects groups of nets with clustered endpoints (buses), plans a corridor with r
 | `--bus-min-nets` | 2 | Minimum number of nets for a raw clique (the strict geometric filter then keeps a group only with 3 or more) |
 | `--bus-attraction-radius` | 5.0 | Reach of the attraction around the corridor or neighbor path (mm) |
 | `--bus-attraction-bonus` | 5000 | Attraction strength: `bonus/50` percent off a step's cost, capped at 90% (the default is at the cap) |
+| `--bus-nets` | - | Declare an ordered bus, `NET,NET,...` in the order its members keep side by side (repeatable); each member follows its own lane of the corridor ([Bus Routing](bus-routing.md#ordered-buses-declared-by-net-list)) |
 
 ### Guide Corridor Options (preferred route)
 

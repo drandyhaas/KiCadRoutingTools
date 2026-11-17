@@ -449,7 +449,9 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                 # via has none, emits no token and inherits the board's setup.
                 tenting_attrs=_via_attrs(via),
                 # ...and its blind/micro type word (a new via is through).
-                via_type=getattr(via, 'via_type', None)
+                via_type=getattr(via, 'via_type', None),
+                # a laid bus's vias ship locked (bus_lanes.py)
+                locked=getattr(via, 'locked', False)
             ) + "\n"
 
     # Add stub segments synthesized by bare-pad target swaps
@@ -458,7 +460,8 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
         for seg in all_swap_segments:
             routing_text += generate_segment_sexpr(
                 (seg.start_x, seg.start_y), (seg.end_x, seg.end_y),
-                seg.width, seg.layer, seg.net_id, net_name=_net_name(seg.net_id)
+                seg.width, seg.layer, seg.net_id, net_name=_net_name(seg.net_id),
+                locked=getattr(seg, 'locked', False)    # a laid bus's lanes (bus_lanes.py)
             ) + "\n"
 
     return routing_text

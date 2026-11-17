@@ -758,7 +758,10 @@ def audit_items(pcb_data, segments, vias, keepouts):
             # its layers is an item KiCad does not allow
             for s in segments:
                 if (not getattr(s, 'graphic', False) and s.layer in ko['layers']
-                        and bound(ko, s.net_id)):
+                        and bound(ko, s.net_id)
+                        # a laid bus's ban (bus_lanes.py) bars its members'
+                        # ramps, not its own lanes, which are laid locked
+                        and not (ko.get('bus_lanes') and getattr(s, 'locked', False))):
                     yield ko, 'track', s
             continue
         ring = ko['polygon']

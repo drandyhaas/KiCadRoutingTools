@@ -59,6 +59,12 @@ NO_LIFT = 'no-lift'                # routes without it: a recorded #908 gap
 LIFT_ROWS = ('_graphic_own_pad_lift', '_graphic_own_pad_via_lift')
 
 REGISTRY = {
+    # --- a laid bus's legality probes (--bus-lanes) ------------------------
+    ('py_router/bus_lanes.py', 'lay'): (
+        NOT_ROUTED, 'the laid lanes\' probes: where a lane\'s vias fit and '
+                    'whether its cells are free, asked of a map built '
+                    'without the bus\'s members; the lanes are placed '
+                    'geometrically, no search routes on it'),
     # --- applies the lift itself ------------------------------------------
     ('py_router/routing_context.py', 'build_single_ended_obstacles'): (
         LIFTS, 'clones a base for ONE net and lifts on the clone; no restore, '

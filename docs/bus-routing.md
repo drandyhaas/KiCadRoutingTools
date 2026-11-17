@@ -26,6 +26,11 @@ The GUI's Advanced tab has the same switch ("Enable bus routing", with the four 
 | `--bus-min-nets` | 2 | Minimum number of nets for a raw clique (the strict filter below then needs 3) |
 | `--bus-attraction-radius` | 5.0 | Reach of the attraction around the corridor or neighbour path (mm) |
 | `--bus-attraction-bonus` | 5000 | Attraction strength: `bonus/50` percent off a step's cost, capped at 90% (the default is at the cap) |
+| `--bus-nets NET,NET,...` | - | Declare an ordered bus by its nets, in the order they keep side by side (repeatable, one bus each); see [Ordered Buses](#ordered-buses-declared-by-net-list) |
+| `--bus-lanes GUIDE_LAYER:BUS_LAYER` | - | Lay the matching `--bus-nets` bus (the first `--bus-lanes` the first `--bus-nets`; `-` for none) as copper along the polyline drawn on GUIDE_LAYER; see [Laid Lanes](#laid-lanes-members-joining-along-the-run) |
+| `--bus-lane-pitch` | 0 (auto) | Distance between laid lanes (mm); 0 leaves room for a member's via beside the next lane |
+| `--bus-fan-pitch` | 0 (none) | Distance the laid lanes spread to along the centreline's last segment (mm), where the bus meets rows farther apart |
+| `--bus-drop-reach` | 0 (auto) | How far downstream of where a member joins its drop may move to find room (mm); 0 is the bus's width (members × pitch); the lane's end via searches half of it |
 | `--ordering bus` | - | The bus-first ordering alone, with no corridor and no attraction (see [Net Ordering](net-ordering.md)) |
 
 ## Bus Detection
@@ -88,6 +93,53 @@ discount % = min(bonus / 50, 90) × proximity² × alignment × layer share
 
 A discount, unlike a subtracted bonus, can never make a step free, so the gradations survive. Clearances are enforced as normal: attraction only changes which legal path is cheapest.
 
+## Ordered Buses (declared by net list)
+
+Detection groups nets by where their ends are and routes them middle-out, each member on whichever side of the corridor is cheaper, so the members' order across the bus is not fixed. When the order matters (neighbouring lines that must differ little in potential, a cell-voltage sense bus in cell order), declare the bus instead:
+
+```bash
+python route.py board.kicad_pcb --nets "/U*" "/G*" ... \
+    --bus-nets "/U0,/G0,/U1,/G1,/U2,/G2" --bus-attraction-radius 1.0
+```
+
+- **Taken as given:** a declared bus is neither detected nor filtered; its members keep the list's order. `--bus-nets` alone turns bus routing on for these nets only; add `--bus` to detect other buses among the rest. An unknown net, a net in two buses or a one-net bus is an error.
+- **Corridor along the whole run:** the corridor is probed along the farthest-reaching member's run (its two farthest-apart pads or track ends as the sides), not its first edge, so a multipoint member's local joints don't shorten it.
+- **One lane per member:** each member is attracted to its own lane, the corridor moved sideways by its place in the order, one track + clearance apart (the farthest-reaching member's lane is the corridor itself). The lanes are mirrored if the members' copper runs the other way across the corridor, so the first member takes the side its own pads are on. Members leave the bus at their own ends.
+- **Each lane points the route's way:** the attraction rewards only moves along the path's direction, so a member's lane is turned to each route's direction of travel (forward and backward probes, multipoint edges).
+- **Tuning:** a narrow `--bus-attraction-radius` (1–2 mm, a few lanes) separates the lanes; at the default 5 mm neighbouring lanes pull almost equally.
+- **Members joining along the run, from both sides:** the attraction cannot hold the order there (below); lay the bus instead, [Laid Lanes](#laid-lanes-members-joining-along-the-run).
+
+## Laid Lanes (members joining along the run)
+
+An ordered bus whose members join it one by one along its run, from either side (a cell-sense bus: twelve taps along both edges of a board, one outlet at the monitoring IC), is a river with tributaries. The attraction cannot hold its order: a step is discounted wherever a lane point within the radius lies in its general direction (a diagonal at 70 %), so a member drifts toward the river at a shallow angle, on any layer, and joins where the search found it cheapest; the honest join, straight from its far end to its lane, is the dearest path it has (no discount, a via, the other lanes to cross). Measured on such a board (12 members, 232 × 50 mm, 4 layers), the members out of order at four sections across the run:
+
+| | out of order at x = -80 / -50 / -20 / +5 mm |
+|---|---|
+| `--bus-nets`, `--bus-attraction-radius 1` | 1 / 8 / 13 / - |
+| `--bus-nets`, radius 5 | 0 / 7 / 14 / - |
+| `--bus-nets`, radius 10 | 1 / 9 / 12 / - |
+| `--bus-nets`, radius 20 | 1 / 7 / 13 / - |
+| a prototype: room for every lane, a drawn centreline, the members searched at heuristic weight 0.3, the lanes fanned | 1 / 6 / 7 / 3 |
+| laid lanes (`--bus-lanes`) | 0 / 0 / 0 / 0, 46 of 46 nets, DRC clean, 64 vias where the router alone took 94 |
+
+River routers assign the order first and the geometry after (Leiserson & Pinter, *Optimal placement for river routing*, 1983; Dai, Dayan & Staepelaere, *Topological routing in SURF*, 1991). `--bus-lanes` does that for a declared bus:
+
+```bash
+python route.py board.kicad_pcb --nets ... --layers F.Cu In2.Cu B.Cu \
+    --bus-nets "/U0,/G0,/U1,/G1,/U2,/G2" --bus-lanes User.2:In2.Cu --bus-fan-pitch 1.5
+```
+
+1. **The centreline is drawn:** one open polyline on the guide layer (a User layer, as `--guide-corridor` reads), where the bus fits, its end at the outlet. Where the bus fits is the designer's knowledge: probed along its longest member, the corridor lay on the other members' exits.
+2. **The lanes are laid before any net routes**, as locked copper on the bus layer: one per member, offset from the centreline in the declared order (mitred through bends), one pitch apart, spreading to `--bus-fan-pitch` along the last segment. The outlet decides which side member 0 takes (each member's pad nearest the centreline's end, in order), not their far ends, which may lie on both sides. Each member's lane runs from where it joins, the lane's point nearest its far end, else the nearest point downstream where its via fits (against every other net's copper, the member's own net-filtered keep-outs, the other lanes and vias) and its lane on to the end is clear, to the centreline's end, a via at both (through vias by default, not a limit of the design). Only downstream: a lane never reaches back past its member's far end, so no ramp runs against the flow. A member with no clear lane within `--bus-drop-reach` is not laid, and says why. The lanes are checked against every other net's copper, the other members' pre-existing copper (their pads, stubs and rows) included, and against each other exactly (via radius, track width, clearance).
+3. **The members route their ramps:** the bus layer is barred to them (a layer ban; their tracks there would be the lanes' neighbours out of order), so a ramp from the far side crosses the other lanes on another layer, as a hand-drawn river's verticals do. Both lane vias are terminals of their member (flagged on the vias themselves: the lane's copper group gives each of them to the component tree as an endpoint), so the member's tree is its far end to the drop via and the end via to its outlet pads; without them a member may bypass its lane, copper without a pad being only a place to launch from.
+4. **An unused drop via goes:** a ramp that joins its lane by a via of its own, downstream, leaves the laid drop via dangling; it is removed and the lane starts at the ramp's via.
+
+The order is then a construction: none out of order on the bus layer, the same copper every run, no other net in a lane. A nested run (the reconciliation laps) finds a member's lane on the board and lays nothing.
+
+- **Pitch:** the default leaves room for a via on a lane beside the next lane (via radius + half the next track + clearance); a wider pitch is the user's.
+- **What to measure:** the order on the bus layer only, downstream of each drop: a ramp crossing the river on another layer is not alongside anything.
+- **Limits:** a lane is straight between the centreline's vertices; an obstacle the centreline does not avoid stops that member's lane (it is not laid, and routes as an ordinary member), so draw the centreline round what is in the way.
+
 ## Interaction with Other Features
 
 - **Net ordering**: `--bus` reorders whatever `--ordering` produced (bus groups first). `--ordering bus` gives the same reorder over an MPS base without corridors or attraction.
@@ -103,7 +155,7 @@ A discount, unlike a subtracted bonus, can never make a step free, so the gradat
 
 ## Limitations
 
-- Grouping is geometric: two unrelated buses that leave a connector side by side and run parallel can be grouped together.
+- Grouping is geometric (declare the bus with `--bus-nets` to fix it): two unrelated buses that leave a connector side by side and run parallel can be grouped together.
 - Attraction is strongest on the path's own layer; other layers get the 35% share.
 - A bus member with no corridor and no routed neighbour (e.g. all earlier members failed) routes without attraction.
 

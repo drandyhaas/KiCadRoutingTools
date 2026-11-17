@@ -327,17 +327,20 @@ EDGE_ROUNDING_MM = 2 ** 0.5 * 1e-6
 
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
                            width: float, layer: str, net_id: int,
-                           net_name: str = None) -> str:
+                           net_name: str = None, locked: bool = False) -> str:
     """Generate KiCad S-expression for a track segment.
 
     Args:
         net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
+        locked: write `(locked yes)` where KiCad 9 writes it (after the width): a laid bus's lane
+            (bus_lanes.py). False writes nothing, as before.
     """
     net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
+    locked_str = "\n\t\t(locked yes)" if locked else ""
     return f'''	(segment
 		(start {start[0]:.6f} {start[1]:.6f})
 		(end {end[0]:.6f} {end[1]:.6f})
-		(width {width})
+		(width {width}){locked_str}
 		(layer "{layer}")
 		{net_str}
 		(uuid "{uuid.uuid4()}")
@@ -587,8 +590,9 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
                        net_name: str = None, tenting_attrs: dict = None,
                        inherit_when_unspecified: bool = False,
-                       via_type: str = None) -> str:
-    """Generate KiCad S-expression for a via.
+                       via_type: str = None, locked: bool = False) -> str:
+    """Generate KiCad S-expression for a via (locked: `(locked yes)` after its layers, as KiCad 9 writes it; a laid
+    bus's via, bus_lanes.py; False writes nothing, as before).
 
     Args:
         free: If True, adds (free yes) to prevent KiCad from auto-assigning net based on overlapping tracks.
@@ -615,6 +619,7 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
     layers_str = '" "'.join(layers)
     type_word = f' {via_type}' if via_type in PARTIAL_VIA_TYPES else ''
     free_str = "\n\t\t(free yes)" if free else ""
+    locked_str = "\n\t\t(locked yes)" if locked else ""
     net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
     tenting_str = via_protection_sexpr(tenting_attrs, net_name,
@@ -623,7 +628,7 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
 		(at {x:.6f} {y:.6f})
 		(size {size})
 		(drill {drill})
-		(layers "{layers_str}"){tenting_str}{free_str}
+		(layers "{layers_str}"){locked_str}{tenting_str}{free_str}
 		{net_str}
 		(uuid "{uuid.uuid4()}")
 	)'''
