@@ -2313,7 +2313,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                     s_.StopSearch()
         s_.parameters.log_search_progress = True
         s_.parameters.log_to_stdout = False
-        s_.log_callback = _progress
+        s_.log_callback = bus_events.solver_progress(
+            'solve', 'the plan-finding workers' if subs is FALLBACK else 'the bound-raising workers', W_V,
+            then=_progress)
         st_ = s_.Solve(m)
         return s_, st_
 

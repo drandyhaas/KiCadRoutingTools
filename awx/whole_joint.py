@@ -340,6 +340,7 @@ def main():
     s_.parameters.max_num_deterministic_batches = BATCHES
     s_.parameters.share_glue_clauses = False
     s_.parameters.share_binary_clauses = False
+    bus_events.watch_solve(s_, 'coupled', 'the coupled search', W_V, bus=None)
     st = s_.Solve(m)
     secs = time.time() - t0
     bus_events.emit('coupled', 'search', bus=None, round=int(rnd), status=s_.StatusName(st), secs=round(secs),

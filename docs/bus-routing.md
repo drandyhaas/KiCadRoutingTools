@@ -155,6 +155,7 @@ The step writes what it is doing, as it does it, to `<OUT stem>.bus/events.jsonl
 | round | start | the bus's process | `round`, `rounds`, `feedback`, `draw` |
 | fanout, solve, loop, lay | start / end | the bus's process and its stages | the `round`; a fanout's and a loop's `exit`, `secs`, `log`; a solve's `status`, `secs`, `crossings`, `proved`, `plan`, `obj`, `bound` (a loop's re-solves too); a lay's `lanes`, `vias`, `copper_mm`, `open`, `drc` |
 | coupled | start / end / search | the bus's process; the coupled solve | a bus waiting for its round's coupled solve, then `joint`, `own`, `secs`; the solve's `status`, `secs`, `cost`, `bound`, `broken` of `couplings` |
+| ends, solve, coupled | progress | a long CP-SAT search, while it runs | `label` (the start, an array's ends, the model, the bound-raising or plan-finding workers, the coupled search), `best` (the best plan's cost, vias' worth; null before the first), `bound` (the cost the search has proved no plan can beat), `secs`. Read off the solver's own progress lines: a first or better plan at once, the same numbers again at most every few seconds. The Bus tab and the Autorouter's bus step row show them as "best, bound (gap % apart)" on the running stage |
 
 ### Rounds, seeds and the loop
 

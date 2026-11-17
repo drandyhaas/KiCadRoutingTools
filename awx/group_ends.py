@@ -293,7 +293,7 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
     # (...and a tooth on the source's FAR FACE: the dearest end there is, a hand never lays one)
     top = sorted({v for v, c in obj if v >= 0 and c >= W_TOP and v in at_of} | {v for v in meta.get('far', ()) if v in at_of})
 
-    def run(fix, hint, batches, extra=None):
+    def run(fix, hint, batches, extra=None, label='a round of the search'):
         mc = m.Clone()
         Pc = mc.Proto()
         for v, x in fix.items():
@@ -313,6 +313,7 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
         s.parameters.max_num_deterministic_batches = batches
         s.parameters.share_glue_clauses = False
         s.parameters.share_binary_clauses = False
+        bus_events.watch_solve(s, 'ends', label, 1000, bus=None)
         r = s.Solve(mc)
         return (list(s.ResponseProto().solution)[:nv] if r in (cp_model.OPTIMAL, cp_model.FEASIBLE) else None), \
             s.StatusName(r)
@@ -345,7 +346,7 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
                 fix = {v: inc[v] for e in lanes for k_ in (0, 1) if e['ref'][k_] != ref_
                        for v in e['x'][k_] if v >= 0}
                 fix.update((v, inc[v]) for o in others if o['ref'] != ref_ for v in o['vars'])
-                got, st_ = run(fix, inc, END_BATCHES)
+                got, st_ = run(fix, inc, END_BATCHES, label=f"{ref_}'s ends, the others held")
                 n_ += 1
                 if got is not None and value(got) < best:
                     inc, best = got, value(got)
@@ -366,7 +367,7 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
             x_ = more(inc)
             best_m = math.inf if x_ is None else x_
     else:
-        inc, st = run({}, hint, BATCHES, extra=over)
+        inc, st = run({}, hint, BATCHES, extra=over, label='the start')
         if inc is None:
             return None, f'no state [{st}]'
         best = value(inc)
@@ -2640,6 +2641,7 @@ def main():
     if len(srefs) != 1:
         raise SystemExit(f'group_ends: the buses share one source, not {sorted(srefs)}')
     sref = srefs.pop()
+    bus_events.for_group(sref)
     # (the group's own settings: the first bus's run's, without what names that bus's own fanout)
     genv = {k: v for k, v in first['env'].items() if k not in OWN_KEYS}
     with awx_settings.given(genv):
@@ -4108,7 +4110,9 @@ def main():
                             s_.StopSearch()
                 s_.parameters.log_search_progress = True
                 s_.parameters.log_to_stdout = False
-                s_.log_callback = _progress
+                s_.log_callback = bus_events.solver_progress('ends', 'the model', 1000, then=_progress, bus=None)
+            else:
+                bus_events.watch_solve(s_, 'ends', 'the model', 1000, bus=None)
             return s_
         # ---- THE REPAIR, after a check's refusal on this tier: every lane the refusal did not name HELD on the ends
         # it had -- but the lanes that crossed one it named -- and the rest solved for the objective: the state the

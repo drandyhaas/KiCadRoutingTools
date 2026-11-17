@@ -17,6 +17,9 @@ With no BUS_EVENTS nothing is written: a stage run by itself, a bench, a harness
   phase        "capture" in a bus's ends-model capture (route_bus under ENDS_ONLY), whose process is stopped as soon as
                its capture stands; absent otherwise
 
+A long CP-SAT solve says how far it has come (solver_progress: kind "progress", the best plan's cost and the bound the
+search has proved, from the solver's own progress lines -- the gap between them closes as the search proves its plan).
+
 A process routing one bus says so once (for_bus: the BUS_EVENTS_BUS setting, beside its other settings), and its
 events -- and its stages' -- carry that bus unless they name another. An appended line is ONE os.write on a descriptor
 opened O_APPEND, so the lines of the step's several processes interleave whole. A write that fails is dropped: an
@@ -24,7 +27,9 @@ event never fails a run, and nothing here is read back by the routing.
 """
 import contextlib
 import json
+import math
 import os
+import re
 import time
 
 import awx_settings
@@ -74,9 +79,19 @@ def for_bus(src, dest):
     return {BUS: f'{src}:{dest}'}
 
 
+_GROUP = [None]            # (for_group: the group this process works for)
+
+
+def for_group(src):
+    """This process works for the group of buses off SRC (the group's ends model): its events that name no bus and no
+    group carry it"""
+    _GROUP[0] = src
+
+
 def emit(stage, kind, group=_FROM_SETTINGS, bus=_FROM_SETTINGS, **payload):
     """one event, appended to BUS_EVENTS (nothing when it is unset). `bus` not given: the process's own (BUS); given
-    (None included), as given. `group` not given: the bus's source, else the process's own bus's"""
+    (None included), as given. `group` not given: the bus's source, else the process's own bus's, else the group the
+    process works for (for_group)"""
     path = awx_settings.get(ENV)
     if not path:
         return
@@ -84,7 +99,7 @@ def emit(stage, kind, group=_FROM_SETTINGS, bus=_FROM_SETTINGS, **payload):
     if bus is _FROM_SETTINGS:
         bus = own
     if group is _FROM_SETTINGS:
-        group = (bus or own).split(':', 1)[0] if (bus or own) else None
+        group = (bus or own).split(':', 1)[0] if (bus or own) else _GROUP[0]
     rec = {'v': V, 't': round(time.time(), 3), 'pid': os.getpid(), 'stage': stage, 'kind': kind,
            'group': group, 'bus': bus}
     if bus and awx_settings.get('ENDS_ONLY'):
@@ -122,3 +137,49 @@ def read(path, offset=0):
         if isinstance(ev, dict):
             out.append(ev)
     return out, offset + end + 1
+
+
+_PROGRESS = re.compile(r'^#(?:Bound|\d+)\s.*?best:(\S+)\s+next:\[([^,\]]+)')
+
+
+def solver_progress(stage, label, scale=1.0, every=5.0, then=None, bus=_FROM_SETTINGS):
+    """A CP-SAT log callback's reader (the solver's parameters log_search_progress on, log_to_stdout off): each of the
+    search's progress lines -- '#Bound' and '#n', 'best:B next:[L,U]' -- becomes a "progress" event of STAGE: LABEL,
+    the best plan's cost and the proven bound, both over SCALE (a via's worth), and the seconds since the reader was
+    made. A first plan, and a better one, at once (better ones a fifth of a second apart at most), else at most one
+    every EVERY seconds. THEN, a callable, is given
+    every line after (the solve's own reader); BUS as emit takes it. Nothing here touches the search: it reads the lines the solver writes.
+    Returns the callback."""
+    st = {'t0': time.time(), 'last': -math.inf, 'best': None}
+
+    def feed(line):
+        if then is not None:
+            then(line)
+        m = _PROGRESS.match(line)
+        if not m or not awx_settings.get(ENV):
+            return
+        try:
+            best, lo = float(m.group(1)), float(m.group(2))
+        except ValueError:
+            return
+        best = best if math.isfinite(best) else None
+        now = time.time()
+        first = best is not None and st['best'] is None
+        better = best is not None and st['best'] is not None and best < st['best']
+        if not first and now - st['last'] < (0.2 if better else every):
+            return
+        st['last'], st['best'] = now, best
+        emit(stage, 'progress', bus=bus, label=label, best=None if best is None else round(best / scale, 1),
+             bound=round(lo / scale, 1) if math.isfinite(lo) else None, secs=round(now - st['t0']))
+    return feed
+
+
+def watch_solve(solver, stage, label, scale=1.0, bus=_FROM_SETTINGS):
+    """SOLVER (a cp_model.CpSolver with no log callback of its own) reports its search's progress as STAGE's
+    "progress" events (solver_progress); nothing without BUS_EVENTS. A solver with a reader of its own is given
+    solver_progress(..., then=its reader) instead"""
+    if awx_settings.get(ENV):
+        solver.parameters.log_search_progress = True
+        solver.parameters.log_to_stdout = False
+        solver.log_callback = solver_progress(stage, label, scale, bus=bus)
+    return solver

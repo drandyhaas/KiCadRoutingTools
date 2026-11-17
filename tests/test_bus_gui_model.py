@@ -21,7 +21,10 @@ model of the step's events.
 7. the Autorouter tab's bus step: EventsTail follows an events file as it grows -- a line still being written waits for
    the next poll --, its live line carries the latest event and the gauges' fractions, its lines every row indented by
    level, and finish() ends whatever is still running; plan_bus_line says the buses, the arrays served and the via, why
-   the step will not run, the buses not taken (at most four, then how many more), and nothing for no record.
+   the step will not run, the buses not taken (at most four, then how many more), and nothing for no record;
+8. a long solve's progress events: the running ends model's row shows the best, the bound and the gap (a solve with no
+   plan yet says so), its details are not filled with them, the status line reads them, and the ends model's end
+   event replaces the text.
 """
 import os
 import sys
@@ -265,6 +268,24 @@ def main():
     ok('plan line: no bus, the one not taken', line.startswith('Buses: none') and 'J0' in line, line)
     ok('plan line: an error said', 'could not' in bp.plan_bus_line(dict(bus, error='the buses could not be found')))
     ok('plan line: none for no record', bp.plan_bus_line(None) is None)
+
+    print('8. a long solve\'s progress')
+    m = bp.RunModel()
+    evs = group_events()
+    upto = next(i for i, e in enumerate(evs) if e['stage'] == 'ends' and e['kind'] == 'start')
+    m.feed_all(evs[:upto + 1])
+    m.feed(ev(13, 'ends', 'progress', group='U1', label='the start', best=None, bound=2610.0, secs=1))
+    row = next(r for r in m.flat() if r.get('stage') == 'ends')
+    ok('no plan yet: said so with the bound', 'no plan yet' in (row['result'] or '') and '2610' in row['result'],
+       row['result'])
+    nd = len(row['details'])
+    m.feed(ev(14, 'ends', 'progress', group='U1', label='the start', best=3073.5, bound=2610.2, secs=2))
+    ok('the running row: best, bound, the gap', row['result'].startswith('the start: best 3073.5, bound 2610.2 (15.1 %'),
+       row['result'])
+    ok('its details not filled with progress', len(row['details']) == nd, row['details'])
+    ok('the status line reads it', '15.1 %' in m.status_line(1015.0), m.status_line(1015.0))
+    m.feed_all(evs[upto + 1:])
+    ok('the ends model\'s end replaces it', 'best 3073.5' not in (row['result'] or ''), row['result'])
 
     print('\nFAILED: ' + ', '.join(failures) if failures else '\nALL OK')
     return 1 if failures else 0

@@ -11,7 +11,12 @@
    ENDS_ONLY, for a bus's events only;
 4. line-atomic: eight processes writing 200 events each at once leave 1600 whole lines, every one JSON;
 5. read(): whole lines only -- a line still being written is left for the next read, which resumes at the offset;
-6. a write that cannot be made (the file's folder gone) is dropped, never raised.
+6. a write that cannot be made (the file's folder gone) is dropped, never raised;
+7. a long solve's progress (solver_progress, from CP-SAT's own progress lines): best and bound over the scale, a plan
+   not yet found said so, the first plan at once, a better one at once past a fifth of a second, the same numbers
+   again held back, the
+   solve's own reader given every line; for_group: a group process's events that name no bus carry its group;
+   watch_solve turns the solver's progress lines on only where events are written.
 """
 import json
 import os
@@ -128,6 +133,43 @@ def main():
             ok('no exception', True)
         except Exception as ex:                       # noqa: BLE001
             ok('no exception', False, repr(ex))
+
+    print('7. a long solve\'s progress')
+    import time as _t
+    path = os.path.join(td, 'progress.jsonl')
+    seen = []
+    with awx_settings.given({**env0, bus_events.ENV: path}):
+        bus_events.for_group('U9')
+        feed = bus_events.solver_progress('ends', 'the start', 1000, every=60, then=seen.append, bus=None)
+        feed('#Model 0.10s var:100/100 constraints:50/50')
+        feed('#Bound 0.20s best:inf next:[2610000,inf] max_lp')
+        feed('#1 0.30s best:3073500 next:[2610200,3073499] fixed_bools:0/9')
+        feed('#2 0.40s best:3073500 next:[2611000,3073499] fixed_bools:0/9')
+        _t.sleep(1.05)
+        feed('#3 1.50s best:3001000 next:[2612000,3000999] fixed_bools:0/9')
+    evs = lines(path)
+    ok('the solve\'s own reader got every line', len(seen) == 5, seen)
+    ok('three events: no plan yet, the first plan at once, the better one (the repeat of the first held back)',
+       [(e['best'], e['bound']) for e in evs] == [(None, 2610.0), (3073.5, 2610.2), (3001.0, 2612.0)], evs)
+    ok('...each a progress of its stage, labelled, timed, carrying the group and no bus',
+       all(e['stage'] == 'ends' and e['kind'] == 'progress' and e['label'] == 'the start' and e['group'] == 'U9'
+           and e['bus'] is None and isinstance(e['secs'], int) for e in evs), evs)
+    bus_events.for_group(None)
+
+    class _Params:
+        log_search_progress = False
+        log_to_stdout = True
+
+    class _Solver:
+        parameters = _Params()
+        log_callback = None
+    sv = bus_events.watch_solve(_Solver(), 'solve', 'x')
+    ok('watch_solve without BUS_EVENTS leaves the solver as it was',
+       sv.log_callback is None and sv.parameters.log_search_progress is False)
+    with awx_settings.given({**env0, bus_events.ENV: path}):
+        sv = bus_events.watch_solve(_Solver(), 'solve', 'x')
+    ok('...with it: its progress lines on, to the reader, not to stdout',
+       callable(sv.log_callback) and sv.parameters.log_search_progress and not sv.parameters.log_to_stdout)
 
     print('\nFAILED: ' + ', '.join(failures) if failures else '\nALL OK')
     return 1 if failures else 0

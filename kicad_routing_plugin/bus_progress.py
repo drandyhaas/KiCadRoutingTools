@@ -14,7 +14,9 @@ it is tested on its own:
   RunModel                 the events read into rows -- a group, its buses,
                            their stages -- each with a state, a time and a
                            result, and the fractions the tab's gauges show
-  describe                 one event as a line of text (the status line)
+  describe                 one event as a line of text (the status line); a
+                           long solve's progress (progress_text): its best
+                           plan, the bound it has proved, and the gap between
   EventsTail               a step's events file followed as it grows, into a
                            RunModel (the Autorouter tab's bus step row)
   plan_bus_line            autoroute's plan record of the bus step as a line
@@ -326,10 +328,28 @@ def _fmt_secs(s):
     return f"{s // 60}:{s % 60:02d}"
 
 
+def progress_text(ev):
+    """A solve's progress event as text: its best plan's cost and the bound the
+    search has proved (vias' worth), and how far apart they are -- 0 % is a
+    plan proved best. The gap is the solver's own measure, not a share of the
+    time: a solve can stand at a gap a long while and then close it."""
+    best, bound, secs = ev.get('best'), ev.get('bound'), ev.get('secs')
+    label = ev.get('label') or 'the solve'
+    t = f", {_fmt_secs(secs)}" if secs is not None else ''
+    if best is None:
+        return f"{label}: no plan yet" + (f", bound {bound:g}" if bound is not None else '') + t
+    if bound is None:
+        return f"{label}: best {best:g}{t}"
+    gap = (best - bound) / abs(best) if best else 0.0
+    return f"{label}: best {best:g}, bound {bound:g} ({100 * max(gap, 0.0):.1f} % apart){t}"
+
+
 def describe(ev):
     """One event as a line of text."""
     st, kind = ev.get('stage'), ev.get('kind')
     g = lambda k, d='?': ev.get(k, d) if ev.get(k) is not None else d   # noqa: E731
+    if kind == 'progress':
+        return progress_text(ev)
     if st == 'step':
         if kind == 'start':
             return ('the step starts: ' + (', '.join(ev['buses']) if ev.get('buses')
@@ -554,6 +574,14 @@ class RunModel:
         elif grp:
             owner = self._group(grp)
         else:
+            return
+        if kind == 'progress':
+            # (a long solve's best and bound: the running row of its stage -- a re-solve inside a bus's loop, the
+            # loop's -- shows them until its next event; never its details, which would fill with them)
+            rows = [r for r in self._stage_rows(owner) if r['state'] == 'running']
+            r = next((r for r in reversed(rows) if r.get('stage') == st), rows[-1] if rows else None)
+            if r is not None and ev.get('phase') != 'capture':
+                r['result'] = progress_text(ev)
             return
         if st == 'group':
             g = self._group(grp)
