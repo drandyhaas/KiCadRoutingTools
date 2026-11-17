@@ -29,6 +29,7 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import awx_settings  # noqa: E402
+import bus_events  # noqa: E402
 
 W_CROSS = 20                                                # a broken coupling, in vias
 # ...and one of a VIA-END RUN (whole_route.with_end_runs): a run inside the array moves onto its lane's end layer and
@@ -324,6 +325,8 @@ def main():
         print(f'  coupled search: none -- the buses\' own plans break no coupling and cramp no change: each bus\'s own '
               'is the coupled plan',
               flush=True)
+        bus_events.emit('coupled', 'search', bus=None, round=int(rnd), status='NONE', secs=round(time.time() - t0),
+                        couplings=len(cpl), broken=0, buses=sorted(parts))
         json.dump({'round': rnd, 'couplings': len(cpl), 'secs': round(time.time() - t0, 1), 'all': cpl,
                    'broken_alone': [], 'broken': [], 'own': True}, open(os.path.join(rd, 'joint.json'), 'w'), indent=1)
         for bus in sorted(parts):
@@ -339,6 +342,10 @@ def main():
     s_.parameters.share_binary_clauses = False
     st = s_.Solve(m)
     secs = time.time() - t0
+    bus_events.emit('coupled', 'search', bus=None, round=int(rnd), status=s_.StatusName(st), secs=round(secs),
+                    couplings=len(brk), buses=sorted(parts),
+                    **({'cost': round(s_.ObjectiveValue() / W_V, 1), 'bound': round(s_.BestObjectiveBound() / W_V, 1),
+                        'broken': sum(s_.Value(k_) for k_ in brk)} if st in ok else {}))
     if st not in ok:
         print(f'  coupled search: [{s_.StatusName(st)}] {secs:.0f}s -- no plan: every bus keeps its own')
         sv = sh if st_h in ok else None

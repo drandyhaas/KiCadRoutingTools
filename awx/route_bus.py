@@ -5,7 +5,7 @@
                          [--feedback-rounds F] [--round-edits EDITS.json]
                          [--clearance C] [--clearance-ceiling C] [--track-width W] [--fanout-track-width W]
                          [--via-size D] [--via-drill D] [--hole-to-hole-clearance H] [--json-out FILE]
-    python3 route_bus.py BOARD.kicad_pcb --find [sizes]
+    python3 route_bus.py BOARD.kicad_pcb --find [--json-out FOUND.json] [sizes]
     python3 route_bus.py BOARD.kicad_pcb OUT.kicad_pcb --src SRC --dest DEST [...]     (one bus by itself)
 
 THE BUSES (route_buses): those bus_plan finds at the chain's sizes, or those --bus names. A bus is the nets between a
@@ -53,6 +53,11 @@ that carries a POUR (a plane: zynq's In1 GND and In2 VCC_1V8) is crossed by the 
 the board as it came and as routed, each refilled (kicad_exact_fill), and a split the bus made is named. The caches are off. Everything the step writes goes in OUT's work directory,
 <OUT stem>.bus/, beside OUT.
 
+PROGRESS (bus_events.py): the step appends one JSON event a line to <OUT stem>.bus/events.jsonl (or to the file the
+BUS_EVENTS setting names) as it goes -- the buses found, each capture, each solve of the group's model and its checks,
+each bus's fanout, solve, coupled solve, loop and lay, each bus's grade, the step's end -- written by every process of
+the step, so a reader (the GUI's Bus tab) follows it while it runs. --find --json-out writes the buses found as JSON.
+
 Exits 0 whenever it writes OUT (#1738) -- the bus handed on routed, or OUT the board as it came (a bus of them left
 as it came, or none found): either way the chain carries on from OUT, and the summary and the console name the nets
 routed and refused, and why. Exits 2 on a usage error (a part the board does not have, a bus spec the step cannot
@@ -78,6 +83,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 from coherent_nets import block_net_name  # noqa: E402
+import bus_events  # noqa: E402
 
 # the caches are a harness's (awx-caches-off-by-default): the step runs every stage without them
 STEP_SETTINGS = {'TAUT_MEMO': '0', 'STAGE_CACHE': '0'}
@@ -85,6 +91,14 @@ STEP_SETTINGS = {'TAUT_MEMO': '0', 'STAGE_CACHE': '0'}
 # the sizes route_bus takes, as the routing CLIs spell them (route.py's, and the escapes' own track)
 SIZE_ARGS = ('clearance', 'clearance_ceiling', 'track_width', 'fanout_track_width', 'via_size', 'via_drill',
              'hole_to_hole_clearance', 'board_edge_clearance')
+
+
+def unrecorded():
+    """The block's stage processes record nothing in the board's redo manifest (#132): a cap pass, a fanout, a bus's
+    own process are the step's insides -- a replay runs them by running the step, which records itself (main) -- and a
+    self-recording tool among them added its own line beside the step's. Every setting but REDO_MANIFEST given"""
+    import awx_settings
+    return awx_settings.given({k: v for k, v in awx_settings.environ().items() if k != 'REDO_MANIFEST'})
 
 
 def step_policy(run_rules=None, settings=None):
@@ -166,8 +180,10 @@ def route_bus(board, out, src, dest, k=None, rounds=4, inproc=False, log=print, 
     run_rules = resolve_rules(board, log=log, **sizes)
     prev = _rules.active()
     _rules.install(run_rules)
+    # (this process routes SRC:DEST: its progress events, and its stages', say so -- bus_events)
+    settings = dict(settings or {}, **bus_events.for_bus(src, dest))
     try:
-        with step_policy(run_rules, settings):
+        with unrecorded(), bus_events.run(bus_events.work_dir(out)), step_policy(run_rules, settings):
             return _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out, settings,
                           feedback_rounds)
     finally:
@@ -387,16 +403,24 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
     EACH SOURCE'S BUSES ARE ONE GROUP (negotiated_buses.route_grouped): every bus's ends model captured by itself,
     every bus's ends chosen in ONE model with the arrays' fanout (group_ends.py), every bus routed on that field at the
     same time -- a bus alone on its array a group of one. The groups in turn, each on the board the one before handed
-    on; the lanes on every copper layer (all_layers)."""
-    from kicad_parser import parse_kicad_pcb
-    from copy_board import copy_board
-    import awx_settings
-    import negotiated_buses
+    on; the lanes on every copper layer (all_layers). The step's progress goes to its events file (bus_events:
+    BUS_EVENTS, else <OUT stem>.bus/events.jsonl), which every stage's process writes to as well."""
     board, out = os.path.abspath(board), os.path.abspath(out)
     if not out.endswith('.kicad_pcb'):
         out += '.kicad_pcb'
     work = out[:-len('.kicad_pcb')] + '.bus'
     os.makedirs(work, exist_ok=True)
+    with unrecorded(), bus_events.run(work):
+        return _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feedback_rounds, **sizes)
+
+
+def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feedback_rounds, **sizes):
+    from kicad_parser import parse_kicad_pcb
+    from copy_board import copy_board
+    import awx_settings
+    import negotiated_buses
+    bus_events.emit('step', 'start', board=board, out=out, rounds=rounds, feedback_rounds=feedback_rounds, k=k,
+                    buses=None if buses is None else [f'{s}:{d}' for s, d in buses], sizes=sizes)
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(board)
     plan = None
@@ -404,6 +428,7 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
         plan = bus_plan(pcb, resolve_rules(board, log=lambda *a_, **k_: None, **sizes))
         for ln in plan_lines(plan):
             log('route_bus: ' + ln)
+        bus_events.emit('step', 'plan', buses=plan['buses'], left=plan['left'])
         buses = [(b['src'], b['dest']) for b in plan['buses']]
     groups = collections.OrderedDict()
     for s, d in buses:
@@ -429,6 +454,8 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
             step_out = os.path.join(work, f'{name}.kicad_pcb')
             step_json = os.path.join(work, f'{name}.summary.json')
             _fresh(step_out, step_json)
+            bus_events.emit('group', 'start', group=s, buses=[f'{s}:{d_}' for _s, d_ in grp],
+                            work=bus_events.work_dir(step_out))
             code, _g = negotiated_buses.route_grouped(cur, step_out, grp, k, rounds, inproc, log, step_json,
                                                       feedback_rounds, **sizes)
             try:
@@ -445,6 +472,9 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
                    + f', {len(neg_g["walled"]["walled"])} walled'
                    + (f', {len((neg_g.get("plane_balls") or {}).get("off") or [])} plane ball(s) on no pour'
                       if (neg_g.get('plane_balls') or {}).get('off') else '')) + ' on the board')
+            bus_events.emit('group', 'end', group=s, exit=code, open=len(neg_g['open']) if neg_g else None,
+                            drc=neg_g['drc']['n'] if neg_g else None,
+                            walled=len(neg_g['walled']['walled']) if neg_g else None, summary=step_json)
             codes.append(code)
             for r_ in got or [dict(src=s, dest=g_[1], exit=None, grade=None, summary=None) for g_ in grp]:
                 runs.append(dict(src=r_['src'], dest=r_['dest'], exit=1 if r_['exit'] is None else r_['exit'],
@@ -459,6 +489,7 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
         json.dump(dict(board=board, out=out, buses=runs, plan=plan, exit=code), f, indent=1)
     if not runs:
         log('route_bus: no bus found -- OUT is the board as it came')
+    bus_events.emit('step', 'end', status=code, out=out, summary=json_out or os.path.join(work, 'summary.json'))
     return code, [r['grade'] for r in runs]
 
 
@@ -680,6 +711,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     cut = [n for n in ladder[:K] if n not in nets]
     log(f'  the run: K={K} of the ladder\'s {len(ladder)} nets'
         + (f' -- {len(nets)} nets: {", ".join(cut)} left out with their pair\'s other leg' if cut else ''))
+    bus_events.emit('bus', 'start', nets=len(nets), bus_nets=len(names), k=K, work=work)
 
     # 3. the flow frame
     with contextlib.redirect_stdout(sys.stderr):
@@ -753,6 +785,8 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                        secs=int(time.time() - t0), exit=code, why=why if code else None)
         with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=1)
+        bus_events.emit('bus', 'end', exit=code, why=why if code else None, routed=len(routed),
+                        refused=len(refused), secs=summary['secs'], grade=g)
         log(g or f'route_bus: {why}')
         if code:
             log(f'route_bus: {why} -- {os.path.basename(out)} is the board as it came')
@@ -890,6 +924,8 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
          + (f'planes={planes["out"]} vs {planes["in"]} in ' if planes and planes.get('out') is not None else '')
          + f'walled={len(walled["walled"])} secs={int(time.time() - t0)}')
     summary['drc'] = dict(bus=d_bus, board=d_out, input=d_in)
+    bus_events.emit('bus', 'graded', vias=int(v), copper_mm=int(c), connected=cc == 0, drc=n_drc, drc_bus=d_bus,
+                    drc_board=d_out, drc_in=d_in, walled=len(walled['walled']), nets=len(nets))
     if length_rows.get('bus'):
         summary['length_rows'] = dict(bus=length_rows['bus'], board=length_rows.get('board'),
                                       input=length_rows.get('input'))
@@ -2442,10 +2478,12 @@ def main():
                          'DEST may be a row part (a QFN), and may name several parts, U4+U3 (a group bus, one source '
                          'and several ends: one bus in one frame, its trunk to the first, a branch off it to each '
                          'other). The buses off one source are one group (route_buses)')
+    import routing_defaults as defaults
     ap.add_argument('--k', type=int, help="the ladder's first K nets (default: the whole ladder)")
-    ap.add_argument('--rounds', type=int, default=4,
-                    help='the whole route\'s rounds at most, each a draw under the next seed (default 4)')
-    ap.add_argument('--feedback-rounds', type=int, default=0, metavar='F',
+    ap.add_argument('--rounds', type=int, default=defaults.BUS_ROUNDS,
+                    help='the whole route\'s rounds at most, each a draw under the next seed (default '
+                         f'{defaults.BUS_ROUNDS})')
+    ap.add_argument('--feedback-rounds', type=int, default=defaults.BUS_FEEDBACK_ROUNDS, metavar='F',
                     help='after each draw that leaves nets open, up to F of the rounds under its seed, the fanout '
                          'fed what the round before found (its crowded ends, its lanes over two vias, its open nets) '
                          'and choosing again from that round\'s board (default 0: every round a draw, but a round '
@@ -2464,7 +2502,9 @@ def main():
                          'bench). Recorded with the step, so a replay runs the same rounds with no one looking')
     ap.add_argument('--inproc', action='store_true', help='every stage in this process rather than each in its own')
     ap.add_argument('--json-out', help='the summary: the nets routed and refused (and why), the rules, the grade '
-                                     '(default: <OUT>.bus/summary.json)')
+                                     '(default: <OUT>.bus/summary.json). With --find: the buses found and not, as '
+                                     'JSON -- {buses, left, step, arrays}: each bus {src, dest, nets, why}, the --bus '
+                                     'arguments that name them, and the board\'s ball arrays')
     g = ap.add_argument_group('sizes', 'the chain\'s sizes, as the routing CLIs take them; one omitted is resolved as '
                                        'route.py resolves it (the board\'s Default net class, else the fallback)')
     g.add_argument('--clearance', type=float, help='the run\'s clearance (mm)')
@@ -2489,13 +2529,23 @@ def main():
         plan = bus_plan(pcb, rules_)
         for ln in plan_lines(plan):
             print(ln)
-        print('the step: ' + (' '.join(f"--bus {b['src']}:{b['dest']}" for b in plan['buses'])
-                              or 'no bus -- OUT the board as it came'))
+        step = [f"{b['src']}:{b['dest']}" for b in plan['buses']]
+        print('the step: ' + (' '.join(f'--bus {s_}' for s_ in step) or 'no bus -- OUT the board as it came'))
+        if a.json_out:
+            with open(a.json_out, 'w', encoding='utf-8') as f:
+                json.dump(dict(plan, step=step, arrays=sorted(r for r, fp in pcb.footprints.items()
+                                                              if len(fp.pads) > 8 and is_array(fp))), f, indent=1)
         sys.exit(0)
     if not a.out or (a.src is None) != (a.dest is None):
         ap.error('OUT is needed, and --src and --dest go together')
     if a.bus and a.src is not None:
         ap.error('--bus names the buses: no --src/--dest with it')
+    # (the step in the board's redo manifest, #132: after --find, which routes nothing -- it prints the buses, and its
+    # --json-out is that listing -- and never a --src/--dest run, which is a group's bus's own process, started by the
+    # step it is part of, or a debugging aid)
+    if a.src is None:
+        from redo_record import record_invocation
+        record_invocation()
     # (before the run is spent: without ortools every stage that plans fails in a log of its own, #1355)
     from startup_checks import StartupCheckError, check_bus_dependencies
     try:

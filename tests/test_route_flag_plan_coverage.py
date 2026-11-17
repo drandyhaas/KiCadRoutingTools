@@ -56,7 +56,7 @@ class TheEnumeration(unittest.TestCase):
     and exactly once."""
 
     TOOLS = ('route.py', 'route_diff.py', 'route_planes.py', 'bga_fanout.py',
-             'qfn_fanout.py')
+             'qfn_fanout.py', 'route_bus.py')
 
     @classmethod
     def setUpClass(cls):
@@ -80,7 +80,10 @@ class TheEnumeration(unittest.TestCase):
         import krt_capabilities as caps
         for tool, (_bad, rows) in self.results.items():
             with self.subTest(tool=tool):
-                real = set(caps.script_flags(caps._tool_path(caps.ROOT, tool)))
+                path = caps._tool_path(caps.ROOT, tool)
+                if not os.path.isfile(path):         # the bus step lives in awx/
+                    path = os.path.join(caps.ROOT, 'awx', tool)
+                real = set(caps.script_flags(path))
                 self.assertEqual(set(rows), real)
         self.assertIn('--bus', self.results['route.py'][1])
 
@@ -240,7 +243,7 @@ class TheNegativeControlsExist(unittest.TestCase):
         for path in ('py_router/route.py', 'py_router/route_diff.py',
                      'py_router/route_planes.py',
                      'py_router/bga_fanout/__init__.py',
-                     'py_router/qfn_fanout/__init__.py'):
+                     'py_router/qfn_fanout/__init__.py', 'awx/route_bus.py'):
             self.assertIn("'%s'" % path, src)
 
 

@@ -57,6 +57,7 @@ TOOL_PATHS = {
     'bga_fanout.py': 'py_router/bga_fanout.py',
     'qfn_fanout.py': 'py_router/qfn_fanout.py',
     'place_fanout_clearance.py': 'py_placer/place_fanout_clearance.py',
+    'route_bus.py': 'awx/route_bus.py',
 }
 
 _CHILD = r'''
@@ -316,6 +317,30 @@ def _cap_intent_unreadable(ns, cwd):
         os.chdir(here)
 
 
+def _bus_usage(ns, cwd):
+    """route_bus.py's own usage checks after parsing, in its main's order: OUT
+    unless --find, --src and --dest together, no --src with --bus, and each
+    --bus a SRC:DEST spec (route_bus.parse_bus's rule)."""
+    if getattr(ns, 'find', False):
+        return None
+    if not getattr(ns, 'out', None) or (ns.src is None) != (ns.dest is None):
+        return 'OUT is needed, and --src and --dest go together'
+    if ns.bus and ns.src is not None:
+        return '--bus names the buses: no --src/--dest with it'
+    for spec in ns.bus or ():
+        parts = str(spec).split(':')
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return f"--bus {spec!r}: SRC:DEST"
+    return None
+
+
+def _bus_round_edits_missing(ns, cwd):
+    if getattr(ns, 'find', False) or not getattr(ns, 'round_edits', None) or not _can_see(cwd):
+        return None
+    if not os.path.isfile(_at(cwd, ns.round_edits)):
+        return f"no round edits file {ns.round_edits}"
+
+
 #: tool -> its argument-judged post-parse checks, in its main's order.
 POST_PARSE = {
     'route.py': (_fab_overrides_missing, _output_twice, _route_group_empty,
@@ -334,6 +359,7 @@ POST_PARSE = {
     'place_fanout_clearance.py': (_cap_clearance_not_finite,
                                   _cap_intent_unreadable,
                                   _fab_overrides_missing),
+    'route_bus.py': (_bus_usage, _bus_round_edits_missing),
 }
 
 #: Every post-parse refusal site in each tool's main, by fingerprint -- a
@@ -455,6 +481,18 @@ REFUSAL_SITES = {
                      "board's parts (#1122)"),
         'except _fp1122.IntentError from declared_cap_rotations': (
             'board', "the same (#1122)"),
+    },
+    'route_bus.py': {
+        'if not os.path.isfile(a.board)': (
+            'board', "the input board's presence when the command ran"),
+        'OUT is needed, and --src and --dest go t': ('argv', '_bus_usage'),
+        '--bus names the buses: no --src/--dest w': ('argv', '_bus_usage'),
+        'except StartupCheckError from check_bus_dependencies': (
+            'board', "the recording machine's python (OR-Tools, the Rust "
+                     "library) -- not in the command"),
+        'except ValueError from parse_bus': ('argv', '_bus_usage'),
+        'if not os.path.isfile(a.round_edits)': ('file', '_bus_round_edits_missing'),
+        'if bad': ('board', "the board's parts and arrays (bus_usage_errors)"),
     },
 }
 

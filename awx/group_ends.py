@@ -136,6 +136,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 import awx_settings  # noqa: E402
+import bus_events  # noqa: E402
 
 # CP-SAT's interleaved batches (reproducible): a four-bus model's search fell to an eighth of its 80th batch's objective
 # between its 80th and 130th, and stood still from there to its 320th
@@ -200,7 +201,7 @@ LNS_HOT = 3         # rounds about one costly ball (fanned out, walled) with no 
 # Ranked above everything below it, one change outweighed any number of crossings and any length
 CHANGE_VIAS = 2.0
 # (a bus's own run's settings that name ITS fanout: not the group's)
-OWN_KEYS = ('FANOUT_NETS', 'DEST', 'ENDS_CAPTURE', 'ENDS_ONLY')
+OWN_KEYS = ('FANOUT_NETS', 'DEST', 'ENDS_CAPTURE', 'ENDS_ONLY', bus_events.BUS)
 
 
 def option_tier(b, k_, l_, i_, tier_of):
@@ -4415,6 +4416,11 @@ def main():
             f'plane\'s layer, {sum(sv.Value(v_) for _c, v_ in far)} ends on a far face (teeth, pairs\' berths), '
             f'{sum(c_ * sv.Value(v_) for c_, v_ in ride) / 1000:.1f} vias\' worth of ways round the arrays and '
             f'inside them')
+        bus_events.emit('ends', 'solve', group=sref, bus=None, check=chk_try + 1, status=sv.StatusName(r),
+                        secs=round(time.time() - t0), rest=round(sv.Value(sum(cost) + const) / 1000, 1),
+                        bound=None if quick else round(sv.BestObjectiveBound() / 1000, 1),
+                        walled=sum(sv.Value(w) for w in walls) - sum(sv.Value(v) for v in fans),
+                        changing_layer=sum(sv.Value(c_) for b in buses for c_ in b.J.chg.values()))
         TR.rec('model', check=chk_try + 1, rnd=rnd, how='repair' if repaired else ('tiers' if tier_of else 'start+search'),
                status=sv.StatusName(r), secs=round(time.time() - t0, 1), W_LEX=W_LEX, W_TOP=W_TOP,
                free={bn_: dict(sorted(v_.items())) for bn_, v_ in repair_info.items()},
@@ -4987,6 +4993,8 @@ def main():
             for b in buses:
                 fresh.setdefault(b.name, set())
             laid_try += 1
+            bus_events.emit('ends', 'field', group=sref, bus=None, check=chk_try + 1, drc=M_['d_f'], drc_bare=M_['d_b'],
+                            lessons=n_ban)
             log(f'  the field as laid, measured: DRC {M_["d_f"]} (the bare board {M_["d_b"]}) -- {n_ban} lesson(s): '
                 f'{n_ban - (len(held) - n_held)} end(s) or other ball\'s choice(s) at fault ruled out'
                 + (f', {len(held) - n_held} part(s) the nudge could not clear held where they came, no via on their '
@@ -5002,6 +5010,7 @@ def main():
         adopts += adopted
         spent += not (newly or adopted or progressed)
         if not taught or spent == we.JOINT_TRIES or adopts > we.JOINT_TRIES:
+            bus_events.emit('ends', 'no_plan', group=sref, bus=None, check=chk_try + 1, buses=list(unplanned))
             log(f'group ends: NO PLAN from the whole solve for {", ".join(unplanned)} after {chk_try + 1} check(s)'
                 + ('' if taught else ' -- and nothing to learn from the last'))
             no_plan = unplanned
@@ -5013,6 +5022,7 @@ def main():
             wide |= more
             whole(more)
         log(f'  check {chk_try + 1}: {", ".join(unplanned)} refused -- the model solved again')
+        bus_events.emit('ends', 'check', group=sref, bus=None, check=chk_try + 1, refused=list(unplanned))
     # (every lane's way out of its exit, arrays' and row parts': a bench's, to lay the field's ties again)
     rep['ways_out'] = [[n_, list(e_), d_, L_] for n_, e_, d_, L_ in wayouts + row_ways]
     json.dump(rep, open(os.path.join(out, 'group.json'), 'w'), indent=1, default=str)
@@ -5030,6 +5040,8 @@ def main():
     for ln in M_['caps']:
         log('    caps: ' + ln[:200])
     field_bad = M_['bad']
+    bus_events.emit('ends', 'field', group=sref, bus=None, drc=M_['d_f'], drc_bare=M_['d_b'], bad=bool(field_bad),
+                    tracks=M_['nt'], vias=M_['nv'])
     log(f'  the field as laid, measured: DRC {M_["d_f"]} (the bare board {M_["d_b"]})'
         + ('' if not field_bad else ' -- THE FANOUT BREAKS THE BOARD\'S RULES:' if M_['d_f'] is not None
            and M_['d_b'] is not None else ' -- no verdict from check_drc'))
@@ -5078,6 +5090,8 @@ def main():
             bad.append(f'{b.name}: {why}')
     for ln in bad:
         log('  REFUSED by the whole route\'s frame -- ' + ln[:400])
+    bus_events.emit('ends', 'done', group=sref, bus=None, secs=round(time.time() - t_all), refused=bad,
+                    no_plan=list(no_plan or []))
     log(f'group ends: {time.time() - t_all:.0f} s in all -> {os.path.join(out, "group.json")}'
         + ('' if bad else '; every bus\'s ends read by the whole route\'s frame'))
     if bad:

@@ -13,7 +13,7 @@ import json
 
 import wx
 
-KNOWN_ACTIONS = ("fanout", "optimize_caps", "route_diff", "route",
+KNOWN_ACTIONS = ("fanout", "optimize_caps", "bus", "route_diff", "route",
                  "route_planes", "repair_planes")
 
 # Appended to the /plan-pcb-routing prompt so the plan lands as parseable JSON.
@@ -45,6 +45,11 @@ PLAN_RESULT_SCHEMA = (
     '"stitch_max_freq": <MHz, derives pitch as lambda/20 from the stackup>, '
     '"stitch_edge_fence": true|false, "stitch_fence_pitch": <mm>, '
     '"stitch_inset": <mm>}} | '
+    '{"action": "bus", "buses": ["<SRC:DEST, the --bus spec; DEST may be several '
+    'parts joined by + (U4+U3); omit buses for the ones the step finds itself>", ...], '
+    '"params": {"rounds": <int>, "feedback_rounds": <int>, "fanout_track_width": <mm>, '
+    '"track_width": <mm>, "clearance_ceiling": <mm>, "via_size": <mm>, "via_drill": <mm>, '
+    '"hole_to_hole_clearance": <mm>, "round_edits": "<EDITS.json path>"}} | '
     ']} '
     'In any step, params MAY additionally include ANY option shown on that '
     'tab or the shared options panel, keyed by its snake_case field name '
@@ -113,12 +118,30 @@ def parse_plan_result(value):
         if action == "route_planes" and not step.get("assignments"):
             errors.append(f"step {i + 1}: route_planes without assignments, dropped")
             continue
+        if action == "bus" and step.get("buses") is not None:
+            # (omitted: the buses the step finds itself, route_bus --find's)
+            bad = _bad_bus_specs(step.get("buses"))
+            if bad:
+                errors.append(f"step {i + 1}: bus {bad}, dropped")
+                continue
         steps.append(step)
     if not steps:
         return None, errors + ["no usable steps in plan"]
     _insert_cap_optimization(steps)
     _append_final_plane_verify(steps)
     return steps, errors
+
+
+def _bad_bus_specs(buses):
+    """Why a bus step's `buses` cannot be route_bus --bus arguments, or None:
+    a list of 'SRC:DEST' strings, DEST one part or several joined by '+'."""
+    if not isinstance(buses, list) or not buses:
+        return "buses must be a non-empty list of 'SRC:DEST' (omit it for the buses the step finds)"
+    for b in buses:
+        parts = str(b).split(':') if isinstance(b, str) else []
+        if len(parts) != 2 or not parts[0] or not parts[1] or not all(parts[1].split('+')):
+            return f"{b!r} is no 'SRC:DEST' (DEST may be U4+U3)"
+    return None
 
 
 def _insert_cap_optimization(steps):
@@ -232,6 +255,10 @@ def step_label(index, step):
         return f"{index}. Fanout {step.get('component')} ({kind})"
     if action == "optimize_caps":
         return f"{index}. Optimize decoupling cap placement"
+    if action == "bus":
+        buses = step.get("buses")
+        return (f"{index}. Bus step: " + (", ".join(buses) if buses
+                                          else "the buses it finds (--find)"))
     if action == "route_diff":
         pairs = step.get("pairs", [])
         shown = ", ".join(pairs[:3]) + (", ..." if len(pairs) > 3 else "")
@@ -429,6 +456,9 @@ _ACTION_OWNERS = {
     'optimize_caps': ('fanout_tab', ('bga_options',)),
     'route_planes': ('planes_tab', ('create_options',)),
     'repair_planes': ('planes_tab', ('create_options',)),
+    # The bus step's own options live on the Bus tab's options panel; its
+    # sizes are the shared panel's, on the dialog.
+    'bus': ('bus_tab', ('options',)),
     # `route` is deliberately absent: its controls are all on the dialog.
 }
 
@@ -503,6 +533,9 @@ def apply_step_params(step, dialog):
         # now it reaches nothing, so it would be a pure leak. Same fix as
         # --board-edge-clearance got, on the same reasoning.
         "optimize_caps": {"board_edge_clearance", "via_size"},
+        # The escapes' track is a value AND its override box (unticked: the
+        # lanes' track, the CLI's omitted flag): the bus block sets both.
+        "bus": {"fanout_track_width"},
     }
 
     def _owners():
@@ -965,6 +998,17 @@ def apply_step_params(step, dialog):
                         # restores between steps).
                         opts.qfn_clearance_check.SetValue(True)
                         opts.qfn_clearance.Enable(True)
+    elif action == "bus":
+        opts = getattr(getattr(dialog, "bus_tab", None), "options", None)
+        if "fanout_track_width" in params and opts is not None:
+            try:
+                opts.fanout_track_width.SetValue(float(params["fanout_track_width"]))
+                opts.fanout_track_width_check.SetValue(True)
+                opts.fanout_track_width.Enable(True)
+                notes.append(f"set fanout_track_width={params['fanout_track_width']}")
+            except (TypeError, ValueError):
+                notes.append("ignored non-numeric fanout_track_width="
+                             f"{params['fanout_track_width']!r}")
     elif action == "optimize_caps":
         # Every cap_* param resolves through the generic loop now that
         # bga_options is one of this action's owners (#772). Only the
@@ -1159,6 +1203,14 @@ def apply_step_selection(step, dialog, all_steps=None):
         tab.assignment_panel.set_assignments(assignments)
     elif action == "repair_planes":
         pass  # obsolete step (#562), skipped at run time -- nothing to set up
+    elif action == "bus":
+        # The buses it names, in order (route_bus --bus each); none named: the
+        # buses the step finds itself at the step's sizes (no --bus).
+        tab = getattr(dialog, "bus_tab", None)
+        if tab is None:
+            notes.append("bus: the dialog has no Bus tab")
+        else:
+            tab.set_plan_buses(step.get("buses"))
     return notes
 
 
@@ -1450,6 +1502,7 @@ class PlanExecutor:
             "optimize_caps": getattr(d, "fanout_tab", None),
             "route_planes": getattr(d, "planes_tab", None),
             "repair_planes": getattr(d, "planes_tab", None),
+            "bus": getattr(d, "bus_tab", None),
         }.get(action)
 
     def _status_source(self, action):
@@ -1480,6 +1533,11 @@ class PlanExecutor:
                               lambda: False),
             "route_planes": (lambda: d.planes_tab._on_action(None),
                              lambda: not d.planes_tab.action_btn.IsEnabled()),
+            # The bus step runs as a CHILD PROCESS (the Bus tab), minutes to
+            # over an hour: busy until it ends AND its output is applied to
+            # the live board, which marks the step produced.
+            "bus": (lambda: d.bus_tab.run_for_plan(),
+                    lambda: d.bus_tab.is_busy()),
             # Obsolete (#562): plane repair runs inside every route step's
             # finalize. Legacy plans' repair steps complete instantly as
             # no-ops (synchronous like optimize_caps; the start-grace period

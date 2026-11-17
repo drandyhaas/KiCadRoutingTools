@@ -395,15 +395,19 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab = self._create_fanout_tab()
         self.notebook.AddPage(self.fanout_tab, "Fanout")
 
-        # Tab 6: Planes
+        # Tab 6: Bus -- the bus step (awx/route_bus.py), run as a child process
+        self.bus_tab = self._create_bus_tab()
+        self.notebook.AddPage(self.bus_tab, "Bus")
+
+        # Tab 7: Planes
         self.planes_tab = self._create_planes_tab()
         self.notebook.AddPage(self.planes_tab, "Planes")
 
-        # Tab 7: Log
+        # Tab 8: Log
         log_panel = self._create_log_tab()
         self.notebook.AddPage(log_panel, "Log")
 
-        # Tab 8: About
+        # Tab 9: About
         self.about_tab = self._create_about_tab()
         self.notebook.AddPage(self.about_tab, "About")
 
@@ -2147,6 +2151,39 @@ class RoutingDialog(wx.Dialog):
             append_log=self._append_log
         )
 
+    def _bus_sizes(self):
+        """The bus step's sizes, as route_bus.py's flags: each one the shared
+        panel's override box gives (ticked), the rest omitted -- the step then
+        resolves them as route.py does, the board's Default class (the CLI's
+        omitted flag). Min Clearance is `--clearance-ceiling` with the
+        Clearance ceiling box ticked, else `--clearance` (#530), as a plan's
+        clearance_ceiling / clearance params set them."""
+        sizes = {}
+        if self.clearance_check.GetValue():
+            sizes['clearance_ceiling' if self._ceiling_on() else 'clearance'] = \
+                self.clearance.GetValue()
+        for name in ('track_width', 'via_size', 'via_drill', 'hole_to_hole_clearance'):
+            if getattr(self, name + '_check').GetValue():
+                sizes[name] = getattr(self, name).GetValue()
+        if self.edge_clearance_check.GetValue():
+            sizes['board_edge_clearance'] = self.board_edge_clearance.GetValue()
+        return sizes
+
+    def _create_bus_tab(self):
+        """Create the Bus tab: the bus step, awx/route_bus.py, as a child
+        process on a snapshot of the board (bus_gui)."""
+        from .bus_gui import BusTab
+        return BusTab(
+            self.notebook,
+            self.pcb_data,
+            self.board_filename,
+            get_sizes=self._bus_sizes,
+            on_complete=self._on_tab_operation_complete,
+            append_log=self._append_log,
+            sync_pcb_data_callback=self._sync_pcb_data_from_board,
+            get_fix_drc=lambda: self.fix_drc_check.GetValue(),
+        )
+
     def _create_planes_tab(self):
         """Create the Planes tab for copper plane creation and repair."""
         from .planes_gui import PlanesTab
@@ -2489,6 +2526,11 @@ class RoutingDialog(wx.Dialog):
 
         # (Planes tab needs no cross-validation since #562: its repair
         # panel is gone -- the route step's finalize owns repair widths.)
+
+        # The Bus tab lists the buses the first time it is shown.
+        if (getattr(self, 'bus_tab', None) is not None and sel >= 0
+                and self.notebook.GetPage(sel) is self.bus_tab):
+            self.bus_tab.on_shown()
 
     def _on_update_schematic_changed(self, event):
         """Handle update schematic checkbox change."""
@@ -2916,6 +2958,20 @@ class RoutingDialog(wx.Dialog):
             pass
         try:
             self.autoroute_tab.reset_to_defaults()
+        except Exception:
+            pass
+        try:
+            # The Bus tab's run options (its BusOptionsPanel), each to
+            # route_bus.py's own default, so a plan step that omits one runs
+            # the CLI's: rounds, feedback_rounds, k, inproc, round_edits,
+            # fanout_track_width_check (unticked: the lanes' track).
+            _bo = self.bus_tab.options
+            for _name, _val in (('rounds', defaults.BUS_ROUNDS),
+                                ('feedback_rounds', defaults.BUS_FEEDBACK_ROUNDS),
+                                ('k', 0), ('inproc', False), ('round_edits', ''),
+                                ('fanout_track_width_check', False)):
+                getattr(_bo, _name).SetValue(_val)
+            _bo.fanout_track_width.Enable(False)
         except Exception:
             pass
         try:

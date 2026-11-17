@@ -47,6 +47,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 import awx_settings  # noqa: E402
+import bus_events  # noqa: E402
 from coherent_nets import block_net_name  # noqa: E402
 
 POLL = 5.0          # (s) between looks at the buses' processes
@@ -85,9 +86,10 @@ def _grade_line(log_path):
     return got
 
 
-def _run_all(jobs, log, ended=None):
+def _run_all(jobs, log, ended=None, src=None):
     """`jobs` [(name, argv, env, log path)] run at the same time, a process each, in awx/; {name: exit code}.
-    `ended(name)` is called as each ends. Every process still running when this one stops is stopped with it"""
+    `ended(name)` is called as each ends. Every process still running when this one stops is stopped with it. `src`:
+    the buses' source, for their progress events (bus_events)"""
     procs = {}
     t0 = time.time()
     try:
@@ -105,6 +107,8 @@ def _run_all(jobs, log, ended=None):
                     ended(name)
                 g = _grade_line(next(lp for n_, _a, _e, lp in jobs if n_ == name))
                 log(f'  {name}: exit {p.returncode} after {int(time.time() - t0)} s' + (f' -- {g}' if g else ''))
+                bus_events.emit('bus', 'exit', group=src, bus=f'{src}:{name}', exit=p.returncode,
+                                secs=int(time.time() - t0), log=next(lp for n_, _a, _e, lp in jobs if n_ == name))
             if len(codes) < len(procs):
                 time.sleep(POLL)
         return codes
@@ -347,11 +351,11 @@ def protect_laid(board, out, log=print):
 GROUP_SET = {'GROUP_LAYERS': 'free', 'GROUP_CUT': 'base'}
 
 
-def _capture_all(jobs, files, log):
+def _capture_all(jobs, files, log, src=None):
     """`jobs` (_bus_job's: each bus by itself, ENDS_ONLY, ENDS_CAPTURE) run at the same time, each STOPPED as soon as
     its capture stands (`files` {name: its path}): whole_ends.choose writes a bus's ends model -- its plan state, its
     menus, its run's settings -- before it searches the bus's own ends, and the group's model takes it from there.
-    {name: whether its capture stands}"""
+    {name: whether its capture stands}. `src`: the buses' source, for their progress events (bus_events)"""
     procs, t0, got = {}, time.time(), {}
     stop = (lambda p: os.killpg(p.pid, signal.SIGTERM)) if hasattr(os, 'killpg') else (lambda p: p.terminate())
     try:
@@ -369,6 +373,8 @@ def _capture_all(jobs, files, log):
                 left.discard(name)
                 log(f'  {name}: its ends model ' + ('captured' if got[name] else f'NOT captured (exit {p.returncode})')
                     + f' after {int(time.time() - t0)} s')
+                bus_events.emit('capture', 'end', group=src, bus=f'{src}:{name}', ok=got[name], exit=p.returncode,
+                                secs=int(time.time() - t0), log=next(lp for n_, _a, _e, lp in jobs if n_ == name))
             if left:
                 time.sleep(POLL)
         return got
@@ -404,9 +410,10 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
     name_of = lambda d_: ''.join(c if c.isalnum() or c in '_.-' else '_' for c in d_)     # noqa: E731  (whole_ends.choose's)
     log(f'route_bus: {len(buses)} bus{"" if len(buses) == 1 else "es"} off {buses[0][0]} from the group\'s ends -- '
         + ', '.join(b[1] for b in buses))
+    bus_events.emit('capture', 'start', group=buses[0][0], bus=None, buses=[f'{s}:{d}' for s, d in buses])
     got = _capture_all([_bus_job(work, 'capture', b, board, {**_env0(), 'ENDS_ONLY': '1', 'ENDS_CAPTURE': caps},
                                  k, 1, inproc, feedback_rounds, sizes) for b in buses],
-                       {b[1]: os.path.join(caps, name_of(b[1]) + '.ends.pkl') for b in buses}, log)
+                       {b[1]: os.path.join(caps, name_of(b[1]) + '.ends.pkl') for b in buses}, log, src=buses[0][0])
     if not all(got.values()):
         log('route_bus: the group\'s ends: no capture of ' + ', '.join(sorted(n_ for n_, ok_ in got.items() if not ok_))
             + ' -- nothing routed')
@@ -418,6 +425,7 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
         group = os.path.join(work, 'group' if r == 1 else f'group{r}')
         shutil.rmtree(group, ignore_errors=True)
         glog = group + '.log'
+        bus_events.emit('ends', 'start', group=buses[0][0], bus=None, round=r, rounds=R, log=glog)
         with open(glog, 'w', encoding='utf-8') as f:
             rc = subprocess.run([sys.executable, '-u', '-X', 'utf8', os.path.join(HERE, 'group_ends.py'), caps, group,
                                  '--board=' + board] + ([f'--from={prev[0]}', f'--feedback={prev[1]}'] if prev else []),
@@ -425,6 +433,8 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
         for ln in open(glog, encoding='utf-8', errors='replace'):
             if re.match(r'group ends: |  check \d+: |  the field as laid|  \S+: its step\'s findings', ln):
                 log('  ' + ln.rstrip()[:300])
+        bus_events.emit('ends', 'end', group=buses[0][0], bus=None, round=r, exit=rc, secs=int(time.time() - t_r),
+                        log=glog)
         if rc:
             log(f'route_bus: the group\'s ends: the model ended {rc} ({os.path.relpath(glog, work)})'
                 + (' -- nothing routed' if r == 1 else f' -- round {best[1]}\'s board stands'))
@@ -446,6 +456,7 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
         key = (len(g_['open']), g_['drc']['n'] if g_['drc']['n'] is not None else 10 ** 9,
                len(g_['walled']['walled'])) if g_ else (10 ** 9, 10 ** 9, 10 ** 9)
         done.append(dict(round=r, open=key[0], drc=key[1], walled=key[2], secs=int(time.time() - t_r)))
+        bus_events.emit('group', 'round', group=buses[0][0], bus=None, **done[-1])
         log(f'  round {r}: ' + (f'{key[0]} open, drc {key[1]}, {key[2]} walled' if g_ else 'no grade')
             + f' in {int(time.time() - t_r)} s')
         if best is None or key < best[0]:
@@ -520,7 +531,8 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
                       **(settings or {})},
                      k, rounds, inproc, feedback_rounds, sizes)
             for b in buses]
-    codes = _run_all(jobs, log, ended=lambda d: open(os.path.join(jd, f'{d}.finished'), 'w').close())
+    bus_events.emit('route', 'start', group=src, bus=None, buses=[f'{src}:{d}' for d in dests], negotiated=not one)
+    codes = _run_all(jobs, log, ended=lambda d: open(os.path.join(jd, f'{d}.finished'), 'w').close(), src=src)
 
     # 4. merged
     boards = [_bus_out(work, phase, b) for b in buses]
@@ -535,6 +547,7 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
             if given:
                 n_conf = conflicts(out, bus_of, os.path.join(work, 'conflicts.json'), log=log)
         protect_laid(board, out, log=log)
+        bus_events.emit('merge', 'end', group=src, bus=None, conflicts=n_conf, given_back=given)
     else:
         with contextlib.redirect_stdout(io.StringIO()):
             copy_board(board, out)
@@ -549,6 +562,8 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
             j_ = json.load(open(x[1])) if x else {}
             nets_.append((b[0], b[1].split('+'), list(j_.get('routed') or []) + list(j_.get('refused') or {})))
         grade_ = rb.board_grade(board, out, nets_, work, log=log, tag='merged')
+        bus_events.emit('grade', 'end', group=src, bus=None, open=len(grade_['open']), drc=grade_['drc']['n'],
+                        walled=len(grade_['walled']['walled']))
     runs = []
     for b, x in zip(buses, boards):
         j = json.load(open(x[1])) if x else {}

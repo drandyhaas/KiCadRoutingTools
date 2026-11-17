@@ -2689,6 +2689,7 @@ With nothing supplied, as on the benches:
 | `baseline_bench.py`, `baseline_freerouting.py`, `baseline_render.py` | a rung by two other routers on the same bench, nets, rules and grade -- the toolkit's production chain without the bus step, and Freerouting through KiCad's Specctra DSN (`FREEROUTING_JAR`, `FREEROUTING_JAVA`) -- and the boards drawn alike, every other net's copper grey |
 | `plane_render.py` | a board drawn with its planes: each zone as KiCad fills it (its outline without KiCad's python), each (net, layer) its own colour at alpha, outlined thin black; the buses' tracks (route_bus summaries, or every net's) by layer over them, the arrays boxed, the page turned by quarter turns (`tests/test_622_plane_render.py`) |
 | `stage_cache.py`, `awx_settings.py`, `detmath.py` | the stage cache; the settings every module reads by name; one answer per LP |
+| `bus_events.py` | the bus step's progress events: one JSON object a line in `<OUT stem>.bus/events.jsonl` (`BUS_EVENTS`), written by every process of the step as it goes and read by the GUI's Bus tab -- never by the routing (`tests/test_bus_events.py`; the stages and payloads: `docs/bus-routing.md`, "Progress events") |
 
 **Shared by both routers:**
 

@@ -51,7 +51,8 @@ controls):
 | Where | Button | Skill | What it fills / shows |
 |-------|--------|-------|------------------------|
 | Auto › Autorouter | **Run Autorouter** | none: `autoroute.py`, no agent | The plan it reads off the board, a checklist of its steps with each one's result, then **Apply Result to Board** (see the README's Plugin Tabs) |
-| Auto › AI Routing | **Plan Routing** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process |
+| Bus tab | **Run Bus Step** | none: `awx/route_bus.py` as a child process, no agent | The buses `--find` lists, the step's progress per group, bus and stage from its events file, then **Apply Result to Board** (see the README's Plugin Tabs) |
+| Auto › AI Routing | **Plan Routing** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process (a `bus` step runs on the Bus tab, as its child process, and is applied before the next step starts) |
 | Auto › AI Routing | **Review Routed Board** | `/review-routed-board` | QA report in the transcript with a PASS/FAIL verdict |
 | Auto › AI Routing | **Diagnose Routing Failures** | `/diagnose-routing-failures` | Root-cause report from the board + the Log tab content |
 | Auto › AI Placement | **Place (AI)** / **Place + Route (AI)** | `/plan-pcb-placement place` / `full` | A headless run into a `krt_placement/` folder beside the board: the seed candidates with a preview, progress from the milestone ledger, then the final board and REPORT.md; **Apply Result to Board** brings it onto the open board |

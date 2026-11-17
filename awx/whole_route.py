@@ -63,6 +63,7 @@ import traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import awx_settings  # noqa: E402
+import bus_events  # noqa: E402
 import cp_seed  # noqa: E402
 PYR = os.path.normpath(os.path.join(HERE, '..', 'py_router'))
 PY = sys.executable
@@ -2312,6 +2313,7 @@ def joint_sync(env, r, solve, say):
     json.dump(req, open(tmp, 'w'))
     os.replace(tmp, os.path.join(rd, f'{bus}.req.json'))
     t0 = time.time()
+    bus_events.emit('coupled', 'start', round=r, peers=peers)
 
     def here(p_):
         return os.path.isfile(os.path.join(rd, f'{p_}.req.json')) or os.path.isfile(os.path.join(rd, f'{p_}.none'))
@@ -2348,6 +2350,7 @@ def joint_sync(env, r, solve, say):
         say('  coupled solve: ' + ln.strip()[:200])
     jj_ = json.load(open(os.path.join(rd, f'{bus}.joint.json')))
     ok_, cuts_, own_ = jj_.get('joint'), jj_.get('cuts'), bool(jj_.get('own'))
+    bus_events.emit('coupled', 'end', round=r, joint=bool(ok_), own=own_, secs=int(time.time() - t0))
     say('  coupled solve: this bus\'s plan '
         + ('its own, the coupled plan (no coupling broken)' if ok_ and own_ else
            "the coupled solve's" if ok_ else 'its own (the coupled solve gave none)')
@@ -2788,7 +2791,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             say(g)
         # (ranked by the nets left OPEN first: a violation is the step's own grade's to answer after the whole route,
         # an open net no later stage of the step lays)
-        return dict(key=(nopen, ndrc, int(v), int(c)), open=nopen, drc=ndrc, grade=g, board=seq,
+        return dict(key=(nopen, ndrc, int(v), int(c)), open=nopen, drc=ndrc, grade=g, board=seq, lanes=lanes,
                     open_nets=sorted(open_nets(os.path.join(d, f'conn{tag}.log'), keys_)) if nopen else [],
                     tag=tag)
 
@@ -2891,6 +2894,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             if draw > 1:
                 env['BUS_SEED'] = str(seed0 + draw - 1)
             say(f"=== fanout round {r}" + (f": round 1 again under seed {seed0 + draw - 1}" if r > 1 else ''))
+        bus_events.emit('round', 'start', round=r, rounds=R, feedback=bool(fed), draw=draw)
         # (an earlier run's fanout of this round: a fanout that fails leaves no board, and one left from before stood in)
         for f_ in glob.glob(os.path.join(d, 'fo.*')) + glob.glob(os.path.join(d, 'fo_*')):
             os.remove(f_)
@@ -2904,9 +2908,11 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             if os.path.isfile(FBD):
                 fenv['FEEDBACK'] = FBD
             fenv['INCREMENTAL'] = os.path.join(fed, 'fo.plan.json')
+        bus_events.emit('fanout', 'start', round=r, log=os.path.join(d, 'fo.log'))
         rc = run(['fanout_from_plan.py', os.path.join(d, 'fo.kicad_pcb'), str(K), f'--board={base}'], fenv,
                  log_path=os.path.join(d, 'fo.log'))[0]
         say(f"  fanout exit {rc} at {secs()} s")
+        bus_events.emit('fanout', 'end', round=r, exit=rc, secs=secs(), log=os.path.join(d, 'fo.log'))
         for ln in grep(os.path.join(d, 'fo.log'), r'plan model'):
             say(ln[:220])
         if not os.path.isfile(os.path.join(d, 'fo.kicad_pcb')):
@@ -3005,6 +3011,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         # (the round's edited cuts held by its first solve too, each breakable at a price, as the loop's re-solves hold
         # theirs: CUTS_FIRM)
         ecut_env = {'CUTS': ecuts, 'CUTS_FIRM': '1'} if ecuts else {}
+        bus_events.emit('solve', 'start', round=r, log=os.path.join(d, 'solve.log'))
         run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin, **ecut_env},
             log_path=os.path.join(d, 'solve.log'))
         for ln in grep(os.path.join(d, 'solve.log'), r'whole_solve:|workers:|crowded:|rules core:'):
@@ -3110,11 +3117,13 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 tried['t0'] = time.time()
                 tried['res'] = lay(r, d, plan_i, plan_bench(loopd, plan_i, bench), sub, tag=f'try{i_}', quiet=True)
                 return tried['res']
+            bus_events.emit('loop', 'start', round=r, log=os.path.join(d, 'loop.log'))
             with open(os.path.join(d, 'loop.log'), 'w') as lf:
                 rc = loop(solve, loopd, LOOP_ROUNDS, lenv(), Log(lf), try_lay=try_lay_)
             for ln in grep(os.path.join(d, 'loop.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
                 say(ln[:170])
             say(f"  loop exit {rc} at {secs()} s")
+            bus_events.emit('loop', 'end', round=r, exit=rc, secs=secs(), log=os.path.join(d, 'loop.log'))
             # ...stopped at crowded ends: the fanout bench repaired where they stand (repair_ends) and the loop run again
             # on it, from where the stopped loop got (loop_seeds: its best round's solve, every cut it held) -- the
             # round's lay, and the next round's feedback, from the new loop
@@ -3131,6 +3140,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 bench = relayed(d, b0_, json.load(open(solve_)), env, say, name='fo_layers_ends')
                 say(f"  the loop again on the repaired ends from {os.path.basename(solve_)}, its "
                     f"{len([c_ for c_ in seeds_['SEED_CUTS'].split(',') if c_])} cut file(s) held")
+                bus_events.emit('loop', 'start', round=r, again='the repaired ends',
+                                log=os.path.join(d, 'loop_ends.log'))
                 with open(os.path.join(d, 'loop_ends.log'), 'w') as lf:
                     tried.clear()
                     rc = loop(solve_, loopd, LOOP_ROUNDS,
@@ -3139,9 +3150,11 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 for ln in grep(os.path.join(d, 'loop_ends.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
                     say(ln[:170])
                 say(f"  the loop again on the repaired ends: exit {rc} at {secs()} s")
+                bus_events.emit('loop', 'end', round=r, exit=rc, secs=secs(), log=os.path.join(d, 'loop_ends.log'))
             # (the round's loops ended: past every loop exchange of the round, for a bus still in one -- joint_pos)
             if env.get('JOINT_DIR'):
                 joint_pos(env, (r, LOOP_END, LOOP_END))
+            bus_events.emit('lay', 'start', round=r)
             # (negotiated buses: the round's lay IN TURN -- joint_lay_turn: one bus's at a time, and a loop that did not
             # pass after every other bus's, so the plan it held, and the rounds laid in its place, are laid round the
             # copper the others laid)
@@ -3166,6 +3179,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                             f"{len([c_ for c_ in seeds_['SEED_CUTS'].split(',') if c_])} cut file(s) held")
                         if env.get('BENCH0'):
                             bench = relayed(d, env['BENCH0'], json.load(open(solve_)), env, say, name='fo_layers_final')
+                        bus_events.emit('loop', 'start', round=r, again='the other buses\' laid copper',
+                                        log=os.path.join(d, 'loop_final.log'))
                         with open(os.path.join(d, 'loop_final.log'), 'w') as lf:
                             tried.clear()
                             rcf_ = loop(solve_, loopf_, LOOP_ROUNDS,
@@ -3173,6 +3188,8 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                         for ln in grep(os.path.join(d, 'loop_final.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
                             say(ln[:170])
                         say(f"  the loop again on the other buses' laid copper: exit {rcf_} at {secs()} s")
+                        bus_events.emit('loop', 'end', round=r, exit=rcf_, secs=secs(),
+                                        log=os.path.join(d, 'loop_final.log'))
                         joint_pos(env, (r, LOOP_END, LOOP_END))
                         best_ = lambda ld_: (json.load(open(os.path.join(ld_, 'best.json'))).get('score', 10 ** 9)
                                              if os.path.isfile(os.path.join(ld_, 'best.json')) else 10 ** 9)
@@ -3223,6 +3240,9 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         env.pop('WALLS_STAND', None)
         env.pop('WALLS_LAST', None)
         env.pop('BUS_AREAS', None)           # (...its edit areas, in its frame, none of the next round's fanout's)
+        bus_events.emit('lay', 'end', round=r, laid=res is not None, secs=secs(),
+                        **({k_: res.get(k_) for k_ in ('lanes', 'open', 'drc')} if res else {}),
+                        **(dict(vias=res['key'][2], copper_mm=res['key'][3]) if res else {}))
         if res is not None and (best is None or res['key'] < best['key']):
             best = res
         # done: a plan laid with NO NET OPEN -- whether or not its loop passed, proved or not, and whatever its

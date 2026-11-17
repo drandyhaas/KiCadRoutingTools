@@ -269,6 +269,18 @@ REGISTRY = {
         'the run then reads Stopped with no result to apply, never a result. '
         'The rest is elapsed time shown in the step rows and the status.'),
 
+    'kicad_routing_plugin/child_run.py': (
+        'hang_detector',
+        "ChildProcess.stop sends SIGTERM to a CLI child's process group and, "
+        'if it has not exited 3 s later (_kill_at, read on the tab\'s UI '
+        'tick), SIGKILL; the run then reads Stopped with no result to apply.'),
+    'kicad_routing_plugin/bus_gui.py': (
+        'hang_detector',
+        "the Bus tab: a --find child killed for a plan step's run is waited "
+        'for 5 s at most (_abort_child) and its state cleared; the rest is '
+        "elapsed time shown in the rows and the status. The step's result is "
+        'its own exit and output, never a clock.'),
+
     # --- an event-loop yield ------------------------------------------------
     'kicad_routing_plugin/differential_gui.py': (
         'reporting', "the run's wall_time shown after a routing run (#1780), "

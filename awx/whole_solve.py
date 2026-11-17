@@ -33,6 +33,7 @@ plan is solved again as its CROWD diagnosis, and the lanes whose crossings the e
 OUT.crowded.json (solve(crowd=True))."""
 import sys, os, re, itertools, collections, json, math, hashlib, time
 import awx_settings
+import bus_events
 import cp_seed  # noqa: E402  (every CP-SAT solve under the bus step's seed)
 import whole_ctx
 import whole_frame
@@ -2029,6 +2030,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         # bound of 0 and 45, and the round stopped with nothing). It is marked so, and no later solve takes it as a floor
         STATUS['plan'] = st in (cp_model.OPTIMAL, cp_model.FEASIBLE)
         keep = not proved and st == cp_model.FEASIBLE and (awx_settings.get('SOLVE_UNPROVED') == '1' or bool(CROWD))
+        bus_events.emit('solve', 'end', status=sv.StatusName(st), secs=round(solve_secs), crossings=len(t),
+                        proved=bool(proved), plan=bool(STATUS['plan'] and (proved or keep)),
+                        **({'obj': round(sv.ObjectiveValue()), 'bound': round(sv.BestObjectiveBound())}
+                           if STATUS['plan'] else {}))
         if not proved and not keep:
             print(('(not proved optimal: best ' + f'{sv.ObjectiveValue():.0f}, bound {sv.BestObjectiveBound():.0f} -- no plan)')
                   if st == cp_model.FEASIBLE else '')

@@ -199,12 +199,14 @@ def _find_python_executable():
     return exe
 
 
-def _pip_install_threaded(packages, progress):
+def _pip_install_threaded(packages, progress, python_exe=None):
     """Run `python -m pip install <packages>` in a worker thread while
     pulsing the wx ProgressDialog from the main thread. Returns
-    (success, log_output).
+    (success, log_output). PYTHON_EXE: the interpreter to install into
+    (default: KiCad's, _find_python_executable) -- the Bus tab installs the
+    bus step's CLI-only OR-Tools into the python that runs that step.
     """
-    python_exe = _find_python_executable()
+    python_exe = python_exe or _find_python_executable()
     cmd = [python_exe, "-m", "pip", "install", "--upgrade", *packages]
 
     # Result holder shared with the worker thread.
