@@ -608,8 +608,9 @@ class BusTab(wx.Panel):
 
     def check_python(self, force=False):
         """(ok, what): the step's python probed in a child (bus_progress.PROBE):
-        route_bus.py parses under it, OR-Tools and the Rust router load, and
-        pcbnew -- where it is importable -- loads beside them. Once per python
+        route_bus.py parses under it, and OR-Tools and the Rust router load with
+        pcbnew kept out, as the step keeps it out of its processes -- so KiCad's
+        own python is ready once OR-Tools is installed in it. Once per python
         unless FORCE. With the Python field empty and KiCad's python not ready,
         a python3 on PATH that is ready is named, for Use It to fill in."""
         python = self.child_python()
@@ -640,10 +641,6 @@ class BusTab(wx.Panel):
                 v = bp.probe_verdict(r.returncode, (r.stdout or '') + (r.stderr or ''))
                 what = f"{python} ({v['version'] or 'no version printed'}): " + (
                     'ready' if v['ok'] else '; '.join(v['problems']))
-                if not v['ok'] and v['pcbnew'] and bp.PCBNEW_CLASH not in what:
-                    what += (" -- this Python loads KiCad's pcbnew, which OR-Tools crashed "
-                             "beside (KiCad's bundled python on macOS): give the step a "
-                             "Python without it")
                 ok, installable = v['ok'], v['installable']
             except (OSError, subprocess.TimeoutExpired) as e:
                 ok, what, installable = False, f"{python}: could not run it ({e})", False

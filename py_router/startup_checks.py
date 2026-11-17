@@ -99,6 +99,13 @@ ROUTING_PACKAGES = ("numpy", "scipy", "shapely")
 # reason Pillow has one: routing never imports it.
 BUS_PACKAGES = ("ortools",)
 
+# ...and the floors the bus step holds a routing package to above routing's own:
+# its 2-D embedding (awx/whole_embed.py) triangulates the free space with
+# shapely.constrained_delaunay_triangles, from shapely 2.1 -- which needs Python
+# 3.10 or newer. Under 2.0 every lane's embedding failed and the step laid
+# nothing, with no word of why.
+BUS_FLOORS = {"shapely": "2.1"}
+
 # Last-resort floors for an install that shipped without requirements.txt.
 # requirements.txt is the source of truth (`requirement_floors` reads it and
 # these only fill gaps); `tests/test_dependency_version_floor.py` asserts this
@@ -517,13 +524,34 @@ def check_bus_dependencies():
     sent them down slower paths without a word.
     Raises StartupCheckError naming what is missing or too old.
     """
-    problems = dependency_problems(BUS_PACKAGES, load=True)
+    problems = bus_dependency_problems(load=True)
     if problems:
-        raise StartupCheckError(format_problems(
+        text = format_problems(
             problems,
             "ERROR: the bus step (awx/route_bus.py) needs Python libraries "
-            "that are missing or too old:"))
+            "that are missing or too old:")
+        note = bus_python_note(problems)
+        raise StartupCheckError(text + (f"\n\n{note}" if note else ''))
     check_rust_library()
+
+
+def bus_python_note(problems):
+    """'' -- or, where a BUS_FLOORS package is among `problems` and this Python
+    is older than that floor's release needs, why no install here mends it."""
+    if any(p.name in BUS_FLOORS for p in problems) and sys.version_info < (3, 10):
+        return (f"shapely {BUS_FLOORS['shapely']} needs Python 3.10 or newer, and this is "
+                f"Python {sys.version_info[0]}.{sys.version_info[1]}: run the bus step "
+                f"under a newer Python")
+    return ''
+
+
+def bus_dependency_problems(load=True):
+    """[Problem] for what the bus step needs: BUS_PACKAGES at requirements.txt's
+    floors, and the routing packages BUS_FLOORS holds higher (only FOUND, so the
+    caller's load setting decides only BUS_PACKAGES)."""
+    problems = dependency_problems(BUS_PACKAGES, load=load)
+    floors = dict(requirement_floors(), **BUS_FLOORS)
+    return problems + dependency_problems(tuple(BUS_FLOORS), floors=floors, load=False)
 
 
 def _raise_if_missing(missing, exc=StartupCheckError):

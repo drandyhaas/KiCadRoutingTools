@@ -43,7 +43,42 @@ call site in one place -- ours, KiCad's own python helpers, and any other plugin
 in the process -- instead of rewriting ~40 `for t in board.GetTracks()` loops
 into index walks and then finding the one that was missed. It is idempotent and
 a no-op on a pcbnew whose SWIG still supplies `next`.
+
+`keep_pcbnew_out()` is the other side: a process that must never load pcbnew
+(the bus step's), and every process it starts, see `import pcbnew` fail.
 """
+import os
+import sys
+
+#: The setting that keeps pcbnew out of a process and every process it starts
+#: (keep_pcbnew_out); `pcbnew_env` is the environment without it.
+NO_PCBNEW = 'KRT_NO_PCBNEW'
+
+
+def keep_pcbnew_out():
+    """This process, and every process it starts, never load KiCad's pcbnew:
+    `import pcbnew` raises ImportError here, and NO_PCBNEW passes it on to the
+    children (patch_swig_iterators, which kicad_parser calls as it is imported,
+    applies it there before anything can import pcbnew).
+
+    The bus step (awx/route_bus.py) runs this as it starts. OR-Tools, which the
+    step solves with, cannot share a process with pcbnew: on Windows each fails
+    to load its DLLs beside the other (WinError 127, #1937), and KiCad's bundled
+    python on macOS crashed loading the two. The step works from files, so
+    nothing it does needs pcbnew in its own processes; KiCad's exact zone fill
+    (kicad_exact_fill) runs KiCad's python in a process of its own, started with
+    `pcbnew_env`. A pcbnew this process has already loaded is left alone."""
+    os.environ[NO_PCBNEW] = '1'
+    if sys.modules.get('pcbnew') is None:
+        sys.modules['pcbnew'] = None
+
+
+def pcbnew_env(env=None):
+    """The environment for a process that is to load pcbnew (KiCad's python
+    running a pcbnew script): ENV, default this process's, without NO_PCBNEW."""
+    out = dict(os.environ if env is None else env)
+    out.pop(NO_PCBNEW, None)
+    return out
 
 
 def patch_swig_iterators(module=None):
@@ -64,6 +99,9 @@ def patch_swig_iterators(module=None):
     False, having done nothing.
     """
     if module is None:
+        if os.environ.get(NO_PCBNEW) == '1' and sys.modules.get('pcbnew') is None:
+            keep_pcbnew_out()       # (a process started by one that keeps it out)
+            return False
         try:
             import pcbnew as module  # noqa: N813
         except Exception:

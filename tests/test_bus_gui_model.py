@@ -15,8 +15,9 @@ model of the step's events.
    run, its buses finished of the routing stage's;
 4. a bus whose process died (no end event) is FAILED with its log; the step's end closes what is still open;
 5. describe() says something for every kind the step writes;
-6. the python probe's verdict: KiCad's own python (pcbnew importable) is never offered an OR-Tools install -- OR-Tools
-   crashed beside pcbnew there --, a python lacking only OR-Tools is; a probe that died loading pcbnew names the clash.
+6. the python probe's verdict: a python lacking only OR-Tools is offered the install -- KiCad's own (pcbnew importable)
+   too, since the step keeps pcbnew out of its processes --, one with a second problem is not, and a probe that stopped
+   before its verdict line says so.
 7. the Autorouter tab's bus step: EventsTail follows an events file as it grows -- a line still being written waits for
    the next poll --, its live line carries the latest event and the gauges' fractions, its lines every row indented by
    level, and finish() ends whatever is still running; plan_bus_line says the buses, the arrays served and the via, why
@@ -207,13 +208,16 @@ def main():
     print('6. the python probe\'s verdict')
     v = bp.probe_verdict(3, 'python 3.9.13\nPCBNEW_IMPORTABLE\nPROBLEM: route_bus.py does not parse\n'
                             'PROBLEM: ERROR: ... ortools: not installed\nNOT OK\n')
-    ok('KiCad\'s python: both problems, pcbnew, NOT installable (OR-Tools beside pcbnew is no fix)',
-       not v['ok'] and len(v['problems']) == 2 and v['pcbnew'] and not v['installable'], v)
+    ok('two problems: not installable, pcbnew said', not v['ok'] and len(v['problems']) == 2 and v['pcbnew']
+       and not v['installable'], v)
+    v = bp.probe_verdict(3, 'python 3.11.5\nPCBNEW_IMPORTABLE\nPROBLEM: ERROR: ... ortools: not installed\nNOT OK\n')
+    ok('KiCad\'s own python lacking only OR-Tools: installable (the step keeps pcbnew out)',
+       v['installable'] and v['pcbnew'] and not v['ok'], v)
     v = bp.probe_verdict(3, 'python 3.12.1\nPROBLEM: ERROR: ... ortools: not installed\nNOT OK\n')
     ok('a python without pcbnew lacking only OR-Tools: installable', v['installable'] and not v['ok'], v)
-    v = bp.probe_verdict(-11, 'python 3.9.13\nPCBNEW_IMPORTABLE\nPCBNEW_CHECK\n')
-    ok('a probe that died loading pcbnew beside OR-Tools: the clash named', not v['ok'] and any(
-        bp.PCBNEW_CLASH in p_ for p_ in v['problems']) and not v['installable'], v)
+    v = bp.probe_verdict(-11, 'python 3.9.13\nPCBNEW_IMPORTABLE\n')
+    ok('a probe that stopped before its verdict: said so, not installable', not v['ok'] and any(
+        'stopped' in p_ for p_ in v['problems']) and not v['installable'], v)
     v = bp.probe_verdict(0, 'python 3.14.8\nOK\n')
     ok('a ready python', v['ok'] and not v['problems'], v)
     v = bp.probe_verdict(1, '')

@@ -41,7 +41,7 @@ import time
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import kicad_locate
-from swig_compat import patch_swig_iterators as _patch_swig_iterators
+from swig_compat import patch_swig_iterators as _patch_swig_iterators, pcbnew_env
 
 # #795: repin_netcodes_from_file() walks board.GetTracks() in the pcbnew
 # subprocess, which imports THIS module -- so the alias must be restored here
@@ -262,14 +262,14 @@ def find_kicad_python() -> Optional[str]:
         # `cand is sys.executable` LITERALLY -- a path DERIVED from sys.prefix
         # (the GUI case, see _this_interpreter) is a reconstruction, so it
         # gets probed like any other candidate rather than trusted.
-        if cand and cand == sys.executable and 'pcbnew' in sys.modules:
+        if cand and cand == sys.executable and sys.modules.get('pcbnew') is not None:
             found = cand           # the GUI plugin on a python-exe front
             break
         if not os.path.isfile(cand):
             continue
         try:
-            if subprocess.run([cand, '-c', 'import pcbnew'],
-                              capture_output=True, timeout=120).returncode == 0:
+            if subprocess.run([cand, '-c', 'import pcbnew'], capture_output=True, timeout=120,
+                              env=pcbnew_env()).returncode == 0:
                 found = cand
                 break
         except Exception:
@@ -616,7 +616,7 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
         # for the net re-pin (LoadBoard flips netcodes over stale fills).
         r = subprocess.run([kpy, script, staged, filled,
                             os.path.dirname(os.path.abspath(__file__))],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout, env=pcbnew_env())
         if 'REFILL_OK' not in (r.stdout or '') or not os.path.isfile(filled):
             _why = (r.stderr or '').strip()[-200:]
             if verbose:
@@ -717,7 +717,7 @@ def write_filled_board(board_file: str, dst_file: str,
         filled = os.path.join(tmpdir, stem + '_filled.kicad_pcb')
         r = subprocess.run([kpy, script, staged, filled,
                             os.path.dirname(os.path.abspath(__file__))],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout, env=pcbnew_env())
         if 'REFILL_OK' not in (r.stdout or '') or not os.path.isfile(filled):
             _why = (r.stderr or '').strip()[-200:]
             if verbose:

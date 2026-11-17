@@ -643,10 +643,13 @@ def active_env_knobs() -> dict:
 #: the plugin sets in KiCad's process for its Log tab (kicad_routing_plugin/
 #: __init__.py): a CLI the GUI runs as a child inherits it, and its recorded
 #: line would carry it where the same command typed in a terminal does not.
+#: KRT_NO_PCBNEW is the bus step's own (swig_compat.keep_pcbnew_out): the step
+#: sets it as it starts, so its line and its stages' never need to say it.
 _NOT_REPLAYED = __import__('re').compile(
     r'^(KICAD|KRT)_(\w*PYTHON\w*|CLI(_\w+)?|SWEEP_\w+|\w+_DIR)$')
 _NOT_REPLAYED_NAMES = frozenset({'KICAD_SAVELOG', 'KICAD_IMAGE',
-                                 'KRT_CMD_TIMING_LEDGER', 'KICAD_FORCE_COLOR'})
+                                 'KRT_CMD_TIMING_LEDGER', 'KICAD_FORCE_COLOR',
+                                 'KRT_NO_PCBNEW'})
 
 
 def is_replay_knob(name: str) -> bool:

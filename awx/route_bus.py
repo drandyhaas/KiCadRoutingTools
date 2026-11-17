@@ -82,6 +82,11 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+if __name__ == '__main__':
+    # (the step's processes never load KiCad's pcbnew, which OR-Tools cannot share a process with:
+    # swig_compat.keep_pcbnew_out, before anything here can import it)
+    import swig_compat  # noqa: E402
+    swig_compat.keep_pcbnew_out()
 from coherent_nets import block_net_name  # noqa: E402
 import bus_events  # noqa: E402
 

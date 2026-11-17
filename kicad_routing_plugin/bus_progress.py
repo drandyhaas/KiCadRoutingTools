@@ -145,20 +145,18 @@ def find_argv(python, board, json_out, sizes=None, script=ROUTE_BUS_SCRIPT):
 
 
 #: The child-python probe, run in a child, never in KiCad's process
-#: (deps_check.CLI_ONLY_PACKAGES): the step's source parses under it, the
-#: step's own dependency gate passes (OR-Tools, the Rust router), and -- where
-#: pcbnew is importable, as in KiCad's own python -- pcbnew loads beside
-#: OR-Tools: the step's modules import pcbnew wherever they can, and the two
-#: in one process can crash it (measured with KiCad 10's bundled python on
-#: macOS, either order). Each problem is a PROBLEM: line; the last line is OK
-#: or NOT OK, absent when the pcbnew load crashed the probe (PCBNEW_CHECK
-#: printed before it).
+#: (deps_check.CLI_ONLY_PACKAGES): the step's source parses under it, and the
+#: step's own dependency gate passes (OR-Tools, the Rust router) with pcbnew
+#: kept out (swig_compat.keep_pcbnew_out), as the step's processes keep it out:
+#: OR-Tools and pcbnew cannot share a process (Windows: WinError 127 either
+#: way; KiCad 10's bundled python on macOS crashed), and nothing the step does
+#: needs pcbnew in its own. Each problem is a PROBLEM: line; the last line is
+#: OK or NOT OK.
 PROBE = r"""
 import importlib.util, sys
 awx, pyr, script = sys.argv[1], sys.argv[2], sys.argv[3]
 print('python %d.%d.%d' % sys.version_info[:3], flush=True)
-has_pcbnew = importlib.util.find_spec('pcbnew') is not None
-if has_pcbnew:
+if importlib.util.find_spec('pcbnew') is not None:
     print('PCBNEW_IMPORTABLE', flush=True)
 bad = 0
 try:
@@ -168,45 +166,35 @@ except SyntaxError as e:
     print('PROBLEM: %s does not parse under this Python %d.%d (%s, line %s)'
           % (script, sys.version_info[0], sys.version_info[1], e.msg, e.lineno), flush=True)
 sys.path[:0] = [awx, pyr]
+import swig_compat
+swig_compat.keep_pcbnew_out()       # (as the step's processes do: OR-Tools never beside pcbnew)
 try:
     from startup_checks import check_bus_dependencies
     check_bus_dependencies()
 except Exception as e:
     bad += 1
     print('PROBLEM: ' + str(e).replace('\n', ' | '), flush=True)
-else:
-    if has_pcbnew:
-        print('PCBNEW_CHECK', flush=True)
-        import pcbnew  # noqa: F401
 print('NOT OK' if bad else 'OK', flush=True)
 sys.exit(3 if bad else 0)
 """
 
-#: What a probe that died loading pcbnew beside OR-Tools means.
-PCBNEW_CLASH = ("OR-Tools and pcbnew cannot be loaded in one process under this "
-                "Python (the probe crashed loading them together), and the step's "
-                "modules load pcbnew wherever it is importable: choose a Python "
-                "without KiCad's pcbnew for the step")
-
 
 def probe_verdict(returncode, output):
     """{ok, version, problems, pcbnew, installable} from the probe's exit and
-    output: `pcbnew` whether that python can import KiCad's pcbnew, and
-    `installable` whether installing OR-Tools there is the one thing it lacks
-    -- never for a python with pcbnew, beside which OR-Tools crashed the
-    probe (PCBNEW_CLASH)."""
+    output: `pcbnew` whether that python can import KiCad's pcbnew (KiCad's
+    own python: the step keeps it out of its processes, so it needs only
+    OR-Tools), and `installable` whether installing OR-Tools there is the one
+    thing it lacks. A probe that stopped before its verdict line is said so."""
     lines = [ln.strip() for ln in (output or '').splitlines() if ln.strip()]
     ver = next((ln for ln in lines if ln.startswith('python ')), '')
     problems = [ln[len('PROBLEM: '):] for ln in lines if ln.startswith('PROBLEM: ')]
-    if 'PCBNEW_CHECK' in lines and lines[-1] not in ('OK', 'NOT OK'):
-        problems.append(PCBNEW_CLASH + f" (exit {returncode})")
+    if lines and lines[-1] not in ('OK', 'NOT OK') and ver:
+        problems.append(f"the probe stopped loading the step's libraries (exit {returncode})")
     ok = returncode == 0 and lines[-1:] == ['OK'] and not problems
     if not ok and not problems:
         problems.append(lines[-1] if lines else f"no output (exit {returncode})")
-    pcb = 'PCBNEW_IMPORTABLE' in lines
-    installable = (not ok and not pcb and len(problems) == 1
-                   and 'ortools' in problems[0].lower())
-    return {'ok': ok, 'version': ver, 'problems': problems, 'pcbnew': pcb,
+    installable = (not ok and len(problems) == 1 and 'ortools' in problems[0].lower())
+    return {'ok': ok, 'version': ver, 'problems': problems, 'pcbnew': 'PCBNEW_IMPORTABLE' in lines,
             'installable': installable}
 
 
