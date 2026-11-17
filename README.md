@@ -356,12 +356,17 @@ python3 package_pcm.py --binary-dir ./path/to/release/artifacts
   [`autoroute.py`](docs/utilities.md#deterministic-plan-router-autoroutepy) as a
   subprocess on a snapshot of the open board (with its `.kicad_pro` / `.kicad_dru`),
   in a temp work folder. Its **Plan** pane shows what it read off the board -- the
-  design rules and where they came from, the planes, the parts it fans out and the
-  ones it does not, with why, the diff pairs and power nets -- and its **Steps**
+  design rules and where they came from, the planes, the buses its bus step will
+  route whole (and the ones it leaves, with why, or why the step cannot run here),
+  the parts it fans out and the ones it does not, with why, the diff pairs and
+  power nets -- and its **Steps**
   checklist one row per step, pending / running (time ticking) / done / FAILED /
   skipped, with each step's result (escapes and grazes, caps moved, pairs routed,
   each route pass's open nets and DRC, which pass shipped, why a pass did not run);
   the rows the run adds (a fanout's next rung, a re-fan) appear as they start.
+  The bus step's row follows that step's own progress events while it runs: its
+  result shows the latest event and how many of its group's stages and buses have
+  finished, and selecting it lists the step's groups, buses and stages.
   Selecting a row shows its command line, decisions, summary and log tail (a failed
   one its exit code and error). Options: *Finish only* (`--finish`), *Effort factor*
   (`--effort-factor`), *Plane layer cost* (`--plane-layer-cost`). **Stop** kills the

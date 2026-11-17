@@ -716,6 +716,14 @@ def bus_summary_path(out):
     return out[:-len('.kicad_pcb')] + '.bus/summary.json'
 
 
+def bus_events_path(out):
+    """The progress events route_bus writes for its OUT (awx/bus_events.py):
+    <OUT stem>.bus/events.jsonl, one JSON object a line from every process of
+    the step -- named in the bus step's AUTOROUTE_STEP events as `events`, so
+    the Autorouter tab follows the step while it runs."""
+    return out[:-len('.kicad_pcb')] + '.bus/events.jsonl'
+
+
 def bus_grade_fields(line):
     """{lanes, vias, copper, connected, drc, walled} from a bus's BUS grade line
     (`BUS U1->U2 ... lanes=34/34 ... | on the board: vias=.. copper=..mm
@@ -938,6 +946,13 @@ class Chain(ChainEvents):
         ev = {'n': self.n, 'tag': tag, 'tool': kind, 'parent': parent,
               'cmd': [os.path.basename(TOOLS[kind])] + argv[5:], 'log': log,
               'board': out, 'input': self.cur}
+        env = _child_env()
+        if kind == 'bus':
+            # (its progress events, at the step's own default -- which it
+            # starts empty -- and never in a BUS_EVENTS this process was given)
+            env.pop('BUS_EVENTS', None)
+            env.pop('BUS_EVENTS_BUS', None)
+            ev['events'] = bus_events_path(out)
         self.started.add(tag)
         emit('AUTOROUTE_STEP', dict(ev, state='running', t=round(time.time(), 3)))
         if tag in _fail_steps():
@@ -946,7 +961,7 @@ class Chain(ChainEvents):
         t0 = time.time()
         with open(log, 'w') as fh:
             rc = subprocess.run(argv, cwd=self.work, stdout=fh,
-                                stderr=subprocess.STDOUT, env=_child_env()).returncode
+                                stderr=subprocess.STDOUT, env=env).returncode
         seconds = round(time.time() - t0, 1)
         text = open(log, errors='replace').read()
         summary = summary_min = None

@@ -40,6 +40,8 @@ import time
 
 import wx
 
+from . import bus_progress as bp
+
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 _ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
@@ -221,6 +223,7 @@ class AutorouteTab(wx.Panel):
 
     def _reset_run_state(self):
         self.rows = []              # one dict per checklist row
+        self._tail_t = 0.0          # (the last poll of a step's events file)
         self.plan = None
         self.summary = None
         self.decisions = []
@@ -478,6 +481,7 @@ class AutorouteTab(wx.Panel):
                 done = True
                 break
             changed |= self._handle_line(line)
+        changed |= self._poll_tails()
         if changed:
             self._refresh_list()
         else:
@@ -488,6 +492,21 @@ class AutorouteTab(wx.Panel):
         self._update_status()
         if done:
             self._finished()
+
+    def _poll_tails(self):
+        """Read what a running step's events file (the bus step's) gained,
+        at most once a second; True when a row's live line changed."""
+        now = time.time()
+        if now - self._tail_t < 1.0:
+            return False
+        self._tail_t = now
+        changed = False
+        for row in self.rows:
+            tail = row.get('tail')
+            if tail is not None and row.get('state') == 'running' and tail.poll():
+                row['live'] = tail.live(now)
+                changed = True
+        return changed
 
     # ------------------------------------------------------------ events
 
@@ -539,6 +558,12 @@ class AutorouteTab(wx.Panel):
             self.rows.insert(at, row)
         state = p.get('state')
         row['state'] = state
+        if p.get('events') and row.get('tail') is None:
+            # (the bus step: its progress events, followed while it runs)
+            row['tail'] = bp.EventsTail(p['events'])
+        if state != 'running' and row.get('tail') is not None:
+            row['tail'].finish(time.time(), 'the step ended')
+            row['live'] = None
         for k in ('n', 'cmd', 'log', 'board', 'input', 'rc', 'seconds', 'summary',
                   'result', 'error_tail', 'grade', 'kept', 'reason', 'iterations'):
             if k in p:
@@ -564,6 +589,9 @@ class AutorouteTab(wx.Panel):
         planes = p.get('planes') or []
         lines.append("Planes: " + (", ".join(f"{n} on {lay}" for n, lay in planes)
                                    if planes else "none"))
+        bus_line = bp.plan_bus_line(p.get('bus'))
+        if bus_line:
+            lines.append(bus_line)
         parts = p.get('parts') or []
         line = "Fan out: " + (", ".join(f"{ref} ({tool} {pitch:g} mm)"
                                         for ref, tool, pitch in parts) if parts else "none")
@@ -602,6 +630,8 @@ class AutorouteTab(wx.Panel):
         return row.get('seconds')
 
     def _row_result(self, row):
+        if row.get('state') == 'running' and row.get('live'):
+            return row['live']
         res = row.get('result') or ''
         if row.get('state') == 'pending' and not res:
             res = row.get('what') or ''
@@ -722,6 +752,9 @@ class AutorouteTab(wx.Panel):
             out.append("Command: " + " ".join(shlex.quote(str(a)) for a in row['cmd']))
         if row.get('log'):
             out.append(f"Log: {row['log']}")
+        if row.get('tail') is not None and row['tail'].model.latest is not None:
+            out.append("--- the bus step's progress ---")
+            out += row['tail'].lines(time.time())
         if row.get('error_tail'):
             out.append("--- error: the last lines of its log ---")
             out += row['error_tail']

@@ -15,6 +15,9 @@ it is tested on its own:
                            their stages -- each with a state, a time and a
                            result, and the fractions the tab's gauges show
   describe                 one event as a line of text (the status line)
+  EventsTail               a step's events file followed as it grows, into a
+                           RunModel (the Autorouter tab's bus step row)
+  plan_bus_line            autoroute's plan record of the bus step as a line
 
 Nothing here estimates: a gauge is a count of things that ended out of things
 that will run (a group's stages, a group's buses), and a solve shows its
@@ -782,3 +785,81 @@ class RunModel:
         """{bus spec: result text} for the buses that ended."""
         return {r['key'][1]: r['result'] for r in self.rows.values()
                 if r['level'] == 1 and r['state'] not in ('pending', 'running')}
+
+
+class EventsTail:
+    """A bus step's events file followed from its start: each poll reads the
+    whole lines written since the last into a RunModel (the Autorouter tab's
+    bus step row, whose process is autoroute's child, not the tab's)."""
+
+    def __init__(self, path):
+        self.path = path
+        self.offset = 0
+        self.model = RunModel()
+
+    def poll(self):
+        """Read what the step wrote since the last poll; True when it wrote."""
+        evs, self.offset = bus_events().read(self.path, self.offset)
+        if evs:
+            self.model.feed_all(evs)
+        return bool(evs)
+
+    def finish(self, t, why):
+        """The step's process ended: its last lines read, and every row still
+        running ended at T with WHY (RunModel.close)."""
+        self.poll()
+        self.model.close(t, why)
+
+    def live(self, now):
+        """The step's progress as one line: its latest event, then the gauges'
+        fractions (group stages ended of those that will run, buses finished
+        of those routing) -- '' before its first event."""
+        m = self.model
+        if m.latest is None:
+            return ''
+        parts = [m.status_line(now)]
+        f = m.fractions()
+        if f['stages'][1]:
+            parts.append(f"group stages {f['stages'][0]} of {f['stages'][1]}")
+        if f['buses'][1]:
+            parts.append(f"buses finished {f['buses'][0]} of {f['buses'][1]}")
+        return ' | '.join(parts)
+
+    def lines(self, now):
+        """Every row of the run as text, indented by its level (a group, its
+        stages and buses, each bus's stages): label, state, elapsed, result."""
+        out = []
+        for r in self.model.flat():
+            el = _fmt_secs(self.model.elapsed(r, now))
+            out.append('  ' * r['level'] + f"{r['label']}: {r['state']}"
+                       + (f", {el}" if el else '')
+                       + (f" -- {r['result']}" if r.get('result') else ''))
+        return out
+
+
+def plan_bus_line(bus, most=4):
+    """The Autorouter tab's plan line for autoroute's bus record (its plan's
+    `bus`: the buses the bus step will route, the ones it leaves and why, the
+    arrays it serves, its via, why it cannot run here, why the buses could not
+    be found); None for no record (a board with no ball array). At most MOST
+    of the buses not taken are named."""
+    if not bus:
+        return None
+    if bus.get('error'):
+        return f"Buses: none routed whole -- {bus['error']}"
+    taken = bus.get('buses') or []
+    left = bus.get('not_taken') or []
+    if taken:
+        line = ("Buses (the bus step, experimental): "
+                + ", ".join(f"{b['src']} -> {b['dest']} ({b['nets']} nets)" for b in taken)
+                + f"; it serves {', '.join(bus.get('arrays') or []) or 'no array'}"
+                + f", via {bus.get('via')}/{bus.get('drill')} mm")
+        if bus.get('missing'):
+            line += f"; NOT RUN: {bus['missing']}"
+    else:
+        line = "Buses: none for the bus step"
+    if left:
+        line += "; not taken: " + "; ".join(
+            f"{b['src']} -> {b['dest']} ({b['nets']} nets: {b['why']})" for b in left[:most]) \
+            + (f"; {len(left) - most} more" if len(left) > most else "")
+    return line

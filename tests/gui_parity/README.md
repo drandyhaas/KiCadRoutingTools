@@ -162,7 +162,13 @@ Apply the live board, saved as KiCad saves it, must grade as the CLI's output
 (check_connected issues, check_drc violations) with the same zones, poses,
 tracks and vias; a step made to fail (`KRT_AUTOROUTE_FAIL_STEPS`) must show in
 its row and the detail pane, a run that fails outright must say FAILED, and
-Stop must end a run mid-route. About two minutes.
+Stop must end a run mid-route. About two minutes. Its bus step's display:
+`test_autoroute_tab_bus_progress.py` -- the REAL tab fed autoroute's plan and
+step lines and a bus step's events file written in pieces: the Plan pane's bus
+line, the bus row's live line (the latest event and the gauges) in its Result
+cell while it runs and the step's own rows in its details, later lines read
+on the next poll, nothing left running once the step ends, and NOT RUN with
+the install line where OR-Tools is missing. Seconds; needs no OR-Tools.
 
 Bus tab: `test_bus_tab_gui.py` -- the REAL tab on a 12-net synthetic pair of
 ball arrays (`awx/synth_bus.py`): the page after Fanout; the step's python

@@ -34,7 +34,11 @@ none -- never 0.
 
 --board runs the layout, run and apply arms on another board (the failure and
 Stop arms stay with splitflap); --require-moves also asserts the run moved a
-part and poured a zone, so poses and zones are really applied.
+part and poured a zone, so poses and zones are really applied. On a board
+with a bus the Plan pane lists its buses; where the bus step runs (its python
+has OR-Tools) its row follows the step's events file -- the live line in the
+Result column while it runs, the step's own rows in its details. The display
+alone, run or not, is test_autoroute_tab_bus_progress.py's.
 
 --apply-check skips the runs: it applies a CLI output to its input loaded as
 the live board and compares as above, for a board too slow to run twice.
@@ -445,14 +449,51 @@ def run(keep, board_file=BOARD, require_moves=False):
             finally:
                 os.environ.pop(AR.FAIL_STEPS_ENV, None)
 
+        # (the bus step's live line, as the tab polls its events file: recorded while it runs)
+        lives = []
+        poll_ = tab._poll_tails
+
+        def _rec_poll():
+            changed = poll_()
+            for rw in tab.rows:
+                if rw.get('tag') == 'bus' and rw.get('state') == 'running' and rw.get('live'):
+                    lives.append((rw['live'], tab._row_result(rw)))
+            return changed
+        tab._poll_tails = _rec_poll
+
         # ---- a clean run
         print("tab: run", flush=True)
         drive()
+        tab._poll_tails = poll_
         gui_ev = events(open(os.path.join(tab.workdir, 'autoroute.log')).read())
         check("the run exits 0", tab.returncode == 0,
               f"rc={tab.returncode}; {tab.status_text.GetValue()}")
         check("the plan came first and filled the Plan pane",
               tab.plan is not None and 'Design rules' in tab.plan_text.GetValue())
+        bi = next((i for i, rw in enumerate(tab.rows) if rw.get('tag') == 'bus'), None)
+        brow = tab.rows[bi] if bi is not None else {}
+        if ((tab.plan or {}).get('bus') or {}).get('buses'):
+            check("the Plan pane lists the bus step's buses",
+                  'Buses (the bus step' in tab.plan_text.GetValue(), tab.plan_text.GetValue()[-400:])
+        if brow.get('state') == 'skipped':
+            print("  (the bus step did not run in this python -- "
+                  + str(brow.get('result'))[:90] + " -- its live display is "
+                  "test_autoroute_tab_bus_progress.py's)", flush=True)
+        elif brow:
+            # (a bus step that ran: its row followed the step's events file)
+            tail = brow.get('tail')
+            check("the bus row followed the step's events file",
+                  tail is not None and tail.model.events > 0 and tail.path == brow.get('events'),
+                  f"{brow.get('events')} {tail.model.events if tail else None}")
+            check("while it ran, its Result column showed the live line (latest event, gauges)",
+                  lives and all(res == live for live, res in lives)
+                  and any('group stages' in live for live, _r in lives), lives[-3:])
+            if bi is not None:
+                tab._show_row(bi)
+            check("its details list the step's own rows",
+                  "the bus step's progress" in tab._detail_value, tab._detail_value[:600])
+            check("once it ended, no row of the step is left running",
+                  tail is not None and not any(r_['state'] == 'running' for r_ in tail.model.rows.values()))
         states = {rw['tag']: rw['state'] for rw in tab.rows}
         check("every checklist row ends terminal",
               all(st in ('done', 'failed', 'skipped') for st in states.values()), states)

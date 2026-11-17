@@ -17,6 +17,10 @@ model of the step's events.
 5. describe() says something for every kind the step writes;
 6. the python probe's verdict: KiCad's own python (pcbnew importable) is never offered an OR-Tools install -- OR-Tools
    crashed beside pcbnew there --, a python lacking only OR-Tools is; a probe that died loading pcbnew names the clash.
+7. the Autorouter tab's bus step: EventsTail follows an events file as it grows -- a line still being written waits for
+   the next poll --, its live line carries the latest event and the gauges' fractions, its lines every row indented by
+   level, and finish() ends whatever is still running; plan_bus_line says the buses, the arrays served and the via, why
+   the step will not run, the buses not taken (at most four, then how many more), and nothing for no record.
 """
 import os
 import sys
@@ -214,6 +218,49 @@ def main():
     ok('a ready python', v['ok'] and not v['problems'], v)
     v = bp.probe_verdict(1, '')
     ok('no output at all: not ready, said so', not v['ok'] and v['problems'], v)
+
+    print('7. the Autorouter tab\'s bus step')
+    import json
+    import tempfile
+    evs = group_events()
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, 'events.jsonl')
+    tail = bp.EventsTail(path)
+    ok('no file yet: nothing read, no live line', not tail.poll() and tail.live(1000.0) == '')
+    half = evs[:20]
+    with open(path, 'w') as f:
+        f.write(''.join(json.dumps(e) + '\n' for e in half) + json.dumps(evs[20])[:15])
+    ok('the whole lines read, the one being written left', tail.poll() and tail.model.events == 20,
+       tail.model.events)
+    live = tail.live(1050.0)
+    ok('the live line: the latest event and the stage gauge', 'U1' in live and 'group stages' in live, live)
+    with open(path, 'w') as f:
+        f.write(''.join(json.dumps(e) + '\n' for e in evs))
+    ok('the rest read on the next poll', tail.poll() and tail.model.events == len(evs), tail.model.events)
+    ok('nothing new: no change', not tail.poll())
+    lines = tail.lines(1200.0)
+    ok('lines: the group first, its buses and stages indented under it',
+       lines and lines[0].startswith('U1') and any(l_.startswith('  ') for l_ in lines)
+       and any('U1:U2' in l_ or 'U2' in l_ for l_ in lines[1:]), lines[:4])
+    t2 = bp.EventsTail(path + '.2')
+    with open(path + '.2', 'w') as f:
+        f.write(''.join(json.dumps(e) + '\n' for e in evs[:25]))
+    t2.finish(1500.0, 'the step ended')
+    ok('finish: nothing left running', not any(r['state'] == 'running' for r in t2.model.rows.values()))
+
+    bus = {'buses': [{'src': 'U1', 'dest': 'U2', 'nets': 34, 'why': 'a memory bus'}], 'arrays': ['U1', 'U2'],
+           'not_taken': [{'src': 'U1', 'dest': f'J{i}', 'nets': 4, 'why': 'too few nets'} for i in range(6)],
+           'via': 0.45, 'drill': 0.2, 'missing': None, 'error': None}
+    line = bp.plan_bus_line(bus)
+    ok('plan line: the bus, its arrays and via, four not taken and how many more',
+       'U1 -> U2 (34 nets)' in line and 'U1, U2' in line and '0.45/0.2' in line and 'J3' in line
+       and 'J4' not in line and '2 more' in line, line)
+    line = bp.plan_bus_line(dict(bus, missing='the bus step needs ortools: not installed'))
+    ok('plan line: why the step will not run', 'NOT RUN: the bus step needs ortools' in line, line)
+    line = bp.plan_bus_line(dict(bus, buses=[], not_taken=bus['not_taken'][:1]))
+    ok('plan line: no bus, the one not taken', line.startswith('Buses: none') and 'J0' in line, line)
+    ok('plan line: an error said', 'could not' in bp.plan_bus_line(dict(bus, error='the buses could not be found')))
+    ok('plan line: none for no record', bp.plan_bus_line(None) is None)
 
     print('\nFAILED: ' + ', '.join(failures) if failures else '\nALL OK')
     return 1 if failures else 0

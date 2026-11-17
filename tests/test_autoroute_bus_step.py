@@ -23,6 +23,9 @@
    its pads is served, one without is not, and the nets protected after and
    not before are the ones handed on.
 6. `bus_grade_fields` / `step_summary('bus', ...)` read route_bus's summary.
+7. The bus step's AUTOROUTE_STEP events name its progress events file
+   (`events`, route_bus's own <OUT stem>.bus/events.jsonl), a BUS_EVENTS this
+   process was given or not; another step's name none.
 """
 import contextlib
 import io
@@ -283,6 +286,38 @@ def test_summary():
            "no summary: said so")
 
 
+def test_events_named():
+    print("the bus step's events file, named in its step events")
+    work = tempfile.mkdtemp()
+    board = os.path.join(work, 'in.kicad_pcb')
+    open(board, 'w').close()
+    saved = {k: os.environ.get(k) for k in (AP.FAIL_STEPS_ENV, 'BUS_EVENTS')}
+    os.environ[AP.FAIL_STEPS_ENV] = 'bus,route'
+    os.environ['BUS_EVENTS'] = os.path.join(work, 'elsewhere.jsonl')
+    try:
+        ch = AP.Chain(board, work)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ch.run('bus', ['{IN}', '{OUT}'], 'bus')
+            ch.run('route', ['{IN}', '{OUT}'], 'route')
+        evs = [json.loads(ln.split(': ', 1)[1]) for ln in buf.getvalue().splitlines()
+               if ln.startswith('AUTOROUTE_STEP: ')]
+        bus = [e for e in evs if e.get('tag') == 'bus']
+        expect(bus and all(e.get('events') == AP.bus_events_path(e['board'] or bus[0]['board'])
+                           for e in bus[:1])
+               and bus[0]['events'].endswith(os.path.join('step01_bus.bus', 'events.jsonl')),
+               f"the bus step names route_bus's own events file ({bus[:1]})")
+        expect(not any(e.get('events') for e in evs if e.get('tag') == 'route'),
+               "another step names none")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     test_plan()
     test_no_ortools()
@@ -290,6 +325,7 @@ def main():
     test_run_plan()
     test_handoff()
     test_summary()
+    test_events_named()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s)")
         return 1
