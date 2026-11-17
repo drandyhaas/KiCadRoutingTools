@@ -340,6 +340,20 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 legs_r[(n, 1)] = ({ctx.byname[n][0]}, [types.SimpleNamespace(
                     start_x=g_[0], start_y=g_[1], end_x=b_[0], end_y=b_[1], width=TRK, net_id=ctx.byname[n][0],
                     layer=ctx.dest_layer[n])])
+        # ...and a group lane's way UNDER parts (Group.options' 'under' and 'straight': over their pads to the via at
+        # its berth) on the layers open on every part it crosses alone -- its berth's stub layer, the part's pads', too
+        n_un = 0
+        for n in (M if Fr.group is not None else ()):
+            w_ = Fr.way.get(n) if hasattr(Fr, 'way') else None
+            if (n, 1) in VEND and w_ is not None and len(w_) > 6 and w_[6] is not None:
+                ban_ = {L_ for L_ in LAYN if L_ not in w_[6]} - (VBAN.get((n, 1)) or set())
+                for L_ in ban_:
+                    VWHY[(n, 1, L_)] = 'its way under the parts to its berth (a pad there)'
+                if ban_:
+                    VBAN[(n, 1)] = (VBAN.get((n, 1)) or set()) | ban_
+                    n_un += 1
+        if n_un:
+            print(f'   via ends\' ways under their parts: {n_un} berth(s) kept off the layers the parts\' pads stand on')
         if legs_r:
             lw_ = {}
             lb_, _ls = _relayer.clashes(ctx.pcb, legs_r, LAYN, _rules.active().fan_clear, why=lw_)

@@ -684,13 +684,14 @@ class Group:
 
     def options(self, p, sd, part, layer, via):
         """[(way, place s, its mouth (a, b) or None, its length, its pocket (its mouths) or None, the pins its leg
-        passes)] -- the ways a lane whose berth stands at p (its stub `sd` out of its pad on part
+        passes, the layers it may run on)] -- the ways a lane whose berth stands at p (its stub `sd` out of its pad on part
         `part`, on `layer`, `via` whether it carries one) enters the group, the shortest first, GROUP_OPTIONS of them.
         'on': its berth on the outline (s where its stub meets it); 'under': straight under its own part from the side
         turned from the source, out where that straight meets the outline; and a berth in a POCKET -- 'mouth' out of
         each of the pocket's mouths, its place there the shallowest berth nearest its own wall, and 'straight' under
         the part in front of it. A way under parts needs a layer open on every part it passes -- the berth's layer, or
-        any with a via at the berth. Its length: from the berth to its place (a mouth's: the berth's depth from it);
+        any with a via at the berth, and the lane runs to its berth on such a layer: a way under parts carries the
+        layers open on all of them (sorted names), the others None. Its length: from the berth to its place (a mouth's: the berth's depth from it);
         a mouth's leg runs along the part's row, past the pins between its berth and the mouth (GROUP_LEG_PASS each, in
         the ends model: deep in a strip a lane's leg past its neighbours' stubs and vias met them, where straight under
         the part in front -- a via at the pin, as a human takes them -- runs clear)"""
@@ -707,8 +708,11 @@ class Group:
                 return True
             op = frozenset.intersection(*[self.open[r] for r in parts])
             return bool(op) and (via or layer in op)
+
+        def open_on(parts):
+            return tuple(sorted(frozenset.intersection(*[self.open[r] for r in parts]))) if parts else None
         if not (self.U.contains(P) and self.E.distance(P) > GROUP_TOL):
-            out.append(('on', self._ray(p, sd), None, 0.0, None, 0))
+            out.append(('on', self._ray(p, sd), None, 0.0, None, 0, None))
             if sd is not None and math.hypot(*sd) > 1e-9:
                 k = math.hypot(*sd)
                 if (sd[0] * self.d[0] + sd[1] * self.d[1]) / k >= FRONT_COS:
@@ -721,7 +725,8 @@ class Group:
                         qs = self.s(q)
                         # (out into the open: a notch's wall or the front -- not a pocket behind another part)
                         if self.E.distance(Point(q)) <= GROUP_TOL:
-                            out.append(('under', qs, None, math.hypot(q[0] - p[0], q[1] - p[1]), None, 0))
+                            out.append(('under', qs, None, math.hypot(q[0] - p[0], q[1] - p[1]), None, 0,
+                                        open_on(crossed)))
         else:
             # (a berth inside the outline: its stub ends in a pocket, or on its own part's copper -- marched out of
             # the copper along the stub to where it stands)
@@ -735,7 +740,7 @@ class Group:
                         break
             Q0 = Point(q0)
             if not (self.U.contains(Q0) and self.E.distance(Q0) > GROUP_TOL):
-                out.append(('on', self.s(q0), None, 0.0, None, 0))
+                out.append(('on', self.s(q0), None, 0.0, None, 0, None))
             else:
                 if self._pk is None:
                     pocket = self.U.difference(self.parts_u)
@@ -743,7 +748,7 @@ class Group:
                         [g for g in getattr(pocket, 'geoms', []) if g.geom_type == 'Polygon']
                 pk = next((g for g in self._pk if g.distance(Q0) < 1e-6), None)
                 if pk is None:
-                    out.append(('on', self.s(q0), None, 0.0, None, 0))
+                    out.append(('on', self.s(q0), None, 0.0, None, 0, None))
                 else:
                     from shapely.ops import linemerge
                     edge = pk.boundary.intersection(self.E.buffer(1e-6))
@@ -776,10 +781,11 @@ class Group:
                         mp = m.interpolate(m.project(Q0))
                         leg = LineString([p, (mp.x, mp.y)])
                         passes = sum(1 for c in pads_ if c != own_pad and leg.distance(Point(c)) <= stub_ + 0.05)
-                        out.append(('mouth', s_ % self.L, (a, b), depth, pkey, passes))
+                        out.append(('mouth', s_ % self.L, (a, b), depth, pkey, passes, None))
                     q, crossed = self._straight(q0)
                     if crossed and under_ok(crossed) and self.E.distance(Point(q)) <= GROUP_TOL:
-                        out.append(('straight', self.s(q), None, math.hypot(q[0] - p[0], q[1] - p[1]), pkey, 0))
+                        out.append(('straight', self.s(q), None, math.hypot(q[0] - p[0], q[1] - p[1]), pkey, 0,
+                                    open_on(crossed)))
         out.sort(key=lambda o: (o[3] + 2.0 * GROUP_LEG_PASS * o[5], o[0]))
         self._opt[key] = out[:max(1, GROUP_OPTIONS)]
         return self._opt[key]

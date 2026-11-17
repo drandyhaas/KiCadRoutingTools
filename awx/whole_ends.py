@@ -1102,6 +1102,14 @@ class Ends:
             necks.add(next(iter(cu)) if len(cu) == 1 else None)
         neck = next(iter(necks)) if len(necks) == 1 else None
         ok = self.via_run_layers(moves, lg)
+        # (a group berth's way UNDER parts -- Group.options' 'under' and 'straight' -- runs to its via over their pads:
+        # on the layers open on every part it crosses alone. Free of them, a far row's lane was planned onto its part's
+        # pad layer, the via at its berth joined nothing and was dropped, and the frame read without it had no way
+        # under the part for that lane)
+        if k_ == 1 and len(opt) > 5 and len(opt[5]) > 6 and opt[5][6] is not None:
+            ok = frozenset(q for q in ok if self.RL[q] in opt[5][6])
+            if neck is not None and neck not in opt[5][6]:
+                neck = None
         return None, (self.RL.index(neck) if neck is not None else None), ok
 
     def via_run_layers(self, moves, lg):
