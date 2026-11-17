@@ -366,6 +366,9 @@ LIST_FLAGS = {
     '--layers': 'layers',
     # #1842: route.py's via span (nargs=2: the top and bottom layer)
     '--via-span': 'via_span',
+    # #1925: the nets whose new vias a route step back-drills (nargs='+'
+    # patterns); its three numbers are plain value flags
+    '--backdrill-nets': 'backdrill_nets',
     '--power-nets': 'power_nets',
     '--power-nets-widths': 'power_nets_widths',
     '--layer-costs': 'layer_costs',
@@ -864,7 +867,8 @@ def parse_command(argv, cwd=None):
     # LIST_FLAGS row's own comment says a converted plan used to drop it, and
     # it still did (26 kept bga_fanout steps on 18 corpus boards).
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers', '--via-span', '--polarity-swap-nets', '--coplanar-nets',
+              '--layers', '--via-span', '--backdrill-nets', '--polarity-swap-nets',
+              '--coplanar-nets',
               '--rip-existing-nets', '--plane-net-layers', '--keep-away',
               '--diff-pair-intra-lane'):
         if k in lists:

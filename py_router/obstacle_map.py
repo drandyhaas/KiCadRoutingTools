@@ -28,6 +28,7 @@ import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router')))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from geometry_utils import via_span_layer_indices
+from backdrill import hole_diameter as _bd_hole
 from area_clearance import composed as _area_composed
 
 try:
@@ -2713,7 +2714,8 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # what "reach your own through-holes" actually needs.
     for via in pcb_data.vias:
         if via.drill > 0:
-            drill_holes.append((via.x, via.y, via.drill))
+            # #1925: a back-drill is the hole where it is the wider one
+            drill_holes.append((via.x, via.y, _bd_hole(via)))
 
     # Add pad drills (through-hole AND NPTH mounting pads carry drills)
     for net_id, pads in pcb_data.pads_by_net.items():
@@ -3238,7 +3240,7 @@ def _via_h2h_cells(via, config: GridRouteConfig, coord: GridCoord):
     if h2h <= 0 or getattr(via, 'drill', 0) <= 0:
         return None
     gx, gy = coord.to_grid(via.x, via.y)
-    req = via.drill / 2.0 + config.via_drill / 2.0 + h2h
+    req = _bd_hole(via) / 2.0 + config.via_drill / 2.0 + h2h   # #1925
     de = coord.to_grid_dist_safe(req) + 1  # ceil + 1-cell bbox margin
     off = np.arange(-de, de + 1)
     dxg, dyg = np.meshgrid(off, off, indexing="ij")
@@ -3452,7 +3454,7 @@ def _per_net_rung_geometry(obstacles, config) -> List[Tuple[int, float, float]]:
     # via_rungs sorts every net_via_sizes entry; the raw adds ask once per net
     # per stamp, so keep the answer on the config, keyed by what it reads.
     _nvs = getattr(config, 'net_via_sizes', None) or {}
-    _key = (run, id(_nvs), len(_nvs))
+    _key = (run, id(_nvs), len(_nvs), id(getattr(config, 'backdrill', None)))
     _memo = config.__dict__.get('_rung_layout_memo')
     if _memo is not None and _memo[0] == _key:
         per = _memo[1]
@@ -4513,6 +4515,16 @@ def _via_track_expansion_per_layer(via_size: float, config: GridRouteConfig,
         for i, layer in enumerate(config.layers):
             reach = via_track_reach(config, via, layer, config.route_reserve_width(layer),
                                     extra_on_layer(extra_clearance, layer))
+            if reach is not None:
+                out[i] = max(out[i], coord.to_grid_dist_safe(reach))
+    if via is not None and getattr(via, 'backdrills', None):
+        # #1925: on a layer a back-drill removes, the hole is the back-drill's
+        from backdrill import track_reach
+        for i, layer in enumerate(config.layers):
+            reach = track_reach(config, via, layer,
+                                config.layer_clearance(layer, clearance, net_id),
+                                config.route_reserve_width(layer),
+                                extra_on_layer(extra_clearance, layer))
             if reach is not None:
                 out[i] = max(out[i], coord.to_grid_dist_safe(reach))
     return out

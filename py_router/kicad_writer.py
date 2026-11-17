@@ -455,6 +455,43 @@ def via_backdrill_sexpr(backdrills: dict = None) -> str:
     return out
 
 
+def set_via_backdrills_in_content(content: str, backdrills_by_uuid: dict):
+    """Make the `(via ...)` blocks named by uuid carry exactly the back-drills
+    given (#1925): `backdrills_by_uuid` is {via uuid: {token: Backdrill}}, an
+    empty dict meaning none. A block that already reads that way is left
+    byte for byte. Blocks come from the parser's paren-balanced `_via_blocks`
+    scan. Returns `(content, n_vias_rewritten)`."""
+    if not backdrills_by_uuid:
+        return content, 0
+    from kicad_parser import _via_blocks, backdrills_from_block
+    uuid_re = re.compile(r'\(uuid\s+"([^"]+)"\)')
+    drill_re = re.compile(r'\(drill\s+[^()]*\)')
+    edits = []
+    for start, blk in _via_blocks(content):
+        um = uuid_re.search(blk)
+        if not um or um.group(1) not in backdrills_by_uuid:
+            continue
+        want = {t: tuple(bd) for t, bd in (backdrills_by_uuid[um.group(1)] or {}).items()}
+        have, _why, bare = backdrills_from_block(blk)
+        if {t: tuple(bd) for t, bd in have.items()} == want:
+            continue
+        bare = re.sub(r'\n[ \t]*(?=\n)', '', bare)
+        dm = drill_re.search(bare)
+        if dm is None:
+            continue
+        edits.append((start, start + len(blk),
+                      bare[:dm.end()] + via_backdrill_sexpr(want) + bare[dm.end():]))
+    if not edits:
+        return content, 0
+    out, pos = [], 0
+    for a, b, text in sorted(edits):
+        out.append(content[pos:a])
+        out.append(text)
+        pos = b
+    out.append(content[pos:])
+    return ''.join(out), len(edits)
+
+
 def stamp_via_protection_in_content(content: str, stamps_by_uuid: dict):
     """Insert a protection spec into the `(via ...)` blocks named by uuid (#962).
 

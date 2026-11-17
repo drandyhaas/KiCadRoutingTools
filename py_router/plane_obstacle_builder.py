@@ -15,6 +15,7 @@ import numpy as np
 from kicad_parser import PCBData, Pad, Segment
 from area_clearance import composed_builder as _area_composed_builder
 from routing_config import GridRouteConfig, GridCoord
+from backdrill import hole_diameter as _bd_hole
 from routing_utils import iter_pad_blocked_cells, pad_blocked_cells_array, \
     segment_blocked_cells_array, segment_blocked_spans
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
@@ -1156,7 +1157,7 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     drill_holes = []
 
     for via in pcb_data.vias:
-        drill_holes.append((via.x, via.y, via.drill))
+        drill_holes.append((via.x, via.y, _bd_hole(via)))   # #1925: the wider hole
 
     # Hole-to-hole is a physical drill-to-drill minimum, independent of net, so
     # include the plane net's OWN through-hole pads too (exclude_net_id is NOT

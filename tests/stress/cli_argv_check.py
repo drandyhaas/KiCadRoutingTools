@@ -285,6 +285,23 @@ def _route_power_nets_count_mismatch(ns, cwd):
                 f"must have the same length")
 
 
+def _route_backdrill_numbers(ns, cwd):
+    # route.py: --backdrill-nets needs its three numbers, which have no
+    # default, and they must be usable (#1925)
+    if not getattr(ns, 'backdrill_nets', None):
+        return None
+    vals = (('--backdrill-oversize', ns.backdrill_oversize),
+            ('--backdrill-margin', ns.backdrill_margin),
+            ('--backdrill-min-stub', ns.backdrill_min_stub))
+    missing = [f for f, v in vals if v is None]
+    if missing:
+        return (f"--backdrill-nets needs {', '.join(missing)}: they are the "
+                f"fabricator's numbers and have no default")
+    if ns.backdrill_oversize <= 0 or ns.backdrill_margin < 0 or ns.backdrill_min_stub < 0:
+        return ("--backdrill-oversize must be above 0, and --backdrill-margin and "
+                "--backdrill-min-stub cannot be negative")
+
+
 def _repair_count_mismatch(ns, cwd):
     if ns.nets and ns.plane_layers and len(ns.nets) != len(ns.plane_layers):
         return "when both --nets and --plane-layers are given, counts must match"
@@ -320,7 +337,8 @@ def _cap_intent_unreadable(ns, cwd):
 POST_PARSE = {
     'route.py': (_fab_overrides_missing, _output_twice, _route_group_empty,
                  _keep_away, _route_force_reroute_unscoped, _route_group_sources,
-                 _route_power_nets_count_mismatch, _net_clearances_unreadable),
+                 _route_power_nets_count_mismatch, _net_clearances_unreadable,
+                 _route_backdrill_numbers),
     'route_diff.py': (_keep_away, _fab_overrides_missing, _output_twice,
                       _diff_force_reroute_unscoped, _net_clearances_unreadable),
     'route_planes.py': (_fab_overrides_missing, _output_twice,
@@ -363,6 +381,8 @@ REFUSAL_SITES = {
         '--force-reroute requires an explicit net':
             ('argv', '_route_force_reroute_unscoped'),
         '--power-nets (': ('argv', '_route_power_nets_count_mismatch'),
+        '--backdrill-nets needs ': ('argv', '_route_backdrill_numbers'),
+        '--backdrill-oversize must be above 0, an': ('argv', '_route_backdrill_numbers'),
         '--component matched no footprint on this':
             ('board', "the board's footprint references"),
         # parse_sources is the argument half; block_refs, in the same try,

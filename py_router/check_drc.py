@@ -740,7 +740,7 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
     if not via_on_layer(via, seg.layer):
         return False, 0.0
 
-    required_dist = via.size / 2 + copper_width(seg) / 2 + clearance
+    required_dist = via_size_on_layer(via, seg.layer) / 2 + copper_width(seg) / 2 + clearance
     actual_dist = point_to_segment_distance(via.x, via.y,
                                             seg.start_x, seg.start_y,
                                             seg.end_x, seg.end_y)
@@ -752,14 +752,41 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
     return False, _within_margin(overlap, tolerance)
 
 
-def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_margin: float = 0.05) -> Tuple[bool, float]:
+def via_size_on_layer(via, layer: str) -> float:
+    """The diameter KiCad grades a via's copper at on `layer` (#1925): the
+    via's own, or -- on a layer a back-drill removes -- the back-drill's.
+    Measured with kicad-cli 10.0.8: there the via is a disc of the
+    back-drill's diameter held to the pair's copper clearance, wider or
+    narrower than the pad it replaces."""
+    if getattr(via, 'backdrills', None):
+        from backdrill import size_on_layer
+        return size_on_layer(via, layer) or via.size
+    return via.size
+
+
+def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_margin: float = 0.05,
+                          copper_layers=None) -> Tuple[bool, float]:
     """Check if two vias overlap.
 
     Args:
         clearance_margin: Fraction of clearance to use as tolerance (default 0.05 = 5%).
+        copper_layers: the board's copper layers, for a back-drilled via
+            (#1925): the pair is graded on each layer both are on, at the
+            diameters they have there. Without it a back-drilled via is
+            graded at its widest diameter.
     """
     # All vias are through-hole, so they always potentially conflict
     required_dist = via1.size / 2 + via2.size / 2 + clearance
+    if getattr(via1, 'backdrills', None) or getattr(via2, 'backdrills', None):
+        from backdrill import hole_diameter
+        common = [l for l in (copper_layers or ())
+                  if via_on_layer(via1, l) and via_on_layer(via2, l)]
+        if common:
+            required_dist = max(via_size_on_layer(via1, l) / 2 + via_size_on_layer(via2, l) / 2
+                                for l in common) + clearance
+        else:
+            required_dist = (max(via1.size, hole_diameter(via1)) / 2
+                             + max(via2.size, hole_diameter(via2)) / 2 + clearance)
     actual_dist = math.sqrt((via1.x - via2.x)**2 + (via1.y - via2.y)**2)
     overlap = required_dist - actual_dist
 
@@ -2770,7 +2797,9 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
 
     # Required clearance: via half-size + clearance
     # (dist_to_pad is already edge-to-edge from pad)
-    required_dist = via.size / 2 + clearance
+    required_dist = max([via_size_on_layer(via, layer) for layer in expanded_layers
+                         if layer.endswith('.Cu') and via_on_layer(via, layer)]
+                        or [via.size]) / 2 + clearance
     overlap = required_dist - dist_to_pad
 
     tolerance = _grade_tol(clearance, clearance_margin)
@@ -8516,7 +8545,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 _eff, _cyr = _cy_pair(_eff, via1, via2, _cy_layers(
                     via_copper_layers(via1, _board_copper),
                     via_copper_layers(via2, _board_copper)))
-            has_violation, overlap = check_via_via_overlap(via1, via2, _eff, clearance_margin)
+            has_violation, overlap = check_via_via_overlap(via1, via2, _eff, clearance_margin,
+                                                           copper_layers=_board_copper)
             if not has_violation and overlap > 0.0 and net1 != net2:   # #1803
                 _note_within_margin(pcb_data, net1, net2, overlap)
             if has_violation:
