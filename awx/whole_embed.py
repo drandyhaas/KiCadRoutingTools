@@ -83,6 +83,7 @@ from scipy.optimize import linprog
 from scipy.sparse import coo_matrix
 from scipy.spatial import cKDTree
 import whole_ctx
+import constrained_triangles as _cdt     # (py_router, on the path whole_ctx sets: shapely's, or GEOS's own)
 import whole_frame
 import whole_passages
 import route_layers
@@ -330,7 +331,7 @@ class Mesh:
 
     def __init__(self, free):
         key, V, T = {}, [], []
-        for t in shapely.constrained_delaunay_triangles(free).geoms:
+        for t in _cdt.constrained_delaunay_triangles(free).geoms:
             ids = []
             for (x, y) in list(t.exterior.coords)[:3]:
                 k = (round(x, 6), round(y, 6))

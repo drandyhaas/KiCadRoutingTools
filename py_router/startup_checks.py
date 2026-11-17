@@ -99,13 +99,6 @@ ROUTING_PACKAGES = ("numpy", "scipy", "shapely")
 # reason Pillow has one: routing never imports it.
 BUS_PACKAGES = ("ortools",)
 
-# ...and the floors the bus step holds a routing package to above routing's own:
-# its 2-D embedding (awx/whole_embed.py) triangulates the free space with
-# shapely.constrained_delaunay_triangles, from shapely 2.1 -- which needs Python
-# 3.10 or newer. Under 2.0 every lane's embedding failed and the step laid
-# nothing, with no word of why.
-BUS_FLOORS = {"shapely": "2.1"}
-
 # Last-resort floors for an install that shipped without requirements.txt.
 # requirements.txt is the source of truth (`requirement_floors` reads it and
 # these only fill gaps); `tests/test_dependency_version_floor.py` asserts this
@@ -526,32 +519,33 @@ def check_bus_dependencies():
     """
     problems = bus_dependency_problems(load=True)
     if problems:
-        text = format_problems(
+        raise StartupCheckError(format_problems(
             problems,
             "ERROR: the bus step (awx/route_bus.py) needs Python libraries "
-            "that are missing or too old:")
-        note = bus_python_note(problems)
-        raise StartupCheckError(text + (f"\n\n{note}" if note else ''))
+            "that are missing or too old:"))
+    tri = bus_triangulation_problem()
+    if tri:
+        raise StartupCheckError("ERROR: the bus step (awx/route_bus.py) cannot "
+                                f"triangulate the free space under this Python: {tri}")
     check_rust_library()
 
 
-def bus_python_note(problems):
-    """'' -- or, where a BUS_FLOORS package is among `problems` and this Python
-    is older than that floor's release needs, why no install here mends it."""
-    if any(p.name in BUS_FLOORS for p in problems) and sys.version_info < (3, 10):
-        return (f"shapely {BUS_FLOORS['shapely']} needs Python 3.10 or newer, and this is "
-                f"Python {sys.version_info[0]}.{sys.version_info[1]}: run the bus step "
-                f"under a newer Python")
-    return ''
-
-
 def bus_dependency_problems(load=True):
-    """[Problem] for what the bus step needs: BUS_PACKAGES at requirements.txt's
-    floors, and the routing packages BUS_FLOORS holds higher (only FOUND, so the
-    caller's load setting decides only BUS_PACKAGES)."""
-    problems = dependency_problems(BUS_PACKAGES, load=load)
-    floors = dict(requirement_floors(), **BUS_FLOORS)
-    return problems + dependency_problems(tuple(BUS_FLOORS), floors=floors, load=False)
+    """[Problem] for the packages the bus step needs beyond routing's."""
+    return dependency_problems(BUS_PACKAGES, load=load)
+
+
+def bus_triangulation_problem():
+    """None, or why the bus step's 2-D embedding (awx/whole_embed.py) cannot
+    cut the free space into constrained Delaunay triangles here: shapely 2.1's
+    function, or GEOS's own (3.10+) under shapely 2.0 -- constrained_triangles.
+    Under a shapely with neither, every lane's embedding failed and the step
+    laid nothing, with no word of why."""
+    try:
+        import constrained_triangles
+        return constrained_triangles.unavailable()
+    except Exception as exc:                                    # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"
 
 
 def _raise_if_missing(missing, exc=StartupCheckError):

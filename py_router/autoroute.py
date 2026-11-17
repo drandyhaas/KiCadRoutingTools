@@ -446,19 +446,18 @@ def plane_layers(n):
 
 
 def bus_missing():
-    """What the bus step needs and this Python lacks (ortools, shapely 2.1), in one line
+    """What the bus step needs and this Python lacks (ortools; constrained triangles), in one line
     with how to install it, or None. The bus step's own gate
     (startup_checks.check_bus_dependencies) loads the library; this only finds
     it, so autoroute itself never imports it."""
-    from startup_checks import bus_dependency_problems, bus_python_note, quoted_requirements
+    from startup_checks import bus_dependency_problems, bus_triangulation_problem, quoted_requirements
     problems = bus_dependency_problems(load=False)
-    if not problems:
-        return None
-    note = bus_python_note(problems)
-    return ('the bus step needs ' + '; '.join(p.describe().strip() for p in problems)
-            + (f'; {note}' if note else
-               f'; install with: "{sys.executable or "python3"}" -m pip install --upgrade '
-               + quoted_requirements(problems)))
+    if problems:
+        return ('the bus step needs ' + '; '.join(p.describe().strip() for p in problems)
+                + f'; install with: "{sys.executable or "python3"}" -m pip install --upgrade '
+                + quoted_requirements(problems))
+    tri = bus_triangulation_problem()
+    return f'the bus step cannot triangulate the free space here: {tri}' if tri else None
 
 
 def _awx():
