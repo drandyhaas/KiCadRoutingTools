@@ -210,8 +210,8 @@ All of these are also available inside KiCad without leaving the plugin - see [A
 **Option C: Command Line -- route a whole board with `autoroute.py`**
 
 ```bash
-# Route the whole board: planes, fanouts, decap clearance, diff pairs and route
-# passes, chosen from the board's own rules, footprints and nets
+# Route the whole board: planes, buses (experimental), fanouts, decap clearance,
+# diff pairs and route passes, chosen from the board's own rules, footprints and nets
 python3 py_router/autoroute.py my_board.kicad_pcb routed.kicad_pcb
 
 # See its plan first, without running anything
@@ -227,7 +227,7 @@ plugin's **Auto › Autorouter** tab runs the same script on the open board.
 **Option D: A hand-built chain (the manual / expert path)**
 
 When a board needs steps `autoroute.py` does not take -- impedance control, length
-matching, keep-away rules, buses, a particular plane map, or a net class that is a
+matching, keep-away rules, round edits to a bus, a particular plane map, or a net class that is a
 real requirement rather than aspirational -- run the tools yourself, the kind of chain
 `/plan-pcb-routing` plans:
 
@@ -460,7 +460,7 @@ All `--nets` options support fnmatch-style wildcards and exclusion patterns:
 
 `autoroute.py` routes a whole board with no agent (the other way is the
 `/plan-pcb-routing` skill): it reads the board's rules, footprints and nets, plans the
-chain (planes, fanouts, decap clearance, diff pairs, route passes) and runs it, each
+chain (planes, buses, fanouts, decap clearance, diff pairs, route passes) and runs it, each
 step as its own process. The commands below are the tools it runs, for a hand-built
 chain.
 

@@ -21,6 +21,17 @@ congestion before the router starts:
                    rail, then GND again; GND on B.Cu on 2-layer boards;
                    poured first, and signals kept off the inner planes
                    until the route step's later passes
+  2a. buses        EXPERIMENTAL, on a board with a ball array: the buses
+                   awx/route_bus.py finds at the chain's sizes (bus_plan, what
+                   its --find prints) routed whole in one call on the poured
+                   board, as the plan skill's bus step -- lane order, layers,
+                   vias and both ends' fanout planned together, every ball of
+                   each bus's arrays served, the lanes handed on protected
+                   and locked. Kept when it laid copper on an array it serves
+                   and its board ranks no lower than the board before it;
+                   else the chain goes on from that board. Needs ortools: without
+                   it the plan says so, with how to install it, and the chain
+                   runs without the step
   3. fanout        every grid array with interior depth or fine pitch
                    (bga_fanout) and every fine-pitch four-sided perimeter
                    package (qfn_fanout), and every dense mezzanine (a
@@ -30,18 +41,21 @@ congestion before the router starts:
                    plane nets excluded; a part that drops escapes or leaves
                    grazes is retried with the fine via (BGA), then with the
                    dogbone (BGA) or under-pad (QFN) method, keeping the attempt
-                   that escaped most, then grazed least
+                   that escaped most, then grazed least; an array the kept bus
+                   step laid copper on is not fanned out again, and every
+                   fanout leaves out the nets it handed on protected
   4. decaps        place_fanout_clearance once, after the fanouts; a part it
                    leaves shorted to a BGA's fanout copper is held in a re-fan
                    of that BGA (bga_fanout --immovable-refs, the BGA's whole
                    ladder, every later fanout replayed at its accepted rung),
                    then place_fanout_clearance again, keeping the board with
                    fewer shorts, then fewer dropped escapes
-  5. diff pairs    name-detected pairs routed first with route_diff; a pair
-                   net it leaves in a DRC violation is ripped and routed
-                   again single-ended, named exactly where that selects it
-                   alone (route_diff records its pairs protected, #521, and
-                   only an exact name lifts that)
+  5. diff pairs    name-detected pairs routed first with route_diff, but for
+                   a pair the bus step handed on routed; a pair net it leaves
+                   in a DRC violation is ripped and routed again
+                   single-ended, named exactly where that selects it alone
+                   (route_diff records its pairs protected, #521, and only an
+                   exact name lifts that)
   6. route         route.py over every net with the poured nets and rails as
                    power nets, a first pass that keeps signals off the planes,
                    a finer grid around fine-pitch parts, deeper rip-up on
@@ -76,7 +90,12 @@ each, which the plugin's Autorouter tab reads (and a script may):
   AUTOROUTE_ANALYSIS: {...}  what analyze() read off the board
   AUTOROUTE_PLAN: {...}      the steps it means to run, in order, each with
                              what it does and why; a row marked optional runs
-                             only if the passes before it leave nets open
+                             only if what comes before it calls for it (a
+                             route pass while nets are open, an array's
+                             fanout when the bus step lays no copper on it);
+                             on a board with a ball array, `bus`: the buses
+                             found and the pairs not taken, each with why,
+                             the arrays the step serves and its via
   AUTOROUTE_STEP: {...}      a step starting (state "running") and ending
                              (state "done" or "failed"), one of each per step
                              run, or a planned step that never ran (state
@@ -95,6 +114,7 @@ from __future__ import annotations
 KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import math
@@ -112,6 +132,7 @@ sys.path.insert(0, HERE)
 
 TOOLS = {
     'planes': os.path.join(HERE, 'route_planes.py'),
+    'bus': os.path.join(REPO, 'awx', 'route_bus.py'),
     'bga': os.path.join(HERE, 'bga_fanout.py'),
     'qfn': os.path.join(HERE, 'qfn_fanout.py'),
     'decap': os.path.join(REPO, 'py_placer', 'place_fanout_clearance.py'),
@@ -126,6 +147,8 @@ PLANE_LAYER_COST = -1.0      # inner planes stay solid; a positive price lets si
 PLANE_FALLBACK_COST = 3.0    # a later pass's price on a solid plane, the route step's in the plan skill
 ROUTE_PASSES = 3             # the first pass plus up to two on its result
 EFFORT_FACTOR = 2.0          # --effort-factor's default
+FINE_VIA_PITCH = 0.65        # an array at or under this pitch escapes on the fine via first
+BUS_ROUNDS = 2               # route_bus --rounds, as the plan skill's bus step
 
 
 def _num(x):
@@ -422,6 +445,79 @@ def plane_layers(n):
     return list(range(1, n - 1))
 
 
+def bus_missing():
+    """What the bus step needs and this Python lacks (ortools), in one line
+    with how to install it, or None. The bus step's own gate
+    (startup_checks.check_bus_dependencies) loads the library; this only finds
+    it, so autoroute itself never imports it."""
+    from startup_checks import BUS_PACKAGES, dependency_problems, quoted_requirements
+    problems = dependency_problems(BUS_PACKAGES, load=False)
+    if not problems:
+        return None
+    return ('the bus step needs ' + '; '.join(p.describe().strip() for p in problems)
+            + f'; install with: "{sys.executable or "python3"}" -m pip install --upgrade '
+            + quoted_requirements(problems))
+
+
+def _awx():
+    """route_bus, imported from the awx tree on first use."""
+    path = os.path.join(REPO, 'awx')
+    if path not in sys.path:
+        sys.path.append(path)
+    import route_bus
+    return route_bus
+
+
+def bus_census(board, pcb, census, clearance, track, via, drill, fine_via, fine_drill):
+    """The buses the bus step (awx/route_bus.py) finds on PCB at the chain's
+    sizes, or None when the board has no ball array (route_bus.is_array):
+    {buses: [{src, dest, nets, why}], not_taken: [{src, dest, nets, why}],
+    arrays: the ball arrays the step serves (each bus's source and its
+    ball-array destinations: every ball of them leaves the step escaped,
+    dropped to its plane or strapped), via/drill: the via it routes at (the
+    fine via when one of those arrays is at FINE_VIA_PITCH or finer, as the
+    fanout's first rung takes it), missing: why it cannot run here (ortools
+    absent, with how to install it), error: why the buses could not be found}.
+    Read-only, in this process: route_bus.bus_plan, as `route_bus.py --find`
+    prints it."""
+    try:
+        rb = _awx()
+        arrays = [ref for ref, fp in pcb.footprints.items() if rb.is_array(fp)]
+        if not arrays:
+            return None
+        with contextlib.redirect_stdout(sys.stderr):
+            rules = rb.resolve_rules(board, log=lambda *a, **k: None,
+                                     clearance_ceiling=clearance, track_width=track,
+                                     fanout_track_width=track, via_size=via, via_drill=drill)
+            plan = rb.bus_plan(pcb, rules)
+    except Exception as e:                                  # noqa: BLE001
+        why = f'the buses could not be found: {type(e).__name__}: {e}'
+        print(f"AUTOROUTE: {why}; the chain runs without the bus step", flush=True)
+        return {'buses': [], 'not_taken': [], 'arrays': [], 'via': via, 'drill': drill,
+                'missing': None, 'error': why}
+    served = []
+    for b in plan['buses']:
+        for ref in [b['src']] + b['dest'].split('+'):
+            if ref in pcb.footprints and ref not in served and rb.is_array(pcb.footprints[ref]):
+                served.append(ref)
+
+    def pitch(ref):
+        p = census.get(ref, (None, None))[1]
+        if p is None:
+            shape = pad_shape(pcb.footprints[ref])
+            p = shape[1] if shape and shape[0] == 'grid' else None
+        return p
+    fine = any((pitch(r) or 1e9) <= FINE_VIA_PITCH for r in served)
+    v, d = (fine_via, fine_drill) if fine else (via, drill)
+    missing = bus_missing() if plan['buses'] else None
+    if missing:
+        print("AUTOROUTE: the board has buses, but the chain runs without the bus "
+              "step: " + missing, flush=True)
+    return {'buses': [dict(b) for b in plan['buses']],
+            'not_taken': [dict(b) for b in plan['left']],
+            'arrays': served, 'via': v, 'drill': d, 'missing': missing, 'error': None}
+
+
 def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
     from kicad_parser import parse_kicad_pcb, pour_zones
     from list_nets import (read_design_rules, effective_floors,
@@ -524,6 +620,15 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
     pairs = [n for i in range(0, len(pairs) - 1, 2) for n in pairs[i:i + 2]
              if pairs[i] in globs and pairs[i + 1] in globs]
 
+    # The buses, on a board with a ball array: the bus step routes them whole
+    # on the poured board, before the fanouts (not on a board --finish takes).
+    extra = {}
+    if not finish:
+        bus = bus_census(board, pcb, census, clearance, track, via, drill,
+                         fine_via, fine_drill)
+        if bus is not None:
+            extra['bus'] = bus
+
     return dict(layers=layers, clearance=clearance, track=track, via=via,
                 drill=drill, fine_via=fine_via, fine_drill=fine_drill, planes=planes,
                 plane_nets=plane_nets, power_nets=power_nets,
@@ -537,7 +642,7 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
                               else None),
                 fanout_why=fanout_why, not_fanned=not_fanned,
                 grounds=[n for n, _ in gnd], rails=[n for n, _ in rails],
-                unselectable=unnamed)
+                unselectable=unnamed, **extra)
 
 
 # --------------------------------------------------------------------------
@@ -606,6 +711,25 @@ def _tail(text, n=ERROR_TAIL_LINES):
     return lines[-n:]
 
 
+def bus_summary_path(out):
+    """The summary route_bus writes for its OUT: <OUT stem>.bus/summary.json."""
+    return out[:-len('.kicad_pcb')] + '.bus/summary.json'
+
+
+def bus_grade_fields(line):
+    """{lanes, vias, copper, connected, drc, walled} from a bus's BUS grade line
+    (`BUS U1->U2 ... lanes=34/34 ... | on the board: vias=.. copper=..mm
+    connected=1 drc=0 ... walled=0 ...`): the lanes laid, and the rest as
+    graded on the board the step handed on."""
+    if not line:
+        return {}
+    head, _, board = line.partition('| on the board:')
+    got = dict(re.findall(r'(\w+)=(\S+)', head))
+    got.update(re.findall(r'(\w+)=(\S+)', board))
+    return {k: got[k] for k in ('lanes', 'vias', 'copper', 'connected', 'drc', 'walled')
+            if k in got}
+
+
 def step_summary(kind, text, summary, summary_min):
     """(summary dict, one-line result) for a finished step of tool KIND, from
     its log TEXT and the JSON_SUMMARY / JSON_SUMMARY_MIN it printed: the
@@ -620,6 +744,20 @@ def step_summary(kind, text, summary, summary_min):
             return d, 'no fanout summary printed'
         return d, (f"escaped {d.get('escaped', 0)}/{d.get('requested', 0)}, "
                    f"{d.get('failed', 0)} dropped, {d['grazes']} graze(s)")
+    if kind == 'bus':
+        buses = [dict(bus=f"{b.get('src')}->{b.get('dest')}", exit=b.get('exit'),
+                      **bus_grade_fields(b.get('grade')))
+                 for b in s.get('buses') or ()]
+        d = {'exit': s.get('exit'), 'buses': buses}
+        if not s:
+            return d, 'no bus summary written'
+        if not buses:
+            return d, 'no bus routed: the board handed on as it came'
+        walled = sum(int(b.get('walled') or 0) for b in buses)
+        return d, (f"{sum(b['exit'] == 0 for b in buses)}/{len(buses)} bus(es) handed on "
+                   f"routed, " + ', '.join(f"{b['bus']} lanes {b.get('lanes', '?')}"
+                                           for b in buses)
+                   + (f", {walled} ball(s) walled in" if walled else ''))
     if kind == 'planes':
         zones = [f"{z.get('net')} on {z.get('layer')}" for z in s.get('plane_zones') or ()]
         d = {'zones': zones, 'status': s.get('status')}
@@ -826,6 +964,13 @@ class Chain(ChainEvents):
                 summary_min = json.loads(m.group(1))
             except ValueError:
                 pass
+        if kind == 'bus':
+            # route_bus prints no JSON_SUMMARY: its summary is a file by OUT
+            try:
+                with open(bus_summary_path(out), encoding='utf-8') as fh:
+                    summary = json.load(fh)
+            except (OSError, ValueError):
+                summary = None
         ok = rc == 0 and os.path.exists(out)
         compact, result = step_summary(kind, text, summary, summary_min)
         if not ok:
@@ -879,12 +1024,28 @@ def plan_steps(a, finish=False, effort_factor=2.0):
                 'a GND pour on the bottom of a 2-layer board' if len(a['layers']) == 2
                 else 'the fewest inner planes that put one next to every signal '
                      'layer; GND, then the dominant rail')
+        bus = a.get('bus') or {}
+        if bus.get('buses'):
+            row('bus', 'bus',
+                f"route {len(bus['buses'])} bus(es) whole with route_bus: "
+                + ', '.join(f"{b['src']} -> {b['dest']} ({b['nets']} nets)"
+                            for b in bus['buses']),
+                'EXPERIMENTAL (the awx research tree): each bus planned and laid '
+                'whole -- lane order, layers, vias and both ends\' fanout -- on the '
+                'poured board, and handed on protected; every ball of '
+                + ', '.join(bus['arrays']) + ' leaves it served, so their fanouts run '
+                'only if it hands no bus on'
+                + (f"; NOT RUN: {bus['missing']}" if bus.get('missing') else ''))
+        by_bus = set(bus.get('arrays') or ()) if bus.get('buses') and not bus.get('missing') \
+            else set()
         for ref, tool, pitch in a['parts']:
             row(f'fanout_{ref}', 'bga' if tool == 'bga' else 'qfn',
                 f"fan out {ref} with {'bga_fanout' if tool == 'bga' else 'qfn_fanout'}"
                 + (' under the pads' if tool == 'mezz' else ''),
                 a.get('fanout_why', {}).get(ref, '') + '; a rung that drops escapes '
-                'or grazes is retried with the next')
+                'or grazes is retried with the next'
+                + ('; only if the bus step, which serves it, lays no copper on it'
+                   if ref in by_bus else ''), optional=ref in by_bus)
         if a['parts']:
             row('decap', 'decap', 'move decoupling caps off the fanout copper '
                 '(place_fanout_clearance)',
@@ -895,7 +1056,9 @@ def plan_steps(a, finish=False, effort_factor=2.0):
             row('diffpairs', 'diff',
                 f"route {len(a['pair_nets']) // 2} differential pair(s) with route_diff",
                 'pairs found by name, routed before the single nets; a pair net '
-                'left in a DRC violation is routed again single-ended')
+                'left in a DRC violation is routed again single-ended'
+                + ('; a pair the bus step hands on routed is left as it is'
+                   if by_bus else ''))
     row('route', 'route', 'route every net' + (' still open' if finish else ''),
         f"grid {a['grid']:g} mm"
         + (', power nets ' + ', '.join(a['power_nets'][:6])
@@ -911,7 +1074,8 @@ def plan_steps(a, finish=False, effort_factor=2.0):
             f"pass's; may cross the planes at {PLANE_FALLBACK_COST:g}", optional=True)
     rules = {k: a[k] for k in ('clearance', 'track', 'via', 'drill', 'fine_via',
                                'fine_drill', 'grid')}
-    return {'mode': 'finish' if finish else 'full', 'rules': rules,
+    extra = {'bus': a['bus']} if 'bus' in a else {}
+    return {'mode': 'finish' if finish else 'full', 'rules': rules, **extra,
             'rules_source': a.get('rules_source'),
             'rules_why': ('the fab floor for every step: a net class above it is '
                           'aspirational, so the route steps cap every class at it; '
@@ -924,6 +1088,105 @@ def plan_steps(a, finish=False, effort_factor=2.0):
             'unselectable': a.get('unselectable', []),
             'congested': a['congested'], 'n_nets': a['n_nets'],
             'effort_factor': effort_factor, 'steps': rows}
+
+
+def bus_handoff(before, after, arrays):
+    """What the bus step handed on, read off the boards BEFORE and AFTER it:
+    {'served': the ARRAYS with copper the step laid (a track end or a via, on
+    the pad's own net) on a pad of them -- an array it fanned out, which no
+    later fanout may fan again --, 'nets': the nets AFTER's records hold
+    protected and BEFORE's do not (the lanes handed on, and the poured nets
+    the step laid copper of), 'names': every net name of AFTER}."""
+    from kicad_parser import parse_kicad_pcb
+    from protected_nets import read_protected_nets, pro_path_for_board
+    with contextlib.redirect_stdout(sys.stderr):
+        pa, pb = parse_kicad_pcb(before), parse_kicad_pcb(after)
+
+    def name(p, i):
+        return p.nets[i].name if i in p.nets else ''
+
+    def seg(p, s):
+        return (name(p, s.net_id), s.layer, round(s.start_x, 3), round(s.start_y, 3),
+                round(s.end_x, 3), round(s.end_y, 3))
+
+    def via(p, v):
+        return (name(p, v.net_id), round(v.x, 3), round(v.y, 3))
+    copper = lambda p: [s for s in p.segments if not getattr(s, 'graphic', False)]  # noqa: E731
+    had = {seg(pa, s) for s in copper(pa)} | {via(pa, v) for v in pa.vias}
+    laid = {}                           # net name -> [(x, y)] of new track ends and vias
+    for s in copper(pb):
+        if seg(pb, s) not in had:
+            laid.setdefault(name(pb, s.net_id), []).extend(
+                [(s.start_x, s.start_y), (s.end_x, s.end_y)])
+    for v in pb.vias:
+        if via(pb, v) not in had:
+            laid.setdefault(name(pb, v.net_id), []).append((v.x, v.y))
+
+    def on(p):
+        return any(abs(x - p.global_x) <= p.size_x / 2 + 1e-3
+                   and abs(y - p.global_y) <= p.size_y / 2 + 1e-3
+                   for x, y in laid.get(p.net_name, ()) if p.net_name)
+    served = [ref for ref in arrays if ref in pb.footprints
+              and any(on(p) for p in pb.footprints[ref].pads)]
+    nets = sorted(set(read_protected_nets(pro_path_for_board(after)))
+                  - set(read_protected_nets(pro_path_for_board(before))))
+    return {'served': served, 'nets': nets,
+            'names': sorted({n.name for n in pb.nets.values() if n.name})}
+
+
+def bus_step(ch, a):
+    """1a. The buses (analyze's `bus`), routed whole by route_bus on the poured
+    board at the chain's sizes, as the plan skill's bus step: one call, every
+    bus it finds, --rounds BUS_ROUNDS. Kept when it laid copper on an array
+    it serves and its board ranks no lower than the board before it (fewer
+    open nets, then fewer violations); else, like a failed step, the chain
+    continues from the board before it and the arrays are fanned out as
+    usual. Returns bus_handoff's record for a kept step, else None."""
+    bus = a.get('bus') or {}
+    if not bus.get('buses'):
+        return None
+    if bus.get('missing'):
+        ch.skip('bus', bus['missing'])
+        ch.decide('bus', False, f"not run: {bus['missing']}; the arrays are fanned out "
+                                f"as usual")
+        return None
+    before = ch.cur
+    out, _, _ = ch.run('bus', [
+        '{IN}', '{OUT}', '--rounds', str(BUS_ROUNDS), '--inproc',
+        '--clearance-ceiling', str(a['clearance']),
+        '--track-width', str(a['track']), '--fanout-track-width', str(a['track']),
+        '--via-size', str(bus['via']), '--via-drill', str(bus['drill'])], 'bus', hold=True)
+    after_it = '; the chain continues from the board before it and fans the arrays out as usual'
+    if not out:
+        ch.decide('bus', False, 'the bus step failed' + after_it)
+        return None
+    base = (ch.held or {}).get('result') or ''
+    h = bus_handoff(before, out, bus['arrays'])
+    if not h['served']:
+        ch.end_step(result=base + '; laid no copper on its arrays: not kept', kept=False)
+        ch.decide('bus', False, f"it laid no copper on {', '.join(bus['arrays'])}: "
+                                f"every bus came through as it came" + after_it)
+        return None
+    g0, g1 = ch.grade(before), ch.grade(out)
+    if g1 is None or (g0 is not None and _improves(g0, g1)):
+        said = 'a checker could not grade it' if g1 is None else (
+            f"{g1['open']} open, {g1['drc']} DRC ranks below the board before it "
+            f"({g0['open']} open, {g0['drc']} DRC)")
+        ch.end_step(result=f"{base}; {said}: not kept", grade=g1, kept=False)
+        ch.decide('bus', False, said + after_it)
+        return None
+    ch.accept(out)
+    ch.end_step(result=f"{base}; {g1['open']} open, {g1['drc']} DRC: kept", grade=g1,
+                kept=True)
+    left = [r for r in bus['arrays'] if r not in h['served']]
+    ch.decide('bus', True,
+              f"kept: it served {', '.join(h['served'])}, whose fanouts are skipped"
+              + (f"; {', '.join(left)}, with no copper of it, fanned out as usual"
+                 if left else '')
+              + f"; {len(h['nets'])} net(s) handed on protected, left out of the "
+                f"fanouts and the pair step", served=h['served'], protected=h['nets'],
+              board=out)
+    return h
 
 
 def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
@@ -941,12 +1204,25 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
             '--clearance', str(a['clearance'])], 'planes')
         ch.accept(out)
 
-    # 3. fanout, each part, with a retry ladder keeping the best escape
+    # 2a. the buses, whole, before any other fanout
+    h = bus_step(ch, a)
+    served = h['served'] if h else []
+
+    # 3. fanout, each part the bus step did not serve, with a retry ladder
+    # keeping the best escape; the nets it handed on protected left out
     excl = [f"!{a['globs'][n]}" for n in a['plane_nets'] if n in a['globs']]
+    for n in (h['nets'] if h else ()):
+        g = _glob(n)
+        # a net no pattern isolates is excluded with the nets it also selects
+        excl.append(f'!{g}' if _selects_exactly(g, n, h['names']) else f'!{n}')
+    excl = list(dict.fromkeys(excl))
     fanned = False
     fans = []
     for ref, tool, pitch in a['parts']:
-        fine = pitch <= 0.65
+        if ref in served:
+            ch.skip(f'fanout_{ref}', 'the bus step served every ball of it')
+            continue
+        fine = pitch <= FINE_VIA_PITCH
         v, d = (a['fine_via'], a['fine_drill']) if fine else (a['via'], a['drill'])
         tw = str(a['track'])
         if tool == 'bga':
@@ -1010,15 +1286,22 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
         if out:
             refan(ch, fans, decap)
     elif a['parts']:
-        ch.skip('decap', 'no fanout escaped a ball, so there is no fanout copper '
-                         'to clear the caps off')
+        ch.skip('decap', 'no fanout after the bus step escaped a ball, and the bus '
+                         'step cleared the caps beneath the arrays it fanned out itself'
+                if served else 'no fanout escaped a ball, so there is no fanout '
+                               'copper to clear the caps off')
 
-    # 5. diff pairs first
+    # 5. diff pairs first, but for a pair the bus step handed on routed
     rip, reroute = [], []
-    if a['pair_nets']:
+    bus_nets = set(h['nets']) if h else set()
+    pairs = [n for i in range(0, len(a['pair_nets']) - 1, 2) for n in a['pair_nets'][i:i + 2]
+             if not {a['pair_nets'][i], a['pair_nets'][i + 1]} & bus_nets]
+    if a['pair_nets'] and not pairs:
+        ch.skip('diffpairs', 'the bus step handed on every pair routed')
+    if pairs:
         before = ch.drc_nets(ch.cur)
         out, s, _ = ch.run('diff', [
-            '{IN}', '{OUT}', '--nets', *[a['globs'][n] for n in a['pair_nets']],
+            '{IN}', '{OUT}', '--nets', *[a['globs'][n] for n in pairs],
             '--track-width', str(max(0.1, a['track'])),
             '--diff-pair-gap', str(max(0.1, a['clearance'])),
             '--clearance-ceiling', str(a['clearance']),
@@ -1034,9 +1317,12 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
             # A pair net the step left in a DRC violation is laid again, single-ended.
             after = ch.drc_nets(out)
             if None not in (before, after):
-                reroute = sorted((after - before) & set(a['pair_nets']))
+                reroute = sorted((after - before) & set(pairs))
+            taken = (len(a['pair_nets']) - len(pairs)) // 2
             ch.decide('diffpairs', True,
                       '; '.join(x for x in (
+                          f"{taken} pair(s) the bus step handed on routed left as "
+                          f"they are" if taken else '',
                           f"{len(rip)} uncoupled pair net(s) the route step may rip"
                           if rip else '',
                           f"{len(reroute)} pair net(s) left in a DRC violation, "

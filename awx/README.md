@@ -261,7 +261,9 @@ FANOUT_NETS="$NETS" FEEDBACK=FEEDBACK.json INCREMENTAL=tmp/e/fo.plan.json \
 
 ### The bus step on a real board
 
-`route_bus.py` is the step the production chain will call. It takes a board
+`route_bus.py` is the bus step of the production chains: the
+`/plan-pcb-routing` skill's Step 1a, and `py_router/autoroute.py`'s step 2a,
+which runs it as the skill does. It takes a board
 as the chain hands it on, finds its buses, and writes the board back with
 them laid, in the board's own frame:
 

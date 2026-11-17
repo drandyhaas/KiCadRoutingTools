@@ -2712,6 +2712,24 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
    boards, where the pour is an outer layer the signals share. Rails are the nets
    `list_nets.find_power_nets` names, and nets carrying power pins
    (`power_in`/`power_out`) of two or more parts that are not a diff pair.
+2a. **Buses (experimental)**: on a board with a ball array
+   (`route_bus.is_array`), the buses the bus step finds at the chain's sizes
+   (`route_bus.bus_plan`, what `awx/route_bus.py --find` prints: a ball array
+   to another ball array sharing 8 nets or more, or to a row part no track
+   passes between the pads of) are routed whole by `awx/route_bus.py` in one
+   call on the poured board, before any other fanout, as the
+   `/plan-pcb-routing` skill's bus step does: `--rounds 2 --inproc`, the
+   chain's clearance ceiling and track for the lanes and the escapes, and the
+   fine via when one of the bus's arrays is at 0.65 mm or finer (the via the
+   fanout's first rung would take), else the working via. The step plans each
+   bus's lane order, layers, vias and both ends' fanout together, serves every
+   ball of its arrays, and hands the lanes on protected (#521) and locked. It
+   is kept when it laid copper on an array it serves and its board ranks no
+   lower than the board before it (open nets, then violations); otherwise,
+   as for a failed step, the chain goes on from the board before it and the
+   arrays are fanned out as usual. It needs `ortools`: without it the plan's
+   bus row says so, with the `pip install` line, and the chain runs without
+   the step. A board where it finds no bus plans no bus step.
 3. **Fanout**: the part's shape is read from its copper pads, in its own
    frame, one land per pin, with each exposed pad set aside together with the
    pads under it, and each marker (a net-less pad unlike the part's commonest
@@ -2730,6 +2748,8 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
    form neither shape (a mezzanine aside), a through-hole part other than a PGA, and any
    connector, socket, header or magnetics by footprint name
    (`autoroute.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
+   An array the kept bus step laid copper on is not fanned out again, and
+   every fanout also excludes the nets the bus step handed on protected.
    A part that drops escapes or leaves grazes is retried with the fine via
    (BGA), then with the dogbone (BGA) or under-pad (QFN) method, keeping the
    attempt that escaped most, then grazed least (`drc_grazes`, less what the
@@ -2744,7 +2764,8 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
    `place_fanout_clearance.py` runs again. The board with fewer shorts, then
    fewer dropped escapes, is kept; a dropped ball is routed from the bare ball
    by the route step (#1521).
-5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`. A
+5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`, but
+   for a pair the bus step handed on routed. A
    pair net the step leaves in a track or via DRC violation (by `check_drc`,
    against the board before the step) is ripped and routed again on its own with
    `route.py --force-reroute`, single-ended, named exactly where that name
@@ -2814,9 +2835,9 @@ follow it (the plugin's Autorouter sub-tab reads nothing else):
 | Line | When | What it carries |
 |------|------|-----------------|
 | `AUTOROUTE_ANALYSIS` | first | everything `analyze()` read off the board, including where the rules came from (`rules_source`), why each part is fanned out (`fanout_why`) and why the larger ones are not (`not_fanned`), and the grounds and rails it found |
-| `AUTOROUTE_PLAN` | after the analysis | the design rules and `rules_why`, planes, parts, pairs, power nets, and `steps`: one `{tag, tool, what, why, optional}` row per step it means to run; an optional row runs only if what comes before calls for it |
-| `AUTOROUTE_STEP` | each step start and end | `state` `running`, then `done` or `failed` (one of each per step run), or `skipped` with its `reason` for a planned step that never ran. An ending carries `seconds`, `rc`, a one-line `result`, the step's own `summary` (escapes, caps moved, pairs routed, routed/failed/vias), the `cmd` and `log`, a route pass's `grade` (open nets, real DRC) and whether it was `kept`, and on failure `error_tail`, the last lines of its log. A step the plan did not list (a fanout's next rung, a re-fan, the pair re-route) names its planned row as `parent` |
-| `AUTOROUTE_DECISION` | when the chain chooses | `{tag, kept, why}`: the fanout rung kept, a re-fan or a route pass kept or not, the pair nets ripped or re-routed |
+| `AUTOROUTE_PLAN` | after the analysis | the design rules and `rules_why`, planes, parts, pairs, power nets, and `steps`: one `{tag, tool, what, why, optional}` row per step it means to run; an optional row runs only if what comes before calls for it (a later route pass, or the fanout of an array the bus step serves). On a board with a ball array, `bus`: `buses` and `not_taken` (`{src, dest, nets, why}` each), the `arrays` the step serves, its `via`/`drill`, and `missing` (what it lacks, with the install line) or `error` when it cannot run |
+| `AUTOROUTE_STEP` | each step start and end | `state` `running`, then `done` or `failed` (one of each per step run), or `skipped` with its `reason` for a planned step that never ran. An ending carries `seconds`, `rc`, a one-line `result`, the step's own `summary` (each bus's exit, lanes, vias, copper and walled balls, escapes, caps moved, pairs routed, routed/failed/vias), the `cmd` and `log`, a route pass's `grade` (open nets, real DRC) and whether it was `kept`, and on failure `error_tail`, the last lines of its log. A step the plan did not list (a fanout's next rung, a re-fan, the pair re-route) names its planned row as `parent` |
+| `AUTOROUTE_DECISION` | when the chain chooses | `{tag, kept, why}`: the bus step kept or not (with the arrays it `served` and the nets it handed on `protected`), the fanout rung kept, a re-fan or a route pass kept or not, the pair nets ripped or re-routed |
 | `AUTOROUTE_SUMMARY` | last | the shipped step (`final_step`, `final_tag`), `output`, `open`, `open_nets`, `drc`, `drc_items`, `seconds`; with `error` when nothing shipped |
 
 `KRT_AUTOROUTE_FAIL_STEPS` (step tags, comma separated) makes those steps run
