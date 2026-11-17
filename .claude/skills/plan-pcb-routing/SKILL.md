@@ -1892,7 +1892,18 @@ python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
   step finds, never to add a mode or layers (there are none to add).
 - **Time:** minutes to an hour a group (h616_lpddr4's 45-net LPDDR4: 15 minutes);
   a group of four buses off one large array can take two. It is the slowest step
-  of the chain; it uses four threads a bus at most.
+  of the chain; it uses four threads a bus at most. Its progress is in
+  `<out stem>.bus/events.jsonl` as it runs, one JSON event a line (the
+  captures, each solve of the group's model, each bus's fanout, solve, loop and
+  lay, each bus's grade): `tail` it rather than wait on the log.
+- **In a GUI plan (the AI tab's RESULT)** the step is
+  `{"action": "bus", "buses": ["U1:U2", ...], "params": {...}}`: omit `buses`
+  for the buses the step finds (the CLI's bare call), and carry the sizes and
+  options as params (`clearance_ceiling`, `track_width`, `via_size`,
+  `via_drill`, `hole_to_hole_clearance`, `fanout_track_width`, `rounds`). The
+  GUI runs it on its Bus tab as the CLI's own command, in a child process, and
+  applies the output to the board before the next step; it goes where Step 1a
+  goes in the chain.
 
 **Every ball of a bus array leaves the step served** -- escaped, dropped to its
 plane, or strapped: the group's model plans every ball of the source and of each
@@ -4054,13 +4065,14 @@ next to the board, so the exact tuned choices replay with no LLM:
    ```
 
    The AI tab's Load button accepts this file and the plan executor runs
-   the same chain through the GUI engine path. KNOWN LIMITATION: the topo
-   bus step (`awx/route_bus.py`, Step 1a) has no GUI action, and the
-   converter refuses it by name ("WARNING: 1 command(s) have NO faithful plan
-   representation and were NOT converted: - route_bus.py: ...") -- a plan with
-   a bus step replays from the `.sh` alone. A command its own tool would
-   refuse is named as REJECTED, with every command upstream of it that
-   only fed it. Env-only
+   the same chain through the GUI engine path. The topo bus step
+   (`awx/route_bus.py`, Step 1a) converts to a `bus` step, every flag kept
+   (`--bus` as its `buses`, in order); the GUI runs it on the Bus tab as a
+   child process -- the same command -- waits for it and applies its output
+   before the next step. The converter refuses a `--find` line (it routes
+   nothing) and a `--src`/`--dest` one (a debugging aid), by name. A command
+   its own tool would refuse is named as REJECTED, with every command
+   upstream of it that only fed it. Env-only
    knobs (the Step 2c plan/attraction stack) do not survive into the JSON —
    only `--flag` params map to plan params, and the converter names each
    knob it drops. Until those knobs are promoted
