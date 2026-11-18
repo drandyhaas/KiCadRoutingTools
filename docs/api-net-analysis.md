@@ -561,13 +561,15 @@ layer's width is, in order: a stored impedance declaration's, a `.kicad_dru`
 rule's, the profile's, the class's.
 
 A differential pair takes a differential profile's width and gap the same
-way. `profile_pair_geometry(pcb_data, board_path, pairs, layers, floor)`
-gives `{P net id: (profile name, {layer: (width mm, gap mm or None)})}` for
-the pairs whose two nets take one differential profile. The pair step, given
-no `--track-width`, no `--diff-pair-gap` and no `--impedance`, couples such
-pairs on each layer at the profile's width and gap for that layer, after a
-stored impedance declaration and a `.kicad_dru` rule's layer widths, and
-prints `Tuning-profile pair geometry: ...`. A gap below what KiCad grades P
+way. `profile_pair_geometry(pcb_data, board_path, pairs, layers, floor,
+rules)` gives `{P net id: (profile name, {layer: (width mm, gap mm or
+None)})}` for the pairs whose two nets take one differential profile, each
+value ranked and clamped by `rules` as a single-ended width is (a
+`track_width` rule for the width, a `diff_pair_gap` rule for the gap). The
+pair step, given no `--track-width`, no `--diff-pair-gap` and no
+`--impedance`, couples such pairs on each layer at the profile's width and
+gap for that layer, after a stored impedance declaration and a `.kicad_dru`
+rule, and prints `Tuning-profile pair geometry: ...`. A gap below what KiCad grades P
 against N at (the clearance, the class, a rule) is built at that and named.
 The pair engine carries one width and one gap per layer per call, so the
 geometry applies when every pair of the call resolves the same one; when
