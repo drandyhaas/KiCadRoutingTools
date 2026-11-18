@@ -43,6 +43,7 @@ from pcb_modification import (
     nudge_grazing_microshift,
     nudge_grazing_vias,
     prune_redundant_cycles,
+    excise_via_shorted_loops,
     collapse_strict_redundant,
     remove_orphan_islands,
     sweep_dead_ends,
@@ -215,7 +216,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
       6. nudge_grazing_vias    -- re-bend / micro-shift load-bearing grazes the
                                   prune must keep (#224/#276/#280).
       7. prune_redundant_cycles -- per-net tree invariant (RAM_A9 loops),
-         then collapse_strict_redundant (#217/#1063: strictly redundant
+         then excise_via_shorted_loops (#1978: a loop whose two ends are
+         one via, which the prune cannot see), then collapse_strict_redundant (#217/#1063: strictly redundant
          copper, incl. in-pad / in-via wiggles, and the vias it frees) and
          remove_orphan_islands. The collapse (and 10b) runs only with
          ``strict_collapse`` and outside a defer_strict_collapse region:
@@ -557,6 +559,17 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _cy_segs:
             print(f"{label}Cycle prune: removed {_cy_segs} redundant loop "
                   f"segment(s) across {_cy_nets} net(s)")
+        # #1978: a loop whose two ends are one via -- a track passing over
+        # its own via mid-span, the copper on one side coming back into it
+        _prog("via-shorted loops")
+        _vl_n, _vl_segs = excise_via_shorted_loops(
+            results, pcb_data, _sub_scope, keep_input_copper=keep_input_copper)
+        counts['via_loops_excised'] = _vl_n
+        _trace('via_loops')
+        if _vl_n:
+            print(f"{label}Via-shorted loops: cut out {_vl_n} loop(s) a track "
+                  f"closed by passing over its own via ({_vl_segs} segment(s) "
+                  f"removed)")
 
     # Strict-redundant collapse (#217 classes 1-2, #1063): superseded
     # parallel chains, pad/via-buried tails and in-pad/in-via wiggles that
