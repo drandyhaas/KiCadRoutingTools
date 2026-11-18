@@ -930,7 +930,7 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |
 | `--mps-reverse-rounds` | false | Route most-conflicting MPS groups first (instead of least) |
 | `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair (meander shorter track) |
-| `--diff-pair-intra-lane` | - | Match, record and grade each intra-matched pair on its **lane**, the copper path between two pads, instead of total copper (#1869): `auto`, or `P_NET=REF.PAD:REF.PAD ...` |
+| `--diff-pair-intra-lane` | - | Match, record and grade each intra-matched pair on its **lane**, the copper path between two pads, instead of total copper (#1869): `auto`, or `P_NET=REF.PAD:REF.PAD ...` (the N member's pads are its pads on the same two parts; name it too, `N_NET=REF.PAD:REF.PAD`, when its pads are on other parts, #1970) |
 | `--ac-couple-match` | false | Match an AC-coupled pair end to end across its series caps (see [Length Matching](length-matching.md#differential-pairs)) |
 
 ## Track Proximity Avoidance
@@ -1055,7 +1055,24 @@ python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "/DATA*"
 # or name the P member's two pads; the N member's are its pads on the same parts
 python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "/DATA*" \
     --diff-pair-intra-match --diff-pair-intra-lane "/DATA+=J1.5:IC4.10"
+
+# or name both members' pads: a pair whose members end on different parts
+python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "DPA_*" \
+    --diff-pair-intra-match --diff-pair-intra-lane DPA_P=C1.1:J1.1 DPA_N=C2.1:J1.2
 ```
+
+A named member keeps the two pads named. A member not named takes its one pad
+on each of the two parts its twin's lane ends on, so one entry per pair is
+enough when both members end on the same two parts. A pair whose members each
+run through their own series part (USB D+/D- through two resistors, a
+DC-blocked pair through two capacitors; `kicad_files/cap_chain.kicad_pcb`'s
+`DPA_P` runs C1.1 - J1.1 and `DPA_N` C2.1 - J1.2) has no pad of the twin on
+that part: one entry refuses with `DPA_N has 0 pad(s) on C1 (none), so its end
+of the lane is not decided; name that member's lane too`, and the lane is given
+by naming both members (#1970). The same holds for a pair whose twin has two
+pads on one of the parts (`has 2 pad(s) on IC4`). Naming both is also how to
+give the N member a lane other than the derived one. The entries come in
+either order.
 
 The pads are recorded with the tolerance (`kicad_routing_tools.intra_pair_tolerance`,
 `lane: {p: [...], n: [...]}`), so later steps and graders read the same path.
@@ -1068,7 +1085,8 @@ record beside the total-copper `skew_mm`.
 multi-point pair's coupled legs' ends (a branch the step leaves for a later step
 is not the lane, however long). N's lane ends on the same two parts as P's; a
 pair whose coupled legs do not form one path, or whose P and N end on different
-parts, gets no lane, is matched on total copper, and the step says why. A lane
+parts, gets no lane, is matched on total copper, and the step says why (a pair
+whose members end on different parts takes a lane by naming both). A lane
 applies only to a pair the step intra-matches (with no `--diff-pair-intra-match`
 the step says the lane is unused) and that no `.kicad_dru` skew rule binds: KiCad
 grades such a rule on total copper, so that pair is matched on total copper, and

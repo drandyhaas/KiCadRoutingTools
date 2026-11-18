@@ -13,7 +13,10 @@ reports each member's branch as a stub.
 A spec is `auto` (the two terminals the pair step itself routed the pair
 between: `resolve_auto`, once the pair is routed) or one or more
 `P_NET=REF.PAD:REF.PAD`, the P member's two pads; the N member's are its pads
-on the same two parts. Either way N's lane ends on the same two parts as P's.
+on the same two parts, unless it is named too. A pair whose members end on
+different parts (each through its own series resistor or capacitor) has no
+such pads, so both its members are named, `P_NET=... N_NET=...`, and each
+keeps the pads named (#1970). Either member may be the one named.
 
 A lane applies to a pair the step intra-matches and no `.kicad_dru` skew rule
 binds (`settle`): KiCad grades such a rule on total copper, so a pair it binds
@@ -28,8 +31,12 @@ AUTO = 'auto'
 def resolve(spec: Optional[Sequence[str]], diff_pair_ids, pcb_data
             ) -> Optional[Dict[int, object]]:
     """{net id: AUTO or (pad, pad)} for both members of every pair a lane is
-    asked for, or None with no spec. Raises ValueError, with the reason, for
-    a spec that names a net no pair of the run has, or pads its nets lack."""
+    asked for, or None with no spec. A member named keeps the pads named (its
+    last entry's, when more than one names it); a member not named takes its
+    one pad on each part of its twin's lane (as the twin's first entry names
+    it). Raises ValueError, with the reason and the entry, for a spec that
+    names a net no pair of the run has, pads its nets lack, or a twin that
+    has not exactly one pad on such a part and is not named itself."""
     if not spec:
         return None
     if isinstance(spec, str):
@@ -49,6 +56,11 @@ def resolve(spec: Optional[Sequence[str]], diff_pair_ids, pcb_data
         return out
     by_p = {pair.p_net_name: pair for _n, pair in pairs}
     by_n = {pair.n_net_name: pair for _n, pair in pairs}
+    from net_queries import pin_pair_pads, pad_label, _copper_pads
+    # Every entry is read and checked first, so a member another entry names
+    # (#1970) is known before any twin's pads are derived.
+    named: Dict[int, tuple] = {}        # net id -> the pads its last entry names
+    entries = []
     for s in spec:
         net, sep, pads = s.partition('=')
         a, sep2, b = pads.partition(':')
@@ -61,11 +73,19 @@ def resolve(spec: Optional[Sequence[str]], diff_pair_ids, pcb_data
                              f"of a pair this step routes")
         given, other = ((pair.p_net_id, pair.n_net_id) if net == pair.p_net_name
                         else (pair.n_net_id, pair.p_net_id))
-        from net_queries import pin_pair_pads, pad_label, _copper_pads
         try:
             first = pin_pair_pads(pcb_data, given, [a, b])
         except ValueError as e:
             raise ValueError(f"--diff-pair-intra-lane {s!r}: {e}") from None
+        named[given] = (a, b)
+        entries.append((s, given, other, first, (a, b)))
+    for s, given, other, first, lane in entries:
+        out[given] = lane
+        if other in named:
+            # both members named: each keeps the pads named, which need not be
+            # on the same parts (a series resistor or capacitor per member)
+            out.setdefault(other, named[other])
+            continue
         twin = []
         for p in first:
             same = sorted(pad_label(q) for q in _copper_pads(pcb_data, other)
@@ -78,7 +98,6 @@ def resolve(spec: Optional[Sequence[str]], diff_pair_ids, pcb_data
                     f"({', '.join(same) or 'none'}), so its end of the lane is "
                     f"not decided; name that member's lane too")
             twin.append(same[0])
-        out[given] = (a, b)
         out.setdefault(other, tuple(twin))
     return out
 
