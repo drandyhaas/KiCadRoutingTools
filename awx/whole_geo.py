@@ -1790,8 +1790,13 @@ for n in M:
         a = pieces[0]; pieces[0] = (tx, ty, a[2], a[3], a[4]); xy_all[0] = (tx, ty)
         lx, ly = Fr.land[n]
         z = pieces[-1]; pieces[-1] = (z[0], z[1], lx, ly, z[4]); xy_all[-1] = (lx, ly)
-        if math.hypot(ex - lx, ey - ly) > 1e-9:          # ...and from its landing straight into its berth
-            pieces.append((lx, ly, ex, ey, z[4])); xy_all.append((ex, ey))
+        if math.hypot(ex - lx, ey - ly) > 1e-9:
+            # ...and from its landing into its berth: straight, or by the points the frame gives its tail (a group's
+            # row lane over the stub ends it passes: whole_frame.Group.landings)
+            px, py = lx, ly
+            for qx, qy in list((getattr(Fr, 'tail', None) or {}).get(n, ())) + [(ex, ey)]:
+                pieces.append((px, py, qx, qy, z[4])); xy_all.append((qx, qy))
+                px, py = qx, qy
             if n in prs and Fr.land[n] != Fr.bend[n]:
                 # a ring pair turns off the ring into its end run as the pair router turns: two 45-degree bends a
                 # turning radius apart (TURN_RUN either side of the landing), not one 90-degree corner the polish

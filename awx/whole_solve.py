@@ -336,10 +336,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         legs_r = {}
         for n in (M if Fr.group is not None else ()):
             if n in Fr.gland and (n, 1) in VEND and n not in prs:
-                g_, b_ = Fr.gland[n], Fr.bend[n]
+                pts_ = [Fr.gland[n]] + list((getattr(Fr, 'tail', None) or {}).get(n, ())) + [Fr.bend[n]]
                 legs_r[(n, 1)] = ({ctx.byname[n][0]}, [types.SimpleNamespace(
                     start_x=g_[0], start_y=g_[1], end_x=b_[0], end_y=b_[1], width=TRK, net_id=ctx.byname[n][0],
-                    layer=ctx.dest_layer[n])])
+                    layer=ctx.dest_layer[n]) for g_, b_ in zip(pts_, pts_[1:])])
         # ...and a group lane's way UNDER parts (Group.options' 'under' and 'straight': over their pads to the via at
         # its berth) on the layers open on every part it crosses alone -- its berth's stub layer, the part's pads', too
         n_un = 0

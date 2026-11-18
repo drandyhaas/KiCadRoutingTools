@@ -710,6 +710,10 @@ def round_lanes(cuts, audit):
     return {x for x in out if not re.match(r'^[-+]?[\d.]+$', x) and not x.startswith('(') and not x.endswith('(s)')}
 
 
+MINI_REROUTE = True       # the lanes a round's lay leaves open planned again by themselves on the laid board
+MINI_SHARE = 4            # ...where they are a few: at most one lane in this many
+
+
 def loop(solve, out, rounds, env, log, try_lay=None):
     """whole_loop.sh SOLVE OUTDIR ROUNDS, its lines to LOG: 0 with OUTDIR/plan.json the snapped plan that passed, 1 when
     no round got there, 3 when it stopped not converging, 4 when it stopped at crowded ends"""
@@ -2260,8 +2264,8 @@ def joint_over(rd, bus):
 def joint_publish(env, plan, stage_name, board=None, nets=None):
     """(JOINT_DIR: negotiated buses) this bus's lanes as `plan` has them -- or the laid `board`'s copper of `nets`
     -- published for the other buses' stages (joint_lanes)"""
-    if not (env.get('JOINT_DIR') and env.get('JOINT_BUS')):
-        return
+    if not (env.get('JOINT_DIR') and env.get('JOINT_BUS')) or env.get('JOINT_QUIET'):
+        return          # (JOINT_QUIET: a loop on a few of the bus's lanes, the mini re-route's, publishes none)
     import joint_lanes
     with awx_settings.given(env):
         if board:
@@ -2940,6 +2944,85 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             say("  nothing laid")
         return None
 
+    def mini_reroute(r, d, res):
+        """THE MINI RE-ROUTE: the few lanes a round's lay left OPEN planned and laid again BY THEMSELVES on the board
+        that lay made -- every other lane's copper there as copper, the open lanes' own ends put back as the round's
+        fanout bench has them -- the solve, one round of its loop and the route as a round's, on those lanes alone
+        (the last resort's recipe, the other way round: there the named lanes are left out, here they are all there
+        is). A whole re-solve moves every lane to answer two; this moves none of what is laid. The result when it
+        leaves fewer open, else None"""
+        legs = lane_legs()
+        opened = set(res.get('open_nets') or ())
+        lanes_ = [ln for ln, lg in legs.items() if any(n in opened for n in lg)]
+        if not lanes_ or len(lanes_) > max(1, len(legs) // MINI_SHARE):
+            return None
+        fo = env.get('BENCH0') or os.path.join(d, 'fo.kicad_pcb')
+        if not (os.path.isfile(fo) and os.path.isfile(os.path.splitext(fo)[0] + '.plan.json')):
+            return None
+        dj = os.path.join(d, 'mini')
+        shutil.rmtree(dj, ignore_errors=True)
+        os.makedirs(dj)
+        bench_m = os.path.join(dj, 'bench.kicad_pcb')
+        shutil.copyfile(res['board'], bench_m)
+        for ext in ('.kicad_pro', '.kicad_dru'):
+            if os.path.isfile(os.path.splitext(res['board'])[0] + ext):
+                shutil.copyfile(os.path.splitext(res['board'])[0] + ext, os.path.splitext(bench_m)[0] + ext)
+        shutil.copyfile(os.path.splitext(fo)[0] + '.plan.json', os.path.splitext(bench_m)[0] + '.plan.json')
+        nets_m = [n for ln in lanes_ for n in legs[ln]]
+        import route_bus as _rb
+        from coherent_nets import namer
+        from kicad_parser import parse_kicad_pcb
+        with contextlib.redirect_stdout(io.StringIO()):
+            pf = parse_kicad_pcb(fo)
+        sn = namer(pf)
+        full = sorted(n.name for n in pf.nets.values() if n.name and sn(n.name) in set(nets_m))
+        with awx_settings.given(env):
+            left = _rb.put_back(bench_m, fo, pf, full)
+        sub_m = solvable(bench_m, nets_m)
+        if not sub_m:
+            return None
+        say(f"=== the mini re-route: {len(lanes_)} of {len(legs)} lane(s) left open, planned again by themselves on "
+            f"the laid board: {', '.join(lanes_)}"
+            + (f' ({left} piece(s) of their ends not clear, left out)' if left else ''))
+        # (JOINT_QUIET: its loop's plans are of these lanes alone -- published as the bus's, the buses after it would
+        # read them in place of its laid copper)
+        env_ = {**env, 'BENCH': bench_m, 'NETS': ','.join(sub_m), 'DEST': dest, 'JOINT_QUIET': '1'}
+        for k_ in ('BENCH0', 'VIA_ENDS', 'VBAN_WALLS', 'WALLS_STAND', 'WALLS_LAST'):
+            env_.pop(k_, None)
+        solve = os.path.join(dj, 'solve.json')
+        run(['whole_solve.py', solve], {**env_, 'SOLVE_UNPROVED': '1'}, log_path=os.path.join(dj, 'solve.log'))
+        for ln in grep(os.path.join(dj, 'solve.log'), r'whole_solve:'):
+            say(ln[:200])
+        if not os.path.isfile(solve):
+            say("  the mini re-route: no plan from the solve")
+            return None
+        bench_l = relayed(dj, bench_m, json.load(open(solve)), env_, say)
+        loopd = os.path.join(dj, 'loop')
+        with open(os.path.join(dj, 'loop.log'), 'w') as lf:
+            # (ONE round of the loop: a few lanes among laid copper have a way or have none, and the buses after
+            # this one wait on its turn -- a quarter of a group bus's lanes with no way through the rest of it went
+            # four rounds on a plan that crossed the laid copper in forty places)
+            rc_ = loop(solve, loopd, 1, env_, Log(lf))
+        for ln in grep(os.path.join(dj, 'loop.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
+            say(ln[:170])
+        say(f"  the mini re-route: loop exit {rc_} at {secs()} s")
+        plan = os.path.join(loopd, 'plan.json') if rc_ == 0 else held_plan(loopd, env_)
+        res2 = lay(r, dj, plan, plan_bench(loopd, plan, bench_l), sub_m, tag='mini', quiet=True) if plan else None
+        if res2 is None or res2['key'] >= res['key']:
+            say("  the mini re-route: no fewer open -- the round's lay stands"
+                + (f" ({res2['open']} open against {res['open']})" if res2 else ''))
+            return None
+        # (its grade's lanes: the round's and these together -- the lay counted the ones it laid)
+        try:
+            a_, b_ = ((int(x) for x in v_.split('/')) for v_ in (res['lanes'], res2['lanes']))
+            lanes_all = '/'.join(str(x + y) for x, y in zip(a_, b_))
+            res2 = dict(res2, lanes=lanes_all, grade=res2['grade'].replace(f"lanes={res2['lanes']} ", f'lanes={lanes_all} '))
+        except (ValueError, KeyError):
+            pass
+        say(res2['grade'])
+        joint_publish(env, None, f'round {r} laid, mini', board=res2['board'], nets=nets_all)
+        return res2
+
     for r in range(1, R + 1):
         d = os.path.join(o, f'r{r}')
         os.makedirs(d, exist_ok=True)
@@ -3300,6 +3383,15 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                         joint_publish(env, None, f'round {r} laid', board=res['board'], nets=nets_all)
                 if plan and res is None:
                     say("  no board laid from the plan (route_seq.log)")
+                # (...and the few lanes it left open, again by themselves on the board it made -- within this bus's
+                # turn to lay: the buses after it read the copper it leaves)
+                if res is not None and res['open'] and MINI_REROUTE:
+                    try:
+                        res = mini_reroute(r, d, res) or res
+                    except (Exception, SystemExit):         # (the round's lay stands whatever becomes of this)
+                        say("  the mini re-route failed -- the round's lay stands: "
+                            + traceback.format_exc().strip().splitlines()[-1][:160])
+                        traceback.print_exc(file=sys.stderr)
             finally:
                 if turn_ is not None:
                     turn_()

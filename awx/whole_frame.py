@@ -580,7 +580,7 @@ class Group:
         ends = {round(b, 6) for _a, b in front}
         self.f0 = next((a for a, _b in front if round(a, 6) not in ends), front[0][0])
         self.f1 = max((b for _a, b in front), key=lambda b: (b - self.f0) % self.L)
-        self._opt, self._pk = {}, None
+        self._opt, self._pk, self._mouth = {}, None, {}
 
     def s(self, p):
         """the walk's coordinate of the outline's point nearest p"""
@@ -598,24 +598,75 @@ class Group:
         """s unrolled at the cut c"""
         return (s - c) % self.L
 
-    @staticmethod
-    def landings(a, b, mem, room):
-        """{lane: its landing}: the lanes `mem` [(lane, its place's point)], in their order along the walk, leaving a
-        pocket by its mouth a-b land on it in that order, `room` apart, each from the mouth's end at its own part's
-        wall -- the end its place stands nearer. Spread evenly over the whole mouth, the lanes of a wide pocket (two
-        parts far apart) landed a pocket's depth from their own part, and their legs cut back across the strip on the
-        berths' layer through whatever parts stand in it, which no solve sees. A mouth too short for its lanes `room`
-        apart spreads them evenly over it"""
+    def landings(self, a, b, mem, room):
+        """({lane: its landing}, {lane: its tail's points between its landing and its berth}): the lanes `mem` [(lane,
+        its way, its berth, its pad or None)], in their order along the walk, leaving a pocket by
+        its mouth a-b land on it in that order, `room` apart, each from the mouth's end at its own part's wall. Spread
+        evenly over the whole mouth, the lanes of a wide pocket (two parts far apart) landed a pocket's depth from
+        their own part, and their legs cut back across the strip on the berths' layer through whatever parts stand in
+        it, which no solve sees. A lane of a part at NEITHER end lands where its wall's point stands nearest the mouth
+        (the way's own, _mouth_place), between the two ends' lanes and `room` from its neighbours: from an end, its leg
+        ran the pocket's width to its berth beside every other's. A mouth too short for its lanes `room` apart spreads
+        them evenly over it"""
         k_ = len(mem)
         lm_ = math.hypot(b[0] - a[0], b[1] - a[1])
         at = lambda t: (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
         if (k_ + 1) * room > lm_:
-            return {n: at((i + 1) / (k_ + 1)) for i, (n, _p) in enumerate(mem)}
-        at_a = [n for n, p in mem if math.dist(p, a) <= math.dist(p, b)]
-        at_b = [n for n, p in mem if math.dist(p, a) > math.dist(p, b)]
+            return {n: at((i + 1) / (k_ + 1)) for i, (n, *_r) in enumerate(mem)}, {}
+        at_a = [n for n, w, *_r in mem if w[7][3] == 'a']
+        at_b = [n for n, w, *_r in mem if w[7][3] == 'b']
         out = {n: at((i + 1) * room / lm_) for i, n in enumerate(at_a)}
         out.update({n: at(1.0 - (i + 1) * room / lm_) for i, n in enumerate(at_b[::-1])})
-        return out
+        # ...and each such lane's TAIL, from its landing to its berth, OVER the stub ends it passes: the lanes of a
+        # row land the nearest the wall first and run down the row to their berths, each past the stubs of the ones
+        # before it -- and a stub that stands further out than the lane behind it runs is crossed by that lane's
+        # straight tail, on the stubs' own layer where it has no via of its own (two neighbours of a chip's row, the
+        # nearer's escape the longer: one crossing in every round's audit that no solve could move). So past each
+        # stub it would come within `room` of, the tail goes by a point `room` beyond that stub's end for every lane
+        # between the two: the lanes over one stub's end nested as they landed
+        tails = {}
+        from shapely.geometry import LineString, Point
+        ends_ = {n: (bp, pd) for n, _w, bp, pd in mem if bp is not None}
+        for seq in (at_a, at_b[::-1]):
+            seq = [n for n in seq if n in ends_]
+            for k, n in enumerate(seq):
+                over = {}
+                for _try in range(k):
+                    path = LineString([out[n]] + [over[j] for j in sorted(over)] + [ends_[n][0]])
+                    hit = None
+                    for j in range(k):
+                        bj, pj = ends_[seq[j]]
+                        stub = LineString([bj, pj]) if math.dist(bj, pj) > 1e-9 else Point(bj)
+                        if j not in over and path.distance(stub) < room - 1e-6:
+                            hit = j
+                            break
+                    if hit is None:
+                        break
+                    bj, pj = ends_[seq[hit]]
+                    d_ = math.dist(bj, pj)
+                    if d_ < 1e-9:
+                        break
+                    r_ = room * (k - hit)
+                    over[hit] = (bj[0] + (bj[0] - pj[0]) / d_ * r_, bj[1] + (bj[1] - pj[1]) / d_ * r_)
+                if over:
+                    tails[n] = [over[j] for j in sorted(over)]
+        mid = [(n, w[7][4]) for n, w, *_r in mem if w[7][3] is None]
+        if mid:
+            m = self._mouth[(a, b)]
+            lo, hi = len(at_a) * room, m.length - len(at_b) * room
+            ps, prev = [], lo
+            for _n, t in mid:
+                prev = max(t, prev + room)
+                ps.append(prev)
+            nxt = hi
+            for i in range(len(ps) - 1, -1, -1):
+                nxt = ps[i] = min(ps[i], nxt - room)
+            if ps[0] < lo + room - 1e-9:
+                ps = [lo + (i + 1) * (hi - lo) / (len(mid) + 1) for i in range(len(mid))]
+            for (n, _t), s_ in zip(mid, ps):
+                q = m.interpolate(s_)
+                out[n] = (float(q.x), float(q.y))
+        return out, tails
 
     def side(self, s, c):
         """the class of a lane entering at s with the cut at c: 'W' on the front (the trunk's), 'N' before it (round
@@ -682,14 +733,129 @@ class Group:
         q = max(cs, key=lambda c: math.hypot(c[0] - p[0], c[1] - p[1]))
         return (float(q[0]), float(q[1])), self._crossed(p, q)
 
+    def _pockets(self):
+        """the group's POCKETS, each (its polygon, its ring, its mouths, its key): the outline less the parts, a piece
+        at a time. A MOUTH is a stretch of the pocket's ring on the outline: (a, b, sa, sb, its line from a to b, a's
+        place on the ring, the ring's sense along it from a) -- a to b in the walk's sense; the pocket's WALLS are
+        the rest of its ring, the parts' faces"""
+        if self._pk is None:
+            from shapely.geometry import LineString, Point
+            from shapely.ops import linemerge
+            pocket = self.U.difference(self.parts_u)
+            self._pk = []
+            for pk in ([pocket] if pocket.geom_type == 'Polygon' else
+                       [g for g in getattr(pocket, 'geoms', []) if g.geom_type == 'Polygon']):
+                ring = pk.exterior
+                edge = pk.boundary.intersection(self.E.buffer(1e-6))
+                segs = [edge] if edge.geom_type == 'LineString' else \
+                    [g for g in getattr(edge, 'geoms', []) if g.geom_type == 'LineString']
+                if len(segs) > 1:
+                    m_ = linemerge(segs)
+                    segs = [m_] if m_.geom_type == 'LineString' else list(m_.geoms)
+                mouths = []
+                for m in segs:
+                    m = self._open_stretch(m)
+                    if m is None or m.length < GROUP_TOL:
+                        continue
+                    a, b = m.coords[0], m.coords[-1]
+                    sa, sb = self.s(a), self.s(b)
+                    if (sb - sa) % self.L > self.L / 2:
+                        a, b, sa, sb, m = b, a, sb, sa, LineString(list(m.coords)[::-1])
+                    a, b = (float(a[0]), float(a[1])), (float(b[0]), float(b[1]))
+                    ba, bm = float(ring.project(Point(a))), float(ring.project(m.interpolate(0.5, normalized=True)))
+                    fwd, back = (bm - ba) % ring.length, (ba - bm) % ring.length
+                    mouths.append((a, b, sa, sb, m, ba, 1 if abs(fwd - m.length / 2) <= abs(back - m.length / 2)
+                                   else -1))
+                    self._mouth[(a, b)] = m
+                self._pk.append((pk, ring, mouths, tuple(sorted((mo[0], mo[1]) for mo in mouths))))
+        return self._pk
+
+    def _open_stretch(self, m):
+        """a mouth's line less what of it, at either end, runs ALONG a part: the outline's edge between two parts'
+        corners need not be square to them, and where it leaves a part's face at a slant it stands a hair off that
+        face for millimetres -- a sliver of pocket no lane enters, yet the mouth began at its far end: a chip's
+        north-face lanes landed at its SOUTH-east corner, the face's whole length from the opening, their legs drawn
+        from there straight through the chip. A mouth leaving a part at once (within twice GROUP_TOL) stands as it
+        is; None where nothing of it is open"""
+        from shapely.geometry import Point
+        from shapely.ops import substring
+
+        def leaves(g):
+            # how far along g it first stands GROUP_TOL off every part
+            n = max(2, int(math.ceil(g.length / GROUP_TOL)))
+            for i in range(n + 1):
+                if self.parts_u.distance(g.interpolate(g.length * i / n)) > GROUP_TOL:
+                    return g.length * i / n
+            return None
+        t0 = leaves(m)
+        if t0 is None:
+            return None
+        t1 = leaves(substring(m, m.length, 0.0))
+        t0, t1 = (t0 if t0 > 2 * GROUP_TOL else 0.0), (t1 if t1 > 2 * GROUP_TOL else 0.0)
+        return m if not (t0 or t1) else substring(m, t0, m.length - t1)
+
+    def _wall_point(self, ring, part, Q):
+        """the place on its own part's wall of a berth at Q in the pocket of `ring`: the wall's point nearest it (a
+        part with no face on this pocket: the ring's)"""
+        from shapely.geometry import box as _box
+        from shapely.ops import nearest_points
+        wall = ring.intersection(_box(*self.boxes[part]).exterior.buffer(1e-6))
+        return nearest_points(ring if wall.is_empty else wall, Q)[0]
+
+    def _mouth_place(self, ring, mo, part, wp):
+        """(the place s on the walk, its place on the pocket's ring, the mouth's end it lands from or None, where
+        along the mouth it lands) of a lane leaving a pocket by the mouth `mo`, its berth's place on its part's wall
+        `wp`. The lanes of one mouth stand along it IN THE ORDER OF THEIR BERTHS ALONG THE POCKET'S WALLS, walked
+        from the mouth's one end round to its other: their legs then cross nowhere in the pocket, whatever its shape.
+        A part standing at an end of the mouth has its lanes there, the nearest along its wall the nearest the end
+        (GROUP_EPS of walk per mm of wall), as a strip between two parts' rows asks. A part at NEITHER end -- one
+        the mouth looks at across the pocket, or passes -- has its lanes where its wall's points stand nearest the
+        mouth, in its wall's order: ranked by their depth from the nearer end, as a strip's are, a chip's west face
+        behind a mouth eleven mm wide had its lanes at the other part's corner in the reverse of their pins' order,
+        every leg across every other and across that part's own, none of it on the walk for a solve to see"""
+        a, b, sa, sb, m, ba, sgn = mo
+        Pn, own = float(ring.length), self.boxes[part]
+        W = Pn - m.length
+        w = ((ba - ring.project(wp)) * sgn) % Pn
+        w = min(max(w, 0.0), W)
+        dbox = lambda c: math.hypot(max(0.0, own[0] - c[0], c[0] - own[2]), max(0.0, own[1] - c[1], c[1] - own[3]))
+        lo, hi = GROUP_EPS * w, m.length - GROUP_EPS * (W - w)
+        da, db = dbox(a), dbox(b)
+        if min(da, db) <= 2 * GROUP_TOL:                 # (an end trimmed back along its part stands just off it)
+            end, t, at = ('a', None, lo) if da <= db else ('b', None, hi)
+        else:
+            end, t = None, float(m.project(wp))
+            at = min(max(t + GROUP_EPS * (w - W / 2), lo), hi)
+        at = min(max(at, 0.0), m.length)
+        return sa + at, float((ba + sgn * at) % Pn), end, t
+
+    def _on_mouth(self, s, part, Q):
+        """the place of a berth ON the outline at s (Q its point): one standing at the mouth of a pocket its own part
+        walls is one of that mouth's lanes, placed among them by its place on that wall (_mouth_place) -- where its
+        stub meets the mouth says nothing of the lanes that land beside it from the pocket; any other, s"""
+        from shapely.geometry import Point, box as _box
+        q = Point(self.pt(s))
+        bx = _box(*self.boxes[part])
+        for _poly, ring, mouths, _key in self._pockets():
+            if ring.distance(bx) > 1e-6:
+                continue
+            for mo in mouths:
+                if mo[4].distance(q) < 1e-4:
+                    return self._mouth_place(ring, mo, part, self._wall_point(ring, part, Q))[0] % self.L
+        return s
+
     def options(self, p, sd, part, layer, via):
         """[(way, place s, its mouth (a, b) or None, its length, its pocket (its mouths) or None, the pins its leg
-        passes, the layers it may run on)] -- the ways a lane whose berth stands at p (its stub `sd` out of its pad on part
-        `part`, on `layer`, `via` whether it carries one) enters the group, the shortest first, GROUP_OPTIONS of them.
+        passes, the layers it may run on[, its stretch in its pocket])] -- the ways a lane whose berth stands at p (its
+        stub `sd` out of its pad on part `part`, on `layer`, `via` whether it carries one) enters the group, the
+        shortest first, GROUP_OPTIONS of them.
         'on': its berth on the outline (s where its stub meets it); 'under': straight under its own part from the side
         turned from the source, out where that straight meets the outline; and a berth in a POCKET -- 'mouth' out of
-        each of the pocket's mouths, its place there the shallowest berth nearest its own wall, and 'straight' under
-        the part in front of it. A way under parts needs a layer open on every part it passes -- the berth's layer, or
+        each of the pocket's mouths its leg reaches without going through a part, its place there by its berth's place
+        along the pocket's walls (_mouth_place), and 'straight' under the part in front of it. A pocket way's STRETCH
+        in the pocket: (the pocket's ring's length, its berth's wall's place on that ring, where it leaves the pocket
+        on it, the mouth's end it lands from or None, where along the mouth it lands) -- two ways of one pocket whose
+        stretches' ends alternate round the ring cross in it (pocket_cross). A way under parts needs a layer open on every part it passes -- the berth's layer, or
         any with a via at the berth, and the lane runs to its berth on such a layer: a way under parts carries the
         layers open on all of them (sorted names), the others None. Its length: from the berth to its place (a mouth's: the berth's depth from it);
         a mouth's leg runs along the part's row, past the pins between its berth and the mouth (GROUP_LEG_PASS each, in
@@ -712,7 +878,7 @@ class Group:
         def open_on(parts):
             return tuple(sorted(frozenset.intersection(*[self.open[r] for r in parts]))) if parts else None
         if not (self.U.contains(P) and self.E.distance(P) > GROUP_TOL):
-            out.append(('on', self._ray(p, sd), None, 0.0, None, 0, None))
+            out.append(('on', self._on_mouth(self._ray(p, sd), part, P), None, 0.0, None, 0, None))
             if sd is not None and math.hypot(*sd) > 1e-9:
                 k = math.hypot(*sd)
                 if (sd[0] * self.d[0] + sd[1] * self.d[1]) / k >= FRONT_COS:
@@ -740,34 +906,13 @@ class Group:
                         break
             Q0 = Point(q0)
             if not (self.U.contains(Q0) and self.E.distance(Q0) > GROUP_TOL):
-                out.append(('on', self.s(q0), None, 0.0, None, 0, None))
+                out.append(('on', self._on_mouth(self.s(q0), part, Q0), None, 0.0, None, 0, None))
             else:
-                if self._pk is None:
-                    pocket = self.U.difference(self.parts_u)
-                    self._pk = [pocket] if pocket.geom_type == 'Polygon' else \
-                        [g for g in getattr(pocket, 'geoms', []) if g.geom_type == 'Polygon']
-                pk = next((g for g in self._pk if g.distance(Q0) < 1e-6), None)
+                pk = next((k_ for k_ in self._pockets() if k_[0].distance(Q0) < 1e-6), None)
                 if pk is None:
                     out.append(('on', self.s(q0), None, 0.0, None, 0, None))
                 else:
-                    from shapely.ops import linemerge
-                    edge = pk.boundary.intersection(self.E.buffer(1e-6))
-                    segs = [edge] if edge.geom_type == 'LineString' else \
-                        [g for g in getattr(edge, 'geoms', []) if g.geom_type == 'LineString']
-                    if len(segs) > 1:
-                        m_ = linemerge(segs)
-                        segs = [m_] if m_.geom_type == 'LineString' else list(m_.geoms)
-                    own = self.boxes[part]
-                    mouths = []
-                    for m in segs:
-                        if m.length < GROUP_TOL:
-                            continue
-                        a, b = m.coords[0], m.coords[-1]
-                        sa, sb = self.s(a), self.s(b)
-                        if (sb - sa) % self.L > self.L / 2:
-                            a, b, sa, sb = b, a, sb, sa
-                        mouths.append(((float(a[0]), float(a[1])), (float(b[0]), float(b[1])), sa, sb, m))
-                    pkey = tuple(sorted((a, b) for a, b, _sa, _sb, _m in mouths))     # (the pocket: its mouths)
+                    _poly, ring, mouths, pkey = pk
                     # (a mouth's leg runs along its part's row at the stub ends, past its neighbours' escapes: the pins
                     # it passes, each a pad within a stub's length of it -- its own the nearest. A pad of ANY of the
                     # group's parts: a pocket's walls are other parts' rows, and a leg down a wall runs through that
@@ -780,19 +925,37 @@ class Group:
                     stub_ = math.hypot(own_pad[0] - p[0], own_pad[1] - p[1])
                     pads_ = [(pd.global_x, pd.global_y) for r_ in sorted(self.boxes)
                              for pd in self.pcb.footprints[r_].pads]
-                    for a, b, sa, sb, m in mouths:
+                    wp = self._wall_point(ring, part, Q0)
+                    bw = float(ring.project(wp))
+                    ways_, through_ = [], []
+                    for mo in mouths:
+                        a, b, m = mo[0], mo[1], mo[4]
                         depth = float(m.distance(Q0))
-                        dbox = lambda c: math.hypot(max(0.0, own[0] - c[0], c[0] - own[2]),
-                                                    max(0.0, own[1] - c[1], c[1] - own[3]))
-                        s_ = (sa + GROUP_EPS * depth) if dbox(a) <= dbox(b) else (sb - GROUP_EPS * depth)
                         mp = m.interpolate(m.project(Q0))
                         leg = LineString([p, (mp.x, mp.y)])
                         passes = sum(1 for c in pads_ if c != own_pad and leg.distance(Point(c)) <= stub_ + 0.05)
-                        out.append(('mouth', s_ % self.L, (a, b), depth, pkey, passes, None))
+                        s_, bo, end_, t_ = self._mouth_place(ring, mo, part, wp)
+                        way_ = ('mouth', s_ % self.L, (a, b), depth, pkey, passes, None,
+                                (float(ring.length), bw, bo, end_, t_))
+                        # (a leg straight through a part is no leg down a wall: it goes round that part's corner,
+                        # past pins and across lanes no place on the walk shows -- a chip's west pins taken out of
+                        # the strip under its south face were priced the width of the chip, laid half as long again
+                        # and crossed the south face's own lanes at the corner. A way only where none other is left)
+                        (through_ if self._crossed(q0, (mp.x, mp.y)) else ways_).append(way_)
+                    out.extend(ways_)
                     q, crossed = self._straight(q0)
                     if crossed and under_ok(crossed) and self.E.distance(Point(q)) <= GROUP_TOL:
+                        # (its stretch in the pocket: from its berth's wall to where it goes under the part in front)
+                        ins = LineString([q0, q]).intersection(_poly)
+                        gs_ = [g for g in ([ins] if ins.geom_type == 'LineString' else getattr(ins, 'geoms', []))
+                               if g.geom_type == 'LineString']
+                        cs_ = list(min(gs_, key=lambda g: g.distance(Q0)).coords) if gs_ else [q0]
+                        far_ = max(cs_, key=lambda c: math.hypot(c[0] - q0[0], c[1] - q0[1]))
                         out.append(('straight', self.s(q), None, math.hypot(q[0] - p[0], q[1] - p[1]), pkey, 0,
-                                    open_on(crossed)))
+                                    open_on(crossed), (float(ring.length), bw, float(ring.project(Point(far_))),
+                                                       None, None)))
+                    if not out:
+                        out.extend(through_)
         out.sort(key=lambda o: (o[3] + 2.0 * GROUP_LEG_PASS * o[5], o[0]))
         self._opt[key] = out[:max(1, GROUP_OPTIONS)]
         return self._opt[key]
@@ -911,6 +1074,22 @@ class Group:
         return choice, best[1], best[0]
 
 
+def pocket_cross(u, v):
+    """two ways of one pocket CROSS in it: the ends of their stretches there (Group.options' eighth element) alternate
+    round the pocket's ring -- a lane out of one mouth past the berth of one that leaves another way, which no place
+    on the walk shows"""
+    if u is None or v is None or abs(u[0] - v[0]) > 1e-9:
+        return False
+    Pn, tol = u[0], 1e-6
+    span = (u[2] - u[1]) % Pn
+    if span < tol or Pn - span < tol:
+        return False
+    da, db = (v[1] - u[1]) % Pn, (v[2] - u[1]) % Pn
+    ins = lambda d: tol < d < span - tol
+    outs = lambda d: span + tol < d < Pn - tol
+    return (ins(da) and outs(db)) or (ins(db) and outs(da))
+
+
 def build(ctx, dest, _trunk=frozenset()):
     """the frame (a SimpleNamespace) of the bench ctx (braid.setup's reading of the board: ends, layers, taut paths)
     round the destination part `dest`. A ring lane whose landing lies short of where its ring's lanes enter the ring
@@ -980,6 +1159,7 @@ def build(ctx, dest, _trunk=frozenset()):
     F.PM = PM = list(F.M)                   # (the lanes round the destination: every lane, a group's too)
     prs = getattr(ctx, 'pairs', None) or {}
     F.gland = {}                            # a group lane's landing short of its berth: the mouth of its pocket
+    F.tail = {}                             # ...and the points its tail goes by from there to its berth (landings)
     if F.group:
         G = F.group
 
@@ -1011,9 +1191,17 @@ def build(ctx, dest, _trunk=frozenset()):
         for n in F.M:
             if F.way[n][0] == 'mouth':
                 by_m[F.way[n][2]].append(n)
+        def _pad_of(n_):
+            # (a single lane's own pad: its part's nearest its berth -- its stub runs between the two)
+            if n_ in prs:
+                return None, None
+            pads_ = [(p_.global_x, p_.global_y) for p_ in pcb.footprints[F.dest_of[n_]].pads]
+            return tuple(F.bend[n_]), min(pads_, key=lambda c_: math.dist(c_, F.bend[n_]))
         for (a, b), mem in by_m.items():
             mem.sort(key=lambda n: (F.P[n], F.M.index(n)))
-            F.gland.update(G.landings(a, b, [(n, G.pt(F.way[n][1])) for n in mem], bd.LPITCH))
+            lands_, tails_ = G.landings(a, b, [(n, F.way[n], *_pad_of(n)) for n in mem], bd.LPITCH)
+            F.gland.update(lands_)
+            F.tail.update(tails_)
         F.pcut = {r: cut([F.bend[n][1] for n in F.M if F.dest_of[n] == r and face(F.bend[n], F.DBs[r]) == 'E'],
                          F.DBs[r][1], F.DBs[r][3]) for r in dests}
     else:
@@ -1241,11 +1429,11 @@ def build(ctx, dest, _trunk=frozenset()):
     kinds_ = route_layers.plane_kinds(pcb, RL_)
     stack_layers = max(1, sum(1 for L_ in RL_ if kinds_.get(L_) != 'gnd')) if len(RL_) > 2 else 1
     while True:
-        in_hull, rtails, packed = {}, {}, {}
+        in_hull, rtails, packed, ahead = {}, {}, {}, {}
         F.ring_squeeze = {}
         for _pass in range(2 * len(pcb.footprints) + 2):
             hits, room = _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails0, north, width, cen, in_hull, packed,
-                                      near_k, rtails)
+                                      near_k, rtails, ahead)
             acted = False
             for k in sorted(hits):
                 ref_, inner = min(hits[k], key=lambda h: (h[1], h[0]))      # the nearest part on the stack
@@ -1255,6 +1443,12 @@ def build(ctx, dest, _trunk=frozenset()):
                     # (its reference stack squeezed into the gap where it fits only across its layers: the geometry
                     # spaces the lanes on each layer)
                     F.ring_squeeze[k] = min(1.0, (inner - bd.TRACK / 2 - bd.CLEAR - edge_in) / max(room[k][2], 1e-9))
+                    acted = True
+                elif edge_in is None and k not in ahead and \
+                        (past_ := _past_part(F, pcb, ref_, k, dpads, north, room[k][2] / stack_layers)) is not None:
+                    # no room inside, but the part stands BEFORE this ring's side of the destination along the trunk
+                    # and a corridor between the two takes the ring's lanes: the ring leaves the trunk PAST the part
+                    ahead[k] = past_
                     acted = True
                 elif edge_in is None:
                     in_hull.setdefault(k, set()).add(ref_)  # no room: this ring goes round it
@@ -1291,8 +1485,28 @@ def _rings_round(p_):
     return bool((p_.drill or 0) > 0 or '*.Cu' in p_.layers or set(RL) <= set(p_.layers))
 
 
+def _past_part(F, pcb, ref, k, dpads, north, need):
+    """the place along the trunk (its s) PAST part `ref` from which ring `k` can leave it, or None: the part's copper
+    the rings go round ends, along the trunk, before the destination's copper on the ring's side of the trunk begins,
+    and the corridor between the two is wide enough for the ring's lanes (`need` mm of them side by side) and their
+    clearances. A destination of several parts has a ragged front: a header beside the part nearest the source,
+    standing in front of a part 6 mm further on, was read on the handoff line alone, joined the hull, and a ring's
+    eleven lanes went round its far end -- 63 mm of ring for berths 25 mm from the source"""
+    sg = north if k == 'N' else -north
+    side = [float(F.spine.project_pt(p_)[0]) for p_ in dpads if sg * float(F.spine.project_pt(p_)[1]) > 0]
+    cs = [(p_.global_x + sx * (p_.size_x or 0.0) / 2, p_.global_y + sy * (p_.size_y or 0.0) / 2)
+          for p_ in pcb.footprints[ref].pads if _rings_round(p_) for sx in (-1, 1) for sy in (-1, 1)]
+    if not side or not cs:
+        return None
+    s_part = max(float(F.spine.project_pt(c_)[0]) for c_ in cs)
+    reach = bd.TRACK / 2 + bd.CLEAR + bd.LPITCH
+    if min(side) - s_part < need + 2 * reach or s_part <= F.H0 - 1e-9:
+        return None
+    return s_part + reach
+
+
 def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, in_hull, packed, near_k=frozenset(),
-                 rtails=None):
+                 rtails=None, ahead=None):
     """each ring's lanes stacked on the handoff line outside the hull (F.o_h) -- or, a ring in `packed`, from that
     edge, between the destination and a part on its stack; a ring in `near_k` from the hull's near corner (build: its
     spine folded back from the whole hull's) -- its start and spine (F.Hk, F.rings). Returns (hits,
@@ -1320,6 +1534,11 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
         e_all = max(sg * o_ for _u, o_ in pts_) + 2 * bd.LPITCH - bd.LANE_MIN
         mem = [n for n in F.final if F.cls.get(n) == k]
         e_ = max(near_edge, e_all)
+        if k in (ahead or {}):
+            # (a ring leaving the trunk PAST a part, beside the destination's side and no longer before its corner:
+            # its start a lane pitch inside its innermost lane must clear the hull there by two, as the start below
+            # is tested -- a lane pitch further out than a ring that starts before the corner)
+            e_ = max(e_, e_all + bd.LPITCH + bd.LANE_MIN / 5)
         if k in near_k and mem:
             # (a ring whose spine FOLDED BACK from the whole hull's edge: the hull WHERE ITS LANES CROSS the handoff
             # line -- its copper up to two lane pitches past the arrival, the destination's near corner on that side --
@@ -1353,7 +1572,7 @@ def _stack_rings(F, ctx, pcb, src, dest, dpads, near, tails, north, width, cen, 
         # start stands OUTSIDE the hull: a lane pitch inside the innermost ring lane on the arrival line, moved back
         # along the trunk until it clears the hull by two lane pitches
         o_start = F.o_h[min(mem, key=lambda n: sg * F.o_h[n])] - sg * bd.LPITCH
-        s_start = F.H0
+        s_start = max(F.H0, (ahead or {}).get(k, F.H0))      # (past a part with no room inside: _past_part)
         hull = dpads + stubs + own(k)
         while _inside(F.spine.xy(s_start, o_start), hull, 2 * bd.LPITCH) and s_start > 0:
             s_start -= bd.LANE_MIN / 5

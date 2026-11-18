@@ -765,24 +765,22 @@ class Ends:
                         for (ol, oid) in conf.get((leg, id(m)), ()):
                             hit.update((ln, j) for ln, j in where.get((ol, oid, end), ()) if ln != lane)
                     self.oconf[(lane, end, i)] = hit
-        # ...and a GROUP's lanes in one POCKET: in their order along it from its first mouth, the ones out of that
-        # mouth, then the ones straight under, then the ones out of the other -- a lane out of a mouth past one that
-        # goes another way crosses it in the pocket, where no place on the walk shows it (Group.units)
+        # ...and a GROUP's lanes in one POCKET: two ways whose stretches in it cross -- a lane out of a mouth past the
+        # berth of one that leaves another way (straight under the part in front, or by another mouth) -- cross where
+        # no place on the walk shows it (whole_frame.pocket_cross: the stretches' ends alternate round the pocket)
         self.pconf = collections.defaultdict(set)
         if self.group is not None:
+            from whole_frame import pocket_cross as _pcross
             pk_ = collections.defaultdict(list)
             for lane, _lg in self.lanes:
                 for j, o in enumerate(self.B[lane]):
                     if o[5][4] is not None:
                         pk_[o[5][4]].append((lane, j))
             for key_, opts_ in pk_.items():
-                m1_ = key_[0]
-                rank_ = lambda w_: 0 if (w_[0] == 'mouth' and w_[2] == m1_) else (1 if w_[0] == 'straight' else 2)
-                dep_ = {(l_, j): _pt_seg(self.B[l_][j][1], m1_[0], m1_[1]) for l_, j in opts_}
-                for (a, i) in opts_:
-                    for (b, j) in opts_:
-                        if a != b and dep_[(a, i)] < dep_[(b, j)] and \
-                                rank_(self.B[a][i][5]) > rank_(self.B[b][j][5]):
+                st_ = {(l_, j): (self.B[l_][j][5][7] if len(self.B[l_][j][5]) > 7 else None) for l_, j in opts_}
+                for x_, (a, i) in enumerate(opts_):
+                    for (b, j) in opts_[x_ + 1:]:
+                        if a != b and _pcross(st_[(a, i)], st_[(b, j)]):
                             self.pconf[(a, i)].add((b, j))
                             self.pconf[(b, j)].add((a, i))
                             self.oconf[(a, 1, i)].add((b, j))

@@ -626,6 +626,44 @@ berths' layer, through parts standing there that no solve sees -- five lanes
 through a row of passives whose gaps take one lane each, two or three left
 open in every round.
 
+A pocket need not be a strip between two rows. Three chips at the corners
+of a triangle close into ONE pocket with three mouths, one of them eleven
+mm wide with a chip's whole face behind it, and four rules keep its lanes'
+legs from crossing where no place on the walk shows it
+(`Group._mouth_place`, `_open_stretch`, `landings`, `pocket_cross`):
+
+- the lanes of one mouth stand along it **in the order of their berths
+  along the pocket's walls**, walked from the mouth's one end round to its
+  other -- for a part at an end of the mouth that is its nearest pin first,
+  as before; a part at NEITHER end (one the mouth looks at across the
+  pocket) has its lanes where its wall's points stand nearest the mouth, in
+  its wall's order. Ranked by their depth from the nearer end, a chip's
+  west face stood at another chip's corner in the reverse of its pins'
+  order, every leg across every other;
+- a mouth is a way only where the straight leg to it goes **through no
+  part** (one that does goes round that part's corner, past pins and across
+  lanes nothing counts), unless no other way is left;
+- a mouth's line is taken **less what of it runs along a part**: the
+  outline's edge between two parts' corners leaves a face at a slant, a hair
+  off it for millimetres, and a chip's north-face lanes landed at its
+  south-east corner, their legs drawn straight through the chip;
+- two ways of one pocket whose stretches in it **alternate round the
+  pocket's ring** -- a lane out of one mouth past the berth of a lane that
+  leaves by another, or straight under the part in front -- cross in it: a
+  conflict in the ends model, as two ends on one place are.
+
+A row lane's **tail**, from its landing down the row to its berth, goes
+over the stub ends it passes: where its straight tail would come within a
+lane's room of an earlier lane's stub, it goes by a point that room beyond
+the stub's end for every lane between the two (`F.tail`). A stub standing
+further out than its neighbour's lane runs was crossed by that lane on the
+stubs' own layer. On that three-chip bus the first audit's same-layer
+crossings, which the solve's own check counted as none, went from 15 to 2
+on the same ends, and those two are ends the conflict rule no longer lets
+the model choose: on ends chosen under these rules its first audit had one
+such row, and the bus laid with no net open where eight to twelve had been
+left.
+
 #### Each source's buses, one group
 
 Buses that leave one array in different directions -- a star round it --
@@ -1391,7 +1429,14 @@ corridor, branch or path:
   destination's copper -- the stack packed into the gap, never inside the
   facing face's lanes -- and is one more thing the ring goes round when they
   do not (`room_inside`): a cap at the corner is gone round, a header lying
-  along the face with the ring's berths behind it is passed inside;
+  along the face with the ring's berths behind it is passed inside. A part
+  that ENDS, along the trunk, short of where the destination's copper on
+  that side begins, with the stack's room between the two, is passed
+  **ahead**: the ring starts past its far end (`_past_part`). Read by its
+  offset from the trunk alone, a pin header lying along the trunk beside a
+  group of three chips joined the hull, and the ring went round its far end:
+  64 mm of ring where 40 serve, eleven lanes of 99 to 131 mm, and a third of
+  the bus left open;
 - the two **orders** the solve inverts: the teeth round the source, the
   berths round the destination -- two lanes at one place round a box (within
   `TIE_MM`: a stack, one exit on two layers) in the order the other end gives
@@ -2317,6 +2362,19 @@ for some of the lanes exists:
   laid 10, 3, 2 and 2 nets open where the loop's best round laid 6, 0, 2 and
   2, and on a bus of ten pairs the held round and the round of fewest
   findings each left a pair open where the third round's plan laid all ten;
+- a round's lay that leaves a FEW lanes open -- a quarter of the bus's at
+  most (`MINI_SHARE`) -- is followed by **the mini re-route**
+  (`mini_reroute`): those lanes planned again BY THEMSELVES on the board that
+  lay made, every other lane's copper there as copper and their own ends put
+  back as the fanout left them -- the solve, ONE round of the loop, the
+  route -- and kept where it leaves fewer open. A whole re-solve moves every
+  lane to answer two; this moves none of what is laid. A 53-lane bus whose
+  loop stopped at crowded ends and whose held plan left one lane open had it
+  closed in 23 s, the board's first lay with no net open on those ends; a
+  bus that left two had one closed in 30 s. It is one round because the buses
+  after this one wait on its turn, and a few lanes among laid copper have a
+  way or have none: a quarter of a group bus's lanes with no way through the
+  rest of it gained nothing from more;
 - a round that lays nothing, or leaves nets open, is followed by **round 1
   again under the next seed**, up to `ROUNDS` (default 4): every solve of a
   round -- the
