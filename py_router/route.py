@@ -6748,6 +6748,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # what `auto` left out and why -- the membership the meanders and the
     # #521 protected_nets record were built from.
     if 'groups' in _length_match_report:
+        # #1971: a group that matched a multipoint member on its main edge
+        # only is graded on each net's total copper, on the board as it now
+        # stands (Phase 3's taps laid, the post-route cleanup done).
+        from length_matching import grade_main_edge_groups
+        grade_main_edge_groups(_length_match_report['groups'], config, pcb_data)
         summary['length_match_groups'] = _length_match_report['groups']
     if 'auto' in _length_match_report:
         summary['length_match_auto'] = _length_match_report['auto']
