@@ -125,8 +125,9 @@ def refine(args):
     from placement.groups import parse_sources
     from placement.grouping import load_groups, validate_doc
     from placement.parser import extract_locked_refs
+    from placement.placement_state import assess_placement
     from placement.portfolio import copy_siblings
-    from placement.writer import write_placed_output
+    from placement.writer import move_refusals, write_placed_output
 
     if not math.isfinite(args.radius) or args.radius <= 0 or args.moves <= 0:
         raise ValueError('--radius must be finite and positive; --moves must be positive')
@@ -149,8 +150,11 @@ def refine(args):
     pcb = parse_kicad_pcb(args.board)
     input_poses = {ref: (part.x, part.y, part.rotation or 0.0)
                    for ref, part in pcb.footprints.items()}
-    if pcb.segments or pcb.vias:
-        raise ValueError('refine an unrouted board; existing tracks or vias cannot follow moves')
+    # footprint and board graphic copper is part of the parts, not routing
+    copper = assess_placement(pcb, args.board)
+    if copper.has_copper:
+        raise ValueError(f'refine an unrouted board; this one carries {copper.copper_carried}, '
+                         'which cannot follow moves')
     unknown = sorted(set(args.refs) - set(pcb.footprints))
     if unknown:
         raise ValueError('unknown footprint keys: ' + ', '.join(unknown))
@@ -175,6 +179,12 @@ def refine(args):
     state, model, movable, notes = place_simple.build(
         pcb, args.board, doc, base, defaults, intent, blocks, held)
     selected = sorted(set(args.refs).intersection(movable))
+    # a part the board writer cannot move is said now, not after the search (#1927)
+    cannot_move = move_refusals(args.board, selected)
+    if cannot_move:
+        raise ValueError('the board writer cannot move '
+                         + '; '.join(f'{ref} ({why})' for ref, why in sorted(cannot_move.items()))
+                         + '. Leave it out of --refs or lock it in the board')
     restore(model, {ref: input_poses[ref] for ref in state.parts})
     original, best, before, after, accepted = search(
         model, selected, args.radius, args.moves, args.seed)
@@ -225,6 +235,8 @@ def refine(args):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    from placement import run_record          # the placement record (#1486)
+    run_record.record('place_refine', argv, boards=[args.board])
     try:
         return refine(args)
     except (OSError, ValueError) as error:

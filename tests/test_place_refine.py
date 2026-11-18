@@ -134,6 +134,35 @@ def test_routed_input_is_refused(tmp_path):
     assert source.read_text(encoding='utf-8') == routed
 
 
+def test_footprint_graphic_copper_is_not_routing(tmp_path):
+    source = board(tmp_path / 'input.kicad_pcb')
+    source.write_text(source.read_text(encoding='utf-8').replace(
+        footprint('HOLD', 30, 25),
+        footprint('HOLD', 30, 25)[:-2] + ' (fp_line (start -0.5 0.6) (end 0.5 0.6)'
+        ' (stroke (width 0.2) (type solid)) (layer "F.Cu")))\n'), encoding='utf-8')
+    assert parse_kicad_pcb(str(source)).segments, 'the fixture lost its graphic copper'
+    output, report = tmp_path / 'refined.kicad_pcb', tmp_path / 'refined.json'
+    result = run(source, output, report)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(report.read_text())['improved']
+
+
+def test_a_part_the_writer_cannot_move_is_refused_before_the_search(tmp_path):
+    source = board(tmp_path / 'input.kicad_pcb')
+    source.write_text(source.read_text(encoding='utf-8').replace(
+        footprint('B', 15, 15),
+        footprint('B', 15, 15)[:-2] + ' (zone (net 0) (net_name "") (layer "F.Cu")'
+        ' (hatch edge 0.5) (polygon (pts (xy 14 14) (xy 16 14) (xy 16 16)))'
+        ' (fill_segments (pts (xy 14 14) (xy 16 14)))))\n'), encoding='utf-8')
+    output, report = tmp_path / 'refined.kicad_pcb', tmp_path / 'refined.json'
+    result = run(source, output, report)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'the board writer cannot move B' in result.stderr, result.stderr
+    assert 'Traceback' not in result.stderr
+    assert not output.exists()
+    assert not report.exists()
+
+
 def test_output_and_report_cannot_overwrite_inputs(tmp_path):
     source = board(tmp_path / 'input.kicad_pcb')
     original = source.read_bytes()

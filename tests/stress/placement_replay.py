@@ -49,6 +49,7 @@ SCRIPTS = {
     'check_floorplan': 'py_tools/check_floorplan.py',
     'fit_template': 'py_tools/fit_template.py',
     'place_pose': 'py_placer/place_pose.py',
+    'place_refine': 'py_placer/place_refine.py',
     'place_simple': 'py_placer/place_simple.py',
     'judge_seeds': 'py_placer/judge_seeds.py',
 }
