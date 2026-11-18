@@ -7,7 +7,7 @@ the others, and where each changes layer. It holds two routers:
 | | how it works | status |
 |---|---|---|
 | **The whole route**<br>`whole_route.py`, `whole_*.py`, `route_bus.py` | Chooses every net's ends, then plans every lane's **whole path before anything is routed** -- crossings, layer changes, geometry on the router's grid -- checks the plan against the router's own rules, and routes every lane in its band at once. | **The current router.** Every rung of both benches routes connected and DRC-clean on a Mac, with fewer vias and less copper than the human. |
-| The braid's pieces<br>`braid.py`, `connect.py`, `corridor.py` | A bench's reading, a corridor planner, and the routers that lay one lane or one pair in its band. | From the earlier router. The whole route reuses its fanout, router, benches and audits. |
+| The braid's pieces<br>`braid.py`, `connect.py`, `corridor.py` | A bench's reading, and the routers that lay one lane or one pair in its band. | From the earlier router. The whole route reuses its fanout, router, benches and audits. |
 
 Two rules both keep:
 
@@ -208,7 +208,7 @@ Every stage reads the bench under the chain's plan environment
 (`whole_route.stage_env` sets it for a run):
 
 ```bash
-export BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2
+export BRAID_EXACT_PAGES=0
 ```
 
 **1. A bench** -- the human's ends, or our own:
@@ -2684,9 +2684,7 @@ whole route plans every lane before anything is routed, and what it takes
 from the braid stays in `braid.py`: the bench's reading (`setup`: the ends,
 the layers, the taut paths), the obstacles, and the routers that lay one
 lane or one pair in its band (`Corridor.route_lane`, `route_pair_lane`,
-through `route_lanes.py --plan`). The braid's corridor planner
-(`plan_corridors`) is driven by `plan_audit.py`'s own command line and by
-`route_lanes.py` without a plan.
+through `route_lanes.py --plan`).
 
 `synth_bus.py` writes synthetic buses with a known optimum
 (`synth_bus.py --self-test` checks its truth model).
@@ -2796,7 +2794,7 @@ With nothing supplied, as on the benches:
 | `source_realize.py` | a source plan realised with the production engine, audited per dimension |
 | `connect.py`, `corridor.py`, `topo_strings.py`, `taut_fast.py` | the real router, corridors (a lane's layers on its two pieces: `tests/test_622_piece_u.py`; a ring wound round the destination from a bundle arriving at a slant: `tests/test_622_wrap_spine_slant.py`), the taut relaxation |
 | `pairs.py` | a differential pair's rules: its hand, end connectors, dive room, crossover, staircase |
-| `plan_audit.py`, `route_lanes.py` | a plan checked before routing; chosen lanes routed one at a time in band, with renders and a refused search's frontiers |
+| `plan_audit.py`, `route_lanes.py` | a plan's checks before routing (run by `whole_audit.py`); a plan's lanes routed one at a time in band (`--plan`), with renders and a refused search's frontiers |
 | `human_ends_bench.py` | a bench on a human's ends, with the plan sidecar |
 | `ship_vias.py`, `rules.py` | Type VII on a via in a pad; the routing numbers |
 

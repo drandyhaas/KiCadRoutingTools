@@ -9,8 +9,8 @@ read the shell's settings rather than the chain's. In a fresh process whose envi
 this pins:
 
 1. importing route_bus imports no chain module (braid, make_bench, fanout_from_plan);
-2. the buses found (find_buses) import the chain's modules under the chain's paging (braid.PAGES_SIDERS 2, its
-   default 1) and the caches off;
+2. the buses found (find_buses) import the chain's modules under the chain's paging (braid.EXACT_PAGES_ENV '0',
+   None where nothing sets it) and the caches off;
 3. the step (route_bus, here refused at once for a part the board does not have) likewise.
 """
 import os
@@ -36,7 +36,7 @@ else:
         print('EXIT', rb.route_bus(sys.argv[2], os.path.join(td, 'o.kicad_pcb'), 'NOPE1', 'NOPE2',
                                    log=lambda *a: None)[0])
 import braid, pairs
-print('PAIRS', braid.PAGES_SIDERS)
+print('PAIRS', braid.EXACT_PAGES_ENV)
 '''
 
 
@@ -59,14 +59,14 @@ def main():
     f = probe('find')
     if f['LOADED'] != '-':
         fails.append(f'importing route_bus loaded chain modules: {f["LOADED"]}')
-    if f['PAIRS'] != '2':
-        fails.append(f'after find_buses braid.PAGES_SIDERS is {f["PAIRS"]}: the chain imported under the shell\'s '
+    if f['PAIRS'] != '0':
+        fails.append(f'after find_buses braid.EXACT_PAGES_ENV is {f["PAIRS"]}: the chain imported under the shell\'s '
                      f'environment')
     s = probe('step')
     if s.get('EXIT') != '2':
         fails.append(f'route_bus with no such parts: exit {s.get("EXIT")}, want 2')
-    if s['PAIRS'] != '2':
-        fails.append(f'after route_bus braid.PAGES_SIDERS is {s["PAIRS"]}: its stages would read the shell\'s '
+    if s['PAIRS'] != '0':
+        fails.append(f'after route_bus braid.EXACT_PAGES_ENV is {s["PAIRS"]}: its stages would read the shell\'s '
                      f'settings')
     for x in fails:
         print(f'  FAIL: {x}')

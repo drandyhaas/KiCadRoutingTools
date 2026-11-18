@@ -1,12 +1,11 @@
-"""plan_audit.py -- audits of a braid PLAN, before anything is routed.
+"""plan_audit.py -- audits of a PLAN, before anything is routed.
 
-Every corridor is planned by the braid's planner (braid.plan_corridors,
-under the caller's environment: BRAID_BRANCH, ...), and the
-plan is checked against the rules the router will apply to it. A plan that
+The plan is the lanes as the router is handed them (whole_ctx.lanes: each
+lane's reserved lines and via sites, its band, its layer runs), and it is
+checked against the rules the router will apply to it. A plan that
 fails one of these hands the router a lane it cannot route in band, so each
-failure here is a refusal found without paying for the route.
-
-usage: plan_audit.py CHECK --board B --nets N1,N2,..|@FILE [--dest REF] [--png OUT]
+failure here is a refusal found without paying for the route. whole_audit.py
+runs the checks on a whole-route plan.
 
   pitch   two lanes' reservations (virtual_of: exactly what the router stamps
           for a lane not routed yet) nearer than the router's bar on one layer:
@@ -30,14 +29,14 @@ step away. Static copper stays where it is.
   bands   each lane's band -- the one route_lane hands the router -- against
           its planned line: the planned length no layer's band covers, and
           whether the band connects tooth to berth at all (a flood over band
-          cells, no obstacles). --only N1,N2 restricts; --png DIR renders.
+          cells, no obstacles). `only` restricts; `png_dir` renders.
   swim    every SWIMMER's planned line (a lane with no page, which the plan
           lets weave, so no other lane's reservation is checked
           against it)
           against the lines that cross it: the crossings in order along it,
           by layer, and each F crossing and B crossing nearer each other than
           one layer change fits between (two via rooms, plus the pair pitch
-          for a pair) -- a place the swimmer cannot weave. --only restricts.
+          for a pair) -- a place the swimmer cannot weave. `only` restricts.
   static  every lane's reservation against other nets' static copper on its
           layer (pads, base segments -- stubs and teeth --, base vias) nearer
           than track/2 + clearance + grid/2 to that copper's edge: a line through
@@ -51,17 +50,8 @@ step away. Static copper stays where it is.
           two or three steps over segments shorter than that is one fold. The
           pitch and dives audits measure one lane against another and cannot
           see either.
-  near NET X,Y [R]   every other lane's reservation within R (two lane pitches) of (X, Y),
-          and the plan facts of NET and of those lanes (page, layers, slots,
-          layer profile).
-
---png OUT (pitch: a file; bands: a directory) draws the finding over the plan.
 """
-KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
-import argparse
 import collections
-import contextlib
-import io
 import bisect
 import math
 import os
@@ -117,16 +107,6 @@ def read_nets(arg):
     if arg.startswith('@'):
         arg = open(arg[1:]).read()
     return [n.strip() for n in arg.replace('\n', ',').split(',') if n.strip()]
-
-
-def plan(board, nets, dest, quiet=True):
-    """(ctx, corridors, log lines): the braid's plan of `nets`, every corridor
-    planned by braid.plan_corridors, the board's copper reset to the base."""
-    logs = []
-    cm = contextlib.redirect_stdout(io.StringIO()) if quiet else contextlib.nullcontext()
-    with cm:
-        ctx, corridors = bd.plan_corridors(board, nets, dest, logs.append)
-    return ctx, corridors, logs
 
 
 def dseg(x, y, p, q):
@@ -1248,62 +1228,3 @@ def check_shape(ctx, corridors, only=None):
     print(f'SHAPE {len(seen)} place(s): {dict(collections.Counter(k[2] for k in seen))} '
           f'in {len({k[0] for k in seen})} lane(s)')
     return hits
-
-
-def show_near(ctx, corridors, nm, P, R=None):
-    R = 2 * bd.LANE_MIN if R is None else R
-    c = next((c for c in corridors if nm in c.members), None)
-    if c is None:
-        print(f'{nm} is not planned')
-        return
-    rows, seen = [], set()
-    for d, om, L in sorted((round(dseg(P[0], P[1], p, q), 3), om, L[0]) for om in c.members if om != nm
-                           for p, q, L in c.virtual_of([om]) if dseg(P[0], P[1], p, q) < R):
-        if (om, L) not in seen:
-            seen.add((om, L))
-            rows.append((d, om, L))
-    print(f'near ({P[0]}, {P[1]}) within {R}: ' + ', '.join(f'{om} {L} {d}' for d, om, L in rows))
-    sc = c.sched_cur
-    for om in [nm] + sorted({r[1] for r in rows}):
-        try:
-            prof = [(round(s, 2), L[0]) for s, L in c.layer_profile(om)]
-        except Exception:
-            prof = None
-        print(f'  {om:7s} page {sc.page.get(om)} tooth {ctx.tooth_layer[om][0]} dest {ctx.dest_layer[om][0]} '
-              f'st {tuple(round(v, 2) for v in c.st[om])} launch {c.launch_o[om]:.2f} '
-              f'target {c.target_o[om]:.2f} profile {prof}')
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('check', choices=('pitch', 'dives', 'static', 'bands', 'swim', 'shape', 'near'))
-    ap.add_argument('args', nargs='*', help='near: NET X,Y [R]')
-    ap.add_argument('--board', required=True)
-    ap.add_argument('--nets', required=True, help='N1,N2,.. or @FILE')
-    ap.add_argument('--dest', required=True, help="the destination part's reference")
-    ap.add_argument('--only', default='', help='bands, swim, shape: these lanes only')
-    ap.add_argument('--png', default='')
-    ap.add_argument('--all', action='store_true', help='dives: print every site, not only the failing ones')
-    a = ap.parse_args(argv)
-    ctx, corridors, _logs = plan(a.board, read_nets(a.nets), a.dest)
-    if a.check == 'pitch':
-        check_pitch(ctx, corridors, a.png or None)
-    elif a.check == 'dives':
-        check_dives(ctx, corridors, a.all)
-    elif a.check == 'static':
-        check_static(ctx, corridors, set(a.only.split(',')) - {''} or None)
-    elif a.check == 'bands':
-        check_bands(ctx, corridors, set(a.only.split(',')) - {''} or None, a.png or None)
-    elif a.check == 'shape':
-        check_shape(ctx, corridors, set(a.only.split(',')) - {''} or None)
-    elif a.check == 'swim':
-        check_swim(ctx, corridors, set(a.only.split(',')) - {''} or None)
-    else:
-        if len(a.args) < 2:
-            ap.error('near: NET X,Y [R]')
-        show_near(ctx, corridors, a.args[0], tuple(map(float, a.args[1].split(','))),
-                  float(a.args[2]) if len(a.args) > 2 else None)
-
-
-if __name__ == '__main__':
-    main()

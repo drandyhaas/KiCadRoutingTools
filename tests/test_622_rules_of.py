@@ -207,7 +207,7 @@ TARGETS = [
     ('braid.SPEC_CLEARANCE', lambda: br.SPEC_CLEARANCE),
     ('braid.VIA_SIZE', lambda: br.VIA_SIZE), ('braid.VIA_DRILL', lambda: br.VIA_DRILL),
     ('braid.MINP', lambda: br.MINP), ('braid.LPITCH', lambda: br.LPITCH),
-    ('braid.HALF_SEP', lambda: br.HALF_SEP),
+    ('braid.LANE_MIN', lambda: br.LANE_MIN),
     ('braid.VIA_NEED', lambda: br.VIA_NEED), ('braid.END_KEEP', lambda: br.END_KEEP),
     ('source_realize.FAN_TRACK', lambda: sr.FAN_TRACK),
     ('source_realize.FAN_CLEAR', lambda: sr.FAN_CLEAR),
@@ -220,7 +220,7 @@ BEFORE_LIT = {
     'braid.TRACK': 0.127, 'braid.CLEAR': 0.105, 'braid.SPEC_CLEARANCE': 0.1,
     'braid.VIA_SIZE': 0.25, 'braid.VIA_DRILL': 0.15,
     'braid.MINP': 0.38, 'braid.LPITCH': 0.35,
-    'braid.HALF_SEP': LIT['half_sep'],
+    'braid.LANE_MIN': 0.127 + 0.105 + 0.02,
     'braid.VIA_NEED': LIT['via_need'], 'braid.END_KEEP': LIT['end_keep'],
     'source_realize.FAN_TRACK': 0.1, 'source_realize.FAN_CLEAR': 0.1,
 }
@@ -281,7 +281,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # exactly one (braid.clip_round_ends' keep_r) and it was fixed; this stops
 # the next one.
 CONSTS = {'TRACK', 'CLEAR', 'SPEC_CLEARANCE', 'SPEC_CLEAR', 'VIA_SIZE',
-          'VIA_DRILL', 'END_KEEP', 'VIA_NEED', 'HALF_SEP', 'MINP',
+          'VIA_DRILL', 'END_KEEP', 'VIA_NEED', 'LANE_MIN', 'MINP',
           'LPITCH', 'MARGIN_OUT',
           'FAN_TRACK', 'FAN_CLEAR'}
 scanned = 0
@@ -310,7 +310,7 @@ truthy('the AST scan actually scanned something', scanned > 10,
        f'only {scanned} file(s) parsed')
 
 # every stage's entry point installs (the threading is the deliverable)
-for fn in ('fanout_from_plan.py', 'make_bench.py', 'cut_ledger.py',):
+for fn in ('fanout_from_plan.py', 'make_bench.py',):
     body = open(os.path.join(AWX, fn), encoding='utf-8').read()
     truthy(f'{fn} installs the chain constants',
            'install_defaults()' in body,

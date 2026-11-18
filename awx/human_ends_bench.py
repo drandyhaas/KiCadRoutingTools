@@ -244,7 +244,7 @@ def write_sidecar(board, nets, dest, out, marker):
     import braid as te
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        ctx, groups = te.setup(board, nets, dest, lambda m='': None, plan=None)
+        ctx, _groups = te.setup(board, nets, dest, lambda m='': None, plan=None)
     if ctx.M is not None:
         raise SystemExit('the pair reads mirrored (chirality -1): turn it with flow_frame.py first')
     keep = [nm for nm in nets if nm in ctx.ends]
@@ -258,7 +258,7 @@ def write_sidecar(board, nets, dest, out, marker):
         d['pages_first'] = True
     json.dump(d, open(out, 'w'), indent=1)
     print(f'wrote {out}: {len(d["ends"])} ends; tooth layers {dict(collections.Counter(d["tooth_layer"].values()))}; '
-          f'berth layers {dict(collections.Counter(d["dest_layer"].values()))}; groups {[len(g) for g in groups]}')
+          f'berth layers {dict(collections.Counter(d["dest_layer"].values()))}')
 
 
 def main(argv=None):

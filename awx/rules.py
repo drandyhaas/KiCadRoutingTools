@@ -9,8 +9,7 @@ Until this module the chain's geometry was written out five times:
 ``track_width=0.1, clearance=0.1`` hardcoded at six production-engine call
 sites and a literal ``--clearance 0.1`` in the chain's grading scripts.
 Nine of those were derived from another one by a formula that lived only in
-a comment, and two of them (``NEST_IN``, ``cut_ledger.NEED``) are the same
-quantity spelled two ways, one ULP apart.
+a comment.
 
 This module is where they live now. It does NOT read the board.
 
@@ -112,15 +111,10 @@ installs the supplied rules when there are some, else DEFAULT (inert).
 Why install-into-constants rather than making each constant a function: the
 chain's consumers read these through module ATTRIBUTES at call time
 (``te.VIA_SIZE``, ``br.TRACK``, ``br.CLEAR``) in ~30 places, so one install
-reaches all of them, and no hot loop grows a function call. The one module
-that binds them into locals at import time (`cut_ledger`) re-reads after
-installing.
+reaches all of them, and no hot loop grows a function call.
 
 DEBT THIS FILE DOES NOT PAY (recorded, not fixed)
 -------------------------------------------------
-  * ``braid.BLOCK_GAP`` 0.45, ``LEG_W``, ``LEG_REQ``, ``LEG_O``,
-    ``HEAD_RUN`` are constants with no formula behind them;
-    only the lane-slice floors of the two pitches are modelled.
   * the 0.025 routing grid in ``braid.setup`` is sized against the fanout's
     0.25 stub packing ("the legal minimum, track + clearance = 0.227, plus
     23 um"). That sentence is a rule computation and the grid is still a
@@ -152,8 +146,6 @@ EXIT_PITCH = 0.38         # braid.MINP
 # the pair step's reaches and widenings in the rules' units -- LANE pitches (braid.LANE_MIN) and PAIR pitches (a
 # pair's track + gap, braid.PP): braid derives its constants from them at import, install() at install
 PAIR_FANIN_LANES = 10.0         # braid.PAIR_FANIN, lane pitches round either of a pair's ends
-PAIR_DIVE_EXTRA_PITCHES = 2.0   # braid.PAIR_DIVE_EXTRA, pair pitches each side of a pair's layer change
-PAIR_FANIN_BAND_PITCHES = 2.0   # braid.PAIR_FANIN_BAND, pair pitches
 PAIR_APPROACH_PITCHES = 4.5     # braid.PAIR_APPROACH, pair pitches
 
 _ROUND = 6                # decimals every derived quantity lands on
@@ -209,11 +201,11 @@ class Rules:
         return _r(self.track + self.hug)
 
     # The five below are braid's / topo_strings' OWN expressions, in their
-    # own order, unrounded -- see "FLOAT BITS". install() writes these back
-    # over the module constants.
+    # own order, unrounded -- see "FLOAT BITS". install() writes them back
+    # over the module constants, all but half_sep, which no module holds.
     @property
     def half_sep(self):
-        return (self.track + self.clearance) / 2     # braid.HALF_SEP
+        return (self.track + self.clearance) / 2
 
     @property
     def via_need(self):
@@ -453,7 +445,6 @@ def install(rules, verbose=False):
     put('braid', 'SPEC_CLEARANCE', rules.clearance)
     put('braid', 'VIA_SIZE', rules.via_size)
     put('braid', 'VIA_DRILL', rules.via_drill)
-    put('braid', 'HALF_SEP', rules.half_sep)
     put('braid', 'VIA_NEED', rules.via_need)
     put('braid', 'LANE_MIN', rules.lane_min)
     put('braid', 'END_KEEP', rules.end_keep)
@@ -471,14 +462,11 @@ def install(rules, verbose=False):
     # the constants other modules DERIVE from these at import, each in its module's own expression and order, so an
     # install leaves every module exactly as a fresh import under the same rules does (test_622_rules_supplied): a
     # module imported before the install -- a GUI's process, an earlier stage in the driver's -- is not re-imported
-    put('braid', 'WRAP_REACH', 10 * rules.lane_min)
     put('braid', 'PAIR_FANIN', PAIR_FANIN_LANES * rules.lane_min)
     for m in _modules('pairs'):
         put('pairs', 'MAX_SEP', 2.0 * rules.lane_pitch)
         pp = rules.track + m.GAP                                  # pairs.pitch(TRACK), after GAP above
         put('braid', 'PP', pp)
-        put('braid', 'PAIR_DIVE_EXTRA', PAIR_DIVE_EXTRA_PITCHES * pp)
-        put('braid', 'PAIR_FANIN_BAND', PAIR_FANIN_BAND_PITCHES * pp)
         put('braid', 'PAIR_APPROACH', PAIR_APPROACH_PITCHES * pp)
     stack = rules.track + rules.clearance + HUG_OVER
     put('select_moves', '_STACK_PITCH', stack)
@@ -498,28 +486,6 @@ def install(rules, verbose=False):
     put('whole_ends', '_CHG_ROOM', 2 * 1.1 * rules.via_need)
     put('plan_audit', 'TINY', rules.track / 25)
     put('whole_feedback', 'FRONT', 2 * rules.via_need + rules.lane_min)
-
-    # the module that binds braid's constants into its OWN locals at
-    # import time -- rebind it, in case it was imported before this call
-    for mod in ('cut_ledger',):
-        for m in _modules(mod):
-            for name, value in (('TRACK', rules.track), ('CLEAR', rules.hug),
-                                ('VIA_SIZE', rules.via_size),
-                                ('VIA_DRILL', rules.via_drill)):
-                if hasattr(m, name):
-                    setattr(m, name, value)
-                    if f'{mod}.{name}' not in done:
-                        done.append(f'{mod}.{name}')
-            if hasattr(m, 'NEED'):
-                # cut_ledger's own expression, NOT the rounded lane_slice: it
-                # spells one lane's slice ``TRACK + CLEAR``, which is one ULP
-                # below the 0.232 select_moves spells as a literal. Keeping
-                # the expression keeps this tool bit-identical to what it
-                # printed before -- the two spellings of one quantity are
-                # themselves an instance of the drift this module ends.
-                m.NEED = rules.track + rules.hug
-                if f'{mod}.NEED' not in done:
-                    done.append(f'{mod}.NEED')
 
     if verbose:
         print(rules.describe(), flush=True)

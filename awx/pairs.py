@@ -897,18 +897,6 @@ def _cut_back(poly: List[Pt], L: float) -> List[Pt]:
     return list(reversed(_cut_front(list(reversed(poly)), L)))
 
 
-def offset_line(p: Pt, q: Pt, h: float) -> List[Tuple[Pt, Pt]]:
-    """The two lines parallel to p->q at +h and -h across it (the pair's
-    legs about a centreline), as (p', q') pairs."""
-    dx, dy = q[0] - p[0], q[1] - p[1]
-    L = math.hypot(dx, dy)
-    if L < 1e-9:
-        return [(p, q)]
-    nx, ny = -dy / L * h, dx / L * h
-    return [((p[0] + nx, p[1] + ny), (q[0] + nx, q[1] + ny)),
-            ((p[0] - nx, p[1] - ny), (q[0] - nx, q[1] - ny))]
-
-
 _DIRS = {'left': (-1, 0), 'right': (1, 0), 'up': (0, -1), 'down': (0, 1)}
 
 

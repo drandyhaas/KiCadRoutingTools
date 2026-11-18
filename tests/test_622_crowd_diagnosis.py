@@ -92,7 +92,7 @@ def env_of(**more):
     e = dict(os.environ)
     for k in ('_CROWD_CHILD', '_CROWD_K_SWEEP', 'SOLVE_CROWD', 'SOLVE_UNPROVED'):
         e.pop(k, None)
-    e.update(ROUTE_LAYERS=LAYERS, DEST='SD1', OMP_NUM_THREADS='1', BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2')
+    e.update(ROUTE_LAYERS=LAYERS, DEST='SD1', OMP_NUM_THREADS='1', BRAID_EXACT_PAGES='0')
     e.update(more)
     return e
 

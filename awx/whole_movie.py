@@ -138,7 +138,7 @@ def _chain_env(round_dir, dest, bench=None):
         env.pop(k, None)
     env.update(OMP_NUM_THREADS='1', VECLIB_MAXIMUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
                TAUT_MEMO=env.get('TAUT_MEMO', '1'),
-               BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2', STAGE_CACHE=env.get('STAGE_CACHE', '1'),
+               BRAID_EXACT_PAGES='0', STAGE_CACHE=env.get('STAGE_CACHE', '1'),
                BENCH=bench or os.path.join(round_dir, 'fo.kicad_pcb'), NETS=','.join(nets), DEST=dest)
     return env
 

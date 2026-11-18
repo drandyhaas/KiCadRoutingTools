@@ -4,8 +4,8 @@ lanes as the router and the audit take them.
 The whole-route tools read one bench from the environment, like the rest of the chain: BENCH (the board, fanned out:
 teeth and berths laid), NETS (N1,N2,.. or @FILE) and DEST (the destination part's reference). plan() reads it --
 braid.setup's reading of the board (its ends, layers, escape directions, pairs and taut paths, a board of the other
-pair chirality turned over, a pair one member), under the braid's plan environment (BRAID_EXACT_PAGES=0
-PLAN_PAGES_SIDERS=2, which whole_route.py sets); none of the braid's own planning. The whole route's frame is built on
+pair chirality turned over, a pair one member), under the chain's stage environment (BRAID_EXACT_PAGES=0, which
+whole_route.py sets). The whole route's frame is built on
 it (whole_frame.py).
 
 PlanLanes(ctx, frame) holds the whole route's lanes where the router and plan_audit's checks expect a corridor, and
@@ -228,7 +228,7 @@ def stub_dir(ctx, net, pt, layer):
 
 
 def plan(quiet=True):
-    """(ctx, the braid's corridor groups): braid.setup's reading of the bench -- planned once, and SAVED: every
+    """(ctx, []) -- braid.setup's reading of the bench, its second place empty -- planned once, and SAVED: every
     whole_* stage plans the same bench (4.5 s of each, a fifth of a loop), so the plan is kept under tmp/ctx_cache,
     keyed as a stage is
     (stage_cache: the environment, which names the bench and its nets, by content) and restored while every file the
@@ -418,7 +418,7 @@ def candidate(pcb, names, dest, plan, tracks=(), cfg=None, board=None):
 
 
 def _plan(board, nets, dest, quiet):
-    """(ctx, the braid's corridor groups): braid.setup's reading of the bench (the groups only reported)"""
+    """(ctx, []): braid.setup's reading of the bench (its second place empty: the callers unpack two)"""
     import braid as bd
     cm = contextlib.redirect_stdout(io.StringIO()) if quiet else contextlib.nullcontext()
     with cm:
@@ -430,15 +430,12 @@ class PlanLanes:
     """the whole route's lanes where the braid's lane and pair routers and plan_audit's checks expect a corridor:
     every lane of the frame (whole_frame) with its tooth and berth, the frame's trunk spine (a lane's layer runs are
     ordered along it), and -- once a plan is installed (install) -- each lane's reserved copper, band, search window
-    and layer runs. Those are all they read, so they run on it unchanged; nothing of the braid's own planning (its
-    corridors, spines, schedules) is in it"""
+    and layer runs. Those are all they read, so they run on it unchanged"""
     idx = 0
     import braid as _bd
     route_lane = _bd.Corridor.route_lane
     route_pair_lane = _bd.Corridor.route_pair_lane
     _pair_band_slack = _bd.Corridor._pair_band_slack
-    _pair_conn_points = _bd.Corridor._pair_conn_points
-    _pair_fanin_band = _bd.Corridor._pair_fanin_band
     _pair_debug_image = _bd.Corridor._pair_debug_image
     del _bd
 
@@ -659,7 +656,7 @@ def install(ctx, c, geo):
 
     def layer_profile(nm):
         """the lane's own layer runs, [(spine s where each starts, layer)] -- what a lane's layer changes are counted
-        from (route_lanes' plan vias, plan_audit near)"""
+        from (route_lanes' plan vias)"""
         out = []
         for i, p_ in enumerate(geo['lanes'].get(nm, {}).get('pieces', [])):
             if i == 0 or p_[4] != geo['lanes'][nm]['pieces'][i - 1][4]:

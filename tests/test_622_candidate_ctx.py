@@ -55,7 +55,7 @@ sys.path.insert(0, os.path.join(ROOT, 'awx'))
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 os.environ.pop('AWX_RULES', None)
 # (the fanout stage's own plan environment, as the whole route sets it for every stage: whole_route.stage_env)
-os.environ.update(ROUTE_LAYERS='F.Cu,B.Cu,In1.Cu,In2.Cu', DEST='U5', BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2')
+os.environ.update(ROUTE_LAYERS='F.Cu,B.Cu,In1.Cu,In2.Cu', DEST='U5', BRAID_EXACT_PAGES='0')
 for k_ in ('BENCH', 'NETS', 'FEEDBACK', 'INCREMENTAL', 'STAGE_CACHE', 'TAUT_MEMO', 'GROUP_ENDS', 'ENDS_CAPTURE',
            'FANOUT_NETS', 'ENDS_BLOCKED', 'JOINT_FOREIGN'):
     os.environ.pop(k_, None)

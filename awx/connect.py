@@ -304,7 +304,6 @@ def connect_pair(pcb: PCBData, p_id: int, n_id: int,
                  a_dir: Optional[Point] = None, b_dir: Optional[Point] = None,
                  lead: float = 0.15,
                  a_n_layer: Optional[str] = None, b_n_layer: Optional[str] = None,
-                 a_conn: Optional[Point] = None, b_conn: Optional[Point] = None,
                  a_given=None, b_given=None, x_given=None,
                  ) -> Optional[Tuple[List[Segment], List[Via]]]:
     """The pair form of `connect` (#622 pairs, 2026-09-20): route the
@@ -360,7 +359,7 @@ def connect_pair(pcb: PCBData, p_id: int, n_id: int,
     return _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                                   cfg, band, margin, band_slack, virtual, window_pts,
                                   virtual_vias, report, g, a_dir, b_dir, half,
-                                  a_conn=a_conn, b_conn=b_conn, a_given=a_given, b_given=b_given)
+                                  a_given=a_given, b_given=b_given)
 
 
 STRAIGHTEN_STEPS = 1.2   # a staircase's chord may stand this many grid steps off it
@@ -940,156 +939,10 @@ def _connect_pair_crossover(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_laye
     return list(first[0]) + list(second[0]), list(first[1]) + list(second[1])
 
 
-def _geo_connector(tip_p, tip_n, d, t, layer, half, cfg, p_id, n_id, lead=0.3, fwd=0.0):
-    """A pair's connector from two tips to a coupled pose running along
-    `t` (the planned lane's direction), when the teeth point ACROSS the
-    lane (the escape direction `d` has a component across `t`): the leg
-    whose tip is AHEAD along `t` runs straight along `t` from its tip;
-    the leg behind first runs forward along `d` until it stands a pair
-    pitch beyond the ahead leg's line, then turns along `t` -- passing
-    the ahead tooth a pitch away, which is at least track + clearance
-    (pairs.pitch). Both legs end `lead` past the later turn, at the pair
-    pitch, the pose's direction `t`. Returns (segments, end_p, end_n) or
-    None when the teeth are not across the lane (|d . n| < 0.5 -- the
-    straight approach converges those), when the tips are too close
-    along `t` to pass each other, or when a leg would have to run
-    backwards into its tooth."""
-    import pairs as _pairs
-    n = _pairs._left(t)
-    dn = d[0] * n[0] + d[1] * n[1]
-    if abs(dn) < 0.5:
-        return None
-    mid = _pairs.mid(tip_p, tip_n)
-    tw = cfg.track_width
-    pitch = 2 * half
-
-    def along(p):
-        return (p[0] - mid[0]) * t[0] + (p[1] - mid[1]) * t[1]
-
-    def u(p):
-        return (p[0] - mid[0]) * d[0] + (p[1] - mid[1]) * d[1]
-    tips = {'p': tip_p, 'n': tip_n}
-    if abs(along(tip_p) - along(tip_n)) < tw + cfg.clearance + 0.02:
-        return None
-    ahead, behind = ('p', 'n') if along(tip_p) > along(tip_n) else ('n', 'p')
-    u_a, u_b = u(tips[ahead]), u(tips[behind])
-    # forward (along d) coordinates of the two runs: the behind leg a
-    # pitch beyond the ahead leg, neither behind its own tip
-    # `fwd`: both legs advance this far along d before the turn, so a
-    # run along the row of tips clears the neighbouring tips
-    U_a = max(u_a, u_b - pitch / abs(dn)) + fwd
-    U_b = U_a + pitch / abs(dn)
-    turns = {}
-    for leg, U, u0 in ((ahead, U_a, u_a), (behind, U_b, u_b)):
-        delta = U - u0
-        if delta < -1e-6:
-            return None
-        tp = tips[leg]
-        turns[leg] = (tp[0] + d[0] * delta, tp[1] + d[1] * delta) if delta > 1e-6 else tp
-    a_end = max(along(turns[ahead]), along(turns[behind])) + lead
-    segs = {}
-    ends = {}
-    for leg in ('p', 'n'):
-        tp, tr = tips[leg], turns[leg]
-        run = a_end - along(tr)
-        if run < tw:
-            return None
-        end = (tr[0] + t[0] * run, tr[1] + t[1] * run)
-        nid = p_id if leg == 'p' else n_id
-        pieces = []
-        if tr is not tp:
-            pieces.append(Segment(tp[0], tp[1], tr[0], tr[1], tw, layer, nid))
-        pieces.append(Segment(tr[0], tr[1], end[0], end[1], tw, layer, nid))
-        segs[leg] = pieces
-        ends[leg] = end
-    # the ends stand a pitch apart across t by construction
-    return segs['p'] + segs['n'], ends['p'], ends['n']
-
-
-def _routed_connector(pcb, p_id, n_id, tip_p, tip_n, d, layer, far, cfg, half, via_half,
-                      band, margin, band_slack, virtual, virtual_vias, lead=0.15):
-    """One end's ROUTED connector (see _connect_pair_prod): the envelope
-    centreline from `lead` mm in front of the tips (along `d`) to `far`,
-    routed by `connect` on the tips' layer, split into the two legs
-    (pairs.split_envelope, the tips as their starts), the far end left
-    open. Returns (segments, vias, end_p, end_n, end_dir) -- the two legs'
-    open ends and the direction they leave in -- or None."""
-    import copy as _copy
-    import pairs as _pairs
-    mid = _pairs.mid(tip_p, tip_n)
-    a_pt = (mid[0] + d[0] * lead, mid[1] + d[1] * lead)
-    ecfg = _copy.copy(cfg)
-    ecfg.track_width = round(2 * half + cfg.track_width, 6)
-    ecfg.via_size = round(2 * via_half + cfg.via_size, 6)
-    ecfg.via_drill = round(ecfg.via_size - (cfg.via_size - cfg.via_drill), 6)
-    dbg = awx_settings.get('BRAID_PAIR_DEBUG')
-    res = None
-    # the far point's layer: the one the BAND is open on there (the plan's
-    # page past the fan-in; a berth whose lane arrives on the other layer
-    # has its connector dive), the tips' layer first when both are open
-    order = [layer] + [L for L in cfg.layers if L != layer]
-    if band is not None and callable(band):
-        def _open(L):
-            try:
-                return bool(np.asarray(band(np.array([far[0]]), np.array([far[1]]), L), dtype=bool).ravel()[0])
-            except Exception:
-                return True
-        order = [L for L in order if _open(L)] + [L for L in order if not _open(L)]
-    for far_layer in order:
-        # the reservations at the size of the copper they stand for (single
-        # tracks, single barrels), not the envelope's: stamped at ecfg's
-        # width each stood 0.136 mm a side too wide on the bench
-        res = connect(pcb, p_id, a_pt, layer, far, far_layer, ecfg, band=band, margin=margin,
-                      band_slack=band_slack, virtual=virtual, window_pts=[tip_p, tip_n, far],
-                      virtual_vias=virtual_vias, own_ids=[p_id, n_id],
-                      virtual_size=(cfg.track_width, cfg.via_size))
-        if dbg:
-            print(f"    connector envelope {a_pt[0]:.2f},{a_pt[1]:.2f} {layer} -> {far[0]:.2f},{far[1]:.2f} "
-                  f"{far_layer} w={ecfg.track_width} via={ecfg.via_size}: "
-                  + ('no route' if res is None else f'{len(res[0])} seg(s) {len(res[1])} via(s)'))
-        if res is not None:
-            break
-    if res is None:
-        return None
-    segs, vias = res
-    runs, left = _pairs._chain(segs, a_pt)
-    if left or not runs:
-        if dbg:
-            print(f"    connector envelope: chain left {len(left)} segment(s) unchained")
-        return None
-    runs = [(L, _pairs._simplify(pts)) for (L, pts) in runs]
-    runs = [(L, pts) for (L, pts) in runs if len(pts) >= 2]
-    if not runs:
-        return None
-    # the open end: the last run's direction, the legs' offsets there
-    L_end, pts = runs[-1]
-    d_end = _pairs._unit(pts[-2], pts[-1])
-    n_end = _pairs._left(d_end)
-    d0 = _pairs._unit(runs[0][1][0], runs[0][1][1])
-    s_p = 1.0 if _pairs._cross(d0, (tip_p[0] - a_pt[0], tip_p[1] - a_pt[1])) >= 0 else -1.0
-    end_p = (pts[-1][0] + s_p * n_end[0] * half, pts[-1][1] + s_p * n_end[1] * half)
-    end_n = (pts[-1][0] - s_p * n_end[0] * half, pts[-1][1] - s_p * n_end[1] * half)
-    out = _pairs.split_envelope(segs, vias, tip_p, tip_n, end_p, end_n, a_pt, pts[-1],
-                                half, via_half, cfg.track_width, cfg.via_size, cfg.via_drill,
-                                p_id, n_id, cfg.layers, cross=False,
-                                tip_layers=(layer, layer, L_end, L_end))
-    if out is None:
-        if dbg:
-            print("    connector split: none")
-        return None
-    segs2, vias2, _ = out
-    why = _pairs.intra_ok(segs2, vias2, p_id, n_id, cfg.track_width, cfg.via_size, cfg.clearance, h2h=_h2h(cfg))
-    if why is not None:
-        if dbg:
-            print(f"    connector split not clean: {why}")
-        return None
-    return segs2, vias2, end_p, end_n, d_end, L_end
-
-
 def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                        cfg, band, margin, band_slack, virtual, window_pts,
                        virtual_vias, report, gap, a_dir=None, b_dir=None, half=None,
-                       a_conn=None, b_conn=None, appr_scale=1.0, attempt=0, a_given=None, b_given=None):
+                       appr_scale=1.0, attempt=0, a_given=None, b_given=None):
     """connect_pair on the production pair router (see connect_pair), given
     CLEAN ENDS: a coupled APPROACH is laid first at each end -- each leg
     from its tip straight out along the escape direction for a via pitch,
@@ -1108,7 +961,7 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
     approach = []
     connectors = []
     conn_vias = []
-    connected = set()        # the ends whose routed connector stands
+    connected = set()        # the ends whose given connector stands
     # the validation window: the same copper the pose router sees (the
     # connectors and the approach are checked against it)
     vw = None
@@ -1139,114 +992,13 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
         else:
             b_p, b_n, b_dir, b_layer = end_p, end_n, end_dir, end_layer
         connected.add(end)
-    if a_dir is not None and b_dir is not None and half is not None and (a_conn or b_conn):
-        # BETTER CONNECTORS (Andy, 2026-09-20): the fan-in in front of the
-        # teeth is where every neighbour's lane crosses, and a straight
-        # approach plus the router's setback search found no clear start
-        # there. So each end's connector is ROUTED: an envelope piece (one
-        # track as wide as both legs, the corridor's own connect, inside
-        # the band, both legs' copper exempt) from the tips to a point on
-        # the planned lane past the fan-in, split into the two legs; the
-        # pose router then runs between the connectors' ends, which stand
-        # in the open corridor. Either connector that cannot be routed
-        # falls back to the straight approach piece.
-        via_half = _pairs.envelope_via_half(cfg, half)
-        dbg = awx_settings.get('BRAID_PAIR_DEBUG')
-        for end, tip_p, tip_n, d, layer, far in (('a', a_p, a_n, a_dir, a_layer, a_conn),
-                                                   ('b', b_p, b_n, b_dir, b_layer, b_conn)):
-            if far is None:
-                continue
-            # `far`: a point, a (point, lane direction) pair, or a list of
-            # such pairs (candidates in order: the lane's leaving run, then
-            # the next)
-            cands = far if isinstance(far, list) else [far]
-            cands = [(f[0], f[1]) if (isinstance(f, tuple) and len(f) == 2 and isinstance(f[0], tuple))
-                     else (f, None) for f in cands]
-            far = cands[0][0]
-            c = None
-            for far_c, lane_dir in cands:
-                if lane_dir is None or c is not None:
-                    continue
-                # GEOMETRIC first: the legs turned into the lane's direction
-                # (no search), validated against the window's copper, the
-                # virtual lines and the band
-                gc = None
-                for fwd in (cfg.clearance + cfg.track_width, 0.0):
-                    gc = _geo_connector(tip_p, tip_n, d, lane_dir, layer, half, cfg, p_id, n_id, fwd=fwd)
-                    if gc is None:
-                        break
-                    segs_g, ep, en = gc
-                    why = _legs_clear(vw, segs_g, [p_id, n_id], cfg, virtual, layer_map, band=band,
-                                      ends=[(ep[0], ep[1], layer), (en[0], en[1], layer)])
-                    if dbg:
-                        print(f"    connector {end} (geometric, along ({lane_dir[0]:.2f},{lane_dir[1]:.2f}), fwd {fwd:.3f}): "
-                              f"{len(segs_g)} seg(s), ends ({ep[0]:.2f},{ep[1]:.2f})/({en[0]:.2f},{en[1]:.2f}): "
-                              + (why or 'clean'))
-                    if why is None:
-                        c = (segs_g, [], ep, en, lane_dir, layer)
-                        break
-                if gc is None and dbg:
-                    print(f"    connector {end} (geometric, along ({lane_dir[0]:.2f},{lane_dir[1]:.2f})): "
-                          f"not this shape (teeth along the lane, or too close)")
-            if c is None:
-                c = _routed_connector(pcb, p_id, n_id, tip_p, tip_n, d, layer, far, cfg, half, via_half,
-                                      band, margin, band_slack, virtual, virtual_vias)
-            if awx_settings.get('BRAID_PAIR_DEBUG'):
-                print(f"    connector {end}: tips ({tip_p[0]:.2f},{tip_p[1]:.2f})/({tip_n[0]:.2f},{tip_n[1]:.2f}) "
-                      f"d=({d[0]:.2f},{d[1]:.2f}) {layer} -> far ({far[0]:.2f},{far[1]:.2f}): "
-                      + ('NONE (straight approach instead)' if c is None else
-                         f"{len(c[0])} seg(s) {len(c[1])} via(s), ends ({c[2][0]:.2f},{c[2][1]:.2f})/"
-                         f"({c[3][0]:.2f},{c[3][1]:.2f}) d_end=({c[4][0]:.2f},{c[4][1]:.2f}) {c[5]}"))
-            if c is None:
-                continue
-            segs_c, vias_c, end_p, end_n, end_dir, end_layer = c
-            connectors += segs_c
-            conn_vias += vias_c
-            if end == 'a':
-                a_p, a_n, a_dir, a_layer = end_p, end_n, end_dir, end_layer
-            else:
-                b_p, b_n, b_dir, b_layer = end_p, end_n, end_dir, end_layer
-            connected.add(end)
     if a_dir is not None and b_dir is not None and half is not None:
-        def _appr(tip_p, tip_n, d, layer, lane=None):
+        def _appr(tip_p, tip_n, d, layer):
             mid = _pairs.mid(tip_p, tip_n)
             n = _pairs._left(d)
             sgn = 1.0 if _pairs._cross(d, (tip_p[0] - mid[0], tip_p[1] - mid[1])) >= 0 else -1.0
             sep = abs((tip_p[0] - tip_n[0]) * n[0] + (tip_p[1] - tip_n[1]) * n[1])
             why = None
-            if lane is not None and vw is not None and sep > 2 * half + 2 * cfg.track_width:
-                # ONTO THE PLANNED LANE: tips far apart along a comb, each leg
-                # runs on along its escape until the two can bend onto the
-                # lane's point `far`, at the pair pitch either side of it,
-                # heading the lane's way (a straight convergence along the
-                # escape ends in a neighbour's slot: zynq K47, both DQS pairs
-                # refused in every order at 2.2 mm past their teeth)
-                far, ld = lane
-                nl = _pairs._left(ld)
-                sg2 = 1.0 if _pairs._cross(ld, (tip_p[0] - far[0], tip_p[1] - far[1])) >= 0 else -1.0
-                ep = (far[0] + sg2 * nl[0] * half, far[1] + sg2 * nl[1] * half)
-                en = (far[0] - sg2 * nl[0] * half, far[1] - sg2 * nl[1] * half)
-                run = 0.0
-                while run <= 3.0 + 1e-9:
-                    kp = (tip_p[0] + d[0] * run, tip_p[1] + d[1] * run)
-                    kn = (tip_n[0] + d[0] * run, tip_n[1] + d[1] * run)
-                    legs = []
-                    if run > 1e-6:
-                        legs += [Segment(tip_p[0], tip_p[1], kp[0], kp[1], cfg.track_width, layer, p_id),
-                                 Segment(tip_n[0], tip_n[1], kn[0], kn[1], cfg.track_width, layer, n_id)]
-                    legs += [Segment(kp[0], kp[1], ep[0], ep[1], cfg.track_width, layer, p_id),
-                             Segment(kn[0], kn[1], en[0], en[1], cfg.track_width, layer, n_id)]
-                    # the bends must not cross each other
-                    if _pairs._seg_seg_dist(legs[-1], legs[-2]) >= cfg.track_width + cfg.clearance - 1e-6:
-                        why = _legs_clear(vw, legs, [p_id, n_id], cfg, virtual, layer_map)
-                        if why is None:
-                            if awx_settings.get('BRAID_PAIR_DEBUG'):
-                                print(f"    approach: tips {sep:.2f} mm apart -- legs run {run:.1f} mm, then bend onto the "
-                                      f"planned lane at ({far[0]:.2f},{far[1]:.2f}) heading ({ld[0]:.2f},{ld[1]:.2f})")
-                            return legs, ep, en, ld
-                    run += 0.1
-                if awx_settings.get('BRAID_PAIR_DEBUG'):
-                    print(f"    approach: no clean bend onto the planned lane within 3 mm ({why}); converging along the escape")
             if sep > 2 * half + 2 * cfg.track_width and vw is not None:
                 # TIPS FAR APART across the escape (a comb of teeth between
                 # them, or two columns' balls): each leg runs on along its
@@ -1282,16 +1034,11 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
             return [Segment(tip_p[0], tip_p[1], end_p[0], end_p[1], cfg.track_width, layer, p_id),
                     Segment(tip_n[0], tip_n[1], end_n[0], end_n[1], cfg.track_width, layer, n_id)], end_p, end_n, d
 
-        def _lane_of(conn):
-            c0 = (conn[0] if isinstance(conn, list) else conn) if conn else None
-            if isinstance(c0, tuple) and len(c0) == 2 and isinstance(c0[0], tuple):
-                return (c0[0], c0[1])
-            return None
         if 'a' not in connected:
-            sa, a_p, a_n, a_dir = _appr(a_p, a_n, a_dir, a_layer, lane=_lane_of(a_conn))
+            sa, a_p, a_n, a_dir = _appr(a_p, a_n, a_dir, a_layer)
             approach += sa
         if 'b' not in connected:
-            sb, b_p, b_n, b_dir = _appr(b_p, b_n, b_dir, b_layer, lane=_lane_of(b_conn))
+            sb, b_p, b_n, b_dir = _appr(b_p, b_n, b_dir, b_layer)
             approach += sb
     pts = [a_p, a_n, b_p, b_n] + list(window_pts or [])
     # ...and 1.5 mm past each end along its direction: a connector's ends
@@ -1458,7 +1205,7 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
             return _connect_pair_prod(pcb, p_id, n_id, a_p0, a_n0, a_layer0, b_p0, b_n0, b_layer0,
                                       cfg, band, margin, band_slack, virtual, window_pts,
                                       virtual_vias, report, gap, a_dir0, b_dir0, half,
-                                      a_conn=None, b_conn=None, appr_scale=float(attempt + 2),
+                                      appr_scale=float(attempt + 2),
                                       attempt=attempt + 1)
         if report is not None and result:
             report['blocked'] = blocked
@@ -1470,20 +1217,6 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
     if not result.get('new_segments'):
         # a probe that stopped at the source returns no failure flag and no
         # copper -- and a lane of approach pieces alone "landed" (K36 SDQS0)
-        if attempt < 2 and (a_conn is not None or b_conn is not None):
-            # ...most often because a LANE-GUIDED connector's pose has no
-            # room at its end (zynq K47 DQS0: the planned lane hooks into
-            # the berths from the north, 0.3 mm from them, between a
-            # reserved lane and a cap; the same pair lands at once along
-            # the berths' own direction): the ends are tried again with
-            # the plain approaches along the escape and arrival directions
-            if awx_settings.get('BRAID_PAIR_DEBUG'):
-                print("    pair route made no copper -- retrying with the plain approaches at both ends")
-            return _connect_pair_prod(pcb, p_id, n_id, a_p0, a_n0, a_layer0, b_p0, b_n0, b_layer0,
-                                      cfg, band, margin, band_slack, virtual, window_pts,
-                                      virtual_vias, report, gap, a_dir0, b_dir0, half,
-                                      a_conn=None, b_conn=None, appr_scale=appr_scale,
-                                      attempt=attempt + 1)
         if report is not None:
             report['empty'] = True
         return None

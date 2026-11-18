@@ -723,7 +723,7 @@ def loop(solve, out, rounds, env, log, try_lay=None):
     no round got there, 3 when it stopped not converging, 4 when it stopped at crowded ends"""
     env = dict(env)
     # the braid's plan environment the planning reads (a pages-first sidecar's paging)
-    env.update(BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2')
+    env.update(BRAID_EXACT_PAGES='0')
     # every expensive stage through stage_cache.py -- on here, a harness's cache (STAGE_CACHE=0 runs them all)
     env['STAGE_CACHE'] = env.get('STAGE_CACHE') or '1'
     env['TAUT_MEMO'] = env.get('TAUT_MEMO') or '1'
@@ -2189,7 +2189,7 @@ def stage_env(env):
     under the same)"""
     env.update(OMP_NUM_THREADS='1', VECLIB_MAXIMUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
                TAUT_MEMO=env.get('TAUT_MEMO') or '1')
-    env.update(BRAID_EXACT_PAGES='0', PLAN_PAGES_SIDERS='2')
+    env.update(BRAID_EXACT_PAGES='0')
     return env
 
 
@@ -2315,7 +2315,7 @@ def joint_sync(env, r, solve, say):
     # go round), and published, the other buses' stages planning round them from here
     gd = os.path.join(os.path.dirname(os.path.abspath(solve)), 'joint_geo')
     os.makedirs(gd, exist_ok=True)
-    genv = {**env, 'BRAID_EXACT_PAGES': '0', 'PLAN_PAGES_SIDERS': '2',
+    genv = {**env, 'BRAID_EXACT_PAGES': '0',
             'STAGE_CACHE': env.get('STAGE_CACHE') or '1', 'TAUT_MEMO': env.get('TAUT_MEMO') or '1'}
     g0, p0 = os.path.join(gd, 'g0.json'), os.path.join(gd, 'p0.json')
     lanes = None

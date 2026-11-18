@@ -507,7 +507,7 @@ footer{margin-top:50px;padding-top:14px;border-top:2px solid var(--line);color:v
 <ul>
 <li><b>CP-SAT</b>: <code>group_ends.py</code> chooses the ends of every bus that leaves an array in one model (<a href="#ends">0a</a>), and <code>whole_joint.py</code> builds several buses' solves into one where their plans cross (<a href="#rounds">4e</a>). <code>whole_ends.py</code> chooses a bus's own joint ends, and uses CP-SAT on one worker to rank end states exactly (<a href="#ends-search">0b</a>). <code>joint_escape.py</code> plans a whole array's escapes, straps and plane drops in one model. <code>synth_bus.cap_sat_feasible</code> and <code>escape_move_floor</code> check that a generated bus can be routed at all.</li>
 <li><b>HiGHS LP</b>: the polish solves a small LP every round (<a href="#polish">4a</a>).</li>
-<li><b>HiGHS MILP</b>, in the older braid chain and the generator of test buses: <code>schedule.exact_pages</code> assigns each net to a page (binary <code>x[i,p]</code>, with <code>x[i,p]+x[j,p] &le; 1</code> for inverted pairs, minimising swimmers, then page vias), and <code>synth_bus.cap_floor</code> puts a binary layer at each crossing (<code>y_a+y_b=1</code>) and counts layer changes. That is the same puzzle as 1a, and an infeasible model there means an odd parity cycle. <code>braid._prime_highs_threads</code> pins it to one thread for determinism.</li>
+<li><b>HiGHS MILP</b>, in the generator of test buses: <code>synth_bus.cap_floor</code> puts a binary layer at each crossing (<code>y_a+y_b=1</code>) and counts layer changes. That is the same puzzle as 1a, and an infeasible model there means an odd parity cycle. <code>braid._prime_highs_threads</code> pins HiGHS to one thread for determinism.</li>
 </ul>
 
 <footer>

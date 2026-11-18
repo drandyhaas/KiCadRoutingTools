@@ -1,25 +1,21 @@
-"""route_lanes.py -- route chosen lanes of a plan ONE AT A TIME, each in its band.
+"""route_lanes.py -- route the lanes of a whole-route plan ONE AT A TIME, each in its band.
 
-The bench is planned by the braid's planner (plan_audit.plan, the
-caller's environment), then ONLY the named lanes are routed, in the braid's
-own attempt-0 order (pairs first, the pages in target order, the
-swimmers), each through its corridor's own route_lane (a
-pair through the braid's pair step) against every other lane's reservation --
-no rescue, no last call, no econ re-lay. What the router does with ONE lane
-in its band is then visible apart from what the rest of the run does to it.
+The bench is read as braid.setup reads it and the plan's lanes are installed
+in the whole route's own frame (whole_ctx.lanes): its reservations, via
+sites, bands and search windows are what the lanes route against. ONLY the
+named lanes are routed -- pairs first (the braid's pair step), then the
+singles (route_lane), each set in the berths' order round the destination --
+each against every other lane's reservation. What the router does with ONE
+lane in its band is then visible apart from what the rest of the run does to
+it.
 
-usage: route_lanes.py NETS|all --board B --nets N1,..|@FILE [--dest REF]
-                  [--plan PLAN.json] [--mode alone|seq] [--write OUT.kicad_pcb]
+usage: route_lanes.py NETS|all --board B --nets N1,..|@FILE --dest REF --plan PLAN.json
+                  [--mode alone|seq] [--write OUT.kicad_pcb]
                   [--png DIR] [--probe X,Y;..|stops] [--box X0,Y0,X1,Y1] [--viacheck]
 
-  --plan PLAN   a WHOLE-ROUTE plan (whole_snap's), routed in place of the braid's
-                plan: the bench read as braid.setup reads it and the plan's
-                lanes installed in the whole route's own frame (whole_ctx.lanes,
-                no braid corridor) -- its reservations, via sites, bands and
-                search windows are what the lanes route against; pairs first,
-                then the singles, in the berths' order round the destination
+  --plan PLAN   the WHOLE-ROUTE plan (whole_snap's) to route
   --mode alone  the copper is reset before each lane (each alone against the plan)
-         seq    the lanes accumulate in order (the kept attempt, these lanes only)
+         seq    the lanes accumulate in order (these lanes only)
   --write OUT   the board the run leaves -- the bench plus every segment and via
                 it added (seq: all the lanes together), its project stamped at
                 the routed floor -- for check_connected / check_drc: a lane the
@@ -57,7 +53,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 import braid as bd  # noqa: E402
 import connect as cn  # noqa: E402
-from plan_audit import plan, read_nets, dseg  # noqa: E402
+from plan_audit import read_nets, dseg  # noqa: E402
 # after a plan's seq lay, a ball of the bus's parts on no bus net that the lay WALLED IN (the step's own cage test,
 # route_bus.walls_made) has the lanes walling it lifted and routed again round its way kept -- the via site it escapes
 # by with them gone, reserved as a lane's line is (lift_walls)
@@ -207,20 +203,6 @@ class Recorder:
         return res
 
 
-def attempt0_order(ctx, corridors):
-    """[(corridor, lane)] in the braid's attempt-0 order."""
-    out = []
-    for c in corridors:
-        sched = c.sched_cur
-        sw_ = [nm for nm in c.members if sched.page.get(nm) is None]
-        ti = {nm: i for i, nm in enumerate(c.target)}
-        order = (sorted((nm for nm in c.target if nm not in sw_), key=lambda nm: ti[nm])
-                 + sorted(sw_, key=lambda nm: -abs(c.launch_o[nm] - c.target_o[nm])))
-        prs = [nm for nm in order if nm in getattr(ctx, 'pairs', {})]
-        out += [(c, nm) for nm in prs + [nm for nm in order if nm not in prs]]
-    return out
-
-
 def probe_at(ctx, cl, x, y, R=0.35):
     """Around (x, y), in the refused call's own obstacle map: where a via or a
     track on each layer is legal, and the obstacles nearest the point."""
@@ -334,7 +316,7 @@ def main(argv=None):
     ap.add_argument('--probe', default='', help="X,Y;X,Y;.. or 'stops'")
     ap.add_argument('--box', default='', help='X0,Y0,X1,Y1: the render view')
     ap.add_argument('--viacheck', action='store_true')
-    ap.add_argument('--plan', default='', help='a whole-route plan (JSON) to route instead of the braid\'s')
+    ap.add_argument('--plan', required=True, help='the whole-route plan (JSON) to route')
     ap.add_argument('--write', default='', help='the board the run leaves (.kicad_pcb)')
     a = ap.parse_args(argv)
     for k in ('board', 'plan', 'write', 'png'):          # whole_ctx works from awx/: every path absolute first
@@ -343,23 +325,18 @@ def main(argv=None):
     if a.nets.startswith('@'):
         a.nets = '@' + os.path.abspath(a.nets[1:])
     box = tuple(map(float, a.box.split(','))) if a.box else None
-    if a.plan:
-        # a whole-route plan: the bench as the braid's setup reads it, the plan's lanes in the whole route's own frame
-        # (whole_ctx.lanes) -- none of the braid's corridors -- routed pairs first, then the singles, each set in the
-        # berths' order round the destination
-        import whole_ctx
-        geo = json.load(open(a.plan))
-        ctx, _groups = whole_ctx.bench_with(a.board, read_nets(a.nets), a.dest)
-        logs = []
-        lanes_ = whole_ctx.lanes(ctx, a.dest, geo, logs.append)
-        corridors = [lanes_]
-        prs_ = getattr(ctx, 'pairs', {}) or {}
-        order = ([(lanes_, nm) for nm in lanes_.order if nm in prs_ and nm in geo['lanes']]
-                 + [(lanes_, nm) for nm in lanes_.order if nm not in prs_ and nm in geo['lanes']])
-        print(f'installed {os.path.basename(a.plan)}: {len(geo["lanes"])} lanes, {len(geo["vias"])} vias')
-    else:
-        ctx, corridors, logs = plan(a.board, read_nets(a.nets), a.dest)
-        order = attempt0_order(ctx, corridors)
+    # the bench as the braid's setup reads it, the plan's lanes in the whole route's own frame (whole_ctx.lanes),
+    # routed pairs first, then the singles, each set in the berths' order round the destination
+    import whole_ctx
+    geo = json.load(open(a.plan))
+    ctx, _groups = whole_ctx.bench_with(a.board, read_nets(a.nets), a.dest)
+    logs = []
+    lanes_ = whole_ctx.lanes(ctx, a.dest, geo, logs.append)
+    corridors = [lanes_]
+    prs_ = getattr(ctx, 'pairs', {}) or {}
+    order = ([(lanes_, nm) for nm in lanes_.order if nm in prs_ and nm in geo['lanes']]
+             + [(lanes_, nm) for nm in lanes_.order if nm not in prs_ and nm in geo['lanes']])
+    print(f'installed {os.path.basename(a.plan)}: {len(geo["lanes"])} lanes, {len(geo["vias"])} vias')
     base_s, base_v = list(ctx.base_segments), list(ctx.base_vias)
     ctx.pcb.segments, ctx.pcb.vias = list(base_s), list(base_v)
     chosen = [p for p in order if a.only == 'all' or p[1] in a.only.split(',')]
@@ -378,7 +355,7 @@ def main(argv=None):
     # tried in a WIDER band, then FREE of the plan, only after them, round what they laid. Free in its turn, ahead of the
     # singles, a pair took the room the plan gave them: zynq LVDS round 3 with RX_D4's dive laid, RX_D1 routed free
     # 2.8 mm off its line, DATA_CLK and RX_D5 free after it, and 9 singles refused -- 13/24 in band where 22/23 were)
-    work = [(c, nm, not a.plan) for (c, nm) in chosen]
+    work = [(c, nm, False) for (c, nm) in chosen]
     wi = 0
     while wi < len(work):
         c, nm, free_ok = work[wi]
@@ -392,7 +369,7 @@ def main(argv=None):
         try:
             if nm in getattr(ctx, 'pairs', {}):
                 # a pair routes FIRST by the braid's own pair step: its ends own
-                # the fan-in, only the others' stubs are reserved there
+                # the fan-in
                 n_log = len(logs)
                 quiet = (contextlib.nullcontext() if awx_settings.get('BRAID_PAIR_DEBUG')
                          else contextlib.redirect_stdout(io.StringIO()))
@@ -401,7 +378,7 @@ def main(argv=None):
                     # laid, as the free rungs are)
                     done_ = bd._route_pairs_planned_in_order(
                         ctx, corridors, logs.append, [nm], free=free_ok,
-                        slacks=(sorted(set(bd.pair_slacks()) | {bd.PP, 2 * bd.PP}) if free_ok and a.plan else None))
+                        slacks=(sorted(set(bd.pair_slacks()) | {bd.PP, 2 * bd.PP}) if free_ok else None))
                 how_ = 'IN BAND ok  '
                 for l_ in logs[n_log:]:
                     if ('pair ' + nm) in l_:
@@ -491,9 +468,9 @@ def main(argv=None):
                     probe_at(ctx, cl, *pt)
         if a.png and calls:
             render(ctx, c, nm, calls[-1], segs_nm, vias_nm, os.path.join(a.png, f'{nm}.png'), box)
-        if a.plan and a.mode == 'seq' and kind != 'pair' and res is not None:
+        if a.mode == 'seq' and kind != 'pair' and res is not None:
             laid[nm] = (c, list(segs_nm), list(vias_nm))
-    if a.plan and a.mode == 'seq' and laid:
+    if a.mode == 'seq' and laid:
         lift_walls(ctx, laid, routed, a.board, read_nets(a.nets), a.dest, base_s, base_v)
     print(f'SUMMARY {a.mode}: {n_ok}/{len(chosen)} in band' + (f' (+{n_free} free)' if n_free else '')
           + f', {v_tot} vias (plan {v_plan} for those)' + (f'; {len(errors)} ERROR(S): {errors}' if errors else ''))
