@@ -29,7 +29,8 @@ from connectivity import (
     compute_component_mst_edges,
     on_grid_point,
 )
-from obstacle_map import get_same_net_through_hole_positions, same_net_partial_via_spans
+from obstacle_map import (get_same_net_through_hole_positions, same_net_partial_via_spans,
+                          via_stops_short)
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
 from area_clearance import narrow_tracks as _area_narrow_tracks
@@ -4992,7 +4993,8 @@ def _pad_all_layer_reach(pcb_data: PCBData, pad_obj) -> bool:
         return False
     px, py = pad_obj.global_x, pad_obj.global_y
     for v in pcb_data.vias:
-        if v.net_id == nid and \
+        # not a blind/micro via: it reaches only the layers it spans
+        if v.net_id == nid and not via_stops_short(v, pcb_data) and \
                 math.hypot(v.x - px, v.y - py) <= (v.size or 0) / 2 + 1e-3:
             return True
     return False
@@ -6490,12 +6492,15 @@ def get_all_segment_tap_points(
                 gx, gy = coord.to_grid(x, y)
                 _offer((gx, gy, layer_idx), x, y)
 
-    # Add vias on ALL layers (vias connect all copper layers)
+    # Add vias on every layer they join: all of them for a through via, its
+    # span for a blind/micro one
     if vias:
+        from geometry_utils import via_on_layer
         for via in vias:
             gx, gy = coord.to_grid(via.x, via.y)
             for layer_idx in range(len(layer_names)):
-                _offer((gx, gy, layer_idx), via.x, via.y)
+                if via_on_layer(via, layer_names[layer_idx]):
+                    _offer((gx, gy, layer_idx), via.x, via.y)
 
     # Return sorted list for deterministic iteration
     return sorted([(gx, gy, layer_idx, ox, oy)
