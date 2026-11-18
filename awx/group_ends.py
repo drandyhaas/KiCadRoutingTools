@@ -3161,8 +3161,8 @@ def main():
         # A ball's move past its first tiers is on its menu because its lane took it (narrow's `keep`); built
         # again on the first tiers alone, 105 of a four-bus group's 454 ends were not on their menus, each was
         # read as the nearest option there, and the state so read broke the arrays' own rules: asked about two
-        # lanes, the repair let 48 others go in four buses, every bus's check refused the answer, and the model
-        # went on for seven checks)
+        # lanes, the repair let 48 others go in four buses and every bus's check refused the answer; asked about
+        # four, the model went on for seven checks and moved 160 of 227 lanes' ends)
         nar_ = set(narrowed) if R_.get('narrowed') is None else set(R_['narrowed'])
         keep_ = R_.get('keep')
         if keep_ is None:

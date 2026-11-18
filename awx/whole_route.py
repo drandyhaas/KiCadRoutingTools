@@ -2410,11 +2410,16 @@ def joint_skip(env, pos):
 
 def joint_step_sync(env, pos, tag, say):
     """(JOINT_DIR) a stage of every bus's loop IN STEP: this bus's stage `tag` of the loop's round `pos` (round, loop,
-    i) done, its lanes published, said (DIR/s{tag}.{R.L.I}/BUS.done), and this bus waits until every other bus has said
-    so too or is past that round -- at its exchange i or later, or its loop ended (joint_gone) -- so what comes next
-    reads every bus's lanes of the same round"""
+    i) done, its lanes published, said (DIR/s{tag}.{R.L.I}/BUS.done), and this bus waits until every bus BEFORE it in
+    the standing order (JOINT_ORDER, joint_lanes.stands: the buses whose planned lanes it reads) has said so too or
+    is past that round -- at its exchange i or later, or its loop ended (joint_gone) -- so what comes next reads
+    their lanes of the same round. It waits for no bus after it, whose lanes it does not read: a bus that stood,
+    its loop run again, waited 470 s after its polish for the two buses planning round it to end their first loops"""
+    import joint_lanes
     jd, bus = env['JOINT_DIR'], env['JOINT_BUS']
-    peers = [p_ for p_ in (env.get('JOINT_PEERS') or '').split(',') if p_ and p_ != bus]
+    ordr = [b_ for b_ in env['JOINT_ORDER'].split(',') if b_]
+    peers = [p_ for p_ in (env.get('JOINT_PEERS') or '').split(',') if p_ and p_ != bus
+             and joint_lanes.stands(p_, bus, ordr)]
     key = '.'.join(str(int(x)) for x in pos)
     sd = os.path.join(jd, f's{tag}.{key}')
     os.makedirs(sd, exist_ok=True)
@@ -2423,22 +2428,26 @@ def joint_step_sync(env, pos, tag, say):
     t0 = time.time()
     while not all(os.path.isfile(os.path.join(sd, f'{p_}.done')) or joint_gone(jd, p_, before) for p_ in peers):
         if time.time() - t0 > JOINT_WAIT:
-            say(f'  negotiation {key}: the other buses\' {tag} not there after {JOINT_WAIT} s -- on without them')
+            say(f'  negotiation {key}: the {tag} of the buses before this one not there after {JOINT_WAIT} s -- on '
+                f'without them')
             return
         time.sleep(5)
 
 
 def joint_lay_turn(env, r, passed, say):
-    """(JOINT_DIR) round r's LAYS IN TURN: one bus lays at a time (DIR/lay.lock, the bus holding it named inside), so
-    a lay reads, of every bus that laid before it, the copper it laid -- and a bus whose loop did NOT pass lays after
-    every other bus has laid its round (DIR/end.{r}/PEER.laid; a peer whose whole route has ended, or one in a later
-    round, has), two such buses in the order of their names (DIR/end.{r}/BUS.json: how its loop ended). Its plan is
-    the one its loop held, a round's the other buses' plans have moved on from and none of them was shown, and it has
-    its loop's other rounds to lay in its place (lay_rounds) where a loop that passed has the one plan. Two buses
-    laying at once read each other's last plan, not each other's copper: a bus that passed read the round-4 lanes of
-    one that then laid its held round 2, and the two boards, each clean, merged with a via of one 0.064 mm short of a
-    track of the other -- or not, by which of the two was the faster that day. Returns (what ends the turn --
-    joint_lay_done, the lock given up -- and, for a loop that did not pass, the buses that have laid since it ended)"""
+    """(JOINT_DIR) round r's LAYS IN TURN, in the buses' STANDING ORDER (JOINT_ORDER, joint_lanes.stands): one bus
+    lays at a time (DIR/lay.lock, the bus holding it named inside), and a bus lays once every bus BEFORE it in the
+    order has laid its round (DIR/end.{r}/PEER.laid; a peer whose whole route has ended, or one in a later round,
+    has) -- the buses whose lanes it planned round, so its lay reads the copper they laid. It waits for no bus AFTER
+    it: those plan round its lanes, and round its copper once it is laid. A bus that stood, its loop not passed for
+    a finding of its own, used to wait for every other bus's lay -- 551 s for the one bus planning round it -- and
+    then ran its loop again round that bus's copper, one finding become six. A loop that did not pass lays the plan
+    it held, a round's the buses after it have planned round, and has its loop's other rounds to lay in its place
+    (lay_rounds) where a loop that passed has the one plan. Two buses laying at once read each other's last plan,
+    not each other's copper: a bus that passed read the round-4 lanes of one that then laid its held round 2, and
+    the two boards, each clean, merged with a via of one 0.064 mm short of a track of the other -- or not, by which
+    of the two was the faster that day. Returns (what ends the turn -- joint_lay_done, the lock given up -- and, for
+    a loop that did not pass, the buses before it that have laid since it ended)"""
     jd, bus = env['JOINT_DIR'], env['JOINT_BUS']
     peers = [p_ for p_ in (env.get('JOINT_PEERS') or '').split(',') if p_ and p_ != bus]
     ed = os.path.join(jd, f'end.{int(r)}')
@@ -2455,22 +2464,20 @@ def joint_lay_turn(env, r, passed, say):
         except (OSError, ValueError, IndexError, TypeError):
             return False
 
-    def held(p_):
-        try:
-            return not json.load(open(os.path.join(ed, f'{p_}.json'))).get('passed')
-        except (OSError, ValueError):
-            return False
+    import joint_lanes
+    ordr = [b_ for b_ in env['JOINT_ORDER'].split(',') if b_]
+    ahead = [p_ for p_ in peers if joint_lanes.stands(p_, bus, ordr)]
     t0 = time.time()
-    since = [p_ for p_ in peers if not laid(p_)]              # (the buses not laid yet when this one's loop ended)
-    if not passed:
-        while not all(laid(p_) or (p_ > bus and held(p_)) for p_ in peers):
-            if time.time() - t0 > JOINT_WAIT:
-                say(f'  negotiation: the other buses\' lays not there after {JOINT_WAIT} s -- laid without them')
-                break
-            time.sleep(5)
-        since = [p_ for p_ in since if laid(p_)]
-        if since:
-            say(f'  negotiation: {", ".join(since)} laid since this bus\'s loop ended ({time.time() - t0:.0f} s)')
+    since = [p_ for p_ in ahead if not laid(p_)]              # (those not laid yet when this one's loop ended)
+    while not all(laid(p_) for p_ in ahead):
+        if time.time() - t0 > JOINT_WAIT:
+            say(f'  negotiation: the lays of the buses before this one not there after {JOINT_WAIT} s -- laid '
+                f'without them')
+            break
+        time.sleep(5)
+    since = [p_ for p_ in since if laid(p_)]
+    if since:
+        say(f'  negotiation: {", ".join(since)} laid since this bus\'s loop ended ({time.time() - t0:.0f} s)')
     lock = os.path.join(jd, 'lay.lock')
     mine = False
     while not mine:
@@ -2490,6 +2497,38 @@ def joint_lay_turn(env, r, passed, say):
         if mine and os.path.isfile(lock):
             os.remove(lock)
     return done, ([] if passed else since)
+
+
+def joint_moved_since(env, r, loopd, since):
+    """(JOINT_DIR) of the buses `since` -- those before this one in the standing order that laid after its loop ended
+    (joint_lay_turn) -- the ones whose laid copper is NOT what this bus's loop planned round: a bus whose own loop did
+    not pass (DIR/end.{r}/PEER.json: it laid a plan its loop HELD, a round's this bus may never have been shown), and
+    a bus one of whose lanes the round this loop holds has a finding against (its audit's rows, loopd/p{i}.audit: the
+    lane moved under it round after round). A bus that passed and laid the plan it published stands where this loop
+    read it: the loop run again for it came to the same findings, 536 s later"""
+    jd = env['JOINT_DIR']
+    try:
+        bi_ = int(json.load(open(os.path.join(loopd, 'best.json')))['i'])
+    except (OSError, ValueError, KeyError, TypeError):
+        bi_ = None
+    named = set()
+    for ln in grep(os.path.join(loopd, f'p{bi_}.audit'), r'^(STATIC|DIVE) ') if bi_ is not None else ():
+        named |= {n_.rstrip(')') for n_ in re.findall(r'\b(?:copper|via) (\S+)', ln)}
+    out = []
+    for p_ in since:
+        try:
+            passed_ = bool(json.load(open(os.path.join(jd, f'end.{int(r)}', f'{p_}.json'))).get('passed'))
+        except (OSError, ValueError):
+            passed_ = False
+        try:
+            theirs_ = {str(r_[5]) for r_ in (json.load(open(os.path.join(jd, 'lanes', f'{p_}.json'))).get('pieces')
+                                             or []) if len(r_) > 5}
+        except (OSError, ValueError):
+            theirs_ = set()
+        if not passed_ or any(n_ in theirs_ or n_ + '_P' in theirs_ or (n_[-2:] in ('_P', '_N') and n_[:-2] in theirs_)
+                              for n_ in named):
+            out.append(p_)
+    return out
 
 
 def joint_final(env):
@@ -3183,9 +3222,9 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             if env.get('JOINT_DIR'):
                 joint_pos(env, (r, LOOP_END, LOOP_END))
             bus_events.emit('lay', 'start', round=r)
-            # (negotiated buses: the round's lay IN TURN -- joint_lay_turn: one bus's at a time, and a loop that did not
-            # pass after every other bus's, so the plan it held, and the rounds laid in its place, are laid round the
-            # copper the others laid)
+            # (negotiated buses: the round's lay IN TURN -- joint_lay_turn: one bus's at a time, after every bus
+            # before it in the standing order, so its plan, and a held plan's rounds laid in its place, are laid round
+            # the copper of the buses it planned round)
             turn_, since_ = joint_lay_turn(env, r, rc == 0, say) if env.get('JOINT_DIR') and env.get('JOINT_BUS') \
                 else (None, [])
             try:
@@ -3196,7 +3235,10 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                 # found 7, 1, 7 and 1 places against the other bus's lanes and stopped as not converging, the round
                 # the other bus passed in; run again on that bus's laid copper, its second round's solve passed in
                 # its first round. Its plan where it passes; else the better of the two loops' held
-                if since_:
+                again_ = joint_moved_since(env, r, loopd, since_) if since_ else []
+                if since_ and not again_:
+                    say(f"  {', '.join(since_)} laid the lanes this bus's loop planned round -- no loop again")
+                if again_:
                     try:
                         solve_, seeds_ = loop_seeds(loopd)
                     except (OSError, ValueError, KeyError):

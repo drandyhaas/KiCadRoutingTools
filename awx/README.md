@@ -673,18 +673,26 @@ alone on its array a group of one:
    the order had none and passed in its first round, the last one's went 10,
    2, 0, and the lay on the same ends took 2129 s with 2 nets open where it
    had taken 5931 s with 4.
-   The buses **lay in turn** (`whole_route.joint_lay_turn`): one bus lays at
-   a time, and a bus whose loop did not pass lays after every other bus has
-   laid, two such buses in the order of their names. Such a bus lays the
-   plan its loop held, its best round's, which it never published: the
-   others had planned round its last round's lanes. Laid at the same time,
-   a bus that passed went round the fourth round's lanes of one that then
-   laid its second, and a via of one came 0.064 mm short of a track of the
-   other in one run of two.
-   A bus whose loop did not pass, and that waited for another bus's lay,
-   **runs its loop again** before it lays: from its best round's solve,
-   that round's cuts held, with the buses that have laid standing as copper
-   in its re-solves (`joint_final`). While another bus still routes, its
+   The buses **lay in turn**, in the standing order
+   (`whole_route.joint_lay_turn`): one bus lays at a time, once every bus
+   before it in the order has laid, and it waits for no bus after it. Those
+   plan round its lanes, and round its copper once it is laid. A bus whose
+   loop did not pass lays the plan its loop held, its best round's. Laid at
+   the same time, a bus that passed went round the fourth round's lanes of
+   one that then laid its second, and a via of one came 0.064 mm short of a
+   track of the other in one run of two. The loops' stages wait in the same
+   way (`joint_step_sync`): an audit waits for the polish of the buses
+   before it, whose lanes it reads, and for no other. A bus that stood, its
+   loop stopped on a finding of its own, had waited 551 s for the bus
+   planning round it to lay, and 470 s more after a polish for two such
+   buses' loops to end.
+   A bus whose loop did not pass, and that waited for the lay of a bus
+   whose copper is not what its loop planned round
+   (`joint_moved_since`: a bus whose own loop did not pass, or one whose
+   lanes its held round has a finding against), **runs its loop again**
+   before it lays: from its best round's solve, that round's cuts held,
+   with the buses that have laid standing as copper in its re-solves
+   (`joint_final`). While another bus still routes, its
    lanes move from round to round, and a finding against them is settled in
    one place and met in another. A memory bus's loop found 7, 1, 5 and 2
    places in four rounds beside a bus still routing and stopped; run again
