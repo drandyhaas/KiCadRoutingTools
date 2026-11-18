@@ -2358,6 +2358,39 @@ def apply_length_matching_to_group(
             group_clearance_index, length_metric, length_to_length
         )
 
+        # A pair's pad-to-die term is its LARGER leg's excess over the pair's
+        # copper figure, and a meander lengthens the two legs unevenly (the
+        # outer leg of each bump gains more), so the term read before
+        # meandering drifts with every bump: six bumps left a pair 0.37 mm
+        # short of KiCad's measure while this line called it matched. Measure
+        # the result as KiCad's tuner does -- max(P copper + P's term, N
+        # copper + N's term) -- and meander on by what is still missing, in
+        # the loop's own measure.
+        if result.get('is_diff_pair') and die[net_name]:
+            def _kicad_length(mod):
+                _now = dict(result)
+                _now.update(mod)
+                legs = pair_member_lengths(_now, pcb_data)
+                return _now, max(legs['P'][0] + legs['P'][1],
+                                 legs['N'][0] + legs['N'][1])
+            _now, _kl = _kicad_length(modified)
+            for _ in range(3):
+                _short = target_length - _kl
+                if _short <= config.length_match_tolerance:
+                    break
+                _m, _s, _b, _l = _apply_meanders_to_net_with_iteration(
+                    _now, new_length + _short, new_length,
+                    config.length_match_tolerance,
+                    config, pcb_data, already_processed_segments, already_processed_vias,
+                    group_clearance_index, length_metric, length_to_length
+                )
+                if not _b:
+                    break
+                modified, new_segments, new_length = _m, _s, _l
+                bump_count += _b
+                _now, _kl = _kicad_length(modified)
+            die[net_name] = _kl - new_length
+
         print(f"      {net_name}: new length = {new_length + die[net_name]:.2f}mm ({bump_count} bumps)")
         _final = new_length + die[net_name]
         _left = target_length - _final

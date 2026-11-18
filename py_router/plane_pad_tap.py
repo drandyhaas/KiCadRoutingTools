@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+from collections import OrderedDict
 from dataclasses import dataclass, replace, field
 from typing import List, Dict, Optional, Tuple, Set
 
@@ -459,7 +460,7 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
                    '_foreign_via_arr_cache', '_foreign_hole_cap_cache',
                    '_edge_grid_cache', '_edge_mask_cache',
                    '_cutout_mask_cache', '_tap_spatial_index_cache',
-                   '_net_tie_lift', '_attach_pts_memo'):
+                   '_net_tie_lift', '_attach_pts_memo', '_tap_map_cache'):
         if _cattr in local.__dict__:
             del local.__dict__[_cattr]
 
@@ -504,6 +505,90 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
             if _polygon_overlaps_window(z.points, wmin_x, wmin_y, wmax_x, wmax_y)
         ]
     return local
+
+
+# Tap window-map memo. try_tap_pad builds a via map and a routing map for a
+# window around every pad it tries, and the ladder (escalation steps, retries,
+# rounds over pending pads) rebuilds the same window with the same inputs again
+# and again: on watchy ~75% of the window builds repeat an earlier identical
+# input. The memo keys a build on everything the builders read from the
+# window -- copper values, pad identity and placement, board_info, the other
+# window attributes -- plus config, net and arguments, and hands back a clone
+# of the stored map, so callers may mutate the result (corridor ghosts do).
+# KRT_TAP_MAP_CACHE sets the number of maps kept (0 disables the memo).
+_TAP_MAP_CACHE_SIZE = int(os.environ.get('KRT_TAP_MAP_CACHE', '96'))
+_SCALARS = (int, float, str, bool, type(None))
+
+
+def _attr_key(v, parent_v, refs):
+    """Key for one window attribute. A value the window shares with the parent
+    board keys on identity and size; a list the window rebuilt (filtered) keys
+    on its elements' identities, held alive in refs so ids stay unique."""
+    if isinstance(v, _SCALARS):
+        return v
+    if isinstance(v, tuple):
+        try:
+            hash(v)
+            return v
+        except TypeError:
+            pass
+    refs.append(v)
+    if v is parent_v or not isinstance(v, (list, tuple)):
+        return ('id', id(v), len(v) if hasattr(v, '__len__') else None)
+    refs.extend(v)
+    return ('elems', tuple(map(id, v)))
+
+
+def _tap_window_key(local: PCBData, parent: PCBData):
+    """Exact-input key of a tap window, as (key, refs). Segments and vias key on
+    values (in order), so fresh extra copper with equal values hits too."""
+    refs: list = []
+    segs = tuple(
+        (s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.layer, s.net_id,
+         s.graphic, s.locked, s.owner_ref, s.drawn_width,
+         id(getattr(s, 'graphic_ring', None)))
+        for s in local.segments)
+    refs.extend(getattr(s, 'graphic_ring', None) for s in local.segments)
+    vias = tuple(
+        (v.x, v.y, v.size, v.drill, tuple(v.layers or ()), v.net_id, v.free, v.locked)
+        for v in local.vias)
+    pads = []
+    for nid, plist in local.pads_by_net.items():
+        refs.extend(plist)
+        pads.append((nid, tuple(
+            (id(p), p.net_id, p.global_x, p.global_y, p.size_x, p.size_y,
+             p.rotation) for p in plist)))
+    bi, pbi = local.board_info, parent.board_info
+    bkey = tuple((k, _attr_key(v, getattr(pbi, k, None), refs))
+                 for k, v in sorted(vars(bi).items()))
+    pvars = vars(parent)
+    rest = tuple((k, _attr_key(v, pvars.get(k), refs))
+                 for k, v in sorted(vars(local).items())
+                 if not k.startswith('_')
+                 and k not in ('segments', 'vias', 'pads_by_net', 'board_info'))
+    return (segs, vias, tuple(pads), bkey, rest), refs
+
+
+def _memo_window_build(parent: PCBData, builder, wkey, local: PCBData, config,
+                       net_id: int, *args, **kwargs):
+    """builder(local, config, net_id, *args, **kwargs), memoized on the parent
+    board by the window key from _tap_window_key. Returns a fresh clone."""
+    if _TAP_MAP_CACHE_SIZE <= 0 or wkey is None:
+        return builder(local, config, net_id, *args, **kwargs)
+    cache = parent.__dict__.get('_tap_map_cache')
+    if cache is None:
+        cache = parent.__dict__['_tap_map_cache'] = OrderedDict()
+    key = (builder.__name__, wkey[0], repr(config), net_id, args,
+           tuple(sorted(kwargs.items())))
+    hit = cache.get(key)
+    if hit is not None:
+        cache.move_to_end(key)
+        return hit[0].clone()
+    m = builder(local, config, net_id, *args, **kwargs)
+    cache[key] = (m.clone(), wkey[1])
+    if len(cache) > _TAP_MAP_CACHE_SIZE:
+        cache.popitem(last=False)
+    return m
 
 
 # --- In-flight copper registry (issue #310) ------------------------------------
@@ -1236,6 +1321,8 @@ def try_tap_pad(
             if _segment_overlaps_window(seg, *bbx):
                 local.segments.append(seg)
 
+    wkey = _tap_window_key(local, pcb_data) if _TAP_MAP_CACHE_SIZE > 0 else None
+
     # Cross-pad via-map reuse (#263): use the pass-shared whole-board map when
     # available. Equivalent to the per-pad window map for every cell this tap
     # can query (see SharedViaMaps); the window path is kept for callers with
@@ -1252,9 +1339,9 @@ def try_tap_pad(
                                    same_net_pad_clearance, pad, max_search_radius,
                                    full_pcb_data=pcb_data)
     if obstacles is None:
-        obstacles = build_via_obstacle_map(
-            local, config, net_id, verbose=False,
-            same_net_pad_clearance=same_net_pad_clearance)
+        obstacles = _memo_window_build(
+            pcb_data, build_via_obstacle_map, wkey, local, config, net_id,
+            verbose=False, same_net_pad_clearance=same_net_pad_clearance)
     routing_obs = None
     # The routing-obstacle map is consulted ONLY to route a via->pad TRACE -- i.e.
     # when reusing nearby same-net copper (steps 1/1b, gated on not disable_reuse),
@@ -1277,9 +1364,9 @@ def try_tap_pad(
         if routing_clearance_cushion:
             routing_config = replace(
                 config, clearance=config.clearance + config.grid_step / 2)
-        routing_obs = build_routing_obstacle_map(
-            local, routing_config, net_id, pad_layer,
-            skip_pad_blocking=False, verbose=False)
+        routing_obs = _memo_window_build(
+            pcb_data, build_routing_obstacle_map, wkey, local, routing_config,
+            net_id, pad_layer, skip_pad_blocking=False, verbose=False)
         if corridor_ghosts is not None:
             # #517 arm 2: steer this tap's trace away from OTHER rips'
             # vacated corridors (single-layer map: this layer is index 0).
@@ -1446,8 +1533,9 @@ def try_tap_pad(
         # pad), leaving routing_obs None. Build it lazily here instead of
         # dereferencing None in route_via_to_pad.
         if routing_obs is None:
-            routing_obs = build_routing_obstacle_map(
-                local, config, net_id, pad_layer, skip_pad_blocking=False, verbose=False)
+            routing_obs = _memo_window_build(
+                pcb_data, build_routing_obstacle_map, wkey, local, config,
+                net_id, pad_layer, skip_pad_blocking=False, verbose=False)
         # Capture the search frontier on failure so a caller doing rip-up can
         # identify which net is blocking the via->pad trace (route_disconnected_
         # planes --rip-blocker-nets).

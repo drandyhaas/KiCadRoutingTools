@@ -407,13 +407,17 @@ run prints a NOTE naming the layer; route each group of pairs in its own call.
 A KiCad 10 differential tuning profile gives the same thing from the project
 (#1936): it stores, per signal layer, the member width and the P/N gap that meet
 its target impedance there. When `--track-width`, `--diff-pair-gap` and
-`--impedance` are all omitted (the GUI: both overrides unchecked) and neither a
-stored impedance nor a layer-scoped rule set the widths, the pairs of a class that
-names such a profile are coupled on each layer at the profile's width and gap for
-that layer, and the run prints `Tuning-profile pair geometry: ...`. A width below
-the fab floor is drawn at the floor and a gap below what KiCad grades P against N
-at (the clearance, the class, a rule) is built at that; both are named. A layer the
-profile has no width for keeps the class geometry. As above, one geometry per layer
+`--impedance` are all omitted (the GUI: both overrides unchecked) and no stored
+impedance set the widths, the pairs of a class that names such a profile are
+coupled on each layer at the profile's width and gap for that layer, and the run
+prints `Tuning-profile pair geometry: ...`. A layer's width and gap are, in order:
+a stored impedance declaration's, a `.kicad_dru` rule's, the profile's, the
+class's. A rule that gives the members a `track_width` or a `diff_pair_gap` `opt`
+on a layer is drawn there in the profile's place (the run names the rule), and a
+profile value is clamped into the rule's and Board Setup's min/max as a class
+value is. A width below the fab floor is drawn at the floor and a gap below what
+KiCad grades P against N at (the clearance, the class, a rule) is built at that;
+each is named. A layer the profile has no width for keeps the class geometry. As above, one geometry per layer
 per call: when the targeted pairs do not all resolve the same one (two profiles, or
 a pair with none) nothing is applied and the run names the pairs. The connectors
 from the pads to the coupled run are drawn at one width per pair: the profile's

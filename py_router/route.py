@@ -2439,6 +2439,31 @@ def _edge_for_project(config) -> float:
     return config.board_edge_clearance if declared is None else declared
 
 
+_ART_TERMINAL_BOARDS = []
+
+
+def _art_terminals_scoped(fn):
+    """batch_route's wrapper: the run gives net-tagged copper art that reaches
+    none of its net's pads a routing terminal (`art_terminals`, #659) on the
+    board it routes; this takes back, on every exit, the terminals THIS call
+    added, so neither the CLI's nor the GUI's PCBData keeps them, and a
+    nested sub-run handed the same board neither adds a second set nor strips
+    the outer run's."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        depth = len(_ART_TERMINAL_BOARDS)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            from art_terminals import remove_art_terminals
+            while len(_ART_TERMINAL_BOARDS) > depth:
+                remove_art_terminals(_ART_TERMINAL_BOARDS.pop())
+    return wrapper
+
+
+@_art_terminals_scoped
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 # #530: cap every auto-read net class at this clearance (the
@@ -2867,6 +2892,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # #1279: the board's `sense:<REF>.<PAD>` groups -- protected, or why not.
     from sense_branch import report as _sense_report
     _sense_report(pcb_data)
+    # #659: net-tagged copper art reaching none of its net's pads is an open
+    # net in KiCad's DRC; give each such island a routing terminal for this
+    # run (taken back by `_art_terminals_scoped`). A --rip-existing-nets net
+    # is re-routed when ripped, so it needs its terminal too.
+    from art_terminals import add_art_terminals
+    if add_art_terminals(pcb_data, (list(net_names) + list(rip_existing_nets or []))
+                         if net_names else None):
+        _ART_TERMINAL_BOARDS.append(pcb_data)
     if final_reconcile:
         from rip_up_reroute import reset_run_ledgers
         reset_run_ledgers(pcb_data)
@@ -2962,6 +2995,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # exist yet, and the per-layer / per-net via readers further down then
     # met unbound names. No file -> no class widths or vias, as for tracks.
     _per_net, _per_layer, _per_net_via = {}, {}, {}
+    _dr = None                      # the board's design rules, when readable
+    _twfloor = _adv_tw = 0.0        # the standard and the deepest track floor
     if input_file and os.path.isfile(input_file):
         try:
             from list_nets import net_track_width_map_by_id, fab_floors
@@ -3498,35 +3533,64 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # only when the operator gave no --track-width and no --impedance (both
     # outrank a draw default) and #521 did not already pin the net.
     if track_width_from_class and impedance is None:
+        _stored_ids = set(net_layer_widths_map)     # #521 pinned these
         for _nid, _bl in (_per_layer or {}).items():
             if _nid not in net_layer_widths_map:
                 net_layer_widths_map[_nid] = dict(_bl)
         # KiCad 10 tuning profiles: a net whose class names one is drawn on
         # each layer at the width the profile gives that layer, under the
-        # same two conditions and after a .kicad_dru rule's own layer widths.
+        # same two conditions. A layer's width is, in order: a stored
+        # impedance declaration's, a .kicad_dru rule's, the profile's, the
+        # class's; a profile width is clamped into the rule's and Board
+        # Setup's min/max and held at the fab floor as a class width is.
+        _pf_rep = {}
         try:
             from tuning_profiles import profile_layer_widths
-            from fab_tiers import fab_floor_min as _pf_floor
-            _pf_ncl = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
+            from fab_tiers import warn_fab_escalation as _wfe1936
+            if not _adv_tw:
+                from fab_tiers import fab_floor_min as _pf_floor
+                _adv_tw = _pf_floor(len(getattr(
+                    pcb_data.board_info, 'copper_layers', None) or []) or 4
+                    ).get('track_width', 0.0)
             _pf_w, _pf_used, _pf_raised = profile_layer_widths(
-                pcb_data, input_file,
-                floor=_pf_floor(_pf_ncl).get('track_width', 0.0))
+                pcb_data, input_file, floor=_adv_tw, rules=_dr, report=_pf_rep)
         except (OSError, ValueError) as _pfe:
             print(f"Warning: tuning-profile widths unavailable ({_pfe}).")
             _pf_w, _pf_used, _pf_raised = {}, {}, []
-        _pf_n = 0
+        _pf_routed = {_nid for _nm, _nid in _targets}
+        _pf_ruled = _pf_rep.get('ruled', {})
+        _pf_n, _pf_by, _pf_low = 0, {}, {}
         for _nid, _bl in _pf_w.items():
-            if _nid not in net_layer_widths_map:
-                net_layer_widths_map[_nid] = dict(_bl)
+            if _nid in _stored_ids:
+                continue
+            # a rule's own layer widths stay where the profile is silent
+            net_layer_widths_map[_nid] = {**(_per_layer or {}).get(_nid, {}), **_bl}
+            _pn = _pf_rep.get('profile_of', {}).get(_nid)
+            if _nid in _pf_routed and _pn and any(
+                    (_pn, _l) not in _pf_ruled for _l in _bl):
                 _pf_n += 1
+                _pf_by[_pn] = _pf_by.get(_pn, 0) + 1
+                for _l, _w in _bl.items():
+                    if (_pn, _l) not in _pf_ruled and _w < _twfloor - 1e-9:
+                        _pf_low[(_pn, _l)] = _w
         if _pf_n:
             print(f"Tuning-profile widths: {_pf_n} net(s) are drawn at their "
                   f"profile's width on each layer ("
-                  + ", ".join(f"{_k}: {_v}" for _k, _v in sorted(_pf_used.items()))
+                  + ", ".join(f"{_k}: {_v}" for _k, _v in sorted(_pf_by.items()))
                   + ").")
+            for (_pn, _pl), _rn in sorted(_pf_ruled.items()):
+                if _pn in _pf_by:
+                    print(f"  profile '{_pn}' {_pl}: .kicad_dru rule \"{_rn}\" "
+                          f"sets the width there")
             for _pn, _pl, _pw0, _pfl in _pf_raised:
-                print(f"  profile '{_pn}' {_pl}: {_pw0:g} mm is below the fab "
-                      f"floor, drawn at {_pfl:g} mm")
+                if _pn in _pf_by:
+                    print(f"  profile '{_pn}' {_pl}: {_pw0:g} mm is "
+                          f"{'below' if _pfl > _pw0 else 'above'} what the board's "
+                          f"rules, Board Setup and the fab floor allow, drawn at "
+                          f"{_pfl:g} mm")
+            # below the standard tier floor: disclosed as a class width is
+            for (_pn, _pl), _w in sorted(_pf_low.items()):
+                _wfe1936(f"tuning profile '{_pn}' width {_w:g} on {_pl}")
     if net_layer_widths_map:
         config_kwargs['net_layer_widths'] = net_layer_widths_map
     # #530 decision 4: per-net via geometry -> config.net_via_sizes (the
@@ -6472,9 +6536,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     #       nothing, so welding adds dead metal. The late
                     #       orphan sweep deletes it at the end of the run.
                     #   graphic end -> net-tagged copper ART (#337) that
-                    #       reaches no pad: KiCad conducts through it, but it
-                    #       is immutable and the router never targets it, so
-                    #       neither operation applies.
+                    #       reaches no pad: KiCad conducts through it, and it
+                    #       is immutable. The route step's own pass routes to
+                    #       it (art_terminals, #659); this recheck's weld does
+                    #       not.
                     # Measured over the recorded corpus the zone-less signal
                     # links split 9 pad-less / 36 graphic / 6 live, so
                     # enrolling all of them sends the router after 45 links it
@@ -6513,8 +6578,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if _art659:
                                 _why659.append(
                                     f"{_art659} to net-tagged copper GRAPHICS "
-                                    f"no pad reaches (art the router never "
-                                    f"targets: a board-authoring fix)")
+                                    f"no pad reaches (an island the route "
+                                    f"step's art terminal did not join, #659)")
                             print(f"  ORACLE CHECK: {_net}: KiCad reports "
                                   f"{len(_pairs)} open link(s), none weldable"
                                   + (" -- " + "; ".join(_why659)

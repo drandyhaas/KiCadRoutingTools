@@ -324,10 +324,19 @@ class DelayModel:
 _MODEL_ATTR = '_tuning_delay_model'
 
 
+def _ranked_size(rules, kind, net_id, layer, value, diff_pair=None):
+    """(size, rule name or None) for a profile's ``value`` once the board's
+    rules have had their say (`DesignRules.ranked_draw_size`); the value
+    itself with no rules."""
+    if rules is None:
+        return value, None
+    return rules.ranked_draw_size(kind, net_id, layer, value, diff_pair=diff_pair)
+
+
 def profile_layer_widths(pcb_data, board_path: str = None, net_ids=None,
-                         floor: float = 0.0):
+                         floor: float = 0.0, rules=None, report=None):
     """({net id: {signal layer: track width mm}}, {profile name: net count},
-    [(profile, layer, stored mm, floor mm)]) for the nets whose class names a
+    [(profile, layer, stored mm, drawn mm)]) for the nets whose class names a
     tuning profile that gives a width.
 
     KiCad 10's tuning profile holds, per signal layer, the track width (and
@@ -335,9 +344,19 @@ def profile_layer_widths(pcb_data, board_path: str = None, net_ids=None,
     impedance on that layer of the stackup; a net class that names the
     profile is drawn at it. The same impedance is a different width on an
     outer and an inner layer, which a net class's one `track_width` cannot
-    say. ``floor`` pins a width up (the fab's minimum track); the third value
-    lists what it raised. A layer the profile has no width for is absent, so
-    the caller's next width source decides there."""
+    say.
+
+    ``rules`` (a `DesignRules`) ranks the profile where it belongs: a
+    `.kicad_dru` rule whose `track_width` gives the net an ``opt`` on a layer
+    is drawn there instead (the answer carries the rule's width, and
+    ``report``, a dict, collects ``ruled``: {(profile, layer): rule name}
+    beside ``profile_of``: {net id: profile name}), and a profile
+    width is clamped into the rule's and Board Setup's [min, max] as a class
+    width is. ``floor`` then pins a width up (the fab's minimum track). The
+    third value lists every profile width that was not drawn as stored. A
+    layer the profile has no width for is absent, so the caller's next width
+    source decides there; a net every layer of which a rule draws is absent
+    from the counts."""
     path = board_path or getattr(pcb_data, 'source_path', '') or ''
     if not path:
         return {}, {}, []
@@ -350,33 +369,55 @@ def profile_layer_widths(pcb_data, board_path: str = None, net_ids=None,
         prof = model.profile_of(nid)
         if prof is None or not prof.layer_width_mm:
             continue
-        got = {}
+        got, own = {}, False
         for layer, w in prof.layer_width_mm.items():
-            if floor and w < floor - 1e-9:
-                row = (prof.name, layer, w, floor)
-                if row not in raised:
-                    raised.append(row)
-                w = floor
-            got[layer] = w
+            drawn, rule = _ranked_size(rules, 'track_width', nid, layer, w)
+            if floor and drawn < floor - 1e-9:
+                drawn = floor
+            if rule is not None:
+                if report is not None:
+                    report.setdefault('ruled', {})[(prof.name, layer)] = rule
+            else:
+                own = True
+                if abs(drawn - w) > 1e-9:
+                    row = (prof.name, layer, w, drawn)
+                    if row not in raised:
+                        raised.append(row)
+            got[layer] = drawn
         out[nid] = got
-        used[prof.name] = used.get(prof.name, 0) + 1
+        if report is not None:
+            report.setdefault('profile_of', {})[nid] = prof.name
+        if own:
+            used[prof.name] = used.get(prof.name, 0) + 1
     return out, used, raised
 
 
 def profile_pair_geometry(pcb_data, board_path: str = None, pairs=(),
-                          layers=None, floor: float = 0.0):
+                          layers=None, floor: float = 0.0, rules=None,
+                          report=None):
     """({P net id: (profile name, {signal layer: (width mm, gap mm or None)})},
-    [(profile, layer, stored mm, floor mm)]) for the differential pairs
+    [(profile, layer, 'width' or 'gap', stored mm, drawn mm)]) for the
+    differential pairs
     whose two nets take one differential tuning profile that gives a width.
 
-    ``pairs`` are (P net id, N net id). A differential profile stores, per
-    signal layer, the member width and the P/N gap of a coupled pair at its
-    target impedance. ``layers`` limits the answer to those layers; ``floor``
-    pins a width up (the fab's minimum track), and the second value lists
-    what it raised. A layer the profile stores no gap for answers None there,
-    and a layer it has no width for is absent: the caller's next source
-    decides. A pair of a single-ended profile, or whose members name two
-    profiles, is absent."""
+    ``pairs`` are (P net id, N net id), or (P net id, N net id, pair name).
+    A differential profile stores, per signal layer, the member width and the
+    P/N gap of a coupled pair at its target impedance. ``layers`` limits the
+    answer to those layers.
+
+    ``rules`` (a `DesignRules`) ranks the profile as `profile_layer_widths`
+    does, the members read as coupled-pair members: a `.kicad_dru` rule that
+    gives a `track_width` or a `diff_pair_gap` ``opt`` on a layer is drawn
+    there instead (``report``, a dict, collects ``ruled``: {(profile, layer,
+    'width' or 'gap'): rule name}), and a profile value is clamped into the
+    rule's and Board Setup's [min, max]. ``floor`` then pins a width up (the
+    fab's minimum track). The second value lists every profile width or gap
+    that was not drawn as stored.
+
+    A layer the profile stores no gap for answers None there, and a layer it
+    has no width for is absent: the caller's next source decides. A pair of a
+    single-ended profile, whose members name two profiles, whose members the
+    rules size differently, or every value of which a rule sets, is absent."""
     path = board_path or getattr(pcb_data, 'source_path', '') or ''
     if not path or not pairs:
         return {}, []
@@ -384,24 +425,50 @@ def profile_pair_geometry(pcb_data, board_path: str = None, pairs=(),
     if not model.profiles:
         return {}, []
     out, raised = {}, []
-    for p_id, n_id in pairs:
+
+    def note(row):
+        if row not in raised:
+            raised.append(row)
+
+    for pair in pairs:
+        p_id, n_id = pair[0], pair[1]
+        name = pair[2] if len(pair) > 2 else None
         prof = model.profile_of(p_id)
         other = model.profile_of(n_id)
         if (prof is None or other is None or prof.name != other.name
                 or not prof.differential or not prof.layer_width_mm):
             continue
-        got = {}
+        got, ruled, own, split = {}, {}, False, False
         for layer, w in prof.layer_width_mm.items():
             if layers is not None and layer not in layers:
                 continue
-            if floor and w < floor - 1e-9:
-                row = (prof.name, layer, w, floor)
-                if row not in raised:
-                    raised.append(row)
-                w = floor
-            got[layer] = (w, prof.layer_gap_mm.get(layer))
-        if got:
+            drawn, rule = _ranked_size(rules, 'track_width', p_id, layer, w, name)
+            if (drawn, rule) != _ranked_size(rules, 'track_width', n_id, layer, w, name):
+                split = True
+                break
+            if floor and drawn < floor - 1e-9:
+                drawn = floor
+            if rule is not None:
+                ruled[(prof.name, layer, 'width')] = rule
+            else:
+                own = True
+                if abs(drawn - w) > 1e-9:
+                    note((prof.name, layer, 'width', w, drawn))
+            g = prof.layer_gap_mm.get(layer)
+            if g is not None:
+                g_drawn, g_rule = _ranked_size(rules, 'diff_pair_gap', p_id, layer, g, name)
+                if g_rule is not None:
+                    ruled[(prof.name, layer, 'gap')] = g_rule
+                else:
+                    own = True
+                    if abs(g_drawn - g) > 1e-9:
+                        note((prof.name, layer, 'gap', g, g_drawn))
+                g = g_drawn
+            got[layer] = (drawn, g)
+        if got and own and not split:
             out[p_id] = (prof.name, got)
+            if report is not None:
+                report.setdefault('ruled', {}).update(ruled)
     return out, raised
 
 

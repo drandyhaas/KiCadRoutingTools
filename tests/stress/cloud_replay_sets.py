@@ -876,21 +876,20 @@ def stage_harvest(args, sets, stress) -> dict:
 
     print(f"  harvested {total} row(s), {artifacts} board artifact dir(s)")
 
-    # Re-grade the harvested boards LOCALLY, on equal terms with the baseline.
+    # Grade both sides on the same terms. An image WITHOUT KiCad has no
+    # kicad-cli, so its `drc_real` falls back to RAW DRC while a locally graded
+    # baseline has kicad-cli reconcile what is pre-existing or not real --
+    # comparing the two measures which machine did the grading, not the engine.
+    # Measured on sets 10-19 the first time this ran: "real DRC 47 -> 87, +40
+    # WORSE", of which +77 was this artifact; the genuine changes netted -37
+    # BETTER. The headline number had the wrong SIGN. Such a wave is re-graded
+    # here, from the boards it kept.
     #
-    # The cloud image deliberately ships no KiCad, so ab_replay_grade's kicad-cli
-    # cross-check degrades to None there and `drc_real` falls back to RAW DRC.
-    # The baseline is graded locally, where kicad-cli reconciles violations that
-    # are pre-existing or not real. Comparing the two directly is not an engine
-    # measurement at all -- it measures which machine did the grading.
-    #
-    # Measured on sets 10-19 the first time this ran: the comparison reported
-    # "real DRC 47 -> 87, +40 WORSE", of which +77 was this artifact across 9
-    # boards, while the 8 genuine raw-DRC changes netted -37 BETTER (one board,
-    # apple1_aci_card, went 44 -> 0). The headline number had the wrong SIGN.
-    #
-    # Keeping the boards is what makes the fix possible: grade them here, with
-    # the same grader and the same kicad-cli the baseline gets.
+    # A KiCad wave already carries that grader: the containers run the same
+    # kicad-cli this machine does. Re-grading it here only spends the time
+    # again, so its cloud grade stands -- unless this machine's kicad-cli is a
+    # different version from the image's, which grades differently; then the
+    # wave is re-graded here, where a --regrade-baseline is graded too.
     missing_pro = [f"{r.get('set')}/{r.get('board')}"
                    for rows in rows_by_set.values() for r in rows
                    if r.get("artifact_warning")]
@@ -899,9 +898,44 @@ def stage_harvest(args, sets, stress) -> dict:
               f"(a .kicad_pcb without its .kicad_pro re-grades against the stock "
               f"netclass): {', '.join(missing_pro[:5])}")
 
-    if not getattr(args, "no_local_regrade", False):
+    regrade, why = harvest_regrade_decision(args, arm)
+    print(f"  grading: {why}")
+    if regrade:
         _regrade_locally(args, sorted(rows_by_set), stress, out, "harvested wave")
     return rows_by_set
+
+
+def arm_kicad_version(arm: str):
+    """The kicad-cli version an arm was graded with in the cloud, read off its
+    name (`<label>-kc_<sha>` = the default image, `<label>-kc-<ver>_<sha>` =
+    that image), or None for a wave built without KiCad."""
+    label = arm.rsplit("_", 1)[0]
+    m = re.search(r"-kc(?:-([^_]+))?$", label)
+    if not m:
+        return None
+    return m.group(1) or DEFAULT_KICAD_IMAGE.removeprefix("kicad/kicad:")
+
+
+def harvest_regrade_decision(args, arm):
+    """(re-grade the harvested boards here?, the reason, for the log)."""
+    if getattr(args, "local_regrade", False):
+        return True, "re-grading locally (--local-regrade)"
+    if getattr(args, "no_local_regrade", False):
+        return False, "kept the cloud grade (--no-local-regrade)"
+    cloud = arm_kicad_version(arm)
+    if cloud is None:
+        return True, ("re-grading locally: the wave was built without KiCad, so "
+                      "its cloud rows have no kicad-cli cross-check")
+    sys.path.insert(0, str(REPO / "py_router"))
+    from kicad_oracle import kicad_cli_version
+    local = kicad_cli_version()
+    if local and local != cloud:
+        return True, (f"re-grading locally: this machine's kicad-cli is {local}, "
+                      f"the image's {cloud}, and the two grade differently")
+    mine = (f"the version this machine has" if local else
+            "and this machine has no kicad-cli to re-grade with")
+    return False, (f"kept the cloud grade: graded by kicad-cli {cloud} in the "
+                   f"image, {mine}; --local-regrade re-grades here")
 
 
 def _regrade_locally(args, sets, stress, out, what):
@@ -1154,12 +1188,14 @@ def main():
                          "commit (`modal volume ls kicad-sweep-results /` lists them).")
     ap.add_argument("--stress-dir", default=str(DEFAULT_STRESS))
     ap.add_argument("--no-local-regrade", action="store_true",
-                    help="do NOT re-grade harvested boards locally. SAFE on a KiCad "
-                         "image (the default since 2026-08-23): the containers run the "
-                         "same kicad-cli grader this machine does and the two were "
-                         "checked to agree, so cloud grading is not a different grader. "
-                         "Do NOT use it on a --no-kicad wave or one banked before that "
-                         "date -- those rows have no real drc_real to compare.")
+                    help="never re-grade harvested boards locally. By default harvest "
+                         "keeps a KiCad wave's cloud grade (the containers run the same "
+                         "kicad-cli this machine does) and re-grades here only a wave "
+                         "built without KiCad, or one whose image's kicad-cli version "
+                         "differs from this machine's. Do NOT use it on a --no-kicad "
+                         "wave -- those rows have no real drc_real to compare.")
+    ap.add_argument("--local-regrade", action="store_true",
+                    help="always re-grade harvested boards locally, even a KiCad wave")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="KICAD_* knob for this arm, repeatable. Rides the arm spec "
                          "(containers do not inherit this shell's environment).")

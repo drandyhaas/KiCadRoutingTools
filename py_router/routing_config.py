@@ -628,18 +628,22 @@ class GridRouteConfig:
               and getattr(rules, 'board_min', None) else 0.0)
         return override_clearance(base, bm, pad, other_pad)
 
-    def track_obstacle_clearance(self, net_id: int, resolved: float) -> float:
+    def track_obstacle_clearance(self, net_id: int, resolved: float,
+                                 graphic: bool = False) -> float:
         """Track-rule seg-vs-seg clearance against obstacle net ``net_id``:
         max(resolved, the track-rule value) -- raise-only, one dict lookup per
         SEGMENT. ``resolved`` is the caller's fully-resolved value (class
-        pairwise max, #498 layer replacement already applied)."""
-        if not self.track_clearances:
+        pairwise max, #498 layer replacement already applied). A copper
+        ``graphic`` is no track to KiCad, so a track rule never binds it
+        (#1931)."""
+        if not self.track_clearances or graphic:
             return resolved
         v = self.track_clearances.get(net_id)
         return resolved if v is None or v <= resolved else v
 
     def layer_clearance(self, layer: str, fallback: float,
-                        net_id: Optional[int] = None, pad=None) -> float:
+                        net_id: Optional[int] = None, pad=None,
+                        graphic: bool = False) -> float:
         """#498 pair clearance on `layer`: the .kicad_dru rule value when the
         layer is ruled (replacement -- may be below `fallback`), else
         `fallback` (the caller's net/class-resolved value). Single-layer
@@ -650,15 +654,20 @@ class GridRouteConfig:
         class/type-scoped rule LATER in the file than the layer's rule wins
         over it for the routed nets it binds (#1491, KiCad's last match);
         without one, or with no such rule, the layer rule replaces as
-        before."""
+        before. ``graphic``: the obstacle is copper graphic, which a scoped
+        rule reads as KiCad's `Graphic` type, never `Track` (#1931)."""
         s1897 = self.scoped_clearance
+        _kind = None
+        if s1897 is not None and pad is not None:
+            _kind = getattr(pad, 'pad_type', None) or 'smd'
+        elif s1897 is not None and graphic:
+            _kind = self._graphic_key(True)
         if (s1897 is not None and layer in s1897.layered_layers
                 and (net_id is not None or pad is not None)):
             # #1897: a scoped rule with a (layer ...) clause naming this layer
             got = s1897.stamp_layered(
                 int((net_id if net_id is not None else getattr(pad, 'net_id', 0)) or 0),
-                (getattr(pad, 'pad_type', None) or 'smd') if pad is not None else None,
-                layer, self)
+                _kind, layer, self)
             if got is not None:
                 return got
         if self.layer_clearances:
@@ -669,8 +678,7 @@ class GridRouteConfig:
                     s = self.scoped_clearance.stamp_on_layer(
                         int((net_id if net_id is not None
                              else getattr(pad, 'net_id', 0)) or 0),
-                        (getattr(pad, 'pad_type', None) or 'smd')
-                        if pad is not None else None, layer, v)
+                        _kind, layer, v)
                     if s is not None:
                         return s
                 return v
@@ -691,7 +699,7 @@ class GridRouteConfig:
         return via_hole_extra(self, clearance, other_via, pad)
 
     def stack_clearance(self, fallback: float, net_id: Optional[int] = None,
-                        pad=None) -> float:
+                        pad=None, graphic: bool = False) -> float:
         """#498 clearance for STACK-SPANNING pairs (via barrels, TH drills):
         KiCad evaluates the pair on every layer both coppers exist on, so the
         requirement is the max over the stack. max(fallback, all rule values)
@@ -706,13 +714,13 @@ class GridRouteConfig:
             return fallback
         if self.scoped_clearance is not None and (net_id is not None or pad is not None):
             # #1897: and the layers a scoped rule's (layer ...) clause names
-            return max([fallback] + [self.layer_clearance(l, fallback, net_id, pad)
+            return max([fallback] + [self.layer_clearance(l, fallback, net_id, pad, graphic)
                                      for l in (list(self.layer_clearances or ())
                                                + [l for l in sorted(layered)
                                                   if l not in (self.layer_clearances or ())])])
         return max([fallback] + list(self.layer_clearances.values()))
 
-    def obstacle_clearance(self, net_id: int) -> float:
+    def obstacle_clearance(self, net_id: int, graphic: bool = False) -> float:
         """KiCad cross-class clearance for an obstacle belonging to `net_id`.
 
         Returns max(routing-side floor, that obstacle net's own class clearance).
@@ -722,16 +730,31 @@ class GridRouteConfig:
         Consumers (base map builder + every incremental obstacle stamper) MUST
         route their foreign-copper clearance through this one method so the ADD
         and REMOVE paths derive an identical per-obstacle value (ref-count
-        symmetry, issue #208/#309)."""
+        symmetry, issue #208/#309).
+
+        ``graphic``: the obstacle is copper GRAPHIC (a net tie's bridge, a
+        tab, a board-level `gr_*`), which KiCad types `Graphic` and a
+        class/type-scoped rule reads so, never as a track (#1931). Inert
+        without a scoped rule."""
         floor = self.net_clearance_floor if self.net_clearance_floor is not None else self.clearance
         base = max(floor, self.net_clearances.get(net_id, self.clearance))
         if self.scoped_clearance is None:
             return base
-        return self.scoped_stamp(net_id, None, base)
+        return self.scoped_stamp(net_id, self._graphic_key(graphic), base)
+
+    @staticmethod
+    def _graphic_key(graphic: bool):
+        """The scoped channel's obstacle key for a track/via (None) or a
+        copper graphic (#1931)."""
+        if not graphic:
+            return None
+        from kicad_dru import GRAPHIC_OBSTACLE
+        return GRAPHIC_OBSTACLE
 
     def scoped_stamp(self, net_id: int, pad_type, default: float) -> float:
         """#1491: the scoped channel's stamp for an obstacle of `net_id` (a
-        track or via, or a pad of `pad_type`), or `default` when no class/type-
+        track or via, a pad of `pad_type`, or a copper graphic for
+        `kicad_dru.GRAPHIC_OBSTACLE`), or `default` when no class/type-
         scoped .kicad_dru rule binds it against a routed net. A builder that
         prices obstacles by its own formula (build_base_obstacle_map) passes
         its value as `default`."""

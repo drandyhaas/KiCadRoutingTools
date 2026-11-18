@@ -443,6 +443,52 @@ def _record_ripped_ghost(result, net_ids, config, layer_map,
                 ripped_route_via_positions[rid] = via_positions
 
 
+class _BoxIndex:
+    """A uniform-cell index of axis-aligned boxes, each grown by `reach`.
+
+    `near(box)` returns, in insertion order, the indices of every added box
+    whose grown box overlaps `box` (and possibly a few more that only share a
+    cell). Two items whose gap exceeds the grown box's reach are never
+    returned, so a caller testing `dist < thr` with `thr <= reach + half size`
+    (the half size already in the added box) loses no pair. A small slack
+    keeps rounding at a cell edge on the returned side."""
+
+    __slots__ = ('reach', 'cell', 'cells', 'n')
+
+    def __init__(self, reach: float):
+        self.reach = reach + 1e-6
+        self.cell = max(1.0, 4.0 * reach)
+        self.cells: Dict[Tuple[int, int], List[int]] = {}
+        self.n = 0
+
+    def add(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        r, c = self.reach, self.cell
+        cells = self.cells
+        idx = self.n
+        for cx in range(int((x0 - r) // c), int((x1 + r) // c) + 1):
+            for cy in range(int((y0 - r) // c), int((y1 + r) // c) + 1):
+                lst = cells.get((cx, cy))
+                if lst is None:
+                    cells[(cx, cy)] = [idx]
+                else:
+                    lst.append(idx)
+        self.n = idx + 1
+
+    def near(self, x0: float, y0: float, x1: float, y1: float) -> List[int]:
+        c, cells = self.cell, self.cells
+        cx0, cx1 = int(x0 // c), int(x1 // c)
+        cy0, cy1 = int(y0 // c), int(y1 // c)
+        if cx0 == cx1 and cy0 == cy1:
+            return cells.get((cx0, cy0), ())
+        out = set()
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                lst = cells.get((cx, cy))
+                if lst:
+                    out.update(lst)
+        return sorted(out)
+
+
 def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
                           own_net_ids: List[int], clearance: float,
                           config: Optional[GridRouteConfig] = None) -> bool:
@@ -533,6 +579,12 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     inp_all = _inp_all[0] if _inp_all else frozenset()
     if h2h > 0 and vias:
         margin = max(margin, max(v.drill for v in vias) / 2.0 + h2h)
+    # ... and a `.kicad_dru` hole_clearance rule, measured from either item's
+    # hole to the other's copper (`_hole_rule_colliders` names its culprit
+    # from the copper this box keeps).
+    if config is not None and getattr(config, 'hole_rules', None) is not None:
+        from check_drc import _hole_rule_reach
+        margin = max(margin, own_half + _hole_rule_reach(getattr(config, 'rules', None)))
     minx, maxx = min(xs) - margin, max(xs) + margin
     miny, maxy = min(ys) - margin, max(ys) + margin
 
@@ -568,10 +620,29 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             hits.append((kind, obj))
         return True
 
+    # A cell index over the foreign copper, each item under its box grown by
+    # the widest threshold any pair with it can have (`margin` plus its own
+    # half size): a restored item tests only the foreign items whose grown
+    # box shares a cell with its own box. A pair farther apart than that
+    # cannot collide, so the pairs tested, their order and the verdict are
+    # the full scan's (the loops below keep each list's original order).
+    seg_idx = _BoxIndex(margin)
+    for o in o_segs:
+        h = o.width / 2.0
+        seg_idx.add(min(o.start_x, o.end_x) - h, min(o.start_y, o.end_y) - h,
+                    max(o.start_x, o.end_x) + h, max(o.start_y, o.end_y) + h)
+    via_idx = _BoxIndex(margin)
+    for v in o_vias:
+        h = max(v.size, v.drill) / 2.0
+        via_idx.add(v.x - h, v.y - h, v.x + h, v.y + h)
+
     # Restored segments vs other-net segments (same layer) and vias (all layers).
     for s in segs:
         hw = s.width / 2.0
-        for o in o_segs:
+        sx0, sx1 = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
+        sy0, sy1 = min(s.start_y, s.end_y), max(s.start_y, s.end_y)
+        for i in seg_idx.near(sx0, sy0, sx1, sy1):
+            o = o_segs[i]
             if o.layer != s.layer:
                 continue
             thr = hw + o.width / 2.0 + _clr(s.net_id, o, s.layer, 'track')
@@ -579,7 +650,8 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
                                 o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
                 if _hit('segment', o, s) and first_only:
                     return hits
-        for v in o_vias:
+        for i in via_idx.near(sx0, sy0, sx1, sy1):
+            v = o_vias[i]
             thr = hw + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
             if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
                                s.end_x, s.end_y) < thr * thr:
@@ -589,7 +661,8 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     # Restored vias (span layers) vs other-net vias and segments.
     for vv in vias:
         vr = vv.size / 2.0
-        for v in o_vias:
+        for i in via_idx.near(vv.x, vv.y, vv.x, vv.y):
+            v = o_vias[i]
             thr = vr + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
             if h2h > 0 and vv.drill > 0 and v.drill > 0 \
                     and not (id(vv) in inp_all and id(v) in inp_all):
@@ -597,14 +670,74 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
                 if _hit('via', v, vv) and first_only:
                     return hits
-        for o in o_segs:
+        for i in seg_idx.near(vv.x, vv.y, vv.x, vv.y):
+            o = o_segs[i]
             thr = vr + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
             if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
                                o.end_x, o.end_y) < thr * thr:
                 if _hit('segment', o, vv) and first_only:
                     return hits
 
+    if not hits and config is not None \
+            and getattr(config, 'hole_rules', None) is not None:
+        hits.extend(_hole_rule_colliders(segs, vias, pcb_data, config, held,
+                                         o_segs, o_vias))
     return hits
+
+
+def _hole_rule_colliders(segs, vias, pcb_data, config, held, o_segs, o_vias) -> list:
+    """The restore test under the board's `.kicad_dru` hole_clearance rules
+    (#1853, #1934): [(kind, the nearest foreign copper)] when a saved piece may not
+    be laid by `check_drc.hole_rule_refusal`, the gate every generator of the
+    step asks, else []. Those rules measure from a HOLE to another net's
+    copper, which is wider than the copper and drill tests above wherever a
+    board declares one, so a via put back beside a via routed since the rip
+    cleared both and shipped inside the rule.
+
+    A piece the step was handed, still where the input had it, is asked
+    against the copper laid or moved since: beside the rest it stood on the
+    input board (#1609, `input_pair_unmoved`)."""
+    from check_drc import hole_rule_refusal
+    dr = getattr(config, 'rules', None)
+    if dr is None:
+        return []
+
+    def _handed(item):
+        return held is not None and held(item, item)
+
+    new_s = [s for s in segs if not _handed(s)]
+    new_v = [v for v in vias if not _handed(v)]
+    old_s = [s for s in segs if _handed(s)]
+    old_v = [v for v in vias if _handed(v)]
+    refused = bool((new_s or new_v)
+                   and hole_rule_refusal(pcb_data, dr, new_s, new_v))
+    if not refused and (old_s or old_v):
+        from types import SimpleNamespace
+        since = SimpleNamespace(
+            nets=pcb_data.nets, footprints={},
+            board_info=getattr(pcb_data, 'board_info', None),
+            segments=[s for s in pcb_data.segments if not _handed(s)],
+            vias=[v for v in pcb_data.vias if not _handed(v)])
+        refused = bool(hole_rule_refusal(since, dr, old_s, old_v))
+    if not refused:
+        return []
+
+    def _gap_sq(o):
+        best = None
+        for p in list(segs) + list(vias):
+            px, py = ((p.x, p.y) if hasattr(p, 'x')
+                      else ((p.start_x + p.end_x) / 2.0, (p.start_y + p.end_y) / 2.0))
+            d = ((o.x - px) ** 2 + (o.y - py) ** 2 if hasattr(o, 'x')
+                 else _pt_seg_dist_sq(px, py, o.start_x, o.start_y, o.end_x, o.end_y))
+            best = d if best is None or d < best else best
+        return best
+
+    near = [('via', v) for v in o_vias] + [('segment', s) for s in o_segs]
+    if not near:
+        # the hole is a pad's: name the saved piece itself
+        p = (list(vias) + list(segs))[0]
+        return [('via' if hasattr(p, 'x') else 'segment', p)]
+    return [min(near, key=lambda ko: _gap_sq(ko[1]))]
 
 
 def restore_write_entry(pruned: dict, input_ids) -> Optional[dict]:
