@@ -8741,8 +8741,8 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     #
     # The weld keeps the LONGER neighbour's own end and moves the other
     # neighbour's end onto it (#1979). Moving both to the bridge's midpoint
-    # turned a long neighbour by half the bridge: on glasgow_revC Z3 a 12.2 mm
-    # coupled leg beside a 6.8 um jog came out 3.4 um off 45 degrees, no
+    # turned a long neighbour by half the bridge: a 12.2 mm coupled
+    # diff-pair leg beside a 6.8 um jog came out 3.4 um off 45 degrees, no
     # longer parallel to its partner in KiCad's integer test, and the pair
     # read 1.8 mm coupled of 15.5 mm. The shorter neighbour's end now moves
     # the whole bridge (at most 0.01 mm where the ends sit on the bridge's,

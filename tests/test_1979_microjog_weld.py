@@ -3,7 +3,7 @@
 
 `add_route_to_pcb_data` drops a segment no longer than 0.01 mm and, when it
 bridges two neighbours, welds them. It moved BOTH neighbours' ends to the
-bridge's midpoint. On glasgow_revC `/IO_Banks/Z3` (route_diff, grid 0.1,
+bridge's midpoint. On a diff pair routed by route_diff (grid 0.1,
 heuristic weight 1.3) the bridge is a 6.8 um jog between a 0.79 mm connector
 and a 12.2 mm 45-degree leg, so the leg turned by 3.4 um, was no longer
 parallel to its partner in KiCad's integer test, and the pair read 1.8 mm
@@ -46,7 +46,7 @@ from pcb_modification import add_route_to_pcb_data  # noqa: E402
 PY = [sys.executable, '-X', 'utf8']
 FAILS = []
 P, N = 1, 2
-# glasgow_revC Z3: the centre line's first segment is a 0.1 mm stub that
+# The issue's pair: the centre line's first segment is a 0.1 mm stub that
 # turns 45 degrees; offset by the 0.225 mm half pitch, the inner member's
 # copy of it is 0.1 - 0.225 * tan(22.5 deg) = 0.0068 mm long, the outer's
 # 0.1932 mm (create_parallel_path_from_float).
@@ -188,7 +188,7 @@ def via_end():
 
 
 def the_route(td):
-    print("5. glasgow_revC /IO_Banks/Z*, the issue's command")
+    print("5. the issue's route_diff command")
     src = os.path.join(REPO, 'kicad_files', 'glasgow_revC.kicad_pcb')
     board_in, out = os.path.join(td, 'in.kicad_pcb'), os.path.join(td, 'out.kicad_pcb')
     summary = os.path.join(td, 'out.json')
