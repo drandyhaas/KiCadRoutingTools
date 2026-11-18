@@ -769,10 +769,17 @@ class Group:
                         mouths.append(((float(a[0]), float(a[1])), (float(b[0]), float(b[1])), sa, sb, m))
                     pkey = tuple(sorted((a, b) for a, b, _sa, _sb, _m in mouths))     # (the pocket: its mouths)
                     # (a mouth's leg runs along its part's row at the stub ends, past its neighbours' escapes: the pins
-                    # it passes, each a pad of the part within a stub's length of it -- its own the nearest)
-                    pads_ = [(pd.global_x, pd.global_y) for pd in self.pcb.footprints[part].pads]
-                    own_pad = min(pads_, key=lambda c: math.hypot(c[0] - p[0], c[1] - p[1]))
+                    # it passes, each a pad within a stub's length of it -- its own the nearest. A pad of ANY of the
+                    # group's parts: a pocket's walls are other parts' rows, and a leg down a wall runs through that
+                    # part's stubs and vias as it does its own row's. Counted on its own part alone, a connector's
+                    # lanes went down the gap between two chips in front of it along one chip's pin row for nothing,
+                    # and in three lays running one or two of them met that chip's escape vias, on other lanes each
+                    # time; the hand-routed board takes those lanes round the chip's far side or straight under it)
+                    own_ = [(pd.global_x, pd.global_y) for pd in self.pcb.footprints[part].pads]
+                    own_pad = min(own_, key=lambda c: math.hypot(c[0] - p[0], c[1] - p[1]))
                     stub_ = math.hypot(own_pad[0] - p[0], own_pad[1] - p[1])
+                    pads_ = [(pd.global_x, pd.global_y) for r_ in sorted(self.boxes)
+                             for pd in self.pcb.footprints[r_].pads]
                     for a, b, sa, sb, m in mouths:
                         depth = float(m.distance(Q0))
                         dbox = lambda c: math.hypot(max(0.0, own[0] - c[0], c[0] - own[2]),
