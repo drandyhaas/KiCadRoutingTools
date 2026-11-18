@@ -1220,24 +1220,15 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
             # measure the board they just wrote.
             from kicad_parser import parse_kicad_pcb
             pcb = parse_kicad_pcb(output_pcb)
-            objects = {
-                # Graphic copper is a shape, not a track (#908, #337) -- the
-                # same exclusion `scan_board_minima` makes below. Counting a
-                # filled fp_poly's stroke here told the reader that N tracks
-                # sit under the original floor when none of them is a track.
-                "min_track_width": [s.width for s in pcb.segments
-                                    if s.width and not getattr(s, 'graphic', False)],
-                "min_via_diameter": [v.size for v in pcb.vias if v.size
-                                     and getattr(v, 'via_type', None) != 'micro'],
-                "min_via_drill": [v.drill for v in pcb.vias if v.drill
-                                  and getattr(v, 'via_type', None) != 'micro'],
-                "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
-                                          if v.size and v.drill and v.size > v.drill
-                                          and getattr(v, 'via_type', None) != 'micro'],
-            }
-            # #1843: and a track a rule area's track_width rule binds is graded
-            # at that rule, as `board_size_values` reads it
-            objects["min_track_width"] = _board_track_widths(pcb)
+            # The objects `board_size_values` reads: graphic copper is a
+            # shape, not a track (#908, #337) -- counting a filled fp_poly's
+            # stroke told the reader that N tracks sit under the original
+            # floor when none of them is a track; a track a rule area's
+            # track_width rule binds (#1843) and a via a .kicad_dru via rule
+            # binds (#1972) are graded at the rule.
+            _vals = board_size_values(pcb)
+            objects = {k: _vals[k] for k in ("min_track_width", "min_via_diameter",
+                                             "min_via_drill", "min_via_annular_width")}
         for key, _label, was, _now, _mv in relaxed:
             objs = list(objects.get(key) or [])
             if objs:
@@ -1295,6 +1286,22 @@ def _board_track_widths(pcb) -> list:
                                                s.end_y, s.layer, s.width))]
 
 
+def board_via_rule_test(pcb):
+    """#1972: `design_rules.via_rule_held_test` for the board ``pcb`` (its
+    own `.kicad_dru`, read beside ``pcb.source_path``), or None when no rule
+    sizes a via. A rules file that cannot be read is said on the console and
+    read as no rule, so every via counts against the Board Setup minimums,
+    as before."""
+    try:
+        from design_rules import via_rule_held_test
+        return via_rule_held_test(pcb)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  WARNING: the board's .kicad_dru via rules could not be read "
+              f"({type(e).__name__}: {e}); every via is measured against the "
+              f"Board Setup via minimums", file=sys.stderr)
+        return None
+
+
 def board_size_values(pcb) -> dict:
     """Every size a measurable fab floor is a statement about, per
     :data:`FAB_FLOOR_KEYS_MEASURABLE` key: ``{key: [mm, ...]}``, one value per
@@ -1314,8 +1321,14 @@ def board_size_values(pcb) -> dict:
     # (`micro_via_floors`), so the through vias keep the board's minimum.
     drilled = [v for v in pcb.vias if getattr(v, 'via_type', None) != 'micro']
     via_drills = [v.drill for v in drilled if v.drill]
+    # #1972: a via whose diameter, hole or ring a .kicad_dru rule sets is
+    # graded at the rule, not at the Board Setup minimum of that kind, so it
+    # says nothing about that minimum (`board_via_rule_test`)
+    held = board_via_rule_test(pcb)
+    free = ((lambda v, kind: not held(v, kind)) if held is not None
+            else (lambda v, kind: True))
     # Through-hole pad / via drills set the smallest hole diameter on the board.
-    hole = list(via_drills)
+    hole = [v.drill for v in drilled if v.drill and free(v, 'hole_size')]
     for fp in pcb.footprints.values():
         for pad in fp.pads:
             if getattr(pad, "drill", 0):
@@ -1324,10 +1337,12 @@ def board_size_values(pcb) -> dict:
         "min_track_width": [s.width for s in pcb.segments
                             if s.width and s.width > 0
                             and not getattr(s, 'graphic', False)],
-        "min_via_diameter": [v.size for v in drilled if v.size],
+        "min_via_diameter": [v.size for v in drilled
+                             if v.size and free(v, 'via_diameter')],
         "min_via_drill": via_drills,
         "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in drilled
-                                  if v.size and v.drill and v.size > v.drill],
+                                  if v.size and v.drill and v.size > v.drill
+                                  and free(v, 'annular_width')],
         "min_through_hole_diameter": hole,
     }
     # #1843: a track a rule area's track_width rule binds is graded at that

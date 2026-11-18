@@ -2597,21 +2597,44 @@ class DesignRules:
             s = _via_holding_ring(s, d, ring)
         return s, d
 
-    def via_size_grade(self, vias, board_floors=None) -> List[dict]:
+    def grade_via_item(self, v, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
+        """#1972: the RuleItem a via grade resolves ``v`` (a Via or a fanout
+        engine's via dict) with. Given ``courtyards``, a via whose position is
+        known is read as itself (`via_item`), the courtyards its disc
+        overlaps measured, so a rule bound by a courtyard term grades it where
+        it stands, as check_drc does (#1805). Otherwise, and for a via with no
+        position, the via of its net (`item_for_net`), as before."""
+        net = int(_via_attr(v, 'net_id'))
+        if courtyards is None:
+            return self.item_for_net(net, 'via')
+        x, y = (v.get('x'), v.get('y')) if isinstance(v, dict) else (
+            getattr(v, 'x', None), getattr(v, 'y', None))
+        if x is None or y is None:
+            return self.item_for_net(net, 'via')
+        if isinstance(v, dict):
+            from types import SimpleNamespace
+            v = SimpleNamespace(x=x, y=y, size=_via_attr(v, 'size'), net_id=net,
+                                drill=_via_attr(v, 'drill'),
+                                via_type=v.get('via_type'), layers=v.get('layers'))
+        return self.via_item(v, courtyards)
+
+    def via_size_grade(self, vias, board_floors=None,
+                       courtyards: Optional['CourtyardIndex'] = None) -> List[dict]:
         """#1676: `annular_grade` for the two other kinds a rule sizes a via by:
         one row per `via_diameter` / `hole_size` rule that sets the minimum of
         at least one of ``vias``: ``{rule, kind, min, vias, below, smallest}``,
         ``min`` KiCad's value and ``smallest`` the smallest size it bound.
         ``board_floors`` as for `annular_grade` (#1775): a via no rule binds is
         graded against its `via_diameter` / `via_drill` under the rule name
-        `Board Setup <key>`, the row marked ``board_setup``."""
+        `Board Setup <key>`, the row marked ``board_setup``. ``courtyards`` as
+        for `annular_grade` (#1972)."""
         rows: Dict[Tuple[str, str], dict] = {}
         bf = board_floors or {}
         for v in vias or ():
             size, drill = _via_attr(v, 'size'), _via_attr(v, 'drill')
             if not size or not drill:
                 continue
-            item = self.item_for_net(int(_via_attr(v, 'net_id')), 'via')
+            item = self.grade_via_item(v, courtyards)
             for kind, have in (('via_diameter', size), ('hole_size', drill)):
                 c = self.resolve_for_copper(kind, item, None, None)
                 need = c.kicad_min if c.fab_bound else c.min
@@ -2632,7 +2655,8 @@ class DesignRules:
             row['smallest'] = round(row['smallest'], 4)
         return [rows[k] for k in sorted(rows)]
 
-    def annular_grade(self, vias, board_floors=None) -> List[dict]:
+    def annular_grade(self, vias, board_floors=None,
+                      courtyards: Optional['CourtyardIndex'] = None) -> List[dict]:
         """#1649: the vias of one step graded against each `annular_width`
         rule (`ROUTER_UNHONOURED_KINDS`) -- the
         answer the "NOT honoured" line, printed before the step, cannot give.
@@ -2647,15 +2671,19 @@ class DesignRules:
         minimums the run ships graded against (`board_setup_via_floors`):
         a via no rule binds is graded against its `annular` instead, under
         the rule name `Board Setup min_via_annular_width`, the row marked
-        ``board_setup``. None (the default) grades rules only."""
+        ``board_setup``. None (the default) grades rules only.
+
+        ``courtyards`` (#1972, `courtyard_index`): each via is graded where
+        it stands (`grade_via_item`), so a rule bound by a courtyard term
+        sets the ring of a via inside that courtyard and the Board Setup row
+        keeps the vias outside it."""
         rows: Dict[str, dict] = {}
         board_ring = (board_floors or {}).get('annular')
         for v in vias or ():
             size, drill = _via_attr(v, 'size'), _via_attr(v, 'drill')
             if not size or not drill:
                 continue
-            c = self.resolve('annular_width',
-                             self.item_for_net(int(_via_attr(v, 'net_id')), 'via'),
+            c = self.resolve('annular_width', self.grade_via_item(v, courtyards),
                              None, None)
             rule, setup = c.min_rule, False
             if rule is None:                # a class or the board minimum set it
@@ -2972,8 +3000,58 @@ def board_setup_via_grade(pcb_data, vias, board_path: Optional[str] = None,
             rules = DesignRules.from_project(pcb_data, board_path)
         except (OSError, ValueError):
             rules = DesignRules()
-    rows = rules.annular_grade(vias, floors) + rules.via_size_grade(vias, floors)
+    cy = grade_courtyards(rules, pcb_data, board_path)
+    rows = (rules.annular_grade(vias, floors, cy)
+            + rules.via_size_grade(vias, floors, cy))
     return [r for r in rows if r.get('board_setup') and r['below']]
+
+
+def grade_courtyards(rules, pcb_data, board_path: Optional[str] = None
+                     ) -> Optional['CourtyardIndex']:
+    """#1972: the `CourtyardIndex` a step's via grades read positions with
+    (`annular_grade` / `via_size_grade`), or None when no via rule binds by
+    courtyard (then nothing is measured, as before). Built once per board
+    and rules and held on ``rules``."""
+    path = board_path or getattr(rules, 'source', None) or getattr(
+        pcb_data, 'source_path', '') or ''
+    sig = (id(pcb_data), path)
+    held = getattr(rules, '_grade_courtyards', None)
+    if held is not None and held[0] == sig and held[1] is pcb_data:
+        return held[2]
+    try:
+        idx = rules.courtyard_index(pcb_data, path or None)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  (courtyard-scoped via rules not read by position: {e})")
+        idx = None
+    rules._grade_courtyards = (sig, pcb_data, idx)
+    return idx
+
+
+def via_rule_held_test(pcb_data, board_path: Optional[str] = None):
+    """#1972: ``held(via, kind)`` -- does a `.kicad_dru` rule set the minimum
+    KiCad grades ``via``'s ``kind`` (`VIA_SIZE_KINDS`) at? Read as check_drc
+    reads it: the via as itself (`via_item`), with the courtyards its disc
+    overlaps measured when a rule binds by courtyard (#1805). KiCad then
+    grades that kind of the via at the rule and not at the Board Setup
+    minimum (kicad-cli 10.0.6: 0.30/0.15 vias inside a courtyard a rule
+    relaxes to ring 0.07 / diameter 0.25 / hole 0.1 are clean under Board
+    Setup 0.13 / 0.35 / 0.2, and flagged without the rule), so its size says
+    nothing about that minimum. ``via`` is a Via or anything with ``x``,
+    ``y``, ``size``, ``drill``, ``net_id``. None when the board has no rules
+    file that sizes a via. Raises when the rules cannot be read."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    dru = os.path.splitext(path)[0] + '.kicad_dru' if path else ''
+    if not dru or not os.path.isfile(dru):
+        return None
+    dr = DesignRules.from_project(pcb_data, path)
+    if not any(set(r.constraints) & set(VIA_SIZE_KINDS) for r in dr.rules):
+        return None
+    cy = dr.courtyard_index(pcb_data, path)
+
+    def held(via, kind: str) -> bool:
+        c = dr.resolve_for_copper(kind, dr.via_item(via, cy), None, None)
+        return c.min_rule is not None
+    return held
 
 
 def disclose_board_setup_vias(pcb_data, vias, board_path: Optional[str] = None,
@@ -3092,10 +3170,11 @@ def disclose_step_rules(rules, pcb_data, results, board_path: Optional[str] = No
     vias = [v for r in results for v in (r.get('new_vias') or [])]
     segs = [s for r in results for s in (r.get('new_segments') or [])]
     out = {}
-    ag = rules.annular_grade(vias)
+    cy = grade_courtyards(rules, pcb_data, board_path or rules.source or None)
+    ag = rules.annular_grade(vias, courtyards=cy)
     if ag:
         out['annular_rules'] = ag
-    vg = rules.via_size_grade(vias)
+    vg = rules.via_size_grade(vias, courtyards=cy)
     if vg:
         out['via_rules'] = vg
     eg = edge_rule_grade(pcb_data, segs, vias, board_path or rules.source or None)

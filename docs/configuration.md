@@ -653,7 +653,13 @@ the part (`!A.insideCourtyard('U1')` binds a via outside that part,
 `A.insideCourtyard('U1') || A.NetName == 'X'` X's via anywhere), is listed as one
 that MAY relax, with the nets its other terms do not rule out. No routing step
 applies a courtyard-scoped rule: the router routes that copper at the class
-value.
+value. The end-of-step via grades (the per-rule lines above and
+`board_setup_vias`) and the DRC writeback do read such a rule by position, as
+check_drc does (#1972). A via inside the courtyard is graded at the rule and is
+not named under the Board Setup minimum. The writeback lowers
+`min_via_annular_width`, `min_via_diameter` and `min_through_hole_diameter` only
+to vias that no `.kicad_dru` rule sizes, because KiCad grades a via that a rule
+sizes at the rule (kicad-cli 10.0.6). This holds on both fronts.
 
 **A via rule's `(layer ...)` clause (#1805).** Every reader of a via's size
 reads it as kicad-cli does for a via, of any type (through, blind, buried,
