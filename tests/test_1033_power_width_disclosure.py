@@ -522,7 +522,9 @@ def t_strict_sizes():
                       and doc.get('power_widths_run_scope') == ['+3V3']
                       and not any(x.get('net_name') == '+5V' for x in rows),
                       (p5, doc.get('power_widths_run_scope'), rows))
-            necked = 'neck-down' in log or 'short edge at' in log
+            # a long edge routed at a width between prints neither (#1983)
+            necked = ('neck-down' in log or 'short edge at' in log
+                      or 'long edge spanning' in log)
             if want == 0:
                 check('strict-sizes: the router did not need to neck this net',
                       not necked)

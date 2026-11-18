@@ -1575,8 +1575,9 @@ class RoutingDialog(wx.Dialog):
         # Power route neck-down (issue #72)
         self.power_tap_neckdown_check = wx.CheckBox(options_scroll, label="Power route neck-down")
         self.power_tap_neckdown_check.SetValue(True)
-        self.power_tap_neckdown_check.SetToolTip("Retry failed wide power routes at the default track width, "
-                                                 "narrow near the pads and wide where clearance allows")
+        self.power_tap_neckdown_check.SetToolTip("Retry failed wide power routes narrower (half, a quarter, ... "
+                                                 "down to the default track width), narrow only where the "
+                                                 "power width does not fit")
         options_inner.Add(self.power_tap_neckdown_check, 0, wx.ALL, 3)
 
         # No BGA zones
