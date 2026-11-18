@@ -242,8 +242,13 @@ matching, keep-away rules, buses, a particular plane map, or a net class that is
 real requirement rather than aspirational -- run the tools yourself, the kind of chain
 `/plan-pcb-routing` plans:
 
-If the parts need placement, first follow the [placement guide](py_placer/placement/README.md).
-Use the resulting placed board as `my_board.kicad_pcb` in this chain.
+If the parts need placement, place them first by their functional groups (see the
+[placement guide](py_placer/placement/README.md)) and use the placed board as
+`my_board.kicad_pcb` in this chain:
+
+```bash
+python3 py_placer/place_simple.py unplaced.kicad_pcb my_board.kicad_pcb --groups groups.json --intent intent.json
+```
 
 ```bash
 # Pour the planes FIRST (#562): the fanout's plane-drop vias then land on
@@ -742,9 +747,31 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 
 ## Documentation
 
-The [documentation index](docs/README.md) links to the routing and placement
-guides, Python API, test instructions, and release process. It also identifies
-the historical proposals and lists the checks for documentation changes.
+The [documentation index](docs/README.md) is organised by task (install, route, place, check, test, release); the table below describes each document.
+
+| Document | Description |
+|----------|-------------|
+| [Routing Architecture](docs/routing-architecture.md) | Module structure, obstacle maps, A* algorithm |
+| [Python API](docs/python-api.md) | Using the modules as a library: parser, writer, modification, config, net analysis, impedance — with runnable examples |
+| [Configuration](docs/configuration.md) | Command-line options, GridRouteConfig parameters |
+| [Differential Pairs](docs/differential-pairs.md) | P/N pairing, polarity swaps, via handling |
+| [Net Ordering](docs/net-ordering.md) | MPS algorithm, inside-out ordering, strategy comparison |
+| [Rip-Up and Reroute](docs/rip-up-reroute.md) | Blocking analysis, progressive N+1 escalation, reroute loop |
+| [Length Matching](docs/length-matching.md) | Trombone meanders, via barrel lengths, DDR auto-grouping, time matching |
+| [Bus Routing](docs/bus-routing.md) | Bus detection and filter, corridor planning, middle-out ordering, corridor attraction; the topo bus step |
+| [Guide Corridor](docs/configuration.md#guide-corridor-options-preferred-route) | User-layer guide paths, waypoints, best-effort following |
+| [Power/Ground Planes](docs/route-plane.md) | Copper zones with automatic via placement |
+| [Utilities](docs/utilities.md) | Every checker (DRC, connectivity, completion, hygiene, pads), the fanout generators, placement tools, renderers, the DRC-settings fixer |
+| [Design Brief](docs/design-brief.md) | Declare what the board IS -- the facts a board file cannot contain -- and compile them into the intent (`<board>.design-brief.json`) |
+| [Floorplan Intent](docs/floorplan-intent.md) | Declare the floorplan, grade the board against it (`check_floorplan.py`) |
+| [BGA Fanout](py_router/bga_fanout/README.md) | BGA escape routing generator |
+| [QFN Fanout](py_router/qfn_fanout/README.md) | QFN/QFP escape routing generator |
+| [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
+| [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
+| [Claude Skills](docs/claude-skills.md) | All eleven AI skills: placement and routing end to end, routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review, the 3D movie |
+| [Placement](py_placer/placement/README.md) | Placement by function: groups, one annealed objective, legality, the floorplan intent's grade |
+| [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
+| [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 
 ## Project Structure
 
@@ -1036,9 +1063,7 @@ Rust acceleration provided a ~10x speedup over the original pure-Python A*.
 
 Every tool prints its accepted options with `--help`. [Configuration](docs/configuration.md)
 explains those options and their defaults. Use [Routing Configuration API](docs/api-routing-config.md)
-for `GridRouteConfig` fields. If a reference disagrees with the checkout's parser
-or shared defaults, correct the reference against that code. The tool-specific
-guides go deeper on their area:
+for `GridRouteConfig` fields. The tool-specific guides go deeper on their area:
 
 | Tool | Purpose | Guide |
 |------|---------|-------|
