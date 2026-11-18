@@ -147,12 +147,16 @@ def main():
     for bus, r in sorted(reqs.items()):
         env = r['env']
         vals = json.load(open(r['solve'][:-len('.json')] + '.vals.json'))
-        with awx_settings.given(env), contextlib.redirect_stdout(io.StringIO()):
+        said = io.StringIO()
+        with awx_settings.given(env), contextlib.redirect_stdout(said):
             import whole_ctx
             import whole_solve as ws
             ctx, _cs = whole_ctx.plan()
             p = ws.solve(ctx, env['DEST'], files(env, 'CUTS'), files(env, 'HIST'), None,
                          soft_cuts=files(env, 'SOFT_CUTS'), joint=types.SimpleNamespace(m=m))
+        for ln in said.getvalue().splitlines():
+            if ln.strip().startswith('held:'):
+                print(f'  {bus}: {ln.strip()[:200]}')         # (a loop's repair: the lanes it held, held here too)
         n0, n1 = p.nv
         if n1 - n0 != len(vals):
             print(f'  {bus}: its model here has {n1 - n0} variables, its own solve {len(vals)} -- NOT the same model: '

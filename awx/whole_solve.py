@@ -1932,36 +1932,46 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 for i_ in range(KMAX + 1):
                     m.AddHint(YL[n_][i_], LAYN.index(ls_[min(i_, len(ls_) - 1)]))
         print(f'   warm start from {os.path.basename(hint)}: {nh} crossing hints')
-        # (SOLVE_HOLD, the loop's re-solve: every lane but the FREE ones -- those the round's cuts and audit name -- held
-        # as the hint laid it: its changes, its layers, and its crossings with another held lane where they were. A
-        # repair of what the round found, not a new plan: the re-solve given the whole model again wandered to plans of
-        # their own, each with findings of its own, and the loop stopped not converging on the first round's)
-        if awx_settings.get('SOLVE_HOLD'):
-            free_ = set(json.load(open(awx_settings.req('SOLVE_HOLD'))).get('free') or ())
-            held_ = [n_ for n_ in M if n_ not in free_]
-            for n_ in held_:
-                chs_ = Hj['changes'].get(n_) or []
-                cs_h, act_h = chg[n_]
-                for i_ in range(KMAX):
-                    if i_ < len(chs_):
-                        m.Add(cs_h[i_] == int(round(chs_[i_] / G)))
-                        m.Add(act_h[i_] == 1)
-                    else:
-                        m.Add(act_h[i_] == 0)
-                ls_ = (Hj.get('layers') or {}).get(n_)
-                if n_ in YL and ls_ and all(L_ in LAYN for L_ in ls_):
-                    for i_ in range(KMAX + 1):
-                        m.Add(YL[n_][i_] == LAYN.index(ls_[min(i_, len(ls_) - 1)]))
-            hs_ = set(held_)
-            nhx_ = 0
-            for k_, v_ in Hj['cross'].items():
-                a_, b_ = k_.split('|')
-                key_ = (a_, b_) if (a_, b_) in t else (b_, a_)
-                if key_ in t and a_ in hs_ and b_ in hs_:
-                    m.Add(t[key_] == int(round(v_['u'] / G)))
-                    nhx_ += 1
-            print(f'   held: {len(held_)} of {len(M)} lanes as {os.path.basename(hint)} laid them, {nhx_} crossings '
-                  f'between them; free: {", ".join(sorted(free_ & set(M)))}')
+
+    def hold_lanes(held_from):
+        """(SOLVE_HOLD, the loop's re-solve: every lane but the FREE ones -- those the round's cuts and audit name -- held
+        as the plan `held_from` laid it: its changes, its layers, and its crossings with another held lane where they
+        were. A repair of what the round found, not a new plan: the re-solve given the whole model again wandered to
+        plans of their own, each with findings of its own, and the loop stopped not converging on the first round's)"""
+        Hj = json.load(open(held_from))
+        free_ = set(json.load(open(awx_settings.req('SOLVE_HOLD'))).get('free') or ())
+        held_ = [n_ for n_ in M if n_ not in free_]
+        for n_ in held_:
+            chs_ = Hj['changes'].get(n_) or []
+            cs_h, act_h = chg[n_]
+            for i_ in range(KMAX):
+                if i_ < len(chs_):
+                    m.Add(cs_h[i_] == int(round(chs_[i_] / G)))
+                    m.Add(act_h[i_] == 1)
+                else:
+                    m.Add(act_h[i_] == 0)
+            ls_ = (Hj.get('layers') or {}).get(n_)
+            if n_ in YL and ls_ and all(L_ in LAYN for L_ in ls_):
+                for i_ in range(KMAX + 1):
+                    m.Add(YL[n_][i_] == LAYN.index(ls_[min(i_, len(ls_) - 1)]))
+        hs_ = set(held_)
+        nhx_ = 0
+        for k_, v_ in Hj['cross'].items():
+            a_, b_ = k_.split('|')
+            key_ = (a_, b_) if (a_, b_) in t else (b_, a_)
+            if key_ in t and a_ in hs_ and b_ in hs_:
+                m.Add(t[key_] == int(round(v_['u'] / G)))
+                nhx_ += 1
+        print(f'   held: {len(held_)} of {len(M)} lanes as {os.path.basename(held_from)} laid them, {nhx_} crossings '
+              f'between them; free: {", ".join(sorted(free_ & set(M)))}')
+    if hint and awx_settings.get('SOLVE_HOLD'):
+        hold_lanes(hint)
+    elif joint is not None and awx_settings.get('SOLVE_HOLD') and awx_settings.get('HINT'):
+        # (...and in the COUPLED solve of that repair, the same lanes held from the same plan: its model is the repair's
+        # own, built again. Built with no lane held, and with the free lanes' cuts alone, the coupled search had every
+        # lane of every bus to move after a repair of five: four buses' first audits found 41 lanes short of their
+        # bar from another object, their second 73, each bus's lanes moved from under the others')
+        hold_lanes(awx_settings.req('HINT'))
     # ---- no more than TWO VIAS on a net where that can be had (Andy, 2026-09-25): a net's vias on the board are its stubs'
     # own (the bench's copper) and its lane's changes -- a pair's leg a barrel at each dive. Each via past two costs
     # W_OVER_X vias more, then the vias, then congestion -- a price, never a cap, so a board that cannot keep it still
