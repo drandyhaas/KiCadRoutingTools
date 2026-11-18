@@ -146,7 +146,7 @@ class SpanView:
         return new
 
     def _filtered(self, name):
-        from geometry_utils import via_copper_layers
+        from geometry_utils import via_span_layers
         from check_drc import pad_copper_layers
         base, keep = self._base, set(self._span)
         copper = list(base.board_info.copper_layers)
@@ -157,7 +157,7 @@ class SpanView:
         if name == 'segments':
             return [s for s in base.segments if s.layer in keep]
         if name == 'vias':
-            return [v for v in base.vias if keep & set(via_copper_layers(v, copper))]
+            return [v for v in base.vias if keep & set(via_span_layers(v, copper))]
         if name == 'zones':
             return [z for z in (getattr(base, 'zones', None) or []) if z.layer in keep]
         if name == 'footprints':
@@ -380,7 +380,7 @@ def only_span_copper(pcb_data, span, via_type: Optional[str] = None):
     aside tracks and vias stay readable through `set_aside`, which the lock
     and hold readers include, so KiCad-locked copper off the span keeps its
     net unrippable inside the call."""
-    from geometry_utils import via_copper_layers
+    from geometry_utils import via_span_layers
     from check_drc import pad_copper_layers
     keep = set(span)
     copper = list(pcb_data.board_info.copper_layers)
@@ -393,7 +393,7 @@ def only_span_copper(pcb_data, span, via_type: Optional[str] = None):
               'zones': list(zones or [])}
     held = {'segments': [s for s in before['segments'] if s.layer not in keep],
             'vias': [v for v in before['vias']
-                     if not keep & set(via_copper_layers(v, copper))],
+                     if not keep & set(via_span_layers(v, copper))],
             'zones': [z for z in before['zones'] if z.layer not in keep]}
     fp_pads = {ref: list(fp.pads) for ref, fp in pcb_data.footprints.items()}
     net_pads = {nid: list(pads) for nid, pads in pcb_data.pads_by_net.items()}
@@ -622,7 +622,7 @@ def hold_outside_copper(pcb_data, span) -> int:
     hold is in memory, for the step; nothing is written to the board.
     Copper already locked or held is left as it is. Returns how many items
     were marked."""
-    from geometry_utils import via_copper_layers
+    from geometry_utils import via_span_layers
     keep = set(span)
     copper = list(pcb_data.board_info.copper_layers)
     n = 0
@@ -633,7 +633,7 @@ def hold_outside_copper(pcb_data, span) -> int:
             s.held_by = HELD_OUTSIDE_SPAN
             n += 1
     for v in pcb_data.vias:
-        if (set(via_copper_layers(v, copper)) - keep
+        if (set(via_span_layers(v, copper)) - keep
                 and not getattr(v, 'locked', False) and not getattr(v, 'held_by', '')):
             v.held_by = HELD_OUTSIDE_SPAN
             n += 1

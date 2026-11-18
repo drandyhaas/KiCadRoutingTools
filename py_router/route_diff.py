@@ -132,7 +132,7 @@ def pair_pn_shortfall(pcb_data, pair, config) -> int:
     0: the pair ships no P/N shortfall."""
     import math
     from diff_pair_routing import _seg_to_seglist_min_edge
-    from geometry_utils import point_to_segment_distance, via_on_layer
+    from geometry_utils import point_to_segment_distance, via_spans_layer
     from check_drc import pad_copper_layers, segment_pad_gap
     p_id, n_id = pair.p_net_id, pair.n_net_id
     board_cu = list(getattr(getattr(pcb_data, 'board_info', None),
@@ -155,7 +155,7 @@ def pair_pn_shortfall(pcb_data, pair, config) -> int:
                      < config.pair_clearance(a, b, s.layer, kind='track') - eps)
             if not short:
                 for v in vias[b]:
-                    if via_on_layer(v, s.layer) and (
+                    if via_spans_layer(v, s.layer) and (
                             point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
                                                       s.end_x, s.end_y)
                             - v.size / 2.0 - w / 2.0
@@ -175,7 +175,7 @@ def pair_pn_shortfall(pcb_data, pair, config) -> int:
         for v in vias[a]:
             short = False
             for s in segs[b]:
-                if via_on_layer(v, s.layer) and (
+                if via_spans_layer(v, s.layer) and (
                         point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
                                                   s.end_x, s.end_y)
                         - v.size / 2.0 - (s.width or 0.0) / 2.0
@@ -190,7 +190,7 @@ def pair_pn_shortfall(pcb_data, pair, config) -> int:
                         break
             if not short:
                 for q, q_cu in pads[b]:
-                    if any(via_on_layer(v, L) for L in q_cu) and (
+                    if any(via_spans_layer(v, L) for L in q_cu) and (
                             segment_pad_gap(v.x, v.y, v.x, v.y, q) - v.size / 2.0
                             < config.pad_pair_clearance(q, a, other_type='via') - eps):
                         short = True
@@ -796,10 +796,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_intra_lane: #1869 -- match, record and grade each intra-matched
             pair on its LANE, the copper path between two pads, instead of
             total copper: 'auto' (the two terminals the pair step routes the
-            pair between) or a list of 'P_NET=REF.PAD:REF.PAD'. None: total
-            copper, KiCad's measure. Only a pair the step intra-matches and no
-            .kicad_dru skew rule binds takes a lane (the step says why
-            another does not). A lane naming pads its nets lack raises
+            pair between) or a list of 'P_NET=REF.PAD:REF.PAD', the N member's
+            pads being its pads on the same two parts unless it is named too
+            ('N_NET=REF.PAD:REF.PAD'; #1970, for a pair whose members end on
+            different parts). None: total copper, KiCad's measure. Only a
+            pair the step intra-matches and no .kicad_dru skew rule binds
+            takes a lane (the step says why another does not). A lane naming
+            pads its nets lack raises
             ValueError (the CLI prints it and exits 2).
         intra_pair_tolerance: the P/N skew every intra-matched pair is matched
             to, over a .kicad_dru rule's (#1503: the CLI's explicit
@@ -3766,7 +3769,10 @@ Examples:
                              "total copper, so a branch to a third pad counts as a stub "
                              "(#1869): 'auto' (the two terminals the pair step routes "
                              "the pair between) or one or more P_NET=REF.PAD:REF.PAD (the "
-                             "N member's pads are its pads on the same two parts). Takes "
+                             "N member's pads are its pads on the same two parts, unless "
+                             "it is named too: name both members, P_NET=... N_NET=..., "
+                             "of a pair whose members end on different parts, such as a "
+                             "series resistor or capacitor per member). Takes "
                              "--diff-pair-intra-match; a pair a .kicad_dru skew rule binds "
                              "is matched on total copper, as KiCad grades the rule. "
                              "Default: total copper, as KiCad's skew DRC measures.")

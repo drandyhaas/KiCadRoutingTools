@@ -34,8 +34,11 @@ re-commit of ripped copper, which must land exactly as it was.
 Cleanup (per net, on this result's new segments only):
 
 1. **Degenerate segment removal** — segments under 0.01 mm are dropped;
-   micro-bridges between two chains are welded shut (neighbors moved to the
-   midpoint) so no gap opens.
+   micro-bridges between two chains are welded shut so no gap opens. The
+   longer neighbour keeps its end and the shorter one's end moves onto it
+   (#1979), so a long leg keeps its bearing (a coupled pair member stays
+   parallel to its partner) and the shorter one takes the bridge, at most
+   0.01 mm. Two equally long neighbours meet at the bridge's midpoint.
 2. **Dead-end prune** (#84) — this route's own dead-end spurs are unwound, so
    dead copper does not block the routes that follow. The net's copper
    already on the board anchors junctions but is never removed here, and the
@@ -341,6 +344,8 @@ Removes collinear intermediate points from an A* path. Note: operates on
 ```python
 via_on_layer(via, layer_name) -> bool
 via_copper_layers(via, copper_layers) -> List[str]
+via_spans_layer(via, layer_name) -> bool
+via_span_layers(via, copper_layers) -> List[str]
 via_end_layers(via) -> Tuple[str, str]
 via_span_layer_indices(via, routing_layers, num_layers)
 PARTIAL_VIA_TYPES = frozenset({'blind', 'buried', 'micro'})
@@ -352,6 +357,11 @@ word as a THROUGH via whatever pair it carries, so only a via whose
 between its two end layers, in stack order. Ask these (they take a `Via` or a
 via dict) instead of reading the pair; `via_end_layers` is what a
 barrel-length measurement spans (`('F.Cu', 'B.Cu')` for a through via).
+
+A layer one of the via's back-drills removes (`Via.backdrills`, #1925) is
+inside its span and carries none of its copper: `via_on_layer` /
+`via_copper_layers` leave it out, and `via_spans_layer` / `via_span_layers`
+keep it, for a clearance, a keep-out or a hole measurement.
 
 ```python
 from kicad_parser import Via

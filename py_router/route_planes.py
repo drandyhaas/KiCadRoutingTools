@@ -2034,7 +2034,7 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers,
     # Each via's copper by its TYPE (found reviewing #1268): every layer for a
     # through via whatever pair it carries, and the run between the ends of a
     # typed blind/micro via -- its middle layers included.
-    from geometry_utils import via_on_layer
+    from geometry_utils import via_spans_layer
     vias = [(v.x, v.y, v.size / 2.0, v.net_id, v) for v in pcb_data.vias]
     EPS = 1e-4  # stay just inside the rule
     _nc = net_clearances or {}
@@ -2068,7 +2068,7 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers,
         for vx, vy, vr, vnid, vobj in vias:
             if vnid == nid:
                 continue
-            if not via_on_layer(vobj, layer):
+            if not via_spans_layer(vobj, layer):
                 continue
             _cl = _pair_clearance(nid, vnid)
             margin = half + vr + _cl

@@ -2682,7 +2682,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, micro_pairs=F
     out, and the census is the one it always was."""
     import math
     from geometry_utils import (point_to_segment_distance,
-                                segment_to_segment_distance, via_on_layer)
+                                segment_to_segment_distance, via_spans_layer)
     from kicad_parser import pad_drill_capsule
     from check_drc import point_to_pad_distance, segment_pad_gap
     clearance = float(clearance or 0.0)
@@ -2762,7 +2762,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, micro_pairs=F
                       x1 + w + reach, y1 + w + reach):
             if h[5] is not None and h[5] == s.net_id:
                 continue
-            if h[6] is not None and not via_on_layer(h[6], s.layer):
+            if h[6] is not None and not via_spans_layer(h[6], s.layer):
                 continue
             d = hole_dist(h, s.start_x, s.start_y, s.end_x, s.end_y)
             if d - w - h[4] >= limit:
@@ -2822,7 +2822,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, micro_pairs=F
             if h[5] is not None and h[5] == v.net_id:
                 continue
             if h[6] is not None and not any(
-                    via_on_layer(h[6], l) and via_on_layer(v, l)
+                    via_spans_layer(h[6], l) and via_spans_layer(v, l)
                     for l in (copper or ['F.Cu', 'B.Cu'])):
                 continue
             d = hole_dist(h, v.x, v.y, v.x, v.y)
@@ -2838,7 +2838,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, micro_pairs=F
             continue
         # Its drill against foreign copper: tracks, vias, pads.
         for s in near(seg_grid, *box):
-            if s.net_id == v.net_id or not via_on_layer(v, s.layer):
+            if s.net_id == v.net_id or not via_spans_layer(v, s.layer):
                 continue
             d = point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
                                           s.end_x, s.end_y) - s.width / 2.0
@@ -2854,7 +2854,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, micro_pairs=F
             if p.net_id == v.net_id:
                 continue
             if pad_copper_layers is not None and copper and not any(
-                    via_on_layer(v, l) for l in pad_copper_layers(p, copper)):
+                    via_spans_layer(v, l) for l in pad_copper_layers(p, copper)):
                 continue
             d = point_to_pad_distance(v.x, v.y, p)
             if d - r_cu >= clearance - 1e-6:
@@ -2867,7 +2867,7 @@ def step_copper_to_hole(pcb, segments, vias, limit, clearance=0.0, micro_pairs=F
         # measured; elsewhere a copper conflict is reported once, as for a
         # track.
         for s in near(gfx_grid, *box):
-            if s.net_id == v.net_id and s.net_id or not via_on_layer(v, s.layer):
+            if s.net_id == v.net_id and s.net_id or not via_spans_layer(v, s.layer):
                 continue
             own = v.net_id in gfx_own.get(id(s), ())
             if own and not is_tie(s):

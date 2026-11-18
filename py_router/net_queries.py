@@ -1011,7 +1011,7 @@ def _via_pad_side(via, pads, pcb_data, copper):
         if not getattr(p, 'polygons', None) \
                 and abs(p.global_x - via.x) > r + p.size_x + p.size_y:
             continue
-        layers = expand_pad_layers(p.layers, copper)
+        layers = pad_joined_layers(p, copper)
         if not set(layers) & on:
             continue
         if _point_to_pad_distance()(via.x, via.y, p) >= r:
@@ -1118,7 +1118,7 @@ def _via_charges_nm(pcb_data, vias, items: List[_Line], segments, pads,
         elif len(joined) == 1:
             line_layer = next(iter(layers))
             anchored = [p for p in pads if _pad_anchor_nm(p) == c]
-            pad_layers = (expand_pad_layers(anchored[0].layers, copper)
+            pad_layers = (pad_joined_layers(anchored[0], copper)
                           if len(anchored) == 1 else ())
             if pad_layers and line_layer not in pad_layers:
                 first = [l for l in copper if l in set(pad_layers)][0]
@@ -1176,7 +1176,7 @@ def _clip_runs_in_pads(runs: List[_Line], pads, copper) -> None:
         pos = _pad_anchor_nm(pad)
         if pos not in ends:
             continue
-        layers = set(expand_pad_layers(pad.layers, copper))
+        layers = set(pad_joined_layers(pad, copper))
         ring = _pad_ring_nm(pad)
         for k in ends[pos]:
             run = runs[k]
@@ -2033,7 +2033,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                       lambda x, y, _v=v, _r=radius: math.hypot(x - _v.x, y - _v.y) <= _r + tolerance,
                       'via', v))
     for pad in pads:
-        pad_layers = [l for l in expand_pad_layers(pad.layers, copper_layers)]
+        pad_layers = [l for l in pad_joined_layers(pad, copper_layers)]
         radius = max(pad.size_x, pad.size_y) / 2
         discs.append((pad.global_x, pad.global_y, radius, pad_layers,
                       lambda x, y, hw=0.0, _p=pad: _track_reaches_pad_at(
@@ -2371,7 +2371,7 @@ class CopperIndex:
 
     def _add_pad(self, p, copper, has_copper):
         r = max(p.size_x, p.size_y) / 2 * 1.5
-        layers = set(expand_pad_layers(p.layers, copper)) if has_copper else set()
+        layers = set(pad_joined_layers(p, copper)) if has_copper else set()
         if (p.drill or 0) > 0:
             layers |= set(copper)      # a hole pierces every copper layer
         for layer in layers:
@@ -2436,7 +2436,7 @@ def _coupling_blocked(index: 'CopperIndex', layer: str, chk, ends, parent_p,
                 continue
             from paste_apertures import pad_has_copper
             on_copper = (pad_has_copper(obj) and layer in
-                         expand_pad_layers(obj.layers, index.copper_layers))
+                         pad_joined_layers(obj, index.copper_layers))
             if on_copper and segment_pad_gap(ax, ay, bx, by, obj) <= 1e-9:
                 return True
             if (obj.drill or 0) > 0:
@@ -3778,6 +3778,20 @@ def pad_landing_extent(size_x: float, size_y: float, shape: str,
     if half_x <= 0 or half_y <= 0:
         return None
     return half_x, half_y, shape in ('circle', 'oval')
+
+
+def pad_joined_layers(pad, routing_layers: List[str]) -> List[str]:
+    """The layers of `routing_layers` on which `pad`'s copper joins its net:
+    `expand_pad_layers` of the pad's own layer set, less the layers a
+    back-drill of a drilled pad removes (#1925, `Pad.backdrills`). A track or
+    via of the net on a removed layer is not connected to the pad there. A
+    clearance reads `expand_pad_layers`: the hole is still in the board."""
+    layers = expand_pad_layers(pad.layers, routing_layers)
+    backdrills = getattr(pad, 'backdrills', None)
+    if backdrills:
+        from geometry_utils import backdrill_removes_layer
+        layers = [l for l in layers if not backdrill_removes_layer(backdrills, l)]
+    return layers
 
 
 def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[str]:

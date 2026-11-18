@@ -16,7 +16,9 @@ tests/test_1925_backdrill_read_keep.py (written in KiCad's own form):
    the parity arm; this makes it fail.
 4. **The removed layers.** `via_stubs.drilled_layers` names, for each via,
    exactly the copper layers pcbnew's `IsBackdrilledOrPostMachined` answers
-   True for: start to end, both inclusive.
+   True for: start to end, both inclusive. `via_copper_layers` leaves
+   exactly those out on both parse paths, and `pad_joined_layers` the same
+   layers of a pad's drill.
 5. **The writer's form loads.** A via `generate_via_sexpr` wrote with
    back-drills is loaded by pcbnew, saved by pcbnew, and both saves read
    back the same value.
@@ -166,6 +168,42 @@ def main():
         check(not bad and seen == len(fx.WANT_VIA),
               'drilled_layers is pcbnew\'s IsBackdrilledOrPostMachined, layer for '
               'layer (%d back-drilled vias)' % seen, bad)
+
+        from geometry_utils import via_copper_layers, via_span_layers
+        from net_queries import expand_pad_layers, pad_joined_layers
+        g_by_pos = {(round(v.x, 4), round(v.y, 4)): v for v in g.vias}
+        bad, cut = [], 0
+        for t in board.GetTracks():
+            if t.GetClass() != 'PCB_VIA':
+                continue
+            pos = (round(pcbnew.ToMM(t.GetPosition().x), 4),
+                   round(pcbnew.ToMM(t.GetPosition().y), 4))
+            left = [n for n in via_span_layers(by_pos[pos], copper)
+                    if not t.IsBackdrilledOrPostMachined(ids[n])]
+            got = [via_copper_layers(v, copper) for v in (by_pos[pos], g_by_pos[pos])]
+            cut += len(left) < len(via_span_layers(by_pos[pos], copper))
+            if got != [left, left]:
+                bad.append((pos, left, got))
+        check(not bad and cut == len(fx.WANT_VIA),
+              'via_copper_layers is the span pcbnew leaves undrilled, on both '
+              'parse paths (%d vias lose a layer)' % cut, bad)
+        bad, cut = [], 0
+        g_pads = {(k, p.pad_number): p for k, fp in g.footprints.items() for p in fp.pads}
+        # A pad's removed layers are read in stack order, as a via's are.
+        # pcbnew's own answer for a PAD is not compared: on 10.0.8 it takes
+        # the drill's two layers as a range of layer numbers (a pad drilled
+        # B.Cu to In3.Cu answers True for In1.Cu and False for In4.Cu).
+        for k, fp in f.footprints.items():
+            for p in fp.pads:
+                gone = set(drilled_layers(p.backdrills, copper))
+                left = [n for n in expand_pad_layers(p.layers, copper) if n not in gone]
+                got = [pad_joined_layers(q, copper) for q in (p, g_pads[(k, p.pad_number)])]
+                cut += bool(gone)
+                if got != [left, left]:
+                    bad.append((k, p.pad_number, left, got))
+        check(not bad and cut == len(fx.WANT_PAD),
+              'pad_joined_layers leaves out the layers a pad\'s back-drill removes, '
+              'on both parse paths (%d pads lose a layer)' % cut, bad)
 
         print('\n5. the writer\'s form loads')
         spec = dict(fx.WANT_VIA['/C'])

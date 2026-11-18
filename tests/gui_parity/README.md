@@ -714,10 +714,14 @@ pass. Run any directly:
   `fanout_config` dict the tab really builds carries what the writeback reads:
   the QFN one had no clearance, via size or drill, so the real QFN run wrote no
   clearance where qfn_fanout does.
-- `test_records_survive_save.py` -- what a GUI step records survives the
-  user's KiCad save. KiCad's project save rewrites the `.kicad_pro` from the
-  copy it loaded and drops a `kicad_routing_tools` record written after load,
-  so the GUI keeps the namespace on the board too (`py_router/tool_records.py`,
+- `test_records_survive_save.py` -- what a GUI step records survives a
+  KiCad save. The gate first measures whether this KiCad's plain
+  `pcbnew.SaveBoard` keeps a board property: where it does (before 10.0.7)
+  every save in it is that plain save, the user's own; where it does not
+  (#1906) the user's save is not covered and every save is the tool's own,
+  `tool_records.save_board`. KiCad's project save rewrites the `.kicad_pro`
+  from the copy it loaded and drops a `kicad_routing_tools` record written
+  after load, so the GUI keeps the namespace on the board too (`py_router/tool_records.py`,
   the board property `kicad_routing_tools` that the same save writes into the
   `.kicad_pcb`), and every reader takes the newer copy by `records_rev`. On
   flat_hierarchy, then on project-less splitflap_driver: a manual GUI step's

@@ -111,7 +111,7 @@ def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float
     channel escape across a cut-out is a collision like any other.
     """
     from check_drc import BoardEdgeGate, laid_copper_edge_clearance
-    from geometry_utils import via_copper_layers
+    from geometry_utils import via_span_layers
 
     def _inside(x0, y0, x1, y1, h):
         return bounds is None or (x1 + h >= bounds[0] and x0 - h <= bounds[2]
@@ -133,7 +133,7 @@ def board_copper_tracks(pcb_data: PCBData, layers: List[str], track_width: float
     for via in pcb_data.vias:
         if not _inside(via.x, via.y, via.x, via.y, via.size / 2):
             continue
-        for layer in via_copper_layers(via, layers):
+        for layer in via_span_layers(via, layers):
             t = create_track((via.x, via.y), (via.x, via.y), via.size, layer,
                              via.net_id, is_existing=True)
             t['spacing_extra'] = (via.size - track_width) / 2

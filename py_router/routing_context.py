@@ -48,12 +48,16 @@ def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):
     coord = GridCoord(config.grid_step)
     free_via_positions = []
     full_cells = set()
+    drilled_pads = []
     for net_id in net_ids:
         for pad in pcb_data.pads_by_net.get(net_id, []):
             if pad.drill and pad.drill > 0:
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
                 free_via_positions.append((gx, gy))
-                full_cells.add((gx, gy))
+                if getattr(pad, 'backdrills', None):
+                    drilled_pads.append(((gx, gy), pad))    # #1925
+                else:
+                    full_cells.add((gx, gy))
     # Every EXISTING same-net via (fanout via-in-pad, a prior route's via, or a
     # board via) is a reusable zero-cost layer transition, so the router reuses it
     # instead of dropping its own beside it. The emitted layer-change via at such a
@@ -79,6 +83,32 @@ def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):
     rows = [(cell[0], cell[1], li) for cell, v in partial if cell not in full_cells
             for li, name in enumerate(config.layers)
             if not via_on_layer(v, name)]
+    # #1925: a layer a back-drill removes has no copper of the barrel, so the
+    # net's own tracks keep off the drilled hole there as they would off any
+    # other hole: a track into it joins nothing (KiCad: a track connected to a
+    # back-drilled layer).
+    from geometry_utils import backdrill_removes_layer
+    from net_queries import pad_joined_layers
+    drilled = [(v.x, v.y, v.size, v.backdrills, v.net_id) for _cell, v in partial
+               if getattr(v, 'backdrills', None)]
+    for cell, pad in drilled_pads:
+        on = set(pad_joined_layers(pad, list(config.layers)))
+        rows.extend((cell[0], cell[1], li) for li, name in enumerate(config.layers)
+                    if name not in on)
+        drilled.append((pad.global_x, pad.global_y, max(pad.size_x, pad.size_y),
+                        pad.backdrills, pad.net_id))
+    for x, y, size, backdrills, net_id in drilled:
+        widest = max([size] + [bd[0] for bd in backdrills.values()])
+        gx, gy = coord.to_grid(x, y)
+        for li, name in enumerate(config.layers):
+            if not backdrill_removes_layer(backdrills, name):
+                continue
+            reach = (widest / 2.0 + config.route_reserve_width(name) / 2.0
+                     + config.layer_clearance(name, config.obstacle_clearance(net_id), net_id))
+            n = coord.to_grid_dist_safe(reach)
+            rows.extend((gx + dx, gy + dy, li)
+                        for dx in range(-n, n + 1) for dy in range(-n, n + 1)
+                        if dx * dx + dy * dy <= n * n)
     if not rows:
         return np.empty((0, 3), dtype=np.int32)
     cells = np.asarray(rows, dtype=np.int32)

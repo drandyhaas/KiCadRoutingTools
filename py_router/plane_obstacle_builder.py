@@ -227,7 +227,11 @@ def _net_conn_graph(net_id: int, pcb_data: PCBData, inv_tol: float) -> "_NetConn
     for p in pcb_data.pads_by_net.get(net_id, []):
         k = pkey(p.global_x, p.global_y)
         if p.drill > 0:
-            pad_at.setdefault(k, set()).update(all_cu)
+            if getattr(p, 'backdrills', None):      # #1925: less the drilled layers
+                from net_queries import pad_joined_layers
+                pad_at.setdefault(k, set()).update(pad_joined_layers(p, all_cu))
+            else:
+                pad_at.setdefault(k, set()).update(all_cu)
         else:
             for pl in p.layers:
                 if pl == '*.Cu':

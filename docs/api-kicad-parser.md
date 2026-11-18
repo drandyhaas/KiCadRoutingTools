@@ -293,7 +293,12 @@ or a size of 0 is no drill (KiCad's own save drops it); a size that is not one
 number makes KiCad refuse the board, and the parser names it in a WARNING and
 carries nothing. `via_stubs.drilled_layers(via.backdrills, copper_layers)`
 gives the layers removed. They are read, carried by every writer that re-emits
-an existing via, measured by `check_via_stubs.py`, and a via's are held as
+an existing via, and measured by `check_via_stubs.py`. A layer a back-drill
+removes is not the barrel's copper: `geometry_utils.via_on_layer` /
+`via_copper_layers` leave it out, and `net_queries.pad_joined_layers(pad,
+layers)` does the same for a drilled pad, so the route steps end no track of
+the net on it, `check_connected` joins nothing there and `check_drc` reports a
+track that does (`track-on-backdrilled-layer`). A via's are also held as
 obstacles by the route steps and graded by `check_drc` on the layers they
 remove (a pad's are not yet); a route step
 defines them only under `--backdrill-nets` (see

@@ -1274,7 +1274,7 @@ These options are only available in `route_diff.py`. All nets passed to route_di
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--diff-chamfer-extra` | 1.5 | Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings) |
 | `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair |
-| `--diff-pair-intra-lane` | - | Measure each intra-matched pair between two pads (its lane) instead of in total copper: `auto` or `P_NET=REF.PAD:REF.PAD ...` (#1869) |
+| `--diff-pair-intra-lane` | - | Measure each intra-matched pair between two pads (its lane) instead of in total copper: `auto` or `P_NET=REF.PAD:REF.PAD ...` (#1869); the N member's pads are its pads on the same two parts, or named too (`N_NET=REF.PAD:REF.PAD`) when they are on other parts, as for a pair through a series part per member (#1970) |
 | `--ac-couple-match` | false | End-to-end length-match AC-coupled pairs split by series DC-blocking caps (#196): the cap chain is found, the concatenated P path is matched against the N path, and the meanders go on whichever segment has room |
 
 `--track-width` is the pair's leg width here (see [Geometry Options](#geometry-options)).

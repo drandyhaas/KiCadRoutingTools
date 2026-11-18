@@ -41,7 +41,14 @@ Rows:
      pair step routed -- a 2-terminal pair's two, a multi-point pair's
      coupled legs' ends even where the copper already joins a farther
      branch -- and a pair whose legs do not form one path, or whose P and N
-     end on different parts, gets no lane and says why.
+     end on different parts, gets no lane and says why;
+ 10. unit, `intra_pair_lane.resolve` (#1970): a member named keeps the pads
+     named, so a pair whose members end on different parts takes a lane when
+     both are named, in either order; one entry still derives the other
+     member's pads on the same two parts, or refuses asking for its lane; a
+     pad its net lacks refuses naming that entry; a member named twice with
+     the same two pads, in either order, resolves as on main, and with other
+     pads refuses naming both entries.
 """
 import json
 import os
@@ -150,9 +157,88 @@ def units():
        f"P and N on different parts: no lane, {why}")
 
 
+def units_resolve():
+    """Row 10: resolve on synthetic pairs (#1970)."""
+    from synth import make_pad, make_net, make_pcb
+    from intra_pair_lane import resolve
+    P, N = 1, 2
+
+    def board(refs_p, refs_n):
+        pads = {P: [make_pad(P, 0.0, 0.0, ref=r, num=n) for r, n in refs_p],
+                N: [make_pad(N, 0.0, 0.5, ref=r, num=n) for r, n in refs_n]}
+        return make_pcb(nets={P: make_net(P, '/X+'), N: make_net(N, '/X-')},
+                        segments=[], vias=[], pads_by_net=pads, zones=[])
+    pairs = [('/X', SimpleNamespace(p_net_id=P, n_net_id=N, p_net_name='/X+',
+                                    n_net_name='/X-'))]
+
+    def lanes(pcb, spec):
+        try:
+            return resolve(spec, pairs, pcb)
+        except ValueError as e:
+            return str(e)
+
+    # each member through its own series part (R1 for P, R2 for N) to J1
+    series = board([('R1', '1'), ('J1', '1')], [('R2', '1'), ('J1', '2')])
+    both = {P: ('R1.1', 'J1.1'), N: ('R2.1', 'J1.2')}
+    for spec in (['/X+=R1.1:J1.1', '/X-=R2.1:J1.2'], ['/X-=R2.1:J1.2', '/X+=R1.1:J1.1']):
+        got = lanes(series, spec)
+        ok(got == both, f"members on different parts, both named ({' '.join(spec)}): {got}")
+    got = lanes(series, ['/X+=R1.1:J1.1'])
+    ok(got == "--diff-pair-intra-lane '/X+=R1.1:J1.1': /X- has 0 pad(s) on R1 (none), "
+       "so its end of the lane is not decided; name that member's lane too",
+       f"one of them named: refused, asking for the other's lane: {got}")
+    got = lanes(series, ['/X-=R2.1:J1.2'])
+    ok(isinstance(got, str) and "'/X-=R2.1:J1.2': /X+ has 0 pad(s) on R2 (none)" in got,
+       f"the N member alone: the same, for P: {got}")
+    got = lanes(series, ['/X+=R1.1:J1.1', '/X-=R2.1:J9.9'])
+    ok(got == "--diff-pair-intra-lane '/X-=R2.1:J9.9': net /X-: J9.9 names 0 of its "
+       "copper pads (J1.2, R2.1)", f"both named, one pad its net lacks: {got}")
+    got = lanes(series, ['/X-=R2.1:J9.9', '/X+=R1.1:J1.1'])
+    ok(isinstance(got, str) and got.startswith("--diff-pair-intra-lane '/X-=R2.1:J9.9': "),
+       f"the same, in the other order: {got}")
+
+    # both members on the same two parts, P and N with a third pad on R1
+    shared = board([('J1', '1'), ('U1', '1'), ('R1', '1')],
+                   [('J1', '2'), ('U1', '2'), ('R1', '2')])
+    derived = {P: ('J1.1', 'U1.1'), N: ('J1.2', 'U1.2')}
+    for spec, want, what in (
+            (['/X+=J1.1:U1.1'], derived, "P named: N's pads on the same parts"),
+            (['/X-=J1.2:U1.2'], {N: ('J1.2', 'U1.2'), P: ('J1.1', 'U1.1')},
+             "N named: P's pads on the same parts"),
+            (['/X+=J1.1:U1.1', '/X+=J1.1:U1.1'], derived, "the same entry twice"),
+            (['/X+=J1.1:U1.1', '/X+=U1.1:J1.1'], {P: ('U1.1', 'J1.1'), N: ('J1.2', 'U1.2')},
+             "P's lane twice, reversed: its last entry's order, N's from the first"),
+            (['/X+=J1.1:U1.1', '/X-=J1.2:R1.2'], {P: ('J1.1', 'U1.1'), N: ('J1.2', 'R1.2')},
+             "both named, N off the derived lane: the pads named"),
+            (['/X-=J1.2:R1.2', '/X+=J1.1:U1.1'], {N: ('J1.2', 'R1.2'), P: ('J1.1', 'U1.1')},
+             "the same, N first")):
+        got = lanes(shared, spec)
+        ok(got == want and list(got) == list(want), f"{what}: {got}")
+    # a member named twice with other pads: main gave it the second entry's
+    # lane, and a twin no entry names one derived from the first
+    for spec in (['/X+=J1.1:U1.1', '/X+=J1.1:R1.1'],
+                 ['/X+=J1.1:U1.1', '/X-=J1.2:U1.2', '/X+=J1.1:R1.1']):
+        got = lanes(shared, spec)
+        ok(got == "--diff-pair-intra-lane '/X+=J1.1:R1.1': /X+'s lane is already named "
+           "by '/X+=J1.1:U1.1', with other pads; name one lane per member",
+           f"P named twice with other pads ({' '.join(spec)}): refused, naming both "
+           f"entries: {got}")
+
+    # N has two pads on U1: its end there is not decided by P's entry
+    two = board([('J1', '1'), ('U1', '1')], [('J1', '2'), ('U1', '2'), ('U1', '3')])
+    got = lanes(two, ['/X+=J1.1:U1.1'])
+    ok(isinstance(got, str) and '/X- has 2 pad(s) on U1 (U1.2, U1.3)' in got
+       and got.endswith("name that member's lane too"),
+       f"N with two pads on U1, P named: refused: {got}")
+    got = lanes(two, ['/X+=J1.1:U1.1', '/X-=J1.2:U1.3'])
+    ok(got == {P: ('J1.1', 'U1.1'), N: ('J1.2', 'U1.3')}, f"and with N named too: {got}")
+
+
 def main():
     print("9. resolve_auto (unit)")
     units()
+    print("10. resolve (unit)")
+    units_resolve()
     with tempfile.TemporaryDirectory() as td:
         check(PY + [tool('copy_board.py'), evidence(BOARD, 'the bundled board'),
                     os.path.join(td, 'in.kicad_pcb')], accept=True)

@@ -1674,11 +1674,11 @@ def _vias_as_layer_copper(vias, layer):
     """Each via that spans `layer`, as a zero-length track of its own
     diameter there: a pair member's via is partner copper on every layer it
     spans (#318)."""
-    from geometry_utils import via_on_layer
+    from geometry_utils import via_spans_layer
     from kicad_parser import Segment
     return [Segment(start_x=v.x, start_y=v.y, end_x=v.x, end_y=v.y,
                     width=v.size, layer=layer, net_id=v.net_id)
-            for v in vias if via_on_layer(v, layer)]
+            for v in vias if via_spans_layer(v, layer)]
 
 
 def _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data,
@@ -3479,7 +3479,7 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     or None.
     """
     from check_drc import check_pad_segment_overlap, check_via_segment_overlap
-    from geometry_utils import via_on_layer
+    from geometry_utils import via_spans_layer
 
     own = (p_net_id, n_net_id)
     pair_segs = [s for s in new_segments if s.net_id in own]
@@ -3558,7 +3558,7 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
         for via in vias:
             if via.net_id == seg.net_id:
                 continue  # the connector legitimately lands on its own-net via
-            if not via_on_layer(via, seg.layer):
+            if not via_spans_layer(via, seg.layer):
                 continue  # a blind/micro via has no copper on this layer
             vclr = _obs_clr(via.net_id, seg.layer)
             if via.net_id in own:

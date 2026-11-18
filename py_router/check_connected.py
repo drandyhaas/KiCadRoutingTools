@@ -17,7 +17,7 @@ from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
 from kicad_parser import (parse_kicad_pcb, Segment, Via, Pad, PCBData, Zone, pad_on_layer,
                           pad_drill_capsule)
-from net_queries import expand_pad_layers
+from net_queries import expand_pad_layers, pad_joined_layers
 
 
 # Fragment blindness: in the strict-fragment view a track-to-track joint
@@ -385,8 +385,8 @@ def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: fl
     def shares_copper(pi, pj):
         if pi.drill > 0 or pj.drill > 0:
             return True  # through-hole spans all copper layers
-        li = set(expand_pad_layers(pi.layers, copper_layers))
-        lj = set(expand_pad_layers(pj.layers, copper_layers))
+        li = set(pad_joined_layers(pi, copper_layers))
+        lj = set(pad_joined_layers(pj, copper_layers))
         return bool(li & lj)
 
     for i in range(len(pads)):
@@ -1345,7 +1345,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     pad_copper_layers = {}  # pad_idx -> set of copper layers the pad actually occupies
     for pad_idx, pad in enumerate(pads):
         # Expand wildcard layers like "*.Cu" to actual copper layers
-        expanded_layers = expand_pad_layers(pad.layers, all_copper_layers)
+        expanded_layers = pad_joined_layers(pad, all_copper_layers)
         this_pad_ids = []  # Track all layer points for this pad
         this_pad_layers = set()
         for layer in expanded_layers:

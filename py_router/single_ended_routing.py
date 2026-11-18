@@ -145,13 +145,13 @@ def _foreign_pad_arrays(pcb_data, layer):
         # sampled foreign-pad check. Expanding against [layer] alone keeps the
         # old answer for `*.Cu` (every copper layer, so this one) and needs no
         # board layer list, which a hand-built PCBData may not carry.
-        from net_queries import expand_pad_layers
+        from net_queries import pad_joined_layers
         nids, cx, cy, hx, hy, cr = [], [], [], [], [], []
         rc, rs, ex, ey, lc = [], [], [], [], []
         custom = []  # (net_id, pad) -- exact-outline pads handled per-pad
         for nid, pads in pcb_data.pads_by_net.items():
             for pad in pads:
-                if layer in expand_pad_layers(pad.layers, [layer]):
+                if layer in pad_joined_layers(pad, [layer]):
                     if getattr(pad, 'polygons', None):
                         # CUSTOM pad with real polygon outline(s): the rounded
                         # rect model would use its bounding box, which both
@@ -369,10 +369,10 @@ def _foreign_pad_types(pcb_data, layer):
         pcb_data._foreign_pad_type_cache = cache
     got = cache[1].get(layer)
     if got is None:
-        from net_queries import expand_pad_layers
+        from net_queries import pad_joined_layers
         got = [getattr(pad, 'pad_type', None) or 'smd'
                for _nid, pads in pcb_data.pads_by_net.items() for pad in pads
-               if layer in expand_pad_layers(pad.layers, [layer])
+               if layer in pad_joined_layers(pad, [layer])
                and not getattr(pad, 'polygons', None)]
         cache[1][layer] = got
     return got
@@ -2737,7 +2737,7 @@ def oracle_link_end_layers(pcb_data: PCBData, net_id: int, x: float, y: float,
     if layer is not None and '*' not in str(layer) and '&' not in str(layer):
         return []
     from geometry_utils import via_on_layer
-    from net_queries import expand_pad_layers
+    from net_queries import pad_joined_layers
     for v in pcb_data.vias:
         if v.net_id == net_id and \
                 math.hypot(v.x - x, v.y - y) <= v.size / 2.0 + 1e-3:
@@ -2747,7 +2747,7 @@ def oracle_link_end_layers(pcb_data: PCBData, net_id: int, x: float, y: float,
             continue
         if math.hypot(p.global_x - x, p.global_y - y) \
                 <= max(p.size_x, p.size_y) / 2.0 + 1e-3:
-            cu = set(expand_pad_layers(p.layers, list(routing_layers)))
+            cu = set(pad_joined_layers(p, list(routing_layers)))
             return [l for l in routing_layers if l in cu]
     return []
 
@@ -2756,7 +2756,7 @@ def _on_own_copper(pcb_data: PCBData, net_id: int, x: float, y: float,
                    layer: str) -> bool:
     """Whether (x, y) lies on the net's own pad, via or track on `layer`."""
     from geometry_utils import point_to_segment_distance, via_on_layer
-    from net_queries import expand_pad_layers
+    from net_queries import pad_joined_layers
     for v in pcb_data.vias:
         if v.net_id == net_id and via_on_layer(v, layer) \
                 and math.hypot(v.x - x, v.y - y) <= v.size / 2.0:
@@ -2768,7 +2768,7 @@ def _on_own_copper(pcb_data: PCBData, net_id: int, x: float, y: float,
             return True
     cu = list(pcb_data.board_info.copper_layers)
     for p in pcb_data.pads_by_net.get(net_id, []):
-        if layer in expand_pad_layers(p.layers, cu) and \
+        if layer in pad_joined_layers(p, cu) and \
                 abs(p.global_x - x) <= p.size_x / 2.0 and \
                 abs(p.global_y - y) <= p.size_y / 2.0:
             return True
@@ -5195,7 +5195,7 @@ def _terminal_layer_test(pcb_data, net_id, layer_names):
     A terminal is on `layer` when its row is, when its pad's (or stub's)
     copper layers include it, or when a plated barrel of the net -- a
     through-hole pad or a via spanning `layer` -- stands at its point."""
-    from net_queries import expand_pad_layers
+    from net_queries import pad_joined_layers
     copper = list(getattr(pcb_data.board_info, 'copper_layers', None)
                   or layer_names)
     own_vias = [v for v in pcb_data.vias if v.net_id == net_id]
@@ -5205,7 +5205,7 @@ def _terminal_layer_test(pcb_data, net_id, layer_names):
             return True
         obj = row[5] if len(row) > 5 else None
         if obj is not None and getattr(obj, 'layers', None) and \
-                layer in expand_pad_layers(obj.layers, copper):
+                layer in pad_joined_layers(obj, copper):
             return True
         return _terminal_copper_on_layer(pcb_data, net_id, row[3], row[4],
                                          layer, vias=own_vias)
@@ -7600,7 +7600,7 @@ def _on_terminal_copper(pcb_data, net_id, layer, grid_pt, orig_pt,
     same path), track or fill region of the net holding both. A terminal
     bridge between the two then joins nothing that copper does not."""
     from geometry_utils import point_to_segment_distance, via_on_layer
-    from net_queries import expand_pad_layers
+    from net_queries import pad_joined_layers
     tol = 1e-6
     pts = (grid_pt, orig_pt)
     for v in list(pcb_data.vias) + list(path_vias):
@@ -7611,7 +7611,7 @@ def _on_terminal_copper(pcb_data, net_id, layer, grid_pt, orig_pt,
     cu = list(getattr(pcb_data.board_info, 'copper_layers', None) or [layer])
     for p in pcb_data.pads_by_net.get(net_id, []):
         if (getattr(p, 'rect_rotation', 0.0) or 0.0) or \
-                layer not in expand_pad_layers(p.layers, cu) or \
+                layer not in pad_joined_layers(p, cu) or \
                 getattr(p, 'pad_type', '') == 'np_thru_hole':
             continue    # a tilted pad is not measured here: under-claim
         hx, hy = p.size_x / 2.0, p.size_y / 2.0
@@ -8122,14 +8122,14 @@ def _neck_exact_pads(pcb_data, layer):
         pcb_data._neck_exact_pad_cache = cache
     hit = cache[1].get(layer)
     if hit is None:
-        from net_queries import expand_pad_layers
+        from net_queries import pad_joined_layers
         from check_drc import _pad_has_no_copper
         pads, bb = [], []
         max_lc = 0.0
         for plist in pcb_data.pads_by_net.values():
             for p in plist:
                 if _pad_has_no_copper(p) or \
-                        layer not in expand_pad_layers(p.layers, [layer]):
+                        layer not in pad_joined_layers(p, [layer]):
                     continue
                 polys = getattr(p, 'polygons', None)
                 vs = [v for poly in (polys or ()) for v in poly]

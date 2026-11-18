@@ -2477,9 +2477,9 @@ class DesignRules:
         facts = {'via_type': vt}
         if vt != 'through':
             # #1844: a partial-span via is on the layers it joins only
-            from geometry_utils import via_copper_layers
+            from geometry_utils import via_span_layers
             facts['other_layers'] = frozenset(
-                via_copper_layers(via, self.copper_layers))
+                via_span_layers(via, self.copper_layers))
         item = self.item_for_net(int(getattr(via, 'net_id', 0) or 0), 'via', **facts)
         item = self._in_areas(item, lambda idx: idx.of_via(via, self.copper_layers))
         if courtyards is None:
@@ -2492,8 +2492,8 @@ class DesignRules:
         layers (`laser_drilled_span`)."""
         if (getattr(via, 'via_type', None) or 'through') != 'micro':
             return False
-        from geometry_utils import via_copper_layers
-        return laser_drilled_span('micro', via_copper_layers(via, self.copper_layers),
+        from geometry_utils import via_span_layers
+        return laser_drilled_span('micro', via_span_layers(via, self.copper_layers),
                                   self.copper_layers)
 
     def track_item(self, seg, courtyards: Optional['CourtyardIndex'] = None) -> RuleItem:
@@ -3392,9 +3392,9 @@ class AreaIndex:
 
     def of_via(self, via, copper_layers):
         from shapely.geometry import Point
-        from geometry_utils import via_copper_layers
+        from geometry_utils import via_span_layers
         try:
-            layers = via_copper_layers(via, list(copper_layers))
+            layers = via_span_layers(via, list(copper_layers))
         except Exception:                                      # noqa: BLE001
             layers = list(copper_layers)
         return self._of(Point(float(via.x), float(via.y)), float(via.size) / 2.0, layers)

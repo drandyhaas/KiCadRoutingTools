@@ -320,9 +320,9 @@ def plan_spans(via, joined: Iterable[str], copper: List[str], depths: Dict[str, 
     from the layer the net uses; a side where no layer is that far is left.
     Lengths come from the stackup, so a board without one is drilled only
     when both numbers are 0."""
-    from geometry_utils import via_copper_layers
+    from geometry_utils import via_span_layers
     from kicad_parser import Backdrill
-    on = via_copper_layers(via, copper)
+    on = via_span_layers(via, copper)
     if getattr(via, 'via_type', 'through') not in (None, '', 'through'):
         return {}, {'top': 'not a through via', 'bottom': 'not a through via'}
     j = [l for l in on if l in set(joined)]
@@ -471,7 +471,7 @@ def wall_conflicts(index: _Index, via, layers: Iterable[str], size: float, confi
     via's copper or its own back-drill's wall there, and any other net's
     drill at the hole-to-hole minimum. Pours are not read: KiCad's fill
     clears a back-drill itself."""
-    from geometry_utils import point_to_segment_distance, via_on_layer
+    from geometry_utils import point_to_segment_distance, via_spans_layer
     from check_drc import point_to_pad_distance
     out = []
     r = size / 2.0
@@ -512,7 +512,7 @@ def wall_conflicts(index: _Index, via, layers: Iterable[str], size: float, confi
         if o.net_id == net:
             continue
         for layer in layers:
-            if not via_on_layer(o, layer):
+            if not via_spans_layer(o, layer):
                 continue
             other = size_on_layer(o, layer) or o.size
             gap = d - other / 2.0 - r
@@ -612,8 +612,8 @@ def finalize(pcb_data, config, input_snapshot, candidates=None) -> Tuple[dict, d
             out[id(v)] = (v, {})
             continue
         rec['drilled'] += 1
-        from geometry_utils import via_copper_layers
-        if wall_conflicts(index, v, via_copper_layers(v, copper), size, config):
+        from geometry_utils import via_span_layers
+        if wall_conflicts(index, v, via_span_layers(v, copper), size, config):
             rec['conservative_only'] += 1
         v.backdrills = dict(tokens)
         out[id(v)] = (v, tokens)
