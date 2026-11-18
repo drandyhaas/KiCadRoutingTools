@@ -7,7 +7,8 @@ lane's track (a via a track wide) at X,Y -- and the cap step (place_fanout_clear
 movable passive locked, its move held within MOVE_MAX; then on each other movable passive the stamp still grazes,
 alone the same way (ALSO_MAX at most); the stamp is taken off again. Only a part the cap step itself would move: one
 beneath an array or beside it within NEAR_MARGIN, never one the board locks. Writes OUT and its plan sidecar (the
-bench's: no end moves). Exit 0 moved; 2 REF is no movable passive; 3 the cap step moved it nowhere clear"""
+bench's: no end moves). Exit 0 moved; 2 REF is no movable passive; 3 the cap step moved it nowhere clear, or only
+onto another bus's copper (negotiated buses: joint_lanes.foreign)"""
 import json
 import math
 import os
@@ -138,6 +139,50 @@ for nb in sorted((r_ for r_ in movable - {ref} if r_ in pm.footprints and grazes
         continue
     moved_b, pm = nxt, pn
     also.append(f'{nb} {dn:.3f} mm to ({now.x:.3f}, {now.y:.3f}) {now.rotation:g}')
+# ---- ...and NOT INTO ANOTHER BUS'S COPPER (negotiated buses: joint_lanes.foreign -- the lanes of the buses this one
+# plans round, and every bus's laid copper and ends). None of it is on the bench's file, so the cap step cannot see it:
+# a decap moved 0.4 mm off one bus's lane stood on the track another bus had laid there, four violations between the
+# two buses on the merged board. A part that would graze it is not moved
+if awx_settings.get('JOINT_FOREIGN'):
+    import joint_lanes
+    pf = parse_kicad_pcb(moved_b)
+    n_s, n_v0 = len(pf.segments), len(pf.vias)
+    joint_lanes.foreign(pf)
+    theirs_s, theirs_v = pf.segments[n_s:], pf.vias[n_v0:]
+    for r_ in [ref] + [a_.split(' ')[0] for a_ in also]:
+        for pd in pf.footprints[r_].pads:
+            if pd.pad_type == 'np_thru_hole':
+                continue
+            cr, tl = _pairs.pad_corner_radius(pd), _pairs.pad_tilt(pd)
+            gap = lambda x_, y_: float(_pairs.pad_distance(*_pairs.into_pad(x_ - pd.global_x, y_ - pd.global_y, tl),   # noqa: E731
+                                                           pd.size_x / 2, pd.size_y / 2, cr))
+            on = lambda L_: L_ in pd.layers or '*.Cu' in pd.layers      # noqa: E731
+            hit = None
+            for s_ in theirs_s:
+                if s_.net_id == pd.net_id or not on(s_.layer):
+                    continue
+                ln_ = math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y)
+                for k_ in range(int(ln_ / 0.05) + 2):
+                    t_ = min(1.0, k_ * 0.05 / ln_) if ln_ > 0 else 0.0
+                    if gap(s_.start_x + (s_.end_x - s_.start_x) * t_,
+                           s_.start_y + (s_.end_y - s_.start_y) * t_) < s_.width / 2 + R.clearance - TOL:
+                        hit = s_
+                        break
+                if hit is not None:
+                    break
+            for v_ in theirs_v if hit is None else ():
+                if v_.net_id != pd.net_id and gap(v_.x, v_.y) < v_.size / 2 + R.clearance - TOL:
+                    hit = v_
+                    break
+            if hit is not None:
+                nm_ = pf.nets[hit.net_id].name if hit.net_id in pf.nets else '?'
+                print(f'ends_passive: {r_} moved off the lane would stand on another bus\'s copper ({nm_}) -- not moved')
+                for f_ in made:
+                    for ext in ('.kicad_pcb', '.kicad_pro', '.kicad_dru'):
+                        g_ = os.path.splitext(f_)[0] + ext
+                        if os.path.isfile(g_):
+                            os.remove(g_)
+                sys.exit(3)
 # ---- the stamp taken off again: its via blocks, matched by place (a net-less via has no name to match by)
 content = open(moved_b, encoding='utf-8').read()
 n_v = 0
