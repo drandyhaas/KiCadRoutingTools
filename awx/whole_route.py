@@ -2237,6 +2237,14 @@ def joint_gone(jd, peer, pos):
         return False
 
 
+def joint_over(rd, bus):
+    """an exchange (its directory `rd`) whose coupled solve was RUN WITHOUT this bus: the bus that ran it has handed
+    every plan out (rd/coord.done, written after the last of them) and none is this bus's. Two buses whose loops ran
+    again on the others' laid copper met at that loop's first exchange and went on; a third came to the same exchange
+    ten minutes later, found their requests and the lock, and waited for a plan no bus was left to write"""
+    return os.path.isfile(os.path.join(rd, 'coord.done')) and not os.path.isfile(os.path.join(rd, f'{bus}.joint.json'))
+
+
 def joint_publish(env, plan, stage_name, board=None, nets=None):
     """(JOINT_DIR: negotiated buses) this bus's lanes as `plan` has them -- or the laid `board`'s copper of `nets`
     -- published for the other buses' stages (joint_lanes)"""
@@ -2339,9 +2347,13 @@ def joint_sync(env, r, solve, say):
         for p_ in [bus] + with_:
             if not os.path.isfile(os.path.join(rd, f'{p_}.joint.json')):
                 json.dump({'bus': p_, 'joint': False}, open(os.path.join(rd, f'{p_}.joint.json'), 'w'))
+        open(os.path.join(rd, 'coord.done'), 'w').close()
     except FileExistsError:
         say(f'  coupled solve: round {r}, with {", ".join(with_)} (another bus runs it)')
     while not os.path.isfile(os.path.join(rd, f'{bus}.joint.json')):
+        if joint_over(rd, bus):
+            say(f'  coupled solve: round {r}\'s was run before this bus asked -- this bus\'s own plan')
+            return None
         if time.time() - t0 > JOINT_WAIT:
             say('  coupled solve: no coupled plan in time -- this bus\'s own plan')
             return None
@@ -2554,9 +2566,13 @@ def joint_loop_sync(env, pos, solve, say):
         for p_ in [bus] + with_:
             if not os.path.isfile(os.path.join(rd, f'{p_}.joint.json')):
                 json.dump({'bus': p_, 'joint': False}, open(os.path.join(rd, f'{p_}.joint.json'), 'w'))
+        open(os.path.join(rd, 'coord.done'), 'w').close()
     except FileExistsError:
         pass
     while not os.path.isfile(os.path.join(rd, f'{bus}.joint.json')):
+        if joint_over(rd, bus):
+            say(f'  coupled re-solve {key}: run before this bus asked -- this bus\'s own re-solve')
+            return False, None
         if time.time() - t0 > JOINT_WAIT:
             say(f'  coupled re-solve {key}: no coupled plan in time -- this bus\'s own re-solve')
             return False, None
