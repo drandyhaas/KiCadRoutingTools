@@ -2484,7 +2484,7 @@ def bus_bench(b, laid, RL):
     return ctx
 
 
-def bus_check(b, laid, RL, save=None):
+def bus_check(b, laid, RL, save=None, plans=None):
     """THE WHOLE SOLVE'S VERDICT on bus `b`'s ends as the model chose them (whole_ends.solve_check's, `exact`, on the
     group's own bench -- bus_bench): {'plan', 'status', 'core' (pairs of lanes whose crossing has no window), 'lanes'
     (the lanes its rules cannot hold together), 'rules' ((lane, the rule's family) as its rules core names them),
@@ -2494,7 +2494,9 @@ def bus_check(b, laid, RL, save=None):
     on these ends: their window empty, or named for their change's room among their crossings), 'short' (those of
     them whose own window is empty -- too short between their two ends for a change, whatever the rest), 'crossing'
     (the refusal read from its crossings with no window alone: `lanes` theirs, no rules asked), 'at'}; None where it
-    cannot be asked"""
+    cannot be asked. `plans` {bus: the plan its check before found}: asked first (whole_solve.solve's `hint` under
+    `check`), and this check's plan kept there for the next"""
+    import tempfile
     import whole_frame
     import whole_solve
     ctx = bus_bench(b, laid, RL)
@@ -2502,20 +2504,32 @@ def bus_check(b, laid, RL, save=None):
         return None
     dest_ = bus_dest(b.E.st)
     buf_ = io.StringIO()
+    hint_ = None
+    if plans is not None and plans.get(b.name):
+        fd_, hint_ = tempfile.mkstemp(suffix='.json', prefix='check_plan_')
+        with os.fdopen(fd_, 'w') as fh_:
+            json.dump(plans[b.name], fh_)
     try:
-        return _bus_check(b, ctx, dest_, RL, buf_, whole_frame, whole_solve)
+        chk = _bus_check(b, ctx, dest_, RL, buf_, whole_frame, whole_solve, hint_)
+        if plans is not None and chk and chk.get('hint'):
+            plans[b.name] = chk['hint']
+        if chk:
+            chk.pop('hint', None)
+        return chk
     finally:
+        if hint_:
+            os.remove(hint_)
         if save:
             # (the check's own solve, as it said it: a check's trace -- group_ends' checks.jsonl names the file)
             os.makedirs(os.path.dirname(save), exist_ok=True)
             open(save, 'w', encoding='utf-8').write(buf_.getvalue())
 
 
-def _bus_check(b, ctx, dest_, RL, buf_, whole_frame, whole_solve):
+def _bus_check(b, ctx, dest_, RL, buf_, whole_frame, whole_solve, hint_=None):
     """bus_check's verdict, the solve's console in `buf_`"""
     with contextlib.redirect_stdout(buf_):
         try:
-            J = whole_solve.solve(ctx, dest_, front=b.plan.get('front') or {}, check=True, core=True)
+            J = whole_solve.solve(ctx, dest_, front=b.plan.get('front') or {}, check=True, core=True, hint=hint_)
         except whole_frame.PairSplit as e:
             at_ = {}
             for p_, w_, bs_ in e.splits:
@@ -2530,6 +2544,8 @@ def _bus_check(b, ctx, dest_, RL, buf_, whole_frame, whole_solve):
                'core': [tuple(k_) for k_ in (J or {}).get('core') or []], 'lanes': [],
                'nochange': list((J or {}).get('nochange') or []), 'ends_y': (J or {}).get('ends_y') or {},
                'short': list((J or {}).get('nochange') or [])}
+        if (J or {}).get('hint'):
+            out['hint'] = J['hint']         # (the plan itself: bus_check keeps it for the bus's next check)
         out['vban'] = [(n_, int(k_), list(ls_)) for n_, k_, ls_ in (J or {}).get('vban') or []]
         out['vend'] = {(n_, int(k_)) for n_, k_ in (J or {}).get('vend') or []}
         out['vban_why'] = [(n_, int(k_), L_, w_) for n_, k_, L_, w_ in (J or {}).get('vban_why') or []]
@@ -3113,6 +3129,8 @@ def main():
     at_point = next((f_ for f_ in ('--at-start', '--at-search') if f_ in flags), None) if frm else None
     fbd = next((a.split('=', 1)[1] for a in flags if a.startswith('--feedback=')), None)
     feedback, fed = {}, {}      # bus -> its step's findings (whole_feedback's file); bus -> its lanes they name
+    found_at = {}               # bus -> the state its step was laid on, which its findings are of: the run before's
+    check_plans = {}            # bus -> the plan its last check with one found: its next check asks it first
     hard = {}                   # bus -> its step's findings that STAND (group_findings_hard.json): ruled out
     if fbd:
         import glob as _glob
@@ -3194,6 +3212,7 @@ def main():
             whole(go_)
         narrow({key_ for key_ in nar_ if key_ in tier_sig}, keep_)
         prev_bus, prev_oth, learned = R_['prev_bus'], R_['prev_oth'], R_['learned']
+        found_at = dict(prev_bus)       # (each bus's state as the run before left it: `prev_bus` moves on with this run)
         cut_at, layers_want = dict(R_['cut_at']), R_['layers_want']
         cut_held.update(R_.get('cut_held') or {})
         oth_ban |= set(R_.get('oth_ban') or ())
@@ -3515,17 +3534,23 @@ def main():
                 hav_, hpr_ = we.fb_tables(hard.get(b.name) or {}, b.E.T, b.E.B)
                 for (l_, k_), ws_ in sorted(hav_.items()):
                     at_ = [i for i, w_ in sorted(ws_.items()) if w_ >= 1.0 - 1e-9 and i in b.J.xs[k_].get(l_, {})]
-                    # (...and the very option the last state had there, whatever the tables weigh it: the finding is
-                    # of that end as it was laid. A row part's berth on a stub and a via, its lane on an inner layer,
-                    # weighed half -- "another layer at the place" -- and seven of eleven such ends were not ruled out)
-                    sg0_ = ((prev_bus.get(b.name) or {}).get(l_) or ((None,), (None,)))[k_][0]
+                    # (...and the very option the step was laid on there, whatever the tables weigh it: the finding
+                    # is of that end as it was laid. A row part's berth on a stub and a via, its lane on an inner layer,
+                    # weighed half -- "another layer at the place" -- and seven of eleven such ends were not ruled out.
+                    # The state the step was LAID on, the run before's (`found_at`), for the lanes this run's findings
+                    # name -- not the state this run has now: read off the last state, the end the model had just
+                    # given a named lane in answer was ruled out in the model built after the next check, the lane
+                    # moved again and seven of its bus's lanes with it, and a bus whose check had just found a plan
+                    # was left on ends with none)
+                    sg0_ = ((found_at.get(b.name) or {}).get(l_) or ((None,), (None,)))[k_][0] \
+                        if l_ in fed.get(b.name, ()) else None
                     at_ = sorted(set(at_) | {i for i in b.J.xs[k_].get(l_, {})
                                              if sg0_ is not None and we._opt_sig((b.E.T, b.E.B)[k_][l_][i]) == sg0_})
                     if at_ and len(at_) >= len(b.J.xs[k_][l_]):
                         # (an end with NO OTHER PLACE -- a row part's pad has one escape: its lane is answered at its
                         # OTHER end instead, the option it had there not taken again. Ruled out where it stood, the
                         # one rule had no state: a bus's eleven open nets, one of them on such a pad, and no model)
-                        sg_ = ((prev_bus.get(b.name) or {}).get(l_) or ((None,), (None,)))[1 - k_][0]
+                        sg_ = ((found_at.get(b.name) or {}).get(l_) or ((None,), (None,)))[1 - k_][0]
                         at_, k_ = [i for i in b.J.xs[1 - k_][l_] if len(b.J.xs[1 - k_][l_]) > 1
                                    and we._opt_sig((b.E.T, b.E.B)[1 - k_][l_][i]) == sg_], 1 - k_
                         n_oth += bool(at_)
@@ -5102,7 +5127,7 @@ def main():
             # the judge of two lanes on one line there -- and asked again)
             sl_ = os.path.join(out, 'checks', f'{b.name}.{chk_try + 1}.free.solve.log')
             with awx_settings.given(b.env):
-                chk = bus_check(b, laid, RL, save=sl_)
+                chk = bus_check(b, laid, RL, save=sl_, plans=check_plans)
             TR.rec('verdict', check=chk_try + 1, bus=b.name, mode='free', secs=round(time.time() - t0, 1),
                    solve_log=os.path.relpath(sl_, out), verdict=chk)
             if chk is not None and chk.get('plan') and FREE:

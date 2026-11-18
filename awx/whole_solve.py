@@ -2194,7 +2194,22 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
             s_.parameters.share_binary_clauses = False
         s_.parameters.stop_after_first_solution = True
         s_.parameters.max_deterministic_time = CHECK_WORK
-        st_ = s_.Solve(m)
+        st_ = None
+        if hint:
+            # (THE PLAN A CHECK BEFORE FOUND, asked first, every value the hint has held: a plan there is this model's
+            # plan, in a second or two, and the layers it answers with are the ones it answered with before. A bus's
+            # check on ends no repair had touched since its last was the whole search again -- 169 to 581 s of a
+            # 53-lane bus's three checks, once with no verdict in its time where the check before had a plan)
+            sh_ = cp_seed.solver()
+            sh_.parameters.num_workers = 1
+            sh_.parameters.fix_variables_to_their_hinted_value = True
+            sh_.parameters.max_deterministic_time = WARM_WORK
+            sth_ = sh_.Solve(m)
+            print(f'   check: the plan before, its values held: [{sh_.StatusName(sth_)}] {sh_.WallTime():.0f}s')
+            if sth_ in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                s_, st_ = sh_, sth_
+        if st_ is None:
+            st_ = s_.Solve(m)
         if st_ == cp_model.UNKNOWN and WLIT and not RLIT:
             # NO VERDICT on the core's one worker: asked again as the solve itself searches -- its workers
             # interleaved, every window held outright, no assumption -- for its first plan, in CHECK_BATCHES. A state
@@ -2238,6 +2253,14 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         # solve's to choose: the group's ends take them, group_ends.py)
         if STATUS['plan'] and NL > 2:
             out_['ends_y'] = {n_: [LAYN[s_.Value(YL[n_][0])], LAYN[s_.Value(YL[n_][KMAX])]] for n_ in M if n_ in YL}
+        if STATUS['plan']:
+            # (...and the plan itself in a warm start's form, for the next check of these ends to ask first: `hint`)
+            hp_ = {'cross': {f'{a_}|{b_}': {'u': s_.Value(v_) * G} for (a_, b_), v_ in t.items()},
+                   'changes': {n_: [s_.Value(x_) * G for x_, a_ in zip(*chg[n_]) if s_.Value(a_)] for n_ in M}}
+            if NL > 2:
+                hp_['layers'] = {n_: [LAYN[s_.Value(YL[n_][k_])] for k_ in range(len(hp_['changes'][n_]) + 1)]
+                                 for n_ in M if n_ in YL}
+            out_['hint'] = hp_
         if (WLIT or RLIT) and st_ == cp_model.INFEASIBLE:
             suff_ = list(s_.SufficientAssumptionsForInfeasibility())
             out_['core'] = sorted({WLIT[i_] for i_ in suff_ if i_ in WLIT})
