@@ -314,8 +314,12 @@ def check_pitch(ctx, corridors, png=None):
                                                    in exact[nm]) else (g / 2, g / 2))) for (p, q, L) in v])
              for nm, v in V.items()}
         # (a pair beside a SINGLE with a pair either side -- which the snap cannot move off either -- its staircase off
-        # its line as well: not beside a single it can move, nor beside another pair, laid against its steps)
-        RS = {nm: _with_stair(ctx.cfg, R[nm]) for nm in V if nm in prs_}
+        # its line as well: not beside a single it can move, nor beside another pair, laid against its steps. A pair
+        # still to be laid: one the plan HOLDS (whole_snap --pairs: laid as the pair router moves) is its staircase
+        # already, with none more to come -- asked for again, by the chord of its own steps, a single 0.26 and 0.29
+        # mm from two held pairs' legs, its bar 0.23, was found short of 0.31 and 0.33 in every round of a loop)
+        held_ = getattr(c, 'held', ())
+        RS = {nm: _with_stair(ctx.cfg, R[nm]) for nm in V if nm in prs_ and nm not in held_}
         reach_sw = TW + CL + 2 * g + (_pairs.turn_straight_steps(ctx.cfg) + 1) * g
         SW = {}
 

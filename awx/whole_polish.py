@@ -693,8 +693,11 @@ def gather():
         P0.append(ln['X'][ii]); P1.append(ln['X'][[i + 1 for i in ii]])
         MT += [mitre(n, i) for i in ii]
         # a pair's staircase off its line (pairs.stair_dev), per segment the more of its two ends': the bar from it of
-        # a single with a pair either side (SAND), which the snap cannot move off either
-        if n in prs:
+        # a single with a pair either side (SAND), which the snap cannot move off either -- a pair still to be laid:
+        # a HELD pair's line IS its staircase, laid, with none more to come (asked of it again, by the chord of its
+        # own steps, a single between two held pairs 0.26 and 0.29 mm from their legs, a bar of 0.23, was held short
+        # of 0.31 and 0.33: the singles' polish ended 54 rows short, the loop solved again four times for nothing)
+        if n in prs and n not in HELD:
             d_ = _pairs.stair_dev(cfg, ln['X'].tolist())
             SD += [max(d_[i], d_[i + 1]) for i in ii]
         else:

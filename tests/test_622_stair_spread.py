@@ -22,7 +22,8 @@ straying past it. What this asserts:
 8. plan_audit.check_pitch reads it for a single with a slanted pair either side (which the snap cannot move off
    either): just past track and clearance from each pair's near leg it is short of both bars; beside ONE pair it is not
    (the snap moves it toward its other side), the same lines as singles are not, nor is a pair where the single was
-   (laid against the other pair's steps).
+   (laid against the other pair's steps). Nor is the single between the two pairs where the plan HOLDS them (its `held`
+   lanes: pairs laid already, as the pair router moves): a laid pair is its staircase, and there is none more to come.
 """
 import math
 import os
@@ -128,13 +129,14 @@ far_ = (100.0, 100.0)
 spine_ = SimpleNamespace(project=lambda xs, ys: (np.zeros(len(xs)), np.zeros(len(xs))))
 
 
-def pitch_hits(members, pairs_):
+def pitch_hits(members, pairs_, held=()):
     ctx_ = SimpleNamespace(cfg=SimpleNamespace(track_width=TW_, clearance=CL_, grid_step=0.025, layers=['F.Cu', 'B.Cu'],
                                                min_turning_radius=0.2),
                            pcb=SimpleNamespace(board_info=SimpleNamespace(board_bounds=(-20.0, -20.0, 20.0, 20.0))),
                            pairs=pairs_)
     c_ = SimpleNamespace(idx=0, members=members, virtual_of=lambda names: [p_ for n_ in names for p_ in lanes_[n_]],
-                         teeth={n_: far_ for n_ in members}, stubs={n_: far_ for n_ in members}, spine=spine_)
+                         teeth={n_: far_ for n_ in members}, stubs={n_: far_ for n_ in members}, spine=spine_,
+                         held=frozenset(held))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         pa_.check_pitch(ctx_, [c_])
@@ -146,10 +148,14 @@ check(len(h_) == 2 and all('S1' in ln for ln in h_), f'a single between two slan
 check(pitch_hits(['PA', 'S1'], {'PA': 1}) == [], 'a single beside ONE slanted pair (the snap moves it off): none short')
 check(pitch_hits(['PA', 'S1', 'PB'], {}) == [], 'the same lines as singles: none short')
 check(pitch_hits(['PA', 'PC'], {'PA': 1, 'PC': 1}) == [], 'a pair where the single is: none short')
+check(pitch_hits(['PA', 'S1', 'PB'], {'PA': 1, 'PB': 1}, held=('PA', 'PB')) == [],
+      'the single between the two pairs, the plan holding them (laid already): none short')
+h1_ = pitch_hits(['PA', 'S1', 'PB'], {'PA': 1, 'PB': 1}, held=('PA',))
+check(len(h1_) == 1 and 'PB' in h1_[0], f'one of the two held: short of the other\'s staircase alone: {h1_}')
 
 if FAIL:
     print('\n'.join('FAIL ' + f for f in FAIL))
     sys.exit(1)
 print('PASS test_622_stair_spread: 0 on the router headings, the worked values, the same under every mirror and '
       f'the swap of x and y, the heading only, at most one run (worst {worst:.4f} of {R}); stair_dev along a line, '
-      'capped at a short jog; the audit\'s pair-to-single allowance per leg')
+      'capped at a short jog; the audit\'s pair-to-single allowance per leg, none for a held pair')

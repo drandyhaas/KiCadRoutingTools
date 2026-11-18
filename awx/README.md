@@ -1940,6 +1940,16 @@ still lacks is in the
   pieces of that layer's free space -- the run is read as it stands, with a
   **breach**: two fixed points either side of the copper. No geometry can
   lay that lane on that layer there, and it is a finding for the solve.
+- **Two runs crossed as read.** Two runs of a layer that cross inside one
+  cell of the layout as read have their own points given up where they are
+  crossed: from a point's spacing before the first place they cross in that
+  cell to as far past the last, each run then straight across the stretch
+  (`uncross`). Where that leaves them crossed a longer stretch is given up,
+  at last the whole cell, and a give-up is kept only where the layout then
+  has fewer crossings than before. A cell is as large as the open board
+  between pieces of fixed copper: where one spans the bend of a whole bundle,
+  two runs laid straight across it cut through every lane inside the bend,
+  and the rounds, which pass nothing through anything, cannot part them.
 - **Where a passage has no room.** Before the rounds, a passage between two
   pieces of fixed copper that holds fewer lanes on a layer than were read
   through it has an end run of it taken another way through the cells: round
@@ -2074,7 +2084,9 @@ prove.
   layer, which the snap cannot move off either, is held that much further off
   each pair's line where it runs at a slant (`pairs.stair_dev`: half the
   smallest staircase along its heading there, no more than half how far a short
-  jog runs across) -- in the geometry, the polish and the audit alike. On
+  jog runs across) -- in the geometry, the polish and the audit alike. A pair
+  the plan holds (laid already, `whole_snap --pairs`) is its staircase, with
+  none more to come: the polish and the audit ask no room for one of it. On
   h616_lpddr4's bus SDQS2 and SDQS3 ran 12 degrees off vertical either
   side of SDQM2, 0.40 from it as planned and 0.30 as laid, where it needs 0.34:
   SDQM2 had no path; held off, every lane of the bus is laid. A single with

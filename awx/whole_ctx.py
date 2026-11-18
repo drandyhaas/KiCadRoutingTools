@@ -665,6 +665,7 @@ def install(ctx, c, geo):
         return out
 
     c.end_legs_of = lambda nm: list(END_LEGS.get(nm, []))
+    c.held = frozenset(geo.get('held') or ())      # (the plan's HELD lanes: its pairs as whole_snap --pairs laid them)
     c.cross_of = lambda nm: CROSS.get(nm)
     c.ends_of = lambda nm: ENDS.get(nm)
     c.virtual_of = virtual_of

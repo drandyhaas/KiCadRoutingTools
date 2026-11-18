@@ -1155,18 +1155,55 @@ def spread_edges():
 
 SIDE_READ = 0.4 * GS
 NSPREAD = spread_edges()
-# two runs of a layer that cross in a cell as read: their free points in that cell given up (the straight lines
-# between their places on its edges, which stand in order, do not cross)
-for _try in range(4):
-    xs_ = same_layer_crossings(layout())
-    if not xs_:
-        break
-    for ka, kb, xy_ in xs_:
-        t_ = int(MESH[RUN[ka]['L']].locate([xy_])[0])
+def uncross():
+    """Two runs of a layer that cross in a cell as read have their free points given up WHERE THEY ARE CROSSED: from
+    a point's spacing before the first place the two cross in that cell to as far past the last, each run then
+    straight across the stretch; where that leaves them crossed, a longer stretch (UNCROSS_PADS), at last the whole
+    cell -- the straight lines between their places on its edges, which stand in order, do not cross. A give-up is
+    kept only where it leaves FEWER crossings in the layout than it found. The whole cell given up at once, in open
+    board where one cell spans the bottom of a U of lanes hung between two arrays' facing sides (13 mm), turned two
+    lanes that touched over half a millimetre at the frame's handoff into chords across the U, through every lane
+    inside it: 8 crossings read became 41, the rounds -- which pass nothing through anything -- never settled, and
+    the round's audit found 29 pairs of one layer's lanes on top of each other. -> the number of give-ups kept"""
+    kept, failed = 0, set()
+    for _ in range(4 * max(len(KEYS), 1)):
+        PL = layout()
+        xs_ = same_layer_crossings(PL)
+        by = collections.defaultdict(list)
+        for ka, kb, xy_ in xs_:
+            by[(ka, kb, int(MESH[RUN[ka]['L']].locate([xy_])[0]))].append(xy_)
+        g_ = next((g_ for g_ in by if g_ not in failed), None)
+        if g_ is None:
+            break
+        ka, kb, t_ = g_
+        was = {k_: RUN[k_]['pts'] for k_ in (ka, kb)}
+        span = {}
         for k_ in (ka, kb):
-            RUN[k_]['pts'] = [p_ for p_ in RUN[k_]['pts'] if not (p_['k'] == 'F' and p_['tri'] == t_)]
+            line = LineString(PL[k_])
+            at = [line.project(Point(q_)) for q_ in by[g_]]
+            s_ = [0.0]
+            for a_, b_ in zip(PL[k_], PL[k_][1:]):
+                s_.append(s_[-1] + math.hypot(b_[0] - a_[0], b_[1] - a_[1]))
+            span[k_] = (min(at), max(at), s_)
+        for pad in UNCROSS_PADS:
+            for k_ in (ka, kb):
+                lo, hi, s_ = span[k_]
+                RUN[k_]['pts'] = [p_ for i_, p_ in enumerate(was[k_])
+                                  if not (p_['k'] == 'F' and p_['tri'] == t_ and lo - pad <= s_[i_ + 1] <= hi + pad)]
+            if len(same_layer_crossings(layout())) < len(xs_):
+                kept += 1
+                break
+        else:
+            for k_ in (ka, kb):
+                RUN[k_]['pts'] = was[k_]
+            failed.add(g_)
+    return kept
+
+
+UNCROSS_PADS = (HPT, 4 * HPT, 16 * HPT, math.inf)     # the stretch given up either side of where two runs cross
+NUNCROSS = uncross()
 log(f'{NMOUTH} of {2 * len(M)} lane ends leave straight through their own stub, {NBACK} more by their own line; {NSPREAD} cell edge(s) with runs read '
-    f'out of a bar, or on one place, put in order a pitch apart')
+    f'out of a bar, or on one place, put in order a pitch apart; {NUNCROSS} stretch(es) where two runs of a layer crossed as read laid straight')
 JUMP_SHORT = GS                 # a passage this far short of its runs' room, at the least: one of them goes round
 JUMP_BACK = 16 * P_MIN          # ...leaving its way this far before the passage at most, and back on it as far after
 JUMP_TRY = 12                   # ...the shortest of the ways found tried, this many at most
