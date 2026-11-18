@@ -1015,6 +1015,65 @@ def _ship_via_protection962(pcb_data, output_file, return_results, results_data,
     return record
 
 
+def _ship_backdrills1925(pcb_data, config, output_file, return_results, results_data,
+                         input_snapshot):
+    """Decide the back-drills of the vias this run added for the nets
+    `--backdrill-nets` asked for, on the board that ships (#1925).
+
+    The route marked each via as its net was routed, so that later nets kept
+    off the walls; the passes after it may have moved copper since. Here
+    every such via is judged again (`backdrill.finalize`): its span from the
+    copper its net really joins it on, kept only where the wall clears every
+    other net on the layers it removes.
+
+    - GUI (`return_results`): judged on the run's board model with the
+      results' vias, whose `backdrills` the plugin applies.
+    - CLI: judged on the written file, which is rewritten in place.
+
+    Returns the record, or None with no such option.
+    """
+    if getattr(config, 'backdrill', None) is None:
+        return None
+    record = None
+    try:
+        import backdrill as _bd
+        if return_results:
+            rd = results_data or {}
+            vias = [v for r in (rd.get('results') or []) for v in (r.get('new_vias') or [])]
+            decided, record = _bd.finalize(pcb_data, config, input_snapshot, candidates=vias)
+            for _v, tokens in decided.values():
+                _v.backdrills = dict(tokens)
+            if results_data is not None:
+                results_data['backdrill'] = record
+        elif output_file and os.path.exists(output_file):
+            from kicad_parser import parse_kicad_pcb
+            from kicad_writer import set_via_backdrills_in_content
+            shipped = parse_kicad_pcb(output_file)
+            decided, record = _bd.finalize(shipped, config, input_snapshot)
+            by_uuid = {v.uuid: tokens for v, tokens in decided.values()
+                       if getattr(v, 'uuid', '')}
+            _anon = len(decided) - len(by_uuid)
+            if _anon:
+                # a via block with no uuid cannot be rewritten: it keeps what
+                # the route marked it with, and is named rather than counted
+                record['not_rewritten'] = _anon
+                print(f"  WARNING: {_anon} via(s) carry no uuid, so their back-drills "
+                      f"were not judged on the written board")
+            with open(output_file, 'r', encoding='utf-8') as fh:
+                content = fh.read()
+            content, n = set_via_backdrills_in_content(content, by_uuid)
+            if n:
+                with open(output_file, 'w', encoding='utf-8', newline='') as fh:
+                    fh.write(content)
+        _bd.print_record(record, 'route')
+    except Exception as e:                                       # noqa: BLE001
+        print(f"  WARNING: back-drills not decided ({type(e).__name__}: {e})")
+        record = None
+    if record is not None:
+        print('BACKDRILL_JSON: ' + json.dumps(record))
+    return record
+
+
 def _strip_written_copper(output_file, segments, vias, name_of,
                           match_width=False, unmatched_out=None):
     """Delete `segments` and `vias` from the written file, in place. Returns
@@ -2659,6 +2718,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # (via_span.resolve_via_span). None -> through vias.
                 via_span: Optional[Sequence[str]] = None,
                 via_span_type: Optional[str] = None,
+                # #1925: net-name patterns whose NEW vias this step back-drills,
+                # with the fabricator's three numbers (mm): how much wider than
+                # the via's drill, the dielectric left before the last layer the
+                # net uses, and the shortest stub worth drilling. None -> no via
+                # is back-drilled (backdrill.make_spec).
+                backdrill_nets: Optional[Sequence[str]] = None,
+                backdrill_oversize: Optional[float] = None,
+                backdrill_margin: Optional[float] = None,
+                backdrill_min_stub: Optional[float] = None,
                 # 'route': lay an escape via at each surface pad of the
                 # selected nets first, then route; 'only': lay the escapes
                 # and route nothing (via_span.escape_pads). None -> off.
@@ -3581,6 +3649,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         config_kwargs['via_span_type'] = _span_type1842
     config = GridRouteConfig(**config_kwargs)
     config.quick = int(quick or 0)
+    if backdrill_nets:
+        # #1925: back-drills are defined only when asked for
+        from backdrill import make_spec as _bd_spec1925
+        config.backdrill = _bd_spec1925(pcb_data, backdrill_nets, backdrill_oversize,
+                                        backdrill_margin, backdrill_min_stub)
+        from kicad_parser import KICAD_10_MIN_VERSION as _k10_1925
+        _ver1925 = getattr(pcb_data, 'kicad_version', 0) or 0
+        if config.backdrill is not None and 0 < _ver1925 < _k10_1925:
+            # KiCad 9's parser has no case for the back-drill tokens
+            print(f"  WARNING: back-drills NOT defined: this board's file format "
+                  f"({_ver1925}) predates KiCad 10, which is the first that can carry "
+                  f"a back-drill. Save the board from KiCad 10 and run the step again.")
+            config.backdrill = None
+        if config.backdrill is not None:
+            print(f"Back-drills asked for on {len(config.backdrill.net_ids)} net(s): "
+                  f"drill + {config.backdrill.oversize:g} mm, "
+                  f"{config.backdrill.margin:g} mm margin, stubs of "
+                  f"{config.backdrill.min_stub:g} mm and over (#1925)")
+            from backdrill import print_not_covered as _bd_not_covered1925
+            _bd_not_covered1925()
     # The in-loop stub-debris trim must treat input copper as read-only in
     # --keep-input-copper runs; the loop only sees config, so carry it there.
     if keep_input_copper:
@@ -3988,6 +4076,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     install_track_clearances(config, track_clearances, input_file, pcb_data,
                              routed_net_ids=[nid for _, nid in net_ids],
                              scoped_rules=scoped_clearance_rules)
+    # #1925: a back-drill's wall floor and legality rungs, with every
+    # clearance of the step now on the config
+    from backdrill import install as _bd_install1925
+    _bd_install1925(config, pcb_data)
     # Net-filtered keep-outs: the board's .kicad_dru `disallow` rules on a
     # named rule area, derived with config.rules just above (net_keepouts.
     # derive_area_keepouts) and stamped per net while a bound net routes.
@@ -7663,7 +7755,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                              getattr(v, 'tenting_attrs', None) or {}),
                          'inherit_when_unspecified': True,
                          # ...and a blind/micro via keeps its type word.
-                         'via_type': getattr(v, 'via_type', 'through')}
+                         'via_type': getattr(v, 'via_type', 'through'),
+                         # ...and its back-drills (#1925).
+                         'backdrills': dict(getattr(v, 'backdrills', None) or {})}
                         for _, _, _mv in _lost666 for v in _mv]
                     import tempfile as _tf666, shutil as _sh666
                     _fd666, _tmp666 = _tf666.mkstemp(suffix='.kicad_pcb')
@@ -9557,6 +9651,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _via_in_pad962 = _ship_via_protection962(
             pcb_data, output_file, return_results, locals().get('results_data'),
             _input_vias962)
+    # #1925: and the back-drills of the vias it added for the nets asked for
+    _backdrill1925 = None
+    if final_reconcile and not skip_routing:
+        _backdrill1925 = _ship_backdrills1925(
+            pcb_data, config, output_file, return_results,
+            locals().get('results_data'), _input_vias962)
 
     # ---- POWER WIDTHS (#1033) ---------------------------------------------
     # Disclosure, not a gate: per requested-width net, how much of the copper
@@ -10165,6 +10265,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # predates the finalize, so it cannot carry this.
             if _merged is not None and _via_in_pad962 is not None:
                 _merged['via_in_pad'] = _via_in_pad962
+            # #1925: likewise the back-drills decided on the shipped board
+            if _merged is not None and _backdrill1925 is not None:
+                _merged['backdrill'] = _backdrill1925
             # #1896: likewise the tap vias of the shipped board
             if _merged is not None and _tap_vias1896 is not None:
                 _merged['tap_vias'] = _tap_vias1896
@@ -10740,6 +10843,25 @@ For differential pair routing, use route_diff.py:
                              "an 8-layer board: buried vias), and route on those layers "
                              "only. Only copper on those layers, and drilled pads, "
                              "blocks a via site. Default: through vias (#1842)")
+    parser.add_argument("--backdrill-nets", nargs="+", default=None, metavar="PATTERN",
+                        help="Back-drill the vias this step adds for the nets matching "
+                             "these patterns (fnmatch on the net name). Needs the three "
+                             "numbers below, which are the fabricator's and have no "
+                             "default. A via site is taken for such a net only where "
+                             "the back-drill's hole clears other nets' copper on every "
+                             "layer; a net that cannot route that way is routed as "
+                             "usual and its vias are drilled where they can be. "
+                             "Default: no via is back-drilled (#1925)")
+    parser.add_argument("--backdrill-oversize", type=float, default=None, metavar="MM",
+                        help="With --backdrill-nets: how much wider than the via's drill "
+                             "the back-drill is")
+    parser.add_argument("--backdrill-margin", type=float, default=None, metavar="MM",
+                        help="With --backdrill-nets: the dielectric the back-drill stops "
+                             "short of the last layer the net uses; a stub layer nearer "
+                             "than that is left in place")
+    parser.add_argument("--backdrill-min-stub", type=float, default=None, metavar="MM",
+                        help="With --backdrill-nets: a stub shorter than this is not "
+                             "drilled")
     parser.add_argument("--via-span-escape", choices=("route", "only"), default=None,
                         help="With --via-span: first lay an escape -- a via of the span "
                              "and a short track -- at each surface pad of the selected "
@@ -11180,6 +11302,18 @@ For differential pair routing, use route_diff.py:
     # every net (a class's via_diameter is its through via's). The fab
     # floor's via sizes are a mechanical drill's and do not pin it.
     _micro_span = False
+    if getattr(args, 'backdrill_nets', None):
+        _bd_missing = [f for f, v in (('--backdrill-oversize', args.backdrill_oversize),
+                                      ('--backdrill-margin', args.backdrill_margin),
+                                      ('--backdrill-min-stub', args.backdrill_min_stub))
+                       if v is None]
+        if _bd_missing:
+            parser.error(f"--backdrill-nets needs {', '.join(_bd_missing)}: they are "
+                         f"the fabricator's numbers and have no default")
+        if args.backdrill_oversize <= 0 or args.backdrill_margin < 0 \
+                or args.backdrill_min_stub < 0:
+            parser.error("--backdrill-oversize must be above 0, and --backdrill-margin "
+                         "and --backdrill-min-stub cannot be negative")
     if getattr(args, 'via_span', None):
         from via_span import (file_copper_layers, resolve_via_span, default_micro_via,
                               laser_drilled)
@@ -11715,6 +11849,10 @@ For differential pair routing, use route_diff.py:
                 same_net_pad_clearance=args.same_net_pad_clearance,
                 via_span=args.via_span, via_span_type=args.via_span_type,
                 via_span_escape=args.via_span_escape,
+                backdrill_nets=args.backdrill_nets,
+                backdrill_oversize=args.backdrill_oversize,
+                backdrill_margin=args.backdrill_margin,
+                backdrill_min_stub=args.backdrill_min_stub,
                 vertical_attraction_radius=args.vertical_attraction_radius,
                 vertical_attraction_cost=args.vertical_attraction_cost,
                 ripped_route_avoidance_radius=args.ripped_route_avoidance_radius,

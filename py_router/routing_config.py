@@ -514,6 +514,13 @@ class GridRouteConfig:
     # read them (hole_rule_routing.RoutedHoleRules), installed with `rules`.
     # None (no such rule) leaves every hole keep-out as it was.
     hole_rules: Optional[object] = None
+    # #1925: the back-drills this step is asked to define
+    # (backdrill.BackdrillSpec, from --backdrill-nets). None = define none.
+    backdrill: Optional[object] = None
+    # #1925: the board's copper-to-hole floor for a back-drill's wall, read
+    # by backdrill.install when the board declares a back-drill or the step
+    # defines them. None = not read (the NPTH-to-track fab value holds).
+    backdrill_wall_floor: Optional[float] = None
     # #1843: the board's clearance rules scoped by a rule area
     # (area_clearance.AreaClearance), installed with `rules`. The base map,
     # the per-net caches and the stamp functions compose every keep-out over
@@ -693,10 +700,15 @@ class GridRouteConfig:
         or ``other_via`` (an existing via, whose own hole the new via's copper
         is held off the same way) is given, each read as the item it is.
         0.0 with no such rule."""
+        # #1925: ... and off the wall of a back-drilled via
+        bd = 0.0
+        if other_via is not None and getattr(other_via, 'backdrills', None):
+            from backdrill import via_extra
+            bd = via_extra(self, clearance, other_via)
         if self.hole_rules is None:
-            return 0.0
+            return bd
         from hole_rule_routing import via_hole_extra
-        return via_hole_extra(self, clearance, other_via, pad)
+        return max(bd, via_hole_extra(self, clearance, other_via, pad))
 
     def stack_clearance(self, fallback: float, net_id: Optional[int] = None,
                         pad=None, graphic: bool = False) -> float:

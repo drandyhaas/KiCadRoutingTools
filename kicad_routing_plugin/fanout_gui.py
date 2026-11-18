@@ -2390,8 +2390,10 @@ class FanoutTab(wx.Panel):
                                get_layer_id(via_dict['layers'][1]),
                                via_dict.get('via_type'))
             # Keep a re-placed via's own tenting/plugging/filling (#489 §8).
-            from .gui_utils import apply_via_protection
+            from .gui_utils import apply_via_protection, apply_via_backdrills
             apply_via_protection(via, via_dict.get('tenting_attrs'))
+            # ...and its back-drills (#1925).
+            apply_via_backdrills(via, via_dict.get('backdrills'))
             board.Add(via)
             vias_added += 1
 
@@ -2868,6 +2870,8 @@ class FanoutTab(wx.Panel):
                 moved_attrs = vd.get('tenting_attrs')
                 # The moved via's type: the dict's, else the live via's own.
                 moved_type = vd.get('via_type')
+                # Its back-drills (#1925), the same way.
+                moved_backdrills = vd.get('backdrills')
                 for track in list(board.GetTracks()):
                     if track.GetClass() != 'PCB_VIA':
                         continue
@@ -2895,6 +2899,14 @@ class FanoutTab(wx.Panel):
                         if moved_type is None:
                             from kicad_parser import pcbnew_via_type
                             moved_type = pcbnew_via_type(track)
+                        if not moved_backdrills:
+                            try:
+                                from kicad_parser import (pcbnew_backdrills,
+                                                          pcbnew_layer_maps)
+                                moved_backdrills = pcbnew_backdrills(
+                                    track, pcbnew_layer_maps(board)[2])
+                            except Exception:
+                                moved_backdrills = None
                         board.RemoveNative(track)
                         break
                 nv = pcbnew.PCB_VIA(board)
@@ -2907,8 +2919,9 @@ class FanoutTab(wx.Panel):
                     from .gui_utils import set_via_layers
                     set_via_layers(nv, _layer_id(vd['layers'][0]),
                                    _layer_id(vd['layers'][1]), moved_type)
-                from .gui_utils import apply_via_protection
+                from .gui_utils import apply_via_protection, apply_via_backdrills
                 apply_via_protection(nv, moved_attrs)
+                apply_via_backdrills(nv, moved_backdrills)
                 board.Add(nv)
 
             for nsd in (result.get('new_segments', []) or []):

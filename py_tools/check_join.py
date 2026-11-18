@@ -224,7 +224,8 @@ def _stage_board(board, out_path, pcb, net_id, cand_segs, cand_vias):
                                          v.layers, net_id,
                                          net_name=net_name,
                                          tenting_attrs=getattr(v, 'tenting_attrs', None),
-                                         via_type=getattr(v, 'via_type', None)))
+                                         via_type=getattr(v, 'via_type', None),
+                                         backdrills=getattr(v, 'backdrills', None)))
     tail = content.rstrip()
     if not tail.endswith(')'):
         raise ValueError(f"{board} does not end with a closing paren")

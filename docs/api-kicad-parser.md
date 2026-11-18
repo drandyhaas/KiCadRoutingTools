@@ -233,6 +233,13 @@ polygon, and the two agree to within pcbnew's arc error. `shape` reads
 padstack keeps its box. A paste opening with a positive margin is the grown
 box (a superset); at zero or a negative margin it is the copper outline.
 
+**Back-drills (`Pad.backdrills`, #1925).** A drilled pad's
+`(backdrill (size S) (layers "START" "END"))` and `(tertiary_drill ...)`, as
+`{token: Backdrill}`; `{}` when it has none. Both parse paths fill it, in the
+form described under [`Via`](#via). The text parser takes the two blocks out
+of the pad before its other readers run: a back-drill's own `(layers ...)` is
+written before the pad's and was read as the pad's layer set.
+
 ### `Segment`
 
 | Field | Type | Meaning |
@@ -271,7 +278,30 @@ box (a superset); at zero or a negative margin it is the copper outline.
 | `locked` | bool | KiCad `(locked yes)`, as on `Segment`: its net is never rip-eligible (#521) and no pass moves or removes the via |
 | `tenting_attrs` | Dict[str, str] | Protection spec as `{token: raw inner s-expr}` for `tenting`/`covering`/`plugging`/`capping`/`filling`, e.g. `{'covering': '(front no) (back no)', 'capping': 'no'}`. `{}` = the board specified nothing (KiCad inherits its board default). Read by **both** parse paths (text and `build_pcb_data_from_board`) in the same normalized form. What a via is actually FABRICATED with is resolved token by token against `BoardInfo.via_protection_setup` by `fab_notes.effective_via_protection` (#962) |
 
-Pass `tenting_attrs` (and `via_type`) back to `generate_via_sexpr` for any via
+| `backdrills` | Dict[str, Backdrill] | KiCad 10's back-drills of this via (#1925): `{'backdrill': Backdrill(size, start_layer, end_layer)}`, with `'tertiary_drill'` for a second one; `{}` = none. Read by **both** parse paths, in one form |
+
+**Back-drills (#1925).** `Backdrill` is a named tuple `(size, start_layer,
+end_layer)`: a wider drill of diameter `size` mm that removes the barrel from
+`start_layer` to `end_layer`, both inclusive, the pair kept in the file's
+order. KiCad 10 writes the tokens between `(drill ...)` and `(layers ...)`.
+Either token may start from either face (a via drilled from both has the top
+one as `backdrill` and the bottom one as `tertiary_drill`; a lone bottom drill
+is a `backdrill`), so read the side from `start_layer`, never from the token.
+The reading is pcbnew 10.0.8's, case by case: the two children in either
+order, anywhere in the block; a token with no `(layers ...)`, no `(size ...)`
+or a size of 0 is no drill (KiCad's own save drops it); a size that is not one
+number makes KiCad refuse the board, and the parser names it in a WARNING and
+carries nothing. `via_stubs.drilled_layers(via.backdrills, copper_layers)`
+gives the layers removed. They are read, carried by every writer that re-emits
+an existing via, measured by `check_via_stubs.py`, and a via's are held as
+obstacles by the route steps and graded by `check_drc` on the layers they
+remove (a pad's are not yet); a route step
+defines them only under `--backdrill-nets` (see
+[Back-drills](configuration.md#back-drills)). The fill model does not read
+them. KiCad's post-machining tokens (`front_post_machining`,
+`back_post_machining`) are not read.
+
+Pass `tenting_attrs` (and `via_type`, and `backdrills`) back to `generate_via_sexpr` for any via
 that already existed, so a ripped-and-re-placed via keeps its real spec instead
 of losing it (#489 §8) — that matters most for via-in-pad, which needs IPC-4761
 Type VII (filled + capped + plated) — and a blind or micro via stays one. A via

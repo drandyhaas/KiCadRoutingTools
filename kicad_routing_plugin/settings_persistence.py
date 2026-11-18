@@ -80,6 +80,10 @@ def get_dialog_settings(dialog):
         'via_span': dialog.via_span.GetValue(),
         'via_span_type': dialog.via_span_type.GetStringSelection(),
         'via_span_escape': dialog.via_span_escape.GetStringSelection(),
+        'backdrill_nets': dialog.backdrill_nets.GetValue(),
+        'backdrill_oversize': dialog.backdrill_oversize.GetValue(),
+        'backdrill_margin': dialog.backdrill_margin.GetValue(),
+        'backdrill_min_stub': dialog.backdrill_min_stub.GetValue(),
         'rip_existing_nets': dialog.rip_existing_nets_ctrl.GetValue(),
         'layer_costs': dialog.layer_costs_ctrl.GetValue(),
 
@@ -424,6 +428,10 @@ def restore_dialog_settings(dialog, settings):
     if 'via_span_type' in settings:
         _i = dialog.via_span_type.FindString(str(settings['via_span_type']))
         dialog.via_span_type.SetSelection(_i if _i >= 0 else 0)
+    for _bd_key in ('backdrill_nets', 'backdrill_oversize', 'backdrill_margin',
+                    'backdrill_min_stub'):
+        if _bd_key in settings:
+            getattr(dialog, _bd_key).SetValue(str(settings[_bd_key] or ''))
     if 'via_span_escape' in settings:
         _i = dialog.via_span_escape.FindString(str(settings['via_span_escape']))
         dialog.via_span_escape.SetSelection(_i if _i >= 0 else 0)

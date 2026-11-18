@@ -48,6 +48,7 @@ _PACK_OFFSET = 1 << 20  # grid coords stay well within +/-2^20 at any allowed gr
 # on the working map are accounted separately by get_stats() deltas per site.
 import itertools as _it
 from geometry_utils import via_span_layer_indices
+from backdrill import hole_diameter as _bd_hole
 _UID = _it.count(1)
 _LEDGER_ENV = os.environ.get("KICAD_OBSTACLE_LEDGER") == "1"
 _LEDGER = None
@@ -722,17 +723,31 @@ def via_rungs(config, pcb_data=None):
     for p in extra:
         if p != run and p not in rungs:
             rungs.append(p)
+    if getattr(config, 'backdrill', None) is not None:
+        # #1925: one more per via geometry a net asked to be back-drilled is
+        # drawn at, after the others so their numbers do not move
+        from backdrill import rung_pairs
+        for p in rung_pairs(config):
+            if p not in rungs:
+                rungs.append(p)
     return rungs
 
 
 def rung_for_net(config, pcb_data, net_id: int) -> int:
     """The via-legality rung a search for ``net_id`` must use: 0 at the run's
     via, else the index of the net's own geometry in ``via_rungs``."""
-    sizes = getattr(config, 'net_via_sizes', None) or {}
-    v = sizes.get(net_id)
-    if not v:
-        return 0
-    key = (round(v[0], 4), round(v[1], 4))
+    key = None
+    if getattr(config, 'backdrill', None) is not None:
+        # #1925: a net asked to be back-drilled searches at its legality rung
+        from backdrill import rung_pair_for_net, searches_at_rung
+        if searches_at_rung(config, net_id):
+            key = rung_pair_for_net(config, net_id)
+    if key is None:
+        sizes = getattr(config, 'net_via_sizes', None) or {}
+        v = sizes.get(net_id)
+        if not v:
+            return 0
+        key = (round(v[0], 4), round(v[1], 4))
     for i, p in enumerate(via_rungs(config, pcb_data), 1):
         if p == key:
             return i
@@ -1020,6 +1035,16 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
                 if _reach is not None:
                     via_track_list[_i] = max(via_track_list[_i],
                                              coord.to_grid_dist_safe(_reach))
+        if getattr(via, 'backdrills', None):
+            # #1925: on a layer a back-drill removes, the hole is the back-drill's
+            from backdrill import track_reach as _bd_reach
+            for _i, (ln, lw) in enumerate(zip(config.layers, layer_widths)):
+                _reach = _bd_reach(config, via, ln,
+                                   config.layer_clearance(ln, obs_clearance, net_id), lw,
+                                   extra_on_layer(extra_clearance, ln))
+                if _reach is not None:
+                    via_track_list[_i] = max(via_track_list[_i],
+                                             coord.to_grid_dist_safe(_reach))
         # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
         # Float radius (no floor) so the disc threshold blocks the true clearance.
         # #498: barrels meet on every stack layer -> stack max.
@@ -1043,7 +1068,7 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
         _h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
         if _h2h > 0 and getattr(via, 'drill', 0) > 0:
             _gx, _gy = coord.to_grid(via.x, via.y)
-            _req = via.drill / 2.0 + config.via_drill / 2.0 + _h2h
+            _req = _bd_hole(via) / 2.0 + config.via_drill / 2.0 + _h2h   # #1925
             _de = coord.to_grid_dist_safe(_req) + 1  # ceil + 1-cell bbox margin
             _off = np.arange(-_de, _de + 1)
             _dxg, _dyg = np.meshgrid(_off, _off, indexing="ij")
@@ -1691,7 +1716,7 @@ def _precompute_via_placement_obstacles(
         # sync -- without it the ripped via leaves a stale drill keepout (#208).
         h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
         if h2h > 0 and via.drill > 0:
-            req = via.drill / 2.0 + config.via_drill / 2.0 + h2h
+            req = _bd_hole(via) / 2.0 + config.via_drill / 2.0 + h2h   # #1925
             # tie -> OPEN, mirroring block_via_cells_near_drills (see above)
             req_sq = (req - GRID_TIE_EPS) ** 2
             de = coord.to_grid_dist_safe(req) + 1  # ceil + 1-cell bbox margin (matches source)

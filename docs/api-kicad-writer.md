@@ -76,8 +76,9 @@ Via dicts:
 ```
 
 A via dict that re-emits a via the board already had also carries that via's
-`'tenting_attrs'`, `'inherit_when_unspecified': True` and `'via_type'` (see
-[Via protection](#via-protection-tenting_attrs) and [Via type](#via-type-via_type));
+`'tenting_attrs'`, `'inherit_when_unspecified': True`, `'via_type'` and
+`'backdrills'` (see [Via protection](#via-protection-tenting_attrs),
+[Via type](#via-type-via_type) and [Back-drills](#back-drills-backdrills));
 a new via carries none of them.
 
 `remove_vias` takes dicts with `x`/`y` keys (and optionally `net_id`, which
@@ -152,7 +153,8 @@ yourself:
 generate_segment_sexpr(start, end, width, layer, net_id, net_name=None) -> str
 generate_via_sexpr(x, y, size, drill, layers, net_id,
                    free=False, net_name=None, tenting_attrs=None,
-                   inherit_when_unspecified=False, via_type=None) -> str
+                   inherit_when_unspecified=False, via_type=None,
+                   backdrills=None) -> str
 generate_gr_line_sexpr(start, end, width, layer) -> str      # debug graphics
 generate_gr_text_sexpr(text, x, y, layer, size=0.5, angle=0) -> str
 generate_zone_sexpr(net_id, net_name, layer, polygon_points,
@@ -204,6 +206,31 @@ file it came from. On the plugin side `gui_utils.set_via_layers` does the same
 for a `PCB_VIA`, setting the type BEFORE the layer pair: pcbnew snaps a through
 via's pair to F.Cu/B.Cu as it is set. `tests/test_749_via_protection_emit_sites.py`
 holds every emit and copy site to this.
+
+### Back-drills (`backdrills`)
+
+`generate_via_sexpr(..., backdrills=...)` takes the via's own `Via.backdrills`
+(#1925) and writes its `(backdrill (size S) (layers "START" "END"))` and
+`(tertiary_drill ...)` back, between `(drill ...)` and `(layers ...)` where
+KiCad 10 writes them (on one line each; pcbnew 10.0.8 loads that form and
+re-saves it as its own). `None` or `{}` writes nothing, so a via with no
+back-drill is written exactly as before. Every site that puts an EXISTING via
+back passes the via's own, as it passes `tenting_attrs` and `via_type`: the
+sites of the table under [Which sites pass what](#which-sites-pass-what), and
+the via dicts they are fed (`'backdrills'`). A via the tool adds has none unless
+the route step was asked for them (`--backdrill-nets`), which sets the via's
+`backdrills` before it is written and, at the end of the step, rewrites the
+shipped file's vias through `set_via_backdrills_in_content(content, {uuid:
+backdrills})` (an empty dict clears; a via that already reads as asked is left
+byte for byte). A net that is ripped and routed again gets new
+vias, so a back-drill on a via the reroute removed goes with that via. On the
+plugin side `gui_utils.apply_via_backdrills(pcb_via, backdrills)` is the twin
+of `apply_via_protection`, called next to it wherever a tab re-creates a via.
+`tests/test_1925_backdrill_read_keep.py` walks the AST for a
+`generate_via_sexpr` call with no `backdrills=`, a via dict that carries
+`'tenting_attrs'` without `'backdrills'`, and a plugin function that builds a
+`PCB_VIA` and applies its protection but not its back-drills;
+`tests/gui_parity/test_1925_backdrill_pcbnew_parity.py` is the pcbnew half.
 
 ### Via protection (`tenting_attrs`)
 

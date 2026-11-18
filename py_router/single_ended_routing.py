@@ -487,14 +487,50 @@ def _hole_via_excess(config, pcb_data, near, base_clearance, layer, own_type='tr
     the foreign via's copper stands off it at the rule too. None without such
     a rule, so callers stay on their own path."""
     hr = getattr(config, 'hole_rules', None) if config is not None else None
-    if hr is None or base_clearance is None:
+    bd = _backdrill_via_reach(pcb_data, layer) if config is not None else None
+    if (hr is None and bd is None) or base_clearance is None:
         return None
-    out = _hole_rule_via_reach(pcb_data, hr, layer)[near] - base_clearance
-    own = _own_via_hole_excess(config, hr, base_clearance) if own_type == 'via' else None
-    if own is not None:
-        out = np.fmax(out, own)
+    out = None
+    if hr is not None:
+        out = _hole_rule_via_reach(pcb_data, hr, layer)[near] - base_clearance
+        own = _own_via_hole_excess(config, hr, base_clearance) if own_type == 'via' else None
+        if own is not None:
+            out = np.fmax(out, own)
+    if bd is not None:
+        # #1925: the wall of a back-drill on this layer, held like a hole's
+        from backdrill import wall_clearance
+        more = bd[near] + wall_clearance(config, base_clearance) - base_clearance
+        out = more if out is None else np.fmax(out, more)
     out = np.where(out > 0, out, np.nan)
     return out if (~np.isnan(out)).any() else None
+
+
+def _backdrill_via_reach(pcb_data, layer):
+    """#1925: per row of `_foreign_via_arrays`, how much wider than the via's
+    body its back-drill is on `layer` (half the difference of the diameters;
+    negative for a narrower drill), NaN where no back-drill removes the
+    layer. None for a board with no back-drilled via. The router holds
+    another net's copper off the wall (`backdrill.track_reach`), so a pass
+    that measures the pair from the via's ring moves the copper back inside
+    it."""
+    from backdrill import board_has_backdrills, size_on_layer
+    if pcb_data is None or not board_has_backdrills(pcb_data):
+        return None
+    vt = pcb_data.vias[-1] if pcb_data.vias else None
+    sig = (len(pcb_data.vias), (vt.x, vt.y, vt.net_id) if vt is not None else None,
+           sum(1 for v in pcb_data.vias if getattr(v, 'backdrills', None)))
+    cache = getattr(pcb_data, '_backdrill_via_cache', None)
+    if cache is None or cache[0] != sig:
+        cache = pcb_data._backdrill_via_cache = (sig, {})
+    got = cache[1].get(layer)
+    if got is None:
+        vals = []
+        for v in pcb_data.vias:
+            size = size_on_layer(v, layer) if getattr(v, 'backdrills', None) else 0.0
+            vals.append((size - float(getattr(v, 'size', 0.0) or 0.0)) / 2.0
+                        if size > 0 else math.nan)
+        got = cache[1][layer] = np.asarray(vals, dtype=float)
+    return got
 
 
 def _own_via_hole_excess(config, hr, base_clearance):
@@ -3001,6 +3037,30 @@ def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     return merged
 
 
+#: What a net prints when it routes only without its back-drilled via's
+#: legality (#1925).
+_BACKDRILL_FALLBACK = ("  (routed without the back-drill's via legality: its vias are "
+                       "back-drilled only where the drill is legal)")
+
+
+def _backdrill_search_config(config: GridRouteConfig, pcb_data, net_id: int):
+    """#1925: the config a net asked to be back-drilled is searched with --
+    the map's via-legality rung of its back-drilled via -- or None when the
+    net is not asked for, the search has already fallen back, or the map
+    carries no such rung."""
+    if getattr(config, 'backdrill', None) is None:
+        return None
+    try:
+        from backdrill import searches_at_rung
+        from obstacle_cache import rung_for_net
+        if not searches_at_rung(config, net_id):
+            return None
+        rung = rung_for_net(config, pcb_data, net_id)
+    except Exception:                                          # noqa: BLE001
+        return None
+    return replace(config, via_rung=rung) if rung else None
+
+
 def _per_net_via_config(config: GridRouteConfig, pcb_data, net_id: int) -> GridRouteConfig:
     """#530 decision 4: the config this net is searched and emitted with --
     its own via geometry (config.net_via_sizes) and the obstacle map's
@@ -3008,7 +3068,9 @@ def _per_net_via_config(config: GridRouteConfig, pcb_data, net_id: int) -> GridR
     run config is returned untouched for a net at the run's via."""
     sizes = getattr(config, 'net_via_sizes', None)
     if not sizes or net_id not in sizes:
-        return config
+        # #1925: a net asked to be back-drilled searches at the rung of its
+        # back-drilled via, and is drawn at the via it has
+        return _backdrill_search_config(config, pcb_data, net_id) or config
     try:
         from obstacle_cache import rung_for_net
         d, h = sizes[net_id]
@@ -3030,9 +3092,27 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     (`net_keepouts.config_for_nets`, #1527)."""
     from net_keepouts import stamp as _nk_stamp, config_for_nets
     with _nk_stamp(obstacles, pcb_data, (net_id,), config):
-        return _route_net_with_obstacles_impl(
+        result = _route_net_with_obstacles_impl(
             pcb_data, net_id, config_for_nets(pcb_data, (net_id,), config),
             obstacles, *args, **kwargs)
+        _bd = getattr(config, 'backdrill', None)
+        if _bd is not None and net_id in _bd.net_ids:
+            # #1925: completion first. A net that does not route where its
+            # back-drilled via is legal is routed as it would be without the
+            # option; its vias are then drilled only where they are legal.
+            if _bd.search and (not result or result.get('failed')):
+                config = replace(config, backdrill=_bd.lenient())
+                _again = _route_net_with_obstacles_impl(
+                    pcb_data, net_id, config_for_nets(pcb_data, (net_id,), config),
+                    obstacles, *args, **kwargs)
+                if _again and not _again.get('failed'):
+                    print(_BACKDRILL_FALLBACK)
+                    result = _again
+            if result and not result.get('failed') and result.get('new_vias'):
+                from backdrill import mark_new_vias
+                mark_new_vias(pcb_data, net_id, replace(config, backdrill=_bd),
+                              result['new_vias'], result.get('new_segments'), obstacles)
+        return result
 
 
 def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
@@ -5654,9 +5734,23 @@ def route_multipoint_main(pcb_data: PCBData, net_id: int, config: GridRouteConfi
     (`net_keepouts.config_for_nets`, #1527)."""
     from net_keepouts import stamp as _nk_stamp, config_for_nets
     with _nk_stamp(obstacles, pcb_data, (net_id,), config):
-        return _route_multipoint_main_impl(
-            pcb_data, net_id, config_for_nets(pcb_data, (net_id,), config),
-            obstacles, *args, **kwargs)
+        cfg = config_for_nets(pcb_data, (net_id,), config)
+        rung_cfg = _backdrill_search_config(cfg, pcb_data, net_id)
+        if rung_cfg is not None:
+            # #1925: first where the net's back-drilled via is legal, then
+            # (completion first) as without the option
+            result = _route_multipoint_main_impl(pcb_data, net_id, rung_cfg,
+                                                 obstacles, *args, **kwargs)
+            if result and not result.get('failed'):
+                return result
+            cfg = replace(cfg, backdrill=cfg.backdrill.lenient())
+            again = _route_multipoint_main_impl(pcb_data, net_id, cfg,
+                                                obstacles, *args, **kwargs)
+            if again and not again.get('failed'):
+                print(_BACKDRILL_FALLBACK)
+            return again if again is not None else result
+        return _route_multipoint_main_impl(pcb_data, net_id, cfg,
+                                           obstacles, *args, **kwargs)
 
 
 def _route_multipoint_main_impl(
@@ -6302,6 +6396,9 @@ def _route_multipoint_main_impl(
 
     print(f"  Phase 1 routed in {total_iterations} iterations, {len(segments)} segments")
     _draw_at_own_via(vias, pcb_data, net_id, config, obstacles)
+    if getattr(config, 'backdrill', None) is not None:
+        from backdrill import mark_new_vias                      # #1925
+        mark_new_vias(pcb_data, net_id, config, vias, segments, obstacles)
 
     return {
         'new_segments': segments,
@@ -6595,6 +6692,10 @@ def route_multipoint_taps(
     via-in-pad unblock on the same map (an unblock via registered there and
     not committed to pcb_data was a free via no probe here could name;
     _register_unblock_via registers none any more)."""
+    if _backdrill_search_config(config, pcb_data, net_id) is not None:
+        # #1925: a net asked to be back-drilled, before anything is stamped
+        return _backdrill_taps(pcb_data, net_id, config, obstacles, main_result,
+                               global_offset, global_total, global_failed)
     ring_cells: list = []
     # Ledger-only (KICAD_OBSTACLE_LEDGER=1): checks the contract above on
     # whatever map this is, which the ref-count ledger cannot (it books only
@@ -6644,6 +6745,31 @@ def route_multipoint_taps(
         _restore_tap_scaffolding(obstacles, free_vias)
         ledger_scaffold_end(_audit, obstacles, pcb_data, net_id, config,
                             result or main_result)
+
+
+def _backdrill_taps(pcb_data, net_id, config, obstacles, main_result,
+                    global_offset, global_total, global_failed):
+    """#1925: Phase 3 of a net asked to be back-drilled. The tap edges are
+    routed first with via sites legal for its back-drilled via (the map's
+    rung of it). If one fails that way they are routed again as without the
+    option -- `route_multipoint_taps` leaves nothing on the map -- and the
+    result that connects more is kept: completion first. Both calls carry
+    the spec with its search switched off, so each is one plain pass."""
+    rung = _backdrill_search_config(config, pcb_data, net_id).via_rung
+    plain_cfg = replace(config, backdrill=config.backdrill.lenient())
+    first = route_multipoint_taps(pcb_data, net_id, replace(plain_cfg, via_rung=rung),
+                                  obstacles, main_result, global_offset, global_total,
+                                  global_failed)
+    before = main_result.get('tap_edges_failed', 0)
+    if first is not None and first.get('tap_edges_failed', 0) <= before:
+        return first
+    plain = route_multipoint_taps(pcb_data, net_id, plain_cfg, obstacles, main_result,
+                                  global_offset, global_total, global_failed)
+    if plain is not None and (first is None or plain.get('tap_edges_failed', 0)
+                              < first.get('tap_edges_failed', 0)):
+        print(_BACKDRILL_FALLBACK)
+        return plain
+    return first if first is not None else plain
 
 
 def inprogress_via_ring_cells(v, net_id: int, config: GridRouteConfig,
@@ -7349,6 +7475,9 @@ def _route_multipoint_taps_impl(
     print(f"  Phase 3 routing complete: {edges_routed} edges, {len(all_segments)} total segments, {len(all_vias)} total vias")
 
     _draw_at_own_via(all_vias, pcb_data, net_id, config, obstacles)
+    if getattr(config, 'backdrill', None) is not None:
+        from backdrill import mark_new_vias                      # #1925
+        mark_new_vias(pcb_data, net_id, config, all_vias, all_segments, obstacles)
     # Update result - preserve original fields, update segments/vias
     updated_result = dict(main_result)
     updated_result['new_segments'] = all_segments

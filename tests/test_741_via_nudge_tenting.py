@@ -892,9 +892,9 @@ class TestTheMoveDictCarriesTheSpecForTheGUI(unittest.TestCase):
         pinned here and spelled in the docstring."""
         self.assertEqual(set(self.by['VF1']),
                          {'x', 'y', 'size', 'drill', 'layers', 'net_id',
-                          'tenting_attrs', 'via_type'})
+                          'tenting_attrs', 'via_type', 'backdrills'})
         doc = inspect.getdoc(FC.nudge_vias_for_unresolved) or ''
-        for k in ('tenting_attrs', 'net_id', 'layers', 'via_type'):
+        for k in ('tenting_attrs', 'net_id', 'layers', 'via_type', 'backdrills'):
             self.assertIn(k, doc,
                           'the contract docstring no longer names %r' % k)
     # MUTATION: rename the key; add a second, differently-spelled one.

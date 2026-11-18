@@ -1607,6 +1607,28 @@ class RoutingDialog(wx.Dialog):
         span_sizer.Add(self.via_span_escape, 0, wx.LEFT, 5)
         options_inner.Add(span_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Back-drills (#1925): empty nets == CLI route.py's --backdrill-nets
+        # default (None: no via is back-drilled). The three numbers are the
+        # fabricator's and have no default, as on the CLI.
+        bd_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        bd_sizer.Add(wx.StaticText(options_scroll, label="Back-drill Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.backdrill_nets = wx.TextCtrl(options_scroll, value="")
+        self.backdrill_nets.SetToolTip("Back-drill the vias this step adds for the nets matching these patterns (space separated, !pattern excludes). Leave empty (default) to back-drill none. Needs the three numbers beside it, from the fabricator. A via site is taken for such a net only where the back-drill's hole clears other nets' copper on every layer; a net that cannot route that way is routed as usual and its vias are drilled where they can be. Same as CLI --backdrill-nets.")
+        bd_sizer.Add(self.backdrill_nets, 1, wx.EXPAND)
+        bd_sizer.Add(wx.StaticText(options_scroll, label="Oversize:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 5)
+        self.backdrill_oversize = wx.TextCtrl(options_scroll, value="", size=(55, -1))
+        self.backdrill_oversize.SetToolTip("mm the back-drill is wider than the via's drill (CLI --backdrill-oversize). No default.")
+        bd_sizer.Add(self.backdrill_oversize, 0)
+        bd_sizer.Add(wx.StaticText(options_scroll, label="Margin:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 5)
+        self.backdrill_margin = wx.TextCtrl(options_scroll, value="", size=(55, -1))
+        self.backdrill_margin.SetToolTip("mm of dielectric the back-drill stops short of the last layer the net uses; a stub layer nearer than that is left (CLI --backdrill-margin). No default.")
+        bd_sizer.Add(self.backdrill_margin, 0)
+        bd_sizer.Add(wx.StaticText(options_scroll, label="Min stub:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 5)
+        self.backdrill_min_stub = wx.TextCtrl(options_scroll, value="", size=(55, -1))
+        self.backdrill_min_stub.SetToolTip("mm; a stub shorter than this is not drilled (CLI --backdrill-min-stub). No default.")
+        bd_sizer.Add(self.backdrill_min_stub, 0)
+        options_inner.Add(bd_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # Rip pre-existing nets (issue #103): make tracks committed by a
         # previous run eligible for rip-up during retry. Mirrors the CLI
         # --rip-existing-nets flag (fnmatch patterns; ALL = everything).
@@ -3044,6 +3066,10 @@ class RoutingDialog(wx.Dialog):
         self.via_span.SetValue("")  # empty == CLI default (None: through vias)
         self.via_span_type.SetSelection(0)
         self.via_span_escape.SetSelection(0)
+        self.backdrill_nets.SetValue("")  # empty == CLI default (None: no back-drill)
+        self.backdrill_oversize.SetValue("")
+        self.backdrill_margin.SetValue("")
+        self.backdrill_min_stub.SetValue("")
         self.rip_existing_nets_ctrl.SetValue("")
         self.force_reroute.SetValue(False)  # match creation default + CLI (store_true)
         self.layer_costs_ctrl.SetValue("")
@@ -3588,6 +3614,16 @@ class RoutingDialog(wx.Dialog):
         _span_escape = self.via_span_escape.GetStringSelection()
         config['via_span_escape'] = _span_escape if _span_escape in ('route', 'only') else None
 
+        # #1925: the back-drills, as route.py's --backdrill-nets and its three
+        # numbers (an empty number stays None; the engine names what is missing)
+        config['backdrill_nets'] = self.backdrill_nets.GetValue().replace(',', ' ').split() or None
+        for _attr in ('backdrill_oversize', 'backdrill_margin', 'backdrill_min_stub'):
+            _txt = getattr(self, _attr).GetValue().strip()
+            try:
+                config[_attr] = float(_txt) if _txt else None
+            except ValueError:
+                config[_attr] = None
+
         # Parse rip-pre-existing-nets (issue #103): empty -> None (keep
         # pre-existing tracks fixed), ALL -> ["*"], else fnmatch patterns.
         rip_existing_text = self.rip_existing_nets_ctrl.GetValue().strip()
@@ -4096,6 +4132,10 @@ class RoutingDialog(wx.Dialog):
                     via_span=config.get('via_span'),
                     via_span_type=config.get('via_span_type'),
                     via_span_escape=config.get('via_span_escape'),
+                    backdrill_nets=config.get('backdrill_nets'),
+                    backdrill_oversize=config.get('backdrill_oversize'),
+                    backdrill_margin=config.get('backdrill_margin'),
+                    backdrill_min_stub=config.get('backdrill_min_stub'),
                     rip_existing_nets=config.get('rip_existing_nets'),
                     force_reroute=config.get('force_reroute', False),
                     # RAW patterns (pre-expansion), like the CLI main: the #521
@@ -4747,8 +4787,10 @@ class RoutingDialog(wx.Dialog):
                            getattr(via, 'via_type', None))
         # Keep a re-placed via's own tenting/plugging/filling (#489 §8). A via
         # with no spec is left to inherit the board setting, as before.
-        from .gui_utils import apply_via_protection
+        from .gui_utils import apply_via_protection, apply_via_backdrills
         apply_via_protection(pcb_via, getattr(via, 'tenting_attrs', None))
+        # ...and its back-drills (#1925).
+        apply_via_backdrills(pcb_via, getattr(via, 'backdrills', None))
         board.Add(pcb_via)
 
     def _move_copper_text_to_silkscreen(self, board):

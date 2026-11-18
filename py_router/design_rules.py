@@ -3936,6 +3936,9 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
     except Exception as e:                                     # noqa: BLE001
         print(f"  ERROR: hole_clearance rules not installed ({e}); this run routes "
               f"WITHOUT them")
+    # #1925: the copper-to-hole floor of a back-drill's wall
+    from backdrill import install as _install_backdrill
+    _install_backdrill(config, pcb_data)
     key = (os.path.abspath(rules.source) if rules.source else '',
            tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
                  for r in rules.rules))

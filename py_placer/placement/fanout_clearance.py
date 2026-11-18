@@ -4776,7 +4776,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     (via_moves, new_segments) for the writer:
       via_moves    = [(old_x, old_y, via dict {'x','y','size',
                        'drill','layers','net_id','tenting_attrs',
-                       'via_type'})]
+                       'via_type','backdrills'})]
       new_segments = [segment dicts {'start','end','width','layer','net_id'}]
     """
     via_moves, new_segments = [], []
@@ -5801,6 +5801,8 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                                # ...and its blind/micro type word, which the
                                # writer and the plugin's twin re-emit too.
                                'via_type': getattr(v, 'via_type', 'through'),
+                               # ...and its back-drills (#1925).
+                               'backdrills': dict(getattr(v, 'backdrills', None) or {}),
                                **({'below_hole_floor': below_floor}
                                   if below_floor else {})}))
             nm = pcb_data.nets[v.net_id].name if v.net_id in pcb_data.nets else v.net_id

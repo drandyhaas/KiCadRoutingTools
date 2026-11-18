@@ -550,7 +550,10 @@ def _tap_window_key(local: PCBData, parent: PCBData):
         for s in local.segments)
     refs.extend(getattr(s, 'graphic_ring', None) for s in local.segments)
     vias = tuple(
-        (v.x, v.y, v.size, v.drill, tuple(v.layers or ()), v.net_id, v.free, v.locked)
+        (v.x, v.y, v.size, v.drill, tuple(v.layers or ()), v.net_id, v.free, v.locked,
+         # #1925: a back-drill is part of the via's keep-out
+         tuple(sorted((t, tuple(bd)) for t, bd in v.backdrills.items()))
+         if getattr(v, 'backdrills', None) else ())
         for v in local.vias)
     pads = []
     for nid, plist in local.pads_by_net.items():

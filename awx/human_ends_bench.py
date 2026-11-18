@@ -355,7 +355,8 @@ def main(argv=None):
             else:
                 emit.append(generate_via_sexpr(o.x, o.y, o.size, o.drill, list(o.layers), nid,
                                                net_name=via_net_name(nid, id2name),
-                                               tenting_attrs=o.tenting_attrs, inherit_when_unspecified=True))
+                                               tenting_attrs=o.tenting_attrs, inherit_when_unspecified=True,
+                                               backdrills=o.backdrills))
                 tot_v += 1
         print(f'  {nm:7s} {rep}')
     for bpath in a.add:
@@ -373,7 +374,8 @@ def main(argv=None):
             if nid is not None:
                 emit.append(generate_via_sexpr(v.x, v.y, v.size, v.drill, list(v.layers), nid,
                                                net_name=via_net_name(nid, id2name),
-                                               tenting_attrs=v.tenting_attrs, inherit_when_unspecified=True))
+                                               tenting_attrs=v.tenting_attrs, inherit_when_unspecified=True,
+                                               backdrills=v.backdrills))
                 nv += 1
         print(f'  added from {os.path.basename(bpath)}: {na} segments, {nv} vias')
         tot_s += na

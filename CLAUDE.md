@@ -1022,6 +1022,8 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   `legality.format_required_clause`, never a hand-copied string), and
   `placement/fanout_clearance.py` prices its pairs through the same model
   (#725).
+- `pad.backdrills` - a drilled pad's KiCad 10 back-drills, as on `via.backdrills`
+  (#1925); `{}` = none. Both parse paths
 - `pad.zone_connection` - RESOLVED zone-connection override ('none', 'thermal',
   'solid', 'thru_hole_only'; None = the zone decides): the pad's own
   `(zone_connect N)`, else its footprint's, both parse paths. Ask
@@ -1071,6 +1073,22 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `via.net_id` - Net ID
 - `via.locked` - KiCad `(locked yes)` (see `segment.locked`)
 - `via.held_by` - the `sense:` group holding this via immutable (see `segment.held_by`)
+- `via.backdrills` - KiCad 10's `(backdrill (size S) (layers "A" "B"))` and
+  `(tertiary_drill ...)`, as `{token: Backdrill(size, start_layer, end_layer)}`;
+  `{}` = none (#1925). Both parse paths. The drill removes `start_layer` to
+  `end_layer` INCLUSIVE and either token may start from either face, so read
+  the side from `start_layer`. Pass it back via
+  `generate_via_sexpr(..., backdrills=...)` (via dicts: a `'backdrills'` key;
+  GUI: `gui_utils.apply_via_backdrills`) for any via that already existed, as
+  `tenting_attrs` is passed; a via the tool adds has none unless the route
+  step was asked (`--backdrill-nets` with its three fab numbers, opt-in).
+  `tests/test_1925_backdrill_read_keep.py` walks the AST for a site that
+  forgets. Measured by `py_tools/check_via_stubs.py` (report-only). A via's
+  declared back-drill is an OBSTACLE on the layers it removes
+  (`py_router/backdrill.py`: other nets' copper off its wall at max(pair
+  clearance, copper-to-hole floor), no flag; a pad's is not one yet), and
+  `check_drc` grades it as KiCad 10.0.8 does (a disc of the back-drill's
+  diameter at the copper clearance). The fill model does not read them. `docs/configuration.md` "Back-drills" has the rules
 - `via.tenting_attrs` - Protection spec `{token: raw inner s-expr}` for
   `tenting`/`covering`/`plugging`/`capping`/`filling` (#489 §8); `{}` = the board
   specified nothing. Read by BOTH parse paths in the same normalized form. Pass it
