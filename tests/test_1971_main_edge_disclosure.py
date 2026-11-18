@@ -25,7 +25,9 @@ Rows:
      `matched` (`matched_main_edge`), and a line says the group is not
      matched on total copper;
   5. control: a group of two 2-pad nets carries `net_copper` records with no
-     pads and no total-copper regrade.
+     pads and no total-copper regrade;
+  6. a main edge that ends on the free end of earlier copper (a stand-in,
+     not a pad) is labelled by its position rather than crashing the step.
 
     python3 tests/test_1971_main_edge_disclosure.py
 """
@@ -70,7 +72,27 @@ def route(inp, out, nets):
     return r, log, (groups or [{}])[0]
 
 
+def stub_end_row():
+    from connectivity import _EndpointStub
+    from kicad_parser import Pad
+    from length_matching import main_edge_pads
+    pad = Pad(component_ref='U1', pad_number='6', global_x=1.0, global_y=2.0,
+              local_x=0.0, local_y=0.0, size_x=1.0, size_y=1.0, shape='rect',
+              layers=['F.Cu'], net_id=1, net_name='/N')
+    stub = _EndpointStub(3.25, 4.5, 'F.Cu', 1)
+    res = {'is_multipoint': True, 'routed_pad_indices': [0, 1],
+           'multipoint_pad_info': [(0, 0, 0, 1.0, 2.0, pad),
+                                   (0, 0, 0, 3.25, 4.5, stub)]}
+    try:
+        got = main_edge_pads(res)
+    except Exception as e:                      # the step used to die here
+        got = repr(e)
+    check("a stub end is labelled by position",
+          got == ['U1.6', 'copper end (3.250, 4.500)'], str(got))
+
+
 def main():
+    stub_end_row()
     tmp = tempfile.mkdtemp(prefix='t1971_')
     try:
         inp = os.path.join(tmp, 'in.kicad_pcb')
