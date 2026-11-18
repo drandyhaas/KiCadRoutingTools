@@ -12,7 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'py_router'))
 
 import fab_tiers  # noqa: E402
-from single_ended_routing import PAD_ENTRY_NECK_MM, _neck_path_ok, _neckdown_allowed  # noqa: E402
+from routing_defaults import PAD_ENTRY_NECK_MM  # noqa: E402
+from single_ended_routing import _neck_path_ok, _neckdown_allowed  # noqa: E402
 
 
 class _Cfg:
