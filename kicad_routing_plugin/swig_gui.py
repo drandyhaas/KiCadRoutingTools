@@ -1195,6 +1195,7 @@ class RoutingDialog(wx.Dialog):
             ('track_proximity_cost', 'Track Prox. Cost:', defaults.TRACK_PROXIMITY_COST, "Cost for routing parallel to existing tracks"),
             ('keep_away_free', 'Keep-away Free (mm):', defaults.KEEP_AWAY_FREE, "#1146: within this distance of the routed net's own pads the keep-away band is not priced, so a pin can leave a package whose other pins belong to the other group"),
             ('keep_away_cost', 'Keep-away Cost:', defaults.KEEP_AWAY_COST, "#1146: cost per cell inside a keep-away band, mm equivalent like the other proximity costs (0 = measure and report only)"),
+            ('jog_max_length', 'Max Jog (mm):', defaults.JOG_MAX_LENGTH, "#1842: the most track a Jog Layers layer carries between two vias"),
             ('vertical_attraction_radius', 'Vert. Attract (mm):', defaults.VERTICAL_ATTRACTION_RADIUS, "Radius for cross-layer track stacking: attracts the route toward ANY net's tracks on other layers (net-agnostic)"),
             ('vertical_attraction_cost', 'Vert. Attract Cost:', defaults.VERTICAL_ATTRACTION_COST, "Bonus for routing in the vertical shadow of other layers' tracks (0 = off; net-agnostic corridor stacking)"),
             ('ripped_route_avoidance_radius', 'Rip Avoid (mm):', defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS, "Radius of the corridor a ripped net's former route reserves for its reroute"),
@@ -1606,6 +1607,19 @@ class RoutingDialog(wx.Dialog):
         self.via_span_escape.SetToolTip("Escapes for a via span: 'route' first lays a via of the span and a short track at each surface pad of the selected nets, then routes; 'only' lays the escapes and routes nothing, leaving the nets for the next sub-stack's step. 'off' (default) lays none.")
         span_sizer.Add(self.via_span_escape, 0, wx.LEFT, 5)
         options_inner.Add(span_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Via kinds and jog-only layers (#1842): empty == CLI route.py's
+        # --via-kinds / --jog-layers defaults (None).
+        kinds_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        kinds_sizer.Add(wx.StaticText(options_scroll, label="Via Kinds:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.via_kinds = wx.TextCtrl(options_scroll, value="")
+        self.via_kinds.SetToolTip("The kinds of via the search may change layers through, as top/bottom layer pairs, e.g. 'F.Cu In1.Cu In1.Cu In6.Cu In6.Cu B.Cu' (micro, buried, micro); add 'F.Cu B.Cu' for the through via. The step routes on all its layers and each layer change is made with a kind that fits there. Not with Via Span. Leave empty (default) for through vias.")
+        kinds_sizer.Add(self.via_kinds, 2, wx.EXPAND)
+        kinds_sizer.Add(wx.StaticText(options_scroll, label="Jog Layers:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 5)
+        self.jog_layers = wx.TextCtrl(options_scroll, value="")
+        self.jog_layers.SetToolTip("Layers that carry only a short jog between two vias (a plane layer a micro via and a buried via share), e.g. 'In1.Cu In6.Cu': at most Max Jog of track each time and no other routing. Needs Via Kinds. Leave empty (default) for none.")
+        kinds_sizer.Add(self.jog_layers, 1, wx.EXPAND)
+        options_inner.Add(kinds_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
         # Rip pre-existing nets (issue #103): make tracks committed by a
         # previous run eligible for rip-up during retry. Mirrors the CLI
@@ -3044,6 +3058,8 @@ class RoutingDialog(wx.Dialog):
         self.via_span.SetValue("")  # empty == CLI default (None: through vias)
         self.via_span_type.SetSelection(0)
         self.via_span_escape.SetSelection(0)
+        self.via_kinds.SetValue("")  # empty == CLI default (None: through vias)
+        self.jog_layers.SetValue("")  # empty == CLI default (None: no jog-only layer)
         self.rip_existing_nets_ctrl.SetValue("")
         self.force_reroute.SetValue(False)  # match creation default + CLI (store_true)
         self.layer_costs_ctrl.SetValue("")
@@ -3087,6 +3103,7 @@ class RoutingDialog(wx.Dialog):
         self.net_clearances_path.SetValue("")
         self.keep_away_free.SetValue(defaults.KEEP_AWAY_FREE)
         self.keep_away_cost.SetValue(defaults.KEEP_AWAY_COST)
+        self.jog_max_length.SetValue(defaults.JOG_MAX_LENGTH)
         self.vertical_attraction_radius.SetValue(defaults.VERTICAL_ATTRACTION_RADIUS)
         self.vertical_attraction_cost.SetValue(defaults.VERTICAL_ATTRACTION_COST)
         self.ripped_route_avoidance_radius.SetValue(defaults.RIPPED_ROUTE_AVOIDANCE_RADIUS)
@@ -3488,6 +3505,7 @@ class RoutingDialog(wx.Dialog):
             'keep_away_cost': self.keep_away_cost.GetValue(),
             'bga_proximity_radius': self.bga_proximity_radius.GetValue(),
             'bga_proximity_cost': self.bga_proximity_cost.GetValue(),
+            'jog_max_length': self.jog_max_length.GetValue(),
             'vertical_attraction_radius': self.vertical_attraction_radius.GetValue(),
             'vertical_attraction_cost': self.vertical_attraction_cost.GetValue(),
             'ripped_route_avoidance_radius': self.ripped_route_avoidance_radius.GetValue(),
@@ -3587,6 +3605,10 @@ class RoutingDialog(wx.Dialog):
         config['via_span_type'] = _span_type if _span_type in ('micro', 'blind', 'buried') else None
         _span_escape = self.via_span_escape.GetStringSelection()
         config['via_span_escape'] = _span_escape if _span_escape in ('route', 'only') else None
+        # #1842: via kinds and jog-only layers, as route.py's --via-kinds /
+        # --jog-layers / --jog-max-length
+        config['via_kinds'] = self.via_kinds.GetValue().replace(',', ' ').split() or None
+        config['jog_layers'] = self.jog_layers.GetValue().replace(',', ' ').split() or None
 
         # Parse rip-pre-existing-nets (issue #103): empty -> None (keep
         # pre-existing tracks fixed), ALL -> ["*"], else fnmatch patterns.
@@ -4096,6 +4118,9 @@ class RoutingDialog(wx.Dialog):
                     via_span=config.get('via_span'),
                     via_span_type=config.get('via_span_type'),
                     via_span_escape=config.get('via_span_escape'),
+                    via_kinds=config.get('via_kinds'),
+                    jog_layers=config.get('jog_layers'),
+                    jog_max_length=config.get('jog_max_length', defaults.JOG_MAX_LENGTH),
                     rip_existing_nets=config.get('rip_existing_nets'),
                     force_reroute=config.get('force_reroute', False),
                     # RAW patterns (pre-expansion), like the CLI main: the #521

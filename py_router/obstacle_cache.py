@@ -346,6 +346,12 @@ def run_obstacle_audit(base_obstacles, working_obstacles,
         bs, ps = base_obstacles.get_stats(), probe.get_stats()
         resid = [(labels[i], ps[i] - bs[i])
                  for i in range(min(len(labels), len(bs), len(ps)))]
+        # #1842: each via kind's own map returns to the base's as well
+        for _k in range(max(base_obstacles.via_kind_count(), probe.via_kind_count())
+                        if hasattr(probe, 'via_kind_count') else 0):
+            resid.append((f"blocked_vias_kind_{_k}",
+                          probe.via_kind_len(_k) - base_obstacles.via_kind_len(_k)))
+        hard |= {n for n, _d in resid if n.startswith("blocked_vias_kind_")}
         leak = [(n, d) for n, d in resid if d != 0 and n in hard]
         soft = [(n, d) for n, d in resid if d != 0 and n not in hard]
         print("\n" + "=" * 60)
@@ -437,6 +443,7 @@ def run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
             pass
         n_nets = n_cells = n_missing = n_vias = n_vmissing = 0
         n_rvias = n_rmissing = 0
+        n_kvias = n_kmissing = 0
         n_entry_stale = 0
         stale_nets = []
         stale_entries = []
@@ -476,6 +483,15 @@ def run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
                     if not _exempt_free.is_via_blocked_rung(int(gx), int(gy), int(_r)):
                         rmiss += 1
             n_rmissing += rmiss
+            # #1842: and every via kind's own map, which a kind is read from
+            for _k, _kc in sorted((getattr(fresh, 'blocked_vias_kinds', None) or {}).items()):
+                if _kc is None or not len(_kc):
+                    continue
+                n_kvias += len(_kc)
+                _km = sum(1 for gx, gy in _kc
+                          if not _exempt_free.is_via_blocked_kind(int(gx), int(gy), int(_k)))
+                n_kmissing += _km
+                rmiss += _km
             n_cells += len(cells)
             n_vias += len(vias)
             n_missing += miss
@@ -494,7 +510,9 @@ def run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
               f"{n_vmissing} NOT via-blocked; {n_entry_stale} cells absent from "
               f"their net's cache entry ({len(stale_entries)} stale entries); "
               f"{n_rvias} rung via cells checked, {n_rmissing} NOT blocked at "
-              f"their rung")
+              f"their rung"
+              + (f"; {n_kvias} via-kind cells checked, {n_kmissing} NOT blocked "
+                 f"in their kind's map" if getattr(config, 'via_kinds', None) else ""))
         for name, em, c in stale_entries[:12]:
             print(f"    stale entry {name}: {em}/{c} current cells not in its entry")
         if len(stale_entries) > 12:
@@ -511,11 +529,14 @@ def run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
             print("  CONTENT OK: every cached net's current copper is blocked "
                   "in the working map.")
         print("=" * 60)
-        return {'nets': n_nets, 'cells': n_cells, 'missing': n_missing,
+        _out = {'nets': n_nets, 'cells': n_cells, 'missing': n_missing,
                 'vias': n_vias, 'via_missing': n_vmissing,
                 'rung_vias': n_rvias, 'rung_via_missing': n_rmissing,
                 'entry_stale': n_entry_stale, 'stale_entries': stale_entries,
                 'stale_nets': stale_nets}
+        if getattr(config, 'via_kinds', None):
+            _out.update(kind_vias=n_kvias, kind_via_missing=n_kmissing)
+        return _out
     except Exception as e:
         print(f"[OBSTACLE CONTENT] skipped ({e})")
         return None
@@ -647,6 +668,11 @@ class NetObstacleData:
     # and removed in lockstep with blocked_vias, like blocked_vias_small (which
     # is the env-armed #568 small rung and stays a separate channel).
     blocked_vias_rungs: dict = field(default_factory=dict)
+    # #1842: via-block cells per via KIND ({kind's map: (M, 2)}), each from
+    # the net's copper as that kind's span sees it and at its own via. None
+    # on a step that declares no kinds. Stamped and removed in lockstep with
+    # blocked_vias, with the map's kind mirror off.
+    blocked_vias_kinds: Optional[dict] = None
     # #815: SEGMENT keep-outs, as capsule SPANS instead of cells --
     # (K, 4) [gx, gy_lo, gy_hi, layer] and (K, 3) [gx, gy_lo, gy_hi].
     #
@@ -804,7 +830,8 @@ def _compose_area_cache(area, pcb_data, net_id, config, extra_clearance,
              if i in near else None
              for i in range(len(area.regions))]
     from types import SimpleNamespace
-    inner = [d if d is not None else SimpleNamespace(blocked_vias_rungs={})
+    inner = [d if d is not None else SimpleNamespace(blocked_vias_rungs={},
+                                                     blocked_vias_kinds={})
              for d in inner]
     # the #568 small rung is the SAME array as blocked_vias_small
     _alias = data.blocked_vias_rungs.get(1) is data.blocked_vias_small
@@ -824,6 +851,10 @@ def _compose_area_cache(area, pcb_data, net_id, config, extra_clearance,
         rows = compose_rows(area, config, 'vias', data.blocked_vias_rungs[r],
                             [d.blocked_vias_rungs.get(r) for d in inner])
         data.blocked_vias_rungs[r] = _unique_rows(rows) if len(rows) else rows
+    for k in list(data.blocked_vias_kinds or ()):                  # #1842
+        rows = compose_rows(area, config, 'vias', data.blocked_vias_kinds[k],
+                            [(d.blocked_vias_kinds or {}).get(k) for d in inner])
+        data.blocked_vias_kinds[k] = _unique_rows(rows) if len(rows) else rows
     return data
 
 
@@ -1144,6 +1175,22 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
             _cat = [a for a in _cells if len(a)]
             data.blocked_vias_rungs[_r] = (_unique_rows(np.concatenate(_cat)) if _cat
                                            else np.empty((0, 2), dtype=np.int32))
+        # #1842: and one pass per via kind with a map of its own, at that
+        # kind's via and on the board as its span sees it.
+        if getattr(config, 'via_kinds', None):
+            from via_kinds import spanned as _spanned_kinds, kind_config as _kind_config
+            data.blocked_vias_kinds = {}
+            for _k in _spanned_kinds(config):
+                _kd = precompute_net_obstacles(
+                    getattr(pcb_data, '_base', pcb_data), net_id, _kind_config(config, _k),
+                    extra_clearance, diagonal_margin, _small_pass=True)
+                _cells = [_kd.blocked_vias]
+                if len(_kd.blocked_via_spans):
+                    _cells.append(expand_via_spans(_kd.blocked_via_spans))
+                _cat = [a for a in _cells if len(a)]
+                data.blocked_vias_kinds[_k.map] = (
+                    _unique_rows(np.concatenate(_cat)) if _cat
+                    else np.empty((0, 2), dtype=np.int32))
     if not _small_pass:
         # A STABLE identity for every cache object, armed or not. id() cannot
         # serve: CPython recycles ids, and make_local_window mints a
@@ -1412,6 +1459,11 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
     """
     if _LEDGER is not None:
         _ledger_cache_op("add", obstacles, cache_data)
+    # #1842: an entry that carries each via kind's own cells stamps them
+    # itself, so the map's kind mirror is off for its through-via cells.
+    _kinds = getattr(cache_data, 'blocked_vias_kinds', None)
+    _mirror = (obstacles.set_kind_mirror(False)
+               if _kinds is not None and hasattr(obstacles, 'set_kind_mirror') else None)
     if len(cache_data.blocked_cells) > 0:
         # Pass numpy array directly to Rust (no conversion needed)
         obstacles.add_blocked_cells_batch(cache_data.blocked_cells)
@@ -1433,6 +1485,11 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
     for _r, _cells in sorted(_rungs.items()):
         if _cells is not None and len(_cells) > 0:
             obstacles.add_blocked_vias_rung_batch(_r, _cells)
+    if _mirror is not None:
+        for _k, _cells in sorted(_kinds.items()):
+            if len(_cells) > 0:
+                obstacles.add_blocked_vias_kind_batch(_k, _cells)
+        obstacles.set_kind_mirror(_mirror)
     if _CELL_WATCH != []:
         ledger_cell_watch(obstacles, "cache-add " + _ledger_site(depth=2, frames=3))
 
@@ -1449,6 +1506,11 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
     """
     if _LEDGER is not None:
         _ledger_cache_op("remove", obstacles, cache_data)
+    # #1842: exact mirror of the add -- the kind mirror off, each kind's own
+    # cells removed.
+    _kinds = getattr(cache_data, 'blocked_vias_kinds', None)
+    _mirror = (obstacles.set_kind_mirror(False)
+               if _kinds is not None and hasattr(obstacles, 'set_kind_mirror') else None)
     if len(cache_data.blocked_cells) > 0:
         obstacles.remove_blocked_cells_batch(cache_data.blocked_cells)
     if len(cache_data.blocked_vias) > 0:
@@ -1468,6 +1530,11 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
     for _r, _cells in sorted(_rungs.items()):
         if _cells is not None and len(_cells) > 0:
             obstacles.remove_blocked_vias_rung_batch(_r, _cells)
+    if _mirror is not None:
+        for _k, _cells in sorted(_kinds.items()):
+            if len(_cells) > 0:
+                obstacles.remove_blocked_vias_kind_batch(_k, _cells)
+        obstacles.set_kind_mirror(_mirror)
     if _CELL_WATCH != []:
         ledger_cell_watch(obstacles, "cache-remove " + _ledger_site(depth=2, frames=3))
 

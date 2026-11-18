@@ -337,6 +337,8 @@ _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
                   # #1842: --via-span's two layer names -> one text field,
                   # --via-span-type -> the choice beside it
                   'via_span', 'via_span_type', 'via_span_escape',
+                  # #1842: --via-kinds / --jog-layers layer lists -> text fields
+                  'via_kinds', 'jog_layers',
                   # #530: --clearance-ceiling -> Min Clearance + the ceiling box
                   'clearance_ceiling',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
@@ -594,8 +596,8 @@ def apply_step_params(step, dialog):
             else:
                 ctl.SetValue('ALL' if value else '')
             return True
-        if name == 'via_span':
-            ctl = getattr(dialog, 'via_span', None)
+        if name in ('via_span', 'via_kinds', 'jog_layers'):
+            ctl = getattr(dialog, name, None)
             if ctl is None:
                 return False
             ctl.SetValue(' '.join(str(v) for v in value)
