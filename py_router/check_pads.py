@@ -275,6 +275,22 @@ def pads_shorted_as_drawn(pcb, net_ids, tolerance: float = 1e-3):
     mine = [p for n in targets for p in pcb.pads_by_net.get(n, ())]
     if not mine:
         return []
+    # A NET TIE's pad touching an ORDINARY part's copper of a net its own tie
+    # group joins it to is the tie doing its job: a Kelvin-sense tie pad
+    # overlaps the shunt resistor's pad by design (KiCad grades the contact a
+    # short, and the sense net is still routable to the tie pad). Copper of
+    # ANOTHER net tie is no such target: two ties stacked on each other is a
+    # placement defect whatever nets meet there.
+    _ties = _tie_groups(pcb)
+
+    def _tied_to(pad):
+        fp = pcb.footprints.get(pad.component_ref)
+        out = set()
+        for g in _ties.get(pad.component_ref, ()):
+            if pad.pad_number in g and fp is not None:
+                out |= {q.net_name for q in fp.pads
+                        if q.pad_number in g and q.net_name}
+        return out
     rows = set()
     # Pads against pads: the pads near any of `mine`, then the one measure.
     reach = max(math.hypot(p.size_x, p.size_y) / 2.0
@@ -292,10 +308,10 @@ def pads_shorted_as_drawn(pcb, net_ids, tolerance: float = 1e-3):
             for dy in (-1, 0, 1):
                 for q in grid.get((cx + dx, cy + dy), ()):
                     near[id(q)] = q
-    for a, b, _d in _overlaps_in(list(near.values()), tolerance,
-                                 ties=_tie_groups(pcb)):
+    for a, b, _d in _overlaps_in(list(near.values()), tolerance, ties=_ties):
         for p, q in ((a, b), (b, a)):
-            if p.net_id in targets:
+            if p.net_id in targets and not (q.component_ref not in _ties
+                                            and q.net_name in _tied_to(p)):
                 rows.add((p.net_name, f'{p.component_ref}.{p.pad_number}',
                           'pad', f'{q.component_ref}.{q.pad_number}',
                           (q.net_name,)))
@@ -308,6 +324,13 @@ def pads_shorted_as_drawn(pcb, net_ids, tolerance: float = 1e-3):
         fp = pcb.footprints.get(r['owner_ref'])
         theirs = sorted({q.net_name for q in (fp.pads if fp else ())
                          if q.net_id and q.net_name != r['net']})
+        _ref, _, _num = r['pad_ref'].rpartition('.')
+        _own = next((q for q in (pcb.footprints[_ref].pads
+                                 if _ref in pcb.footprints else ())
+                     if q.pad_number == _num), None)
+        if (_own is not None and r['owner_ref'] not in _ties
+                and set(theirs) <= _tied_to(_own)):
+            continue
         if theirs:
             rows.add((r['net'], r['pad_ref'], 'footprint copper',
                       r['owner_ref'], tuple(theirs)))

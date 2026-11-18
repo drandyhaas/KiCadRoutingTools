@@ -65,14 +65,23 @@ def ok(cond, msg):
         FAILS.append(msg)
 
 
-def run(argv, what):
+def run(argv, what, verdict=None):
+    """Run a step; BROKEN TEST unless it ran. ``verdict`` ({exit code: the
+    line that exit prints}) admits a non-zero exit that IS an answer:
+    check_drc exits 1 when it finds violations, which the caller's own check
+    grades as a FAIL, not as a step that did not run."""
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
                        errors='replace', cwd=REPO, timeout=1800)
     text = (r.stdout or '') + (r.stderr or '')
-    if r.returncode != 0 or 'Traceback' in text:
+    answered = r.returncode in (verdict or {}) and verdict[r.returncode] in text
+    if (r.returncode != 0 and not answered) or 'Traceback' in text:
         raise AssertionError(f"BROKEN TEST: {what} did not run (exit {r.returncode})\n"
                              f"{text[-1500:]}")
     return text
+
+
+# check_drc's two answers: clean (exit 0) and violations found (exit 1)
+DRC_VERDICT = {0: 'NO DRC VIOLATIONS FOUND', 1: 'DRC VIOLATIONS:'}
 
 
 def facts(path):
@@ -113,7 +122,7 @@ def one(py, td, name):
        f"and the same min_track_width in the project: CLI {cli_floor} GUI {gui_floor}")
     for front, out in (('CLI', cli_out), ('GUI', gui_out)):
         text = run(py + [os.path.join(REPO, 'py_router', 'check_drc.py'), out,
-                         '--clearance-margin-mm', '0.0005'], 'check_drc')
+                         '--clearance-margin-mm', '0.0005'], 'check_drc', DRC_VERDICT)
         ok('NO DRC VIOLATIONS FOUND' in text, f"check_drc is clean on the {front} board")
 
 
@@ -158,7 +167,7 @@ def main():
         ok(cli == gui, f"and the GUI ships the same copper: CLI {cli} GUI {gui}")
         for name, out in (('CLI', cli_out), ('GUI', gui_out)):
             text = run(py + [os.path.join(REPO, 'py_router', 'check_drc.py'), out,
-                             '--clearance-margin-mm', '0.0005'], 'check_drc')
+                             '--clearance-margin-mm', '0.0005'], 'check_drc', DRC_VERDICT)
             ok('NO DRC VIOLATIONS FOUND' in text, f"check_drc is clean on the {name} board")
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")

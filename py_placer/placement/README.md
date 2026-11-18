@@ -362,7 +362,7 @@ of it; `check_floorplan --intent` grades all of it.
 | `decaps` limits (`max_distance_mm`, `max_pin_distance_mm`) | priced where graded at error: the decap-limit term | yes |
 | `blocks[].rotation`, `rotation_candidates` | not read (`place_fanout_clearance --intent` holds them) | no rule checks a part's angle; the plan check bounds a zone on the declared angles, and `array_conflict` flags a row whose rotation contradicts them |
 | `arrays[]` | not read: `place_simple` warns that the rows are graded only | yes (`array_formation`, `array_conflict`) |
-| `keep_away[]` | not read | yes (pad edge to pad edge, WARN unless its severity is raised); `route.py` reads the design brief's `keep_away` itself |
+| `keep_away[]` | priced: the pad-edge gap shortfall for the declared aggressor/victim net pair (`KEEP_AWAY_WEIGHT`) | yes (pad edge to pad edge, WARN unless its severity is raised); `route.py` reads the design brief's `keep_away` itself |
 | `replicate[]` | not read (`place_pose replicate --intent` applies it) | yes |
 | `templates[]` | applied and priced: each member seated at its template pose round its chip at the start, carried with every move of the chip, its drift priced (`--template-weight`, default 100 per mm); it joins the chip's group and is not priced as a decap | yes (`template`, WARN; `template_broken`, ERROR, past 5 x the tolerance) |
 

@@ -31,9 +31,12 @@ it:
    every declared face (`blocks[].side`, `edge_connectors[].side`,
    `fixed_poses[].side`, applied before it places, by the writer's flip);
    `fixed_poses[]` (seated at the declared pose and held there); and each
-   `edge_connectors[]` entry with an `edge` (seated on that edge). The rest
-   of the intent is graded only; "Which rules the placer can see" below has
-   the table.
+   `edge_connectors[]` entry with an `edge` (seated on that edge). It also
+   seats and carries movable template members and cover standoffs with
+   their anchors,
+   prices `links[]` and `keep_away[]`, and includes declared `rails[]` in
+   its rail objective. The table under "Which rules the placer can see"
+   distinguishes constraints applied by the placer from grade-only rules.
 2. **`place_pose --intent` refuses a pose that walks a part out of its
    zone, or into a keep-out.** A pose that leaves a moved part further
    outside its block's zone than it was, or inside one of `keepouts[]` it was

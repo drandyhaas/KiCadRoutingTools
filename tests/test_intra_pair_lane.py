@@ -21,10 +21,10 @@ which joins the branches to R4.
 
 Rows:
   1. control, no lane: the record names no pads, and check_drc fails the
-     pair on total copper, `/DATA-` 2.2846 mm shorter than `/DATA+`;
+     pair on total copper, `/DATA-` 2.2568 mm shorter than `/DATA+`;
   2. `auto`: the record names IC4.10 / J1.5 and IC4.9 / J1.4; check_drc
-     grades the lane at 0.105 mm, inside the 0.15 mm recorded, with no skew
-     violation, and reports the two branches as stubs (about 5.45 and
+     grades the lane at 0.0912 mm, inside the 0.15 mm recorded, with no skew
+     violation, and reports the two branches as stubs (about 5.43 and
      3.27 mm); board_score's pair record carries the lane and its skew;
   3. a `.kicad_dru` skew rule over the same two nets is graded on total
      copper, lane or no lane, as KiCad grades it;
@@ -162,9 +162,9 @@ def main():
         rec = record(b).get('/DATA+') or {}
         ok(rec.get('tolerance_mm') == 0.15 and 'lane' not in rec,
            f"the record names no pads: {rec}")
-        out = drc(b, flagged='2.2846mm shorter than /DATA+')
+        out = drc(b, flagged='2.2568mm shorter than /DATA+')
         ok('SKEW-OUT-OF-RANGE violations (1)' in out and 'Recorded lane' not in out,
-           "check_drc fails the pair on total copper, 2.2846 mm")
+           "check_drc fails the pair on total copper, 2.2568 mm")
 
         print("2. --diff-pair-intra-lane auto")
         b = chain(td, 'auto', ['auto'])
@@ -175,8 +175,8 @@ def main():
            f"the record names the lane's pads: {lane}")
         out = drc(b)
         line = next((l for l in out.splitlines() if 'Recorded lane' in l), '')
-        ok('SKEW-OUT-OF-RANGE' not in out and 'skew 0.1050 mm on the lane' in line,
-           f"check_drc grades the lane, 0.105 mm, with no skew violation: {line.strip()[:120]}")
+        ok('SKEW-OUT-OF-RANGE' not in out and 'skew 0.0912 mm on the lane' in line,
+           f"check_drc grades the lane, 0.0912 mm, with no skew violation: {line.strip()[:120]}")
         js = os.path.join(td, 'auto.json')
         check(PY + [tool('check_drc.py'), b, '--json', js], accept=True)
         with open(evidence(js, 'check_drc --json'), encoding='utf-8') as fh:
@@ -184,8 +184,8 @@ def main():
 
         lg = (doc.get('recorded_lanes') or [{}])[0]
         stubs = lg.get('stub_mm') or {}
-        ok(abs((lg.get('skew_mm') or 0) - 0.105) < 0.001
-           and abs((stubs.get('/DATA+') or 0) - 5.45) < 0.02
+        ok(abs((lg.get('skew_mm') or 0) - 0.0912) < 0.001
+           and abs((stubs.get('/DATA+') or 0) - 5.43) < 0.02
            and abs((stubs.get('/DATA-') or 0) - 3.27) < 0.02,
            f"--json carries the lane skew and the branches as stubs: {lg.get('skew_mm')}, {stubs}")
         sj = os.path.join(td, 'score.json')
@@ -194,7 +194,7 @@ def main():
             capture_output=True, text=True, cwd=REPO)
         with open(evidence(sj, 'the score'), encoding='utf-8') as fh:
             pr = json.load(fh)['components']['diff_pairs']['pairs']['/DATA+']
-        ok(pr.get('lane_skew_mm') == 0.105 and pr.get('skew_mm') == 2.2846,
+        ok(pr.get('lane_skew_mm') == 0.0912 and pr.get('skew_mm') == 2.2568,
            f"board_score: lane skew {pr.get('lane_skew_mm')}, total-copper skew {pr.get('skew_mm')}")
 
         print("3. a .kicad_dru skew rule stays on total copper")
@@ -202,7 +202,7 @@ def main():
         with open(dru, 'w', encoding='utf-8') as fh:
             fh.write('(version 1)\n(rule "data skew"\n  (condition "A.NetName == \'/DATA+\' '
                      '|| A.NetName == \'/DATA-\'")\n  (constraint skew (max 0.15mm)))\n')
-        out = drc(b, flagged='2.2846mm shorter than /DATA+')
+        out = drc(b, flagged='2.2568mm shorter than /DATA+')
         ok("'data skew'" in out and 'Recorded lane' not in out,
            "the file's rule binds the pair and is graded on all its copper")
         os.remove(dru)

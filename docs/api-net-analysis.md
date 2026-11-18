@@ -549,12 +549,16 @@ A profile also stores the track width (and, for a differential profile, the
 pair gap) that meets its target impedance on each signal layer; the
 `TuningProfile` carries them as `layer_width_mm` and `layer_gap_mm`, with
 `differential`. `profile_layer_widths(pcb_data, board_path)` gives
-`{net id: {layer: mm}}` for the nets whose class names a profile with widths
-(pinned up at `floor`, the raised rows returned too). A route step given no
+`{net id: {layer: mm}}` for the nets whose class names a profile with widths.
+Given `rules` (a `DesignRules`) it ranks each width as the router does: a
+`.kicad_dru` rule that gives the net a `track_width` `opt` on a layer is
+drawn there instead, and a profile width is clamped into the rule's and
+Board Setup's min/max (`DesignRules.ranked_draw_size`), then pinned up at
+`floor`; the rows not drawn as stored are returned too. A route step given no
 `--track-width` and no `--impedance` draws such a net at its profile's width
-on each layer (#1936), after a stored impedance declaration and a
-`.kicad_dru` rule's own layer widths, and prints how many nets took them. A
-layer the profile gives no width falls through to the class width.
+on each layer (#1936) and prints how many of the nets it routes took them. A
+layer's width is, in order: a stored impedance declaration's, a `.kicad_dru`
+rule's, the profile's, the class's.
 
 A differential pair takes a differential profile's width and gap the same
 way. `profile_pair_geometry(pcb_data, board_path, pairs, layers, floor)`
