@@ -1072,7 +1072,9 @@ of the lane is not decided; name that member's lane too`, and the lane is given
 by naming both members (#1970). The same holds for a pair whose twin has two
 pads on one of the parts (`has 2 pad(s) on IC4`). Naming both is also how to
 give the N member a lane other than the derived one. The entries come in
-either order.
+either order. A member named in two entries must name the same two pads in
+both, in either order (the last entry's order is recorded); an entry naming
+other pads for it refuses, naming both entries.
 
 The pads are recorded with the tolerance (`kicad_routing_tools.intra_pair_tolerance`,
 `lane: {p: [...], n: [...]}`), so later steps and graders read the same path.

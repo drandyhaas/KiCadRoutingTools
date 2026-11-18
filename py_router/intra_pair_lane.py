@@ -16,7 +16,8 @@ between: `resolve_auto`, once the pair is routed) or one or more
 on the same two parts, unless it is named too. A pair whose members end on
 different parts (each through its own series resistor or capacitor) has no
 such pads, so both its members are named, `P_NET=... N_NET=...`, and each
-keeps the pads named (#1970). Either member may be the one named.
+keeps the pads named (#1970). Either member may be the one named, and a
+member named in two entries names the same two pads in both.
 
 A lane applies to a pair the step intra-matches and no `.kicad_dru` skew rule
 binds (`settle`): KiCad grades such a rule on total copper, so a pair it binds
@@ -35,8 +36,9 @@ def resolve(spec: Optional[Sequence[str]], diff_pair_ids, pcb_data
     last entry's, when more than one names it); a member not named takes its
     one pad on each part of its twin's lane (as the twin's first entry names
     it). Raises ValueError, with the reason and the entry, for a spec that
-    names a net no pair of the run has, pads its nets lack, or a twin that
-    has not exactly one pad on such a part and is not named itself."""
+    names a net no pair of the run has, pads its nets lack, a member twice
+    with different pads, or a twin that has not exactly one pad on such a
+    part and is not named itself."""
     if not spec:
         return None
     if isinstance(spec, str):
@@ -60,6 +62,7 @@ def resolve(spec: Optional[Sequence[str]], diff_pair_ids, pcb_data
     # Every entry is read and checked first, so a member another entry names
     # (#1970) is known before any twin's pads are derived.
     named: Dict[int, tuple] = {}        # net id -> the pads its last entry names
+    named_by: Dict[int, str] = {}       # net id -> the first entry naming it
     entries = []
     for s in spec:
         net, sep, pads = s.partition('=')
@@ -77,7 +80,15 @@ def resolve(spec: Optional[Sequence[str]], diff_pair_ids, pcb_data
             first = pin_pair_pads(pcb_data, given, [a, b])
         except ValueError as e:
             raise ValueError(f"--diff-pair-intra-lane {s!r}: {e}") from None
+        # a member named again names the same two pads, in either order (the
+        # last entry's order is kept, as before); other pads would give it the
+        # second entry's lane and its twin one derived from the first
+        if given in named and set(named[given]) != {a, b}:
+            raise ValueError(f"--diff-pair-intra-lane {s!r}: {net}'s lane is "
+                             f"already named by {named_by[given]!r}, with other "
+                             f"pads; name one lane per member")
         named[given] = (a, b)
+        named_by.setdefault(given, s)
         entries.append((s, given, other, first, (a, b)))
     for s, given, other, first, lane in entries:
         out[given] = lane

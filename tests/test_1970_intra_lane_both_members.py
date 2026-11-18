@@ -35,7 +35,13 @@ output):
      `/DATA-` shares J1 and IC4 with `/DATA+`: one entry still derives the
      other member's pads as before (`/DATA+=J1.5:IC4.10` gives `/DATA-`
      J1.4 / IC4.9), both named keep the pads named, and `/DATA+` named twice,
-     the second time reversed, resolves as on main.
+     the second time reversed, resolves as on main;
+  8. route_diff.py on lvds_converter_dualclk (the step of
+     tests/test_intra_pair_lane.py): `/DATA+` named twice with other pads
+     (`/DATA+=J1.5:IC4.10 /DATA+=J1.5:R4.1`) refuses, naming both entries;
+     main took /DATA+ J1.5 - R4.1 and /DATA- J1.4 - IC4.9 from it. Control:
+     the same lane spelled twice, reversed, routes and records the lane main
+     records (/DATA+ IC4.10 - J1.5, /DATA- J1.4 - IC4.9).
 
 Run: python3 -X utf8 tests/test_1970_intra_lane_both_members.py
 """
@@ -188,6 +194,35 @@ def cap_rows(td):
         ok(good, f"{' '.join(lane)}: refuses, naming {bad} {why}")
 
 
+def lvds_twice(td):
+    """Row 8: a member named twice, through the pair step on lvds."""
+    board = os.path.join(td, 'lvds.kicad_pcb')
+    check(PY + [tool('copy_board.py'), evidence(LVDS, 'the bundled board'), board],
+          accept=True)
+    step = [board, os.path.join(td, 'lvds_out.kicad_pcb'), '--nets', '/DATA+', '/DATA-',
+            '--diff-pair-intra-match', '--length-match-tolerance', '0.15',
+            '--force-reroute', '--diff-pair-intra-lane']
+    try:
+        check(PY + [tool('route_diff.py')] + step + ['/DATA+=J1.5:IC4.10', '/DATA+=J1.5:R4.1'],
+              refuse="Error: --diff-pair-intra-lane '/DATA+=J1.5:R4.1': /DATA+'s lane is "
+                     "already named by '/DATA+=J1.5:IC4.10', with other pads; name one "
+                     "lane per member", code=2, timeout=900)
+        ok(True, "/DATA+ named twice with other pads: refused, naming both entries")
+    except AssertionError as e:
+        ok(False, f"/DATA+ named twice with other pads: refused, naming both entries "
+                  f"{_reason(e)}")
+    try:
+        check(PY + [tool('route_diff.py')] + step + ['/DATA+=J1.5:IC4.10', '/DATA+=IC4.10:J1.5'],
+              accept=True, timeout=900)
+        from kicad_dru import recorded_intra_pair_lanes
+        got = recorded_intra_pair_lanes(evidence(step[1], 'the pair step board'))
+        why = {'/DATA+': got.get('/DATA+'), '/DATA-': got.get('/DATA-')}
+    except AssertionError as e:
+        got, why = {}, _reason(e)
+    ok(got.get('/DATA+') == ['IC4.10', 'J1.5'] and got.get('/DATA-') == ['J1.4', 'IC4.9'],
+       f"control: the same lane twice, reversed, routes and records main's lane: {why}")
+
+
 def lvds_rows():
     """Row 7: `resolve` on the bundled board, where the derivation works."""
     from kicad_parser import parse_kicad_pcb
@@ -222,6 +257,8 @@ def main():
         check(PY + [tool('copy_board.py'), evidence(CAP, 'the bundled board'),
                     os.path.join(td, 'in.kicad_pcb')], accept=True)
         cap_rows(td)
+        print("8. a member named twice, on lvds_converter_dualclk")
+        lvds_twice(td)
     if FAILS:
         print(f"\nFAILED ({len(FAILS)}):")
         for f in FAILS:

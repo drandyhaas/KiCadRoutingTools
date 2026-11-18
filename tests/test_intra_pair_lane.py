@@ -46,8 +46,9 @@ Rows:
      named, so a pair whose members end on different parts takes a lane when
      both are named, in either order; one entry still derives the other
      member's pads on the same two parts, or refuses asking for its lane; a
-     pad its net lacks refuses naming that entry; a member named twice
-     resolves as on main.
+     pad its net lacks refuses naming that entry; a member named twice with
+     the same two pads, in either order, resolves as on main, and with other
+     pads refuses naming both entries.
 """
 import json
 import os
@@ -213,6 +214,15 @@ def units_resolve():
              "the same, N first")):
         got = lanes(shared, spec)
         ok(got == want and list(got) == list(want), f"{what}: {got}")
+    # a member named twice with other pads: main gave it the second entry's
+    # lane, and a twin no entry names one derived from the first
+    for spec in (['/X+=J1.1:U1.1', '/X+=J1.1:R1.1'],
+                 ['/X+=J1.1:U1.1', '/X-=J1.2:U1.2', '/X+=J1.1:R1.1']):
+        got = lanes(shared, spec)
+        ok(got == "--diff-pair-intra-lane '/X+=J1.1:R1.1': /X+'s lane is already named "
+           "by '/X+=J1.1:U1.1', with other pads; name one lane per member",
+           f"P named twice with other pads ({' '.join(spec)}): refused, naming both "
+           f"entries: {got}")
 
     # N has two pads on U1: its end there is not decided by P's entry
     two = board([('J1', '1'), ('U1', '1')], [('J1', '2'), ('U1', '2'), ('U1', '3')])
