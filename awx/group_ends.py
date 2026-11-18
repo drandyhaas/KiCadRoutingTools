@@ -3425,9 +3425,6 @@ def main():
                                           (), False, m=m, cutvar=CUTVAR and b.arr[1] is not None, only=only_)
                     if isinstance(b.J, tuple):
                         raise SystemExit(f'group_ends: {b.name}: {b.J[1]}')
-            if reach is not None and rnd == 1:
-                log(f'  the stretch\'s model: {len(reach)} lanes within its rounds\' reach, the other {n_only} each '
-                    f'held on its two ends')
                 # (what the checks taught of a lane's LENGTH: no change of layer on ends that leave it no longer than
                 # the longest lane of its kind the solve found no room in -- behind an assumption, as every rule)
                 rm_ = (learned.get(b.name) or {}).get('room') or {}
@@ -3450,6 +3447,9 @@ def main():
                     for i, v in (b.J.xs[k_].get(l_) or {}).items():
                         if we._opt_sig(opts_[l_][i]) == sg_:
                             endlay_rows.append((b, l_, k_, [v.Not(), b.J.y[k_][l_][q_].Not()]))
+            if reach is not None and rnd == 1:
+                log(f'  the stretch\'s model: {len(reach)} lanes within its rounds\' reach, the other {n_only} each '
+                    f'held on its two ends')
             by_name = {b.name: b for b in buses}
             RL = buses[0].E.RL
             NL = len(RL)
