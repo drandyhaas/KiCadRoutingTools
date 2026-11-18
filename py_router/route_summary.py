@@ -363,6 +363,8 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False,
         # would be measuring a slice, so first always wins.
         for _k in ('power_widths', 'power_widths_measured_on',
                    'power_widths_run_scope',
+                   # #1872: the shipped necks, measured by the same census
+                   'power_necks',
                    # #1843: the necks, measured the same way
                    'area_necks'):
             if _k in first:
@@ -778,7 +780,7 @@ def summary_min(merged: Dict, name_cap: int = 20) -> Dict:
     `batch_route` returns, and this line -- not the printed big summary. It
     is included here only when present.
 
-    Deliberately ABSENT: power_widths, ampacity, stacked copper --
+    Deliberately ABSENT: power_widths, power_necks, ampacity, stacked copper --
     forensics that stay in the big summaries / --json-out. And the DRC-floor
     writeback verdict, which does not exist yet when this prints: the
     writeback runs afterwards and reports on its own, so a consumer must

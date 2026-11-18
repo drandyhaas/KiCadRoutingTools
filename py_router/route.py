@@ -2497,6 +2497,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 power_tap_neckdown: bool = True,
                 neckdown_length: float = 2.5,
                 neckdown_taper_length: float = 0.5,
+                # #1872: bound a power net's neck to N mm under every policy.
+                power_neck_max_mm: Optional[float] = None,
                 json_out: Optional[str] = None,
                 clearance: float = defaults.CLEARANCE,
                 via_size: float = defaults.VIA_SIZE,
@@ -3512,6 +3514,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             pcb_data._keep_away_state = {}
     config_kwargs['neckdown_length'] = neckdown_length
     config_kwargs['neckdown_taper_length'] = neckdown_taper_length
+    config_kwargs['power_neck_max_mm'] = power_neck_max_mm
     # --no-stub-layer-swap reached only the up-front stub pass; the in-loop and
     # reconciliation STUB-SWAP RESCUE read config.stub_layer_swap and kept moving
     # input stubs (a 0.8 mm stub swapped onto F.Cu shorted a fine-pitch pad).
@@ -9575,7 +9578,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if (final_reconcile and not _ckpt_stop
             and (getattr(config, 'power_net_widths', None) or {})):
         try:
-            from routing_common import power_width_report
+            from routing_common import power_width_report, power_neck_report
             _req1033 = {pcb_data.nets[_n].name: max(_w, config.track_width)
                         for _n, _w in config.power_net_widths.items()
                         if _n in pcb_data.nets}
@@ -9623,6 +9626,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                              if _n in pcb_data.nets}
                 for _nm, _r in _pw1033.items():
                     _r['in_run_scope'] = _nm in _insc1033
+                # #1872: the shipped necks, next to power_widths -- the same
+                # census (same board, same requested widths), so a reader can
+                # check every narrow run against the bound without re-reading
+                # the board.
+                _pn1033 = power_neck_report(
+                    _segs1033,
+                    {_ids1033[_nm]: _w for _nm, _w in _req1033.items()
+                     if _nm in _ids1033},
+                    lambda _ni: (_board1033.nets[_ni].name
+                                 if _ni in _board1033.nets else f"Net {_ni}"),
+                    lambda _ni: (_board1033.nets[_ni].pads
+                                 if _ni in _board1033.nets else []))
+                summary['power_necks'] = _pn1033
                 summary['power_widths'] = _pw1033
                 summary['power_widths_run_scope'] = sorted(_insc1033)
                 # WHICH copper was measured. The CLI reads the written file,
@@ -9669,6 +9685,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     print(f"  (design_rules power reconcile skipped: "
                           f"{_dre1033})")
                 if return_results:
+                    results_data['power_necks'] = _pn1033
                     results_data['power_widths'] = _pw1033
                     results_data['power_widths_measured_on'] = _stage1033
                     results_data['power_widths_run_scope'] = sorted(_insc1033)
@@ -10868,6 +10885,12 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--neckdown-taper-length", type=float, default=defaults.NECKDOWN_TAPER_LENGTH,
                         help="Length in mm of the stepped narrow-to-wide width taper on neck-down tap routes "
                              "(0 = abrupt width change, default: 0.5)")
+    parser.add_argument("--power-neck-max-mm", type=float, default=None,
+                        help="Bound a power net's neck to at most N mm under every escalation policy (default: "
+                             "no bound -- the 2 mm pad-entry allowance applies only under --escalation off). "
+                             "A bound at or below the neck-down taper length leaves no pad-entry zone -- the "
+                             "taper counts inside the bound; use --neckdown-taper-length 0 for very small "
+                             "bounds (#1872)")
 
     # Router algorithm parameters
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
@@ -11154,6 +11177,16 @@ For differential pair routing, use route_diff.py:
         parser.error(f"--power-nets ({len(args.power_nets)}) and "
                      f"--power-nets-widths ({len(args.power_nets_widths)}) "
                      f"must have the same length")
+    if args.power_neck_max_mm is not None:
+        # #1872: NaN defeats every <= 0 / > 0 check, so an explicitly passed
+        # flag would silently mean "no flag" -- the exact silent shipping
+        # this issue exists to kill. Refuse it (and inf) loudly, as
+        # --clearance already refuses non-finite values.
+        import math
+        if not math.isfinite(args.power_neck_max_mm):
+            parser.error("--power-neck-max-mm must be a finite number")
+        if args.power_neck_max_mm <= 0:
+            parser.error("--power-neck-max-mm must be > 0 when given")
     # #530: --clearance-ceiling is the clamp switch (#439 used the PRESENCE of
     # --clearance). Given -> non-Default classes are capped at min(class, ceiling)
     # and the output .kicad_pro clamps them to the routed floor. Omitted -> honor
@@ -11662,6 +11695,7 @@ For differential pair routing, use route_diff.py:
                 power_tap_neckdown=not args.no_power_tap_neckdown,
                 neckdown_length=args.neckdown_length,
                 neckdown_taper_length=args.neckdown_taper_length,
+                power_neck_max_mm=args.power_neck_max_mm,
                 json_out=args.json_out,
                 clearance=args.clearance,
                 net_clearances=_net_clearances_map,
