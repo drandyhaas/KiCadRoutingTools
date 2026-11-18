@@ -796,10 +796,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_intra_lane: #1869 -- match, record and grade each intra-matched
             pair on its LANE, the copper path between two pads, instead of
             total copper: 'auto' (the two terminals the pair step routes the
-            pair between) or a list of 'P_NET=REF.PAD:REF.PAD'. None: total
-            copper, KiCad's measure. Only a pair the step intra-matches and no
-            .kicad_dru skew rule binds takes a lane (the step says why
-            another does not). A lane naming pads its nets lack raises
+            pair between) or a list of 'P_NET=REF.PAD:REF.PAD', the N member's
+            pads being its pads on the same two parts unless it is named too
+            ('N_NET=REF.PAD:REF.PAD'; #1970, for a pair whose members end on
+            different parts). None: total copper, KiCad's measure. Only a
+            pair the step intra-matches and no .kicad_dru skew rule binds
+            takes a lane (the step says why another does not). A lane naming
+            pads its nets lack raises
             ValueError (the CLI prints it and exits 2).
         intra_pair_tolerance: the P/N skew every intra-matched pair is matched
             to, over a .kicad_dru rule's (#1503: the CLI's explicit
@@ -3766,7 +3769,10 @@ Examples:
                              "total copper, so a branch to a third pad counts as a stub "
                              "(#1869): 'auto' (the two terminals the pair step routes "
                              "the pair between) or one or more P_NET=REF.PAD:REF.PAD (the "
-                             "N member's pads are its pads on the same two parts). Takes "
+                             "N member's pads are its pads on the same two parts, unless "
+                             "it is named too: name both members, P_NET=... N_NET=..., "
+                             "of a pair whose members end on different parts, such as a "
+                             "series resistor or capacitor per member). Takes "
                              "--diff-pair-intra-match; a pair a .kicad_dru skew rule binds "
                              "is matched on total copper, as KiCad grades the rule. "
                              "Default: total copper, as KiCad's skew DRC measures.")
