@@ -3500,6 +3500,13 @@ side taking the via site -- on that BGA the capacitors under it, and with
 those gone it reads 0 short at the same class. Only when no other part is
 that close, and none lines the space the pads still open into, does the line
 name the part's own pads and narrower geometry as the other answer.
+The flow grades the PLACEMENT: like `--pad`'s verdict, it sets the board's
+routing aside. A `routed` line says how much was set aside, and the JSON
+carries `graded` and `routed_set_aside` (#1981). It also counts the nets that
+can leave by a track, not a via site beside each pin. A via-drop fan-out run
+after a route step can therefore drop pins this flow reads as free, because the
+routed tracks now stand on their via sites. `qfn_fanout.py` names that
+copper for each pad it drops.
 
 ```bash
 python3 py_tools/check_reachability.py board.kicad_pcb --part U3
