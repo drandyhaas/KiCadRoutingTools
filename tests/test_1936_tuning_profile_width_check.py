@@ -33,6 +33,7 @@ import copy
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -202,7 +203,9 @@ def pair(td):
                and got[n]['profile_off'][0]['drawn_mm'] == 0.3 for n in nets),
        f"a profile gap of 0.35: every net off its gap over its coupled length, at "
        f"0.3: {got['DPA_P']['profile_off'][:1]}")
-    ok('at gap 0.3 (profile 0.35)' in text, 'and the report prints the gap row')
+    # (main's slanted via legs put a few um of spread on the routed gap)
+    ok(re.search(r'at gap 0\.3( to 0\.30\d+)? \(profile 0\.35\)', text),
+       'and the report prints the gap row')
 
     _rc, _text, doc = against('width', [tpair.entry('F.Cu', 0.2, 0.3)])
     got = rows(doc)
