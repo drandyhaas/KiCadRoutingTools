@@ -656,7 +656,10 @@ class DifferentialTab(wx.Panel):
             "Match, record and grade each intra-matched pair on its lane -- the "
             "copper path between two pads -- instead of total copper, so a branch "
             "to a third pad counts as a stub (#1869). 'auto' (the two terminals "
-            "the pair step routes) or P_NET=REF.PAD:REF.PAD ..., space separated. "
+            "the pair step routes) or P_NET=REF.PAD:REF.PAD ..., space separated; "
+            "the N member's pads are its pads on the same two parts, unless it "
+            "is named too (N_NET=REF.PAD:REF.PAD), as a pair whose members end "
+            "on different parts must be. "
             "Needs intra-pair matching; a pair a .kicad_dru skew rule binds is "
             "matched on total copper, as KiCad grades the rule. "
             "Empty: total copper, as KiCad's skew DRC measures.")

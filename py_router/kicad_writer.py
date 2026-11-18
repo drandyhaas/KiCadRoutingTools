@@ -7,7 +7,8 @@ import re
 import uuid
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import Pad, is_kicad_10, _unescape_kicad_string, BACKDRILL_TOKENS
+from kicad_parser import (Pad, is_kicad_10, _unescape_kicad_string, BACKDRILL_TOKENS,
+                          _track_locked)
 from routing_utils import pos_key, POSITION_DECIMALS
 from geometry_utils import PARTIAL_VIA_TYPES
 
@@ -1803,11 +1804,18 @@ def remove_segments_from_content(content: str, segments: List,
     def _canon(nid):
         return net_id_to_name.get(nid, nid) if net_id_to_name else nid
 
-    def seg_key(p1, p2, layer, net_token):
-        return (frozenset((p1, p2)), layer, net_token)
+    # The lock is part of the key: a strip target the model holds unlocked
+    # matches only an unlocked block. Without it a locked track and an
+    # unlocked same-width copy stacked on it share one key, and a pass that
+    # chose the COPY (the strict collapse, which spares locked copper) took
+    # whichever block came first in the file -- the locked original, which
+    # the input carries before any copy a run appends (#1261 contract).
+    def seg_key(p1, p2, layer, net_token, locked):
+        return (frozenset((p1, p2)), layer, net_token, bool(locked))
 
     targets = [(seg_key(pos_key(s.start_x, s.start_y),
-                        pos_key(s.end_x, s.end_y), s.layer, _canon(s.net_id)),
+                        pos_key(s.end_x, s.end_y), s.layer, _canon(s.net_id),
+                        getattr(s, 'locked', False)),
                 getattr(s, 'width', None))
                for s in segments]
 
@@ -1851,7 +1859,8 @@ def remove_segments_from_content(content: str, segments: List,
             mw = width_re.search(block)
             key = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
                           pos_key(float(me.group(1)), float(me.group(2))),
-                          ml.group(1) or ml.group(2), net_token)
+                          ml.group(1) or ml.group(2), net_token,
+                          _track_locked(block))
         spans.append((j, k))
         items.append((key, float(mw.group(1)) if mw else None))
         pos = k
@@ -1903,8 +1912,11 @@ def remove_vias_from_content(content: str, vias: List,
     from collections import Counter
     targets = Counter()
     _v_by_key = {}
+    # Keyed on the lock too, as in the segment twin above: an unlocked
+    # target never takes a locked via stacked at its position.
     for v in vias:
-        _vk = (pos_key(v.x, v.y), _canon(v.net_id))
+        _vk = (pos_key(v.x, v.y), _canon(v.net_id),
+               bool(getattr(v, 'locked', False)))
         targets[_vk] += 1
         _v_by_key.setdefault(_vk, []).append(v)
 
@@ -1941,7 +1953,8 @@ def remove_vias_from_content(content: str, vias: List,
             else:
                 mi = net_id_re.search(block)
                 net_token = _canon(int(mi.group(1))) if mi else None
-            _vk = (pos_key(float(ma.group(1)), float(ma.group(2))), net_token)
+            _vk = (pos_key(float(ma.group(1)), float(ma.group(2))), net_token,
+                   _track_locked(block))
             if targets.get(_vk, 0) > 0:
                 targets[_vk] -= 1
                 keep = False
