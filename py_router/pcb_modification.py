@@ -8735,11 +8735,34 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     # Filter out very short (degenerate) segments. A dropped segment whose BOTH
     # ends touch other segments is a micro-bridge (sub-grid geometry like
     # bisector offsets can produce um-scale bridges between a connector and the
-    # parallel path) - weld its neighbors together at the midpoint so no gap is
-    # left behind. One-ended micro-stubs (e.g. collapsed appendices) are
-    # dropped as before, without disturbing the junction they hang off.
+    # parallel path) - weld its neighbors together so no gap is left behind.
+    # One-ended micro-stubs (e.g. collapsed appendices) are dropped as before,
+    # without disturbing the junction they hang off.
+    #
+    # The weld keeps the LONGER neighbour's own end and moves the other
+    # neighbour's end onto it (#1979). Moving both to the bridge's midpoint
+    # turned a long neighbour by half the bridge: on glasgow_revC Z3 a 12.2 mm
+    # coupled leg beside a 6.8 um jog came out 3.4 um off 45 degrees, no
+    # longer parallel to its partner in KiCad's integer test, and the pair
+    # read 1.8 mm coupled of 15.5 mm. The shorter neighbour's end now moves
+    # the whole bridge (at most 0.01 mm where the ends sit on the bridge's,
+    # as routed), turning it by at most asin(bridge / its length).
     def seg_len(s):
         return math.sqrt((s.end_x - s.start_x)**2 + (s.end_y - s.start_y)**2)
+
+    def end_at(other, ax, ay):
+        """other's end point at (ax, ay)."""
+        if abs(other.start_x - ax) < 0.005 and abs(other.start_y - ay) < 0.005:
+            return other.start_x, other.start_y
+        return other.end_x, other.end_y
+
+    def weld_point(seg, a, b):
+        """Where neighbours `a` (at seg's start) and `b` (at its end) meet."""
+        if seg_len(a) == seg_len(b):    # a tie favours neither: the old midpoint
+            return (seg.start_x + seg.end_x) / 2, (seg.start_y + seg.end_y) / 2
+        if seg_len(a) > seg_len(b):
+            return end_at(a, seg.start_x, seg.start_y)
+        return end_at(b, seg.end_x, seg.end_y)
 
     def touching(seg, ax, ay):
         """Other segments with an endpoint at (ax, ay)."""
@@ -8763,15 +8786,14 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
             # Not a simple chain bridge (dangling micro-stub, junction, or
             # T-tap) - drop it without disturbing the neighbors
             continue
-        mid_x = (seg.start_x + seg.end_x) / 2
-        mid_y = (seg.start_y + seg.end_y) / 2
+        weld_x, weld_y = weld_point(seg, start_touch[0], end_touch[0])
         for ax, ay, others in ((seg.start_x, seg.start_y, start_touch),
                                (seg.end_x, seg.end_y, end_touch)):
             for other in others:
                 if abs(other.start_x - ax) < 0.005 and abs(other.start_y - ay) < 0.005:
-                    other.start_x, other.start_y = mid_x, mid_y
+                    other.start_x, other.start_y = weld_x, weld_y
                 if abs(other.end_x - ax) < 0.005 and abs(other.end_y - ay) < 0.005:
-                    other.end_x, other.end_y = mid_x, mid_y
+                    other.end_x, other.end_y = weld_x, weld_y
     cleaned_segments = kept_segments
 
     # Per-commit dead-end prune (issue #84): drop this route's own dead-end spurs
