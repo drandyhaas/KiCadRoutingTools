@@ -292,3 +292,73 @@ pub fn poly_keepout_cells(
     }
     Python::with_gil(|py| Ok(out.into_pyarray(py).unbind()))
 }
+
+/// Connected-component labels for `check_connected.analyze_conn_excluding`.
+/// Points are 0..num_points; `edges` is E x 2; an edge touching an
+/// `excluded` point is dropped (the Python `if a in excl or b in excl:
+/// continue`). Returns, for each id in `queries`, a label that is equal for
+/// two queries exactly when the union-find puts them in one set. The label
+/// is a root index, so only equality carries meaning -- which is all the
+/// Python uses (unique counts, the main root by first-seen pad order).
+#[pyfunction]
+pub fn component_labels(
+    num_points: i64,
+    edges: PyReadonlyArray2<i64>,
+    excluded: PyReadonlyArray1<i64>,
+    queries: PyReadonlyArray1<i64>,
+) -> PyResult<Py<PyArray1<i64>>> {
+    if num_points < 0 {
+        return Err(PyValueError::new_err("component_labels: num_points < 0"));
+    }
+    let n = num_points as usize;
+    let edges = edges.as_array();
+    if edges.nrows() > 0 && edges.ncols() != 2 {
+        return Err(PyValueError::new_err("component_labels: edges is E x 2"));
+    }
+    let check = |v: i64| -> PyResult<usize> {
+        if v < 0 || v as usize >= n {
+            Err(PyValueError::new_err(format!("component_labels: point id {} outside 0..{}", v, n)))
+        } else {
+            Ok(v as usize)
+        }
+    };
+    let mut excl = vec![false; n];
+    for &v in excluded.as_slice()? {
+        excl[check(v)?] = true;
+    }
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    let mut rank: Vec<u8> = vec![0; n];
+    #[inline]
+    fn find(parent: &mut [u32], mut i: u32) -> u32 {
+        while parent[i as usize] != i {
+            let g = parent[parent[i as usize] as usize];
+            parent[i as usize] = g;
+            i = g;
+        }
+        i
+    }
+    for r in 0..edges.nrows() {
+        let a = check(edges[[r, 0]])?;
+        let b = check(edges[[r, 1]])?;
+        if excl[a] || excl[b] {
+            continue;
+        }
+        let ra = find(&mut parent, a as u32);
+        let rb = find(&mut parent, b as u32);
+        if ra == rb {
+            continue;
+        }
+        let (hi, lo) = if rank[ra as usize] < rank[rb as usize] { (rb, ra) } else { (ra, rb) };
+        parent[lo as usize] = hi;
+        if rank[hi as usize] == rank[lo as usize] {
+            rank[hi as usize] = rank[hi as usize].saturating_add(1);
+        }
+    }
+    let q = queries.as_slice()?;
+    let mut out: Vec<i64> = Vec::with_capacity(q.len());
+    for &v in q {
+        let i = check(v)?;
+        out.push(find(&mut parent, i as u32) as i64);
+    }
+    Python::with_gil(|py| Ok(out.into_pyarray(py).unbind()))
+}

@@ -5,6 +5,8 @@
   routing_utils.segment_blocked_spans / segment_blocked_cells_array
 * point_segment_distances  == geometry_utils.point_to_segment_distance
 * poly_keepout_cells       == the pre-kernel _Occ.block_poly cell loop
+* component_labels (via analyze_conn_excluding) == the Python union-find
+  path (return_uf=True), every returned field
 
 Randomized, seeded, thousands of cases each, with degenerate segments
 (zero and sub-1e-5 length), repeated / collinear polygon points, vertices
@@ -28,6 +30,7 @@ from routing_utils import (_capsule_mask, GRID_TIE_EPS, segment_blocked_spans,
 from geometry_utils import point_to_segment_distance
 from check_drc import _point_in_poly
 from bga_fanout.underpad import _Occ
+from check_connected import analyze_conn_excluding
 
 
 FAILS = []
@@ -251,9 +254,77 @@ def test_block_poly():
     _ok('block_poly no polygons is a no-op', not any(g.grid[0]))
 
 
+def _graph(rng):
+    n_segs = rng.randint(0, 40)
+    n_pads = rng.randint(0, 12)
+    n_vias = rng.randint(0, 6)
+    pid = 2 * n_segs
+    pad_ids = list(range(pid, pid + n_pads))
+    pid += n_pads
+    via_point_ids, via_index_repr = {}, {}
+    for j in range(n_vias):
+        k = rng.randint(1, 3)
+        via_point_ids[j] = list(range(pid, pid + k))
+        via_index_repr[j] = pid
+        pid += k
+    num_points = pid
+    edges = []
+    for i in range(n_segs):
+        if rng.random() < 0.9:
+            edges.append((2 * i, 2 * i + 1))
+    for _ in range(rng.randint(0, 3 * max(1, num_points))):
+        if num_points:
+            a, b = rng.randrange(num_points), rng.randrange(num_points)
+            edges.append((a, b))                               # self-loops / duplicates included
+    for j, ids in via_point_ids.items():
+        for a, b in zip(ids, ids[1:]):
+            edges.append((a, b))
+    locs = []
+    for _ in range(n_pads):
+        # few distinct locations so the (round, round, layer) dedup is hit
+        locs.append((rng.choice([1.0, 1.00001, 2.5, 3.123456]), rng.choice([0.0, 0.00004, 7.7]),
+                     'P%d' % rng.randint(1, 3), rng.choice(['F.Cu', 'B.Cu'])))
+    g = {'num_points': num_points, 'pad_ids': pad_ids, 'pad_locations': locs,
+         'edges': edges, 'num_segments': n_segs,
+         'via_point_ids': via_point_ids, 'via_index_repr': via_index_repr}
+    if rng.random() < 0.1:
+        del g['num_points']
+    return g
+
+
+def test_conn():
+    rng = random.Random(25211)
+    cases = 5000
+    bad = 0
+    for c in range(cases):
+        g = _graph(rng)
+        n_segs = g['num_segments']
+        ex_s = rng.sample(range(n_segs), rng.randint(0, n_segs)) if n_segs and rng.random() < 0.8 else []
+        nv = len(g['via_point_ids'])
+        ex_v = rng.sample(range(nv), rng.randint(0, nv)) if nv and rng.random() < 0.5 else []
+        new = analyze_conn_excluding(g, ex_s, ex_v)
+        old = analyze_conn_excluding(g, ex_s, ex_v, return_uf=True)
+        old.pop('uf')
+        # the second call must hit the cached edge array and agree too
+        again = analyze_conn_excluding(g, ex_s, ex_v)
+        if new != old or again != old:
+            bad += 1
+            if bad <= 3:
+                print('  case %d: new=%r old=%r' % (c, new, old))
+    _ok('component_labels path == union-find path (%d graphs)' % cases, bad == 0, '%d differ' % bad)
+    # a mutated edge list (same object, new length) must not reuse the cache
+    g = {'num_points': 4, 'pad_ids': [0, 1], 'pad_locations': [(0, 0, 'a', 'F'), (1, 1, 'b', 'F')],
+         'edges': [], 'num_segments': 0, 'via_point_ids': {}, 'via_index_repr': {}}
+    r1 = analyze_conn_excluding(g)
+    g['edges'].append((0, 1))
+    r2 = analyze_conn_excluding(g)
+    _ok('edge cache follows a grown edge list', not r1['connected'] and r2['connected'])
+
+
 if __name__ == '__main__':
     test_capsule()
     test_point_segment()
     test_block_poly()
+    test_conn()
     print('ALL PASS' if not FAILS else '%d FAILED' % len(FAILS))
     sys.exit(1 if FAILS else 0)

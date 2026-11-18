@@ -1890,6 +1890,76 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     }
 
 
+# id(graph['edges']) -> (edges list, (E, 2) int64 array). The list is held so
+# its id stays unique while cached; graphs are never mutated after building.
+_EDGES_NP_CACHE: Dict[int, Tuple[list, "np.ndarray"]] = {}
+_EDGES_NP_CAP = 32
+
+
+def _edges_array(edges):
+    hit = _EDGES_NP_CACHE.get(id(edges))
+    if hit is not None and hit[0] is edges and len(hit[1]) == len(edges):
+        return hit[1]
+    import numpy as np
+    if edges:
+        arr = np.array(edges, dtype=np.int64).reshape(-1, 2)
+    else:
+        arr = np.empty((0, 2), dtype=np.int64)
+    if len(_EDGES_NP_CACHE) >= _EDGES_NP_CAP:
+        _EDGES_NP_CACHE.pop(next(iter(_EDGES_NP_CACHE)))
+    _EDGES_NP_CACHE[id(edges)] = (edges, arr)
+    return arr
+
+
+def _analyze_conn_labels(graph, excl, excluded, excluded_vias):
+    """analyze_conn_excluding without return_uf: the union-find runs in Rust
+    (grid_router.component_labels) over the cached edge array. Union-find
+    sets are the connected components of the kept edges whatever the union
+    order, and below only label EQUALITY is used -- unique counts and the
+    main root as the first-seen pad component with the most pads -- so the
+    result equals the Python union-find's exactly."""
+    import numpy as np
+    from grid_router import component_labels
+    pad_ids = graph['pad_ids']
+    pad_locations = graph['pad_locations']
+    if not pad_ids:
+        return {'connected': True, 'num_components': 0, 'disconnected_pads': [],
+                'num_copper_components': 0}
+    q = list(pad_ids)
+    for j, vid in graph.get('via_index_repr', {}).items():
+        if j not in excluded_vias:
+            q.append(vid)
+    n_segs_total = graph.get('num_segments', 0)
+    q.extend(2 * i_ for i_ in range(n_segs_total) if i_ not in excluded)
+    num_points = graph.get('num_points')
+    if num_points is None:
+        num_points = max(max(q), max(excl, default=-1),
+                         max((max(a, b) for a, b in graph['edges']),
+                             default=-1)) + 1
+    labels = component_labels(
+        int(num_points), _edges_array(graph['edges']),
+        np.fromiter(excl, dtype=np.int64, count=len(excl)),
+        np.asarray(q, dtype=np.int64)).tolist()
+    pad_roots = labels[:len(pad_ids)]
+    unique_roots = set(pad_roots)
+    root_counts = defaultdict(int)
+    for r in pad_roots:
+        root_counts[r] += 1
+    main_root = max(root_counts.keys(), key=lambda r: root_counts[r])
+    disconnected = []
+    seen_pads = set()
+    for root, loc in zip(pad_roots, pad_locations):
+        if root != main_root:
+            pad_key = (round(loc[0], 4), round(loc[1], 4), loc[3])
+            if pad_key not in seen_pads:
+                seen_pads.add(pad_key)
+                disconnected.append(loc)
+    return {'connected': len(unique_roots) == 1,
+            'num_components': len(unique_roots),
+            'disconnected_pads': disconnected,
+            'num_copper_components': len(set(labels))}
+
+
 def analyze_conn_excluding(graph: Dict, excluded_seg_indices=(),
                            excluded_via_indices=(), return_uf: bool = False) -> Dict:
     """Re-evaluate net connectivity from a prebuilt graph (check_net_connectivity
@@ -1926,6 +1996,9 @@ def analyze_conn_excluding(graph: Dict, excluded_seg_indices=(),
                              'via point ids, so a via cannot be excluded')
         for j in excluded_vias:
             excl.update(vpids.get(j, ()))
+    if not return_uf:
+        return _analyze_conn_labels(graph, excl, set(excluded_seg_indices),
+                                    excluded_vias)
     uf = UnionFind()
     for a, b in graph['edges']:
         if a in excl or b in excl:

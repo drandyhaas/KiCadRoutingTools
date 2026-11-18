@@ -170,5 +170,6 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(geometry_kernels::capsule_cells, m)?)?;
     m.add_function(wrap_pyfunction!(geometry_kernels::point_segment_distances, m)?)?;
     m.add_function(wrap_pyfunction!(geometry_kernels::poly_keepout_cells, m)?)?;
+    m.add_function(wrap_pyfunction!(geometry_kernels::component_labels, m)?)?;
     Ok(())
 }
