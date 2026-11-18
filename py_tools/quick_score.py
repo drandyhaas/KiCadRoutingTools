@@ -46,6 +46,7 @@ KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
 
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -198,12 +199,15 @@ def main(argv=None):
                     help="the board the seed was placed from (the pile): grade the assembly "
                          "as `board_score --baseline` does (check_assembly's count, summed "
                          "into blocking)")
-    ap.add_argument('--json', help='write the score here')
+    ap.add_argument('--json', help='write the score and ascending judge_key here; '
+                    'null rank entries sort last')
     a = ap.parse_args(argv)
     sc = quick_score(a.board, intent=a.intent, baseline=a.baseline)
     if a.json:
         with open(a.json, 'w', encoding='utf-8') as fh:
-            json.dump(sc, fh, indent=1)
+            json.dump({**sc, 'judge_key': [
+                value if math.isfinite(value) else None for value in judge_key(sc)
+            ]}, fh, indent=1)
     q = sc['quality']
     p = sc['poured']
     fp = sc['blocking_by'].get('floorplan')
