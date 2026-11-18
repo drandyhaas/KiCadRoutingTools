@@ -24,6 +24,8 @@ sys.path.insert(0, os.path.join(ROOT, 'py_tools'))
 
 import numpy as np
 
+sys.path.insert(0, os.path.join(ROOT, 'rust_router'))
+import rust_alloc  # noqa: E402,F401
 from grid_router import point_segment_distances, capsule_spans, capsule_cells
 from routing_utils import (_capsule_mask, GRID_TIE_EPS, segment_blocked_spans,
                            segment_blocked_cells_array)

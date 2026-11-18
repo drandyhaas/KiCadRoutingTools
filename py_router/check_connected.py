@@ -1919,7 +1919,8 @@ def _analyze_conn_labels(graph, excl, excluded, excluded_vias):
     main root as the first-seen pad component with the most pads -- so the
     result equals the Python union-find's exactly."""
     import numpy as np
-    from grid_router import component_labels
+    from routing_utils import _kernels
+    component_labels = _kernels().component_labels
     pad_ids = graph['pad_ids']
     pad_locations = graph['pad_locations']
     if not pad_ids:

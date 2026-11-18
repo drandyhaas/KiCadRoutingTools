@@ -505,6 +505,16 @@ def _kernels():
     dominated a cache miss."""
     global _GRID_ROUTER
     if _GRID_ROUTER is None:
+        # The extension lives in rust_router/; put it on the path the way
+        # obstacle_map does, so callers that never import a routing module
+        # (check_connected, the cleanup passes, tests) can load it too.
+        import os
+        import sys
+        rust_dir = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', 'rust_router'))
+        if rust_dir not in sys.path:
+            sys.path.insert(0, rust_dir)
+        import rust_alloc  # noqa: F401  # issue #419: before grid_router loads
         import grid_router
         _GRID_ROUTER = grid_router
     return _GRID_ROUTER

@@ -491,7 +491,8 @@ class _Occ:
         meander-antenna / comb pad stops phantom-blocking escapes far from any
         real copper (#232 class, BGA side)."""
         import numpy as np
-        from grid_router import poly_keepout_cells
+        from routing_utils import _kernels
+        poly_keepout_cells = _kernels().poly_keepout_cells
         pts = [pt for poly in polys for pt in poly]
         if not pts:
             return
