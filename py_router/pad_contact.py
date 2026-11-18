@@ -47,6 +47,36 @@ def _row(pcb, pad, kind, item, net_id, at, overlap, clearance, layer=None):
     }
 
 
+#: Float slack on the contact skip: a pad is skipped only when its disc lies
+#: this much beyond the contact distance, so rounding never skips a contact.
+_SKIP_SLACK_MM = 1e-6
+
+
+def _pad_disc(pad):
+    """`(x, y, r)`: a disc about the pad's centre that holds all its copper,
+    as the pad checks measure it (`point_to_pad_distance`): the custom
+    polygons when it has them, else the circumscribed circle of its rect,
+    which also holds the rotated and the rounded shapes."""
+    cx, cy = pad.global_x, pad.global_y
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        r = max((math.hypot(x - cx, y - cy) for poly in polys for x, y in poly),
+                default=0.0)
+    else:
+        r = math.hypot(pad.size_x, pad.size_y) / 2.0
+    return cx, cy, r
+
+
+def _point_segment_distance(px, py, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    ll = dx * dx + dy * dy
+    if ll <= 0.0:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / ll
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
 def pad_contacts(pcb, segments=None, vias=None, clearance=0.0, area=None) -> List[dict]:
     """Every via and track in contact with the copper of a pad of another net,
     sorted by pad; `item` is the copper object. `segments` / `vias` measure a
@@ -59,7 +89,7 @@ def pad_contacts(pcb, segments=None, vias=None, clearance=0.0, area=None) -> Lis
     margin = 0.1 if clearance else 0.0
     base_clearance = clearance
     from check_drc import (_pad_has_no_copper, check_pad_segment_overlap,
-                           check_pad_via_overlap)
+                           check_pad_via_overlap, copper_width)
     segments = pcb.segments if segments is None else segments
     vias = pcb.vias if vias is None else vias
     layers = list(getattr(pcb.board_info, 'copper_layers', None) or [])
@@ -76,6 +106,16 @@ def pad_contacts(pcb, segments=None, vias=None, clearance=0.0, area=None) -> Lis
         grid.setdefault((int(p.global_x // cell), int(p.global_y // cell)),
                         []).append(p)
 
+    # Each pad's copper lies inside a disc about its centre: the circumscribed
+    # circle of its (rotated, rounded) rect, or of its custom polygons. A pad
+    # whose disc is farther from the copper than the contact distance cannot
+    # be in contact, so its exact check is skipped. The grid's cell is sized
+    # by the board's LARGEST pad, and one big pad (a shield, a thermal slug)
+    # makes every cell hold hundreds of pads the exact checks then reject.
+    # The skip is conservative and leaves the candidate order alone, so the
+    # rows are the same, in the same order.
+    disc = {id(p): _pad_disc(p) for p in pads}
+
     def near(x0, y0, x1, y1, r):
         for cx in range(int((x0 - r) // cell) - 1, int((x1 + r) // cell) + 2):
             for cy in range(int((y0 - r) // cell) - 1, int((y1 + r) // cell) + 2):
@@ -88,8 +128,12 @@ def pad_contacts(pcb, segments=None, vias=None, clearance=0.0, area=None) -> Lis
         exempt = pcb.net_tie_exempt_pad_ids(v.net_id)
         clearance = (area.via_clearance(v, base_clearance)
                      if area is not None and base_clearance else base_clearance)
+        reach = v.size / 2.0 + clearance
         for p in near(v.x, v.y, v.x, v.y, v.size / 2.0 + clearance):
             if p.net_id == v.net_id or id(p) in exempt:
+                continue
+            px, py, pr = disc[id(p)]
+            if math.hypot(v.x - px, v.y - py) - pr > reach + _SKIP_SLACK_MM:
                 continue
             hit, overlap = check_pad_via_overlap(p, v, clearance, layers, margin)
             if hit:
@@ -101,10 +145,16 @@ def pad_contacts(pcb, segments=None, vias=None, clearance=0.0, area=None) -> Lis
         exempt = pcb.net_tie_exempt_pad_ids(s.net_id)
         clearance = (area.segment_clearance(s, base_clearance)
                      if area is not None and base_clearance else base_clearance)
+        reach = copper_width(s) / 2.0 + clearance
         for p in near(min(s.start_x, s.end_x), min(s.start_y, s.end_y),
                       max(s.start_x, s.end_x), max(s.start_y, s.end_y),
                       s.width / 2.0 + clearance):
             if p.net_id == s.net_id or id(p) in exempt:
+                continue
+            px, py, pr = disc[id(p)]
+            if (_point_segment_distance(px, py, s.start_x, s.start_y,
+                                        s.end_x, s.end_y) - pr
+                    > reach + _SKIP_SLACK_MM):
                 continue
             hit, overlap, pt = check_pad_segment_overlap(p, s, clearance, layers,
                                                          margin)
