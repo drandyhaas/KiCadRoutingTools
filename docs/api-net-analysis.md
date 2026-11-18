@@ -343,7 +343,11 @@ through a via is charged the span it walks). Pads and vias attach by copper
 **overlap** (a track ends anywhere inside them, not on their centre), and their
 own pad/barrel copper is not charged. A track joins a pad where its round end
 reaches the pad's exact outline -- a rotated pad, a cap that stops short of the
-edge -- as `check_connected` and KiCad join it (#1629). A **via-in-pad** -- a
+edge -- as `check_connected` and KiCad join it (#1629). A track joins a via
+the same way, where its copper reaches the via's (via radius plus the track's
+half width), whether it ends there or passes the via mid-span (#1969): a lane
+that comes back past its own via within that reach is walked through the via,
+so it reads the shorter path its copper carries. A **via-in-pad** -- a
 via whose copper overlaps the pad -- joins that pad on every layer both carry,
 so a via in an SMD pad whose tracks leave on an inner layer reaches its pad
 through the barrel (#1314; before, the pad met only track ends and such a net
