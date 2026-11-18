@@ -2498,6 +2498,31 @@ def _edge_for_project(config) -> float:
     return config.board_edge_clearance if declared is None else declared
 
 
+_ART_TERMINAL_BOARDS = []
+
+
+def _art_terminals_scoped(fn):
+    """batch_route's wrapper: the run gives net-tagged copper art that reaches
+    none of its net's pads a routing terminal (`art_terminals`, #659) on the
+    board it routes; this takes back, on every exit, the terminals THIS call
+    added, so neither the CLI's nor the GUI's PCBData keeps them, and a
+    nested sub-run handed the same board neither adds a second set nor strips
+    the outer run's."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        depth = len(_ART_TERMINAL_BOARDS)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            from art_terminals import remove_art_terminals
+            while len(_ART_TERMINAL_BOARDS) > depth:
+                remove_art_terminals(_ART_TERMINAL_BOARDS.pop())
+    return wrapper
+
+
+@_art_terminals_scoped
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 # #530: cap every auto-read net class at this clearance (the
@@ -2935,6 +2960,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # #1279: the board's `sense:<REF>.<PAD>` groups -- protected, or why not.
     from sense_branch import report as _sense_report
     _sense_report(pcb_data)
+    # #659: net-tagged copper art reaching none of its net's pads is an open
+    # net in KiCad's DRC; give each such island a routing terminal for this
+    # run (taken back by `_art_terminals_scoped`). A --rip-existing-nets net
+    # is re-routed when ripped, so it needs its terminal too.
+    from art_terminals import add_art_terminals
+    if add_art_terminals(pcb_data, (list(net_names) + list(rip_existing_nets or []))
+                         if net_names else None):
+        _ART_TERMINAL_BOARDS.append(pcb_data)
     if final_reconcile:
         from rip_up_reroute import reset_run_ledgers
         reset_run_ledgers(pcb_data)
@@ -6536,9 +6569,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     #       nothing, so welding adds dead metal. The late
                     #       orphan sweep deletes it at the end of the run.
                     #   graphic end -> net-tagged copper ART (#337) that
-                    #       reaches no pad: KiCad conducts through it, but it
-                    #       is immutable and the router never targets it, so
-                    #       neither operation applies.
+                    #       reaches no pad: KiCad conducts through it, and it
+                    #       is immutable. The route step's own pass routes to
+                    #       it (art_terminals, #659); this recheck's weld does
+                    #       not.
                     # Measured over the recorded corpus the zone-less signal
                     # links split 9 pad-less / 36 graphic / 6 live, so
                     # enrolling all of them sends the router after 45 links it
@@ -6577,8 +6611,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if _art659:
                                 _why659.append(
                                     f"{_art659} to net-tagged copper GRAPHICS "
-                                    f"no pad reaches (art the router never "
-                                    f"targets: a board-authoring fix)")
+                                    f"no pad reaches (an island the route "
+                                    f"step's art terminal did not join, #659)")
                             print(f"  ORACLE CHECK: {_net}: KiCad reports "
                                   f"{len(_pairs)} open link(s), none weldable"
                                   + (" -- " + "; ".join(_why659)

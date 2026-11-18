@@ -326,6 +326,22 @@ def _withdraw_unused_escapes(pcb_data, net_id, tap_results, config,
     return kept
 
 
+def _on_board_pads(pcb_data, net_id):
+    """The net's pads less those `make_off_board_test` puts off the board
+    (#291: what `connectivity.drop_off_board_pads` drops from every routing
+    endpoint set). The off-board set is read once per board."""
+    off = getattr(pcb_data, '_off_board_pad_ids', None)
+    if off is None:
+        from check_drc import make_off_board_test
+        test = make_off_board_test(pcb_data.board_info)
+        off = frozenset() if test is None else frozenset(
+            id(p) for pads in pcb_data.pads_by_net.values() for p in pads
+            if test(p.global_x, p.global_y))
+        pcb_data._off_board_pad_ids = off
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    return [p for p in pads if id(p) not in off] if off else pads
+
+
 def _net_component_info(pcb_data, net_id):
     """Connected components of a net's pads+copper on the REAL board.
 
@@ -344,7 +360,9 @@ def _net_component_info(pcb_data, net_id):
     net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
     net_zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
                  if z.net_id == net_id]
-    net_pads = pcb_data.pads_by_net.get(net_id, [])
+    # #291: an off-board pad is no part to join. Counted, it kept the net
+    # open for the rescue, and a gap aimed at it ran its copper off the board.
+    net_pads = _on_board_pads(pcb_data, net_id)
 
     res = check_net_connectivity(net_id, net_segments, net_vias, net_pads,
                                  net_zones, return_graph=True,

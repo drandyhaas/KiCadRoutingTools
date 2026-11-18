@@ -36,11 +36,24 @@ import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY bef
 from grid_router import GridObstacleMap
 
 
+_CIRCLE_OFFSETS_MEMO: Dict[float, np.ndarray] = {}
+
+
 def _precompute_circle_offsets(radius_sq: float) -> np.ndarray:
     """Pre-compute circle offsets for a given squared radius.
 
-    Returns numpy array of shape (N, 2) with (dx, dy) offsets.
+    Returns numpy array of shape (N, 2) with (dx, dy) offsets. Pure in
+    radius_sq, so memoized; the array is read-only (callers only add it to
+    centres).
     """
+    hit = _CIRCLE_OFFSETS_MEMO.get(radius_sq)
+    if hit is None:
+        hit = _CIRCLE_OFFSETS_MEMO[radius_sq] = _circle_offsets(radius_sq)
+        hit.setflags(write=False)
+    return hit
+
+
+def _circle_offsets(radius_sq: float) -> np.ndarray:
     radius_int = int(math.ceil(math.sqrt(radius_sq)))
     offsets = []
     for ex in range(-radius_int, radius_int + 1):
