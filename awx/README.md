@@ -606,7 +606,10 @@ one order, each lane placed where it enters the outline. The lanes entering
 on the FRONT, the walk under the hull's edges facing the source, end from
 the trunk; the rest ride the rings round the hull. A berth in a pocket
 leaves it by either of its mouths, or straight under the part in front of it
-on a layer that part leaves open. A part leaves a layer open where none of
+on a layer that part leaves open. Its ways out are ranked by their depth and
+by the pins each mouth's leg passes -- a pad within a stub's length of the
+leg, of ANY part of the group: a leg down a pocket runs along the row of the
+part that is its other wall as it does its own part's. A part leaves a layer open where none of
 its pads stands on it and no other part's pad stands inside its copper box
 there (decaps on the back layer under a QFN close it:
 `whole_frame.open_layers`). Every stage reads the parts so -- the solve, the
@@ -1141,7 +1144,11 @@ tried. Where no escape of the ball clears,
 its menu is read again without the escapes of other nets near the ball --
 unlocked, fanned, not yet routed -- and an escape only those stand in is laid
 with them escaped again in the same call (`source_realize.realize`'s
-`free`). A memory bus's edge data line, a surface tooth with four crossers in
+`free`). Never a net more than one ball of which stands on the array -- a
+plane's: the realize strips a freed net whole, and a ground net freed for one
+lane's dogbone came back with a ball walled in -- nor, on a group's field, a
+lane of another bus of the group, whose tooth is that bus's end. A memory
+bus's edge data line, a surface tooth with four crossers in
 a 3.2 mm channel, had no room to change layer before its first crossing:
 another net's escape ran under its ball, its menu held no via; with that
 escape laid again it took a via in its pad and the solve proved a plan.
