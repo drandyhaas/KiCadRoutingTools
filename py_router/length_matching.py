@@ -252,6 +252,30 @@ def member_pad_to_die(result: dict, net_name: str, pcb_data,
     return _sum(pads_by_net.get(net_id, ())) if net_id is not None else 0.0
 
 
+def main_edge_pads(result: dict):
+    """The `REF.PAD` labels of the pads a multipoint single-ended member's
+    matched length runs between (#1971), or None for any other member.
+
+    route.py routes a net of three or more pads as its longest MST edge first
+    (Phase 1) and matches the group before Phase 3 lays the other taps, so
+    such a member's `route_length` is that one edge's copper -- the pads
+    `routed_pad_indices` names, the span `member_pad_to_die` already charges.
+    A diff pair, or a member measured from board copper (its length is the
+    net's total copper), is not one."""
+    if (not result.get('is_multipoint') or result.get('from_board')
+            or result.get('is_diff_pair')):
+        return None
+    info = result.get('multipoint_pad_info')
+    routed = result.get('routed_pad_indices')
+    if not info or not routed:
+        return None
+    from net_queries import pad_label
+    # pad_info rows are (gx, gy, layer_idx, x, y, pad)
+    labels = [pad_label(info[i][5]) for i in sorted(routed)
+              if 0 <= i < len(info) and len(info[i]) > 5]
+    return labels or None
+
+
 def _pad_to_die_note(terms: dict, group_results: dict, pcb_data, unit: str) -> str:
     """The run line naming each member's pad-to-die term (#1248). A pair's
     term is its larger leg's excess over its copper figure, so its legs are
@@ -2270,9 +2294,30 @@ def apply_length_matching_to_group(
     member_status: Dict[str, dict] = {}
     _lo, _hi = (window[0], window[1]) if window is not None else (None, None)
 
+    # #1971: what each member's length IS. A multipoint member routed this
+    # run is matched on its main edge (the longest MST edge, before Phase 3
+    # lays its taps), between the two pads named here; every other
+    # single-ended member on its net copper.
+    edge_pads = {n: main_edge_pads(r) for n, r in group_results.items()}
+
     def _record(name, length, state, shortfall=0.0):
+        r = group_results[name]
+        measure = ('main_edge' if edge_pads[name]
+                   else 'diff_pair' if r.get('is_diff_pair') else 'net_copper')
         member_status[name] = _member_record(length, target_length, state,
-                                             _lo, _hi, shortfall)
+                                             _lo, _hi, shortfall,
+                                             measure=measure,
+                                             pads=edge_pads[name])
+
+    def _between(name):
+        p = edge_pads.get(name)
+        return f" between {' and '.join(p)} (main edge)" if p else ""
+    if any(edge_pads.values()):
+        print(f"  Length matching group: {sum(1 for p in edge_pads.values() if p)} "
+              f"multipoint member(s) matched on their main edge only (the longest "
+              f"MST edge; Phase 3 lays their other taps afterwards): "
+              + ', '.join(f"{n} {'-'.join(p)}" for n, p in edge_pads.items() if p)
+              + " -- the group is graded on each net's total copper once routed (#1971)")
     if any(die.values()):
         print(f"  Pad-to-die included (#1248): "
               + _pad_to_die_note(die, group_results, pcb_data, 'mm'))
@@ -2343,12 +2388,12 @@ def apply_length_matching_to_group(
                       f"and cannot be shortened here{RESET}")
                 _record(net_name, current_length, 'over_target')
             else:
-                print(f"    {net_name}{suffix}: {current_length:.2f}mm (OK, within tolerance)")
+                print(f"    {net_name}{suffix}: {current_length:.2f}mm{_between(net_name)} (OK, within tolerance)")
                 _record(net_name, current_length, 'matched')
             continue
 
         suffix = " (diff pair)" if result.get('is_diff_pair') else ""
-        print(f"    {net_name}{suffix}: {current_length:.2f}mm -> adding {delta:.2f}mm")
+        print(f"    {net_name}{suffix}: {current_length:.2f}mm{_between(net_name)} -> adding {delta:.2f}mm")
 
         # The meander loop measures COPPER, so it gets the copper target.
         modified, new_segments, bump_count, new_length = _apply_meanders_to_net_with_iteration(
@@ -2391,7 +2436,7 @@ def apply_length_matching_to_group(
                 _now, _kl = _kicad_length(modified)
             die[net_name] = _kl - new_length
 
-        print(f"      {net_name}: new length = {new_length + die[net_name]:.2f}mm ({bump_count} bumps)")
+        print(f"      {net_name}: new length = {new_length + die[net_name]:.2f}mm{_between(net_name)} ({bump_count} bumps)")
         _final = new_length + die[net_name]
         _left = target_length - _final
         if abs(_left) <= config.length_match_tolerance:
@@ -2422,10 +2467,18 @@ def apply_length_matching_to_group(
     return net_results
 
 
-def _member_record(length, target, state, lo=None, hi=None, shortfall=0.0):
-    """One member's verdict for `length_match_groups[].member_status`."""
+def _member_record(length, target, state, lo=None, hi=None, shortfall=0.0,
+                   measure='net_copper', pads=None):
+    """One member's verdict for `length_match_groups[].member_status`.
+
+    `measure` says what `length_mm` is (#1971): 'net_copper' (the net's
+    copper: a 2-pad net, or a member measured from the board), 'main_edge'
+    (a multipoint member's longest MST edge, between `pads`) or 'diff_pair'
+    (the pair's matching span, as KiCad's pair tuner measures it)."""
     rec = {'length_mm': round(length, 3), 'target_mm': round(target, 3),
-           'status': state}
+           'status': state, 'measure': measure}
+    if pads:
+        rec['pads'] = list(pads)
     if shortfall:
         rec['shortfall_mm'] = round(shortfall, 3)
     if lo is not None or hi is not None:
@@ -2556,6 +2609,81 @@ def grade_late_group_members(record, late, config, pcb_data):
     record['member_status'] = status
     _store_member_status(config, status)
     return all(r.get('status') == 'matched' for r in status.values())
+
+
+def grade_main_edge_groups(records, config, pcb_data):
+    """#1971: grade, on each net's TOTAL copper, every group that matched a
+    member on its main edge only.
+
+    A multipoint member routed this run is matched on its longest MST edge,
+    before Phase 3 lays its other taps (`main_edge_pads`), so its `matched`
+    says nothing of the copper the net ships: two three-pad nets matched to
+    0.35 mm on their edges were 23.9 mm apart on total copper. Total copper
+    is the measure KiCad's length/skew DRC reads, `board_score
+    --length-groups`' default, and the one a member routed by an earlier
+    step is matched on (`_seed_group_members_from_board`), so a group is
+    graded on it here, on the board as it now stands (`pcb_data`, after
+    Phase 3 and the post-route cleanup). No copper is changed.
+
+    Every single-ended member gets `net_copper_mm` (copper + every pad's
+    pad-to-die, the board-copper measure the matcher uses; None when the
+    copper does not join its pads), the group `net_copper_spread_mm` and
+    `net_copper_within_tolerance` (None when a member is unmeasured). Unless
+    the group is within tolerance on total copper, a main-edge member the
+    matcher called `matched` reads `matched_main_edge`. Pair records are
+    left as they are. Time matching records no member verdicts and is
+    skipped. Updates `records` in place; returns the records it graded."""
+    if pcb_data is None or getattr(config, 'time_matching', False):
+        return []
+    from net_queries import calculate_route_length
+    tol = config.length_match_tolerance
+    nid_of = {n.name: i for i, n in pcb_data.nets.items() if n.name}
+    graded = []
+    for rec in records or ():
+        ms = rec.get('member_status') or {}
+        if not any(r.get('measure') == 'main_edge' for r in ms.values()):
+            continue
+        copper = {}
+        for name, r in ms.items():
+            if r.get('measure') == 'diff_pair':
+                continue
+            nid = nid_of.get(name)
+            segs = [s for s in pcb_data.segments if s.net_id == nid]
+            vias = [v for v in pcb_data.vias if v.net_id == nid]
+            if nid is None or not segs or not _board_net_connected(
+                    pcb_data, nid, segs, vias):
+                copper[name] = None
+            else:
+                copper[name] = (calculate_route_length(segs, vias, pcb_data)
+                                + member_pad_to_die({}, name, pcb_data))
+            r['net_copper_mm'] = (None if copper[name] is None
+                                  else round(copper[name], 3))
+        known = [v for v in copper.values() if v is not None]
+        spread = (max(known) - min(known)) if len(known) >= 2 else None
+        within = (None if (spread is None or len(known) < len(copper))
+                  else spread <= tol)
+        rec['net_copper_spread_mm'] = None if spread is None else round(spread, 3)
+        rec['net_copper_within_tolerance'] = within
+        if within is not True:
+            for r in ms.values():
+                if r.get('measure') == 'main_edge' and r.get('status') == 'matched':
+                    r['status'] = 'matched_main_edge'
+        graded.append(rec)
+        edges = ', '.join(f"{n} {'-'.join(r.get('pads') or ())}"
+                          for n, r in ms.items() if r.get('measure') == 'main_edge')
+        lens = ', '.join(f"{n} {'unmeasured (pads not joined)' if v is None else f'{v:.2f}mm'}"
+                         for n, v in copper.items())
+        if within is True:
+            verdict = (f"total copper is within the {tol:g}mm tolerance too "
+                       f"(spread {spread:.2f}mm)")
+        elif within is False:
+            verdict = (f"total copper differs by {spread:.2f}mm, over the {tol:g}mm "
+                       f"tolerance -- NOT matched on total copper")
+        else:
+            verdict = "total copper not measurable on every member -- NOT matched on total copper"
+        print(f"  Length match group '{rec.get('name')}': matched on the main edge of "
+              f"its multipoint member(s) ({edges}); {verdict} ({lens}) (#1971)")
+    return graded
 
 
 def _net_copper_path(segs, vias, pads):
