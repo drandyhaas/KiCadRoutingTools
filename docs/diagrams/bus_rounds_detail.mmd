@@ -1,49 +1,55 @@
 flowchart TD
-    START(["route_bus, one bus: up to --rounds route rounds (default 4)"])
-    KIND{"this round"}
-    subgraph ROUND["a route round"]
-        E["ends + fanout<br/>whole_ends, fanout_from_plan"]
-        CHK{"escape bus:<br/>the solve's check,<br/>5 at most"}
-        FO["the ends laid by the fanout<br/>(the cap step on a joint bus)"]
-        S["the round's solve: whole_solve (CP-SAT)<br/>an unproved plan kept; escape bus: relaxed if none"]
+    START(["route_bus: the buses of one source, one group (negotiated_buses.route_grouped):<br/>up to --rounds group rounds (default 4)"])
+    CAP["captures: each bus's ends model as its own run builds it<br/>(route_bus --src/--dest, ENDS_CAPTURE)"]
+    subgraph ENDS["the group's ends: group_ends.py"]
+        M["one CP-SAT model: every bus's teeth and berths,<br/>every other ball of the arrays served<br/>(first tiers; whole menus a stretch of lanes at a time)"]
+        CHK{"each bus's ends put to<br/>its whole solve (whole_solve, a check)"}
+        REP["the repair: the lanes the refusal named free,<br/>every other lane held on its ends"]
+        FLD{"the arrays fanned out as chosen:<br/>the shared field, the board's DRC on it"}
+        TIE["the field's ties (field_ties)"]
+    end
+    subgraph BUS["every bus on the field at the same time, each its own whole route (GROUP_ENDS)"]
+        S["the round's solve: whole_solve (CP-SAT), an unproved plan kept;<br/>coupled where two buses' plans cross (whole_joint)"]
         subgraph LOOP["the loop: LOOP_ROUNDS (6) at most"]
             G["geometry<br/>whole_geo (LP)"]
+            E["geometry in board xy<br/>whole_embed (an LP a round)"]
             P["polish<br/>whole_polish"]
             N["snap: pairs first, then singles<br/>whole_snap"]
             A{"audit, gate, lint"}
-            RS["re-solve,<br/>the cuts firm"]
-            REP["repair_ends,<br/>the loop again"]
+            RS["re-solve, coupled,<br/>the cuts firm"]
+            RE["repair_ends: a via or a tooth nudged,<br/>a passive moved, a ball escaped again;<br/>the loop again"]
         end
-        L["lay: route_lanes --plan<br/>the passing plan, else the plan it held<br/>(LAY_TRY: another loop round's too)"]
-        GR{"graded"}
+        L["lay, the buses in turn (the standing order): route_lanes --plan<br/>the passing plan, else the plan its loop held"]
+        MINI["the mini re-route: a few lanes left open<br/>planned again alone on the laid board, one round"]
     end
+    MRG{"merged, graded on the board"}
     STOP(["done"])
-    NEXT{"a feedback round left<br/>for this draw?"}
-    FB(["next round: a FEEDBACK ROUND<br/>the same seed, fed findings.json,<br/>from this round's board<br/>(back to the top)"])
-    DR(["next round: the next DRAW<br/>the next seed, the step's board,<br/>nothing carried<br/>(back to the top)"])
-    BEST(["no rounds left: the best round<br/>(fewest open, then vias);<br/>nothing laid: the LAST RESORT,<br/>partial plans"])
-    START --> KIND
-    KIND -- "a draw: seed BUS_SEED (else 1) + draw - 1" --> E
-    KIND -- "a feedback round" --> E
-    E -- "escape bus" --> CHK
-    CHK -- "refused: learn and choose again<br/>(those lanes not on those ends again,<br/>a lane with no room for a change on one layer,<br/>a crossing held apart)" --> E
-    CHK -- "a plan, or the 5th refusal stands" --> FO
-    E -- "plain or joint bus" --> FO
-    FO --> S
+    FB(["next group round: what the buses' steps found at their ends<br/>goes back to the model (group_ends --from --feedback),<br/>which answers from the state it had; the buses again on that field"])
+    BEST(["no rounds left: the board with the fewest nets open,<br/>then violations, then balls walled in"])
+    START --> CAP
+    CAP --> M
+    M --> CHK
+    CHK -- "refused: a lane held to one layer,<br/>two crossings held apart, an end off a layer,<br/>the state refused" --> REP
+    REP --> CHK
+    CHK -- "every bus has a plan" --> FLD
+    FLD -- "a violation the fanout made:<br/>that end not taken again" --> REP
+    FLD -- "clean" --> TIE
+    TIE --> S
     S --> G
-    G --> P
+    G --> E
+    E --> P
     P -- "side flips" --> G
     P --> N
     N --> A
     A -- "findings: cuts + history<br/>(this round's alone)" --> RS
     RS --> G
-    A -- "ends crowded twice<br/>(exit 4)" --> REP
-    REP --> G
+    A -- "ends crowded<br/>(exit 4)" --> RE
+    RE --> G
     A -- "pass" --> L
     A -- "not converging, crowded again,<br/>out of loop rounds" --> L
-    L --> GR
-    GR -- "connected and clean" --> STOP
-    GR -- "nets open: lanes named<br/>(feedback.json, for the last resort)" --> NEXT
-    NEXT -- "yes" --> FB
-    NEXT -- "no, rounds left" --> DR
-    NEXT -- "no rounds left" --> BEST
+    L -- "a few lanes open" --> MINI
+    L --> MRG
+    MINI --> MRG
+    MRG -- "no net open, no violation,<br/>no ball walled in" --> STOP
+    MRG -- "short of clean, rounds left" --> FB
+    MRG -- "short of clean, none left" --> BEST

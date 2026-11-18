@@ -1,40 +1,37 @@
 flowchart TD
-    START(["one bus: up to R rounds"])
-    KIND{"this round"}
-    subgraph ROUND["a round"]
-        E["ends + fanout"]
-        CHK{"escape bus:<br/>the solve's check,<br/>5 at most"}
-        S["the round's solve (CP-SAT)"]
+    START(["the bus step: each source's buses one group,<br/>up to R rounds a group"])
+    CAP["each bus's ends model captured"]
+    M["the group's ends: one model (CP-SAT)<br/>every bus's teeth and berths,<br/>the arrays' whole fanout"]
+    CHK{"each bus's ends<br/>put to its solve"}
+    FLD["the arrays fanned out as chosen:<br/>the shared field, measured"]
+    subgraph BUS["every bus on the field, at the same time"]
+        S["the round's solve (CP-SAT),<br/>coupled where two buses' plans cross"]
         subgraph LOOP["the loop, 6 rounds at most"]
-            G["geometry (LP) and polish"]
+            G["geometry (two LPs) and polish"]
             N["snap to the grid"]
             A{"audit"}
             RS["solve again<br/>with the cuts"]
         end
-        L["lay the copper"]
-        GR{"graded"}
+        L["lay the copper, the buses in turn;<br/>a few lanes left open planned again alone"]
     end
+    MRG{"merged and graded"}
     STOP(["done"])
-    NEXT{"a feedback round left?"}
-    FB(["next: a feedback round<br/>(back to the top)"])
-    DR(["next: a new draw<br/>(back to the top)"])
-    BEST(["the best round;<br/>nothing laid: the last resort"])
-    START --> KIND
-    KIND -- "a draw: the next seed, the step's board" --> E
-    KIND -- "a feedback round: the same seed,<br/>the findings, that round's board" --> E
-    E --> CHK
-    CHK -- "refused: learn, choose again" --> E
-    CHK -- "a plan, or the 5th refusal" --> S
-    E -- "plain or joint bus" --> S
+    FB(["next round: what the buses found<br/>at their ends goes back to the model,<br/>which answers from the state it had"])
+    BEST(["no rounds left:<br/>the best round's board"])
+    START --> CAP
+    CAP --> M
+    M --> CHK
+    CHK -- "refused: learn, repair" --> M
+    CHK -- "every bus has a plan" --> FLD
+    FLD -- "a violation the fanout made: learn" --> M
+    FLD --> S
     S --> G
     G --> N
     N --> A
     A -- "findings: cuts + history" --> RS
     RS --> G
     A -- "passes, or the loop stops:<br/>the plan it held" --> L
-    L --> GR
-    GR -- "connected and clean" --> STOP
-    GR -- "nets open" --> NEXT
-    NEXT -- "yes" --> FB
-    NEXT -- "no, rounds left" --> DR
-    NEXT -- "no rounds left" --> BEST
+    L --> MRG
+    MRG -- "no net open, no violation,<br/>no ball walled in" --> STOP
+    MRG -- "short of clean, rounds left" --> FB
+    MRG -- "short of clean, none left" --> BEST
