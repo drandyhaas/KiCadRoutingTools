@@ -634,7 +634,7 @@ _MUST_RESOLVE_ON = {
     # gate, which an adversarial review called out.
     'fanout': {'exit_margin', 'extension'},
     # the bus step's own options, on the Bus tab's options panel
-    'bus': {'rounds', 'feedback_rounds', 'k', 'inproc', 'round_edits'},
+    'bus': {'rounds', 'feedback_rounds', 'k', 'inproc', 'pack', 'round_edits'},
 }
 
 

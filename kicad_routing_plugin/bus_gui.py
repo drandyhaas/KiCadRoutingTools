@@ -124,6 +124,14 @@ class BusOptionsPanel(wx.Panel):
                                "than each stage in a process of its own.")
         grid.Add(self.inproc, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.AddSpacer(0)
+        self.pack = wx.CheckBox(self, label="Pack the laid lanes")
+        self.pack.SetToolTip("--pack: after a round's lay each single lane is pulled taut "
+                             "against its neighbour and laid again as packed copper; the "
+                             "packed board is kept only where it has no more nets open and "
+                             "no more violations than the lay. Unticked: the lay stands, as "
+                             "the CLI does without the flag.")
+        grid.Add(self.pack, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.AddSpacer(0)
         grid.Add(wx.StaticText(self, label="Round edits:"), 0, wx.ALIGN_CENTER_VERTICAL)
         edits = wx.BoxSizer(wx.HORIZONTAL)
         self.round_edits = wx.TextCtrl(self, size=(150, -1))
@@ -168,6 +176,7 @@ class BusOptionsPanel(wx.Panel):
         """The options as bus_progress.build_argv takes them."""
         return {'rounds': self.rounds.GetValue(), 'feedback_rounds': self.feedback_rounds.GetValue(),
                 'k': self.k.GetValue(), 'inproc': self.inproc.GetValue(),
+                'pack': self.pack.GetValue(),
                 'round_edits': self.round_edits.GetValue().strip()}
 
     def fanout_width(self):
@@ -186,6 +195,8 @@ class BusOptionsPanel(wx.Panel):
                     getattr(self, name).SetValue(int(cfg[name]))
             if 'inproc' in cfg:
                 self.inproc.SetValue(bool(cfg['inproc']))
+            if 'pack' in cfg:
+                self.pack.SetValue(bool(cfg['pack']))
             if 'round_edits' in cfg:
                 self.round_edits.SetValue(str(cfg['round_edits'] or ''))
             if 'fanout_track_width' in cfg:
@@ -203,7 +214,8 @@ class BusOptionsPanel(wx.Panel):
         this machine's, not a step's)."""
         d = _defaults()
         self.set_config({'rounds': d.BUS_ROUNDS, 'feedback_rounds': d.BUS_FEEDBACK_ROUNDS, 'k': 0,
-                         'inproc': False, 'round_edits': '', 'fanout_track_width_check': False})
+                         'inproc': False, 'pack': False, 'round_edits': '',
+                         'fanout_track_width_check': False})
 
 
 class BusDialog(wx.Dialog):

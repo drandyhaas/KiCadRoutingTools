@@ -114,7 +114,7 @@ def build_argv(python, board, out, buses=None, options=None, sizes=None,
     """The bus step's command line, as a terminal would type it.
 
     BUSES: the --bus specs in routing order, or None for the buses the step
-    finds itself (no --bus). OPTIONS: rounds, feedback_rounds, k, inproc,
+    finds itself (no --bus). OPTIONS: rounds, feedback_rounds, k, inproc, pack,
     round_edits -- each passed only where it differs from the CLI's default,
     so the defaults give the bare command. SIZES: SIZE_ARGS name -> mm, or
     None for one not given (fanout_track_width among them)."""
@@ -134,6 +134,8 @@ def build_argv(python, board, out, buses=None, options=None, sizes=None,
         argv += ['--k', str(int(o['k']))]
     if o.get('inproc'):
         argv.append('--inproc')
+    if o.get('pack'):
+        argv.append('--pack')
     if o.get('round_edits'):
         argv += ['--round-edits', str(o['round_edits'])]
     return argv + size_flags(sizes)

@@ -104,14 +104,15 @@ def main():
     base = ['py', '-u', '-X', 'utf8', bp.ROUTE_BUS_SCRIPT, 'in.kicad_pcb', 'out.kicad_pcb']
     ok('defaults: the bare command', bp.build_argv('py', 'in.kicad_pcb', 'out.kicad_pcb', None, {
         'rounds': defaults.BUS_ROUNDS, 'feedback_rounds': defaults.BUS_FEEDBACK_ROUNDS, 'k': 0,
-        'inproc': False, 'round_edits': ''}, {}) == base)
+        'inproc': False, 'pack': False, 'round_edits': ''}, {}) == base)
     argv = bp.build_argv('py', 'in.kicad_pcb', 'out.kicad_pcb', ['U1:U2', 'U1:J4+J5'],
-                         {'rounds': 1, 'feedback_rounds': 2, 'k': 12, 'inproc': True, 'round_edits': '/e.json'},
+                         {'rounds': 1, 'feedback_rounds': 2, 'k': 12, 'inproc': True, 'pack': True,
+                          'round_edits': '/e.json'},
                          {'via_size': 0.35, 'clearance_ceiling': 0.1, 'track_width': 0.1, 'fanout_track_width': 0.08,
                           'clearance': None})
     ok('every option, the buses in order, the sizes in SIZE_ARGS order', argv == base + [
         '--bus', 'U1:U2', '--bus', 'U1:J4+J5', '--rounds', '1', '--feedback-rounds', '2', '--k', '12', '--inproc',
-        '--round-edits', '/e.json', '--clearance-ceiling', '0.1', '--track-width', '0.1',
+        '--pack', '--round-edits', '/e.json', '--clearance-ceiling', '0.1', '--track-width', '0.1',
         '--fanout-track-width', '0.08', '--via-size', '0.35'], argv)
     ok('SIZE_ARGS read from route_bus.py', bp.SIZE_ARGS[:2] == ('clearance', 'clearance_ceiling')
        and 'fanout_track_width' in bp.SIZE_ARGS and len(bp.SIZE_ARGS) == 8, bp.SIZE_ARGS)

@@ -279,7 +279,7 @@ def main():
         restore_dialog_settings(dlg, dict(settings, active_tab_name='Bus', active_tab=0))
         if dlg.notebook.GetPageText(dlg.notebook.GetSelection()) != 'Bus':
             bad.append("the Bus page is not restored by name")
-        want = {'rounds': 1, 'feedback_rounds': 2, 'k': 12, 'inproc': True,
+        want = {'rounds': 1, 'feedback_rounds': 2, 'k': 12, 'inproc': True, 'pack': True,
                 'round_edits': '/x/edits.json', 'fanout_track_width_check': True,
                 'fanout_track_width': 0.0975, 'bus_python': '/x/python3'}
         dlg.bus_tab.set_config(want)
@@ -294,17 +294,30 @@ def main():
             dlg2.reset_params_to_defaults()
             got = dlg2.bus_tab.get_config()
             reset_want = dict(want, rounds=rd.BUS_ROUNDS, feedback_rounds=rd.BUS_FEEDBACK_ROUNDS,
-                              k=0, inproc=False, round_edits='', fanout_track_width_check=False)
+                              k=0, inproc=False, pack=False, round_edits='',
+                              fanout_track_width_check=False)
             got['fanout_track_width'] = round(got['fanout_track_width'], 4)
             if got != reset_want:
                 bad.append(f"after reset_params_to_defaults: {got}, want {reset_want}")
+            # A file saved before an option existed: its bus options lack the
+            # key, and restore leaves that control as it stands (here, as the
+            # reset left it) with every other option restored.
+            older = dict(saved, bus_options={k: v for k, v in saved['bus_options'].items()
+                                             if k != 'pack'})
+            restore_dialog_settings(dlg2, older)
+            got = dlg2.bus_tab.get_config()
+            got['fanout_track_width'] = round(got['fanout_track_width'], 4)
+            if got != dict(want, pack=False):
+                bad.append(f"bus options without 'pack': restored {got}, "
+                           f"want {dict(want, pack=False)}")
         finally:
             dlg2.Destroy()
         if bad:
             failures.append("Bus tab: " + "; ".join(bad))
         else:
             print("  Bus tab: OK (after Fanout, restored by name, options by value, the "
-                  "per-step reset to the CLI's defaults keeping the python)")
+                  "per-step reset to the CLI's defaults keeping the python, a file "
+                  "without an option's key restored)")
         dlg.bus_tab.set_config({'bus_python': ''})
         dlg.bus_tab.reset_to_defaults()
         restore_dialog_settings(dlg, settings)

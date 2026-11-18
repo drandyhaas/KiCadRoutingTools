@@ -2963,12 +2963,14 @@ class RoutingDialog(wx.Dialog):
         try:
             # The Bus tab's run options (its BusOptionsPanel), each to
             # route_bus.py's own default, so a plan step that omits one runs
-            # the CLI's: rounds, feedback_rounds, k, inproc, round_edits,
-            # fanout_track_width_check (unticked: the lanes' track).
+            # the CLI's: rounds, feedback_rounds, k, inproc, pack,
+            # round_edits, fanout_track_width_check (unticked: the lanes'
+            # track).
             _bo = self.bus_tab.options
             for _name, _val in (('rounds', defaults.BUS_ROUNDS),
                                 ('feedback_rounds', defaults.BUS_FEEDBACK_ROUNDS),
-                                ('k', 0), ('inproc', False), ('round_edits', ''),
+                                ('k', 0), ('inproc', False), ('pack', False),
+                                ('round_edits', ''),
                                 ('fanout_track_width_check', False)):
                 getattr(_bo, _name).SetValue(_val)
             _bo.fanout_track_width.Enable(False)

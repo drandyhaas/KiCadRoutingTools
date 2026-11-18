@@ -173,6 +173,10 @@ REFUSED_TOOLS = {
         'routes chosen lanes of an awx bus plan one at a time, a stage of '
         'route_bus; the plan\'s bus step is route_bus.py, not this. Run it on '
         'the CLI'),
+    'pack_lanes.py': (
+        'packs the lanes an awx bus round laid, each pulled taut against its '
+        'neighbour, a stage of route_bus (its --pack); the plan\'s bus step is '
+        'route_bus.py, not this. Run it on the CLI'),
     'joint_escape.py': (
         'plans and lays one awx escape for every signal ball of an array; the '
         'plan\'s fanout step is bga_fanout / qfn_fanout, not this. Run it on '
@@ -495,6 +499,9 @@ BOOL_FLAGS = {
     # route_bus.py: every bus's stages in its own process (the Bus tab's
     # checkbox of that name).
     '--inproc': 'inproc',
+    # route_bus.py: each round's laid lanes packed, kept where the packed
+    # board is no worse than the lay (the Bus tab's checkbox of that name).
+    '--pack': 'pack',
     # Found by the flag enumeration over route_diff.py and bga_fanout.py:
     # each has a control, reset per step, under another name.
     '--diff-pair-intra-match': 'intra_match_check',     # route_diff
