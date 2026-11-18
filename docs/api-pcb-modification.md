@@ -205,6 +205,11 @@ widths); and
 > `run_post_route_cleanup` runs it right after `prune_redundant_cycles`, which
 > cannot see such a loop: it joins a via only to segment ends and removes only
 > whole segments, and the passing track is load-bearing on its other side.
+> The pipeline runs it only on the nets the step length-matches
+> (`length_graded_net_ids`: pairs matched P to N and length-match group
+> members, plus the AC-coupled chain members route_diff passes as
+> `extra_length_matched_net_ids`). Elsewhere the loop is dead copper no
+> measure reads, and cutting it only reshapes what later steps route round.
 
 > **The graze prune keeps a fill island's only link.** `prune_grazing_segments`
 > grades each removal on a zoned net twice: under the real-fill validator

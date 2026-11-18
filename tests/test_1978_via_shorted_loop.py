@@ -26,7 +26,9 @@ Rows:
      where the inner member turns back across its own via: the shipped
      member paths agree within the tolerance, the all-copper skew does too,
      the record is matched without a re-match, and no member track passes
-     over its own via.
+     over its own via;
+  4. the same route with no length matching: the pass is scoped to the nets
+     a step length-matches, so the loop stays and no cut is reported.
 
     python3 tests/test_1978_via_shorted_loop.py
 """
@@ -211,12 +213,32 @@ def route_row():
               f"{rec['status']} {rec['delta_mm']} rematch={rec.get('rematch')}")
 
 
+def unmatched_row():
+    print("the same pair, no length matching:")
+    board = os.path.join(ROOT, 'kicad_files', 'ulx3s.kicad_pcb')
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, 'out.kicad_pcb')
+        r = run_check([sys.executable, '-X', 'utf8', tool('route_diff.py'), board, out,
+                       '--nets', 'USB_FTDI_D*', '--layers', 'F.Cu', 'In1.Cu', 'In2.Cu',
+                       'B.Cu', '--grid-step', '0.1', '--heuristic-weight', '1.3'],
+                      accept=True)
+        evidence(out, 'the routed board')
+        check('no via-shorted loop is cut', 'Via-shorted loops' not in r.stdout)
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            pcb = parse_kicad_pcb(out)
+        ids = {n.name: i for i, n in pcb.nets.items()}
+        kept = passes_own_via(pcb, ids['USB_FTDI_D-'])
+        check('the loop is still there (the case holds)', bool(kept), str(len(kept)))
+
+
 def main():
     if hasattr(pm, 'excise_via_shorted_loops'):
         unit_rows()
     else:
         check('pcb_modification.excise_via_shorted_loops exists', False)
     route_row()
+    unmatched_row()
     print('FAILED: ' + ', '.join(failures) if failures else 'PASS')
     return 1 if failures else 0
 
