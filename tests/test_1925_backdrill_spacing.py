@@ -19,6 +19,9 @@ nothing could ask a route step to back-drill the vias it adds.
   6. the search takes a via site only where the drill is legal: with copper
      of another net under the direct sites it places the vias elsewhere, and
      the sites the plain route took are refused by the judge;
+  6c. the wall is priced by the pair's clearance as the board's rules give
+     it: the other net's class, a `.kicad_dru` layer rule replacing it, and
+     the board's copper-to-hole floor under all of them;
   7. completion first: with no legal site anywhere the net is still routed,
      its vias are left undrilled and the summary says why;
   8. `check_drc` grades a back-drilled via as KiCad 10.0.8 does: on a layer
@@ -276,6 +279,9 @@ def test_define_when_asked():
            f"both vias are drilled 0.6 mm from B.Cu up to In2.Cu: {drills(pcb, '/S')}")
         ok(rec is not None and (rec['vias'], rec['drilled'], rec['conflict']) == (2, 2, 0),
            f"the step's record counts them: {rec}")
+        ok('Back-drills, not covered:' in log and 'diff-pair step' in log
+           and len(rec.get('not_covered') or []) == 3,
+           "the log and the record say what the step does not cover")
         with open(run_utils.evidence(js, 'the --json-out file'), encoding='utf-8') as fh:
             doc = json.load(fh)
         ok((doc.get('backdrill') or {}).get('drilled') == 2,
@@ -285,7 +291,7 @@ def test_define_when_asked():
         with open(off, encoding='utf-8') as fh:
             text = fh.read()
         ok(len(parse(off).vias) == 2 and 'backdrill' not in text and rec_off is None
-           and 'BACK-DRILL' not in log_off,
+           and 'BACK-DRILL' not in log_off and 'Back-drills' not in log_off,
            "the same route without the option adds two vias and no back-drill")
         # a file format KiCad 9 reads cannot carry the token
         with open(src, encoding='utf-8') as fh:
@@ -363,6 +369,59 @@ def test_neighbours_judged_in_turn():
        f"the refusal names the other drill at the hole-to-hole minimum: {rec['conflicts'][0]}")
     ok([bool(v.backdrills) for v in sorted(pcb.vias, key=lambda v: v.x)] == [True, False],
        "and the vias are left as decided")
+
+
+def test_wall_priced_by_the_boards_rules():
+    print("6c: the wall is priced by the pair's clearance as the board's rules give it")
+    import backdrill
+    from routing_config import GridRouteConfig
+    # /S's via at (10, 5), to be drilled 0.6 mm on In2.Cu and B.Cu; a 0.2 mm
+    # track of /W on B.Cu passes `gap` mm from the wall.
+    own = [('/S', 10, 5, 10, 2, 'F.Cu', 0.2), ('/S', 10, 5, 13, 5, 'In1.Cu', 0.2)]
+
+    def needed(gap, floor=0.0, classes=None, layers=None):
+        y = round(5 + 0.3 + gap + 0.1, 4)
+        with tempfile.TemporaryDirectory() as td:
+            pcb = parse(write_board(os.path.join(td, 'w.kicad_pcb'),
+                                    tracks=own + [('/W', 5, y, 15, y, 'B.Cu', 0.2)],
+                                    vias=[('/S', 10, 5, 0.6, 0.3, '')]))
+        cfg = GridRouteConfig(clearance=0.1, via_size=0.6, via_drill=0.3,
+                              hole_to_hole_clearance=0.25, hole_clearance=floor,
+                              layers=list(pcb.board_info.copper_layers))
+        w = net_id(pcb, '/W')
+        cfg.net_clearances = {w: c for c in ([classes] if classes else [])}
+        cfg.layer_clearances = dict(layers or {})
+        cfg.backdrill = backdrill.make_spec(pcb, ['/S'], 0.3, 0.2, 0.25)
+        backdrill.install(cfg, pcb)     # reads the board's floor, as a step does
+        hits = backdrill.wall_conflicts(backdrill._Index(pcb, cfg.layers), pcb.vias[0],
+                                        ['In2.Cu', 'B.Cu'], 0.6, cfg)
+        return [(h[0], h[1], h[4]) for h in hits]
+
+    ok(needed(0.22) == [] and needed(0.18) == [('B.Cu', 'track', 0.2)],
+       "no class, no rule: the 0.2 mm copper-to-hole floor, over the 0.1 clearance")
+    ok(needed(0.22, classes=0.3) == [('B.Cu', 'track', 0.3)],
+       "the other net's class at 0.3 is wider than the floor, and is what is asked")
+    ok(needed(0.32, classes=0.3, layers={'B.Cu': 0.35}) == [('B.Cu', 'track', 0.35)],
+       "a .kicad_dru layer rule of 0.35 on B.Cu replaces the class there")
+    ok(needed(0.22, classes=0.3, layers={'B.Cu': 0.05}) == []
+       and needed(0.18, classes=0.3, layers={'B.Cu': 0.05}) == [('B.Cu', 'track', 0.2)],
+       "a relaxing layer rule (0.05) replaces the class too, and the wall keeps the "
+       "hole floor: a wall is a hole")
+    ok(needed(0.22, floor=0.3) == [('B.Cu', 'track', 0.3)],
+       "a board declaring a 0.3 mm copper-to-hole floor holds the wall at it")
+    ok(needed(0.32, classes=0.3, layers={'In2.Cu': 0.5}) == [],
+       "(a rule on another layer does not reach the track's)")
+    # the plane tap's window memo keys a via with its back-drill
+    from plane_pad_tap import _tap_window_key
+    keys = []
+    with tempfile.TemporaryDirectory() as td:
+        for tag, bd in (('a', ''), ('b', backdrill_token(0.6, 'B.Cu', 'In2.Cu')),
+                        ('c', backdrill_token(0.6, 'B.Cu', 'In2.Cu'))):
+            pcb = parse(write_board(os.path.join(td, tag + '.kicad_pcb'), tracks=own,
+                                    vias=[('/S', 10, 5, 0.6, 0.3, bd)]))
+            keys.append(_tap_window_key(pcb, pcb)[0][1])
+    ok(keys[0] != keys[1] and keys[1] == keys[2],
+       "a tap window's memo key tells a back-drilled via from a plain one")
 
 
 def test_completion_first():
@@ -525,7 +584,8 @@ def main():
     for fn in (test_plan_spans, test_option_is_whole,
                test_declared_backdrill_is_an_obstacle, test_new_via_off_the_wall,
                test_define_when_asked, test_search_takes_legal_sites,
-               test_neighbours_judged_in_turn, test_completion_first, test_check_drc_grades_the_disc,
+               test_neighbours_judged_in_turn, test_wall_priced_by_the_boards_rules,
+               test_completion_first, test_check_drc_grades_the_disc,
                test_rewrite_only_the_named_vias, test_manifest_to_plan):
         fn()
     print()

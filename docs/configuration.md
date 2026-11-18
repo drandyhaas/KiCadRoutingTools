@@ -461,7 +461,22 @@ face (`Via.backdrills`). Two things follow, and only the second is an option.
   drill, and those left undrilled because the wall would stand too close
   (`conflict`, with the first twenty named).
 
-  Not covered: the diff-pair step and the plane steps define no back-drill; a
+  The record's keys: `nets` (asked nets), `oversize_mm` / `margin_mm` /
+  `min_stub_mm` (the three numbers as given), `vias` (new vias on the asked
+  nets), `drilled`, `no_stub` (nothing to drill), `conflict` and `conflicts`
+  (each `x`, `y`, `layer`, `with` track / via / pad / drill, `gap_mm`,
+  `needed_mm`), `sides_left` (per reason, the via sides not drilled: `short`,
+  `margin`, `no stackup`, `unjoined`, `not a through via`),
+  `conservative_only` (vias drilled that the search's every-layer test would
+  have refused), `not_rewritten` (CLI only, when present: vias with no uuid,
+  left as the route marked them) and `not_covered` (the list below, so the
+  count is not read as more than it is; the log prints it when the option is
+  read).
+
+  Not covered: the diff-pair step and the plane steps define no back-drill
+  (the route step's own plane finalize is judged with the rest, on the board
+  that ships); on a board whose file format predates KiCad 10, which cannot
+  carry the token, the option defines nothing and the log says so; a
   drilled pad's back-drill is read and kept but is not an obstacle yet; a
   via an earlier step added is left as it is; pours are not read by the judge
   (KiCad's own fill clears a back-drill); KiCad's post-machining tokens are not

@@ -3667,6 +3667,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"drill + {config.backdrill.oversize:g} mm, "
                   f"{config.backdrill.margin:g} mm margin, stubs of "
                   f"{config.backdrill.min_stub:g} mm and over (#1925)")
+            from backdrill import print_not_covered as _bd_not_covered1925
+            _bd_not_covered1925()
     # The in-loop stub-debris trim must treat input copper as read-only in
     # --keep-input-copper runs; the loop only sees config, so carry it there.
     if keep_input_copper:

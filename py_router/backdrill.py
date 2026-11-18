@@ -578,7 +578,8 @@ def finalize(pcb_data, config, input_snapshot, candidates=None) -> Tuple[dict, d
     rec = {'nets': len(spec.net_ids), 'oversize_mm': spec.oversize,
            'margin_mm': spec.margin, 'min_stub_mm': spec.min_stub,
            'vias': 0, 'drilled': 0, 'no_stub': 0, 'conflict': 0,
-           'sides_left': {}, 'conservative_only': 0, 'conflicts': []}
+           'sides_left': {}, 'conservative_only': 0, 'conflicts': [],
+           'not_covered': list(NOT_COVERED)}
     copper_by_net = {}
     judged = [v for v in (candidates if candidates is not None else pcb_data.vias)
               if v.net_id in spec.net_ids and not _preexisting(v, snap_by_net)]
@@ -617,6 +618,20 @@ def finalize(pcb_data, config, input_snapshot, candidates=None) -> Tuple[dict, d
         v.backdrills = dict(tokens)
         out[id(v)] = (v, tokens)
     return out, rec
+
+
+#: What a step that defines back-drills does not do, said in its summary
+#: (`not_covered`) and its log so the count is not read as more than it is.
+NOT_COVERED = (
+    "pours: the judge and the fill model do not read a back-drill "
+    "(KiCad's own fill clears it)",
+    "the plane steps and the diff-pair step define no back-drill",
+    "a drilled pad's back-drill is not an obstacle",
+)
+
+
+def print_not_covered() -> None:
+    print("  Back-drills, not covered: " + "; ".join(NOT_COVERED) + ".")
 
 
 def print_record(rec, context: str = '') -> None:
