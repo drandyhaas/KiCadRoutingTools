@@ -31,12 +31,18 @@ stays open), and a board the fanout's audit refuses, or a round that lays NOTHIN
 next seed's round follows. The loop's last re-solve keeps a plan it cannot prove. When no round laid anything, the LAST
 RESORT is a partial plan on the last ends laid, the named lanes (then more) left out and open. The run's result is its best --
 the fewest open nets, then the fewest vias -- in OUTDIR/best.kicad_pcb (and its own rN/ or partialN/seq.kicad_pcb).
+
 The last line is that result's grade:
   WHOLE K=.. round=.. lanes=../.. vias=.. copper=..mm connected=0|1 drc=N secs=.. open=..
 Exits 0 when it is connected and DRC-clean, 1 when nets are left open or a violation stands, 2 when nothing could be
 laid at all (no fanout board, or no plan even for half the lanes).
 --loop exits 0 with OUTDIR/plan.json the snapped plan that passed, 1 when no round got there, 3 when it stopped not
 converging, 4 when it stopped at crowded ends.
+
+THE PACK, off by default (the setting BUS_PACK=1, route_bus --pack): after a round's lay, and its mini re-route where
+one ran, the laid lanes are packed -- each single lane pulled taut against its neighbour and laid again as octilinear
+copper (pack_lanes.py, pack.py), in rN/pack/ -- and the packed board graded as the lay is; it is the round's board only
+where it has no more nets open and no more violations than the lay, which stands otherwise (pack_lay).
 """
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
 
@@ -2832,6 +2838,17 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             return None
         if not quiet:
             joint_publish(env, None, f'round {r} laid{tag}', board=seq, nets=nets_all)
+        lanes = '\n'.join(m.split(' ')[0] for m in re.findall(r'[0-9]+/[0-9]+ in band', sm))
+        res_ = graded(r, d, seq, lanes, tag)
+        if not quiet:
+            say(res_['grade'])
+        # (...and what it stood on -- its bench, its nets, its plan -- for the pack of its lanes: pack_lay)
+        return dict(res_, bench=bench, nets=list(nets) if nets else None, plan=plan)
+
+    def graded(r, d, seq, lanes, tag=''):
+        """the board SEQ graded as a round's lay is: the run's nets' connectivity (check_connected), their violations
+        (check_drc), their vias and copper -- the result (its key, open nets, violations, grade line, board). `lanes`
+        the lay's own count for the grade line; `tag` in the logs' names in `d` (conn{tag}.log, drc{tag}.json, ...)"""
         from coherent_nets import net_patterns
         pats = net_patterns(nets_all, keys_)
         # (the checkers by the path the shell gives them, from awx/: their logs echo it; always in a process of
@@ -2850,17 +2867,51 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         # LENGTH_ROWS; a checker that counted none, its exit: one at least)
         ndrc = dv if dv is not None else int(dc != 0)
         nopen = 0 if cc == 0 else max(1, count_open(os.path.join(d, f'conn{tag}.log')))
-        lanes = '\n'.join(m.split(' ')[0] for m in re.findall(r'[0-9]+/[0-9]+ in band', sm))
         v, c = grade_counts(seq, set(nets_all))
         g = (f"WHOLE K={K} round={r} lanes={lanes} vias={v} copper={c}mm connected={int(cc == 0)} "
              f"drc={ndrc} secs={secs()} open={nopen}")
-        if not quiet:
-            say(g)
         # (ranked by the nets left OPEN first: a violation is the step's own grade's to answer after the whole route,
         # an open net no later stage of the step lays)
         return dict(key=(nopen, ndrc, int(v), int(c)), open=nopen, drc=ndrc, grade=g, board=seq, lanes=lanes,
                     open_nets=sorted(open_nets(os.path.join(d, f'conn{tag}.log'), keys_)) if nopen else [],
                     tag=tag)
+
+    def pack_lay(r, d, res, laid):
+        """THE PACK (route_bus --pack, the setting BUS_PACK): the lanes of the round's laid board `res` -- its lay's,
+        or a mini re-route's where one was kept -- each pulled taut against its neighbour and laid again as packed
+        copper (pack_lanes.py, a stage of its own, written into `d`/pack: the laid board stays as it is), read on the
+        bench the round's lay `laid` stood on. The packed board is graded as a lay is (graded) and kept only where it
+        is NO WORSE: no more nets open and no more violations than the board it was packed from. The result when it
+        is kept, else None -- the lay stands"""
+        dp = os.path.join(d, 'pack')
+        shutil.rmtree(dp, ignore_errors=True)
+        os.makedirs(dp)
+        out_p = os.path.join(dp, 'seq.kicad_pcb')
+        rc_ = run(['pack_lanes.py', '--board', laid['bench'], '--laid', res['board'],
+                   '--nets', ','.join(laid['nets']) if laid.get('nets') else NETS, '--dest', dest]
+                  + (['--plan', laid['plan']] if laid.get('plan') else []) + ['--write', out_p], env,
+                  log_path=os.path.join(dp, 'pack.log'))[0]
+        sm = ' '.join(grep(os.path.join(dp, 'pack.log'), r'^SUMMARY pack: '))
+        if rc_ != 0 or not sm:
+            say(f"  the pack: its stage ended {rc_} with no packed board ({os.path.relpath(dp, o)}/pack.log) -- the "
+                f"round's lay stands")
+            return None
+        say(f"  the pack: {sm[len('SUMMARY pack: '):]}")
+        if not os.path.isfile(out_p):
+            say("  the pack: no lane packed -- the round's lay stands")
+            return None
+        res_p = graded(r, dp, out_p, res['lanes'])
+        if res_p['open'] > res['open'] or res_p['drc'] > res['drc']:
+            say(f"  the pack: worse than the lay -- {res_p['open']} open, drc {res_p['drc']} against {res['open']} "
+                f"open, drc {res['drc']} -- the round's lay stands")
+            return None
+        say(f"  the pack: no worse than the lay ({res_p['open']} open, drc {res_p['drc']}; vias {res['key'][2]} -> "
+            f"{res_p['key'][2]}, copper {res['key'][3]} -> {res_p['key'][3]} mm) -- the packed board stands")
+        say(res_p['grade'])
+        # (the packed copper published in the lay's place, as a kept mini re-route's is: what the buses after this
+        # one read)
+        joint_publish(env, None, f'round {r} laid, packed', board=res_p['board'], nets=nets_all)
+        return dict(res_p, bench=laid['bench'], nets=laid.get('nets'), plan=laid.get('plan'))
 
     def lane_legs():
         """{lane: its nets} as the ends model makes lanes: a pair one lane named by its base (pairs.pair_names),
@@ -3381,11 +3432,21 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                     say("  no board laid from the plan (route_seq.log)")
                 # (...and the few lanes it left open, again by themselves on the board it made -- within this bus's
                 # turn to lay: the buses after it read the copper it leaves)
+                laid_ = res
                 if res is not None and res['open'] and MINI_REROUTE:
                     try:
                         res = mini_reroute(r, d, res) or res
                     except (Exception, SystemExit):         # (the round's lay stands whatever becomes of this)
                         say("  the mini re-route failed -- the round's lay stands: "
+                            + traceback.format_exc().strip().splitlines()[-1][:160])
+                        traceback.print_exc(file=sys.stderr)
+                # (...and, asked for -- BUS_PACK, route_bus --pack -- its laid lanes packed, kept where the packed
+                # board is no worse: within this bus's turn too, so the buses after it read the copper that stands)
+                if res is not None and env.get('BUS_PACK', '0') not in ('', '0'):
+                    try:
+                        res = pack_lay(r, d, res, laid_) or res
+                    except (Exception, SystemExit):         # (the round's lay stands whatever becomes of this)
+                        say("  the pack failed -- the round's lay stands: "
                             + traceback.format_exc().strip().splitlines()[-1][:160])
                         traceback.print_exc(file=sys.stderr)
             finally:

@@ -2,7 +2,7 @@
 """route_bus.py -- the bus step: an array pair's bus routed on the board as it is.
 
     python3 route_bus.py BOARD.kicad_pcb OUT.kicad_pcb [--bus SRC:DEST ...] [--k K] [--rounds R] [--inproc]
-                         [--feedback-rounds F] [--round-edits EDITS.json]
+                         [--feedback-rounds F] [--round-edits EDITS.json] [--pack]
                          [--clearance C] [--clearance-ceiling C] [--track-width W] [--fanout-track-width W]
                          [--via-size D] [--via-drill D] [--hole-to-hole-clearance H] [--json-out FILE]
     python3 route_bus.py BOARD.kicad_pcb --find [--json-out FOUND.json] [sizes]
@@ -167,11 +167,12 @@ def resolve_rules(board, clearance=None, clearance_ceiling=None, track_width=Non
 
 
 def route_bus(board, out, src, dest, k=None, rounds=4, inproc=False, log=print, json_out=None, settings=None,
-              feedback_rounds=0, **sizes):
+              feedback_rounds=0, pack=False, **sizes):
     """Route the bus between `src` and `dest` on `board`, writing `out`, at the chain's sizes (`sizes`: SIZE_ARGS,
     resolve_rules). Returns (exit code, grade line). The run's rules are installed for the step and supplied to
     every stage (rules.SETTING); the process's own are put back after. `settings` {name: value}: awx settings for
-    this step alone, over the environment, in the step and in every stage it runs"""
+    this step alone, over the environment, in the step and in every stage it runs. `pack` (--pack): the setting
+    BUS_PACK among them -- the whole route packs each round's laid lanes (whole_route.chain's pack_lay)"""
     import rules as _rules
     import awx_settings
     bad = sorted(set(sizes) - set(SIZE_ARGS))
@@ -186,7 +187,7 @@ def route_bus(board, out, src, dest, k=None, rounds=4, inproc=False, log=print, 
     prev = _rules.active()
     _rules.install(run_rules)
     # (this process routes SRC:DEST: its progress events, and its stages', say so -- bus_events)
-    settings = dict(settings or {}, **bus_events.for_bus(src, dest))
+    settings = dict(settings or {}, **bus_events.for_bus(src, dest), **({'BUS_PACK': '1'} if pack else {}))
     try:
         with unrecorded(), bus_events.run(bus_events.work_dir(out)), step_policy(run_rules, settings):
             return _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out, settings,
@@ -399,7 +400,7 @@ def plan_lines(plan):
 
 
 def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=print, json_out=None, feedback_rounds=0,
-                **sizes):
+                pack=False, **sizes):
     """Every bus on `board` routed, `out` the board handed on: `buses` [(src, dest)] (parse_bus), else bus_plan's.
     Returns (status, grade lines): 0 when every bus was handed on routed, 1 when one or more left as it came (or none
     was found), 2 on a usage error -- the step's status, which the summary keeps; the process exits 0 whenever OUT is
@@ -410,17 +411,18 @@ def route_buses(board, out, buses=None, k=None, rounds=4, inproc=False, log=prin
     every bus's ends chosen in ONE model with the arrays' fanout (group_ends.py), every bus routed on that field at the
     same time -- a bus alone on its array a group of one. The groups in turn, each on the board the one before handed
     on; the lanes on every copper layer (all_layers). The step's progress goes to its events file (bus_events:
-    BUS_EVENTS, else <OUT stem>.bus/events.jsonl), which every stage's process writes to as well."""
+    BUS_EVENTS, else <OUT stem>.bus/events.jsonl), which every stage's process writes to as well. `pack` (--pack):
+    every bus's whole route packs each round's laid lanes -- the setting BUS_PACK, given to every bus's process."""
     board, out = os.path.abspath(board), os.path.abspath(out)
     if not out.endswith('.kicad_pcb'):
         out += '.kicad_pcb'
     work = out[:-len('.kicad_pcb')] + '.bus'
     os.makedirs(work, exist_ok=True)
     with unrecorded(), bus_events.run(work):
-        return _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feedback_rounds, **sizes)
+        return _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feedback_rounds, pack, **sizes)
 
 
-def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feedback_rounds, **sizes):
+def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feedback_rounds, pack=False, **sizes):
     from kicad_parser import parse_kicad_pcb
     from copy_board import copy_board
     import awx_settings
@@ -454,6 +456,10 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
     # (every bus's lanes on every copper layer: the setting each bus's process takes, unless the caller named them)
     env_ = awx_settings.environ()
     env_.setdefault('ROUTE_LAYERS', all_layers(pcb))
+    if pack:
+        # (--pack: BUS_PACK, the setting every bus's whole route reads after its round's lay -- a bus's process takes
+        # the run's settings as its environment, negotiated_buses._env0; a harness sets it there with no flag)
+        env_['BUS_PACK'] = '1'
     with awx_settings.given(env_):
         for s, grp in groups.items():
             name = f'{s}-{"_".join(g_[1] for g_ in grp)}'
@@ -2482,6 +2488,12 @@ def main():
                          '(--rounds must reach it); its cuts and areas keep lanes off layers there, its raw cuts and '
                          'flips seed its solve and loop. Points in the board\'s frame ("frame": "bench" the round\'s '
                          'bench). Recorded with the step, so a replay runs the same rounds with no one looking')
+    ap.add_argument('--pack', action='store_true',
+                    help='THE PACK, off by default (the setting BUS_PACK=1): after a round\'s lay each single lane is '
+                         'pulled taut against its neighbour and laid again as packed octilinear copper (pack_lanes.py, '
+                         'pack.py); the packed board is graded as the lay is and kept only where it has no more nets '
+                         'open and no more violations, else the lay stands. A pair, and a lane the lay necked, stay '
+                         'as laid')
     ap.add_argument('--inproc', action='store_true', help='every stage in this process rather than each in its own')
     ap.add_argument('--json-out', help='the summary: the nets routed and refused (and why), the rules, the grade '
                                      '(default: <OUT>.bus/summary.json). With --find: the buses found and not, as '
@@ -2553,9 +2565,9 @@ def main():
         sys.exit(2)
     if a.src is None:
         sys.exit(cli_exit(route_buses(a.board, a.out, buses, a.k, a.rounds, a.inproc, json_out=a.json_out,
-                                      feedback_rounds=a.feedback_rounds, **sizes)[0], a.out))
+                                      feedback_rounds=a.feedback_rounds, pack=a.pack, **sizes)[0], a.out))
     sys.exit(cli_exit(route_bus(a.board, a.out, a.src, a.dest, a.k, a.rounds, a.inproc, json_out=a.json_out,
-                                feedback_rounds=a.feedback_rounds, **sizes)[0], a.out))
+                                feedback_rounds=a.feedback_rounds, pack=a.pack, **sizes)[0], a.out))
 
 
 if __name__ == '__main__':

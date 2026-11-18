@@ -50,9 +50,32 @@ Pt = Tuple[float, float]
 FREEZE = ts.FREEZE           # no moves this close to an endpoint
 STEP = ts.STEP               # fine spacing (mm)
 COARSE = 4 * ts.STEP         # coarse spacing (mm)
+MARGIN = 2.0                 # candidate obstacles: within this of the string's box (mm)
 OUT = 1e-3                   # a projected point sits this far outside the boundary (mm)
 CROSS_SIN = 0.5              # |sin(angle)| above which a capsule is a crossing, not a wall
 PUSHES = 6                   # projections per round for a point wedged between obstacles
+
+
+def _near(D, C, P):
+    """The candidates whose inflated box meets the string's box + MARGIN."""
+    x0, y0 = P.min(0) - MARGIN
+    x1, y1 = P.max(0) + MARGIN
+    if len(D):
+        md = ((D[:, 0] + D[:, 2] >= x0) & (D[:, 0] - D[:, 2] <= x1)
+              & (D[:, 1] + D[:, 2] >= y0) & (D[:, 1] - D[:, 2] <= y1))
+        Dn = D[md]
+    else:
+        Dn = D
+    if len(C):
+        cx0 = np.minimum(C[:, 0], C[:, 0] + C[:, 2]) - C[:, 4]
+        cx1 = np.maximum(C[:, 0], C[:, 0] + C[:, 2]) + C[:, 4]
+        cy0 = np.minimum(C[:, 1], C[:, 1] + C[:, 3]) - C[:, 4]
+        cy1 = np.maximum(C[:, 1], C[:, 1] + C[:, 3]) + C[:, 4]
+        mc = (cx1 >= x0) & (cx0 <= x1) & (cy1 >= y0) & (cy0 <= y1)
+        Cn = C[mc]
+    else:
+        Cn = C
+    return Dn, Cn
 
 
 def _tangents(P):
