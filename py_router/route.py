@@ -3215,6 +3215,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # than one "kept as the input had it".
     from fab_notes import via_snapshot as _via_snapshot962
     _input_vias962 = _via_snapshot962(pcb_data.vias, pcb_data)
+    _input_drills1925 = None
+    if backdrill_nets:
+        # #1925: and their back-drills and uuids, to tell the input's own vias
+        # from the ones this run lays beside or over them
+        from backdrill import input_snapshot as _bd_snapshot1925
+        _input_drills1925 = _bd_snapshot1925(pcb_data.vias)
 
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
@@ -9656,7 +9662,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if final_reconcile and not skip_routing:
         _backdrill1925 = _ship_backdrills1925(
             pcb_data, config, output_file, return_results,
-            locals().get('results_data'), _input_vias962)
+            locals().get('results_data'), _input_drills1925)
 
     # ---- POWER WIDTHS (#1033) ---------------------------------------------
     # Disclosure, not a gate: per requested-width net, how much of the copper

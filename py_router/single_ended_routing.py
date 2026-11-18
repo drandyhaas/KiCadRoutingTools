@@ -3043,6 +3043,18 @@ _BACKDRILL_FALLBACK = ("  (routed without the back-drill's via legality: its via
                        "back-drilled only where the drill is legal)")
 
 
+def _connects_more(a, b) -> bool:
+    """#1925: does routing result `a` connect more than `b`? A result over
+    none, a routed one over a failed one, then fewer failed tap edges. How
+    the two attempts of a net asked to be back-drilled are told apart; on a
+    tie the caller keeps the first, the one routed where the drill is legal."""
+    def key(r):
+        if r is None:
+            return (0, 0, 0)
+        return (1, 0 if r.get('failed') else 1, -int(r.get('tap_edges_failed', 0) or 0))
+    return key(a) > key(b)
+
+
 def _backdrill_search_config(config: GridRouteConfig, pcb_data, net_id: int):
     """#1925: the config a net asked to be back-drilled is searched with --
     the map's via-legality rung of its back-drilled via -- or None when the
@@ -5748,7 +5760,9 @@ def route_multipoint_main(pcb_data: PCBData, net_id: int, config: GridRouteConfi
                                                 obstacles, *args, **kwargs)
             if again and not again.get('failed'):
                 print(_BACKDRILL_FALLBACK)
-            return again if again is not None else result
+                return again
+            # both failed: the attempt that connected more, the first on a tie
+            return again if _connects_more(again, result) else result
         return _route_multipoint_main_impl(pcb_data, net_id, cfg,
                                            obstacles, *args, **kwargs)
 
@@ -6765,11 +6779,10 @@ def _backdrill_taps(pcb_data, net_id, config, obstacles, main_result,
         return first
     plain = route_multipoint_taps(pcb_data, net_id, plain_cfg, obstacles, main_result,
                                   global_offset, global_total, global_failed)
-    if plain is not None and (first is None or plain.get('tap_edges_failed', 0)
-                              < first.get('tap_edges_failed', 0)):
+    if _connects_more(plain, first):
         print(_BACKDRILL_FALLBACK)
         return plain
-    return first if first is not None else plain
+    return first
 
 
 def inprogress_via_ring_cells(v, net_id: int, config: GridRouteConfig,

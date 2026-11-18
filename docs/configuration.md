@@ -432,11 +432,17 @@ face (`Via.backdrills`). Two things follow, and only the second is an option.
 - **A back-drill a via of the board declares is an obstacle, with no flag.** On each
   layer it removes, the hole is the back-drill's diameter and has no copper, so
   the route steps hold other nets' tracks and new vias off its wall as they
-  hold them off an unplated hole: the larger of the pair's clearance and the
+  hold them off an unplated hole: the larger of the pair's clearance (the
+  wider of the two nets' classes, the back-drilled net's own included) and the
   board's copper-to-hole floor (`rules.min_hole_clearance`, never under the
   0.20 mm NPTH-to-track value). A new via's drill keeps the hole-to-hole
   minimum from the wider hole. The passes that move copper after a route read
   the same wall. A board with no back-drill is routed exactly as before.
+- **A layer a back-drill removes is not the barrel's copper**, for a via and
+  for a drilled pad. A route step ends no track of the net on it (the net
+  reaches that layer through a via of its own), `check_connected` joins
+  nothing to the barrel there, and `check_drc` reports a track that is joined
+  to it (`track-on-backdrilled-layer`, KiCad's `track_on_post_machined_layer`).
 - **`route.py --backdrill-nets` defines them** on the vias the step adds for
   the nets named, and only there. `--backdrill-oversize`, `--backdrill-margin`
   and `--backdrill-min-stub` are the fabricator's numbers: none has a default,
@@ -455,7 +461,11 @@ face (`Via.backdrills`). Two things follow, and only the second is an option.
   be without the flag (completion first), and the log says so. Each new via is marked as its net is routed, so the nets after it keep
   off its wall on the layers it removes. At the end of the step every such via
   is judged again on the board that ships: its span from the copper its net
-  really joins it on, kept only if the wall clears every other net there. The
+  really joins it on, kept only if the wall clears every other net there. A
+  via the input already had is left as it is: on the written board, one that
+  still carries its uuid, or one laid again on its spot with the same
+  back-drills. A net routed again lays its vias beside the old ones, and
+  those are the step's and are judged. The
   summary line `BACK-DRILL (route): N of M ...`, `BACKDRILL_JSON:` and the
   `backdrill` key of `--json-out` count the vias drilled, those with nothing to
   drill, and those left undrilled because the wall would stand too close
@@ -477,7 +487,7 @@ face (`Via.backdrills`). Two things follow, and only the second is an option.
   (the route step's own plane finalize is judged with the rest, on the board
   that ships); on a board whose file format predates KiCad 10, which cannot
   carry the token, the option defines nothing and the log says so; a
-  drilled pad's back-drill is read and kept but is not an obstacle yet; a
+  drilled pad's back-drill is not an obstacle to other nets yet; a
   via an earlier step added is left as it is; pours are not read by the judge
   (KiCad's own fill clears a back-drill); KiCad's post-machining tokens are not
   read. The GUI's route tab has the same four fields (Back-drill Nets,

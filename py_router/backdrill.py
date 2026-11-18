@@ -219,7 +219,9 @@ def legality_via(config, size: float, drill: float) -> Tuple[float, float]:
     must reach the wall's, and its drill is the back-drill's."""
     spec = config.backdrill
     wall = drill + spec.oversize
-    reach = wall + 2.0 * (wall_floor(config) - _min_clearance(config))
+    # the wall's keep-out is never narrower than the wall: a clearance above
+    # the copper-to-hole floor adds nothing to subtract
+    reach = wall + 2.0 * max(0.0, wall_floor(config) - _min_clearance(config))
     return (round(max(size, reach), 4), round(wall, 4))
 
 
@@ -288,17 +290,28 @@ def install(config, pcb_data) -> None:
         prepare(config)
 
 
+#: Bumped whenever this module gives a via its back-drills, so an answer
+#: kept by `board_has_backdrills` cannot outlive a mark made in place.
+_MARKS = [0]
+
+
 def board_has_backdrills(pcb_data) -> bool:
     """Does any via of the board declare a back-drill? Asked by the passes
-    that would otherwise do nothing for a board without one; the answer is
-    kept per via count, which every commit of a route changes."""
+    that would otherwise do nothing for a board without one. The answer is
+    kept while the via list has the same length and the same last via
+    (#339's key: a rip plus an add leaves the count alone and changes the
+    tail) and no via has been marked since."""
+    vias = pcb_data.vias
+    tail = vias[-1] if vias else None
+    key = (len(vias),
+           (tail.x, tail.y, tail.net_id, bool(getattr(tail, 'backdrills', None)))
+           if tail is not None else None, _MARKS[0])
     memo = getattr(pcb_data, '_has_backdrills', None)
-    n = len(pcb_data.vias)
-    if memo is not None and memo[0] == n:
+    if memo is not None and memo[0] == key:
         return memo[1]
-    got = any(getattr(v, 'backdrills', None) for v in pcb_data.vias)
+    got = any(getattr(v, 'backdrills', None) for v in vias)
     try:
-        pcb_data._has_backdrills = (n, got)
+        pcb_data._has_backdrills = (key, got)
     except Exception:                                           # noqa: BLE001
         pass
     return got
@@ -416,6 +429,8 @@ def mark_new_vias(pcb_data, net_id: int, config, vias, segments, obstacles=None)
             if tokens:
                 v.backdrills = tokens
                 n += 1
+        if n:
+            _MARKS[0] += 1
         return n
     except Exception as e:                                      # noqa: BLE001
         print(f"  WARNING: back-drills not marked on net {net_id} "
@@ -484,9 +499,13 @@ def wall_conflicts(index: _Index, via, layers: Iterable[str], size: float, confi
     layers = list(layers)
     lset = set(layers)
 
+    own_clearance = config.obstacle_clearance(net)
+
     def need(other_net, layer):
+        # the pair's clearance as KiCad grades the disc: the wider of the two
+        # nets' classes, the via's own included
         return wall_clearance(config, config.layer_clearance(
-            layer, config.obstacle_clearance(other_net), other_net))
+            layer, max(own_clearance, config.obstacle_clearance(other_net)), other_net))
 
     for s in index.near(index.segs, via.x, via.y, reach + 1.0):
         if s.net_id == net or s.layer not in lset:
@@ -544,6 +563,41 @@ def wall_conflicts(index: _Index, via, layers: Iterable[str], size: float, confi
     return out
 
 
+def input_snapshot(vias) -> List[tuple]:
+    """`(net, x, y, size, back-drills, uuid)` of every via, taken BEFORE a
+    step changes the board: what `finalize` tells the input's own vias by."""
+    return [(int(v.net_id), float(v.x), float(v.y), float(v.size or 0.0),
+             {t: tuple(bd) for t, bd in (getattr(v, 'backdrills', None) or {}).items()},
+             getattr(v, 'uuid', '') or '')
+            for v in vias or () if v.net_id is not None]
+
+
+def _inputs_own(via, snap_by_net, input_uuids, given: bool) -> bool:
+    """Is `via` one the input board already had, to be left as it is?
+
+    On a written board (`given` False) it is the input's own block when it
+    carries an input via's uuid: the writer keeps an untouched via's block
+    and gives every via it lays a new one. Otherwise it is the input's only
+    where an input via of the net stood at its spot (within half the smaller
+    diameter, the reach of a nudge) with the SAME back-drills: a via laid
+    again carrying the input's own drills. Standing beside an input via is
+    not enough. A re-routed net's vias land there, and each carries the mark
+    the route gave it, which nothing has judged yet. With no uuid to read on
+    a written board, the same spot and the same (or no) drills is the
+    input's."""
+    uuid = getattr(via, 'uuid', '') or ''
+    if not given and uuid and uuid in input_uuids:
+        return True
+    mine = {t: tuple(bd) for t, bd in (getattr(via, 'backdrills', None) or {}).items()}
+    size = float(getattr(via, 'size', 0.0) or 0.0) or 0.6
+    for x, y, isz, drills, _uuid in snap_by_net.get(via.net_id, ()):
+        if math.hypot(via.x - x, via.y - y) > max(1e-3, min(size, isz or 0.6) / 2.0):
+            continue
+        if drills == mine and (drills or (not given and not uuid)):
+            return True
+    return False
+
+
 def _drilled(tokens, copper):
     from via_stubs import drilled_layers
     return drilled_layers(tokens, copper)
@@ -553,11 +607,13 @@ def finalize(pcb_data, config, input_snapshot, candidates=None) -> Tuple[dict, d
     """Decide, on the board that ships, the back-drills of every via the
     step added for the asked nets. `pcb_data` is that board, `candidates` its
     vias to judge (default: all of `pcb_data.vias`), `input_snapshot` is
-    `fab_notes.via_snapshot` of the board before the step.
+    `input_snapshot` of the board's vias before the step.
 
     Returns ({id(via): (via, {token: Backdrill})}, record), and leaves each
     judged via's `backdrills` as decided. A via the input already had is left
-    alone. The record counts, over the step's new vias on
+    alone (`_inputs_own`); one the step laid again beside or on an input
+    via's spot is the step's, and is judged. The record counts, over the
+    step's new vias on
     the asked nets: `vias`, `drilled`, and per reason the sides left
     (`short`, `margin`, `no stackup`, `unjoined`), `conflict` (vias whose
     wall would stand too close to another net on a layer the drill removes,
@@ -565,7 +621,6 @@ def finalize(pcb_data, config, input_snapshot, candidates=None) -> Tuple[dict, d
     `conservative_only` (vias drilled here that the all-layer test of the
     search would have refused: what a per-span test in the search could add).
     """
-    from fab_notes import _preexisting
     from via_stubs import copper_depths, joined_layers
     spec = config.backdrill
     copper = list(pcb_data.board_info.copper_layers or [])
@@ -573,6 +628,8 @@ def finalize(pcb_data, config, input_snapshot, candidates=None) -> Tuple[dict, d
     snap_by_net: Dict[int, list] = {}
     for ent in input_snapshot or ():
         snap_by_net.setdefault(ent[0], []).append(ent[1:])
+    input_uuids = {ent[5] for ent in input_snapshot or () if ent[5]}
+    given = candidates is not None
     index = _Index(pcb_data, copper)
     out = {}
     rec = {'nets': len(spec.net_ids), 'oversize_mm': spec.oversize,
@@ -582,7 +639,8 @@ def finalize(pcb_data, config, input_snapshot, candidates=None) -> Tuple[dict, d
            'not_covered': list(NOT_COVERED)}
     copper_by_net = {}
     judged = [v for v in (candidates if candidates is not None else pcb_data.vias)
-              if v.net_id in spec.net_ids and not _preexisting(v, snap_by_net)]
+              if v.net_id in spec.net_ids
+              and not _inputs_own(v, snap_by_net, input_uuids, given)]
     # Judged afresh, one after the other: a via's wall is weighed against the
     # drills already kept, never against a mark that may yet be refused (two
     # neighbours would otherwise refuse each other).
@@ -617,6 +675,7 @@ def finalize(pcb_data, config, input_snapshot, candidates=None) -> Tuple[dict, d
             rec['conservative_only'] += 1
         v.backdrills = dict(tokens)
         out[id(v)] = (v, tokens)
+    _MARKS[0] += 1
     return out, rec
 
 
@@ -626,7 +685,7 @@ NOT_COVERED = (
     "pours: the judge and the fill model do not read a back-drill "
     "(KiCad's own fill clears it)",
     "the plane steps and the diff-pair step define no back-drill",
-    "a drilled pad's back-drill is not an obstacle",
+    "a drilled pad's back-drill is not an obstacle to other nets",
 )
 
 
