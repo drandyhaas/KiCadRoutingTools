@@ -270,8 +270,15 @@ def main_edge_pads(result: dict):
     if not info or not routed:
         return None
     from net_queries import pad_label
+
+    def label(end):
+        # A routed end is a pad, or a stand-in at the free end of copper an
+        # earlier step laid (connectivity._EndpointStub), which has no part
+        if getattr(end, 'component_ref', None):
+            return pad_label(end)
+        return f'copper end ({end.global_x:.3f}, {end.global_y:.3f})'
     # pad_info rows are (gx, gy, layer_idx, x, y, pad)
-    labels = [pad_label(info[i][5]) for i in sorted(routed)
+    labels = [label(info[i][5]) for i in sorted(routed)
               if 0 <= i < len(info) and len(info[i]) > 5]
     return labels or None
 
