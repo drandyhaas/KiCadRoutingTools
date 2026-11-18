@@ -117,7 +117,18 @@ Or [download the ZIP](https://github.com/drandyhaas/KiCadRoutingTools/archive/re
 
 Commands here use `python3`. On Windows, use `py -3` (or `python`) if `python3` is not found.
 
-### 2. Install the Rust Router
+### 2. Install Python dependencies
+
+Install dependencies into the interpreter that will run the CLI:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+The KiCad plugin uses KiCad's Python. See [Requirements](#requirements)
+for details.
+
+### 3. Install the Rust Router
 
 ```bash
 python3 build_router.py
@@ -155,7 +166,7 @@ python3 build_router.py --tag v0.15.0     # download a specific release
 python3 build_router.py --clean           # remove all build artifacts
 ```
 
-### 3. Choose Your Interface
+### 4. Choose Your Interface
 
 **To route a whole board automatically, use one of two ways** -- and an AI assistant
 asked to route a board with this package should do the same:
@@ -231,10 +242,10 @@ matching, keep-away rules, buses, a particular plane map, or a net class that is
 real requirement rather than aspirational -- run the tools yourself, the kind of chain
 `/plan-pcb-routing` plans:
 
-```bash
-# Optionally place the board first, by its functional groups (see py_placer/placement/README.md)
-python3 py_placer/place_simple.py my_board.kicad_pcb placed.kicad_pcb --groups groups.json --intent intent.json
+If the parts need placement, first follow the [placement guide](py_placer/placement/README.md).
+Use the resulting placed board as `my_board.kicad_pcb` in this chain.
 
+```bash
 # Pour the planes FIRST (#562): the fanout's plane-drop vias then land on
 # real fill, and the route step welds plane pads into it.
 python3 py_router/route_planes.py my_board.kicad_pcb poured.kicad_pcb --nets GND --plane-layers B.Cu
@@ -731,29 +742,9 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Routing Architecture](docs/routing-architecture.md) | Module structure, obstacle maps, A* algorithm |
-| [Python API](docs/python-api.md) | Using the modules as a library: parser, writer, modification, config, net analysis, impedance — with runnable examples |
-| [Configuration](docs/configuration.md) | Command-line options, GridRouteConfig parameters |
-| [Differential Pairs](docs/differential-pairs.md) | P/N pairing, polarity swaps, via handling |
-| [Net Ordering](docs/net-ordering.md) | MPS algorithm, inside-out ordering, strategy comparison |
-| [Rip-Up and Reroute](docs/rip-up-reroute.md) | Blocking analysis, progressive N+1 escalation, reroute loop |
-| [Length Matching](docs/length-matching.md) | Trombone meanders, via barrel lengths, DDR auto-grouping, time matching |
-| [Bus Routing](docs/bus-routing.md) | Bus detection and filter, corridor planning, middle-out ordering, corridor attraction; the topo bus step |
-| [Guide Corridor](docs/configuration.md#guide-corridor-options-preferred-route) | User-layer guide paths, waypoints, best-effort following |
-| [Power/Ground Planes](docs/route-plane.md) | Copper zones with automatic via placement |
-| [Utilities](docs/utilities.md) | Every checker (DRC, connectivity, completion, hygiene, pads), the fanout generators, placement tools, renderers, the DRC-settings fixer |
-| [Design Brief](docs/design-brief.md) | Declare what the board IS -- the facts a board file cannot contain -- and compile them into the intent (`<board>.design-brief.json`) |
-| [Floorplan Intent](docs/floorplan-intent.md) | Declare the floorplan, grade the board against it (`check_floorplan.py`) |
-| [BGA Fanout](py_router/bga_fanout/README.md) | BGA escape routing generator |
-| [QFN Fanout](py_router/qfn_fanout/README.md) | QFN/QFP escape routing generator |
-| [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
-| [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
-| [Claude Skills](docs/claude-skills.md) | All ten AI skills: placement and routing end to end, routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
-| [Placement](py_placer/placement/README.md) | Placement by function: groups, one annealed objective, legality, the floorplan intent's grade |
-| [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
-| [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
+The [documentation index](docs/README.md) links to the routing and placement
+guides, Python API, test instructions, and release process. It also identifies
+the historical proposals and lists the checks for documentation changes.
 
 ## Project Structure
 
@@ -1043,7 +1034,11 @@ Rust acceleration provided a ~10x speedup over the original pure-Python A*.
 
 ## Command Reference
 
-Every tool prints its full option list with `--help`, and **[docs/configuration.md](docs/configuration.md)** is the single source of truth for the flags — defaults, guidance, and which tool each applies to. The tool-specific guides go deeper on their area:
+Every tool prints its accepted options with `--help`. [Configuration](docs/configuration.md)
+explains those options and their defaults. Use [Routing Configuration API](docs/api-routing-config.md)
+for `GridRouteConfig` fields. If a reference disagrees with the checkout's parser
+or shared defaults, correct the reference against that code. The tool-specific
+guides go deeper on their area:
 
 | Tool | Purpose | Guide |
 |------|---------|-------|
@@ -1094,7 +1089,8 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 - scipy (`pip3 install scipy`) - used for optimal target assignment and Voronoi partitioning
 - shapely **2.0 or newer** (`pip3 install "shapely>=2.0"`) - polygon operations: multi-net plane layers, the placement courtyard reader
 - Pillow (optional, `pip3 install Pillow`; 10.1+ for full-size caption fonts) - board renders and the placement preview; without it only rendering is off
-- `pip3 install -r requirements.txt` installs all of the above
+- `python3 -m pip install -r requirements.txt` installs the Python dependencies
+  into the selected CLI interpreter.
 - Rust toolchain — only needed if you build the router from source (`python3 build_router.py --from-source`); not required when using the prebuilt binary
 
 ## Limitations
