@@ -1123,6 +1123,11 @@ def loop(solve, out, rounds, env, log, try_lay=None):
             lcuts += [c for c in gj.get('lcuts', []) + pj.get('lcuts', []) if c not in lcuts]
             if lcuts:
                 log(f"  layer cuts: {', '.join(c_['lane'] + ' under ' + c_['island'] for c_ in lcuts)}")
+            # (the lanes' own routes in the frame are the FRAME geometry's map: the embedding's output, which `gj` is
+            # on more layers than two, carries none -- read from it alone, own_spans had no map and every cut of the
+            # round stood unplaced, its box projected on the trunk)
+            if not gj.get('uxy') and os.path.isfile(O(f'g{i}.json')):
+                gj = {**gj, 'uxy': json.load(open(O(f'g{i}.json'))).get('uxy') or {}}
             json.dump(own_spans({'cuts': cuts, 'vcuts': vcuts, 'lcuts': lcuts}, gj, pj), open(O(f'c{i}.json'), 'w'))
             n = len(cuts) + len(vcuts) + len(lcuts)
             n_cut = n                               # (the cuts alone: what the solve would be given)

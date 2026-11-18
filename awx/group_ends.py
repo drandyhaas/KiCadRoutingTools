@@ -2760,6 +2760,20 @@ def bus_stage(out_path, base, log=print):
                 ends_model={k: {} for k in ('over', 'load', 'x', 'front')})
     # (the blocked fronts the model chose, for the rounds' solves as for the model's own check: bus_plan)
     side['ends_model']['front'] = {n: v for n, v in (plan.get('front') or {}).items() if n in names}
+    # (a bus to SEVERAL PARTS: each net's own part, as the bus's own fanout writes it -- the berths' box of each part
+    # by itself. With none, the round's feedback and its ends' repair read ONE box round every part's berths, the
+    # gap between the parts in it: a finding out between two parts was read as at the berths, a loop stopped for
+    # its ends on findings its solve had still to answer, and the model was told of pairs of ends never crowded
+    # together)
+    parts_ = [r_ for r_ in dest.split('+') if r_]
+    if len(parts_) > 1:
+        side['dest_of'] = {}
+        for nm in names:
+            ps_ = [p_ for p_ in byname[nm][1].pads if p_.component_ref in parts_]
+            if ps_:
+                e_ = plan['ends'][nm][1]
+                side['dest_of'][nm] = min(ps_, key=lambda p_: math.hypot(p_.global_x - e_[0],
+                                                                         p_.global_y - e_[1])).component_ref
     # (the cuts the model read the ends at, and a group's ways in: the frame takes the ones it is given)
     for k in ('dest_cut', 'src_cut', 'dest_entry'):
         if plan.get(k) is not None:
