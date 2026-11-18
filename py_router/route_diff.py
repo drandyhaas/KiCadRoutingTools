@@ -2709,11 +2709,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     dp_scope = diff_cleanup_scope(
         diff_pair_ids_to_route, routed_results, state.diff_pair_single_ended_nets,
         lambda nid: _dpc_member_connected(pcb_data, nid))
+    # #1978: an AC-coupled chain this step matches end to end is length-matched
+    # too, though its pairs are not in config.skew_graded_net_ids
+    _ac_matched_ids = ({nid for _xn in ac_xnets
+                        for nid in (_xn.p_net_ids + _xn.n_net_ids)}
+                       if config.ac_couple_match else set())
     _dp_cleanup = run_post_route_cleanup(
         results, pcb_data, dp_scope, config,
         label='Diff-pair ', snap=False, phantom=False, neck=False,
         keep_input_copper=keep_input_copper,
-        progress_callback=progress_callback)
+        progress_callback=progress_callback,
+        extra_length_matched_net_ids=_ac_matched_ids)
     # #1843: a coupled pair is laid at one gap, so a tightened rule area it
     # passes through is not honoured between P and N: said so, per pair.
     from area_clearance import pair_gaps_below

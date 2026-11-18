@@ -44,6 +44,7 @@ from pcb_modification import (
     nudge_grazing_vias,
     prune_redundant_cycles,
     excise_via_shorted_loops,
+    length_graded_net_ids,
     collapse_strict_redundant,
     remove_orphan_islands,
     sweep_dead_ends,
@@ -197,6 +198,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            smooth: bool = False,
                            merge_collinear: bool = True,
                            strict_collapse: bool = True,
+                           extra_length_matched_net_ids=None,
                            ) -> CleanupOutcome:
     """Run the post-route cleanup passes in their one canonical order.
 
@@ -217,7 +219,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                                   prune must keep (#224/#276/#280).
       7. prune_redundant_cycles -- per-net tree invariant (RAM_A9 loops),
          then excise_via_shorted_loops (#1978: a loop whose two ends are
-         one via, which the prune cannot see), then collapse_strict_redundant (#217/#1063: strictly redundant
+         one via, which the prune cannot see; length-matched nets only), then collapse_strict_redundant (#217/#1063: strictly redundant
          copper, incl. in-pad / in-via wiggles, and the vias it frees) and
          remove_orphan_islands. The collapse (and 10b) runs only with
          ``strict_collapse`` and outside a defer_strict_collapse region:
@@ -301,6 +303,13 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     cleaned normally, and the strip lists then stay empty by construction.
     Do NOT set it on the plane fronts' file-round-trip (results=[] makes
     every segment read as input and would freeze all plane copper).
+
+    The via-shorted loop cut (#1978) runs only on the nets this step
+    length-matches: `length_graded_net_ids` (pairs matched P to N, group
+    members) plus ``extra_length_matched_net_ids`` (route_diff's AC-coupled
+    chain members). Such a loop carries no signal and only a length measure
+    counts it, while removing it elsewhere just reshapes copper the later
+    steps route round.
     """
     out = CleanupOutcome()
     counts = out.counts
@@ -561,9 +570,15 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                   f"segment(s) across {_cy_nets} net(s)")
         # #1978: a loop whose two ends are one via -- a track passing over
         # its own via mid-span, the copper on one side coming back into it
-        _prog("via-shorted loops")
-        _vl_n, _vl_segs = excise_via_shorted_loops(
-            results, pcb_data, _sub_scope, keep_input_copper=keep_input_copper)
+        _vl_n = _vl_segs = 0
+        _vl_scope = (length_graded_net_ids(pcb_data, config)
+                     | set(extra_length_matched_net_ids or ()))
+        if _vl_scope and _sub_scope is not None:
+            _vl_scope &= set(_sub_scope)
+        if _vl_scope:
+            _prog("via-shorted loops")
+            _vl_n, _vl_segs = excise_via_shorted_loops(
+                results, pcb_data, _vl_scope, keep_input_copper=keep_input_copper)
         counts['via_loops_excised'] = _vl_n
         _trace('via_loops')
         if _vl_n:
