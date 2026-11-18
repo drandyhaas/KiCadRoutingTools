@@ -1650,6 +1650,21 @@ _NO_LAYER_RULES: Dict[str, float] = {}
 #: a track / via stamp stands for
 _ROUTED_TYPES = ('track', 'via')
 
+#: #1931: the obstacle key of a footprint's (or the board's) copper GRAPHIC,
+#: passed where a stamp takes a pad type. KiCad types that copper `Graphic`,
+#: never `Track`: measured on kicad-cli 10.0.6, a rule on `B.Type == 'Graphic'`
+#: binds a net tie's filled bridge and a stroked fp_line alike, and one on
+#: `B.Type == 'Track'` binds neither. No pad type is spelled so.
+GRAPHIC_OBSTACLE = 'graphic'
+
+
+def _obstacle_types(pad_type: Optional[str]) -> tuple:
+    """The item types an obstacle stamp stands for: a track or via (None),
+    a graphic (`GRAPHIC_OBSTACLE`), else a pad of that pad type."""
+    if pad_type is None:
+        return _ROUTED_TYPES
+    return ('graphic',) if pad_type == GRAPHIC_OBSTACLE else ('pad',)
+
 
 class ScopedClearanceInstall:
     """A call's scoped-channel stamps (#1491): for an obstacle net (and pad
@@ -1678,7 +1693,7 @@ class ScopedClearanceInstall:
         key = (self.sc._sig(net_id), pad_type)
         if key in self._memo:
             return self._memo[key]
-        types = _ROUTED_TYPES if pad_type is None else ('pad',)
+        types = _obstacle_types(pad_type)
         rule_max, unmatched, relaxers = None, [], []
         for r in self.reps:
             hit_all = True
@@ -1760,7 +1775,7 @@ class ScopedClearanceInstall:
         hit = self._layered_memo.get(key)
         if hit is not None and hit[0] is lmap:
             return hit[1]
-        types = _ROUTED_TYPES if pad_type is None else ('pad',)
+        types = _obstacle_types(pad_type)
         bound, vals = False, []
         for r in self.reps:
             cp = max(clr, nc.get(int(net_id or 0), clr), nc.get(r, clr))
@@ -1788,7 +1803,7 @@ class ScopedClearanceInstall:
         if key in self._layer_memo:
             return self._layer_memo[key]
         lo = self.sc.layer_orders.get(layer, -1)
-        types = _ROUTED_TYPES if pad_type is None else ('pad',)
+        types = _obstacle_types(pad_type)
         later, vals = False, []
         for r in self.reps:
             for rt in _ROUTED_TYPES:

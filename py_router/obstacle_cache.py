@@ -956,12 +956,16 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
         layer_w = config.get_net_track_width(net_id, seg.layer)
         seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) else layer_w
         own_half = seg_w / 2
-        if seg_w == layer_w:
+        # #1931: this net's copper graphic is a Graphic to a scoped rule
+        _gr = getattr(seg, 'graphic', False)
+        if seg_w == layer_w and not (_gr and config.scoped_clearance is not None):
             expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
             via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
-            _clr_l = config.layer_clearance(seg.layer, obs_clearance, net_id)  # #498
-            _trk_l = config.track_obstacle_clearance(net_id, _clr_l)  # dru track rule
+            _clr_l = config.layer_clearance(  # #498
+                seg.layer, (config.obstacle_clearance(net_id, graphic=True) if _gr
+                            else obs_clearance), net_id, graphic=_gr)
+            _trk_l = config.track_obstacle_clearance(net_id, _clr_l, graphic=_gr)  # dru track rule
             expansion_mm = max(coord.grid_step,
                                own_half + _trk_l
                                + config.route_reserve_width(seg.layer) / 2

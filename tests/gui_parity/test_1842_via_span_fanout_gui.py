@@ -10,11 +10,17 @@ bga_fanout.py, the GUI with the same step as a plan through the REAL headless
 dialog and plan executor (`py_router/run_plan.py`). They must agree on: the
 vias (count, type, layer pair, size, drill), the layers the tracks are on,
 how many nets got copper, and the output project's via and drilled-hole
-minimums, which must be the board's own.
+minimums, which must be the board's own. A third leg runs the plan in process
+and reads those minimums off the LIVE board: the saved project cannot show
+them, since the headless save skips the settings and the project is written
+from the file's own copper, while KiCad writes the live settings at the
+user's next save.
 
-Needs KiCad's python (pcbnew + wx): exit 77 without it.
+Needs KiCad's python (pcbnew + wx): launched under any other, it re-execs
+into KiCad's (`headless_plan.reexec_into_kicad`), and exits 77 only when
+there is none.
 
-    <KiCad python> tests/gui_parity/test_1842_via_span_fanout_gui.py
+    python3 tests/gui_parity/test_1842_via_span_fanout_gui.py
 """
 import contextlib
 import io
@@ -78,7 +84,9 @@ def main():
         import pcbnew  # noqa: F401
         import wx      # noqa: F401
     except Exception as e:                                     # noqa: BLE001
-        print(f"SKIP: needs KiCad's python (pcbnew + wx): {e}")
+        from headless_plan import reexec_into_kicad
+        reexec_into_kicad(__file__)
+        print(f"SKIP: needs KiCad's python (pcbnew + wx), and none was found: {e}")
         return 77
     py = [sys.executable, '-X', 'utf8']
     with tempfile.TemporaryDirectory() as td:
@@ -124,6 +132,26 @@ def main():
                 'min_microvia_drill', 'min_via_annular_width', 'min_hole_clearance')
         ok(all(gui['rules'][k] == own.get(k) for k in kept),
            "and the board's own via and drilled-hole minimums are kept")
+
+        # The live board: what KiCad saves into the project at the user's save.
+        # A micro span's via is no floor for the board's through vias and holes.
+        from copy_board import copy_board
+        from headless_plan import run_plan
+        import pcbnew
+        live_path = os.path.join(td, 'live.kicad_pcb')
+        copy_board(board, live_path)
+        with contextlib.redirect_stdout(io.StringIO()):
+            res = run_plan(live_path, json.load(open(plan, encoding='utf-8'))['steps'],
+                           timeout=1500, save=False)
+        if [st.get('status') for st in res.get('steps') or ()] != ['done']:
+            raise AssertionError(f"BROKEN TEST: the in-process plan did not run: "
+                                 f"{res.get('steps')} {res.get('log')}")
+        ds = pcbnew.GetBoard().GetDesignSettings()
+        live = {'min_via_diameter': round(ds.m_ViasMinSize / 1e6, 4),
+                'min_through_hole_diameter': round(ds.m_MinThroughDrill / 1e6, 4)}
+        ok(all(live[k] == own.get(k) for k in live),
+           f"the live board keeps them too: live {live}, board's own "
+           f"{ {k: own.get(k) for k in live} }")
     if FAILS:
         print(f"\nFAILED: {len(FAILS)}")
         return 1

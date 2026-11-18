@@ -2554,6 +2554,13 @@ def _free_on_pad_cells(pad, layer_idx, config, obstacles, coord,
     # The landing rule is shared with placement's keep-out channel (#1031),
     # which must not accept a pose this function would find no cell on.
     from net_queries import pad_landing_extent
+    # The pad's copper on THIS layer (a per-layer padstack's smaller layer):
+    # a landing seeded from the max-over-layers model ends a track on copper
+    # only another layer has, which KiCad grades open.
+    from kicad_parser import pad_on_layer
+    _lname = (config.layers[layer_idx]
+              if 0 <= layer_idx < len(getattr(config, 'layers', ()) or ()) else None)
+    pad = pad_on_layer(pad, _lname, joins=True)
     # getattr: connectivity._EndpointStub (zero size, no `shape`) reaches
     # here from the end-of-run reconciliation; it must yield no cells, not
     # raise.
@@ -3940,11 +3947,13 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
     only ever ADDS Nones, so it cannot invalidate a cached failure.
     Successes are never cached (they carry mutable Via/Segment objects and
     the tap path's note_clearance_used side effect -- the exact two hazards
-    that sank the full-result memo, reverted same day). Bails to the impl
-    when phase-3 in-flight copper is pending: pending copper changes
-    placement legality WITHOUT an epoch bump, so a failure under inflight
-    state must not be trusted later. Likewise when the caller hands
-    ``pending_vias`` (this net's own uncommitted vias, see the impl)."""
+    that sank the full-result memo, reverted same day). Phase-3 in-flight
+    copper and the caller's ``pending_vias`` (this net's own uncommitted
+    vias, see the impl) change placement legality WITHOUT an epoch bump, so
+    a failure under them is keyed on their exact content as well: it answers
+    only the identical in-flight/pending state, never a later different one.
+    (They used to bypass the memo; the same boxed pad then re-failed with the
+    same pending via on every rescue rung, tigard 191 calls / 74 s.)"""
     # #1842: a via-span step lays copper on its span only. This via and its
     # stub start on the PAD's layer, so a pad with copper outside the span
     # (an F.Cu ball in an In1-In6 step) is not this step's to escape.
@@ -3957,23 +3966,29 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
 
     from plane_pad_tap import inflight_copper_dicts
     _iv, _isg = inflight_copper_dicts(pcb_data)
-    _inflight = bool(_iv) or bool(_isg) or bool(pending_vias)
-    _memo = None
-    if not _inflight:
-        _memo = getattr(pcb_data, '_via_place_fail_memo', None)
-        if _memo is None:
-            _memo = pcb_data._via_place_fail_memo = set()
-        _mkey = (net_id, pad_obj.component_ref, pad_obj.pad_number,
-                 pad_obj.global_x, pad_obj.global_y,
-                 getattr(pcb_data, '_copper_epoch', 0),
-                 config.via_size, config.via_drill, config.clearance,
-                 config.board_edge_clearance, config.same_net_pad_clearance,
-                 tuple(layer_names))
-        if _mkey in _memo:
-            return None
+    _memo = getattr(pcb_data, '_via_place_fail_memo', None)
+    if _memo is None:
+        _memo = pcb_data._via_place_fail_memo = set()
+    # Exact content of the copper the impl adds on top of pcb_data (empty
+    # tuples when none is in flight): the impl's extra_vias/extra_segments.
+    _transient = (
+        tuple((v['x'], v['y'], v['size'], v['drill'], tuple(v['layers']),
+               v['net_id'], v['via_type']) for v in (_iv or ())),
+        tuple((s['start'], s['end'], s['width'], s['layer'], s['net_id'])
+              for s in (_isg or ())),
+        tuple((v.x, v.y, v.size, v.drill, tuple(v.layers), v.net_id,
+               getattr(v, 'via_type', 'through')) for v in (pending_vias or ())))
+    _mkey = (net_id, pad_obj.component_ref, pad_obj.pad_number,
+             pad_obj.global_x, pad_obj.global_y,
+             getattr(pcb_data, '_copper_epoch', 0),
+             config.via_size, config.via_drill, config.clearance,
+             config.board_edge_clearance, config.same_net_pad_clearance,
+             tuple(layer_names), _transient)
+    if _mkey in _memo:
+        return None
     r = _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data,
                                       net_id, coord, layer_names, pending_vias)
-    if r is None and _memo is not None:
+    if r is None:
         _memo.add(_mkey)
     return r
 
