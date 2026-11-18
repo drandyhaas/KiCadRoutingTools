@@ -105,14 +105,29 @@ w_back = G.options((22.5, 0.0), (1.0, 0.0), 'J', 'B.Cu', True)
 check(sorted(w[0] for w in w_back) == ['on', 'under'], f'3: a far-face berth with a via -- on, or under J: {w_back}')
 check(not any(w[0] == 'under' for w in G.options((22.5, 0.0), (1.0, 0.0), 'J', 'B.Cu', False)),
       '3: no way under J on B.Cu, its own layer, without a via')
-# ...the landings on a mouth from (0, 0) to (0, 10): three lanes placed at its a end, one at its b end
-ld = wf.Group.landings((0.0, 0.0), (0.0, 10.0), [('a1', (0, 0.1)), ('a2', (0, 0.2)), ('a3', (0, 0.3)),
-                                                  ('b1', (0, 9.9))], 0.4)
-check({n: round(p[1], 6) for n, p in ld.items()} == {'a1': 0.4, 'a2': 0.8, 'a3': 1.2, 'b1': 9.6},
-      f'3: a wide mouth -- its lanes a lane\'s room apart from their own wall: {ld}')
-ld = wf.Group.landings((0.0, 0.0), (0.0, 1.0), [('a1', (0, 0.1)), ('a2', (0, 0.2)), ('b1', (0, 0.9))], 0.4)
-check({n: round(p[1], 6) for n, p in ld.items()} == {'a1': 0.25, 'a2': 0.5, 'b1': 0.75},
-      f'3: a mouth too short for them -- spread evenly: {ld}')
+# ...the landings on a mouth from (0, 0) to (0, 10): three lanes of the part at its a end, one of the part at its b
+# end (a way's last field says which end its part stands at: Group._mouth_place)
+
+
+def way(end):
+    return (None,) * 7 + ((0.0, 0.0, 0.0, end, None),)
+
+
+ld, tl = wf.Group.landings(None, (0.0, 0.0), (0.0, 10.0), [('a1', way('a'), None, None), ('a2', way('a'), None, None),
+                                                           ('a3', way('a'), None, None), ('b1', way('b'), None, None)], 0.4)
+check({n: round(p[1], 6) for n, p in ld.items()} == {'a1': 0.4, 'a2': 0.8, 'a3': 1.2, 'b1': 9.6} and not tl,
+      f'3: a wide mouth -- its lanes a lane\'s room apart from their own wall: {ld} {tl}')
+ld, tl = wf.Group.landings(None, (0.0, 0.0), (0.0, 1.0), [('a1', way('a'), None, None), ('a2', way('a'), None, None),
+                                                          ('b1', way('b'), None, None)], 0.4)
+check({n: round(p[1], 6) for n, p in ld.items()} == {'a1': 0.25, 'a2': 0.5, 'b1': 0.75} and not tl,
+      f'3: a mouth too short for them -- spread evenly: {ld} {tl}')
+# ...and a row lane's TAIL: two lanes of a row, their berths 2 and 4 mm down it, each with a stub from its berth to its
+# pad. The second's straight tail would pass 0.3 mm from the first's stub end: it goes by a point a lane's room
+# beyond that end; the first, which passes no stub, has no tail
+ld, tl = wf.Group.landings(None, (0.0, 0.0), (0.0, 10.0), [('a1', way('a'), (2.0, 0.2), (2.0, -0.5)),
+                                                           ('a2', way('a'), (4.0, 0.2), (4.0, -0.5))], 0.4)
+check(set(tl) == {'a2'} and [tuple(round(c, 6) for c in q) for q in tl['a2']] == [(2.0, 0.6)],
+      f'3: a row lane\'s tail over the stub end it passes: {tl}')
 # 4. the arrangement: every lane's ways and the cut, the fewest crossings -- equal to the best of every valid split
 # (each pocket's lanes in their order along it), and Group.score's crossings at every cut one by one
 import itertools  # noqa: E402
