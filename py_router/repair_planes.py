@@ -2405,6 +2405,9 @@ def _repair_planes_all(
                                                            'through'),
                                        'tenting_attrs': dict(
                                            getattr(_x, 'tenting_attrs', None)
+                                           or {}),
+                                       'backdrills': dict(
+                                           getattr(_x, 'backdrills', None)
                                            or {})})
                                   _prov_via(_x.net_id, _x.x, _x.y,
                                             'custody-stub')
@@ -3676,7 +3679,8 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
                 # the parser could not read back at all (#748).
                 net_name=via_net_name(via['net_id'], net_id_to_name),
                 tenting_attrs=via.get('tenting_attrs'),
-                via_type=via.get('via_type')
+                via_type=via.get('via_type'),
+                backdrills=via.get('backdrills')        # #1925
             )
             via_sexprs.append(sexpr)
 

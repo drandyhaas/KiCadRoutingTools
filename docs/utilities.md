@@ -19,6 +19,7 @@ runnable tool in the clone with a one-line purpose.
   [non-orthonormal segments](#non-orthonormal-segment-checker-check_orthonormalpy) ·
   [impedance](#impedance-audit-check_impedancepy) ·
   [return vias](#return-via-coverage-check_return_viaspy) ·
+  [via stubs](#via-stub-lengths-check_via_stubspy) ·
   [reference planes](#reference-plane-check-check_reference_planepy) ·
   [power drop](#power-drop-report-check_power_droppy) ·
   [reachability](#reachability-check-check_reachabilitypy) ·
@@ -3352,6 +3353,67 @@ share one reference plane: the stackup is not consulted. `board_score
 --impedance-nets` publishes the count for the named nets as
 `advisory.return_vias`, outside `blocking`, and its `RETURN VIAS` line names a
 named net whose vias were left out as power.
+
+## Via Stub Lengths (`check_via_stubs.py`)
+
+How much barrel does each via leave past the layers its net uses (#1925)? It
+reports, per via of the nets asked for, the stub on each side through the
+stackup, the longest stub per net, and the vias over `--max-stub`. Read-only,
+report-only (exit 0 whatever it counts; 2 when a `--nets` pattern names no
+net of the board; 3 for a missing board). It changes no board and proposes no
+back-drill: it is the instrument a back-drill threshold would be judged by.
+
+```bash
+python3 py_tools/check_via_stubs.py routed.kicad_pcb [--nets GLOB ...] \
+    [--max-stub MM] [--json report.json]
+```
+
+- `--nets` — only the vias of these nets (`route.py --nets` glob syntax);
+  default every via. Each pattern is accounted on its own, as
+  `check_return_vias.py` does.
+- `--max-stub` — name the vias whose longer stub exceeds this many mm. There
+  is no default: the length that matters is the interface's.
+
+```
+Via stubs: 7 of 9 via(s) measured, 3 back-drilled, 3 over 0.5 mm
+  /A: 1 via(s), longest stub 1.140 mm, 1 over
+    (10.000, 10.000) F.Cu-B.Cu joined F.Cu/In1.Cu: top 0.000 mm, bottom 1.140 mm  [OVER]
+  /B: 1 via(s), longest stub 0.735 mm, 1 over
+    (20.000, 10.000) F.Cu-B.Cu joined F.Cu/In1.Cu: top 0.000 mm, bottom 0.735 mm  [back-drilled B.Cu..In3.Cu at 0.5; OVER]
+```
+
+The measure is `via_stubs.via_stub_report`:
+
+- A net's copper **joins** a via on a layer where a track of the net touches
+  the via's pad, a pad of the net overlaps it, or a pour of the net holds the
+  via's centre inside its outline (the outline, not the fill).
+- The **top stub** runs from the top surface of the highest joined layer to
+  the barrel's top end, the **bottom stub** from the bottom surface of the
+  lowest joined layer to its bottom end. A blind, buried or micro via is
+  measured to its own end layers. A via joined on no layer has no stub and is
+  listed `unjoined`.
+- A **back-drill the board declares** (`Via.backdrills`) removes its start to
+  end layer, both inclusive, as KiCad reads it. A run of removed layers that
+  begins at the via's end moves the barrel's end to the far surface of the
+  deepest removed layer; the dielectric beyond it still counts, since the file
+  does not say where in it the drill stops, so a back-drilled stub is the
+  longest the declared drill can leave.
+- A layer the net joins the via on and a back-drill removes is named
+  (`joined_on_drilled`, `JOINED ON A BACK-DRILLED LAYER`), and the stubs are
+  measured from the joined layers the drill leaves (none left: not measured).
+  It is the copper KiCad's DRC reports as
+  `track_on_post_machined_layer`, which it counts per track where this counts
+  per via and also reads pads and pours.
+- A board with **no stackup** has no stub length: the report says
+  `NOT GRADED in mm` and the JSON still lists the layers each stub passes
+  (`stub_top_layers`, `stub_bottom_layers`).
+
+The JSON carries every via (`vias`: `net`, `x`, `y`, `span`, `joined`,
+`joined_by`, `drilled`, `stub_top_mm`, `stub_bottom_mm`, `longest_mm`, `over`,
+`backdrills`), `by_net` (`vias`, `longest_mm`, `over`, `unjoined`,
+`joined_on_drilled`), `measured`, `unmeasured`, `over`, `backdrilled_vias`,
+`max_stub_mm` and `pad_backdrills`: the drilled pads that declare a
+back-drill, whose own stubs are not measured.
 
 ## Power Drop Report (`check_power_drop.py`)
 

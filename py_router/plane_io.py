@@ -768,7 +768,8 @@ def write_plane_output(
             # could not read back (#748).
             net_name=via_net_name(via['net_id'], net_id_to_name),
             tenting_attrs=via.get('tenting_attrs'),
-            via_type=via.get('via_type')
+            via_type=via.get('via_type'),
+            backdrills=via.get('backdrills')        # #1925
         ))
 
     # Add segments
@@ -990,7 +991,9 @@ def restore_failed_reroute_nets(
                                   # or the restore silently re-tents them (#489 §8).
                                   'tenting_attrs': dict(getattr(v, 'tenting_attrs', {}) or {}),
                                   # ...and its blind/micro type word.
-                                  'via_type': getattr(v, 'via_type', 'through')})
+                                  'via_type': getattr(v, 'via_type', 'through'),
+                                  # ...and its back-drills (#1925).
+                                  'backdrills': dict(getattr(v, 'backdrills', None) or {})})
 
     if not restored_net_ids:
         return [], 0, 0
@@ -1081,7 +1084,8 @@ def restore_failed_reroute_nets(
                                                                  net_id_to_name),
                                            tenting_attrs=v.get('tenting_attrs'),
                                            inherit_when_unspecified=True,
-                                           via_type=v.get('via_type')))
+                                           via_type=v.get('via_type'),
+                                           backdrills=v.get('backdrills')))
     for s in restored_segs:
         nm = net_id_to_name.get(s['net_id']) if net_id_to_name else None
         elements.append(generate_segment_sexpr(s['start'], s['end'], s['width'],

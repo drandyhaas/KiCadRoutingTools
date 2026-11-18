@@ -7,7 +7,7 @@ import re
 import uuid
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import Pad, is_kicad_10, _unescape_kicad_string
+from kicad_parser import Pad, is_kicad_10, _unescape_kicad_string, BACKDRILL_TOKENS
 from routing_utils import pos_key, POSITION_DECIMALS
 from geometry_utils import PARTIAL_VIA_TYPES
 
@@ -433,6 +433,28 @@ def via_protection_sexpr(tenting_attrs: dict = None,
     return "".join(f"\n\t\t{p}" for p in parts)
 
 
+def via_backdrill_sexpr(backdrills: dict = None) -> str:
+    """The `(backdrill ...)` / `(tertiary_drill ...)` fragment of a via that
+    already carried them (#1925), or "" -- so a via with none is written
+    exactly as before.
+
+    `backdrills` is a Via's `backdrills` ({token: (size, start_layer,
+    end_layer)}). KiCad 10 writes the tokens between `(drill ...)` and
+    `(layers ...)`, each over three lines; this is the one-line form, which
+    pcbnew 10.0.8 loads and re-saves as its own. Nothing here DECIDES a
+    back-drill: a via the tool adds has none."""
+    if not backdrills:
+        return ""
+    out = ""
+    for token in BACKDRILL_TOKENS:
+        bd = backdrills.get(token)
+        if not bd:
+            continue
+        size, start, end = bd
+        out += f'\n\t\t({token} (size {size}) (layers "{start}" "{end}"))'
+    return out
+
+
 def stamp_via_protection_in_content(content: str, stamps_by_uuid: dict):
     """Insert a protection spec into the `(via ...)` blocks named by uuid (#962).
 
@@ -587,7 +609,7 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
                        net_name: str = None, tenting_attrs: dict = None,
                        inherit_when_unspecified: bool = False,
-                       via_type: str = None) -> str:
+                       via_type: str = None, backdrills: dict = None) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
@@ -611,6 +633,10 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
             through via and passes None. The word is written verbatim, so a
             `buried` (KiCad 10's word, which KiCad 9 refuses to load) only ever
             goes back into the KiCad 10 file it was read from.
+        backdrills: The via's own Via.backdrills (#1925). Pass it for any via
+            that already existed, as `tenting_attrs` is passed: without it a
+            re-emitted via loses its `(backdrill ...)` / `(tertiary_drill ...)`.
+            None or {} writes nothing; a via the tool adds has none.
     """
     layers_str = '" "'.join(layers)
     type_word = f' {via_type}' if via_type in PARTIAL_VIA_TYPES else ''
@@ -622,7 +648,7 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
     return f'''	(via{type_word}
 		(at {x:.6f} {y:.6f})
 		(size {size})
-		(drill {drill})
+		(drill {drill}){via_backdrill_sexpr(backdrills)}
 		(layers "{layers_str}"){tenting_str}{free_str}
 		{net_str}
 		(uuid "{uuid.uuid4()}")
@@ -1333,6 +1359,8 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                 inherit_when_unspecified=existing,
                 # A re-emitted blind/micro via keeps its type word.
                 via_type=via.get('via_type'),
+                # ...and its back-drills (#1925).
+                backdrills=via.get('backdrills'),
             )
             elements.append(v)
 

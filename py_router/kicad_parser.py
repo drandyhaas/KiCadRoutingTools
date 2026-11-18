@@ -20,7 +20,7 @@ from swig_compat import patch_swig_iterators as _patch_swig_iterators
 # only inside its functions), so importing it here cannot cycle.
 from paste_apertures import PasteAperture, build_paste_apertures, pad_has_copper
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple, Optional
+from typing import Dict, List, NamedTuple, Sequence, Tuple, Optional
 from pathlib import Path
 
 # #795: KiCad's own `__iter__` for GetTracks()/GetDrawings() calls the py2
@@ -374,6 +374,27 @@ def pcb_uses_name_nets(pcb) -> bool:
     return getattr(pcb, 'kicad_version', 0) >= KICAD_10_MIN_VERSION
 
 
+#: KiCad 10's two extra drills of a via or drilled pad, in the order KiCad
+#: writes them (PADSTACK::SecondaryDrill / TertiaryDrill).
+BACKDRILL_TOKENS = ('backdrill', 'tertiary_drill')
+
+
+class Backdrill(NamedTuple):
+    """One `(backdrill (size S) (layers "START" "END"))` or `(tertiary_drill
+    ...)` of a via or a drilled pad (#1925): a wider drill of diameter `size`
+    mm that removes the barrel from `start_layer` to `end_layer`, BOTH
+    inclusive (pcbnew 10.0.8's IsBackdrilledOrPostMachined answers True for
+    the end layer too). The pair is kept in the file's order, and either
+    token may start from either face: KiCad writes a back-drill from the top
+    as `backdrill` and one from the bottom as `tertiary_drill` when a via has
+    both, but a lone bottom drill as `backdrill`. Read the side from
+    `start_layer`, never from the token. A plain tuple, so a via dict that
+    carries one stays JSON-serialisable."""
+    size: float
+    start_layer: str
+    end_layer: str
+
+
 @dataclass
 class Pad:
     """Represents a component pad with global board coordinates."""
@@ -485,6 +506,9 @@ class Pad:
     # BEFORE its partner pad's (check_drc.kicad_tests_tie_waiver). Set by
     # BOTH parse paths.
     uuid: str = ""
+    # #1925: the drilled pad's back-drills, {token: Backdrill} for the tokens
+    # of BACKDRILL_TOKENS the pad carries; {} = none. Set by BOTH parse paths.
+    backdrills: Dict[str, Backdrill] = field(default_factory=dict)
     # A KiCad 9+ PADSTACK's per-layer copper: {layer: (size_x, size_y, shape,
     # rect_rotation, roundrect_rratio)}, board frame, for each copper layer
     # whose own copper is SMALLER than `size_x`/`size_y` -- those are the max
@@ -731,6 +755,12 @@ class Via:
     # matters most for via-in-pad, where IPC-4761 Type VII filled+capped+plated
     # is what keeps solder out of the barrel.
     tenting_attrs: Dict[str, str] = field(default_factory=dict)
+    # #1925: the via's back-drills, {token: Backdrill} for the tokens of
+    # BACKDRILL_TOKENS it carries; {} = none. Set by BOTH parse paths, and
+    # carried by every writer that re-emits an existing via the way
+    # `tenting_attrs` is (`generate_via_sexpr(..., backdrills=...)`), or the
+    # board loses its back-drills on the first step that rewrites the via.
+    backdrills: Dict[str, Backdrill] = field(default_factory=dict)
     # #1279: the protected sense branch (KiCad group `sense:<REF>.<PAD>`) this
     # via is a member of, '' otherwise (see Pad.sense).
     sense: str = ""
@@ -5328,6 +5358,16 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
 
             pad_num = (pad_match.group(1) if pad_match.group(1) is not None
                        else pad_match.group(2))
+            # #1925: the pad's back-drills, taken OUT of the text the readers
+            # below see -- a back-drill's own `(layers "B.Cu" "In3.Cu")` is
+            # written before the pad's, and was read as the pad's layer set.
+            pad_backdrills = {}
+            if '(backdrill' in pad_text or '(tertiary_drill' in pad_text:
+                pad_backdrills, _bd_why, pad_text = backdrills_from_block(pad_text)
+                for _w in _bd_why:
+                    print(f"WARNING: {reference} pad {pad_num!r}: {_w} -- the "
+                          f"back-drill is NOT carried. KiCad refuses to load "
+                          f"such a board.", file=sys.stderr)
             pad_type = pad_match.group(3)  # smd, thru_hole, etc.
             pad_shape = pad_match.group(4)  # circle, rect, roundrect, etc.
 
@@ -5572,6 +5612,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 zone_connection=(zone_connect_from_text(pad_text)
                                  or fp_zone_connection),
                 uuid=own_uuid_from_text(pad_text),
+                backdrills=pad_backdrills,
             )
             # Per-layer padstack copper and the custom pad's join outline
             # (Pad.layer_copper / join_polygons); the pcbnew path builds the
@@ -5919,6 +5960,8 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
     # One linear scan: most boards mention no protection token and skip the
     # per-block spec work entirely.
     want_spec = any(('(' + t) in content for t in VIA_PROTECTION_TOKENS)
+    want_drills = any(('(' + t) in content for t in BACKDRILL_TOKENS)
+    unread_drills = []
 
     for _start, block in _via_blocks(content):
         m = _VIA_PREFIX_RE.match(block)
@@ -6004,9 +6047,13 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             spec = _via_spec_from_block(block)
             if spec:
                 via.tenting_attrs = spec
+        if want_drills:
+            via.backdrills, _why, _rest = backdrills_from_block(block)
+            unread_drills += [(_start, 'via', w) for w in _why]
         vias.append(via)
 
     _report_unparsed_copper(content, 'via', unparsed)
+    _report_unread_backdrills(content, unread_drills)
     return vias
 
 
@@ -6224,6 +6271,111 @@ def _balanced_token_text(text: str, token: str) -> Optional[str]:
                 # parser-parity rule), not just semantically equal.
                 return " ".join(inner.split())
     return None
+
+
+_BACKDRILL_SIZE_RE = re.compile(r'\(size\s+([^()]*?)\s*\)')
+_BACKDRILL_LAYERS_RE = re.compile(r'\(layers\s+"([^"]*)"\s+"([^"]*)"\s*\)')
+
+
+def _token_span(text: str, token: str) -> Optional[Tuple[int, int]]:
+    """(start, end) of the first paren-balanced `(token ...)` in `text`, or
+    None. String-aware."""
+    m = re.search(r'\(' + re.escape(token) + r'(?=[\s()])', text)
+    if not m:
+        return None
+    depth = 0
+    in_str = False
+    i = m.start()
+    while i < len(text):
+        c = text[i]
+        if in_str:
+            if c == '\\':
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return m.start(), i + 1
+        i += 1
+    return None
+
+
+def backdrills_from_block(block: str):
+    """``({token: Backdrill}, [reason, ...], block without the tokens)`` for
+    one via or pad block (#1925).
+
+    Read as KiCad 10.0.8 reads them (each case loaded and re-saved through
+    pcbnew): the two children in either order, anywhere in the block; a token
+    with no `(layers ...)`, no `(size ...)` or a size of 0 is NO drill, and
+    KiCad's own save drops it, so it is dropped here too. A size KiCad
+    refuses to load (anything but one number) is a reason, for the caller to
+    name. The third value is what the block's other readers must see: a
+    back-drill's `(layers ...)` comes BEFORE the item's own in the file."""
+    out: Dict[str, Backdrill] = {}
+    problems: List[str] = []
+    for token in BACKDRILL_TOKENS:
+        span = _token_span(block, token)
+        if span is None:
+            continue
+        inner = block[span[0] + len(token) + 1:span[1] - 1]
+        block = block[:span[0]] + block[span[1]:]
+        sm = _BACKDRILL_SIZE_RE.search(inner)
+        lm = _BACKDRILL_LAYERS_RE.search(inner)
+        if sm is None or lm is None:
+            continue
+        try:
+            size = float(sm.group(1))
+        except ValueError:
+            problems.append(f"({token} (size {sm.group(1)})): not one number")
+            continue
+        if size > 0:
+            out[token] = Backdrill(size, lm.group(1), lm.group(2))
+    return out, problems, block
+
+
+def pcbnew_backdrills(item, get_layer_name) -> Dict[str, 'Backdrill']:
+    """A live PCB_VIA's or PAD's back-drills, in the text parser's form
+    (#1925). `get_layer_name` is pcbnew_layer_maps()'s. {} on a pcbnew whose
+    wrapper has no secondary / tertiary drill accessors: KiCad 9 and earlier,
+    whose file format has no such token either."""
+    out: Dict[str, Backdrill] = {}
+    for token, stem in (('backdrill', 'SecondaryDrill'),
+                        ('tertiary_drill', 'TertiaryDrill')):
+        try:
+            size = getattr(item, f'Get{stem}Size')()
+            # A via answers an int or None, a pad a VECTOR2I.
+            if size is not None and not isinstance(size, (int, float)):
+                size = size.x if hasattr(size, 'x') else size[0]
+            if not size or size <= 0:
+                continue
+            start = getattr(item, f'Get{stem}StartLayer')()
+            end = getattr(item, f'Get{stem}EndLayer')()
+        except Exception:
+            continue
+        if start is None or end is None or int(start) < 0 or int(end) < 0:
+            continue
+        import pcbnew
+        out[token] = Backdrill(pcbnew.ToMM(int(size)), get_layer_name(int(start)),
+                               get_layer_name(int(end)))
+    return out
+
+
+def _report_unread_backdrills(content: str, rows) -> None:
+    """One WARNING naming back-drill tokens that could not be read (#1925).
+    ``rows`` are ``(offset, what, reason)``."""
+    if not rows:
+        return
+    shown = ', '.join(f"{what} at line {content.count(chr(10), 0, off) + 1}: {why}"
+                      for off, what, why in rows[:5])
+    more = f", and {len(rows) - 5} more" if len(rows) > 5 else ""
+    print(f"WARNING: {len(rows)} back-drill token(s) could not be read and "
+          f"are NOT carried: {shown}{more}. KiCad refuses to load such a "
+          f"board.", file=sys.stderr)
 
 
 def _via_spec_from_block(block: str) -> Dict[str, str]:
@@ -8934,6 +9086,7 @@ def pcbnew_track_copper(board, to_mm=None, get_layer_name=None, owners=None):
                 uuid=_item_uuid(track),
                 locked=bool(track.IsLocked()),
                 via_type=pcbnew_via_type(track),
+                backdrills=pcbnew_backdrills(track, get_layer_name),
             )
             vias.append(v)
             if owners is not None:
@@ -9989,6 +10142,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 zone_connection=(zone_connect_from_pcbnew(pad)
                                  or fp_zone_connection),
                 uuid=str(pad.m_Uuid.AsString()),        # #1737
+                backdrills=pcbnew_backdrills(pad, get_layer_name),
             )
             # Per-layer padstack copper and the custom pad's join outline,
             # through the text path's two helpers (Pad.layer_copper /

@@ -400,6 +400,46 @@ def apply_via_protection(pcb_via, tenting_attrs):
     return applied
 
 
+def apply_via_backdrills(pcb_via, backdrills):
+    """Put a Via's back-drills back onto a pcbnew PCB_VIA (#1925): the GUI
+    counterpart of `generate_via_sexpr(..., backdrills=...)`, for a via a tab
+    RE-CREATES. `backdrills` is Via.backdrills ({token: (size, start_layer,
+    end_layer)}); None or {} leaves the via alone, so a via the tool adds
+    gets none. Does nothing on a pcbnew without the secondary / tertiary
+    drill setters (KiCad 9 and earlier). Returns True when something was
+    applied."""
+    if not backdrills:
+        return False
+    try:
+        import pcbnew
+    except ImportError:
+        return False
+    from kicad_parser import BACKDRILL_TOKENS, mm_to_iu
+
+    def _layer_id(name):
+        # File tokens, as both parse paths hold them (pcbnew_layer_maps).
+        return getattr(pcbnew, name.replace('.', '_'), None)
+
+    applied = False
+    for token, stem in zip(BACKDRILL_TOKENS, ('SecondaryDrill', 'TertiaryDrill')):
+        bd = backdrills.get(token)
+        if not bd:
+            continue
+        size, start, end = bd
+        start_id, end_id = _layer_id(start), _layer_id(end)
+        if start_id is None or end_id is None:
+            continue
+        try:
+            iu = mm_to_iu(size)
+            getattr(pcb_via, f'Set{stem}Size')(pcbnew.VECTOR2I(iu, iu))
+            getattr(pcb_via, f'Set{stem}StartLayer')(start_id)
+            getattr(pcb_via, f'Set{stem}EndLayer')(end_id)
+            applied = True
+        except Exception:
+            pass
+    return applied
+
+
 def live_via_is_micro(via) -> bool:
     """A pcbnew PCB_VIA typed micro (#1842): the project writeback leaves it
     out of the via diameter, via drill, annular ring and smallest-hole
@@ -1697,6 +1737,7 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                            board.GetLayerID(lys[-1]),
                            getattr(v, 'via_type', None))
             apply_via_protection(via, getattr(v, 'tenting_attrs', None))
+            apply_via_backdrills(via, getattr(v, 'backdrills', None))
             board.Add(via)
         if orc.get('links_routed'):
             print(f"KiCad-oracle (GUI): routed {orc['links_routed']} "

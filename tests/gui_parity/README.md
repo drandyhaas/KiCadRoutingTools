@@ -149,7 +149,9 @@ enums), `test_via_type_parse_parity.py` (via spans, #1268),
 openings and graphic copper), `test_967_pad_geometry_coverage.py`,
 `test_pad_loader_parity.py` (pcbnew's load-time rewrites),
 `test_1164_teardrop_parity.py`, `test_1211_sheet_name_parity.py`,
-`test_1248_die_length_parity.py`, `test_edge_poly_outline_parity.py`,
+`test_1248_die_length_parity.py`, `test_1925_backdrill_pcbnew_parity.py`
+(a via's and a pad's back-drills, the writer's form and the plugin's twin),
+`test_edge_poly_outline_parity.py`,
 `test_noncopper_zone_parity.py`, `test_zone_arc_outline_parity.py`,
 `test_zone_closing_vertex_parity.py`, and `test_714_mirror_pcbnew_parity.py`
 (the placement writer's layer flip against pcbnew's own `Flip`; the flip's

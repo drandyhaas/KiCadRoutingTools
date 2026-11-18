@@ -1601,8 +1601,10 @@ class PlanesTab(wx.Panel):
                 # #962: the engine stamped Type VII onto a via it put in a pad
                 # or paste opening, and a re-placed via carries its own spec.
                 # This tab applied NEITHER before (every other tab did).
-                from .gui_utils import apply_via_protection
+                from .gui_utils import apply_via_protection, apply_via_backdrills
                 apply_via_protection(via, via_data.get('tenting_attrs'))
+                # ...and a re-placed via's back-drills (#1925).
+                apply_via_backdrills(via, via_data.get('backdrills'))
                 board.Add(via)
                 vias_added += 1
             self._new_vias = []
