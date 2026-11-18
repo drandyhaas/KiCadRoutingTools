@@ -5115,6 +5115,14 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+    elif _wrote_output and getattr(args, 'escalation', None) == 'off':
+        # --escalation off: the project shipped as declared; name what on the
+        # board sits below it (input copper -- the router's never does).
+        try:
+            from fix_kicad_drc_settings import report_below_project_rules
+            report_below_project_rules(args.output_file)
+        except Exception as e:                               # noqa: BLE001
+            print(f"  (skipped the below-rule report: {e})")
     if _wrote_output:
         # #581: record an ACTIVE same-net pad via clearance in the output's
         # project so every later chain step keeps its vias off same-net pads

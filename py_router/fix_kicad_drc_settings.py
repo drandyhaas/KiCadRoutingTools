@@ -2351,9 +2351,12 @@ def apply_routed_floors(board_pcb: str, clearance=None, hole_clearance=None,
     :func:`apply_targets_to_project` the writeback uses, so
     :func:`fix_project_for_output` stays authoritative and can never conflict
     with what this wrote. No-op when the board has no sibling project or no
-    floor was given. Returns the change strings (empty = nothing done)."""
+    floor was given. Returns the change strings (empty = nothing done).
+    A no-op under ``--escalation off`` (:func:`_rules_are_promised`)."""
     if not board_pcb or (clearance is None and hole_clearance is None
                          and edge_clearance is None):
+        return []
+    if _rules_are_promised():
         return []
     pro = find_project(board_pcb)
     if not os.path.isfile(pro):
@@ -3174,6 +3177,50 @@ def apply_fix_to_board(board, *, minima, clearance=None, hole_clearance=None,
                                   class_ceiling=class_ceiling)
 
 
+def _rules_are_promised() -> bool:
+    """True under ``--escalation off``: the run promised the project's rules,
+    so no writer here may lower a floor (fab_tiers.project_writeback_allowed)."""
+    try:
+        from fab_tiers import get_escalation_policy, project_writeback_allowed
+        return not project_writeback_allowed(get_escalation_policy()[0])
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def report_below_project_rules(pcb_path: str, verbose: bool = True) -> dict:
+    """The objects of the board at ``pcb_path`` below the size floors its
+    project declares (Board Setup, or the authored .kicad_dru rule that binds
+    the object -- :func:`size_values_below_authored`), printed when
+    ``verbose``. Under ``--escalation off`` the router's own copper is never
+    below them, so these come from the input (a footprint's pad drill, a
+    track the run kept): the project is not lowered to hide them, and KiCad's
+    DRC reports each. Returns ``{key: {'count', 'smallest', 'floor'}}``."""
+    try:
+        import tool_records
+        rules = _effective_rules(tool_records.load_project(find_project(pcb_path)))
+    except Exception:                                        # noqa: BLE001
+        return {}
+    floors = {k: rules[k] for k in _RULE_KIND
+              if isinstance(rules.get(k), (int, float)) and rules[k] > 0}
+    out = {}
+    for key, r in size_values_below_authored(pcb_path, floors, pcb_path).items():
+        if r.get("below"):
+            out[key] = {"count": len(r["below"]), "smallest": min(r["below"]),
+                        "floor": floors[key]}
+    if verbose:
+        if out:
+            print("  --escalation off: the project's DRC rules ship as declared; "
+                  "the board holds object(s) below them (KiCad's DRC reports "
+                  "each -- fix the board or the rule):")
+            for key, r in sorted(out.items()):
+                print(f"      rules.{key} {r['floor']:g} mm: {r['count']} "
+                      f"object(s) below, smallest {r['smallest']:g} mm")
+        else:
+            print("  --escalation off: the project's DRC rules ship as declared; "
+                  "nothing on the board is below their size floors")
+    return out
+
+
 def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            hole_clearance=None, hole_to_hole=None, edge_clearance=None,
                            track_width=None, via_diameter=None, via_drill=None,
@@ -3222,6 +3269,13 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     # seeded them (seed_project_for_output); this covers a caller that did not
     # write the board through one.
     carry_input_siblings(output_pcb, input_pcb, skip=(".kicad_pro",))
+    if _rules_are_promised():
+        # --escalation off: the project's rules are the promise; lowering
+        # them to the board's smallest object would grade an object below
+        # them clean. Report those objects instead; DRC flags them.
+        if verbose:
+            report_below_project_rules(output_pcb)
+        return out_pro
 
     # The records (origin, protected nets, ...) as the board holds them: the
     # newer of the project's copy and the board file's, which is where a GUI

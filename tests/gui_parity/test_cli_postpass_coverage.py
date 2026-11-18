@@ -291,6 +291,15 @@ KNOWN_CLI_ONLY = {
     'consume_zone_replacements': 'route_planes.py: takes create_plane\'s '
                                  'replaced-pour records for JSON_SUMMARY '
                                  '(report-only, no board mutation)',
+    # --escalation off: the project ships as declared, and this names the
+    # objects on the written board below its size floors. The GUI writes no
+    # floor under off either (update_live_drc_floors); KiCad's DRC on the
+    # live board lists the same objects there.
+    'report_below_project_rules': 'route/route_diff/route_planes/'
+                                  'repair_planes --escalation off: lists the '
+                                  'written board\'s objects below the '
+                                  'declared size floors (report-only, no '
+                                  'board mutation)',
 }
 
 

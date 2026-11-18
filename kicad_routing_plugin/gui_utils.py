@@ -1282,8 +1282,21 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
     deliberately does not pass -- which would have added the generic
     "floors relaxed" line to every fanout run as a side effect of a clamp fix.
 
+    A no-op for the floors under ``--escalation off`` (the run promised the
+    board's rules; fix_kicad_drc_settings._rules_are_promised): the records
+    are still persisted.
+
     Best-effort: never raises."""
     persist_live_tool_records(board, same_net_pad_clearance)
+    try:
+        from fix_kicad_drc_settings import _rules_are_promised
+        if _rules_are_promised():
+            if log:
+                log("  Escalation off: the board's DRC rules are left as "
+                    "declared (no floor lowered)")
+            return []
+    except Exception:                                        # noqa: BLE001
+        pass
     _clamped = []
     try:
         import pcbnew

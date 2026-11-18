@@ -132,7 +132,9 @@ try:
     shutil.copy(out1, out2)
     shutil.copy(os.path.splitext(out1)[0] + '.kicad_pro',
                 os.path.splitext(out2)[0] + '.kicad_pro')
-    fab_tiers.set_escalation_policy('off')          # a new run: a fresh ledger
+    # a new run: a fresh ledger (fab: --escalation off would skip the
+    # writeback whose disclosure this checks)
+    fab_tiers.set_escalation_policy('fab')
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         said = fx.warn_if_class_clearance_relaxed(out2)

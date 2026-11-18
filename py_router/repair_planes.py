@@ -4248,6 +4248,15 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+    elif (not args.dry_run and args.output_file
+            and os.path.isfile(args.output_file)) and getattr(args, 'escalation', None) == 'off':
+        # --escalation off: the project shipped as declared; name what on the
+        # board sits below it (input copper -- the router's never does).
+        try:
+            from fix_kicad_drc_settings import report_below_project_rules
+            report_below_project_rules(args.output_file)
+        except Exception as e:                               # noqa: BLE001
+            print(f"  (skipped the below-rule report: {e})")
 
     # Machine-readable summary (mirrors route.py/route_diff.py) so an orchestrator
     # and the next pipeline step can read the clearance this step actually used.
