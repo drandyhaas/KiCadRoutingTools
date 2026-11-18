@@ -14,7 +14,9 @@ route_grouped:
    and every loop's re-solve are one COUPLED SOLVE, the buses in step (JOINT_DIR: whole_route.joint_sync and
    joint_loop_sync, whole_joint.py: where two buses' laid-out lanes cross or come within a lane's pitch, their layers
    differ there or the coupling is paid for), and every stage plans round the other buses' lanes as they publish them
-   (joint_lanes). A bus whose process ends is said ended right away, so no other waits for it.
+   (joint_lanes) in the buses' STANDING ORDER (standing_order): of two buses the later plans round the earlier one's
+   planned lanes, the earlier round the later one's only once they are laid. A bus whose process ends is said ended
+   right away, so no other waits for it.
 4. MERGED (merge): OUT is the first bus's board with every other bus's nets' copper from that bus's own board -- those
    it routed and those it put back as they came --, every routed net protected. Each DRC violation between two buses'
    nets, or between a bus's net and another, is named (conflicts.json); another net's copper in one is given back to
@@ -507,6 +509,18 @@ def _bus_out(work, phase, bus):
     return (b_, s_) if os.path.isfile(b_) and os.path.isfile(s_) else None
 
 
+def standing_order(field, dests):
+    """the buses `dests` in their STANDING ORDER, the first standing against every later one (joint_lanes.stands: of
+    two buses whose plans cross, the later plans round the earlier one's lanes): the bus of FEWER lanes first -- it
+    has the fewest ways to give, and the larger bus the most layers and room to go round it -- by the lanes the group's
+    model gave each (group.json beside the field), a tie by name"""
+    import group_ends
+    gj = os.path.join(os.path.dirname(field), 'group.json')
+    gb = (json.load(open(gj)).get('buses') or {}) if os.path.isfile(gj) else {}
+    n_ = {d_: len((gb.get(group_ends.bus_key(d_)) or {}).get('state') or ()) for d_ in dests}
+    return sorted(dests, key=lambda d_: (n_[d_], d_))
+
+
 def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None,
                    feedback_rounds=0, t0=None, settings=None, **sizes):
     """The buses `buses` [(src, dest)] routed negotiated on the shared field `field` (the group's model's, from
@@ -524,10 +538,13 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     os.makedirs(jd)
     one = len(buses) == 1
     phase = 'solo' if one else 'neg'
+    ordr = standing_order(field, dests)
     log(f'  {buses[0][1]} on the field, by itself' if one else
-        f'  every bus on the shared field, negotiated (meeting in {os.path.relpath(jd, os.path.dirname(out))})')
+        f'  every bus on the shared field, negotiated (meeting in {os.path.relpath(jd, os.path.dirname(out))}); '
+        f'where two buses\' plans cross, the later of {", ".join(ordr)} plans round the earlier')
     jobs = [_bus_job(work, phase, b, field,
-                     {**_env0(), **({} if one else {'JOINT_DIR': jd, 'JOINT_PEERS': ','.join(dests)}),
+                     {**_env0(), **({} if one else {'JOINT_DIR': jd, 'JOINT_PEERS': ','.join(dests),
+                                                    'JOINT_ORDER': ','.join(ordr)}),
                       **(settings or {})},
                      k, rounds, inproc, feedback_rounds, sizes)
             for b in buses]

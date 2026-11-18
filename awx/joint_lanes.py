@@ -9,7 +9,9 @@ foreign(pcb): every OTHER bus's lanes as published, turned into this bus's flow 
 read (braid.setup's parse, whole_route's tracks of a bench) as copper of their own nets: tracks a lane's width wide (a
 pair's lane its two legs' whole width), vias a via's (a pair's dive its two). The stages then plan round them as round
 any copper that is not theirs -- the geometry, the polish and its audit, the snap and the lay -- and the stage cache,
-which keys a stage by every file it opened, plans again when a peer publishes. The board's file is never changed."""
+which keys a stage by every file it opened, plans again when a peer publishes. The board's file is never changed.
+Under the negotiation's standing order (JOINT_ORDER: `stands`) a bus's PLANNED lanes are copper only to the buses after
+it; its bench's ends and its laid copper are copper to every bus."""
 import json
 import math
 import os
@@ -169,11 +171,26 @@ def publish_board(board, nets, stage):
                      'laid': True})
 
 
+def order():
+    """the negotiation's STANDING ORDER (JOINT_ORDER, negotiated_buses.standing_order): the buses' names, the first
+    standing against every later one"""
+    return [b_ for b_ in (awx_settings.get('JOINT_ORDER') or '').split(',') if b_]
+
+
+def stands(peer, bus, ordr):
+    """does `peer`'s PLAN stand against `bus`'s (the standing order `ordr`): two buses' plans that cross on a layer
+    are a finding in BOTH buses' audits, and both moving their lanes off it crossed again somewhere else next round,
+    round after round -- so of every two buses ONE stands: the later bus plans round the earlier one's lanes as round
+    copper, and the earlier one reads the later one's lanes only once they are LAID"""
+    return peer in ordr and bus in ordr and ordr.index(peer) < ordr.index(bus)
+
+
 def foreign(pcb):
     """every other bus's published lanes put on `pcb` (this bus's flow frame) as copper of their own nets; the count.
     Only under JOINT_FOREIGN: 'all' every other bus's, 'finished' only a bus's whose whole route has ended (its laid
     copper final: a round's first solve, which the coupled solve builds again, and the coupled solve itself -- the buses
-    still routing are coupled there, not copper)"""
+    still routing are coupled there, not copper). Under a standing order (`stands`) a bus's PLANNED lanes are copper
+    only to the buses it stands against; its ends on its bench and its laid copper are copper to every bus"""
     me = _me()
     mode = awx_settings.get('JOINT_FOREIGN')
     if me is None or mode not in ('all', 'finished'):
@@ -199,6 +216,7 @@ def foreign(pcb):
     base = {b_: legs[0] for b_, legs in _pairs.pair_names(sorted(by), admit_all=True).items()}
     w_pair = _pairs.pitch(R.track) + R.track
     cu = [L for L in (pcb.board_info.copper_layers or [])]
+    ordr = order()
     n_ = 0
     for f in sorted(os.listdir(d)):
         if not f.endswith('.json') or f.startswith('.') or f == f'{bus}.json':
@@ -211,7 +229,8 @@ def foreign(pcb):
         except (OSError, ValueError):
             continue
         bench = doc.get('bench') or {}
-        for row in (doc.get('pieces') or []) + (bench.get('pieces') or []):
+        plan = {} if ordr and not doc.get('laid') and not stands(f[:-len('.json')], bus, ordr) else doc
+        for row in (plan.get('pieces') or []) + (bench.get('pieces') or []):
             x0, y0, x1, y1, L, ln = row[:6]
             nid = by.get(ln) if ln in by else by.get(base.get(ln))
             if nid is None:
@@ -223,7 +242,7 @@ def foreign(pcb):
             pcb.segments.append(Segment(start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1], width=w, layer=L,
                                         net_id=nid, uuid=f'joint-{doc.get("bus")}-{n_}'))
             n_ += 1
-        for row in (doc.get('vias') or []) + (bench.get('vias') or []):
+        for row in (plan.get('vias') or []) + (bench.get('vias') or []):
             x, y, ln = row[:3]
             nid = by.get(ln) if ln in by else by.get(base.get(ln))
             if nid is None:

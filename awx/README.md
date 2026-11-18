@@ -659,9 +659,20 @@ alone on its array a group of one:
    copper. The couplings each coupled solve settled are held from there as
    firm layer cuts, a lane kept off the other lane's layer within
    `whole_joint.CUT_R` (0.35 mm) of the coupling. Every stage of every bus,
-   from the loop's audits to the lay, plans round the other buses' lanes as
-   they publish them (`joint_lanes`: plans, laid boards and each bus's own
-   bench copper, in the board's frame).
+   from the loop's audits to the lay, plans round the other buses' copper as
+   they publish it (`joint_lanes`: plans, laid boards and each bus's own
+   bench copper, in the board's frame), in a **standing order**
+   (`negotiated_buses.standing_order`: the bus of fewer lanes first). Of two
+   buses the later plans round the earlier one's planned lanes; the earlier
+   reads the later one's lanes only once they are laid, and its ends on its
+   bench always. Two plans that cross on one layer are a finding in both
+   buses' audits, and with both buses moving their lanes off it they crossed
+   again somewhere else the round after: of 41 findings in four buses' first
+   audits 35 were such crossings, and their counts went 15, 25, 61 and 13,
+   19, 18 over the rounds. With one of the two standing, the first bus of
+   the order had none and passed in its first round, the last one's went 10,
+   2, 0, and the lay on the same ends took 2129 s with 2 nets open where it
+   had taken 5931 s with 4.
    The buses **lay in turn** (`whole_route.joint_lay_turn`): one bus lays at
    a time, and a bus whose loop did not pass lays after every other bus has
    laid, two such buses in the order of their names. Such a bus lays the

@@ -1460,18 +1460,25 @@ def firm_keys(plan):
 
 def peer_lanes(env):
     """(JOINT_DIR) the names of the lanes the OTHER buses of the negotiation last published (DIR/lanes/PEER.json, each
-    piece's lane): {name} -- empty with no negotiation"""
+    piece's lane) whose crossing with this bus's is the two buses' to settle: {name} -- empty with no negotiation.
+    Not a bus's LAID lanes, nor (JOINT_ORDER: joint_lanes.stands) a bus's this one plans round: both are copper here,
+    and a cut against copper is this bus's own to hold"""
+    import joint_lanes
     jd, bus = env.get('JOINT_DIR'), env.get('JOINT_BUS')
     d = os.path.join(jd, 'lanes') if jd else None
+    ordr = [b_ for b_ in (env.get('JOINT_ORDER') or '').split(',') if b_]
     out = set()
     if not d or not os.path.isdir(d):
         return out
     for f in os.listdir(d):
         if f.endswith('.json') and f[:-len('.json')] != bus:
             try:
-                out |= {str(r_[5]) for r_ in (json.load(open(os.path.join(d, f))).get('pieces') or []) if len(r_) > 5}
+                doc = json.load(open(os.path.join(d, f)))
             except (OSError, ValueError):
-                pass
+                continue
+            if ordr and (doc.get('laid') or joint_lanes.stands(f[:-len('.json')], bus, ordr)):
+                continue
+            out |= {str(r_[5]) for r_ in (doc.get('pieces') or []) if len(r_) > 5}
     return out
 
 
