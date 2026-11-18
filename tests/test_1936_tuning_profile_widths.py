@@ -15,6 +15,19 @@ track width 0.1 mm) with Q's track removed and the profile's widths edited.
      width and says so;
   4. an explicit --track-width wins;
   5. a class that names no profile is drawn at the class width, as before.
+
+A layer's width is, in order: a stored impedance declaration's, a `.kicad_dru`
+rule's, the profile's, the class's. Each pair has a row:
+  6. --impedance outranks the profile;
+  7. a stored impedance declaration outranks it;
+  8. a `.kicad_dru` rule that gives one width for every layer outranks it,
+     and a rule scoped to another layer leaves the profile its own layers;
+  9. the profile's width is clamped into Board Setup's minimum and a rule's
+     maximum, and raised to the standard fab floor, each said;
+ 10. where the board's rules cannot be read the width is held at the fab
+     tier's deepest floor and the descent below the standard one is
+     disclosed as a class width's is;
+ 11. the `Tuning-profile widths` line counts the nets the step routes.
 """
 import contextlib
 import io
@@ -82,15 +95,15 @@ def q_widths(board):
     return out
 
 
-def route(td, board, tag, extra=()):
+def route(td, board, tag, extra=(), nets=('Q',)):
     out = os.path.join(td, tag + '.kicad_pcb')
     r = subprocess.run(PY + [os.path.join('py_router', 'route.py'), board, out,
-                             '--nets', 'Q', '--layers', 'F.Cu'] + list(extra),
+                             '--nets', *nets, '--layers', 'F.Cu'] + list(extra),
                        capture_output=True, text=True, cwd=REPO)
     line = next((ln for ln in r.stdout.splitlines()
                  if ln.startswith('JSON_SUMMARY_MIN:')), None)
     doc = json.loads(line[len('JSON_SUMMARY_MIN:'):]) if line else {}
-    assert doc.get('routed') == 1, (f"BROKEN TEST: Q did not route ({tag})\n"
+    assert doc.get('routed') == 1, (f"BROKEN TEST: the net did not route ({tag})\n"
                                     f"{(r.stdout + r.stderr)[-800:]}")
     return run_utils.evidence(out), r.stdout
 
@@ -137,11 +150,160 @@ def routed(td):
        f"a class that names no profile is drawn at the class width: {q_widths(out)}")
 
 
+RULE = ('(version 1)\n(rule "W"\n  %s(constraint track_width (%s))\n'
+        '  (condition "A.hasNetclass(\'TIMED\')"))\n')
+
+
+def _edit(*edits):
+    def edit(proj):
+        _widths(proj)
+        for e in edits:
+            e(proj)
+    return edit
+
+
+def _f_width(mm):
+    def edit(proj):
+        t1846._profile(proj)['layer_entries'][0]['width'] = int(round(mm * 1e6))
+    return edit
+
+
+def _board_min(mm):
+    def edit(proj):
+        proj['board']['design_settings']['rules']['min_track_width'] = mm
+    return edit
+
+
+def _stored(proj):
+    proj['kicad_routing_tools'] = {'net_impedance': {
+        'Q': {'ohms': 60.0, 'differential': False}}}
+
+
+def with_dru(board, text):
+    with open(os.path.splitext(board)[0] + '.kicad_dru', 'w', encoding='utf-8') as fh:
+        fh.write(text)
+    return board
+
+
+def one_width(out):
+    got = q_widths(out).get('F.Cu', set())
+    return next(iter(got)) if len(got) == 1 else None
+
+
+def precedence(td):
+    print('6-8. what outranks the profile')
+    board = stage(td, 'pi', _widths)
+    out, log = route(td, board, 'pi_o', ['--impedance', '60'])
+    w_imp = one_width(out)
+    ok(w_imp is not None and abs(w_imp - F_W) > 0.01
+       and 'Tuning-profile widths:' not in log,
+       f"--impedance outranks the profile: Q at {w_imp}, not {F_W}")
+    board = stage(td, 'ps', _edit(_stored))
+    out, log = route(td, board, 'ps_o')
+    ok(one_width(out) == w_imp and 'Reapplying stored 60 ohm' in log
+       and 'Tuning-profile widths:' not in log,
+       f"a stored impedance declaration outranks it: Q at {one_width(out)}, "
+       f"the width --impedance 60 gave")
+    board = with_dru(stage(td, 'pr', _widths), RULE % ('', 'opt 0.3mm'))
+    out, log = route(td, board, 'pr_o')
+    ok(one_width(out) == 0.3 and 'Tuning-profile widths:' not in log,
+       f"a .kicad_dru rule with one width for every layer outranks it: "
+       f"{q_widths(out)}")
+    board = with_dru(stage(td, 'pl', _widths),
+                     RULE % ('(layer "B.Cu")\n  ', 'opt 0.3mm'))
+    out, log = route(td, board, 'pl_o')
+    ok(one_width(out) == F_W and "B.Cu: .kicad_dru rule \"W\" sets the width" in log
+       and "F.Cu: .kicad_dru rule" not in log,
+       f"a rule scoped to B.Cu leaves the profile F.Cu and says which layer "
+       f"it sets: {q_widths(out)}")
+    from kicad_parser import parse_kicad_pcb
+    from design_rules import DesignRules
+    from tuning_profiles import profile_layer_widths
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        pcb = parse_kicad_pcb(board)
+        rules = DesignRules.from_project(pcb, board)
+    q = next(i for i, n in pcb.nets.items() if n.name == 'Q')
+    rep = {}
+    got, used, _r = profile_layer_widths(pcb, board, rules=rules, report=rep)
+    ok(got[q] == {'F.Cu': F_W, 'B.Cu': 0.3} and used == {'PROF6': 2}
+       and rep.get('ruled') == {('PROF6', 'B.Cu'): 'W'},
+       f"and the reader gives B.Cu the rule's width: {got[q]}, {rep.get('ruled')}")
+
+
+def clamped(td):
+    print('9. the clamp')
+    board = stage(td, 'cm', _edit(_f_width(0.11), _board_min(0.127)))
+    out, log = route(td, board, 'cm_o')
+    ok(one_width(out) == 0.127 and "F.Cu: 0.11 mm is below" in log
+       and 'drawn at 0.127 mm' in log,
+       f"a profile width under Board Setup's minimum track is drawn at the "
+       f"minimum: {q_widths(out)}")
+    board = with_dru(stage(td, 'cx', _widths), RULE % ('', 'max 0.15mm'))
+    out, log = route(td, board, 'cx_o')
+    ok(one_width(out) == 0.15 and "F.Cu: 0.2 mm is above" in log,
+       f"and one over a rule's maximum at the maximum: {q_widths(out)}")
+    board = stage(td, 'cf', _edit(_f_width(0.08), _board_min(0.05)))
+    out, log = route(td, board, 'cf_o')
+    ok(one_width(out) == 0.0889 and "F.Cu: 0.08 mm is below" in log,
+       f"one between the advanced and the standard fab floor is raised to "
+       f"the standard floor, as a class width is: {q_widths(out)}")
+
+
+def disclosed(td):
+    print('10. below the standard floor with the rules unread')
+    import route as route_mod
+    import design_rules
+    import fab_tiers
+    board = stage(td, 'ds', _edit(_f_width(0.08), _board_min(0.05)))
+    out = os.path.join(td, 'ds_o.kicad_pcb')
+    real = design_rules.DesignRules.from_project
+    state = {'failed': 0}
+
+    def once(*a, **k):
+        # batch_route's own reader is its width resolver
+        if (not state['failed'] and os.path.basename(
+                sys._getframe(1).f_code.co_filename) == 'route.py'):
+            state['failed'] = 1
+            raise ValueError('rules unreadable (test)')
+        return real(*a, **k)
+    design_rules.DesignRules.from_project = once
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            route_mod.batch_route(board, out, ['Q'], layers=['F.Cu'],
+                                  track_width=0.1, track_width_from_class=True)
+            summary = fab_tiers.escalation_summary()
+    finally:
+        design_rules.DesignRules.from_project = real
+    log = buf.getvalue()
+    assert state['failed'] and 'design-rule widths unavailable' in log, \
+        "BROKEN TEST: the width resolver did not take the fallback"
+    ctx = [c for c in summary['fab_tier_contexts'] if 'PROF6' in c and 'F.Cu' in c]
+    ok(one_width(run_utils.evidence(out)) == 0.08 and len(ctx) == 1
+       and "WARNING: tuning profile 'PROF6' width 0.08 on F.Cu" in log,
+       f"the width is drawn and the descent is in design_rules: "
+       f"{q_widths(out)}, {ctx}")
+
+
+def counted(td):
+    print('11. the count')
+    board = stage(td, 'ct', _widths)
+    _out, log = route(td, board, 'ct_o')
+    line = next((ln for ln in log.splitlines()
+                 if ln.startswith('Tuning-profile widths:')), '')
+    ok('Tuning-profile widths: 1 net(s)' in line and 'PROF6: 1' in line,
+       f"two nets take the profile and the step routes one: {line!r}")
+
+
 def main():
     td = tempfile.mkdtemp(prefix='krt1936_')
     try:
         reader(td)
         routed(td)
+        precedence(td)
+        clamped(td)
+        disclosed(td)
+        counted(td)
     finally:
         shutil.rmtree(td, ignore_errors=True)
     if FAILS:
