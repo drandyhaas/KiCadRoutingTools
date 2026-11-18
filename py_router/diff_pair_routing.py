@@ -2540,7 +2540,74 @@ def create_parallel_path_from_float(centerline_path, sign, spacing_mm=0.1, start
 
         result.append((x + perp_x, y + perp_y, layer))
 
-    return result
+    return _drop_reversed_offset_segments(centerline_path, result, start_dir, end_dir)
+
+
+def _drop_reversed_offset_segments(centerline_path, offset, start_dir=None, end_dir=None):
+    """The inner offset of a centerline segment shorter than its two corners'
+    miters runs BACKWARDS (#1441): the leg overshoots the corner and doubles
+    back, and the doubled-back point sits closer to the partner's outer leg
+    than the pair spacing. Each such segment is removed the way an offset
+    curve is cleaned: its two ends move to where its neighbours' offset lines
+    meet -- the stub direction at a leg's end -- so the leg turns where its
+    own lines cross. One point per centerline point is kept (the caller zips
+    them by index); the collapsed pair becomes a zero-length segment."""
+    n = len(offset)
+    if n < 2:
+        return offset
+    out = list(offset)
+
+    def _line(a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        return (a[0], a[1], dx, dy) if dx * dx + dy * dy > 1e-18 else None
+
+    def _meet(l1, l2):
+        x1, y1, dx1, dy1 = l1
+        x2, y2, dx2, dy2 = l2
+        den = dx1 * dy2 - dy1 * dx2
+        if abs(den) < 1e-12 * math.hypot(dx1, dy1) * math.hypot(dx2, dy2):
+            return None
+        t = ((x2 - x1) * dy2 - (y2 - y1) * dx2) / den
+        return (x1 + t * dx1, y1 + t * dy1)
+
+    def _same_layer(*idx):
+        return len({centerline_path[i][2] for i in idx}) == 1
+
+    for j in range(n - 1):
+        if not _same_layer(j, j + 1):
+            continue
+        cdx = centerline_path[j + 1][0] - centerline_path[j][0]
+        cdy = centerline_path[j + 1][1] - centerline_path[j][1]
+        odx, ody = out[j + 1][0] - out[j][0], out[j + 1][1] - out[j][1]
+        if cdx * odx + cdy * ody >= 0.0:
+            continue
+        if j > 0 and _same_layer(j - 1, j):
+            before = _line(out[j - 1], out[j])
+        elif j == 0 and start_dir is not None:
+            before = (out[0][0], out[0][1], start_dir[0], start_dir[1])
+        else:
+            continue
+        if j + 2 < n and _same_layer(j + 1, j + 2):
+            after = _line(out[j + 1], out[j + 2])
+        elif j + 1 == n - 1 and end_dir is not None:
+            after = (out[-1][0], out[-1][1], end_dir[0], end_dir[1])
+        else:
+            continue
+        if before is None or after is None:
+            continue
+        x = _meet(before, after)
+        if x is None:
+            continue
+        # a meeting point far from the segment is a near-parallel accident,
+        # not a corner: leave such a leg as it was
+        span = math.hypot(cdx, cdy) + math.hypot(odx, ody)
+        if min(math.hypot(x[0] - out[j][0], x[1] - out[j][1]),
+               math.hypot(x[0] - out[j + 1][0], x[1] - out[j + 1][1])) > 2.0 * span + 1e-9:
+            continue
+        layer = out[j][2]
+        out[j] = (x[0], x[1], layer)
+        out[j + 1] = (x[0], x[1], layer)
+    return out
 
 
 def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
@@ -4793,7 +4860,8 @@ def _fold_legs_onto_middle(mid_segs, leg_segs, own_vias, net_ids):
     tail and the leg copper lying on it (the turn back) are not laid. Only
     the end's first `2 x reach` of middle may lie before the overlap (the
     middle's own end stub). Left alone: a tail that carries one of the net's
-    vias, and any fold that would leave the net's copper in more pieces.
+    vias (a via beside the join is the leg's own, and its link to the leg is
+    kept), and any fold that would leave the net's copper in more pieces.
 
     Returns (mid_segs, leg_segs, {net_id: mm of doubled copper removed})."""
     from dataclasses import replace as _rep
@@ -4879,7 +4947,16 @@ def _fold_legs_onto_middle(mid_segs, leg_segs, own_vias, net_ids):
 
             def _to_tail(px, py):
                 return min(_pt_seg_dist(px, py, a[0], a[1], b[0], b[1]) for a, b in tail)
-            if any(_to_tail(v.x, v.y) < (v.size or 0.0) / 2.0 for v in mine_v):
+
+            def _at_via(px, py):
+                return any(math.hypot(px - v.x, py - v.y) < 1e-6 for v in mine_v)
+            # A via the tail runs over is the tail's: leave it. A via whose
+            # nearest point on the tail is the join is beside the copper that
+            # stays (the leg's own via, its link landing where the overlap
+            # began), and the fold does not take its copper.
+            if any(_to_tail(v.x, v.y) < (v.size or 0.0) / 2.0
+                   and _to_tail(v.x, v.y) < math.hypot(v.x - jx, v.y - jy) - 1e-6
+                   for v in mine_v):
                 break                             # the tail carries a via: leave it
             # the leg: keep the part beyond the overlap, cut where it stops
             far_is_start = t0 >= t1
@@ -4898,7 +4975,9 @@ def _fold_legs_onto_middle(mid_segs, leg_segs, own_vias, net_ids):
                        if s is not l and not (
                            s.net_id == nid and s.layer == m.layer
                            and _to_tail(s.start_x, s.start_y) < reach
-                           and _to_tail(s.end_x, s.end_y) < reach)]
+                           and _to_tail(s.end_x, s.end_y) < reach
+                           and not _at_via(s.start_x, s.start_y)
+                           and not _at_via(s.end_x, s.end_y))]
             if math.hypot(cx - fx, cy - fy) > 1e-6:
                 new_leg.append(_rep(l, start_x=fx, start_y=fy, end_x=cx, end_y=cy))
             if math.hypot(cx - jx, cy - jy) > 1e-6:

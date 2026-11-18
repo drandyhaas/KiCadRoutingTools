@@ -900,6 +900,12 @@ def via_support_parts(v, net_segs, net_pads, net_zones, copper_layers):
         if _pt_seg_dist(v.x, v.y, s.start_x, s.start_y,
                         s.end_x, s.end_y) < r + s.width / 2 - 1e-6:
             by_seg[i] = s.layer
+        elif (getattr(s, 'graphic_filled', False) and getattr(s, 'graphic_ring', None)
+              and point_in_polygon(v.x, v.y, list(s.graphic_ring))):
+            # a FILLED graphic conducts through its whole interior (#337,
+            # #1181), as check_connected grades it: a barrel inside it is
+            # joined on that layer though no stroke reaches it
+            by_seg[i] = s.layer
     fixed = set()
     for p in net_pads:
         if getattr(p, 'pad_type', '') == 'np_thru_hole':

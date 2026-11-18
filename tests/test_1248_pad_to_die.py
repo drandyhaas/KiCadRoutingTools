@@ -403,14 +403,17 @@ def test_route_diff_intra(tmp):
 
 #: Two pairs in one group, routed without intra-match. DA makes a U-turn, so
 #: its P leg's copper is ~1.2 mm longer than N's, and N declares 2.0 mm of
-#: pad-to-die; DB runs straight with none, and is the longer pair.
+#: pad-to-die; DB runs straight with none, and is the longer pair -- by what
+#: DA's run can meander: with the pose heuristic's headings right (#1441) DA
+#: takes its direct route, and a 27 mm DB asked for a seventh bump it had no
+#: room for, so DB is 24 mm.
 #: tests/gui_parity/test_1248_die_length_parity.py routes the same board and
 #: has kicad-cli's DRC referee it.
 PAIR_GROUP_PADS = [
     ('A1', 10, 12, 'DA_P', ''), ('A2', 10, 13.2, 'DA_N', '(die_length 2.0)'),
     ('A3', 10, 30, 'DA_P', ''), ('A4', 10, 28.8, 'DA_N', ''),
     ('B1', 23, 34, 'DB_P', ''), ('B2', 23, 35.2, 'DB_N', ''),
-    ('B3', 50, 34, 'DB_P', ''), ('B4', 50, 35.2, 'DB_N', '')]
+    ('B3', 47, 34, 'DB_P', ''), ('B4', 47, 35.2, 'DB_N', '')]
 PAIR_GROUP_ARGV = ['DA_P', 'DA_N', 'DB_P', 'DB_N', '--track-width', '0.2',
                    '--clearance', '0.15', '--diff-pair-gap', '0.15',
                    '--length-match-group', 'D*', '--length-match-tolerance', '0.1']

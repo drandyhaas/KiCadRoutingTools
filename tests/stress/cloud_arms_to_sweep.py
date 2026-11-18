@@ -22,21 +22,23 @@ bridges the two: same rows, arranged the way rank_arms expects.
 The merge is not a concatenation, because the two halves of a wave carry
 different fields:
 
-* `<wave>/<set>/summary.json` holds the GRADING after harvest re-graded the
-  kept boards locally (`drc_real` via kicad-cli, the corrected net census).
-* `<wave>/_raw/<arm>/<set>__<board>.json` holds the PROVENANCE the regrade
-  drops on the floor -- `arm`, `steps`, `rescue_steps`, `patched_defaults`,
-  `env_overrides`, and the perf counters.
+* `<wave>/<set>/summary.json` holds the GRADING: the cloud's on a KiCad wave,
+  else harvest's local re-grade of the kept boards (`drc_real` via kicad-cli,
+  the corrected net census).
+* `<wave>/_raw/<arm>/<set>__<board>.json` holds the PROVENANCE -- `arm`,
+  `steps`, `rescue_steps`, `patched_defaults`, `env_overrides`, and the perf
+  counters. A re-grade now keeps these too, but a wave re-graded before it did
+  has summary rows without them.
 
 Take grading from the first and provenance from the second. Feeding rank_arms
-the regraded rows alone would silently disable its chain-identity guard (no
+rows without the provenance would silently disable its chain-identity guard (no
 `steps`), its arm identification (no `arm`/`patched_defaults`) and its rescue
 cell (no `rescue_steps`) -- i.e. exactly the three checks that make the number
 mean anything.
 
 Grader mixing
 -------------
-Harvest re-grades locally, but a board whose artifact was not kept is re-added
+When harvest re-grades locally, a board whose artifact was not kept is re-added
 to summary.json marked `regraded: False` and keeps its CLOUD grade -- and on a
 wave built WITHOUT KiCad the image has no kicad-cli, so its `drc_real` falls
 back to raw DRC. (Check before assuming: `--with-kicad` has been the DEFAULT
