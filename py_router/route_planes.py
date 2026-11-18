@@ -556,23 +556,27 @@ def _bound_tap_neck(segments, net_id, pad_layer, config):
     """A plane tap is drawn at the board default width, so for a power net it
     is a NECK. That is a pad entry only while it is short: cm5-io's +5V
     (2 mm class) shipped 47 taps at 0.09 mm, one 7.25 mm long, under
-    ``--escalation off``. Record every necked tap in the fab ledger, and under
-    ``off`` refuse one longer than the pad-entry allowance (the caller reports
-    the pad unconnected instead of shipping a thread as a rail)."""
+    ``--escalation off``. Record every necked tap in the fab ledger, and
+    refuse one longer than the pad-entry allowance (the caller reports the
+    pad unconnected instead of shipping a thread as a rail). The allowance
+    is PAD_ENTRY_NECK_MM under ``off`` and unbounded otherwise -- unless
+    ``--power-neck-max-mm`` sets it, in which case it binds under every
+    policy (#1872)."""
     try:
         net_w = config.get_net_track_width(net_id, pad_layer)
     except Exception:                                          # noqa: BLE001
         return segments
     if not segments or net_w <= config.track_width + 1e-9:
         return segments
-    from fab_tiers import may_narrow, note_narrowing
-    allowance = defaults.PAD_ENTRY_NECK_MM
+    from fab_tiers import note_narrowing, power_neck_allowance_mm, power_neck_bound_label
+    allowance = power_neck_allowance_mm(config)
     length = sum(math.hypot(s['end'][0] - s['start'][0], s['end'][1] - s['start'][1])
                  for s in segments)
-    if not may_narrow() and length > allowance + 1e-9:
+    if allowance is not None and length > allowance + 1e-9:
+        label = power_neck_bound_label(config)
         print(f"    {YELLOW}plane tap for net {net_id} refused: {length:.2f}mm at "
               f"{config.track_width:g}mm exceeds the {allowance:g}mm pad-entry "
-              f"allowance for a {net_w:g}mm net (--escalation off){RESET}")
+              f"allowance for a {net_w:g}mm net ({label}){RESET}")
         return None
     note_narrowing(net_id, 'track_width', net_w, config.track_width, 'plane tap')
     return segments

@@ -14,7 +14,6 @@ from contextlib import contextmanager
 from operator import attrgetter
 from typing import Dict, List, Optional, Set, Tuple
 from terminal_colors import YELLOW, GREEN, RESET
-from routing_defaults import PAD_ENTRY_NECK_MM
 
 from dataclasses import replace
 from kicad_parser import (PCBData, Segment, Via, pad_is_plated_through,
@@ -3661,8 +3660,9 @@ SHORT_POWER_EDGE_MM = 10.0
 # the last stretch: a 2 mm rail meets a 0.2 mm connector pin. Under
 # ``--escalation off`` only that pad-entry stretch may neck; a rail that needs
 # to be narrow for longer fails and is reported instead. The bound,
-# PAD_ENTRY_NECK_MM, lives in routing_defaults (imported at the top), shared
-# with the tap router (route_planes._bound_tap_neck).
+# PAD_ENTRY_NECK_MM, lives in routing_defaults; the effective bound for a
+# run is fab_tiers.power_neck_allowance_mm (the flag, else the policy),
+# shared with the tap router (route_planes._bound_tap_neck).
 
 
 def _path_length_mm(path, grid_step):
@@ -3673,14 +3673,23 @@ def _path_length_mm(path, grid_step):
     return total
 
 
-def _neck_path_ok(path, grid_step):
-    """Under ``--escalation off`` a necked edge may only be a pad-entry stretch:
-    its routed LENGTH must stay within PAD_ENTRY_NECK_MM, not just the span
-    between its endpoints (a short span can be routed as a long detour)."""
-    from fab_tiers import may_narrow
-    if may_narrow():
+def _neck_path_ok(path, grid_step, config=None):
+    """A necked edge may only be a pad-entry stretch: its routed LENGTH must
+    stay within the pad-entry allowance, not just the span between its
+    endpoints (a short span can be routed as a long detour).
+
+    The allowance is PAD_ENTRY_NECK_MM under ``--escalation off`` and
+    unbounded under the other policies -- unless ``--power-neck-max-mm``
+    sets it, in which case it binds under every policy (#1872).
+    ``config`` is None only for callers that predate the flag; the helper
+    reads the flag off the config when there is one and the policy when
+    there is not, so they keep the old policy-only behaviour either way.
+    """
+    from fab_tiers import power_neck_allowance_mm
+    allowance = power_neck_allowance_mm(config)
+    if allowance is None:
         return True
-    return _path_length_mm(path, grid_step) <= PAD_ENTRY_NECK_MM + 1e-9
+    return _path_length_mm(path, grid_step) <= allowance + 1e-9
 
 
 def _neckdown_allowed(config, span_mm=None):
@@ -3690,13 +3699,15 @@ def _neckdown_allowed(config, span_mm=None):
     PAD_ENTRY_NECK_MM (``span_mm`` is the edge's source->target span; None
     means unknown, i.e. a trunk) -- this ladder was the one descent site that
     never asked, and cm5-io shipped 95 of 115 mm of a 1 mm rail at 0.15 mm
-    under a policy that promised exact sizes."""
-    from fab_tiers import may_narrow
+    under a policy that promised exact sizes. ``--power-neck-max-mm``
+    confines it the same way under every policy (#1872)."""
+    from fab_tiers import power_neck_allowance_mm
     if not config.power_tap_neckdown:
         return False
-    if may_narrow():
+    allowance = power_neck_allowance_mm(config)
+    if allowance is None:
         return True
-    return span_mm is not None and span_mm <= PAD_ENTRY_NECK_MM + 1e-9
+    return span_mm is not None and span_mm <= allowance + 1e-9
 
 
 def _pad_entry_zone_mm(config):
@@ -3704,12 +3715,14 @@ def _pad_entry_zone_mm(config):
     (config.neckdown_length). Under ``--escalation off`` the zone and the
     taper beyond it together stay within PAD_ENTRY_NECK_MM (#1452): a zone
     longer than the allowance would ship more narrow copper at a pad than the
-    policy lets any edge carry."""
-    from fab_tiers import may_narrow
-    if may_narrow():
+    policy lets any edge carry. ``--power-neck-max-mm`` clips it the same
+    way under every policy (#1872)."""
+    from fab_tiers import power_neck_allowance_mm
+    allowance = power_neck_allowance_mm(config)
+    if allowance is None:
         return config.neckdown_length
     taper = max(0.0, config.neckdown_taper_length)
-    return max(0.0, min(config.neckdown_length, PAD_ENTRY_NECK_MM - taper))
+    return max(0.0, min(config.neckdown_length, allowance - taper))
 
 
 # #1452: nets an edge of which failed this run because ``--escalation off``
@@ -4723,12 +4736,18 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         return result + (False, None)
     span_mm = _edge_span_mm(sources, targets, config.grid_step)
     neck_floor = layer_w if power_wide else config.track_width
+    # #1872: the neck bound for this run, computed once -- the flag when set
+    # (under every policy), else the policy's allowance. None = unbounded.
+    from fab_tiers import power_neck_allowance_mm, power_neck_bound_label
+    _allowance = power_neck_allowance_mm(config)
+    _label = power_neck_bound_label(config)
 
     def _pad_entry_neck(prior):
         # #1452: --escalation off refused (or could not use) the ladder.
         # Keep the edge at its width and narrow only a pad-entry stretch.
-        from fab_tiers import may_narrow
-        if may_narrow() or not config.power_tap_neckdown:
+        # #1872: the same attempt runs whenever an allowance applies -- under
+        # off, or under any policy when --power-neck-max-mm is set.
+        if _allowance is None or not config.power_tap_neckdown:
             return prior + (False, None)
         n_margins = (config.base_track_margins() if power_wide
                      else config.track_margins_for_width(config.track_width))
@@ -4741,8 +4760,8 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
             _PAD_ENTRY_REFUSALS.pop(net_id, None)
             print(f"{print_prefix}{YELLOW}Wide {'power' if power_wide else 'impedance'} "
                   f"route blocked - kept at {net_w:.4f}mm with a pad-entry neck "
-                  f"to {neck_floor:.4f}mm (at most the {PAD_ENTRY_NECK_MM:g}mm "
-                  f"pad-entry allowance, --escalation off){RESET}")
+                  f"to {neck_floor:.4f}mm (at most the {_allowance:g}mm "
+                  f"pad-entry allowance, {_label}){RESET}")
             return ((path, iters) + prior[2:4] + (False,) + prior[5:7]
                     + (True, None))
         # Would the edge route at the neck width at all? Only then did the
@@ -4759,12 +4778,13 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
             bwd = _union_frontier_cells(prior[3], narrow[3])
             return (prior[0], iters, fwd, bwd) + prior[4:] + (False, None)
         _PAD_ENTRY_REFUSALS[net_id] = {
-            'span_mm': round(span_mm, 3), 'allowance_mm': PAD_ENTRY_NECK_MM,
-            'net_width_mm': net_w, 'neck_width_mm': neck_floor}
-        print(f"{print_prefix}{YELLOW}Neck-down refused (--escalation off): the "
+            'span_mm': round(span_mm, 3), 'allowance_mm': _allowance,
+            'net_width_mm': net_w, 'neck_width_mm': neck_floor,
+            'bound': _label}
+        print(f"{print_prefix}{YELLOW}Neck-down refused ({_label}): the "
               f"edge spans {span_mm:.2f}mm and only a {neck_floor:.4f}mm track "
               f"reaches it, but no route keeps {net_w:.4f}mm outside the "
-              f"{PAD_ENTRY_NECK_MM:g}mm pad-entry allowance{RESET}")
+              f"{_allowance:g}mm pad-entry allowance{RESET}")
         return (prior[0], iters) + prior[2:] + (False, None)
 
     if not _neckdown_allowed(config, span_mm):
@@ -4779,14 +4799,14 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
                 router, obstacles, config, sources, targets, tm,
                 pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
             total_iters += r[1]
-            if r[0] is not None and not _neck_path_ok(r[0], config.grid_step):
+            if r[0] is not None and not _neck_path_ok(r[0], config.grid_step, config):
                 # A 2 mm span routed as a 12 mm detour is a narrow trunk, not a
                 # pad entry (cm5-io USBH1_VBUS 0.2 mm x 12.1 mm, USB30_DN half
                 # width on In2 under --escalation off). Refuse it; the edge
                 # fails honestly at the requested width.
                 print(f"{print_prefix}{YELLOW}Neck-down at {w:.4f}mm rejected: path "
                       f"{_path_length_mm(r[0], config.grid_step):.1f}mm exceeds the "
-                      f"{PAD_ENTRY_NECK_MM:g}mm pad-entry allowance{RESET}")
+                      f"{_allowance:g}mm pad-entry allowance{RESET}")
                 continue
             if r[0] is not None:
                 print(f"{print_prefix}{YELLOW}Wide {'power' if power_wide else 'impedance'} route blocked - routed short edge at "
@@ -4820,6 +4840,16 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         bwd = _union_frontier_cells(result[3], retry[3])
         return ((result[0], result[1] + retry[1], fwd, bwd) + result[4:]
                 + (False, None))
+    # #1872: the trunk retry shipped the neck unexamined -- a 40 mm run at
+    # the neck floor is a trunk, not a pad entry. Refuse it the same way the
+    # short-edge loop refuses a long detour and fall through to the
+    # pad-entry attempt (which keeps the width, or reports the refusal).
+    if not _neck_path_ok(retry[0], config.grid_step, config):
+        print(f"{print_prefix}{YELLOW}Neck-down at {neck_floor:.4f}mm rejected: path "
+              f"{_path_length_mm(retry[0], config.grid_step):.1f}mm exceeds the "
+              f"{_allowance:g}mm pad-entry allowance{RESET}")
+        return _pad_entry_neck(
+            (retry[0], result[1] + retry[1]) + retry[2:])
     return (retry[0], result[1] + retry[1]) + retry[2:] + (True, None)
 
 
