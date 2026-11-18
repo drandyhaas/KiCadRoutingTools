@@ -3103,9 +3103,14 @@ def main():
     if fbd:
         import glob as _glob
         for nm, cap in caps.items():
+            # (a bus's step leaves its findings in its own run: `<source>-<bus>.bus/run` where the step is the bus's
+            # alone, `<bus>/bus.bus/run` where the buses are laid on the group's field, each in a directory of its
+            # name. Read by the first form alone, a lay on the field handed the model nothing -- the round after a
+            # lay that left nets open searched again from its state, told of none of them)
             fs = sorted(f_ for pat_ in {nm, nm.replace('_', '+'), '+'.join(cap['st'].get('dests') or [nm])}
-                        for f_ in _glob.glob(os.path.join(fbd, '**', f'*-{pat_}.bus', 'run', 'group_findings.json'),
-                                             recursive=True))
+                        for g_ in (os.path.join(fbd, '**', f'*-{pat_}.bus', 'run', 'group_findings.json'),
+                                   os.path.join(fbd, '**', pat_, 'bus.bus', 'run', 'group_findings.json'))
+                        for f_ in _glob.glob(g_, recursive=True))
             if fs:
                 feedback[nm] = json.load(open(fs[-1]))
                 fb_ = feedback[nm]
@@ -3119,6 +3124,8 @@ def main():
                     f'to avoid and {len(fb_.get("pairs") or [])} pair(s) of ends priced; of them '
                     f'{len(hard[nm].get("avoid") or [])} end(s) and {len(hard[nm].get("pairs") or [])} pair(s) stood two '
                     f'audits running and are ruled out, naming {len(fed[nm])} lane(s): ' + ', '.join(sorted(fed[nm])[:16]))
+    if fbd and not feedback:
+        log(f'  --feedback: no bus\'s step left findings under {fbd} -- the model is told nothing')
     if frm:
         R_ = pickle.load(open(os.path.join(frm, 'search.pkl' if at_point else 'resume.pkl'), 'rb'))
         more_ = set(R_['wide']) - wide
