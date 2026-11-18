@@ -6,7 +6,7 @@
 //! the Python keeps the policy (which polygons, which cells, which edges) and
 //! hands the arrays over.
 
-use numpy::{IntoPyArray, PyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -140,4 +140,155 @@ pub fn capsule_cells(
     let arr = numpy::ndarray::Array2::from_shape_vec((n, 2), flat)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(arr.into_pyarray(py).unbind())
+}
+
+/// `check_drc._point_in_poly`: even-odd ray cast over the ring `xs`/`ys`.
+#[inline]
+fn point_in_poly(x: f64, y: f64, xs: &[f64], ys: &[f64]) -> bool {
+    let n = xs.len();
+    if n == 0 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (xs[i], ys[i]);
+        let (xj, yj) = (xs[j], ys[j]);
+        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// CPython's `v**2` on a float: the C library `pow(v, 2.0)`, which is not
+/// always `v*v` to the last bit. The exponent goes through `black_box` so
+/// LLVM cannot fold the call into a multiply.
+#[inline]
+fn py_sq(v: f64) -> f64 {
+    v.powf(std::hint::black_box(2.0))
+}
+
+/// `geometry_utils.point_to_segment_distance`, same operation order
+/// (`v**2` via `py_sq`; `max(0, min(1, t))` with Python's tie rules).
+#[inline]
+fn point_to_segment_distance(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let length_sq = dx * dx + dy * dy;
+    if length_sq < 1e-10 {
+        return (py_sq(px - x1) + py_sq(py - y1)).sqrt();
+    }
+    let v = ((px - x1) * dx + (py - y1) * dy) / length_sq;
+    let t = py_max(0.0, py_min(1.0, v));
+    let proj_x = x1 + t * dx;
+    let proj_y = y1 + t * dy;
+    (py_sq(px - proj_x) + py_sq(py - proj_y)).sqrt()
+}
+
+/// Exposed for the randomized equality test against the Python original.
+#[pyfunction]
+pub fn point_segment_distances(
+    p: PyReadonlyArray2<f64>,
+    s: PyReadonlyArray2<f64>,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let p = p.as_array();
+    let s = s.as_array();
+    if p.ncols() != 2 || s.ncols() != 4 || p.nrows() != s.nrows() {
+        return Err(PyValueError::new_err("point_segment_distances: p is N x 2, s is N x 4"));
+    }
+    let out: Vec<f64> = (0..p.nrows())
+        .map(|i| point_to_segment_distance(p[[i, 0]], p[[i, 1]], s[[i, 0]], s[[i, 1]], s[[i, 2]], s[[i, 3]]))
+        .collect();
+    Python::with_gil(|py| Ok(out.into_pyarray(py).unbind()))
+}
+
+/// `underpad.UnderpadGrid.block_poly`'s cell loop: every lattice cell
+/// (a, b) with a in [a0, a1), b in [b0, b1), at x = x0 + a*res,
+/// y = y0 + b*res, that lies inside one of the polygons or within `thr` of
+/// one of their edges. Polygons arrive flattened: `pts` is N x 2 and ring k
+/// is rows offs[k]..offs[k+1]. Per polygon, in order: inside test, then
+/// each edge's bbox reject (bbox grown by `thr`) and the point-to-segment
+/// distance `<= thr` -- the Python `_within` decision exactly.
+/// Returns the flat indices a*ny + b of the hit cells, a-major.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn poly_keepout_cells(
+    pts: PyReadonlyArray2<f64>,
+    offs: PyReadonlyArray1<i64>,
+    thr: f64,
+    x0: f64,
+    y0: f64,
+    res: f64,
+    a0: i64,
+    a1: i64,
+    b0: i64,
+    b1: i64,
+    ny: i64,
+) -> PyResult<Py<PyArray1<i64>>> {
+    let pts = pts.as_array();
+    let offs = offs.as_slice()?;
+    if pts.ncols() != 2 {
+        return Err(PyValueError::new_err("poly_keepout_cells: pts is N x 2"));
+    }
+    struct Poly {
+        xs: Vec<f64>,
+        ys: Vec<f64>,
+        // per edge: bx0, bx1, by0, by1, x1, y1, x2, y2
+        edges: Vec<[f64; 8]>,
+    }
+    let mut polys: Vec<Poly> = Vec::with_capacity(offs.len().saturating_sub(1));
+    for k in 0..offs.len().saturating_sub(1) {
+        let (s, e) = (offs[k], offs[k + 1]);
+        if s < 0 || e < s || e as usize > pts.nrows() {
+            return Err(PyValueError::new_err("poly_keepout_cells: bad ring offsets"));
+        }
+        let xs: Vec<f64> = (s as usize..e as usize).map(|i| pts[[i, 0]]).collect();
+        let ys: Vec<f64> = (s as usize..e as usize).map(|i| pts[[i, 1]]).collect();
+        let n = xs.len();
+        let mut edges = Vec::with_capacity(n);
+        for i in 0..n {
+            let (x1, y1) = (xs[i], ys[i]);
+            let (x2, y2) = (xs[(i + 1) % n], ys[(i + 1) % n]);
+            edges.push([
+                py_min(x1, x2) - thr,
+                py_max(x1, x2) + thr,
+                py_min(y1, y2) - thr,
+                py_max(y1, y2) + thr,
+                x1,
+                y1,
+                x2,
+                y2,
+            ]);
+        }
+        polys.push(Poly { xs, ys, edges });
+    }
+    let within = |x: f64, y: f64| -> bool {
+        for p in &polys {
+            if point_in_poly(x, y, &p.xs, &p.ys) {
+                return true;
+            }
+            for e in &p.edges {
+                if x < e[0] || x > e[1] || y < e[2] || y > e[3] {
+                    continue;
+                }
+                if point_to_segment_distance(x, y, e[4], e[5], e[6], e[7]) <= thr {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    let mut out: Vec<i64> = Vec::new();
+    for a in a0..a1 {
+        let x = x0 + (a as f64) * res;
+        for b in b0..b1 {
+            let y = y0 + (b as f64) * res;
+            if within(x, y) {
+                out.push(a * ny + b);
+            }
+        }
+    }
+    Python::with_gil(|py| Ok(out.into_pyarray(py).unbind()))
 }
