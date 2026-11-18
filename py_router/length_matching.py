@@ -5253,7 +5253,7 @@ def _ac_coupled_member_lengths(result, p_net_id, n_net_id, pcb_data):
     n_die = net_pad_to_die_length(pcb_data, n_net_id) if pcb_data is not None else 0.0
 
     return {
-        'result': result,
+        'result': result, 'p_result': result, 'n_result': result,
         'p_net_id': p_net_id, 'n_net_id': n_net_id,
         'p_segs': p_segs, 'n_segs': n_segs,
         'p_vias': p_vias, 'n_vias': n_vias,
@@ -5264,7 +5264,47 @@ def _ac_coupled_member_lengths(result, p_net_id, n_net_id, pcb_data):
     }
 
 
-def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
+def _ac_coupled_separate_member_lengths(p_result, n_result, p_net_id, n_net_id,
+                                        pcb_data):
+    """`_ac_coupled_member_lengths` for a member pair whose two nets were
+    routed ONE AT A TIME (#1980): each net has its own result (the pair
+    step's single-ended member fallback, which routes a pair too short to
+    couple), so each side is read from its own result, never the P result's
+    N copper. Each net is measured on the board's copper, as intra-pair
+    matching measures a leg (`net_signal_length`, pad-to-die included), and
+    its fixed offset is whatever the board has beyond the result's own copper.
+    None when a net's pads are not joined yet: there is no length to match."""
+    from net_queries import net_signal_length, net_pad_to_die_length
+    md = {'result': None, 'p_result': p_result, 'n_result': n_result,
+          'p_net_id': p_net_id, 'n_net_id': n_net_id}
+    for side, res, nid in (('p', p_result, p_net_id), ('n', n_result, n_net_id)):
+        segs = [s for s in res.get('new_segments', []) if s.net_id == nid]
+        vias = [v for v in res.get('new_vias', []) if v.net_id == nid]
+        routed = calculate_route_length(segs, vias, pcb_data)
+        board = net_signal_length(pcb_data, nid) if pcb_data is not None else None
+        if board is None:
+            return None
+        die = net_pad_to_die_length(pcb_data, nid)
+        md.update({f'{side}_segs': segs, f'{side}_vias': vias,
+                   f'{side}_routed': routed, f'{side}_die': die,
+                   f'{side}_stub': board - routed - die, f'{side}_len': board})
+    return md
+
+
+def _ac_member_unrouted_reason(diag):
+    """The `ac_coupled_xnets` reason for a member with no copper to match
+    (#1980), from its pair's diagnostics: a pair the step DEFERRED to
+    single-ended routing (an electrically short half) reads
+    `member-deferred-<why>`, so the row names the deferral rather than the
+    missing copper it led to; any other reads `member-not-routed`."""
+    diag = diag or {}
+    if diag.get('outcome') == 'deferred' and diag.get('reason'):
+        return f"member-deferred-{diag['reason']}"
+    return 'member-not-routed'
+
+
+def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data,
+                                     pair_diagnostics=None):
     """End-to-end length-match one AC-coupled XNet (issue #196).
 
     Matches the concatenated P conductor (the sum of every member pair's P net)
@@ -5281,11 +5321,19 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
     improve (mirroring intra-pair's guard, #460). Degrades gracefully on
     congestion and never claims a match it could not make.
 
+    A member pair the step routed one net at a time (the single-ended member
+    fallback, which takes the halves too short to couple) is measured and
+    meandered net by net, each from its own result (#1980). A member with no
+    copper to match leaves the chain `not-matchable`; `pair_diagnostics`
+    ({pair name: the pair step's record}) says why, so a member the step
+    deferred to single-ended routing reads `member-deferred-<why>`.
+
     Returns a record in the per-pair vocabulary (#1799): {'skew_mm' (the
     end-to-end skew it leaves, None when a member was not fully routed),
     'tolerance_mm', 'status': 'within-tolerance' | 'matched' | 'improved' |
     'unmatched' | 'not-matchable', 'reason': None | 'meanders-would-worsen'
-    | 'no-room-for-meanders' | 'member-not-routed'}.
+    | 'no-room-for-meanders' | 'member-not-routed' |
+    'member-deferred-<why>'}.
     """
     tol = config.length_match_tolerance
     name = "+".join(xnet.base_names)
@@ -5297,11 +5345,28 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
     members = []
     for m in xnet.members:
         res = routed_results.get(m.p_net_id)
-        if res is None or routed_results.get(m.n_net_id) is None:
-            print(f"    AC-couple {name}: member '{m.base_name}' not fully routed; "
-                  f"skipping end-to-end match")
-            return _rec(None, 'not-matchable', 'member-not-routed')
-        md = _ac_coupled_member_lengths(res, m.p_net_id, m.n_net_id, pcb_data)
+        n_res = routed_results.get(m.n_net_id)
+        md = None
+        if res is not None and n_res is res:
+            md = _ac_coupled_member_lengths(res, m.p_net_id, m.n_net_id, pcb_data)
+        elif res is not None and n_res is not None:
+            md = _ac_coupled_separate_member_lengths(res, n_res, m.p_net_id,
+                                                     m.n_net_id, pcb_data)
+        if md is None:
+            diag = (pair_diagnostics or {}).get(m.base_name)
+            reason = _ac_member_unrouted_reason(diag)
+            if reason == 'member-not-routed':
+                print(f"    AC-couple {name}: member '{m.base_name}' not fully routed; "
+                      f"skipping end-to-end match")
+            else:
+                fb = (diag or {}).get('se_fallback') or {}
+                fb_txt = (", its single-ended fallback: "
+                          + ", ".join(f"{k.upper()} {v}" for k, v in sorted(fb.items()))
+                          if fb else "")
+                print(f"    AC-couple {name}: member '{m.base_name}' was deferred to "
+                      f"single-ended routing ({diag['reason']}{fb_txt}) and is not "
+                      f"connected; skipping end-to-end match")
+            return _rec(None, 'not-matchable', reason)
         md['base'] = m.base_name
         members.append(md)
 
@@ -5368,7 +5433,7 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
                   f"(wanted +{want:.3f}mm)")
             continue
         added = new_len - cur
-        res = md['result']
+        res = md[f'{S}_result']
         if id(res) not in snapshots:
             snapshots[id(res)] = (res, list(res['new_segments']))
         res['new_segments'] = [s for s in res['new_segments']

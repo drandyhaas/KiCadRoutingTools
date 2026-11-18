@@ -2614,7 +2614,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print("End-to-end AC-coupled diff-pair length matching (#196)")
         print("=" * 60)
         for _xn in ac_xnets:
-            _acr = apply_ac_coupled_length_matching(_xn, routed_results, config, pcb_data)
+            _acr = apply_ac_coupled_length_matching(
+                _xn, routed_results, config, pcb_data,
+                pair_diagnostics=state.pair_diagnostics)
             # #1799: the pass's own verdict; re-read off the shipped copper
             # below (regrade_ac_chains), as the per-pair records are.
             ac_coupled_summary.append({
