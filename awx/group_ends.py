@@ -3156,40 +3156,43 @@ def main():
                     if ks_:
                         with awx_settings.given(genv):
                             expand(bpcb, A_, ks_)
-        if at_point:
-            # (a bench's, FROM A RUN'S SEARCH -- its search.pkl: the menus as the search left them, each bus ball on
-            # its first tiers and the move its lane holds, or whole where a need had widened it)
-            nar_ = set(narrowed) if R_.get('narrowed') is None else set(R_['narrowed'])
-            keep_ = R_.get('keep')
-            if keep_ is None:
-                # (...one put together from a run's trace, its menus not in it: every bus ball narrowed, each on the
-                # move of its whole menu that a lane's end in the state names)
-                # (...read in its bus's own frame: a lane's end is recorded as its bus's ends model sees it, a quarter
-                # turn of the board's for a bus off another face)
-                import source_realize as sr_
-                sigs_ = {nm_: {sg_ for e_ in pb_.values() for end_ in e_ for sg_ in end_[0] if isinstance(sg_, tuple)}
-                         for nm_, pb_ in R_['prev_bus'].items()}
-                turn_ = {}
-                for nm_, cap_ in caps.items():
-                    st_ = cap_['st']
-                    turn_[nm_] = frame_map(arrays[st_['sref']].pads, {
-                        p_.pad_number: (p_.global_x, p_.global_y) for p_ in st_['pcb'].footprints[st_['sref']].pads})
-                keep_ = {}
-                for key_ in sorted(nar_):
-                    A_ = arrays[key_[0]]
-                    nm_ = next((A_.bus_of[n_] for n_, k_ in A_.ball_of.items() if k_ == key_[1]), None)
-                    if nm_ not in sigs_:
-                        continue
-                    x_ = next((x_ for x_ in whole_opts.get(key_, ()) if x_[0] == 'escape'
-                               and sr_.move_sig(turn_move(x_[1], turn_[nm_])) in sigs_[nm_]), None)
-                    if x_ is not None:
-                        keep_[key_] = tier_sig[key_][1](x_[1])
-                log(f'  from {frm}, at its search\'s end: {len(keep_)} of {len(nar_)} narrowed balls keep the move '
-                    f'their lane holds')
-            go_ = {key_ for key_ in narrowed if key_ not in nar_}
-            if go_:
-                whole(go_)
-            narrow({key_ for key_ in nar_ if key_ in tier_sig}, keep_)
+        # (THE MENUS AS THE RUN LEFT THEM: each bus ball on its first tiers and the move its lane holds, or whole
+        # where a need had widened it -- a bench's FROM A RUN'S SEARCH, its search.pkl, and a run FROM A RUN'S END.
+        # A ball's move past its first tiers is on its menu because its lane took it (narrow's `keep`); built
+        # again on the first tiers alone, 105 of a four-bus group's 454 ends were not on their menus, each was
+        # read as the nearest option there, and the state so read broke the arrays' own rules: asked about two
+        # lanes, the repair let 48 others go in four buses, every bus's check refused the answer, and the model
+        # went on for seven checks)
+        nar_ = set(narrowed) if R_.get('narrowed') is None else set(R_['narrowed'])
+        keep_ = R_.get('keep')
+        if keep_ is None:
+            # (...the moves not kept with it -- a run's end, or a state put together from a run's trace: each
+            # narrowed bus ball on the move of its whole menu that a lane's end in the state names)
+            # (...read in its bus's own frame: a lane's end is recorded as its bus's ends model sees it, a quarter
+            # turn of the board's for a bus off another face)
+            import source_realize as sr_
+            sigs_ = {nm_: {sg_ for e_ in pb_.values() for end_ in e_ for sg_ in end_[0] if isinstance(sg_, tuple)}
+                     for nm_, pb_ in R_['prev_bus'].items()}
+            turn_ = {}
+            for nm_, cap_ in caps.items():
+                st_ = cap_['st']
+                turn_[nm_] = frame_map(arrays[st_['sref']].pads, {
+                    p_.pad_number: (p_.global_x, p_.global_y) for p_ in st_['pcb'].footprints[st_['sref']].pads})
+            keep_ = {}
+            for key_ in sorted(nar_):
+                A_ = arrays[key_[0]]
+                nm_ = next((A_.bus_of[n_] for n_, k_ in A_.ball_of.items() if k_ == key_[1]), None)
+                if nm_ not in sigs_:
+                    continue
+                x_ = next((x_ for x_ in whole_opts.get(key_, ()) if x_[0] == 'escape'
+                           and sr_.move_sig(turn_move(x_[1], turn_[nm_])) in sigs_[nm_]), None)
+                if x_ is not None:
+                    keep_[key_] = tier_sig[key_][1](x_[1])
+            log(f'  from {frm}: {len(keep_)} of {len(nar_)} narrowed balls keep the move their lane holds')
+        go_ = {key_ for key_ in narrowed if key_ not in nar_}
+        if go_:
+            whole(go_)
+        narrow({key_ for key_ in nar_ if key_ in tier_sig}, keep_)
         prev_bus, prev_oth, learned = R_['prev_bus'], R_['prev_oth'], R_['learned']
         cut_at, layers_want = dict(R_['cut_at']), R_['layers_want']
         cut_held.update(R_.get('cut_held') or {})
@@ -5336,7 +5339,8 @@ def main():
     pickle.dump({'wide': set(wide), 'lined': set(lined), 'prev_bus': prev_bus, 'prev_oth': prev_oth, 'learned': learned,
                  'cut_at': dict(cut_at), 'cuts': dict(cuts), 'layers_want': layers_want, 'searched': set(searched),
                  'cut_held': dict(cut_held), 'feedback': feedback, 'hard': hard, 'oth_ban': set(oth_ban),
-                 'held': dict(held), 'prev_x': {nm: sorted(x_) for nm, x_ in prev_x.items()}},
+                 'held': dict(held), 'prev_x': {nm: sorted(x_) for nm, x_ in prev_x.items()},
+                 'narrowed': set(narrowed)},
                 open(os.path.join(out, 'resume.pkl'), 'wb'))
     if M_ is None or no_plan:
         M_ = lay_and_measure(laid, wayouts)
