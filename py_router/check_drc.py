@@ -22,8 +22,8 @@ from geometry_utils import (
     closest_point_on_segment,
     segment_to_segment_closest_points,
     segment_to_segment_distance as _seg_seg_dist_coords,
-    via_on_layer,
-    via_copper_layers,
+    via_spans_layer,
+    via_span_layers,
 )
 from net_queries import expand_pad_layers
 
@@ -737,7 +737,7 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
     # layers between its end layers (an F.Cu->In1.Cu microvia is not on In2..B.Cu).
     if not seg.layer.endswith('.Cu'):
         return False, 0.0
-    if not via_on_layer(via, seg.layer):
+    if not via_spans_layer(via, seg.layer):
         return False, 0.0
 
     required_dist = via.size / 2 + copper_width(seg) / 2 + clearance
@@ -2760,7 +2760,7 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
     # A through via conflicts with a pad on any copper layer; a via KiCad
     # types blind/buried/micro only with a pad on its span (#1268): an SMD pad
     # on B.Cu over an F.Cu->In1.Cu microvia is no conflict.
-    if not any(layer.endswith('.Cu') and via_on_layer(via, layer)
+    if not any(layer.endswith('.Cu') and via_spans_layer(via, layer)
                for layer in expanded_layers):
         return False, 0.0
 
@@ -2955,7 +2955,7 @@ def pad_via_hole_required(pad, via, via_hole_clearance, board_copper, binder=Non
     if _pad_has_no_copper(pad):
         return None
     board_copper = list(board_copper)
-    span = frozenset(via_copper_layers(via, board_copper)
+    span = frozenset(via_span_layers(via, board_copper)
                      or (getattr(via, 'layers', None) or ('F.Cu', 'B.Cu')))
     shared = frozenset(pad_copper_layers(pad, board_copper)) & span
     if not shared:
@@ -3152,7 +3152,7 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
             return point_to_pad_distance(cobj.x, cobj.y, hobj) - cobj.size / 2.0
         return pad_copper_gap(hobj, cobj)
 
-    via_layers = {id(v): frozenset(via_copper_layers(v, copper)) for v in pcb_data.vias}
+    via_layers = {id(v): frozenset(via_span_layers(v, copper)) for v in pcb_data.vias}
     # (kind, item, p1, p2, radius, net, ref, layers, no-copper class): the
     # class is 'bare' for an NPTH or ring-uncovered hole, 'peg' for #1753's
     # flush peg, None for a hole in copper
@@ -5056,12 +5056,12 @@ def _disallow_rule_pass(pcb_file, pcb_data, routing_layers, matching_net_ids,
                     'net1': _net(s.net_id), 'layer': s.layer,
                     'seg_loc': (s.start_x, s.start_y, s.end_x, s.end_y)})
     if via_rules:
-        from geometry_utils import via_copper_layers
+        from geometry_utils import via_span_layers
         for v in pcb_data.vias:
             if matching_net_ids is not None and v.net_id not in matching_net_ids:
                 continue
             vt = getattr(v, 'via_type', 'through') or 'through'
-            on = tuple(via_copper_layers(v, copper))
+            on = tuple(via_span_layers(v, copper))
             key = ('v', v.net_id, vt, on)
             if key not in memo:
                 memo[key] = dr.via_disallow_rule(v.net_id, vt, on)
@@ -5723,6 +5723,66 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
              'already had' if n_viol and baseline_pd is None else ''))
 
 
+def _backdrilled_layer_pass(pcb_data, matching_net_ids, violations, quiet):
+    """#1925: a track joined to a via or a drilled pad of its net on a layer a
+    back-drill of that barrel removes (`track-on-backdrilled-layer`).
+
+    The drill takes the barrel's copper on the layer, so the track joins
+    nothing there. KiCad reports it as `track_on_post_machined_layer`, and
+    this reads the joint as KiCad does (measured on kicad-cli 10.0.8): the
+    track's centreline comes inside the via's pad circle, or touches the
+    drilled pad's copper shape. A track whose edge only overlaps the pad is
+    not reported by either. The layers a drill removes are its start to its
+    end layer in STACK order, for a via and for a pad. kicad-cli 10.0.8 reads
+    a via's that way, and a pad's as a range of layer numbers instead (a pad
+    drilled B.Cu to In2.Cu is reported on In1.Cu too, and one drilled F.Cu to
+    In1.Cu on B.Cu), so on a pad the two agree only where both ranges do."""
+    from geometry_utils import backdrill_removes_layer
+    from kicad_parser import pad_is_plated_through
+    barrels = [(v.net_id, v.backdrills, v, None) for v in pcb_data.vias
+               if getattr(v, 'backdrills', None) and v.net_id
+               and (matching_net_ids is None or v.net_id in matching_net_ids)]
+    for net_id, pads in (getattr(pcb_data, 'pads_by_net', None) or {}).items():
+        if net_id and (matching_net_ids is None or net_id in matching_net_ids):
+            barrels.extend((net_id, p.backdrills, None, p) for p in pads
+                           if getattr(p, 'backdrills', None) and pad_is_plated_through(p))
+    if not barrels:
+        return
+    by_net = {}
+    for seg in pcb_data.segments:
+        if seg.net_id and not getattr(seg, 'graphic', False):
+            by_net.setdefault(seg.net_id, []).append(seg)
+    n_found = 0
+    for net_id, backdrills, via, pad in barrels:
+        net = pcb_data.nets.get(net_id)
+        name = net.name if net else str(net_id)
+        for seg in by_net.get(net_id, ()):
+            if not backdrill_removes_layer(backdrills, seg.layer):
+                continue
+            if via is not None:
+                joined = point_to_segment_distance(
+                    via.x, via.y, seg.start_x, seg.start_y,
+                    seg.end_x, seg.end_y) < via.size / 2.0
+            else:
+                joined = segment_pad_gap(seg.start_x, seg.start_y,
+                                         seg.end_x, seg.end_y, pad) <= 0.0
+            if not joined:
+                continue
+            row = {'type': 'track-on-backdrilled-layer', 'net1': name, 'net2': name,
+                   'layer': seg.layer,
+                   'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y)}
+            if via is not None:
+                row.update(item2='via', via_loc=(via.x, via.y))
+            else:
+                row.update(item2='pad %s.%s' % (pad.component_ref, pad.pad_number),
+                           via_loc=(pad.global_x, pad.global_y))
+            violations.append(row)
+            n_found += 1
+    if n_found and not quiet:
+        print("Tracks joined to a back-drilled layer: %d (the drill removes the "
+              "barrel's copper there, so the track is not connected)" % n_found)
+
+
 def _keepout_area_layers(ko, routing_layers):
     """The copper layers a rule area covers: its `(layers ...)` tokens with
     `*.Cu` / `F&B.Cu` expanded the way pad layers are, or every copper layer
@@ -5745,7 +5805,7 @@ def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
       area's copper layers whose COPPER (the centreline grown by half its
       width) reaches into the area -- the outer outline minus its holes;
     - `(vias not_allowed)`: a via whose copper disk reaches into it, when the
-      via has copper (`geometry_utils.via_on_layer`) on one of its layers.
+      via has copper (`geometry_utils.via_spans_layer`) on one of its layers.
 
     "Reaches into" means by more than `tol`; a centreline inside the area
     always does. Pads, footprints and zone fill are NOT graded (fill pulls
@@ -5876,7 +5936,7 @@ def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
                     if d > 0.0 and r - d <= tol:
                         continue
                     v = vias[i]
-                    on = [l for l in layers if via_on_layer(v, l)]
+                    on = [l for l in layers if via_spans_layer(v, l)]
                     if not on:
                         continue
                     reach = (r - d) if d > 0.0 else r + boundary.distance(p)
@@ -7715,7 +7775,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if layer is not None:
                 _ls = (layer,)
             elif isinstance(_o, Via):
-                _ls = _cy_layers(_pad_copper(pad), via_copper_layers(_o, _board_copper))
+                _ls = _cy_layers(_pad_copper(pad), via_span_layers(_o, _board_copper))
             else:
                 _ls = _cy_layers(_pad_copper(pad), _pad_copper(_o))
             eff, _cyr = _cy_pair(eff, pad, _o, _ls)
@@ -8363,7 +8423,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     _v = pcb_data.vias[int(_i)]
                     if _v.net_id == _sh.net_id and _sh.net_id:
                         continue
-                    if not via_on_layer(_v, _sh.layer):
+                    if not via_spans_layer(_v, _sh.layer):
                         continue    # #1268: a blind/micro via off this layer
                     if not (_shape_ok or matching_net_ids is None
                             or _v.net_id in matching_net_ids):
@@ -8514,8 +8574,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             _cyr = None
             if net1 != net2:
                 _eff, _cyr = _cy_pair(_eff, via1, via2, _cy_layers(
-                    via_copper_layers(via1, _board_copper),
-                    via_copper_layers(via2, _board_copper)))
+                    via_span_layers(via1, _board_copper),
+                    via_span_layers(via2, _board_copper)))
             has_violation, overlap = check_via_via_overlap(via1, via2, _eff, clearance_margin)
             if not has_violation and overlap > 0.0 and net1 != net2:   # #1803
                 _note_within_margin(pcb_data, net1, net2, overlap)
@@ -8756,7 +8816,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # with a severity still binds its pairs, and the severity pass then
         # leaves an `ignore` one's ungraded. No rule: the one value, as before.
         from design_rules import laser_drilled_span as _h2h_laser_span
-        from geometry_utils import via_copper_layers as _h2h_span
+        from geometry_utils import via_span_layers as _h2h_span
         _h2h_dr = None
         _h2h_pinned = set()            # rules the fab floor pinned up
         _h2h_bound = hole_to_hole_clearance
@@ -9634,6 +9694,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
     _via_in_paste_pass(pcb_data, matching_via_nets, _baseline_pd, violations,
                        _accepted_edge, quiet)
+    _backdrilled_layer_pass(pcb_data, matching_net_ids, violations, quiet)
     _keepout_pass(pcb_data, routing_layers, matching_net_ids, _baseline_pd,
                   violations, _accepted_edge,
                   _grade_tol(clearance, clearance_margin), quiet)
@@ -10116,6 +10177,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                               + ("" if v.get('format_can_declare', True) else
                                  "  [this file format cannot declare it per via: "
                                  "state Type VII on the fab drawing, or move the via]"))
+                    elif vtype == 'track-on-backdrilled-layer':
+                        print(f"  Track:{v['net1']} on {v['layer']} joined to its {v['item2']} "
+                              f"where a back-drill removes that layer")
+                        print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                        print(f"    At: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     elif vtype == 'keepout':
                         _an = (f"'{v['area']}'" if v['area'] else '(unnamed)') + (
                             ' [footprint rule area]' if v.get('area_in_footprint') else '')

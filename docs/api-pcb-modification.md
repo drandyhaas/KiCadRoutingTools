@@ -344,6 +344,8 @@ Removes collinear intermediate points from an A* path. Note: operates on
 ```python
 via_on_layer(via, layer_name) -> bool
 via_copper_layers(via, copper_layers) -> List[str]
+via_spans_layer(via, layer_name) -> bool
+via_span_layers(via, copper_layers) -> List[str]
 via_end_layers(via) -> Tuple[str, str]
 via_span_layer_indices(via, routing_layers, num_layers)
 PARTIAL_VIA_TYPES = frozenset({'blind', 'buried', 'micro'})
@@ -355,6 +357,11 @@ word as a THROUGH via whatever pair it carries, so only a via whose
 between its two end layers, in stack order. Ask these (they take a `Via` or a
 via dict) instead of reading the pair; `via_end_layers` is what a
 barrel-length measurement spans (`('F.Cu', 'B.Cu')` for a through via).
+
+A layer one of the via's back-drills removes (`Via.backdrills`, #1925) is
+inside its span and carries none of its copper: `via_on_layer` /
+`via_copper_layers` leave it out, and `via_spans_layer` / `via_span_layers`
+keep it, for a clearance, a keep-out or a hole measurement.
 
 ```python
 from kicad_parser import Via

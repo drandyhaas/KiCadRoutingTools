@@ -77,9 +77,9 @@ def _pad_touches_copper_group(pad, group, net_vias, routing_layers) -> bool:
     in a few iterations; over-claiming recreates the phantom-success bug.
     """
     from check_connected import track_reaches_pad
-    from net_queries import expand_pad_layers
+    from net_queries import pad_joined_layers
     px, py = pad.global_x, pad.global_y
-    pad_layers = expand_pad_layers(pad.layers, routing_layers)
+    pad_layers = pad_joined_layers(pad, routing_layers)
     reach_pad = min(pad.size_x, pad.size_y) / 4 if (pad.size_x and pad.size_y) else 0.05
     # A via-in-pad fans an SMD pad out to every copper layer, so the
     # group's copper may legitimately reach the pad on a layer the pad
@@ -315,10 +315,9 @@ def endpoint_reaches_pad(x, y, radius, layers, pad, unflashed_hole_only=False) -
         return set()                        # a hole, not copper (#328)
     # Local import: net_queries imports this module, so a module-level import
     # would cycle -- the same reason check_net_connectivity is imported below.
-    from net_queries import expand_pad_layers
+    from net_queries import pad_joined_layers
     want = list(layers)
-    on = set(want) & set(expand_pad_layers(list(getattr(pad, 'layers', None)
-                                                or ()), want))
+    on = set(want) & set(pad_joined_layers(pad, want))
     if not on:
         return set()                        # cheap test first; geometry is the cost
     margin = max(radius - 1e-6, COINCIDENCE_TOL)
@@ -385,8 +384,19 @@ def via_copper_layers(via, copper_layers=None) -> set:
     When `copper_layers` is supplied, a blind/buried via also gets the layers
     BETWEEN its endpoints -- a buried F.Cu-In2.Cu via touches In1.Cu, and
     treating the span as the two endpoints alone manufactured phantom
-    unsupported-via findings (check_weird._via_span, same rule).
+    unsupported-via findings (check_weird._via_span, same rule). A layer a
+    back-drill of the via removes is not among them (#1925).
     """
+    span = _via_barrel_layers(via, copper_layers)
+    backdrills = getattr(via, 'backdrills', None)
+    if backdrills:
+        # #1925: a layer a back-drill removes carries none of the via's copper
+        from geometry_utils import backdrill_removes_layer
+        span = {L for L in span if not backdrill_removes_layer(backdrills, L)}
+    return span
+
+
+def _via_barrel_layers(via, copper_layers=None) -> set:
     declared = [L for L in (getattr(via, 'layers', None) or ()) if L.endswith('.Cu')]
     if not declared or ('F.Cu' in declared and 'B.Cu' in declared):
         return set(copper_layers or declared or ())
@@ -1384,7 +1394,7 @@ def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
     trunk-to-trunk 4.5mm from the gap, and the rescue's verify undid it
     every retry -- the net shipped open though the window route existed).
     """
-    from net_queries import expand_pad_layers
+    from net_queries import pad_joined_layers
 
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
@@ -1412,7 +1422,7 @@ def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
             _add(x, y, layer_idx, gx, gy)
     for pad in routable(drop_off_board_pads(pcb_data, pcb_data.pads_by_net.get(net_id, []))):
         gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-        for layer in expand_pad_layers(pad.layers, config.layers):
+        for layer in pad_joined_layers(pad, config.layers):
             layer_idx = layer_map.get(layer)
             if layer_idx is not None:
                 _add(pad.global_x, pad.global_y, layer_idx, gx, gy)
@@ -1494,7 +1504,7 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
         - error_message: None if successful, otherwise describes why routing can't proceed
     """
     # Import expand_pad_layers locally to avoid circular import
-    from net_queries import expand_pad_layers
+    from net_queries import pad_joined_layers
 
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
@@ -1540,7 +1550,7 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                     targets = []
                     for pad in unconnected_pads:
                         gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                        for layer in expand_pad_layers(pad.layers, config.layers):
+                        for layer in pad_joined_layers(pad, config.layers):
                             layer_idx = layer_map.get(layer)
                             if layer_idx is not None:
                                 targets.append((gx, gy, layer_idx, pad.global_x, pad.global_y))
@@ -1727,7 +1737,7 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                 for pad in unconnected_pads:
                     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
                     # Expand wildcard layers like "*.Cu" to actual routing layers
-                    expanded_layers = expand_pad_layers(pad.layers, config.layers)
+                    expanded_layers = pad_joined_layers(pad, config.layers)
                     for layer in expanded_layers:
                         layer_idx = layer_map.get(layer)
                         if layer_idx is not None:
@@ -1799,7 +1809,7 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
         pad = net_pads[0]
         gx, gy = coord.to_grid(pad.global_x, pad.global_y)
         # Expand wildcard layers like "*.Cu" to actual routing layers
-        expanded_layers = expand_pad_layers(pad.layers, config.layers)
+        expanded_layers = pad_joined_layers(pad, config.layers)
         for layer in expanded_layers:
             layer_idx = layer_map.get(layer)
             if layer_idx is not None:
@@ -1810,7 +1820,7 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
         for pad in net_pads[1:]:
             gx, gy = coord.to_grid(pad.global_x, pad.global_y)
             # Expand wildcard layers like "*.Cu" to actual routing layers
-            expanded_layers = expand_pad_layers(pad.layers, config.layers)
+            expanded_layers = pad_joined_layers(pad, config.layers)
             for layer in expanded_layers:
                 layer_idx = layer_map.get(layer)
                 if layer_idx is not None:
@@ -1889,7 +1899,7 @@ def _get_multipoint_net_pads_unordered(
         None if not a multi-point net
     """
     # Import expand_pad_layers locally to avoid circular import
-    from net_queries import expand_pad_layers
+    from net_queries import pad_joined_layers
 
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
@@ -1910,7 +1920,7 @@ def _get_multipoint_net_pads_unordered(
         for pad in net_pads:
             gx, gy = coord.to_grid(pad.global_x, pad.global_y)
             # Expand wildcard layers like "*.Cu" to actual routing layers
-            expanded_layers = expand_pad_layers(pad.layers, config.layers)
+            expanded_layers = pad_joined_layers(pad, config.layers)
             # Use FIRST layer for MST calculation (one entry per physical pad)
             # The tap routing will create targets on ALL layers for through-hole pads
             for layer in expanded_layers:
@@ -1941,7 +1951,7 @@ def _get_multipoint_net_pads_unordered(
         groups = find_connected_groups(net_segments, vias=net_vias)
 
         def _pad_layers(pad):
-            return expand_pad_layers(pad.layers, config.layers)
+            return pad_joined_layers(pad, config.layers)
 
         def _pad_on_group(pad, group) -> bool:
             # Hoisted to _pad_touches_copper_group (#545 F8) so Case 2 shares

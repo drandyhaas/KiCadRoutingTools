@@ -1082,8 +1082,14 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   GUI: `gui_utils.apply_via_backdrills`) for any via that already existed, as
   `tenting_attrs` is passed; a via the tool adds has none, and no step decides
   one. `tests/test_1925_backdrill_read_keep.py` walks the AST for a site that
-  forgets. Measured by `py_tools/check_via_stubs.py` (report-only); the
-  router, the fill model and `check_drc` do not read them
+  forgets. Measured by `py_tools/check_via_stubs.py` (report-only). A layer
+  a back-drill removes is not the barrel's copper: `via_on_layer` /
+  `via_copper_layers` leave it out, as `net_queries.pad_joined_layers(pad,
+  layers)` does for a drilled pad, so a route ends no track of the net there,
+  `check_connected` joins nothing there and `check_drc` reports a track that
+  does (`track-on-backdrilled-layer`). The hole is still in the board: a
+  clearance or keep-out reads `via_spans_layer` / `via_span_layers` (and
+  `expand_pad_layers`). The fill model does not read them
 - `via.tenting_attrs` - Protection spec `{token: raw inner s-expr}` for
   `tenting`/`covering`/`plugging`/`capping`/`filling` (#489 §8); `{}` = the board
   specified nothing. Read by BOTH parse paths in the same normalized form. Pass it

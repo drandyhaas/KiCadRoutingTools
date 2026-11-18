@@ -1251,6 +1251,23 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
     return True, ""
 
 
+def stub_meets_drilled_barrel(pcb_data: PCBData, stub: StubInfo, dest_layer: str) -> bool:
+    """#1925: would `stub`, moved to `dest_layer`, run into a via or a drilled
+    pad of its net where a back-drill removes that layer? The barrel has no
+    copper there, so the moved stub would join nothing at that end."""
+    from geometry_utils import backdrill_removes_layer, point_to_segment_distance
+    barrels = [(v.x, v.y, v.size / 2.0) for v in pcb_data.vias
+               if v.net_id == stub.net_id and getattr(v, 'backdrills', None)
+               and backdrill_removes_layer(v.backdrills, dest_layer)]
+    barrels += [(p.global_x, p.global_y, max(p.size_x, p.size_y) / 2.0)
+                for p in pcb_data.pads_by_net.get(stub.net_id, [])
+                if getattr(p, 'backdrills', None)
+                and backdrill_removes_layer(p.backdrills, dest_layer)]
+    return any(point_to_segment_distance(x, y, s.start_x, s.start_y, s.end_x, s.end_y)
+               < r + (s.width or 0.0) / 2.0
+               for x, y, r in barrels for s in stub_switch_segments(pcb_data, stub))
+
+
 def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
                   all_stubs_by_layer: Dict[str, List[Tuple[str, List[Segment]]]],
                   pcb_data: PCBData, config: GridRouteConfig,
@@ -1286,6 +1303,10 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     if forbidden_destination(config, dest_layer, pcb_data,
                              (stub_p.net_id, stub_n.net_id)):
         return False, f"{dest_layer} is a forbidden layer (negative cost or a .kicad_dru track ban)"
+
+    if any(stub_meets_drilled_barrel(pcb_data, stub, dest_layer)
+           for stub in (stub_p, stub_n)):
+        return False, f"a back-drill of the net's own barrel removes {dest_layer} (#1925)"
 
     # #581: an active (> 0) same-net pad via clearance forbids pad-centre vias.
     if getattr(config, 'same_net_pad_clearance', -1.0) > 0:
@@ -1626,6 +1647,9 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
 
     if forbidden_destination(config, dest_layer, pcb_data, (stub.net_id,)):
         return False, f"{dest_layer} is a forbidden layer (negative cost or a .kicad_dru track ban)"
+
+    if stub_meets_drilled_barrel(pcb_data, stub, dest_layer):
+        return False, f"a back-drill of the net's own barrel removes {dest_layer} (#1925)"
 
     # #581: an active (> 0) same-net pad via clearance forbids the pad-centre
     # via this switch would drill -- decline the swap instead.

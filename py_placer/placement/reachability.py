@@ -265,8 +265,8 @@ class PairPricing:
 
     def via(self, via, layer):
         try:
-            from geometry_utils import via_copper_layers
-            cu = frozenset(via_copper_layers(via, list(self.board_copper)))
+            from geometry_utils import via_span_layers
+            cu = frozenset(via_span_layers(via, list(self.board_copper)))
         except Exception:                                       # noqa: BLE001
             cu = frozenset()
         return self._price(self.model.item_floor(

@@ -254,11 +254,11 @@ class RoutedHoleRules:
 
     def via_copper_value(self, via) -> Optional[float]:
         """`copper_value` for one via of the board."""
-        from geometry_utils import via_copper_layers
+        from geometry_utils import via_span_layers
         _via, it, vals = self._via_entry(via)
         if 'copper' not in vals:
             vals['copper'] = self.copper_value(
-                it, getattr(via, 'net_id', 0), via_copper_layers(via, self.dr.copper_layers))
+                it, getattr(via, 'net_id', 0), via_span_layers(via, self.dr.copper_layers))
         return vals['copper']
 
     def _pad_entry(self, pad):
@@ -362,9 +362,9 @@ def via_hole_extra(config, clearance: float, other_via=None, pad=None) -> float:
     # ... and the new via's copper off another via's hole
     drill = float(getattr(other_via, 'drill', 0.0) or 0.0) if other_via is not None else 0.0
     if drill > 0:
-        from geometry_utils import via_copper_layers
+        from geometry_utils import via_span_layers
         size = float(getattr(other_via, 'size', 0.0) or 0.0) or config.via_size
-        lays = set(via_copper_layers(other_via, hr.dr.copper_layers)) & set(hr.new_via_layers)
+        lays = set(via_span_layers(other_via, hr.dr.copper_layers)) & set(hr.new_via_layers)
         vals = [hr.via_value(other_via, l, 'via') for l in hr.dr.copper_layers if l in lays]
         vals = [x for x in vals if x is not None]
         if vals:

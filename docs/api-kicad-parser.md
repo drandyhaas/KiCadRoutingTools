@@ -294,7 +294,12 @@ number makes KiCad refuse the board, and the parser names it in a WARNING and
 carries nothing. `via_stubs.drilled_layers(via.backdrills, copper_layers)`
 gives the layers removed. Nothing in the tools decides a back-drill: they are
 read, carried by every writer that re-emits an existing via, and measured by
-`check_via_stubs.py`. The router, the fill model and `check_drc` do not read
+`check_via_stubs.py`. A layer a back-drill removes is not the barrel's copper:
+`geometry_utils.via_on_layer` / `via_copper_layers` leave it out, and
+`net_queries.pad_joined_layers(pad, layers)` does the same for a drilled pad,
+so the route steps end no track of the net on it, `check_connected` joins
+nothing there and `check_drc` reports a track that does
+(`track-on-backdrilled-layer`). The fill model does not read
 them. KiCad's post-machining tokens (`front_post_machining`,
 `back_post_machining`) are not read.
 

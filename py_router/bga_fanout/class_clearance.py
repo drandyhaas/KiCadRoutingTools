@@ -199,7 +199,7 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
     from check_drc import (check_segment_overlap, check_via_segment_overlap,
                            check_via_via_overlap, check_pad_segment_overlap,
                            check_pad_via_overlap, _pad_has_no_copper)
-    from geometry_utils import via_on_layer
+    from geometry_utils import via_spans_layer
     hot = {n for n, c in net_clearances.items() if c > base + 1e-9}
     # #1567: the clearance each new item was laid at (a rescue's mark, else
     # `base`), and the classes at or below `base` such copper went under
@@ -313,7 +313,7 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
                     hit = check_segment_overlap(oa, ob, need, _MARGIN)[0]
             elif {kind_a, kind_b} == {'seg', 'via'}:
                 sv, vv = (oa, ob) if kind_a == 'seg' else (ob, oa)
-                if not via_on_layer(vv, sv.layer):
+                if not via_spans_layer(vv, sv.layer):
                     continue
                 _t = (('track' if kind_a == 'seg' else 'via',),
                       ('track' if kind_b == 'seg' else 'via',))

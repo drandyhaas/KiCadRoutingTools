@@ -73,10 +73,10 @@ def joined_layers(via, segments, pads, zones, copper: List[str]) -> Dict[str, Li
     """{layer: how the net's copper joins `via` there} over the layers the via
     has copper on, in stack order; each value lists 'track', 'pad' and / or
     'zone'. `segments`, `pads` and `zones` are the via's net's."""
-    from geometry_utils import point_to_segment_distance, via_copper_layers
+    from geometry_utils import point_to_segment_distance, via_span_layers
     from net_queries import expand_pad_layers
     from check_drc import point_to_pad_distance
-    on = via_copper_layers(via, copper)
+    on = via_span_layers(via, copper)
     how: Dict[str, List[str]] = {}
     r = via.size / 2.0
     for s in segments:
@@ -113,8 +113,8 @@ def via_stub(via, joined: Iterable[str], copper: List[str],
     (`joined_layers`), `depths` is `copper_depths`. The mm values are None
     when the stackup does not give every layer of the via a depth, or the via
     is joined on no layer a back-drill leaves."""
-    from geometry_utils import via_copper_layers
-    on = via_copper_layers(via, copper)
+    from geometry_utils import via_span_layers
+    on = via_span_layers(via, copper)
     gone = set(drilled_layers(getattr(via, 'backdrills', None), copper))
     joined = [l for l in on if l in set(joined)]
     kept = [l for l in joined if l not in gone]

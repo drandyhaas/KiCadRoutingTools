@@ -489,8 +489,9 @@ def _via_field(via, name: str, default=None):
     return getattr(via, name, default)
 
 
-def via_on_layer(via, layer_name: str) -> bool:
-    """True when the via has copper on `layer_name`.
+def via_spans_layer(via, layer_name: str) -> bool:
+    """True when the via's barrel passes `layer_name`, drilled away there or
+    not: what a keep-out, a clearance or a hole measurement reads.
 
     Only a via KiCad types blind, buried or micro (`Via.via_type`) covers part
     of the stack: the layers between its two end layers in stack order. Any
@@ -510,6 +511,36 @@ def via_on_layer(via, layer_name: str) -> bool:
     return a <= o <= b
 
 
+def backdrill_removes_layer(backdrills, layer_name: str) -> bool:
+    """True when one of `backdrills` ({token: (size, start, end)}, a via's or
+    a drilled pad's) removes the copper of `layer_name` (#1925): each drill
+    takes its start to its end layer, both inclusive, in stack order. A drill
+    or a layer whose name is not F.Cu / InN.Cu / B.Cu removes nothing."""
+    if not backdrills:
+        return False
+    o = _copper_order(layer_name)
+    if o < 0:
+        return False
+    for bd in backdrills.values():
+        a, b = _copper_order(bd[1]), _copper_order(bd[2])
+        if a >= 0 and b >= 0 and min(a, b) <= o <= max(a, b):
+            return True
+    return False
+
+
+def via_on_layer(via, layer_name: str) -> bool:
+    """True when the via has copper on `layer_name`: its barrel passes the
+    layer (`via_spans_layer`) and no back-drill of the via removes it there
+    (#1925). A track, pad or pour of the net on a removed layer is not joined
+    to the via, which is `via_stubs.joined_layers`' reading too. The hole a
+    back-drill leaves is still there: a clearance or keep-out reads
+    `via_spans_layer`."""
+    if not via_spans_layer(via, layer_name):
+        return False
+    backdrills = _via_field(via, "backdrills")
+    return not (backdrills and backdrill_removes_layer(backdrills, layer_name))
+
+
 def via_span_layer_indices(via, routing_layers, num_layers: int):
     """Routing-layer indices a via's copper occupies.
 
@@ -517,7 +548,7 @@ def via_span_layer_indices(via, routing_layers, num_layers: int):
     occupies only the layers between its two end layers in stack order: an
     F.Cu->In1.Cu microvia leaves In2..B.Cu free for tracks (via-in-pad GND
     microvias freed nothing while every via was rasterized on all layers).
-    Layers are matched by NAME through `via_on_layer`, never by index: a
+    Layers are matched by NAME through `via_spans_layer`, never by index: a
     full-stack run's config.layers is not in stack order (`--layers F.Cu
     In2.Cu B.Cu` appends In1/In3/In4 after B.Cu). Without a name for every map
     layer the answer is every layer, so a board whose vias are all through
@@ -527,18 +558,26 @@ def via_span_layer_indices(via, routing_layers, num_layers: int):
             or not routing_layers or len(routing_layers) < num_layers):
         return range(num_layers)
     return [i for i, name in enumerate(list(routing_layers)[:num_layers])
-            if via_on_layer(via, name)]
+            if via_spans_layer(via, name)]
 
 
 def via_copper_layers(via, copper_layers):
     """The layers of `copper_layers` (in that order) a via has copper on: all
     of them for a through via, whatever pair it carries, and the run between
-    its end layers for one KiCad types blind/buried/micro. Accepts a Via or a
-    via dict. This is what every consumer that asks "which layers does this
-    via join" should read -- a via's stored pair is NOT its span (found
-    reviewing #1268: an untyped via is through to KiCad, and a typed one also
-    joins the layers BETWEEN its ends)."""
+    its end layers for one KiCad types blind/buried/micro -- less the layers a
+    back-drill of the via removes (#1925). Accepts a Via or a via dict. This
+    is what every consumer that asks "which layers does this via join" should
+    read -- a via's stored pair is NOT its span (found reviewing #1268: an
+    untyped via is through to KiCad, and a typed one also joins the layers
+    BETWEEN its ends)."""
     return [layer for layer in copper_layers if via_on_layer(via, layer)]
+
+
+def via_span_layers(via, copper_layers):
+    """The layers of `copper_layers` (in that order) a via's barrel passes,
+    drilled away there or not (`via_spans_layer`): what a keep-out, a
+    clearance or a hole measurement reads."""
+    return [layer for layer in copper_layers if via_spans_layer(via, layer)]
 
 
 def via_end_layers(via):

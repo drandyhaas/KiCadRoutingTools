@@ -4337,6 +4337,10 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
         # mounting hole has no barrel -- suppressing a via there would ship a
         # broken layer transition.
         if pad_is_plated_through(pad):
+            if getattr(pad, 'backdrills', None):
+                # #1925: a back-drilled barrel joins only the layers the drill
+                # leaves (same_net_partial_via_spans)
+                continue
             # Offset pads (#325): the reusable BARREL is at the hole anchor,
             # not the (possibly offset) copper centre.
             hx = getattr(pad, 'hole_x', None)
@@ -4368,9 +4372,11 @@ def via_stops_short(via, pcb_data) -> bool:
     """Is this a via KiCad types blind/buried/micro whose copper misses at
     least one of the board's copper layers? Such a via is NOT a reusable hole
     for an arbitrary layer change (found reviewing #1268): the router rode an
-    F.Cu->In1.Cu microvia to B.Cu at zero cost and emitted no via."""
+    F.Cu->In1.Cu microvia to B.Cu at zero cost and emitted no via. So is a via
+    of any type with a layer back-drilled away (#1925)."""
     from geometry_utils import PARTIAL_VIA_TYPES, via_copper_layers
-    if getattr(via, 'via_type', 'through') not in PARTIAL_VIA_TYPES:
+    if getattr(via, 'via_type', 'through') not in PARTIAL_VIA_TYPES \
+            and not getattr(via, 'backdrills', None):
         return False
     cu = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers',
                       None) or ['F.Cu', 'B.Cu'])
@@ -4380,9 +4386,10 @@ def via_stops_short(via, pcb_data) -> bool:
 def same_net_partial_via_spans(pcb_data, net_id: int,
                                config: GridRouteConfig) -> Dict[Tuple[int, int], frozenset]:
     """{(gx, gy): copper layer names} for this net's vias that stop short of
-    the stack (`via_stops_short`). A layer change at such a cell rides the via
-    only between two layers of its span; any other layer change there needs a
-    via of its own. Stacked partial vias at one cell pool their spans."""
+    the stack (`via_stops_short`) and its back-drilled plated pads. A layer
+    change at such a cell rides the barrel only between two layers of its
+    span; any other layer change there needs a via of its own. Stacked partial
+    vias at one cell pool their spans."""
     from geometry_utils import via_copper_layers
     coord = GridCoord(config.grid_step)
     cu = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers',
@@ -4393,6 +4400,18 @@ def same_net_partial_via_spans(pcb_data, net_id: int,
             cell = coord.to_grid(via.x, via.y)
             spans[cell] = spans.get(cell, frozenset()) | frozenset(
                 via_copper_layers(via, cu))
+    # #1925: a back-drilled plated pad is such a barrel too
+    from kicad_parser import pad_is_plated_through
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if getattr(pad, 'backdrills', None) and pad_is_plated_through(pad):
+            from net_queries import pad_joined_layers
+            on = frozenset(pad_joined_layers(pad, cu))
+            hx = getattr(pad, 'hole_x', None)
+            hy = getattr(pad, 'hole_y', None)
+            for cell in {coord.to_grid(pad.global_x, pad.global_y),
+                         coord.to_grid(hx if hx is not None else pad.global_x,
+                                       hy if hy is not None else pad.global_y)}:
+                spans[cell] = spans.get(cell, frozenset()) | on
     return spans
 
 

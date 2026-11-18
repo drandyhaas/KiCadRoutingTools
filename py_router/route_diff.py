@@ -132,7 +132,7 @@ def pair_pn_shortfall(pcb_data, pair, config) -> int:
     0: the pair ships no P/N shortfall."""
     import math
     from diff_pair_routing import _seg_to_seglist_min_edge
-    from geometry_utils import point_to_segment_distance, via_on_layer
+    from geometry_utils import point_to_segment_distance, via_spans_layer
     from check_drc import pad_copper_layers, segment_pad_gap
     p_id, n_id = pair.p_net_id, pair.n_net_id
     board_cu = list(getattr(getattr(pcb_data, 'board_info', None),
@@ -155,7 +155,7 @@ def pair_pn_shortfall(pcb_data, pair, config) -> int:
                      < config.pair_clearance(a, b, s.layer, kind='track') - eps)
             if not short:
                 for v in vias[b]:
-                    if via_on_layer(v, s.layer) and (
+                    if via_spans_layer(v, s.layer) and (
                             point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
                                                       s.end_x, s.end_y)
                             - v.size / 2.0 - w / 2.0
@@ -175,7 +175,7 @@ def pair_pn_shortfall(pcb_data, pair, config) -> int:
         for v in vias[a]:
             short = False
             for s in segs[b]:
-                if via_on_layer(v, s.layer) and (
+                if via_spans_layer(v, s.layer) and (
                         point_to_segment_distance(v.x, v.y, s.start_x, s.start_y,
                                                   s.end_x, s.end_y)
                         - v.size / 2.0 - (s.width or 0.0) / 2.0
@@ -190,7 +190,7 @@ def pair_pn_shortfall(pcb_data, pair, config) -> int:
                         break
             if not short:
                 for q, q_cu in pads[b]:
-                    if any(via_on_layer(v, L) for L in q_cu) and (
+                    if any(via_spans_layer(v, L) for L in q_cu) and (
                             segment_pad_gap(v.x, v.y, v.x, v.y, q) - v.size / 2.0
                             < config.pad_pair_clearance(q, a, other_type='via') - eps):
                         short = True
