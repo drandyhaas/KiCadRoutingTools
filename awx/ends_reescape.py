@@ -128,6 +128,19 @@ if not cands:
     movable_ |= {v_.net_id for v_ in pcb0.vias if v_.net_id not in run_ids and v_.net_id != nid and not v_.locked
                  and near_(v_.x, v_.y)}
     movable_ -= {s_.net_id for s_ in pcb0.segments if s_.locked} | {v_.net_id for v_ in pcb0.vias if v_.locked}
+    # NOT a net more than one ball of which stands on the array -- a plane's: realize strips a freed net WHOLE, and
+    # every other ball's way down is then laid again wherever the engine puts it (a ground net freed for one lane's
+    # dogbone came back with a ball walled in and its copper across the lane's) -- and, on a group's field, NOT a lane
+    # of another bus of the group: its tooth is that bus's end, and moved here it is moved on this bus's copy alone
+    balls_ = {}
+    for p_ in pcb0.footprints[sref].pads:
+        balls_[p_.net_id] = balls_.get(p_.net_id, 0) + 1
+    fixed_ = {i_ for i_, n_ in balls_.items() if n_ > 1}
+    gj_ = os.path.join(awx_settings.get('GROUP_ENDS') or '', 'group.json')
+    if awx_settings.get('GROUP_ENDS') and os.path.isfile(gj_):
+        theirs_ = {n_ for b_ in (json.load(open(gj_)).get('buses') or {}).values() for n_ in (b_.get('state') or ())}
+        fixed_ |= {v_[0] for k_, v_ in byname.items() if k_ in theirs_ and v_[0] not in run_ids}
+    movable_ -= fixed_
     pcb2 = copy.copy(pcb0)
     pcb2.segments = [s_ for s_ in pcb0.segments if s_.net_id not in movable_]
     pcb2.vias = [v_ for v_ in pcb0.vias if v_.net_id not in movable_]
@@ -154,7 +167,7 @@ if not cands:
                 continue
             p_, q_ = (s.start_x, s.start_y), (s.end_x, s.end_y)
             w_ = s.width / 2 + bar
-            ok_ = not s.locked and s.net_id not in run_ids
+            ok_ = not s.locked and s.net_id not in run_ids and s.net_id not in fixed_
             if site is not None and seg_d(site, p_, q_) < w_ + te.VIA_SIZE / 2 - te.TRACK / 2:
                 hit(s.net_id, ok_)
             elif s.layer == m.layer and min(seg_d(r_, p_, q_) for r_ in ray) < w_:
@@ -167,7 +180,7 @@ if not cands:
             pts_ = ray + [a_ for a_, _b, _L in legs] + [b_ for _a, b_, _L in legs] + ([site] if site else [])
             if min(math.hypot(v.x - r_[0], v.y - r_[1]) for r_ in pts_) - v.size / 2 < bar + \
                     (te.VIA_SIZE / 2 if site else 0.0):
-                hit(v.net_id, not v.locked and v.net_id not in run_ids)
+                hit(v.net_id, not v.locked and v.net_id not in run_ids and v.net_id not in fixed_)
         for fp in pcb0.footprints.values():
             for p in fp.pads:
                 if p.net_id != nid and (m.layer in p.layers or '*.Cu' in p.layers or (p.drill or 0) > 0) and \
