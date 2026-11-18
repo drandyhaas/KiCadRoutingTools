@@ -1835,6 +1835,28 @@ PULL_MIN = P_MIN / 2   # a stretch of a run is pulled straight where that saves 
 SPUR_MIN = TW / 4      # ...a spur where it saves a quarter of a track's width
 
 
+def _thin_to(xy):
+    """for each point i of a line, the last j with xy[i..j] all on one straight line (to a thousandth of a micron,
+    off a line a micron long at least): a stretch that ends there or sooner may have no polygon for a hull"""
+    n = len(xy)
+    out = [0] * n
+    for i in range(n):
+        x0, y0 = xy[i]
+        dx = dy = d = 0.0
+        j = i
+        while j + 1 < n:
+            ex, ey = xy[j + 1][0] - x0, xy[j + 1][1] - y0
+            if d == 0.0:
+                e = math.hypot(ex, ey)
+                if e > 1e-3:
+                    dx, dy, d = ex, ey, e
+            elif abs(dx * ey - dy * ex) > 1e-6 * d:
+                break
+            j += 1
+        out[i] = j
+    return out
+
+
 def pull_runs():
     """each run PULLED TAUT where it doubles back on itself: a stretch of it whose way is half as long again as the
     straight line between its two ends, with nothing in between -- no fixed copper, no other run of its layer, no via
@@ -1869,27 +1891,71 @@ def pull_runs():
             cum = [0.0]
             for a, b in zip(xy, xy[1:]):
                 cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+            XY, CUM = np.asarray(xy, dtype=float), np.asarray(cum)
+            # (the run's breaches and dives' ends counted up to each point: none among pts[i:j - 1] where the two
+            # counts are one)
+            hard = np.concatenate(([0], np.cumsum([p['k'] in ('X', 'D') for p in r['pts']])))
+            thin = _thin_to(xy)
+
+            def empty(i, j):
+                """nothing inside the stretch i..j: its hull in the layer's free space, no other run's line in it,
+                no via"""
+                # (the hull built from the coordinates at once: a MultiPoint of a list of points made each one
+                # a Python object, 97 % of the embedding's time on a 32-lane group bus)
+                hull = shapely.convex_hull(shapely.multipoints(XY[i:j + 1]))
+                if hull.geom_type != 'Polygon':
+                    hull = hull.buffer(1e-4)
+                return in_free(L_, hull) and \
+                    not any(segs[L_][q_][0] != key for q_ in trees[L_].query(hull, predicate='intersects')) and \
+                    not (vtree is not None and len(vtree.query(hull, predicate='contains_properly')))
             found = None
+            # (A stretch's hull holds the hull of every stretch within it: one with something inside has it inside
+            # every longer one too, an empty one is empty for every shorter. So from each i the stretches are empty
+            # up to one j and none past it, and that j only grows with i: `far` is the furthest known empty, found
+            # by a few looks at hulls where every pair of points was one -- a run of a thousand points through a
+            # board full of laid copper took minutes a round. A stretch that is one straight line has no hull but a
+            # widened line, which a longer stretch's hull need not hold: those are looked at each for itself)
+            far = -1
             for i in range(0, n - 2):
-                for j in range(n - 1, i + 1, -1):
+                js = np.arange(n - 1, i + 1, -1)
+                chord_ = np.hypot(XY[js, 0] - XY[i, 0], XY[js, 1] - XY[i, 1])
+                way_ = CUM[js] - CUM[i]
+                # (...or a spur: out and straight back, three times its chord, however short. Never a breach, nor a
+                # dive's end. Read a hair wide here, each one's own numbers below)
+                cand = js[((((way_ - chord_ >= PULL_MIN - 1e-9) & (way_ >= 1.5 * chord_ - 1e-9)) |
+                            ((way_ - chord_ >= SPUR_MIN - 1e-9) & (way_ >= 3 * chord_ - 1e-9))) &
+                           (hard[js - 1] == hard[i]))]
+                if not len(cand):
+                    continue
+                past = cand[cand > max(far, thin[i])]
+                if len(past):
+                    if empty(i, int(past[0])):
+                        far = int(past[0])
+                    else:
+                        # (the nearest first, each step twice the last, then the two halves between)
+                        up = past[::-1]
+                        lo, hi, at, step = -1, len(up) - 1, 0, 1
+                        while at < hi:
+                            if not empty(i, int(up[at])):
+                                hi = at
+                                break
+                            lo, at, step = at, at + step, 2 * step
+                        while hi - lo > 1:
+                            mid = (lo + hi) // 2
+                            if empty(i, int(up[mid])):
+                                lo = mid
+                            else:
+                                hi = mid
+                        if lo >= 0:
+                            far = int(up[lo])
+                for j in cand.tolist():
                     chord = math.hypot(xy[j][0] - xy[i][0], xy[j][1] - xy[i][1])
                     way = cum[j] - cum[i]
-                    # (...or a spur: out and straight back, three times its chord, however short)
                     if not ((way - chord >= PULL_MIN and way >= 1.5 * chord) or
                             (way - chord >= SPUR_MIN and way >= 3 * chord)):
                         continue
-                    if any(p['k'] in ('X', 'D') for p in r['pts'][i:j - 1]):     # (never a breach, nor a dive's end)
-                        continue
-                    # (the hull built from the coordinates at once: a MultiPoint of a list of points made each one
-                    # a Python object, 97 % of the embedding's time on a 32-lane group bus)
-                    hull = shapely.convex_hull(shapely.multipoints(np.asarray(xy[i:j + 1], dtype=float)))
-                    if hull.geom_type != 'Polygon':
-                        hull = hull.buffer(1e-4)
-                    if not in_free(L_, hull):
-                        continue
-                    if any(segs[L_][q_][0] != key for q_ in trees[L_].query(hull, predicate='intersects')):
-                        continue
-                    if vtree is not None and len(vtree.query(hull, predicate='contains_properly')):
+                    # (one straight line: looked at for itself; any other: empty up to `far`)
+                    if (j > far) if j > thin[i] else not empty(i, j):
                         continue
                     # ...and the straight line no nearer anything than its bar, or than the stretch it replaces was
                     ch, old = LineString([xy[i], xy[j]]), LineString(xy[i:j + 1])
