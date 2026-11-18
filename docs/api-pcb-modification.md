@@ -34,8 +34,11 @@ re-commit of ripped copper, which must land exactly as it was.
 Cleanup (per net, on this result's new segments only):
 
 1. **Degenerate segment removal** — segments under 0.01 mm are dropped;
-   micro-bridges between two chains are welded shut (neighbors moved to the
-   midpoint) so no gap opens.
+   micro-bridges between two chains are welded shut so no gap opens. The
+   longer neighbour keeps its end and the shorter one's end moves onto it
+   (#1979), so a long leg keeps its bearing (a coupled pair member stays
+   parallel to its partner) and the shorter one takes the bridge, at most
+   0.01 mm. Two equally long neighbours meet at the bridge's midpoint.
 2. **Dead-end prune** (#84) — this route's own dead-end spurs are unwound, so
    dead copper does not block the routes that follow. The net's copper
    already on the board anchors junctions but is never removed here, and the
