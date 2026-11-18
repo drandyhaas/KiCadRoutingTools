@@ -229,6 +229,22 @@ pub struct GridObstacleMap {
     /// smaller via; callers stamping a LARGER via must populate its map), so
     /// existing single-rung callers behave identically.
     pub blocked_vias_rungs: Vec<FxHashMap<u64, u16>>,
+    /// #1842: via blocking per via KIND (a via that joins only a run of
+    /// neighbouring layers: micro, blind, buried), one refcounted map per
+    /// kind. Unlike a rung, a kind's map is read ON ITS OWN: the static via
+    /// bitmap and `blocked_vias` hold what blocks a through via, which
+    /// includes copper on layers a shorter via never reaches. So the caller
+    /// stamps everything that blocks a via of the kind here, board-edge
+    /// bands included, and the freeze leaves these maps alone. Empty unless
+    /// a caller stamps one: no existing query reads them.
+    pub blocked_vias_kinds: Vec<FxHashMap<u64, u16>>,
+    /// #1842: while set, every add to / remove from `blocked_vias` is
+    /// repeated in each via-kind map. What blocks a through via blocks any
+    /// shorter, no larger via, so a stamp whose caller knows nothing of
+    /// kinds stays safe for them; a caller that stamps a kind's own cells
+    /// clears the flag around its `blocked_vias` stamp. Off by default.
+    #[pyo3(get)]
+    pub kind_mirror: bool,
     /// Stub proximity costs: (gx, gy) -> cost
     pub stub_proximity: FxHashMap<u64, i32>,
     /// Layer-specific proximity costs (for track proximity on same layer)
@@ -275,6 +291,8 @@ impl GridObstacleMap {
             static_via_bitmap: BlockedBitmap::new(1),
             blocked_vias: FxHashMap::default(),
             blocked_vias_rungs: Vec::new(),
+            blocked_vias_kinds: Vec::new(),
+            kind_mirror: false,
             stub_proximity: FxHashMap::default(),
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
             num_layers,
@@ -332,6 +350,8 @@ impl GridObstacleMap {
             static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
             blocked_vias_rungs: self.blocked_vias_rungs.clone(),
+            blocked_vias_kinds: self.blocked_vias_kinds.clone(),
+            kind_mirror: self.kind_mirror,
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
             num_layers: self.num_layers,
@@ -359,6 +379,8 @@ impl GridObstacleMap {
             static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
             blocked_vias_rungs: self.blocked_vias_rungs.clone(),
+            blocked_vias_kinds: self.blocked_vias_kinds.clone(),
+            kind_mirror: self.kind_mirror,
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
             num_layers: self.num_layers,
@@ -562,6 +584,7 @@ impl GridObstacleMap {
     pub fn add_blocked_via(&mut self, gx: i32, gy: i32) {
         let key = pack_xy(gx, gy);
         *self.blocked_vias.entry(key).or_insert(0) += 1;
+        if self.kind_mirror { self.kinds_add(key); }
     }
 
     /// #568: add/remove a SMALL-rung (rung 1) blocked via (refcounted, mirrors
@@ -609,6 +632,7 @@ impl GridObstacleMap {
             if let Some(count) = self.blocked_vias.get_mut(&key) {
                 if *count > 1 { *count -= 1; } else { self.blocked_vias.remove(&key); }
             }
+            if self.kind_mirror { self.kinds_remove(key); }
             return;
         }
         let m = self.rung_map_mut(rung);
@@ -636,6 +660,73 @@ impl GridObstacleMap {
             if let Some(count) = m.get_mut(&key) {
                 if *count > 1 { *count -= 1; } else { m.remove(&key); }
             }
+        }
+    }
+
+    /// #1842: set the kind mirror (see `kind_mirror`); returns what it was.
+    pub fn set_kind_mirror(&mut self, on: bool) -> bool {
+        let was = self.kind_mirror;
+        self.kind_mirror = on;
+        was
+    }
+
+    /// Create via-kind maps up to `count` (empty ones), so a kind with
+    /// nothing in its way is legal everywhere rather than absent.
+    pub fn ensure_via_kinds(&mut self, count: usize) {
+        while self.blocked_vias_kinds.len() < count {
+            self.blocked_vias_kinds.push(FxHashMap::default());
+        }
+    }
+
+    /// #1842: number of via-kind maps this map carries (0 unless stamped).
+    pub fn via_kind_count(&self) -> usize {
+        self.blocked_vias_kinds.len()
+    }
+
+    /// Number of blocked cells in via-kind map `kind` (0 when absent).
+    pub fn via_kind_len(&self, kind: usize) -> usize {
+        self.blocked_vias_kinds.get(kind).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Batch add to via-kind map `kind` (shape: N x 2, columns gx, gy;
+    /// refcounted like `blocked_vias`). The map is created on first use.
+    pub fn add_blocked_vias_kind_batch(&mut self, kind: usize, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        let m = self.kind_map_mut(kind);
+        for row in arr.rows() {
+            *m.entry(pack_xy(row[0], row[1])).or_insert(0) += 1;
+        }
+    }
+
+    /// The remove twin of `add_blocked_vias_kind_batch`.
+    pub fn remove_blocked_vias_kind_batch(&mut self, kind: usize, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        let m = self.kind_map_mut(kind);
+        for row in arr.rows() {
+            let key = pack_xy(row[0], row[1]);
+            if let Some(count) = m.get_mut(&key) {
+                if *count > 1 { *count -= 1; } else { m.remove(&key); }
+            }
+        }
+    }
+
+    /// Every blocked cell of via-kind map `kind`, sorted.
+    pub fn blocked_via_cells_at_kind(&self, kind: usize) -> Vec<(i32, i32)> {
+        let mut rows: Vec<(i32, i32)> = self.blocked_vias_kinds.get(kind)
+            .map(|m| m.keys().map(|k| unpack_xy(*k)).collect())
+            .unwrap_or_default();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// #1842: is a via of kind map `kind` blocked at (gx, gy)? Reads that
+    /// map alone (see `blocked_vias_kinds`). A map that was never created
+    /// blocks everywhere: a kind is legal only where its caller proved it.
+    #[inline]
+    pub fn is_via_blocked_kind(&self, gx: i32, gy: i32, kind: usize) -> bool {
+        match self.blocked_vias_kinds.get(kind) {
+            Some(m) => m.contains_key(&pack_xy(gx, gy)),
+            None => true,
         }
     }
 
@@ -748,6 +839,7 @@ impl GridObstacleMap {
             for gy in lo..=hi {
                 let key = pack_xy(gx, gy);
                 *self.blocked_vias.entry(key).or_insert(0) += 1;
+                if self.kind_mirror { self.kinds_add(key); }
             }
         }
     }
@@ -777,6 +869,7 @@ impl GridObstacleMap {
             let gy = row[1];
             let key = pack_xy(gx, gy);
             *self.blocked_vias.entry(key).or_insert(0) += 1;
+            if self.kind_mirror { self.kinds_add(key); }
         }
     }
 
@@ -871,6 +964,12 @@ impl GridObstacleMap {
         for (&key, &count) in other.blocked_vias.iter() {
             *self.blocked_vias.entry(key).or_insert(0) += count;
         }
+        for (k, other_map) in other.blocked_vias_kinds.iter().enumerate() {
+            let m = self.kind_map_mut(k);
+            for (&key, &count) in other_map.iter() {
+                *m.entry(key).or_insert(0) += count;
+            }
+        }
     }
 
     /// Remove blocked cells from numpy array (decrements reference count, removes entry when count reaches 0)
@@ -908,6 +1007,7 @@ impl GridObstacleMap {
                     self.blocked_vias.remove(&key);
                 }
             }
+            if self.kind_mirror { self.kinds_remove(key); }
         }
     }
 
@@ -964,6 +1064,7 @@ impl GridObstacleMap {
                         self.blocked_vias.remove(&key);
                     }
                 }
+                if self.kind_mirror { self.kinds_remove(key); }
             }
         }
     }
@@ -1505,6 +1606,29 @@ impl GridObstacleMap {
 // #[pymethods] block: pyo3 wraps every method in that block for Python, and a
 // method returning `&mut FxHashMap` cannot be wrapped.
 impl GridObstacleMap {
+    #[inline]
+    fn kinds_add(&mut self, key: u64) {
+        for m in self.blocked_vias_kinds.iter_mut() {
+            *m.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    #[inline]
+    fn kinds_remove(&mut self, key: u64) {
+        for m in self.blocked_vias_kinds.iter_mut() {
+            if let Some(count) = m.get_mut(&key) {
+                if *count > 1 { *count -= 1; } else { m.remove(&key); }
+            }
+        }
+    }
+
+    fn kind_map_mut(&mut self, kind: usize) -> &mut FxHashMap<u64, u16> {
+        while self.blocked_vias_kinds.len() <= kind {
+            self.blocked_vias_kinds.push(FxHashMap::default());
+        }
+        &mut self.blocked_vias_kinds[kind]
+    }
+
     fn rung_map_mut(&mut self, rung: usize) -> &mut FxHashMap<u64, u16> {
         // rung 0 is blocked_vias; callers route rung 0 there explicitly
         let idx = rung - 1;

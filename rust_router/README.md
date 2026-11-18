@@ -5,7 +5,7 @@ The compiled half of KiCad Routing Tools: the Python extension module
 searches and obstacle map, the placer's per-move kernels, and the grid searches
 of the `awx/` whole-route bus router. The rest is Python that calls in here.
 
-**Current Version: 0.24.1** (the crate version in `Cargo.toml`)
+**Current Version: 0.24.2** (the crate version in `Cargo.toml`)
 
 > **Release note:** the newest published release is
 > [v0.24.1](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.24.1)
@@ -42,6 +42,7 @@ the original pure-Python A* it replaced (measured then; there is no Python A* le
 - **Bus path attraction**: a member follows an earlier member's path, by a direction-aware step discount and an optional potential-shaped term (#656)
 - **Wide tracks**: an exact swept-capsule clearance check with a fractional, per-layer margin (#156/#173)
 - **Via legality per via size** ("rungs", #568/#530), and **free vias**: an existing same-net hole is reused at no cost
+- **Via kinds** (#1842): a search may change layers through several kinds of via, each joining its own layers and legal by its own map; two vias of a path stand apart, joined by a jog-then-via edge, and a **jog-only layer** carries nothing but that jog
 - **Pose-based routing with a Dubins heuristic** for differential-pair centerlines: headings at both ends, P/N via spacing, straight runs around vias, GND-via sites, a cumulative-turn limit
 - **Frontier analysis**: a failed search returns the cells that stopped it, and `identify_blocking_obstacles` maps those cells to the nets that own them, for rip-up
 - A reference-counted obstacle map that nets are stamped into and removed from incrementally, a bitmap for permanent board geometry (#422), and column-span batch stamping (#815)
@@ -247,6 +248,15 @@ as rung 0.
 - `is_via_blocked_rung(gx, gy, rung)`, `rung_count()`, `rung_len(rung)`, `blocked_via_cells_at_rung(rung)` (sorted list of (gx, gy))
 - `add_blocked_via_small(gx, gy)`, `remove_blocked_via_small(gx, gy)`, `add_blocked_vias_small_batch(vias)`, `remove_blocked_vias_small_batch(vias)`: the rung-1 forms
 
+**Via kinds** (#1842). A kind is a via that joins only some layers (micro,
+blind, buried). Each has a counted map of its own, read alone: the through
+via's maps hold copper a shorter via never reaches. Nothing reads these maps
+unless a router is given kinds (`GridRouter.set_via_kinds`).
+- `add_blocked_vias_kind_batch(kind, vias)`, `remove_blocked_vias_kind_batch(kind, vias)`: N x 2 (gx, gy)
+- `ensure_via_kinds(count)`: create empty maps, so a kind with nothing in its way is legal everywhere; a kind with no map is legal nowhere
+- `is_via_blocked_kind(gx, gy, kind)`, `via_kind_count()`, `via_kind_len(kind)`, `blocked_via_cells_at_kind(kind)`
+- `set_kind_mirror(on)` (returns what it was), `kind_mirror`: while on, every add to and remove from the through via's counted map is repeated in each kind's map, so a stamp that knows nothing of kinds still blocks them (sound while no kind is larger than the configured via). A caller that stamps a kind's own cells turns it off around its through-via stamp.
+
 **Queries**
 - `is_blocked(gx, gy, layer)`, `is_via_blocked(gx, gy)`
 - `segment_blocked(gx1, gy1, gx2, gy2, layer, r)`: is any blocked cell centre within `r` cells of the segment (the wide-track swept-capsule test; `r <= 0` tests the end cell only)
@@ -321,6 +331,9 @@ Methods:
 - `route_with_frontier(...)`: the same arguments; returns `(path, iterations, blocked_cells)`, where `blocked_cells` (a list of (gx, gy, layer) that stopped the search) is empty on success
 - `set_proximity_heuristic_cost(cost)`: set before each route
 - `set_attraction_path([(gx, gy, layer), ...])`, `clear_attraction_path()`: the path bus members are attracted to (an empty list clears it)
+- `set_via_kinds([(layers, cost, map), ...], min_run=0)` (#1842): the kinds of via later searches may change layers through. `layers` is a bit mask of layer indices the kind joins, `cost` its via cost, `map` its via-kind map in the obstacle map (below 0: the through via's legality, at the search's `via_rung`). A layer change uses the cheapest kind that joins both layers and fits, the first listed on a tie. `min_run` (cells) keeps two consecutive vias of a path that far apart, so two kinds that share a layer are never drilled one on the other: no via within `min_run` steps of the last, and from such a node a **jog-then-via** edge -- a straight run of at least `min_run` cells on the node's layer, then a via at its end -- reaches the next one. A returned path shows that edge as its two points. An empty list (the default) is the single through via and the search is as before.
+- `via_kind_at(obstacles, gx, gy, from_layer, to_layer, via_rung=0)`: the index of the kind a search lays for that change at that cell, -1 for none -- the search's own rule, for the caller that turns a path into vias
+- `set_layer_jog_caps([cap, ...])` (#1842): per layer, 0 or the longest jog in cells of a jog-only layer -- one that carries no track but the run of a jog-then-via edge (so it needs `set_via_kinds` with a `min_run`). A via may end on a jog-only layer even where its cost forbids one.
 
 ### PoseRouter
 
@@ -453,6 +466,27 @@ src/
 - **Placement kernels**: the trees and gap trees keep the Python's float expressions in order; the crossing and pad-hit kernels skip pairs whose boxes cannot meet; the congestion kernels sum a move's change over the cells it reaches, so their totals can differ from a whole-window Python sum in the last bits
 
 ## Version History
+
+### 0.24.2 (2026-11-18)
+- **Via kinds** (`router.rs`, `obstacle_map.rs`, #1842): a search may change
+  layers through several kinds of via instead of the one through via.
+  `GridRouter.set_via_kinds([(layers, cost, map), ...])` declares them; the
+  via branch of the search then asks, per destination layer, for the
+  cheapest kind that joins the two layers and fits (`pick_via_kind`), where
+  a kind fits by its OWN via map (`GridObstacleMap.blocked_vias_kinds`,
+  `add_/remove_blocked_vias_kind_batch`, `is_via_blocked_kind`) and the
+  through via by the existing rung test. Two consecutive vias of a path
+  stand `min_run` cells apart: a via may not follow another within that
+  many steps, and a jog-then-via edge (a straight run, then the via) reaches
+  the next one in one relaxation, so no second label per cell is needed.
+  `via_kind_at` gives a caller the same answer for a returned path. The kind maps are left out of the
+  static freeze and every existing query; `set_kind_mirror` repeats
+  through-via stamps in them for callers that know nothing of kinds.
+- **Jog-only layers** (`router.rs`): `set_layer_jog_caps` names layers that
+  carry no track but the run of a jog-then-via edge, up to a length each.
+- With no kinds and no caps set (every existing caller) the search takes
+  the same branches as 0.24.1: routes, iteration counts and graded results
+  are unchanged on the boards compared.
 
 ### 0.24.1 (2026-11-16)
 - **The pose router's Dubins heuristic reads headings in the grid's frame**

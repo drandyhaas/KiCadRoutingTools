@@ -191,9 +191,18 @@ impl NodeStore {
         let mut path = Vec::new();
         let mut idx = goal_idx;
         loop {
-            path.push(self.coords(idx));
+            let (cx, cy, cl) = self.coords(idx);
+            path.push((cx, cy, cl));
             match self.parent(idx) {
-                Some(parent_idx) => idx = parent_idx,
+                Some(parent_idx) => {
+                    // #1842: a jog-then-via edge changes cell AND layer; its
+                    // via is at the child's cell, off the parent's layer.
+                    let (px, py, pl) = self.coords(parent_idx);
+                    if pl != cl && (px != cx || py != cy) {
+                        path.push((cx, cy, pl));
+                    }
+                    idx = parent_idx
+                }
                 None => break,
             }
         }
@@ -659,7 +668,10 @@ impl GridSearch {
         // S6: the layer_forbidden(current.layer) test is hoisted out of the
         // direction loop (G2: no track on a forbidden source layer; it was an
         // unconditional first-iteration `break` inside the loop).
-        if !router.layer_forbidden(current.layer as usize) {
+        // #1842: a jog-only layer carries no track but the jog of a staggered
+        // via pair (the jog-then-via edges below).
+        if !router.layer_forbidden(current.layer as usize)
+            && router.jog_cap(current.layer as usize) == 0 {
             for (dx, dy) in DIRECTIONS {
                 // Just came through a via: only the exact pre-via direction is allowed
                 if let Some((req_dx, req_dy)) = required_direction {
@@ -860,15 +872,37 @@ impl GridSearch {
         // skipped before is_free_via is ever read -- forcing a redundant via to be
         // dropped a couple cells away beside a perfectly good via-in-pad.
         let free_here = obstacles.is_free_via(current.gx, current.gy);
-        if can_place_via && (!via_too_close || free_here)
-            && (!obstacles.is_via_blocked_rung(current.gx, current.gy, self.opts.via_rung) || free_here) {
+        // #1842: with via kinds declared, whether a via fits here depends on
+        // the two layers it joins, so the site test moves into the layer loop.
+        let kinds_mode = !router.via_kinds.is_empty();
+        // #1842: the path's via within the last `via_min_run` steps, if any.
+        // A via may not follow it on the spot or a step or two on (two kinds
+        // that share a layer are never drilled one on the other): the next
+        // one is reached by a jog-then-via edge instead (below).
+        let recent_via: Option<(i32, i32)> = if kinds_mode && router.via_min_run > 0 {
+            self.recent_via(current_idx, router.via_min_run)
+        } else { None };
+        let run_ok = free_here || recent_via.is_none();
+        if can_place_via && run_ok && (!via_too_close || free_here)
+            && (kinds_mode || free_here
+                || !obstacles.is_via_blocked_rung(current.gx, current.gy, self.opts.via_rung)) {
             for layer in 0..obstacles.num_layers as u8 {
                 if layer == current.layer {
                     continue;
                 }
-                if router.layer_forbidden(layer as usize) {
+                if router.layer_forbidden(layer as usize)
+                    && router.jog_cap(layer as usize) == 0 {
                     continue; // FORBIDDEN LAYER: never end a via here
                 }
+                // #1842: the cheapest declared kind that joins these two
+                // layers and fits here; none => no via between them here.
+                let kind_cost = if kinds_mode && !free_here {
+                    match router.pick_via_kind(obstacles, current.gx, current.gy,
+                                               current.layer, layer, self.opts.via_rung) {
+                        Some((_, c)) => c,
+                        None => continue,
+                    }
+                } else { router.via_cost };
 
                 // Check if destination layer is blocked at this position
                 if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy,
@@ -889,7 +923,7 @@ impl GridSearch {
                 // Zero cost for free via positions (through-hole pads on same net).
                 // S6: is_free_via was recomputed for every destination layer;
                 // free_here is loop-invariant, reuse it.
-                let via_cost = if free_here { 0 } else { router.via_cost };
+                let via_cost = if free_here { 0 } else { kind_cost };
                 let proximity_cost = (obstacles.get_stub_proximity_cost(current.gx, current.gy)
                     + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
                     * router.via_proximity_cost;
@@ -940,7 +974,119 @@ impl GridSearch {
             }
         }
 
+        // #1842 jog-then-via: from a node just past a via of this path, or on
+        // a jog-only layer, the next via is reached in ONE edge -- a straight
+        // run of track on this layer, then a via at its far end. The run is
+        // at least `via_min_run` cells (the two vias stand side by side) and,
+        // on a jog-only layer, at most that layer's cap; elsewhere it is the
+        // minimum, since ordinary track carries a longer one. One edge, so
+        // no second label per cell is needed to keep the two vias apart.
+        let own_jog_cap = router.jog_cap(current.layer as usize);
+        if kinds_mode && router.via_min_run > 0 && can_place_via
+            && (own_jog_cap > 0 || recent_via.is_some()) {
+            let b = current.layer;
+            let n_min = router.via_min_run;
+            let n_max = if own_jog_cap > 0 { own_jog_cap.max(n_min) } else { n_min };
+            let margin = self.opts.track_margin.at(b as usize);
+            let b_cost = router.layer_cost_or_default(b as usize);
+            for (dx, dy) in DIRECTIONS {
+                let diag = dx != 0 && dy != 0;
+                let unit = if diag { DIAG_COST } else { ORTHO_COST };
+                // steps along this ray that cover n_min / n_max cells of length
+                let lo = if diag { (n_min * 1000 + 1413) / 1414 } else { n_min };
+                let hi = if diag { (n_max * 1000 / 1414).max(lo) } else { n_max };
+                let (mut x, mut y) = (current.gx, current.gy);
+                for n in 1..=hi {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if obstacles.segment_blocked(x, y, nx, ny, b as usize, margin) {
+                        break;
+                    }
+                    x = nx;
+                    y = ny;
+                    if n < lo || obstacles.is_free_via(x, y) {
+                        continue;
+                    }
+                    if let Some((vx, vy)) = recent_via {
+                        let (ex, ey) = ((x - vx) as i64, (y - vy) as i64);
+                        if ex * ex + ey * ey < (n_min as i64) * (n_min as i64) {
+                            continue;
+                        }
+                    }
+                    if self.opts.via_exclusion_radius > 0 && current_vias.iter().any(|&(vx, vy)| {
+                        (x - vx).abs().max((y - vy).abs()) <= self.opts.via_exclusion_radius * 2
+                    }) {
+                        continue;
+                    }
+                    let jog_cost = (unit as i64 * n as i64 * b_cost as i64 / 1000) as i32;
+                    for layer in 0..obstacles.num_layers as u8 {
+                        if layer == b {
+                            continue;
+                        }
+                        if router.layer_forbidden(layer as usize)
+                            && router.jog_cap(layer as usize) == 0 {
+                            continue;
+                        }
+                        let kind_cost = match router.pick_via_kind(obstacles, x, y, b, layer,
+                                                                   self.opts.via_rung) {
+                            Some((_, c)) => c,
+                            None => continue,
+                        };
+                        if obstacles.segment_blocked(x, y, x, y, layer as usize,
+                                                     self.opts.track_margin.at(layer as usize)) {
+                            continue;
+                        }
+                        let (existing_g, closed) = self.store.g_closed_at(x, y, layer);
+                        if closed {
+                            continue;
+                        }
+                        let transition = router.layer_cost_or_default(layer as usize) - b_cost;
+                        let new_g = g + jog_cost + (kind_cost + transition).max(0);
+                        if new_g < existing_g {
+                            if existing_g != i32::MAX {
+                                sink.on_revisit();
+                            }
+                            self.store.relax(x, y, layer, new_g, current_idx, current_steps + n);
+                            let neighbor = GridState::new(x, y, layer);
+                            if self.opts.via_exclusion_radius > 0 {
+                                let mut new_vias = current_vias.clone();
+                                new_vias.push((x, y));
+                                self.path_vias.insert(neighbor.as_key(), new_vias);
+                            }
+                            let h = router.heuristic_to_targets(&neighbor, &self.target_states,
+                                                                &self.target_hint);
+                            self.open_set.push(OpenEntry {
+                                f_score: new_g.saturating_add(h),
+                                g_score: new_g,
+                                state: neighbor,
+                                counter: self.counter,
+                            });
+                            self.counter += 1;
+                            sink.on_push();
+                        }
+                    }
+                }
+            }
+        }
+
         SearchStep::Progress
+    }
+
+    /// #1842: where this node's path laid a via within its last `steps`
+    /// edges (the node's own cell when it arrived by one), None when it laid
+    /// none. A via edge is one whose two ends are on different layers; a
+    /// jog-then-via edge's via is at its far end.
+    fn recent_via(&self, idx: u32, steps: i32) -> Option<(i32, i32)> {
+        let mut child = idx;
+        for _ in 0..steps {
+            let parent = self.store.parent(child)?;
+            let (cx, cy, cl) = self.store.coords(child);
+            let (_, _, pl) = self.store.coords(parent);
+            if cl != pl {
+                return Some((cx, cy));
+            }
+            child = parent;
+        }
+        None
     }
 }
 
@@ -985,6 +1131,30 @@ pub struct GridRouter {
     // can genuinely compete with via_cost -- the capability no bounded
     // per-step discount has.
     attraction_potential: i32,
+    // #1842: the via kinds a search may change layers through. Empty (the
+    // default) = one kind, the through via at `via_cost`, legal where
+    // `is_via_blocked_rung` says: the search is then exactly as before.
+    via_kinds: Vec<ViaKind>,
+    // #1842: with kinds, the least track (cells) between two vias of one
+    // path; 0 = none.
+    via_min_run: i32,
+    // #1842: per layer, 0 or the longest jog (cells) of a JOG-ONLY layer: a
+    // layer that carries no track but the run between the two vias of a
+    // staggered pair. Empty = no such layer.
+    layer_jog_caps: Vec<i32>,
+}
+
+/// #1842: one kind of via a search may use. It joins any two of the layers
+/// in the bit mask `layers` (bit i = layer index i of the search's map),
+/// costs `cost`, and fits where via-kind map `map` of the obstacle map is
+/// clear; `map < 0` is the through via's legality (`is_via_blocked_rung`).
+/// The site test is per transition, so any via whose legality depends on
+/// the layers it joins is a kind with a map of its own.
+#[derive(Clone, Copy)]
+pub(crate) struct ViaKind {
+    layers: u32,
+    cost: i32,
+    map: i32,
 }
 
 #[pymethods]
@@ -1014,7 +1184,51 @@ impl GridRouter {
             attraction_cross_layer_pct,
             attraction_path_buckets: FxHashMap::default(),
             attraction_potential,
+            via_kinds: Vec::new(),
+            via_min_run: 0,
+            layer_jog_caps: Vec::new(),
         }
+    }
+
+    /// #1842: declare the via kinds later searches may change layers
+    /// through, each `(layers, cost, map)`: it joins any two of the layers
+    /// whose index bits are set in `layers`, costs `cost`, and is legal
+    /// where via-kind map `map` of the obstacle map is clear (`map < 0`:
+    /// where a through via is). A layer change is made with the cheapest
+    /// kind that joins the two layers and fits, the first listed on a tie.
+    /// An empty list restores the single through via. `min_run` (cells) is
+    /// the least distance between two consecutive vias of a path, so two
+    /// kinds that share a layer stand side by side: a via may not follow
+    /// another within that many steps, and the next via is reached instead
+    /// by a jog-then-via edge (a straight run of at least `min_run`, then
+    /// the via). 0 = no minimum, and no such edge.
+    #[pyo3(signature = (kinds, min_run=0))]
+    pub fn set_via_kinds(&mut self, kinds: Vec<(u32, i32, i32)>, min_run: i32) {
+        self.via_kinds = kinds.into_iter()
+            .map(|(layers, cost, map)| ViaKind { layers, cost, map })
+            .collect();
+        self.via_min_run = if self.via_kinds.is_empty() { 0 } else { min_run.max(0) };
+    }
+
+    /// #1842: the index of the kind a search lays for a layer change
+    /// `from` -> `to` at (gx, gy) on `obstacles`, or -1 when no declared
+    /// kind fits (or none is declared). The search's own choice, for the
+    /// caller that turns a path into vias.
+    #[pyo3(signature = (obstacles, gx, gy, from_layer, to_layer, via_rung=0))]
+    pub fn via_kind_at(&self, obstacles: &GridObstacleMap, gx: i32, gy: i32,
+                       from_layer: u8, to_layer: u8, via_rung: usize) -> i32 {
+        self.pick_via_kind(obstacles, gx, gy, from_layer, to_layer, via_rung)
+            .map_or(-1, |(i, _)| i as i32)
+    }
+
+    /// #1842: per layer, the longest jog in cells of a JOG-ONLY layer; 0 or
+    /// a missing entry = an ordinary layer. A jog-only layer carries no
+    /// track but the straight run between the two vias of a staggered pair
+    /// (the jog-then-via edge of `set_via_kinds`, which needs a `min_run`),
+    /// at most this long; a via may end there even when the layer's cost
+    /// forbids it. An empty list = no such layer.
+    pub fn set_layer_jog_caps(&mut self, caps: Vec<i32>) {
+        self.layer_jog_caps = if caps.iter().any(|&c| c > 0) { caps } else { Vec::new() };
     }
 
     /// Set the proximity heuristic cost for subsequent routes.
@@ -1233,6 +1447,47 @@ impl GridRouter {
     #[inline]
     fn layer_forbidden(&self, layer: usize) -> bool {
         self.layer_costs.get(layer).map_or(false, |&c| c < 0)
+    }
+
+    /// #1842: the longest jog of jog-only `layer` in cells, 0 for an
+    /// ordinary layer.
+    #[inline]
+    fn jog_cap(&self, layer: usize) -> i32 {
+        if self.layer_jog_caps.is_empty() { return 0; }
+        self.layer_jog_caps.get(layer).copied().unwrap_or(0).max(0)
+    }
+
+    /// #1842: (index, cost) of the kind a layer change `from` -> `to` at
+    /// (gx, gy) is made with: the cheapest declared kind that joins
+    /// both layers and whose site test passes, the first listed on a tie.
+    /// The ONE reading the search and `via_kind_at` both take.
+    #[inline]
+    fn pick_via_kind(&self, obstacles: &GridObstacleMap, gx: i32, gy: i32,
+                     from: u8, to: u8, via_rung: usize) -> Option<(usize, i32)> {
+        if from >= 32 || to >= 32 {
+            return None;
+        }
+        let need = (1u32 << from) | (1u32 << to);
+        let mut best: Option<(usize, i32)> = None;
+        for (i, k) in self.via_kinds.iter().enumerate() {
+            if k.layers & need != need {
+                continue;
+            }
+            if let Some((_, c)) = best {
+                if k.cost >= c {
+                    continue;
+                }
+            }
+            let blocked = if k.map < 0 {
+                obstacles.is_via_blocked_rung(gx, gy, via_rung)
+            } else {
+                obstacles.is_via_blocked_kind(gx, gy, k.map as usize)
+            };
+            if !blocked {
+                best = Some((i, k.cost));
+            }
+        }
+        best
     }
 
     /// Cost to use in arithmetic; a forbidden/missing layer folds to the neutral
