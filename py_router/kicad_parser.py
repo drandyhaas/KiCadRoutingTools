@@ -8340,7 +8340,10 @@ def propagate_via_cluster_nets(content: str, vias, segments, footprints, zones,
         if getattr(v, 'free', False):
             continue        # `(free yes)`: KiCad never re-nets a free via
         layers = span(v)
-        r = v.size / 2.0
+        # A track end ON the rim joins the via: pcbnew compares integer nm
+        # (300000 <= 300000), where float puts (39.6 - 39.3)**2 a few ulps
+        # over 0.3**2. 1 nm of slack restores that, and no more.
+        r = v.size / 2.0 + 1e-6
         own = any(s.net_id == v.net_id and s.layer in layers
                   and (ex - v.x) ** 2 + (ey - v.y) ** 2 <= r * r
                   for ex, ey, s in near(ends, v.x, v.y, r)) if v.net_id else False
@@ -8389,7 +8392,7 @@ def propagate_via_cluster_nets(content: str, vias, segments, footprints, zones,
                          for ring in fills.get((z.uuid, z.layer), ()))}
         if not origin:
             continue
-        r = v.size / 2.0
+        r = v.size / 2.0 + 1e-6     # rim ends join, as above
         origin |= {s.net_id for ex, ey, s in near(ends, v.x, v.y, r)
                    if s.net_id and s.layer in layers
                    and (ex - v.x) ** 2 + (ey - v.y) ** 2 <= r * r}
