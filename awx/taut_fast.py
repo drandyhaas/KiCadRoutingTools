@@ -1,9 +1,9 @@
 """taut_fast.py -- the taut-string relaxation, vectorised and convergent.
 The relaxation of detect_buses.taut_paths.
 
-The same model as topo_strings.relax (curve shortening on a densified
+The model is curve shortening on a densified
 polyline against discs and capsules, the ends frozen, a shortcut every
-so often), with three changes that were measured to matter
+so often, with three choices that were measured to matter
 (README, "The taut memo, sharded; and why the relaxation itself is
 not fast", 2026-09-08):
 
@@ -39,7 +39,7 @@ crossings. Deterministic and translation-invariant.
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -50,32 +50,9 @@ Pt = Tuple[float, float]
 FREEZE = ts.FREEZE           # no moves this close to an endpoint
 STEP = ts.STEP               # fine spacing (mm)
 COARSE = 4 * ts.STEP         # coarse spacing (mm)
-MARGIN = 2.0                 # candidate obstacles: within this of the string's box (mm)
 OUT = 1e-3                   # a projected point sits this far outside the boundary (mm)
 CROSS_SIN = 0.5              # |sin(angle)| above which a capsule is a crossing, not a wall
 PUSHES = 6                   # projections per round for a point wedged between obstacles
-
-
-def _near(D, C, P):
-    """The candidates whose inflated box meets the string's box + MARGIN."""
-    x0, y0 = P.min(0) - MARGIN
-    x1, y1 = P.max(0) + MARGIN
-    if len(D):
-        md = ((D[:, 0] + D[:, 2] >= x0) & (D[:, 0] - D[:, 2] <= x1)
-              & (D[:, 1] + D[:, 2] >= y0) & (D[:, 1] - D[:, 2] <= y1))
-        Dn = D[md]
-    else:
-        Dn = D
-    if len(C):
-        cx0 = np.minimum(C[:, 0], C[:, 0] + C[:, 2]) - C[:, 4]
-        cx1 = np.maximum(C[:, 0], C[:, 0] + C[:, 2]) + C[:, 4]
-        cy0 = np.minimum(C[:, 1], C[:, 1] + C[:, 3]) - C[:, 4]
-        cy1 = np.maximum(C[:, 1], C[:, 1] + C[:, 3]) + C[:, 4]
-        mc = (cx1 >= x0) & (cx0 <= x1) & (cy1 >= y0) & (cy0 <= y1)
-        Cn = C[mc]
-    else:
-        Cn = C
-    return Dn, Cn
 
 
 def _tangents(P):
@@ -648,8 +625,3 @@ def _own_net(obs):
             if obs.cnets[i] is not None:
                 return int(obs.cnets[i])
     return -2
-
-
-def relax(src: Pt, dst: Pt, obs, rounds: int = 400) -> Tuple[List[Pt], int]:
-    """Drop-in for topo_strings.relax: (points, rounds used)."""
-    return relax_many([(src, dst, obs)], rounds)[0]

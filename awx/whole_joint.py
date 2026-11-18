@@ -209,10 +209,9 @@ def main():
     # layers: coupled for their changes alone, each kept a via's room off the place (the joint loop's audits found a
     # lane run through another bus's via at 0.25 mm, beyond the pitch: no coupling had held the via off it)
     NEAR_V = te.VIA_SIZE / 2 + te.TRACK / 2 + te.CLEAR - 1e-3
-    brk, cpl, cost, lits = [], [], [], []
+    brk, cpl, lits = [], [], []
     brk_run = []                # (the broken couplings of a run: W_RUN_CROSS)
     nvia = 0
-    G = ws.G
 
     def bits_at(p, n, u, k_):
         """lane n's changes before u (monotone), each a via's room off u -- STRETCH off it, where more -- unless the
@@ -329,7 +328,7 @@ def main():
         # search each bus's own model again, just solved by that bus -- four such searches, 198 to 264 s each, ended
         # where they began or 2 vias-worth lower, one of them with no couplings at all. Each bus keeps its own plan, as
         # the coupled plan: `own`, nothing written over its solve, and no coupling settled to hold through its loop)
-        print(f'  coupled search: none -- the buses\' own plans break no coupling and cramp no change: each bus\'s own '
+        print('  coupled search: none -- the buses\' own plans break no coupling and cramp no change: each bus\'s own '
               'is the coupled plan',
               flush=True)
         bus_events.emit('coupled', 'search', bus=None, round=key, status='NONE', secs=round(time.time() - t0),

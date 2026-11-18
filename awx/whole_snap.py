@@ -286,19 +286,12 @@ def static_around(m, R):
     return STATIC_NEAR[key]
 
 
-def leg_clear(pts, L, net, n, near):
-    """a leg (points, layer, its net) clear of every other net's copper at half a track and the clearance -- pads as
-    drawn, the other leg's stub among them -- and of the copper placed so far (a placed pair's legs off the grid by
-    half a step), exactly: the pair step lays it where it is"""
-    return leg_static_clear(pts, L, net, near) and leg_placed_clear(pts, L, n)
-
-
 HOLE_MORE = board_rules.hole_track_clear(ctx.pcb, CL) - CL     # (a hole with no copper: the router's floor past CL)
 VIA_HOLE = max(CL, board_rules.board_hole_clear(ctx.pcb))     # (...and a via's copper off its wall)
 
 
 def leg_static_clear(pts, L, net, near):
-    """leg_clear against the board's fixed copper `near` (static_around's) alone: what never changes -- a hole with no
+    """a leg's track (`pts` on layer L, of `net`) clear of the board's fixed copper `near` (static_around's): what never changes -- a hole with no
     copper at the router's floor off its wall (board_rules.hole_track_clear)"""
     pads, segs, vias = near
     bar = TW / 2 + CL
@@ -339,7 +332,7 @@ def placed_near(c, r):
 
 
 def leg_placed_clear(pts, L, n, near=None):
-    """leg_clear against the copper placed so far alone (other lanes than n): all of it, or `near` (placed_near's)"""
+    """a leg's track clear of the copper placed so far (other lanes than n): all of it, or `near` (placed_near's)"""
     legs_, placed_, pvias_ = near if near is not None else (LEGS, PLACED, PVIAS)
     for (m_, L_, p_, q_) in legs_:
         if m_ != n and L_ == L and _pairs.poly_dist(pts, [p_, q_]) < TW + CL + g / 2 - 1e-9:

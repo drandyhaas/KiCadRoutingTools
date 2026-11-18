@@ -14,7 +14,7 @@ corridor's business, not this module's.
 from __future__ import annotations
 
 import awx_settings
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Dict, Optional, Sequence, Set
 import prices as _pr  # ONE source for the swimmer price
 
 # BRAID_EXACT_PAGES=1 (2026-09-11, README TODO 20): the two pages assigned

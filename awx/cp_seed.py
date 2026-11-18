@@ -48,7 +48,7 @@ class Apart:
 
     def StatusName(self, status=None):
         if self.died is not None:
-            return f'UNKNOWN: the solver\'s process died, ' + (f'signal {-self.died}' if self.died < 0
+            return 'UNKNOWN: the solver\'s process died, ' + (f'signal {-self.died}' if self.died < 0
                                                                 else f'exit {self.died}')
         return (self.status if status is None else status).name
 

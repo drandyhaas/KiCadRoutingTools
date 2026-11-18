@@ -1,4 +1,4 @@
-"""awx_settings -- what awx's modules read by name: a policy (PLAN_PAGES_SIDERS), a knob (BRAID_ATTEMPTS), a
+"""awx_settings -- what awx's modules read by name: a policy (PLAN_PAGES_SIDERS), a knob (BUS_SEED), a
 stage's hand-off (HINT, GEO_FLIPS_FROM, SNAP_KEEP), a cache's switch (TAUT_MEMO).
 
 They used to read os.environ, which the drivers set for each stage's process. A routing call inside KiCad's own

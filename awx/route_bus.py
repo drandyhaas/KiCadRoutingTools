@@ -1038,7 +1038,7 @@ def walled_grade(board, routed, refs, names, log=print):
     other check of the step's sees it: the bus's grade is its own nets', and the board's DRC finds no violation in a
     ball nothing reaches. Measured: imx6ulz's U2.F1 (VMEM), escaped by a stub to the array's face, a DDR lane on In2.Cu
     under the stub's end and two on F.Cu turning across it. A ball whose net has no other pad has nothing to reach and
-    is not asked. A WALL is copper no later step moves (fixed_nets): the bus's own, a net an earlier step protected
+    is not asked. A WALL is copper no later step moves (_fixed_nets): the bus's own, a net an earlier step protected
     (#521), a pour's, KiCad-locked or held copper, and every pad. Another net's escape is none: the route step takes it
     up and lays it again elsewhere -- QSPI_SCK, U1.A5 of a DDR3 bus's source, read walled with USR_BTN's B.Cu stub under
     the ball; route.py ripped that stub, dropped a via beside the ball and laid USR_BTN again, both connected.
@@ -1256,7 +1256,7 @@ def caps_walling(before, after, refs, bus, moved):
     """(caps, balls): the passives of `moved` (references; their poses all that differs from `before` to `after`) whose
     move walled a ball of `refs` in -- walled_grade's test -- each such ball's nearest moved passive in its view whose
     pose put back frees it, else every moved one in its view; and the balls"""
-    from kicad_parser import parse_kicad_pcb, is_immutable_copper
+    from kicad_parser import parse_kicad_pcb
     g = walled_grade(before, after, refs, bus, log=lambda *a: None)
     if not g['walled']:
         return [], []
@@ -1856,30 +1856,6 @@ def half_pairs(pcb, names):
     return out
 
 
-def later_nets(board, bus, buses):
-    """{net (short name): its part}: the nets of the buses after `bus` in `buses` off its source, on `board` -- each
-    bus's nets as its own step takes them (make_bench.pair_nets and pulled_nets, toward each of its parts)"""
-    with step_policy():                 # (make_bench imports the chain's modules: under its policy, step_policy)
-        import make_bench as mb
-    from coherent_nets import namer
-    from flow_frame import dest_refs
-    from kicad_parser import parse_kicad_pcb
-    i = next((k for k, b in enumerate(buses) if b[0] == bus[0] and b[1] == bus[1]), None)
-    rest = [b for b in buses[i + 1:] if b[0] == bus[0]] if i is not None else []
-    if not rest:
-        return {}
-    with contextlib.redirect_stdout(io.StringIO()):
-        pcb = parse_kicad_pcb(board)
-    sn = namer(pcb)
-    out = {}
-    for b in rest:
-        for P in dest_refs(b[1]):
-            pn = mb.pair_nets(pcb, b[0], P)
-            for n in list(pn) + list(pulled_nets(pcb, b[0], P, sorted(pn))):
-                out.setdefault(sn(n), P)
-    return out
-
-
 def clear_row_escapes(board, ref, names, keep, work, log=print, zone=None):
     """The movable passives beside a ROW PART `ref` (escape_moves.row_part: a QFN) moved off the bus's escapes there,
     on `board` in place: each of `names`' pads on it has one escape, straight out of its row, and a decoupling cap
@@ -2141,7 +2117,7 @@ def hold_board_escapes(board, base, out, pcb, src, failed, names=(), short=lambd
 
 def escape_blocks(txt, pcb, ref, names, grow=1.5):
     """The segment and via blocks of the nets `names` (full names) inside `ref`'s box of pads grown `grow` mm, in
-    either net dialect: the escapes an earlier fanout laid them at that array (SOURCE_SHARED)"""
+    either net dialect: the escapes an earlier fanout laid them at that array"""
     fp_ = pcb.footprints[ref]
     xs, ys = [p.global_x for p in fp_.pads], [p.global_y for p in fp_.pads]
     box = (min(xs) - grow, min(ys) - grow, max(xs) + grow, max(ys) + grow)

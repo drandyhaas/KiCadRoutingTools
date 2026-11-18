@@ -114,9 +114,6 @@ class _Held:
     def Value(self, v):
         return self.vals.Value(v)
 
-    def BooleanValue(self, v):
-        return self.vals.BooleanValue(v)
-
     def ObjectiveValue(self):
         return self.main.ObjectiveValue()
 

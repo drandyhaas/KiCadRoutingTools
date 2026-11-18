@@ -29,9 +29,8 @@ cannot read as drawn, all handled here:
     ending on another's interior) is joined explicitly -- a bridge to the via
     centre, a split at the T -- or the braid reads the overlap as a free end;
   * a via that lands in a pad is stamped Type VII as the chain's own are.
-The bench gets the chain's DRC floor in its .kicad_pro. Never give a chain TAG
-that collides with the bench's name up to case (macOS paths are case-blind,
-and chain_k.sh removes its outputs before it writes them).
+The bench gets the chain's DRC floor in its .kicad_pro. Never give a run an OUTDIR
+that collides with the bench's name up to case (macOS paths are case-blind).
 """
 KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
 import argparse

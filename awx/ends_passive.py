@@ -9,7 +9,6 @@ alone the same way (ALSO_MAX at most); the stamp is taken off again. Only a part
 beneath an array or beside it within NEAR_MARGIN, never one the board locks. Writes OUT and its plan sidecar (the
 bench's: no end moves). Exit 0 moved; 2 REF is no movable passive; 3 the cap step moved it nowhere clear, or only
 onto another bus's copper (negotiated buses: joint_lanes.foreign)"""
-import json
 import math
 import os
 import re

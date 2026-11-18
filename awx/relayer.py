@@ -17,6 +17,8 @@ import math
 import os
 import sys
 
+import numpy as np
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
@@ -50,6 +52,43 @@ def run_to_via(pcb, nid, end_pt, layer, with_via=False):
     return None
 
 
+# ---- the distance between segments, arrays of them at a time (clashes')
+def _pt_seg_d2(P, S0, S1):
+    """Squared distance from each point of P (n, 2) to each segment
+    S0->S1 (m, 2): (n, m)."""
+    dx = S1[:, 0] - S0[:, 0]
+    dy = S1[:, 1] - S0[:, 1]
+    ll = np.maximum(dx * dx + dy * dy, 1e-12)
+    px = P[:, None, 0] - S0[None, :, 0]
+    py = P[:, None, 1] - S0[None, :, 1]
+    t = np.clip((px * dx[None] + py * dy[None]) / ll[None], 0.0, 1.0)
+    ex = px - t * dx[None]
+    ey = py - t * dy[None]
+    return ex * ex + ey * ey
+
+
+def _orient(P, Q, R):
+    return ((Q[..., 0] - P[..., 0]) * (R[..., 1] - P[..., 1])
+            - (Q[..., 1] - P[..., 1]) * (R[..., 0] - P[..., 0]))
+
+
+def seg_seg_dist(A0, A1, B0, B1):
+    """Distance between each segment A0->A1 (n, 2) and each B0->B1
+    (m, 2): (n, m); 0 where they cross."""
+    if not len(A0) or not len(B0):
+        return np.zeros((len(A0), len(B0)))
+    d2 = np.minimum(np.minimum(_pt_seg_d2(A0, B0, B1), _pt_seg_d2(A1, B0, B1)),
+                    np.minimum(_pt_seg_d2(B0, A0, A1).T, _pt_seg_d2(B1, A0, A1).T))
+    a0, a1 = A0[:, None, :], A1[:, None, :]
+    b0, b1 = B0[None, :, :], B1[None, :, :]
+    o1 = _orient(a0, a1, b0)
+    o2 = _orient(a0, a1, b1)
+    o3 = _orient(b0, b1, a0)
+    o4 = _orient(b0, b1, a1)
+    x = (o1 * o2 < 0) & (o3 * o4 < 0)
+    return np.sqrt(np.where(x, 0.0, d2))
+
+
 def clashes(pcb, runs, layers, clear, why=None):
     """what a via end's run would stand beside on another layer. `runs` {key: (its nets' ids, its segments)} -- each
     end's runs to its vias (run_to_via), a pair's both legs. Returns (ban {key: the layers whose copper -- another net's
@@ -58,8 +97,6 @@ def clashes(pcb, runs, layers, clear, why=None):
     segment is held off every net's copper but its own -- a pair's partner leg's too: its ball on the surface, where
     the run moved was the relayer's, shorted the zynq LVDS bus's TX_D5_P onto TX_D5_N's ball, U1.Y14. `why`, a dict:
     filled with {(key, layer): the copper that bans it -- 'segment NET' or 'pad REF.PAD NET', the first found}"""
-    import numpy as np
-    from pack import seg_seg_dist
     moving = {id(s) for _nids, segs in runs.values() for s in segs}
     arr = lambda segs: (np.array([(s.start_x, s.start_y) for s in segs], float).reshape(-1, 2),
                         np.array([(s.end_x, s.end_y) for s in segs], float).reshape(-1, 2),

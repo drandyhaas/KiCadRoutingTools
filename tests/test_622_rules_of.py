@@ -310,7 +310,7 @@ truthy('the AST scan actually scanned something', scanned > 10,
        f'only {scanned} file(s) parsed')
 
 # every stage's entry point installs (the threading is the deliverable)
-for fn in ('braid.py', 'fanout_from_plan.py', 'make_bench.py', 'cut_ledger.py',):
+for fn in ('fanout_from_plan.py', 'make_bench.py', 'cut_ledger.py',):
     body = open(os.path.join(AWX, fn), encoding='utf-8').read()
     truthy(f'{fn} installs the chain constants',
            'install_defaults()' in body,

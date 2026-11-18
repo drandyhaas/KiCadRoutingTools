@@ -2,7 +2,7 @@
 crowded, for the fanout to choose again (fanout_from_plan: FEEDBACK=OUT.json; whole_ends prices them).
 whole_feedback.py --repeat SIDECAR.plan.json HOT_BEFORE.json HOT_NOW.json -- exit 0 (and name them) when a finding at
 the ends -- its kind, its lanes, its end -- stands in both rounds' audits: the solve had its round and did not move it,
-and only the fanout can (whole_loop stops there) -- but not while the round has a finding of the solve's own that the
+and only the fanout can (the loop stops there) -- but not while the round has a finding of the solve's own that the
 round before had not: the solve answers that first.
 whole_feedback.py --refused SIDECAR.plan.json OUT.json REFUSED.json -- the FANOUT AUDIT's findings on a board the fanout
 refused (fanout_from_plan: a pair split by other lanes' ends between its tips): each split pair's end and each such
@@ -28,7 +28,7 @@ lane's options there), pairs of ends not to be chosen together, each end's point
 laid, and ends pinned (the lane's option nearest `at`, in the sidecar's frame, on `layer` where one is).
 whole_feedback.py --now SIDECAR.plan.json HOT.json -- exit 0 (and name them) when a finding at the ends is one no solve
 moves: a pitch or a static clearance there comes of where the ends stand (a dive there is the solve's: its via cut
-moves it; a fold, the crossings the solve put round it) -- whole_loop stops at once, before paying a solve.
+moves it; a fold, the crossings the solve put round it) -- the loop stops at once, before paying a solve.
 
 A finding (whole_gate --hot: its place, its kind, the lanes it names) is AT an array's ends -- the teeth or the berths --
 where their own copper is: beside a side face, within the width that face's lanes stack to (its ends' count, a lane

@@ -215,7 +215,6 @@ def foreign(pcb):
             by.setdefault(sn(n.name), i)
     base = {b_: legs[0] for b_, legs in _pairs.pair_names(sorted(by), admit_all=True).items()}
     w_pair = _pairs.pitch(R.track) + R.track
-    cu = [L for L in (pcb.board_info.copper_layers or [])]
     ordr = order()
     n_ = 0
     for f in sorted(os.listdir(d)):

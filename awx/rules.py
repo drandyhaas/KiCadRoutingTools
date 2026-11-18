@@ -136,7 +136,7 @@ import math
 import os
 import awx_settings
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ----------------------------------------------------------- the constants
 # These are the literals this module replaces, and this is their one home.
@@ -413,8 +413,8 @@ def install(rules, verbose=False):
         """Every live module object for the logical name ``mod``.
 
         THE `__main__` TRAP, and it is not theoretical -- it shipped in the
-        first version of this file and a control run caught it. A stage is
-        run as ``python3 braid.py``, so the router's own module is named
+        first version of this file and a control run caught it. A stage was
+        run as ``python3 braid.py``, so the router's own module was named
         ``__main__``: ``sys.modules['braid']`` is absent and a plain
         ``sys.modules.get('braid')`` writes NOTHING, silently, while the
         stage prints the rules it is not using.

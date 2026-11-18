@@ -1,33 +1,23 @@
 #!/usr/bin/env python3
-"""#622 taut strings: assert CLEANLINESS, not convergence (user, 0902).
+"""#622 taut strings: assert CLEANLINESS, not convergence.
 
-topo_strings.relax seeds every net as a straight chord and iterates
-smooth-then-push, one point at a time, until the points stop moving.
-A chord seeded ACROSS a thin obstacle (a foreign track capsule) is a
-STABLE CYCLE: the neighbours get pushed to opposite sides, the middle
-point is pushed off the axis and smoothed back onto it. Reproduced:
-400 rounds, unchanged at exactly 10.000 mm, three points inside the
-capsule (0.111 / 0.232 / 0.111 mm deep), and the loop reported
-convergence. No pointwise fix can help -- "the curve crosses the
-track" is a property of the whole curve; the remedy is a curve around
-the obstacle's END, a different homotopy SECTOR, which the flow cannot
-change. The seed chose it.
+A relaxation iterates until its points stop moving, and a string that has
+stopped can still stand inside copper. A chord seeded ACROSS a thin obstacle
+(a foreign track's capsule) is a stable cycle: the neighbours are pushed to
+opposite sides, the middle point is pushed off the axis and smoothed back
+onto it, and the loop reports convergence. "The curve crosses the track" is
+a property of the whole curve, which no pointwise step sees.
 
-So: (1) after relax, walk the polyline (points AND the 0.25 mm samples
-between them) and require point_violation None everywhere; (2) treat
-a violation as WRONG SECTOR -- reseed with a polyline around the
-offending obstacle on one side, relax from that seed
-(relax_from, the same loop corridor.relax_path runs), keep the clean
-candidate; recurse on what the new seed hits, a few levels deep.
-relax itself is untouched (bit-identical for every caller); this is a
-wrapper the taut-path producer calls.
+So after a relaxation the polyline is walked (its points AND the 0.25 mm
+samples between them) and every violation is classified (`assess`): clean,
+tolerated (in the escape comb, or shallow) or violating. Reported, never
+repaired.
 """
 import math
 
 import topo_strings as ts
 
 
-MARGIN = 0.30      # how far beyond an obstacle's end the detour point sits
 SAMPLE = 0.25      # seg_clear's own sampling step
 TOL = 0.05         # a graze under this is the push loop's own stopping slack
 END_ZONE = 1.5     # mm from either end: the escape COMB, where every string
@@ -109,23 +99,17 @@ def classify(pts, obs, viol):
     return out
 
 
-def relax_clean(src, dst, obs, rounds=400, depth=3):
-    """relax, then ASSERT cleanliness; on a violation reseed around the
-    offender and relax again, up to `depth` levels. Returns
-    (pts, iterations, status, n_reseeds) with status 'clean' (the
-    chord's own sector was fine), 'reseeded' (a detour sector is
-    clean), or 'INVALID' (no clean sector found -- the least-violating
-    polyline is returned, and the caller must say so loudly)."""
-    pts, it = ts.relax(src, dst, obs)
-    return assess(pts, it, obs)
+# the finding on the last polyline assessed: {'cls': its violations counted by kind (classify), 'n': how many they are},
+# None when it is clean. assess sets it; the taut paths' producer (detect_buses.taut_paths) prints it
+last = None
 
 
 def assess(pts, it, obs):
     """The cleanliness verdict on a relaxed polyline: (pts, it, status,
-    n_reseeds), status 'clean' / 'tolerated' / 'violating' -- the second
-    half of relax_clean, shared with the batched relaxation."""
+    n_reseeds), status 'clean' / 'tolerated' / 'violating'."""
+    global last
     n_re = 0
-    relax_clean.last = None
+    last = None
     # assert-only: violations are classified and reported, never
     # reseeded (a reseed was tried and lost on the ladder). A capsule
     # is a single-layer foreign track a lane crosses by diving, so on a
@@ -136,7 +120,7 @@ def assess(pts, it, obs):
     if not viol:
         return pts, it, 'clean', 0
     cls = classify(pts, obs, viol)
-    relax_clean.last = dict(cls=cls, n=len(viol))
+    last = dict(cls=cls, n=len(viol))
     if not (cls['midfield_cap'] + cls['midfield_disc']):
         # comb-zone / shallow only: reported, never reseeded
         return pts, it, 'tolerated', 0

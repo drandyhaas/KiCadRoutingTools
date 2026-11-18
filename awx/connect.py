@@ -37,8 +37,7 @@ from plane_pad_tap import make_local_window  # noqa: E402
 from obstacle_map import (build_base_obstacle_map,  # noqa: E402
                           add_same_net_via_clearance,
                           add_same_net_pad_drill_via_clearance,
-                          same_net_pad_via_keepout_cells,
-                          add_board_edge_obstacles)
+                          same_net_pad_via_keepout_cells)
 from routing_context import _add_free_via_positions  # noqa: E402
 from net_rescue import _fence_window, _result_escapes_window  # noqa: E402
 from single_ended_routing import route_net_with_obstacles  # noqa: E402
@@ -120,11 +119,7 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             virtual: Optional[List[Tuple[Point, Point, str]]] = None,
             window_pts: Optional[List[Point]] = None,
             virtual_vias: Optional[List[Point]] = None,
-            b_alts: Optional[List[Tuple[float, float, str]]] = None,
             report: Optional[dict] = None,
-            soft: Optional[List[Tuple[Point, Point, str, float]]] = None,
-            soft_vias: Optional[List[Tuple[float, float, float]]] = None,
-            soft_cost: float = 5.0,
             own_ids: Optional[List[int]] = None,
             virtual_size: Optional[Tuple[float, float]] = None,
             ) -> Optional[Tuple[List[Segment], List[Via]]]:
@@ -156,12 +151,7 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     the A* tried to expand into and found blocked (`blocked`, absolute
     grid (gx, gy, layer)), the window it searched (`window`) and the
     config (`cfg`) -- what a blocker analysis needs to name the copper
-    that boxed the net. `soft`: copper that is a PRICE, not a wall --
-    (p, q, layer, width) centrelines and `soft_vias` (x, y, size) whose
-    clearance footprint costs `soft_cost` mm-equivalent per cell instead
-    of being blocked, so a search through it finds the path that
-    crosses the FEWEST such pieces (a min-cut probe); the caller keeps
-    that copper OUT of `pcb` and never adds the probe's path.
+    that boxed the net.
     """
     coord = GridCoord(cfg.grid_step)
     layer_map = build_layer_map(cfg.layers)
@@ -258,11 +248,6 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             stamp(cells)
         _m(f'band stamped {n_band} cells')
 
-    if soft or soft_vias:
-        _stamp_soft(obstacles, coord, layer_map, cfg, soft or (),
-                    soft_vias or (), soft_cost)
-        _m('soft stamped')
-
     x0, y0, x1, y1 = window.board_info.board_bounds
     g0 = coord.to_grid(x0, y0)
     g1 = coord.to_grid(x1, y1)
@@ -271,15 +256,6 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     gb = coord.to_grid(*b)
     sources = [(ga[0], ga[1], layer_map[a_layer], a[0], a[1])]
     targets = [(gb[0], gb[1], layer_map[b_layer], b[0], b[1])]
-    # b_alts: ALTERNATIVE finish points (earlier stops on the dest
-    # stub) -- the search terminates at whichever target it reaches
-    # cheapest, so a lane that passes the pad no longer climbs to the
-    # stub tip and pays the span twice (#622 berth overshoot)
-    for (xx, yy, ll) in (b_alts or ()):
-        if ll not in layer_map:
-            continue
-        gg = coord.to_grid(xx, yy)
-        targets.append((gg[0], gg[1], layer_map[ll], xx, yy))
     if len(own) > 1:
         # an ENVELOPE lane owns every leg's copper, but the router's
         # terminal-short gate measures foreign copper against `net_id`
@@ -1513,107 +1489,3 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
         return None
     return connectors + approach + list(result.get('new_segments') or []), \
         conn_vias + list(result.get('new_vias') or [])
-
-
-def _walk_capsule_cells(pts: np.ndarray, hw: int) -> Tuple[np.ndarray, np.ndarray]:
-    """The cells of the union of the integer discs of radius `hw` (every
-    (ex, ey) with ex*ex + ey*ey <= hw*hw) centred on each point of a
-    Bresenham walk `pts` ((n, 2) int, connected, monotone), as (gx, gy)
-    int32 arrays with NO cell twice. Exact: the walk visits every column
-    between its ends and consecutive centres differ by at most one cell
-    in each coordinate, so in any column the discs' intervals overlap or
-    touch and their union is ONE span, [min over the taps of (the walk's
-    lowest y in the tapped column - h), max of (highest + h)], with
-    h(ex) = isqrt(hw*hw - ex*ex). One disc per point was 197 cells at
-    hw 8 for every point of every priced lane -- 12 million rows for a
-    K28 min-cut probe, 660 MB at the peak of the braid (README TODO 10)."""
-    px = pts[:, 0].astype(np.int64)
-    py = pts[:, 1].astype(np.int64)
-    xmin = int(px.min())
-    n = int(px.max()) - xmin + 1
-    BIG = np.int64(1 << 40)
-    ymin = np.full(n + 2 * hw, BIG, dtype=np.int64)
-    ymax = np.full(n + 2 * hw, -BIG, dtype=np.int64)
-    idx = px - xmin + hw
-    np.minimum.at(ymin, idx, py)
-    np.maximum.at(ymax, idx, py)
-    taps = 2 * hw + 1
-    ex = np.arange(-hw, hw + 1)
-    h = np.array([math.isqrt(hw * hw - int(e) * int(e)) for e in ex], dtype=np.int64)
-    # output column c = xmin - hw + i, i in [0, n + 2hw); tap j = hw - ex
-    # reads the walk's column c - ex, which sits at padded index i + j
-    from numpy.lib.stride_tricks import sliding_window_view
-    pad_lo = np.concatenate([np.full(hw, BIG, dtype=np.int64), ymin, np.full(hw, BIG, dtype=np.int64)])
-    pad_hi = np.concatenate([np.full(hw, -BIG, dtype=np.int64), ymax, np.full(hw, -BIG, dtype=np.int64)])
-    lo = (sliding_window_view(pad_lo, taps) - h[None, ::-1]).min(axis=1)
-    hi = (sliding_window_view(pad_hi, taps) + h[None, ::-1]).max(axis=1)
-    cols = np.arange(xmin - hw, xmin - hw + n + 2 * hw, dtype=np.int64)
-    lens = hi - lo + 1
-    total = int(lens.sum())
-    gx = np.repeat(cols, lens)
-    starts = np.cumsum(lens) - lens
-    gy = np.repeat(lo, lens) + (np.arange(total, dtype=np.int64) - np.repeat(starts, lens))
-    return gx.astype(np.int32), gy.astype(np.int32)
-
-
-def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
-                soft, soft_vias, soft_cost: float) -> None:
-    """Price the clearance footprint of `soft` copper per cell on its
-    layer (set_layer_proximity_batch, which keeps the MAX per cell), and
-    of `soft_vias` on every layer. The footprint is the obstacle model's
-    own: half the copper width + the clearance + half a track of the
-    searching net -- a cell whose centre lies inside it is one the hard
-    model would have blocked. Each piece's footprint is stamped ONCE per
-    cell (_walk_capsule_cells): the map keeps the max per cell, so the
-    map is the one a disc per walk point made, in a twentieth of the
-    rows."""
-    from bresenham_utils import walk_line
-    cost = cfg.cell_cost(soft_cost)
-    rows = []
-    disks = {}
-
-    def disk(r_grid):
-        d = disks.get(r_grid)
-        if d is None:
-            rr = range(-r_grid, r_grid + 1)
-            d = np.array([(ex, ey) for ex in rr for ey in rr
-                          if ex * ex + ey * ey <= r_grid * r_grid],
-                         dtype=np.int32)
-            disks[r_grid] = d
-        return d
-
-    def stamp(li, gx, gy):
-        r = np.empty((gx.size, 4), dtype=np.int32)
-        r[:, 0] = li
-        r[:, 1] = gx
-        r[:, 2] = gy
-        r[:, 3] = cost
-        rows.append(r)
-    for (p, q, layer, w) in soft:
-        li = layer_map.get(layer)
-        if li is None:
-            continue
-        hw = coord.to_grid_dist(w / 2 + cfg.clearance + cfg.track_width / 2)
-        gx1, gy1 = coord.to_grid(p[0], p[1])
-        gx2, gy2 = coord.to_grid(q[0], q[1])
-        pts = np.asarray(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int64)
-        gx, gy = _walk_capsule_cells(pts, int(hw))
-        stamp(li, gx, gy)
-    for (x, y, size) in soft_vias:
-        hw = coord.to_grid_dist(size / 2 + cfg.clearance + cfg.track_width / 2)
-        gx0, gy0 = coord.to_grid(x, y)
-        off = disk(hw)
-        for li in range(len(cfg.layers)):
-            stamp(li, gx0 + off[:, 0], gy0 + off[:, 1])
-    if not rows:
-        return
-    # no np.unique(axis=0): the map keeps the MAX cost per cell, so a cell
-    # stamped twice at the same cost is the same map, and the row sort
-    # was 41 of the K41 braid's 172 profiled seconds (2026-09-08)
-    arr = np.ascontiguousarray(np.concatenate(rows))
-    obstacles.set_layer_proximity_batch(arr)
-
-
-def seg_len(segs: List[Segment]) -> float:
-    return sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
-               for s in segs)

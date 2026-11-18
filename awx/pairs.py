@@ -909,11 +909,6 @@ def offset_line(p: Pt, q: Pt, h: float) -> List[Tuple[Pt, Pt]]:
             ((p[0] - nx, p[1] - ny), (q[0] - nx, q[1] - ny))]
 
 
-def describe(m) -> str:
-    return (f'{m.direction}/{m.layer}/{m.kind} @({m.exit_pt[0]:.2f},{m.exit_pt[1]:.2f}) '
-            f'{m.vias}v')
-
-
 _DIRS = {'left': (-1, 0), 'right': (1, 0), 'up': (0, -1), 'down': (0, 1)}
 
 

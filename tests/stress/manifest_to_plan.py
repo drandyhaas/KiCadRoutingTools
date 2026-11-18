@@ -177,10 +177,6 @@ REFUSED_TOOLS = {
         'plans and lays one awx escape for every signal ball of an array; the '
         'plan\'s fanout step is bga_fanout / qfn_fanout, not this. Run it on '
         'the CLI and start the plan from its output'),
-    'braid.py': (
-        'emits the awx braid for a fanned-out bus, a stage of route_bus; the '
-        'plan\'s bus step is route_bus.py, not this. Run it on the CLI and '
-        'start the plan from its output'),
     'baseline_freerouting.py': (
         'routes an awx rung with Freerouting, another router; no plan step '
         'runs it. Run it on the CLI'),

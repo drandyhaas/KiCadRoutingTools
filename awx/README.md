@@ -7,7 +7,7 @@ the others, and where each changes layer. It holds two routers:
 | | how it works | status |
 |---|---|---|
 | **The whole route**<br>`whole_route.py`, `whole_*.py`, `route_bus.py` | Chooses every net's ends, then plans every lane's **whole path before anything is routed** -- crossings, layer changes, geometry on the router's grid -- checks the plan against the router's own rules, and routes every lane in its band at once. | **The current router.** Every rung of both benches routes connected and DRC-clean on a Mac, with fewer vias and less copper than the human. |
-| The braid chain<br>`braid.py` | A corridor braid routed stage by stage on the fanout's ends. | The earlier router. The whole route reuses its fanout, router, benches and audits. |
+| The braid's pieces<br>`braid.py`, `connect.py`, `corridor.py` | A bench's reading, a corridor planner, and the routers that lay one lane or one pair in its band. | From the earlier router. The whole route reuses its fanout, router, benches and audits. |
 
 Two rules both keep:
 
@@ -18,7 +18,7 @@ Two rules both keep:
 **Contents**
 
 1. [The whole route](#the-whole-route) -- [results](#results), [running it](#running-it), [the bus step](#the-bus-step-on-a-real-board), [the group's ends](#the-groups-ends-group_endspy), [how it works](#how-it-works), [the same answer on each machine](#each-machine-the-same-answer); its two solvers explained: [CP-SAT and HiGHS in the whole route](https://drandyhaas.github.io/KiCadRoutingTools/solvers/)
-2. [The braid chain](#the-braid-chain)
+2. [The braid's pieces](#the-braids-pieces)
 3. [Shared pieces](#shared-pieces) -- grading, `rules.py`, measuring honestly, the tools, what this adds to `py_router`
 4. [TODO](#todo)
 
@@ -934,8 +934,7 @@ by what crosses: the lanes most of the state's dives are owed to, together,
 or a lane and the lanes it crosses.
 
 **The cut** round a ball array destination, where the order of its exits
-starts and ends, is its far face's middle (`negotiated_buses.GROUP_SET`), no
-variable of the group's model.
+starts and ends, is its far face's middle, no variable of the group's model.
 
 **What it costs,** the group's ends within each board's bus step below. Peak
 memory is as macOS counts it, the process's footprint, measured on the model
@@ -2259,8 +2258,9 @@ only the fanout can move.
   turns either off).
 - **The planned bench** is planned once and saved (`whole_ctx.plan`, under
   `tmp/ctx_cache`).
-- **Refusals:** a bench outside the canonical frame (`flow_frame.py`) or with
-  more than two copper layers is refused, not misread. A run of only some of
+- **Refusals:** a bench outside the canonical frame (`flow_frame.py`), or
+  without the routing layers it is asked to plan on (`ROUTE_LAYERS`), is
+  refused, not misread. A run of only some of
   the bus's lanes -- the last resort's partial -- is judged by the frame's own
   trunk, pad box to pad box, where its balls' centroids alone read a quarter
   off: a bench turned for the whole bus is in the frame for any part of it.
@@ -2668,18 +2668,17 @@ STAGE_CACHE=0 TAUT_MEMO=0 PYTHONHASHSEED=2 python3 whole_route.py 15 OUT2
 
 ---
 
-## The braid chain
+## The braid's pieces
 
-The earlier router. The **fanout** lays the ends the whole route's ends
-model chooses and reports what it could not; the **braid** (`braid.py`)
-routes the lanes in corridors of two pages, every lane by the production grid
-router inside its band, with a rescue ladder and a blocker-directed rip for
-what is refused.
-
-Its stages are `fanout_from_plan.py OUT K --board=BENCH` (the ends, and the
-destination fanned out to them) and `braid.py --board OUT --nets NETS --dest
-REF --out STEM` (every lane routed in its band), run under the chain's own
-environment (`whole_route.stage_env`).
+The earlier router was a corridor braid: the lanes routed in corridors of
+two pages, every lane by the production grid router inside its band. The
+whole route plans every lane before anything is routed, and what it takes
+from the braid stays in `braid.py`: the bench's reading (`setup`: the ends,
+the layers, the taut paths), the obstacles, and the routers that lay one
+lane or one pair in its band (`Corridor.route_lane`, `route_pair_lane`,
+through `route_lanes.py --plan`). The braid's corridor planner
+(`plan_corridors`) is driven by `plan_audit.py`'s own command line and by
+`route_lanes.py` without a plan.
 
 `synth_bus.py` writes synthetic buses with a known optimum
 (`synth_bus.py --self-test` checks its truth model).
@@ -2690,7 +2689,7 @@ environment (`whole_route.stage_env`).
 
 ### Grading
 
-`via_census.py` breaks a board down per net. Every write that can put a via in a pad declares IPC-4761
+Every write that can put a via in a pad declares IPC-4761
 Type VII on it (`ship_vias.stamp`), as the route step does (#962).
 
 ### One source for every routing number (`rules.py`)
@@ -2749,7 +2748,7 @@ With nothing supplied, as on the benches:
 
 | | |
 |---|---|
-| `route_bus.py` | the bus step: a board as the chain hands it on, its buses routed in the board's own frame, graded on the board (`BUS ..`), handed on whenever their own nets come out clean, another net's copper it laid put back first (`tests/test_622_bus_handed_on.py`); the buses it routes and the parts it leaves, each with why (`bus_plan`, `find_buses`, `--find`: `tests/test_622_find_buses.py`), each source's buses one group (`route_buses`), the lanes on every copper layer (`all_layers`); the lanes handed on locked (`lock_lanes`: `tests/test_622_bus_lock.py`); a pull pad a short tie reaches joined to its lane on the routed board (`attach_pulls`: `tests/test_622_attach_pulls.py`); a net a pull or a termination alone keeps out laid as a lane (`pulled_nets`: `tests/test_622_route_bus_pulled.py`); one source and several ends as one whole route, `--bus SRC:U4+U3` (the frame's branches, `whole_frame.dest_ranks`: `tests/test_622_two_end.py`); `--src`/`--dest`, one bus by itself with its own ends, a group's per-bus process |
+| `route_bus.py` | the bus step: a board as the chain hands it on, its buses routed in the board's own frame, graded on the board (`BUS ..`), handed on whenever their own nets come out clean, another net's copper it laid put back first (`tests/test_622_bus_handed_on.py`); the buses it routes and the parts it leaves, each with why (`bus_plan`, `find_buses`, `--find`: `tests/test_622_find_buses.py`), each source's buses one group (`route_buses`), the lanes on every copper layer (`all_layers`); the lanes handed on locked (`lock_lanes`: `tests/test_622_bus_lock.py`); a pull pad a short tie reaches joined to its lane on the routed board (`attach_pulls`: `tests/test_622_attach_pulls.py`); a net a pull or a termination alone keeps out laid as a lane (`pulled_nets`: `tests/test_622_route_bus_pulled.py`); one source and several ends as one whole route, `--bus SRC:U4+U3` (the parts one destination, `whole_frame.Group`: `tests/test_622_two_end.py`); `--src`/`--dest`, one bus by itself with its own ends, a group's per-bus process |
 | `negotiated_buses.py`, `whole_joint.py`, `joint_lanes.py` | each source's buses one group (`route_grouped`): every bus's ends model captured, the group's ends, every bus on the shared field in its own frame and a process of its own (`route_on_field`), merged (`merge`, `conflicts`, `give_back`, `protect_laid`), the group's rounds; a round's first plans and every loop's re-solves one coupled solve, one CP-SAT model, the buses in step, coupled where two buses' lanes cross or come within a lane's pitch (`whole_joint.py`, `JOINT_DIR`, `whole_route.joint_loop_sync`); each bus's lanes published in the board's frame and laid as copper of their own nets on every other bus's stages (`joint_lanes.publish`, `foreign`) |
 | `group_ends.py` | the group's ends (`negotiated_buses.route_grouped`): every bus off one array given its ends by one CP-SAT model over its captured ends model and the arrays' shared menus; the model offered each bus ball's first tiers, its whole menu by need (a refusal's rules) and by use (the search's epochs, a stretch of lanes at a time; `tier_search`, `lane_stretches`); each bus's ends checked by its whole solve; the arrays fanned out as chosen and measured, a violation the fanout made answered by the model (`write_field`, `teach_laid`); a bus step's fanout stage on the group's ends (`bus_stage`, `GROUP_ENDS`) |
 | `field_ties.py` | the field's ties: the pads on a poured net beneath a group's parts tied on the fanned-out field, before the lanes (`group_ends`, after the field is measured) |
@@ -2775,6 +2774,7 @@ With nothing supplied, as on the benches:
 | `baseline_bench.py`, `baseline_freerouting.py`, `baseline_render.py` | a rung by two other routers on the same bench, nets, rules and grade -- the toolkit's production chain without the bus step, and Freerouting through KiCad's Specctra DSN (`FREEROUTING_JAR`, `FREEROUTING_JAVA`) -- and the boards drawn alike, every other net's copper grey |
 | `plane_render.py` | a board drawn with its planes: each zone as KiCad fills it (its outline without KiCad's python), each (net, layer) its own colour at alpha, outlined thin black; the buses' tracks (route_bus summaries, or every net's) by layer over them, the arrays boxed, the page turned by quarter turns (`tests/test_622_plane_render.py`) |
 | `stage_cache.py`, `awx_settings.py`, `detmath.py` | the stage cache; the settings every module reads by name; one answer per LP |
+| `bus_trace.py`, `run_trace.py` | what a run saved, read back: the group's ends' checks and lessons (`checks.jsonl`), a bus's feedback trace, the run's settings (`run.json`) |
 | `bus_events.py` | the bus step's progress events: one JSON object a line in `<OUT stem>.bus/events.jsonl` (`BUS_EVENTS`), written by every process of the step as it goes and read by the GUI's Bus tab -- never by the routing (`tests/test_bus_events.py`; the stages and payloads: `docs/bus-routing.md`, "Progress events") |
 
 **Shared by both routers:**
@@ -2788,9 +2788,9 @@ With nothing supplied, as on the benches:
 | `pairs.py` | a differential pair's rules: its hand, end connectors, dive room, crossover, staircase |
 | `plan_audit.py`, `route_lanes.py` | a plan checked before routing; chosen lanes routed one at a time in band, with renders and a refused search's frontiers |
 | `human_ends_bench.py` | a bench on a human's ends, with the plan sidecar |
-| `ship_vias.py`, `rules.py`, `via_census.py` | Type VII on a via in a pad; the routing numbers; the per-net census |
+| `ship_vias.py`, `rules.py` | Type VII on a via in a pad; the routing numbers |
 
-**The braid chain:** `braid.py`, `schedule.py`, `dedupe_boards.py`, `pack.py`, `re_escape.py`.
+**The braid's pieces:** `braid.py`, `schedule.py`.
 
 **Benches, frames and comparisons:**
 
@@ -3332,6 +3332,3 @@ channels first, and the other escapes leave round it.
   `make_bench.py OUT SU1 SD1 BENCH`: an F.Cu escape ends 0.11 mm from the
   1 mm hole, one TRACK-HOLE violation, and the bench is refused. The same
   code is on main.
-- **The braid chain, if it is picked up again:** one placement of every
-  layer change (`place_dives`); group moves for K51's last vias; a pair's two
-  ends moved together.

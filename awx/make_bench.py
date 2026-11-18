@@ -4,7 +4,7 @@
     python3 make_bench.py BOARD.kicad_pcb SRC DST OUT.kicad_pcb [--two-layer]
                           [--src-side F|B] [--dst-side F|B] [--rotate DEG]
 
-The chain (`chain_k.sh`, BASE / DEST) needs three things a corpus board
+The chain (`whole_route.py`, BASE / DEST) needs three things a corpus board
 does not carry: a SOURCE array already fanned out for the pair's nets
 (the teeth the plan launches from), a project whose DRC floor is the one
 the chain routes to, and the coherent K-ladder of its rivers. This
@@ -32,9 +32,9 @@ prepared, so a second array pair is one command away:
    largest first, singletons last -- a prefix K never splits a river.
    `coherent_nets.py` reads it beside the board.
 
-Then: `BASE=OUT.kicad_pcb DEST=DST bash chain_k.sh TAG K ...`.
+Then: `BASE=OUT.kicad_pcb DEST=DST python3 whole_route.py K OUTDIR`.
 
-THE POSE GATE (`pose_gate.sh`): nothing in the chain may lean on the
+THE POSE GATE: nothing in the chain may lean on the
 board's axes or on which face an array sits. `--src-side` / `--dst-side`
 put an array on the other face (the placement writer's mirror, the
 #714 path), and every part its pads then collide with -- the decoupling
@@ -438,7 +438,7 @@ def main(argv=None):
     print(f'{os.path.basename(out)}: {"DRC clean" if n_drc == 0 else f"{n_drc} DRC violation(s)"}'
           f' at the chain\'s floor ({te.SPEC_CLEARANCE})')
     write_ladder(out, names)
-    print(f'run: BASE={out} DEST={dst} bash chain_k.sh TAG K ...')
+    print(f'run: BASE={out} DEST={dst} python3 whole_route.py K OUTDIR')
     return 0 if n_drc == 0 else 1
 
 

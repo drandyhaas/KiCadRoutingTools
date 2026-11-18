@@ -314,7 +314,7 @@ def main():
                + ('   [frame mirrored back: chirality -1]' if CY is not None else '')
                + ('   runs: grey empty, green < 60% full, orange, RED OVER (lanes and vias, each via its room on '
                   'every layer)' if PL is not None else '')
-               + (f'   cuts: ' + ', '.join(f'r{i_ + 1} {os.path.basename(f_)}' for i_, f_ in enumerate(a.cuts.split(',')))
+               + ('   cuts: ' + ', '.join(f'r{i_ + 1} {os.path.basename(f_)}' for i_, f_ in enumerate(a.cuts.split(',')))
                   if a.cuts else ''), fill=(60, 60, 60), font=f22)
         im.save(out)
         print('frame_render: wrote', out, im.size, 'H0', round(F.H0, 2), 'Hk', {k: round(v, 2) for k, v in F.Hk.items()},

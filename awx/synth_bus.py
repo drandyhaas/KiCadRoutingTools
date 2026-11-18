@@ -2,8 +2,8 @@
 """synth_bus.py -- generated bus articles with KNOWN ANSWERS (#622).
 
 Every number in this campaign comes from ONE bench (`fb_t2q_fresh`, an H3
-to a DDR3) graded against ONE human layout, so the ladder and
-`judge_gate.py` see a comparison but never an OPTIMUM. This writes bus
+to a DDR3) graded against ONE human layout, so the ladder sees
+a comparison but never an OPTIMUM. This writes bus
 problems whose optimum is known by construction, so "how far off is the
 plan" becomes a number rather than a ranking.
 
@@ -420,7 +420,7 @@ def wind_length(w, n, k):
 def wind_cut_k(w, n, c):
     """lane n's winding (-1, 0, 1) with ONE cut round the destination at c (a place round it, as q; not on the facing
     face): its place taken in the turn of the perimeter between the cut and itself that holds the facing face"""
-    q, P, Wd, H = w['q'][n], w['P'], w['Wd'], w['H']
+    q, Wd, H = w['q'][n], w['Wd'], w['H']
     if c > Wd + H:                       # (on the south or the far face: past it, round the north)
         return -1 if q > c else 0
     return 1 if q < c else 0             # (on the north face: short of it, round the south)
@@ -1358,17 +1358,17 @@ def cap_survey(seeds=5, ks=(8, 10, 12, 14, 16, 20, 24, 32), cap=2):
               f'{" (highest rung with any feasible seed: K=%d)" % max(ever) if ever else ""}.')
     else:
         print('Every rung tested had a feasible seed.')
-    print(f'  So the directive is a property of the ARRANGEMENT, not a rule '
-          f'of the channel.')
+    print('  So the directive is a property of the ARRANGEMENT, not a rule '
+          'of the channel.')
     if f_bad:
         print(f'  A cap of {2 * cap} is not free either -- it failed at '
               f'K={", ".join(str(k) for k in f_bad)}.')
     else:
         print(f'  A cap of {2 * cap} held at every rung tested.')
-    print(f'  Above the failing K the directive is reachable only by LEAVING '
-          f'the channel --')
-    print(f'  un-crossing pairs by going around an array, which this model '
-          f'does not contain.')
+    print('  Above the failing K the directive is reachable only by LEAVING '
+          'the channel --')
+    print('  un-crossing pairs by going around an array, which this model '
+          'does not contain.')
     return 0
 
 
@@ -1973,7 +1973,7 @@ def build(a):
     # source order and in the planted destination order -- named
     # SYPj_P / SYPj_N so pairs.pair_names finds them; spread along the bus.
     # The truth is unchanged (a pair is two nets of the pattern); what the
-    # chain must add is COUPLING, which pair_census reports.
+    # chain must add is COUPLING.
     if getattr(a, 'pairs', 0):
         cands = [i for i in range(K - 1) if abs(pi[i] - pi[i + 1]) == 1]
         chosen, used = [], set()

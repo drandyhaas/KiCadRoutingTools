@@ -1,6 +1,6 @@
 """route_lanes.py -- route chosen lanes of a plan ONE AT A TIME, each in its band.
 
-The bench is planned exactly as braid.run plans it (plan_audit.plan, the
+The bench is planned by the braid's planner (plan_audit.plan, the
 caller's environment), then ONLY the named lanes are routed, in the braid's
 own attempt-0 order (pairs first, the pages in target order, the
 swimmers), each through its corridor's own route_lane (a
@@ -504,8 +504,7 @@ def main(argv=None):
 
 
 def write(ctx, board, out, base_s, base_v):
-    """the bench plus every segment and via the run added, its project stamped at the routed floor (as braid.run
-    stamps its own)"""
+    """the bench plus every segment and via the run added, its project stamped at the routed floor"""
     from kicad_writer import add_tracks_and_vias_to_pcb
     from fix_kicad_drc_settings import fix_project_for_output
     from bga_fanout.flip_frame import other_layer
@@ -513,7 +512,7 @@ def write(ctx, board, out, base_s, base_v):
     old_s, old_v = set(map(id, base_s)), set(map(id, base_v))
     segs = [s_ for s_ in ctx.pcb.segments if id(s_) not in old_s]
     vias = [v_ for v_ in ctx.pcb.vias if id(v_) not in old_v]
-    # the copper back in the board's own frame, as braid.run writes it: the braid's setup turns a board of the other
+    # the copper back in the board's own frame: the braid's setup turns a board of the other
     # chirality over (ctx.M maps a point of the turned board back, and the layers swap), and every lane here was laid
     # on the turned board -- written as laid, it lands mirrored (K15's own fanout: four nets open, a lane over a pad)
     M, OL = (ctx.M, other_layer) if getattr(ctx, 'M', None) is not None else ((lambda x, y: (x, y)), (lambda L: L))
@@ -530,7 +529,7 @@ def write(ctx, board, out, base_s, base_v):
     copy_siblings(board, out)           # (the project and the .kicad_dru's per-layer rules with it)
     fix_project_for_output(out, board, clearance=cfg.clearance, track_width=cfg.track_width,
                            via_diameter=cfg.via_size, via_drill=cfg.via_drill, verbose=False)
-    # (a via laid in a pad or a paste opening declares Type VII, as braid.run's and the fanout's do (#962): a lane's
+    # (a via laid in a pad or a paste opening declares Type VII, as the fanout's do (#962): a lane's
     # change right at its tooth stood 0.15 mm into its own ball's paste opening on the zynq LVDS bus, and check_drc
     # graded the board's only violation, via-in-paste)
     import ship_vias

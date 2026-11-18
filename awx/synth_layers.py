@@ -46,7 +46,7 @@ PY = sys.executable
 sys.path.insert(0, HERE)
 
 # (tag, K, synth_bus arguments, graded against the optimum): straight channels at depth 1 (every ball on the facing
-# column, so the permutation is the problem) with the arrays' interiors CLOSED (--pad-inner 0.6, synth_ladder's b2:
+# column, so the permutation is the problem) with the arrays' interiors CLOSED (--pad-inner 0.6:
 # the unused balls too fat for an F track between them, so no lane threads an array or reaches another face on F --
 # the channel's optimum is then the board's); the same OPEN, ungraded -- what the other faces buy (on two layers as on
 # more, the route laid fewer vias than the channel's optimum on nearly every open case); then the cases whose truth is

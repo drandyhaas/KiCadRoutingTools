@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""group_ends.py CAPTURES OUT --board=BOARD [--log] [--verify] [--full] -- THE GROUP'S ENDS: the ends of every bus off
+"""group_ends.py CAPTURES OUT --board=BOARD [--from=A_RUN_S_OUT [--feedback=ITS_BUSES_OUT]] [--log] [--verify] [--full] --
+THE GROUP'S ENDS: the ends of every bus off
 one shared array chosen in ONE model -- the shared array's fanout and every bus's berths together -- every ball of an
 array offered the same choices.
 
@@ -1351,7 +1352,7 @@ def qfn_berths(st, pcb):
     return out
 
 
-def load_bus(name, cap, arrays, log, cut=None, rank=False, cutvar=False, feedback=None, bare_ids=None):
+def load_bus(name, cap, arrays, log, cut=None, rank=False, feedback=None, bare_ids=None):
     """a bus's ends model from its capture, under its own run's settings, its ends at the group's ARRAYS (`arrays`
     {ref: build_array's}: its source, and its destination where that is one) chosen from their menus: each such array
     bare in its board (its own fanout's copper there left out), the moves its balls are offered there (A.offer: the
@@ -1499,22 +1500,7 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, cutvar=False, feedbac
             # menu since widened): chosen again at each later building, it moved between two models of one search)
             fc = lambda c_: (f'{c_[0]} {float(c_[1]):.2f}' if isinstance(c_, (tuple, list))     # noqa: E731
                              else f'far face {float(c_):.2f}')
-            B.cut0 = None
-            if cutvar:
-                # (THE CUT THE MODEL'S, `cutvar`: its start's ends descended at the cut the bus's BALLS point to --
-                # whole_ends.cut_candidates' guess, the fewest crossings of the balls alone, the nearest the far
-                # face's middle on a tie -- which the model is then hinted at. Descended at the far face's middle
-                # whatever the balls said, a bus's start stood in another cut's ends, and its search did not leave)
-                tc_, est_ = we.cut_candidates(E, B.boxes[0], B.boxes[1], E.wcut)
-                P_ = int(round(2000 * ((B.boxes[1][2] - B.boxes[1][0]) + (B.boxes[1][3] - B.boxes[1][1]))))
-                t0_ = min(tc_, key=lambda t_: (est_[t_], min(t_, P_ - t_)))
-                B.cut0 = tc_[t0_]
-                B.own = we.joint_descent(E, own, B.boxes, E.wcut if B.cut0 is None else B.cut0, dear=B.dear)[0]
-                log(f'  {name}: its start\'s cut round {st["dref"]} by its balls: '
-                    + ('the far face\'s middle' if B.cut0 is None else fc(B.cut0))
-                    + f', {est_[t0_]} crossings of the balls alone (the far face\'s middle {est_[0]}, the worst cut '
-                    f'{max(est_.values())}; {len(tc_)} cuts)')
-            elif cut is not None or not rank:
+            if cut is not None or not rank:
                 E.wcut = cut[0] if cut is not None else E.wcut
                 B.own = we.joint_descent(E, own, B.boxes, E.wcut, dear=B.dear)[0]
             else:
@@ -1605,76 +1591,6 @@ def lane_run(b, l_, i, j):
     ot, ob = b.E.T[l_][i], b.E.B[l_][j]
     return (len(ot[0]), ot[0][0].direction, ob[0][0].direction), \
         ((ob[1][0] - ot[1][0]) * ux + (ob[1][1] - ot[1][1]) * uy) / n_
-
-
-def cut_ride(m, b, ride, via_mm):
-    """THE WAY ROUND the destination at the cut the model chooses (whole_ends._joint_model's `cutvar`), added to `ride`
-    [(thousandths of a via, literal)] beside the base cut's own (way_round): for each berth option the cut chosen sends
-    the LONG way round -- a berth north of the facing face wrapped by a cut before that face, one south of it left
-    unwrapped by a cut past it -- the difference. Returns how many"""
-    import whole_frame as wf
-    T_, C_, w_, _tc = b.J.cutvar[:4]
-    Q = lambda v_: int(round(v_ * 1000))        # noqa: E731
-    DB = b.J.DB
-    P = Q(2 * ((DB[2] - DB[0]) + (DB[3] - DB[1])))
-    tNW, tSW = Q(wf.perim_c((DB[0], DB[1]), DB, b.J.cut)), Q(wf.perim_c((DB[0], DB[3]), DB, b.J.cut))
-    if any(tNW <= t <= tSW for t in T_[1:]):
-        raise SystemExit(f'group_ends: {b.name}: a cut offered on the facing face -- '
-                         + ', '.join(f'{_tc[t]} at {t}' for t in T_[1:] if tNW <= t <= tSW)
-                         + f' (the facing face {tNW} to {tSW}, the base {b.J.cut})')
-    kh = next((k for k, t in enumerate(T_) if t > tSW), None)
-    hi = C_[kh] if kh is not None else 0        # [the cut stands past the facing face]
-    n = 0
-    for l_ in b.J.lanes:
-        for i, x_ in b.J.xs[1][l_].items():
-            t = b.J.pos[(1, l_, i)]
-            if t < tNW:         # (round the north at the base: the long way where a cut before the facing face wraps it)
-                if isinstance(hi, int) and hi == 1:
-                    continue
-                extra = (t + P - tSW) - (tNW - t)
-                lits = [x_, w_[l_]] + ([] if isinstance(hi, int) else [hi.Not()])
-            elif t > tSW:       # (round the south at the base: the long way where a cut past the facing face stands before it)
-                if isinstance(hi, int) and hi == 0:
-                    continue
-                extra = (tNW + P - t) - (t - tSW)
-                lits = [x_, w_[l_].Not()] + ([] if isinstance(hi, int) else [hi])
-            else:
-                continue
-            c_ = int(round(b.J.npair[l_] * max(0, extra) / via_mm))
-            if c_ > 0:
-                z_ = m.NewBoolVar('')
-                m.AddBoolOr([z_] + [v.Not() for v in lits])
-                ride.append((c_, z_))
-                n += 1
-    return n
-
-
-def cut_hold(m, b, at):
-    """bus `b`'s cut HELD at the candidate nearest `at` (a cut as cut_chosen gives it; None the base's) among those it
-    may take: the cut is the model's to choose ONCE -- by its start, on each tier of its menus -- and stands from
-    there. Left free through the weighted search, a bus started at the cut its balls point to ended at another
-    region's, its crossings dealt again on the way, with two and a half times as many. Returns the candidate's index"""
-    import whole_frame as wf
-    T_, C_, _w, _tc, _est, base_ok = b.J.cutvar
-    t = 0 if at is None else int(round(1000 * wf.perim_c(wf.cut_point(at, b.J.DB), b.J.DB, b.J.cut)))
-    P = int(round(2000 * ((b.J.DB[2] - b.J.DB[0]) + (b.J.DB[3] - b.J.DB[1]))))
-    ks = [k for k in range(len(T_)) if k or base_ok or len(T_) == 1]
-    k = min(ks, key=lambda k: min(abs(T_[k] - t), P - abs(T_[k] - t)))
-    if k >= 1:
-        m.Add(C_[k] == 1)
-    if not isinstance(C_[k + 1], int):
-        m.Add(C_[k + 1] == 0)
-    return k
-
-
-def cut_chosen(sv, b):
-    """the cut round its destination bus `b`'s state chose (whole_ends._joint_model's `cutvar`): the base's (the far
-    face's middle, a y on it) or (face, its coordinate), as whole_frame.cut_point takes it -- and how many of its lanes
-    it wraps"""
-    T_, C_, w_, tc_ = b.J.cutvar[:4]
-    k = max(k for k in range(len(T_)) if isinstance(C_[k], int) or sv.Value(C_[k]))
-    c = tc_[T_[k]]
-    return (b.J.cut if c is None else (c[0], float(c[1]))), int(sum(sv.Value(v) for v in w_.values()))
 
 
 def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_ban=(), held=()):
@@ -2105,9 +2021,8 @@ def lane_heads(m, A, b, k_, way_b, P):
     the place where the ray from A's centre toward the point it makes for leaves A's box. At its SOURCE that point is
     on its destination's box (the bus's frame, turned to the board's): the middle of the face toward the source for a
     berth on that face, else the corner of the side of the destination the lane goes round -- a berth on the north
-    face round the north, one on the south face round the south, one on the far face round the side the cut sends it
-    (the cut the model's: the lane's WRAPPED literal, and whether the cut stands past the facing face, as cut_ride
-    reads them). A lane at its destination, and one headed for a GROUP of parts, is headed for its bus's face (0).
+    face round the north, one on the south face round the south, one on the far face round the side the cut sends
+    it. A lane at its destination, and one headed for a GROUP of parts, is headed for its bus's face (0).
     A part beside the array is seen from it at an angle: four buses off one array, the face toward one bus's part
     was the middle of the array's west face, the ray to the part left it 2.8 mm north of that, and the side the
     bus's cut sent its far berths round 3.9 mm north -- along the face past another bus's exits, which every lane of
@@ -2134,12 +2049,6 @@ def lane_heads(m, A, b, k_, way_b, P):
         return (place_round(A.box, d_, (cx + dx * t_, cy + dy * t_)) - way_b + P // 2) % P - P // 2
     head = {'F': toward((DB[0], (DB[1] + DB[3]) / 2)), 'N': toward((DB[0], DB[1])), 'S': toward((DB[0], DB[3]))}
     tNW, tSW = Q(wf.perim_c((DB[0], DB[1]), DB, b.J.cut)), Q(wf.perim_c((DB[0], DB[3]), DB, b.J.cut))
-    w_, hi = None, 0
-    if b.J.cutvar:
-        T_, C_, w_ = b.J.cutvar[:3]
-        kh = next((k for k, t in enumerate(T_) if t > tSW), None)
-        hi = C_[kh] if kh is not None else 0        # [the cut stands past the facing face]
-    neg = lambda e_: 1 - e_ if isinstance(e_, int) else e_.Not()     # noqa: E731
     out = {}
     for l_ in lanes:
         conds = collections.defaultdict(list)       # heading -> [the literals that, all held, send the lane there]
@@ -2147,14 +2056,8 @@ def lane_heads(m, A, b, k_, way_b, P):
             t = b.J.pos[(1, l_, j)]
             if tNW <= t <= tSW:
                 conds['F'].append([x_])
-            elif w_ is None:
+            else:
                 conds['N' if t < tNW else 'S'].append([x_])
-            elif t < tNW:       # (round the north, but the long way round the south where a cut before the face wraps it)
-                conds['N'] += [[x_, w_[l_].Not()], [x_, hi]]
-                conds['S'].append([x_, w_[l_], neg(hi)])
-            else:               # (round the south, but the long way round the north where a cut past the face leaves it)
-                conds['S'] += [[x_, w_[l_]], [x_, neg(hi)]]
-                conds['N'].append([x_, w_[l_].Not(), hi])
         by = collections.defaultdict(list)
         for c_, cs in conds.items():
             for cl_ in cs:
@@ -3111,8 +3014,6 @@ def main():
     # WHAT THE WHOLE SOLVE'S CHECKS TAUGHT, a bus: the lanes held to one layer, the crossings held apart, the states
     # refused (each lane's two ends by their signature, so that they stand on a menu built again)
     learned = {}
-    cut_at = {}                 # bus -> the cut round its destination its last state chose (the cut the model's)
-    cut_held = {}               # (bus, on the lines) -> the cut its first start on that tier chose: held from there
     oth_ban = set()             # (array, ball, 'x' a fan-out / 'd' a drop, which): an other ball's choice ruled out
     from_first = False          # (--from) the first model built from the run before: its last state the ends wanted
     held = {}                   # a part the nudge could not clear -> its pads where it came: no via on them (array_rows)
@@ -3213,8 +3114,7 @@ def main():
         narrow({key_ for key_ in nar_ if key_ in tier_sig}, keep_)
         prev_bus, prev_oth, learned = R_['prev_bus'], R_['prev_oth'], R_['learned']
         found_at = dict(prev_bus)       # (each bus's state as the run before left it: `prev_bus` moves on with this run)
-        cut_at, layers_want = dict(R_['cut_at']), R_['layers_want']
-        cut_held.update(R_.get('cut_held') or {})
+        layers_want = R_['layers_want']
         oth_ban |= set(R_.get('oth_ban') or ())
         held.update(R_.get('held') or {})
         cuts.update(R_['cuts'])
@@ -3366,11 +3266,10 @@ def main():
     # (GROUP_LAYERS=free: a lane's ends' layers are its own bus's solve's to choose -- the model's are where it starts
     # -- unless the lane CROSSES another bus's, or its run under an array lies along another bus's: those two lanes'
     # layers are what keeps them apart, and stay the model's (the plan's `held_layers`). A bus alone on its arrays has
-    # none held. GROUP_CUT=model: each ball array destination's CUT is the model's to choose with the ends)
+    # none held)
     FREE = awx_settings.get('GROUP_LAYERS') == 'free'
     global CHECK_DUMP
     CHECK_DUMP = awx_settings.get('GROUP_CHECK_DUMP') or None
-    CUTVAR = awx_settings.get('GROUP_CUT') == 'model'
     # (a check's refusal of a bus's PATTERN ends, which gives it the lines, is none of its JOINT_TRIES: those are its
     # ends' on the lines, as a bus's own ends had them)
     chk_try, spent, n_taught, adopts = -1, 0, 0, 0
@@ -3411,8 +3310,8 @@ def main():
                     for key_ in [k_ for k_ in built if k_[0] == nm and k_[2] == (nm in lined)]:
                         del built[key_]         # (a menu since changed: not built on again)
                     built[(nm, mine, nm in lined)] = load_bus(
-                        nm, cap, arrays, log, cut=None if CUTVAR else cuts.get((nm, nm in lined)),
-                        rank=nm in lined and not CUTVAR, cutvar=CUTVAR, feedback=feedback.get(nm),
+                        nm, cap, arrays, log, cut=cuts.get((nm, nm in lined)),
+                        rank=nm in lined, feedback=feedback.get(nm),
                         bare_ids={n_.name: i_ for i_, n_ in bpcb.nets.items() if n_.name})
                 b = built[(nm, mine, nm in lined)]
                 teach(b)
@@ -3465,7 +3364,7 @@ def main():
                     n_only += len(only_)
                 with awx_settings.given(b.env):
                     b.J = we._joint_model(b.E, b.own, (learned.get(b.name) or {}).get('xl'), lambda *a: None, b.boxes,
-                                          (), False, m=m, cutvar=CUTVAR and b.arr[1] is not None, only=only_)
+                                          (), False, m=m, only=only_)
                     if isinstance(b.J, tuple):
                         raise SystemExit(f'group_ends: {b.name}: {b.J[1]}')
                 # (what the checks taught of a lane's LENGTH: no change of layer on ends that leave it no longer than
@@ -3719,7 +3618,6 @@ def main():
             # of track a via): a lane that leaves an array by a face turned from its other end, or arrives by one, travels
             # round the array to the face toward it, a leg each
             import select_moves as sm_
-            import whole_frame
             ride = []
             for b in buses:
                 for k_ in (0, 1):
@@ -3794,25 +3692,6 @@ def main():
                 log(f'  a group\'s walk holds the lanes the room beside it does: {n_walk} place(s) offered to more '
                     f'lanes than they hold')
             for b in buses:
-                if getattr(b.J, 'cutvar', None):
-                    nz_ = cut_ride(m, b, ride, sm_.VIA_MM)
-                    T_, C_, _w, tc_, est_ = b.J.cutvar[:5]
-                    # (hinted at the cut its last state chose -- the candidate nearest it -- else the base's)
-                    at_ = cut_at.get(b.name, getattr(b, 'cut0', None))
-                    t_at = 0 if at_ is None else int(round(1000 * whole_frame.perim_c(
-                        whole_frame.cut_point(at_, b.J.DB), b.J.DB, b.J.cut)))
-                    k_at = min(range(len(T_)), key=lambda k: abs(T_[k] - t_at))
-                    if (b.name, b.name in lined) in cut_held:
-                        k_at = cut_hold(m, b, cut_held[(b.name, b.name in lined)])
-                    for k in range(1, len(T_)):
-                        m.AddHint(C_[k], int(k <= k_at))
-                    fq_ = lambda c_: 'far middle' if c_ is None else f'{c_[0]} {float(c_[1]):.2f}'     # noqa: E731
-                    log(f'  {b.name}: its cut round {b.E.st["dref"]} the model\'s: {len(T_)} of {len(tc_)} cuts offered (those '
-                        f'at its balls\' {we.CUT_BEST} best counts of crossings), {nz_} ways the long way round '
-                        f'priced; the fewest first: '
-                        + ', '.join(f'{fq_(tc_[t_])} {est_[t_]}' for t_ in sorted(T_, key=est_.get)[:6])
-                        + f' ... the most of all {max(est_.values())}')
-            for b in buses:
                 for l_ in b.J.lanes:
                     for q in range(NL):
                         if pk[q]:
@@ -3863,10 +3742,7 @@ def main():
                     xl_ = (learned.get(b.name) or {}).get('xl')
                     if (xl_ or (b.name, b.name in lined) not in searched) and not from_first:
                         with awx_settings.given(b.env):
-                            # (...at the cut its last state chose, where the cut is the model's)
-                            c_ = cut_at.get(b.name, getattr(b, 'cut0', None)) if getattr(b.J, 'cutvar', None) else None
-                            s_ = we.joint_descent(b.E, s_, b.boxes, b.E.wcut if c_ is None else c_, xl_,
-                                                  dear=b.dear)[0]
+                            s_ = we.joint_descent(b.E, s_, b.boxes, b.E.wcut, xl_, dear=b.dear)[0]
                 wanted[b.name] = s_
                 for l_ in b.J.lanes:
                     for k_ in (0, 1):
@@ -4597,16 +4473,6 @@ def main():
             for i_, v_ in enumerate(vals_):
                 m.AddHint(m.GetIntVarFromProtoIndex(i_), v_)
             searched.update((b.name, b.name in lined) for b in buses)
-            # (THE CUT the search chose stands through every model of this tier built after it: cut_hold)
-            for b in buses:
-                if getattr(b.J, 'cutvar', None) and (b.name, b.name in lined) not in cut_held:
-                    T_, C_, _w, tc_ = b.J.cutvar[:4]
-                    k_ = max(k for k in range(len(T_)) if isinstance(C_[k], int) or vals_[C_[k].Index()])
-                    c_ = tc_[T_[k_]]
-                    cut_held[(b.name, b.name in lined)] = None if c_ is None else (c_[0], float(c_[1]))
-                    cut_hold(m, b, cut_held[(b.name, b.name in lined)])
-                    log(f'  {b.name}: its cut round {b.E.st["dref"]} chosen by the search, held from here: '
-                        + ('the far face\'s middle' if c_ is None else f'{c_[0]} {float(c_[1]):.2f}'))
         else:
             # ---- THE START, as a bus's own ends' search starts (whole_ends.nearest_start): the state NEAREST the ends wanted
             # -- the fewest of them moved -- then, those ends HELD, the rest searched for the objective (the other balls'
@@ -4665,17 +4531,6 @@ def main():
                     f'{sum(vals_[v_.Index()] for _c, v_ in far)} teeth on a far face')
                 for i_, v_ in enumerate(vals_):
                     m.AddHint(m.GetIntVarFromProtoIndex(i_), v_)
-                # (THE CUT, chosen by the start -- the ends wanted held, the rest searched: the cut that serves those ends
-                # -- stands through the search and every model of this tier built after it: cut_hold)
-                for b in buses:
-                    if getattr(b.J, 'cutvar', None) and (b.name, b.name in lined) not in cut_held:
-                        T_, C_, _w, tc_ = b.J.cutvar[:4]
-                        k_ = max(k for k in range(len(T_)) if isinstance(C_[k], int) or vals_[C_[k].Index()])
-                        c_ = tc_[T_[k_]]
-                        cut_held[(b.name, b.name in lined)] = None if c_ is None else (c_[0], float(c_[1]))
-                        cut_hold(m, b, cut_held[(b.name, b.name in lined)])
-                        log(f'  {b.name}: its cut round {b.E.st["dref"]} chosen by the start, held from here: '
-                            + ('the far face\'s middle' if c_ is None else f'{c_[0]} {float(c_[1]):.2f}'))
             if '--model' in flags:
                 m.ExportToFile(os.path.join(out, 'model.pb.txt'))   # (a bench's: the model as the search takes it, its start in it)
                 # (...and which of its variables are which bus's lanes' ends, for a bench that holds some and frees others)
@@ -4765,25 +4620,6 @@ def main():
             b.state, b.lay = s, lay
             cuts[(b.name, b.name in lined)] = (b.E.wcut,)
             b.cut = None
-            if getattr(b.J, 'cutvar', None):
-                b.cut, nw_ = cut_chosen(sv, b)
-                cut_at[b.name] = b.cut
-                if awx_settings.get('GROUP_CUT_DEBUG'):
-                    T_, C_, w_, tc_, est_ = b.J.cutvar[:5]
-                    json.dump({'est': {str(t_): e_ for t_, e_ in est_.items()}, 'T': T_, 'C': [c_ if isinstance(c_, int) else int(sv.Value(c_)) for c_ in C_],
-                               'tc': {str(t_): c_ for t_, c_ in tc_.items()}, 'cut': b.cut, 'base': b.J.cut,
-                               'DB': list(b.J.DB), 'lanes': list(b.J.lanes),
-                               'tp': {l_: b.J.pos[(0, l_, s[l_][0])] for l_ in b.J.lanes},
-                               'bp': {l_: b.J.pos[(1, l_, s[l_][1])] for l_ in b.J.lanes},
-                               'bpt': {l_: list(b.E.B[l_][s[l_][1]][1]) for l_ in b.J.lanes},
-                               'pv': {l_: [b.J.pos[(1, l_, j)] for j in b.J.xs[1][l_]] for l_ in b.J.lanes},
-                               'w': {l_: int(sv.Value(v_)) for l_, v_ in w_.items()},
-                               'X': [[a_, b_, 1 if isinstance(x_, int) else int(sv.Value(x_))]
-                                     for (a_, b_), x_ in b.J.X.items()]},
-                              open(os.path.join(out, f'cut_debug_{b.name}_{chk_try}.json'), 'w'), default=str)
-                log(f'  {b.name}: its cut round {b.E.st["dref"]}, chosen with its ends: '
-                    + (f'{b.cut[0]} {b.cut[1]:.2f}' if isinstance(b.cut, tuple) else f'far face {float(b.cut):.2f}')
-                    + f' -- {nw_} of {len(b.J.lanes)} lanes reached the other way round for it')
             prev_bus[b.name] = {l_: tuple((we._opt_sig(o_), lay[l_][k_],
                                            tuple((m_.direction, tuple(m_.exit_pt)) for m_ in o_[0]))
                                           for k_, o_ in enumerate((b.E.T[l_][s[l_][0]], b.E.B[l_][s[l_][1]])))
@@ -5099,7 +4935,7 @@ def main():
             est_ = None if not est_parts or any(v_ is None for v_ in est_parts.values()) else sum(est_parts.values())
             with open(os.path.join(out, 'search.json'), 'w', encoding='utf-8') as fh:
                 json.dump({'estimate': est_, 'seed': awx_settings.get('BUS_SEED'), 'buses': est_parts}, fh)
-            log(f'group ends: the search alone -- its estimate ' + ('none' if est_ is None else f'{est_} vias'))
+            log('group ends: the search alone -- its estimate ' + ('none' if est_ is None else f'{est_} vias'))
             return
         if chk_try == 0 and tier_of and (not frm or at_point == '--at-start'):
             # (THE SEARCH'S END, kept for a bench of the checks FROM it -- --from=OUT --at-search: the state, the
@@ -5107,9 +4943,9 @@ def main():
             # as its last stretch read them -- and nothing yet taught. A check's repair is then asked of this state
             # in minutes, where the search that leads to it is most of the model's time)
             pickle.dump({'wide': set(wide), 'lined': set(lined), 'prev_bus': prev_bus, 'prev_oth': prev_oth,
-                         'learned': copy.deepcopy(learned), 'cut_at': dict(cut_at), 'cuts': dict(cuts),
+                         'learned': copy.deepcopy(learned), 'cuts': dict(cuts),
                          'layers_want': copy.deepcopy(layers_want), 'searched': set(searched),
-                         'cut_held': dict(cut_held), 'feedback': feedback, 'hard': hard, 'oth_ban': set(oth_ban),
+                         'feedback': feedback, 'hard': hard, 'oth_ban': set(oth_ban),
                          'held': dict(held), 'prev_x': {nm: sorted(x_) for nm, x_ in prev_x.items()},
                          'narrowed': set(narrowed), 'keep': kept_last},
                         open(os.path.join(out, 'search.pkl'), 'wb'))
@@ -5362,8 +5198,8 @@ def main():
     TR.rec('done', checks=chk_try + 1, no_plan=no_plan or [], secs=round(time.time() - t_all, 1))
     # (the run as it ends, for a run FROM it: --from)
     pickle.dump({'wide': set(wide), 'lined': set(lined), 'prev_bus': prev_bus, 'prev_oth': prev_oth, 'learned': learned,
-                 'cut_at': dict(cut_at), 'cuts': dict(cuts), 'layers_want': layers_want, 'searched': set(searched),
-                 'cut_held': dict(cut_held), 'feedback': feedback, 'hard': hard, 'oth_ban': set(oth_ban),
+                 'cuts': dict(cuts), 'layers_want': layers_want, 'searched': set(searched),
+                 'feedback': feedback, 'hard': hard, 'oth_ban': set(oth_ban),
                  'held': dict(held), 'prev_x': {nm: sorted(x_) for nm, x_ in prev_x.items()},
                  'narrowed': set(narrowed)},
                 open(os.path.join(out, 'resume.pkl'), 'wb'))

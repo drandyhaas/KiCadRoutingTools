@@ -8,7 +8,7 @@
 Each rung runs whole_route.py (the fanout on the whole route's ends, the solve, the loop, the route, the checks) in
 its own container and sends back its log and its routed board, written to DIR/kK.log and DIR/kK_seq.kicad_pcb, so a
 cloud ladder can be held against the laptop's copper for copper. The stack is the LAPTOP's: its Python (3.14) and
-the same pinned numpy / scipy / shapely / ortools (modal_k.py: a python or numpy change moves routed copper). The
+the same pinned numpy / scipy / shapely / ortools (a python or numpy change moves routed copper). The
 working tree is shipped as it stands, uncommitted edits and all.
 
     MODAL_WHOLE_KICAD=1 modal run awx/modal_whole.py::stage --cmd 'zsh CHAIN.sh ...' --ins ... --outs ...

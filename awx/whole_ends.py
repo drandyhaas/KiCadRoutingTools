@@ -284,37 +284,6 @@ def side_fences(pcb, box, skip, out=FENCE_OUT):
     return res
 
 
-def _box_run(a, b, box, n=64):
-    """the length of the straight a->b inside box"""
-    k = 0
-    for j in range(n):
-        t = (j + 0.5) / n
-        x, y = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
-        if box[0] < x < box[2] and box[1] < y < box[3]:
-            k += 1
-    return k / n * math.hypot(b[0] - a[0], b[1] - a[1])
-
-
-def corner_slope(spine, p0, p1, box, tol=0.05):
-    """the least slope |do/ds| on `spine` a lane from p0 to p1 needs PAST the corner of `box` it must go round -- its
-    straight through the box, the corner the shorter detour outside it takes; 0 where the straight is clear, inf where
-    p1 stands no further along the spine than that corner"""
-    if _box_run(p0, p1, box) < tol:
-        return 0.0
-    best = None
-    for c in ((box[0], box[1]), (box[0], box[3]), (box[2], box[1]), (box[2], box[3])):
-        if _box_run(p0, c, box) > tol or _box_run(c, p1, box) > tol:
-            continue
-        d = math.hypot(c[0] - p0[0], c[1] - p0[1]) + math.hypot(p1[0] - c[0], p1[1] - c[1])
-        if best is None or d < best[0]:
-            best = (d, c)
-    if best is None:
-        return math.inf
-    sc, oc = spine.project_pt(best[1])
-    s1, o1 = spine.project_pt(p1)
-    return float(abs(o1 - oc) / (s1 - sc)) if s1 - sc > 1e-6 else math.inf
-
-
 OPP_DIVE = 0.0            # vias for a crossover riding on a pair's dive (one of the ends kernel's constants)
 
 
@@ -332,9 +301,6 @@ def _seg_d(a, b, p, q):
     if cross(a, b, p, q):
         return 0.0
     return min(pt(a, p, q), pt(b, p, q), pt(p, a, b), pt(q, a, b))
-
-
-_pt_seg = lambda p, a, b: _seg_d(p, p, a, b)        # (the least distance from point p to segment ab)
 
 
 
@@ -2048,55 +2014,7 @@ def joint_state(E, hint, learned=None, log=print, boxes=None):
     return s, how
 
 
-CUT_BEST = 3               # the cuts offered: those at the balls' guess's this many best counts (cut_candidates)
-
-
-def cut_candidates(E, SB, DB, base):
-    """({place: cut}, {place: guess}) -- THE CUTS round a ball array destination its ends' model may choose (the
-    cut a variable: _joint_model's `cutvar`), by their places round the destination's box DB as the cut `base` (the
-    far face's middle: place 0, cut None) unrolls it, in thousandths of a mm: one in each gap between two berths
-    offered round the far face and the two sides (whole_frame.cut_gaps), but none ON a berth -- two lanes' exits a
-    fraction of a micron apart leave a gap of their own, a cut in it within TIE_MM of both (one exit, a stack), and
-    the model, which reads places to the micron, wrapped another set of lanes than the frame did at that cut: 225
-    crossings counted for 262.
-    Each cut's GUESS, before any end is chosen: the crossings of the lanes' BALLS -- each lane at its ball's place
-    round the source's box SB and round the destination as that cut unrolls it (a pair at its two balls' middle).
-    A cut is good where the nets either side of it leave the source at its two ends"""
-    import bisect
-    import whole_frame
-    Q = lambda v_: int(round(v_ * 1000))        # noqa: E731
-    lanes, LG = [l_ for l_, _lg in E.lanes], dict(E.lanes)
-    TQ = Q(TIE_MM)
-    bpl = sorted({Q(_place_b(E, o, DB, base)) for l_ in lanes for o in E.B[l_] if not o[4]})
-
-    def off_berths(t_):
-        i_ = bisect.bisect_left(bpl, t_)
-        return all(abs(bpl[j_] - t_) > TQ for j_ in (i_ - 1, i_) if 0 <= j_ < len(bpl))
-    tc = {0: None}
-    for c_ in whole_frame.cut_gaps([o[1] for l_ in lanes for o in E.B[l_] if not o[4]], DB,
-                                   avoid=[m_.exit_pt for l_ in lanes for o in E.B[l_] for m_ in o[0]]):
-        t_ = Q(whole_frame.perim_c(whole_frame.cut_point(c_, DB), DB, base))
-        if off_berths(t_):
-            tc.setdefault(t_, c_)
-    P_ = Q(2 * ((DB[2] - DB[0]) + (DB[3] - DB[1])))
-
-    def ball(ref_, lg_):
-        ids_ = {E.st['byname'][leg][0] for leg in lg_}
-        ps_ = [(p_.global_x, p_.global_y) for p_ in E.st['pcb'].footprints[ref_].pads if p_.net_id in ids_]
-        return (sum(p_[0] for p_ in ps_) / len(ps_), sum(p_[1] for p_ in ps_) / len(ps_)) if ps_ else None
-    bs = {l_: ball(E.st['sref'], LG[l_]) for l_ in lanes}
-    bd = {l_: ball(E.st['dref'], LG[l_]) for l_ in lanes}
-    ls = [l_ for l_ in lanes if bs[l_] is not None and bd[l_] is not None]
-    ks = {l_: Q(whole_frame.perim_s(bs[l_], SB, None)) for l_ in ls}
-    kd = {l_: Q(whole_frame.perim_c(bd[l_], DB, base)) for l_ in ls}
-    est = {}
-    for t_ in tc:
-        ku = {l_: (kd[l_] - t_) % P_ for l_ in ls}
-        est[t_] = sum(1 for a_, b_ in itertools.combinations(ls, 2) if (ks[a_] - ks[b_]) * (ku[a_] - ku[b_]) < 0)
-    return tc, est
-
-
-def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=False, m=None, cutvar=False, only=None):
+def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=False, m=None, only=None):
     """_joint_state's MODEL of the joint ends on `E`, built and not solved -- into `m`, where one is given (the GROUP's
     ends, group_ends.py: every bus off one array in one model), a model of its own otherwise. A namespace of the model's
     parts: its lanes and each one's options at the two ends (xs[end][lane][option]), each end's layer (y[end][lane], one-
@@ -2104,13 +2022,7 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
     changes' chg_cost, the walled balls' walls) and, `core`, each conflict pair's assumption (held). (None, why) where a
     lane has no clean option.
     `only` {lane: (its tooth option, its berth option)}: a lane HELD on those two ends -- offered no other, so every
-    row and term of its other options is never built (the group's search: the lanes a stretch's rounds cannot free).
-    `cutvar` (a ball array destination's): THE CUT round the destination is the model's to choose with the ends -- among
-    E.wcut (the base: the far face's middle) and one in each gap between two berths offered on the far face or the far
-    half of a side (whole_frame.cut_gaps). The namespace's `cutvar`: (the candidates' places round the destination as
-    the base unrolls it, T[0] 0 the base's; the cut order-encoded, C[k] = [the cut at T[k] or past it]; each lane's
-    WRAPPED literal -- its berth before the cut, so last in the order the cut unrolls; {place: the cut there, None
-    the base}; {place: its guess}; whether the base itself may be taken)"""
+    row and term of its other options is never built (the group's search: the lanes a stretch's rounds cannot free)"""
     import types
     import bisect
     import whole_frame
@@ -2349,63 +2261,7 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
                     m.AddBoolOr([lit] + [neg(e_) for e_ in (lea, g_) if not isinstance(e_, int)])
                 Bc[key] = lit
         return Bc[key]
-    # THE CUT A VARIABLE (`cutvar`): a lane whose berth lies before the cut chosen is WRAPPED -- it goes to the end of
-    # the order that cut unrolls, reached the other way round the destination -- and two lanes' order at the berths is
-    # the base's where both are wrapped or neither, the unwrapped one first otherwise. Ranked outside the model by a
-    # descent of each bus alone, the cut it called free of crossings had 43 to 390 of them in the model
-    CV = None
     before1 = lambda a, b: before(1, a, b)       # noqa: E731
-    if cutvar and E.group is None:
-        # (the cuts offered, and each one's GUESS: cut_candidates. Offered: those at the guess's CUT_BEST best counts
-        # -- each count a run of neighbouring gaps, the cuts NEAR one of its best -- and the base, the unrolling's
-        # origin. With every gap round the far face and the sides offered, a bus's search left the cut its balls
-        # point to for one on the other side, and ended with four times the crossings)
-        tc_, est_ = cut_candidates(E, SB, DB, cut)
-        P_ = Q(2 * ((DB[2] - DB[0]) + (DB[3] - DB[1])))
-        top_ = sorted(set(est_.values()))[:CUT_BEST][-1]
-        T_ = sorted(t_ for t_ in tc_ if t_ == 0 or est_[t_] <= top_)
-        C_ = [1] + [m.NewBoolVar('') for _ in T_[1:]] + [0]
-        for kk_ in range(1, len(T_) - 1):
-            m.AddImplication(C_[kk_ + 1], C_[kk_])
-        if est_[0] > top_ and len(T_) > 1:
-            m.Add(C_[1] == 1)           # (the base itself not among them: the unrolling's origin, not a cut to take)
-        # (...nor the BASE cut with a berth taken ON it -- a row of balls at the far face's middle, a pair's two legs
-        # either side of it: which way round that berth goes is then the rounding's, here and in the frame)
-        if len(T_) > 1:
-            for l_ in lanes:
-                for j_ in OB[l_]:
-                    if pos[(1, l_, j_)] <= TQ or pos[(1, l_, j_)] >= P_ - TQ:
-                        m.AddBoolOr([xs[1][l_][j_].Not(), C_[1]])
-        wrap_ = {}
-        for l_ in lanes:
-            wl_ = wrap_[l_] = m.NewBoolVar('')
-            for kk_ in range(len(T_)):
-                g_ = ge(1, l_, T_[kk_])             # [the lane's place >= T_k]
-                # (the cut at T_k or past it, the lane's place before T_k: wrapped)
-                if kk_ >= 1 and not (isinstance(g_, int) and g_ == 1):
-                    m.AddBoolOr([wl_, C_[kk_].Not()] + ([] if isinstance(g_, int) else [g_]))
-                # (the cut at T_k or before it, the lane's place at T_k or past it: not wrapped)
-                if not (isinstance(g_, int) and g_ == 0):
-                    cl_ = [wl_.Not()] + ([] if isinstance(g_, int) else [g_.Not()])
-                    if not isinstance(C_[kk_ + 1], int):
-                        cl_.append(C_[kk_ + 1])
-                    m.AddBoolOr(cl_)
-        B1_ = {}
-
-        def before1(a, b):
-            """[a's place before b's at the berths as the CHOSEN cut unrolls them]: raised wherever the places and
-            the cut say so"""
-            if (a, b) not in B1_:
-                base = before(1, a, b)
-                lit = m.NewBoolVar('')
-                if not (isinstance(base, int) and base == 0):
-                    bl_ = [] if isinstance(base, int) else [base.Not()]
-                    m.AddBoolOr([lit, wrap_[a], wrap_[b]] + bl_)
-                    m.AddBoolOr([lit, wrap_[a].Not(), wrap_[b].Not()] + bl_)
-                m.AddBoolOr([lit, wrap_[a], wrap_[b].Not()])
-                B1_[(a, b)] = lit
-            return B1_[(a, b)]
-        CV = (T_, C_, wrap_, tc_, est_, est_[0] <= top_)
     X, const = {}, 0
     # (JOINT_X_LAYERS: a crossing's base X_TRUNK, and past it its price by the layers the two lanes share -- one at one
     # end JOINT_X_MID, one at both ends JOINT_X and what was learned)
@@ -2536,7 +2392,7 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
     return types.SimpleNamespace(m=m, lanes=lanes, LG=LG, npair=npair, idx=idx, OT=OT, OB=OB, O_=O_, xs=xs, y=y, chg=chg,
                                  cost=cost, cost_tag=cost_tag, chg_cost=chg_cost, walls=walls_, const=const, X=X,
                                  held=held, dom=dom, pos=pos, before=before, before1=before1,
-                                 NL=NL, SB=SB, DB=DB, cut=cut, t0=t0, cutvar=CV)
+                                 NL=NL, SB=SB, DB=DB, cut=cut, t0=t0)
 
 
 FLOOR_BATCHES = 40         # the order puzzle's search, in batches (route_floor): its optimum comes in the first few
@@ -2562,9 +2418,8 @@ def route_floor(J, val, kmax=3):
     jb = {l_: next(j for j, v in J.xs[1][l_].items() if val(v)) for l_ in lanes}
     tl = {l_: next(q for q in range(2) if val(J.y[0][l_][q])) for l_ in lanes}
     dl = {l_: next(q for q in range(2) if val(J.y[1][l_][q])) for l_ in lanes}
-    wrap = {l_: int(val(w_)) for l_, w_ in J.cutvar[2].items()} if J.cutvar else {}
     pt = {l_: J.pos[(0, l_, it[l_])] for l_ in lanes}
-    pb = {l_: (wrap.get(l_, 0), J.pos[(1, l_, jb[l_])]) for l_ in lanes}
+    pb = {l_: (0, J.pos[(1, l_, jb[l_])]) for l_ in lanes}
     b0 = lambda a, b: pt[a] + TQ < pt[b]                                             # noqa: E731
     b1 = lambda a, b: pb[a][0] < pb[b][0] or (pb[a][0] == pb[b][0] and pb[a][1] + TQ < pb[b][1])   # noqa: E731
     X = {frozenset((a, b)) for a, b in itertools.combinations(lanes, 2)
@@ -2638,9 +2493,8 @@ def dive_triples(J, val):
     it = {l_: next(i for i, v in J.xs[0][l_].items() if val(v)) for l_ in lanes}
     jb = {l_: next(j for j, v in J.xs[1][l_].items() if val(v)) for l_ in lanes}
     lay = {l_: tuple(next(q for q in range(2) if val(J.y[k_][l_][q])) for k_ in (0, 1)) for l_ in lanes}
-    wrap = {l_: int(val(w_)) for l_, w_ in J.cutvar[2].items()} if J.cutvar else {}
     pt = {l_: J.pos[(0, l_, it[l_])] for l_ in lanes}
-    pb = {l_: (wrap.get(l_, 0), J.pos[(1, l_, jb[l_])]) for l_ in lanes}
+    pb = {l_: (0, J.pos[(1, l_, jb[l_])]) for l_ in lanes}
     b0 = lambda a, b: pt[a] + TQ < pt[b]                                             # noqa: E731
     b1 = lambda a, b: pb[a][0] < pb[b][0] or (pb[a][0] == pb[b][0] and pb[a][1] + TQ < pb[b][1])   # noqa: E731
     still = {q: [l_ for l_ in lanes if lay[l_] == (q, q)] for q in (0, 1)}
@@ -2687,9 +2541,8 @@ def dive_cuts(J, mc, free, vals, w_dive):
     held = [l_ for l_ in lanes if l_ not in free]
     it = {l_: next(i for i, v in J.xs[0][l_].items() if val(v)) for l_ in held}
     jb = {l_: next(j for j, v in J.xs[1][l_].items() if val(v)) for l_ in held}
-    wrap = {l_: int(val(w_)) for l_, w_ in J.cutvar[2].items()} if J.cutvar else {}
     pt = {l_: J.pos[(0, l_, it[l_])] for l_ in held}
-    pb = {l_: (wrap.get(l_, 0), J.pos[(1, l_, jb[l_])]) for l_ in held}
+    pb = {l_: (0, J.pos[(1, l_, jb[l_])]) for l_ in held}
     lit = lambda v: (mc.GetBoolVarFromProtoIndex(v.Index()) if v.Index() >= 0          # noqa: E731
                      else mc.GetBoolVarFromProtoIndex(-v.Index() - 1).Not())
     O0, O1 = {}, {}             # (a, b) -> a before b at the teeth / the berths: True, or the model's literal
@@ -2954,7 +2807,7 @@ def joint_choose(st, log=print, fixed=None, seed=None, learned=None, free_teeth=
         WIND_SEEN.append(E.wcut)
     fc = lambda c_: (f'{c_[0]} {float(c_[1]):.3f}' if isinstance(c_, (tuple, list)) else
                      'far (none)' if c_ is None else f'far {c_:.3f}')
-    log(f'  whole ends: the joint ends\' cuts by their descents: '
+    log('  whole ends: the joint ends\' cuts by their descents: '
         + ', '.join(f'{fc(c_)} {cost_:.0f} ({nx_} x)' for cost_, _q2, c_, _s2, nx_ in ranked))
     t_c = time.time()
     xl = {}
@@ -2991,7 +2844,7 @@ def joint_choose(st, log=print, fixed=None, seed=None, learned=None, free_teeth=
                     f'ends, held to one layer: ' + ', '.join(sorted(chk.get('nochange') or ())))
             if chk.get('core'):
                 E._nocross |= {frozenset(k_) for k_ in chk['core']}
-                log(f'  whole ends: the joint ends: crossings held apart: '
+                log('  whole ends: the joint ends: crossings held apart: '
                     + ', '.join('/'.join(sorted(k_)) for k_ in sorted(E._nocross, key=sorted)))
             at_ = chk.get('at') or {}
             E._nogoods.append({l_: tuple(None if at_.get(l_) not in (None, k_) else s[l_][k_] for k_ in (0, 1))
@@ -4065,8 +3918,6 @@ def _fmt(p):
             + (f', {len(p["walled"])} ball(s) walled in ('
                + ', '.join(('source ' if e == 0 else 'destination ') + k for e, k in p['walled']) + ')'
                if p.get('walled') else '')
-            + (f', {len(p["corner"])} lane(s) the frame cannot lay round the source\'s corner ('
-               + ', '.join(p['corner']) + ')' if p.get('corner') else '')
             + (f' [the route exact on the orders: {p["route"]}, estimated {p["route_est"]}]'
                if p.get('route_est') is not None and p['route_est'] != p['route'] else ''))
 

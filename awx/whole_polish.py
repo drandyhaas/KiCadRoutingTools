@@ -188,10 +188,6 @@ def stub_ways(n, router=True):
     return (w(a) if a else None), (-w(b) if b else None)
 
 
-def fixed(n, i):
-    return i == 0 or i == len(LANES[n]['X']) - 1 or bool(LANES[n]['H'][i])
-
-
 def turn_deg(X, i):
     d1, d2 = X[i] - X[i - 1], X[i + 1] - X[i]
     l1, l2 = np.linalg.norm(d1), np.linalg.norm(d2)

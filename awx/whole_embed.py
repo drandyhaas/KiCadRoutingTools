@@ -2452,7 +2452,6 @@ def round_of(it):
     # crosses the lane between. The shortfall is priced in steps: free up to the comfortable pitch's, then the
     # slack's, then the pitch itself (W_HARD) -- and never to nothing: the two stay SIDE apart along that line, on
     # the sides they stand, so no lane passes through another
-    tA = time.time()
     lp.kind = 'lane'
     segs = [[] for _ in range(NL)]
     allseg = []
@@ -2537,7 +2536,6 @@ def round_of(it):
             lp.kind = f'lane:{ka[0]}.{ka[1]}[{j}]~{kb[0]}.{kb[1]}[{i}] d{dd:.3f}'
             lp.ge(terms + [(s_, 1.0) for s_ in sls], comf - ((1 - lam) * c0 + lam * c1 - cp_))
             npair += 1
-    tB = time.time()
     # ---- rows: every lane a via's room off every other lane's via, on the braid's side of it (and never through it)
     wrong, said = 0, 0
     if allseg:

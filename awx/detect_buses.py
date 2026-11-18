@@ -202,12 +202,6 @@ import atexit as _atexit
 _atexit.register(lambda: _memo_save(force=True))   # the last dirty shards
 
 
-def _memo_load():
-    """Kept for callers that poke the memo (probes): nothing to do, the
-    shards load on first touch."""
-    _memo_migrate()
-
-
 def _memo_shard(prefix):
     d = _TAUT_SHARDS.get(prefix)
     if d is None and not _TAUT_DISK:
@@ -319,9 +313,9 @@ def taut_paths(nets: Sequence[str],
             dirty = True
             out[nm] = pts
             if status == 'violating':
-                print(f'TAUT VIOLATING: {nm} -- {tc.relax_clean.last} (assert-only)', flush=True)
+                print(f'TAUT VIOLATING: {nm} -- {tc.last} (assert-only)', flush=True)
             elif status == 'tolerated':
-                print(f'TAUT tolerated: {nm} -- {tc.relax_clean.last}', flush=True)
+                print(f'TAUT tolerated: {nm} -- {tc.last}', flush=True)
     if dirty:
         _memo_save()
     return out

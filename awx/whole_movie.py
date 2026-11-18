@@ -2465,8 +2465,8 @@ def build_scenes(film, speed=1.0):
                 y_ += 21
             y_ += 6
     sc.append(Scene('strings', 'strings', 12, strings, [
-        (0, f'The taut strings. Each lane is first a STRING from its tooth to its berth -- a straight line across the '
-            f'board, through whatever stands between.'),
+        (0, 'The taut strings. Each lane is first a STRING from its tooth to its berth -- a straight line across the '
+            'board, through whatever stands between.'),
         (0.22, ('Each string is then pulled TAUT, round after round: every point moves toward the middle of its two '
                 'neighbours and is put back outside any copper it has entered, the two ends held.' if film.relax else
                 'Each string is then pulled TAUT: it shortens wherever it can and is pushed off the other nets\' copper, '

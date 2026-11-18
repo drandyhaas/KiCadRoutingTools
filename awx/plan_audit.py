@@ -1,6 +1,6 @@
 """plan_audit.py -- audits of a braid PLAN, before anything is routed.
 
-Every corridor is planned exactly as braid.run plans it (braid.plan_corridors,
+Every corridor is planned by the braid's planner (braid.plan_corridors,
 under the caller's environment: BRAID_BRANCH, ...), and the
 plan is checked against the rules the router will apply to it. A plan that
 fails one of these hands the router a lane it cannot route in band, so each
@@ -121,7 +121,7 @@ def read_nets(arg):
 
 def plan(board, nets, dest, quiet=True):
     """(ctx, corridors, log lines): the braid's plan of `nets`, every corridor
-    planned as braid.run plans it, the board's copper reset to the base."""
+    planned by braid.plan_corridors, the board's copper reset to the base."""
     logs = []
     cm = contextlib.redirect_stdout(io.StringIO()) if quiet else contextlib.nullcontext()
     with cm:

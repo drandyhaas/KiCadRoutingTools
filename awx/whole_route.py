@@ -2,11 +2,9 @@
 """whole_route.py K OUTDIR [ROUNDS] [--feedback-rounds F] -- the whole route on rung K, end to end, in Python.
    whole_route.py --loop SOLVE.json OUTDIR [ROUNDS] -- the loop alone on a solve (the bench from BENCH / NETS / DEST).
 
-The same chain as whole_chain.sh and whole_loop.sh, and the same stages run the same way: each stage is its own
-process, given the environment and the arguments the shell scripts give it, in the same order, on the same branches.
-What changes is only the driver, which no longer needs zsh.
+Each stage is its own process, given its environment and its arguments by this driver.
 
-The chain (whole_chain.sh): the fanout choosing every net's tooth and berth with the whole route's ends model
+The chain: the fanout choosing every net's tooth and berth with the whole route's ends model
 (fanout_from_plan), the solve (whole_solve), the loop (below) and the route all at once (route_lanes),
 graded (check_connected, check_drc). A round that leaves nets open is followed by round 1 AGAIN under the next seed
 (cp_seed: every solve of the round searches under the step's seed plus the round less one) -- from the same board, the
@@ -16,15 +14,15 @@ FEEDBACK ROUNDS under its seed instead: the ends the round before's audits found
 its open nets (whole_feedback) go back to the fanout (FEEDBACK=), which chooses again INCREMENTALLY from that round's
 board. A round whose solve has NO PLAN is followed by a feedback round whatever F (the lanes its solve found no room
 for, named), within the ROUNDS. BASE (default fb_t2q_pairs.kicad_pcb) is the bench, DEST (default DU1) its destination
-part, both from the environment as the shell script reads them.
+part, both from the environment.
 
-The loop (whole_loop.sh), every step fed by a MEASUREMENT of the one before: geometry (whole_geo), polish
+The loop, every step fed by a MEASUREMENT of the one before: geometry (whole_geo), polish
 (whole_polish), audit (whole_audit through whole_gate); side flips the polish could not avoid go to the geometry again
 on the same solve, or with cuts and findings to the solve again; a smooth plan that passes has its pairs laid first
 (whole_snap --pairs), the singles fitted round them (whole_polish; SNAP_KEEP where a single is short) and snapped
 (whole_snap), audited, gated and linted. A loop that is NOT CONVERGING stops (exit 3), and so does one whose findings
-stand at the ENDS (exit 4, the fanout's to change). Each stage goes through stage_cache.py, on by default here as in
-whole_loop.sh (STAGE_CACHE=0 runs every stage).
+stand at the ENDS (exit 4, the fanout's to change). Each stage goes through stage_cache.py, on by default here
+(STAGE_CACHE=0 runs every stage).
 
 The chain never ends with nothing while a plan for some of the lanes can be laid: a round's solve keeps a plan it cannot
 prove (laid all the same), a loop that does not pass is laid from the plan it held (held_plan; a lane it cannot lay
@@ -228,7 +226,7 @@ def stripped(s):
     return s.rstrip('\n')
 
 
-# =============================================================================== the loop (whole_loop.sh)
+# =============================================================================== the loop
 def nflips(files):
     """the side flips in a comma list of polish outputs, every file's"""
     return len({tuple(x) for f in files.split(',') if f for x in json.load(open(f)).get('flips', [])})
@@ -715,7 +713,7 @@ MINI_SHARE = 4            # ...where they are a few: at most one lane in this ma
 
 
 def loop(solve, out, rounds, env, log, try_lay=None):
-    """whole_loop.sh SOLVE OUTDIR ROUNDS, its lines to LOG: 0 with OUTDIR/plan.json the snapped plan that passed, 1 when
+    """the loop on SOLVE in OUTDIR, ROUNDS at most, its lines to LOG: 0 with OUTDIR/plan.json the snapped plan that passed, 1 when
     no round got there, 3 when it stopped not converging, 4 when it stopped at crowded ends"""
     env = dict(env)
     # the braid's plan environment the planning reads (a pages-first sidecar's paging)
@@ -1318,7 +1316,7 @@ def loop(solve, out, rounds, env, log, try_lay=None):
         if gate(plan, O('plan.audit'))[0] == 0 and lint == 'LINT clean':
             log(f"=== the plan passes: {plan}")
             return 0
-        # (`try_lay`; LOOP_TRY_LAY=0: not) a snapped plan with EVERY lane laid, short at its audit: LAID as it stands
+        # (`try_lay`) a snapped plan with EVERY lane laid, short at its audit: LAID as it stands
         # first -- the lay and its checks are the judge the audit stands in for, and a plan laid with no net open and no
         # violation passes. A memory bus's first plan passed its smooth audit, snapped all 45 lanes and was 0.02 mm
         # short at two places of its snapped audit; three re-solves later it had 12 to 14 findings, the other bus had
@@ -1367,7 +1365,7 @@ def loop(solve, out, rounds, env, log, try_lay=None):
             joint_pos(env, (int(env['JOINT_ROUND']), int(env.get('JOINT_LOOP') or '1'), LOOP_END))
 
 
-# =============================================================================== the chain (whole_chain.sh)
+# =============================================================================== the chain
 def grade_counts(board, nets):
     """(vias, copper mm) of the run's nets on BOARD, counted as the chain counts them"""
     import math
@@ -2007,7 +2005,7 @@ def held_plan(loopd, env, i=None):
     than two each re-solve relays the via ends afresh, and a later round's plan snapped and laid on round 1's bench
     started its lanes at stubs on other layers (zynq LVDS zDF r2, a later round held: eight lanes refused within a few
     steps of their teeth or berths, 33 nets open; on its own bench 13).
-    `i`: loop round i's smooth plan so, into held{i}_*.json (LAY_TRY: lay_rounds), plan_bench finding its bench
+    `i`: loop round i's smooth plan so, into held{i}_*.json (lay_rounds), plan_bench finding its bench
     by the round's number"""
     O = lambda name: os.path.join(loopd, name)
     pre = 'held_' if i is None else f'held{i}_'
@@ -2301,8 +2299,7 @@ def joint_sync(env, r, solve, say):
     rd = os.path.join(jd, f'r{r}')
     os.makedirs(rd, exist_ok=True)
     joint_pos(env, (r, 0, 0))
-    if not os.path.isfile(solve) or not os.path.isfile(solve[:-len('.json')] + '.vals.json') or \
-            json.load(open(solve)).get('relaxed'):
+    if not os.path.isfile(solve) or not os.path.isfile(solve[:-len('.json')] + '.vals.json'):
         open(os.path.join(rd, f'{bus}.none'), 'w').close()
         say(f'  coupled solve: no plan of this bus\'s own model to bring to round {r}\'s coupled solve')
         return None
@@ -2588,8 +2585,7 @@ def joint_loop_sync(env, pos, solve, say):
     rd = os.path.join(jd, f'r{key}')
     os.makedirs(rd, exist_ok=True)
     joint_pos(env, pos)
-    if not os.path.isfile(solve) or not os.path.isfile(solve[:-len('.json')] + '.vals.json') or \
-            json.load(open(solve)).get('relaxed'):
+    if not os.path.isfile(solve) or not os.path.isfile(solve[:-len('.json')] + '.vals.json'):
         open(os.path.join(rd, f'{bus}.none'), 'w').close()
         return False, None
     try:
@@ -2714,7 +2710,7 @@ def round_edit_files(ed, d, env, bench):
 
 
 def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
-    """whole_chain.sh K OUTDIR ROUNDS: the exit code, the grade the last line printed. The bench and its destination
+    """the chain on rung K in OUTDIR, ROUNDS at most: the exit code, the grade the last line printed. The bench and its destination
     are `base` and `dest` when given (route_bus.py), else BASE and DEST from the environment; `settings` go over the
     environment for every stage (route_bus.py's caches off). `R` rounds at most, of them up to `F` feedback rounds
     after each draw (below)"""
@@ -3361,7 +3357,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                     say("  the plan's lay stood before another bus laid -- laid again")
                     tr_ = None
                 if tr_ is not None and tr_['open'] == 0 and tr_['drc'] == 0:
-                    # (the loop passed BY its plan's lay, LOOP_TRY_LAY: that lay is the round's -- said and published
+                    # (the loop passed BY its plan's lay: that lay is the round's -- said and published
                     # as an unquiet lay says and publishes itself)
                     for nm in ('seq.kicad_pcb', 'seq.kicad_pro', 'route_seq.log', 'conn.log', 'drc.log'):
                         b_, e_ = os.path.splitext(nm)

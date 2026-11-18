@@ -69,7 +69,6 @@ DST_ALONG = int(awx_settings.get('DST_ALONG') or 3)
 # between them, and its net shipped open. And a destination pass whose berths wall in a ball of a destination part
 # likewise: the walling berths re-planned as a berth not laid as asked is (fanout_destination) -- a BGA's berths' inner
 # runs round an RF ground ball, twelve lanes' copper about it on every layer
-SRC_WALLS = True            # (the test is always on here; escape_plan.run reads this)
 WALL_RETRIES = 3            # a walling realize: the rest of its moves realized without the walling ones, so often
 # DST_CLIMB=k enumerates destination dog-bones whose run climbs along the
 # array up to k pitches before it leaves (escape_moves climb=), the class
@@ -95,8 +94,8 @@ def copy_pro(src_board, dst_board):
     copy_siblings(src_board, dst_board)
     # ...and stamp the floor this stage fans out at (0.1 / 0.1 / the braid's
     # via, the numbers fanout_once is called with below), lower-only, as the
-    # production CLIs do -- see braid.write_out for why a bare copy was not
-    # enough (a Default class clearance of 0.0 rode down every chain step).
+    # production CLIs do: a bare copy was not enough (a Default class
+    # clearance of 0.0 rode down every chain step).
     try:
         from fix_kicad_drc_settings import fix_project_for_output
         fix_project_for_output(dst_board, src_board, clearance=te.SPEC_CLEARANCE,
@@ -120,38 +119,6 @@ def _drop_tie_siblings(tmp):
 DST_ITERS = 8  # destination select -> fan out -> audit -> ban -> re-select
 
 
-def _load_force(var):
-    """PLAN_FORCE_DST / PLAN_FORCE_SRC (a PROBE, 2026-09-11, ported back
-    from handoff_0910b): a JSON file {net: {"direction": .., "layer": ..,
-    "kind": ..}} restricts that net's menu at that end to the class named
-    (any subset of the three keys). Written by tmp/human_sides.py off the
-    human's copper, it measures the plan's headroom -- what the braid does
-    on our teeth with the human's destination classes -- not a mechanism."""
-    path = awx_settings.get(var, '')
-    if not path:
-        return {}
-    import json
-    with open(path, encoding='utf-8') as f:
-        return json.load(f)
-
-
-def _force(force, nm, moves, end):
-    want = force.get(nm)
-    if not want:
-        return moves
-    keep = [m for m in moves
-            if all(getattr(m, k, None) == v for k, v in want.items()
-                   if k in ('direction', 'layer', 'kind'))]
-    if not keep:
-        print(f'  force ({end}): {nm} has no {want} move among {len(moves)} -- menu kept')
-        return moves
-    return keep
-
-
-FORCE_DST = _load_force('PLAN_FORCE_DST')
-FORCE_SRC = _load_force('PLAN_FORCE_SRC')
-
-
 def dedupe_climbs(moves):
     """One CLIMBED candidate per (kind, face, layer, exit row) -- the cheapest
     by (vias, run length) -- the plain candidates untouched, in the menu's
@@ -172,18 +139,6 @@ def dedupe_climbs(moves):
             best[k] = (c, m)
     keep = {id(v[1]) for v in best.values()}
     return [m for m in moves if not getattr(m, 'climb', 0) or id(m) in keep]
-
-
-def _lane_of(m, ax):
-    """The coordinate of the LANE a climb runs along -- the column line or
-    column-gap midline for a run that climbs in y, the row line or row gap
-    for one that climbs in x. It is the run leg's constant coordinate, read
-    off the move's own legs (the one perpendicular to the face's `ax`)."""
-    pax = 1 - ax
-    for (a, b, _L) in reversed(m.legs or ()):
-        if abs(a[ax] - b[ax]) > 1e-6 and abs(a[pax] - b[pax]) <= 1e-6:
-            return a[pax]                      # the climb leg itself
-    return (m.site or m.exit_pt)[pax]
 
 
 def via_escapes(moves, end):
@@ -367,7 +322,6 @@ def plan_state(pcb, names, banned=frozenset()):
                       f'for the pair at the exit -- dropped')
             if keep:
                 dmenu[nm] = keep
-        dmenu[nm] = _force(FORCE_DST, nm, dmenu[nm], 'destination')
         dmenu[nm] = via_escapes(dmenu[nm], 'dest')
         launch[nm] = ends[nm][0]
         others = [p for p in net.pads if p.component_ref != ends[nm][2]]
@@ -470,7 +424,7 @@ def plan_state(pcb, names, banned=frozenset()):
                               and math.hypot(v.x - p.global_x, v.y - p.global_y) < 6.0)
                           if p is not None else 0)
     # the layer the taut paths relax against: the one most teeth are
-    # born on, not F -- the board turned over (mirror_board.py, every
+    # born on, not F -- the board turned over (every
     # tooth on B) planned 55 vias for 28 nets where the front planned 37,
     # because its taut strings dodged the caps that had come to F and
     # ignored the arrays' own side; the bench (every tooth on F) is
@@ -1081,8 +1035,7 @@ def main():
     # inert today, and the seam for a supplied geometry (see rules.py).
     _r = _rules.install_defaults()
     # printed from the MODULES THIS STAGE READS, never from the Rules object
-    # (see braid.main: a print of the Rules cannot tell you the install
-    # reached anything).
+    # (a print of the Rules cannot tell you the install reached anything).
     print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {te.CLEAR}), '
           f'track {te.TRACK}, fanout {sr.FAN_TRACK}/{sr.FAN_CLEAR}, '
           f'via {te.VIA_SIZE}/{te.VIA_DRILL}  [{_r.source}]')
@@ -1365,7 +1318,7 @@ def _audit_line(splits, far, stops):
 
 
 def _berth_walls(board, out_path, names, choice, dst_pad, byname):
-    """(SRC_WALLS) {'REF.PAD': [net]}: the balls of the destination parts on no bus net that the pass's berths
+    """{'REF.PAD': [net]}: the balls of the destination parts on no bus net that the pass's berths
     (`out_path` against `board`, the board it laid them on) wall in -- route_bus.walls_made, the step's own cage test --
     each with the run's nets of `choice` that wall it, by their short names"""
     import route_bus
@@ -1453,7 +1406,7 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
             bad = sorted({l_ for _pr, end_, lanes_ in sp if end_ == 'berth' for ln in lanes_
                           for l_ in legs_.get(ln, (ln,)) if l_ in choice})
             walled_ = _berth_walls(board, out_path, names, choice, dst_pad, byname) \
-                if not sp and not far and not stops and SRC_WALLS else {}
+                if not sp and not far and not stops else {}
             if not sp and not far and not stops and not walled_:
                 print(f'  destination pass {it}: every berth laid as planned')
                 break

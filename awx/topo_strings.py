@@ -36,7 +36,6 @@ SPEC_CLEAR = _rules.active().clearance
                      # import one where the other is meant.
 MARGIN_OUT = _rules.active().margin_out   # routing margin outside the field
                                          # (= SPEC_CLEAR + TRACK / 2)
-MARGIN_IN = 0.06                     # bare-copper margin inside the field
 FREEZE = 0.35                        # no pushes this close to an endpoint
 STEP = 0.12                          # densify step (mm)
 
@@ -425,32 +424,6 @@ def shortcut(pts, obs):
         out.append(pts[j])
         i = j
     return out
-
-
-def relax(src, dst, obs, rounds=400):
-    pts = densify([src, dst])
-    ends = (src, dst)
-    for it in range(rounds):
-        moved = 0.0
-        for i in range(1, len(pts) - 1):
-            p = pts[i]
-            if d2(p, ends[0]) < FREEZE * FREEZE or d2(p, ends[1]) < FREEZE * FREEZE:
-                continue
-            q = (0.5 * p[0] + 0.25 * pts[i - 1][0] + 0.25 * pts[i + 1][0],
-                 0.5 * p[1] + 0.25 * pts[i - 1][1] + 0.25 * pts[i + 1][1])
-            for _k in range(6):
-                v = obs.point_violation(q)
-                if v is None:
-                    break
-                depth, (ux, uy) = v
-                q = (q[0] + ux * (depth + 0.01), q[1] + uy * (depth + 0.01))
-            moved += math.hypot(q[0] - p[0], q[1] - p[1])
-            pts[i] = q
-        if it % 25 == 24:
-            pts = densify(shortcut(pts, obs))
-        if moved < 1e-4 * len(pts):
-            break
-    return densify(shortcut(pts, obs)), it + 1
 
 
 

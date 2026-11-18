@@ -777,7 +777,6 @@ class Group:
         north-face lanes landed at its SOUTH-east corner, the face's whole length from the opening, their legs drawn
         from there straight through the chip. A mouth leaving a part at once (within twice GROUP_TOL) stands as it
         is; None where nothing of it is open"""
-        from shapely.geometry import Point
         from shapely.ops import substring
 
         def leaves(g):
@@ -1288,8 +1287,6 @@ def build(ctx, dest, _trunk=frozenset()):
         F.mid[n] = in_frame(F.spine, pts)
     F.se = {n: tuple(map(float, F.spine.project_pt(F.gland.get(n, F.bend[n])))) for n in near}
     F.H0 = (min(F.se[n][0] for n in near) if near else float(F.spine.project_pt((x0, (y0 + y1) / 2))[0]))
-    W_, H_ = x1 - x0, y1 - y0
-    sW, sH = SB[2] - SB[0], SB[3] - SB[1]
     perim_src = lambda p: perim_s(p, SB, F.scut)
     # a PAIR is one lane here: its two tips must stand together at both ends, no other lane's end between them ON
     # THE PAIR'S LAYER there (a lane ending on the other layer runs under the pair's end legs: K41's SCKE1 berths on
