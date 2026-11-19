@@ -836,6 +836,72 @@ def live_track_held(board, track, held) -> bool:
                      pcbnew.ToMM(track.GetWidth())))
 
 
+def live_via_rule_test(board):
+    """#1972: the GUI twin of `fix_kicad_drc_settings.board_via_rule_test`:
+    `design_rules.via_rule_held_test` for the live board, read from the
+    rules file beside the board file and a namespace of the live board's
+    nets, footprints (their keys `live_footprints_by_key`'s, their courtyards
+    read from the board file as the engine's `CourtyardIndex` reads them) and
+    copper layers -- not a parse of the board, which the writeback must not
+    do (`board_minima_from_live`). None when the board has no rules file
+    sizing a via; a rules file that cannot be read is said on the console and
+    read as no rule, so every via counts against the Board Setup minimums."""
+    import os
+    try:
+        path = board.GetFileName() or ''
+    except Exception:                                          # noqa: BLE001
+        return None
+    if not path or not os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
+        return None
+    try:
+        import pcbnew
+        from collections import Counter
+        from types import SimpleNamespace
+        from design_rules import via_rule_held_test
+        nets = {}
+        for code, ni in board.GetNetsByNetcode().items():
+            if int(code):
+                nets[int(code)] = SimpleNamespace(name=ni.GetNetname())
+        fps, raw = {}, []
+        for key, fp in live_footprints_by_key(board).items():
+            pos = fp.GetPosition()
+            raw.append(fp.GetReference())
+            fps[key] = SimpleNamespace(
+                reference=fp.GetReference(), footprint_name=str(fp.GetFPIDAsString()),
+                x=pcbnew.ToMM(pos.x), y=pcbnew.ToMM(pos.y),
+                rotation=fp.GetOrientationDegrees(),
+                layer=board.GetLayerName(fp.GetLayer()), pads=[])
+        copper = [board.GetLayerName(l) for l in board.GetEnabledLayers().Seq()
+                  if pcbnew.IsCopperLayer(l)]
+        pcb = SimpleNamespace(
+            source_path=os.path.abspath(path), nets=nets, footprints=fps, groups={},
+            duplicate_references={r: n for r, n in Counter(raw).items() if r and n > 1},
+            board_info=SimpleNamespace(copper_layers=copper))
+        return via_rule_held_test(pcb, path)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  WARNING: the board's .kicad_dru via rules could not be read "
+              f"({type(e).__name__}: {e}); every via is measured against the "
+              f"Board Setup via minimums")
+        return None
+
+
+def live_via_namespace(board, via):
+    """A live PCB_VIA as `design_rules.DesignRules.via_item` reads a via."""
+    import pcbnew
+    from kicad_parser import pcbnew_via_type
+    pos = via.GetPosition()
+    try:
+        w = pcbnew.ToMM(via.GetFrontWidth())
+    except Exception:                                          # noqa: BLE001
+        w = pcbnew.ToMM(via.GetWidth())
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        x=pcbnew.ToMM(pos.x), y=pcbnew.ToMM(pos.y), size=w,
+        drill=pcbnew.ToMM(via.GetDrillValue()), net_id=via.GetNetCode(),
+        via_type=pcbnew_via_type(via),
+        layers=[board.GetLayerName(via.TopLayer()), board.GetLayerName(via.BottomLayer())])
+
+
 def board_minima_from_live(board):
     """The GUI twin of fix_kicad_drc_settings.scan_board_minima(), read from the
     LIVE pcbnew board instead of re-parsing the board file.
@@ -861,6 +927,9 @@ def board_minima_from_live(board):
         import pcbnew
         widths, via_sizes, via_drills, annular, holes = [], [], [], [], []
         _held, _widths_unread = live_room_width_test(board)
+        # #1972: a via a .kicad_dru rule sizes is graded at the rule, not at
+        # the Board Setup minimum (fix_kicad_drc_settings.board_size_values)
+        _vheld = live_via_rule_test(board)
         for t in board.GetTracks():
             try:
                 if t.Type() == pcbnew.PCB_VIA_T:
@@ -876,12 +945,18 @@ def board_minima_from_live(board):
                     # and its ring at the micro via rule the step writes
                     # (fix_kicad_drc_settings.micro_via_floors)
                     _micro = live_via_is_micro(t)
-                    if w and not _micro:
+                    _ns = (live_via_namespace(board, t)
+                           if _vheld is not None and not _micro else None)
+
+                    def _free(kind):
+                        return _ns is None or not _vheld(_ns, kind)
+                    if w and not _micro and _free('via_diameter'):
                         via_sizes.append(w)
                     if d and not _micro:
                         via_drills.append(d)
-                        holes.append(d)
-                    if w and d and w > d and not _micro:
+                        if _free('hole_size'):
+                            holes.append(d)
+                    if w and d and w > d and not _micro and _free('annular_width'):
                         annular.append((w - d) / 2.0)
                 else:
                     w = pcbnew.ToMM(t.GetWidth())

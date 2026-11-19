@@ -14,7 +14,7 @@ from __future__ import annotations
 import env_knobs
 import math
 from typing import List, Dict, Tuple, Optional
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import sys
 import os
@@ -250,7 +250,9 @@ def underpad_pad_counts(ref: str) -> Dict:
             'pads_reused': r.get('pads_reused', 0),
             'pads_already_served': served,
             'vias_placed': r.get('vias_placed', 0),
-            'dropped_pads': dropped}
+            'dropped_pads': dropped,
+            # #1981: per dropped pad, what refused its via sites
+            'dropped_blockers': list(r.get('dropped_blockers', ()))}
 
 
 def stub_pad_counts(ref: str) -> Dict:
@@ -283,7 +285,7 @@ def pad_counts(ref: str) -> Dict:
     out = dict(parts[0])
     for c in parts[1:]:
         for k, v in c.items():
-            out[k] = out[k] + v
+            out[k] = out[k] + v if k in out else v
     return out
 
 
@@ -1355,7 +1357,21 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         return any(aperture_distance(vx, vy, ap) < via_size / 2 + same_net_pad_clearance - 1e-6
                    for ap in _paste_aps[net_id])
 
-    def via_clears(vx, vy, net_id, placed, px=None, py=None):
+    def _refused(why, what):
+        """`via_clears`' refusal: False, and (#1981) ``what`` refused the
+        site appended to ``why`` when the caller asks."""
+        if why is not None:
+            why.append(what)
+        return False
+
+    def _net_label(nid):
+        n = (getattr(pcb_data, 'nets', None) or {}).get(nid)
+        return getattr(n, 'name', None) or f"net {nid}"
+
+    def _pad_label(pad):
+        return f"{pad.component_ref}.{pad.pad_number}"
+
+    def via_clears(vx, vy, net_id, placed, px=None, py=None, why=None):
         """Is a via at (vx, vy) legal, given the board AND this run's own output?
 
         `foreign_vias` / `foreign_pads` / `foreign_tracks` above are a SNAPSHOT
@@ -1375,15 +1391,19 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
 
         `px, py` are the candidate's OWN pad, so its stub can be tested too --
         the same blindness in the other direction.
+
+        ``why`` (#1981), a list: a refusal appends what refused the site (a
+        foreign track or via by net, a pad by REF.PAD, the board edge, ...),
+        so a dropped pad can be told what holds its via sites.
         """
         if _edge_rings:
             if not _pt_on_board(vx, vy, _edge_outer, _edge_cutouts):
-                return False
+                return _refused(why, 'the board edge')
             if _pt_rings_dist(vx, vy, _edge_rings) < via_size / 2 + _edge_clear - 1e-6:
-                return False
+                return _refused(why, 'the board edge')
         if _filled_gate and _filled_gate.via_hit(
                 vx, vy, via_size, net_id, lambda sh: _pc(net_id, sh.net_id)) is not None:
-            return False
+            return _refused(why, 'filled graphic copper')
         if _hole_gate and _hole_gate.via_why(
                 vx, vy, via_size, via_drill, net_id,
                 # #1853: and this run's own vias and stubs so far
@@ -1393,27 +1413,27 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                                  'layer': layer, 'net_id': qn}
                                 for qx, qy, qn, qpx, qpy in placed
                                 if qpx is not None and (qpx, qpy) != (qx, qy)]):
-            return False
+            return _refused(why, 'a .kicad_dru hole rule')
         for fx, fy, fs, fn, fd in foreign_vias:
             # The DRILLS are an obstacle whatever the net: hole-to-hole is
             # net-independent (#282/#479 audit gap 2), and on a board whose
             # min_hole_to_hole outgrows via_size + clearance - via_drill it is
             # the binding rule against a foreign via too.
             if math.hypot(vx - fx, vy - fy) < (via_drill + fd) / 2 + _h2h - 1e-6:
-                return False
+                return _refused(why, f"via {_net_label(fn)}")
             if fn == net_id:
                 continue                        # same-net copper is no obstacle
             if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + _pc(
                     net_id, fn, (('via',), ('via',))) - 1e-6:
-                return False
+                return _refused(why, f"via {_net_label(fn)}")
         for hx, hy, hd in _drilled_pad_holes:
             # Net-independent drill floor vs every drilled pad (slot-exact).
             if math.hypot(vx - hx, vy - hy) < (via_drill + hd) / 2 + _h2h - 1e-6:
-                return False
+                return _refused(why, 'a drilled pad hole')
         _cand = _Via(x=vx, y=vy, size=via_size, drill=via_drill,
                      layers=list(_via_cu), net_id=net_id)
         if _paste_hit(vx, vy, net_id):
-            return False
+            return _refused(why, 'a same-net paste opening')
         for pad, gx, gy, reach, hole in _pad_discs:
             if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
                 # #581: an active same-net pad via clearance keeps the via that far off every
@@ -1422,7 +1442,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                         and not (pad.drill and pad.drill > 0)
                         and check_pad_via_overlap(pad, _cand, same_net_pad_clearance,
                                                   _via_cu, 0.0)[0]):
-                    return False
+                    return _refused(why, f"pad {_pad_label(pad)}")
                 continue
             if _pad_has_no_copper(pad):
                 # An NPTH hole: the via's copper is held off the hole wall at
@@ -1436,7 +1456,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                         vx, vy, via_size, hole, npth_via_clearance(
                             getattr(pad, 'local_clearance', 0.0) or 0.0,
                             _pc(net_id, pad.net_id), _hole_clr), 0.0)[0]:
-                    return False
+                    return _refused(why, f"hole {_pad_label(pad)}")
                 continue
             # #1568: CALL the grader, as the stub half does (#619). A box grown
             # by the clearance with SQUARE corners (`_seg_hits_pad`) overstates
@@ -1452,18 +1472,20 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             if math.hypot(vx - gx, vy - gy) - reach >= via_size / 2 + _eff:
                 continue        # the pad's copper lies inside `reach` of its centre
             if check_pad_via_overlap(pad, _cand, _eff, _via_cu, 0.0)[0]:
-                return False
+                return _refused(why, f"pad {_pad_label(pad)}")
         for sx0, sy0, sx1, sy1, sw, sn in foreign_tracks:
             if sn == net_id:
                 continue
             if point_to_segment_distance(vx, vy, sx0, sy0, sx1, sy1) \
                     < via_size / 2 + sw / 2 + _pc(net_id, sn, (('via',), ('track',))) - 1e-6:
-                return False
-        return not run_output_conflict(
-            vx, vy, net_id, placed, px, py,
-            via_size=via_size, via_drill=via_drill, clearance=clearance,
-            track_width=track_width, hole_to_hole=_h2h,
-            pair_clearance=_pc if _priced else None)
+                return _refused(why, f"track {_net_label(sn)}")
+        if run_output_conflict(
+                vx, vy, net_id, placed, px, py,
+                via_size=via_size, via_drill=via_drill, clearance=clearance,
+                track_width=track_width, hole_to_hole=_h2h,
+                pair_clearance=_pc if _priced else None):
+            return _refused(why, "this run's own vias and stubs")
+        return True
 
     def stub_clears_erased(px, py, vx, vy, net_id):
         """#619: is the pad->via stub clear of the copper `nets_to_route` erased?
@@ -1652,6 +1674,57 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return (vx, vy)
         return None
 
+    def stub_blocker(px, py, vx, vy, net_id):
+        """#1981: a name for what refused a pad-to-via stub, for the drop
+        report only (the refusal is the routing map's, which names nothing):
+        the foreign track on the stub's layer, or via, nearest to inside its
+        clearance of the stub, within one grid step of slack for the map's
+        quantisation. None when no such copper is near."""
+        best = None
+        slack = max(grid_step, 0.0)
+        for sg in pcb_data.segments:
+            if sg.net_id == net_id or sg.layer != footprint.layer:
+                continue
+            gap = segment_to_segment_distance(px, py, vx, vy, sg.start_x, sg.start_y,
+                                              sg.end_x, sg.end_y) \
+                - (sg.width / 2 + track_width / 2 + _pc(net_id, sg.net_id))
+            if gap < slack and (best is None or gap < best[0]):
+                best = (gap, f"track {_net_label(sg.net_id)}")
+        for fx, fy, fs, fn, _fd in foreign_vias:
+            if fn == net_id:
+                continue
+            gap = point_to_segment_distance(fx, fy, px, py, vx, vy) \
+                - (fs / 2 + track_width / 2 + _pc(net_id, fn))
+            if gap < slack and (best is None or gap < best[0]):
+                best = (gap, f"via {_net_label(fn)}")
+        return best[1] if best else None
+
+    def site_blockers(pi):
+        """#1981: what refuses each via site `place_pin` tries for a dropped
+        pad, against the board and this run's committed output: per site the
+        first test it fails, through the same tests (`via_clears` says which
+        object refused it). Returns (Counter of what, number of sites)."""
+        ex, ey = pi.escape_direction
+        px, py = pi.pad.global_x, pi.pad.global_y
+        _om, _ocfg = _obstacles_for(pi.pad.net_id)
+        seen = Counter()
+        sites = candidate_offsets(pi.pad_width, 'near')
+        for d in sites:
+            vx, vy = snap(px + ex * d), snap(py + ey * d)
+            if not (stub_layer_idx is None or
+                    _om.line_clear(px, py, vx, vy, stub_layer, _ocfg)) \
+                    or not stub_clears_erased(px, py, vx, vy, pi.pad.net_id):
+                what = stub_blocker(px, py, vx, vy, pi.pad.net_id)
+                seen[f"the pad-to-via stub's path ({what})" if what
+                     else "the pad-to-via stub's path"] += 1
+                continue
+            why = []
+            if via_clears(vx, vy, pi.pad.net_id, placed_global, px, py, why=why):
+                seen['nothing in the final layout (the side search took it)'] += 1
+            else:
+                seen[why[0] if why else 'the via test'] += 1
+        return seen, len(sites)
+
     def trial(pis, order, mode_fn, committed):
         # Greedily place a side under one configuration; return idx->pos|None.
         placed = list(committed)
@@ -1699,6 +1772,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
 
     tracks, vias, dropped = [], [], []
     dropped_pads = []        # (pad number, net name): `dropped` names nets only
+    dropped_pis = []
     placed_global = []
     by_side = defaultdict(list)
     for pi in pad_infos:
@@ -1728,6 +1802,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             if pos is None:
                 dropped.append(pi.pad.net_name)
                 dropped_pads.append((pi.pad.pad_number, pi.pad.net_name))
+                dropped_pis.append(pi)
                 continue
             if pos is SERVED_IN_RUN:
                 continue
@@ -1806,8 +1881,22 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
           f"(pitch {pitch:.2f}, via {via_size:.2f}, stagger {stagger:.3f} mm"
           f"{', via-in-pad' if allow_via_in_pad else ''}"
           f"{f', {n_alt} side(s) used an alternative stagger' if n_alt else ''})")
+    dropped_blockers = []
     if dropped:
         print(f"    dropped (no clear via offset): {dropped}")
+        # #1981: what holds each dropped pad's via sites -- copper already on
+        # the board (a route step's tracks between the pins), a pad, the edge
+        print("    what refuses each via site a dropped pad tried (pad: what, "
+              "at how many of its sites):")
+        for pi in dropped_pis:
+            seen, n_sites = site_blockers(pi)
+            dropped_blockers.append({
+                'pad': f"{pi.pad.component_ref}.{pi.pad.pad_number}",
+                'net': pi.pad.net_name, 'sites': n_sites, 'blockers': dict(seen)})
+            print(f"      {pi.pad.component_ref}.{pi.pad.pad_number} "
+                  f"({pi.pad.net_name}): "
+                  + ', '.join(f"{w} at {c}" for w, c in seen.most_common())
+                  + f" of {n_sites}")
         if via_drill + _h2h > via_size + clearance:
             # #618's disclosure, for this escape: the drill rule, not the
             # copper one, set the via spacing that left these pads without one.
@@ -1830,6 +1919,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                                   for t in tracks), default=0.0), 4),
         'allow_via_in_pad': bool(allow_via_in_pad),
         'dropped_pads': list(dropped_pads),
+        'dropped_blockers': dropped_blockers,           # #1981
         # #1804: per pad, not per net
         'pads_tried': len(pad_infos),
         'pads_reused': reused_n,

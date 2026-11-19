@@ -271,7 +271,13 @@ The via-drop's PADS are in `JSON_SUMMARY` beside the per-net counts:
 `pads_requested` = `pads_escaped` + `pads_already_served` + the dropped pads,
 named in `dropped_pads` (`"U1.57"`); `pads_reused` (bridged to an existing
 via) and `vias_placed`. A net whose selected pads were all served counts as
-escaped.
+escaped. Each dropped pad gets a line saying what refused its via sites (#1981):
+for each site, the first test it fails. That is a foreign track or via by net,
+a pad by `REF.PAD`, the board edge, or the pad-to-via stub's path, with the
+track or via standing nearest on it. `dropped_blockers` in `JSON_SUMMARY`
+carries the same (`{pad, net, sites, blockers: {what: count}}`). Copper that a
+route step laid between the pins shows up here: fan a part out before routing
+its neighbours' nets.
 Example:
 
 ```bash
