@@ -217,6 +217,69 @@ def freed_of_hold(lcuts, held, own, end_layers, lane_of=None):
     return freed
 
 
+def _seg_seg(a_, b_, c_, d_):
+    """two segments' least distance: 0 where they cross, else an end's against the other"""
+    def orient(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    o1, o2, o3, o4 = orient(a_, b_, c_), orient(a_, b_, d_), orient(c_, d_, a_), orient(c_, d_, b_)
+    if o1 * o2 < 0 and o3 * o4 < 0:
+        return 0.0
+    return min(_pairs._pt_seg(a_, c_, d_), _pairs._pt_seg(b_, c_, d_), _pairs._pt_seg(c_, a_, b_),
+               _pairs._pt_seg(d_, a_, b_))
+
+
+def dive_clear(segments, vias, pads, nids, P, t, off_d, half, l_dive, via=None, trk=None, clr=None):
+    """does a PAIR's DIVE at `P`, its line along the unit `t`, stand clear of the copper given (`segments`, `vias`,
+    `pads`: every other net's -- those of `nids`, the pair's own legs, skipped)? The dive as the pair router lays it:
+    its two barrels `off_d` either side of the line, and each leg's straight run `half` either side of it, `l_dive`
+    along the line each way from P"""
+    from routing_utils import point_to_pad_rect_dist
+    via, trk, clr = VIA if via is None else via, TRK if trk is None else trk, CLR if clr is None else clr
+    nrm = (-t[1], t[0])
+    bars = [(P[0] + sg * off_d * nrm[0], P[1] + sg * off_d * nrm[1]) for sg in (-1.0, 1.0)]
+    runs = [((P[0] + sg * half * nrm[0] - l_dive * t[0], P[1] + sg * half * nrm[1] - l_dive * t[1]),
+             (P[0] + sg * half * nrm[0] + l_dive * t[0], P[1] + sg * half * nrm[1] + l_dive * t[1])) for sg in (-1.0, 1.0)]
+    reach = max(off_d, half) + l_dive + via
+    for s_ in segments:
+        if s_.net_id in nids or min(math.hypot(s_.start_x - P[0], s_.start_y - P[1]),
+                                    math.hypot(s_.end_x - P[0], s_.end_y - P[1])) > reach + math.hypot(
+                s_.end_x - s_.start_x, s_.end_y - s_.start_y):
+            continue
+        a_, b_ = (s_.start_x, s_.start_y), (s_.end_x, s_.end_y)
+        if any(_pairs._pt_seg(c_, a_, b_) < via / 2 + clr + s_.width / 2 for c_ in bars):
+            return False
+        if any(_seg_seg(r0_, r1_, a_, b_) < trk / 2 + clr + s_.width / 2 for r0_, r1_ in runs):
+            return False
+    for v_ in vias:
+        if v_.net_id in nids or math.hypot(v_.x - P[0], v_.y - P[1]) > reach + v_.size:
+            continue
+        if any(math.hypot(v_.x - c_[0], v_.y - c_[1]) < via / 2 + clr + v_.size / 2 for c_ in bars):
+            return False
+        if any(_pairs._pt_seg((v_.x, v_.y), r0_, r1_) < trk / 2 + clr + v_.size / 2 for r0_, r1_ in runs):
+            return False
+    for p_ in pads:
+        if p_.net_id in nids or p_.pad_type == 'np_thru_hole' or \
+                abs(p_.global_x - P[0]) > reach + 2 or abs(p_.global_y - P[1]) > reach + 2:
+            continue
+        if any(point_to_pad_rect_dist(c_[0], c_[1], p_) < via / 2 + clr for c_ in bars):
+            return False
+        if any(_pairs.seg_pad_distance(r0_, r1_, p_) < trk / 2 + clr for r0_, r1_ in runs):
+            return False
+    return True
+
+
+def blocked_spans(blocked, step):
+    """the places `blocked` (ascending, `step` apart where they run on) merged into spans [first, last]"""
+    spans, cur_ = [], None
+    for s_ in blocked:
+        if cur_ is not None and s_ - cur_[1] <= step * 1.5:
+            cur_[1] = s_
+        else:
+            cur_ = [s_, s_]
+            spans.append(cur_)
+    return spans
+
+
 def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, front=None, check=False,
           core=False, rules=False, lanecore=False, joint=None, cores=False):
     """the solve of the bench ctx (whole_ctx.plan()) round the destination part `dest`: the JSON
@@ -943,6 +1006,36 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                         VCUTS.append({'lane': n, 'u': u_, 'w': w_, 'built': 1})
         if len(VCUTS) > NVC2:
             print(f'   built-in via cuts on the rings at other parts\' pads: {len(VCUTS) - NVC2}')
+    # ...and where a PAIR's DIVE meets the copper in front of its tooth: a pair whose tooth is a surface stub may change
+    # layer in the face band (TVIA -- the band waived, its dive room kept), where the arrays' ends stand thick -- its
+    # neighbours' stubs and their dog-bone vias, the bus's own among them, which no cut above reads. The dive as the pair
+    # router lays it -- its two barrels a dive offset either side of the line and each leg's straight run either side of
+    # them along the line -- tested against every other net's copper on the bench at each step of its window there;
+    # where it does not stand clear, no change. Unread, a DDR strobe pair's dive stood a dive room past its tooth
+    # between two neighbours' tooth vias, the embed laid it square across its way to fit, the pair router could not lay
+    # it, and the dive moved on along its tooth's face crowded a neighbour there
+    NVC3 = len(VCUTS)
+    off_d = _pairs.dive_offset(ctx.cfg, _pairs.pitch(TRK) / 2)
+    hp_ = _pairs.pitch(TRK) / 2
+    pads_ = [p_ for fp_ in ctx.pcb.footprints.values() for p_ in fp_.pads]
+    for n in sorted(TVIA):
+        if n not in prs or n not in M:
+            continue
+        nids_ = {ctx.byname[leg][0] for leg in prs[n]}
+        lo_, hi_ = entry[n] + VIN0[n], min(BAND, end[n] - VIN1[n])
+        blocked, s_ = [], lo_
+        while s_ <= hi_ + 1e-9:
+            P0, P1 = spine.xy(s_ - G, whole_frame.ref(Fr, n, s_ - G)), spine.xy(s_ + G, whole_frame.ref(Fr, n, s_ + G))
+            P = spine.xy(s_, whole_frame.ref(Fr, n, s_))
+            dl_ = math.hypot(P1[0] - P0[0], P1[1] - P0[1]) or 1.0
+            if not dive_clear(ctx.base_segments, ctx.base_vias, pads_, nids_, P,
+                              ((P1[0] - P0[0]) / dl_, (P1[1] - P0[1]) / dl_), off_d, hp_, L_DIVE):
+                blocked.append(s_)
+            s_ += G
+        # (not a built-in cut: those are waived in a tooth via's own window, which is where this one stands)
+        VCUTS += [{'lane': n, 'u': (a_ + b_) / 2, 'w': (b_ - a_) / 2 + G} for a_, b_ in blocked_spans(blocked, G)]
+    if len(VCUTS) > NVC3:
+        print(f'   built-in via cuts where a pair\'s dive meets the copper in front of its tooth: {len(VCUTS) - NVC3}')
     # ---- the braid rule over every triple
     nt = 0
     for i, j, k in itertools.combinations(Ln, 3):

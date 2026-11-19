@@ -1596,6 +1596,13 @@ once, proved optimal in its vias.
   each ring, by each lane's own place in its ring's stack: the lanes that
   berth sooner peel off sooner, so the ones still on the ring run inside them,
   and a pad cuts the lanes whose place stands within its reach.
+- A pair whose tooth is a surface stub may change layer in the face band, at
+  its tooth (its dive room kept). There the arrays' ends stand thick, so at
+  each step of that window its **dive** as the pair router lays it -- two
+  barrels a dive offset either side of the line, each leg's straight run
+  beside them -- is tested against every other net's copper on the bench
+  (`dive_clear`), and the change is cut where it does not stand clear. This
+  is a plain cut: built-in cuts are waived in a tooth via's window.
 
 **The objective**, as the ends model's:
 
