@@ -181,7 +181,8 @@ def main(ks: str = "15,28,35,41,51", out: str = "modal_whole_out", rounds: int =
 @app.function(cpu=(2, 8), memory=(256, 16384), timeout=86400, max_containers=40)
 def run_board(case: str, seed: int = 1, rounds: int = 1, sets: list | None = None, cap: int = 79200) -> dict:
     """One board of the BUS BOARDS check (tests/stress/bus_boards.py --cases CASE) under the bus step's seed (BUS_SEED),
-    in its own container: its report row, its log, the route's own log and the board it hands on. `sets`: K=V settings
+    in its own container: its report row, its log, the route's own log and the board it hands on (a board not clean:
+    its whole run directory, every stage's files). `sets`: K=V settings
     for the run; `cap`: seconds the board may take before the check stops it (its row says so). (Two cores asked, eight
     allowed: a single bus's fanout runs on about one, buses negotiated at once on one each; and a day allowed -- a
     board's fanout took more than 3.5 times as long here as on the desk it was written at, a four-bus board ten
@@ -206,9 +207,14 @@ def run_board(case: str, seed: int = 1, rounds: int = 1, sets: list | None = Non
     row = json.loads(rep.read_text())["cases"].get(case) if rep.exists() else None
     tb = io.BytesIO()
     with tarfile.open(fileobj=tb, mode="w:gz") as t:
-        for f in ("run.log", "bus.kicad_pcb", "bus.kicad_pro", "bus.kicad_dru"):
-            if (Path(out) / case / f).exists():
-                t.add(str(Path(out) / case / f), arcname=f"{case}/{f}")
+        if row and row.get("ok") and not row.get("why"):
+            for f in ("run.log", "bus.kicad_pcb", "bus.kicad_pro", "bus.kicad_dru"):
+                if (Path(out) / case / f).exists():
+                    t.add(str(Path(out) / case / f), arcname=f"{case}/{f}")
+        elif (Path(out) / case).exists():
+            # (a board not clean: its whole run -- each bus's loop, the group's ends and checks -- so a stage of it can
+            # be replayed on the desk from what the cloud had)
+            t.add(str(Path(out) / case), arcname=case)
     cpu = subprocess.run(["sh", "-c", "grep -m1 'model name' /proc/cpuinfo"], capture_output=True, text=True).stdout
     return {"case": case, "seed": seed, "rc": p.returncode, "secs": round(time.time() - t0), "log": log, "row": row,
             "cpu": cpu.strip(), "tgz": tb.getvalue()}
