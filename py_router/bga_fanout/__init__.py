@@ -5003,6 +5003,52 @@ def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
     return sorted(names)
 
 
+def _is_power_pin(pad) -> bool:
+    """A pad whose schematic pin type is a power pin (power_in / power_out,
+    alone or with KiCad's '+no_connect' suffix)."""
+    return (pad.pintype or '').split('+')[0] in ('power_in', 'power_out')
+
+
+def plane_drop_net_ids(footprint: Footprint, pcb_data: PCBData,
+                       net_filter: Optional[List[str]] = None,
+                       plane_min_pads: int = 6,
+                       plane_net_layers: Optional[Dict[str, List[str]]] = None
+                       ) -> Set[int]:
+    """The nets whose balls on `footprint` the drop pass gives a via (#424 D2).
+
+    With no filter, a net with >= `plane_min_pads` balls on the part: the
+    escape engines skip exactly those. With a filter, a net the filter leaves
+    out (it is not escaped) when it is a plane by any of: >= `plane_min_pads`
+    balls on the part; a copper zone of its own; a plane declared for it in
+    `plane_net_layers` (--plane-net-layers); every one of its balls on the
+    part a power pin by its schematic pin type. The last two catch a small
+    rail -- a few balls, its pour not drawn yet -- that the count and the
+    zone miss, and which was then neither escaped nor dropped. A left-out net
+    that is none of these (a signal another step escapes) gets no via; the
+    audit after the pass names its balls (`unserved_plane_balls`).
+    """
+    fp_pads = [p for p in footprint.pads if p.net_id]
+    counts = Counter(p.net_name for p in fp_pads)
+    from kicad_parser import pour_zones
+    # A net that POURS (a teardrop, #1164, is routing output, not a pour).
+    zone_ids = {z.net_id for z in pour_zones(pcb_data.zones) if z.net_id}
+    declared = set(plane_net_layers or ())
+    powered: Dict[str, bool] = {}
+    for p in fp_pads:
+        powered[p.net_name] = powered.get(p.net_name, True) and _is_power_pin(p)
+    drop_ids: Set[int] = set()
+    for p in fp_pads:
+        if net_filter is not None:
+            if matches_net_filter(p.net_name, net_filter):
+                continue                      # fanned as a signal, not a plane
+            if (counts[p.net_name] >= plane_min_pads or p.net_id in zone_ids
+                    or p.net_name in declared or powered[p.net_name]):
+                drop_ids.add(p.net_id)
+        elif counts[p.net_name] >= plane_min_pads:
+            drop_ids.add(p.net_id)
+    return drop_ids
+
+
 def generate_plane_drops(footprint: Footprint,
                          pcb_data: PCBData,
                          layers: Optional[List[str]] = None,
@@ -5022,11 +5068,12 @@ def generate_plane_drops(footprint: Footprint,
                          ) -> Tuple[List[Dict], List[Dict], Dict]:
     """Drop a via for every plane-net ball of `footprint` (#424 D2).
 
-    Plane nets are auto-detected with the SAME classification the escape
-    engines use to skip them: a net the caller EXCLUDED via `net_filter` with
-    >= `plane_min_pads` balls on this footprint (with no filter, the pad-count
-    heuristic alone) -- plus any excluded net that already owns a copper zone,
-    so boards with existing pours drop regardless of ball count. Each such SMD
+    Plane nets are auto-detected by `plane_drop_net_ids`: a net the caller
+    EXCLUDED via `net_filter` with >= `plane_min_pads` balls on this footprint
+    (with no filter, the pad-count heuristic alone), or an excluded net that
+    already owns a copper zone, is declared in `plane_net_layers`, or has
+    only power pins on the part -- so a small rail drops before its pour
+    exists. Each such SMD
     ball gets a dog-bone stub + via in a free inter-ball gap (#128 allocator),
     falling back to an exact-checked, pad-clamped via-in-pad tap; the ball is
     not routed anywhere -- the plane poured later picks the via up at fill.
@@ -5041,20 +5088,8 @@ def generate_plane_drops(footprint: Footprint,
     and `net_ok(net_id)` (None: all) admits only the drop nets of one class,
     so the caller can lay each class at its own clearance.
     """
-    fp_pads = [p for p in footprint.pads if p.net_id]
-    counts = Counter(p.net_name for p in fp_pads)
-    from kicad_parser import pour_zones
-    # A net that POURS (a teardrop, #1164, is routing output, not a pour).
-    zone_ids = {z.net_id for z in pour_zones(pcb_data.zones) if z.net_id}
-    drop_ids: Set[int] = set()
-    for p in fp_pads:
-        if net_filter is not None:
-            if matches_net_filter(p.net_name, net_filter):
-                continue                      # fanned as a signal, not a plane
-            if counts[p.net_name] >= plane_min_pads or p.net_id in zone_ids:
-                drop_ids.add(p.net_id)
-        elif counts[p.net_name] >= plane_min_pads:
-            drop_ids.add(p.net_id)
+    drop_ids = plane_drop_net_ids(footprint, pcb_data, net_filter,
+                                  plane_min_pads, plane_net_layers)
     if net_ok is not None:
         drop_ids = {n for n in drop_ids if net_ok(n)}
     if not drop_ids:
@@ -5708,6 +5743,9 @@ def _generate_bga_fanout_all(footprint: Footprint,
                                     _r['in_pad'] = _r.get('in_pad', 0) + _r2.get('in_pad', 0)
                                     _r['failed'] = _r2.get('failed', 0)
                         _left += rep2.get('failed', 0)
+                        # the latest attempt's reason for each ball it failed
+                        rep.setdefault('failed_balls', {}).update(
+                            rep2.get('failed_balls') or {})
                     if len(_rungs) > 1:
                         rep['failed'] = _left
             return d_tracks, d_vias, rep
@@ -5801,7 +5839,90 @@ def _generate_bga_fanout_all(footprint: Footprint,
                   f"each (#1217):")
             for _l in _nb:
                 print(_l)
+    # Every plane ball this call leaves with no copper, named with why, on
+    # the copper it returns (after the hole_clearance re-escape, which can
+    # take a drop off): JSON_SUMMARY plane_drop.unserved and both fronts' log.
+    if _enabled and _pad_filter is None and not _single_pass:
+        _uns = unserved_plane_balls(
+            footprint, pcb_data, net_filter, tracks, vias_to_add,
+            plane_drop_net_ids(footprint, pcb_data, net_filter, 6,
+                               plane_net_layers),
+            LAST_PLANE_DROP_REPORT, track_width)
+        LAST_PLANE_DROP_REPORT['unserved'] = _uns
+        for _l in unserved_plane_ball_lines(_uns, footprint.reference):
+            print(_l)
     return tracks, vias_to_add, vias_to_remove, failed_nets
+
+
+def unserved_plane_balls(footprint, pcb_data, net_filter, tracks, vias,
+                         drop_ids, report, track_width: float = 0.0,
+                         plane_min_pads: int = 6) -> List[Dict[str, str]]:
+    """The plane balls of `footprint` a fanout leaves with no copper, each
+    {'ball': 'REF.PAD', 'net', 'reason'}, in pad order.
+
+    A plane ball is one the escape engines do not escape: with `net_filter`,
+    a ball whose net the filter leaves out; without, one whose net has >=
+    `plane_min_pads` balls on the part. Single-pad, `unconnected-*` and
+    drilled balls are not counted (a barrel already spans every layer). A
+    ball is served when it has copper of its net (`ball_has_copper`, over
+    `tracks`/`vias` and the board's own copper) or a pour promise
+    (`report['pour_served_pads']`, #678). `drop_ids` are the nets the drop
+    pass covered (`plane_drop_net_ids`); `report['failed_balls']` holds the
+    pass's reason per ball."""
+    nc = single_pad_net_ids(footprint, pcb_data)
+    counts = Counter(p.net_name for p in footprint.pads if p.net_id)
+    cand = []
+    for p in footprint.pads:
+        if not p.net_id or p.net_id in nc or (p.drill or 0) > 0:
+            continue
+        if (p.net_name or '').lower().startswith('unconnected-'):
+            continue
+        if net_filter:
+            if matches_net_filter(p.net_name, net_filter):
+                continue
+        elif counts[p.net_name] < plane_min_pads:
+            continue
+        cand.append(p)
+    if not cand:
+        return []
+    ids = {p.net_id for p in cand}
+    t_all = [t for t in tracks if t.get('net_id') in ids]
+    v_all = [v for v in vias if v.get('net_id') in ids]
+    b_v, b_t = _board_copper(pcb_data, ids)
+    t_all += b_t
+    v_all += b_v
+    promised = (report or {}).get('pour_served_pads') or {}
+    failed = (report or {}).get('failed_balls') or {}
+    out = []
+    for p in cand:
+        key = f"{footprint.reference}.{p.pad_number}"
+        if key in promised or ball_has_copper(p, v_all, t_all, track_width):
+            continue
+        if p.net_id not in drop_ids:
+            why = (f"left out of --nets but not taken for a plane (fewer "
+                   f"than {plane_min_pads} balls here, no zone, not in "
+                   f"--plane-net-layers, not all power pins)")
+        elif key in failed:
+            why = failed[key]['reason']
+        else:
+            why = "its drop via was taken off by a later pass"
+        out.append({'ball': key, 'net': p.net_name, 'reason': why})
+    return out
+
+
+def unserved_plane_ball_lines(unserved, ref: str) -> List[str]:
+    """Console lines for `unserved_plane_balls`: a header, then one line per
+    reason naming every ball it covers. [] when there are none."""
+    if not unserved:
+        return []
+    by: Dict[str, List[str]] = {}
+    for u in unserved:
+        by.setdefault(u['reason'], []).append(f"{u['ball']} {u['net']}")
+    lines = [f"  Plane balls left with no via on {ref}: {len(unserved)} "
+             f"(the route step must reach each another way)"]
+    for why, balls in by.items():
+        lines.append(f"    {why}: {', '.join(balls)}")
+    return lines
 
 
 def main():
@@ -5900,7 +6021,9 @@ def main():
                              'plane poured later picks the ball up directly instead of the '
                              'plane step tapping through the finished ball field (#360). '
                              '"auto" (default) detects plane nets from the --nets exclusions '
-                             '(>= 6 balls, or any excluded net that already owns a zone); '
+                             '(>= 6 balls, or an excluded net that owns a zone, is in '
+                             '--plane-net-layers or has only power pins on the part); every '
+                             'plane ball left with no copper is named in plane_drop.unserved; '
                              '"off" disables. KICAD_FANOUT_PLANE_DROP=0/1 overrides both '
                              '(the recorded-manifest A/B switch).')
     parser.add_argument('--grid-step', type=float, default=defaults.GRID_STEP,

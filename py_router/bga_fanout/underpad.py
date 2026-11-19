@@ -4178,6 +4178,8 @@ def generate_underpad_escape(footprint: Footprint,
         # by routing). Recorded per ball, keyed "REF.PAD", published in the
         # drop report and noted for the .kicad_pro writeback.
         _promised: Dict[str, Dict[str, str]] = {}
+        # every ball whose drop failed, keyed "REF.PAD", with why
+        _failed_balls: Dict[str, Dict[str, str]] = {}
         _rep_nets: Dict[str, Dict[str, int]] = {}
         n_gap = n_ctr = n_exist = n_fail = n_pour = 0
         n_trk = [0]
@@ -4350,15 +4352,23 @@ def generate_underpad_escape(footprint: Footprint,
             # #581 (no_via_in_pad): the centre fallback IS a via-in-pad --
             # fail the drop instead (the ball is left for the plane tap,
             # which honors the same constraint through its via map).
-            ok = not no_via_in_pad
-            ok = ok and not (locked_smd_pads and not via_site_ok(gx, gy, cs / 2.0))
-            if ok and _via_site_conflict(gx, gy, p.net_id, _ctx,
-                                         vr=cs / 2.0, vdr=cd / 2.0) is not None:
-                ok = False
-            if not ok:
+            why = None
+            if no_via_in_pad:
+                why = "via-in-pad is off (same-net pad clearance)"
+            elif locked_smd_pads and not via_site_ok(gx, gy, cs / 2.0):
+                why = "a via in the pad would touch a locked pad"
+            else:
+                _c = _via_site_conflict(gx, gy, p.net_id, _ctx,
+                                        vr=cs / 2.0, vdr=cd / 2.0)
+                if _c is not None:
+                    why = f"a via in the pad fails: {_c}"
+            if why is not None:
                 reserved_sites.extend(_own)   # plane step may still tap here
                 n_fail += 1
                 r['failed'] += 1
+                _failed_balls[f"{p.component_ref}.{p.pad_number}"] = {
+                    'net': p.net_name,
+                    'reason': f"no free inter-ball via site, and {why}"}
                 continue
             occ.block_all(gx, gy, ckeep)
             exact_vias.append((gx, gy, cs / 2.0, cd / 2.0, p.net_id))
@@ -4375,7 +4385,8 @@ def generate_underpad_escape(footprint: Footprint,
                  'track_connects': n_trk[0],
                  'pour_tracks': n_ptrk[0], 'failed': n_fail,
                  # #678: WHICH balls were promised, not just how many.
-                 'pour_served_pads': dict(_promised)})
+                 'pour_served_pads': dict(_promised),
+                 'failed_balls': dict(_failed_balls)})
         if _promised:
             # Engine-side note (both fronts inherit it); the step boundary
             # that knows the output project persists it -- the CLI main next
