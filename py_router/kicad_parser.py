@@ -7,7 +7,11 @@ from __future__ import annotations
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}
 
+import collections
 import functools
+import hashlib
+import pickle
+import threading
 from array import array
 import os
 import re
@@ -8286,6 +8290,74 @@ def release_text_caches() -> None:
     _footprint_edge_points_by_ref_cached.cache_clear()
 
 
+# Content-keyed cache of whole-board parses. One route.py run parses its
+# input and output files again and again (batch_route, file_only_copper, every
+# _late_* sweep, the final regrade), mostly with no byte changed in between:
+# esp_prog parses 19 times for 7 distinct texts, a 10.8 MB board 48 times at
+# 2.5 s each. A hit costs a sha1 of the bytes plus one pickle.loads (0.03 s on
+# that board), and returns a FRESH object, because callers mutate PCBData
+# (art terminals, renumbered nets). The key is the path (PCBData records
+# source_path), the bytes' sha1 and the two layer arguments; the parse reads
+# nothing else. What the parse printed is recorded and said again on a hit.
+# KRT_PARSE_CACHE=0 turns it off.
+_PARSE_CACHE = collections.OrderedDict()
+_PARSE_CACHE_SIZE = 4
+
+
+def _parse_cache_key(filepath, guide_layer, keepout_layer):
+    if os.environ.get('KRT_PARSE_CACHE', '1') == '0':
+        return None
+    try:
+        with open(filepath, 'rb') as f:
+            digest = hashlib.sha1(f.read()).hexdigest()
+    except (OSError, TypeError):
+        return None
+    return (os.path.abspath(filepath), digest, guide_layer, keepout_layer)
+
+
+def clear_parse_cache() -> None:
+    """Forget every cached parse (tests that patch the parser's internals)."""
+    _PARSE_CACHE.clear()
+
+
+class _ParseOutputTee:
+    """Pass sys.stdout/sys.stderr writes through and record them, so a cache
+    hit says what the parse said.
+
+    The streams are process-wide, so only the parsing thread's writes are
+    recorded (another thread printing meanwhile -- a GUI's UI thread -- is not
+    the parse's output, and would otherwise be said again on every hit), and
+    a stream is put back only if it is still this tee's (a thread that
+    swapped it meanwhile keeps its own)."""
+
+    class _Stream:
+        def __init__(self, inner, err, said, owner):
+            self._inner, self._err, self._said = inner, err, said
+            self._owner = owner
+
+        def write(self, text):
+            if threading.get_ident() == self._owner:
+                self._said.append((self._err, text))
+            return self._inner.write(text)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def __init__(self):
+        self.said = []
+        owner = threading.get_ident()
+        self._out, self._errs = sys.stdout, sys.stderr
+        self._tee_out = self._Stream(self._out, False, self.said, owner)
+        self._tee_err = self._Stream(self._errs, True, self.said, owner)
+        sys.stdout, sys.stderr = self._tee_out, self._tee_err
+
+    def close(self):
+        if sys.stdout is self._tee_out:
+            sys.stdout = self._out
+        if sys.stderr is self._tee_err:
+            sys.stderr = self._errs
+
+
 def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
                     keepout_layer: str = "User.2") -> PCBData:
     """
@@ -8300,15 +8372,37 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         PCBData object containing all parsed data
     """
     global _PARSE_MEMO
+    key = _parse_cache_key(filepath, guide_layer, keepout_layer)
+    if key is not None:
+        hit = _PARSE_CACHE.get(key)
+        if hit is not None:
+            _PARSE_CACHE.move_to_end(key)
+            blob, said = hit
+            for err, text in said:
+                (sys.stderr if err else sys.stdout).write(text)
+            return pickle.loads(blob)
     outer = _PARSE_MEMO is None
     if outer:
         _PARSE_MEMO = {'live': {}, 'masked_from': {}, 'ends': {}, 'shapes': {}}
+    tee = _ParseOutputTee() if key is not None else None
     try:
-        return _parse_kicad_pcb(filepath, guide_layer, keepout_layer)
+        pcb = _parse_kicad_pcb(filepath, guide_layer, keepout_layer)
     finally:
+        if tee is not None:
+            tee.close()
         if outer:
             _PARSE_MEMO = None
         release_text_caches()
+    if key is not None:
+        try:
+            blob = pickle.dumps(pcb, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            blob = None
+        if blob is not None:
+            _PARSE_CACHE[key] = (blob, tuple(tee.said))
+            while len(_PARSE_CACHE) > _PARSE_CACHE_SIZE:
+                _PARSE_CACHE.popitem(last=False)
+    return pcb
 
 
 def _parse_kicad_pcb(filepath: str, guide_layer: str,

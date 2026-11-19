@@ -1,23 +1,6 @@
 [
   {
     "set": "set1",
-    "repo": "skot/bitaxe",
-    "path": "bitaxeUltra.kicad_pcb",
-    "file": "bitaxe_ultra.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/skot/bitaxe/87c33bf67c3c88d6590fcdaaee2bbce7834a777d/bitaxeUltra.kicad_pcb",
-    "github_url": "https://github.com/skot/bitaxe",
-    "version": 20221018,
-    "size_kb": 1258,
-    "layers_est": 4,
-    "footprints": 136,
-    "routable_nets": 61,
-    "packages": "mixed",
-    "short_name": "bitaxe_ultra",
-    "note": "Bitcoin ASIC miner, medium-complex",
-    "branch": "master"
-  },
-  {
-    "set": "set1",
     "repo": "wntrblm/Castor_and_Pollux",
     "path": "hardware/mainboard/mainboard.kicad_pcb",
     "file": "castor_pollux.kicad_pcb",

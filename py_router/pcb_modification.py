@@ -4417,6 +4417,206 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
 
 
+def excise_via_shorted_loops(results, pcb_data: PCBData, scope_net_ids=None,
+                             keep_input_copper: bool = False) -> Tuple[int, int]:
+    """Cut out a loop of routed copper that its own via shorts (#1978).
+
+    A track ``E`` that passes over a same-net via ``V`` mid-span -- its
+    copper overlapping the via's, its two ends both clear of it -- is joined
+    to ``V`` there, as check_connected and KiCad join it (#1969). When the
+    copper on one side of ``E`` runs on as one unbranched chain that comes
+    back into ``V``, ``E``'s piece on that side and the chain are a loop
+    with both ends on ``V``: no signal travels it, but every all-copper
+    measure (KiCad's skew and length rules) counts it. A coupled pair whose
+    inner member turned back past its own via shipped that way, the loop
+    1.8 mm of N's copper; the shipped re-match (#1622) then lengthened P to
+    balance it, and the pair read matched at 0.002 mm with its pad-to-pad
+    paths 1.79 mm apart.
+
+    The cycle prune cannot see this loop: it joins a via to segment ENDS,
+    and it removes whole segments, while ``E`` is load-bearing on its other
+    side. So the chain is removed here and ``E`` is shortened, in place, to
+    the foot of ``V``'s centre on it, inside the via's copper.
+
+    Only routed copper is changed, never immutable copper (#1261), and only
+    a pure loop: every joint of the chain is a plain two-segment vertex on
+    ``E``'s layer -- no pad, no other via, no third track ending on or
+    crossing the chain. Each excision is gated on check_net_connectivity,
+    physical and width-clamped (#322) -- no pad stranded, no component
+    added -- and undone otherwise. Nets with a zone are skipped (a pour is
+    a mesh, as in prune_redundant_cycles).
+    `keep_input_copper` is accepted for the pipeline's uniform signature:
+    input copper is never a candidate here either way.
+
+    Returns (loops_excised, segments_removed)."""
+    from collections import defaultdict
+    from check_connected import check_net_connectivity, track_reaches_pad
+    from geometry_utils import via_copper_layers
+
+    tol = COINCIDENCE_TOL
+    routed_seg_ids = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_ids.add(id(s))
+    if not routed_seg_ids:
+        return 0, 0
+    copper_layers = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    zoned = {z.net_id for z in (getattr(pcb_data, 'zones', []) or [])}
+
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if scope_net_ids is not None and s.net_id not in scope_net_ids:
+            continue
+        if s.net_id in zoned or getattr(s, 'graphic', False):
+            continue
+        segs_by_net[s.net_id].append(s)
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        if v.net_id in segs_by_net:
+            vias_by_net[v.net_id].append(v)
+
+    def movable(s):
+        return id(s) in routed_seg_ids and not _locked(s)
+
+    def worse(before, after):
+        return ((before.get('connected') and not after.get('connected'))
+                or len(after.get('disconnected_pads') or [])
+                > len(before.get('disconnected_pads') or [])
+                or (after.get('num_components') or 1) > (before.get('num_components') or 1))
+
+    def ends(s):
+        return ((s.start_x, s.start_y), (s.end_x, s.end_y))
+
+    removed_ids = set()
+    loops = 0
+    for net_id, segs in segs_by_net.items():
+        vias = [v for v in vias_by_net.get(net_id, ()) if len(v.layers or ()) >= 2]
+        if not vias:
+            continue
+        pads = pcb_data.pads_by_net.get(net_id, [])
+
+        def chain_back(x, y, layer, prev, e, via, r):
+            """The unbranched chain from (x, y) on `layer` that comes back
+            into `via`, or None."""
+            chain, seen = [], {id(e)}
+            for _ in range(256):
+                if any(endpoint_reaches_pad(x, y, prev.width / 2, (layer,), p)
+                       for p in pads):
+                    return None
+                for o in vias:
+                    if o is not via and math.hypot(o.x - x, o.y - y) <= o.size / 2 + tol:
+                        return None
+                touching, teeing = [], False
+                for o in live:
+                    if o is prev or o.layer != layer:
+                        continue
+                    if any(math.hypot(ex - x, ey - y) <= tol for ex, ey in ends(o)):
+                        touching.append(o)
+                    elif _pt_seg_dist(x, y, o.start_x, o.start_y, o.end_x, o.end_y) <= tol:
+                        teeing = True
+                if teeing or len(touching) != 1:
+                    return None
+                nxt = touching[0]
+                if id(nxt) in seen or not movable(nxt):
+                    return None
+                seen.add(id(nxt))
+                chain.append(nxt)
+                (sx, sy), (ex, ey) = ends(nxt)
+                x, y = (ex, ey) if math.hypot(sx - x, sy - y) <= tol else (sx, sy)
+                if math.hypot(x - via.x, y - via.y) <= r + max(nxt.width / 2 - 1e-6, tol):
+                    break
+                prev = nxt
+            else:
+                return None
+            # the chain's own bodies: no third track ending on or crossing
+            # them, no other via on them, no pad under them
+            inner = {id(c) for c in chain}
+            for c in chain:
+                if any(track_reaches_pad(c, p) for p in pads):
+                    return None
+                for o in vias:
+                    if o is not via and _pt_seg_dist(o.x, o.y, c.start_x, c.start_y,
+                                                     c.end_x, c.end_y) <= o.size / 2 + c.width / 2:
+                        return None
+                for o in live:
+                    if id(o) in inner or o.layer != c.layer:
+                        continue
+                    for ox, oy in ends(o):
+                        if (_pt_seg_dist(ox, oy, c.start_x, c.start_y, c.end_x, c.end_y) <= tol
+                                and not any(math.hypot(ox - cx, oy - cy) <= tol
+                                            for cx, cy in ends(c))):
+                            return None
+                    if _x_crossing(c, o) is not None:
+                        return None
+            return chain
+
+        def grade(universe):
+            # the physical model, and the width-clamped twin the other
+            # subtractive passes also gate on (#322), so the joint left
+            # where E's copper overlaps the via is not a fragile one
+            return (check_net_connectivity(net_id, universe, vias, pads),
+                    _strict_conn_graph(net_id, universe, vias, pads, [])[0])
+
+        live = list(segs)
+        changed = True
+        while changed:
+            changed = False
+            for via in vias:
+                r = via.size / 2
+                vlayers = via_copper_layers(via, copper_layers) if copper_layers \
+                    else list(via.layers)
+                for e in list(live):
+                    if e.layer not in vlayers or not movable(e):
+                        continue
+                    dx, dy = e.end_x - e.start_x, e.end_y - e.start_y
+                    length = math.hypot(dx, dy)
+                    if length <= 2 * tol:
+                        continue
+                    reach = r + max(e.width / 2 - 1e-6, tol)
+                    if any(math.hypot(px - via.x, py - via.y) <= reach for px, py in ends(e)):
+                        continue        # E ends in the via: not a pass
+                    t = ((via.x - e.start_x) * dx + (via.y - e.start_y) * dy) / length
+                    if not tol < t < length - tol:
+                        continue
+                    fx, fy = e.start_x + dx * t / length, e.start_y + dy * t / length
+                    if math.hypot(fx - via.x, fy - via.y) > reach:
+                        continue
+                    for at_start in (True, False):
+                        x, y = (e.start_x, e.start_y) if at_start else (e.end_x, e.end_y)
+                        chain = chain_back(x, y, e.layer, e, e, via, r)
+                        if not chain:
+                            continue
+                        before = grade(live)
+                        old = (e.start_x, e.start_y, e.end_x, e.end_y)
+                        if at_start:
+                            e.start_x, e.start_y = fx, fy
+                        else:
+                            e.end_x, e.end_y = fx, fy
+                        gone = {id(c) for c in chain}
+                        trial = [s for s in live if id(s) not in gone]
+                        if any(worse(b, a) for b, a in zip(before, grade(trial))):
+                            e.start_x, e.start_y, e.end_x, e.end_y = old
+                            continue
+                        live = trial
+                        removed_ids |= gone
+                        loops += 1
+                        changed = True
+                        break
+                    if changed:
+                        break
+                if changed:
+                    break
+
+    if loops:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
+        pcb_data.segments = [s for s in pcb_data.segments if id(s) not in removed_ids]
+        bump_copper_epoch(pcb_data)
+    return loops, len(removed_ids)
+
+
 def _pt_seg(px, py, x1, y1, x2, y2):
     vx, vy = x2 - x1, y2 - y1
     l2 = vx * vx + vy * vy

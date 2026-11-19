@@ -17,22 +17,6 @@
   },
   {
     "set": "set2monster",
-    "repo": "antmicro/cm4-baseboard-lvds-adapter",
-    "path": "cm4-lvds-adapter.kicad_pcb",
-    "file": "antmicro__cm4_lvds_adapter.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/antmicro/cm4-baseboard-lvds-adapter/main/cm4-lvds-adapter.kicad_pcb",
-    "github_url": "https://github.com/antmicro/cm4-baseboard-lvds-adapter/blob/main/cm4-lvds-adapter.kicad_pcb",
-    "size_kb": 8679,
-    "layers_est": 6,
-    "footprints": 155,
-    "routable_nets": 106,
-    "tier": "hard",
-    "packages": "BGA/SoC,high-speed",
-    "short_name": "cm4_lvds",
-    "note": "Antmicro CM4 baseboard LVDS display adapter, 6-layer, 155 fp, 106 nets"
-  },
-  {
-    "set": "set2monster",
     "repo": "antmicro/snapdragon-625-baseboard",
     "path": "sc606-baseboard.kicad_pcb",
     "file": "antmicro__snapdragon625_baseboard.kicad_pcb",

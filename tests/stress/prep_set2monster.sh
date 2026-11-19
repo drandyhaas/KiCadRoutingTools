@@ -13,7 +13,6 @@ PREP="$SELF/prep_set2.py"
 mkdir -p "$STRESS/boards_unrouted_set2monster" "$STRESS/boards_set2monster"
 MAP=(
   "poe_usbc_pd|antmicro__poe_usbc_pd"
-  "cm4_lvds|antmicro__cm4_lvds_adapter"
   "snapdragon625|antmicro__snapdragon625_baseboard"
   "hdmi_mipi_bridge|antmicro__hdmi_mipi_bridge"
   "oculink_10gbe|antmicro__oculink_10gbe_adapter"

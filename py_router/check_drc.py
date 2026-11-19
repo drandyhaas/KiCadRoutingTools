@@ -8564,6 +8564,14 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if pair_key in via_via_checked:
                 continue
             via_via_checked.add(pair_key)
+            # Two vias whose copper shares no layer (a F.Cu-In1.Cu micro via
+            # over an In6.Cu-B.Cu one) have no copper to clear; their holes
+            # are graded by the hole checks. A board that lists no copper
+            # layers says nothing either way, so the pair is graded.
+            _l1 = set(via_copper_layers(via1, _board_copper))
+            _l2 = set(via_copper_layers(via2, _board_copper))
+            if _l1 and _l2 and not (_l1 & _l2):
+                continue
 
             _eff = (apply_layer_rules(*_pair_rules(net1, net2, (('via', None), ('via', None))),
                                       stack=True)

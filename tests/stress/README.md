@@ -372,8 +372,16 @@ Wired into RUNBOOK step 11b; output goes into the results JSON `comparison` /
 
 ## Board sets
 
-Sets 1–26 are **15 boards** each except set25 (14); sets 27–30 are smaller or
-larger (9, 5, 12 and 22 boards). `set1monster`, `set2monster` and `set3monster`
+Sets 1–26 are **15 boards** each except set1, set6 and set25 (14) and set14 and
+set26 (13); sets 27–30 are smaller or larger (8, 18, 12 and 22 boards). Sets
+31–33 are three published autorouter benchmarks, each complete, so a run over
+one compares with the published scores: set31 is Koppar's 8-board benchmark,
+set32 the 25-board Zap! comparison set, set33 PCBWorld-Bench (109 boards).
+Corpus boards that are also benchmark boards moved into them with their
+recorded chains (one from set6, two from set14, two from set26, one each from
+set1, set27, set1monster and set2monster); each set's `fetch_setN.py`
+docstring and the `BENCHMARK.txt` in its board directories say what the
+benchmark is. `set1monster`, `set2monster` and `set3monster`
 hold boards too heavy for an ordinary set (what `validate_candidate.py` tiers
 `monster`: more than 8 copper layers or 500+ footprints), and set3monster also
 takes a board whose replay is too slow for one (set25's spartan6_4layer, ~2.7 h
@@ -381,7 +389,8 @@ of route steps). Every set `N` has its
 `manifest_setN.json`, `fetch_setN.py` and `prep_setN.sh` here; RUNBOOK →
 "Building a board set" is the recipe. The first four:
 
-- **Set 1** — the original 15 (listed in `manifest_set1.json`).
+- **Set 1** — the original 15 (listed in `manifest_set1.json`), now 14:
+  `bitaxe_ultra` moved to set32 as a benchmark board.
   `spirit_cm5` (6-layer) was dropped and replaced by `lpddr4_testbed`
   (antmicro/lpddr4-testbed, 6-layer BGA LPDDR4). Boards live in
   `boards_unrouted_set1/`; results in `results_set1/`; run-1 baseline in `results_baseline/`.
