@@ -38,7 +38,9 @@ Pad openings: every netted pad on the side whose copper (its real, possibly
 rotated rectangle) meets the artwork is cut out of it grown by OWN_MARGIN, so
 a mask-defined pad or a test point keeps nothing out and a broad opening keeps
 copper out everywhere but next to its pads. A pad that is merely near the
-artwork exempts nothing. A FILLED copper graphic (a footprint's tab, #1181)
+artwork exempts nothing, and so does the pad of a net with one pad that no
+zone carries: such a net never routes, and cutting its pad out would only let
+other nets' copper into the opening. A FILLED copper graphic (a footprint's tab, #1181)
 is cut out the same way: the opening exposes copper already there, and that
 copper keeps out every net it does not grant.
 
