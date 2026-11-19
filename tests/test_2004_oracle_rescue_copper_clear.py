@@ -24,6 +24,8 @@ spot, no routing:
      (it measured endpoint distances only, so a crossing read as clear)
   7. a round pad is measured as its circle (check_drc's pad shape), not its
      bounding square, which refused legal copper beside it
+  8. #2010: the result's vias are graded (foreign copper, hole-to-hole, the
+     outline), and both call sites pass them
 """
 import contextlib
 import io
@@ -155,11 +157,42 @@ def main():
     expect(not rescue_copper_clear(diag_seg(0.05), pcb, gnd, cfg),
            "copper 0.05 from the circle is refused")
 
+    # 8. #2010: the result's vias are graded too -- against the foreign
+    #    track, drill to drill, and the outline
+    from kicad_parser import Via
+    from dataclasses import replace as _dc_replace
+
+    def via(x, y, size=0.45, drill=0.2):
+        return Via(x=x, y=y, size=size, drill=drill, layers=['F.Cu', 'B.Cu'],
+                   net_id=gnd)
+    vgap = 0.06 + 0.45 / 2 + 0.05                   # copper 0.05 from the track
+    expect(not rescue_copper_clear([], pcb, gnd, cfg, vias=[via(cx, fy - vgap)]),
+           "#2010: a via 0.05 from a foreign track is refused")
+    vclr = 0.06 + 0.45 / 2 + 0.12
+    expect(rescue_copper_clear([], pcb, gnd, cfg, vias=[via(cx, fy - vclr)]),
+           "#2010: a via 0.12 clear of it passes")
+    fv = Via(x=cx - 0.9, y=fy - 0.8, size=0.3, drill=0.15,
+             layers=['F.Cu', 'B.Cu'], net_id=other)
+    pcb.vias.append(fv)
+    cfg_h = _dc_replace(cfg, hole_to_hole_clearance=0.25)
+    # copper clear of the foreign via (0.42 - 0.15 - 0.15 = 0.12 > 0.09) but
+    # drill edges only 0.42 - 0.075 - 0.1 = 0.245 apart, under 0.25
+    near_drill = via(fv.x + 0.42, fv.y, size=0.3, drill=0.2)
+    expect(not rescue_copper_clear([], pcb, gnd, cfg_h, vias=[near_drill]),
+           "#2010: a via drilled within hole-to-hole of another net's via is refused")
+    expect(rescue_copper_clear([], pcb, gnd, cfg, vias=[near_drill]),
+           "  (the same via passes at the default 0.20 floor: the refusal is the drill)")
+    bx0 = pcb.board_info.board_bounds[0]
+    expect(not rescue_copper_clear([], pcb, gnd, cfg,
+                                   vias=[via(bx0 - 2.0, cy)]),
+           "#2010: a via off the board is refused")
+    pcb.vias.remove(fv)
+
     # 5. both oracle paths that commit rescue copper call the gate
     src = open(os.path.join(ROOT, 'py_router', 'kicad_oracle.py'),
                encoding='utf-8').read()
-    calls = re.findall(r"rescue_copper_clear\(\s*_esc2?\.get\('new_segments'\)",
-                       src)
+    calls = re.findall(r"rescue_copper_clear\(\s*_esc2?\.get\('new_segments'\)"
+                       r"[^)]*vias=_esc2?\.get\('new_vias'\)", src)
     expect(len(calls) == 2,
            f"the weld escalation and the exact-fill strap both gate ({len(calls)} call(s))")
 

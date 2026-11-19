@@ -3963,6 +3963,82 @@ def laid_copper_edge_clearance(pcb_data, clearance: float) -> float:
     return max(declared if declared > 0 else clearance, fab_edge_floor())
 
 
+def new_copper_refusal(segs, vias, pcb_data, config) -> str:
+    """'' when every piece of not-yet-laid copper clears the board's existing
+    copper of OTHER nets, else why not -- graded with this module's own
+    primitives at `config.pair_clearance` (the clearance between two nets'
+    copper), with no tolerance: tracks against tracks on their layer, against
+    vias and pads; barrels against tracks, vias, pads and drills
+    (hole-to-hole on any net). A copper-to-hole floor (`config.hole_clearance`)
+    raises the clearance to a drill by the barrel's ring; the board's
+    .kicad_dru hole rules are graded by `hole_rule_refusal`.
+
+    For copper a generator lays as GIVEN geometry, or commits from a search
+    whose map could not see the board as it is: the diff-pair crossover
+    (#1055; a barrel on the partner's pad, a leg into a routed pair's track)
+    and the KiCad-oracle's rescue vias (#2010)."""
+    segs, vias = list(segs), list(vias)
+    if not segs and not vias:
+        return ''
+    layers = list(config.layers)
+    hc = getattr(config, 'hole_clearance', 0.0) or 0.0
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    xs, ys = [], []
+    for s in segs:
+        xs += [s.start_x, s.end_x]
+        ys += [s.start_y, s.end_y]
+    for v in vias:
+        xs.append(v.x)
+        ys.append(v.y)
+    reach = 2.0 + max([config.via_size, config.track_width, hc, h2h] + [v.size for v in vias])
+    x0, x1, y0, y1 = min(xs) - reach, max(xs) + reach, min(ys) - reach, max(ys) + reach
+
+    def near(ax, ay, bx=None, by=None):
+        bx = ax if bx is None else bx
+        by = ay if by is None else by
+        return not (max(ax, bx) < x0 or min(ax, bx) > x1 or max(ay, by) < y0 or min(ay, by) > y1)
+
+    b_segs = [t for t in pcb_data.segments if near(t.start_x, t.start_y, t.end_x, t.end_y)]
+    b_vias = [w for w in pcb_data.vias if near(w.x, w.y)]
+    b_pads = [p for fp in pcb_data.footprints.values() for p in fp.pads if near(p.global_x, p.global_y)]
+
+    def clr(a, b, layer=None):
+        return config.pair_clearance(a, b, layer) if hasattr(config, 'pair_clearance') else config.clearance
+
+    def ring(v):
+        return max(0.0, (v.size - (v.drill or 0.0)) / 2.0)
+
+    for s in segs:
+        for t in b_segs:
+            if t.net_id != s.net_id and t.layer == s.layer \
+                    and check_segment_overlap(s, t, clr(s.net_id, t.net_id, s.layer), 0.0)[0]:
+                return f'track {s.layer} grazes net {t.net_id} track'
+        for w in b_vias:
+            if w.net_id != s.net_id and check_via_segment_overlap(
+                    w, s, max(clr(s.net_id, w.net_id, s.layer), hc - ring(w)), 0.0)[0]:
+                return f'track {s.layer} grazes net {w.net_id} via'
+        for p in b_pads:
+            if p.net_id != s.net_id and check_pad_segment_overlap(
+                    p, s, clr(s.net_id, p.net_id, s.layer), layers, 0.0)[0]:
+                return f'track {s.layer} grazes pad {p.component_ref}.{p.pad_number}'
+    for v in vias:
+        for t in b_segs:
+            if t.net_id != v.net_id and check_via_segment_overlap(
+                    v, t, max(clr(v.net_id, t.net_id, t.layer), hc - ring(v)), 0.0)[0]:
+                return f'barrel grazes net {t.net_id} track on {t.layer}'
+        for w in b_vias:
+            if w.net_id != v.net_id and check_via_via_overlap(v, w, clr(v.net_id, w.net_id), 0.0)[0]:
+                return f'barrel grazes net {w.net_id} via'
+            if h2h > 0 and check_via_drill_overlap(v, w, h2h, 0.0)[0]:
+                return f'drill within hole-to-hole of net {w.net_id} via'
+        for p in b_pads:
+            if p.net_id != v.net_id and check_pad_via_overlap(
+                    p, v, max(clr(v.net_id, p.net_id), hc - ring(v)), layers, 0.0)[0]:
+                return f'barrel grazes pad {p.component_ref}.{p.pad_number}'
+    why = hole_rule_refusal(pcb_data, getattr(config, 'rules', None), segs, vias)
+    return why or ''
+
+
 class BoardEdgeGate:
     """The board's Edge.Cuts as a generator that does not read the obstacle
     map must see them (#1677): off the board or inside a cut-out is refused

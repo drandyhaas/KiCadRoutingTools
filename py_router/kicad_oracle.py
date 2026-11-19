@@ -1097,7 +1097,7 @@ def emitted_copper_clear(route_points, extra_conn, width, pcb_data, net_id,
     return True
 
 
-def rescue_copper_clear(segments, pcb_data, net_id, config):
+def rescue_copper_clear(segments, pcb_data, net_id, config, vias=()):
     """True when a rescue-ladder result's segments, each at its own width,
     clear foreign copper, the board edge, NPTH drills and keep-outs --
     `wide_route_clear`, the measurement `emitted_copper_clear` makes for the
@@ -1110,7 +1110,14 @@ def rescue_copper_clear(segments, pcb_data, net_id, config):
     could graze what the map said was clear (zynq_ad9364: a 0.0889 GND strap
     14 um inside clearance of an off-grid fanout track). Segments are graded
     per width, one call each: a None-layer point between two segments
-    separates them, so no leg is invented between them."""
+    separates them, so no leg is invented between them.
+
+    Its `vias` are graded too (#2010), each against the board as KiCad
+    grades a barrel: foreign copper on every layer it spans, drill to drill
+    on any net and the board's hole rules (check_drc.new_copper_refusal),
+    filled footprint copper (filled_graphic_refusal) and the outline
+    (BoardEdgeGate). A rescue via's clearance was judged on the same grid
+    map as its tracks."""
     from plane_region_connector import wide_route_clear
     bec = getattr(config, 'board_edge_clearance', 0.0)
     by_width = {}
@@ -1125,6 +1132,17 @@ def rescue_copper_clear(segments, pcb_data, net_id, config):
             pts.append((s.end_x, s.end_y, s.layer))
         if not wide_route_clear(pts, width, pcb_data, net_id, config,
                                 board_edge_clearance=bec):
+            return False
+    vias = list(vias or ())
+    if vias:
+        from check_drc import (new_copper_refusal, filled_graphic_refusal,
+                               BoardEdgeGate)
+        if new_copper_refusal((), vias, pcb_data, config):
+            return False
+        if filled_graphic_refusal(pcb_data, vias, config.clearance):
+            return False
+        edge = BoardEdgeGate(pcb_data, bec or 0.0)
+        if edge and any(edge.via_refused(v.x, v.y, v.size) for v in vias):
             return False
     return True
 
@@ -2936,7 +2954,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                               f"({_ko2}, #1778)")
                         _esc2 = None
                 if _esc2 and not _esc2.get('failed') and not rescue_copper_clear(
-                        _esc2.get('new_segments'), pcb_data, net_id, _esc2_cfg):
+                        _esc2.get('new_segments'), pcb_data, net_id, _esc2_cfg,
+                        vias=_esc2.get('new_vias') or ()):
                     print(f"    {net_name}: exact-fill strap REJECTED "
                           f"(copper would violate clearance, #2004)")
                     _esc2 = None
@@ -3291,7 +3310,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"on its layer -- unrelated fragment join, #648)")
                     _esc = None
                 if _esc and not _esc.get('failed') and not rescue_copper_clear(
-                        _esc.get('new_segments'), pcb_data, net_id, _esc_cfg):
+                        _esc.get('new_segments'), pcb_data, net_id, _esc_cfg,
+                        vias=_esc.get('new_vias') or ()):
                     print(f"    {net_name}: weld escalation REJECTED "
                           f"(copper would violate clearance, #2004)")
                     _esc = None
