@@ -821,7 +821,11 @@ on its array is a group of one. The step:
 3. **Checked.** Each bus's ends go to its own whole solve, under its strict
    rules, on the board as the model fanned it out. A refusal teaches the
    model (a lane held to one layer, two crossings held apart, a state
-   refused) and the model is solved again.
+   refused) and the model is solved again. A plan through a keep-out area
+   is no plan there: the check holds each such cut, which the bus's own
+   solve may break at a price, and its refusal names the end whose layer
+   cannot hold beside the area -- ends whose lane has no way off that layer
+   before the area were passed, and the lane was never laid.
 4. **The field.** The arrays are fanned out exactly as chosen and the cap
    nudge runs on them, each bus lane's way out held clear for it while it
    does. The board's DRC measures the field: a violation the fanout made is
@@ -2200,7 +2204,8 @@ single's terminal join as the router lays it; each piece's off-grid allowance;
 a pair's end connectors and crossover as exact copper; a pair's dive for its
 straight runs, its room from both ends and the three cells the pair router
 tests; every pose for the router's probe; bands sampled on the router's grid;
-a via against a pair's legs, unplated holes and every stub. A shortfall of a
+a via against a pair's legs, unplated holes and every stub, and against its
+own lane's other vias by the hole-to-hole rule. A shortfall of a
 quarter of the router's grid step or less is a near-miss, not a finding: the
 grid snap or a nudge moves a lane or a via that near its bar off it. Each
 check counts its near-misses on a `NUDGE` line of their own.
@@ -2634,6 +2639,21 @@ taken only with more routing layers than two. Every via is a through via.
   a via's room either side. A lane over is priced at a hundred vias. Without
   the gates the solve would learn such a wall a round at a time, from the
   geometry's layer cuts.
+- **Passages.** Every gap the fixed copper leaves on a layer across a
+  column holds its count of lanes at the lane pitch
+  (`whole_passages.Census`), a lane over priced as a part gate's. A lane
+  counts in the gap its reference crosses the column in, and not at a column
+  where its reference stands in its own array's box -- the bar round its
+  destination's pads a step before its berth, its source's a step past its
+  tooth: there it is arriving or leaving, not passing. Counted in the nearest
+  gap, every lane ending on a connector's row overfilled the gaps at the
+  row's two ends, and the plan bought dives to take lanes off the
+  connector's layer for their last millimetre. The census holds the board's
+  keep-out areas too -- the rule areas with tracks not allowed and the mask
+  artwork, as the router stamps them -- each a piece on its layers: the box
+  round a compact area, a sparser one in slabs a lane pitch deep. So the
+  solve's rows, the layer walls and the geometry in board xy all go round
+  them.
 - **Passive regions** (`whole_solve`'s `REGION_W`, 2 vias, and
   `REGION_REACH`, 3 lane pitches). Parts whose pads stand on some
   routing layers only -- decoupling caps, an RF network's 0402s -- within a

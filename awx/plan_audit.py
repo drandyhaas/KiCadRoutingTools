@@ -702,6 +702,17 @@ def check_dives(ctx, corridors, show_all=False):
                     if short(vv[0], vv[1]):
                         hits.append(f'via {vv[0]:.3f}/{vv[1]:.3f} ({vv[2]})')
                         fail['via'] += 1
+                    # ...and its OWN lane's other via sites, by the hole-to-hole rule: one net's copper keeps no
+                    # clearance from itself, two drills keep theirs whatever their nets. A lane come up to its berth
+                    # by a via at its stub's end, in a row of such vias too tight to stand side by side, had that
+                    # via slid back along it to 0.18 mm from the via it had dived at: nothing measured the two, the
+                    # plan was laid as it stood, and the net was put back as it came for the violation
+                    ov = min(((math.hypot(px - x, py - y), cfg.via_drill + h2h + g2 * (vo + boff(nm, px, py)))
+                              for s2 in sites[nm] if s2 != s for (px, py) in barrels[nm][s2]),
+                             key=lambda r: r[0] - r[1], default=(9, 0))
+                    if short(ov[0], ov[1]):
+                        hits.append(f'via {ov[0]:.3f}/{ov[1]:.3f} (its own)')
+                        fail['via'] += 1
                 if nm in pairs and s not in exact_b[nm] and (nm, s) not in xsite:
                     # ...and the three CELLS the pair router tests for the dive, on the pair's map: the centre, and
                     # pairs.pose_via_cells grid steps either way along its arriving heading's integer perpendicular.

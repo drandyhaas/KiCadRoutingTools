@@ -1404,6 +1404,14 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
             # the same crossing each, and the loop stopped NOT CONVERGING with the lane open)
             (firm_broken if str(k_).startswith('chan keepout') or cut_ in CHAN_FIRM else soft_broken)[
                 bkey_] = br_     # (k_ a front's end, or an island's name)
+            if check and str(k_).startswith('chan keepout'):
+                # (A CHECK asks whether these ends have a plan the router can lay, with no objective: a keep-out's
+                # cut, breakable at a price in the solve, was free to break there, and ends whose lane has no way
+                # off the area's layer before it -- a surface tooth, another part's pads between it and the area, no
+                # place for a via among them -- read "a plan". The bus's own solve then broke that cut in its first
+                # plan and the lane was never laid. Held here, by the lane's own rule: ends with no plan clear of
+                # the area are refused, and the core names the end whose layer cannot hold)
+                m.Add(br_ == 0).OnlyEnforceIf(kept(n_, fam='keepout'))
             continue
         par = m.NewBoolVar('')
         m.AddBoolXOr(bef + [par.Not()])                        # par: an odd number of changes before the span
@@ -1599,6 +1607,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 lits_[L_] = on_
             return lits_[L_]
         seen_p = set()
+        own_arr_ = {n: {'src ' + str(Fr.src), 'dest ' + str(Fr.dest_of[n])} for n in M}     # (the census's labels)
         for fk_, sp_, ring_ in _wp.frames(Fr):
             s_ = 0.0
             while s_ <= sp_.L:
@@ -1612,8 +1621,18 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                         by_ = collections.defaultdict(list)
                         for n, o_ in offs_.items():
                             j_ = _wp.Census.run_of(runs_, o_)
-                            if j_ is not None:
-                                by_[j_].append(n)
+                            if j_ is None:
+                                continue
+                            # (a lane whose reference stands, at this column, in its OWN array's box -- the bar round
+                            # its destination's pads a step before its berth, its source's a step past its tooth --
+                            # is arriving or leaving there, not passing: read into the nearest gap beside the array,
+                            # every lane ending on a row part overfilled the gaps at its two ends, 24 lanes over on
+                            # one layer a column before a connector, each priced as a part gate's; the plan paid a
+                            # dive to take a lane off that layer for its last 0.9 mm and back up at its own pad)
+                            if not (runs_[j_][0] <= o_ <= runs_[j_][1]) and \
+                                    (runs_[j_][3] if o_ > runs_[j_][1] else runs_[j_][2]) in own_arr_[n]:
+                                continue
+                            by_[j_].append(n)
                         for j_, ls_ in by_.items():
                             room_ = QW_(CEN.room(runs_[j_]))
                             if sum(widp_[n] for n in ls_) <= room_:

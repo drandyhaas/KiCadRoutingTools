@@ -84,6 +84,31 @@ class Census:
         for (lab_, ls_), b_ in sorted(isl.items(), key=lambda kv: (kv[0][0], sorted(kv[0][1]))):
             obs.append(tuple(b_) + (ls_, lab_))
         self.islands = isl
+        # ...and the board's KEEP-OUT areas (plan_audit.keepout_areas: the rule areas with tracks not allowed and the
+        # mask artwork, as the router stamps them): no copper, but no lane's way on their layers either -- each a piece
+        # on those layers, named as the audit names it: the box round an area that fills more than half of it (a
+        # logo's blob, a rounded square: straight sides for the lanes read out of it to stand along), a sparser shape
+        # in slabs a lane pitch deep. Unknown to the census, the strip between an array's face and an area a
+        # millimetre in front of it read as open board: the geometry laid lanes out through the area, the audit found
+        # one, the loop cut that lane off the layer there, the next round's layout sent the lane beside it through,
+        # and the loop ended not converging
+        import plan_audit as _pa
+        from shapely.geometry import Polygon, box as _sbox
+        for i_, (P_, H_, la_, _bb) in enumerate(_pa.keepout_areas(ctx.pcb, self.LAYN)):
+            ls_ = frozenset(LI[L_] for L_ in la_ if L_ in LI)
+            g_ = Polygon(P_, [h_ for h_ in H_]).buffer(0)
+            if not ls_ or g_.is_empty:
+                continue
+            gx0, gy0, gx1, gy1 = g_.bounds
+            if 2 * g_.area > (gx1 - gx0) * (gy1 - gy0):
+                obs.append((gx0, gy0, gx1, gy1, ls_, f'keepout K{i_}'))
+                continue
+            n_ = max(1, int(math.ceil((gy1 - gy0) / self.PMIN)))
+            for j_ in range(n_):
+                sl_ = g_.intersection(_sbox(gx0, gy0 + (gy1 - gy0) * j_ / n_, gx1, gy0 + (gy1 - gy0) * (j_ + 1) / n_))
+                for part in getattr(sl_, 'geoms', [sl_]):
+                    if not part.is_empty and part.area > 0:
+                        obs.append(tuple(part.bounds) + (ls_, f'keepout K{i_}'))
         # (what a box covers is left out: a via inside one that stands on EVERY layer, a track inside one on its own --
         # a group's part open on a layer leaves the vias and tracks under it there in the way)
         inbox = lambda x, y, bs: any(B_[0] <= x <= B_[2] and B_[1] <= y <= B_[3] for B_ in bs)   # noqa: E731
