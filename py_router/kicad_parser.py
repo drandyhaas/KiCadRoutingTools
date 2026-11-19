@@ -11,6 +11,7 @@ import collections
 import functools
 import hashlib
 import pickle
+import threading
 from array import array
 import os
 import re
@@ -8169,14 +8170,22 @@ def clear_parse_cache() -> None:
 
 class _ParseOutputTee:
     """Pass sys.stdout/sys.stderr writes through and record them, so a cache
-    hit says what the parse said."""
+    hit says what the parse said.
+
+    The streams are process-wide, so only the parsing thread's writes are
+    recorded (another thread printing meanwhile -- a GUI's UI thread -- is not
+    the parse's output, and would otherwise be said again on every hit), and
+    a stream is put back only if it is still this tee's (a thread that
+    swapped it meanwhile keeps its own)."""
 
     class _Stream:
-        def __init__(self, inner, err, said):
+        def __init__(self, inner, err, said, owner):
             self._inner, self._err, self._said = inner, err, said
+            self._owner = owner
 
         def write(self, text):
-            self._said.append((self._err, text))
+            if threading.get_ident() == self._owner:
+                self._said.append((self._err, text))
             return self._inner.write(text)
 
         def __getattr__(self, name):
@@ -8184,12 +8193,17 @@ class _ParseOutputTee:
 
     def __init__(self):
         self.said = []
+        owner = threading.get_ident()
         self._out, self._errs = sys.stdout, sys.stderr
-        sys.stdout = self._Stream(self._out, False, self.said)
-        sys.stderr = self._Stream(self._errs, True, self.said)
+        self._tee_out = self._Stream(self._out, False, self.said, owner)
+        self._tee_err = self._Stream(self._errs, True, self.said, owner)
+        sys.stdout, sys.stderr = self._tee_out, self._tee_err
 
     def close(self):
-        sys.stdout, sys.stderr = self._out, self._errs
+        if sys.stdout is self._tee_out:
+            sys.stdout = self._out
+        if sys.stderr is self._tee_err:
+            sys.stderr = self._errs
 
 
 def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",

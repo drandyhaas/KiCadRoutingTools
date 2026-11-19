@@ -105,6 +105,49 @@ def test_hit_repeats_what_the_parse_printed():
         assert err1.startswith('WARNING: err\n')
 
 
+def test_other_threads_output_is_not_replayed():
+    """Another thread printing while the parse runs is not the parse's
+    output: a hit must not say it again."""
+    import threading
+    real = kicad_parser._parse_kicad_pcb
+
+    def busy(path, guide_layer, keepout_layer):
+        t = threading.Thread(target=lambda: print('OTHER THREAD'))
+        t.start()
+        t.join()
+        print('NOTE: parse')
+        return real(path, guide_layer, keepout_layer)
+    with _board() as board:
+        kicad_parser._parse_kicad_pcb = busy
+        try:
+            _, out1, _ = _quiet(kicad_parser.parse_kicad_pcb, board)
+            _, out2, _ = _quiet(kicad_parser.parse_kicad_pcb, board)
+        finally:
+            kicad_parser._parse_kicad_pcb = real
+        assert 'OTHER THREAD' in out1 and 'NOTE: parse' in out1
+        assert out2 == 'NOTE: parse\n', repr(out2)
+
+
+def test_stream_swapped_during_the_parse_is_kept():
+    """A stream something else installed while the parse ran stays
+    installed: the tee puts back only its own."""
+    real = kicad_parser._parse_kicad_pcb
+    mine = io.StringIO()
+
+    def swapping(path, guide_layer, keepout_layer):
+        sys.stdout = mine
+        return real(path, guide_layer, keepout_layer)
+    with _board() as board:
+        kicad_parser._parse_kicad_pcb = swapping
+        before = sys.stdout
+        try:
+            kicad_parser.parse_kicad_pcb(board)
+            assert sys.stdout is mine
+        finally:
+            sys.stdout = before
+            kicad_parser._parse_kicad_pcb = real
+
+
 def test_off_switch():
     with _board() as board:
         os.environ['KRT_PARSE_CACHE'] = '0'
@@ -120,6 +163,8 @@ TESTS = [
     test_changed_file_reparses,
     test_layer_arguments_are_part_of_the_key,
     test_hit_repeats_what_the_parse_printed,
+    test_other_threads_output_is_not_replayed,
+    test_stream_swapped_during_the_parse_is_kept,
     test_off_switch,
 ]
 
