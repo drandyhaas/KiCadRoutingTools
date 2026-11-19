@@ -34,7 +34,7 @@ from routing_context import (
     record_single_ended_success, record_diff_pair_success, record_pair_paths,
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
-from obstacle_cache import update_net_obstacles_after_routing, refresh_net_obstacles
+from obstacle_cache import update_net_obstacles_after_routing, refresh_net_obstacles, committed_net_ids
 from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
                                record_pair_diag, blocker_names)
 from terminal_colors import RED, GREEN, RESET
@@ -1121,7 +1121,8 @@ def run_reroute_loop(
                                 add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
                                 refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,  # #806
                                                       pcb_data, config,
-                                                      (ripped_pair.p_net_id, ripped_pair.n_net_id))
+                                                      committed_net_ids(retry_result,
+                                                                        (ripped_pair.p_net_id, ripped_pair.n_net_id)))
                                 from plane_fragility import fragility_on_copper_change  # #466
                                 fragility_on_copper_change(config, pcb_data,
                                                            retry_result.get('new_segments'),
@@ -1241,7 +1242,8 @@ def run_reroute_loop(
                             add_route_to_pcb_data(pcb_data, swap_result, debug_lines=config.debug_lines)
                             refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,  # #806
                                                   pcb_data, config,
-                                                  (ripped_pair.p_net_id, ripped_pair.n_net_id))
+                                                  committed_net_ids(swap_result,
+                                                                    (ripped_pair.p_net_id, ripped_pair.n_net_id)))
                             from plane_fragility import fragility_on_copper_change  # #466
                             fragility_on_copper_change(config, pcb_data,
                                                        swap_result.get('new_segments'),
