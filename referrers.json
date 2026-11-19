@@ -1870,5 +1870,57 @@
    "referrer": "t.co",
    "uniques": 22
   }
+ ],
+ "2026-11-19": [
+  {
+   "count": 945,
+   "referrer": "aocr.org",
+   "uniques": 939
+  },
+  {
+   "count": 527,
+   "referrer": "Google",
+   "uniques": 378
+  },
+  {
+   "count": 299,
+   "referrer": "github.com",
+   "uniques": 176
+  },
+  {
+   "count": 273,
+   "referrer": "linkedin.com",
+   "uniques": 142
+  },
+  {
+   "count": 162,
+   "referrer": "forum.kicad.info",
+   "uniques": 120
+  },
+  {
+   "count": 86,
+   "referrer": "l.facebook.com",
+   "uniques": 21
+  },
+  {
+   "count": 44,
+   "referrer": "com.linkedin.android",
+   "uniques": 28
+  },
+  {
+   "count": 41,
+   "referrer": "DuckDuckGo",
+   "uniques": 22
+  },
+  {
+   "count": 40,
+   "referrer": "Bing",
+   "uniques": 32
+  },
+  {
+   "count": 25,
+   "referrer": "t.co",
+   "uniques": 22
+  }
  ]
 }

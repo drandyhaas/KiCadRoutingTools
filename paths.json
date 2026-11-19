@@ -2230,5 +2230,67 @@
    "title": "/releases/tag/v0.23.8",
    "uniques": 30
   }
+ ],
+ "2026-11-19": [
+  {
+   "count": 2204,
+   "path": "/drandyhaas/KiCadRoutingTools",
+   "title": "Overview",
+   "uniques": 1227
+  },
+  {
+   "count": 705,
+   "path": "/drandyhaas/KiCadRoutingTools/issues",
+   "title": "/issues",
+   "uniques": 71
+  },
+  {
+   "count": 350,
+   "path": "/drandyhaas/KiCadRoutingTools/discussions/1364",
+   "title": "/discussions/1364",
+   "uniques": 201
+  },
+  {
+   "count": 310,
+   "path": "/drandyhaas/KiCadRoutingTools/pulls",
+   "title": "/pulls",
+   "uniques": 30
+  },
+  {
+   "count": 125,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_all.png",
+   "title": "/blob/main/docs/routed_all.png",
+   "uniques": 104
+  },
+  {
+   "count": 102,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_kit.png",
+   "title": "/blob/main/docs/routed_kit.png",
+   "uniques": 87
+  },
+  {
+   "count": 98,
+   "path": "/drandyhaas/KiCadRoutingTools/releases",
+   "title": "/releases",
+   "uniques": 68
+  },
+  {
+   "count": 84,
+   "path": "/drandyhaas/KiCadRoutingTools/tree/main",
+   "title": "/tree/main",
+   "uniques": 53
+  },
+  {
+   "count": 60,
+   "path": "/drandyhaas/kicadroutingtools",
+   "title": "Overview",
+   "uniques": 25
+  },
+  {
+   "count": 49,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/README.md",
+   "title": "/blob/main/README.md",
+   "uniques": 25
+  }
  ]
 }
