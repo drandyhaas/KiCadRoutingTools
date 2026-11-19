@@ -69,6 +69,19 @@ def _pair_config(pcb_data, base, net_clearances, routed_net_ids=None):
     return cfg, install_pair_rule_channels(cfg, pcb_data, routed_net_ids)
 
 
+def _room_verdicts(pcb_data, footprint, base, routed_net_ids):
+    """The rule area holding the part's ball field (`area_view.part_view`),
+    as `class_violations` takes it: (the view, the pair verdicts inside the
+    area, the run clearance there), or None when no such area is read."""
+    from bga_fanout.area_view import part_view
+    view = part_view(pcb_data, footprint)
+    if view is None:
+        return None
+    cfg, rules = _pair_config(pcb_data, base, {}, routed_net_ids)
+    view.apply(cfg, base)
+    return view, rules, cfg.clearance
+
+
 def laid_floor(pcb_data, clearance, clearance_floor=0.0):
     """#1567: the lowest clearance an escape run at `clearance` may lay copper
     at -- the fab-floor rescues' tightest rung (`_underpad_shrink_rescue`,
@@ -117,7 +130,35 @@ def rules_bind(pcb_data, footprint, base):
         return False
     nets = _part_nets(footprint)
     _cfg, rules = _pair_config(pcb_data, base, {}, nets)
-    return rules.live and bool(rules.obstacle_floors(nets, list(pcb_data.nets)))
+    if not rules.live:
+        return False
+    if rules.obstacle_floors(nets, list(pcb_data.nets)):
+        return True
+    return _layered_rule_binds(rules, nets, list(pcb_data.nets))
+
+
+def _layered_rule_binds(rules, routed_net_ids, net_ids) -> bool:
+    """Does a scoped rule with a `(layer ...)` clause (#1897) bind a routed
+    net's copper against a net of `net_ids` on a layer it names? Such a rule
+    binds nothing asked without a layer, so `obstacle_floors` cannot see it.
+    One question per pair of rule signatures."""
+    sc = rules.cfg.scoped_clearance
+    if sc is None or not sc.sc.layered_layers:
+        return False
+    s = sc.sc
+    own = {s.net_signature(n): n for n in routed_net_ids}
+    other = {s.net_signature(n): n for n in net_ids if n}
+    for a in own.values():
+        for b in other.values():
+            if a == b:
+                continue
+            for layer in s.layered_layers:
+                for ta in ('track', 'via'):
+                    for tb in ('track', 'via', 'pad'):
+                        if s.layer_pair_value(a, ta, b, tb, None, None, layer,
+                                              stamp=True) is not None:
+                            return True
+    return False
 
 
 def rule_class_map(pcb_data, base, net_clearances, routed_net_ids, rules=None):
@@ -174,7 +215,7 @@ def _bbox(kind, o):
 
 
 def class_violations(pcb_data, tracks, vias, base, net_clearances,
-                     partners=(), fixed=(0, 0), cfg=None, rules=None):
+                     partners=(), fixed=(0, 0), cfg=None, rules=None, room=None):
     """The pairs this call's copper (`tracks`, `vias`: the engines' dicts)
     makes below KiCad's class clearance.
 
@@ -191,6 +232,12 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
     caller's --diff-pair-gap and not graded here. `fixed` = (n_tracks,
     n_vias): the leading items already kept -- graded as obstacles, never
     reported against each other.
+
+    `room` (`_room_verdicts`): (the rule area holding the ball field, the
+    verdicts inside it, the run clearance there). A pair either item of which
+    meets the area is priced at the room's view -- its rule replaces the
+    classes and the rules before it -- and a pair wholly outside it at
+    `rules`, as KiCad's last matching rule reads them.
 
     Returns [(a, b, need, low)] where a is ('t', i) or ('v', i) into the
     lists, b is the same for this call's copper or ('board', None) for copper
@@ -219,7 +266,8 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
         return []
     board_cu = list(pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu'])
     reach = max([net_clearances[n] for n in hot | low]
-                + ([rules.max_value(base)] if ruled else [])) + 0.05
+                + ([rules.max_value(base)] if ruled else [])
+                + ([room[1].max_value(room[2])] if room else [])) + 0.05
 
     new = ([('t', i, 'seg', _seg_obj(t)) for i, t in enumerate(tracks)]
            + [('v', i, 'via', _via_obj(v)) for i, v in enumerate(vias)])
@@ -263,12 +311,30 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
         tag, i = ref
         return (tag == 't' and i < fixed[0]) or (tag == 'v' and i < fixed[1])
 
-    def verdict(na, nb, at, layer=None, kind='layer', types=None):
+    held = {}
+
+    def in_room(k):
+        """Does item `k`'s copper meet the room's area?"""
+        got = held.get(k)
+        if got is None:
+            _ref, kind, o, _bb, _n = items[k]
+            got = held[k] = room[0].holds(kind, o)
+        return got
+
+    def verdict(na, nb, at, layer=None, kind='layer', types=None, pair=None):
         """(need, low) for a graded pair, else (None, False). A pair above
         `base`, and (#1565) any pair a scoped or track rule binds: a rescue
         rung may have laid it below `base`; both priced from `base`. Else
         (#1567) a pair of a `low` class with copper laid at `at` < `base`,
-        priced from `at` and graded when that value stands above it."""
+        priced from `at` and graded when that value stands above it. A pair
+        in the room (`pair`: the two item indices) is priced at its view."""
+        if room and pair is not None and (in_room(pair[0]) or in_room(pair[1])):
+            r_in, b_in = room[1], room[2]
+            need = r_in(na, nb, layer, base=b_in, kind=kind, types=types)
+            if need > base + 1e-9 or (_ruled(r_in) and r_in.binds(
+                    na, nb, layer, kind=kind, types=types)):
+                return need, False
+            return None, False
         need = rules(na, nb, layer, base=base, kind=kind, types=types)
         if need > base + 1e-9 or (ruled and rules.binds(
                 na, nb, layer, kind=kind, types=types)):
@@ -308,7 +374,7 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
             if kind_a == 'seg' and kind_b == 'seg':
                 if oa.layer != ob.layer:
                     continue
-                need, is_low = verdict(na, nb, at, oa.layer, kind='track')
+                need, is_low = verdict(na, nb, at, oa.layer, kind='track', pair=(a, b))
                 if need is not None:
                     hit = check_segment_overlap(oa, ob, need, _MARGIN)[0]
             elif {kind_a, kind_b} == {'seg', 'via'}:
@@ -317,21 +383,21 @@ def class_violations(pcb_data, tracks, vias, base, net_clearances,
                     continue
                 _t = (('track' if kind_a == 'seg' else 'via',),
                       ('track' if kind_b == 'seg' else 'via',))
-                need, is_low = verdict(na, nb, at, sv.layer, types=_t)
+                need, is_low = verdict(na, nb, at, sv.layer, types=_t, pair=(a, b))
                 if need is not None:
                     hit = check_via_segment_overlap(vv, sv, need, _MARGIN)[0]
             elif kind_a == 'via' and kind_b == 'via':
-                need, is_low = verdict(na, nb, at, kind='stack')
+                need, is_low = verdict(na, nb, at, kind='stack', pair=(a, b))
                 if need is not None:
                     hit = check_via_via_overlap(oa, ob, need, _MARGIN)[0]
             elif kind_b == 'pad':
                 _pt = (('pad', getattr(ob, 'pad_type', None) or 'smd'),)
                 if kind_a == 'seg':
-                    need, is_low = verdict(na, nb, at, oa.layer, types=(('track',), _pt))
+                    need, is_low = verdict(na, nb, at, oa.layer, types=(('track',), _pt), pair=(a, b))
                     if need is not None:
                         hit = check_pad_segment_overlap(ob, oa, need, board_cu, _MARGIN)[0]
                 else:
-                    need, is_low = verdict(na, nb, at, kind='stack', types=(('via',), _pt))
+                    need, is_low = verdict(na, nb, at, kind='stack', types=(('via',), _pt), pair=(a, b))
                     if need is not None:
                         hit = check_pad_via_overlap(ob, oa, need, board_cu, _MARGIN)[0]
             if hit:
@@ -440,6 +506,7 @@ def class_reescape(core, args, result):
     base = float(args['clearance'])
     nc = {int(n): float(c) for n, c in (args.get('net_clearances') or {}).items()}
     cfg, rules = _pair_config(pcb, base, nc, _part_nets(fp))
+    room = _room_verdicts(pcb, fp, base, _part_nets(fp))
     # #1565: the scoped and track rules. Balls alike to every rule
     # (rules.group_key) re-escape together, at the value a rule sets between
     # two of their nets (`_rule_floor`); a rule between groups is held on the
@@ -504,7 +571,7 @@ def class_reescape(core, args, result):
     tw = args['track_width']
     lo = min([float(d.get(LAID, base)) for d in tracks + vias], default=base)
     viol = class_violations(pcb, tracks, vias, base, nc, partners, cfg=cfg,
-                            rules=rules)
+                            rules=rules, room=room)
     tracks, vias, balls = chain_split(tracks, vias, viol)
     # ...and a ball of a wider class the escape left bare: the scalar engine
     # could not price its own class, so it is escaped at it too.
@@ -568,7 +635,7 @@ def class_reescape(core, args, result):
         n0 = (len(tracks), len(vias))
         tr_all, vi_all = tracks + list(t2), vias + list(v2)
         viol2 = class_violations(pcb, tr_all, vi_all, base, nc, partners,
-                                 fixed=n0, cfg=cfg, rules=rules)
+                                 fixed=n0, cfg=cfg, rules=rules, room=room)
         n_short += len(viol2)
         tracks, vias, _ = chain_split(tr_all, vi_all, viol2, keep_from=n0)
     left = [p for p in balls if not ball_has_copper(p, vias, tracks, tw)]
