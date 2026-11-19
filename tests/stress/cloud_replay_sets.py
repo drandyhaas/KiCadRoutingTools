@@ -58,6 +58,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -744,6 +745,9 @@ def stage_run(args, sets, stress, plan):
         # that one-line chain, so a later regrade reads what actually ran.
         spec["autoroute"] = True
         spec["note"] = "cloud autoroute: autoroute.py on each recorded input"
+        if args.autoroute_args:
+            spec["autoroute_args"] = shlex.split(args.autoroute_args)
+            spec["note"] += f" ({args.autoroute_args})"
     if spec.get("env") or spec.get("defaults") or spec.get("manifest_sed"):
         spec["note"] = (f"cloud replay; env={spec.get('env')} defaults={spec.get('defaults')}"
                         + (f" strip={args.strip_flag}" if spec.get("manifest_sed") else ""))
@@ -1212,6 +1216,10 @@ def main():
                          "recorded input instead of replaying the recorded chain, graded "
                          "the same way. Its chains differ from every replay arm, so "
                          "compare it with pair_arms.py --any-final, and pass --no-baseline.")
+    ap.add_argument("--autoroute-args", default="",
+                    help="with --autoroute: autoroute.py's own options for every board, "
+                         "one quoted string (e.g. \"--board-rules --keep-placement "
+                         "--write-fill\"). Name the arm apart with --label.")
     ap.add_argument("--jobs", type=int, default=6,
                     help="sets re-graded in parallel during the baseline stage (default 6)")
     ap.add_argument("--workdir", default="", help="scratch for the generated arms file")
