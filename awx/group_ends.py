@@ -294,6 +294,35 @@ def stretch_reach(buses, stretch, costly=()):
     return {names[j] for j in out}
 
 
+class StateRead:
+    """a state of model `m` -- a value per variable, a solver's own answer on it -- read as a solver's answer is:
+    Value(a variable, a literal or a linear expression), ObjectiveValue(), StatusName()"""
+
+    def __init__(self, m, vals):
+        ob = m.Proto().objective
+        self.vals = vals
+        self.objective = float(sum(c * (vals[v] if v >= 0 else 1 - vals[-v - 1]) for v, c in zip(ob.vars, ob.coeffs))
+                               + ob.offset) * (ob.scaling_factor or 1.0)
+
+    def Value(self, e):
+        if isinstance(e, int):
+            return e
+        ix = getattr(e, 'Index', None)
+        if ix is not None:
+            i = ix()
+            return self.vals[i] if i >= 0 else 1 - self.vals[-i - 1]
+        from ortools.sat.python import cp_model_helper
+        f = cp_model_helper.FlatIntExpr(e)
+        return f.offset + sum(c * self.vals[v.index] for v, c in zip(f.vars, f.coeffs))
+
+    def ObjectiveValue(self):
+        return self.objective
+
+    @staticmethod
+    def StatusName(status):
+        return status.name
+
+
 def tier_search(m, meta, log, seed=1, hint=None, pool=None):
     """THE SEARCH ON TIERED MENUS of model `m`, its objective set. `meta`: 'lanes' [{'x': [the option
     variables of each end], 'tier': [their tiers], 'at': [the places of its balls at each end]}], 'others' [{'vars',
@@ -1386,9 +1415,13 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, feedback=None, bare_i
                hash(tuple((v.x, v.y, v.net_id) for v in pcb.vias)),
                hash(tuple((p.global_x, p.global_y, p.net_id) for f in pcb.footprints.values() for p in f.pads)))
         if cap.get('_fronts_of') != of_:
-            cap['_fronts_of'], cap['_fronts'] = of_, {}
+            cap['_fronts_of'], cap['_fronts'], cap['_ends_memo'] = of_, {}, {}
         pcb.__dict__['_exit_front'] = cap['_fronts']
         st['pcb'] = pcb
+        # (...and, held the same way, what the ends model works out of an end's moves alone -- which of them cannot be
+        # laid together, which ways down of the plane balls each takes: whole_ends' `ends_memo`, read again only while
+        # that end's moves are the very ones. A row part's berths are: its own run's menu at every building)
+        st['ends_memo'] = cap.setdefault('_ends_memo', {})
         for k_, A in arr.items():
             if A is None:
                 continue
@@ -2492,8 +2525,11 @@ def repair_holds(mg, buses, fresh, prev_x, held_idx):
     named -- held on the ends its last state had (`held_idx`), on model `mg` (every rule's gate set). The held lanes
     that CANNOT stand with what the refusal taught are let go too: asked with each held end an assumption, a "no
     state" names the ones in its way -- held as rules, the repair of a refusal that named one lane had no state in a
-    second, three checks in four. Returns (the lanes left free, {a held end's variable: its (bus, lane)}, the lanes
-    let go, {bus: {lane: why it is free}}, the last answer's solver, its status)"""
+    second, three checks in four. ASKED FIRST WITH THE HELD ENDS SET, not assumed: a state there is the answer the
+    assumptions give -- the same ends held, none let go -- and the solver reads a model with those ends set down to
+    the lanes left free, where under assumptions it searches the whole of it; the assumptions are asked only where
+    that has no state, for the names. Returns (the lanes left free, {a held end's variable: its (bus, lane)}, the
+    lanes let go, {bus: {lane: why it is free}}, the last answer's solver, its status)"""
     from ortools.sat.python import cp_model
     import cp_seed
     n_free, hold_, info = 0, {}, {}
@@ -2517,6 +2553,19 @@ def repair_holds(mg, buses, fresh, prev_x, held_idx):
                     hold_[b.J.xs[k_][l_][i].Index()] = (b.name, l_)
     n_let, sf, st = 0, None, cp_model.UNKNOWN
     for _t in range(200):           # (each pass lets at least one lane go: it ends)
+        mq = mg.Clone()
+        mq.ClearObjective()
+        pq_ = mq.Proto()
+        for i_ in sorted(hold_):
+            d_ = pq_.variables[i_].domain
+            d_.clear()
+            d_.extend([1, 1])
+        sf = cp_seed.solver()
+        sf.parameters.num_workers = 1
+        sf.parameters.max_deterministic_time = 20.0
+        st = sf.Solve(mq)
+        if st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            break
         mf = mg.Clone()
         mf.ClearObjective()
         mf.AddAssumptions([mf.GetBoolVarFromProtoIndex(i_) for i_ in sorted(hold_)])
@@ -2895,10 +2944,12 @@ def main():
             b_.J = None
         gc.collect()
 
-    def narrow(keys, keep=None):
+    def narrow(keys, keep=None, rules=True):
         """bus balls `keys` {(array, ball)} back on their first TIER_MENU tiers -- and each on the move `keep` names
-        ({key: its signature}: the one its lane took)"""
-        for ref in sorted({r_ for r_, _k in keys}):
+        ({key: its signature}: the one its lane took). `rules` False: the arrays' rules' data NOT made again here --
+        the arrays named are returned, for a caller that changes their menus once more before anything reads it"""
+        refs = sorted({r_ for r_, _k in keys})
+        for ref in refs:
             A_ = arrays[ref]
             ks = sorted(k for r_, k in keys if r_ == ref)
             for k in ks:
@@ -2909,8 +2960,10 @@ def main():
                 A_.bm.menu[k] = [o_ for kd_, o_, _pc in A_.bm.opts[k] if kd_ == 'escape']
                 mver[(ref, k)] += 1
                 narrowed.add((ref, k))
-            array_rules(bpcb, A_)
+            if rules:
+                array_rules(bpcb, A_)
             retier(ref, ks)
+        return set() if rules else set(refs)
     wide = set(every) if '--full' in flags else {(A.ref, k) for A in arrays.values() for k in A.bm.items
                                                  if not A.offer[k]}
     if wide:
@@ -4460,18 +4513,10 @@ def main():
             log(f'  the search: {line_}')
             if true_more is not None:
                 more_last = true_more(vals_) or 0
-            # (the state as a solver's answer, every variable held at it)
-            mh = m.Clone()
-            for i_, v_ in enumerate(vals_):
-                d_ = mh.Proto().variables[i_].domain
-                d_.clear()
-                d_.extend([v_, v_])
-            sv = cp_seed.solver()
-            sv.parameters.num_workers = 1
-            r, quick = sv.Solve(mh), True
-            m.ClearHints()
-            for i_, v_ in enumerate(vals_):
-                m.AddHint(m.GetIntVarFromProtoIndex(i_), v_)
+            # (the state as a solver's answer: read, not solved for -- it is a solver's own answer on this model, every
+            # variable's value. Held in a copy of the model and solved once more to be read, and hinted back into a
+            # model that is let go before any solve reads it, each stretch paid a second for what it had)
+            sv, r, quick = StateRead(m, vals_), cp_model.OPTIMAL, True
             searched.update((b.name, b.name in lined) for b in buses)
         else:
             # ---- THE START, as a bus's own ends' search starts (whole_ends.nearest_start): the state NEAREST the ends wanted
@@ -4828,6 +4873,7 @@ def main():
             return n_, sv.ObjectiveValue() - W_TOP * n_ + more_last
         if chk_try == 0 and tier_of and (not repaired or at_point == '--at-start'):
             fresh = {}
+            stale_ = set()          # (the arrays whose menus the stretch searched was taken back on, their rules' data due)
             if stretches is None:
                 stretches, sweep_v0 = lane_stretches(buses), sweep_value()
             if 0 <= epoch < len(stretches):
@@ -4848,7 +4894,10 @@ def main():
                 back_ = (epoch_balls | stretch_balls(buses, stretches[epoch])) & (wide - narrowed) & set(keep_)
                 kept_last = dict(keep_)     # (every bus ball's move in the state: the search's end, search.pkl)
                 if back_:
-                    narrow(back_, keep_)
+                    # (the arrays' rules' data made once for the two changes of menu a switch of stretch is -- this
+                    # one's balls back, the next one's whole -- by `whole` below: made here too, each switch worked
+                    # out an array's groups of vias and its lines' points for menus no model was built on)
+                    stale_ = narrow(back_, keep_, rules=False)
             epoch += 1
             now_ = sweep_value()
             if epoch == len(stretches) and sweep + 1 < EPOCH_SWEEPS and len(stretches) > 1 \
@@ -4882,10 +4931,14 @@ def main():
                 release(buses)
                 m = mc = mh = sv = rows = gates = None
                 whole(more_ | near_)
+                for ref in sorted(stale_ - {r_ for r_, _k in more_ | near_}):
+                    array_rules(bpcb, arrays[ref])
                 epoch_balls = more_ | near_
                 epoch_fan = list(fan_)
                 in_epoch = True
                 continue
+            for ref in sorted(stale_):
+                array_rules(bpcb, arrays[ref])
             in_epoch = False
         elif in_epoch:
             in_epoch = False            # (a costly ball's stretch searched: on to the checks)

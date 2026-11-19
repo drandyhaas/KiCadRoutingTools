@@ -287,6 +287,17 @@ def side_fences(pcb, box, skip, out=FENCE_OUT):
 OPP_DIVE = 0.0            # vias for a crossover riding on a pair's dive (one of the ends kernel's constants)
 
 
+def _move_key(m):
+    """a move by every field its conflict tests and the plane balls' ways read, each exactly as it stands: two moves
+    of one key are the same move to both (the key of what is kept from one building of a bus's ends to the next --
+    st['ends_memo'])"""
+    return (getattr(m, 'net', None), getattr(m, 'kind', None), getattr(m, 'direction', None),
+            getattr(m, 'layer', None), None if getattr(m, 'exit_pt', None) is None else tuple(m.exit_pt),
+            getattr(m, 'vias', None), tuple((tuple(p_), tuple(q_), L_) for p_, q_, L_ in (m.legs or ())),
+            None if m.site is None else tuple(m.site), getattr(m, 'climb', 0), getattr(m, 'street', 0),
+            getattr(m, 'inner', 0))
+
+
 def _seg_d(a, b, p, q):
     """the least distance between segments ab and pq"""
     def pt(u, v, w):
@@ -637,7 +648,19 @@ class Ends:
                 continue
             # stacked: the whole route orders each layer's lanes on their own, so an F exit over a B one is
             # no conflict
-            for (a, i, b, j) in _sm_c._conflicts(cands, True, stack=True, via_reach=self.via_reach[end_]):
+            # (KEPT from one building of the bus's ends to the next, st['ends_memo'], while the end's moves are the
+            # very ones: a row part's berths are its own run's menu at every building of a group's model, and the
+            # test of them against each other was a third of each building)
+            memo_ = st.get('ends_memo')
+            key_ = None if memo_ is None else (self.via_reach[end_], tuple((n, tuple(_move_key(m_) for m_ in cands[n]))
+                                                                             for n in names))
+            if key_ is not None and (memo_.get(('conflicts', end_)) or (None,))[0] == key_:
+                pairs_ = memo_[('conflicts', end_)][1]
+            else:
+                pairs_ = list(_sm_c._conflicts(cands, True, stack=True, via_reach=self.via_reach[end_]))
+                if key_ is not None:
+                    memo_[('conflicts', end_)] = (key_, pairs_)
+            for (a, i, b, j) in pairs_:
                 conf[(a, id(cands[a][i]))].add((b, id(cands[b][j])))
                 conf[(b, id(cands[b][j]))].add((a, id(cands[a][i])))
             # ...and two nets' vias nearer than a via and a clearance apart (vias_clash), found by their sites' cells
@@ -3532,6 +3555,25 @@ def plane_ways(st, lanes, T, B, cur, ends=(0, 1)):
     `stub` or a strap's on `layer`), and `secs` (its own build time). `ends`: the arrays asked (0 the source, 1 the
     destination)"""
     t0 = time.time()
+    # (KEPT from one building of the bus's ends to the next, st['ends_memo'] -- the caller's, emptied when the board
+    # is another -- while the lanes and every option asked about are the very ones, each move by its every field: the
+    # ways are the board's, and what an option kills its own copper's. A row part's berths are its own run's menu at
+    # every building of a group's model, and this was half of each)
+    memo_ = st.get('ends_memo')
+    key_ = None if memo_ is None else (
+        tuple(ends), tuple((l_, tuple(lg)) for l_, lg in lanes),
+        tuple(tuple(tuple(_move_key(m) + (m is cur.get(leg),) for leg, m in zip(lg, o[0])) for o in opts)
+              for l_, lg in lanes for end, opts in ((0, T[l_]), (1, B[l_])) if end in ends))
+    if key_ is not None and (memo_.get('plane_ways') or (None,))[0] == key_:
+        return memo_['plane_ways'][1]
+    out_ = _plane_ways(st, lanes, T, B, cur, ends, t0)
+    if key_ is not None:
+        memo_['plane_ways'] = (key_, out_)
+    return out_
+
+
+def _plane_ways(st, lanes, T, B, cur, ends, t0):
+    """plane_ways' own work"""
     import copy
     import types
     import escape_moves as em
