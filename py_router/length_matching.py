@@ -2184,6 +2184,61 @@ def clamp_target_to_window(target, window, tolerance):
                f"{'-' if hi is None else format(hi, 'g')}]mm")
 
 
+def _mark_members_without_new_copper(group_results: dict) -> None:
+    """A single-ended member this step laid no copper for -- its pads were
+    already joined by copper an earlier step laid ("All pads already
+    connected") -- is that earlier copper: measured whole and not meandered,
+    like a member seeded from the board. Its result carries the copper's
+    length (`stub_length`) and no segments, so the meander loop measured
+    nothing, reported `new length = 0.00mm` and wrote 0 back as its length."""
+    marked = []
+    for name, r in group_results.items():
+        if (r.get('from_board') or r.get('is_diff_pair')
+                or r.get('new_segments')):
+            continue
+        r['from_board'] = True
+        marked.append(name)
+    if marked:
+        print(f"  Length matching group: {len(marked)} member(s) laid no copper "
+              f"this step (their pads were already joined by earlier copper), "
+              f"measured as that copper: {', '.join(sorted(marked))}")
+
+
+def _measure_single_ended_on_board(group_results: dict, die: dict, pcb_data) -> dict:
+    """Measure each 2-pad single-ended member routed this step on the board's
+    copper (`net_signal_length`: the pad-to-pad path the post-route cleanup
+    will leave), in place of `route_length`.
+
+    The router's `route_length` is the new copper plus every segment the net
+    already had (`stub_length`), and the meander loop measured the new copper
+    alone, so a member started from one measure and was lengthened and
+    reported in another. Neither is what ships: a fanout stub the new route
+    leaves dead is stripped at the end of the step. Returns each re-measured
+    member's offset -- the part of the board measure that is not this step's
+    copper -- which the meander loop adds to every copper reading so it
+    works in the same measure. A multipoint member keeps its main-edge
+    measure (#1971): its taps are laid after matching, so the board does not
+    yet join its pads; nor does a member whose pads the board does not join."""
+    offsets = {}
+    if pcb_data is None:
+        return offsets
+    from net_queries import calculate_route_length, net_signal_length
+    for name, r in group_results.items():
+        if (r.get('from_board') or r.get('is_diff_pair')
+                or r.get('is_multipoint')):
+            continue
+        segs = r.get('new_segments') or []
+        if not segs:
+            continue
+        board = net_signal_length(pcb_data, segs[0].net_id)
+        if board is None:
+            continue
+        copper = calculate_route_length(segs, r.get('new_vias') or [], pcb_data)
+        r['route_length'] = board - die.get(name, 0.0)
+        offsets[name] = r['route_length'] - copper
+    return offsets
+
+
 def apply_length_matching_to_group(
     net_results: Dict[str, dict],
     net_names: List[str],
@@ -2284,7 +2339,9 @@ def apply_length_matching_to_group(
     # Find target length. A member's length includes its pad-to-die term
     # (#1248), as KiCad's tuner and its length/skew DRC count it; route_length
     # stays copper, so the meander loop below still works on copper.
+    _mark_members_without_new_copper(group_results)
     die = {n: member_pad_to_die(r, n, pcb_data) for n, r in group_results.items()}
+    copper_offset = _measure_single_ended_on_board(group_results, die, pcb_data)
     target_length = max(r['route_length'] + die[n] for n, r in group_results.items())
     # #1391: the board's .kicad_dru length window binds what check_drc and
     # KiCad grade, so the group aims INTO it: short members meander up to the
@@ -2402,12 +2459,18 @@ def apply_length_matching_to_group(
         suffix = " (diff pair)" if result.get('is_diff_pair') else ""
         print(f"    {net_name}{suffix}: {current_length:.2f}mm{_between(net_name)} -> adding {delta:.2f}mm")
 
-        # The meander loop measures COPPER, so it gets the copper target.
+        # The meander loop measures COPPER, so it gets the copper target; a
+        # member measured on the board reads its copper plus the part of that
+        # measure the meanders do not touch, as the #1828 re-match does.
+        _off = copper_offset.get(net_name, 0.0)
+
+        def _metric(segs, vias, _off=_off):
+            return length_metric(segs, vias) + _off
         modified, new_segments, bump_count, new_length = _apply_meanders_to_net_with_iteration(
             result, target_length - die[net_name], result['route_length'],
             config.length_match_tolerance,
             config, pcb_data, already_processed_segments, already_processed_vias,
-            group_clearance_index, length_metric, length_to_length
+            group_clearance_index, _metric, length_to_length
         )
 
         # A pair's pad-to-die term is its LARGER leg's excess over the pair's
