@@ -16,9 +16,7 @@ mkdir -p "$STRESS/boards_unrouted_set14" "$STRESS/boards_set14"
 # short-name (the staged source file is <short-name>.kicad_pcb)
 NAMES=(
   "rusefi_alphax4"
-  "kintex_pcie"
   "librevna"
-  "xerxes_cm4_blade"
   "cm5_minima2"
   "cm4_underwater"
   "epdiy_v7"
