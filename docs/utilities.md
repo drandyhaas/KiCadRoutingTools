@@ -2800,6 +2800,22 @@ Options:
                      price lets every step cross them (the plan-pcb-routing
                      skill's route step uses 3.0), trading reference integrity
                      for routability.
+  --board-rules      Route to the board's own declared rules instead of the
+                     fab floor: its Default net class's clearance, track
+                     width, via and diff-pair gap/width, each held at its
+                     Board Setup minimums (the via grown to the minimum
+                     annular ring), every other class at its own clearance,
+                     and no step narrows below them (--escalation off). A net
+                     that cannot complete at the board's rules fails and is
+                     reported. By default autoroute routes every step at the
+                     fab floor, treating a net class above it as aspirational.
+  --keep-placement   No step moves a part: the decap step, which moves
+                     decoupling caps off the fanout copper, is not run.
+  --write-fill       Write the shipped board with its zones filled by KiCad's
+                     own ZONE_FILLER (needs KiCad's python), so it reads no
+                     phantom plane opens when opened or graded before a
+                     refill -- route.py's --write-fill (#910), applied to the
+                     board autoroute ships.
 ```
 
 The chain, each step's arguments, return code, iterations and grade are
