@@ -929,6 +929,43 @@ def _track_samples(x1, y1, x2, y2, li, hw, own_pads, free, opposite, reach):
     return keep, hit, sp, np.concatenate(owners)
 
 
+def band_meter(pcb_data, config, net_id: int):
+    """In-band length of a candidate track of `net_id`, measured as
+    keep_away_report measures the routed copper (#2006): a function
+    (layer, x1, y1, x2, y2, width) -> mm. A post-route pass that moves copper
+    asks it so it does not hand back a band the router kept clear. None when
+    the band is not priced (no rule sets the net against another, or
+    keep_away_cost is 0). Reads the other side's copper as it is now; build a
+    new meter once that copper moves."""
+    if getattr(config, 'keep_away_cost', 0) <= 0:
+        return None
+    st = _state(config, pcb_data, announce=False)
+    if st is None or net_id not in st.members:
+        return None
+    opp = st.opposite((net_id,))
+    if not opp:
+        return None
+    st.refresh(pcb_data)
+    free = max(0.0, float(getattr(config, 'keep_away_free', 0.0) or 0.0))
+    geo = {n: _net_geometry(st, pcb_data, config, n) for n in (net_id, *opp)}
+    opposite, reach = _opposite_copper(geo, opp)
+    own_pads = geo[net_id]['pads']
+    lidx = {L: i for i, L in enumerate(config.layers)}
+
+    def in_band(layer, x1, y1, x2, y2, width) -> float:
+        li = lidx.get(layer)
+        if li is None:
+            return 0.0
+        samples = _track_samples(x1, y1, x2, y2, li, width / 2, own_pads, free,
+                                 opposite, reach)
+        if samples is None:
+            return 0.0
+        keep, hit, _sp, _owners = samples
+        return math.hypot(x2 - x1, y2 - y1) * float(hit.sum()) / len(keep)
+
+    return in_band
+
+
 def keep_away_report(pcb_data, config, announce: bool = True) -> Optional[dict]:
     """Measure every keep-away net's tracks against the other side's copper.
 
