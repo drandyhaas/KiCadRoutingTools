@@ -11,7 +11,7 @@ import os
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via, is_immutable_copper
-from routing_utils import pos_key, POSITION_DECIMALS, into_pad_frame_point
+from routing_utils import pos_key, POSITION_DECIMALS
 from geometry_utils import point_to_segment_distance, segments_intersect
 from via_span import HELD_OUTSIDE_SPAN
 
@@ -1441,7 +1441,7 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
     `area` (#1843, `config.area_clearance`) holds a pair a rule area binds to
     the area's value."""
     from geometry_utils import segment_to_segment_distance, point_to_segment_distance
-    from check_drc import segment_to_rect_distance
+    from check_drc import segment_to_pad_copper_distance
     from single_ended_routing import _seg_foreign_hole_dist
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     half = width / 2
@@ -1488,12 +1488,12 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
         for pad in pads:
             if not (layer in pad.layers or any('*' in L for L in pad.layers)):
                 continue
-            # Rotate the segment into the pad's frame so a tilted pad is tested
-            # against its true rectangle (distance is rotation-invariant).
-            rx1, ry1 = into_pad_frame_point(x1, y1, pad)
-            rx2, ry2 = into_pad_frame_point(x2, y2, pad)
-            d, _ = segment_to_rect_distance(rx1, ry1, rx2, ry2, pad.global_x, pad.global_y,
-                                            pad.size_x / 2, pad.size_y / 2)
+            if pad.pad_type == 'np_thru_hole':
+                continue  # no copper: its drill is the NPTH pass above
+            # The pad's copper as check_drc measures it (its tilt, its shape's
+            # corner radius, a custom pad's polygons): a round pad read as its
+            # bounding square refused legal copper beside it.
+            d = segment_to_pad_copper_distance(x1, y1, x2, y2, pad)
             # A pad override REPLACES the pair value, floored at the board
             # minimum (KiCad, measured). No config in this scope: the
             # module helper with the board's memoised rules.min_clearance.
@@ -4628,11 +4628,24 @@ def _pt_seg(px, py, x1, y1, x2, y2):
 
 
 def _seg_seg_min_dist(ax, ay, bx, by, cx, cy, dx, dy) -> float:
-    """Minimum Euclidean distance between segments AB and CD (endpoint sampling,
-    exact for the non-crossing case a clearance test cares about; crossing -> ~0
-    which still flags)."""
+    """Minimum Euclidean distance between segments AB and CD: 0 when they
+    cross, else the least endpoint-to-segment distance. The endpoint terms
+    alone are NOT ~0 for a crossing: two long segments crossing mid-span have
+    every endpoint far from the other, so a crossing read as clear."""
+    if _segs_properly_cross(ax, ay, bx, by, cx, cy, dx, dy):
+        return 0.0
     return min(_pt_seg(ax, ay, cx, cy, dx, dy), _pt_seg(bx, by, cx, cy, dx, dy),
                _pt_seg(cx, cy, ax, ay, bx, by), _pt_seg(dx, dy, ax, ay, bx, by))
+
+
+def _segs_properly_cross(ax, ay, bx, by, cx, cy, dx, dy) -> bool:
+    """AB and CD cross at a point interior to both (each one's ends strictly on
+    opposite sides of the other). A touch at an end is the endpoint terms'."""
+    d1 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    d2 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax)
+    d3 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx)
+    d4 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx)
+    return d1 * d2 < 0.0 and d3 * d4 < 0.0
 
 
 def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=None,
@@ -4790,6 +4803,13 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
                        _pt_to_segs(x1, y1, fax, fay, fbx, fby)),
             np.minimum(_pts_to_seg(fax, fay, x0, y0, x1, y1),
                        _pts_to_seg(fbx, fby, x0, y0, x1, y1)))
+        # A crossing is distance 0, as in the scalar _seg_seg_min_dist: the
+        # endpoint terms alone read a mid-span crossing as clear.
+        _d1 = (x1 - x0) * (fay - y0) - (y1 - y0) * (fax - x0)
+        _d2 = (x1 - x0) * (fby - y0) - (y1 - y0) * (fbx - x0)
+        _d3 = (fbx - fax) * (y0 - fay) - (fby - fay) * (x0 - fax)
+        _d4 = (fbx - fax) * (y1 - fay) - (fby - fay) * (x1 - fax)
+        d = np.where((_d1 * _d2 < 0.0) & (_d3 * _d4 < 0.0), 0.0, d)
         req = np.maximum(eff, fef) - 1e-4
         _own = -1
         _prow = None

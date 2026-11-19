@@ -188,6 +188,29 @@ def main():
            "#2010: a via off the board is refused")
     pcb.vias.remove(fv)
 
+    # 9. #2010: a PLATED barrel is held at the copper clearance (the router's
+    #    rule), not raised by the NPTH floor: on orbiter_kb a rescue via
+    #    0.1615 off a track's hole edge (the board's rule 0.155, KiCad clean)
+    #    was refused at hole_clearance 0.25 minus its ring
+    cfg_hc = _dc_replace(cfg, hole_clearance=0.25)
+    pv = via(cx, fy - (0.06 + 0.25 / 2 + 0.11), size=0.25, drill=0.15)
+    expect(rescue_copper_clear([], pcb, gnd, cfg_hc, vias=[pv]),
+           "#2010: a plated via 0.11 clear of a track passes at an NPTH floor of 0.25")
+    # ... while the NPTH floor holds at an NPTH hole, graded at its drill
+    base = next(q for q in pcb.footprints[rp.component_ref].pads)
+    hole = _dc_replace(base, pad_type='np_thru_hole', net_id=0, net_name='',
+                       drill=1.0, size_x=1.4, size_y=1.4, shape='circle',
+                       global_x=cx + 1.5, global_y=cy + 1.2, hole_x=None, hole_y=None)
+    pcb.footprints[rp.component_ref].pads.append(hole)
+    try:
+        nv = via(hole.global_x + 0.5 + 0.2 + 0.125, hole.global_y, size=0.25, drill=0.15)
+        expect(not rescue_copper_clear([], pcb, gnd, cfg_hc, vias=[nv]),
+               "#2010: a via 0.2 off an NPTH hole is refused at its 0.25 floor")
+        expect(rescue_copper_clear([], pcb, gnd, cfg, vias=[nv]),
+               "  (with the floor unset (0) it passes: an NPTH pad's mask opening is not copper)")
+    finally:
+        pcb.footprints[rp.component_ref].pads.remove(hole)
+
     # 5. both oracle paths that commit rescue copper call the gate
     src = open(os.path.join(ROOT, 'py_router', 'kicad_oracle.py'),
                encoding='utf-8').read()

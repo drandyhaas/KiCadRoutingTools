@@ -2667,6 +2667,29 @@ def _net_tie_span_waived(pcb_data, seg, seg_net: int, partner_pad, clearance: fl
         for cx, cy in contacts)
 
 
+def segment_to_pad_copper_distance(x1: float, y1: float, x2: float, y2: float,
+                                   pad) -> float:
+    """Edge distance from segment (x1, y1)-(x2, y2) to `pad`'s COPPER, measured
+    as check_pad_segment_overlap measures it: a custom pad's polygons, else its
+    rectangle in the pad's own frame (a tilted pad's `rect_rotation`) with the
+    shape's corner radius (`pad_corner_radius`: a circle or oval is exact).
+    For a generator's own clearance test, so it refuses only what this checker
+    flags: a round pad read as its bounding square refused legal copper beside
+    it (#2004, #2010). Callers skip an NPTH pad, which has no copper."""
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        return _segment_to_polys_distance(x1, y1, x2, y2, polys)[0]
+    rot = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if rot:
+        rad = math.radians(rot)
+        cr, sr = math.cos(rad), math.sin(rad)
+        x1, y1 = _into_pad_frame(x1, y1, pad, cr, sr)
+        x2, y2 = _into_pad_frame(x2, y2, pad, cr, sr)
+    return segment_to_rect_distance(x1, y1, x2, y2, pad.global_x, pad.global_y,
+                                    pad.size_x / 2, pad.size_y / 2,
+                                    pad_corner_radius(pad))[0]
+
+
 def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
                                routing_layers: List[str],
                                clearance_margin: float = 0.05) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
@@ -3969,9 +3992,10 @@ def new_copper_refusal(segs, vias, pcb_data, config) -> str:
     primitives at `config.pair_clearance` (the clearance between two nets'
     copper), with no tolerance: tracks against tracks on their layer, against
     vias and pads; barrels against tracks, vias, pads and drills
-    (hole-to-hole on any net). A copper-to-hole floor (`config.hole_clearance`)
-    raises the clearance to a drill by the barrel's ring; the board's
-    .kicad_dru hole rules are graded by `hole_rule_refusal`.
+    (hole-to-hole on any net, vias' and pads'). Plated copper is held at the
+    copper clearance, as the router holds it; `config.hole_clearance` is the
+    floor for an NPTH wall, graded at its drill; the board's .kicad_dru hole
+    rules are graded by `hole_rule_refusal`.
 
     For copper a generator lays as GIVEN geometry, or commits from a search
     whose map could not see the board as it is: the diff-pair crossover
@@ -4005,9 +4029,27 @@ def new_copper_refusal(segs, vias, pcb_data, config) -> str:
     def clr(a, b, layer=None):
         return config.pair_clearance(a, b, layer) if hasattr(config, 'pair_clearance') else config.clearance
 
-    def ring(v):
-        return max(0.0, (v.size - (v.drill or 0.0)) / 2.0)
+    def npth(p):
+        return p.pad_type == 'np_thru_hole'
 
+    def to_hole(px, py, p, x1, y1, x2=None, y2=None):
+        """Distance from a point (or segment) to `p`'s drill capsule edge."""
+        from kicad_parser import pad_drill_capsule
+        (c1x, c1y), (c2x, c2y), prad = pad_drill_capsule(p)
+        if x2 is None:
+            from geometry_utils import point_to_segment_distance
+            return point_to_segment_distance(x1, y1, c1x, c1y, c2x, c2y) - prad
+        from geometry_utils import segment_to_segment_distance
+        return segment_to_segment_distance(x1, y1, x2, y2, c1x, c1y, c2x, c2y) - prad
+
+    # Plated barrels and plated pads are held at the copper clearance -- the
+    # router's own rule (its run says "plated holes and vias: copper
+    # clearance"; the via's ring and the DRC-floor writeback keep KiCad's
+    # min_hole_clearance consistent with it). `hc` is the floor for an NPTH
+    # wall only, which has no copper (an NPTH pad's size is its mask
+    # opening): an NPTH hole is graded by its drill, never as copper. #2010:
+    # raising every barrel by hc refused a rescue via 0.1615 off a track's
+    # hole edge on a board whose rule was 0.155, KiCad clean.
     for s in segs:
         for t in b_segs:
             if t.net_id != s.net_id and t.layer == s.layer \
@@ -4015,16 +4057,21 @@ def new_copper_refusal(segs, vias, pcb_data, config) -> str:
                 return f'track {s.layer} grazes net {t.net_id} track'
         for w in b_vias:
             if w.net_id != s.net_id and check_via_segment_overlap(
-                    w, s, max(clr(s.net_id, w.net_id, s.layer), hc - ring(w)), 0.0)[0]:
+                    w, s, clr(s.net_id, w.net_id, s.layer), 0.0)[0]:
                 return f'track {s.layer} grazes net {w.net_id} via'
         for p in b_pads:
+            if npth(p):
+                if p.drill and to_hole(0, 0, p, s.start_x, s.start_y, s.end_x, s.end_y) \
+                        < s.width / 2.0 + max(hc, clr(s.net_id, 0, s.layer)) - 1e-6:
+                    return f'track {s.layer} within the NPTH floor of {p.component_ref}.{p.pad_number}'
+                continue
             if p.net_id != s.net_id and check_pad_segment_overlap(
                     p, s, clr(s.net_id, p.net_id, s.layer), layers, 0.0)[0]:
                 return f'track {s.layer} grazes pad {p.component_ref}.{p.pad_number}'
     for v in vias:
         for t in b_segs:
             if t.net_id != v.net_id and check_via_segment_overlap(
-                    v, t, max(clr(v.net_id, t.net_id, t.layer), hc - ring(v)), 0.0)[0]:
+                    v, t, clr(v.net_id, t.net_id, t.layer), 0.0)[0]:
                 return f'barrel grazes net {t.net_id} track on {t.layer}'
         for w in b_vias:
             if w.net_id != v.net_id and check_via_via_overlap(v, w, clr(v.net_id, w.net_id), 0.0)[0]:
@@ -4032,8 +4079,15 @@ def new_copper_refusal(segs, vias, pcb_data, config) -> str:
             if h2h > 0 and check_via_drill_overlap(v, w, h2h, 0.0)[0]:
                 return f'drill within hole-to-hole of net {w.net_id} via'
         for p in b_pads:
+            if h2h > 0 and p.drill and check_pad_drill_via_overlap(p, v, h2h, 0.0)[0]:
+                return f'drill within hole-to-hole of {p.component_ref}.{p.pad_number}'
+            if npth(p):
+                if p.drill and to_hole(0, 0, p, v.x, v.y) \
+                        < v.size / 2.0 + max(hc, clr(v.net_id, 0)) - 1e-6:
+                    return f'barrel within the NPTH floor of {p.component_ref}.{p.pad_number}'
+                continue
             if p.net_id != v.net_id and check_pad_via_overlap(
-                    p, v, max(clr(v.net_id, p.net_id), hc - ring(v)), layers, 0.0)[0]:
+                    p, v, clr(v.net_id, p.net_id), layers, 0.0)[0]:
                 return f'barrel grazes pad {p.component_ref}.{p.pad_number}'
     why = hole_rule_refusal(pcb_data, getattr(config, 'rules', None), segs, vias)
     return why or ''
