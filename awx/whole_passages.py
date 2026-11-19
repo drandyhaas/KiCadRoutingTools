@@ -52,7 +52,11 @@ class Census:
         grp = getattr(Fr, 'group', None)
         if dest_boxes is None and grp is not None:
             def dest_boxes(i):
-                return [B_ for r_, B_ in Fr.DBs.items() if self.LAYN[i] not in grp.open[r_]]
+                # (on its own pads' layers alone, whole_frame.own_layers: another part's pads in its box stand there
+                # as islands of their own -- read as the whole box on their layers, four caps between a connector's
+                # rows walled the front layer under all of it, and the lanes the plan laid over the near row there,
+                # as the hand-routed board has them, were read round the connector's end)
+                return [B_ for r_, B_ in Fr.DBs.items() if self.LAYN[i] in grp.own[r_]]
         on_ = []                                          # each layer's boxes: the source's, the destination's there
         for i in range(self.NL):
             on_.append([tuple(Fr.SB)])

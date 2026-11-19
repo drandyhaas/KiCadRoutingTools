@@ -479,6 +479,71 @@ def open_layers(pcb, ref):
     return frozenset(L for L in RL if L not in used)
 
 
+def own_layers(pcb, ref):
+    """the routing layers part `ref`'s OWN pads stand on (every layer for a drilled pad, or copper on every layer): where
+    its box is copper a lane goes round. Another part's pads inside the box stand there as themselves (islands), and a
+    lane passes between them -- as the human runs a two-row connector's far-row lanes over its near row on the front
+    layer, between the caps placed under it"""
+    import route_layers
+    RL = route_layers.layers()
+    used = set()
+    for p in pcb.footprints[ref].pads:
+        if (p.drill or 0) > 0 or '*.Cu' in p.layers:
+            return frozenset(RL)
+        used |= {L for L in p.layers if L in RL}
+    return frozenset(used)
+
+
+def open_on_line(pcb, refs, boxes, a, b):
+    """the routing layers open along the straight a -> b under the parts `refs` (their copper boxes `boxes`): not their
+    own pads' layers (own_layers: where the census stands their boxes as copper), and no other part's pad standing in
+    one of those boxes within a lane's reach of the line (a track's half width and a clearance, and half a lane's pitch
+    it may stand off the line by) -- a drilled pad there, or copper on every layer, shuts every layer. open_layers
+    reads the whole box: four decoupling caps on the front layer between a two-row connector's rows, each at one
+    place, shut the front layer under all 19.6 mm of it, where the hand-routed board runs the far row's lanes over the
+    near row on that very layer -- a lane the solve sent there, straight to its via, was held off it and taken round
+    the connector's end"""
+    import route_layers
+    from routing_utils import into_pad_frame_point
+    from shapely.geometry import LineString, box as _box
+    RL = route_layers.layers()
+    used = set().union(*[own_layers(pcb, r) for r in refs]) if refs else set()
+    reach = bd.TRACK / 2 + bd.CLEAR + bd.LANE_MIN / 2
+    for r, fp in pcb.footprints.items():
+        if r in refs:
+            continue
+        for p in fp.pads:
+            if p.pad_type == 'np_thru_hole':
+                continue
+            hx, hy = (p.size_x or 0.0) / 2, (p.size_y or 0.0) / 2
+            if not any(min(x1, p.global_x + hx) - max(x0, p.global_x - hx) > 1e-6 and
+                       min(y1, p.global_y + hy) - max(y0, p.global_y - hy) > 1e-6 for x0, y0, x1, y1 in boxes):
+                continue
+            # (the line in the pad's own frame, against its rectangle: exact for a pad on a tilted angle too)
+            seg = LineString([into_pad_frame_point(a[0], a[1], p), into_pad_frame_point(b[0], b[1], p)])
+            if seg.distance(_box(p.global_x - hx, p.global_y - hy, p.global_x + hx, p.global_y + hy)) > reach:
+                continue
+            if (p.drill or 0) > 0 or '*.Cu' in p.layers:
+                return frozenset()
+            used |= {L for L in p.layers if L in RL}
+    return frozenset(L for L in RL if L not in used)
+
+
+def under_open(Fr, ctx, n):
+    """{part: the layers open along its line} for lane n's way under a GROUP's parts (Group.options' 'under', straight
+    back along its berth's own stub, and 'straight', under the part in front of its pocket): the parts its straight
+    crosses, each with the way's own layers -- open along that line under all of them (Group.open_line); {} for a
+    lane whose way runs under none"""
+    w_ = (getattr(Fr, 'way', None) or {}).get(n) if Fr.group is not None else None
+    if not w_ or w_[0] not in ('straight', 'under') or len(w_) < 7 or w_[6] is None:
+        return {}
+    # (an 'under' way runs back along its berth's own stub, as Group.options lays it)
+    sd_ = ctx.stub_dir.get(n) if w_[0] == 'under' else None
+    k_ = math.hypot(*sd_) if sd_ else 0.0
+    return {r_: frozenset(w_[6]) for r_ in
+            Fr.group._straight(Fr.bend[n], (sd_[0] / k_, sd_[1] / k_) if k_ > 1e-9 else None)[1]}
+
+
 def tree_edges(boxes):
     """the pairs of parts the tree that joins every part by the shortest gaps between their boxes joins (bridge_of's
     tree): [(a, b)]"""
@@ -534,6 +599,8 @@ class Group:
         self.pcb, self.refs = pcb, list(refs)
         self.boxes = {r: copper_box(pcb, r) for r in self.refs}
         self.open = {r: open_layers(pcb, r) for r in self.refs}
+        self.own = {r: own_layers(pcb, r) for r in self.refs}
+        self._oline = {}
         xs = [v for b in self.boxes.values() for v in (b[0], b[2])]
         ys = [v for b in self.boxes.values() for v in (b[1], b[3])]
         self.bbox = (min(xs), min(ys), max(xs), max(ys))
@@ -733,6 +800,14 @@ class Group:
         q = max(cs, key=lambda c: math.hypot(c[0] - p[0], c[1] - p[1]))
         return (float(q[0]), float(q[1])), self._crossed(p, q)
 
+    def open_line(self, parts, a, b):
+        """the layers a lane runs on along the straight a -> b under the group's parts `parts` (open_on_line): what
+        stands on its own line, not anywhere in their boxes (self.open, each part's whole box)"""
+        key = (tuple(sorted(parts)), round(a[0], 6), round(a[1], 6), round(b[0], 6), round(b[1], 6))
+        if key not in self._oline:
+            self._oline[key] = open_on_line(self.pcb, sorted(parts), [self.boxes[r] for r in parts], a, b)
+        return self._oline[key]
+
     def _pockets(self):
         """the group's POCKETS, each (its polygon, its ring, its mouths, its key): the outline less the parts, a piece
         at a time. A MOUTH is a stretch of the pocket's ring on the outline: (a, b, sa, sb, its line from a to b, a's
@@ -854,9 +929,9 @@ class Group:
         along the pocket's walls (_mouth_place), and 'straight' under the part in front of it. A pocket way's STRETCH
         in the pocket: (the pocket's ring's length, its berth's wall's place on that ring, where it leaves the pocket
         on it, the mouth's end it lands from or None, where along the mouth it lands) -- two ways of one pocket whose
-        stretches' ends alternate round the ring cross in it (pocket_cross). A way under parts needs a layer open on every part it passes -- the berth's layer, or
-        any with a via at the berth, and the lane runs to its berth on such a layer: a way under parts carries the
-        layers open on all of them (sorted names), the others None. Its length: from the berth to its place (a mouth's: the berth's depth from it);
+        stretches' ends alternate round the ring cross in it (pocket_cross). A way under parts needs a layer open on every part it passes ALONG ITS OWN LINE (open_line) -- the
+        berth's layer, or any with a via at the berth, and the lane runs to its berth on such a layer: a way under
+        parts carries the layers open along it under all of them (sorted names), the others None. Its length: from the berth to its place (a mouth's: the berth's depth from it);
         a mouth's leg runs along the part's row, past the pins between its berth and the mouth (GROUP_LEG_PASS each, in
         the ends model: deep in a strip a lane's leg past its neighbours' stubs and vias met them, where straight under
         the part in front -- a via at the pin, as a human takes them -- runs clear)"""
@@ -868,14 +943,14 @@ class Group:
         P = Point(p)
         out = []
 
-        def under_ok(parts):
+        def under_ok(parts, a, b):
             if not parts:
                 return True
-            op = frozenset.intersection(*[self.open[r] for r in parts])
+            op = self.open_line(parts, a, b)
             return bool(op) and (via or layer in op)
 
-        def open_on(parts):
-            return tuple(sorted(frozenset.intersection(*[self.open[r] for r in parts]))) if parts else None
+        def open_on(parts, a, b):
+            return tuple(sorted(self.open_line(parts, a, b))) if parts else None
         if not (self.U.contains(P) and self.E.distance(P) > GROUP_TOL):
             out.append(('on', self._on_mouth(self._ray(p, sd), part, P), None, 0.0, None, 0, None))
             if sd is not None and math.hypot(*sd) > 1e-9:
@@ -886,12 +961,12 @@ class Group:
                     # would come out at the front a pin or two along, past its near-row neighbours -- crossings the
                     # pins' order never asks for, in the strip between the parts where they have no room)
                     q, crossed = self._straight(p, (sd[0] / k, sd[1] / k))
-                    if part in crossed and under_ok(crossed):
+                    if part in crossed and under_ok(crossed, p, q):
                         qs = self.s(q)
                         # (out into the open: a notch's wall or the front -- not a pocket behind another part)
                         if self.E.distance(Point(q)) <= GROUP_TOL:
                             out.append(('under', qs, None, math.hypot(q[0] - p[0], q[1] - p[1]), None, 0,
-                                        open_on(crossed)))
+                                        open_on(crossed, p, q)))
         else:
             # (a berth inside the outline: its stub ends in a pocket, or on its own part's copper -- marched out of
             # the copper along the stub to where it stands)
@@ -943,7 +1018,7 @@ class Group:
                         (through_ if self._crossed(q0, (mp.x, mp.y)) else ways_).append(way_)
                     out.extend(ways_)
                     q, crossed = self._straight(q0)
-                    if crossed and under_ok(crossed) and self.E.distance(Point(q)) <= GROUP_TOL:
+                    if crossed and under_ok(crossed, q0, q) and self.E.distance(Point(q)) <= GROUP_TOL:
                         # (its stretch in the pocket: from its berth's wall to where it goes under the part in front)
                         ins = LineString([q0, q]).intersection(_poly)
                         gs_ = [g for g in ([ins] if ins.geom_type == 'LineString' else getattr(ins, 'geoms', []))
@@ -951,7 +1026,7 @@ class Group:
                         cs_ = list(min(gs_, key=lambda g: g.distance(Q0)).coords) if gs_ else [q0]
                         far_ = max(cs_, key=lambda c: math.hypot(c[0] - q0[0], c[1] - q0[1]))
                         out.append(('straight', self.s(q), None, math.hypot(q[0] - p[0], q[1] - p[1]), pkey, 0,
-                                    open_on(crossed), (float(ring.length), bw, float(ring.project(Point(far_))),
+                                    open_on(crossed, q0, q), (float(ring.length), bw, float(ring.project(Point(far_))),
                                                        None, None)))
                     if not out:
                         out.extend(through_)

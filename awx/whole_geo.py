@@ -179,6 +179,9 @@ BOXI = {r_: i_ + 1 for i_, r_ in enumerate(Fr.dests)}      # a destination part'
 # (a GROUP's part stands on its pads' layers alone: a lane on the layers it leaves open passes under it --
 # whole_frame.Group's ways under a part -- its box no bound there)
 OPEN_I = {r_: {F(L_) for L_ in Fr.group.open[r_]} for r_ in Fr.dests} if Fr.group is not None else {}
+# ...and a lane whose way runs under parts: the layers open along its OWN line under each (whole_frame.under_open) --
+# a cap between a connector's rows at one place shuts its layer in the part's box, not on every lane's line
+OPEN_N = {(n_, r_): {F(L_) for L_ in op_} for n_ in M for r_, op_ in whole_frame.under_open(Fr, ctx, n_).items()}
 log(f'pad boxes grown by the terminals: {[round(b[2] - b[0], 3) for b in BOX]}')
 
 
@@ -845,7 +848,7 @@ def build_and_solve(sides, prev=None):
         under_ = frozenset()
         if OPEN_I:
             lays_ = layers_at(n, lay_u(f, n, FR[f]['u'](s_)))
-            under_ = frozenset(BOXI[r_] for r_ in Fr.dests if lays_ <= OPEN_I[r_])
+            under_ = frozenset(BOXI[r_] for r_ in Fr.dests if lays_ <= OPEN_N.get((n, r_), OPEN_I[r_]))
         iv = intervals(f, FR[f]['sp'], s_, round(mg, 4), OWN[n] if f == 'T' else (False, 0), under_)
         if not iv:
             continue

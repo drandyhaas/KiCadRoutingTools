@@ -609,12 +609,20 @@ leaves it by either of its mouths, or straight under the part in front of it
 on a layer that part leaves open. Its ways out are ranked by their depth and
 by the pins each mouth's leg passes -- a pad within a stub's length of the
 leg, of ANY part of the group: a leg down a pocket runs along the row of the
-part that is its other wall as it does its own part's. A part leaves a layer open where none of
-its pads stands on it and no other part's pad stands inside its copper box
-there (decaps on the back layer under a QFN close it:
-`whole_frame.open_layers`). Every stage reads the parts so -- the solve, the
-layer walls and the geometry in board xy (`whole_passages.Census`) -- with
-the bus's own stubs and vias under an opened part kept as copper. Read as
+part that is its other wall as it does its own part's. A way under a part
+runs on a layer none of the part's own pads stands on, and no other part's
+pad within a lane's reach of THAT WAY'S OWN LINE (decaps on the back layer
+under a QFN close it there: `whole_frame.open_on_line`). Read off the part's
+whole box instead, four caps on the front layer between a two-row
+connector's rows, each at one place, closed that layer under all 19.6 mm of
+it: the far row's lanes, which the hand-routed board runs over the near row
+on that layer, were held off it, and one taken round the connector's end
+left a net open. The solve's cuts under the part and the geometry's bound
+read each lane's own way (`whole_frame.under_open`); the census the 2-D
+geometry reads stands a part's box as copper on its own pads' layers alone,
+the other parts' pads in it standing as themselves (`whole_frame.own_layers`,
+`whole_passages.Census`), with the bus's own stubs and vias under an opened
+part kept as copper. Read as
 closed on every layer by the geometry alone, the lanes planned under a PHY
 were pushed out to its box's edge, into the 1.5 mm strip between it and a
 connector, and three nets were left open. The lanes leaving one mouth land

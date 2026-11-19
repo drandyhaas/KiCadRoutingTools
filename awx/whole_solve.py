@@ -237,7 +237,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         a lane passes under a part on a layer it leaves open (whole_frame.Group) -- a single part's on every layer"""
         if Fr.group is None:
             return list(Fr.DBs.values())
-        return [B_ for r_, B_ in Fr.DBs.items() if LAYN[L_] not in Fr.group.open[r_]]
+        return [B_ for r_, B_ in Fr.DBs.items() if LAYN[L_] in Fr.group.own[r_]]
     F = lambda x: 1 if x == 'B.Cu' else 0
     tl = {n: F(ctx.tooth_layer[n]) for n in M}
     dl = {n: F(ctx.dest_layer[n]) for n in M}
@@ -542,11 +542,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         return list(b_) if d_ is None else [min(b_[0], d_[0]), min(b_[1], d_[1]), max(b_[2], d_[2]), max(b_[3], d_[3])]
     for n_ in (M if Fr.group is not None else ()):
         if Fr.way[n_][0] in ('straight', 'under'):
-            # (an 'under' way runs back along its berth's own stub, as Group.options lays it)
-            sd_ = ctx.stub_dir.get(n_) if Fr.way[n_][0] == 'under' else None
-            k_sd = math.hypot(*sd_) if sd_ else 0.0
-            for r_ in Fr.group._straight(Fr.bend[n_], (sd_[0] / k_sd, sd_[1] / k_sd) if k_sd > 1e-9 else None)[1]:
-                blk_ = [LAYN.index(L_) for L_ in LAYN if L_ not in Fr.group.open[r_]]
+            # (the layers open along the lane's own line under each part, whole_frame.under_open -- not every pad in
+            # the part's box: one cap between a connector's rows held every lane over its rows off the front layer)
+            for r_, op_ in sorted(whole_frame.under_open(Fr, ctx, n_).items()):
+                blk_ = [LAYN.index(L_) for L_ in LAYN if L_ not in op_]
                 if blk_:
                     # (a cut's 'layer' is, on two layers, the one the lane is held ON -- whole_route.layer_cut's -- and
                     # on more the one it is held off: written the blocked one on two, the lane was held under the part
