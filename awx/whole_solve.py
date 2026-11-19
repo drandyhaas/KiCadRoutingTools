@@ -202,6 +202,21 @@ def _plane_tie(ctx, m, sv, OBJ, t, chg, YL, M, entry, end, LAYN, KMAX, Q):
     return _Held(sv, s_)
 
 
+def freed_of_hold(lcuts, held, own, end_layers, lane_of=None):
+    """the lanes of `held` -- those a group's model holds to the layers it chose for their ends -- that the loop's
+    layer cuts free of them: each has a FIRM cut against a laid track of another net (its island a net's bare name,
+    none of the bus's `own`: no coupling with another bus's planned lane, no keep-out, no part's box, no wall) on a
+    layer one of its ends is held on (`end_layers[lane]`, the cut's `blocked`). A cut naming a pair's leg stands for
+    its pair (`lane_of`)."""
+    freed = set()
+    for c_ in lcuts:
+        n_, isl_ = (lane_of or {}).get(c_.get('lane'), c_.get('lane')), str(c_.get('island') or '')
+        if n_ in held and c_.get('firm') and isl_ and ' ' not in isl_ and isl_ not in own \
+                and set(end_layers[n_]) & {int(b_) for b_ in c_.get('blocked') or ()}:
+            freed.add(n_)
+    return freed
+
+
 def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, front=None, check=False,
           core=False, rules=False, lanecore=False, joint=None):
     """the solve of the bench ctx (whole_ctx.plan()) round the destination part `dest`: the JSON
@@ -269,10 +284,24 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         # another bus's lane, and their layers are what keeps the two apart)
         hl_ = getattr(ctx, 'held_layers', None) or ()
         held_ = {n for n in M if any(leg in hl_ for leg in (prs[n] if n in prs else (n,)))}
+        # (...and a held lane is FREED where the loop has found another net's laid track across it on the very layer
+        # one of its ends is held on (freed_of_hold): the hold keeps the lane and another bus's apart by the layers the
+        # group chose for the crossings its model had, and a track laid across the lane on that layer is a crossing
+        # the model had not. Held all the same, the lane could change layer nowhere before that track, a millimetre
+        # past its tooth: the cut broke every round, the lane was planned through the other bus's lanes, and its net
+        # was left open)
+        freed_ = freed_of_hold(
+            [c_ for fn_ in cuts for c_ in json.load(open(fn_)).get('lcuts', [])], held_,
+            set(M) | {leg for n in prs for leg in prs[n]},
+            {n: {tli[n], dli[n]} | ({LAYN.index(L_) for L_ in ctx.pair_layers[n]} if n in prs else set())
+             for n in held_}, {leg: n for n in prs for leg in prs[n]})
+        held_ -= freed_
         VEND = {(n, k_): True for n in M for k_ in (0, 1) if n not in held_ and via_end(n, k_)}
         print(f'   {NL} routing layers {",".join(LAYN)}; via ends, their layers the solve\'s: '
               f'{sum(1 for k_ in VEND if k_[1] == 0)} teeth, {sum(1 for k_ in VEND if k_[1] == 1)} berths of {len(M)} lanes'
-              + (f' ({len(held_)} lanes held to the group\'s layers)' if held_ else ''))
+              + (f' ({len(held_)} lanes held to the group\'s layers)' if held_ else '')
+              + (f'; {len(freed_)} freed of the group\'s layers, another net\'s copper across them there: '
+                 f'{", ".join(sorted(freed_))}' if freed_ else ''))
     # ...where their runs can lie: a via end's run (its stub from the via out, as the relayer moves it) on another
     # layer lies beside the copper there -- another net's stub or pad within the rule bans that layer, and two runs
     # within the rule of each other (crossing, laid on two layers) end on different layers (the ns3_rev synth: two

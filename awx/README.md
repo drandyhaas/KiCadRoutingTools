@@ -2519,7 +2519,12 @@ taken only with more routing layers than two. Every via is a through via.
   lie on: the solve chooses which (`VIA_ENDS`, on with more routing layers
   than two). On the group's ends each end's layer is the model's, held
   (`VIA_ENDS=0`), except where the model left a bus's end layers to its own
-  solve (`group_ends.layers_free`). Another net's copper within the rule of the run bans a layer, and
+  solve (`group_ends.layers_free`). A held end is freed again where the
+  loop finds another net's laid track across its lane on the layer it is
+  held on (a firm layer cut: `whole_solve.freed_of_hold`): the group chose
+  that layer for the crossings its model had, a track laid across the lane
+  there is one it had not, and held at its end as well the lane has nowhere
+  to change before it. Another net's copper within the rule of the run bans a layer, and
   two runs within the rule of each other end on different layers. A pair's two
   legs move as one run, and each leg is held off its partner's ball and neck:
   TX_D5_P's run on B.Cu passed under TX_D5_N's ball, moved onto F.Cu it ran
