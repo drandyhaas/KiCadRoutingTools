@@ -3368,7 +3368,9 @@ def find_nets_matching_patterns(all_net_names: List[str], patterns: List[str]) -
 # so lanes of different interfaces are never one group. An interface is the
 # prefix, plus a CHANNEL where the names carry one: a trailing `_A`/`_B` is a
 # channel tag on a prefix where some signal appears with both letters on the
-# board (haasoscope's DQ0_A/DQ0_B) -- a lone `_B` is still active-low. The
+# board (haasoscope's DQ0_A/DQ0_B) -- a lone `_B` is still active-low. On a
+# clock or strobe the tag may stand before the polarity (DQS0_A_P, CK_A_N)
+# as well as after it (DQS0_t_A), and is read the same either way. The
 # clock (CK/CLK) joins `command_address`, because the command/address bus is
 # sampled on it and is matched to it; so command/address splits by channel
 # only where every channel carrying command nets has its OWN clock. When it
@@ -3534,6 +3536,20 @@ def _ddr_read_name(name: str):
     return None
 
 
+def _ddr_channel_tag(r: dict):
+    """(channel letter A/B or None, the tail tokens before it) for a read
+    name. The letter is the LAST tail token, except that on a clock or strobe
+    a trailing polarity (P/N/T/C) is stepped over first, so `DQS0_A_P` and
+    `CK_A_N` carry channel A exactly as `DQS0_t_A` does."""
+    tail = r['tail']
+    if r['role'] in ('clock', 'strobe') and tail \
+            and tail[-1].upper() in ('P', 'N', 'T', 'C'):
+        tail = tail[:-1]
+    if tail and tail[-1].upper() in ('A', 'B'):
+        return tail[-1].upper(), tail[:-1]
+    return None, tail
+
+
 def _ddr_natural_key(s: str):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
 
@@ -3624,19 +3640,20 @@ def classify_ddr_nets(net_names: List[str],
     tag_letters: Dict[str, Dict[tuple, set]] = {}
     for name in context:
         r = reads.get(name)
-        if r is None or not r['tail'] or r['tail'][-1].upper() not in ('A', 'B'):
+        if r is None:
             continue
-        sig = (r['kind'], r['n'], r['half'],
-               tuple(t.upper() for t in r['tail'][:-1]))
+        letter, before = _ddr_channel_tag(r)
+        if letter is None:
+            continue
+        sig = (r['kind'], r['n'], r['half'], tuple(t.upper() for t in before))
         tag_letters.setdefault(r['iface'], {}).setdefault(sig, set()).add(
-            r['tail'][-1].upper())
+            letter)
     channelled = {p for p, sigs in tag_letters.items()
                   if any(len(v) >= 2 for v in sigs.values())}
 
     def channel_of(r):
-        if r['iface'] in channelled and r['tail'] \
-                and r['tail'][-1].upper() in ('A', 'B'):
-            return r['tail'][-1].upper()
+        if r['iface'] in channelled:
+            return _ddr_channel_tag(r)[0]
         return None
 
     def data_lane(r):
