@@ -1650,11 +1650,52 @@ def loop_seeds(loopd):
     return r_['solve'], {'SEED_CUTS': s_['cuts'], 'SEED_FLIPS': r_['flips'], 'SEED_HIST': s_['hist']}
 
 
+def audit_static_rows(aud):
+    """an audit's findings against STATIC copper: [(short by, lane, layer, kind, object words, (x, y), a pair's dive)]
+    -- 'STATIC LANE LAYER d/bar KIND OBJECT at (x,y)', and a pair's 'DIVE LANE (x,y) pair static d/bar (KIND OBJ ...)',
+    on every layer (its barrels stand through them all)"""
+    rows_ = []
+    for ln in lines_of(aud):
+        m_ = re.match(r'^STATIC (\S+)\s+([FB]|In\d+\.Cu) ([-+]?[\d.]+)/([\d.]+) (copper|via|pad|hole|keepout) (.+?) '
+                      r'at \(([-\d.]+),\s*([-\d.]+)\)', ln)
+        if m_:
+            L_ = {'F': 'F.Cu', 'B': 'B.Cu'}.get(m_.group(2), m_.group(2))
+            rows_.append((float(m_.group(3)) - float(m_.group(4)), m_.group(1), L_, m_.group(5), m_.group(6).split(),
+                          (float(m_.group(7)), float(m_.group(8))), False))
+        m_ = re.match(r'^DIVE (\S+)\s+\(\s*([-\d.]+),\s*([-\d.]+)\)\s+pair\s+static ([-+]?[\d.]+)/([\d.]+) '
+                      r'\((copper|via|pad|hole|keepout) ([^)]+)\)', ln)
+        if m_:
+            rows_.append((float(m_.group(4)) - float(m_.group(5)), m_.group(1), None, m_.group(6), m_.group(7).split(),
+                          (float(m_.group(2)), float(m_.group(3))), True))
+    return rows_
+
+
+def crowded_rows(loopd, named, aud, i_stop):
+    """(rows, from_stop, the stopping round's audit) for repair_ends: the static rows of `aud` -- the audit of the round
+    the loop goes on from -- and, for a lane the stop NAMED (`named` [(lane, where)]) with no row there, its rows in
+    the STOPPING round's audit (loopd/p{i_stop}.audit), where the feedback found them: against copper no solve moves,
+    they stand on the bench whichever round's plan it lays. Read off the held round's alone, a pair that could not lay
+    at a dive sent the loop on to a round whose two lanes met a plane's via at their teeth; the held round's audit
+    had no row of either, nothing was moved, and a lane shipped open. `from_stop` the lanes read there"""
+    rows = audit_static_rows(aud)
+    aud_stop = os.path.join(loopd, f'p{i_stop}.audit') if i_stop else None
+    from_stop = set()
+    if aud_stop and aud_stop != aud and os.path.isfile(aud_stop):
+        have_ = {r_[1] for r_ in rows}
+        want_ = {l_ for l_, _w in named}
+        for r_ in audit_static_rows(aud_stop):
+            if r_[1] in want_ and r_[1] not in have_:
+                rows.append(r_)
+                from_stop.add(r_[1])
+    return rows, from_stop, aud_stop
+
+
 def repair_ends(d, loopd, env, nets, say):
     """A loop stopped at CROWDED ENDS on STATIC findings (a lane too close, at its tooth, to copper the solve cannot
     move) has the round's fanout bench repaired where they stand, one lane at a time, before the round gives the ends
-    to the next round's fanout: what the finding names, read off the stopping round's audit (STATIC LANE LAYER d/bar
-    KIND OBJECT at (x,y): a track of OBJECT on that layer, its via on every layer, a pad, a hole, a keep-out), is
+    to the next round's fanout: what the finding names, read off the audit of the round the loop goes on from -- a
+    lane named with no row there, off the stopping round's (crowded_rows) -- (STATIC LANE LAYER d/bar KIND OBJECT at
+    (x,y): a track of OBJECT on that layer, its via on every layer, a pad, a hole, a keep-out), is
     - another net's via (a plane ball's drop), unlocked: moved off the point (ends_nudge --via-at), a pair's end too;
     - a bus lane's own escape -- its via, or its stub's track on that layer -- unlocked: nudged off it (ends_nudge);
     - anything else right past the tooth (another net's track or pad on the tooth's layer, a locked via on every
@@ -1682,6 +1723,7 @@ def repair_ends(d, loopd, env, nets, say):
     # (the stopping round's audit: the round of the last hot file, whose findings whole_feedback read)
     hps = sorted(glob.glob(os.path.join(loopd, 'hp[0-9]*.json')), key=lambda f_: int(re.sub(r'\D', '', os.path.basename(f_))))
     i_ = re.sub(r'\D', '', os.path.basename(hps[-1])) if hps else None
+    i_stop = i_
     # (...but the round the loop GOES ON FROM, where it holds another: the loop run again starts at its best round's
     # solve (loop_seeds), and the bench is repaired for THAT plan's copper. A pair's dive stood half a millimetre from
     # one round's geometry to the next at one route place; the cap moved clear of the stopping round's dive was moved
@@ -1696,21 +1738,7 @@ def repair_ends(d, loopd, env, nets, say):
     if not aud or not os.path.isfile(aud):
         say('  crowded ends: no audit of the stopping round')
         return None
-    rows = []
-    for ln in lines_of(aud):
-        m_ = re.match(r'^STATIC (\S+)\s+([FB]|In\d+\.Cu) ([-+]?[\d.]+)/([\d.]+) (copper|via|pad|hole|keepout) (.+?) '
-                      r'at \(([-\d.]+),\s*([-\d.]+)\)', ln)
-        if m_:
-            L_ = {'F': 'F.Cu', 'B': 'B.Cu'}.get(m_.group(2), m_.group(2))
-            rows.append((float(m_.group(3)) - float(m_.group(4)), m_.group(1), L_, m_.group(5), m_.group(6).split(),
-                         (float(m_.group(7)), float(m_.group(8))), False))
-        # (...and a pair's DIVE short of static copper: 'DIVE LANE (x,y) pair static d/bar (KIND OBJ ...)', on every
-        # layer -- its barrels stand through them all)
-        m_ = re.match(r'^DIVE (\S+)\s+\(\s*([-\d.]+),\s*([-\d.]+)\)\s+pair\s+static ([-+]?[\d.]+)/([\d.]+) '
-                      r'\((copper|via|pad|hole|keepout) ([^)]+)\)', ln)
-        if m_:
-            rows.append((float(m_.group(4)) - float(m_.group(5)), m_.group(1), None, m_.group(6), m_.group(7).split(),
-                         (float(m_.group(2)), float(m_.group(3))), True))
+    rows, from_stop, aud_stop = crowded_rows(loopd, named, aud, i_stop)
     dive_off = next((float(m_.group(1)) for ln in lines_of(aud)
                      for m_ in [re.search(r'two barrels ([\d.]+) either side', ln)] if m_), None)
     bench0 = env.get('BENCH0') or env['BENCH']
@@ -1752,8 +1780,12 @@ def repair_ends(d, loopd, env, nets, say):
     for lane, where in dict.fromkeys(named):
         mine = sorted(r_ for r_ in rows if r_[1] == lane)
         if not mine:
-            say(f"  crowded ends: {lane} at the {where}: no STATIC row of it in {os.path.basename(aud)}")
+            say(f"  crowded ends: {lane} at the {where}: no STATIC row of it in {os.path.basename(aud)}"
+                + (f" nor {os.path.basename(aud_stop)}" if aud_stop and aud_stop != aud else ''))
             continue
+        if lane in from_stop:
+            say(f"  crowded ends: {lane} at the {where}: its rows read in {os.path.basename(aud_stop)}, the stopping "
+                f"round's ({os.path.basename(aud)} has none)")
         if bxs_ is not None:
             mine = [r_ for r_ in mine if _en.near(ends_, bxs_, 0 if where == 'teeth' else 1, *bxy_(r_[5]), reach_,
                                                   _bd_.LANE_MIN)]
@@ -1774,7 +1806,8 @@ def repair_ends(d, loopd, env, nets, say):
             pref_ = obj[0].split('.', 1)[0]
             flags_ = []
             if dive and dive_off:
-                xy_ = (json.load(open(os.path.join(loopd, f'p{i_}.json'))).get('lanes', {}).get(lane) or {}).get('xy')
+                xy_ = (json.load(open(os.path.join(loopd, f'p{i_stop if lane in from_stop else i_}.json')))
+                       .get('lanes', {}).get(lane) or {}).get('xy')
                 if xy_ and len(xy_) > 1:
                     k_ = min(range(len(xy_) - 1), key=lambda q_: seg_d(pp_, xy_[q_], xy_[q_ + 1]))
                     ux_, uy_ = xy_[k_ + 1][0] - xy_[k_][0], xy_[k_ + 1][1] - xy_[k_][1]

@@ -2354,6 +2354,10 @@ copper it names found there:
   read as the tooth, and the loop on the repaired ends drew it with no length.
 
 Every move is checked on the fanout's own obstacle model and the moves chain.
+The findings are read off the audit of the round the loop goes on from; a lane
+the stop named with no finding there is read off the stopping round's audit
+(`crowded_rows`), so a loop that went on past a held round still repairs what
+stopped it.
 A pair's own end and a finding at the berths that is not another net's via
 wait for the next round. On DDR and two-end buses on four and eight layers, a
 round that had stopped crowded passed in that round with fewer vias, and two
