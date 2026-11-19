@@ -8568,8 +8568,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # over an In6.Cu-B.Cu one) have no copper to clear; their holes
             # are graded by the hole checks. A board that lists no copper
             # layers says nothing either way, so the pair is graded.
-            _l1 = set(via_copper_layers(via1, _board_copper))
-            _l2 = set(via_copper_layers(via2, _board_copper))
+            _l1 = set(via_span_layers(via1, _board_copper))
+            _l2 = set(via_span_layers(via2, _board_copper))
             if _l1 and _l2 and not (_l1 & _l2):
                 continue
 
