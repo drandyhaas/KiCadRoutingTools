@@ -891,14 +891,16 @@ TIER_RUNG_KEY = 'tier_rung'
 
 
 def _prefer_hole_ring(rungs, ring):
-    """#1914: the ladder ``rungs`` with the copper-to-hole ring PREFERRED, not
-    required: each tier rung raised to hold ``ring`` round its drill comes
+    """#1914: the ladder ``rungs`` with the copper-to-hole ring PREFERRED
+    under ``fab`` and REQUIRED under ``board``. Under ``fab`` each tier rung raised to hold ``ring`` round its drill comes
     immediately before the rung itself (duplicates dropped, so a rung that
     already holds the ring appears once). The ring is preferred WITHIN a tier
     rung and never causes a fab-tier escalation by itself: a smaller tier is
     tried only after the rung above it, raised and as it is, did not fit.
-    Completion first: a via only an unraised rung fits still ships, and the
-    run's census of its shipped vias names it (:func:`replace_hole_ring_rows`).
+    Completion first under ``fab``: a via only an unraised rung fits still
+    ships, and the run's census of its shipped vias names it
+    (:func:`replace_hole_ring_rows`). Under ``board`` only the raised rung is
+    offered: the board's hole clearance is one of its own rules.
 
     Each rung carries :data:`TIER_RUNG_KEY`, its index in ``rungs``, so a
     site that tells a fab-tier escalation by the rung (:func:`rung_tier`,
@@ -909,7 +911,16 @@ def _prefer_hole_ring(rungs, ring):
     out, seen = [], []
     for i, r in enumerate(rungs):
         tagged = dict(r, **{TIER_RUNG_KEY: i})
-        for cand in (_apply_hole_ring([tagged], ring)[0], tagged):
+        # Under ``board`` the board's own hole clearance is a rule the run
+        # may not go below, like its via and drill minimums (#1676): the ring
+        # is REQUIRED, so only the raised rung is offered. A ring-short via is
+        # legal only where its raised twin is (other-net copper held at the
+        # clearance off the raised copper is exactly the hole clearance off the
+        # hole), so the raised rung loses no legal site.
+        cands = ((_apply_hole_ring([tagged], ring)[0],)
+                 if _ESCALATION == 'board' else
+                 (_apply_hole_ring([tagged], ring)[0], tagged))
+        for cand in cands:
             if _key(cand) not in seen:
                 seen.append(_key(cand))
                 out.append(cand)
