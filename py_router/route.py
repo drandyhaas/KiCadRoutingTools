@@ -3064,7 +3064,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             _c = _dr.resolve_for_copper(
                                 'track_width', _dr.item_for_net(nid, 'track', l), None, l)
                             _w = track_width
-                            if _c.min is not None and _w < _c.min:
+                            if _c.min_rule is not None and _c.min is not None and _w < _c.min:
                                 _w = _c.min
                             if _c.max is not None and _w > _c.max:
                                 _w = _c.max
