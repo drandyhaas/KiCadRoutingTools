@@ -154,6 +154,85 @@ def crossover_copper(geo: dict, L1: str, L2: str, p_id: int, n_id: int, track: f
     return segs, vias
 
 
+def _board_clear(segs: Sequence[Segment], vias: Sequence[Via], pcb_data, config) -> str:
+    """'' when every new piece clears the board's existing copper of OTHER
+    nets, else why not -- graded with check_drc's own primitives at
+    `config.pair_clearance` (check_drc's clearance between two nets' copper),
+    with no tolerance: tracks against tracks on their layer, against vias and
+    pads; barrels against tracks, vias, pads and drills. The partner's copper
+    is another net's here, so a barrel on the partner's pad is refused (it
+    shipped once: ethercat_ax58100 P0_TXOP's barrel 0.134 mm into C36.2).
+    A copper-to-hole floor (`config.hole_clearance`) raises the clearance to a
+    drill by the barrel's ring; the board's .kicad_dru hole rules are graded by
+    check_drc.hole_rule_refusal. The pair map and the connector graze gate are
+    not enough for given copper: the single-track map leaves out the nets the
+    step routes, and the gate passed a leg 0.036 mm into a routed pair's track
+    (berkeley_obsidian AD1_P / MGT_RX2_P)."""
+    from check_drc import (check_segment_overlap, check_via_segment_overlap, check_via_via_overlap,
+                           check_pad_segment_overlap, check_pad_via_overlap, check_via_drill_overlap,
+                           hole_rule_refusal)
+    segs, vias = list(segs), list(vias)
+    if not segs and not vias:
+        return ''
+    layers = list(config.layers)
+    hc = getattr(config, 'hole_clearance', 0.0) or 0.0
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    xs, ys = [], []
+    for s in segs:
+        xs += [s.start_x, s.end_x]
+        ys += [s.start_y, s.end_y]
+    for v in vias:
+        xs.append(v.x)
+        ys.append(v.y)
+    reach = 2.0 + max([config.via_size, config.track_width, hc, h2h] + [v.size for v in vias])
+    x0, x1, y0, y1 = min(xs) - reach, max(xs) + reach, min(ys) - reach, max(ys) + reach
+
+    def near(ax, ay, bx=None, by=None):
+        bx = ax if bx is None else bx
+        by = ay if by is None else by
+        return not (max(ax, bx) < x0 or min(ax, bx) > x1 or max(ay, by) < y0 or min(ay, by) > y1)
+
+    b_segs = [t for t in pcb_data.segments if near(t.start_x, t.start_y, t.end_x, t.end_y)]
+    b_vias = [w for w in pcb_data.vias if near(w.x, w.y)]
+    b_pads = [p for fp in pcb_data.footprints.values() for p in fp.pads if near(p.global_x, p.global_y)]
+
+    def clr(a, b, layer=None):
+        return config.pair_clearance(a, b, layer) if hasattr(config, 'pair_clearance') else config.clearance
+
+    def ring(v):
+        return max(0.0, (v.size - (v.drill or 0.0)) / 2.0)
+
+    for s in segs:
+        for t in b_segs:
+            if t.net_id != s.net_id and t.layer == s.layer \
+                    and check_segment_overlap(s, t, clr(s.net_id, t.net_id, s.layer), 0.0)[0]:
+                return f'track {s.layer} grazes net {t.net_id} track'
+        for w in b_vias:
+            if w.net_id != s.net_id and check_via_segment_overlap(
+                    w, s, max(clr(s.net_id, w.net_id, s.layer), hc - ring(w)), 0.0)[0]:
+                return f'track {s.layer} grazes net {w.net_id} via'
+        for p in b_pads:
+            if p.net_id != s.net_id and check_pad_segment_overlap(
+                    p, s, clr(s.net_id, p.net_id, s.layer), layers, 0.0)[0]:
+                return f'track {s.layer} grazes pad {p.component_ref}.{p.pad_number}'
+    for v in vias:
+        for t in b_segs:
+            if t.net_id != v.net_id and check_via_segment_overlap(
+                    v, t, max(clr(v.net_id, t.net_id, t.layer), hc - ring(v)), 0.0)[0]:
+                return f'barrel grazes net {t.net_id} track on {t.layer}'
+        for w in b_vias:
+            if w.net_id != v.net_id and check_via_via_overlap(v, w, clr(v.net_id, w.net_id), 0.0)[0]:
+                return f'barrel grazes net {w.net_id} via'
+            if h2h > 0 and check_via_drill_overlap(v, w, h2h, 0.0)[0]:
+                return f'drill within hole-to-hole of net {w.net_id} via'
+        for p in b_pads:
+            if p.net_id != v.net_id and check_pad_via_overlap(
+                    p, v, max(clr(v.net_id, p.net_id), hc - ring(v)), layers, 0.0)[0]:
+                return f'barrel grazes pad {p.component_ref}.{p.pad_number}'
+    why = hole_rule_refusal(pcb_data, getattr(config, 'rules', None), segs, vias)
+    return why or ''
+
+
 # --------------------------------------------------------------- sites
 
 
@@ -229,10 +308,8 @@ def try_crossover(pcb_data, diff_pair, config, obstacles, base_obstacles, unrout
     from routing_config import GridCoord
     from obstacle_map import add_segments_list_as_obstacles, add_vias_list_as_obstacles, check_line_clearance
     from diff_pair_routing import (_pair_via_offset, _min_via_center_distance, centreline_extra_clearance,
-                                   _connector_grazes_foreign_copper, _pn_tracks_cross_full,
-                                   _neck_pair_partner_grazes)
+                                   _pn_tracks_cross_full, _neck_pair_partner_grazes)
     from via_span import via_layer_pair as _via_layer_pair, via_kind as _via_kind
-    from stub_layer_switching import via_barrel_clear_of_foreign_copper
 
     centerline = natural.get('centerline') or []
     if len(centerline) < 2:
@@ -287,16 +364,14 @@ def try_crossover(pcb_data, diff_pair, config, obstacles, base_obstacles, unrout
                                     via_pitch):
                     continue
                 # the crossover's own copper against the board: the single-track
-                # map for its legs, the barrels against every layer's copper
+                # map first (cheap; it holds the static obstacles, rule areas
+                # and edge), then every other net's copper exactly
                 if not all(check_line_clearance(base_obstacles, s.start_x, s.start_y, s.end_x, s.end_y,
                                                 layer_map[s.layer], config) for s in segs):
                     continue
                 if any(base_obstacles.is_via_blocked(*coord.to_grid(v.x, v.y)) for v in vias):
                     continue
-                if any(not via_barrel_clear_of_foreign_copper(v.x, v.y, v.net_id, pcb_data, config,
-                                                              {p_id, n_id})[0] for v in vias):
-                    continue
-                if _connector_grazes_foreign_copper(segs, pcb_data, p_id, n_id, config):
+                if _board_clear(segs, vias, pcb_data, config):
                     continue
                 attempts += 1
                 if verbose:
@@ -322,6 +397,15 @@ def try_crossover(pcb_data, diff_pair, config, obstacles, base_obstacles, unrout
                 if hard:
                     if verbose:
                         print("    crossover result: intra-pair clearance short -- rejected")
+                    continue
+                # the whole result (both spans, their connectors and return
+                # vias, and the crossover) against the board's other copper:
+                # the spans' own gates allow a tolerance and a connector the
+                # router necked can still graze where the crossover joins it
+                why = _board_clear(all_segs, all_vias, pcb_data, config)
+                if why:
+                    if verbose:
+                        print(f"    crossover result: {why} -- rejected")
                     continue
                 if verbose:
                     print(f"  Crossover: routed at ({V[0]:.2f},{V[1]:.2f}) {L1}->{L2} "
