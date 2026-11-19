@@ -537,7 +537,8 @@ def class_reescape(core, args, result):
         f = round(floor_of(p.net_id), 6)
         groups[(f, round(descent_floor(p.net_id, f), 6),
                 rules.group_key(p.net_id) if ruled else None)].append(p)
-    method = 'dogbone' if args.get('escape_method') == 'dogbone' else 'underpad'
+    method = (args.get('escape_method')
+              if args.get('escape_method') in ('dogbone', 'dogbone-only') else 'underpad')
     from kicad_parser import Segment as _Seg, Via as _Via
     n_short = 0
     for gk in sorted(groups, key=lambda k: (k[0], k[1], repr(k[2]))):

@@ -905,7 +905,7 @@ class BGAOptionsPanel(wx.ScrolledWindow):
     """
 
     # wx.Choice index -> engine escape_method value (order matches the dropdown)
-    ESCAPE_METHODS = ('auto', 'channel', 'underpad', 'dogbone')
+    ESCAPE_METHODS = ('auto', 'channel', 'underpad', 'dogbone', 'dogbone-only')
 
     #: The "Cap Placement (advanced)" knobs: control attribute -> the value
     #: the control is CREATED with -- which is ALSO
@@ -1082,7 +1082,8 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             self, choices=["Auto (channel, under-pad retry)",
                            "Channel",
                            "Under-pad (dense BGA)",
-                           "Dog-bone (gap vias)"])
+                           "Dog-bone (gap vias)",
+                           "Dog-bone only (vias, no escape)"])
         self.escape_method_choice.SetSelection(0)
         self.escape_method_choice.SetToolTip(
             "Auto (default): run the channel router and, if it drops any ball, "
@@ -1095,7 +1096,9 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             "the diagonal inter-ball gap instead of in the pad (#128) - the "
             "standard hand-layout escape; keeps ball-grid positions free of "
             "barrels on inner layers and avoids via-vs-neighbour-ball grazes "
-            "on small balls.")
+            "on small balls. Dog-bone only: each ball's stub and gap via and "
+            "no escape run (the via in the pad where no gap is free; a diff "
+            "pair's two vias placed together, mirrored).")
         esc_method_row.Add(self.escape_method_choice, 1)
         options_sizer.Add(esc_method_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
@@ -1302,7 +1305,7 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         return self.ESCAPE_METHODS[sel] if 0 <= sel < len(self.ESCAPE_METHODS) else 'auto'
 
     def set_escape_method(self, value):
-        """Set the dropdown from an engine value ('auto'/'channel'/'underpad').
+        """Set the dropdown from an engine value (one of ESCAPE_METHODS).
 
         Unknown values are ignored (dropdown keeps its current selection).
         """

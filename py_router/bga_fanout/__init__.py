@@ -3245,6 +3245,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
             engine laying a whole-array PLAN (escape_dir_hints full moves,
             plane drops and straps, from awx/joint_escape.py) before its
             generic phases, with `bus`'s per-net layers and priority.
+            'dogbone-only' is the under-pad engine laying each signal ball's
+            dog-bone stub and via and no escape (vias_only): the via in a
+            diagonal gap, else in the pad; a diff pair's two vias together.
+            It takes no escape-priority pass and no rip or surface rescue.
 
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
@@ -3560,7 +3564,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # Boards without multi-ball nets take a single pass, byte-identical to
     # the old behavior. The joint escape engine takes none of it: its plan
     # already chose which of a net's balls escape and which strap to them.
-    if _pad_filter is None and not _single_pass and escape_method != 'jointescape':
+    if (_pad_filter is None and not _single_pass
+            and escape_method not in ('jointescape', 'dogbone-only')):
         _nc_ids = single_pad_net_ids(footprint, pcb_data)
         _pair_nets: Set[str] = set()
         if diff_pair_patterns:
@@ -3909,7 +3914,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
         if keep[0][0] not in balance_layers:
             # rebalance treats its first entry as the top layer (edge escapes)
             balance_layers = [keep[0][0]] + balance_layers
-        if escape_method in ('underpad', 'dogbone', 'jointescape'):
+        if escape_method in ('underpad', 'dogbone', 'dogbone-only', 'jointescape'):
             layers = underpad_layers
         else:
             layers = [keep[0][0]] + [l for l, _ in
@@ -3970,7 +3975,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # deficit -- and the run still reports failed:0, since the success metric ignores
     # sub-clearance grazes. We have all four numbers here, so warn (don't silently
     # ship the graze). Doesn't apply to underpad, which routes under the pad field.
-    if escape_method not in ('underpad', 'dogbone', 'jointescape'):
+    if escape_method not in ('underpad', 'dogbone', 'dogbone-only', 'jointescape'):
         _budget = escape_budget(
             min(grid.pitch_x, grid.pitch_y) / 2.0, via_size, via_drill, track_width,
             clearance, len(pcb_data.board_info.copper_layers or []) or 2)
@@ -3988,7 +3993,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # via-in-pad: ball -> 45-stub -> via in the diagonal inter-ball gap. The
     # joint escape is the same engine laying a whole-array plan (joint=True,
     # see underpad.py), and takes the same rescues.
-    if escape_method in ('underpad', 'dogbone', 'jointescape'):
+    if escape_method in ('underpad', 'dogbone', 'dogbone-only', 'jointescape'):
         from bga_fanout.underpad import generate_underpad_escape
         net_filter_fn = None
         if net_filter:
@@ -4011,6 +4016,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             grid_step=grid_step,
             only_pad_keys=_pad_filter,
             dogbone=(escape_method == 'dogbone' or _joint_dogbone),
+            vias_only=(escape_method == 'dogbone-only'),
             escape_dir_hints=escape_dir_hints,
             no_via_in_pad=(same_net_pad_clearance is not None
                            and same_net_pad_clearance > 0),  # #581
@@ -4040,7 +4046,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 clearance_floor=_clearance_floor)
         # #652 directive 2: whatever the floor could not fit alongside the
         # committed escapes, try again with the nearest neighbour evicted.
-        if failed_nets and not _single_pass and env_knobs.FANOUT_RIP_RESCUE:
+        # Neither this rung nor the surface one below serves a dog-bone-only
+        # fan-out: both lay escapes. Its shrink rescue above is a smaller via.
+        if failed_nets and not _single_pass and escape_method != 'dogbone-only' \
+                and env_knobs.FANOUT_RIP_RESCUE:
             tracks, vias_to_add, failed_nets = _underpad_rip_rescue(
                 footprint, pcb_data, grid, layers, _up_kw,
                 tracks, vias_to_add, failed_nets,
@@ -4052,7 +4061,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # vialess track -- outer-row territory, the way humans escape it.
         # Exact interval geometry, not the router grid: the legal corridor
         # band can be a few um wide and off-grid.
-        if failed_nets and not _single_pass and env_knobs.FANOUT_SURFACE_RESCUE:
+        if failed_nets and not _single_pass and escape_method != 'dogbone-only' \
+                and env_knobs.FANOUT_SURFACE_RESCUE:
             tracks, failed_nets = _surface_gap_escape(
                 footprint, pcb_data, tracks, vias_to_add, failed_nets,
                 track_width, clearance, exit_margin)
@@ -5865,7 +5875,9 @@ def main():
                              'fail visibly) and is recorded in the sibling .kicad_pro so later '
                              'chain steps inherit it. -1 explicitly allows via-in-pad. '
                              'Default: the project record, else allowed.')
-    parser.add_argument('--escape-method', choices=['auto', 'channel', 'underpad', 'dogbone'], default='auto',
+    parser.add_argument('--escape-method',
+                        choices=['auto', 'channel', 'underpad', 'dogbone', 'dogbone-only'],
+                        default='auto',
                         help='Fanout engine (default: auto). "channel" = 45-stub + '
                              'channel router with diff-pair support. "underpad" = dense-array '
                              'grid escape (issue #122): each signal vias in its pad and routes '
@@ -5876,6 +5888,10 @@ def main():
                              'inter-ball gap instead of in the pad (issue #128): ball -> 45 '
                              'stub -> staggered gap via, keeping ball-grid positions free of '
                              'barrels on the inner layers (the standard hand-layout escape). '
+                             '"dogbone-only" = the dog-bone stub and gap via for every '
+                             'signal ball and NO escape run (via in the pad where no gap is '
+                             'free; a diff pair\'s two vias placed together, mirrored); plane '
+                             'balls get theirs from the plane drops. '
                              '"auto" = channel first, and if it drops any ball, retry with '
                              'underpad and keep whichever escapes more (issue #288).')
     parser.add_argument('--plane-net-layers', nargs='+', default=None,
@@ -6087,7 +6103,9 @@ def main():
         print(f"Error: {_refusal}")
         return 2
 
-    if tracks:
+    # vias alone are a result too: a dog-bone-only ball whose via went in
+    # its pad has no track
+    if tracks or vias_to_add or vias_to_remove:
         print(f"\nWriting {len(tracks)} tracks to {args.output}...")
         if vias_to_add:
             print(f"  Adding {len(vias_to_add)} vias")
@@ -6120,7 +6138,7 @@ def main():
     _drop_names = set((LAST_PLANE_DROP_REPORT.get('nets') or {}).keys())
     _drop_ids = {nid for nid, net in pcb_data.nets.items()
                  if net.name in _drop_names}
-    escaped_net_ids = {t['net_id'] for t in tracks
+    escaped_net_ids = {t['net_id'] for t in list(tracks) + list(vias_to_add)
                        if t.get('net_id') is not None
                        and t['net_id'] not in _drop_ids}
     unescaped = sorted(set(_failed_nets))
