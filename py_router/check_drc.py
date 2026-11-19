@@ -2839,19 +2839,41 @@ class HoleRuleBinder:
     `hole_rule_grade` grades with, and that a generator pricing a pair before
     it lays it asks (`pad_via_hole_required`). ``dr`` is the board's
     `design_rules.DesignRules`; `walk` is empty when it declares no
-    hole_clearance rule."""
+    hole_clearance rule.
 
-    def __init__(self, dr):
+    A rule scoped by a rule area (`Rule.area_scoped_condition`) binds by
+    where each item stands, as kicad-cli 10.0.8 grades it: ``board`` (the
+    board the items are on; a generator's view of it will do) has its rule
+    areas measured (`DesignRules.area_index`), so every item's RuleItem
+    carries the areas its copper overlaps, per layer. Without ``board``, or
+    for an item not measured, such a rule reads as unknown, as before."""
+
+    def __init__(self, dr, board=None):
         from design_rules import parse_condition_maybe, rule_may_match
         self._match = rule_may_match
         self.dr = dr
         self.walk = []
-        for r in (dr.rules if dr is not None else ()):
+        rules = list(dr.rules) if dr is not None else []
+        if board is not None and getattr(board, 'board_info', None) is not None and any(
+                'hole_clearance' in r.constraints and r.area_scoped_condition is not None
+                for r in rules):
+            try:
+                dr.area_index(board)
+            except Exception:                                   # noqa: BLE001
+                pass                    # the rule stays unknown, and is named
+        measured = dr is not None and getattr(dr, '_area_index', None) is not None
+        #: the rules that bind by position (by a rule area)
+        self.positional = set()
+        for r in rules:
             spec = r.constraints.get('hole_clearance')
             if spec is None:
                 continue
-            ast = (('unknown',) if str(r.unsupported or '').startswith('constraint')
-                   else parse_condition_maybe(r.condition_src))
+            if measured and r.area_scoped_condition is not None:
+                ast = r.area_scoped_condition
+                self.positional.add(id(r))
+            else:
+                ast = (('unknown',) if str(r.unsupported or '').startswith('constraint')
+                       else parse_condition_maybe(r.condition_src))
             self.walk.append((r, ast, spec.get('min') or 0.0))
         #: the widest value a reporting rule asks, 0.0 with none
         self.reach = max([mn for r, _a, mn in self.walk
@@ -2888,7 +2910,11 @@ class HoleRuleBinder:
         if key not in self._decided:
             out = None
             for r, ast, _mn in reversed(self.walk):
-                m = self._match(r, ast, a, b, layer, self.dr.copper_layers, self.ctx)
+                if id(r) in self.positional and (
+                        a.area_layers is None or (b is not None and b.area_layers is None)):
+                    m = None            # an item whose areas were not measured
+                else:
+                    m = self._match(r, ast, a, b, layer, self.dr.copper_layers, self.ctx)
                 if m is None:
                     out = ('unknown', r)
                     break
@@ -2974,7 +3000,8 @@ def pad_via_hole_required(pad, via, via_hole_clearance, board_copper, binder=Non
 
 def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
                     clearance_margin: float = 0.05, matching_net_ids=None,
-                    board_min=None, no_copper_floor=None, pad_pair_clearance=None):
+                    board_min=None, no_copper_floor=None, pad_pair_clearance=None,
+                    area_board=None):
     """The copper-to-hole rows KiCad's hole_clearance makes, graded as
     kicad-cli 10.0.6 grades them (measured on probe boards: every via drill,
     plated and NPTH hole against the copper of every track, via and pad of
@@ -3014,12 +3041,17 @@ def hole_rule_grade(pcb_data, dr, board_copper, clearance: float = 0.0,
     copper clearance of a pad pair, which decides the pad-vs-pad-hole yield
     (else the rules' own resolver, else no yield).
 
+    A rule scoped by a rule area binds by where each item stands
+    (`HoleRuleBinder`); ``area_board`` is the board whose rule areas are
+    measured when ``pcb_data`` is a view of it that carries none (a gate's
+    copper near its candidates), else ``pcb_data``.
+
     Returns (rows, unread): unread maps a rule whose condition is not read
     here, and that may bind a pair close enough to be flagged, to why. A pair
     such a rule may bind is graded at the board minimum (None: not graded)."""
     from kicad_parser import pad_drill_capsule, plated_drill_exposed, flush_drill_peg
     from design_rules import override_clearance
-    binder = HoleRuleBinder(dr)
+    binder = HoleRuleBinder(dr, area_board if area_board is not None else pcb_data)
     grading = board_min is not None
     if not binder.walk and not grading:
         return [], {}
@@ -3421,7 +3453,7 @@ def _hole_gate_verdict(board, pcb_data, dr, segments, vias) -> str:
     copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
                   or dr.copper_layers)
     nets = {getattr(i, 'net_id', 0) for i in list(segments) + list(vias)}
-    rows, _unread = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets)
+    rows, _unread = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets, area_board=pcb_data)
     via_at = {(round(v.x, 6), round(v.y, 6)) for v in vias}
     seg_at = {(round(s.start_x, 6), round(s.start_y, 6), round(s.end_x, 6),
                round(s.end_y, 6), s.layer) for s in segments}
@@ -3708,7 +3740,7 @@ def hole_rule_step_rows(pcb_data, dr, segments=(), vias=()):
     copper = list(getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
                   or dr.copper_layers)
     nets = {s.net_id for s in segs} | {v.net_id for v in vs}
-    rows, _unread = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets)
+    rows, _unread = hole_rule_grade(board, dr, copper, 0.0, 0.0, nets, area_board=pcb_data)
     name_to_id = {n.name: nid for nid, n in pcb_data.nets.items() if n.name}
     out = []
     for r in rows:
@@ -7653,14 +7685,26 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     _hole_named: Set[str] = set()
     if _cy_dr is not None and any('hole_clearance' in r.constraints for r in _cy_dr.rules):
         _hole_dr = _cy_dr
+        # a rule scoped by a rule area the board draws binds by where each
+        # item stands (`HoleRuleBinder`, the rule areas measured above)
+        _hole_by_area = {r.name for r in _hole_dr.rules
+                         if 'hole_clearance' in r.constraints
+                         and r.area_scoped_condition is not None
+                         and getattr(_hole_dr, '_area_index', None) is not None}
         _hole_graded = [r for r in _hole_dr.rules if 'hole_clearance' in r.constraints
                         and r.unsupported is None]
         if _hole_graded and not quiet:
             print("Hole-clearance rules (.kicad_dru), graded hole to copper: "
                   + ", ".join(f"'{r.name}':{(r.constraints['hole_clearance'].get('min') or 0):g}"
                               for r in _hole_graded))
+        if _hole_by_area and not quiet:
+            print("Area-scoped hole-clearance rules (.kicad_dru), graded by where each "
+                  "hole and copper item stands: "
+                  + ", ".join(f"'{r.name}':{(r.constraints['hole_clearance'].get('min') or 0):g}"
+                              for r in _hole_dr.rules if r.name in _hole_by_area))
         for r in _hole_dr.rules:
             if ('hole_clearance' not in r.constraints or r.unsupported is None
+                    or r.name in _hole_by_area
                     or r.severity in ('warning', 'ignore', 'exclusion')):
                 continue
             _hole_named.add(r.name)

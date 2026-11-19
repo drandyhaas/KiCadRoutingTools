@@ -14,6 +14,20 @@ the one the grader uses: last matching rule, condition read either way
 round, the rule's `(layer ...)` clause against the copper's layer. A rule of
 severity ignore binds nothing; a rule whose condition is not read binds
 nothing here and is named.
+
+A rule scoped by a rule area (`A.insideArea('ROOM')`, `intersectsArea`,
+`enclosedByArea`) binds by where each item stands, as check_drc grades it
+(`check_drc.HoleRuleBinder`): a hole of the board is measured against the
+board's rule areas, so a via or pad hole inside the area is held at the rule
+and one outside it is not, where the condition asks the hole. The copper a
+step lays has no position here, so where the condition turns on THAT item
+being in an area -- one drawn on the layer asked, within the rule's reach of
+the hole (or the copper) it is held off, the reach the stamp itself has --
+the walk is tighten-safe: the rule may bind, so the pair is held at the
+larger of the rule's value and what the rules before it give. Copper that
+reaches into the area only along a segment that passes the hole outside it
+is the one case this does not hold; the step's own grade of the copper it
+laid (`check_drc.hole_rule_step_grade`) names any such row.
 """
 
 import fnmatch
@@ -52,17 +66,40 @@ class RoutedHoleRules:
     class or a name pattern adds nothing of the kind."""
 
     def __init__(self, dr, pcb_data, new_via_type: str = 'through',
-                 new_via_layers: Optional[Sequence[str]] = None):
+                 new_via_layers: Optional[Sequence[str]] = None,
+                 copper_reach: float = 0.0):
         from design_rules import parse_condition_maybe, _eval3, match_dp_suffix, _wx_matches
         self.dr = dr
         self.walk = []
+        if pcb_data is not None and getattr(pcb_data, 'board_info', None) is not None and any(
+                'hole_clearance' in r.constraints and r.area_scoped_condition is not None
+                for r in dr.rules):
+            try:
+                dr.area_index(pcb_data)
+            except Exception:                                   # noqa: BLE001
+                pass                    # the rule stays unread, and is named
+        index = getattr(dr, '_area_index', None)
+        #: rule-area name -> the copper layers the area is drawn on
+        self.area_layers = {a[0]: frozenset(a[1]) for a in (index.areas if index else ())}
+        #: the rules that bind by a rule area, read by position (`_area_match`)
+        self.positional = set()
         for r in dr.rules:
             spec = r.constraints.get('hole_clearance')
             if spec is None:
                 continue
-            ast = (('unknown',) if str(r.unsupported or '').startswith('constraint')
-                   else parse_condition_maybe(r.condition_src))
+            if index is not None and r.area_scoped_condition is not None:
+                ast = r.area_scoped_condition
+                self.positional.add(id(r))
+            else:
+                ast = (('unknown',) if str(r.unsupported or '').startswith('constraint')
+                       else parse_condition_maybe(r.condition_src))
             self.walk.append((r, ast, float(spec.get('min') or 0.0)))
+        self._index = index if self.positional else None
+        # how far from a measured item's copper the copper a step lays beside
+        # it may reach: the widest positional rule, and the widest copper
+        # (``copper_reach``: a new via's diameter, the track width)
+        self._near_r = max([mn for r, _a, mn in self.walk if id(r) in self.positional]
+                           or [0.0]) + float(copper_reach or 0.0)
         self.ctx = ('hole_clearance', dr._net_name_set())
         self.unread: Dict[str, str] = {}
         self._memo: Dict[tuple, Optional[float]] = {}
@@ -106,9 +143,12 @@ class RoutedHoleRules:
                          if isinstance(a, str)})
         lays = [r.layers_for(cu) for r, _a, _m in self.walk]
 
+        areas = sorted(self.area_layers.items())
+
         def _sig(layer):
             return (layer == cu[0] if cu else False, layer == cu[-1] if cu else False,
                     tuple(lay is None or layer in lay for lay in lays),
+                    tuple(layer in al for _n, al in areas),
                     tuple(layer == q or _wx_matches(q, layer) or fnmatch.fnmatchcase(layer, q)
                           for q in lits))
         rep: Dict[tuple, str] = {}
@@ -133,9 +173,18 @@ class RoutedHoleRules:
         key = (a, b, layer)
         if key in self._decided:
             return self._decided[key]
-        out = None
+        vals = []
         for r, ast, mn in reversed(self.walk):
-            m = rule_may_match(r, ast, a, b, layer, self.dr.copper_layers, self.ctx)
+            if id(r) in self.positional:
+                m = self._area_match(r, ast, a, b, layer)
+                if m is None:
+                    # it may bind where the copper stands: tighten-safe, the
+                    # larger of its value and what the rules before it give
+                    if r.severity not in ('ignore', 'exclusion'):
+                        vals.append(mn)
+                    continue
+            else:
+                m = rule_may_match(r, ast, a, b, layer, self.dr.copper_layers, self.ctx)
             if m is None:
                 # not read here: it binds nothing and is named NOT honoured;
                 # the rules before it still decide the pair
@@ -143,10 +192,55 @@ class RoutedHoleRules:
                                        or 'its condition is not read here')
                 continue
             if m:
-                out = None if r.severity in ('ignore', 'exclusion') else mn
+                if r.severity not in ('ignore', 'exclusion'):
+                    vals.append(mn)
                 break
+        out = max(vals) if vals else None
         self._decided[key] = out
         return out
+
+    def _area_match(self, r, ast, a, b, layer):
+        """`rule_may_match` for a rule scoped by a rule area: an item whose
+        areas were measured (a hole of the board) is in an area or not; for
+        one that was not (the copper a step lays), an area predicate is
+        unknown where the area is drawn on the layer asked, else false."""
+        from design_rules import rule_may_match, _eval3
+        lay = rule_may_match(r, None, a, b, layer, self.dr.copper_layers, self.ctx)
+        if lay is False:
+            return False
+        best = False
+        for x, y in ((a, b), (b, a)) if b is not None else ((a, b),):
+            v = _eval3(self._placed(ast, x, y, layer), x, y, layer, self.ctx)
+            if v is True:
+                return None if lay is None else True
+            if v is None:
+                best = None
+        return best
+
+    def _placed(self, node, a, b, layer):
+        """``node`` with each rule-area predicate answered for the pair."""
+        from design_rules import _eval, _item
+        if not isinstance(node, tuple) or not node:
+            return node
+        if node[0] == 'area':
+            it = _item(node[1], a, b)
+            if it is None:
+                return ('lit', False)
+            if it.area_layers is not None:
+                return ('lit', bool(_eval(node, a, b, layer)))
+            other = _item('B' if node[1] == 'A' else 'A', a, b)
+            if other is not None and other.area_near is not None:
+                # beside a measured item: only an area within its reach
+                on = frozenset(l for n, l in other.area_near if n == node[3])
+            else:
+                on = self.area_layers.get(node[3], frozenset())
+            if node[2] == 'enclosedbyarea' and it.type == 'via':
+                possible = bool(on)
+            else:
+                possible = bool(on) and (layer is None or layer in on)
+            return ('unknown',) if possible else ('lit', False)
+        return tuple(self._placed(c, a, b, layer) if isinstance(c, tuple) else c
+                     for c in node)
 
     def _copper(self, nid, layer, kind='track'):
         """A net's copper a step may lay: a track on ``layer``, or a new via
@@ -242,6 +336,11 @@ class RoutedHoleRules:
             vt = getattr(via, 'via_type', None)
             if vt:
                 it = replace(it, via_type=vt)
+            if self._index is not None:
+                from shapely.geometry import Point
+                it = replace(it, area_near=self._near(
+                    Point(float(via.x), float(via.y)), float(getattr(via, 'size', 0.0) or 0.0)
+                    / 2.0))
             # the via is kept with its entry, so its id cannot be reused
             hit = self._memo[('via', id(via))] = (via, it, {})
         return hit
@@ -266,9 +365,26 @@ class RoutedHoleRules:
         ask about each pad on every layer, in every net's cache build."""
         hit = self._memo.get(('pad', id(pad)))
         if hit is None or hit[0] is not pad:
+            it = self.dr.pad_item(pad)
+            if self._index is not None:
+                from design_rules import _pad_copper_geometry
+                geom, r = _pad_copper_geometry(pad)
+                if geom is None or getattr(pad, 'pad_type', None) == 'np_thru_hole':
+                    # no copper: the hole itself
+                    from shapely.geometry import LineString, Point
+                    from kicad_parser import pad_drill_capsule
+                    p1, p2, r = pad_drill_capsule(pad)
+                    geom = Point(p1) if tuple(p1) == tuple(p2) else LineString([p1, p2])
+                it = replace(it, area_near=self._near(geom, r))
             # the pad is kept with its entry, so its id cannot be reused
-            hit = self._memo[('pad', id(pad))] = (pad, self.dr.pad_item(pad), {})
+            hit = self._memo[('pad', id(pad))] = (pad, it, {})
         return hit
+
+    def _near(self, geom, r: float):
+        """The (area, layer) pairs within `_near_r` of copper ``geom`` grown
+        by ``r``, on every copper layer the area is drawn on."""
+        over, _inside = self._index._of(geom, r + self._near_r, self.dr.copper_layers)
+        return over
 
     def pad_value(self, pad, layer: str, kind: str = 'track') -> Optional[float]:
         _pad, it, vals = self._pad_entry(pad)
@@ -291,9 +407,13 @@ class RoutedHoleRules:
 def _routed(config, pcb_data, rules=None):
     from via_span import via_kind
     span = getattr(config, 'via_span', None) if config is not None else None
+    reach = (max(float(getattr(config, 'via_size', 0.0) or 0.0),
+                 float(getattr(config, 'track_width', 0.0) or 0.0))
+             if config is not None else 0.0)
     return RoutedHoleRules(rules if rules is not None else config.rules, pcb_data,
                            new_via_type=via_kind(config) if config is not None else 'through',
-                           new_via_layers=list(span) if span else None)
+                           new_via_layers=list(span) if span else None,
+                           copper_reach=reach)
 
 
 def install(config, pcb_data) -> None:
@@ -329,6 +449,10 @@ def mark_honoured(rules, pcb_data) -> None:
             continue
         r.honoured = (f"hole_clearance min {mn:g} mm: routed tracks and vias are kept "
                       f"that far from the holes of other nets' vias and pads")
+        if id(r) in got.positional:
+            r.honoured += (", where its rule area binds them: by where each hole "
+                           "stands, and wherever the copper a step lays may be in "
+                           "the area (tighten-safe)")
         r.router_unhonoured = None
 
 
