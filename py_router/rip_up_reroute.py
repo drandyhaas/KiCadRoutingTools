@@ -17,7 +17,8 @@ from routing_config import GridRouteConfig, DiffPairNet
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_costs import compute_track_proximity_for_net, compute_ripped_route_costs
 from obstacle_cache import (
-    precompute_net_obstacles, add_net_obstacles_from_cache, remove_net_obstacles_from_cache
+    precompute_net_obstacles, add_net_obstacles_from_cache, remove_net_obstacles_from_cache,
+    refresh_net_obstacles, committed_net_ids
 )
 
 # Debug knob, read ONCE: no per-rip environ lookup when it is off.
@@ -359,9 +360,12 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
             remaining_net_ids.append(net_id)
 
     # Update working_obstacles if provided (for incremental approach)
-    # Remove old cache (with route), recompute (stubs only), add new cache
+    # Remove old cache (with route), recompute (stubs only), add new cache --
+    # for EVERY net the removed copper was on (#806): a pair's saved result
+    # carries its GND return vias on the return net, and refreshing P and N
+    # alone left GND's entry blocking vias no longer on the board.
     if working_obstacles is not None and net_obstacles_cache is not None:
-        for rid in ripped_net_ids:
+        for rid in committed_net_ids(saved_result, ripped_net_ids):
             if rid in net_obstacles_cache:
                 remove_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[rid])
             # Recompute cache - now only has stubs (route was removed from pcb_data)
@@ -940,6 +944,12 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
                 refused_sink.add(net_id)
             return
         add_route_to_pcb_data(pcb_data, saved_result, trace_event='restore')
+        # The branch is back on the board, so the working map must block it
+        # again: the partial rip recomputed the net's entry WITHOUT it, and
+        # nothing else refreshes that entry before the next search reads the
+        # map (#806).
+        refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
+                              config, committed_net_ids(saved_result, [net_id]))
         from plane_fragility import fragility_on_copper_change  # #466
         fragility_on_copper_change(config, pcb_data,
                                    saved_result.get('new_segments'),
@@ -1046,9 +1056,11 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
                 pcb_data, net_id, config, layer_map)
 
     # Update working_obstacles if provided (for incremental approach)
-    # Remove stubs-only cache, recompute (with route), add new cache
+    # Remove stubs-only cache, recompute (with route), add new cache -- for
+    # every net the restored copper is on, the pair's GND return vias
+    # included (#806, as rip_up_net above).
     if working_obstacles is not None and net_obstacles_cache is not None:
-        for rid in ripped_net_ids:
+        for rid in committed_net_ids(saved_result, ripped_net_ids):
             if rid in net_obstacles_cache:
                 remove_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[rid])
             # Recompute cache - now has route again (restored to pcb_data)
