@@ -22,6 +22,8 @@ spot, no routing:
   5. both oracle paths that commit rescue copper call the gate
   6. `wide_route_clear` refuses a leg that crosses a foreign track mid-span
      (it measured endpoint distances only, so a crossing read as clear)
+  7. a round pad is measured as its circle (check_drc's pad shape), not its
+     bounding square, which refused legal copper beside it
 """
 import contextlib
 import io
@@ -132,6 +134,26 @@ def main():
     expect(not wide_route_clear([(cx, fy - 0.3, LAYER), (cx, fy + 0.3, LAYER)],
                                 w, pcb, gnd, cfg),
            "wide_route_clear refuses a leg crossing a foreign track mid-span")
+
+    # 7. a round pad is measured as its circle, not its bounding square:
+    #    copper on the pad's 45-degree diagonal, inside the square but 0.12
+    #    clear of the circle, passes; 0.05 from the circle is refused
+    rp = next(q for ps in pcb.pads_by_net.values() for q in ps
+              if q.shape == 'circle' and q.net_id not in (0, gnd)
+              and not getattr(q, 'polygons', None))
+    R = rp.size_x / 2
+
+    def diag_seg(gap):
+        dd = (R + w / 2 + gap) / math.sqrt(2)
+        mx, my = rp.global_x + dd, rp.global_y + dd
+        return [Segment(start_x=mx - 0.01, start_y=my + 0.01,
+                        end_x=mx + 0.01, end_y=my - 0.01, width=w,
+                        layer='F.Cu', net_id=gnd)]
+    expect(rescue_copper_clear(diag_seg(0.12), pcb, gnd, cfg),
+           f"copper 0.12 clear of round pad {rp.component_ref}.{rp.pad_number}'s "
+           f"circle passes (it is inside the pad's bounding square)")
+    expect(not rescue_copper_clear(diag_seg(0.05), pcb, gnd, cfg),
+           "copper 0.05 from the circle is refused")
 
     # 5. both oracle paths that commit rescue copper call the gate
     src = open(os.path.join(ROOT, 'py_router', 'kicad_oracle.py'),
