@@ -820,7 +820,7 @@ def _simplify(pts, tol):
     return [p for p, k_ in zip(pts, keep) if k_]
 
 
-def trace(key, avoid=()):
+def trace(key, avoid=(), simple=False):
     """run `key`'s own points, read off its reference line: where it crosses each edge of the chain of cells it
     passes, and a free point every HPT between"""
     n, k = key
@@ -885,6 +885,24 @@ def trace(key, avoid=()):
             i = max(i - 1, 0)
         else:
             i += 1
+    # (the cells it came round to again: a LOOP round a piece of fixed copper -- its samples inside a bar are each read
+    # out to the nearest free place on their own, the cells between two of them joined by the shortest chain, and where
+    # the two lie either side of a wall that chain goes round its end and, a sample on, back. `simple`: each loop cut,
+    # the run straight on from the cell it came back to -- the caller's to ask where the loop crosses another lane)
+    r['twice'] = len(full) - len(set(full))
+    if simple:
+        seen_, i = {}, 0
+        while i < len(full):
+            j = seen_.get(full[i])
+            if j is None:
+                seen_[full[i]] = i
+                i += 1
+                continue
+            for t_ in full[j + 1:i]:
+                if seen_.get(t_, -1) > j:
+                    del seen_[t_]
+            del full[j + 1:i + 1]; del fat[j + 1:i + 1]; del brk[j + 1:i + 1]
+            i = j + 1
     # where it crosses into each cell after the first
     # (RAW: its place along the edge's LINE read off the reference as it has it -- past the edge's end where the
     # reference stands inside the copper's bar there: lanes read out of one bar to one boundary keep their order by it)
@@ -915,6 +933,7 @@ def trace(key, avoid=()):
         elif c:
             out.append(portal(m, full[c - 1], t, X[c]))
             out[-1]['raw'], out[-1]['psh'] = RAW[c]
+            out[-1]['br'] = full[c - 1] in bridge or t in bridge
         # its free points in this cell: a point wherever the reference bends (kept to 0.4 of a grid step of it), and a
         # straight stretch longer than HPT filled -- every point inside the cell
         a0 = (tuple(sam[fat[c]]) if brk[c] else X[c]) if c else tuple(sam[0])
@@ -1105,6 +1124,46 @@ def _isotonic(z):
     return [v for v, c in zip(vals, cnt) for _ in range(c)]
 
 
+def way_order(kx, px, ky, py, Ps):
+    """two runs of a layer on one cell edge, by WHERE THEY GO: followed on together through the cell edges they share,
+    to the cell they part in -- there the one leaving by the edge at the shared edge's one end stands nearer that end
+    on it, and so back, cell by cell, to this edge (two runs through one cell by the same two edges keep their order
+    about the corner those share). Followed on, and back the way they came; -> True where run kx stands nearer the
+    edge's lower point than ky, False where farther, None where neither way says (they part nowhere, or one ends
+    first) or the two ways say otherwise (they cross between)"""
+    ed = lambda p_: (min(p_['a'], p_['b']), max(p_['a'], p_['b']))      # noqa: E731
+    lx, ly = Ps[kx][0], Ps[ky][0]
+    ix, iy = Ps[kx][1][id(px)], Ps[ky][1][id(py)]
+    same = px['from'] == py['from']
+    got = []
+    for step in (1, -1):
+        sx, sy = step, (step if same else -step)
+        chain, j = [ed(px)], 1
+        while 0 <= ix + sx * j < len(lx) and 0 <= iy + sy * j < len(ly) \
+                and ed(lx[ix + sx * j]) == ed(ly[iy + sy * j]) and j <= len(lx):
+            chain.append(ed(lx[ix + sx * j]))
+            j += 1
+        if not (0 <= ix + sx * j < len(lx) and 0 <= iy + sy * j < len(ly)):
+            got.append(None)
+            continue
+        ex, ey, ek = ed(lx[ix + sx * j]), ed(ly[iy + sy * j]), chain[-1]
+        if (ek[0] in ex) == (ek[0] in ey) or len(set(ex) & set(ek)) != 1 or len(set(ey) & set(ek)) != 1:
+            got.append(None)        # (not the two other edges of one cell: no word)
+            continue
+        s_ = ek[0] in ex            # (kx leaves by the edge at ek's lower point: nearer it on ek)
+        for e0, e1 in zip(chain[-2::-1], chain[:0:-1]):
+            v_ = set(e0) & set(e1)
+            if len(v_) != 1:
+                s_ = None
+                break
+            v_ = v_.pop()
+            near = s_ if v_ == e1[0] else not s_
+            s_ = near if v_ == e0[0] else not near
+        got.append(s_)
+    f_, b_ = got
+    return f_ if b_ is None or f_ == b_ else (b_ if f_ is None else None)
+
+
 def spread_edges():
     """on each cell edge where a run was read out of a bar, or two stand on one place: the runs in the order the
     reference has them (RAW) -- but two of them read within a pitch of each other AS THE BRAID ORDERS THEM, wherever
@@ -1116,6 +1175,10 @@ def spread_edges():
     round's audit found two lanes of one layer 0.006 mm apart at the teeth. -> the edges spread"""
     import functools
     done = 0
+    Ps = {}
+    for k_ in KEYS:
+        l_ = [p_ for p_ in RUN[k_]['pts'] if p_['k'] == 'P']
+        Ps[k_] = (l_, {id(p_): i_ for i_, p_ in enumerate(l_)})
     for (L_, a, b), lst in edge_lists().items():
         ln = lst[0][1]['len']
         can = lambda e_: e_[1]['raw'] if e_[2] else ln - e_[1]['raw']
@@ -1123,6 +1186,12 @@ def spread_edges():
         def cmp(x, y):
             dx = can(x) - can(y)
             by_place = -1 if dx < 0 else 1 if dx > 0 else 0
+            # (a place read off a way round fixed copper the reference does not take -- trace's bridge -- or out of a
+            # bar is no order: by where the two runs go, way_order)
+            if x[0][0] != y[0][0] and (x[1]['psh'] or y[1]['psh'] or x[1].get('br') or y[1].get('br')):
+                w_ = way_order(x[0], x[1], y[0], y[1], Ps)
+                if w_ is not None:
+                    return -1 if w_ else 1
             if abs(dx) > P_MIN or x[0][0] == y[0][0]:
                 return by_place
             bit = order_bit(x[0][0], x[0][1], y[0][0], y[0][1])     # +1: y on x's left
@@ -1141,6 +1210,10 @@ def spread_edges():
         G_ = sum(gaps)
         if G_ > hi - lo:
             gaps = [g_ * max(hi - lo, 0.0) / G_ * 0.999 for g_ in gaps] if G_ > 0 else gaps
+            # (...two lanes never on ONE place: a hair apart, in their order, where the edge has no room for them at
+            # all -- on one place two runs the wrong way round there cross nothing as read, and the first round's
+            # pitch rows part them across each other)
+            gaps = [max(g_, ORDER_HAIR) if x[0][0] != y[0][0] else g_ for g_, x, y in zip(gaps, lst, lst[1:])]
             G_ = sum(gaps)
         cum = [0.0]
         for g_ in gaps:
@@ -1154,7 +1227,44 @@ def spread_edges():
 
 
 SIDE_READ = 0.4 * GS
+ORDER_HAIR = 1e-3              # two lanes with no room on a cell edge: this far apart, in their order
 NSPREAD = spread_edges()
+# ...and a run that crosses another lane of its layer as read and came round to a cell it had passed is read again
+# with its loops cut (trace's `simple`) -- the two runs of a crossing together where both did -- and kept so where
+# that leaves fewer crossings on the edges as spread: two lanes taken round one side of another bus's laid track,
+# each read in loops round its end (40 mm of lane where 14 lay), crossed five times and never came apart. A loop that
+# crosses nothing stands: the lanes beside it are read round the same copper the same way, and cut alone it would
+# cross them
+NLOOP, _done, _tried = 0, set(), set()
+for _try in range(2 * len(KEYS)):
+    xs_ = same_layer_crossings(layout())
+    got_ = None
+    for ka, kb, _xy in xs_:
+        ks_ = tuple(q_ for q_ in (ka, kb) if RUN[q_]['twice'] and q_ not in _done)
+        if ks_ and ks_ not in _tried:
+            got_ = ks_
+            break
+    if got_ is None:
+        break
+    _tried.add(got_)
+    keep_ = {q_: {f_: RUN[q_][f_] for f_ in ('pts', 'first', 'last', 'gaps', 'bridge', 'breach', 'pushed', 'twice')}
+             for q_ in got_}
+    was_t = [(p_, p_['t']) for k_ in KEYS for p_ in RUN[k_]['pts'] if p_['k'] == 'P']
+    for q_ in got_:
+        RUN[q_]['pts'] = trace(q_, simple=True)
+    spread_edges()
+    if len(same_layer_crossings(layout())) < len(xs_):
+        NLOOP += len(got_)
+        _done |= set(got_)
+        for q_ in got_:
+            RUN[q_]['twice'] = 0
+    else:
+        for q_ in got_:
+            RUN[q_].update(keep_[q_])
+        for p_, t_ in was_t:
+            p_['t'] = t_
+if NLOOP:
+    BREACH = [(k_, pa_, pb_, copper_between(RUN[k_]['L'], pa_, pb_)) for k_ in KEYS for (pa_, pb_) in RUN[k_]['breach']]
 def uncross():
     """Two runs of a layer that cross in a cell as read have their free points given up WHERE THEY ARE CROSSED: from
     a point's spacing before the first place the two cross in that cell to as far past the last, each run then
@@ -1203,7 +1313,8 @@ def uncross():
 UNCROSS_PADS = (HPT, 4 * HPT, 16 * HPT, math.inf)     # the stretch given up either side of where two runs cross
 NUNCROSS = uncross()
 log(f'{NMOUTH} of {2 * len(M)} lane ends leave straight through their own stub, {NBACK} more by their own line; {NSPREAD} cell edge(s) with runs read '
-    f'out of a bar, or on one place, put in order a pitch apart; {NUNCROSS} stretch(es) where two runs of a layer crossed as read laid straight')
+    f'out of a bar, or on one place, put in order a pitch apart; {NUNCROSS} stretch(es) where two runs of a layer crossed as read laid straight'
+    + f'; {NLOOP} run(s) that crossed another read again with their loops cut ({sum(1 for k_ in KEYS if RUN[k_]["twice"])} more came round to a cell they had passed and cross nothing)')
 JUMP_SHORT = GS                 # a passage this far short of its runs' room, at the least: one of them goes round
 JUMP_BACK = 16 * P_MIN          # ...leaving its way this far before the passage at most, and back on it as far after
 JUMP_TRY = 12                   # ...the shortest of the ways found tried, this many at most

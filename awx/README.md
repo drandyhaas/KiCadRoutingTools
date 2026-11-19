@@ -1939,11 +1939,35 @@ still lacks is in the
   an array's corner two lanes of one layer lay so, the other way round over
   one stretch: ordered by where the lines stood, they crossed and crossed
   back inside the bar, no round could part them, and the gate read the two
-  as teeth short of their pitch. Where it crosses fixed copper
+  as teeth short of their pitch. Where an edge has no room for a pitch
+  between them, two lanes still stand a hair apart in their order, never on
+  one place: on one place two runs the wrong way round cross nothing as
+  read, and the first round parts them across each other. Where it crosses fixed copper
   that no free cells of the layer lead round -- the two sides are separate
   pieces of that layer's free space -- the run is read as it stands, with a
   **breach**: two fixed points either side of the copper. No geometry can
   lay that lane on that layer there, and it is a finding for the solve.
+- **Two runs ordered by where they go.** A place read out of a bar, or off
+  a way round fixed copper the line does not take (two cells it passes that
+  are not neighbours, joined by the shortest chain between them), is no
+  order either. Two runs with such a place on a shared cell edge are
+  ordered by where they go (`way_order`): followed through the edges they
+  share to the cell they part in, the one leaving by the edge at the shared
+  edge's one end is the nearer that end, and so back cell by cell; asked
+  forward and backward, and no word where the two disagree (the runs cross
+  between) or neither says anything. Two lanes taken round one side of
+  another bus's laid track were read by their places the wrong way round on
+  two edges with a corner in common: a crossing inside one cell that the
+  start's count did not see and no round undid.
+- **Runs read in loops.** A line through a bar has its samples read out to
+  the nearest free place each on its own, and where two lie either side of
+  a wall the chain joining them goes round the wall's end and back: a run
+  comes round to a cell it has passed. A run that crosses another of its
+  layer as read and has such a loop is read again with its loops cut, the
+  two runs of a crossing together where both have one, and kept so only
+  where the layout as spread then has fewer crossings. A loop that crosses
+  nothing stands: the lanes beside it are read round the same copper the
+  same way, and cut alone it would cross them.
 - **Two runs crossed as read.** Two runs of a layer that cross inside one
   cell of the layout as read have their own points given up where they are
   crossed: from a point's spacing before the first place they cross in that
