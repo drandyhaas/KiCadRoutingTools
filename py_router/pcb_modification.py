@@ -8881,7 +8881,10 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     must leave byte-faithful).
     """
     new_segments = result['new_segments']
-    if not new_segments:
+    # A result with vias and no segments commits its vias (#2005): returning
+    # on no segments alone dropped them, while remove_route_from_pcb_data
+    # removed them, so a rip + restore lost a via-only result.
+    if not new_segments and not result.get('new_vias'):
         return
     # #658 in-run river packing: pack the FRESH route's runs against
     # committed sibling runs BEFORE this copper becomes an obstacle.
@@ -9054,7 +9057,7 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         _have_s.add(id(seg))
         pcb_data.segments.append(seg)
     _have_v = {id(v) for v in pcb_data.vias}
-    for via in result['new_vias']:
+    for via in result.get('new_vias') or ():
         if id(via) in _have_v:
             continue
         _have_v.add(id(via))
@@ -9064,7 +9067,7 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     adopt_restored_stubs(pcb_data, result)
     if getattr(pcb_data, '_route_trace', None) is not None:     # the movie's record
         from route_trace import record
-        record(pcb_data, cleaned_segments, result['new_vias'], result, trace_event)
+        record(pcb_data, cleaned_segments, result.get('new_vias') or [], result, trace_event)
 
 
 def adopt_restored_stubs(pcb_data: PCBData, result: dict) -> None:
