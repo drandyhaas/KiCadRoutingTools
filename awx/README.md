@@ -2349,6 +2349,9 @@ copper it names found there:
 - anything else right past a tooth -- another net's track or pad, a locked
   via: the lane's ball escaped again (`ends_reescape.py`), on the same face
   within a millimetre of the old tooth, where the solve's order still holds.
+  Its new tooth is measured against every part of a group's destination: by
+  the first part alone, a lane ending at another member had its berth's stub
+  read as the tooth, and the loop on the repaired ends drew it with no length.
 
 Every move is checked on the fanout's own obstacle model and the moves chain.
 A pair's own end and a finding at the berths that is not another net's via

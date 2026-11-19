@@ -38,6 +38,10 @@ names = [n for n in awx_settings.req('NETS').split(',') if n]
 pcb = parse_kicad_pcb(bench)
 st = ffp.plan_state(pcb, names)
 byname, src_pad, sref = st['byname'], st['src_pad'], st['sref']
+# (the ends told apart by EVERY part of a group's destination, as the realize reads DEST: by its first part alone, a
+# lane ending at another member had both free ends read as the source's, and the one farther from its own pad or
+# via -- its berth's stub -- was taken for the tooth, the lane then of no length)
+dest_all = '+'.join(st['dests']) if len(st.get('dests') or ()) > 1 else st['dref']
 bar = te.TRACK / 2 + te.CLEAR + MARGIN
 
 
@@ -83,7 +87,7 @@ def clears(m, nid):
 
 
 # (the SOURCE end -- the bench is fanned at both arrays: the two ends told apart by the destination, plan_state's)
-old = sr.measure_tooth(pcb, lane, src_pad[lane], byname, dest_ref=st['dref'], which='src')
+old = sr.measure_tooth(pcb, lane, src_pad[lane], byname, dest_ref=dest_all, which='src')
 if old is None:
     print(f'ends_reescape: {lane} has no tooth on the bench')
     sys.exit(2)
@@ -246,7 +250,7 @@ for _k, m, d in cands[:TRIES]:
     if lane in (res.get('ok') or []) and not res.get('rejected'):
         # (off LAYER: an escape the engine laid back on it -- its ladder falls to the surface when the asked via
         # cannot stand -- is no escape off it, and the next is tried)
-        got_ = sr.measure_tooth(parse_kicad_pcb(out), lane, src_pad[lane], byname, dest_ref=st['dref'], which='src') \
+        got_ = sr.measure_tooth(parse_kicad_pcb(out), lane, src_pad[lane], byname, dest_ref=dest_all, which='src') \
             if AVOID else None
         if got_ is None or got_['layer'] != AVOID:
             break
@@ -266,7 +270,7 @@ if keep_s or keep_v:
         [{'x': v_.x, 'y': v_.y, 'size': v_.size, 'drill': v_.drill, 'layers': list(v_.layers), 'net_id': nid,
           'tenting_attrs': getattr(v_, 'tenting_attrs', {}), 'inherit_when_unspecified': True} for v_ in keep_v],
         net_id_to_name=_n2n)
-new = sr.measure_tooth(parse_kicad_pcb(out), lane, src_pad[lane], byname, dest_ref=st['dref'], which='src')
+new = sr.measure_tooth(parse_kicad_pcb(out), lane, src_pad[lane], byname, dest_ref=dest_all, which='src')
 side = json.load(open(os.path.splitext(bench)[0] + '.plan.json'))
 side['ends'][lane][0] = list(new['tooth'])
 side['tooth_layer'][lane] = new['layer']
