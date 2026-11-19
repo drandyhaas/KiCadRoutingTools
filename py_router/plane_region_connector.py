@@ -3266,11 +3266,10 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                                                    + (py - y1) * dy) / L2))
         return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
-    def _seg_seg(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2):
-        return min(_seg_pt(ax1, ay1, ax2, ay2, bx1, by1),
-                   _seg_pt(ax1, ay1, ax2, ay2, bx2, by2),
-                   _seg_pt(bx1, by1, bx2, by2, ax1, ay1),
-                   _seg_pt(bx1, by1, bx2, by2, ax2, ay2))
+    # The shared distance, which is 0 for segments that CROSS: the four
+    # endpoint distances alone read a leg crossing a foreign track mid-span
+    # as clear (#2004).
+    from geometry_utils import segment_to_segment_distance as _seg_seg
 
     legs = []
     for k in range(len(route_points) - 1):

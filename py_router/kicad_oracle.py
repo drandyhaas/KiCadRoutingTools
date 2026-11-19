@@ -1097,6 +1097,38 @@ def emitted_copper_clear(route_points, extra_conn, width, pcb_data, net_id,
     return True
 
 
+def rescue_copper_clear(segments, pcb_data, net_id, config):
+    """True when a rescue-ladder result's segments, each at its own width,
+    clear foreign copper, the board edge, NPTH drills and keep-outs --
+    `wide_route_clear`, the measurement `emitted_copper_clear` makes for the
+    main link path (#2004).
+
+    The weld escalation and the exact-fill strap commit a rescue result
+    directly, and the rescue's fine-grid A* judges clearance on its grid
+    map: an off-grid foreign track is rounded there, and an exact-fill
+    endpoint seeds a cell beside the fill's edge, so the copper as written
+    could graze what the map said was clear (zynq_ad9364: a 0.0889 GND strap
+    14 um inside clearance of an off-grid fanout track). Segments are graded
+    per width, one call each: a None-layer point between two segments
+    separates them, so no leg is invented between them."""
+    from plane_region_connector import wide_route_clear
+    bec = getattr(config, 'board_edge_clearance', 0.0)
+    by_width = {}
+    for s in segments or ():
+        by_width.setdefault(s.width, []).append(s)
+    for width, segs in by_width.items():
+        pts = []
+        for s in segs:
+            if pts:
+                pts.append((s.start_x, s.start_y, None))
+            pts.append((s.start_x, s.start_y, s.layer))
+            pts.append((s.end_x, s.end_y, s.layer))
+        if not wide_route_clear(pts, width, pcb_data, net_id, config,
+                                board_edge_clearance=bec):
+            return False
+    return True
+
+
 def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
     """Sample points (x, y, layer) on the net's largest track+via copper
     component, graded WITHOUT any zone-fill credit. The biggest genuine
@@ -2903,6 +2935,11 @@ def oracle_reconnect(board_file: str, net_names, config,
                         print(f"    {net_name}: exact-fill strap REJECTED "
                               f"({_ko2}, #1778)")
                         _esc2 = None
+                if _esc2 and not _esc2.get('failed') and not rescue_copper_clear(
+                        _esc2.get('new_segments'), pcb_data, net_id, _esc2_cfg):
+                    print(f"    {net_name}: exact-fill strap REJECTED "
+                          f"(copper would violate clearance, #2004)")
+                    _esc2 = None
                 if _esc2 and not _esc2.get('failed'):
                     _e2segs = _esc2.get('new_segments') or []
                     _e2vias = _esc2.get('new_vias') or []
@@ -3252,6 +3289,11 @@ def oracle_reconnect(board_file: str, net_names, config,
                     print(f"    {net_name}: weld escalation REJECTED "
                           f"(copper reaches neither/only one gap endpoint "
                           f"on its layer -- unrelated fragment join, #648)")
+                    _esc = None
+                if _esc and not _esc.get('failed') and not rescue_copper_clear(
+                        _esc.get('new_segments'), pcb_data, net_id, _esc_cfg):
+                    print(f"    {net_name}: weld escalation REJECTED "
+                          f"(copper would violate clearance, #2004)")
                     _esc = None
                 # #658: the rescue's scoped fine router has no layer-cost
                 # plumbing, so a FORBIDDEN layer (cost -1, e.g. power
