@@ -821,7 +821,14 @@ on its array is a group of one. The step:
 3. **Checked.** Each bus's ends go to its own whole solve, under its strict
    rules, on the board as the model fanned it out. A refusal teaches the
    model (a lane held to one layer, two crossings held apart, a state
-   refused) and the model is solved again. A plan through a keep-out area
+   refused) and the model is solved again. Where crossings have no window
+   between them, the check names every such set the state holds, not the
+   first alone: the first set's crossings are set free and the rest asked
+   again, set after set, and each is a refused state of its own. Named one a
+   check, a bus whose ends held three was refused at three checks running,
+   each with a repair of the model between; over two seeds of a four-bus
+   board the checks refused 3 and 8 times where they had 8 and 15, the stage
+   a fifth shorter. A plan through a keep-out area
    is no plan there: the check holds each such cut, which the bus's own
    solve may break at a price, and its refusal names the end whose layer
    cannot hold beside the area -- ends whose lane has no way off that layer

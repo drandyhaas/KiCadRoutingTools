@@ -2465,7 +2465,8 @@ def _bus_check(b, ctx, dest_, RL, buf_, whole_frame, whole_solve, hint_=None):
     """bus_check's verdict, the solve's console in `buf_`"""
     with contextlib.redirect_stdout(buf_):
         try:
-            J = whole_solve.solve(ctx, dest_, front=b.plan.get('front') or {}, check=True, core=True, hint=hint_)
+            J = whole_solve.solve(ctx, dest_, front=b.plan.get('front') or {}, check=True, core=True, hint=hint_,
+                                  cores=True)
         except whole_frame.PairSplit as e:
             at_ = {}
             for p_, w_, bs_ in e.splits:
@@ -2501,6 +2502,9 @@ def _bus_check(b, ctx, dest_, RL, buf_, whole_frame, whole_solve, hint_=None):
             # crossing is named)
             out['lanes'] = sorted({l_ for k_ in out['core'] for l_ in k_})
             out['rules'], out['hands'], out['endlay'], out['crossing'] = [], [], [], True
+            # (EVERY core of crossings the state holds, the solve's `cores`: each one's lanes apart -- each is a
+            # refused state of its own)
+            out['groups'] = [sorted({l_ for k_ in c_ for l_ in k_}) for c_ in (J or {}).get('cores') or [out['core']]]
         elif not out['plan'] and out['status'] == 'INFEASIBLE':
             # (no crossing named with the windows alone: THE RULES that cannot hold together, each lane's by FAMILY
             # -- which rule of a lane cannot hold, a pair's hands among them -- and the crossings their core names
@@ -5163,11 +5167,12 @@ def main():
                     k_ = frozenset(k_)
                     L_['xl'][k_] = 2 * L_['xl'][k_] if k_ in L_['xl'] else we.JOINT_LEARN
                 at_ = chk.get('at') or {}
-                ng_ = {l_: tuple(None if at_.get(l_) not in (None, k_) else
-                                 we._opt_sig((b.E.T, b.E.B)[k_][l_][s_[l_][k_]]) for k_ in (0, 1))
-                       for l_ in chk['lanes'] if l_ in s_}
-                if ng_:
-                    L_['nogoods'].append(ng_)
+                for g_ in chk.get('groups') or [list(chk['lanes'])]:
+                    ng_ = {l_: tuple(None if at_.get(l_) not in (None, k_) else
+                                     we._opt_sig((b.E.T, b.E.B)[k_][l_][s_[l_][k_]]) for k_ in (0, 1))
+                           for l_ in g_ if l_ in s_}
+                    if ng_:
+                        L_['nogoods'].append(ng_)
                 taught = taught or new_
                 # (a lane held to one layer is offered its whole menu: on the lines it has its pattern's one via site,
                 # and two such lanes side by side had no end each on one layer -- the model no state, its rules naming

@@ -218,7 +218,7 @@ def freed_of_hold(lcuts, held, own, end_layers, lane_of=None):
 
 
 def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, front=None, check=False,
-          core=False, rules=False, lanecore=False, joint=None):
+          core=False, rules=False, lanecore=False, joint=None, cores=False):
     """the solve of the bench ctx (whole_ctx.plan()) round the destination part `dest`: the JSON
     whole_geo reads (crossings, changes, each lane's route coordinate), or None when CP-SAT finds no plan or none it
     proves optimal in its vias. `cuts`
@@ -2309,6 +2309,30 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         if (WLIT or RLIT) and st_ == cp_model.INFEASIBLE:
             suff_ = list(s_.SufficientAssumptionsForInfeasibility())
             out_['core'] = sorted({WLIT[i_] for i_ in suff_ if i_ in WLIT})
+            if cores and not RLIT and out_['core']:
+                # (EVERY CORE of the crossings' windows, `cores`: the first one's crossings set free -- their windows
+                # no longer held -- and the rest asked again, core after core, until a plan stands with them free, or
+                # what is left has no plan whatever the windows. One core a check, a bus whose ends held three was
+                # refused at three checks running, each with a repair of the group's model between)
+                found_, free_w = [list(out_['core'])], set(out_['core'])
+                for _it in range(len(win)):         # (each pass sets a crossing free at least: it ends)
+                    m.ClearAssumptions()
+                    m.AddAssumptions([m.GetBoolVarFromProtoIndex(i_) for i_ in sorted(WLIT) if WLIT[i_] not in free_w])
+                    s5_ = cp_seed.solver()
+                    s5_.parameters.num_workers = 1
+                    s5_.parameters.stop_after_first_solution = True
+                    s5_.parameters.max_deterministic_time = CHECK_WORK
+                    if s5_.Solve(m) != cp_model.INFEASIBLE:
+                        break
+                    nxt_ = sorted({WLIT[i_] for i_ in s5_.SufficientAssumptionsForInfeasibility() if i_ in WLIT})
+                    if not nxt_:
+                        break
+                    found_.append(nxt_)
+                    free_w |= set(nxt_)
+                out_['core'] = sorted(free_w)
+                out_['cores'] = found_
+                print(f'   check: {len(found_)} core(s) of crossings with no window: '
+                      + '; '.join(', '.join(f'{a_}/{b_}' for a_, b_ in c_) for c_ in found_)[:600])
             if RLIT:
                 # (the rules of the core, minimal: each dropped in turn -- its rule set free -- and kept out when the
                 # rest, with every window held, still has no plan; a core as CP-SAT returns it is sufficient, not
