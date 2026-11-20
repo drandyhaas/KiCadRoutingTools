@@ -729,8 +729,33 @@ class Group:
             return {n: at((i + 1) / (k_ + 1)) for i, (n, *_r) in enumerate(mem)}, {}
         at_a = [n for n, w, *_r in mem if w[7][3] == 'a']
         at_b = [n for n, w, *_r in mem if w[7][3] == 'b']
-        out = {n: at((i + 1) * room / lm_) for i, n in enumerate(at_a)}
-        out.update({n: at(1.0 - (i + 1) * room / lm_) for i, n in enumerate(at_b[::-1])})
+        # (...`room` apart ACROSS THEIR TAILS: each lane leaves its landing for its berth, and where that way runs at
+        # a slant to the mouth the lanes a `room` apart along the mouth leave closer than that -- the three lanes of
+        # a chip's far face, landed 0.31 mm apart on a mouth 36 degrees off their way, left 0.19 mm apart, less than
+        # a track and its clearance, and the embedding parted them across the berths' own vias. Each lane after an
+        # end's first takes the mouth's length that puts it `room` from the tail before it, no more than twice
+        # `room` (a tail within 30 degrees of the mouth), and no more than the mouth has for them all)
+        to_ = {n: bp for n, _w, bp, *_r in mem if bp is not None}
+
+        def steps(seq, t0, sg):
+            ts, t = [], t0
+            for i, n in enumerate(seq):
+                st = room
+                if i and n in to_:
+                    p0 = at(t)
+                    d_ = math.dist(p0, to_[n])
+                    if d_ > 1e-9:
+                        sin_ = abs((b[0] - a[0]) * (to_[n][1] - p0[1]) - (b[1] - a[1]) * (to_[n][0] - p0[0])) / (lm_ * d_)
+                        st = room / max(sin_, 0.5)
+                t += sg * st / lm_
+                ts.append(t)
+            return ts
+        ta, tb = steps(at_a, 0.0, 1.0), steps(at_b[::-1], 1.0, -1.0)
+        if (ta[-1] if ta else 0.0) + room / lm_ > (tb[-1] if tb else 1.0) - 1e-9:
+            ta = [(i + 1) * room / lm_ for i in range(len(at_a))]
+            tb = [1.0 - (i + 1) * room / lm_ for i in range(len(at_b))]
+        out = {n: at(t) for n, t in zip(at_a, ta)}
+        out.update({n: at(t) for n, t in zip(at_b[::-1], tb)})
         # ...and each such lane's TAIL, from its landing to its berth, OVER the stub ends it passes: the lanes of a
         # row land the nearest the wall first and run down the row to their berths, each past the stubs of the ones
         # before it -- and a stub that stands further out than the lane behind it runs is crossed by that lane's

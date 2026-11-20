@@ -289,7 +289,7 @@ class BusTab(wx.Panel):
     POLL_MS = 500
 
     def __init__(self, parent, pcb_data, board_filename, get_sizes=None, on_complete=None,
-                 append_log=None, sync_pcb_data_callback=None, get_fix_drc=None):
+                 append_log=None, sync_pcb_data_callback=None, get_fix_drc=None, get_escalation=None):
         super().__init__(parent)
         self.pcb_data = pcb_data
         self.board_filename = board_filename
@@ -298,6 +298,9 @@ class BusTab(wx.Panel):
         # step resolves as route.py does (the board's Default class).
         self.get_sizes = get_sizes or (lambda: {})
         self.get_fix_drc = get_fix_drc or (lambda: True)
+        # get_escalation(): the shared panel's Escalation choice, the step's
+        # --escalation as every routing tab takes it (None: the CLI's default)
+        self.get_escalation = get_escalation or (lambda: None)
         self.on_complete = on_complete
         self.append_log = append_log or (lambda text: None)
         self.sync_pcb_data_callback = sync_pcb_data_callback
@@ -713,7 +716,8 @@ class BusTab(wx.Panel):
     def command(self, python, board, out):
         """The step's command line for BOARD -> OUT, as the CLI types it."""
         sizes = dict(self.get_sizes(), fanout_track_width=self.options.fanout_width())
-        return bp.build_argv(python, board, out, self.buses.argv_buses(), self.options.options(), sizes)
+        return bp.build_argv(python, board, out, self.buses.argv_buses(),
+                             dict(self.options.options(), escalation=self.get_escalation()), sizes)
 
     def run(self):
         """Run the step on a snapshot; returns whether it started."""

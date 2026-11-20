@@ -28,7 +28,12 @@ lane's options there), pairs of ends not to be chosen together, each end's point
 laid, and ends pinned (the lane's option nearest `at`, in the sidecar's frame, on `layer` where one is).
 whole_feedback.py --now SIDECAR.plan.json HOT.json -- exit 0 (and name them) when a finding at the ends is one no solve
 moves: a pitch or a static clearance there comes of where the ends stand (a dive there is the solve's: its via cut
-moves it; a fold, the crossings the solve put round it) -- the loop stops at once, before paying a solve.
+moves it; a fold, the crossings the solve put round it) -- the loop stops at once, before paying a solve. Only where
+EVERY lane the finding names is at its OWN end there (near_own): a lane that only passes in front of that face, on
+its way to a berth on another face or another part, is the solve's to move -- off that layer, the loop's layer cut.
+whole_feedback.py --own SIDECAR.plan.json HOT.json -- each finding at the ends with the lanes it names that END there,
+one line `OWN [{"xy": [x, y] (the plan's frame, as HOT has it), "kind", "lanes", "own"}, ..]`: the loop's own reading
+of which of two lanes found short of their pitch ends there and which passes.
 
 A finding (whole_gate --hot: its place, its kind, the lanes it names) is AT an array's ends -- the teeth or the berths --
 where their own copper is: beside a side face, within the width that face's lanes stack to (its ends' count, a lane
@@ -63,10 +68,11 @@ REFUSED = sys.argv[1] == '--refused'
 NAME = sys.argv[1] == '--name'
 RAISE = sys.argv[1] == '--raise'
 EDITS = sys.argv[1] == '--edits'
-if REPEAT or NOW or REFUSED or NAME or RAISE or EDITS:
+OWN = sys.argv[1] == '--own'
+if REPEAT or NOW or REFUSED or NAME or RAISE or EDITS or OWN:
     sys.argv.pop(1)
 NAME_TOP = 3                                         # --name's last tier: the lanes most crossed, this many a round
-if NOW:
+if NOW or OWN:
     sys.argv.insert(2, '')                            # (no earlier round)
 sidecar, out, hots = sys.argv[1], sys.argv[2], sys.argv[3:]
 S = json.load(open(sidecar))
@@ -119,20 +125,82 @@ def end_of(lane, k):
     return {'lane': lane, 'end': k, 'points': [ends[n][k] for n in lg], 'layer': lay[k].get(lg[0])}
 
 
+DIRK = {0: dict(S.get('tooth_dir') or {}), 1: dict(S.get('stub_dir') or {})}   # each net's end's escape direction:
+#                                                                                 its FACE (none given: every end one
+#                                                                                 face, near_own then near's own test)
+_FACE_BOXES = {}
+
+
+def near_own(lane, k, x, y):
+    """is (x, y) at lane's OWN end k: at the ends of its face -- the ends k leaving the array the way its own does --
+    as `near` tests the array's (ends_near). Near the array's ends alone, a lane passing in front of one face on its
+    way to a berth on another was named at that berth, 12 mm from the finding"""
+    lg = legs_of(lane)
+    f = tuple(DIRK[k].get(lg[0]) or ()) if lg else ()
+    if (k, f) not in _FACE_BOXES:
+        sub = {n: e for n, e in ends.items() if tuple(DIRK[k].get(n) or ()) == f}
+        _FACE_BOXES[(k, f)] = (sub, ends_near.boxes(sub, S.get('dest_of') or {}) if sub else None)
+    sub, bxs = _FACE_BOXES[(k, f)]
+    return bool(sub) and ends_near.near(sub, bxs, k, x, y, FRONT, bd.LANE_MIN)
+
+
+def all_own(lanes, k, x, y):
+    """is the finding at (x, y), near the ends k, the FANOUT's: every lane it names at its OWN end there. One of
+    whose lanes only passes -- its own end on another face, or another part -- is the solve's: that lane can leave
+    the layer there, and no other place for the end it passes answers it. Read at the array's ends alone, a lane to
+    a part's far side squeezed past the last berth of its near side on that berth's layer was "at the berths": the
+    loop stopped on it with nothing asked of the solve, the berth's lane shipped open, and the group's model was
+    told to move a berth that had one place"""
+    return bool(lanes) and near(k, x, y) and all(near_own(ln, k, x, y) for ln in lanes)
+
+
 def at_ends(fn):
-    """the findings of a hot file at the ends: {(kind, lanes, end)}"""
+    """the findings of a hot file at the ends -- every lane they name at its own end there: {(kind, lanes, end)}"""
     got = set()
     for x, y, kind, *rest in json.load(open(fn)).get('hot', []):
         x, y = board_xy(x, y)
         lanes = tuple(sorted(lanes_named(rest[0] if rest else [])))
         for k in (0, 1):
-            if lanes and near(k, x, y):
+            if all_own(lanes, k, x, y):
                 got.add((kind, lanes, k))
+    return got
+
+
+if OWN:
+    rows = []
+    for x0, y0, kind, *rest in json.load(open(hots[0])).get('hot', []):
+        x, y = board_xy(x0, y0)
+        lanes = lanes_named(rest[0] if rest else [])
+        ks = [k for k in (0, 1) if near(k, x, y)]
+        if lanes and ks:
+            rows.append({'xy': [x0, y0], 'kind': kind, 'lanes': lanes,
+                         'own': sorted({ln for k in ks for ln in lanes if near_own(ln, k, x, y)})})
+    print('OWN ' + json.dumps(rows))
+    sys.exit(0)
+def solves(fn):
+    """the findings of a hot file that are the solve's to move, {(kind, lanes)}: all but a pitch or a static
+    clearance at the ends"""
+    got = set()
+    for x, y, kind, *rest in json.load(open(fn)).get('hot', []):
+        x, y = board_xy(x, y)
+        lanes = tuple(sorted(lanes_named(rest[0] if rest else [])))
+        if not (kind in ('PITCH', 'STATIC') and any(all_own(lanes, k, x, y) for k in (0, 1))):
+            got.add((kind, lanes))
     return got
 
 
 if NOW:
     fanouts = sorted(f for f in at_ends(hots[0]) if f[0] in ('PITCH', 'STATIC'))
+    # (...and NOT while the round has a pitch or a static clearance that IS the solve's -- two lanes out between
+    # the arrays, or one passing another's end: the solve has not been asked about it yet, and the round it is owed
+    # may be the one that lays the lane. Stopped at once for two pairs of berths the fanout must part, a round whose
+    # third finding was a lane crossing another's approach on its layer never went back to the solve; the pairs
+    # were laid all the same, and the crossed lane shipped open)
+    theirs = sorted(f for f in solves(hots[0]) if f[0] in ('PITCH', 'STATIC')) if fanouts else []
+    if theirs:
+        print(f'  {len(fanouts)} finding(s) at the ends, and {len(theirs)} of the solve\'s own -- the solve\'s first: '
+              + ', '.join(f'{kind} {"/".join(lanes)}' for kind, lanes in theirs))
+        sys.exit(1)
     for kind, lanes, k in fanouts:
         print(f'  {kind} {"/".join(lanes)} at the {"teeth" if k == 0 else "berths"}')
     sys.exit(0 if fanouts else 1)
@@ -143,16 +211,6 @@ if REPEAT:
     # stands beside that, not in place of it. Stopped there, a loop whose first round's three findings were down to a
     # berth 0.07 mm from a capacitor's pad and one new dive beside another bus's lane handed on a plan the snap laid a
     # lane short at that dive -- the dive one more round's via cut away, the berth laid round the pad with no violation
-    def solves(fn):
-        """the findings of a hot file that are the solve's to move, {(kind, lanes)}: all but a pitch or a static
-        clearance at the ends"""
-        got = set()
-        for x, y, kind, *rest in json.load(open(fn)).get('hot', []):
-            x, y = board_xy(x, y)
-            lanes = tuple(sorted(lanes_named(rest[0] if rest else [])))
-            if not (kind in ('PITCH', 'STATIC') and any(near(k, x, y) for k in (0, 1))):
-                got.add((kind, lanes))
-        return got
     fresh = sorted(solves(hots[0]) - solves(out)) if both else []
     if fresh:
         print(f'  {len(both)} finding(s) at the ends in both rounds, and {len(fresh)} of the solve\'s this round the '
@@ -362,25 +420,6 @@ if NAME:
     sys.exit(0)
 seen = {json.dumps(x, sort_keys=True) for x in fb['pairs']}
 added = 0
-DIRK = {0: dict(S.get('tooth_dir') or {}), 1: dict(S.get('stub_dir') or {})}   # each net's end's escape direction:
-#                                                                                 its FACE (none given: every end one
-#                                                                                 face, near_own then near's own test)
-_FACE_BOXES = {}
-
-
-def near_own(lane, k, x, y):
-    """is (x, y) at lane's OWN end k: at the ends of its face -- the ends k leaving the array the way its own does --
-    as `near` tests the array's (ends_near). Near the array's ends alone, a lane passing in front of one face on its
-    way to a berth on another was named at that berth, 12 mm from the finding"""
-    lg = legs_of(lane)
-    f = tuple(DIRK[k].get(lg[0]) or ()) if lg else ()
-    if (k, f) not in _FACE_BOXES:
-        sub = {n: e for n, e in ends.items() if tuple(DIRK[k].get(n) or ()) == f}
-        _FACE_BOXES[(k, f)] = (sub, ends_near.boxes(sub, S.get('dest_of') or {}) if sub else None)
-    sub, bxs = _FACE_BOXES[(k, f)]
-    return bool(sub) and ends_near.near(sub, bxs, k, x, y, FRONT, bd.LANE_MIN)
-
-
 for fn in hots:
     for x, y, kind, *rest in json.load(open(fn)).get('hot', []):
         x, y = board_xy(x, y)

@@ -115,9 +115,10 @@ def build_argv(python, board, out, buses=None, options=None, sizes=None,
 
     BUSES: the --bus specs in routing order, or None for the buses the step
     finds itself (no --bus). OPTIONS: rounds, feedback_rounds, k, inproc, pack,
-    round_edits -- each passed only where it differs from the CLI's default,
-    so the defaults give the bare command. SIZES: SIZE_ARGS name -> mm, or
-    None for one not given (fanout_track_width among them)."""
+    round_edits, escalation (the shared panel's, as every routing tab takes
+    it) -- each passed only where it differs from the CLI's default, so the
+    defaults give the bare command. SIZES: SIZE_ARGS name -> mm, or None for
+    one not given (fanout_track_width among them)."""
     import routing_defaults as defaults
     o = options or {}
     argv = [python, '-u', '-X', 'utf8', script, board, out]
@@ -138,6 +139,8 @@ def build_argv(python, board, out, buses=None, options=None, sizes=None,
         argv.append('--pack')
     if o.get('round_edits'):
         argv += ['--round-edits', str(o['round_edits'])]
+    if o.get('escalation') and o['escalation'] != defaults.ESCALATION:
+        argv += ['--escalation', str(o['escalation'])]
     return argv + size_flags(sizes)
 
 

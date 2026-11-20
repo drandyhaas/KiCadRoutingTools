@@ -771,6 +771,25 @@ alone on its array a group of one:
    nets open, then the fewest violations, then the fewest balls walled in,
    is the group's. No fallback: a bus with no capture, or a first model that
    ends with no state or no plan, is the step's result, named.
+5. **The group's escalation** (`--escalation fab|board|off`, route.py's own
+   flag and default). A group that still leaves the board short of clean is
+   routed again a rung down the fab ladder (`escalation_ladder`): the
+   lanes' track, the escapes' track and the via step down together, two or
+   three rungs to the policy's floor, and the clearance never -- it is the
+   DRC floor's. A rung is not the search again. It starts from the end the
+   run before it kept (`group_ends --from --feedback --at-end`): the
+   findings that run's lay left at its ends are answered by the model's
+   repair -- every lane held on its ends but those the findings name and
+   those that cross one -- then the checks, the fanout and the lay at the
+   rung's sizes. The fewest nets open, then violations, then balls walled
+   in, stands, the sizes asked for on a tie; a rung that leaves the board
+   clean ends the ladder, and a group with no result at all is not
+   escalated -- that is the step's own result. The board handed on ships
+   as route.py ships its own (`shipped_rules`): its project's floor lowered
+   to the copper it carries, and every net delivered below the sizes asked
+   for in the summary's `design_rules` and the `Design rules [...]` line.
+   The Bus tab passes the shared Escalation choice
+   (`tests/test_622_group_escalation.py`).
 
 The groups go in turn, each on the board the one before handed on. Each bus
 is its own routing step, with its own process and its own pool of threads,
@@ -953,6 +972,28 @@ again after a check or a lesson (a repair, which holds most lanes on their
 ends) that leaves a costly ball has the lanes nearest it searched once more,
 as an epoch. Every solve is bounded by deterministic batches, never a clock,
 so a board and its settings give one answer.
+
+**The repair** answers a check's refusal, a lesson of the laid field, or a
+lay's findings (`--feedback`): every lane the refusal did not name, nor that
+crossed one it named, held on the ends it had, and the rest solved for the
+objective. Its model is built small first -- a held lane offered the one
+option it has at each end, so nothing of its other options is built -- and
+whole only where the small one has no state, which means a held lane must be
+let go: the whole model names which. It starts from the state refused, not
+from each bus's ends arranged again, and so does an epoch's model: both
+hold lanes where that state had them. Where the repair's own first question
+is unanswered in its work, the repair itself is asked next, and the whole
+model's question (is there a state at all, and if not which rules cannot
+hold together) only if the repair finds none.
+
+**A walled ball** (or a plane ball fanned out) outweighs everything below it
+in the objective by the most the terms below can come to, and no more: of
+one end's options, one end's layers, one other ball's moves, one pair of
+ends' priced meetings, one is taken, so the dearest of each counts once.
+A state's value is read by that weight -- the costly balls its quotient,
+the rest its remainder. A lay's findings about two ends crowded together
+are priced by weight -- the options of an end that weigh the same are one
+term's -- not option by option.
 
 **On two routing layers** the model's count of vias misses some: it counts a
 lane's change of layer where its two ends' layers differ and nothing where
@@ -2859,7 +2900,7 @@ With nothing supplied, as on the benches:
 | `negotiated_buses.py`, `whole_joint.py`, `joint_lanes.py` | each source's buses one group (`route_grouped`): every bus's ends model captured, the group's ends, every bus on the shared field in its own frame and a process of its own (`route_on_field`), merged (`merge`, `conflicts`, `give_back`, `protect_laid`), the group's rounds; a round's first plans and every loop's re-solves one coupled solve, one CP-SAT model, the buses in step, coupled where two buses' lanes cross or come within a lane's pitch (`whole_joint.py`, `JOINT_DIR`, `whole_route.joint_loop_sync`); each bus's lanes published in the board's frame and laid as copper of their own nets on every other bus's stages (`joint_lanes.publish`, `foreign`) |
 | `group_ends.py` | the group's ends (`negotiated_buses.route_grouped`): every bus off one array given its ends by one CP-SAT model over its captured ends model and the arrays' shared menus; the model offered each bus ball's first tiers, its whole menu by need (a refusal's rules) and by use (the search's epochs, a stretch of lanes at a time; `tier_search`, `lane_stretches`); each bus's ends checked by its whole solve; the arrays fanned out as chosen and measured, a violation the fanout made answered by the model (`write_field`, `teach_laid`); a bus step's fanout stage on the group's ends (`bus_stage`, `GROUP_ENDS`) |
 | `field_ties.py` | the field's ties: the pads on a poured net beneath a group's parts tied on the fanned-out field, before the lanes (`group_ends`, after the field is measured) |
-| `escape_plan.py` | a dog-boned ball's escapes, the menus' moves from its via (`escape_menu`: along a ball line beside it, a sidestep to a line further over, or a street; `escape_out`: a surface escape from a ball with none) (`tests/test_622_escape_menu.py`) |
+| `escape_plan.py` | a dog-boned ball's escapes, the menus' moves from its via (`escape_menu`: along a ball line beside it, a sidestep to a line further over, or a street; `escape_out`: a surface escape from a ball with none) (`tests/test_622_escape_menu.py`). The lines they leave along are one lattice a face (`line_step`): the ball pitch cut in the most even parts each at least a lane's pitch at the fanout's sizes -- half a pitch at ordinary sizes, a quarter at the fab ladder's narrowest, where two lanes fit between two balls (`tests/test_622_escape_lattice.py`) |
 | `joint_escape.py`, `conflict_groups.py` | an array's menus for the group's ends (`build_menus`: every ball's escapes, drops and straps; a drop at a finer rung's via: `tests/test_622_drop_fine_via.py`; nothing in a laid pair's pocket: `test_622_pair_teeth.py`; no escape between two laid lanes that close round it: `test_622_lane_walls.py`; a rule area that forbids pours read as a pour of no net, so no plane drop is planned where no plane will pour: `zone_regions`); an array's whole plan in one CP-SAT solve, laid by the under-pad engine's joint escape (`plan_array`, `fan_array`: a bus's own run escapes the balls its comb refused by it; `tests/test_622_plan_array.py`); the escapes' conflicts as cliques and bicliques (`tests/test_622_conflict_groups.py`) |
 | `whole_route.py`, `modal_whole.py` | one rung end to end -- fanout, solve, loop, route, checks, rounds under the next seed -- graded in one line (`WHOLE K=..`); the loop's layer cuts from the audit and the snap (`tests/test_622_layer_cuts.py`); a lane its fanout gave no end, or ran and did not lay, left out of the round, open (`with_ends`: `tests/test_622_whole_route_no_ends.py`); the ladder in the cloud, one container per rung |
 | `cp_seed.py` | the bus step's seed: every CP-SAT solve of a round under one seed (`BUS_SEED`, else CP-SAT's default), the next draw under the next and a feedback round under its draw's -- the same board and seed the same plan |

@@ -2182,6 +2182,7 @@ class RoutingDialog(wx.Dialog):
             append_log=self._append_log,
             sync_pcb_data_callback=self._sync_pcb_data_from_board,
             get_fix_drc=lambda: self.fix_drc_check.GetValue(),
+            get_escalation=lambda: self.escalation.GetStringSelection(),
         )
 
     def _create_planes_tab(self):

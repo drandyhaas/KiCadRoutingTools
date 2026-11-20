@@ -2419,14 +2419,34 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
                                                        'front': Q(fr.get(i, 0.0)),
                                                        'fb_avoid': Q(FB_AVOID * fb.get(i, 0.0)),
                                                        'tooth': Q(E.tooth_price(l_, i)) if k_ == 0 else 0}))
+    # (...its pairs, BY WEIGHT: the options of an end that weigh the same are one literal -- one of them is taken, so
+    # their sum says "this end stands at that weight" -- and a term is a pair of weights, not a pair of options: priced
+    # option by option, two lanes on their whole menus were 6 to 7 thousand terms a pair of ends, 87 thousand of a
+    # group model's 278 thousand variables. `fb_one`: the terms of one pair of ends, of which a state pays ONE at most
+    # -- each end takes one option -- for whoever bounds what the cost can come to: summed as if all were paid at
+    # once, the bound was 180 times what the rest of the cost could differ by)
+    fb_one = []
     for a_, b_, k_, ia, ib in E.fb_pairs:
-        for i, wa in ia.items():
-            for j, wb in ib.items():
-                if i in xs[k_][a_] and j in xs[k_][b_] and wa * wb:
-                    z_ = m.NewBoolVar('')
-                    m.Add(z_ >= xs[k_][a_][i] + xs[k_][b_][j] - 1)
-                    cost.append(Q(FB_PAIR * wa * wb) * z_)
-                    cost_tag.append(('fb_pair', (a_, b_), {'end': k_, 'opts': (i, j)}))
+        wa_, wb_ = collections.defaultdict(list), collections.defaultdict(list)
+        for i, w in sorted(ia.items()):
+            if w and i in xs[k_][a_]:
+                wa_[round(w, 9)].append(i)
+        for j, w in sorted(ib.items()):
+            if w and j in xs[k_][b_]:
+                wb_[round(w, 9)].append(j)
+        zs_ = []
+        for wa, is_ in sorted(wa_.items()):
+            for wb, js_ in sorted(wb_.items()):
+                c_ = Q(FB_PAIR * wa * wb)
+                if not c_:
+                    continue
+                z_ = m.NewBoolVar('')
+                m.Add(z_ >= sum(xs[k_][a_][i] for i in is_) + sum(xs[k_][b_][j] for j in js_) - 1)
+                cost.append(c_ * z_)
+                cost_tag.append(('fb_pair', (a_, b_), {'end': k_, 'opts': (tuple(is_), tuple(js_))}))
+                zs_.append(z_)
+        if zs_:
+            fb_one.append(zs_)
     # a plane ball of the arrays its ends leave no way down (walled_balls): every drop killed, and every strap killed or
     # to a ball with none left
     walls_ = []
@@ -2457,6 +2477,7 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
     assert len(cost_tag) == len(cost), f'{len(cost_tag)} cost tags for {len(cost)} cost terms'
     return types.SimpleNamespace(m=m, lanes=lanes, LG=LG, npair=npair, idx=idx, OT=OT, OB=OB, O_=O_, xs=xs, y=y, chg=chg,
                                  cost=cost, cost_tag=cost_tag, chg_cost=chg_cost, walls=walls_, const=const, X=X,
+                                 fb_one=fb_one,
                                  held=held, dom=dom, pos=pos, before=before, before1=before1,
                                  NL=NL, SB=SB, DB=DB, cut=cut, t0=t0)
 

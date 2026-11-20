@@ -591,9 +591,12 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
     # and keyed by the lane and the name, a later cut's layers overwrote an earlier one's)
     CHAN_BLK = {}             # cut -> the island's layers (more than two: the run held off each)
     CHAN_FIRM = set()         # a cut held FIRM, as a keep-out's (its cut file's 'firm')
-    # (each cut once: one the cut files carry twice -- a hard round's in CUTS and again in SOFT_CUTS -- read a second
-    # time after the first had waived its lane's end room, found no window, and the two sorted None against a number)
-    _seen_lc = set()
+    # (each cut once, by what it IS here -- its lane, its island, its layer and its stretch of the lane's route: one
+    # the cut files carry twice -- a hard round's in CUTS and again in SOFT_CUTS, or two findings of one audit a box
+    # apart whose stretch of the lane is the same -- read a second time after the first had waived its lane's end
+    # room, found no window, and the two sorted None against a number. The second's layers and its firmness are the
+    # first's too from there)
+    _seen_lc = {}
     # ...and a GROUP lane's way UNDER a part (whole_frame.Group: straight under the part in front of its pocket, or under
     # its own part from its far side): held off that part's pad layers across its box, firm -- the geometry lets it pass
     # under the part on the layers left open there (whole_geo's per-layer boxes)
@@ -666,11 +669,6 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
               f'layer\'s free space within {_band:.2f} mm of a lane\'s line')
     for fn_ in [None] + list(cuts) + list(soft_cuts):
         for c_ in (_under if fn_ is None else json.load(open(fn_)).get('lcuts', [])):
-            k_lc = (c_['lane'], c_['island'], int(c_['layer']), tuple(round(float(v_), 6) for v_ in c_['box']),
-                    tuple(c_.get('span') or ()))
-            if k_lc in _seen_lc:
-                continue
-            _seen_lc.add(k_lc)
             n_ = c_['lane']
             # (a pair's lane too on more layers than two: its legs on one layer, held off the island's as a single's)
             if n_ not in M or (n_ in prs and NL == 2):
@@ -706,6 +704,13 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                     # end 9 mm off, and two nets of the bus shipped open)
                     v_ = VNEED + TRK / 2 + G
                 lo_c, hi_c, w0_, w1_ = s0_ - v_, s1_ + v_, None, None
+                k_lc = (n_, c_['island'], L_, round(s0_ - t_, 4), round(s1_ + t_, 4), round(lo_c, 4), round(hi_c, 4))
+                if k_lc in _seen_lc:
+                    if blk_ is not None:
+                        CHAN_BLK[_seen_lc[k_lc]] = sorted(set(CHAN_BLK[_seen_lc[k_lc]]) | set(blk_))
+                    if c_.get('firm'):
+                        CHAN_FIRM.add(_seen_lc[k_lc])
+                    continue
                 # (an island so near the lane's tooth -- or a trunk lane's berth -- that its end room leaves no change
                 # before it -- after it: the change from the stub's end to the island, its end room and the face band
                 # waived and no stagger there, its neighbours still a ball pitch apart, as at a blocked front. On more
@@ -736,11 +741,12 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 cut_ = (n_, 'chan ' + c_['island'], L_, round(s0_ - t_, 4), round(s1_ + t_, 4), round(lo_c, 4),
                         round(hi_c, 4), w0_, w1_)
                 CHAN_CUTS.add(cut_)
+                _seen_lc[k_lc] = cut_
                 if blk_ is not None:
                     CHAN_BLK[cut_] = blk_
                 if c_.get('firm'):
                     CHAN_FIRM.add(cut_)
-    CHAN_CUTS = sorted(CHAN_CUTS)
+    CHAN_CUTS = sorted(CHAN_CUTS, key=lambda c_: c_[:7])
     XO = {n for n in prs if n in M and _pairs.opposite_hands(ctx, n)}
     for n in XO:
         VIN0[n] = _pairs.crossover_room(ctx.cfg, ctx.pair_ends[n][0], _axis(ctx.tooth_dir.get(n)), 0)

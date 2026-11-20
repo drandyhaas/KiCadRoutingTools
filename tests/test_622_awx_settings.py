@@ -32,6 +32,9 @@ NOT_THE_ROUTE = {
     # (route_bus's CLI main: the round edits file named for the step's own child processes, which it starts -- the
     # in-process route takes ROUND_EDITS from its caller's settings)
     ('route_bus', "        os.environ['ROUND_EDITS'] = os.path.abspath(a.round_edits)"),
+    # (...and the escalation policy its flag gives, for the same children; the in-process route takes it from its
+    # caller's settings likewise)
+    ('route_bus', "        os.environ[ESCALATION_SETTING] = a.escalation"),
     ('whole_passages', "    os.environ.update(env)"),                    # its own __main__, a research CLI
     ('replay_stage', "    env = dict(os.environ)"),                      # a harness: a stage's child's environment
 }

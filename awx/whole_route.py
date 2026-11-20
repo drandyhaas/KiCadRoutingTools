@@ -399,7 +399,7 @@ def _via_ends(bench):
     return _VIA_ENDS[key]
 
 
-def audit_layer_cuts(audit, geo, bench=None, areas=None):
+def audit_layer_cuts(audit, geo, bench=None, areas=None, own=None, cross=None):
     """the LAYER cuts an audit's STATIC findings give: a lane found against a pad of an island (a geometry's 'islands',
     'REF.PAD' -> island) on one layer, the layer it was found on -- and, on more routing layers than two, a lane found
     against an ARRAY's own pad (no island), off the layer it was found on round that place (ARRAY_CUT_R): it was pushed
@@ -418,13 +418,18 @@ def audit_layer_cuts(audit, geo, bench=None, areas=None):
     and the snap failed them there every round) is held off its layers where its laid path meets the area itself (its
     polygon: own_spans), not the area's box -- the area east of U15 is an L whose box reaches U15's berths. And on more
     than two, a PITCH finding at one lane's end (the geometry's `lanes`): the lane passing that end held off the
-    layer there"""
+    layer there. `own` {(x, y): the lanes that END there} (the loop's own_ends, whole_feedback --own) says which of
+    the two ends there, where the finding is at an array's ends -- the feedback's own test of a lane's end, the one the
+    loop stops by; without it, an end within the cut's box of the place. `cross` {frozenset of two lanes} (the
+    round's solve's crossings): with it, a TWIST is read -- two lanes found on top of each other (their centrelines
+    nearer than half a track) that the solve never crossed -- and the one whose own end is the farther held off the
+    layer there, wherever it stands"""
     import route_layers
     nl = len(route_layers.layers())
     out, isl, bxs = [], geo.get('islands') or {}, geo.get('island_boxes') or {}
     ends_ = {n: (v['xy'][0], v['xy'][-1]) for n, v in (geo.get('lanes') or {}).items() if v.get('xy')}
     for ln in lines_of(audit):
-        p = re.match(r'PITCH (\S+)\s+(\S+)\s+([FB]|In\d+\.Cu) min [-\d.]+\s+over [\d.]+ mm\s+at \(([-\d.]+),\s*([-\d.]+)\)',
+        p = re.match(r'PITCH (\S+)\s+(\S+)\s+([FB]|In\d+\.Cu) min ([-\d.]+)\s+over [\d.]+ mm\s+at \(([-\d.]+),\s*([-\d.]+)\)',
                      ln)
         if p and nl > 2:
             # (two lanes short of their pitch on one layer at ONE lane's end -- its tooth or berth within the cut's box
@@ -435,10 +440,31 @@ def audit_layer_cuts(audit, geo, bench=None, areas=None):
             # lanes ending there are the fanout's to part; neither, the solve's own crossing to price)
             import rules as _rules
             R_ = _rules.active()
-            x, y = float(p.group(4)), float(p.group(5))
+            x, y = float(p.group(5)), float(p.group(6))
             r = max(ARRAY_CUT_R, 3 * (R_.track / 2 + R_.clearance + R_.grid / 2))
             at_ = [any(math.hypot(e_[-2] - x, e_[-1] - y) <= r for e_ in ends_.get(n_, ()))
                    for n_ in (p.group(1), p.group(2))]
+            # (...at an array's ends, by the feedback's test of a lane's OWN end -- the face its end leaves by, to that
+            # face's reach -- not this box alone: a lane to a part's far side crossed the approach of its near side's
+            # last berth 1.4 mm short of that berth's tip, on its layer. Past the box, no cut was made; "at the
+            # berths", the loop stopped; and the berth's lane shipped open in four lays of one bus)
+            # (...where NEITHER end is within the box: one lane's end near enough for the box is the nearer reading,
+            # and stands -- two lanes ending on one face, the one a pitch from the place and the other past the box,
+            # were parted by that cut in the round it was made)
+            own_ = (own or {}).get((round(x, 2), round(y, 2)))
+            if own_ is not None and not any(at_):
+                at_ = [n_ in own_ for n_ in (p.group(1), p.group(2))]
+            # (A TWIST: the two on top of each other where the solve crossed them nowhere -- the geometry's own
+            # doing, a lane taken across its neighbour's approach where its handoff had no room. No crossing of the
+            # solve's stands there to price, so the history moved nothing: the same plan came back, the same twist
+            # with it. On two layers it is a crossing like any other: the lane that PASSES -- its own end the
+            # farther from the place -- is held off that layer there)
+            if not any(at_) and cross is not None and float(p.group(4)) < R_.track / 2 \
+                    and frozenset((p.group(1), p.group(2))) not in cross \
+                    and all(n_ in ends_ for n_ in (p.group(1), p.group(2))):
+                d_ = [min(math.hypot(e_[-2] - x, e_[-1] - y) for e_ in ends_[n_]) for n_ in (p.group(1), p.group(2))]
+                if abs(d_[0] - d_[1]) > r:
+                    at_ = [d_[0] < d_[1], d_[1] < d_[0]]
             if at_[0] != at_[1] and all(n_ in ends_ for n_ in (p.group(1), p.group(2))):
                 lane, pad = (p.group(2), p.group(1)) if at_[0] else (p.group(1), p.group(2))
                 c = {'lane': lane, 'island': pad, 'layer': 0, 'box': [x - r, y - r, x + r, y + r],
@@ -776,6 +802,23 @@ def loop(solve, out, rounds, env, log, try_lay=None):
         """whole_gate.py PLAN AUDIT [...]: (exit code, stdout), its stderr to the loop's log"""
         rc, so = run(['whole_gate.py', plan, audit] + list(more), env, err=err)
         return rc, stripped(so)
+
+    def own_ends(plan, found, hot):
+        """{(x, y): the lanes at their OWN end there} of an audit's findings at the ends (whole_feedback --own on its
+        hot places, HOT): which of two lanes found short of their pitch there ENDS there and which only passes -- the
+        layer cuts' reading (audit_layer_cuts). None with no fanout's sidecar beside the bench"""
+        sc_ = env['BENCH'][:-len('.kicad_pcb')] + '.plan.json' if env['BENCH'].endswith('.kicad_pcb') \
+            else env['BENCH'] + '.plan.json'
+        if not os.path.isfile(sc_):
+            return None
+        gate(plan, found, '--hot', hot)
+        if not os.path.isfile(hot):
+            return None
+        rc, so = run(['whole_feedback.py', '--own', sc_, hot], env, err=err)
+        ln = next((x_ for x_ in so.splitlines() if x_.startswith('OWN ')), None)
+        if rc != 0 or ln is None:
+            return None
+        return {(round(r_['xy'][0], 2), round(r_['xy'][1], 2)): set(r_['own']) for r_ in json.loads(ln[4:])}
 
     def addhot(plan, found, hot):
         """an audit's findings as history: its hot places (whole_gate --hot), added when it names any"""
@@ -1125,7 +1168,11 @@ def loop(solve, out, rounds, env, log, try_lay=None):
             # answer to such an island, and it stands whatever flip names the lane and island
             import route_layers
             nl_ = len(route_layers.layers())
-            lcuts = [c for c in audit_layer_cuts(O(f'p{i}.audit'), gj, env.get('BENCH'), env.get('BUS_AREAS'))
+            lcuts = [c for c in audit_layer_cuts(O(f'p{i}.audit'), gj, env.get('BENCH'), env.get('BUS_AREAS'),
+                                                 own=own_ends(p, O(f'p{i}.audit'), O(f'p{i}.own.json')) if nl_ > 2
+                                                 else None,
+                                                 cross={frozenset(k_.split('|')) for k_ in
+                                                        (json.load(open(st['solve'])).get('cross') or {})})
                      if nl_ > 2 or (c['lane'], c['island']) not in new]
             lcuts += place_cuts(lcuts, pj, env.get('BENCH'), set(env.get('NETS', '').split(',')))
             lcuts += [c for c in gj.get('lcuts', []) + pj.get('lcuts', []) if c not in lcuts]

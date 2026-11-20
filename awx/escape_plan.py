@@ -169,6 +169,23 @@ def own_via(pcb, pad, nid, grid):
     return (v.x, v.y) if v is not None else None
 
 
+def line_step(pitch, copper):
+    """THE LINES ESCAPES LEAVE ALONG, one lattice a face for every ball of the array: the ball pitch `pitch` cut in the
+    most EVEN parts each at least a lane's pitch at the fanout's track -- its track, its clearance and a routing grid
+    step. A ball's own line and the gap line between two balls are always on it; between them as many more lines as
+    the lanes fit, so a narrower track (the fab escalation's) leaves more lanes a pitch -- where the board's copper
+    lets them by (path_clear). Every escape's lines on one lattice, two runs a lattice line apart never conflict, and
+    the array's rules read conflicts at its lines' points (group_ends.run_points)"""
+    import rules as _rules
+    tp = copper.track + copper.clear + _rules.active().grid
+    return pitch / (2 * max(1, int(pitch / (2 * tp) + 1e-9)))
+
+
+def lattice(reach, step):
+    """the lattice's offsets from a line out to `reach` (a multiple of `step`): step, 2 step, .. reach"""
+    return [step * j for j in range(1, int(round(reach / step)) + 1)]
+
+
 def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE, own_line=False):
     """every escape the ball at `pad` has from its via at `site`, by each of `faces`, on each of `layers` (the module's
     docstring): [Move]. `own_line`: only its runs straight out along the ball's own line"""
@@ -195,22 +212,33 @@ def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE, own_line=Fals
         if s * (e - site[k]) < -1e-6:
             continue                            # (the via stands past this face's exit line)
         lo, hi = (y0, y1) if a_ == 1 else (x0, x1)
+        st_ = line_step(2 * h, copper)
         if in_pad:
-            # (its own line, and half a pitch onto the gap line either side -- escape_moves' climb from a via in the
-            # pad: an earlier step's field laid such an escape for a later bus's ball, and that bus's menu, its own line
-            # alone, held no move at it -- three balls whose neighbours' vias closed their own lines stood open)
+            # (its own line, and onto every line of the lattice out to the gap line either side -- escape_moves' climb
+            # from a via in the pad: an earlier step's field laid such an escape for a later bus's ball, and that bus's
+            # menu, its own line alone, held no move at it -- three balls whose neighbours' vias closed their own lines
+            # stood open)
             lines = [(ball[a_], [site, P(ball[a_], e)])] + \
-                [(ball[a_] + sg * h, [site, P(ball[a_] + sg * h, site[k]), P(ball[a_] + sg * h, e)]) for sg in (-1, 1)]
+                [(ball[a_] + sg * o_, [site, P(ball[a_] + sg * o_, site[k]), P(ball[a_] + sg * o_, e)])
+                 for sg in (-1, 1) for o_ in lattice(h, st_)]
         else:
             lines = []
             for sg in (-1, 1):
                 ln0 = site[a_] + sg * h
-                lines.append((ln0, [site, P(ln0, site[k]), P(ln0, e)]))
-                # (the gap line a pitch over: a street where no via stands on it -- path_clear finds which)
-                ls = site[a_] + sg * 2 * h
-                lines.append((ls, [site, P(ls, site[k]), P(ls, e)]))
+                # (every line of the lattice out to the gap line a pitch over: the ball line beside the via, the
+                # street -- where no via stands on it, path_clear finds which -- and, where the lanes' pitch fits more
+                # than two lines a ball pitch, those between)
+                for o_ in lattice(2 * h, st_):
+                    ls = site[a_] + sg * o_
+                    lines.append((ls, [site, P(ls, site[k]), P(ls, e)]))
                 row = site[k] + s * hk
-                if s * (e - row) < 1e-6:
+                # (a row within the relayer's TOL of the exit line IS that line, as a leg that short is no leg --
+                # dedupe: an array whose balls stand a few nanometres off their grid had the outer ring's dog-bones'
+                # "row" 6 to 11 nm short of the exit line, and each was offered side-steps ALONG the exit line, outside
+                # the array: 354 moves of one 400-ball array, their last leg that far off its axis and so no span of
+                # theirs (select_moves._lane_spans) -- a run the array's rules never saw, laid across the tips of the
+                # escapes that end on that line, and the field's lessons ruled them out one state at a time)
+                if s * (e - row) < _END_TOL:
                     continue                    # (no ball row between the via and the exit line to sidestep along)
                 for m in range(1, side + 1):
                     ln = ln0 + sg * m * 2 * h
@@ -260,8 +288,9 @@ def escape_out(pad, grid, faces, copper):
         lo, hi = (y0, y1) if a_ == 1 else (x0, x1)
         paths = [(ball[a_], [ball, P(ball[a_], e)])]
         for sg in (-1, 1):
-            g_ = ball[a_] + sg * h
-            paths.append((g_, [ball, P(g_, ball[k] + s * hk), P(g_, e)]))
+            for o_ in lattice(h, line_step(2 * h, copper)):
+                g_ = ball[a_] + sg * o_
+                paths.append((g_, [ball, P(g_, ball[k] + s * hk), P(g_, e)]))
         for ln, path in paths:
             if not (lo - h - 1e-6 <= ln <= hi + h + 1e-6):
                 continue

@@ -128,6 +128,19 @@ ld, tl = wf.Group.landings(None, (0.0, 0.0), (0.0, 10.0), [('a1', way('a'), (2.0
                                                            ('a2', way('a'), (4.0, 0.2), (4.0, -0.5))], 0.4)
 check(set(tl) == {'a2'} and [tuple(round(c, 6) for c in q) for q in tl['a2']] == [(2.0, 0.6)],
       f'3: a row lane\'s tail over the stub end it passes: {tl}')
+# ...and a mouth at a SLANT to its lanes' way: the lanes land a lane's room apart ACROSS their tails, not along the
+# mouth. Two lanes whose berths lie 37 degrees off the mouth's line: a room apart along it they would leave 0.24 mm
+# apart; the second lands where it stands a room from the first's tail, within two rooms of it along the mouth -- and
+# on a mouth with no length for that, a room along it as before
+import math  # noqa: E402
+slant = [('a1', way('a'), (3.0, 4.4), (3.6, 4.4)), ('a2', way('a'), (3.0, 5.2), (3.6, 5.2))]
+ld, tl = wf.Group.landings(None, (0.0, 0.0), (0.0, 10.0), slant, 0.4)
+off = abs(0.8 * (ld['a2'][0] - ld['a1'][0]) - 0.6 * (ld['a2'][1] - ld['a1'][1]))       # (a1's tail runs along (0.6, 0.8))
+check(abs(ld['a1'][1] - 0.4) < 1e-9 and off >= 0.4 - 1e-6 and 0.4 < ld['a2'][1] - ld['a1'][1] <= 0.8 + 1e-9,
+      f'3: a slanted mouth -- the second lane a room from the first\'s tail: {ld}, {off:.3f} mm across')
+ld, tl = wf.Group.landings(None, (0.0, 0.0), (0.0, 1.3), slant, 0.4)
+check({n: round(p_[1], 6) for n, p_ in ld.items()} == {'a1': 0.4, 'a2': 0.8},
+      f'3: ...a room along the mouth where it has no length for more: {ld}')
 # 4. the arrangement: every lane's ways and the cut, the fewest crossings -- equal to the best of every valid split
 # (each pocket's lanes in their order along it), and Group.score's crossings at every cut one by one
 import itertools  # noqa: E402

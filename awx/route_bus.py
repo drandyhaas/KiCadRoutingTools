@@ -97,6 +97,130 @@ STEP_SETTINGS = {'TAUT_MEMO': '0', 'STAGE_CACHE': '0'}
 SIZE_ARGS = ('clearance', 'clearance_ceiling', 'track_width', 'fanout_track_width', 'via_size', 'via_drill',
              'hole_to_hole_clearance', 'board_edge_clearance')
 
+# the step's --escalation, a setting every bus's process reads (route_buses runs a group's buses each in its own)
+ESCALATION_SETTING = 'BUS_ESCALATION'
+# a rung's pitches, as a part of the run's (rung_pitches): a setting the rung's every process reads, as its policy
+PITCH_SCALE_SETTING = 'BUS_PITCH_SCALE'
+
+
+def install_escalation(board, run_rules):
+    """THE STEP'S ESCALATION POLICY -- --escalation (ESCALATION_SETTING), else routing_defaults.ESCALATION -- installed
+    in this process as route.py installs its own (fab_tiers.set_policy_from_args): the board's own declared floors
+    read off its project, capped at the run's sizes as the request. Returns the policy's name"""
+    import types
+    import awx_settings
+    import fab_tiers as ft
+    policy = awx_settings.get(ESCALATION_SETTING) or ft.DEFAULT_ESCALATION
+    with contextlib.redirect_stdout(io.StringIO()):
+        ft.set_policy_from_args(types.SimpleNamespace(
+            escalation=policy, clearance=run_rules.clearance, track_width=run_rules.track,
+            via_size=run_rules.via_size, via_drill=run_rules.via_drill, hole_to_hole_clearance=run_rules.hole_to_hole,
+            board_edge_clearance=run_rules.edge_clearance), board)
+    return policy
+
+
+def escalation_ladder(run_rules, board):
+    """THE BUS'S RUNGS BELOW ITS SIZES: the fab escalation route.py walks for a net that would ship open
+    (net_rescue._size_escalation_ladder), for a bus's open lanes or the whole bus. Two or three rungs on which the
+    lanes' track, the escapes' track and the via step down TOGETHER from the run's sizes to the installed policy's
+    floor -- the fab ladder's last rung under --escalation fab, the board's own declared floors under board, no rung
+    under off (fab_tiers.escalation_rungs). The clearance is never reduced: it is the DRC floor's. [Rules], the
+    narrowest last"""
+    import dataclasses
+    import fab_tiers as ft
+    ladder = ft.escalation_rungs(ft.count_copper_layers_in_file(board))
+    if not ladder:
+        return []
+    w_floor = min(f['track_width'] for f in ladder)
+    w0, f0 = run_rules.track, run_rules.fan_track
+    vias = [(f['via_diameter'], min(f['via_drill'], run_rules.via_drill)) for f in ladder
+            if f['via_diameter'] < run_rules.via_size - 1e-9]
+    travel = max(w0, f0) - w_floor > 1e-9
+    if not travel and not vias:
+        return []
+    m = len(vias)
+    n = 3 if (travel and m) else (2 if travel else m)
+    out, seen = [], set()
+    for k in range(1, n + 1):
+        w = round(w0 + (w_floor - w0) * k / n, 4) if w0 > w_floor else w0
+        fw = round(f0 + (w_floor - f0) * k / n, 4) if f0 > w_floor else f0
+        v, dr = vias[min(m - 1, (k * m - 1) // n)] if m else (run_rules.via_size, run_rules.via_drill)
+        if (w, fw, v, dr) in seen:
+            continue
+        seen.add((w, fw, v, dr))
+        # (a via past the standard tier's floor -- the advanced tier's, more costly to fab, or under board the board's
+        # own declared minimum -- said when the rung is tried, rung_line)
+        past = ('past the standard fab floor: ' + ('the board\'s own declared minimums'
+                                                   if ft.escalation_target() == 'board_floors'
+                                                   else 'the advanced tier\'s, more costly to fab'),) \
+            if m and ft.ladder_escalates(ladder, v, dr) else ()
+        _k, lp, ep_ = rung_pitches(run_rules, w)
+        out.append(dataclasses.replace(run_rules, track=w, fan_track=fw, via_size=v, via_drill=dr, lane_pitch=lp,
+                                       exit_pitch=ep_, source=f'the fab escalation, rung {len(out) + 1}', notes=past))
+    return out
+
+
+def rung_pitches(run_rules, track):
+    """(the part of the run's, the lanes' pitch, the exits' pitch) of a rung whose lanes are `track` wide: the run's
+    two pitches scaled as the lane's own slice (its track and its hug), never under that slice. The chain plans its
+    rings, its handoffs and a group's mouths a LANE PITCH apart and its teeth an EXIT PITCH apart (rules' 0.35 and
+    0.38 mm, chosen for a 0.127 mm lane), floored at the lane's slice and no part of the lane's width otherwise: a
+    rung that halved the track left every ring and mouth as wide as before, and held no lane more"""
+    k = round((track + run_rules.hug) / run_rules.lane_slice, 6)
+    sl = round(track + run_rules.hug, 6)
+    return k, max(sl, round(run_rules.lane_pitch * k, 6)), max(sl, round(run_rules.exit_pitch * k, 6))
+
+
+def rung_line(r):
+    """a rung's sizes, as the log says them"""
+    return (f'track {r.track:g}, escapes {r.fan_track:g}, via {r.via_size:g}/{r.via_drill:g}, the lanes\' pitch '
+            f'{r.lane_pitch:g} (clearance {r.clearance:g})' + ''.join(f' -- {n}' for n in r.notes))
+
+
+def shipped_rules(out, board, names, run_rules, log=print):
+    """THE FLOOR THE BUS SHIPS, as route.py ships its own: OUT's project stamped at the run's sizes and lowered to the
+    copper OUT carries (fix_project_for_output, which reads the board's own minima) -- so KiCad grades an escalated
+    lane at the width it was laid -- and the design rules' ledger (fab_tiers.note_narrowing) of what SHIPS, each of
+    the bus's nets (`names`, full) whose smallest track or via stands below what the run asked: a track below the
+    escapes' width, or one between it and the lanes'; a via, or its drill, below the run's. The ledger's summary,
+    its one line said (fab_tiers.escalation_report_line)"""
+    import fab_tiers as ft
+    from fix_kicad_drc_settings import fix_project_for_output
+    with contextlib.redirect_stdout(io.StringIO()):
+        fix_project_for_output(out, board, clearance=run_rules.clearance, track_width=run_rules.fan_track,
+                               via_diameter=run_rules.via_size, via_drill=run_rules.via_drill, verbose=False)
+    from coherent_nets import namer
+    pcb = parse_kicad_pcb_quiet(out)
+    sn = namer(pcb)
+    want = {n.name for n in pcb.nets.values() if n.name and (n.name in set(names) or sn(n.name) in set(names))}
+    eps = 1e-6
+    ft.reset_ledger()
+    for nid, n in sorted(pcb.nets.items()):
+        if n.name not in want:
+            continue
+        ws = [s.width for s in pcb.segments if s.net_id == nid]
+        under = [w for w in ws if w < run_rules.fan_track - eps]
+        mid = [w for w in ws if run_rules.fan_track + eps < w < run_rules.track - eps]
+        if under:
+            ft.note_narrowing(nid, 'track_width', run_rules.fan_track, min(under), 'bus step', count=len(under),
+                              net_name=n.name)
+        if mid:
+            ft.note_narrowing(nid, 'track_width', run_rules.track, min(mid), 'bus step', count=len(mid),
+                              net_name=n.name)
+        vs = [v for v in pcb.vias if v.net_id == nid]
+        small = [v for v in vs if v.size < run_rules.via_size - eps]
+        if small:
+            ft.note_narrowing(nid, 'via_diameter', run_rules.via_size, min(v.size for v in small), 'bus step',
+                              count=len(small), net_name=n.name)
+        holes = [v for v in vs if v.drill < run_rules.via_drill - eps]
+        if holes:
+            ft.note_narrowing(nid, 'hole_size', run_rules.via_drill, min(v.drill for v in holes), 'bus step',
+                              count=len(holes), net_name=n.name)
+    line = ft.escalation_report_line()
+    if line:
+        log(f'  {line}')
+    return ft.escalation_summary()
+
 
 def unrecorded():
     """The block's stage processes record nothing in the board's redo manifest (#132): a cap pass, a fanout, a bus's
@@ -163,6 +287,13 @@ def resolve_rules(board, clearance=None, clearance_ceiling=None, track_width=Non
     fan = float(fanout_track_width) if fanout_track_width is not None else got['track_width']
     fan = enforce_fab_floors(n_cu, track_width=fan).get('track_width', fan)
     r = _rules.Rules.from_router_config(types.SimpleNamespace(**got), fan_track=fan)
+    # (a RUNG's pitches, a part of its run's -- rung_pitches, PITCH_SCALE_SETTING: every process of the rung resolves
+    # its sizes here)
+    import awx_settings
+    k = awx_settings.get(PITCH_SCALE_SETTING)
+    if k:
+        r = dataclasses.replace(r, lane_pitch=max(r.lane_slice, round(r.lane_pitch * float(k), 6)),
+                                exit_pitch=max(r.lane_slice, round(r.exit_pitch * float(k), 6)))
     return dataclasses.replace(r, source='the chain\'s sizes, resolved as route.py resolves its own')
 
 
@@ -184,16 +315,30 @@ def route_bus(board, out, src, dest, k=None, rounds=4, inproc=False, log=print, 
         with contextlib.redirect_stdout(sys.stderr):
             settings = dict(settings or {}, ROUTE_LAYERS=all_layers(parse_kicad_pcb(board)))
     run_rules = resolve_rules(board, log=log, **sizes)
+    install_escalation(board, run_rules)
     prev = _rules.active()
     _rules.install(run_rules)
     # (this process routes SRC:DEST: its progress events, and its stages', say so -- bus_events)
     settings = dict(settings or {}, **bus_events.for_bus(src, dest), **({'BUS_PACK': '1'} if pack else {}))
     try:
         with unrecorded(), bus_events.run(bus_events.work_dir(out)), step_policy(run_rules, settings):
-            return _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out, settings,
-                          feedback_rounds)
+            got = _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out, settings,
+                         feedback_rounds)
     finally:
         _rules.install(prev)
+    # (OUT as it ships: its project's floor lowered to its copper, and the design rules' ledger of what it carries, as
+    # route.py's main writes its own -- shipped_rules -- in its summary)
+    sj_ = json_out or os.path.join(bus_events.work_dir(out), 'summary.json')
+    try:
+        s_ = json.load(open(sj_, encoding='utf-8'))
+    except (OSError, ValueError):
+        return got
+    if not s_.get('ends_only') and os.path.isfile(out):
+        s_['design_rules'] = shipped_rules(out, board, list(s_.get('routed') or []) + list(s_.get('refused') or {}),
+                                           run_rules, log)
+        with open(sj_, 'w', encoding='utf-8') as f:
+            json.dump(s_, f, indent=1)
+    return got
 
 
 #: the OUT boards this process wrote (absolute paths): a step that hands on -- routed, or the board as it came --
@@ -474,6 +619,14 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
                 sj_ = json.load(open(step_json))
             except (OSError, ValueError):
                 sj_ = {}
+            # THE GROUP ESCALATED (--escalation, route.py's fab escalation for a whole group of buses): a group whose
+            # buses left nets open (or broke the board's rules, or walled a ball in) routed again WHOLE -- its ends
+            # model, the arrays' fanout and every bus's lanes -- a rung down the fab ladder, the lanes' track, the
+            # escapes' and the vias together (escalation_ladder), rung after rung to the policy's floor until one
+            # leaves the board clean. The fewest open, then violations, then walled balls stands; the sizes asked for
+            # on a tie. The clearance is never reduced
+            step_out, step_json, code, sj_ = _escalated(cur, step_out, step_json, code, sj_, grp, k, rounds, inproc,
+                                                        log, feedback_rounds, negotiated_buses, sizes)
             got, neg_g = sj_.get('buses'), sj_.get('grade')
             # (a grade whose check_drc gave no verdict -- a crash -- said so)
             log('route_bus: the group\'s ends left '
@@ -497,12 +650,121 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
         copy_board(cur, out)
     HANDED_ON.add(out)
     code = 1 if not runs else max(codes)
+    # (OUT as it ships, as route.py's main ships its own: its project's floor lowered to the copper it carries -- an
+    # escalated group's narrower tracks and vias graded at their sizes -- and the design rules' ledger of what it
+    # carries below the sizes asked for, every bus's nets, said in one line: shipped_rules)
+    nets_ = set()
+    for r_ in runs:
+        try:
+            s_ = json.load(open(r_['summary'])) if r_.get('summary') else {}
+        except (OSError, ValueError):
+            s_ = {}
+        nets_ |= set(s_.get('routed') or []) | set(s_.get('refused') or {})
+    rules_ = resolve_rules(board, log=lambda *a_, **k_: None, **sizes)
+    install_escalation(board, rules_)
+    design = shipped_rules(out, board, sorted(nets_), rules_, log) if runs else None
     with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:
-        json.dump(dict(board=board, out=out, buses=runs, plan=plan, exit=code), f, indent=1)
+        json.dump(dict(board=board, out=out, buses=runs, plan=plan, exit=code, design_rules=design), f, indent=1)
     if not runs:
         log('route_bus: no bus found -- OUT is the board as it came')
     bus_events.emit('step', 'end', status=code, out=out, summary=json_out or os.path.join(work, 'summary.json'))
     return code, [r['grade'] for r in runs]
+
+
+def _group_key(sj):
+    """a group's result as its escalation compares them: (nets open, violations, balls walled in), the fewest best --
+    a group with no grade, or whose check gave no verdict, the worst"""
+    g = sj.get('grade')
+    if not g or g['drc']['n'] is None:
+        return (math.inf, math.inf, math.inf)
+    return (len(g['open']), g['drc']['n'], len(g['walled']['walled']))
+
+
+def _group_state(out, sj):
+    """(its group's directory, its lay's work directory) of a group routed to OUT (negotiated_buses.route_grouped) whose
+    summary is SJ -- the round whose board stands -- or None where that group kept no end (resume.pkl)"""
+    work = out[:-len('.kicad_pcb')] + '.bus'
+    r = int(sj.get('round') or 1)
+    group = os.path.join(work, 'group' if r == 1 else f'group{r}')
+    lay = os.path.join(work, f'round{r}.bus') if sj.get('rounds') else work
+    return (group, lay) if os.path.isfile(os.path.join(group, 'resume.pkl')) else None
+
+
+def _escalated(board, step_out, step_json, code, sj, grp, k, rounds, inproc, log, feedback_rounds, nb, sizes):
+    """(OUT, its summary's path, status, summary) of the group BOARD -> STEP_OUT as it stands, or escalated (route_buses:
+    THE GROUP ESCALATED), each rung its own OUT and summary beside the group's, the escalation's record in the one
+    that stands"""
+    key0 = _group_key(sj)
+    if key0 == (0, 0, 0):
+        return step_out, step_json, code, sj
+    if key0[0] == math.inf:
+        # (NO GRADE -- nothing routed (no capture, a model that ended with no state), or a check with no verdict: the
+        # step's own result, named where it happened. The rungs answer nets a routed group left open; a run with no
+        # result routed again at three more sizes was that run four times)
+        return step_out, step_json, code, sj
+    run_rules = resolve_rules(board, log=lambda *a_, **k_: None, **sizes)
+    policy = install_escalation(board, run_rules)
+    rungs = escalation_ladder(run_rules, board)
+    say = lambda key_: f'{key_[0]} open, {key_[1]} violation(s), {key_[2]} walled'  # noqa: E731
+    if policy == 'off' or (not rungs and not _group_state(step_out, sj)):
+        log(f'route_bus: the fab escalation ({policy}): no rung below the sizes asked for -- the group stands '
+            f'({say(key0)})')
+        return step_out, step_json, code, sj
+    # (...and THE FLOOR'S SIZES ONCE MORE, the ladder's last step: a rung is two things -- the run before it repaired
+    # from the findings its lay left, and narrower copper to repair it in. Where no narrower copper is left -- a run
+    # asked for at the floor, or the narrowest rung itself left a net open -- the repair alone is still owed: a
+    # two-layer memory bus at the floor's sizes, one address lane's end crowded by a capacitor's pad, was "no rung
+    # below the sizes asked for" and shipped that net open with its lay's two findings unread)
+    import dataclasses
+    floor_ = rungs[-1] if rungs else run_rules
+    rungs = rungs + [dataclasses.replace(floor_, source='the fab escalation, the floor again',
+                                         notes=('the sizes of the run before it: its lay\'s findings alone',))]
+    best = (key0, 0, step_out, step_json, code, sj)
+    tried = [dict(rung=0, **_rules_dict(run_rules), result=list(key0))]
+    last, key_l = (step_out, sj), key0
+    for i, rr in enumerate(rungs, 1):
+        # (...each rung FROM THE RUN BEFORE IT: its group's model from that run's end, the findings its lay left
+        # answered and every other lane held (group_ends --at-end), then the checks, the fanout and the lay at the
+        # rung's sizes. Searched again from nothing, each rung cost what the first run had -- zynq's group 51 minutes
+        # at its first rung, the whole escalation past three hours)
+        start = _group_state(*last)
+        if i == len(rungs) and not start:
+            break       # (the floor again from no run's end would be the search again at the same sizes: the same run)
+        log(f'route_bus: === the fab escalation ({policy}), rung {i} of {len(rungs)}: {say(key_l)} left by the run '
+            f'it starts from -- routed again whole at {rung_line(rr)}'
+            + (f', from its group\'s end ({os.path.relpath(start[0], os.path.dirname(step_out))})' if start
+               else ' -- no group\'s end kept by a run before: searched from the start'))
+        sizes_i = dict(sizes, track_width=rr.track, fanout_track_width=rr.fan_track, via_size=rr.via_size,
+                       via_drill=rr.via_drill)
+        out_i = step_out[:-len('.kicad_pcb')] + f'.rung{i}.kicad_pcb'
+        json_i = step_json[:-len('.summary.json')] + f'.rung{i}.summary.json'
+        import awx_settings
+        with awx_settings.given({**awx_settings.environ(),
+                                 PITCH_SCALE_SETTING: repr(rung_pitches(run_rules, rr.track)[0])}):
+            code_i, _g = nb.route_grouped(board, out_i, grp, k, rounds, inproc, log, json_i, feedback_rounds,
+                                          start=start, **sizes_i)
+        try:
+            sj_i = json.load(open(json_i))
+        except (OSError, ValueError):
+            sj_i = {}
+        key_i = _group_key(sj_i)
+        tried.append(dict(rung=i, **_rules_dict(rr), result=list(key_i)))
+        log(f'route_bus: rung {i}: {say(key_i)}')
+        # (...the last run that KEPT its group's end: a rung whose model ended with no state keeps none, and the rung
+        # after it starts from the run before that one -- not from nothing)
+        if _group_state(out_i, sj_i):
+            last, key_l = (out_i, sj_i), key_i
+        if (key_i, i) < best[:2] and os.path.isfile(out_i):
+            best = (key_i, i, out_i, json_i, code_i, sj_i)
+        if key_i == (0, 0, 0):
+            break
+    key_b, i_b, out_b, json_b, code_b, sj_b = best
+    sj_b['escalation'] = dict(policy=policy, kept=i_b, rungs=tried)
+    with open(json_b, 'w', encoding='utf-8') as f:
+        json.dump(sj_b, f, indent=1)
+    log('route_bus: the fab escalation: ' + (f'rung {i_b} stands ({say(key_b)}; {rung_line(rungs[i_b - 1])})' if i_b
+                                             else f'no rung did better -- the sizes asked for stand ({say(key0)})'))
+    return out_b, json_b, code_b, sj_b
 
 
 def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=None, settings=None, feedback_rounds=0):
@@ -2509,7 +2771,19 @@ def main():
     g.add_argument('--via-drill', type=float, help='via drill (mm)')
     g.add_argument('--hole-to-hole-clearance', type=float, help='drill to drill (mm; default: the board\'s own)')
     g.add_argument('--board-edge-clearance', type=float, help='copper to edge (mm; default: the board\'s own)')
+    import fab_tiers as _ft
+    g.add_argument('--escalation', choices=list(_ft.ESCALATION_POLICIES), default=None,
+                   help='how far below the sizes a group of buses that leaves nets open (or violations, or a ball '
+                        'walled in) is routed again, as route.py\'s --escalation (default '
+                        f'{_ft.DEFAULT_ESCALATION}): \'fab\' down the fab ladder to its floor, \'board\' to the '
+                        'board\'s own declared floors, \'off\' never. The group is routed again whole -- its ends, '
+                        'the arrays\' fanout and every bus\'s lanes -- the lanes\' and the escapes\' tracks and the '
+                        'vias a rung down together, the clearance never')
     a = ap.parse_args()
+    # (a setting every bus's process reads -- the negotiated buses' too, each its own process: one with no flag of its
+    # own runs under its parent's)
+    if a.escalation:
+        os.environ[ESCALATION_SETTING] = a.escalation
     if not os.path.isfile(a.board):
         print(f'route_bus: no board {a.board}', file=sys.stderr)
         sys.exit(2)
