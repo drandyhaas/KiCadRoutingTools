@@ -109,8 +109,9 @@ VIA_SIZE_KINDS = ('annular_width', 'via_diameter', 'hole_size')
 #: term binds them: a via's size (#1805), a track's width and the clearance
 #: of tracks, vias and pads (#1832). The router reads none of them.
 COURTYARD_GRADED_KINDS = VIA_SIZE_KINDS + ('track_width', 'clearance')
-#: #1843: the kinds a rule scoped by a rule area is graded for, by position
-AREA_GRADED_KINDS = ('clearance', 'track_width')
+#: #1843: the kinds a rule scoped by a rule area is graded for, by position;
+#: `hole_clearance` by check_drc's copper-to-hole grade (`HoleRuleBinder`)
+AREA_GRADED_KINDS = ('clearance', 'track_width', 'hole_clearance')
 # The kinds a rule may carry without being reported as "parsed, not
 # consumed". WIDER than what is read today: the resolver's callers ask only
 # for track_width / via_diameter / hole_size (draw_size, floor), copper
@@ -327,6 +328,11 @@ class RuleItem:
     # not measured: a rule's `area_scoped_condition` is then not read for it.
     area_layers: Optional[FrozenSet[Tuple[str, str]]] = None
     area_enclosed: Optional[FrozenSet[Tuple[str, str]]] = None
+    # the (area name, copper layer) pairs within reach of a measured item's
+    # copper: where copper laid beside it may stand in an area, for the
+    # router's reading of an area-scoped hole_clearance rule
+    # (`hole_rule_routing.RoutedHoleRules`). None = not measured.
+    area_near: Optional[FrozenSet[Tuple[str, str]]] = None
     # #1805: the courtyards the item's copper overlaps, as (reference, library
     # id, 'front' | 'back' of that part), for a rule's `courtyard_condition`
     # (`CourtyardIndex`). None = not measured: a courtyard term then reads as
@@ -355,11 +361,12 @@ class Rule:
     # (check_drc's vias, and #1832 its tracks and pads) is resolved against
     # it, by position. No routing step measures one, so none reads the rule.
     courtyard_condition: object = None
-    # #1843: a clearance / track_width rule's condition parsed WITH its
-    # rule-area predicates (parse_condition(areas=True)) when they are all it
-    # does not read. `unsupported` stays set: only an item measured against
-    # the board's rule areas (`DesignRules.area_index`) is resolved against
-    # it, by position. No routing step measures one, so none reads the rule.
+    # #1843: a clearance / track_width / hole_clearance rule's condition
+    # parsed WITH its rule-area predicates (parse_condition(areas=True)) when
+    # they are all it does not read. `unsupported` stays set: only an item
+    # measured against the board's rule areas (`DesignRules.area_index`) is
+    # resolved against it, by position (`area_clearance` for the first two,
+    # `check_drc.HoleRuleBinder` / `hole_rule_routing` for the third).
     area_scoped_condition: object = None
     # set by net_keepouts.derive_area_keepouts when the router honours the
     # rule as a net-filtered keep-out: what it honours, for the report
@@ -2451,13 +2458,15 @@ class DesignRules:
         for the same board (and the same rule areas), it returns the index
         it holds and keeps the resolved items it has cached."""
         board = getattr(pcb_data, 'board_info', None)
-        sig = (id(pcb_data), id(getattr(board, 'keepouts', None)),
-               len(getattr(board, 'keepouts', None) or ()))
+        # keyed on the rule areas themselves, so a view of the same board
+        # (a generator's gate reads one) finds the index it built
+        kos = getattr(board, 'keepouts', None)
+        sig = (id(kos), len(kos or ()))
         held = getattr(self, '_area_index_of', None)
-        if held is not None and held[0] == sig and held[1] is pcb_data:
+        if held is not None and held[0] == sig and held[1] is kos:
             return self._area_index
         idx = AreaIndex(self, pcb_data)
-        self._area_index_of = (sig, pcb_data)
+        self._area_index_of = (sig, kos)
         self._area_index = idx if idx.names else None
         self._cache.clear()
         return self._area_index
