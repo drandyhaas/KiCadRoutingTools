@@ -3257,6 +3257,10 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
     # Set attraction path for bus routing (if provided)
     if attraction_path:
         router.set_attraction_path(attraction_path)
+        # An ordered bus member's lane points along each route's own way.
+        from bus_detection import Lane, LaneOrientedRouter
+        if isinstance(attraction_path, Lane):
+            router = LaneOrientedRouter(router, attraction_path)
         if config.verbose:
             layers_in_path = set(p[2] for p in attraction_path)
             print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
@@ -5819,7 +5823,8 @@ def _route_multipoint_main_impl(
         # fresh via to reach copper the island already spans.
         _vs = _vias_by_comp.get(_cid, [])
         _pts = _clear_launch_rows(
-            get_all_segment_tap_points(_segs, coord, layer_names, vias=_vs),
+            _off_banned_layers(get_all_segment_tap_points(_segs, coord, layer_names, vias=_vs),
+                               layer_names, pcb_data, net_id),
             obstacles, coord, pcb_data, net_id)
         # Keyed by cell, valued by the OWNER float point of that cell --
         # the conversion below welds the route to the owner of the cell
@@ -5965,6 +5970,10 @@ def _route_multipoint_main_impl(
 
     if attraction_path:
         router.set_attraction_path(attraction_path)
+        # An ordered bus member's lane points along each route's own way.
+        from bus_detection import Lane, LaneOrientedRouter
+        if isinstance(attraction_path, Lane):
+            router = LaneOrientedRouter(router, attraction_path)
         if config.verbose:
             layers_in_path = set(p[2] for p in attraction_path)
             print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
@@ -6418,6 +6427,19 @@ def _clear_launch_rows(rows, obstacles, coord, pcb_data, net_id, bounds=None):
     return out
 
 
+def _off_banned_layers(points, layer_names, pcb_data, net_id):
+    """Launch points of a net's existing copper without those on a layer the net is barred from (a layer ban:
+    net_keepouts.banned_layers, e.g. a laid bus's lane layer, bus_lanes.py): a route launched from a cell there welds
+    to its owner with a track on that layer, which the keep-out check then refuses. The net's vias still offer every
+    other layer. Unchanged for a net with no ban."""
+    from net_keepouts import banned_layers
+    banned = banned_layers(pcb_data, (net_id,))
+    if not banned:
+        return points
+    idx = {i for i, name in enumerate(layer_names) if name in banned}
+    return [p for p in points if p[2] not in idx]
+
+
 def get_all_segment_tap_points(
     segments: List[Segment],
     coord: GridCoord,
@@ -6795,8 +6817,9 @@ def _route_multipoint_taps_impl(
     obstacles.clear_source_target_cells()
     for _cid, _segs in _p3_segs_by_comp.items():
         _pts = _clear_launch_rows(
-            get_all_segment_tap_points(_segs, coord, layer_names,
-                                       vias=_p3_vias_by_comp.get(_cid, [])),
+            _off_banned_layers(get_all_segment_tap_points(_segs, coord, layer_names,
+                                                          vias=_p3_vias_by_comp.get(_cid, [])),
+                               layer_names, pcb_data, net_id),
             obstacles, coord, pcb_data, net_id)
         # Keyed by cell, valued by the OWNER float point (Phase 3's
         # tap_point_map / end-weld contract: weld to the owner of the cell
@@ -6948,8 +6971,9 @@ def _route_multipoint_taps_impl(
         # Vias are included on ALL layers since they connect all copper layers
         obstacles.clear_source_target_cells()
         all_tap_points = _clear_launch_rows(
-            get_all_segment_tap_points(all_segments, coord, layer_names,
-                                       vias=all_vias),
+            _off_banned_layers(get_all_segment_tap_points(all_segments, coord, layer_names,
+                                                          vias=all_vias),
+                               layer_names, pcb_data, net_id),
             obstacles, coord, pcb_data, net_id)
 
         # Always include the designated source pad position as a potential source

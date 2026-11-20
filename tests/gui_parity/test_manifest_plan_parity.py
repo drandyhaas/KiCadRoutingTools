@@ -855,11 +855,24 @@ ROUTE_CLI_ONLY = {
 # row or an alias. Listed so this gate stays green while the list stays
 # visible; taking an entry off is that code change.
 #
-# EMPTY now. It held --component (a route step never read its refs, so a
-# replay routed every net), the keepout / guide-corridor layer and spacing
-# flags (controls that were never reset), and --no-fix-drc-settings (its
-# checkbox was a preference no step reset); each left when its fix landed.
-ROUTE_KNOWN_GAPS = {}
+# It held --component (a route step never read its refs, so a replay routed
+# every net), the keepout / guide-corridor layer and spacing flags (controls
+# that were never reset), and --no-fix-drc-settings (its checkbox was a
+# preference no step reset); each left when its fix landed.
+ROUTE_KNOWN_GAPS = {
+    '--bus-nets': "a declared ordered bus (its nets in their side-by-side order) "
+                  "changes what a step routes; the GUI's bus controls have no "
+                  "net-list field yet, so a replay routes the nets unordered",
+    '--bus-lanes': "lays a declared bus's lanes along a drawn centreline (a "
+                   "User layer); no GUI control names the guide and bus "
+                   "layers yet, so a replay routes the bus unlaid",
+    '--bus-lane-pitch': "the laid lanes' spacing; reaches no GUI control, as "
+                        "--bus-lanes does not",
+    '--bus-fan-pitch': "the laid lanes' fan at the centreline's end; reaches "
+                       "no GUI control, as --bus-lanes does not",
+    '--bus-drop-reach': "how far a laid lane's drop may move; reaches no GUI "
+                        "control, as --bus-lanes does not",
+}
 
 # REACHED, but the control is not restored by swig_gui's
 # reset_params_to_defaults, which the plan executor runs before EVERY step: a

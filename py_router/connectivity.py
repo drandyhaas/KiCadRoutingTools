@@ -1989,6 +1989,18 @@ def _get_multipoint_net_pads_unordered(
                              if any(abs(v.x - px) < 0.05 and abs(v.y - py) < 0.05
                                     for px, py in _gpts)),
                             key=lambda v: (v.x, v.y))
+            # A laid bus's lane (bus_lanes.py): its vias are flagged terminals, every one of them an endpoint, so the
+            # component MST spans the lane from its nearest end (its far end to the drop via, its end via to the
+            # outlet pads) rather than from one representative point. A through via: launched on the first routing
+            # layer it spans (its ramps keep off the bus layer).
+            _lane_vias = [v for v in _gvias if getattr(v, 'bus_lane_terminal', False)]
+            if _lane_vias:
+                _lidx = next((layer_map[l] for l in getattr(_lane_vias[0], 'layers', []) if l in layer_map), 0)
+                for _v in _lane_vias:
+                    gx, gy = coord.to_grid(_v.x, _v.y)
+                    endpoint_info.append((gx, gy, _lidx, _v.x, _v.y,
+                                          _make_endpoint_stub(_v.x, _v.y, config.layers[_lidx], net_id)))
+                continue
             if _gvias:
                 _gv = _gvias[0]
                 _vlayer = next(

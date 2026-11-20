@@ -310,7 +310,8 @@ _FINALIZE_ROUTE_KNOBS = (
     'mps_segment_intersection', 'keepout_enabled', 'keepout_layer',
     'guide_corridor_enabled', 'guide_corridor_layer', 'guide_corridor_spacing',
     'bus_enabled', 'bus_detection_radius', 'bus_attraction_radius',
-    'bus_attraction_bonus', 'bus_min_nets',
+    'bus_attraction_bonus', 'bus_min_nets', 'bus_nets', 'bus_detect',
+    'bus_lanes', 'bus_lane_pitch', 'bus_fan_pitch', 'bus_drop_reach',
     'keep_away', 'keep_away_free', 'keep_away_cost',
     # Net-filtered keep-outs (net_keepouts.py), resolved from the step's
     # .kicad_dru: a reconnect of a bound net must stay out of the regions the
@@ -2513,6 +2514,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bus_attraction_radius: float = 5.0,
                 bus_attraction_bonus: int = 5000,
                 bus_min_nets: int = 2,
+                bus_nets: Optional[List[List[str]]] = None,
+                bus_detect: bool = True,
+                bus_lanes: Optional[List[Optional[Tuple[str, str]]]] = None,
+                bus_lane_pitch: float = 0.0,
+                bus_fan_pitch: float = 0.0,
+                bus_drop_reach: float = 0.0,
                 guide_corridor_enabled: bool = False,
                 guide_corridor_layer: str = "User.1",
                 guide_corridor_spacing: float = 0.0,
@@ -3488,6 +3495,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         time_matching=time_matching, time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory, layer_costs=layer_costs
     )
+    # Declared ordered buses (--bus-nets): route.py's own, not route_diff's.
+    config_kwargs.update(bus_nets=list(bus_nets or []), bus_detect=bus_detect,
+                         bus_lanes=list(bus_lanes or []), bus_lane_pitch=bus_lane_pitch,
+                         bus_fan_pitch=bus_fan_pitch, bus_drop_reach=bus_drop_reach)
     config_kwargs['power_tap_neckdown'] = power_tap_neckdown
     # #1253: the rules the board's design brief declares join the caller's,
     # read here in the engine so the CLI and the GUI both get them with no
@@ -3998,6 +4009,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     from net_keepouts import attach as _nk_attach
     _nk_attach(pcb_data, net_keepouts if net_keepouts is not None
                else getattr(getattr(config, 'rules', None), 'net_keepouts', None))
+    # Laid buses (--bus-lanes, bus_lanes.py): their members' ramps keep off the
+    # bus layer, as a layer ban the audit knows is the lanes' own (`bus_lanes`).
+    # A nested run takes them with the rest (and would derive the same).
+    from bus_lanes import layer_bans as _bl_bans
+    _bl = [b for b in _bl_bans(config)
+           if not any(k.get('bus_lanes') and k['name'] == b['name']
+                      for k in (getattr(pcb_data, '_net_keepouts', None) or []))]
+    if _bl:
+        _nk_attach(pcb_data, list(getattr(pcb_data, '_net_keepouts', None) or []) + _bl)
     _reconcile_kwargs['net_keepouts'] = list(getattr(pcb_data, '_net_keepouts', None) or [])
     # #1678 / #1676: a nested run reads the output, whose .kicad_dru sibling
     # does not exist yet, so it carries what this run resolved.
@@ -4587,6 +4607,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _reconcile_kwargs['scoped_clearance_rules'] = _scoped_rules_of(config)
     # #1842: under a via span the builders read the board without the copper
     # outside the span
+    # Laid buses (--bus-lanes): the lanes laid as locked copper before any map
+    # is built, so every map and every route sees them; written with the swap
+    # copper (bus_lanes.py). A nested run finds them laid and lays nothing.
+    from bus_lanes import lay as _lay_bus_lanes
+    _laid_lanes = _lay_bus_lanes(pcb_data, config, board_file=input_file)
+    all_swap_segments.extend(_laid_lanes['segments'])
+    all_swap_vias.extend(_laid_lanes['vias'])
     from via_span import obstacle_board as _obstacle_board1842
     _obs_pcb = _obstacle_board1842(pcb_data, config)
     base_obstacles = build_base_obstacle_map(
@@ -7494,6 +7521,29 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if final_reconcile:
             _cap_moves_in_run666('write')
     else:
+        # Laid buses (--bus-lanes): a drop via its ramp did not use (the ramp
+        # joined its lane by a via of its own) goes, the lane starting at the
+        # ramp's via instead, so nothing ships dangling (bus_lanes.py).
+        _laid_bl = getattr(pcb_data, '_bus_laid', None)
+        if _laid_bl and _laid_bl.get('laid'):
+            from bus_lanes import trim_unused_drops
+            _seen_bl = set()
+            _segs_bl, _vias_bl = [], []
+            for _it in (list(pcb_data.segments) + [x for r in results for x in r.get('new_segments', [])]
+                        + list(all_swap_segments)):
+                if id(_it) not in _seen_bl:
+                    _seen_bl.add(id(_it)); _segs_bl.append(_it)
+            for _it in (list(pcb_data.vias) + [x for r in results for x in r.get('new_vias', [])]
+                        + list(all_swap_vias)):
+                if id(_it) not in _seen_bl:
+                    _seen_bl.add(id(_it)); _vias_bl.append(_it)
+            _gone_bl = trim_unused_drops(_laid_bl, _segs_bl, _vias_bl, pcb_data.pads_by_net)
+            if _gone_bl:
+                _gone_ids = {id(v) for v in _gone_bl}
+                all_swap_vias[:] = [v for v in all_swap_vias if id(v) not in _gone_ids]
+                pcb_data.vias[:] = [v for v in pcb_data.vias if id(v) not in _gone_ids]
+                print(f"  bus lanes: {len(_gone_bl)} drop via(s) its ramp did not use removed, "
+                      f"the lane starting at the ramp's via")
         # Write output file using extracted output_writer module
         wrote = write_routed_output(
             input_file=input_file,
@@ -10905,6 +10955,29 @@ For differential pair routing, use route_diff.py:
                              f"at 90%% -- 4500 and above is full strength (default: {defaults.BUS_ATTRACTION_BONUS})")
     parser.add_argument("--bus-min-nets", type=int, default=defaults.BUS_MIN_NETS,
                         help=f"Minimum nets to form a bus group (default: {defaults.BUS_MIN_NETS})")
+    parser.add_argument("--bus-nets", action="append", default=[], metavar="NET,NET,...",
+                        help="Declare a bus by its nets, comma-separated, in the order they must keep side by "
+                             "side along their common run (e.g. by potential); repeatable, one bus each. Each "
+                             "member is attracted to its own lane of the bus's planned corridor, one track + "
+                             "clearance apart, so the order holds through bends and layer changes. Turns bus "
+                             "routing on for these nets only; add --bus to detect other buses as well")
+    parser.add_argument("--bus-lanes", action="append", default=[], metavar="GUIDE_LAYER:BUS_LAYER",
+                        help="Lay the matching --bus-nets bus (the first --bus-lanes the first --bus-nets, and so "
+                             "on; '-' for none) as copper before routing: its centreline is the polyline drawn on "
+                             "GUIDE_LAYER (a User layer), its lanes are laid on BUS_LAYER in the declared order, "
+                             "each member's from where it joins (the lane at its far end, else the nearest free "
+                             "spot downstream) to the centreline's end, a via at both; then only the members' "
+                             "ramps are routed, the bus layer barred to them. The order is a construction, so it "
+                             "holds where members join from both sides (see docs/bus-routing.md)")
+    parser.add_argument("--bus-lane-pitch", type=float, default=0.0,
+                        help="Distance between laid lanes in mm (default 0: room for a via beside a lane)")
+    parser.add_argument("--bus-fan-pitch", type=float, default=0.0,
+                        help="Distance the laid lanes spread to along the centreline's last segment, where the "
+                             "bus meets rows farther apart, in mm (default 0: no fan)")
+    parser.add_argument("--bus-drop-reach", type=float, default=0.0,
+                        help="How far downstream of where a member joins its laid lane its drop via may move to "
+                             "find room, in mm (default 0: the bus's width, members x pitch); the lane's end via "
+                             "searches half of it upstream from the centreline's end")
     parser.add_argument("--guide-corridor", action="store_true",
                         help="Steer routed nets along a guide polyline drawn on a User layer (issue #7)")
     parser.add_argument("--guide-corridor-layer", type=str, default=defaults.GUIDE_CORRIDOR_LAYER,
@@ -11681,7 +11754,14 @@ For differential pair routing, use route_diff.py:
                 heuristic_weight=args.heuristic_weight,
                 turn_cost=args.turn_cost,
                 direction_preference_cost=args.direction_preference_cost,
-                bus_enabled=args.bus,
+                bus_enabled=args.bus or bool(args.bus_nets),
+                bus_nets=[[n.strip() for n in spec.split(',') if n.strip()] for spec in args.bus_nets],
+                bus_detect=args.bus,
+                bus_lanes=[None if spec.strip() in ('', '-') else tuple(spec.strip().split(':', 1))
+                           for spec in args.bus_lanes],
+                bus_lane_pitch=args.bus_lane_pitch,
+                bus_fan_pitch=args.bus_fan_pitch,
+                bus_drop_reach=args.bus_drop_reach,
                 bus_detection_radius=args.bus_detection_radius,
                 bus_attraction_radius=args.bus_attraction_radius,
                 bus_attraction_bonus=args.bus_attraction_bonus,

@@ -445,6 +445,19 @@ class GridRouteConfig:
     bus_min_nets: int = 2  # Minimum nets to form a bus
     bus_attraction_radius: float = 5.0  # mm - attraction radius from neighbor track
     bus_attraction_bonus: int = 5000  # Cost bonus for staying near neighbor
+    # Buses declared by net list (--bus-nets), each list the side-by-side
+    # order its members keep along the run; bus_detect False routes only these
+    # as buses (--bus-nets without --bus).
+    bus_nets: List[List[str]] = field(default_factory=list)
+    bus_detect: bool = True
+    # Laid lanes (--bus-lanes): per declared bus (by its place in bus_nets),
+    # None or (guide layer, bus layer): its centreline drawn on the guide
+    # layer, its lanes laid as copper on the bus layer before any net routes,
+    # its members' ramps routed with the bus layer barred to them (bus_lanes.py).
+    bus_lanes: List[Optional[Tuple[str, str]]] = field(default_factory=list)
+    bus_lane_pitch: float = 0.0   # mm between lanes; 0 = room for a via beside a lane
+    bus_fan_pitch: float = 0.0    # mm the lanes spread to along the centreline's last segment; 0 = none
+    bus_drop_reach: float = 0.0   # mm a drop may move downstream of where its member joins; 0 = the bus's width
     # Guide corridor - route selected nets through a user-drawn polyline (issue #7)
     guide_corridor_enabled: bool = False  # Steer routed nets along a drawn guide path
     guide_corridor_layer: str = "User.1"  # User layer the guide polyline is drawn on
