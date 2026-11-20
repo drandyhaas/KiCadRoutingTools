@@ -1421,6 +1421,8 @@ def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
             continue
         gx, gy = coord.to_grid(via.x, via.y)
         for layer in config.layers:
+            if not via_on_layer(via, layer):
+                continue   # a blind/micro via is an end only on its span
             layer_idx = layer_map.get(layer)
             if layer_idx is not None:
                 _add(via.x, via.y, layer_idx, gx, gy)

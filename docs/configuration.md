@@ -175,6 +175,9 @@ python3 py_router/route_diff.py in.kicad_pcb out.kicad_pcb --nets "/DQS_P" "/DQS
 | `--via-span TOP BOTTOM` | none (through vias) | `route.py`: lay vias that join only this run of neighbouring copper layers, and route on those layers only. See [Via span](#via-span) |
 | `--via-span-type` | read off the span | The via type written for `--via-span`: `micro`, `blind` or `buried` |
 | `--via-span-escape` | off | With `--via-span`: `route` first lays an escape (a via of the span beside each surface pad of the selected nets, and the short track to it), then routes; `only` lays the escapes and routes nothing |
+| `--via-kinds TOP BOTTOM [TOP BOTTOM ...]` | none (through vias) | `route.py`: the kinds of via the search may change layers through, as layer pairs. See [Via kinds](#via-kinds) |
+| `--jog-layers LAYER [LAYER ...]` | none | `route.py`, with `--via-kinds`: layers that carry no track but the jog between two vias. See [Via kinds](#via-kinds) |
+| `--jog-max-length` | 2.0 | The longest jog, in mm, on a `--jog-layers` layer |
 | `--grid-step` | 0.1 | Grid resolution in mm |
 | `--same-net-pad-clearance` | the project's recorded value, else -1 | Edge-to-edge clearance (mm) between every via the run places and same-net pads (#581). `> 0` keeps vias off same-net SMD pads and off the net's solder-paste openings (#962), i.e. no via-in-pad, and is recorded in the sibling `.kicad_pro` so later chain steps inherit it; `-1` allows via-in-pad. On every routing CLI (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py`) |
 
@@ -576,6 +579,62 @@ vias; `--via-span F.Cu In1.Cu` completes all 36 with micro vias, clean in
 The two-step form above lays 72 micro-via escapes and then routes 35 of the 36
 on the inner layers with buried vias, both steps clean in `check_drc` and
 KiCad's DRC.
+
+<a id="via-kinds"></a>
+**Via kinds (#1842).** A via span gives a step one kind of via. `route.py
+--via-kinds TOP BOTTOM [TOP BOTTOM ...]` gives its search several: each pair
+is a kind, typed and sized as a via span of that pair would be (a micro pair
+draws the Default class's micro via, any other the step's via; `F.Cu B.Cu`
+is the through via). The step routes on every layer of `--layers`, and a
+layer change is made with a declared kind that joins the two layers and fits
+at that spot, so one net can go surface, micro via, inner layer, buried via,
+inner layer in one step:
+
+    python3 py_router/route.py board.kicad_pcb out.kicad_pcb \
+      --via-kinds F.Cu In1.Cu In1.Cu In6.Cu In6.Cu B.Cu
+
+- **Each kind has its own legality.** What blocks a via of a kind is the
+  copper on the layers it joins and every drilled pad, at that kind's size
+  (`via_kinds.kind_config`, the board read through `via_span.SpanView`). The
+  obstacle map carries one via map per kind beside the through via's, stamped
+  by the base build, each net's cache entry and the raw stamps; a stamp that
+  knows nothing of kinds is repeated in every kind's map by the map itself,
+  which is why a kind may not be larger than the step's via.
+- **The search picks per transition.** Between two layers it uses the first
+  declared kind that joins both and fits there; all kinds cost `--via-cost`.
+  Two consecutive vias of a path stand at least the drill spacing apart, so
+  a micro via and a buried via that share a layer are side by side, never
+  stacked: right after a via the search reaches the next one by a single
+  jog-then-via edge, a straight run of track and the via at its end.
+- **Outside the search nothing changes.** Pad taps, the plane finalize and
+  the reconciliation pass lay through vias where a through via fits, as in
+  any step. A via laid by the search is written with its kind's layer pair,
+  type and size; micro vias get the micro-via rule in the output's
+  `.kicad_dru` as under a via span.
+- **Not with `--via-span`.** As under a span, BGA exclusion zones are off
+  unless `--no-bga-zones` says otherwise.
+- **`--jog-layers`** names jog-only layers: the search lays no track there
+  but that jog -- one straight run from a via to the next, at most
+  `--jog-max-length` mm. It is for the plane layer a micro via and a buried
+  via share, where `--layer-costs -1` alone would forbid the jog too and an
+  ordinary cost would let routes cut the plane up (a via may end on a
+  jog-only layer whatever its cost). It needs `--via-kinds`.
+- **The summary says so.** `JSON_SUMMARY` and `--json-out` carry `via_kinds`:
+  each kind with its layer pair, type, size and the number of such vias on
+  the board, and the jog caps.
+- The GUI route tab has the same controls (**Via Kinds**, **Jog Layers**, and
+  **Max Jog** among the advanced parameters).
+
+On `tests/fixtures/1842/mixed_kinds.py` (8 layers, four nets from F.Cu pads
+walled in on F.Cu and covered on B.Cu to B.Cu pads walled in and covered the
+other way round) a step with through vias and a step with any one via span
+each route 0 of 4 nets; `--via-kinds F.Cu In1.Cu In1.Cu In6.Cu In6.Cu B.Cu`
+routes all 4 with 4 vias of each kind, clean in `check_drc`,
+`check_connected` and KiCad's DRC. With `--jog-layers In1.Cu In6.Cu` the
+longest run of track on In1.Cu falls from 19.1 mm to 2.0 mm, one jog a net. A three-step
+via-span chain (two `--via-span-escape only` steps, then the inner span)
+reaches the same nets with 9,046 search iterations where the one step takes
+121,728: the search then looks through all eight layers for each net.
 
 **Via rules (#1676).** A step given no explicit via (`--via-size` omitted, the
 GUI's Via Size override unticked) starts from a via that meets the

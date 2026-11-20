@@ -222,6 +222,10 @@ KEEPOUT_LAYER = "User.2"  # User layer the keepout polygon is drawn on
 
 # Clearance parameters
 ROUTING_CLEARANCE_MARGIN = 1.0
+# #1842: the most track a jog-only layer (--jog-layers) carries between two
+# vias, mm. The staggered micro-plus-buried transitions the feature is for
+# were laid by hand at 2 to 2.6 mm.
+JOG_MAX_LENGTH = 2.0
 HOLE_TO_HOLE_CLEARANCE = 0.20  # mm - JLC "Via Hole-to-Hole Spacing" (edge-to-edge),
                                # the floor that governs router-placed via drills.
                                # (JLCPCB's pad-hole-to-hole is a separate, larger
@@ -397,6 +401,7 @@ PARAM_RANGES = {
     'board_edge_clearance': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 3},
     'bga_proximity_radius': {'min': 0.0, 'max': 20.0, 'inc': 0.5, 'digits': 1},
     'bga_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'jog_max_length': {'min': 0.1, 'max': 50.0, 'inc': 0.1, 'digits': 2},
     'vertical_attraction_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'vertical_attraction_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'ripped_route_avoidance_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},

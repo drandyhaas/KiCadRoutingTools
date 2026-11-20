@@ -29,6 +29,28 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from geometry_utils import via_span_layer_indices
 from area_clearance import composed as _area_composed
+from functools import wraps
+
+
+def _kinds_exact(fn):
+    """#1842: a raw stamp (or its remove twin) that stamps each via kind's
+    own cells itself, through `_stamp_rungs_at_own_via`. The map's kind
+    mirror is off while it runs, so its through-via cells are not also
+    repeated in the kind maps; on a map without via kinds, or with a config
+    that declares none, the call is the function itself."""
+    @wraps(fn)
+    def stamp(obstacles, *args, **kwargs):
+        set_mirror = getattr(obstacles, 'set_kind_mirror', None)
+        if set_mirror is None or isinstance(obstacles, _RungViaSink) or not any(
+                getattr(a, 'via_kinds', None) for a in list(args) + list(kwargs.values())):
+            return fn(obstacles, *args, **kwargs)
+        was = set_mirror(False)
+        try:
+            return fn(obstacles, *args, **kwargs)
+        finally:
+            set_mirror(was)
+    return stamp
+
 
 try:
     from grid_router import GridObstacleMap
@@ -731,6 +753,24 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         except Exception as _re:                              # noqa: BLE001
             print(f"  WARNING: per-net via rungs not stamped on the base map ({_re}); "
                   f"nets with their own via size route at the run's via legality")
+        try:
+            # #1842: one via map per declared via kind, from the base as that
+            # kind's span sees it and at its own via; then the kind mirror,
+            # so a later stamp that knows nothing of kinds reaches them too.
+            from via_kinds import spanned as _spanned_kinds, kind_config as _kind_config
+            _kinds = _spanned_kinds(config)
+            if _kinds:
+                for _k in _kinds:
+                    _sub = build_base_obstacle_map(
+                        pcb_data, _kind_config(config, _k), nets_to_route,
+                        extra_clearance, net_clearances, static_base=False,
+                        _rung_pass=True, stamp_pads=stamp_pads)
+                    _cells = _sub.blocked_via_cells_at_rung(0)
+                    if _cells:
+                        _real_obstacles.add_blocked_vias_kind_batch(
+                            _k.map, np.asarray(_cells, dtype=np.int32))
+                _real_obstacles.ensure_via_kinds(len(_kinds))
+                _real_obstacles.set_kind_mirror(True)
         finally:
             for _k, _v in _build_records.items():
                 setattr(pcb_data, _k, _v)
@@ -2955,6 +2995,7 @@ def via_floor_npth_holes(pcb_data: PCBData, routed_net_ids) -> list:
     return holes
 
 
+@_kinds_exact
 @_area_composed
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 net_id: int, config: GridRouteConfig,
@@ -3201,6 +3242,7 @@ def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord:
             obstacles.add_blocked_via(c[0], c[1])
 
 
+@_kinds_exact
 @_area_composed
 def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
@@ -3255,6 +3297,7 @@ def _via_h2h_cells(via, config: GridRouteConfig, coord: GridCoord):
     return np.column_stack([(gx + dxg)[dm], (gy + dyg)[dm]]).astype(np.int32)
 
 
+@_kinds_exact
 @_area_composed
 def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
@@ -3477,6 +3520,39 @@ def _per_net_rung_geometry(obstacles, config) -> List[Tuple[int, float, float]]:
     return [(r, d, h) for r in range(1, n + 1)]
 
 
+def _stamp_kinds_at_own_via(obstacles, config, stamp, remove: bool = False) -> None:
+    """#1842: re-run ``stamp(sink, kind_config)`` once per via kind that has
+    a map of its own and add (or remove) the via-block rows it records to
+    that map -- the kind's own via, on the board as its span sees it. Only
+    inside a `_kinds_exact` stamp, where the map's kind mirror is off; any
+    other caller's cells already reached the kind maps through the mirror."""
+    if not getattr(config, 'via_kinds', None) or isinstance(obstacles, _RungViaSink):
+        return
+    try:
+        if obstacles.kind_mirror or not obstacles.via_kind_count():
+            return
+    except AttributeError:
+        return
+    from via_kinds import spanned, kind_config
+    for kind in spanned(config):
+        sink = _RungViaSink()
+        stamp(sink, kind_config(config, kind))
+        cells = sink.cells()
+        if len(cells):
+            if remove:
+                obstacles.remove_blocked_vias_kind_batch(kind.map, cells)
+            else:
+                obstacles.add_blocked_vias_kind_batch(kind.map, cells)
+
+
+def _off_kind_span(config, layers) -> bool:
+    """#1842: in a via kind's own pass (`via_kinds.kind_config`), is copper
+    on ``layers`` outside the kind's span? It then blocks no via of the
+    kind. False in every other pass."""
+    return bool(config.__dict__.get('_kind_pass')) and not (
+        set(config.via_span or ()) & set(layers))
+
+
 def _stamp_rungs_at_own_via(obstacles, config, stamp, remove: bool = False,
                             populated_only: bool = False) -> None:
     """#1226: re-run ``stamp(sink, rung_config)`` once per per-net rung at that
@@ -3499,6 +3575,7 @@ def _stamp_rungs_at_own_via(obstacles, config, stamp, remove: bool = False,
     unpopulated rung falls back to rung 0 and already sees this copper there;
     populating it with this copper ALONE would hide the base's (the small
     rung of an unfrozen map holds no base copper at all)."""
+    _stamp_kinds_at_own_via(obstacles, config, stamp, remove)
     geos = _per_net_rung_geometry(obstacles, config)
     small = None
     if populated_only:
@@ -3580,6 +3657,7 @@ def _via_raw_block_cells(via, config, coord, num_layers, extra_clearance,
     return out
 
 
+@_kinds_exact
 @_area_composed
 def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
                                 config: GridRouteConfig,
@@ -3605,6 +3683,9 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
     # clearance (max(routing-side floor, that via net's class)); the REMOVE twin
     # derives the same per-via value from via.net_id so the ref-counts stay in sync.
     for via in vias:
+        if _off_kind_span(config, [config.layers[_i] for _i in via_span_layer_indices(
+                via, config.layers, num_layers)]):
+            continue   # #1842: a via kind's pass, and this via is off its span
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
         via_clearance = config.obstacle_clearance(getattr(via, 'net_id', 0))
         via_track_expansion_grid = _via_track_expansion_per_layer(
@@ -3644,6 +3725,7 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
     _ledger_close(obstacles, _pre, "add_vias_list")
 
 
+@_kinds_exact
 @_area_composed
 def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
                                     config: GridRouteConfig,
@@ -3674,6 +3756,8 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     _small_arrs: list = []
     for seg in segments:
         layer_idx = layer_map.get(seg.layer)
+        if _off_kind_span(config, (seg.layer,)):
+            continue   # #1842: a via kind's pass, and this track is off its span
         if layer_idx is not None:
             # Routing-side reserve width for the future track (#156)
             reserve_width = config.route_reserve_width(seg.layer)
@@ -3723,6 +3807,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     _ledger_close(obstacles, _pre, "add_segments_list")
 
 
+@_kinds_exact
 @_area_composed
 def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: list,
                                          config: GridRouteConfig,
@@ -3798,6 +3883,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
     _ledger_close(obstacles, _pre, "remove_segments_list")
 
 
+@_kinds_exact
 @_area_composed
 def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
                                      config: GridRouteConfig,

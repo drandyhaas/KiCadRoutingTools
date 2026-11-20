@@ -2663,6 +2663,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # selected nets first, then route; 'only': lay the escapes
                 # and route nothing (via_span.escape_pads). None -> off.
                 via_span_escape: Optional[str] = None,
+                # #1842: the via kinds the search may change layers through,
+                # a flat list of (top, bottom) layer pairs
+                # (via_kinds.resolve_via_kinds). None -> one kind, the
+                # through via (or the step's --via-span).
+                via_kinds: Optional[Sequence[str]] = None,
+                # #1842: layers that carry only a jog between two vias, at
+                # most `jog_max_length` mm of track each time. None -> none.
+                jog_layers: Optional[Sequence[str]] = None,
+                jog_max_length: float = defaults.JOG_MAX_LENGTH,
                 # #1260: the pour islands this run may not cut
                 # (GridRouteConfig.pour_barriers). None (both fronts) ->
                 # computed from this call's scope; a list is the OUTER run's,
@@ -3188,6 +3197,41 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             disable_bga_zones = []
             print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
                   f"fields (--no-bga-zones)")
+    _kinds1842 = _caps1842 = None
+    # #1842: via kinds chosen within the search, and jog-only layers
+    if via_kinds or jog_layers:
+        import via_kinds as _vk1842
+        if via_kinds and _span1842:
+            raise ValueError("--via-kinds and --via-span cannot be given together: a "
+                             "via span is a step of one kind on its own layers")
+        _kinds1842 = _vk1842.resolve_via_kinds(
+            pcb_data, via_kinds, via_size, via_drill,
+            input_file or getattr(pcb_data, 'source_path', '') or '')
+        _caps1842 = _vk1842.resolve_jog_caps(pcb_data, jog_layers, jog_max_length,
+                                             _kinds1842)
+        try:
+            import grid_router as _gr1842
+            _kinds_ok = hasattr(_gr1842.GridRouter, 'set_via_kinds')
+        except Exception:                                      # noqa: BLE001
+            _kinds_ok = False
+        if not _kinds_ok:
+            raise ValueError("--via-kinds / --jog-layers need grid_router 0.24.2 or "
+                             "newer; run build_router.py --from-source")
+        if _kinds1842:
+            print(f"Via kinds (#1842): the search changes layers through "
+                  f"{', '.join(k.label() for k in _kinds1842)}; a via laid outside "
+                  f"the search is a through via")
+            if disable_bga_zones is None and any(k.map >= 0 for k in _kinds1842):
+                # as under a via span: a BGA's pad field is closed to this
+                # step's tracks and vias for the fan-out step's through
+                # vias; a shorter via between or under the balls is how a
+                # dense part escapes
+                disable_bga_zones = []
+                print("  via kinds: tracks and vias are allowed inside BGA pad "
+                      "fields (--no-bga-zones)")
+        if _caps1842:
+            print(f"Jog-only layers (#1842): {', '.join(n for n, _ in _caps1842)} carry "
+                  f"no track but a jog of at most {_caps1842[0][1]:g} mm between two vias")
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # One cost per requested layer, or the full-stack append below puts its
@@ -3579,6 +3623,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if _span1842:
         config_kwargs['via_span'] = tuple(_span1842)
         config_kwargs['via_span_type'] = _span_type1842
+    if _kinds1842:
+        config_kwargs['via_kinds'] = _kinds1842
+    if _caps1842:
+        config_kwargs['jog_caps'] = _caps1842
+    import via_kinds as _vk_reset1842
+    _vk_reset1842.reset()
     config = GridRouteConfig(**config_kwargs)
     config.quick = int(quick or 0)
     # The in-loop stub-debris trim must treat input copper as read-only in
@@ -7433,6 +7483,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _span_summary1842 = via_span_summary(config, pcb_data)
     if _span_summary1842:
         summary['via_span'] = _span_summary1842
+    # #1842: the via kinds the search chose between and the jog-only layers
+    import via_kinds as _vk_sum1842
+    _kinds_summary1842 = _vk_sum1842.summary(config, pcb_data.vias)
+    if _kinds_summary1842:
+        summary['via_kinds'] = _kinds_summary1842
     try:                       # #653: env knobs into the machine-readable
         import env_knobs as _ek653   # summary, so a harness can detect a
         summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
@@ -10192,6 +10247,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _vs1842 = via_span_summary(config, pcb_data)
             if _merged is not None and _vs1842:
                 _merged['via_span'] = _vs1842
+            import via_kinds as _vk_sum1842
+            _vks1842 = _vk_sum1842.summary(config, pcb_data.vias)
+            if _merged is not None and _vks1842:
+                _merged['via_kinds'] = _vks1842
             # #1680/#1681: likewise the pad contacts and grazes it ships.
             if _merged is not None and _pad_contacts_left:
                 _merged['pad_contacts'] = _pad_contacts_left
@@ -10745,6 +10804,24 @@ For differential pair routing, use route_diff.py:
                              "an 8-layer board: buried vias), and route on those layers "
                              "only. Only copper on those layers, and drilled pads, "
                              "blocks a via site. Default: through vias (#1842)")
+    parser.add_argument("--via-kinds", nargs="+", default=None, metavar="LAYER",
+                        help="The kinds of via the search may change layers through, as "
+                             "TOP BOTTOM layer pairs, e.g. F.Cu In1.Cu In1.Cu In6.Cu "
+                             "In6.Cu B.Cu (micro, buried, micro); F.Cu B.Cu adds the "
+                             "through via. The step routes on every layer of --layers, "
+                             "and each layer change is made with a kind that joins the "
+                             "two layers and fits there: only copper on a kind's own "
+                             "layers (and drilled pads) blocks it. A micro pair draws "
+                             "the Default class's micro via, any other the step's via. "
+                             "Not with --via-span. Default: through vias (#1842)")
+    parser.add_argument("--jog-layers", nargs="+", default=None, metavar="LAYER",
+                        help="Layers that carry only a short jog between two vias (a "
+                             "plane layer a micro via and a buried via share): at most "
+                             "--jog-max-length of track each time, and no other routing. "
+                             "Needs --via-kinds (#1842)")
+    parser.add_argument("--jog-max-length", type=float, default=defaults.JOG_MAX_LENGTH,
+                        help="The most track a --jog-layers layer carries between two "
+                             f"vias, mm (default: {defaults.JOG_MAX_LENGTH})")
     parser.add_argument("--via-span-escape", choices=("route", "only"), default=None,
                         help="With --via-span: first lay an escape -- a via of the span "
                              "and a short track -- at each surface pad of the selected "
@@ -11206,6 +11283,8 @@ For differential pair routing, use route_diff.py:
                     print(f"--{_pname.replace('_', '-')} not given; using the board "
                           f"Default net-class micro via {_val}mm (--via-span).")
             _vs_explicit = True
+    # #1842: --via-kinds / --jog-layers against the board's own stack
+    __import__('via_kinds').check_cli(parser, args, args.input_file)
     # track_width / via_size / via_drill: when omitted, default to the board's OWN
     # Default net-class value (else the routing_defaults constant), so a bare route
     # uses the board's own geometry -- parity with the GUI's per-control override.
@@ -11720,6 +11799,8 @@ For differential pair routing, use route_diff.py:
                 same_net_pad_clearance=args.same_net_pad_clearance,
                 via_span=args.via_span, via_span_type=args.via_span_type,
                 via_span_escape=args.via_span_escape,
+                via_kinds=args.via_kinds, jog_layers=args.jog_layers,
+                jog_max_length=args.jog_max_length,
                 vertical_attraction_radius=args.vertical_attraction_radius,
                 vertical_attraction_cost=args.vertical_attraction_cost,
                 ripped_route_avoidance_radius=args.ripped_route_avoidance_radius,

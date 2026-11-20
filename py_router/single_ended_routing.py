@@ -21,6 +21,7 @@ from kicad_parser import (PCBData, Segment, Via, pad_is_plated_through,
                           plated_drill_exposed, flush_drill_peg)
 from routing_config import GridRouteConfig, GridCoord
 from via_span import via_layer_pair, via_kind
+import via_kinds as _via_kinds
 from routing_utils import build_layer_map, pad_rect_halfspan
 from connectivity import (
     get_net_endpoints,
@@ -29,7 +30,8 @@ from connectivity import (
     compute_component_mst_edges,
     on_grid_point,
 )
-from obstacle_map import get_same_net_through_hole_positions, same_net_partial_via_spans
+from obstacle_map import (get_same_net_through_hole_positions, same_net_partial_via_spans,
+                          via_stops_short)
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
 from area_clearance import narrow_tracks as _area_narrow_tracks
@@ -2336,6 +2338,26 @@ def _probe_route_with_frontier(
     legs never trip it, so they pay nothing; only the rare offender pays one extra
     route. Falls back to the first (DRC-flawed but connected) path if the guarded
     re-route fails to connect at all."""
+    if getattr(config, 'via_kinds', None):
+        # #1842: the search itself keeps a run of track between two vias of
+        # a path (two kinds that share a layer stand side by side). A path
+        # that still brings two of them together is routed again under the
+        # spacing guard, as below; then the kind of every layer change is
+        # read back off the map that was searched.
+        result = _probe_route_with_frontier_once(
+            router, obstacles, forward_sources, forward_targets, config,
+            print_prefix, direction_labels, track_margin, pcb_data, current_net_id,
+            single_direction, via_exclusion_radius=0)
+        if result[0] is not None and _via_kinds.path_has_close_vias(result[0], config):
+            retry = _probe_route_with_frontier_once(
+                router, obstacles, forward_sources, forward_targets, config,
+                print_prefix, direction_labels, track_margin, pcb_data, current_net_id,
+                single_direction, via_exclusion_radius=_via_kinds.exclusion_radius(config))
+            if retry[0] is not None:
+                result = retry
+        _via_kinds.note_path(router, obstacles, config, result[0], current_net_id,
+                             getattr(config, 'via_rung', 0))
+        return result
     result = _probe_route_with_frontier_once(
         router, obstacles, forward_sources, forward_targets, config,
         print_prefix, direction_labels, track_margin, pcb_data, current_net_id,
@@ -3253,6 +3275,7 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
                         attraction_bonus=bus_attraction_bonus,
                         attraction_cross_layer_pct=bus_xlayer_pct,
                         attraction_potential=env_knobs.GLOBAL_PLAN.get('attract_potential', 0))
+    _via_kinds.arm_router(router, config)   # #1842: no-op without kinds
 
     # Set attraction path for bus routing (if provided)
     if attraction_path:
@@ -3387,6 +3410,14 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
             if ((gx1, gy1) not in through_hole_positions
                     and not {layer_names[layer1], layer_names[layer2]}
                     <= partial_spans.get((gx1, gy1), frozenset())):
+                # #1842: the kind the search laid here, when it chose one
+                _kind = _via_kinds.kind_at(config, net_id, gx1, gy1, layer1, layer2)
+                if _kind is not None:
+                    via = Via(x=x1, y=y1, size=_kind.size, drill=_kind.drill,
+                              layers=_kind.pair, via_type=_kind.via_type,
+                              net_id=net_id)
+                    new_vias.append(via)
+                    continue
                 _vx, _vy = _emit_via_site(pcb_data, gx1, gy1, x1, y1, net_id)
                 _vsz, _vdr = _emit_via_size(pcb_data, gx1, gy1, config,
                                             net_id=net_id, x=_vx, y=_vy)
@@ -4992,7 +5023,8 @@ def _pad_all_layer_reach(pcb_data: PCBData, pad_obj) -> bool:
         return False
     px, py = pad_obj.global_x, pad_obj.global_y
     for v in pcb_data.vias:
-        if v.net_id == nid and \
+        # not a blind/micro via: it reaches only the layers it spans
+        if v.net_id == nid and not via_stops_short(v, pcb_data) and \
                 math.hypot(v.x - px, v.y - py) <= (v.size or 0) / 2 + 1e-3:
             return True
     return False
@@ -5962,6 +5994,7 @@ def _route_multipoint_main_impl(
                         attraction_bonus=bus_attraction_bonus,
                         attraction_cross_layer_pct=bus_xlayer_pct,
                         attraction_potential=env_knobs.GLOBAL_PLAN.get('attract_potential', 0))
+    _via_kinds.arm_router(router, config)   # #1842: no-op without kinds
 
     if attraction_path:
         router.set_attraction_path(attraction_path)
@@ -6490,12 +6523,15 @@ def get_all_segment_tap_points(
                 gx, gy = coord.to_grid(x, y)
                 _offer((gx, gy, layer_idx), x, y)
 
-    # Add vias on ALL layers (vias connect all copper layers)
+    # Add vias on every layer they join: all of them for a through via, its
+    # span for a blind/micro one
     if vias:
+        from geometry_utils import via_on_layer
         for via in vias:
             gx, gy = coord.to_grid(via.x, via.y)
             for layer_idx in range(len(layer_names)):
-                _offer((gx, gy, layer_idx), via.x, via.y)
+                if via_on_layer(via, layer_names[layer_idx]):
+                    _offer((gx, gy, layer_idx), via.x, via.y)
 
     # Return sorted list for deterministic iteration
     return sorted([(gx, gy, layer_idx, ox, oy)
@@ -6855,6 +6891,7 @@ def _route_multipoint_taps_impl(
                         proximity_heuristic_cost=0,  # Set per-route below
                         layer_direction_preferences=config.get_layer_direction_preferences(),
                         direction_preference_cost=config.direction_preference_cost)
+    _via_kinds.arm_router(router, config)   # #1842: no-op without kinds
 
     # Per-layer fractional track margins (#156): exact extra half-width over
     # the stamps' reserve, no ceil, no +1 (see track_margins_for_net).
@@ -7806,6 +7843,13 @@ def _path_to_segments_vias(
             elif {layer_names[layer1], layer_names[layer2]} <= \
                     partial_spans.get((gx1, gy1), frozenset()):
                 pass    # a blind/micro via of the net spans both layers
+            elif _via_kinds.kind_at(config, net_id, gx1, gy1, layer1, layer2) is not None:
+                # #1842: the kind the search laid here
+                _kind = _via_kinds.kind_at(config, net_id, gx1, gy1, layer1, layer2)
+                _kx, _ky = coord.to_float(gx1, gy1)
+                vias.append(Via(x=_kx, y=_ky, size=_kind.size, drill=_kind.drill,
+                                layers=_kind.pair, via_type=_kind.via_type,
+                                net_id=net_id))
             else:
                 # the grid cell, or the site an unblock checked for it
                 vx, vy = _emit_via_site(pcb_data, gx1, gy1,

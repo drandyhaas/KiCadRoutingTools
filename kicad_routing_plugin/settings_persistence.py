@@ -80,6 +80,9 @@ def get_dialog_settings(dialog):
         'via_span': dialog.via_span.GetValue(),
         'via_span_type': dialog.via_span_type.GetStringSelection(),
         'via_span_escape': dialog.via_span_escape.GetStringSelection(),
+        'via_kinds': dialog.via_kinds.GetValue(),
+        'jog_layers': dialog.jog_layers.GetValue(),
+        'jog_max_length': dialog.jog_max_length.GetValue(),
         'rip_existing_nets': dialog.rip_existing_nets_ctrl.GetValue(),
         'layer_costs': dialog.layer_costs_ctrl.GetValue(),
 
@@ -427,6 +430,12 @@ def restore_dialog_settings(dialog, settings):
     if 'via_span_escape' in settings:
         _i = dialog.via_span_escape.FindString(str(settings['via_span_escape']))
         dialog.via_span_escape.SetSelection(_i if _i >= 0 else 0)
+    if 'via_kinds' in settings:
+        dialog.via_kinds.SetValue(settings['via_kinds'])
+    if 'jog_layers' in settings:
+        dialog.jog_layers.SetValue(settings['jog_layers'])
+    if 'jog_max_length' in settings:
+        dialog.jog_max_length.SetValue(settings['jog_max_length'])
     if 'rip_existing_nets' in settings:
         dialog.rip_existing_nets_ctrl.SetValue(settings['rip_existing_nets'])
     if 'layer_costs' in settings:
