@@ -2449,13 +2449,17 @@ Options:
   --plane-drop        auto (default) or off. After the signal escape (any
                       method), every SMD ball on a plane net - a net excluded
                       from --nets with >= 6 balls on the part, or an excluded
-                      net that already owns a copper zone - gets a via
+                      net that already owns a copper zone, is declared in
+                      --plane-net-layers or has only power pins on the
+                      part - gets a via
                       immediately: a dog-bone via in a free inter-ball gap,
                       else an exact-checked via-in-pad tap. The plane poured
                       later picks these vias up at fill, so the plane step
                       never has to push a tap through the finished ball field
                       (#360/#424). Per-net counts land in
-                      JSON_SUMMARY.plane_drop; KICAD_FANOUT_PLANE_DROP=0/1
+                      JSON_SUMMARY.plane_drop, and every plane ball left with
+                      no copper is named with why in plane_drop.unserved and
+                      on the console; KICAD_FANOUT_PLANE_DROP=0/1
                       overrides the flag (the recorded-manifest A/B switch)
   --immovable-refs REF [REF ...]
                       Parts the fanout keeps its vias and escapes off, as if

@@ -1103,7 +1103,8 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         self.plane_drop.SetValue(True)
         self.plane_drop.SetToolTip(
             "After the signal escape, give every plane-net ball (a net excluded "
-            "from the fanout with >= 6 balls, or one that already owns a zone) "
+            "from the fanout with >= 6 balls, or one that owns a zone or has "
+            "only power pins) "
             "a via now: a dog-bone via in a free inter-ball gap, else "
             "via-in-pad. The plane poured later picks the via up at fill, "
             "instead of the plane step pushing a tap through the finished ball "

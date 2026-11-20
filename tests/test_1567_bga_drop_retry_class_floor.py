@@ -140,8 +140,12 @@ def run(rule):
             raise AssertionError("BROKEN TEST: no GND drop via was laid")
 
         print("1. the retry stops at the drop net's class")
+        # GND's rung is the class; +3V3 (Default class, every ball a power
+        # pin, so a drop net too) takes its own rung at the fab floor
         check("the retry runs at the 0.30 floor, not the fab floor",
-              all(abs(float(c) - CLASS) < 1e-6 for c in retry), f"retry clearance {retry}")
+              any(abs(float(c) - CLASS) < 1e-6 for c in retry)
+              and all(abs(float(c) - CLASS) < 1e-6 or float(c) < 0.1 + 1e-6 for c in retry),
+              f"retry clearance {retry}")
 
         print("2. no drop via below its class")
         short = [(v, via_gap(v, pads, segs, others)) for v in drops]
