@@ -191,7 +191,8 @@ EPOCH_LANES = 16
 EPOCH_STALL = 12
 EPOCH_SWEEPS = 12   # a sweep that gained a hundredth of the objective is followed by another, its stretches drawn
 EPOCH_GAIN = 0.01
-COSTLY_TRIES = 2    # a costly ball left by a later model (a repair, a lesson of the field laid): its lanes searched again
+COSTLY_TRIES = 2    # a costly ball left by a later model (a repair, a lesson of the field laid): its lanes searched again,
+#                     this many times a ball
 END_BATCHES = 24    # a bus's ends in turn, after the start (tier_search.end_turns): a solve's batches at most, a
 #                     round's own (LNS_BATCHES)
 LNS_K = 8           # a round of the search frees this many lanes on their whole menus
@@ -3349,8 +3350,8 @@ def main():
     epoch_fan = []              # (the costly balls of the state a stretch starts from: its rounds' reach, stretch_reach)
     kept_last = None            # (each bus ball's move in the search's last state, by its tier signature)
     more_last = 0               # (two routing layers) what the model does not count of the search's last state
-    costly_tries = 0
-    mouth_said = None           # (the mouths offered to more lanes than they hold: said once a count)
+    costly_tries = collections.Counter()    # (a costly ball (array, ball) -> the searches after a repair it has had)
+    mouth_said = None          # (the mouths offered to more lanes than they hold: said once a count)
     walk_said = None            # (the places on a group's walk offered to more lanes than they hold: the same)
     while True:
         chk_try += 0 if in_epoch else 1
@@ -4947,14 +4948,17 @@ def main():
             in_epoch = False
         elif in_epoch:
             in_epoch = False            # (a costly ball's stretch searched: on to the checks)
-        elif tier_of and costly_tries < COSTLY_TRIES:
+        elif tier_of:
             # ---- A COSTLY BALL LEFT by a later model -- a repair after a check, the model solved again for a lesson
             # of the field laid, each holding most lanes on their ends: the lanes nearest it, one stretch, their balls
             # and the balls round it offered their whole menus, and searched from this state as an epoch is. A repair
-            # that held every lane round a plane ball whose drop a lesson had taken left it fanned out
-            fan_ = costly_now()
+            # that held every lane round a plane ball whose drop a lesson had taken left it fanned out. COSTLY_TRIES
+            # A BALL, not a run: a search that clears its ball has spent nothing a later repair's new one needs --
+            # two tries a run, each clearing its ball, left the last repair's three plane balls fanned out, one of
+            # them walled in by the lanes laid round its stub
+            fan_ = [b_ for b_ in costly_now() if costly_tries[b_] < COSTLY_TRIES]
             if fan_:
-                costly_tries += 1
+                costly_tries.update(fan_)
                 dl_ = {}
                 for b in buses:
                     for l_ in b.J.lanes:
