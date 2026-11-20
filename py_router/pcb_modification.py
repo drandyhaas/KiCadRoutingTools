@@ -5916,7 +5916,12 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         min_gain is never an allowance to get longer;
       * strands no same-net copper: mid-span via taps, pad touches, and
         T/X-touching sibling tracks hold their span un-collapsed unless the
-        touch sits at a kept endpoint.
+        touch sits at a kept endpoint;
+      * on a net a --keep-away rule prices, puts no more track inside the
+        band than the copper it replaces, measured as keep_away_report
+        measures the shipped board (#2006). The router bent the staircase
+        away from the other side's copper; a shortcut through the band
+        would hand that space back.
 
     Per net, the result is committed only if check_net_connectivity does not
     grade it worse than the original. The guard runs WITHOUT pour credit:
@@ -5928,10 +5933,11 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     same pour-blind convention routing follows; the plane finalize /
     kicad-oracle recheck downstream owns that damage (see the comment at
     the clears() block). dry_run=True measures without mutating anything --
-    the #536 "is it worth it on OUR output" instrument. Soft costs are
+    the #536 "is it worth it on OUR output" instrument. Other soft costs are
     deliberately not consulted (the router's corridors are a routing-time
-    concept); callers gate this to the final chain step -- see
-    cleanup_pipeline.
+    concept); the keep-away is the exception because it is graded on the
+    copper after routing (JSON_SUMMARY['keep_away']). Callers gate this to
+    the final chain step -- see cleanup_pipeline.
 
     Returns (changed_count, nets_changed, original_segments_to_remove,
     added_segments, stats)."""
@@ -5946,6 +5952,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                            npth_slot_capsules, segment_to_npth_slots_distance)
     from connectivity import COINCIDENCE_TOL
     from obstacle_map import resolve_hole_clearance
+    from keep_away import band_meter
 
     # #1038: the board's DECLARED copper-to-hole floor, not the flat 0.20. The
     # smoother CHOOSES where new copper goes (a shortcut replacing a staircase
@@ -6237,6 +6244,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
             stats['nets'] += 1
             net_pads = pcb_data.pads_by_net.get(net_id, [])
             net_vias = vias_by_net.get(net_id, [])
+            # #2006: built per net, after the nets before it were smoothed.
+            in_band = band_meter(pcb_data, config, net_id) if config is not None else None
 
             candidates = [s for s in net_segs
                           if not getattr(s, 'graphic', False)
@@ -6471,6 +6480,29 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                 v = _cmemo[key] = clears(x1, y1, x2, y2, layer, net_id, w)
                             return v
 
+                        _bmemo = {}
+
+                        def band_m(x1, y1, x2, y2):
+                            key = (x1, y1, x2, y2)
+                            v = _bmemo.get(key)
+                            if v is None:
+                                v = _bmemo[key] = in_band(layer, x1, y1, x2, y2, w)
+                            return v
+
+                        def band_kept(poly, i, j, pts):
+                            # #2006: no more track inside a keep-away band
+                            # than the sub-path poly[i..j] it replaces.
+                            if in_band is None:
+                                return True
+                            added = sum(band_m(pts[q][0], pts[q][1],
+                                               pts[q + 1][0], pts[q + 1][1])
+                                        for q in range(len(pts) - 1))
+                            if added <= 0.0:
+                                return True
+                            return added <= sum(band_m(poly[p][0], poly[p][1],
+                                                       poly[p + 1][0], poly[p + 1][1])
+                                                for p in range(i, j)) + 1e-9
+
                         def collapse(poly, leg_pos, allow_tie):
                             """One greedy pass over polyline poly -> {i: (j, pts)}."""
                             m = len(poly) - 1
@@ -6557,7 +6589,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                             continue
                                         if all(clears_m(pts[q][0], pts[q][1],
                                                         pts[q + 1][0], pts[q + 1][1])
-                                               for q in range(len(pts) - 1)):
+                                               for q in range(len(pts) - 1)) \
+                                                and band_kept(poly, i, j, pts):
                                             found = (j, pts)
                                             break
                                     if found:

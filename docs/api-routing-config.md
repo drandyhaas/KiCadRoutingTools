@@ -267,7 +267,10 @@ builder prepared, stamp the band themselves (a rescue rung only where the
 band reaches its window); and the plane finalize's reroute and region-join
 sub-runs inherit the rules. The copper the finalize lays directly -- pad
 taps, join segments, oracle welds -- does not price it, but the report below
-is measured on the shipped board, so it counts them.
+is measured on the shipped board, so it counts them. Octolinear smoothing
+(#536) refuses a shortcut that would put more of a net's track inside a band
+than the copper it replaces, measured as the report measures it (#2006), so it
+does not hand back a band the router kept clear.
 
 Because it is soft, the route step measures what shipped: per net of either
 group left inside a band, the track length inside it beyond the free radius,
