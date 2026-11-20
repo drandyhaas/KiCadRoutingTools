@@ -42,6 +42,16 @@ from coherent_nets import net_keys, net_patterns, engine_filter  # noqa: E402  t
 GAP_TOL = 0.2      # mm: an achieved tooth this close to the asked exit is the same gap
 
 
+def gap_tol():
+    """GAP_TOL, kept UNDER the least two exit lines stand apart -- the fanout's track and its clearance (the lines'
+    lattice adds a grid step, escape_plan.line_step): 0.2 mm is half the half-ball grid of a 0.8 mm array, and at the
+    fab ladder's narrowest sizes, where the lines stand 0.2 mm apart, a tooth laid on the NEXT line read as the one
+    asked"""
+    import rules as _rules
+    r = _rules.active()
+    return min(GAP_TOL, r.fan_track + r.fan_clear)
+
+
 def move_sig(m):
     """The identity of a menu move for the plan's feasibility ledger.
 
@@ -324,18 +334,18 @@ def audit(asked, achieved, original, laid, log, label):
                      else f'LAYER {a.layer[0]}->{g["layer"][0]}')
             v.append('kind ok' if g['kind'] == a.kind
                      else f'KIND {a.kind}->{g["kind"]}')
-            v.append('gap ok' if gap <= GAP_TOL else f'GAP off {gap:.2f}mm along the face')
-            if outward > GAP_TOL:
+            v.append('gap ok' if gap <= gap_tol() else f'GAP off {gap:.2f}mm along the face')
+            if outward > gap_tol():
                 v.append(f'exit {outward:.2f}mm further out than the model')
             n_dir += g['direction'] == a.direction
             n_lay += g['layer'] == a.layer
             n_kind += g['kind'] == a.kind
-            n_gap += gap <= GAP_TOL
+            n_gap += gap <= gap_tol()
             if o and (g['tooth'] == o['tooth'] and g['layer'] == o['layer']
                       and g['vias'] == o['vias']):
                 v.append('= original')
         exact = (nm in laid and g is not None and g['direction'] == a.direction
-                 and g['layer'] == a.layer and g['kind'] == a.kind and gap <= GAP_TOL)
+                 and g['layer'] == a.layer and g['kind'] == a.kind and gap <= gap_tol())
         # WHICH dimensions the engine could not give, for a caller that has
         # to decide whether asking again is worth a pass. Losing the gap is
         # a berth a hair along its own face; losing the LAYER or the KIND is
@@ -345,7 +355,7 @@ def audit(asked, achieved, original, laid, log, label):
             [k for k, okd in (('face', g['direction'] == a.direction),
                               ('layer', g['layer'] == a.layer),
                               ('kind', g['kind'] == a.kind),
-                              ('gap', gap <= GAP_TOL)) if not okd]
+                              ('gap', gap <= gap_tol())) if not okd]
         audit_d[nm] = {'original': o, 'asked': fmt_ask(a), 'achieved': g,
                        'gap_mm': round(gap, 3), 'outward_mm': round(outward, 3),
                        'verdict': ', '.join(v), 'exact': exact, 'lost': lost}
@@ -353,7 +363,7 @@ def audit(asked, achieved, original, laid, log, label):
     n_ok = len(laid)
     same = sum(1 for nm in laid if audit_d[nm]['verdict'].endswith('= original'))
     log(f'  {label} audit: {len(names)} asked, {n_ok} laid -- face {n_dir}/{n_ok}, '
-        f'layer {n_lay}/{n_ok}, kind {n_kind}/{n_ok}, same gap (<= {GAP_TOL} mm) '
+        f'layer {n_lay}/{n_ok}, kind {n_kind}/{n_ok}, same gap (<= {gap_tol():g} mm) '
         f'{n_gap}/{n_ok}' + (f'; {same} identical to the original' if original else ''))
     oa = order_agreement(asked, {n: achieved[n] for n in laid}, laid)
     log(f'  {label} ORDER along each face (asked vs achieved, face-ok teeth only): '
