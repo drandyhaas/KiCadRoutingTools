@@ -1027,6 +1027,42 @@ def wayout_runs(wayouts, layers, reach=None):
     return wo
 
 
+def stuck_in_ways(field, caps, wayouts):
+    """THE PARTS THE NUDGE LEFT IN THE LANES' WAYS OUT, as findings: [{'type': 'way-out', 'layer', 'net1', 'net2': None,
+    'pad_ref', 'closest_pt'}], one for each lane's way out (`wayouts`, wayout_runs) a pad of such a part stands in
+    on the laid `field` -- the parts the nudge's own lines (`caps`: write_field's) name as stuck or unresolved, a pad
+    within the clearance of the way out's run on its layer. The ways out are laid for the nudge alone and taken up
+    again: a part left standing in them breaks no rule of the board's, and the field's check finds nothing"""
+    import rules as _rules
+    from kicad_parser import parse_kicad_pcb
+    refs = sorted({r_ for ln in caps if ln.startswith(('Stuck', 'Unresolved')) and ':' in ln
+                   for r_ in re.findall(r'[A-Za-z_]+\d+\w*', ln.rsplit(':', 1)[1])})
+    if not refs or not wayouts:
+        return []
+    with contextlib.redirect_stdout(io.StringIO()):
+        pf = parse_kicad_pcb(field)
+    cu = pf.board_info.copper_layers
+    cl = _rules.active().clearance
+    out = []
+    for w in wayout_runs(wayouts, cu):
+        (ax, ay), (bx, by) = w['start'], w['end']
+        L2 = (bx - ax) ** 2 + (by - ay) ** 2
+        for r_ in refs:
+            for p_ in (pf.footprints[r_].pads if r_ in pf.footprints else ()):
+                if p_.net_id == w['net_id'] or not (w['layer'] in p_.layers or '*.Cu' in p_.layers):
+                    continue
+                # (the pad's rectangle to the run's line: the nearest of the run's points to the pad's centre)
+                t = 0.0 if L2 < 1e-12 else max(0.0, min(1.0, ((p_.global_x - ax) * (bx - ax)
+                                                             + (p_.global_y - ay) * (by - ay)) / L2))
+                d = math.hypot(max(abs(ax + t * (bx - ax) - p_.global_x) - p_.size_x / 2, 0.0),
+                               max(abs(ay + t * (by - ay) - p_.global_y) - p_.size_y / 2, 0.0)) - w['width'] / 2
+                if d < cl - 1e-6:
+                    out.append({'type': 'way-out', 'layer': w['layer'], 'net1': pf.nets[w['net_id']].name,
+                                'net2': None, 'pad_ref': f'{r_}.{p_.pad_number}', 'closest_pt': [ax, ay]})
+                    break
+    return out
+
+
 def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()):
     """the arrays FANNED OUT as the model chose them, on a copy of the bare `board` (its project beside it): each
     piece of `laid` [(its net's id, its copper: joint_escape.Piece, the layer its run takes, the fan track)] as its own
@@ -2526,7 +2562,7 @@ def _bus_check(b, ctx, dest_, RL, buf_, whole_frame, whole_solve, hint_=None):
     return out
 
 
-def repair_holds(mg, buses, fresh, prev_x, held_idx):
+def repair_holds(mg, buses, fresh, prev_x, held_idx, let_go=True, refused=False, work=20.0):
     """THE REPAIR'S HELD ENDS, after a check's refusal: every lane the refusal did not name -- nor that crossed one it
     named -- held on the ends its last state had (`held_idx`), on model `mg` (every rule's gate set). The held lanes
     that CANNOT stand with what the refusal taught are let go too: asked with each held end an assumption, a "no
@@ -2534,7 +2570,9 @@ def repair_holds(mg, buses, fresh, prev_x, held_idx):
     second, three checks in four. ASKED FIRST WITH THE HELD ENDS SET, not assumed: a state there is the answer the
     assumptions give -- the same ends held, none let go -- and the solver reads a model with those ends set down to
     the lanes left free, where under assumptions it searches the whole of it; the assumptions are asked only where
-    that has no state, for the names. Returns (the lanes left free, {a held end's variable: its (bus, lane)}, the
+    that has no state, for the names -- and not at all without `let_go` (a model whose held lanes are offered the one
+    option: none can be let go on it). `refused`: the held ends are KNOWN to have no state (the repair's own search
+    proved it): the names asked for at once, each solve in `work` deterministic seconds. Returns (the lanes left free, {a held end's variable: its (bus, lane)}, the
     lanes let go, {bus: {lane: why it is free}}, the last answer's solver, its status)"""
     from ortools.sat.python import cp_model
     import cp_seed
@@ -2559,25 +2597,26 @@ def repair_holds(mg, buses, fresh, prev_x, held_idx):
                     hold_[b.J.xs[k_][l_][i].Index()] = (b.name, l_)
     n_let, sf, st = 0, None, cp_model.UNKNOWN
     for _t in range(200):           # (each pass lets at least one lane go: it ends)
-        mq = mg.Clone()
-        mq.ClearObjective()
-        pq_ = mq.Proto()
-        for i_ in sorted(hold_):
-            d_ = pq_.variables[i_].domain
-            d_.clear()
-            d_.extend([1, 1])
-        sf = cp_seed.solver()
-        sf.parameters.num_workers = 1
-        sf.parameters.max_deterministic_time = 20.0
-        st = sf.Solve(mq)
-        if st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            break
+        if not (refused and _t == 0):
+            mq = mg.Clone()
+            mq.ClearObjective()
+            pq_ = mq.Proto()
+            for i_ in sorted(hold_):
+                d_ = pq_.variables[i_].domain
+                d_.clear()
+                d_.extend([1, 1])
+            sf = cp_seed.solver()
+            sf.parameters.num_workers = 1
+            sf.parameters.max_deterministic_time = work
+            st = sf.Solve(mq)
+            if st in (cp_model.OPTIMAL, cp_model.FEASIBLE) or not let_go:
+                break
         mf = mg.Clone()
         mf.ClearObjective()
         mf.AddAssumptions([mf.GetBoolVarFromProtoIndex(i_) for i_ in sorted(hold_)])
         sf = cp_seed.solver()
         sf.parameters.num_workers = 1
-        sf.parameters.max_deterministic_time = 20.0
+        sf.parameters.max_deterministic_time = work
         st = sf.Solve(mf)
         if st != cp_model.INFEASIBLE:
             break
@@ -3085,8 +3124,11 @@ def main():
     # ends, and a step that left nets open on them had nowhere to send what it found
     frm = next((a.split('=', 1)[1] for a in flags if a.startswith('--from=')), None)
     # (a bench's: FROM a state kept in a search.pkl, straight to the search's sweeps -- --at-start, the state its start's
-    # -- or to its checks, --at-search, the state its search's end)
-    at_point = next((f_ for f_ in ('--at-start', '--at-search') if f_ in flags), None) if frm else None
+    # -- or to its checks, --at-search, the state its search's end. And a RUNG's (route_bus: the group escalated):
+    # --at-end, from the run's END (its resume.pkl), its step's findings answered by the repair and every other lane
+    # held -- on the rung's finer menus, which hold every move of the coarser ones -- to the checks at the rung's sizes:
+    # searched again from nothing, a rung cost what the first run had, 51 to 87 minutes of a group's model)
+    at_point = next((f_ for f_ in ('--at-start', '--at-search', '--at-end') if f_ in flags), None) if frm else None
     fbd = next((a.split('=', 1)[1] for a in flags if a.startswith('--feedback=')), None)
     feedback, fed = {}, {}      # bus -> its step's findings (whole_feedback's file); bus -> its lanes they name
     found_at = {}               # bus -> the state its step was laid on, which its findings are of: the run before's
@@ -3119,7 +3161,8 @@ def main():
     if fbd and not feedback:
         log(f'  --feedback: no bus\'s step left findings under {fbd} -- the model is told nothing')
     if frm:
-        R_ = pickle.load(open(os.path.join(frm, 'search.pkl' if at_point else 'resume.pkl'), 'rb'))
+        R_ = pickle.load(open(os.path.join(frm, 'search.pkl' if at_point in ('--at-start', '--at-search')
+                                           else 'resume.pkl'), 'rb'))
         more_ = set(R_['wide']) - wide
         if more_:
             wide |= more_
@@ -3177,9 +3220,13 @@ def main():
         oth_ban |= set(R_.get('oth_ban') or ())
         held.update(R_.get('held') or {})
         cuts.update(R_['cuts'])
-        if not feedback:
+        if not feedback or at_point == '--at-end':
             searched |= set(R_['searched'])     # (with findings to answer, the ends are searched whole again: many
-            #                                     lanes may have to move for a good state under what they rule out)
+            #                                     lanes may have to move for a good state under what they rule out.
+            #                                     A RUNG's are not -- the repair answers them: read as not searched,
+            #                                     each bus's ends were descended again for the model after the
+            #                                     repair, the lanes it held stood elsewhere than wanted, and the
+            #                                     state nearest moved 24 ends of a bus no finding named)
         # (...from the LAST STATE all the same, the group's: the first model built from it wants every end where that
         # state had it, none descended again a bus at a time -- from_first. Each bus's ends descended alone for its
         # own crossings, a four-bus group's start stood 76 of 200 ends from its last state to rule out ONE end, and
@@ -3250,6 +3297,13 @@ def main():
         d_b = measured['bare']
         bad_ = d_f is None or d_b is None or d_f > d_b
         items = [i_ for i_ in (json.load(open(jp_f)).get('items') or []) if not i_.get('accepted')] if bad_ and d_f else []
+        # (...and A PART THE NUDGE COULD NOT MOVE CLEAR OF THE LANES' WAYS OUT: each lane whose way out it is left
+        # standing in, a finding as a violation is -- that lane's end at fault, teach_laid. The nudge said so and
+        # nothing read it: a memory bus's decoupling capacitor in front of its array's face, the corner it had gone
+        # to on other ends taken by a via on these, was left in three lanes' ways out with the field's check clean;
+        # the lanes were planned through it, the loop stopped with its ends crowded, and one net shipped open)
+        with awx_settings.given(genv):
+            items += stuck_in_ways(os.path.join(out, 'shared_field.kicad_pcb'), caps_, wayouts)
         moved = set()               # (the parts the nudge moved from where the board has them)
         if items:
             if 'poses' not in measured:
@@ -3341,7 +3395,8 @@ def main():
         fresh = {nm: set(fed.get(nm) or ()) for nm in caps}
         prev_x = {nm: {tuple(pr_) for pr_ in x_} for nm, x_ in (R_.get('prev_x') or {}).items()}
     elif frm and at_point:
-        # (a bench's: every lane held on the state's ends -- then its checks, --at-search, or its sweeps, --at-start)
+        # (a bench's: every lane held on the state's ends -- then its checks, --at-search, or its sweeps, --at-start;
+        # a rung's with no findings to answer, --at-end: its checks)
         fresh = {nm: set() for nm in caps}
     laid_try, M_ = 0, None      # the field's violations answered so far; the last laying's measure
     # (THE EPOCHS of the search -- TIER_MENU: `stretches` the lanes in stretches round the source, `epoch` the one on
@@ -3351,11 +3406,19 @@ def main():
     kept_last = None            # (each bus ball's move in the search's last state, by its tier signature)
     more_last = 0               # (two routing layers) what the model does not count of the search's last state
     costly_tries = collections.Counter()    # (a costly ball (array, ball) -> the searches after a repair it has had)
+    # (the last state's price below its costly balls -- a run from another's end: that run's last -- a repair's is
+    # held against it: A DEAR REPAIR, below)
+    v_last = R_.get('below') if frm else None
     mouth_said = None          # (the mouths offered to more lanes than they hold: said once a count)
     walk_said = None            # (the places on a group's walk offered to more lanes than they hold: the same)
+    whole_q = False             # (a repair had no state: the whole model's question asked, the model built again)
+    again, small_r = False, True    # (the same check's model built again; the repair's model built small, first)
     while True:
-        chk_try += 0 if in_epoch else 1
-        rnd = 0
+        if not again:
+            small_r = True
+        chk_try += 0 if in_epoch or again else 1
+        again = False
+        rnd, deferred = 0, False
         while True:
             rnd += 1
             buses, more = [], set()
@@ -3403,10 +3466,24 @@ def main():
             # was 347k variables and 1.36M rows, and each of its rounds -- eight lanes freed -- paid the solver's
             # reading of all of it. On more routing layers than two: on two, a round also frees a lane with whatever
             # it crosses, any lane of its bus)
-            reach = None
+            reach, small_now = None, False
             if in_epoch and stretches and 0 <= epoch < len(stretches) and stretches[epoch] \
                     and len(buses[0].E.RL) > 2 and prev_bus:
                 reach = stretch_reach(buses, stretches[epoch], [arrays[r_].bm.balls[k] for r_, k in epoch_fan])
+            elif fresh and small_r and not in_epoch and not whole_q and all(prev_bus.get(nm_) for nm_ in caps):
+                # (A REPAIR'S MODEL, built small as a stretch's: the repair holds every lane on its ends but those a
+                # refusal named and those that crossed one (repair_holds) -- so the held ones are offered the one
+                # option they have at each end, the same state asked of a model without the rows and terms of the
+                # options they cannot take. Built whole, a three-bus group's model after a refusal was 191 to 283
+                # thousand variables, 22 to 31 s in the making, and its repairs 150 to 362 s each -- eleven of them
+                # 1420 s of a run's 5229. A held lane the lessons leave no state must be LET GO, and here it has no
+                # other option to go to: with no state this way the model is built whole, and asked as before)
+                reach = set()
+                for nm_ in caps:
+                    fr_ = set(fresh.get(nm_) or ())
+                    fr_ |= {l2_ for pr_ in prev_x.get(nm_, ()) if fr_ & set(pr_) for l2_ in pr_}
+                    reach |= {(nm_, str(l_)) for l_ in fr_}
+                small_now = True
             n_only = 0
             for b in buses:
                 only_ = None
@@ -3448,7 +3525,10 @@ def main():
                     for i, v in (b.J.xs[k_].get(l_) or {}).items():
                         if we._opt_sig(opts_[l_][i]) == sg_:
                             endlay_rows.append((b, l_, k_, [v.Not(), b.J.y[k_][l_][q_].Not()]))
-            if reach is not None and rnd == 1:
+            if small_now:
+                log(f'  the repair\'s model: {len(reach)} lanes a refusal named or that crossed one, the other {n_only} '
+                    f'each held on its two ends')
+            elif reach is not None and rnd == 1:
                 log(f'  the stretch\'s model: {len(reach)} lanes within its rounds\' reach, the other {n_only} each '
                     f'held on its two ends')
             by_name = {b.name: b for b in buses}
@@ -3799,7 +3879,16 @@ def main():
                         s_[l_] = tuple(b.own[l_][k_] if i is None else i for k_, i in enumerate(ij_))
                     held_idx[b.name] = dict(s_)        # (the last state's own ends on this menu: the repair's)
                     xl_ = (learned.get(b.name) or {}).get('xl')
-                    if (xl_ or (b.name, b.name in lined) not in searched) and not from_first:
+                    # (...never for AN EPOCH's model: that one starts from the state before AS IT STOOD -- each end
+                    # held where it was, below. Descended again there -- a bus a check's core had priced a crossing
+                    # of -- the ends wanted were no longer the state's: every model of a costly ball's stretch after
+                    # a repair said "the state before breaks", spent 86 to 125 s on the state nearest ends the state
+                    # never had, 44 to 56 of some 220 moved, and where that had none in its work the run stopped
+                    # with no state. Nor for A REPAIR's: it holds every lane but a few on the state refused, and
+                    # starts from that state -- the ends descended again are another bus-wide arrangement, which the
+                    # held lanes contradict end by end)
+                    if (xl_ or (b.name, b.name in lined) not in searched) and not from_first and not in_epoch \
+                            and not (fresh and not whole_q):
                         with awx_settings.given(b.env):
                             s_ = we.joint_descent(b.E, s_, b.boxes, b.E.wcut, xl_, dear=b.dear)[0]
                 wanted[b.name] = s_
@@ -3940,15 +4029,32 @@ def main():
             # rule, and is the one the repair searches from. Asked after the first tiers' state, that state was looked
             # for at every refusal -- half of the time between two checks of a four-bus group, 93 to 337 s at each of
             # a three-bus group's four -- and then not read: the repair had its own. With none this way, as before)
-            if fresh and not in_epoch and all(b.name in held_idx for b in buses):
+            if fresh and not in_epoch and not whole_q and all(b.name in held_idx for b in buses):
                 mg_ = m.Clone()
                 for g_ in gates.values():
                     mg_.Add(mg_.GetBoolVarFromProtoIndex(g_.Index()) == 1)
-                got_ = repair_holds(mg_, buses, fresh, prev_x, held_idx)
+                got_ = repair_holds(mg_, buses, fresh, prev_x, held_idx, let_go=not small_now)
                 if got_[5] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     probe, sc, qc = got_[:4], got_[4], got_[5]
                     narrow_vals = list(sc.ResponseProto().solution)[:len(m.Proto().variables)]
                     state_known = True
+                    break
+                if small_now and got_[5] != cp_model.UNKNOWN:
+                    # (...the small model has NO state: a held lane must be let go, and the whole model names which)
+                    log(f'  round {rnd}: the repair\'s model has no state with the other lanes held '
+                        f'[{got_[4].StatusName(got_[5])}] -- built whole')
+                    small_r = False
+                    release(buses)
+                    m = mc = rows = gates = None
+                    continue
+                # (...NEITHER A STATE NOR A REFUSAL IN ITS WORK: THE REPAIR ITSELF NEXT -- the same question, the
+                # objective with it and the search's workers -- and the whole model's question only where the repair
+                # has no state either. Asked between the two, the first tiers' and the whole model's question stood
+                # unanswered through their work at three refusals of a three-bus group running, 276 to 399 s each,
+                # and each time the repair then had its state in 161 to 301 s: the answer waited for was not read)
+                if got_[5] == cp_model.UNKNOWN:
+                    probe, sc, qc = got_[:4], got_[4], got_[5]
+                    narrow_vals, state_known, deferred = None, False, True
                     break
             mc = m.Clone()
             mc.ClearObjective()
@@ -4145,6 +4251,7 @@ def main():
                     release(buses)
                     m = mc = rows = gates = None
                     whole(more)
+                    whole_q = False         # (other menus: the repair's own question is asked of them again)
                     continue
                 if not core_:
                     # (no array's rule in it: a BUS's own model has no state on the moves its balls are offered -- its
@@ -4170,6 +4277,7 @@ def main():
                         release(buses)
                         m = mc = rows = gates = None
                         whole(more)
+                        whole_q = False
                         continue
                 # (every rule named a LESSON of a check -- an end taken off its layer -- and nothing left to widen: the
                 # lesson cannot be held, and is taken back. It was a reading of one refusal, no rule of the board's: a
@@ -4181,6 +4289,7 @@ def main():
                     log(f'  round {rnd}: no state ({time.time() - t0:.0f} s) -- what a check taught cannot be held, and '
                         'is taken back: ' + ', '.join(f'{bn_}:{l_} its {("tooth", "berth")[k_]} off its layer'
                                                       for _kd, bn_, l_, k_ in core_))
+                    whole_q = False
                     continue
                 log(f'group ends: NO STATE holds every rule ({time.time() - t0:.0f} s), the lanes named offered their '
                     'whole menus. The rules that cannot hold together:')
@@ -4296,34 +4405,43 @@ def main():
         # no net open)
         fans = [v for r_ in rows.values() for v in r_.fans]
         walls = [t for b in buses for t in b.J.walls] + fans
-        legs = sum(b.J.npair[l_] for b in buses for l_ in b.J.lanes)
-        m.Minimize(sum(cost) + const)
-        # (a walled ball outweighs everything below it: the most the terms below can differ by -- of the options of one
-        # lane's end, or of its layers, one is taken, so the dearest of them counts once -- and every change of layer;
-        # a change itself is priced CHANGE_VIAS vias, in the rest's own currency)
+        # (a change of layer is priced CHANGE_VIAS vias, a run on a plane's layer at the router's price, both in the
+        # rest's own currency: everything below a walled ball is one sum)
+        W_LEX = int(round(1000 * CHANGE_VIAS))
+        below = W_LEX * sum(chg) + sum(c_ * (W_LEX // 1000) * v_ for c_, v_ in plane) + sum(cost) + const
+        m.Minimize(below)
+        # (A WALLED BALL OUTWEIGHS EVERYTHING BELOW IT -- the most that sum can COME TO, and no more: of the options of
+        # one lane's end, of its layers, of another ball's moves or layers, of one pair of ends' priced meetings, one
+        # is taken, so the dearest of each counts once; every other term whole; and the start's price on a lane past
+        # its first tiers (tier_search's `over`), added to this objective there, a lane each. A state's value read
+        # by that weight -- its walled balls the quotient, the rest the remainder -- needs the rest below it, never
+        # more. Weighed as if every change of layer and every run on a plane cost what all the rest together could,
+        # the weight stood at 2e14 to 8e14, and on menus a little wider -- 334 of 522 balls whole -- that weight on
+        # each option of each plane ball overflowed the objective's sum: the solver called the model invalid, and
+        # the run stopped with no state)
         one_of = {}
         groups = [list(b.J.xs[k_][l_].values()) for b in buses for k_ in (0, 1) for l_ in b.J.lanes] + \
             [list(b.J.y[k_][l_]) for b in buses for k_ in (0, 1) for l_ in b.J.lanes] + \
-            [g_ for r_ in rows.values() for g_ in r_.lits]
+            [g_ for r_ in rows.values() for g_ in r_.lits] + [g_ for b in buses for g_ in b.J.fb_one]
         for n_, g_ in enumerate(groups):
             for v_ in g_:
                 one_of[v_.Index()] = n_
         pr_ = m.Proto()
         ob_ = pr_.floating_point_objective if len(pr_.floating_point_objective.vars) else pr_.objective
-        top_, low_, rest_ = collections.defaultdict(float), collections.defaultdict(float), 0.0
+        top_, low_, more_, less_ = collections.defaultdict(float), collections.defaultdict(float), 0.0, 0.0
         for v_, c_ in zip(ob_.vars, ob_.coeffs):
             i_, c_ = (v_, c_) if v_ >= 0 else (-v_ - 1, -c_)
             g_ = one_of.get(i_)
             if g_ is None:
-                rest_ += abs(c_)
+                more_, less_ = more_ + max(c_, 0), less_ + min(c_, 0)
             else:
                 top_[g_], low_[g_] = max(top_[g_], c_), min(low_[g_], c_)
-        W_LEX = int(math.ceil(rest_ + sum(top_[g_] - low_[g_] for g_ in top_))) + 1
-        W_LEX += -W_LEX % 1000              # (a thousandth of it whole: the planes' prices are in thousandths of a via)
-        W_TOP = W_LEX * (legs + 1) + sum(c_ for c_, _v in plane) * (W_LEX // 1000)
-        W_LEX = int(round(1000 * CHANGE_VIAS))
-        m.Minimize(W_TOP * sum(walls) + W_LEX * sum(chg) + sum(c_ * (W_LEX // 1000) * v_ for c_, v_ in plane)
-                   + sum(cost) + const)
+        hi_ = ob_.offset + more_ + sum(top_.values()) + \
+            int(round(1000 * TIER_OVER)) * sum(len(b.J.lanes) for b in buses)
+        lo_ = ob_.offset + less_ + sum(low_.values())
+        W_TOP = int(math.ceil(max(hi_, hi_ - lo_))) + 1
+        W_TOP += -W_TOP % 1000              # (a thousandth of it whole: the prices are in thousandths of a via)
+        m.Minimize(W_TOP * sum(walls) + below)
         log(f'  the objective: a change {W_LEX}, a walled ball {W_TOP}')
         def _search(stall=None):
             # (reproducible, as the joint ends' own: a count of interleaved batches, no clauses shared)
@@ -4370,7 +4488,7 @@ def main():
         # way, the start and the search as before
         repaired = False
         repair_info = {}                # bus -> {lane: why it was free in the repair} (a trace's)
-        if fresh and all(b.name in held_idx for b in buses):
+        if fresh and not whole_q and all(b.name in held_idx for b in buses):
             t0 = time.time()
             # (the held ends: the ones the state above was asked with, where it was the repair's own)
             n_free, hold_, n_let, repair_info = probe or repair_holds(m, buses, fresh, prev_x, held_idx)[:4]
@@ -4423,14 +4541,49 @@ def main():
             if sh is None:
                 sh = _search(stall=SEARCH_STALL)
                 rh = sh.Solve(mh)
+            if rh == cp_model.INFEASIBLE and not small_now:
+                # (THE HELD ENDS PROVED UNABLE TO STAND -- by the repair's own search, where the question asked of
+                # them first had neither a state nor a refusal in its work: the lanes in their way are named -- the
+                # same question, each held end an assumption, in the start's work -- let go, and the repair asked
+                # once more. Left there, a refusal naming two lanes ended a run: the holds had no state in five
+                # seconds of the search, the question first asked of them had none either way in its twenty, no lane
+                # was let go, and the whole model's question after it stood unanswered through its work)
+                t1_ = time.time()
+                got2_ = repair_holds(m, buses, fresh, prev_x, held_idx, refused=True, work=START_WORK)
+                if got2_[2]:
+                    n_free, hold_, n_let, repair_info = got2_[:4]
+                    log(f'  the repair: the held ends proved unable to stand -- {n_let} lane(s) in their way let go '
+                        f'({time.time() - t1_:.0f} s), asked again')
+                    mh = m.Clone()
+                    for i_ in sorted(hold_):
+                        mh.Add(mh.GetBoolVarFromProtoIndex(i_) == 1)
+                    sh = _search(stall=SEARCH_STALL)
+                    rh = sh.Solve(mh)
             repaired = rh in (cp_model.OPTIMAL, cp_model.FEASIBLE)
             log(f'  the repair: every lane held on its ends but the {n_free} the refusal named or that crossed one'
                 + (f' and {n_let} more that could not stand with what it taught' if n_let else '') + ': '
                 + (f'[{sh.StatusName(rh)}]' if repaired else f'no state that way [{sh.StatusName(rh)}], searched whole')
                 + (f', stopped where it stalled (its {sh.stalled}th reduction)' if sh.stalled else '')
                 + f' ({time.time() - t0:.0f} s)')
+        whole_q = False
         if repaired:
             sv, r, quick = sh, rh, True
+        elif small_now:
+            # (the repair's small model, searched, had no state: the whole model, as before)
+            log(f'  the repair\'s model had no state [{sh.StatusName(rh)}]: built whole')
+            release(buses)
+            m = mc = mh = sv = rows = gates = None
+            small_r, again = False, True
+            continue
+        elif not state_known and deferred:
+            # (...the whole model's question after all: its refusal names the rules, its state starts the search)
+            log(f'  the repair had no state [{sh.StatusName(rh)}]'
+                + (f' ({m.Validate()[:160]})' if rh == cp_model.MODEL_INVALID else '')
+                + ': the whole model\'s question asked, the model built again')
+            release(buses)
+            m = mc = mh = sv = rows = gates = None
+            whole_q = again = True
+            continue
         elif not state_known:
             raise SystemExit(f'group_ends: a state not found nor ruled out, and none by the repair '
                              f'[{sh.StatusName(rh)}]')
@@ -4877,6 +5030,11 @@ def main():
             # menus it was built on, so two builds' whole objectives differ by it where one such ball stands in both)
             n_ = sum(sv.Value(w_) for w_ in walls)
             return n_, sv.ObjectiveValue() - W_TOP * n_ + more_last
+        # (...the state's price below its costly balls, held against the state before's -- A DEAR REPAIR, below)
+        v_now_ = sweep_value()[1]
+        dear_was_ = v_last
+        dear_ = bool(repaired and v_last is not None and v_now_ - v_last >= W_LEX)
+        v_last = v_now_
         if chk_try == 0 and tier_of and (not repaired or at_point == '--at-start'):
             fresh = {}
             stale_ = set()          # (the arrays whose menus the stretch searched was taken back on, their rules' data due)
@@ -4988,6 +5146,30 @@ def main():
                 fresh = {}
                 in_epoch = True
                 continue
+            # ---- A DEAR REPAIR: its state dearer than the state before it by a change of layer or more. The repair
+            # holds every lane it was not told of on its ends, and solves the few left for the objective: what a
+            # lesson rules out of an end it can only answer with that lane's next way, across whatever the held lanes
+            # leave it -- three lanes of a two-layer memory bus moved off a capacitor went from 167 crossings to 211,
+            # the bus's own solve had no plan of them, and four nets shipped open where one had. The lanes the repair
+            # freed -- the ones named first, then those it let go, then those that crossed one -- are searched again
+            # as a stretch from that state, their balls on their whole menus: the lanes round them may move too
+            if dear_:
+                rk_ = lambda w_: 0 if w_ == 'named' else (2 if str(w_).startswith('crossed') else 1)    # noqa: E731
+                free_ = sorted((rk_(w_), bn_, str(l_)) for bn_, ri_ in repair_info.items() for l_, w_ in ri_.items())
+                if free_:
+                    stretches, epoch = [sorted((bn_, l_) for _r, bn_, l_ in free_[:EPOCH_LANES])], 0
+                    more_ = stretch_balls(buses, stretches[0]) & narrowed
+                    log(f'  the repair\'s state is dearer than the state before it by {(v_now_ - dear_was_) / 1000:.1f} '
+                        f'vias\' worth: the {len(stretches[0])} lanes it freed searched again, {len(more_)} balls '
+                        f'offered their whole menus')
+                    release(buses)
+                    m = mc = mh = sv = rows = gates = None
+                    whole(more_)
+                    epoch_balls = set(more_)
+                    epoch_fan = []
+                    fresh = {}
+                    in_epoch = True
+                    continue
         # ---- CHECKED BY THE WHOLE SOLVE, as a bus's own ends were (whole_ends.joint_choose): each bus's ends given to
         # the solve under its strict rules, on the board as the model fanned it out; a refusal TEACHES -- the lanes no
         # change fits in held to one layer (and offered their whole menus), the crossings with no window held apart and
@@ -5266,7 +5448,7 @@ def main():
                  'cuts': dict(cuts), 'layers_want': layers_want, 'searched': set(searched),
                  'feedback': feedback, 'hard': hard, 'oth_ban': set(oth_ban),
                  'held': dict(held), 'prev_x': {nm: sorted(x_) for nm, x_ in prev_x.items()},
-                 'narrowed': set(narrowed)},
+                 'narrowed': set(narrowed), 'below': v_last},
                 open(os.path.join(out, 'resume.pkl'), 'wb'))
     if M_ is None or no_plan:
         M_ = lay_and_measure(laid, wayouts)
