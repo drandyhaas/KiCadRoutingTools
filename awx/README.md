@@ -672,6 +672,16 @@ the model choose: on ends chosen under these rules its first audit had one
 such row, and the bus laid with no net open where eight to twelve had been
 left.
 
+The lanes of a mouth's end land a lane's room apart **across their
+tails**, not along the mouth: each after the first takes the mouth's length
+that puts it that room from the tail before it -- no more than twice the
+room, and the room itself where the mouth has no length for more. A lane's
+room apart along a mouth 36 degrees off their way, three lanes of a chip's
+far face left 0.19 mm apart, less than a track and its clearance. The
+embedding parted them round a berth's via the wrong way, across that berth's
+own lane, in the stretch past the route's end where no solve and no layer
+cut has a say, and that net was left open (`tests/test_622_two_end.py`).
+
 #### Each source's buses, one group
 
 Buses that leave one array in different directions -- a star round it --
@@ -771,6 +781,29 @@ alone on its array a group of one:
    nets open, then the fewest violations, then the fewest balls walled in,
    is the group's. No fallback: a bus with no capture, or a first model that
    ends with no state or no plan, is the step's result, named.
+5. **The group's escalation** (`--escalation fab|board|off`, route.py's own
+   flag and default). A group that still leaves the board short of clean is
+   routed again a rung down the fab ladder (`escalation_ladder`): the
+   lanes' track, the escapes' track and the via step down together, two or
+   three rungs to the policy's floor, and the clearance never -- it is the
+   DRC floor's. A rung is not the search again. It starts from the end the
+   run before it kept (`group_ends --from --feedback --at-end`): the
+   findings that run's lay left at its ends are answered by the model's
+   repair -- every lane held on its ends but those the findings name and
+   those that cross one -- then the checks, the fanout and the lay at the
+   rung's sizes, its lanes' and exits' pitches scaled as the lane's own
+   slice (`rung_pitches`: the chain plans its rings, its handoffs and a
+   group's mouths a lane pitch apart, and that pitch was a constant, as
+   wide at the narrowest rung as at the sizes asked for). The fewest nets
+   open, then violations, then balls walled
+   in, stands, the sizes asked for on a tie; a rung that leaves the board
+   clean ends the ladder, and a group with no result at all is not
+   escalated -- that is the step's own result. The board handed on ships
+   as route.py ships its own (`shipped_rules`): its project's floor lowered
+   to the copper it carries, and every net delivered below the sizes asked
+   for in the summary's `design_rules` and the `Design rules [...]` line.
+   The Bus tab passes the shared Escalation choice
+   (`tests/test_622_group_escalation.py`).
 
 The groups go in turn, each on the board the one before handed on. Each bus
 is its own routing step, with its own process and its own pool of threads,
@@ -811,7 +844,9 @@ on its array is a group of one. The step:
    each layer, two buses' lanes that meet on two layers or priced, a pocket
    between two parts of a group entered by one mouth by no more lanes than
    land across it a lane pitch apart (the frame lands every lane of a mouth
-   side by side, whatever its layer; the rest go in by the other mouth or
+   side by side, whatever its layer -- a lane pitch apart across their
+   tails, their ways on to their berths, which is more of the mouth where
+   those run at a slant to it; the rest go in by the other mouth or
    straight under a part), and every
    plane ball dropped, strapped or (dearest of all) fanned out -- dropped only
    where its plane will pour (a rule area that forbids pours stands as a pour
@@ -857,6 +892,16 @@ on its array is a group of one. The step:
    does. The board's DRC measures the field: a violation the fanout made is
    the model's to answer (a lesson: an end not taken again, a part the nudge
    could not clear held where it came), and the model is solved again.
+   A part the nudge could not move clear of the lanes' **ways out** is a
+   finding too, each lane whose way out one of its pads is left standing in
+   (`stuck_in_ways`, read off the nudge's own "Stuck" and "Unresolved"
+   lines): the ways out are laid for the nudge alone and taken up again, so
+   a part left in them breaks no rule of the board's and the field's check
+   is clean. A two-layer memory bus's decoupling capacitor in front of its
+   array's face -- the corner it had gone to on other ends taken by a via
+   on these -- was left in three lanes' ways out; the lanes were planned
+   through it, the loop stopped with its ends crowded, and one net shipped
+   open (`tests/test_622_stuck_in_ways.py`).
    Then **the field's ties** (`field_ties.py`): the pads on a poured net
    that stand beneath the group's parts -- a decap at an array's edge, a
    pull-up's supply pad under a destination part -- are tied before a lane
@@ -951,8 +996,39 @@ source's far face, the dearest end -- draws the rounds first, and the balls
 round it are offered their whole menus with the stretch. A model solved
 again after a check or a lesson (a repair, which holds most lanes on their
 ends) that leaves a costly ball has the lanes nearest it searched once more,
-as an epoch. Every solve is bounded by deterministic batches, never a clock,
+as an epoch. So has **a dear repair**: one whose state is dearer than the
+state before it by a change of layer or more has the lanes it freed -- those
+named first, then those it let go, then those that crossed one -- searched
+again as a stretch from that state. The repair holds every lane it was not
+told of, so what a lesson rules out of an end it can only answer with that
+lane's next way, across whatever the held lanes leave it: three lanes moved
+off a capacitor took a two-layer bus from 167 crossings to 211, its own
+solve had no plan of them, and four nets shipped open where one had; the
+stretch brought it to 174 in half a minute, and the bus laid clean in its
+first round. Every solve is bounded by deterministic batches, never a clock,
 so a board and its settings give one answer.
+
+**The repair** answers a check's refusal, a lesson of the laid field, or a
+lay's findings (`--feedback`): every lane the refusal did not name, nor that
+crossed one it named, held on the ends it had, and the rest solved for the
+objective. Its model is built small first -- a held lane offered the one
+option it has at each end, so nothing of its other options is built -- and
+whole only where the small one has no state, which means a held lane must be
+let go: the whole model names which. It starts from the state refused, not
+from each bus's ends arranged again, and so does an epoch's model: both
+hold lanes where that state had them. Where the repair's own first question
+is unanswered in its work, the repair itself is asked next, and the whole
+model's question (is there a state at all, and if not which rules cannot
+hold together) only if the repair finds none.
+
+**A walled ball** (or a plane ball fanned out) outweighs everything below it
+in the objective by the most the terms below can come to, and no more: of
+one end's options, one end's layers, one other ball's moves, one pair of
+ends' priced meetings, one is taken, so the dearest of each counts once.
+A state's value is read by that weight -- the costly balls its quotient,
+the rest its remainder. A lay's findings about two ends crowded together
+are priced by weight -- the options of an end that weigh the same are one
+term's -- not option by option.
 
 **On two routing layers** the model's count of vias misses some: it counts a
 lane's change of layer where its two ends' layers differ and nothing where
@@ -2639,6 +2715,27 @@ taken only with more routing layers than two. Every via is a through via.
   earlier bus's track crossing in front of it on one of them: the lane found
   was held off that layer, the other was put on it the next round, and the
   repair holding every lane it crosses could keep it off nowhere.
+- **A lane that only passes an end.** A finding at an array's ends is the
+  fanout's only where every lane it names ends there, by the feedback's own
+  test of a lane's end (`whole_feedback --own`: the face its end leaves by,
+  to that face's reach). A lane to a part's far side found short of its
+  pitch with the lane of the near side's last berth is the solve's to move:
+  it is held off that layer there, firm, and the loop gives the solve the
+  round that asks it. Read off the place alone it was "at the berths": the
+  loop stopped, ENDS CROWDED, with nothing asked of the solve, and the
+  berth's lane shipped open in four lays of one bus.
+- **A twist.** Two lanes found on top of each other, far from both their
+  ends, that the round's solve crossed nowhere: the geometry took one across
+  the other's approach where its handoff had no room. No crossing of the
+  solve's stands there to price, so the history moved nothing and the same
+  plan came back. The one whose own end is the farther is held off that
+  layer there (`audit_layer_cuts`' `cross`); where the solve did cross the
+  two it is its own crossing to price (`tests/test_622_passing_lane.py`).
+- **One cut each.** A layer cut is one cut by what the solve makes of it --
+  its lane, its island, its layer and its stretch of the lane's route --
+  whatever the cut files' rows: two findings of one audit a box apart, the
+  lane's stretch the same, were read twice, the second after the first had
+  waived the lane's end room, and the solve stopped on sorting the two.
 - **Keep-out rule areas.** The audit measures each lane against the board's
   keep-out areas whose tracks are not allowed on its layer
   (`plan_audit.keepout_areas`, resolved as the router resolves them), and a
@@ -2859,7 +2956,7 @@ With nothing supplied, as on the benches:
 | `negotiated_buses.py`, `whole_joint.py`, `joint_lanes.py` | each source's buses one group (`route_grouped`): every bus's ends model captured, the group's ends, every bus on the shared field in its own frame and a process of its own (`route_on_field`), merged (`merge`, `conflicts`, `give_back`, `protect_laid`), the group's rounds; a round's first plans and every loop's re-solves one coupled solve, one CP-SAT model, the buses in step, coupled where two buses' lanes cross or come within a lane's pitch (`whole_joint.py`, `JOINT_DIR`, `whole_route.joint_loop_sync`); each bus's lanes published in the board's frame and laid as copper of their own nets on every other bus's stages (`joint_lanes.publish`, `foreign`) |
 | `group_ends.py` | the group's ends (`negotiated_buses.route_grouped`): every bus off one array given its ends by one CP-SAT model over its captured ends model and the arrays' shared menus; the model offered each bus ball's first tiers, its whole menu by need (a refusal's rules) and by use (the search's epochs, a stretch of lanes at a time; `tier_search`, `lane_stretches`); each bus's ends checked by its whole solve; the arrays fanned out as chosen and measured, a violation the fanout made answered by the model (`write_field`, `teach_laid`); a bus step's fanout stage on the group's ends (`bus_stage`, `GROUP_ENDS`) |
 | `field_ties.py` | the field's ties: the pads on a poured net beneath a group's parts tied on the fanned-out field, before the lanes (`group_ends`, after the field is measured) |
-| `escape_plan.py` | a dog-boned ball's escapes, the menus' moves from its via (`escape_menu`: along a ball line beside it, a sidestep to a line further over, or a street; `escape_out`: a surface escape from a ball with none) (`tests/test_622_escape_menu.py`) |
+| `escape_plan.py` | a dog-boned ball's escapes, the menus' moves from its via (`escape_menu`: along a ball line beside it, a sidestep to a line further over, or a street; `escape_out`: a surface escape from a ball with none) (`tests/test_622_escape_menu.py`). The lines they leave along are one lattice a face (`line_step`): the ball pitch cut in the most even parts each at least a lane's pitch at the fanout's sizes -- half a pitch at ordinary sizes, a quarter at the fab ladder's narrowest, where two lanes fit between two balls. No sidestep runs along the exit line: an outer ring's dog-bone stands half a pitch out, and the "row" beside it is the exit line itself -- read as that line within the relayer's tolerance, since an array's balls may stand a few nanometres off their grid (`tests/test_622_escape_lattice.py`) |
 | `joint_escape.py`, `conflict_groups.py` | an array's menus for the group's ends (`build_menus`: every ball's escapes, drops and straps; a drop at a finer rung's via: `tests/test_622_drop_fine_via.py`; nothing in a laid pair's pocket: `test_622_pair_teeth.py`; no escape between two laid lanes that close round it: `test_622_lane_walls.py`; a rule area that forbids pours read as a pour of no net, so no plane drop is planned where no plane will pour: `zone_regions`); an array's whole plan in one CP-SAT solve, laid by the under-pad engine's joint escape (`plan_array`, `fan_array`: a bus's own run escapes the balls its comb refused by it; `tests/test_622_plan_array.py`); the escapes' conflicts as cliques and bicliques (`tests/test_622_conflict_groups.py`) |
 | `whole_route.py`, `modal_whole.py` | one rung end to end -- fanout, solve, loop, route, checks, rounds under the next seed -- graded in one line (`WHOLE K=..`); the loop's layer cuts from the audit and the snap (`tests/test_622_layer_cuts.py`); a lane its fanout gave no end, or ran and did not lay, left out of the round, open (`with_ends`: `tests/test_622_whole_route_no_ends.py`); the ladder in the cloud, one container per rung |
 | `cp_seed.py` | the bus step's seed: every CP-SAT solve of a round under one seed (`BUS_SEED`, else CP-SAT's default), the next draw under the next and a feedback round under its draw's -- the same board and seed the same plan |

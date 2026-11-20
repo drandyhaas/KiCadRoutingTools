@@ -389,7 +389,7 @@ def _capture_all(jobs, files, log, src=None):
 
 
 def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None, feedback_rounds=0,
-                  t0=None, **sizes):
+                  t0=None, start=None, **sizes):
     """The buses off one array routed from THE GROUP'S ENDS (awx/group_ends.py): each bus's ends model
     captured by itself on `board` (work/caps, _capture_all), every bus's ends chosen in ONE model and the arrays
     fanned out once as chosen (work/group, its log work/group.log), then every bus routed negotiated on that field
@@ -399,7 +399,9 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
     answers them from the state it had, and the buses are routed again on that field (work/roundN.kicad_pcb); the
     board with the fewest nets open, then the fewest violations, then the fewest balls walled in, is `out`. No
     fallback: a bus with no capture, or a first model that ends with no state or no plan, is the step's result,
-    named. Returns (exit code, grade lines)"""
+    named. `start` (an earlier run's group directory, its lay's work directory): the first model FROM that run's end,
+    its lay's findings answered and every other lane held (group_ends --at-end) -- a rung of the group's escalation,
+    the same buses at finer sizes. Returns (exit code, grade lines)"""
     from copy_board import copy_board
     work = out[:-len('.kicad_pcb')] + '.bus'
     caps = os.path.join(work, 'caps')
@@ -421,13 +423,15 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
     best, done, prev = None, [], None            # prev: (the round before's group, its buses' work)
     for r in range(1, R + 1):
         t_r = time.time()
+        frm_ = [f'--from={prev[0]}', f'--feedback={prev[1]}'] if prev else \
+            ([f'--from={start[0]}', f'--feedback={start[1]}', '--at-end'] if start else [])
         group = os.path.join(work, 'group' if r == 1 else f'group{r}')
         shutil.rmtree(group, ignore_errors=True)
         glog = group + '.log'
         bus_events.emit('ends', 'start', group=buses[0][0], bus=None, round=r, rounds=R, log=glog)
         with open(glog, 'w', encoding='utf-8') as f:
             rc = subprocess.run([sys.executable, '-u', '-X', 'utf8', os.path.join(HERE, 'group_ends.py'), caps, group,
-                                 '--board=' + board] + ([f'--from={prev[0]}', f'--feedback={prev[1]}'] if prev else []),
+                                 '--board=' + board] + frm_,
                                 cwd=HERE, env={**_env0(), **GROUP_SET}, stdout=f, stderr=subprocess.STDOUT).returncode
         for ln in open(glog, encoding='utf-8', errors='replace'):
             if re.match(r'group ends: |  check \d+: |  the field as laid|  \S+: its step\'s findings', ln):
