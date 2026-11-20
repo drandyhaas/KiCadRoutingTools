@@ -549,6 +549,40 @@ built once and kept on `pcb_data`, from `pcb_data.source_path`'s project --
 on the GUI front, the project file next to the board as last saved.
 `route_delay_ps` times one net's copper with a profile, without pad-to-die.
 
+A profile also stores the track width (and, for a differential profile, the
+pair gap) that meets its target impedance on each signal layer; the
+`TuningProfile` carries them as `layer_width_mm` and `layer_gap_mm`, with
+`differential`. `profile_layer_widths(pcb_data, board_path)` gives
+`{net id: {layer: mm}}` for the nets whose class names a profile with widths.
+Given `rules` (a `DesignRules`) it ranks each width as the router does: a
+`.kicad_dru` rule that gives the net a `track_width` `opt` on a layer is
+drawn there instead, and a profile width is clamped into the rule's and
+Board Setup's min/max (`DesignRules.ranked_draw_size`), then pinned up at
+`floor`; the rows not drawn as stored are returned too. A route step given no
+`--track-width` and no `--impedance` draws such a net at its profile's width
+on each layer (#1936) and prints how many of the nets it routes took them. A
+layer's width is, in order: a stored impedance declaration's, a `.kicad_dru`
+rule's, the profile's, the class's.
+
+A differential pair takes a differential profile's width and gap the same
+way. `profile_pair_geometry(pcb_data, board_path, pairs, layers, floor,
+rules)` gives `{P net id: (profile name, {layer: (width mm, gap mm or
+None)})}` for the pairs whose two nets take one differential profile, each
+value ranked and clamped by `rules` as a single-ended width is (a
+`track_width` rule for the width, a `diff_pair_gap` rule for the gap). The
+pair step, given no `--track-width`, no `--diff-pair-gap` and no
+`--impedance`, couples such pairs on each layer at the profile's width and
+gap for that layer, after a stored impedance declaration and a `.kicad_dru`
+rule, and prints `Tuning-profile pair geometry: ...`. A gap below what KiCad grades P
+against N at (the clearance, the class, a rule) is built at that and named.
+The pair engine carries one width and one gap per layer per call, so the
+geometry applies when every pair of the call resolves the same one; when
+they do not, nothing is applied and the run names the pairs, to be routed a
+profile per call. The connectors from the pads to the coupled run are drawn
+at one width per pair: the profile's where it gives one geometry on every
+layer the pair's pads and stubs are on, else the net class's, which the run
+says.
+
 ```python
 from kicad_parser import parse_kicad_pcb
 from net_queries import kicad_net_length_parts_nm

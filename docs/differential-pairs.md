@@ -369,8 +369,9 @@ emitted, the same fab-floored neck the terminal legs get.
 
 P and N paths are created as perpendicular offsets from the simplified centerline.
 The offset is half the P/N centre pitch, `(width + gap) / 2`. With per-layer widths
-(an `--impedance` solve, a stored impedance declaration, or a layer-scoped
-`.kicad_dru` width rule) it is taken per layer from that layer's own width
+(an `--impedance` solve, a stored impedance declaration, a layer-scoped
+`.kicad_dru` width rule, or a tuning profile) it is taken per layer from that
+layer's own width, and its own gap where a tuning profile gives one
 (`layer_pair_spacing`), so a narrower stripline layer keeps the declared gap:
 
 ```python
@@ -402,6 +403,26 @@ run prints `Design-rule layer widths: ...`. The engine draws one width per layer
 call, so when the targeted pairs resolve different widths on a layer (pairs in
 different classes, a rule scoped to some of them) the rules are not applied and the
 run prints a NOTE naming the layer; route each group of pairs in its own call.
+
+A KiCad 10 differential tuning profile gives the same thing from the project
+(#1936): it stores, per signal layer, the member width and the P/N gap that meet
+its target impedance there. When `--track-width`, `--diff-pair-gap` and
+`--impedance` are all omitted (the GUI: both overrides unchecked) and no stored
+impedance set the widths, the pairs of a class that names such a profile are
+coupled on each layer at the profile's width and gap for that layer, and the run
+prints `Tuning-profile pair geometry: ...`. A layer's width and gap are, in order:
+a stored impedance declaration's, a `.kicad_dru` rule's, the profile's, the
+class's. A rule that gives the members a `track_width` or a `diff_pair_gap` `opt`
+on a layer is drawn there in the profile's place (the run names the rule), and a
+profile value is clamped into the rule's and Board Setup's min/max as a class
+value is. A width below the fab floor is drawn at the floor and a gap below what
+KiCad grades P against N at (the clearance, the class, a rule) is built at that;
+each is named. A layer the profile has no width for keeps the class geometry. As above, one geometry per layer
+per call: when the targeted pairs do not all resolve the same one (two profiles, or
+a pair with none) nothing is applied and the run names the pairs. The connectors
+from the pads to the coupled run are drawn at one width per pair: the profile's
+when it gives one geometry on every layer the pair's pads and stubs are on,
+otherwise the net class's, and the run says which pairs.
 
 ### Corner Handling (Miters)
 
