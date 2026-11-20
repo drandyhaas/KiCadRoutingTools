@@ -293,6 +293,8 @@ class Constraint:
     # minimum), and whether that rule is a coupled-pair rule (#1293)
     min_rule: Optional[str] = None
     min_rule_coupled: bool = False
+    # the custom rule that set ``opt`` (None: the net class's own value)
+    opt_rule: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -2203,6 +2205,7 @@ class DesignRules:
         disallow: set = set()
         min_from_rule = False
         min_rule = None
+        opt_rule = None
         ctx = (kind, self._net_name_set())
         for rule in self.rules:
             if kind not in rule.constraints:
@@ -2234,6 +2237,8 @@ class DesignRules:
                     if f == 'min':
                         min_from_rule = True
                         min_rule = rule
+                    elif f == 'opt':
+                        opt_rule = rule.name
             source = f'rule "{rule.name}"'
 
         if kind == 'disallow':
@@ -2272,7 +2277,8 @@ class DesignRules:
             rule_name, rule_coupled = None, False
         c = Constraint(kind, min=cur['min'], opt=cur['opt'], max=cur['max'],
                        source=source, kicad_min=cur['min'],
-                       min_rule=rule_name, min_rule_coupled=rule_coupled)
+                       min_rule=rule_name, min_rule_coupled=rule_coupled,
+                       opt_rule=opt_rule)
         if micro and laser_drilled_span(a.via_type, a.other_layers, self.copper_layers):
             # the fab profile's via floor is a mechanical-drill number; a via
             # typed micro over more than two adjacent layers is drilled so
@@ -2411,6 +2417,29 @@ class DesignRules:
         if c.max is not None and v > c.max:
             v = c.max
         return float(v)
+
+    def ranked_draw_size(self, kind: str, net_id: int, layer: Optional[str],
+                         value: float, diff_pair: Optional[str] = None
+                         ) -> Tuple[float, Optional[str]]:
+        """`draw_size` for a ``value`` whose source ranks between a custom
+        rule and the net class (a tuning profile's width or gap): (the size
+        to draw, the rule that set it or None). A matching rule's ``opt``
+        outranks ``value``, as an explicit CLI value outranks both; whichever
+        is drawn is clamped into the same [min, max] the class value is."""
+        kind = canonical_kind(kind)
+        a = self.item_for_net(net_id, 'track', layer, diff_pair=diff_pair)
+        c = self.resolve_for_copper(kind, a, None, layer)
+        rule = None
+        v = self.cli.get(kind)
+        if v is None and c.opt_rule is not None and c.opt is not None:
+            v, rule = c.opt, c.opt_rule
+        if v is None:
+            v = value
+        if c.min is not None and v < c.min:
+            v = c.min
+        if c.max is not None and v > c.max:
+            v = c.max
+        return float(v), rule
 
     # ---------------- disclosure ----------------
 
