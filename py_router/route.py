@@ -9290,6 +9290,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _lap_names = _next_lap1763(_lrok, _lrfail, _lap10)
                     if not _lap_names:
                         break
+                # The pair-unit lap (CLI leg below) works on a board file; the
+                # GUI leg routes on the shared in-memory model and skips it.
+                if _rfail and os.environ.get('KICAD_PAIR_UNIT_LAP', '1') != '0':
+                    import pair_exchange as _px1
+                    _gx = _px1.find_exchanges(
+                        getattr(batch_route, '_targets_left_open', None) or {},
+                        [n.name for n in pcb_data.nets.values()])
+                    if _gx:
+                        print(f"  Pair-unit lap: {_gx[0][0]}/{_gx[0][1]} "
+                              f"exchange left open -- skipped in the GUI leg "
+                              f"(file-mode only)")
             else:
                 _rk.update(return_results=False)
                 # Bounded PROGRESS-LOOP (2026-08-06, Andy's step7-vs-step8
