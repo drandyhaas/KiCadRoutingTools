@@ -38,6 +38,53 @@ import braid as bd
 import corridor as cr
 
 FACES = ('E', 'N', 'W', 'S')          # a tie between faces goes to the first
+SLOPE_MAX = 8.0                       # the steepest a lane runs to its spine (whole_geo's slope cap, side_switch's)
+
+
+def side_switch(SB, DB, column=0.1):
+    """{(tooth face, ring): whether a lane can pass the source's box SB on its TOOTH's side ('N' or 'S': the side face
+    it leaves by) and the destination's box DB on the OTHER side (its ring round it) -- along the trunk as the frame
+    lays it (frame(): the straight spine from SB's centre to DB's), its offset changing at most SLOPE_MAX a unit of
+    the spine from one column (`column` mm) to the next, as the geometry's (whole_geo). The offsets the lane can reach
+    carried column by column from SB's centre to DB's, each box's on its own side held: none left, no geometry lays
+    the lane. Two parts standing diagonally, their facing corners nearly level along the spine, leave a lane only the
+    columns between those corners to change sides in"""
+    ca = ((SB[0] + SB[2]) / 2, (SB[1] + SB[3]) / 2)
+    cb = ((DB[0] + DB[2]) / 2, (DB[1] + DB[3]) / 2)
+    L = math.hypot(cb[0] - ca[0], cb[1] - ca[1])
+    if L < 1e-9:
+        return {('S', 'N'): True, ('N', 'S'): True}
+    d = ((cb[0] - ca[0]) / L, (cb[1] - ca[1]) / L)
+    n = (d[1], -d[0])                   # (the offset's sign: positive toward the north, the smaller y)
+
+    def across(b, s):
+        # (the box's offsets on the column at s, or None where the column misses it)
+        p = (ca[0] + s * d[0], ca[1] + s * d[1])
+        lo, hi = -math.inf, math.inf
+        for p0, nk, b0, b1 in ((p[0], n[0], b[0], b[2]), (p[1], n[1], b[1], b[3])):
+            if abs(nk) < 1e-12:
+                if not b0 <= p0 <= b1:
+                    return None
+                continue
+            a_, c_ = (b0 - p0) / nk, (b1 - p0) / nk
+            lo, hi = max(lo, min(a_, c_)), min(hi, max(a_, c_))
+        return (lo, hi) if lo <= hi else None
+    out = {}
+    for f_, r_ in (('S', 'N'), ('N', 'S')):
+        lo, hi, ok = -math.inf, math.inf, True
+        for k in range(int(L / column) + 1):
+            s = k * column
+            lo, hi = lo - SLOPE_MAX * column, hi + SLOPE_MAX * column
+            a, b = across(SB, s), across(DB, s)
+            if a is not None:
+                lo, hi = (lo, min(hi, a[0])) if f_ == 'S' else (max(lo, a[1]), hi)
+            if b is not None:
+                lo, hi = (max(lo, b[1]), hi) if r_ == 'N' else (lo, min(hi, b[0]))
+            if lo > hi:
+                ok = False
+                break
+        out[(f_, r_)] = ok
+    return out
 
 
 class PairSplit(SystemExit):

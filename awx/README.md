@@ -816,7 +816,14 @@ on its array is a group of one. The step:
    plane ball dropped, strapped or (dearest of all) fanned out -- dropped only
    where its plane will pour (a rule area that forbids pours stands as a pour
    of no net, `joint_escape.zone_regions`), and no via within a pad's own
-   recorded clearance of a pad of its net. Every rule is hard; where no state
+   recorded clearance of a pad of its net. No lane leaves the source by one
+   side face and goes round the destination by the other side where the
+   trunk has no room for it to change sides: the frame lays it on the
+   straight spine between the two boxes at the geometry's slope cap
+   (`whole_frame.side_switch`), and two parts standing diagonally, their
+   facing corners nearly level along the spine, leave it a few columns to
+   cross in -- on one bus four such lanes were laid on one another there,
+   and with the rule the bus laid with none open. Every rule is hard; where no state
    holds them all, the rules that cannot hold together are named. The
    objective: a walled ball or a plane ball fanned out first; then the rest,
    a change of layer two vias (`CHANGE_VIAS`), a crossing priced by the layers

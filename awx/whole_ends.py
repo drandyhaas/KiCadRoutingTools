@@ -2104,6 +2104,28 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
             lits_ += [xs[k_][l_][e_].Not() for k_, e_ in enumerate(ij_) if e_ is not None]
         if lits_:
             m.AddBoolOr(lits_)
+    # THE TRUNK'S SIDES: a lane leaving the source by one side face (its tooth's, N or S) and reaching the destination
+    # round the OTHER side (its berth's ring) changes sides between the two boxes, where the frame lays it on the
+    # trunk's straight spine at the geometry's slope cap (whole_frame.side_switch). Where those columns are too few,
+    # no geometry lays it -- four lanes from a source's south face to a destination's north ring, its two boxes'
+    # facing corners 0.2 mm apart along the spine: the geometry paid 9.6 mm of bound and laid them on one another --
+    # and no such pair of ends is the lane's (a group's destination its own frame's: not this)
+    if E.group is None:
+        sw_ = [fr_ for fr_, ok_ in sorted(whole_frame.side_switch(SB, DB).items()) if not ok_]
+        n_sw = 0
+        for l_ in lanes if sw_ else ():
+            tf_ = {i: whole_frame.face(E.T[l_][i][1], SB) for i in xs[0][l_]}
+            rs_ = {j: whole_frame.ring_side(E.B[l_][j][1], DB, cut) for j in xs[1][l_]}
+            for f_, r_ in sw_:
+                ti_ = [xs[0][l_][i] for i, v_ in tf_.items() if v_ == f_]
+                bj_ = [xs[1][l_][j] for j, v_ in rs_.items() if v_ == r_]
+                if ti_ and bj_:
+                    m.Add(sum(ti_) + sum(bj_) <= 1)
+                    n_sw += 1
+        if n_sw:
+            log('  the trunk\'s sides: no room between the boxes to change sides from the source\'s '
+                + ' or '.join(f'{f_} face to the {r_} ring' for f_, r_ in sw_)
+                + f' -- {n_sw} lane(s) offered no such pair of ends')
     cost = []
     # (each term of `cost` TAGGED, in step with it: (its family, its lanes, its parts) -- what a trace splits the
     # objective by (group_ends' checks.jsonl); the objective itself is `cost` alone, as ever)
