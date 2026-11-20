@@ -1151,13 +1151,21 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         from list_nets import resolve_net_class, class_diff_pair_geometry
         ctx = _pair_geometry_inputs()
         _classes = ctx['classes']
+        _tw, _tg = _profile_terminal_geom.get(_pair.p_net_id, (None, None))
         if not _classes:
-            return None, None
+            return _tw, _tg
         _c = _classes.get(resolve_net_class(_pair.p_net_name, ctx['rules']), {})
         # A 0 (or absent) class pair width / gap is unset: it inherits
         # Default's, else the class track width / clearance -- read as
         # a width, a stored 0 put every pair at the fab floor.
-        return class_diff_pair_geometry(_c, _classes.get('Default'))
+        _cw, _cg = class_diff_pair_geometry(_c, _classes.get('Default'))
+        return (_tw if _tw is not None else _cw, _tg if _tg is not None else _cg)
+
+    # #1936: {P net id: (width, gap or None)} of a pair whose tuning profile
+    # gives one geometry on every layer its pads and stubs are on. It stands
+    # in for the class's pair width and gap, which the terminal connectors
+    # are drawn at (set where the profile geometry is resolved, below).
+    _profile_terminal_geom = {}
 
     # #1843: {P net id: the tightened rule area value a pair that has to
     # pass the area is built at} (`area_clearance.pair_gap_plan`)
@@ -1425,13 +1433,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # do not, the run says which layers disagree.
     # Members come from pair detection, which expands the patterns the
     # caller passed; resolve_net_ids above matches exact names only.
+    _pair_rules = None          # the board's design rules, when readable
+    _lw_from_rules = False      # layer_widths are a .kicad_dru rule's
     if impedance is None and not layer_widths and net_names and diff_pair_width_from_class:
         try:
             from design_rules import DesignRules as _DR
             from list_nets import fab_floors as _ff
             _cu_all = list(getattr(pcb_data.board_info, 'copper_layers', None) or layers)
-            _dr = _DR.from_project(pcb_data, input_file, fab_floor=_ff(len(_cu_all)),
-                                   copper_layers=_cu_all)
+            _dr = _pair_rules = _DR.from_project(
+                pcb_data, input_file, fab_floor=_ff(len(_cu_all)),
+                copper_layers=_cu_all)
             _by_layer = {l: set() for l in layers}
             _scoped = False     # a layer-scoped rule sizes some member somewhere
             for _pn, _pr in find_differential_pairs(pcb_data, net_names).items():
@@ -1454,10 +1465,139 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                         "group of pairs in its own call to apply the rules.")
             elif _scoped:
                 layer_widths = {l: next(iter(v)) for l, v in _by_layer.items()}
+                _lw_from_rules = True
                 print("  Design-rule layer widths: " + ", ".join(
                     f"{l}={w:g}mm" for l, w in layer_widths.items()))
         except Exception as _dre:                          # noqa: BLE001
             print(f"  Warning: design-rule layer widths unavailable ({_dre}).")
+
+    # #1936: KiCad 10 tuning profiles. A differential profile stores the pair's
+    # member width and P/N gap on each signal layer; with no --track-width, no
+    # --diff-pair-gap and no --impedance, after a stored impedance declaration
+    # and a .kicad_dru rule's layer widths, the pairs of a class that names
+    # one are coupled at them. The engine carries one width and one gap per
+    # layer per call (#156, #1747), so they apply when every targeted pair
+    # resolves the same geometry on every layer the call routes on.
+    pair_layer_gaps = {}
+    if (impedance is None and (not layer_widths or _lw_from_rules) and _target_pairs
+            and diff_pair_width_from_class and diff_pair_gap_from_class):
+        try:
+            from tuning_profiles import profile_pair_geometry
+            from fab_tiers import fab_floor_min as _pf_floor, fab_floors as _pf_std
+            _pf_ncl = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
+            _pf_names = {_pr.p_net_id: _pn for _pn, _pr in
+                         find_differential_pairs(pcb_data, net_names or []).items()}
+            _pf_rep = {}
+            _pf_geom, _pf_raised = profile_pair_geometry(
+                pcb_data, input_file,
+                [(_p.p_net_id, _p.n_net_id, _pf_names.get(_p.p_net_id))
+                 for _p in _target_pairs],
+                _routable_layers,
+                floor=_pf_floor(_pf_ncl).get('track_width', 0.0),
+                rules=_pair_rules, report=_pf_rep)
+        except (OSError, ValueError) as _pfe:
+            print(f"Warning: tuning-profile pair geometry unavailable ({_pfe}).")
+            _pf_geom, _pf_raised, _pf_rep = {}, [], {}
+        if _pf_geom:
+            _pf_maps, _pf_gap_raised = {}, []
+            _pf_gap0 = {(_pn, _pl): _v0 for _pn, _pl, _pk, _v0, _v1 in _pf_raised
+                        if _pk == 'gap'}
+            for _p in _target_pairs:
+                _name, _got = _pf_geom.get(_p.p_net_id, (None, {}))
+                # the narrowest gap KiCad grades clean between this P and N
+                _gf = _pair_build_gap(_p, _p.p_net_name, 0.0, clearance,
+                                      announce=False, floor_only=True)
+                _m = {}
+                for _l, (_w, _g) in _got.items():
+                    if (_g is not None and _g < _gf - 1e-9
+                            and (_name, _l, 'gap') not in _pf_rep.get('ruled', {})):
+                        # (the stored gap, where a rule's minimum already
+                        # raised it part of the way)
+                        _row = (_name, _l, _pf_gap0.get((_name, _l), _g), _gf)
+                        if _row not in _pf_gap_raised:
+                            _pf_gap_raised.append(_row)
+                        _g = _gf
+                    _m[_l] = (round(_w, 6), None if _g is None else round(_g, 6))
+                _pf_maps[_p.p_net_name] = (_name, _m)
+            _distinct = {tuple(sorted(_m.items())) for _n, _m in _pf_maps.values()}
+            if len(_distinct) > 1:
+                _split = sorted({_l for _n, _m in _pf_maps.values() for _l in _m
+                                 if len({_m2.get(_l) for _n2, _m2 in _pf_maps.values()}) > 1})
+                print("  NOTE: tuning-profile pair geometry NOT applied: the targeted "
+                      "pairs resolve different widths or gaps on "
+                      + ", ".join(_split)
+                      + " (" + ", ".join(sorted(
+                          f"{_pn}: {_n or 'no differential profile'}"
+                          for _pn, (_n, _m) in _pf_maps.items()))
+                      + ") and the diff engine draws one width and one gap per layer "
+                        "per call (#156), so they route at their net-class geometry. "
+                        "Route each profile's pairs in its own call to apply it.")
+            else:
+                _m = next(iter(_pf_maps.values()))[1]
+                # a rule's own layer widths stay where the profile is silent
+                layer_widths = {**layer_widths, **{_l: _w for _l, (_w, _g) in _m.items()}}
+                pair_layer_gaps = {_l: _g for _l, (_w, _g) in _m.items() if _g is not None}
+                _used = {}
+                for _n, _m2 in _pf_maps.values():
+                    _used[_n] = _used.get(_n, 0) + 1
+                print(f"Tuning-profile pair geometry: {len(_pf_maps)} pair(s) are "
+                      f"coupled at their profile's width and gap on each layer ("
+                      + ", ".join(f"{_k}: {_v}" for _k, _v in sorted(_used.items()))
+                      + "): "
+                      + ", ".join(
+                          f"{_l}={_w:g}mm" + (f"/gap {_g:g}mm" if _g is not None else "")
+                          for _l, (_w, _g) in _m.items()) + ".")
+                # The connectors from the pads to the coupled run are drawn at
+                # the pair's one call width and gap: the profile's where it
+                # gives one geometry on every layer the pair's pads and stubs
+                # are on, else the net class's.
+                from net_queries import expand_pad_layers
+                _class_ends = []
+                for _p in _target_pairs:
+                    _tl = set()
+                    for _nid in (_p.p_net_id, _p.n_net_id):
+                        for _pad in pcb_data.pads_by_net.get(_nid, []):
+                            _tl.update(expand_pad_layers(
+                                list(getattr(_pad, 'layers', None) or []),
+                                _routable_layers))
+                    _own = (_p.p_net_id, _p.n_net_id)
+                    _tl.update(_s.layer for _s in pcb_data.segments if _s.net_id in _own)
+                    _vals = {_m.get(_l) for _l in _tl if _l in _routable_layers}
+                    if len(_vals) == 1 and None not in _vals:
+                        _profile_terminal_geom[_p.p_net_id] = next(iter(_vals))
+                    else:
+                        _class_ends.append(_p.p_net_name)
+                if _class_ends:
+                    print(f"  {len(_class_ends)} pair(s) have pads or stubs on layers "
+                          f"the profile gives different geometry (or none): their "
+                          f"connectors from the pads to the coupled run are drawn at "
+                          f"the net-class pair width and gap ("
+                          + ", ".join(sorted(_class_ends)[:6])
+                          + (", ..." if len(_class_ends) > 6 else "") + ").")
+                for (_pn, _pl, _pk), _rn in sorted(_pf_rep.get('ruled', {}).items()):
+                    print(f"  profile '{_pn}' {_pl}: .kicad_dru rule \"{_rn}\" sets "
+                          f"the {_pk} there")
+                _pf_graded = {(_pn, _pl) for _pn, _pl, _g0, _g1 in _pf_gap_raised}
+                for _pn, _pl, _pk, _pw0, _pfl in _pf_raised:
+                    if _pk == 'gap' and (_pn, _pl) in _pf_graded:
+                        continue
+                    print(f"  profile '{_pn}' {_pl}: {_pk} {_pw0:g} mm is "
+                          f"{'below' if _pfl > _pw0 else 'above'} what the board's "
+                          f"rules, Board Setup and the fab floor allow, drawn at "
+                          f"{_pfl:g} mm")
+                # below the standard tier floor: disclosed as a class width is
+                _pf_std_w = _pf_std(_pf_ncl).get('track_width', 0.0)
+                _pf_ruled_w = {_pl for (_pn, _pl, _pk) in _pf_rep.get('ruled', {})
+                               if _pk == 'width'}
+                for _l, (_w, _g) in sorted(_m.items()):
+                    if _w < _pf_std_w - 1e-9 and _l not in _pf_ruled_w:
+                        from fab_tiers import warn_fab_escalation
+                        warn_fab_escalation(
+                            f"tuning profile '{'/'.join(sorted(_used))}' pair "
+                            f"width {_w:g} on {_l}")
+                for _pn, _pl, _pg0, _pfl in _pf_gap_raised:
+                    print(f"  profile '{_pn}' {_pl}: gap {_pg0:g} mm is below what "
+                          f"KiCad grades P against N at, built at {_pfl:g} mm")
 
     if _span1842 and disable_bga_zones is None:
         # #1842: "no new via in a BGA's pad field" is a rule for through
@@ -1534,6 +1674,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if layer_widths:
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
+    if pair_layer_gaps:
+        config_kwargs['pair_layer_gaps'] = pair_layer_gaps
     config_kwargs['layer_costs'] = layer_costs  # per-layer bias for coupled diff routing (#193)
     # #1253: the rules the board's design brief declares join the caller's,
     # read in the engine (input_file, else PCBData.source_path) so the CLI

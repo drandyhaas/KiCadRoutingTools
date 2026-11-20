@@ -35,6 +35,8 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 #: profile delays are stored in attoseconds per mm
 _AS_PER_PS = 1e6
+#: profile widths and gaps are stored in nanometres
+_NM_PER_MM = 1e6
 _DEFAULT_PRIORITY = 2147483647
 _WARNED: set = set()
 
@@ -56,6 +58,12 @@ class TuningProfile(NamedTuple):
     #: {(signal layer from, signal layer to, via layer from, via layer to): ps},
     #: each entry as the project stores it
     via_overrides: Dict[tuple, float]
+    #: signal layer -> the track width (mm) the profile gives that layer, and
+    #: for a differential profile the pair gap (mm); a layer whose entry
+    #: stores 0 is absent
+    layer_width_mm: Dict[str, float] = {}
+    layer_gap_mm: Dict[str, float] = {}
+    differential: bool = False        # profile type 1
 
 
 def _is_num(v) -> bool:
@@ -178,17 +186,23 @@ def _read_project(board_path: str):
             break
         if not p.get('profile_name'):
             continue
-        layers = {}
+        layers, widths, gaps = {}, {}, {}
         entries = p.get('layer_entries')
         for e in entries if isinstance(entries, list) else []:
             if isinstance(e, dict) and e.get('signal_layer') and isinstance(
                     e.get('delay'), (int, float)):
                 layers[str(e['signal_layer'])] = float(e['delay']) / _AS_PER_PS
+                # width and diff_pair_gap are stored in nanometres
+                for key, into in (('width', widths), ('diff_pair_gap', gaps)):
+                    v = e.get(key)
+                    if _is_num(v) and v > 0:
+                        into[str(e['signal_layer'])] = float(v) / _NM_PER_MM
         via = p.get('via_prop_delay')
         profiles[str(p['profile_name'])] = TuningProfile(
             str(p['profile_name']), bool(p.get('enable_time_domain_tuning')), layers,
             float(via) / _AS_PER_PS if isinstance(via, (int, float)) else 0.0,
-            _via_overrides(p.get('via_overrides')))
+            _via_overrides(p.get('via_overrides')), widths, gaps,
+            p.get('type') == 1)
     classes = []
     settings = proj.get('net_settings')
     for c in ((settings if isinstance(settings, dict) else {}).get('classes') or []):
@@ -308,6 +322,172 @@ class DelayModel:
 
 
 _MODEL_ATTR = '_tuning_delay_model'
+
+
+def _ranked_size(rules, kind, net_id, layer, value, diff_pair=None):
+    """(size, rule name or None) for a profile's ``value`` once the board's
+    rules have had their say (`DesignRules.ranked_draw_size`); the value
+    itself with no rules."""
+    if rules is None:
+        return value, None
+    return rules.ranked_draw_size(kind, net_id, layer, value, diff_pair=diff_pair)
+
+
+def profile_layer_widths(pcb_data, board_path: str = None, net_ids=None,
+                         floor: float = 0.0, rules=None, report=None):
+    """({net id: {signal layer: track width mm}}, {profile name: net count},
+    [(profile, layer, stored mm, drawn mm)]) for the nets whose class names a
+    tuning profile that gives a width.
+
+    KiCad 10's tuning profile holds, per signal layer, the track width (and
+    for a differential profile the pair gap) that meets the profile's target
+    impedance on that layer of the stackup; a net class that names the
+    profile is drawn at it. The same impedance is a different width on an
+    outer and an inner layer, which a net class's one `track_width` cannot
+    say.
+
+    ``rules`` (a `DesignRules`) ranks the profile where it belongs: a
+    `.kicad_dru` rule whose `track_width` gives the net an ``opt`` on a layer
+    is drawn there instead (the answer carries the rule's width, and
+    ``report``, a dict, collects ``ruled``: {(profile, layer): rule name}
+    beside ``profile_of``: {net id: profile name}), and a profile
+    width is clamped into the rule's and Board Setup's [min, max] as a class
+    width is. ``floor`` then pins a width up (the fab's minimum track). The
+    third value lists every profile width that was not drawn as stored. A
+    layer the profile has no width for is absent, so the caller's next width
+    source decides there; a net every layer of which a rule draws is absent
+    from the counts."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path:
+        return {}, {}, []
+    model = DelayModel(path, pcb_data)
+    if not model.profiles:
+        return {}, {}, []
+    out, used, raised = {}, {}, []
+    ids = list(net_ids) if net_ids is not None else [n for n in pcb_data.nets if n]
+    for nid in ids:
+        prof = model.profile_of(nid)
+        if prof is None or not prof.layer_width_mm:
+            continue
+        got, own = {}, False
+        for layer, w in prof.layer_width_mm.items():
+            drawn, rule = _ranked_size(rules, 'track_width', nid, layer, w)
+            if floor and drawn < floor - 1e-9:
+                drawn = floor
+            if rule is not None:
+                if report is not None:
+                    report.setdefault('ruled', {})[(prof.name, layer)] = rule
+            else:
+                own = True
+                if abs(drawn - w) > 1e-9:
+                    row = (prof.name, layer, w, drawn)
+                    if row not in raised:
+                        raised.append(row)
+            got[layer] = drawn
+        out[nid] = got
+        if report is not None:
+            report.setdefault('profile_of', {})[nid] = prof.name
+        if own:
+            used[prof.name] = used.get(prof.name, 0) + 1
+    return out, used, raised
+
+
+def profile_pair_geometry(pcb_data, board_path: str = None, pairs=(),
+                          layers=None, floor: float = 0.0, rules=None,
+                          report=None):
+    """({P net id: (profile name, {signal layer: (width mm, gap mm or None)})},
+    [(profile, layer, 'width' or 'gap', stored mm, drawn mm)]) for the
+    differential pairs
+    whose two nets take one differential tuning profile that gives a width.
+
+    ``pairs`` are (P net id, N net id), or (P net id, N net id, pair name).
+    A differential profile stores, per signal layer, the member width and the
+    P/N gap of a coupled pair at its target impedance. ``layers`` limits the
+    answer to those layers.
+
+    ``rules`` (a `DesignRules`) ranks the profile as `profile_layer_widths`
+    does, the members read as coupled-pair members: a `.kicad_dru` rule that
+    gives a `track_width` or a `diff_pair_gap` ``opt`` on a layer is drawn
+    there instead (``report``, a dict, collects ``ruled``: {(profile, layer,
+    'width' or 'gap'): rule name}), and a profile value is clamped into the
+    rule's and Board Setup's [min, max]. ``floor`` then pins a width up (the
+    fab's minimum track). The second value lists every profile width or gap
+    that was not drawn as stored.
+
+    A layer the profile stores no gap for answers None there, and a layer it
+    has no width for is absent: the caller's next source decides. A pair of a
+    single-ended profile, whose members name two profiles, whose members the
+    rules size differently, or every value of which a rule sets, is absent."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path or not pairs:
+        return {}, []
+    model = DelayModel(path, pcb_data)
+    if not model.profiles:
+        return {}, []
+    out, raised = {}, []
+
+    def note(row):
+        if row not in raised:
+            raised.append(row)
+
+    for pair in pairs:
+        p_id, n_id = pair[0], pair[1]
+        name = pair[2] if len(pair) > 2 else None
+        prof = model.profile_of(p_id)
+        other = model.profile_of(n_id)
+        if (prof is None or other is None or prof.name != other.name
+                or not prof.differential or not prof.layer_width_mm):
+            continue
+        got, ruled, own, split = {}, {}, False, False
+        for layer, w in prof.layer_width_mm.items():
+            if layers is not None and layer not in layers:
+                continue
+            drawn, rule = _ranked_size(rules, 'track_width', p_id, layer, w, name)
+            if (drawn, rule) != _ranked_size(rules, 'track_width', n_id, layer, w, name):
+                split = True
+                break
+            if floor and drawn < floor - 1e-9:
+                drawn = floor
+            if rule is not None:
+                ruled[(prof.name, layer, 'width')] = rule
+            else:
+                own = True
+                if abs(drawn - w) > 1e-9:
+                    note((prof.name, layer, 'width', w, drawn))
+            g = prof.layer_gap_mm.get(layer)
+            if g is not None:
+                g_drawn, g_rule = _ranked_size(rules, 'diff_pair_gap', p_id, layer, g, name)
+                if g_rule is not None:
+                    ruled[(prof.name, layer, 'gap')] = g_rule
+                else:
+                    own = True
+                    if abs(g_drawn - g) > 1e-9:
+                        note((prof.name, layer, 'gap', g, g_drawn))
+                g = g_drawn
+            got[layer] = (drawn, g)
+        if got and own and not split:
+            out[p_id] = (prof.name, got)
+            if report is not None:
+                report.setdefault('ruled', {}).update(ruled)
+    return out, raised
+
+
+def geometry_profiles(pcb_data, board_path: str = None) -> Dict[int, TuningProfile]:
+    """{net id: its tuning profile} for the nets whose class names a profile
+    that gives a width on some layer -- what a check of shipped copper
+    against the profile's geometry reads."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path:
+        return {}
+    model = DelayModel(path, pcb_data)
+    if not model.profiles:
+        return {}
+    out = {}
+    for nid in pcb_data.nets:
+        prof = model.profile_of(nid) if nid else None
+        if prof is not None and prof.layer_width_mm:
+            out[nid] = prof
+    return out
 
 
 def net_time_profile(pcb_data, net_id) -> Optional[TuningProfile]:
