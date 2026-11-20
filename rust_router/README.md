@@ -5,7 +5,7 @@ The compiled half of KiCad Routing Tools: the Python extension module
 searches and obstacle map, the placer's per-move kernels, and the grid searches
 of the `awx/` whole-route bus router. The rest is Python that calls in here.
 
-**Current Version: 0.24.1** (the crate version in `Cargo.toml`)
+**Current Version: 0.25.0** (the crate version in `Cargo.toml`)
 
 > **Release note:** the newest published release is
 > [v0.24.1](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.24.1)
@@ -453,6 +453,21 @@ src/
 - **Placement kernels**: the trees and gap trees keep the Python's float expressions in order; the crossing and pad-hit kernels skip pairs whose boxes cannot meet; the congestion kernels sum a move's change over the cells it reaches, so their totals can differ from a whole-window Python sum in the last bits
 
 ## Version History
+
+### 0.25.0 (2026-11-18)
+- **Geometry kernels** (`geometry_kernels.rs`) for three pure-compute Python
+  loops of the route, each the computation it replaces operation for
+  operation (same float expressions in the same order, CPython's `min`/`max`
+  tie rules, `v**2` as the CRT `pow`), so routes are unchanged:
+  `capsule_spans` / `capsule_cells` compute a cache miss of
+  `routing_utils.segment_blocked_spans` / `segment_blocked_cells_array`
+  (the `_capsule_mask` predicate with `GRID_TIE_EPS`, one shared loop);
+  `poly_keepout_cells` is the BGA/QFN escape occupancy's polygon keepout
+  (`_Occ.block_poly`); `component_labels` is the union-find of
+  `check_connected.analyze_conn_excluding`. `point_segment_distances` is
+  `geometry_utils.point_to_segment_distance` over arrays.
+  `tests/test_geometry_kernels.py` holds each to the Python on thousands of
+  seeded random cases.
 
 ### 0.24.1 (2026-11-16)
 - **The pose router's Dubins heuristic reads headings in the grid's frame**
