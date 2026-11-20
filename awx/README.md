@@ -828,11 +828,15 @@ on its array is a group of one. The step:
    berths. The module docstring names each rule.
 3. **Checked.** Each bus's ends go to its own whole solve, under its strict
    rules, on the board as the model fanned it out. A refusal teaches the
-   model (a lane held to one layer, two crossings held apart, a state
-   refused) and the model is solved again. Where crossings have no window
-   between them, the check names every such set the state holds, not the
-   first alone: the first set's crossings are set free and the rest asked
-   again, set after set, and each is a refused state of its own. Named one a
+   model (a lane held to one layer, a set of crossings not all crossed
+   again, a state refused) and the model is solved again. Where crossings
+   have no window between them, the check names every such set the state
+   holds, not the first alone: the first set's crossings are set free and
+   the rest asked again, set after set, and each is a refused state of its
+   own. Each set is one lesson, not all of its crossings again (a clause):
+   one of them uncrossed takes its window off the rest. Held each apart
+   instead, the sets of one check held 90 to 196 crossings of a 38-lane bus
+   apart at once, and the model had no state. Named one a
    check, a bus whose ends held three was refused at three checks running,
    each with a repair of the model between; over two seeds of a four-bus
    board the checks refused 3 and 8 times where they had 8 and 15, the stage
@@ -1228,7 +1232,7 @@ names the LANES whose rules cannot hold together (every rule of a lane on one
 assumption, the core made minimal), and the crossings whose windows either
 core named. A refused state teaches every later one: those lanes not all on
 those ends again, a lane no change fits in on one layer, those crossings not
-again, and their crossings priced. With no plan in five checks
+all again, and their crossings priced. With no plan in five checks
 (`JOINT_TRIES`) the last state stands: the round lays it, and a round left
 with nets open is followed by the next seed's ([the
 rounds](#the-rounds-and-never-nothing-whole_routepy)). Reproducible: a

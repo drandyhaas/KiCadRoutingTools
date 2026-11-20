@@ -15,7 +15,9 @@ windows, and the model learns each core as a refused state of its own.
 2. ...it returns every core it found (`cores`) and the union as the core;
 3. the group's check asks the solve for its cores;
 4. ...reads each core's lanes as a group of its own;
-5. ...and teaches the model one refused state per group, each over that group's lanes alone.
+5. ...and teaches the model one refused state per group, each over that group's lanes alone;
+6. ...and each core as one lesson: not all of its crossings again (a clause) -- each of its crossings held apart, the
+   cores of one check held 90 to 196 crossings of one bus apart at once, and the group had no state.
 """
 import ast
 import os
@@ -54,12 +56,27 @@ check('2. every core returned, and the union as the core',
 
 i = GROUP.index('J = whole_solve.solve(ctx, dest_, front=')
 check('3. the group\'s check asks the solve for its cores', 'cores=True' in GROUP[i:i + 250])
-check('4. each core\'s lanes a group of its own',
-      "out['groups'] = [sorted({l_ for k_ in c_ for l_ in k_}) for c_ in (J or {}).get('cores') or [out['core']]]"
-      in GROUP)
+check('4. each core kept apart, and its lanes a group of its own',
+      "out['cores'] = [[tuple(k_) for k_ in c_] for c_ in (J or {}).get('cores') or [out['core']]]" in GROUP
+      and "out['groups'] = [sorted({l_ for k_ in c_ for l_ in k_}) for c_ in out['cores']]" in GROUP)
 i = GROUP.index("for g_ in chk.get('groups') or [list(chk['lanes'])]:")
 check('5. one refused state taught per group, over its own lanes',
       "for l_ in g_ if l_ in s_}" in GROUP[i:i + 400] and "L_['nogoods'].append(ng_)" in GROUP[i:i + 400])
+
+ENDS = open(os.path.join(ROOT, 'awx', 'whole_ends.py')).read()
+check('6. each core taught as one lesson, its crossings together',
+      "cores_ = {we.core_of(c_) for c_ in chk.get('cores') or [chk.get('core') or ()] if c_}" in GROUP
+      and "L_['nocross'] |= cores_" in GROUP)
+i = ENDS.index("for c_ in getattr(E, '_nocross', ()):")
+check('6. ...the model holds NOT ALL of a core\'s crossings again -- one clause -- never each one apart',
+      'm.AddBoolOr(lits_)' in ENDS[i:i + 400] and 'm.Add(xv == 0)' not in ENDS)
+sys.path[:0] = [os.path.join(ROOT, 'awx'), os.path.join(ROOT, 'py_router')]
+import whole_ends  # noqa: E402
+c_ = whole_ends.core_of([('A', 'B'), ('C', 'A')])
+check('6. ...a core read back as its crossings',
+      sorted(sorted(p_) for p_ in whole_ends.core_pairs(c_)), [['A', 'B'], ['A', 'C']])
+check('6. ...a lone crossing, as an older run kept its lessons, a core of its own',
+      whole_ends.core_pairs(frozenset(('A', 'B'))), [frozenset(('A', 'B'))])
 
 print(f'{N[0] - len(BAD)}/{N[0]} checks passed')
 sys.exit(1 if BAD else 0)

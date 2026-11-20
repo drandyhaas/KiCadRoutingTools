@@ -1985,6 +1985,17 @@ def _last_ends():
         return None
 
 
+def core_pairs(c):
+    """the crossings (lane pairs, frozensets) of a learned CORE `c` (E._nocross: a frozenset of them) -- a lone pair as
+    a core of its own, as a lesson read from a run that kept each crossing apart"""
+    return [c] if all(isinstance(x_, str) for x_ in c) else list(c)
+
+
+def core_of(pairs):
+    """a check's core of crossings (lane pairs) as E._nocross keeps it"""
+    return frozenset(frozenset(k_) for k_ in pairs)
+
+
 def _opt_sig(o):
     """an end option's signature, its legs' moves -- and a GROUP berth's way in and its place on the walk, since one
     move is offered once per way in (Group.options) and the way decides which lanes cross -- the same end on a field
@@ -2356,11 +2367,21 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
                 cost.append(w_ * xv)
                 cost_tag.append(('crossing', (a, b), {'crossing': Q(JOINT_X),
                                                       'learned': w_ - Q(JOINT_X)}))
-            if frozenset((a, b)) in getattr(E, '_nocross', ()):
-                m.Add(xv == 0)                     # (a crossing whose window the check could not hold: not again)
         X[(a, b)] = xv
         for q in range(NL):
             m.Add(y[0][a][q] + y[0][b][q] + xv - chg[a] - chg[b] <= 2)
+    # (A CORE OF CROSSINGS whose windows the check could not hold together: NOT ALL OF THEM AGAIN -- one of them
+    # uncrossed takes its window off the rest. Each of its crossings held apart instead, the cores of one check -- 90 to
+    # 196 crossings of a 38-lane bus -- were all held apart at once, and the group had no state. A crossing whatever the
+    # ends, it stays in no clause; a pair that never crosses here meets its core already)
+    Xf_ = {frozenset(k_): v_ for k_, v_ in X.items()}
+    for c_ in getattr(E, '_nocross', ()):
+        xs_ = [Xf_.get(pr_) for pr_ in core_pairs(c_)]
+        if any(v_ is None for v_ in xs_):
+            continue
+        lits_ = [v_.Not() for v_ in xs_ if not isinstance(v_, int)]
+        if lits_:
+            m.AddBoolOr(lits_)
     # the options' own costs: the fanout's vias, a single's blocked front, a far-face tooth, the feedback's avoided ends
     for k_ in (0, 1):
         for l_ in lanes:
@@ -2836,8 +2857,8 @@ def joint_choose(st, log=print, fixed=None, seed=None, learned=None, free_teeth=
     xl = {}
     t_chk = []
     # what each refused state teaches, held for every later state (joint_state): the LANES its exact core names not
-    # all on those ends again, a lane with no room for a change on its ends on one layer, and two lanes whose crossing's
-    # window the check could not hold not crossing
+    # all on those ends again, a lane with no room for a change on its ends on one layer, and the crossings whose
+    # windows the check could not hold together not all crossing again
     E._nogoods, E._nochg, E._nocross = [], set(), set()
     last_ = None
     unplanned = False       # (no state of these passed the solve's check: the one that stands is unverified)
@@ -2866,9 +2887,10 @@ def joint_choose(st, log=print, fixed=None, seed=None, learned=None, free_teeth=
                 log(f'  whole ends: the joint ends: {len(E._nochg) - n0_} lane(s) with no room for a change on their '
                     f'ends, held to one layer: ' + ', '.join(sorted(chk.get('nochange') or ())))
             if chk.get('core'):
-                E._nocross |= {frozenset(k_) for k_ in chk['core']}
-                log('  whole ends: the joint ends: crossings held apart: '
-                    + ', '.join('/'.join(sorted(k_)) for k_ in sorted(E._nocross, key=sorted)))
+                E._nocross.add(core_of(chk['core']))
+                log('  whole ends: the joint ends: crossings not all again: '
+                    + '; '.join(', '.join('/'.join(sorted(k_)) for k_ in sorted(core_pairs(c_), key=sorted))
+                                for c_ in sorted(E._nocross, key=lambda c_: sorted(map(sorted, core_pairs(c_))))))
             at_ = chk.get('at') or {}
             E._nogoods.append({l_: tuple(None if at_.get(l_) not in (None, k_) else s[l_][k_] for k_ in (0, 1))
                                for l_ in chk['lanes'] if l_ in s})

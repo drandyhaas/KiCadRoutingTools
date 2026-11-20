@@ -2504,7 +2504,8 @@ def _bus_check(b, ctx, dest_, RL, buf_, whole_frame, whole_solve, hint_=None):
             out['rules'], out['hands'], out['endlay'], out['crossing'] = [], [], [], True
             # (EVERY core of crossings the state holds, the solve's `cores`: each one's lanes apart -- each is a
             # refused state of its own)
-            out['groups'] = [sorted({l_ for k_ in c_ for l_ in k_}) for c_ in (J or {}).get('cores') or [out['core']]]
+            out['cores'] = [[tuple(k_) for k_ in c_] for c_ in (J or {}).get('cores') or [out['core']]]
+            out['groups'] = [sorted({l_ for k_ in c_ for l_ in k_}) for c_ in out['cores']]
         elif not out['plan'] and out['status'] == 'INFEASIBLE':
             # (no crossing named with the windows alone: THE RULES that cannot hold together, each lane's by FAMILY
             # -- which rule of a lane cannot hold, a pair's hands among them -- and the crossings their core names
@@ -5146,9 +5147,9 @@ def main():
                 # 3 mm from its tooth to its berth, a change between them, was named at four checks running, its window
                 # for the change never empty, and came back each time with one end moved and the change kept)
                 # (...but not the lanes of a refusal read from its CROSSINGS alone (the check's `crossing`): what it
-                # says is that those two lanes' crossing has no window, and it is held apart below -- held to one
-                # layer besides, a lane from a surface end on one face to a part on the other had no end left, and
-                # its bus's own model no state)
+                # says is that those crossings have no windows together, and they are not all crossed again below --
+                # held to one layer besides, a lane from a surface end on one face to a part on the other had no end
+                # left, and its bus's own model no state)
                 nochg_ = {l_ for l_ in chk.get('nochange') or () if l_ in s_} | \
                     ({l_ for l_ in chk['lanes'] if l_ in s_ and b.lay[l_][0] != b.lay[l_][1]}
                      if not chk.get('crossing') else set())
@@ -5157,12 +5158,14 @@ def main():
                 fresh[b.name] = {l_ for l_ in chk['lanes'] if l_ in s_} | nochg_
                 # (a refusal that teaches a LANE something new -- held to one layer, to its hands, an end off its
                 # layer -- is progress, of which there is only so much: it is none of the tries)
+                # (each core of crossings: not all of them again -- whole_ends._joint_model)
+                cores_ = {we.core_of(c_) for c_ in chk.get('cores') or [chk.get('core') or ()] if c_}
                 progressed = progressed or el_new_ or rm_new or bool(nochg_ - L_['nochg']) or \
                     bool({l_ for l_ in chk.get('hands') or () if l_ in s_} - L_['hands']) or \
-                    bool({frozenset(k_) for k_ in chk.get('core') or ()} - L_['nocross'])
+                    bool(cores_ - L_['nocross'])
                 L_['nochg'] |= nochg_
                 L_['hands'] |= {l_ for l_ in chk.get('hands') or () if l_ in s_}
-                L_['nocross'] |= {frozenset(k_) for k_ in chk.get('core') or ()}
+                L_['nocross'] |= cores_
                 for k_ in chk.get('core') or ():        # (its core's crossings priced, doubled when named again)
                     k_ = frozenset(k_)
                     L_['xl'][k_] = 2 * L_['xl'][k_] if k_ in L_['xl'] else we.JOINT_LEARN
@@ -5186,8 +5189,8 @@ def main():
                         + ', '.join(f'{("a single", "a pair")[kd_[0] - 1]} {kd_[1]} to {kd_[2]} {ln_:.2f} mm'
                                     for kd_, ln_ in sorted(L_['room'].items())))
                 log(f'  {b.name}: held from here: {len(L_["nochg"])} lane(s) to one layer, {len(L_["hands"])} pair(s) '
-                    f'to their hands, {len(L_["endlay"])} end(s) off their layer, {len(L_["nocross"])} crossing(s) '
-                    f'apart, {len(L_["nogoods"])} refused state(s)')
+                    f'to their hands, {len(L_["endlay"])} end(s) off their layer, {len(L_["nocross"])} core(s) of '
+                    f'crossings not all again, {len(L_["nogoods"])} refused state(s)')
                 # (WHAT THIS CHECK TAUGHT, a trace's: each lesson new since it was asked, and the lanes the repair
                 # is to free for it)
                 new_l_ = {}
