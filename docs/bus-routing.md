@@ -26,6 +26,7 @@ The GUI's Advanced tab has the same switch ("Enable bus routing", with the four 
 | `--bus-min-nets` | 2 | Minimum number of nets for a raw clique (the strict filter below then needs 3) |
 | `--bus-attraction-radius` | 5.0 | Reach of the attraction around the corridor or neighbour path (mm) |
 | `--bus-attraction-bonus` | 5000 | Attraction strength: `bonus/50` percent off a step's cost, capped at 90% (the default is at the cap) |
+| `--bus-nets NET,NET,...` | - | Declare an ordered bus by its nets, in the order they keep side by side (repeatable, one bus each); see [Ordered Buses](#ordered-buses-declared-by-net-list) |
 | `--ordering bus` | - | The bus-first ordering alone, with no corridor and no attraction (see [Net Ordering](net-ordering.md)) |
 
 ## Bus Detection
@@ -88,6 +89,21 @@ discount % = min(bonus / 50, 90) × proximity² × alignment × layer share
 
 A discount, unlike a subtracted bonus, can never make a step free, so the gradations survive. Clearances are enforced as normal: attraction only changes which legal path is cheapest.
 
+## Ordered Buses (declared by net list)
+
+Detection groups nets by where their ends are and routes them middle-out, each member on whichever side of the corridor is cheaper, so the members' order across the bus is not fixed. When the order matters (neighbouring lines that must differ little in potential, a cell-voltage sense bus in cell order), declare the bus instead:
+
+```bash
+python route.py board.kicad_pcb --nets "/U*" "/G*" ... \
+    --bus-nets "/U0,/G0,/U1,/G1,/U2,/G2" --bus-attraction-radius 1.0
+```
+
+- **Taken as given:** a declared bus is neither detected nor filtered; its members keep the list's order. `--bus-nets` alone turns bus routing on for these nets only; add `--bus` to detect other buses among the rest. An unknown net, a net in two buses or a one-net bus is an error.
+- **Corridor along the whole run:** the corridor is probed along the farthest-reaching member's run (its two farthest-apart pads or track ends as the sides), not its first edge, so a multipoint member's local joints don't shorten it.
+- **One lane per member:** each member is attracted to its own lane, the corridor moved sideways by its place in the order, one track + clearance apart (the farthest-reaching member's lane is the corridor itself). The lanes are mirrored if the members' copper runs the other way across the corridor, so the first member takes the side its own pads are on. Members leave the bus at their own ends.
+- **Each lane points the route's way:** the attraction rewards only moves along the path's direction, so a member's lane is turned to each route's direction of travel (forward and backward probes, multipoint edges).
+- **Tuning:** a narrow `--bus-attraction-radius` (1–2 mm, a few lanes) separates the lanes; at the default 5 mm neighbouring lanes pull almost equally.
+
 ## Interaction with Other Features
 
 - **Net ordering**: `--bus` reorders whatever `--ordering` produced (bus groups first). `--ordering bus` gives the same reorder over an MPS base without corridors or attraction.
@@ -103,7 +119,7 @@ A discount, unlike a subtracted bonus, can never make a step free, so the gradat
 
 ## Limitations
 
-- Grouping is geometric: two unrelated buses that leave a connector side by side and run parallel can be grouped together.
+- Grouping is geometric (declare the bus with `--bus-nets` to fix it): two unrelated buses that leave a connector side by side and run parallel can be grouped together.
 - Attraction is strongest on the path's own layer; other layers get the 35% share.
 - A bus member with no corridor and no routed neighbour (e.g. all earlier members failed) routes without attraction.
 
