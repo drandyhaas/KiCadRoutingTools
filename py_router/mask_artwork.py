@@ -38,7 +38,9 @@ Pad openings: every netted pad on the side whose copper (its real, possibly
 rotated rectangle) meets the artwork is cut out of it grown by OWN_MARGIN, so
 a mask-defined pad or a test point keeps nothing out and a broad opening keeps
 copper out everywhere but next to its pads. A pad that is merely near the
-artwork exempts nothing. A FILLED copper graphic (a footprint's tab, #1181)
+artwork exempts nothing, and so does the pad of a net with one pad that no
+zone carries: such a net never routes, and cutting its pad out would only let
+other nets' copper into the opening. A FILLED copper graphic (a footprint's tab, #1181)
 is cut out the same way: the opening exposes copper already there, and that
 copper keeps out every net it does not grant.
 
@@ -249,7 +251,7 @@ def _point_in(p: Point, poly: Sequence[Point]) -> bool:
     return inside
 
 
-def _pad_trees(footprints, copper_graphics=None) -> Dict[str, tuple]:
+def _pad_trees(footprints, copper_graphics=None, routed_nets=None) -> Dict[str, tuple]:
     """{copper side: (STRtree, [copper shape])} of every pad with a net (its
     real size and tilt; round and rounded pads by their enclosing rectangle)
     and every FILLED copper graphic (`copper_graphics`, Segments whose
@@ -268,9 +270,20 @@ def _pad_trees(footprints, copper_graphics=None) -> Dict[str, tuple]:
         if seg.layer in shapes:
             g = Polygon(ring)
             shapes[seg.layer].append(g if g.is_valid else g.buffer(0))
+    # A pad's opening is exempt so its own net can leave it; a net with one
+    # pad never routes, and exempting it only opened the band around it to
+    # every OTHER net, whose copper there is bare in the opening
+    # (solder_mask_bridge: scalenode-cm4 SP6 under the N1 logo).
+    npads: Dict[int, int] = {}
     for fp in (footprints or {}).values():
         for pad in getattr(fp, 'pads', ()) or ():
-            if not getattr(pad, 'net_id', 0):
+            nid = getattr(pad, 'net_id', 0)
+            if nid:
+                npads[nid] = npads.get(nid, 0) + 1
+    routed = set(routed_nets or ()) | {n for n, c in npads.items() if c > 1}
+    for fp in (footprints or {}).values():
+        for pad in getattr(fp, 'pads', ()) or ():
+            if getattr(pad, 'net_id', 0) not in routed:
                 continue
             x, y = pad.global_x, pad.global_y
             hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
@@ -327,7 +340,8 @@ def board_mask_artwork(pcb_data) -> List[dict]:
                 art = extract_mask_artwork(
                     f.read(), getattr(pcb_data, 'footprints', None),
                     [s for s in getattr(pcb_data, 'segments', ()) or ()
-                     if getattr(s, 'graphic', False) and getattr(s, 'graphic_ring', None)])
+                     if getattr(s, 'graphic', False) and getattr(s, 'graphic_ring', None)],
+                    {getattr(z, 'net_id', 0) for z in getattr(pcb_data, 'zones', ()) or ()})
         bi.mask_artwork = art
     return art
 
@@ -426,21 +440,24 @@ def _graphics(content: str, footprints):
                 yield g, lm.group(1)
 
 
-def extract_mask_artwork(content: str, footprints=None, copper_graphics=None) -> List[dict]:
+def extract_mask_artwork(content: str, footprints=None, copper_graphics=None,
+                         routed_nets=None) -> List[dict]:
     """Keep-out dicts for the F.Mask / B.Mask artwork of a board (see module
     doc): the union of every graphic on a side, minus the pads' own openings,
     so a logo of many strokes is a few polygons rather than one per stroke.
     `footprints` (parse_kicad_pcb's) supply the pads whose own mask openings
     are exempt, and the footprints' poses; None exempts nothing.
     `copper_graphics` (filled graphic copper Segments) are exempt the same
-    way: an opening over a footprint's copper tab is that tab's opening."""
+    way: an opening over a footprint's copper tab is that tab's opening.
+    `routed_nets` are nets routed even with a single pad (a zone's net): their
+    lone pad keeps its opening exempt too."""
     from shapely import union_all
     found = {'F.Mask': [], 'B.Mask': []}
     for g, mask in _graphics(content, footprints):
         found[mask].append(g)
     if not any(found.values()):
         return []
-    pads = _pad_trees(footprints, copper_graphics)
+    pads = _pad_trees(footprints, copper_graphics, routed_nets)
     out = []
     for mask, geoms in found.items():
         if not geoms:
