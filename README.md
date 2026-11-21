@@ -877,6 +877,7 @@ KiCadRoutingTools/
 │   ├── board_score.py            # One score for a board: blocking, then quality
 │   ├── quick_score.py            # Score a route.py --quick 2 board (the placement seed judge)
 │   ├── check_reachability.py     # Is this pad reachable, or is the geometry to blame?
+│   ├── check_fanout.py           # Which pins of a part can't fan out to a via, and what blocks them
 │   ├── check_join.py             # Verify a hand-drawn join against all board copper before committing it
 │   ├── fill_for_delivery.py      # Write a filled copy of a routed board (#910)
 │   └── _path.py                  # sys.path bootstrap so the tools import py_router
