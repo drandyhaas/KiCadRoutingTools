@@ -184,7 +184,8 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
     if _bare_pad_pair_vias_fit(pcb_data, new_vias, config)[0]:
         return True
     from fab_tiers import (escalation_rungs, warn_fab_escalation, note_narrowing,
-                           via_hole_ring, ladder_escalates, rung_tier)
+                           via_hole_ring, ladder_escalates, rung_tier,
+                           get_escalation_policy)
     copper = sum(1 for l in config.layers if l.endswith('.Cu'))
     # escalation_rungs, never the physical fab floor: empty under --escalation
     # off (the vias stay as asked and the caller reverts the swap), bounded by
@@ -210,6 +211,7 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
     # when the uncapped one is at or above it: the ring is not a reason to
     # step to a smaller (costlier) tier.
     ring = via_hole_ring()
+    board_rules = bool(ring) and get_escalation_policy()[0] == 'board'
     nominal_drill = min(f['via_drill'] for i, f in enumerate(ladder)
                         if rung_tier(ladder, i) == 0)
     size = config.via_size
@@ -221,9 +223,14 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
         pairs = [(size, drill)]
         if ring:
             held = round(size - 2.0 * ring, 3)
-            lo = nominal_drill if drill >= nominal_drill - 1e-9 else drill_floor
+            lo = (drill_floor if board_rules or drill < nominal_drill - 1e-9
+                  else nominal_drill)
             if lo - 1e-9 <= held < drill - 1e-9:
                 pairs.insert(0, (size, held))
+            if board_rules:
+                # own rules: the ring is required (fab_tiers._prefer_hole_ring)
+                pairs = [(s_, d_) for s_, d_ in pairs
+                         if (s_ - d_) / 2.0 >= ring - 1e-9]
         for size_, drill_ in pairs:
             for v in new_vias:
                 v.size, v.drill = size_, drill_
