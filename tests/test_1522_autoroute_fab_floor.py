@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""autoroute's size ladder: the class first (#2021), the fab floor on demand
-(#1522), the board's own rules with --board-rules.
+"""autoroute's size ladder: the standard tier then the fab floor (#2021), the
+fab floor alone on demand (#1522), the board's own rules with --board-rules.
 
 1. `analyze` on a board whose Default class (0.2) is above the fab floor:
-   by default its first size rung is the class, then the standard tier, then
-   the floor, each strictly narrower; with `floor_first` the one rung is the
-   floor, `effective_floors`' drc_clearance.
+   by default its first size rung is the standard tier, not the class (an
+   aspirational class, as the plan skill reads one), then the floor, each
+   strictly narrower; with `floor_first` the one rung is the floor,
+   `effective_floors`' drc_clearance.
 2. `run_plan` at one rung (--floor-first) with a recording chain: every
    step's clearance argument -- the planes, each fanout rung, the decap
    pass, the diff pairs' gap and ceiling, and the route passes' ceiling --
    is that one value, and no part's fanout ladder runs the same command
    twice.
-3. The default ladder: a part's first escape at the class, then every
-   escape at the floor; while nets stay open the route step runs again at
-   each narrower rung from the board it started on, its ceiling and track
-   the rung's; a narrower rung that grades no better ships nothing, and no
-   rung runs once nothing is open.
+3. The ladder, on three rungs: a part's first escape at the first rung,
+   then every escape at the floor; while nets stay open the route step runs
+   again at each narrower rung from the board it started on, its ceiling and
+   track the rung's, judged on its own passes; a narrower rung that grades no
+   better ships nothing, and no rung runs once nothing is open.
 4. --board-rules: every routing step is told the board's own Default class
    as --clearance with --escalation board, never the ceiling.
 """
@@ -39,7 +40,7 @@ def expect(cond, what):
 
 
 def test_analyze():
-    print("analyze: the class first, then narrower rungs down to the fab floor")
+    print("analyze: the standard tier first, then the fab floor")
     declared = board_default_netclass_clearance(BOARD)
     a = AP.analyze(BOARD)
     floor = effective_floors(read_design_rules(BOARD).get('constraints') or {},
@@ -47,8 +48,13 @@ def test_analyze():
     expect(declared and declared > floor + 1e-9,
            f"the board declares a Default class above the floor ({declared} > {floor})")
     rungs = a['size_rungs']
-    expect(abs(a['clearance'] - declared) < 1e-9 and rungs[0]['name'] == 'class',
-           f"clearance {a['clearance']} is the class {declared}")
+    std = effective_floors(read_design_rules(BOARD).get('constraints') or {},
+                           len(a['layers']))['fab']['clearance']
+    expect(abs(a['clearance'] - std) < 1e-9 and rungs[0]['name'] == 'standard'
+           and a['clearance'] < declared - 1e-9,
+           f"clearance {a['clearance']} is the standard tier {std}, not the "
+           f"class {declared}")
+    expect(len(rungs) == 2, f"two rungs, standard and floor ({rungs})")
     expect(abs(rungs[-1]['clearance'] - floor) < 1e-9 and rungs[-1]['name'] == 'floor',
            f"the last rung {rungs[-1]} is the fab floor {floor}")
     expect(all((n['clearance'], n['track']) != (p['clearance'], p['track'])

@@ -168,8 +168,8 @@ class AutorouteOptionsPanel(wx.Panel):
         self.floor_first = wx.CheckBox(self, label="Start at the fab floor (--floor-first)")
         self.floor_first.SetToolTip(
             "Start every step at the fab floor (the deepest tier) instead of the "
-            "board's Default net class with the standard tier and the floor below "
-            "it as the size rungs the chain steps down to.")
+            "standard tier with the floor below it as the size rung the chain "
+            "steps down to.")
         grid.Add(self.floor_first, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.AddSpacer(0)
         self.keep_placement = wx.CheckBox(self, label="Keep placement (--keep-placement)")

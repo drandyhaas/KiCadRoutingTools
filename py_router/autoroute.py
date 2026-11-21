@@ -10,13 +10,12 @@ footprints, net names, layer count and the board's own design rules -- and
 runs the chain, so routing without an agent gets the steps that remove most
 congestion before the router starts:
 
-  1. design rules  the board's Default net class first (the standard tier
-                   where it declares none), every class capped at it, with
-                   each step's own escalation narrowing a net that cannot
-                   complete; the working via (fine via for fine-pitch
-                   escapes); then size rungs below it, the standard tier
-                   and the fab floor, which the fanouts and the route step
-                   step down to as the plan skill does (#2021); all from
+  1. design rules  the standard fab tier first, every net class capped at
+                   it, with each step's own escalation narrowing a net that
+                   cannot complete; the working via (fine via for fine-pitch
+                   escapes); then the fab floor below it, which the fanouts
+                   and the route step step down to as the plan skill does
+                   on aspirational rules (#2021); all from
                    list_nets.read_design_rules. --floor-first starts every
                    step at the fab floor (#1522)
   2. planes        on 4+ layer boards the fewest inner layers that put a
@@ -475,26 +474,18 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, board_rules=False,
     floor = dict(name='floor', clearance=clearance, track=track)
     rungs = [floor]
     if not (board_rules or floor_first):
-        # #2021, the plan skill's ladder on aspirational rules: start at the
-        # board's Default class (the standard tier where it declares none),
-        # then the standard tier, then the deepest floor -- each rung strictly
-        # narrower than the one before, never below the floor.
-        d = (rules.get('classes') or {}).get('Default') or {}
+        # #2021: a board's net classes are aspirational unless --board-rules
+        # says they are the user's own, so the plan skill routes at the fab
+        # floor rather than at the class: start at the standard tier (what
+        # route.py's --fab-tier auto starts at), then the deepest floor, each
+        # rung strictly narrower than the one before.
         std = eff.get('fab') or {}
-        std_c = _num(max(std.get('clearance') or clearance, clearance))
-        std_t = _num(max(std.get('track_width') or track, track))
-        cls = dict(name='class',
-                   clearance=_num(max(d.get('clearance') or std_c, clearance)),
-                   track=_num(max(d.get('track_width') or std_t, track)))
-        rungs = []
-        for r in (cls, dict(name='standard', clearance=std_c, track=std_t), floor):
-            if rungs:
-                r = dict(r, clearance=min(r['clearance'], rungs[-1]['clearance']),
-                         track=min(r['track'], rungs[-1]['track']))
-                if (r['clearance'], r['track']) == (rungs[-1]['clearance'],
-                                                    rungs[-1]['track']):
-                    continue
-            rungs.append(r)
+        std_r = dict(name='standard',
+                     clearance=_num(max(std.get('clearance') or clearance, clearance)),
+                     track=_num(max(std.get('track_width') or track, track)))
+        rungs = [std_r] if (std_r['clearance'], std_r['track']) != (
+            floor['clearance'], floor['track']) else []
+        rungs.append(floor)
         clearance, track = rungs[0]['clearance'], rungs[0]['track']
     if board_rules:
         # --board-rules: the board's own declared rules instead of the fab
@@ -1035,8 +1026,8 @@ def plan_steps(a, finish=False, effort_factor=2.0, keep_placement=False):
                            'above it is aspirational, so the route steps cap every '
                            'class at it; read from ' + src)
                           if a.get('floor_first') else
-                          ('the board\'s Default net class first (the standard tier '
-                           'where it declares none), every class capped at it; a net '
+                          ('the standard fab tier first, every net class capped at '
+                           'it (a class above it is aspirational); a net '
                            'that cannot complete is narrowed by the step itself '
                            '(--fab-tier auto --escalation fab), a fanout that drops '
                            'balls retries at the fab floor, and while nets stay open '
@@ -1379,7 +1370,7 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), rerou
 
     While nets stay open, the whole step is routed again from the board it
     started on at each narrower size rung (#2021: the plan skill's congestion
-    escalation, class -> standard tier -> fab floor), with passes of its own,
+    escalation on aspirational rules, standard tier -> fab floor), with passes of its own,
     and a board ships only when it ranks above the best so far: a narrower
     rung that does not complete more ships nothing. The REROUTE nets are first
     ripped and routed again on their own. Returns (chain, best board or None,
@@ -1622,10 +1613,8 @@ def main():
                          'to those minimums (--escalation board)')
     ap.add_argument('--floor-first', action='store_true',
                     help='start every step at the fab floor (the deepest tier: 0.09 mm '
-                         'clearance on 4+ layers, 0.10 on 2) instead of the board\'s '
-                         'Default net class with the size rungs below it (#1522; the '
-                         'default since #2021 is the class first, as the plan skill '
-                         'routes)')
+                         'clearance on 4+ layers, 0.10 on 2) instead of the standard '
+                         'tier with the floor below it as a size rung (#1522, #2021)')
     ap.add_argument('--keep-placement', action='store_true',
                     help='no step moves a part: the decap step, which moves '
                          'decoupling caps off the fanout copper, is not run')

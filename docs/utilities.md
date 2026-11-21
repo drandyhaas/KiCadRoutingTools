@@ -2704,9 +2704,10 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
 
 1. **Design rules**, as the plan-pcb-routing skill sizes a chain on
    aspirational rules (#2021): a ladder of size rungs, each strictly narrower
-   than the one before -- the board's Default net class (the standard fab
-   tier where the board declares none), the standard tier, then the fab
-   floor (the deepest tier: 0.09 mm clearance on 4+ layers, 0.10 on 2) --
+   than the one before -- the standard fab tier, then the fab floor (the
+   deepest tier: 0.09 mm clearance on 4+ layers, 0.10 on 2). A net class above
+   them is taken as aspirational, as the skill takes a stock class;
+   `--board-rules` routes at the board's own rules instead --
    with the working via and the fine via for fine-pitch escapes
    (`list_nets.read_design_rules`). Every step starts at the first rung, its
    clearance passed as `--clearance-ceiling`, and each step's own escalation
@@ -2771,7 +2772,7 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
    may cross them at 3.0 (`autoroute.PLANE_FALLBACK_COST`), so a plane carries
    only what could not route without it. While nets stay open, the whole step
    is routed again from the board it started on at each narrower size rung
-   (`route_standard`, `route_floor`, each with passes of its own), the skill's
+   (`route_floor`, with passes of its own), the skill's
    congestion escalation; a narrower rung ships only when it ranks above the
    best board so far.
 
@@ -2822,8 +2823,8 @@ Options:
                      narrowed only down to those minimums (--escalation
                      board), as the skill routes the user's own rules.
   --floor-first      Start every step at the fab floor (the deepest tier)
-                     instead of the size ladder from the board's Default
-                     class (#1522). Not with --board-rules.
+                     instead of the standard tier with the floor below it
+                     (#1522). Not with --board-rules.
   --keep-placement   No step moves a part: the decap step, which moves
                      decoupling caps off the fanout copper, is not run.
   --write-fill       Write the shipped board with its zones filled by KiCad's
