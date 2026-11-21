@@ -17,12 +17,14 @@ it stays out. Every routed pair the record leaves out is a row of
 
 Rows:
   1. end to end, the haasoscope test chain's fanned-out board
-     (`routed_output`), `*lvds_rx1_*`: the fallback really ran
-     (`[least self-graze; no clean layer]`, on three of the 13 pairs), both
-     members of every pair that took it are recorded `diff-pair`, and
+     (`routed_output`), all 56 `*lvds*` pairs: the fallback really ran
+     (`[least self-graze; no clean layer]`, on three of them), both members
+     of every such pair that shipped are recorded `diff-pair` (one that took
+     it and then failed has nothing to record), and
      `unprotected_pairs` is []. (orangecrab_ext_pll's USB pair was the witness
      until #1441 corrected the coupled middle's search, which then finds that
-     pair a layer it couples on cleanly.)
+     pair a layer it couples on cleanly; the 13 `*lvds_rx1_*` pairs were,
+     until the #1055 polarity crossover routed most of them coupled.)
   2. unit: a pair result carrying `selfgraze` whose P and N tracks stand
      0.1 mm apart under a 0.25 mm clearance stays out, and is listed with
      the reason `self-graze fallback` and its shortfall count;
@@ -161,7 +163,7 @@ def units():
 
 
 def end_to_end():
-    print("1. haasoscope's lvds_rx1 pairs through the self-graze fallback")
+    print("1. haasoscope's lvds pairs through the self-graze fallback")
     import re
     from protected_nets import read_protected_nets, pro_path_for_board
     with tempfile.TemporaryDirectory() as td:
@@ -170,7 +172,7 @@ def end_to_end():
         check(PY + [tool('copy_board.py'), evidence(BOARD, 'the bundled board'), board],
               accept=True)
         r = check(PY + [tool('route_diff.py'), board, out,
-                        '--nets', '*lvds_rx1_*', '--swappable-nets', '*lvds_rx1_*',
+                        '--nets', '*lvds*', '--swappable-nets', '*lvds*',
                         '--impedance', '100', '--proximity-heuristic-factor', '0.0',
                         '--clearance', '0.1', '--via-size', '0.3', '--via-drill', '0.2',
                         '--track-width', '0.1',
@@ -189,11 +191,19 @@ def end_to_end():
                   "exercises #1871\n" + log[-600:])
             return False
         prot = read_protected_nets(pro_path_for_board(evidence(out, 'the routed board')))
-        ok(all(prot.get(p + '_P') == 'diff-pair' and prot.get(p + '_N') == 'diff-pair'
-               for p in fell),
-           f"both members of every fallback pair are recorded: {sorted(set(fell))}")
         with open(evidence(js, '--json-out'), encoding='utf-8') as fh:
             doc = json.load(fh)
+        # A pair can take the fallback and still end failed (no result, no
+        # copper to record); #1871 is about the ones that ship.
+        shipped = [p for p in sorted(set(fell))
+                   if p in set(doc.get('routed_diff_pairs') or [])]
+        if not shipped:
+            print("  [BROKEN TEST] no pair that took the self-graze fallback shipped: "
+                  f"nothing here exercises #1871 (fell back: {sorted(set(fell))})")
+            return False
+        ok(all(prot.get(p + '_P') == 'diff-pair' and prot.get(p + '_N') == 'diff-pair'
+               for p in shipped),
+           f"both members of every shipped fallback pair are recorded: {shipped}")
         ok(doc.get('unprotected_pairs') == [],
            f"and no routed pair is left out: {doc.get('unprotected_pairs')}")
         n = 2 * len(doc.get('routed_diff_pairs') or [])

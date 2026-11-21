@@ -759,6 +759,24 @@ nets one by one costs build time: each named net is read on its own (a rule ORin
 prints `.kicad_dru rule 'x': hole_clearance min 0.254 mm: routed tracks and vias
 are kept that far from the holes of other nets' vias and pads`.
 
+A `hole_clearance` rule whose only unread terms are rule-area predicates
+(`A.insideArea('ROOM')`, `intersectsArea`, `enclosedByArea`, on either item,
+with any of the terms above) binds by where each item stands, as kicad-cli
+10.0.8 grades it: an item is in an area where its copper overlaps the area on
+the layer the pair is asked on (a through via pair is asked on every layer the
+two share), `enclosedByArea` wants the whole item inside, and the last matching
+rule still wins. `check_drc.py` grades it so (`Area-scoped hole-clearance
+rules`), and the generators' gate (`HoleRuleGate`: the fan-outs, GND vias, plane
+taps) and the route step read the same answer. The route step measures each
+hole of the board against the areas; the copper it lays has no position when
+the map is built, so where the condition turns on that copper being in an area
+-- one drawn on the layer, within the rule's reach of the hole -- the hole is
+held at the larger of the rule's value and what the earlier rules give
+(tighten-safe). A track that passes such a hole outside the area and enters it
+further along is not held by the map; the step's own grade names any such row.
+A rule naming an area the board does not draw stays `NOT GRADED` and `NOT
+honoured`.
+
 The generators that test a via site by their own means ask the same grader:
 `bga_fanout.py` (dogbone and under-pad), `qfn_fanout.py`, `route_planes.py
 --add-gnd-vias` and the plane taps each refuse a site through

@@ -11,7 +11,7 @@ import os
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via, is_immutable_copper
-from routing_utils import pos_key, POSITION_DECIMALS, into_pad_frame_point
+from routing_utils import pos_key, POSITION_DECIMALS
 from geometry_utils import point_to_segment_distance, segments_intersect
 from via_span import HELD_OUTSIDE_SPAN
 
@@ -1441,7 +1441,7 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
     `area` (#1843, `config.area_clearance`) holds a pair a rule area binds to
     the area's value."""
     from geometry_utils import segment_to_segment_distance, point_to_segment_distance
-    from check_drc import segment_to_rect_distance
+    from check_drc import segment_to_pad_copper_distance
     from single_ended_routing import _seg_foreign_hole_dist
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     half = width / 2
@@ -1488,12 +1488,12 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
         for pad in pads:
             if not (layer in pad.layers or any('*' in L for L in pad.layers)):
                 continue
-            # Rotate the segment into the pad's frame so a tilted pad is tested
-            # against its true rectangle (distance is rotation-invariant).
-            rx1, ry1 = into_pad_frame_point(x1, y1, pad)
-            rx2, ry2 = into_pad_frame_point(x2, y2, pad)
-            d, _ = segment_to_rect_distance(rx1, ry1, rx2, ry2, pad.global_x, pad.global_y,
-                                            pad.size_x / 2, pad.size_y / 2)
+            if pad.pad_type == 'np_thru_hole':
+                continue  # no copper: its drill is the NPTH pass above
+            # The pad's copper as check_drc measures it (its tilt, its shape's
+            # corner radius, a custom pad's polygons): a round pad read as its
+            # bounding square refused legal copper beside it.
+            d = segment_to_pad_copper_distance(x1, y1, x2, y2, pad)
             # A pad override REPLACES the pair value, floored at the board
             # minimum (KiCad, measured). No config in this scope: the
             # module helper with the board's memoised rules.min_clearance.
@@ -4628,11 +4628,24 @@ def _pt_seg(px, py, x1, y1, x2, y2):
 
 
 def _seg_seg_min_dist(ax, ay, bx, by, cx, cy, dx, dy) -> float:
-    """Minimum Euclidean distance between segments AB and CD (endpoint sampling,
-    exact for the non-crossing case a clearance test cares about; crossing -> ~0
-    which still flags)."""
+    """Minimum Euclidean distance between segments AB and CD: 0 when they
+    cross, else the least endpoint-to-segment distance. The endpoint terms
+    alone are NOT ~0 for a crossing: two long segments crossing mid-span have
+    every endpoint far from the other, so a crossing read as clear."""
+    if _segs_properly_cross(ax, ay, bx, by, cx, cy, dx, dy):
+        return 0.0
     return min(_pt_seg(ax, ay, cx, cy, dx, dy), _pt_seg(bx, by, cx, cy, dx, dy),
                _pt_seg(cx, cy, ax, ay, bx, by), _pt_seg(dx, dy, ax, ay, bx, by))
+
+
+def _segs_properly_cross(ax, ay, bx, by, cx, cy, dx, dy) -> bool:
+    """AB and CD cross at a point interior to both (each one's ends strictly on
+    opposite sides of the other). A touch at an end is the endpoint terms'."""
+    d1 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    d2 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax)
+    d3 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx)
+    d4 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx)
+    return d1 * d2 < 0.0 and d3 * d4 < 0.0
 
 
 def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=None,
@@ -4790,6 +4803,13 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
                        _pt_to_segs(x1, y1, fax, fay, fbx, fby)),
             np.minimum(_pts_to_seg(fax, fay, x0, y0, x1, y1),
                        _pts_to_seg(fbx, fby, x0, y0, x1, y1)))
+        # A crossing is distance 0, as in the scalar _seg_seg_min_dist: the
+        # endpoint terms alone read a mid-span crossing as clear.
+        _d1 = (x1 - x0) * (fay - y0) - (y1 - y0) * (fax - x0)
+        _d2 = (x1 - x0) * (fby - y0) - (y1 - y0) * (fbx - x0)
+        _d3 = (fbx - fax) * (y0 - fay) - (fby - fay) * (x0 - fax)
+        _d4 = (fbx - fax) * (y1 - fay) - (fby - fay) * (x1 - fax)
+        d = np.where((_d1 * _d2 < 0.0) & (_d3 * _d4 < 0.0), 0.0, d)
         req = np.maximum(eff, fef) - 1e-4
         _own = -1
         _prow = None
@@ -5896,7 +5916,12 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         min_gain is never an allowance to get longer;
       * strands no same-net copper: mid-span via taps, pad touches, and
         T/X-touching sibling tracks hold their span un-collapsed unless the
-        touch sits at a kept endpoint.
+        touch sits at a kept endpoint;
+      * on a net a --keep-away rule prices, puts no more track inside the
+        band than the copper it replaces, measured as keep_away_report
+        measures the shipped board (#2006). The router bent the staircase
+        away from the other side's copper; a shortcut through the band
+        would hand that space back.
 
     Per net, the result is committed only if check_net_connectivity does not
     grade it worse than the original. The guard runs WITHOUT pour credit:
@@ -5908,10 +5933,11 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     same pour-blind convention routing follows; the plane finalize /
     kicad-oracle recheck downstream owns that damage (see the comment at
     the clears() block). dry_run=True measures without mutating anything --
-    the #536 "is it worth it on OUR output" instrument. Soft costs are
+    the #536 "is it worth it on OUR output" instrument. Other soft costs are
     deliberately not consulted (the router's corridors are a routing-time
-    concept); callers gate this to the final chain step -- see
-    cleanup_pipeline.
+    concept); the keep-away is the exception because it is graded on the
+    copper after routing (JSON_SUMMARY['keep_away']). Callers gate this to
+    the final chain step -- see cleanup_pipeline.
 
     Returns (changed_count, nets_changed, original_segments_to_remove,
     added_segments, stats)."""
@@ -5926,6 +5952,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                            npth_slot_capsules, segment_to_npth_slots_distance)
     from connectivity import COINCIDENCE_TOL
     from obstacle_map import resolve_hole_clearance
+    from keep_away import band_meter
 
     # #1038: the board's DECLARED copper-to-hole floor, not the flat 0.20. The
     # smoother CHOOSES where new copper goes (a shortcut replacing a staircase
@@ -6217,6 +6244,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
             stats['nets'] += 1
             net_pads = pcb_data.pads_by_net.get(net_id, [])
             net_vias = vias_by_net.get(net_id, [])
+            # #2006: built per net, after the nets before it were smoothed.
+            in_band = band_meter(pcb_data, config, net_id) if config is not None else None
 
             candidates = [s for s in net_segs
                           if not getattr(s, 'graphic', False)
@@ -6451,6 +6480,29 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                 v = _cmemo[key] = clears(x1, y1, x2, y2, layer, net_id, w)
                             return v
 
+                        _bmemo = {}
+
+                        def band_m(x1, y1, x2, y2):
+                            key = (x1, y1, x2, y2)
+                            v = _bmemo.get(key)
+                            if v is None:
+                                v = _bmemo[key] = in_band(layer, x1, y1, x2, y2, w)
+                            return v
+
+                        def band_kept(poly, i, j, pts):
+                            # #2006: no more track inside a keep-away band
+                            # than the sub-path poly[i..j] it replaces.
+                            if in_band is None:
+                                return True
+                            added = sum(band_m(pts[q][0], pts[q][1],
+                                               pts[q + 1][0], pts[q + 1][1])
+                                        for q in range(len(pts) - 1))
+                            if added <= 0.0:
+                                return True
+                            return added <= sum(band_m(poly[p][0], poly[p][1],
+                                                       poly[p + 1][0], poly[p + 1][1])
+                                                for p in range(i, j)) + 1e-9
+
                         def collapse(poly, leg_pos, allow_tie):
                             """One greedy pass over polyline poly -> {i: (j, pts)}."""
                             m = len(poly) - 1
@@ -6537,7 +6589,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                             continue
                                         if all(clears_m(pts[q][0], pts[q][1],
                                                         pts[q + 1][0], pts[q + 1][1])
-                                               for q in range(len(pts) - 1)):
+                                               for q in range(len(pts) - 1)) \
+                                                and band_kept(poly, i, j, pts):
                                             found = (j, pts)
                                             break
                                     if found:
@@ -8881,7 +8934,10 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     must leave byte-faithful).
     """
     new_segments = result['new_segments']
-    if not new_segments:
+    # A result with vias and no segments commits its vias (#2005): returning
+    # on no segments alone dropped them, while remove_route_from_pcb_data
+    # removed them, so a rip + restore lost a via-only result.
+    if not new_segments and not result.get('new_vias'):
         return
     # #658 in-run river packing: pack the FRESH route's runs against
     # committed sibling runs BEFORE this copper becomes an obstacle.
@@ -9054,7 +9110,7 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         _have_s.add(id(seg))
         pcb_data.segments.append(seg)
     _have_v = {id(v) for v in pcb_data.vias}
-    for via in result['new_vias']:
+    for via in result.get('new_vias') or ():
         if id(via) in _have_v:
             continue
         _have_v.add(id(via))
@@ -9064,7 +9120,7 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     adopt_restored_stubs(pcb_data, result)
     if getattr(pcb_data, '_route_trace', None) is not None:     # the movie's record
         from route_trace import record
-        record(pcb_data, cleaned_segments, result['new_vias'], result, trace_event)
+        record(pcb_data, cleaned_segments, result.get('new_vias') or [], result, trace_event)
 
 
 def adopt_restored_stubs(pcb_data: PCBData, result: dict) -> None:

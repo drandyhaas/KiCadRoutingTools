@@ -123,7 +123,7 @@ def recorded_repo_prefix(manifest_text: str) -> str | None:
 AUTOROUTE_OUTPUT = "autoroute.kicad_pcb"
 
 
-def autoroute_manifest(manifest_text: str, tool: str) -> str:
+def autoroute_manifest(manifest_text: str, tool: str, extra_args=()) -> str:
     """The recorded chain replaced by ONE autoroute.py run on the same input.
 
     The autorouter arm asks what the deterministic planner makes of a board
@@ -134,6 +134,8 @@ def autoroute_manifest(manifest_text: str, tool: str) -> str:
     the grade subtracts the same pre-existing conditions as the recorded
     chain's. Everything the recorded chain chose (steps, nets, layers,
     clearances) is dropped: autoroute.py reads them off the board.
+    `extra_args` are autoroute.py's own options, appended to its command
+    (cloud_replay_sets --autoroute-args).
     """
     lines = manifest_text.splitlines()
     cwd = next((ln for ln in lines if re.match(r"^#\s*cwd=", ln)), None)
@@ -157,7 +159,8 @@ def autoroute_manifest(manifest_text: str, tool: str) -> str:
     head = [ln for ln in lines[:3] if ln.startswith("#") and "cwd=" not in ln]
     return "\n".join(head + ["set -e", cwd,
                              f"python3 -u -X utf8 {shlex.quote(tool)} "
-                             f"{shlex.quote(src)} {AUTOROUTE_OUTPUT}"]) + "\n"
+                             f"{shlex.quote(src)} {AUTOROUTE_OUTPUT}"
+                             + "".join(f" {shlex.quote(a)}" for a in extra_args)]) + "\n"
 
 
 def recorded_corpus_prefix(manifest_text: str) -> str | None:

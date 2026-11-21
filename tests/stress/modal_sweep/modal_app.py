@@ -433,7 +433,8 @@ def _replay_one(task: dict) -> dict:
         # The autorouter arm: the recorded chain becomes ONE autoroute.py run
         # on the same input, at this container's repo (so no remap applies).
         text = sweep_lib.autoroute_manifest(
-            text, f"{REPO}/py_router/autoroute.py")
+            text, f"{REPO}/py_router/autoroute.py",
+            spec.get("autoroute_args") or ())
         manifest_path.write_text(text)
 
     # 3. Remap the recorded repo prefix onto this container's repo.
