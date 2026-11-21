@@ -3029,7 +3029,13 @@ field admits (e.g. 0.15–0.2) rather than the open-field ideal.
 The neck-down zone (`--neckdown-length`, 2.5 mm from each pad) is laid at the
 rail's width capped at the pad's short side wherever that fits, and at
 `--track-width` only where it does not (#1318): a 0.3 mm rail into a 0.3 mm
-LQFP pin keeps 0.3 where the neighbours allow. What still ships narrow is in
+LQFP pin keeps 0.3 where the neighbours allow. An edge that does not fit at
+the rail's width is routed at the widest of half, a quarter, ... of it that
+fits, short or long (#1983), and narrows to that width only where the rail's
+width does not fit: a 2 mm rail through a gap that passes 1 mm but not 2 mm
+ships at 1 mm there, not at `--track-width`. The
+log line `Wide power route blocked on <net>: long edge spanning ...` names the
+width each long edge reached. What still ships narrow is in
 the JSON summary's `power_widths` (and one `power copper shipped under width`
 row per net in `design_rules`).
 

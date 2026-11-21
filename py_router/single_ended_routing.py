@@ -3935,6 +3935,13 @@ def _edge_span_mm(sources, targets, grid_step):
     return best * grid_step
 
 
+def _net_label(pcb_data, net_id):
+    """The net's name for a log line, else ``net_<id>``."""
+    nets = getattr(pcb_data, 'nets', None) or {}
+    net = nets.get(net_id)
+    return net.name if net is not None and net.name else f"net_{net_id}"
+
+
 def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
                              coord, layer_names, pending_vias=None):
     """FAILURE-ONLY memo over the #189 in-pad via placement (2026-08-14
@@ -4701,13 +4708,15 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
 
     Same return shape as _route_connection_at_margin plus a trailing
     (necked_down, uniform_width):
-      - necked_down=True (long trunk): the wide route failed and it re-routed at the
-        neck floor; the caller necks down the segments near the pad
+      - necked_down=True (long trunk): the wide route failed, it re-routed at the
+        neck floor and no width between routed; the caller keeps the net's width
+        where it fits and necks to the floor where it does not
         (_neck_width_for_net picks the floor per net class).
-      - uniform_width=W (short edge, necked_down=False): a short wide edge routed
-        at width W (full -> /2 -> ... -> neck floor); the caller sets EVERY segment
-        to W so the trace -- and the obstacle map (which reads seg.width) and the
-        written output -- is genuinely that width, not the configured width.
+      - uniform_width=W (necked_down=False): the edge routed at width W -- a short
+        edge stepping full -> /2 -> ... -> neck floor, or a long edge (#1983)
+        trying the same widths above the floor once the floor routed; the caller
+        lays it at the net's width where that fits and necks to W where it does
+        not (_assign_wide_route_widths).
       - both None/False: full width, no rewidthing.
     """
     result = _route_connection_at_margin(
@@ -4804,17 +4813,21 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         # 2026-08-05 -- see the note above _rung_search_pair.)
         return _pad_entry_neck((result[0], total_iters) + result[2:])
 
-    # Long trunk: keep the existing single wide->narrow retry + neck-down.
+    # Long trunk: retry at the neck floor, then (#1983) at the widths between.
     # Power necks to the LAYER width (base_track_margins: the impedance extra
     # on impedance runs, 0 on plain runs); an impedance net necks to the
     # NOMINAL width (its margins vs the stamps' reserve, usually all-zero).
-    print(f"{print_prefix}{YELLOW}Wide route blocked - retrying at default track width (neck-down){RESET}")
+    _kind = 'power' if power_wide else 'impedance'
+    _edge = (f"Wide {_kind} route blocked on {_net_label(pcb_data, net_id)}: "
+             f"long edge spanning {span_mm:.2f}mm")
     retry_margins = (config.base_track_margins() if power_wide
                      else config.track_margins_for_width(config.track_width))
     retry = _route_connection_at_margin(
         router, obstacles, config, sources, targets, retry_margins,
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
     if retry[0] is None:
+        print(f"{print_prefix}{YELLOW}{_edge} does not route at the "
+              f"{neck_floor:.4f}mm neck width either{RESET}")
         # Rip-up analysis reads the UNION of both attempts' frontiers (#1400).
         # The wide attempt alone cannot see a wall the narrow route meets: it
         # cannot leave a narrow pad entry past its static neighbours, so its
@@ -4828,7 +4841,32 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         bwd = _union_frontier_cells(result[3], retry[3])
         return ((result[0], result[1] + retry[1], fwd, bwd) + result[4:]
                 + (False, None))
-    return (retry[0], result[1] + retry[1]) + retry[2:] + (True, None)
+    # #1983: the edge routes at the neck floor, so try the widths between
+    # (the short-edge ladder's rungs, widest first) before shipping it
+    # there. Without them a 2 mm trunk that did not fit fell straight to the
+    # 0.25 mm signal width where 1 mm fits (splitflap +12V: 52 mm at 0.25).
+    # The floor search runs first so an edge no width routes costs what it
+    # always did, and these run only for an edge known to route. A rung's
+    # route is laid as the short-edge ladder's is (uniform_width): at the
+    # net's width wherever that fits, necked to the rung only where it does
+    # not -- the long-trunk rule with the neck at the rung, not the floor.
+    total_iters = result[1] + retry[1]
+    rungs = _power_width_ladder(net_w, neck_floor)[:-1]
+    for w in rungs:
+        r = _route_connection_at_margin(
+            router, obstacles, config, sources, targets,
+            config.track_margins_for_width(w),
+            pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
+        total_iters += r[1]
+        if r[0] is not None:
+            print(f"{print_prefix}{YELLOW}{_edge} routed at {w:.4f}mm "
+                  f"(down from {net_w:.4f}){RESET}")
+            return (r[0], total_iters) + r[2:] + (False, w)
+    _tried = (f"; {', '.join(f'{w:.4f}' for w in rungs)}mm did not route"
+              if rungs else "")
+    print(f"{print_prefix}{YELLOW}{_edge} routed at the {neck_floor:.4f}mm "
+          f"neck width (down from {net_w:.4f}{_tried}), neck-down{RESET}")
+    return (retry[0], total_iters) + retry[2:] + (True, None)
 
 
 def _route_connection_at_margin(router, obstacles, config, sources, targets, track_margin,
