@@ -123,7 +123,62 @@ def near_points(pa, pb, near):
     return out
 
 
+def _bench_mark():
+    """what a brought plan is OF: the bench's board (its path, size and time of writing), its nets, its destination"""
+    import whole_ctx
+    board, nets, dest = whole_ctx.bench()
+    st = os.stat(board)
+    return [os.path.abspath(board), st.st_size, st.st_mtime_ns, sorted(nets), dest]
+
+
+def save_plan(path):
+    """THIS BUS'S READING OF ITS BENCH, BROUGHT TO THE COUPLED SOLVE (`whole_joint.py --plan PATH`, run by a bus under
+    its own settings, in its own process where its stages run there): whole_ctx.plan()'s, written whole as the stage
+    cache writes one, with what it is of beside it (PATH.json). The coupled solve builds every bus's model again in
+    ONE model, and planned every bus's bench itself for it -- its board parsed, its taut strings relaxed again, bus
+    after bus: 141 s of the 185 s a four-bus group's coupled model took to build under a profile, for what each bus's
+    own process had in hand"""
+    import pickle
+    import whole_ctx
+    out = whole_ctx.plan()
+    with open(path + '.tmp', 'wb') as f:
+        whole_ctx._Pickler(f, protocol=pickle.HIGHEST_PROTOCOL).dump(out)
+    os.replace(path + '.tmp', path)
+    with open(path + '.json', 'w') as f:
+        json.dump(_bench_mark(), f)
+
+
+def brought(path):
+    """the plan a bus brought (save_plan), read as the stage cache reads one (whole_ctx._guard) -- None where it
+    brought none, or one of another bench than the settings in force name (its board written since, other nets)"""
+    import pickle
+    import whole_ctx
+    if not path or not os.path.isfile(path) or not os.path.isfile(path + '.json'):
+        return None
+    try:
+        if json.load(open(path + '.json')) != _bench_mark():
+            return None
+        with open(path, 'rb') as f:
+            out = pickle.load(f)
+    except (OSError, ValueError, EOFError, pickle.UnpicklingError, AttributeError, ImportError):
+        return None
+    _board, nets, dest = whole_ctx.bench()
+    return whole_ctx._guard(out, nets, dest)
+
+
+def put(doc, path):
+    """`doc` written to `path` WHOLE: beside it, then moved onto it -- a bus waiting for the file reads it the moment
+    it is there, and found one being written is one it cannot read"""
+    tmp = os.path.join(os.path.dirname(path), '.' + os.path.basename(path) + '.tmp')
+    with open(tmp, 'w') as f:
+        json.dump(doc, f)
+    os.replace(tmp, path)
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--plan':
+        save_plan(sys.argv[2])
+        return
     if any(a in ('--help', '-h') for a in sys.argv[1:]) or len(sys.argv) < 3:
         print('usage: ' + __doc__.split(' -- ', 1)[0].strip())
         sys.exit(0 if len(sys.argv) > 1 else 2)
@@ -151,7 +206,8 @@ def main():
         with awx_settings.given(env), contextlib.redirect_stdout(said):
             import whole_ctx
             import whole_solve as ws
-            ctx, _cs = whole_ctx.plan()
+            # (the bus's own reading of its bench, brought with its request: save_plan -- else planned here)
+            ctx, _cs = brought(r.get('plan')) or whole_ctx.plan()
             p = ws.solve(ctx, env['DEST'], files(env, 'CUTS'), files(env, 'HIST'), None,
                          soft_cuts=files(env, 'SOFT_CUTS'), joint=types.SimpleNamespace(m=m))
         for ln in said.getvalue().splitlines():
@@ -336,8 +392,7 @@ def main():
         json.dump({'round': rnd, 'couplings': len(cpl), 'secs': round(time.time() - t0, 1), 'all': cpl,
                    'broken_alone': [], 'broken': [], 'own': True}, open(os.path.join(rd, 'joint.json'), 'w'), indent=1)
         for bus in sorted(parts):
-            json.dump({'bus': bus, 'joint': True, 'own': True, 'cuts': None},
-                      open(os.path.join(rd, f'{bus}.joint.json'), 'w'))
+            put({'bus': bus, 'joint': True, 'own': True, 'cuts': None}, os.path.join(rd, f'{bus}.joint.json'))
         return
     s_ = cp_seed.solver()
     s_.parameters.num_workers = WORKERS
@@ -417,7 +472,7 @@ def main():
         if J is not None and jc.get(bus):
             cf_ = os.path.join(rd, f'{bus}.cuts.json')
             json.dump({'cuts': [], 'vcuts': [], 'lcuts': jc[bus]}, open(cf_, 'w'), indent=0)
-        json.dump({'bus': bus, 'joint': J is not None, 'cuts': cf_}, open(os.path.join(rd, f'{bus}.joint.json'), 'w'))
+        put({'bus': bus, 'joint': J is not None, 'cuts': cf_}, os.path.join(rd, f'{bus}.joint.json'))
     json.dump(rep, open(os.path.join(rd, 'joint.json'), 'w'), indent=1)
 
 

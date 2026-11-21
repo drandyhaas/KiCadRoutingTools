@@ -204,13 +204,36 @@ def _hausdorff(A, B):
 BLOCK = 25        # rounds between shortcut-and-densify resamples, as before
 
 
+RUN = 256         # (_batch_candidates) points measured together: a run of the points' array, neighbours on a string
+
+
+def _near_table(P, own, onet, lo, hi, dist):
+    """the (points, obstacles) table of `dist` where it is within REACH and the obstacle another net's, inf elsewhere
+    -- measured only for the obstacles whose reach (`lo`, `hi`: its box, REACH and its radius round it) meets a RUN
+    of points' box: a point within REACH of an obstacle stands in that box, so every other entry is past REACH, as
+    the whole table had it. `dist(rows, cols)`: the distances of the points `rows` (a slice) to the obstacles `cols`"""
+    m, n = len(P), len(onet)
+    out = np.full((m, n), np.inf)
+    for r0 in range(0, m, RUN):
+        rows = slice(r0, min(m, r0 + RUN))
+        Q = P[rows]
+        cols = np.flatnonzero((lo[:, 0] <= Q[:, 0].max()) & (hi[:, 0] >= Q[:, 0].min())
+                              & (lo[:, 1] <= Q[:, 1].max()) & (hi[:, 1] >= Q[:, 1].min()))
+        if len(cols):
+            d = dist(rows, cols)
+            out[rows, cols] = np.where((d <= REACH) & (onet[None, cols] != own[rows, None]), d, np.inf)
+    return out
+
+
 def _batch_candidates(P, own, D, C, dnet, cnet):
     """Per point, the nearest obstacles within REACH that are not the
     point's own net, as padded (M, KMAX) index arrays (-1 = none)."""
     m = len(P)
+    pad = REACH + 1e-6          # (an obstacle's box a hair wider than its reach: the table's own test decides)
     if len(D):
-        dd = np.hypot(P[:, None, 0] - D[None, :, 0], P[:, None, 1] - D[None, :, 1]) - D[None, :, 2]
-        dd = np.where((dd <= REACH) & (dnet[None, :] != own[:, None]), dd, np.inf)
+        rr = (D[:, 2] + pad)[:, None]
+        dd = _near_table(P, own, dnet, D[:, :2] - rr, D[:, :2] + rr, lambda rows, cols: np.hypot(
+            P[rows, None, 0] - D[None, cols, 0], P[rows, None, 1] - D[None, cols, 1]) - D[None, cols, 2])
         k = min(KMAX, dd.shape[1])
         od = np.argpartition(dd, k - 1, axis=1)[:, :k] if dd.shape[1] > k else np.argsort(dd, axis=1)
         vd = np.take_along_axis(dd, od, 1) < np.inf
@@ -220,11 +243,15 @@ def _batch_candidates(P, own, D, C, dnet, cnet):
     if len(C):
         ax, ay, sx, sy, r = C.T
         L2 = np.where(sx * sx + sy * sy > 1e-12, sx * sx + sy * sy, 1.0)
-        px = P[:, None, 0] - ax[None]
-        py = P[:, None, 1] - ay[None]
-        t = np.clip((px * sx[None] + py * sy[None]) / L2[None], 0.0, 1.0)
-        dc = np.hypot(px - t * sx[None], py - t * sy[None]) - r[None]
-        dc = np.where((dc <= REACH) & (cnet[None, :] != own[:, None]), dc, np.inf)
+
+        def seg_dist(rows, cols):
+            px = P[rows, None, 0] - ax[None, cols]
+            py = P[rows, None, 1] - ay[None, cols]
+            t = np.clip((px * sx[None, cols] + py * sy[None, cols]) / L2[None, cols], 0.0, 1.0)
+            return np.hypot(px - t * sx[None, cols], py - t * sy[None, cols]) - r[None, cols]
+        rr = (r + pad)[:, None]
+        ends = np.stack([np.stack([ax, ay], 1), np.stack([ax + sx, ay + sy], 1)])
+        dc = _near_table(P, own, cnet, ends.min(0) - rr, ends.max(0) + rr, seg_dist)
         k = min(KMAX, dc.shape[1])
         oc = np.argpartition(dc, k - 1, axis=1)[:, :k] if dc.shape[1] > k else np.argsort(dc, axis=1)
         vc = np.take_along_axis(dc, oc, 1) < np.inf

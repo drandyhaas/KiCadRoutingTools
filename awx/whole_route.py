@@ -2315,7 +2315,16 @@ def with_ends(bench, nets, dest, lanes):
 
 
 JOINT_WAIT = 4 * 3600          # (JOINT_DIR) seconds a bus waits for the round's other buses at most
+JOINT_POLL = 0.5               # (JOINT_DIR) seconds between a waiting bus's looks at what it waits for
 LOOP_END = 10 ** 6              # (joint_pos) a loop's position once it has ended: past every re-solve of it
+
+
+def _put(doc, path):
+    """`doc` written to `path` whole (beside it, then moved onto it): a bus waiting for it reads it once it is there"""
+    tmp = os.path.join(os.path.dirname(path), '.' + os.path.basename(path) + '.tmp')
+    with open(tmp, 'w') as f:
+        json.dump(doc, f)
+    os.replace(tmp, path)
 
 
 def joint_pos(env, pos):
@@ -2416,8 +2425,12 @@ def joint_sync(env, r, solve, say):
     lanes = with_end_runs(lanes, genv, q_, cx_, cy_)
     say('  coupled solve: this bus\'s own plan laid out for the couplings: '
         + (f'{len(lanes["pieces"])} pieces' if lanes else 'NOT (its taut paths instead)'))
+    # (...and its reading of its bench brought with the request -- whole_joint.save_plan: the coupled solve builds
+    # this bus's model again, and planned its bench again for it)
+    plan_ = os.path.join(gd, 'plan.pkl')
+    run(['whole_joint.py', '--plan', plan_], env, log_path=os.path.join(gd, 'plan.log'))
     req = {'bus': bus, 'env': {k_: v_ for k_, v_ in env.items() if isinstance(v_, str)}, 'solve': os.path.abspath(solve),
-           'turn': [int(q_), cx_, cy_], 'lanes': lanes}
+           'turn': [int(q_), cx_, cy_], 'lanes': lanes, 'plan': plan_ if os.path.isfile(plan_ + '.json') else None}
     tmp = os.path.join(rd, f'.{bus}.req.json')
     json.dump(req, open(tmp, 'w'))
     os.replace(tmp, os.path.join(rd, f'{bus}.req.json'))
@@ -2435,7 +2448,7 @@ def joint_sync(env, r, solve, say):
         if time.time() - t0 > JOINT_WAIT:
             say(f'  coupled solve: the other buses not there after {JOINT_WAIT} s -- this bus\'s own plan')
             return None
-        time.sleep(5)
+        time.sleep(JOINT_POLL)
     with_ = [p_ for p_ in peers if os.path.isfile(os.path.join(rd, f'{p_}.req.json'))]
     if not with_:
         say(f'  coupled solve: no other bus in round {r} -- this bus\'s own plan')
@@ -2447,7 +2460,7 @@ def joint_sync(env, r, solve, say):
         run(['whole_joint.py', jd, str(r)], env, log_path=os.path.join(rd, 'joint.log'), own_process=True)
         for p_ in [bus] + with_:
             if not os.path.isfile(os.path.join(rd, f'{p_}.joint.json')):
-                json.dump({'bus': p_, 'joint': False}, open(os.path.join(rd, f'{p_}.joint.json'), 'w'))
+                _put({'bus': p_, 'joint': False}, os.path.join(rd, f'{p_}.joint.json'))
         open(os.path.join(rd, 'coord.done'), 'w').close()
     except FileExistsError:
         say(f'  coupled solve: round {r}, with {", ".join(with_)} (another bus runs it)')
@@ -2458,7 +2471,7 @@ def joint_sync(env, r, solve, say):
         if time.time() - t0 > JOINT_WAIT:
             say('  coupled solve: no coupled plan in time -- this bus\'s own plan')
             return None
-        time.sleep(5)
+        time.sleep(JOINT_POLL)
     for ln in grep(os.path.join(rd, 'joint.log'), r'couplings|side by side|coupled search|NOT the same'):
         say('  coupled solve: ' + ln.strip()[:200])
     jj_ = json.load(open(os.path.join(rd, f'{bus}.joint.json')))
@@ -2484,7 +2497,7 @@ def joint_sync(env, r, solve, say):
     while not all(os.path.isfile(os.path.join(rd, f'{p_}.laid')) or gone(p_) for p_ in with_):
         if time.time() - t0 > JOINT_WAIT:
             break
-        time.sleep(5)
+        time.sleep(JOINT_POLL)
     return cuts_ if ok_ else None
 
 
@@ -2520,7 +2533,7 @@ def joint_step_sync(env, pos, tag, say):
             say(f'  negotiation {key}: the {tag} of the buses before this one not there after {JOINT_WAIT} s -- on '
                 f'without them')
             return
-        time.sleep(5)
+        time.sleep(JOINT_POLL)
 
 
 def joint_lay_turn(env, r, passed, say):
@@ -2563,7 +2576,7 @@ def joint_lay_turn(env, r, passed, say):
             say(f'  negotiation: the lays of the buses before this one not there after {JOINT_WAIT} s -- laid '
                 f'without them')
             break
-        time.sleep(5)
+        time.sleep(JOINT_POLL)
     since = [p_ for p_ in since if laid(p_)]
     if since:
         say(f'  negotiation: {", ".join(since)} laid since this bus\'s loop ended ({time.time() - t0:.0f} s)')
@@ -2579,7 +2592,7 @@ def joint_lay_turn(env, r, passed, say):
             if time.time() - t0 > JOINT_WAIT:
                 say(f'  negotiation: another bus\'s lay not over after {JOINT_WAIT} s -- laid beside it')
                 break
-            time.sleep(2)
+            time.sleep(JOINT_POLL)
 
     def done():
         joint_lay_done(env, r)
@@ -2682,8 +2695,10 @@ def joint_loop_sync(env, pos, solve, say):
         lanes = None
     q_, cx_, cy_ = (float(v_) for v_ in env['JOINT_TURN'].split(','))
     lanes = with_end_runs(lanes, env, q_, cx_, cy_)
+    plan_ = os.path.join(rd, f'{bus}.plan.pkl')         # (its reading of its bench, as joint_sync brings it)
+    run(['whole_joint.py', '--plan', plan_], env, log_path=os.path.join(rd, f'{bus}.plan.log'))
     req = {'bus': bus, 'env': {k_: v_ for k_, v_ in env.items() if isinstance(v_, str)}, 'solve': os.path.abspath(solve),
-           'turn': [int(q_), cx_, cy_], 'lanes': lanes}
+           'turn': [int(q_), cx_, cy_], 'lanes': lanes, 'plan': plan_ if os.path.isfile(plan_ + '.json') else None}
     tmp = os.path.join(rd, f'.{bus}.req.json')
     json.dump(req, open(tmp, 'w'))
     os.replace(tmp, os.path.join(rd, f'{bus}.req.json'))
@@ -2694,7 +2709,7 @@ def joint_loop_sync(env, pos, solve, say):
         if time.time() - t0 > JOINT_WAIT:
             say(f'  coupled re-solve {key}: the other buses not there after {JOINT_WAIT} s -- this bus\'s own re-solve')
             return False, None
-        time.sleep(5)
+        time.sleep(JOINT_POLL)
     with_ = [p_ for p_ in peers if os.path.isfile(os.path.join(rd, f'{p_}.req.json'))]
     if not with_:
         return False, None
@@ -2704,7 +2719,7 @@ def joint_loop_sync(env, pos, solve, say):
         run(['whole_joint.py', jd, key], env, log_path=os.path.join(rd, 'joint.log'), own_process=True)
         for p_ in [bus] + with_:
             if not os.path.isfile(os.path.join(rd, f'{p_}.joint.json')):
-                json.dump({'bus': p_, 'joint': False}, open(os.path.join(rd, f'{p_}.joint.json'), 'w'))
+                _put({'bus': p_, 'joint': False}, os.path.join(rd, f'{p_}.joint.json'))
         open(os.path.join(rd, 'coord.done'), 'w').close()
     except FileExistsError:
         pass
@@ -2715,7 +2730,7 @@ def joint_loop_sync(env, pos, solve, say):
         if time.time() - t0 > JOINT_WAIT:
             say(f'  coupled re-solve {key}: no coupled plan in time -- this bus\'s own re-solve')
             return False, None
-        time.sleep(5)
+        time.sleep(JOINT_POLL)
     for ln in grep(os.path.join(rd, 'joint.log'), r'couplings|side by side|coupled search|NOT the same'):
         say(f'  coupled re-solve {key}: ' + ln.strip()[:200])
     jj_ = json.load(open(os.path.join(rd, f'{bus}.joint.json')))
