@@ -4942,9 +4942,8 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     from check_drc import (board_edge_geometry, _point_on_board,
                            _point_to_rings_distance, _segment_to_rings_distance,
                            point_to_pad_distance, _pad_has_no_copper,
-                           segment_to_rect_distance, _seg_seg_dist_coords)
+                           segment_to_pad_copper_distance, _seg_seg_dist_coords)
     from kicad_parser import pad_drill_capsule
-    from routing_utils import into_pad_frame_point
     from single_ended_routing import _seg_foreign_hole_dist
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(
         getattr(pcb_data, 'board_info', None))
@@ -5545,14 +5544,10 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                 continue
             if not has_cu:
                 continue  # NPTH: no copper; the hole check above covers it
-            # rotation-aware pad rect (#370 B3): rotate the segment into
-            # the pad's frame so a tilted pad is tested against its true
-            # rectangle (distance is rotation-invariant).
-            rx1, ry1 = into_pad_frame_point(sx, sy, p)
-            rx2, ry2 = into_pad_frame_point(ex, ey, p)
-            d, _ = segment_to_rect_distance(
-                rx1, ry1, rx2, ry2, p.global_x, p.global_y,
-                p.size_x / 2.0, p.size_y / 2.0)
+            # the pad's copper as check_drc measures it: its tilt (#370 B3),
+            # its shape's corner radius and a custom pad's polygons -- a
+            # round pad read as its bounding square refused legal copper
+            d = segment_to_pad_copper_distance(sx, sy, ex, ey, p)
             if d < hw + req(pfl, cfl):
                 return False
         for ov in pcb_data.vias:

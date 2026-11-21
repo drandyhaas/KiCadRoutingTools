@@ -420,7 +420,32 @@ def plane_layers(n):
     return list(range(1, n - 1))
 
 
-def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
+def _board_rule_sizes(rules, floor):
+    """The sizes a --board-rules run routes at: the board's Default net class
+    (clearance, track width, via, diff-pair gap and width), each held at the
+    board's own Board Setup minimums (rules.min_*), the via grown to the
+    minimum annular ring. A value the board does not declare falls back to the
+    fab-floor one in `floor`. -> dict(clearance, track, via, drill, pair_gap,
+    pair_width)."""
+    d = (rules.get('classes') or {}).get('Default') or {}
+    c = rules.get('constraints') or {}
+
+    def pos(*vals):
+        vs = [float(v) for v in vals if v]
+        return max(vs) if vs else None
+    clearance = d.get('clearance') or c.get('min_clearance') or floor['clearance']
+    track = pos(d.get('track_width'), c.get('min_track_width')) or floor['track']
+    via = pos(d.get('via_diameter'), c.get('min_via_diameter')) or floor['via']
+    drill = pos(d.get('via_drill'), c.get('min_through_hole_diameter')) or floor['drill']
+    ring = c.get('min_via_annular_width')
+    if ring and (via - drill) / 2.0 < float(ring) - 1e-9:
+        via = drill + 2.0 * float(ring)
+    return dict(clearance=_num(clearance), track=_num(track), via=_num(via), drill=_num(drill),
+                pair_gap=_num(d.get('diff_pair_gap') or floor['pair_gap']),
+                pair_width=_num(d.get('diff_pair_width') or floor['pair_width']))
+
+
+def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, board_rules=False):
     from kicad_parser import parse_kicad_pcb, pour_zones
     from list_nets import (read_design_rules, effective_floors,
                            find_power_nets, find_differential_pairs,
@@ -438,6 +463,18 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
     track = _num(max(eff['fab_track_width'], 0.1))
     via, drill = _num(eff['working_via_diameter']), _num(eff['working_via_drill'])
     fine_via, fine_drill = _num(eff['fine_via_diameter']), _num(eff['fine_via_drill'])
+    pair_gap, pair_width = _num(max(0.1, clearance)), _num(max(0.1, track))
+    if board_rules:
+        # --board-rules: the board's own declared rules instead of the fab
+        # floor; no via smaller than the board allows, so the fine via is the
+        # working one (a fanout that cannot escape at it is left to the route
+        # step, which routes the part from its pads).
+        br = _board_rule_sizes(rules, dict(clearance=clearance, track=track,
+                                           via=via, drill=drill, pair_gap=pair_gap,
+                                           pair_width=pair_width))
+        clearance, track, via, drill = br['clearance'], br['track'], br['via'], br['drill']
+        fine_via, fine_drill = via, drill
+        pair_gap, pair_width = br['pair_gap'], br['pair_width']
 
     pairs = []
     for pr in find_differential_pairs(pcb) or []:
@@ -523,7 +560,9 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST):
              if pairs[i] in globs and pairs[i + 1] in globs]
 
     return dict(layers=layers, clearance=clearance, track=track, via=via,
-                drill=drill, fine_via=fine_via, fine_drill=fine_drill, planes=planes,
+                drill=drill, fine_via=fine_via, fine_drill=fine_drill,
+                pair_gap=pair_gap, pair_width=pair_width, board_rules=bool(board_rules),
+                planes=planes,
                 plane_nets=plane_nets, power_nets=power_nets,
                 layer_costs=layer_costs, parts=parts, grid=grid,
                 congested=congested, n_nets=n_nets, pair_nets=pairs,
@@ -855,7 +894,26 @@ class Chain(ChainEvents):
             self.cur = out
 
 
-def plan_steps(a, finish=False, effort_factor=2.0):
+def _rules_args(a):
+    """How a routing step is told its clearance. By default the ceiling: every
+    net class capped at the fab floor (#1522). With --board-rules the board's
+    own Default class as --clearance, every other class at its own, and no
+    narrowing below any of it (--escalation off): a net that cannot complete
+    at the board's rules fails and is reported."""
+    if a.get('board_rules'):
+        return ['--clearance', str(a['clearance']), '--escalation', 'off']
+    return ['--clearance-ceiling', str(a['clearance'])]
+
+
+def _fanout_rules_args(a):
+    """A fanout step's clearance: --clearance and, as on the route steps, the
+    ceiling by default or the board's own rules with --board-rules."""
+    if a.get('board_rules'):
+        return _rules_args(a)
+    return ['--clearance', str(a['clearance'])] + _rules_args(a)
+
+
+def plan_steps(a, finish=False, effort_factor=2.0, keep_placement=False):
     """AUTOROUTE_PLAN's payload: the design rules the chain routes at and the
     steps it means to run, in order, as {tag, tool, what, why, optional}. A
     step marked optional runs only if what comes before it calls for it;
@@ -883,7 +941,11 @@ def plan_steps(a, finish=False, effort_factor=2.0):
                 + (' under the pads' if tool == 'mezz' else ''),
                 a.get('fanout_why', {}).get(ref, '') + '; a rung that drops escapes '
                 'or grazes is retried with the next')
-        if a['parts']:
+        if a['parts'] and keep_placement:
+            row('decap', 'decap', 'not run: --keep-placement',
+                'no step moves a part, so the decoupling caps stay where they are',
+                optional=True)
+        elif a['parts']:
             row('decap', 'decap', 'move decoupling caps off the fanout copper '
                 '(place_fanout_clearance)',
                 'once, after the fanouts, when one escaped a ball; a part it leaves '
@@ -908,23 +970,29 @@ def plan_steps(a, finish=False, effort_factor=2.0):
             f'effort stays within --effort-factor {effort_factor:g} x the first '
             f"pass's; may cross the planes at {PLANE_FALLBACK_COST:g}", optional=True)
     rules = {k: a[k] for k in ('clearance', 'track', 'via', 'drill', 'fine_via',
-                               'fine_drill', 'grid')}
+                               'fine_drill', 'grid', 'pair_gap', 'pair_width')}
+    src = a.get('rules_source') or "the fab defaults (the board has no .kicad_pro)"
     return {'mode': 'finish' if finish else 'full', 'rules': rules,
             'rules_source': a.get('rules_source'),
-            'rules_why': ('the fab floor for every step: a net class above it is '
-                          'aspirational, so the route steps cap every class at it; '
-                          'read from ' + (a.get('rules_source') or
-                                          "the fab defaults (the board has no .kicad_pro)")),
+            'board_rules': bool(a.get('board_rules')),
+            'rules_why': (('the board\'s own rules (--board-rules): its Default net '
+                           'class, held at its Board Setup minimums, every other class '
+                           'at its own, and no step narrows below them; read from ' + src)
+                          if a.get('board_rules') else
+                          ('the fab floor for every step: a net class above it is '
+                           'aspirational, so the route steps cap every class at it; '
+                           'read from ' + src)),
             'layers': a['layers'],
             'layer_costs': a['layer_costs'], 'planes': a['planes'],
             'power_nets': a['power_nets'], 'pair_nets': a['pair_nets'],
             'parts': a['parts'], 'not_fanned': a.get('not_fanned', []),
             'unselectable': a.get('unselectable', []),
             'congested': a['congested'], 'n_nets': a['n_nets'],
-            'effort_factor': effort_factor, 'steps': rows}
+            'effort_factor': effort_factor, 'keep_placement': bool(keep_placement),
+            'steps': rows}
 
 
-def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
+def run_plan(board, output, a, work, finish=False, effort_factor=2.0, keep_placement=False):
     ch = Chain(board, work, clearance=a['clearance'], baseline=os.path.abspath(board))
     L = a['layers']
     costs = [str(c) for c in a['layer_costs']]
@@ -936,7 +1004,8 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
         out, _, _ = ch.run('planes', [
             '{IN}', '{OUT}', '--nets', *[n for n, _ in a['planes']],
             '--plane-layers', *[l for _, l in a['planes']],
-            '--clearance', str(a['clearance'])], 'planes')
+            '--clearance', str(a['clearance']),
+            *(['--escalation', 'off'] if a.get('board_rules') else [])], 'planes')
         ch.accept(out)
 
     # 3. fanout, each part, with a retry ladder keeping the best escape
@@ -951,10 +1020,9 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
             base = ['{IN}', '--output', '{OUT}', '--component', ref,
                     '--nets', '*', *excl, '--layers', *L, '--layer-costs', *costs,
                     '--track-width', tw, '--grid-step', str(a['grid']),
-                    '--clearance', str(a['clearance']),
                     # the ceiling too, as on the route steps: bga_fanout honours
                     # and keeps the net classes without one (#1529)
-                    '--clearance-ceiling', str(a['clearance'])]
+                    *_fanout_rules_args(a)]
             # The working via, then the fine via (one rung when they are the
             # same via), then the fine via with dogbone escapes.
             vias = dict.fromkeys([(v, d), (a['fine_via'], a['fine_drill'])])
@@ -966,10 +1034,10 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
         else:
             base = ['{IN}', '--output', '{OUT}', '--component', ref,
                     '--nets', '*', *excl, '--width', tw,
-                    '--grid-step', str(a['grid']), '--clearance', str(a['clearance']),
+                    '--grid-step', str(a['grid']),
                     # the ceiling too, as on the route steps: qfn_fanout honours
                     # and keeps the net classes without one (#1529)
-                    '--clearance-ceiling', str(a['clearance'])]
+                    *_fanout_rules_args(a)]
             ladder = [
                 base,
                 base + ['--escape-method', 'underpad',
@@ -1001,7 +1069,9 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
 
     # 4. decaps, once, after the fanouts -- and again after a re-fan that
     # holds the parts it left shorted
-    if fanned:
+    if fanned and keep_placement:
+        ch.skip('decap', '--keep-placement: no step moves a part')
+    elif fanned:
         decap = ['{IN}', '{OUT}', '--clearance', str(a['clearance'])]
         out, _, _ = ch.run('decap', decap, 'decap')
         ch.accept(out)
@@ -1017,9 +1087,9 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0):
         before = ch.drc_nets(ch.cur)
         out, s, _ = ch.run('diff', [
             '{IN}', '{OUT}', '--nets', *[a['globs'][n] for n in a['pair_nets']],
-            '--track-width', str(max(0.1, a['track'])),
-            '--diff-pair-gap', str(max(0.1, a['clearance'])),
-            '--clearance-ceiling', str(a['clearance']),
+            '--track-width', str(a.get('pair_width', _num(max(0.1, a['track'])))),
+            '--diff-pair-gap', str(a.get('pair_gap', _num(max(0.1, a['clearance'])))),
+            *_rules_args(a),
             '--via-size', str(a['via']), '--via-drill', str(a['drill']),
             '--layers', *L, '--layer-costs', *costs,
             '--grid-step', str(a['grid'])], 'diffpairs')
@@ -1224,7 +1294,7 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), rerou
     def route_args(costs):
         return base + ['--layers', *L, '--layer-costs', *costs]
     base = ['{IN}', '{OUT}', '--nets', '*', '--no-bga-zones',
-            '--clearance-ceiling', str(a['clearance']),
+            *_rules_args(a),
             '--track-width', str(a['track']),
             '--via-size', str(a['via']), '--via-drill', str(a['drill']),
             '--grid-step', str(a['grid'])]
@@ -1349,6 +1419,29 @@ def _plane_layer_cost(text):
     return v
 
 
+def _write_fill(out, input_board):
+    """--write-fill: KiCad fills the shipped board's zones in place (#910), the
+    route step's own delivery fill. Its project is the shipped one, the input's
+    the fallback and the via-protection baseline. -> True when the board was
+    filled, else the reason it ships unfilled."""
+    try:
+        from kicad_exact_fill import write_filled_board
+        st = write_filled_board(out, out, verbose=True, project_from=input_board,
+                                baseline_file=input_board)
+    except Exception as e:                      # the board ships either way
+        print(f"AUTOROUTE: --write-fill skipped: {e}", flush=True)
+        return f'skipped: {e}'
+    if st.ok:
+        with open(out, encoding='utf-8', errors='replace') as fh:
+            n = fh.read().count('(filled_polygon')
+        print(f"AUTOROUTE: --write-fill: {n} filled_polygon block(s) written", flush=True)
+        return True
+    why = st.reason + (f' ({st.detail})' if st.detail else '')
+    print(f"AUTOROUTE: --write-fill did not run: {why}; the board ships unfilled -- "
+          f"grade it with `kicad-cli pcb drc --refill-zones`", flush=True)
+    return why
+
+
 def _ship(src, dst):
     """Copy board SRC and its siblings to DST, removing any sibling DST has
     that SRC does not, so the shipped set is exactly SRC's."""
@@ -1385,12 +1478,28 @@ def main():
                          'at 3.0; a positive price lets every step cross them '
                          '(the skill\'s route step uses 3.0), trading reference '
                          'integrity for routability')
+    ap.add_argument('--board-rules', action='store_true',
+                    help='route to the board\'s own declared rules instead of the fab '
+                         'floor: its Default net class\'s clearance, track width, via '
+                         'and diff-pair gap/width, held at its Board Setup minimums, '
+                         'every other class at its own, and no step narrows below '
+                         'them (--escalation off): a net that cannot complete at the '
+                         'board\'s rules fails and is reported')
+    ap.add_argument('--keep-placement', action='store_true',
+                    help='no step moves a part: the decap step, which moves '
+                         'decoupling caps off the fanout copper, is not run')
+    ap.add_argument('--write-fill', action='store_true',
+                    help='write the shipped board with its zones FILLED (KiCad\'s own '
+                         'ZONE_FILLER, needs KiCad\'s python), so it reads no phantom '
+                         'plane opens when opened or graded before a refill (#910)')
     args = ap.parse_args()
 
     t_start = time.time()
-    a = analyze(args.input_file, finish=args.finish, plane_cost=args.plane_layer_cost)
+    a = analyze(args.input_file, finish=args.finish, plane_cost=args.plane_layer_cost,
+                board_rules=args.board_rules)
     print("AUTOROUTE_ANALYSIS: " + json.dumps(a, sort_keys=True), flush=True)
-    plan = plan_steps(a, finish=args.finish, effort_factor=args.effort_factor)
+    plan = plan_steps(a, finish=args.finish, effort_factor=args.effort_factor,
+                      keep_placement=args.keep_placement)
     emit('AUTOROUTE_PLAN', plan)
     if args.dry_run:
         return 0
@@ -1411,7 +1520,8 @@ def main():
     finally:
         shutil.rmtree(stage, ignore_errors=True)
     ch, final, grade = run_plan(src, out, a, work, finish=args.finish,
-                                effort_factor=args.effort_factor)
+                                effort_factor=args.effort_factor,
+                                keep_placement=args.keep_placement)
     ch.end_step()
     note = None
     if not final and (args.finish or ch.cur != src):
@@ -1453,6 +1563,8 @@ def main():
         print("AUTOROUTE_SUMMARY: " + json.dumps(summary), flush=True)
         return 1
     _ship(final, out)
+    if args.write_fill:
+        summary['filled'] = _write_fill(out, os.path.abspath(args.input_file))
     print("AUTOROUTE_SUMMARY: " + json.dumps(summary), flush=True)
     return 0
 

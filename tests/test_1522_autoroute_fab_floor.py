@@ -135,9 +135,56 @@ def test_run_plan():
            f"({len(by_part.get('U2', []))} rungs)")
 
 
+def test_board_rules_and_keep_placement():
+    """--board-rules: every routing step is told the board's own Default
+    class as --clearance with --escalation off, never the ceiling;
+    --keep-placement: the decap pass does not run. Default mode is the
+    test above."""
+    print("run_plan --board-rules --keep-placement: the board's rules, no part moved")
+    br = AP.analyze(BOARD, board_rules=True)
+    expect(br.get('board_rules') is True, "analyze records board_rules")
+    expect(br['clearance'] >= AP.analyze(BOARD)['clearance'] - 1e-9,
+           f"board-rules clearance {br['clearance']} is not below the fab floor's")
+    a = dict(layers=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'], clearance=0.2,
+             track=0.2, via=0.6, drill=0.3, fine_via=0.6, fine_drill=0.3,
+             pair_gap=0.15, pair_width=0.18, board_rules=True,
+             planes=[('GND', 'In1.Cu')], plane_nets=['GND'], power_nets=['GND'],
+             layer_costs=[1.0, -1.0, 1.0, 1.0], grid=0.05, congested=False,
+             n_nets=10, pair_nets=['D_P', 'D_N'],
+             globs={'GND': 'GND', 'D_P': 'D_P', 'D_N': 'D_N'},
+             parts=[('U1', 'bga', 0.8), ('U3', 'qfn', 0.5)])
+    ch = RecordingChain()
+    orig = AP.Chain, AP.route_passes
+    AP.Chain = lambda *args, **kw: ch
+    AP.route_passes = lambda ch, a, L, costs, *r, **k: (ch, ch.cur, None)
+    try:
+        AP.run_plan('in', 'out', a, 'work', keep_placement=True)
+    finally:
+        AP.Chain, AP.route_passes = orig
+    ch2 = RecordingChain()
+    AP.route_passes(ch2, a, a['layers'], ['1.0', '-1.0', '1.0', '1.0'])
+    runs = ch.runs + ch2.runs
+    expect(not [t for k, t, _ in runs if k == 'decap' or 'decap' in t],
+           "--keep-placement: no decap pass ran")
+    for kind, tag, args in runs:
+        if kind == 'prune':
+            continue
+        expect('--clearance-ceiling' not in args,
+               f"{tag}: no --clearance-ceiling")
+        expect(_values(args, '--clearance') == ['0.2'],
+               f"{tag}: --clearance {_values(args, '--clearance')} is the board's 0.2")
+        expect(_values(args, '--escalation') == ['off'],
+               f"{tag}: --escalation {_values(args, '--escalation')} is off")
+        if kind == 'diff':
+            expect(_values(args, '--diff-pair-gap') == ['0.15']
+                   and _values(args, '--track-width') == ['0.18'],
+                   f"{tag}: the board's pair gap / width")
+
+
 def main():
     test_analyze()
     test_run_plan()
+    test_board_rules_and_keep_placement()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s)")
         return 1

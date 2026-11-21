@@ -857,6 +857,29 @@ def _collect_setback_blocked_cells(center_x, center_y, dir_x, dir_y, layer_idx, 
     return blocked
 
 
+def _xo_natural(centerline_mm, p_sign, original_src, original_tgt,
+                forced_source_dir, forced_target_dir):
+    """What a rejected route found, for the polarity ladder's crossover rung
+    (diff_pair_crossover.try_crossover): its simplified centreline in mm with
+    layer indices, in ROUTE order, the endpoint tuples it ran between in that
+    order, the physical-end directions forced at those ends, and P's side at
+    its start. The route runs from whichever original end its first point is
+    nearer, so the ends are matched to it by distance, not assumed."""
+    if not centerline_mm or len(centerline_mm) < 2:
+        return None
+    x0, y0 = centerline_mm[0][0], centerline_mm[0][1]
+
+    def d(ep):
+        return math.hypot((ep[5] + ep[7]) / 2 - x0, (ep[6] + ep[8]) / 2 - y0)
+    if d(original_src) <= d(original_tgt):
+        src_ep, tgt_ep, src_dir, tgt_dir = original_src, original_tgt, forced_source_dir, forced_target_dir
+    else:
+        src_ep, tgt_ep, src_dir, tgt_dir = original_tgt, original_src, forced_target_dir, forced_source_dir
+    return {'centerline': [(float(x), float(y), int(L)) for x, y, L in centerline_mm],
+            'p_sign': int(p_sign), 'src_ep': src_ep, 'tgt_ep': tgt_ep,
+            'src_forced': src_dir, 'tgt_forced': tgt_dir}
+
+
 def _detect_polarity(simplified_path, coord,
                      p_src_x, p_src_y, n_src_x, n_src_y,
                      p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
@@ -6272,6 +6295,22 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
                     best['polarity_swap_denied'] = True
                 return best
 
+            # The last rung: cross the legs at a layer change, the way a
+            # designer does (#1055), on a site along the centreline the
+            # rejected no-swap route found. It runs only when every rung above
+            # failed, so a pair that routes today routes the same way.
+            xo_nat = no_swap.get('xo_natural') if isinstance(no_swap, dict) else None
+            if xo_nat:
+                from diff_pair_crossover import try_crossover
+                xo = try_crossover(pcb_data, diff_pair, config, obstacles, base_obstacles,
+                                   unrouted_stubs, xo_nat, route_diff_pair_with_obstacles)
+                if xo is not None:
+                    xo['iterations'] = spent_iterations + xo.get('iterations', 0)
+                    return xo
+                not_made.append(('crossover', 'no site along the path routed'))
+            else:
+                not_made.append(('crossover', 'no centreline to place one on'))
+
             if policy_denied and swap_end in swap_allowed_ends:
                 # Every candidate the policy allows failed. Whether the
                 # denied swap is what is missing is a question of geometry,
@@ -6465,6 +6504,8 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
             'failed': True,
             'intra_pair_short': True,
             'intra_pair_gap': round(_gap, 5),
+            'xo_natural': _xo_natural(simplified_path_float, p_sign, original_src, original_tgt,
+                                      forced_source_dir, forced_target_dir),
             'iterations': 0,
             'blocked_cells_forward': [],
             'blocked_cells_backward': [],
@@ -6640,6 +6681,8 @@ def _route_diff_pair_with_obstacles_impl(pcb_data: PCBData, diff_pair: DiffPairN
             'failed': True,
             'iterations': result.get('iterations', 0),
             'pn_crossing': True,
+            'xo_natural': _xo_natural(simplified_path_float, p_sign, original_src, original_tgt,
+                                      forced_source_dir, forced_target_dir),
             # The untangling swap retry never ran because the per-pair policy
             # forbids swaps for this pair (#279) - report it as wanted-but-denied.
             'polarity_swap_denied': (not force_swap and not force_no_swap

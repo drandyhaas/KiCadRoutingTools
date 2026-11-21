@@ -3252,8 +3252,7 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
     forbidding tracks and a net-filtered keep-out binding `net_id`. Every
     leg is measured, the ones anchored on a seed cell included."""
     import math
-    from check_drc import (segment_to_rect_distance, _into_pad_frame,
-                           board_edge_geometry,
+    from check_drc import (board_edge_geometry, segment_to_pad_copper_distance,
                            _segment_to_rings_distance, copper_keepout_gate)
     from kicad_parser import pad_drill_circles
     half = width / 2.0
@@ -3266,11 +3265,10 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                                                    + (py - y1) * dy) / L2))
         return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
-    def _seg_seg(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2):
-        return min(_seg_pt(ax1, ay1, ax2, ay2, bx1, by1),
-                   _seg_pt(ax1, ay1, ax2, ay2, bx2, by2),
-                   _seg_pt(bx1, by1, bx2, by2, ax1, ay1),
-                   _seg_pt(bx1, by1, bx2, by2, ax2, ay2))
+    # The shared distance, which is 0 for segments that CROSS: the four
+    # endpoint distances alone read a leg crossing a foreign track mid-span
+    # as clear (#2004).
+    from geometry_utils import segment_to_segment_distance as _seg_seg
 
     legs = []
     for k in range(len(route_points) - 1):
@@ -3448,16 +3446,10 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                     req = half + pext + clr
                     if (bb[0] - req <= p.global_x <= bb[2] + req
                             and bb[1] - req <= p.global_y <= bb[3] + req):
-                        sx, sy, ex, ey = x1, y1, x2, y2
-                        rot = getattr(p, 'rect_rotation', 0.0) or 0.0
-                        if rot:
-                            rad = math.radians(rot)
-                            cr, sr = math.cos(rad), math.sin(rad)
-                            sx, sy = _into_pad_frame(sx, sy, p, cr, sr)
-                            ex, ey = _into_pad_frame(ex, ey, p, cr, sr)
-                        d, _ = segment_to_rect_distance(
-                            sx, sy, ex, ey, p.global_x, p.global_y,
-                            p.size_x / 2.0, p.size_y / 2.0, 0.0)
+                        # The pad's copper as check_drc measures it: a
+                        # round pad read as its bounding square refused
+                        # copper clear of the circle (#2004).
+                        d = segment_to_pad_copper_distance(x1, y1, x2, y2, p)
                         if d < half + clr - EPS:
                             return False
                 if is_th:

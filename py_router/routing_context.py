@@ -1189,9 +1189,11 @@ def record_diff_pair_success(
             record_single_ended_success's callers keep. None = no map.
     """
     add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-    from obstacle_cache import refresh_net_obstacles
+    # Every net the result put copper on: the pair's GND return vias ride
+    # it on the return net (#806, committed_net_ids).
+    from obstacle_cache import refresh_net_obstacles, committed_net_ids
     refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
-                          config, (pair.p_net_id, pair.n_net_id))
+                          config, committed_net_ids(result, (pair.p_net_id, pair.n_net_id)))
 
     if pair.p_net_id in remaining_net_ids:
         remaining_net_ids.remove(pair.p_net_id)
