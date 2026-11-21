@@ -640,7 +640,10 @@ def mux(ffmpeg, video, stems, out):
 
 if __name__ == '__main__':
     # (the Kokoro engine's two steps, run by kokoro_speak with the cache venv's Python; nothing else is run from here)
-    if sys.argv[1:2] == ['--fetch'] and len(sys.argv) <= 3:
+    if any(a_ in ('--help', '-h') for a_ in sys.argv[1:]):
+        print('usage: whole_movie_sound.py --fetch [kokoro:NAME]   -- the neural voice of whole_movie.py --sound had '
+              'ahead of time (the sound itself is made by whole_movie.py --sound)')
+    elif sys.argv[1:2] == ['--fetch'] and len(sys.argv) <= 3:
         # (the neural voice had ahead of time: installed into the cache and its weights fetched, nothing spoken)
         v_ = sys.argv[2] if len(sys.argv) == 3 else DEFAULT_VOICE
         if not v_.startswith('kokoro:'):
