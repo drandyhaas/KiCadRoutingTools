@@ -1092,7 +1092,18 @@ under a lane it meets there. So a state is judged with the changes the
 *order* of its crossings forces (`whole_ends.route_floor`), a round's model is
 given the dives it can see (`dive_cuts`), and two rounds in three free a group
 by what crosses: the lanes most of the state's dives are owed to, together,
-or a lane and the lanes it crosses.
+or a lane and the lanes it crosses. A round there is a quarter solve and the
+rest the work round it, so that work is done once: the order puzzle of a
+state asked before is answered from what it was answered, and solved by the
+two strategies that prove it rather than eight, each to its own proof; the
+dives' rows are written only where their lanes can stand as a dive needs
+them (a held lane's layers are its option's own); and a round's solve runs
+without the solver's own neighbourhood searches, being one neighbourhood of
+this search already -- with them the one strategy that moves the bound had
+a task in sixty, and the few rounds that ended unproved held their optimum
+from their first seconds. On more routing layers than two the rounds keep
+them, and so does a bus's ends in turn: there they are what finds the state
+(`tests/test_622_ends_search_speed.py`).
 
 **The cut** round a ball array destination, where the order of its exits
 starts and ends, is its far face's middle, no variable of the group's model.

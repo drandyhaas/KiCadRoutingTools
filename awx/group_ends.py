@@ -363,6 +363,7 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
     more = meta.get('more')         # what the model does not count of a state: main's `true_more`
     n_more = [0, 0]
     lanes, others, W_TOP = meta['lanes'], meta['others'], meta['W_TOP']
+    two = max((len(e['y'][0]) for e in lanes), default=0) <= 2      # (two routing layers: `run`'s `lns`)
     pts_of = [[tuple(p) for k_ in (0, 1) for p in e['at'][k_]] for e in lanes]
     at_of = {}
     for j, e in enumerate(lanes):
@@ -386,7 +387,7 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
         c_, r_ = divmod(v + off, W_TOP)
         return (f'{c_} costly ball(s) + ' if c_ else '') + f'{r_ / 1000:.1f}'
 
-    def run(fix, hint, batches, extra=None, label='a round of the search', once=False):
+    def run(fix, hint, batches, extra=None, label='a round of the search', once=False, lns=True):
         mc = m.Clone()
         Pc = mc.Proto()
         for v, x in fix.items():
@@ -406,6 +407,22 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
         s.parameters.max_num_deterministic_batches = batches
         s.parameters.share_glue_clauses = False
         s.parameters.share_binary_clauses = False
+        if not lns:
+            # (NONE OF THE SOLVER'S OWN NEIGHBOURHOOD SEARCHES in a ROUND, which is one neighbourhood of this search
+            # already: its batches go to the two full strategies, which PROVE it. With them a batch was twelve
+            # tasks of which the solver's seven neighbourhood searches took all but one in five: the rounds of
+            # one two-layer bus's search that ended at their batches unproved, 8 to 10 s each, each held the
+            # optimum from their first seconds (two from their hint) and a bound a part in a thousand short of it
+            # -- the one strategy that moves the bound had run five times in 288 tasks. Without them the same
+            # rounds were proved, at the same answers, in 4 to 8 s, and a round that was proved in its first
+            # batches -- 97 in 100 -- is what it was. On TWO routing layers (`two`), where a round is a few
+            # hundred variables once the solver has read it. NOT on more: a round there leaves the layers of
+            # its nearest lanes free too (LNS_LAYERS) -- ten times the variables, a round in seven unproved either
+            # way, and without the neighbourhood searches each round a third more work for states no better. And
+            # NOT a bus's ends in turn: a whole side of a bus free is a model of ten thousand variables no
+            # strategy proves in its batches, and there the neighbourhood searches are what finds its state --
+            # without them such a solve took five times as long for a state no better)
+            s.parameters.use_lns = False
         if once:
             # (a round's model, most of it held: one pass of the solver's presolve leaves what three do -- with the
             # layers held a round's search is short, and the presolve was near half its time)
@@ -472,7 +489,7 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
         # objective: what the model built before it read as derived terms are set at their least)
         held = {v: hint[v] for e in lanes for k_ in (0, 1) for v in e['x'][k_] if v >= 0}
         held.update((v, hint[v]) for o in others for v in o['vars'])
-        got, _st = run(held, hint, LNS_BATCHES)
+        got, _st = run(held, hint, LNS_BATCHES, lns=not two)
         inc = got if got is not None else list(hint)
         best = value(inc)
         if more:
@@ -504,7 +521,7 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
                         ps = [p for j in free for p in pts_of[j]] + centre
                         fix.update((v, inc[v]) for o in others if dist([tuple(o['at'])], ps) > LNS_NEAR
                                    for v in o['vars'])
-                        got, _st = run(fix, inc, LNS_BATCHES, label='a round about a costly ball')
+                        got, _st = run(fix, inc, LNS_BATCHES, label='a round about a costly ball', lns=not two)
                         n_h0 += 1
                         if got is not None and value(got) < best:
                             inc, best = got, value(got)
@@ -605,7 +622,7 @@ def tier_search(m, meta, log, seed=1, hint=None, pool=None):
         else:
             asked.add(ask_)
             xcut = meta.get('cuts') if pool else None      # (the dives a round can see: main's `dive_cuts`)
-            got, _st = run(fix, inc, LNS_BATCHES, once=hold_y, extra=(
+            got, _st = run(fix, inc, LNS_BATCHES, once=hold_y, lns=not two, extra=(
                 lambda mc_: xcut(mc_, {(lanes[j_]['bus'], lanes[j_]['lane']) for j_ in free}, inc)) if xcut else None)
         if got is not None and more and pool:
             # (a state is taken where it is better WITH what the model does not count)
@@ -2099,6 +2116,14 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
         # (one row per pair's lane, via and the lane it is another's of: the pair's options it stands in the way of
         # summed -- a lane takes one option, so that is each of them alone. One row per option and via, four buses'
         # pairs at one array had 361 thousand)
+        # (each via's reach for a lane worked out ONCE, and a via whose reach ends short of the way's own line passed
+        # over before the distance to the way is measured: the way runs straight out along one axis, so a via is no
+        # nearer it than it stands off that line. Asked of every via for every option of every pair, the reach and
+        # the distance were eleven million questions a search, most of an array's rules' time)
+        ring_ = {}
+        for _k2, _i2, site_, r_ in vias_:
+            if (site_[0], site_[1], r_) not in ring_:
+                ring_[(site_[0], site_[1], r_)] = je._ring(site_, r_)
         agg_ = {}
         for b, k_ in users:
             opts = b.E.T if k_ == 0 else b.E.B
@@ -2119,9 +2144,13 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
                     e = (mid[0] + u[0] * je.LANE_REACH, mid[1] + u[1] * je.LANE_REACH)
                     reach_ = max(back, je.LANE_REACH) + bar_p + 1.0
                     own_ = {mv.gid[1] for mv in opts[lane][i][0]}
+                    ax_ = 1 if u[0] else 0          # (the axis ACROSS the way)
                     for k2, i2, site, r_ in vias_:
-                        if k2 in own_ or abs(site[0] - mid[0]) > reach_ or abs(site[1] - mid[1]) > reach_ or \
-                                je._pt_seg(site, a, e) - je._ring(site, r_) >= bar_p - 1e-9:
+                        if k2 in own_ or abs(site[0] - mid[0]) > reach_ or abs(site[1] - mid[1]) > reach_:
+                            continue
+                        rg_ = ring_[(site[0], site[1], r_)]
+                        if abs(site[ax_] - mid[ax_]) - rg_ >= bar_p + 1e-6 or \
+                                je._pt_seg(site, a, e) - rg_ >= bar_p - 1e-9:
                             continue
                         ne = len(esc.get(k2, ()))
                         left = [((oname, k2, 0), ('drop', k2, i2 - ne))] if i2 >= ne else \

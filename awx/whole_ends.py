@@ -2492,6 +2492,12 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
 
 
 FLOOR_BATCHES = 40         # the order puzzle's search, in batches (route_floor): its optimum comes in the first few
+FLOOR_SEARCH = ['core', 'no_lp']    # the order puzzle's full strategies (route_floor)
+# route_floor's answers by the state asked: the lanes, each one's places and layers at its two ends, its legs -- all
+# the puzzle is built from. A round of the group's search that finds nothing better hands back the state it started
+# from, and each stretch starts by asking the state the one before ended on: of 161 puzzles asked in one bus's
+# search, a third were ones already answered, each built in Python and solved again for the same answer
+_FLOOR_MEMO = {}
 
 
 def route_floor(J, val, kmax=3):
@@ -2516,6 +2522,12 @@ def route_floor(J, val, kmax=3):
     dl = {l_: next(q for q in range(2) if val(J.y[1][l_][q])) for l_ in lanes}
     pt = {l_: J.pos[(0, l_, it[l_])] for l_ in lanes}
     pb = {l_: (0, J.pos[(1, l_, jb[l_])]) for l_ in lanes}
+    # (the puzzle is these and nothing else, the seed its solve runs under with them: asked again, the same answer)
+    key_ = (kmax, awx_settings.get('BUS_SEED'),
+            tuple((l_, J.npair[l_], pt[l_], pb[l_][1], tl[l_], dl[l_]) for l_ in lanes))
+    if key_ in _FLOOR_MEMO:
+        ch_, ov_, T_ = _FLOOR_MEMO[key_]
+        return ch_, ov_, dict(T_)
     b0 = lambda a, b: pt[a] + TQ < pt[b]                                             # noqa: E731
     b1 = lambda a, b: pb[a][0] < pb[b][0] or (pb[a][0] == pb[b][0] and pb[a][1] + TQ < pb[b][1])   # noqa: E731
     X = {frozenset((a, b)) for a, b in itertools.combinations(lanes, 2)
@@ -2567,6 +2579,12 @@ def route_floor(J, val, kmax=3):
     m.Minimize(int(W_OVER) * sum(J.npair[n] * over[n] for n in lanes) + sum(J.npair[n] * tot[n] for n in lanes))
     s = cp_seed.solver()
     s.parameters.num_workers = 4
+    # (THE TWO STRATEGIES THAT PROVE IT, as the ends' own search runs (group_ends.SEARCH): a batch of the solver's
+    # interleaved search ends when every one of its strategies has -- and left to itself the solver ran eight on
+    # the whole puzzle, each to its own proof of the one optimum. `core` had it first in every puzzle looked at, at
+    # a quarter to a third of the solve; the rest of the solve was the seven others reaching what it had: three
+    # puzzles 1.75, 0.29 and 0.17 s so, and 0.46, 0.09 and 0.07 s with these two, the same optimum proved)
+    s.parameters.subsolvers.extend(FLOOR_SEARCH)
     s.parameters.interleave_search = True
     s.parameters.max_num_deterministic_batches = FLOOR_BATCHES
     s.parameters.share_glue_clauses = False
@@ -2574,7 +2592,9 @@ def route_floor(J, val, kmax=3):
     if s.Solve(m) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
     T = {n: int(s.Value(tot[n])) for n in lanes}
-    return sum(J.npair[n] * T[n] for n in lanes), sum(J.npair[n] * int(s.Value(over[n])) for n in lanes), T
+    got_ = (sum(J.npair[n] * T[n] for n in lanes), sum(J.npair[n] * int(s.Value(over[n])) for n in lanes), T)
+    _FLOOR_MEMO[key_] = (got_[0], got_[1], dict(T))
+    return got_
 
 
 def dive_triples(J, val):
@@ -2641,6 +2661,16 @@ def dive_cuts(J, mc, free, vals, w_dive):
     pb = {l_: (0, J.pos[(1, l_, jb[l_])]) for l_ in held}
     lit = lambda v: (mc.GetBoolVarFromProtoIndex(v.Index()) if v.Index() >= 0          # noqa: E731
                      else mc.GetBoolVarFromProtoIndex(-v.Index() - 1).Not())
+    # (A HELD LANE'S LAYERS ARE ITS OPTIONS' OWN: held on an end, it stands there on the layers that option allows
+    # (the model's own rows: a layer only where the chosen option allows it -- J.dom), and where that is one layer
+    # the other's literal is no literal but a constant. Written with the model's literals for every lane, a round's
+    # rows were some ninety thousand -- most of a round's time in the writing -- of which the solver's presolve kept
+    # a few hundred: every other one held a layer no option of its held lane allows)
+    can = {}
+    for l_ in held:
+        for k_, i_ in ((0, it[l_]), (1, jb[l_])):
+            fx_, _nk, ok_ = J.dom[(k_, l_, i_)]
+            can[(k_, l_)] = tuple((fx_ == q_) if fx_ is not None else (q_ in ok_) for q_ in (0, 1))
     O0, O1 = {}, {}             # (a, b) -> a before b at the teeth / the berths: True, or the model's literal
     for a in lanes:
         for b in lanes:
@@ -2672,8 +2702,25 @@ def dive_cuts(J, mc, free, vals, w_dive):
             Pc.objective.vars.append(dv[l_].Index())
             Pc.objective.coeffs.append(int(w_dive) * J.npair[l_])
         return dv[l_]
-    yl = {(k_, l_, q_): (J.y[k_][l_][q_] if isinstance(J.y[k_][l_][q_], int) else lit(J.y[k_][l_][q_]))
-          for k_ in (0, 1) for l_ in lanes for q_ in (0, 1)}
+    yl = {}
+    for k_ in (0, 1):
+        for l_ in lanes:
+            c_ = can.get((k_, l_))
+            for q_ in (0, 1):
+                v_ = J.y[k_][l_][q_]
+                if isinstance(v_, int):
+                    yl[(k_, l_, q_)] = v_
+                elif c_ is not None and not c_[q_]:
+                    yl[(k_, l_, q_)] = 0
+                elif c_ is not None and not c_[1 - q_]:
+                    yl[(k_, l_, q_)] = 1
+                else:
+                    yl[(k_, l_, q_)] = lit(v_)
+    # (...so a three is asked only where its lanes can stand as a dive needs them: e on q1 at its teeth and q2 at
+    # its berths, p on q1 at both, q on q2 at both -- `chg` and `stay`, by (q1, q2) = (0, 1) and (1, 0))
+    nz = lambda k_, l_, q_: not (isinstance(yl[(k_, l_, q_)], int) and yl[(k_, l_, q_)] == 0)     # noqa: E731
+    chg = {l_: (nz(0, l_, 0) and nz(1, l_, 1), nz(0, l_, 1) and nz(1, l_, 0)) for l_ in lanes}
+    stay = {l_: (nz(0, l_, 0) and nz(1, l_, 0), nz(0, l_, 1) and nz(1, l_, 1)) for l_ in lanes}
     n = 0
     seen = set()
     # (e before p before q at the teeth, p before q before e at the berths; and its mirror, the three the other way)
@@ -2683,8 +2730,18 @@ def dive_cuts(J, mc, free, vals, w_dive):
         for (a, b) in A0:
             n0[a].append(b)
         for e in lanes:
+            ce = chg[e]
+            if not (ce[0] or ce[1]):
+                continue
             for p in n0[e]:
+                sp = stay[p]
+                e01, e10 = ce[0] and sp[0], ce[1] and sp[1]
+                if not (e01 or e10):
+                    continue
                 for q in n0[p]:
+                    sq = stay[q]
+                    if not ((e01 and sq[1]) or (e10 and sq[0])):
+                        continue
                     if q == e or (p, q) not in A1 or (q, e) not in A1:
                         continue
                     ords = [A0[(e, p)], A0[(p, q)], A1[(p, q)], A1[(q, e)]]
