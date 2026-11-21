@@ -18,6 +18,7 @@ runnable tool in the clone with a one-line purpose.
   [copper hygiene](#copper-hygiene-checker-check_weirdpy) ·
   [non-orthonormal segments](#non-orthonormal-segment-checker-check_orthonormalpy) ·
   [impedance](#impedance-audit-check_impedancepy) ·
+  [signal review](#signal-review-signal_reviewpy) ·
   [return vias](#return-via-coverage-check_return_viaspy) ·
   [reference planes](#reference-plane-check-check_reference_planepy) ·
   [power drop](#power-drop-report-check_power_droppy) ·
@@ -1379,6 +1380,40 @@ What to do about each finding is in
 (`route.py --quick 2`) and turns the two-pad parts it lists;
 `render_nets.py` draws a finding's nets beside another routed board's.
 Exit 0 reviewed (findings or not), 2 unreadable input.
+
+## Signal Review (`signal_review.py`)
+
+How well the signals are routed, after DRC and connectivity pass. It reads one
+routed board and reports, read-only:
+
+- **nets**: each signal net's routed track length over the length of the
+  minimum spanning tree of its pads (the straight line for a two-pad net), its
+  vias and its vias in pads. Rails, power-named nets and poured nets are left
+  out. A net is flagged past `--max-detour` (1.5) or `--max-vias` (2); the
+  detour counts only on a pad tree of 3 mm or more;
+- **vias in SMD pads**: every via whose barrel overlaps an SMD pad of its own
+  net, on any net, by pad (the test behind the via-in-pad fab note);
+- **diff pairs**: every pair route_diff pairs, with the share of the longer
+  member's track that runs coupled as KiCad's DRC counts it, with P and N at
+  most `--pair-gap-max` apart (default the pair's declared `diff_pair_gap`
+  max, else twice its class gap), the skew, the vias, and each coupled layer's
+  differential impedance at its measured width and gap (with a stackup). A
+  routed pair under `--min-coupled` (0.8) is flagged;
+- **pair names that do not pair**: names that differ only in a polarity token
+  but that route_diff, or KiCad's `MatchDpSuffix` (its diff-pair router, DRC
+  rules and `board_score`), does not pair, each with the rename that both
+  pair. route_diff pairs neither `/mcu/USB_DP_MCU` / `/mcu/USB_DM_MCU` nor
+  `LVDS_P_CLK` / `LVDS_N_CLK`; KiCad does not pair `USB_DP` / `USB_DM`.
+  `route_diff.py` prints the same warning for the nets it was given.
+
+```bash
+python3 -X utf8 py_tools/signal_review.py routed.kicad_pcb
+python3 -X utf8 py_tools/signal_review.py routed.kicad_pcb --nets 'USB*' 'QSPI*' 'SD_*' --json signal.json
+```
+
+`--nets` limits every section to the selected nets (route.py's glob rules), and
+the text then lists every selected net, not only the flagged ones. Exit 0
+reviewed (findings or not), 2 unreadable input.
 
 ## Seed Judge Score (`quick_score.py`)
 

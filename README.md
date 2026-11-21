@@ -872,6 +872,7 @@ KiCadRoutingTools/
 │   ├── check_assembly.py         # Is a placement buildable?
 │   ├── render_placement.py       # PNG stills of a placement, with its legality
 │   ├── route_review.py           # What to move after a route
+│   ├── signal_review.py          # Signal quality after a route: detours, vias in pads, pair coupling
 │   ├── render_nets.py            # Chosen nets' copper on several boards side by side
 │   ├── render_power.py           # A board's power components over its rails
 │   ├── board_score.py            # One score for a board: blocking, then quality

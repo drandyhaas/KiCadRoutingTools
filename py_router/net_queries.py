@@ -2478,10 +2478,11 @@ def diff_pair_coupling(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     nearest N track, exactly as KiCad sums them.
 
     Returns {'coupled_mm', 'length_p_mm', 'length_n_mm', 'uncoupled_mm',
-    'coupled_by_layer', 'arc_chords'}. `uncoupled_mm` is KiCad's
+    'coupled_by_layer', 'gap_by_layer', 'arc_chords'}. `uncoupled_mm` is KiCad's
     diff_pair_uncoupled "actual": max(P, N track length) - coupled. Track
     lengths are tracks only -- KiCad's coupling test counts no via barrel and
-    no pad-to-die. `arc_chords` counts the pair's tracks parsed from an
+    no pad-to-die. `gap_by_layer` is each layer's coupled gap, weighted by
+    length. `arc_chords` counts the pair's tracks parsed from an
     `(arc ...)`: the parser linearises those, and KiCad couples arcs on their
     own path, so a nonzero count means the figures are approximate.
 
@@ -2529,7 +2530,7 @@ def diff_pair_coupling(pcb_data: PCBData, p_net_id: int, n_net_id: int,
         if sq_len(a, b) > 2:
             n_by_layer.setdefault(s.layer, []).append((s, a, b))
 
-    coupled, by_layer = 0, {}
+    coupled, by_layer, gap_area = 0, {}, {}
     for sp in p_tracks:
         pa, pb = _pts(sp)
         if sq_len(pa, pb) <= 2:
@@ -2558,6 +2559,7 @@ def diff_pair_coupling(pcb_data: PCBData, p_net_id: int, n_net_id: int,
             length = norm(db[0] - da[0], db[1] - da[1])
             coupled += length
             by_layer[sp.layer] = by_layer.get(sp.layer, 0) + length
+            gap_area[sp.layer] = gap_area.get(sp.layer, 0) + gap * length
 
     uuids: Dict[str, int] = {}
     for s in p_tracks + n_tracks:
@@ -2568,6 +2570,7 @@ def diff_pair_coupling(pcb_data: PCBData, p_net_id: int, n_net_id: int,
             'length_p_mm': len_p / 1e6, 'length_n_mm': len_n / 1e6,
             'uncoupled_mm': (max(len_p, len_n) - coupled) / 1e6,
             'coupled_by_layer': {k: v / 1e6 for k, v in sorted(by_layer.items())},
+            'gap_by_layer': {k: gap_area[k] / v / 1e6 for k, v in sorted(by_layer.items()) if v},
             'layers_p': sorted({s.layer for s in p_tracks}),
             'layers_n': sorted({s.layer for s in n_tracks}),
             'arc_chords': arcs}
@@ -2682,7 +2685,8 @@ def diff_pair_copper(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     for k, v in list(out.items()):
         if isinstance(v, float):
             out[k] = round(v, 4)
-    out['coupled_by_layer'] = {k: round(v, 4) for k, v in out['coupled_by_layer'].items()}
+    for k in ('coupled_by_layer', 'gap_by_layer'):
+        out[k] = {layer: round(v, 4) for layer, v in out[k].items()}
     return out
 
 
@@ -3727,6 +3731,119 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
         complete_pairs[name] = pair
 
     return complete_pairs
+
+
+# A polarity token in a net name's leaf, standing on its own between
+# separators: the USB D forms (DP/DM/DN, D+/D-, DPLUS/DMINUS) and the bare
+# P/N. Case-insensitive, so 'clk_p' / 'clk_n' is seen too.
+_POLARITY_TOKEN = re.compile(
+    r'(?<![A-Za-z0-9])(?:(?P<d>D(?:PLUS|MINUS|P|M|N|\+|-))|P|N)'
+    r'(?![A-Za-z0-9])', re.IGNORECASE)
+_POSITIVE_TOKENS = frozenset({'DP', 'DPLUS', 'D+', 'P'})
+
+
+def _route_diff_pairs(p_name: str, n_name: str) -> bool:
+    a, b = extract_diff_pair_base(p_name), extract_diff_pair_base(n_name)
+    return bool(a and b and a[0] == b[0] and a[2] == b[2] and a[1] and not b[1])
+
+
+def _kicad_pairs(p_name: str, n_name: str) -> bool:
+    from design_rules import match_dp_suffix
+    rv, comp, _base = match_dp_suffix(p_name)
+    return rv > 0 and comp == n_name
+
+
+def _token_to_end(name: str, start: int, end: int, token: str) -> Optional[str]:
+    """`name` with its polarity token at [start, end) moved to the end of the
+    leaf as `token`, behind the separator it had (else '_')."""
+    head, tail = name[:start], name[end:]
+    if head[-1:] in ('_', '-', '.'):
+        sep, head = head[-1], head[:-1]
+    elif tail[:1] in ('_', '-', '.'):
+        sep, tail = tail[0], tail[1:]
+    else:
+        sep = '_'
+    rest = head + tail
+    if not rest or rest.endswith('/'):
+        return None
+    return rest + sep + token
+
+
+def _pair_rename(p, n, p_span, n_span, d_form, taken) -> Dict[str, str]:
+    """{old name: new name} that both route_diff and KiCad pair, else one
+    route_diff pairs, else {}. Tries each name's own token moved to the end,
+    then KiCad's spelling of it (DP/DN, D+/D-, P/N: the last character must
+    be P/N or +/-, case-sensitive)."""
+    own = (p[p_span[0]:p_span[1]], n[n_span[0]:n_span[1]])
+    if d_form:
+        kicad = ('D+', 'D-') if own[0] == 'D+' else ('DP', 'DN')
+    else:
+        kicad = ('P', 'N')
+    found = []
+    for tp, tn in (own, kicad):
+        new_p = _token_to_end(p, *p_span, tp)
+        new_n = _token_to_end(n, *n_span, tn)
+        if not new_p or not new_n or {new_p, new_n} & (taken - {p, n}):
+            continue
+        if _route_diff_pairs(new_p, new_n):
+            found.append((not _kicad_pairs(new_p, new_n), new_p, new_n))
+    if not found:
+        return {}
+    _, new_p, new_n = min(found, key=lambda f: f[0])
+    return {old: new for old, new in ((p, new_p), (n, new_n)) if old != new}
+
+
+def near_miss_diff_pairs(net_names) -> List[Dict]:
+    """Net-name pairs that read as one differential pair but that route_diff
+    (`extract_diff_pair_base`) or KiCad (`design_rules.match_dp_suffix`:
+    its diff-pair router, DRC rules and board_score) does not pair.
+
+    Two names are a pair when they differ only in one polarity token
+    (`_POLARITY_TOKEN`) of the same family, positive in one and negative in
+    the other, and no third name shares that spelling. route_diff pairs
+    neither '/mcu/USB_DP_MCU' / '/mcu/USB_DM_MCU' nor 'clk_p' / 'clk_n';
+    KiCad does not pair 'USB_DP' / 'USB_DM' (M is no polarity to it) nor
+    '/D+_L' / '/D-_L'. KiCad's auto-names ('Net-(...)', 'unconnected-(...)')
+    are skipped: their '-P' / '-N' is a pin name (#1456).
+
+    Returns [{'p', 'n', 'route_diff', 'kicad', 'rename'}], 'route_diff' and
+    'kicad' saying whether each rule pairs the two as they are, and 'rename'
+    {old: new} the smallest rename found that both pair, else one route_diff
+    pairs, else {} (`_pair_rename`).
+    """
+    names = sorted({nm for nm in net_names
+                    if nm and not nm.startswith(('Net-(', 'unconnected-('))})
+    halves: Dict[Tuple[str, bool, str], Dict[bool, list]] = {}
+    for nm in names:
+        for m in _POLARITY_TOKEN.finditer(nm, nm.rfind('/') + 1):
+            key = (nm[:m.start()], bool(m.group('d')), nm[m.end():])
+            positive = m.group(0).upper() in _POSITIVE_TOKENS
+            halves.setdefault(key, {True: [], False: []})[positive].append(
+                (nm, (m.start(), m.end())))
+    taken = set(names)
+    out = []
+    for key in sorted(halves):
+        pos, neg = halves[key][True], halves[key][False]
+        if len(pos) != 1 or len(neg) != 1:
+            continue
+        (p, p_span), (n, n_span) = pos[0], neg[0]
+        route_diff, kicad = _route_diff_pairs(p, n), _kicad_pairs(p, n)
+        if route_diff and kicad:
+            continue
+        out.append({'p': p, 'n': n, 'route_diff': route_diff, 'kicad': kicad,
+                    'rename': _pair_rename(p, n, p_span, n_span, key[1], taken)})
+    return out
+
+
+def near_miss_text(miss: Dict) -> str:
+    """One near-miss pair as a sentence: which rule misses it, and the rename."""
+    if not miss['route_diff'] and not miss['kicad']:
+        missed = 'neither route_diff nor KiCad pairs them'
+    else:
+        missed = f"{'KiCad' if miss['route_diff'] else 'route_diff'} does not pair them"
+    fix = (', '.join(f"{old} -> {new}" for old, new in miss['rename'].items())
+           if miss['rename'] else 'no rename found')
+    return f"{miss['p']} / {miss['n']} read as a pair, but {missed}; rename {fix}"
 
 
 def find_single_ended_nets(

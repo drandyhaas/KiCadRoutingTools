@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
-from net_queries import extract_diff_pair_base
+from net_queries import extract_diff_pair_base, near_miss_diff_pairs, near_miss_text
 
 
 # (p_name, n_name) pairs that MUST resolve to the same base + style and opposite
@@ -61,6 +61,48 @@ NON_PAIRS = ["GND", "VCC", "CLK", "Net-(R1-Pad1)", "+3V3", "",
              # #1456: the ref-pin '-' of an auto-name is not a polarity separator
              "Net-(U1-P)", "Net-(U1-N)"]
 
+# Names that read as one pair but that route_diff or KiCad's MatchDpSuffix
+# misses: (p, n, route_diff pairs them, KiCad pairs them, the rename offered).
+NEAR_MISSES = [
+    ("/mcu/USB_DP_MCU", "/mcu/USB_DM_MCU", False, False,
+     {"/mcu/USB_DP_MCU": "/mcu/USB_MCU_DP", "/mcu/USB_DM_MCU": "/mcu/USB_MCU_DN"}),
+    ("USB_D+_MCU", "USB_D-_MCU", True, False,
+     {"USB_D+_MCU": "USB_MCU_D+", "USB_D-_MCU": "USB_MCU_D-"}),
+    ("LVDS_P_CLK", "LVDS_N_CLK", False, False,
+     {"LVDS_P_CLK": "LVDS_CLK_P", "LVDS_N_CLK": "LVDS_CLK_N"}),
+    ("TX_P_0", "TX_N_0", False, True, {"TX_P_0": "TX_0_P", "TX_N_0": "TX_0_N"}),
+    ("clk_p", "clk_n", False, False, {"clk_p": "clk_P", "clk_n": "clk_N"}),
+    ("USB_DP", "USB_DM", True, False, {"USB_DM": "USB_DN"}),
+]
+
+
+def run_near_misses():
+    fails = []
+    for p, n, route_diff, kicad, rename in NEAR_MISSES:
+        got = near_miss_diff_pairs(["GND", p, n])
+        want = [{'p': p, 'n': n, 'route_diff': route_diff, 'kicad': kicad, 'rename': rename}]
+        if got != want:
+            fails.append(f"{p}/{n}: {got} != {want}")
+    # A rename that would take an existing name is not offered.
+    got = near_miss_diff_pairs(["A_P_X", "A_N_X", "A_X_P"])
+    if [m['rename'] for m in got] != [{}] or 'no rename found' not in near_miss_text(got[0]):
+        fails.append(f"A_P_X/A_N_X beside A_X_P: {got}")
+    # A pair both rules already pair, a lone half and an auto-name are no near miss.
+    for p_name, n_name in PAIRS:
+        for m in near_miss_diff_pairs([p_name, n_name]):
+            if not m['route_diff']:
+                fails.append(f"{p_name}/{n_name}: route_diff pairs it, read as a miss {m}")
+    for names in (["/power/CHG_N"], ["Net-(U1-DP)", "Net-(U1-DM)"]):
+        if near_miss_diff_pairs(names):
+            fails.append(f"{names}: {near_miss_diff_pairs(names)}")
+    if fails:
+        print(f"FAIL near misses ({len(fails)}):")
+        for f in fails:
+            print("  -", f)
+        return False
+    print(f"PASS: {len(NEAR_MISSES)} near-miss pairs")
+    return True
+
 
 def run():
     fails = []
@@ -93,4 +135,4 @@ def run():
 
 
 if __name__ == "__main__":
-    sys.exit(0 if run() else 1)
+    sys.exit(0 if all([run(), run_near_misses()]) else 1)
