@@ -462,6 +462,194 @@ def derive_contact_fingers(pcb_data) -> List[dict]:
     return out
 
 
+def _strip_footprints(pcb_data):
+    """[(ref, footprint)] of the mating-contact footprints whose pads are
+    strips and whose copper stays on the board: a plug or card-edge fingers
+    (the parts `derive_contact_fingers` reads, before its at-the-outline
+    test). `derive_finger_bands` judges the edge itself."""
+    import _placer_path  # noqa: F401  (placement lives in py_placer/)
+    from placement.floorplan import is_board_copper_plug, _copper_pads
+    from placement.legality import BoardOutlineGate, pad_copper_overrun_mm, EPS
+    from placement.part_class import is_card_fingers
+    out, gate = [], None
+    for ref, fp in sorted((getattr(pcb_data, 'footprints', None) or {}).items()):
+        if not (is_board_copper_plug(fp) or is_card_fingers(fp)):
+            continue
+        if gate is None:
+            gate = BoardOutlineGate(pcb_data.board_info, 0.0)
+        if (_elongated_fingers(fp)
+                and pad_copper_overrun_mm(_copper_pads(fp), gate) <= EPS):
+            out.append((ref, fp))
+    return out
+
+
+#: How far a finger's outer end may stand from the outline and still face
+#: the edge: the stock PCIe edge footprints end their fingers 1.3 mm short of
+#: it (1.65 at a presence-detect finger), past MATING_FINGER_EDGE_MM.
+FINGER_EDGE_REACH = 2.0
+
+#: A gap between neighbouring fingers this many times the row's median gap
+#: (a keying notch, a split connector) ends a run: the band does not bridge it.
+FINGER_RUN_BREAK = 2.0
+
+
+def derive_finger_bands(pcb_data) -> List[dict]:
+    """The strip a mating edge connector's fingers occupy, from each finger's
+    inner end to the board edge, kept clear of copper the way human card-edge
+    designs keep it (#2022): the socket wipes the fingers and the edge past
+    them is bevelled, so copper between the fingers or past their outer ends
+    is ground off or shorted, and a via there is drilled through the contact
+    area. Per run of fingers on each of their copper layers:
+
+    * one region over the run, from the fingers' inner ends to past the edge,
+      that no net's via may enter (`finger_band` 'via');
+    * one column per finger, from its inner end to past the edge and across
+      to the midpoints with its neighbours, that no track of another net may
+      enter (`finger_band` 'column'): a track between two fingers, or along
+      the strip beside them, crosses some column not its own;
+    * and the finger's own strip past its outer end, which its own net may
+      not enter either (`finger_band` 'tail'): a finger is entered from its
+      inner end.
+
+    Regions carry clearance 0: they forbid copper overlap, the way KiCad
+    grades a rule area, and a finger's own net reaches its finger down the
+    middle of its column. [] when the board has no mating edge connector.
+    Fingers whose strips are not axis-aligned are left out."""
+    from check_drc import board_edge_geometry, _point_to_rings_distance
+    from paste_apertures import pad_has_copper
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    mating = _strip_footprints(pcb_data)
+    if not mating:
+        return []
+    rings, _o, _c = board_edge_geometry(pcb_data.board_info, rect_ring=True)
+    if not rings:
+        return []
+    names = frozenset(n.name for nid, n in pcb_data.nets.items() if nid and n.name)
+    out: List[dict] = []
+    for ref, fp in mating:
+        fingers = [p for p in fp.pads if pad_has_copper(p) and p.size_x > 0
+                   and p.size_y > 0 and abs(getattr(p, 'rect_rotation', 0.0) or 0.0) < 1e-6
+                   and max(p.size_x, p.size_y) >= FINGER_MIN_ASPECT * min(p.size_x, p.size_y)]
+        if len(fingers) < 2:
+            continue
+        # the strips' long axis is across the edge: v along it, u along the edge
+        vert = sum(1 for p in fingers if p.size_y > p.size_x) * 2 >= len(fingers)
+
+        def uv(p):
+            """(u0, u1, v0, v1): the pad's extent along / across the edge."""
+            hx, hy = p.size_x / 2.0, p.size_y / 2.0
+            if vert:
+                return (p.global_x - hx, p.global_x + hx, p.global_y - hy, p.global_y + hy)
+            return (p.global_y - hy, p.global_y + hy, p.global_x - hx, p.global_x + hx)
+
+        def xy(u, v):
+            return (u, v) if vert else (v, u)
+        # which end of the strips faces the edge: the one nearer the outline
+        near_hi = 0.0
+        for p in fingers:
+            u0, u1, v0, v1 = uv(p)
+            um = (u0 + u1) / 2.0
+            near_hi += (_point_to_rings_distance(*xy(um, v0), rings)
+                        - _point_to_rings_distance(*xy(um, v1), rings))
+        sign = 1.0 if near_hi >= 0 else -1.0       # +1: the edge is at larger v
+
+        def edge_gap(p):
+            """How far the finger's outer end stands from the outline."""
+            u0, u1, v0, v1 = uv(p)
+            return _point_to_rings_distance(*xy((u0 + u1) / 2.0,
+                                                v1 if sign > 0 else v0), rings)
+        def faces_edge(p):
+            """The finger's outer end stands at the outline, nearer it than
+            the finger's long sides do."""
+            u0, u1, v0, v1 = uv(p)
+            vm = (v0 + v1) / 2.0
+            side = min(_point_to_rings_distance(*xy(u0, vm), rings),
+                       _point_to_rings_distance(*xy(u1, vm), rings))
+            g = edge_gap(p)
+            return g <= FINGER_EDGE_REACH and g < side
+        # The row is the fingers whose outer ends face the edge, and every
+        # finger in line with them (a shorter presence-detect finger stops
+        # further from the edge). A footprint the plug test accepts can run
+        # its strips ALONG the board with one or two near an edge (an edge
+        # modelled on a backplane): none faces it, and it has no band.
+        anchors = [p for p in fingers if faces_edge(p)]
+        if len(anchors) < 2:
+            continue
+        a0 = min(uv(p)[2] for p in anchors)
+        a1 = max(uv(p)[3] for p in anchors)
+        fingers = [p for p in fingers if uv(p)[2] < a1 and uv(p)[3] > a0]
+        # past the edge by the farthest finger's distance to it, plus a margin
+        reach = max(edge_gap(p) for p in fingers) + 1.0
+        layers = sorted({l for p in fingers for l in p.layers if l in copper},
+                        key=copper.index)
+        for layer in layers:
+            row = sorted((p for p in fingers if layer in p.layers),
+                         key=lambda p: uv(p)[0])
+            if not row:
+                continue
+            gaps = [uv(b)[0] - uv(a)[1] for a, b in zip(row, row[1:])]
+            med = sorted(gaps)[len(gaps) // 2] if gaps else 0.0
+            runs, cur = [], [row[0]]
+            for p, g in zip(row[1:], gaps):
+                if med > 0 and g > FINGER_RUN_BREAK * med:
+                    runs.append(cur)
+                    cur = []
+                cur.append(p)
+            runs.append(cur)
+            for run in runs:
+                ext = [uv(p) for p in run]
+                lefts = [ext[0][0] - med / 2.0] + [
+                    (ext[i - 1][1] + ext[i][0]) / 2.0 for i in range(1, len(run))]
+                rights = lefts[1:] + [ext[-1][1] + med / 2.0]
+                # inner = the end away from the edge; edge = past the edge
+                inner = [(e[2] if sign > 0 else e[3]) for e in ext]
+                outer = [(e[3] if sign > 0 else e[2]) for e in ext]
+                edge = max(outer) + reach if sign > 0 else min(outer) - reach
+
+                def rect(u0, u1, va, vb):
+                    return [xy(u0, va), xy(u1, va), xy(u1, vb), xy(u0, vb)]
+                stair = []
+                for i in range(len(run)):
+                    stair += [xy(lefts[i], inner[i]), xy(rights[i], inner[i])]
+                stair += [xy(rights[-1], edge), xy(lefts[0], edge)]
+                out.append({'name': f"finger band {ref} {layer}", 'rule': None,
+                            'polygon': stair, 'holes': [], 'layers': set(copper),
+                            'tracks_allowed': True, 'vias_allowed': False,
+                            'nets': names, 'clearance': 0.0, 'finger_band': 'via',
+                            'ref': ref})
+                for i, p in enumerate(run):
+                    own = p.net_name if p.net_id else ''
+                    out.append({'name': f"finger band {ref}.{p.pad_number} {layer}",
+                                'rule': None,
+                                'polygon': rect(lefts[i], rights[i], inner[i], edge),
+                                'holes': [], 'layers': {layer},
+                                'tracks_allowed': False, 'vias_allowed': True,
+                                'nets': names - {own}, 'clearance': 0.0,
+                                'finger_band': 'column', 'ref': ref,
+                                'pad': p.pad_number})
+                    if own:
+                        out.append({'name': f"finger tail {ref}.{p.pad_number} {layer}",
+                                    'rule': None,
+                                    'polygon': rect(lefts[i], rights[i], outer[i], edge),
+                                    'holes': [], 'layers': {layer},
+                                    'tracks_allowed': False, 'vias_allowed': True,
+                                    'nets': frozenset({own}), 'clearance': 0.0,
+                                    'finger_band': 'tail', 'ref': ref,
+                                    'pad': p.pad_number})
+    return out
+
+
+def derive_mating_keepouts(pcb_data) -> List[dict]:
+    """The keep-outs a mating edge connector's geometry makes, with no rule
+    to name them: no via in a contact finger (#1116) and no copper in the
+    finger strip but a finger's own entry (#2022). One list for every
+    derivation site -- `design_rules.install_design_rules` and the KiCad
+    oracle's own re-parse (kicad_oracle), which re-derived only the rules
+    file's keep-outs and so welded GND through the strip and dropped a via in
+    two fingers at once."""
+    return derive_contact_fingers(pcb_data) + derive_finger_bands(pcb_data)
+
+
 def binds(ko: dict, net_name: str) -> bool:
     """True when keep-out `ko` forbids its items to net `net_name`."""
     return net_name in ko.get('nets', ())

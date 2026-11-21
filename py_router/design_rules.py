@@ -4008,12 +4008,13 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
         # #1843: and the clearance rules scoped by a rule area
         from area_clearance import mark_honoured
         mark_honoured(rules, pcb_data, config)
-        # #1116: no via in an edge connector's contact finger
+        # #1116: no via in an edge connector's contact finger, and #2022:
+        # no copper in its finger strip but a finger's own entry
         try:
-            from net_keepouts import derive_contact_fingers
-            rules.net_keepouts = list(rules.net_keepouts) + derive_contact_fingers(pcb_data)
+            from net_keepouts import derive_mating_keepouts
+            rules.net_keepouts = list(rules.net_keepouts) + derive_mating_keepouts(pcb_data)
         except Exception as e:                                 # noqa: BLE001
-            rules.notes.append(f"contact-finger via keep-outs not derived ({e})")
+            rules.notes.append(f"edge-connector keep-outs not derived ({e})")
     if net_keepouts and pcb_data is not None:
         # #1853: the hole_clearance rules the route steps read
         from hole_rule_routing import mark_honoured as _mark_holes

@@ -2266,15 +2266,18 @@ def oracle_reconnect(board_file: str, net_names, config,
         nonlocal _net_keepouts
         if _ncl_by_name:
             config.net_clearances = rekey_by_name(_ncl_by_name, pcb.nets)
-        from net_keepouts import attach, derive_area_keepouts, derive_layer_bans
+        from net_keepouts import (attach, derive_area_keepouts, derive_layer_bans,
+                                  derive_mating_keepouts)
         if _net_keepouts is None:
             # the rules source's net-filtered keep-outs name nets and
-            # polygons, so one derivation serves every parse
+            # polygons, so one derivation serves every parse; an edge
+            # connector's (#1116, #2022) are the board's own geometry
             try:
                 from design_rules import DesignRules
                 rules = DesignRules.from_project(pcb, _track_src)
                 _net_keepouts = (derive_area_keepouts(rules, pcb)
-                                 + derive_layer_bans(rules, pcb))
+                                 + derive_layer_bans(rules, pcb)
+                                 + derive_mating_keepouts(pcb))
             except Exception as _ke:                        # noqa: BLE001
                 print(f"  KiCad-oracle recheck: net-filtered keep-outs not "
                       f"derived ({_ke})")

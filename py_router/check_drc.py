@@ -5987,10 +5987,17 @@ def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
         layers = _keepout_area_layers(ko, routing_layers)
         base = {'type': 'keepout', 'area': ko.get('name') or '',
                 'area_in_footprint': bool(ko.get('in_footprint'))}
+        # #2022: a finger column binds every net but its finger's, a tail
+        # only that one; every other area binds every item
+        bound = (ko.get('nets') if ko.get('finger_band') in ('column', 'tail')
+                 else None)
         if segs and not ko.get('tracks_allowed', True) and layers:
             cand = np.nonzero(np.isin(slayer, layers)
                               & (lo_x <= bx1) & (hi_x >= bx0)
                               & (lo_y <= by1) & (hi_y >= by0))[0]
+            if bound is not None:
+                cand = np.array([i for i in cand.tolist()
+                                 if _net(segs[i].net_id) in bound], dtype=np.int64)
             if len(cand):
                 if lines is None:
                     lines = shapely.linestrings(np.stack(
@@ -6199,6 +6206,8 @@ def _keepout_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
     kicad_drc_compare keeps these on a labelled channel of their own."""
     _finger_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
                  violations, accepted, tol, quiet)
+    _finger_band_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
+                      violations, accepted, tol, quiet)
     rows = keepout_census(pcb_data, routing_layers, tol=tol,
                           net_ids=matching_net_ids)
     inherited = set()
@@ -6239,6 +6248,58 @@ def contact_finger_areas(pcb_data):
     from net_keepouts import derive_contact_fingers
     return [dict(ko, in_footprint=True, contact_finger=True)
             for ko in derive_contact_fingers(pcb_data)]
+
+
+def finger_band_areas(pcb_data):
+    """The finger strips of an edge connector (#2022), as `keepout_census`
+    reads an area: the regions the router keeps copper out of
+    (`net_keepouts.derive_finger_bands`). [] when the board has none."""
+    from net_keepouts import derive_finger_bands
+    return [dict(ko, in_footprint=True) for ko in derive_finger_bands(pcb_data)]
+
+
+def _finger_band_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
+                      violations, accepted, tol, quiet):
+    """#2022: copper in an edge connector's finger strip, as `keepout` rows
+    (`finger_band` 'via', 'column' or 'tail'): any net's via in the strip, a
+    track of another net in a finger's column (between the fingers or along
+    the strip past them), and a finger's own track past its outer end. The
+    socket wipes the strip and the edge past it is bevelled; KiCad grades
+    none of it, so this is check_drc's own finding. Copper the `--baseline`
+    board already had there is accepted `inherited-keepout`."""
+    areas = finger_band_areas(pcb_data)
+    if not areas:
+        return
+    rows = keepout_census(pcb_data, routing_layers, tol=tol,
+                          net_ids=matching_net_ids, areas=areas)
+    kind = {ko['name']: ko['finger_band'] for ko in areas}
+    # a via is in every layer's band of its run: one row per via
+    seen, kept = set(), []
+    for r in rows:
+        r['finger_band'] = kind.get(r['area'])
+        if r['item'] == 'via':
+            key = (r.get('via_loc'), r['area'].rsplit(' ', 1)[0])
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append(r)
+    rows = kept
+    inherited = set()
+    if rows and baseline_pd is not None:
+        inherited = {_keepout_key(r) for r in keepout_census(
+            baseline_pd, routing_layers, tol=tol,
+            areas=finger_band_areas(baseline_pd))}
+    n_viol, n_inh = _accept_inherited(rows, inherited, violations, accepted)
+    if quiet or not rows:
+        return
+    by = {}
+    for r in rows:
+        by[r['finger_band']] = by.get(r['finger_band'], 0) + 1
+    print("Copper in an edge connector's finger strip: %d (violations: %s), "
+          "%d inherited from --baseline (accepted)%s" % (
+              n_viol, ', '.join(f"{n} {k}" for k, n in sorted(by.items())), n_inh,
+              '; pass --baseline <input board> to accept the copper the board '
+              'already had there' if n_viol and baseline_pd is None else ''))
 
 
 def _finger_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
@@ -10970,7 +11031,10 @@ if __name__ == "__main__":
                               if v.get('accepted') == 'inherited-keepout'),
                 # #1116: of the violations, vias in a contact finger
                 contact_finger=sum(1 for v in _real if v.get('type') == 'keepout'
-                                   and v.get('contact_finger'))),
+                                   and v.get('contact_finger')),
+                # #2022: and copper in an edge connector's finger strip
+                finger_band=sum(1 for v in _real if v.get('type') == 'keepout'
+                                and v.get('finger_band'))),
             # `short`: copper of two nets in contact (SHORT_TYPES), never a
             # drill, hole or edge item whatever its overlap (#1558). A
             # crossing has no overlap to grade: it is contact (#1563).
