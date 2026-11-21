@@ -557,6 +557,26 @@ array's second row, its stub out between two lanes that ran on side by side
 a track's width short of a track's room, had kept nothing by its via site:
 the wall stood past it (`tests/test_622_ball_channel.py`).
 
+**The plan is asked first** (`kept_ways.py`, the loop's `keep_ways`), on two
+routing layers and one bus. The plan that passes is read as copper on its
+bench -- a single's pieces a track wide, a pair one track over both its legs
+-- and given the same cage test. For a ball it walls in, the way out between
+its lanes is laid on a copy of the bench as a track of the ball's own net, a
+track and a cell of the cage test's raster either side wide, and the loop is
+run again on that bench from the round's solve, with its flips, cuts and
+history: the geometry moves every lane off the way together, which the lay,
+a lane at a time and each in its band, cannot. The plan that passes there
+stands; the lay routes round the way as round any copper and takes it up
+from the board it leaves, every piece or the run stops. Where no plan passes
+with the way kept, or a ball has no way, the round's own plan stands and the
+lay's guard is left to it, said in the round's log. A ball whose way out ran
+between a lane and a fixed pad a tenth of a millimetre short of a track's
+room shipped walled in: the lay routed the lane again to the bare clearance
+of the way, a raster cell short of what the cage test asks, and the lane
+beside it left it a hundredth too little to give more. Not on a solve's
+relayed bench (more routing layers than two) nor among negotiated buses:
+there the lay's guard stands alone (`tests/test_622_kept_ways.py`).
+
 It exits 0 whenever it writes OUT (#1738): the bus nets it hands on connected
 and clean (those it put back are in `refused`), or none handed on and OUT the
 board as it came. The summary's `exit` says which, and over several buses it
@@ -1827,7 +1847,17 @@ one model gave a different answer on every run.
 **Its work by need.** The bound-raising workers run first, a probe of 10
 batches (`PROBE_BATCHES`): their plan meeting their bound is the solve.
 Else the plan-finding workers run on from the probe's plan and bound, one
-search of at most 100 batches (`SOLVE_BATCHES`). Each stops sooner once
+search of at most 100 batches (`SOLVE_BATCHES`). On two routing layers that
+search is its complete searches' alone, the solver's own neighbourhood
+searches off (`finders_alone`): an interleaved search shares its work evenly
+among all its subsolvers, and beside the three named here the solver adds ten
+neighbourhood searches once a plan is known, which took two thirds of every
+batch where only a complete search raises the bound. Four seeds of a 50-lane
+two-layer bus, each unproved with them (63, 226, 47 and 44 vias' worth
+against bounds of 25, 38, 21 and 28), are proved without, at 63, 78, 35 and
+44. With more layers the neighbourhood searches are the ones that find the
+plans -- an eight-layer bus kept 82 with them and 92 without -- so there the
+search is as it was (`tests/test_622_finders_alone.py`). Each stops sooner once
 the vias are proved, and the probe once it has a plan and three of its own
 model reductions in a row find no better plan or bound. With more routing
 layers than two every solve of a round keeps a plan it cannot prove, and the

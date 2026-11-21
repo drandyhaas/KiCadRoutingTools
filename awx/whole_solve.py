@@ -74,6 +74,15 @@ SUBSOLVERS = ['default_lp', 'max_lp', 'core', 'objective_lb_search']
 # ...and when they cannot prove it, the PLAN-FINDING workers the first four leave out, with core-based search to close
 # the proof from their plan (the finders alone found K51-on-the-human's-fanout's plan and left its bound where it was)
 FALLBACK = ['quick_restart', 'no_lp', 'core']
+
+
+def finders_alone(subs, layers):
+    """True for the plan-finders' own workers (FALLBACK, by what the list names) on TWO routing layers: their search
+    runs with CP-SAT's neighbourhood workers off (solve's `once`). The bound-raising probe and a window's search
+    keep theirs, and so does every search on more layers -- there the neighbourhood searches find the plans"""
+    return layers == 2 and list(subs) == FALLBACK
+
+
 FACE_ROOM = 2 * VNEED                 # the band along the source's near face: a change's room along its lane
 NEAR_X_MM = 8.0                       # a crossing this far past the source's near face or more is free of the face's price
 SOLVE_STALL = 3                        # the search's model reductions in a row with no progress: stalled
@@ -2496,6 +2505,13 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         s_.parameters.max_num_deterministic_batches = batches
         s_.parameters.share_glue_clauses = False
         s_.parameters.share_binary_clauses = False
+        # ON TWO LAYERS THE PLAN-FINDERS' search is its complete searches' ALONE (finders_alone): an interleaved
+        # search shares its deterministic work evenly among all its subsolvers, and beside the three named here
+        # CP-SAT adds ten neighbourhood searches once a plan is known -- which then take two thirds of every batch,
+        # where only a complete search raises the bound. Off, each batch is a turn of each complete search: the
+        # same batches, the same workers, the search as reproducible as before
+        if finders_alone(subs, NL):
+            s_.parameters.use_lns = False
         stall = {'n': 0, 'plan': False, 'search': False, 'due': False}
 
         def _progress(line):

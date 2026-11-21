@@ -253,6 +253,7 @@ def findings(gate_line):
 
 
 LOOP_ROUNDS = 6                 # the loop's rounds at most
+KEEP_WAYS = 2                   # (loop's keep_ways) the benches with ways kept one inside another, at most
 
 
 class NotConverging(Exception):
@@ -1257,6 +1258,65 @@ def loop(solve, out, rounds, env, log, try_lay=None):
         log("=== no round passed")
         return 1
 
+    def keep_ways(i, plan):
+        """THE WAYS OUT OF THE BALLS THE PLAN WALLS IN, kept (kept_ways.py). The plan that passes is asked whether
+        its lanes, laid as it has them, wall in a ball of the bus's parts on no bus net -- the step's own cage test,
+        on the plan. Where they do, each such ball's way out between the lanes is laid on a copy of the bench as copper
+        of the ball's own net, and THE LOOP IS RUN AGAIN ON THAT BENCH from this round's solve, with every flip, cut
+        and history the loop holds: the geometry, the polish, the snap and their audits read the way as they read any
+        copper, and the solve is asked again where they find cuts. The plan that passes there replaces this one and
+        stands on that bench -- the lay routes round the way too, and takes it up from the board it leaves (chain's
+        lay, ways_up). Where no plan passes there, or a walled ball has no way, this round's plan stands as it was:
+        the lay's own guard (route_lanes.lift_walls) is left to it, and the log says so.
+        The lay found such a ball only once its lanes were copper, and could lift a lane and route it again, one at
+        a time, each in its band: a ball whose way out ran between a lane and a fixed pad, a track's room short by
+        a few hundredths of a millimetre, needed a lane to leave the corridor, and shipped walled in.
+        Not where the bench is a solve's relayed one (more routing layers than two: BENCH0 -- each re-solve relays its
+        plan from the fanout's bench, which has no way on it), nor among negotiated buses (JOINT_DIR: their exchanges
+        are counted by this loop's rounds): there the lay's guard stands alone, as before"""
+        depth = int(env.get('KEPT_WAYS') or 0)
+        if env.get('BENCH0') or env.get('JOINT_DIR') or depth >= KEEP_WAYS:
+            return
+        wb, wl = O(f'ways{i}.kicad_pcb'), O(f'ways{i}.log')
+        rc_ = run(['kept_ways.py', plan, wb], env, log_path=wl)[0]
+        said_ = grep(wl, r'^(WAY|NO WAY) ')
+        if rc_ != 0:
+            for ln in tail(wl, 3):
+                log('  ' + ln)
+            log(f"  the balls the plan walls in not asked for (kept_ways ended {rc_}): the plan stands as it is, the "
+                f"lay's own guard left to it")
+            return
+        if not said_:
+            return                              # (no ball walled in: nothing changes)
+        for ln in said_:
+            log('  ' + ln)
+        if not os.path.isfile(wb):
+            log("  no way out to keep: the plan stands as it is, the lay's own guard left to it")
+            return
+        ld = O(f'ways{i}.loop')
+
+        def sub(s_=''):
+            log('  | ' + s_)
+        sub.f = log.f
+        log(f"=== round {i}: the plan walls {len(grep(wl, r'^WAY '))} ball(s) in -> the loop again on the bench with "
+            f"their ways out kept ({os.path.basename(wb)}), from {os.path.basename(st['solve'])}")
+        rc_w = loop(st['solve'], ld, rounds, dict(env, BENCH=wb, SEED_FLIPS=st['flips'], SEED_CUTS=st['cuts'],
+                                                  SEED_HIST=st['hist'], KEPT_WAYS=str(depth + 1)), sub)
+        if rc_w != 0:
+            log(f"  no plan passes with the ways kept (the loop on that bench ended {rc_w}): this round's plan stands "
+                f"as it was, the lay's own guard left to it")
+            return
+        shutil.copyfile(os.path.join(ld, 'plan.json'), plan)
+        shutil.copyfile(plan, O(f'plan{i}.json'))
+        for nm in ('plan.audit', 'plan.lint', 'snap.log'):
+            if os.path.isfile(os.path.join(ld, nm)):
+                shutil.copyfile(os.path.join(ld, nm), O(nm))
+        # (the bench that plan stands on: the one with the ways, or one inside it with another ball's too)
+        benches['plan'] = plan_bench(ld, 'plan.json', wb)
+        json.dump(benches, open(O('benches.json'), 'w'), indent=1)
+        log(f"  the plan with the ways kept stands, on {os.path.relpath(benches['plan'], out)}: the lay routes round "
+            f"them and takes them up")
+
     def smooth_passes(i):
         """the PAIRS first, laid as the pair router moves (its turning radius, its straight dives), then the singles
         fitted round them (the polish, the pairs held) and snapped: an exit code, or 'continue' for the next round"""
@@ -1369,6 +1429,7 @@ def loop(solve, out, rounds, env, log, try_lay=None):
         lint = (tail(O('plan.lint'), 1) or [''])[0]
         log(f"  snapped: {lint}")
         if gate(plan, O('plan.audit'))[0] == 0 and lint == 'LINT clean':
+            keep_ways(i, plan)
             log(f"=== the plan passes: {plan}")
             return 0
         # (`try_lay`) a snapped plan with EVERY lane laid, short at its audit: LAID as it stands
@@ -2067,6 +2128,18 @@ def put_blocked(path, side, lanes, say=print):
     if new:
         json.dump(fb, open(path, 'w'), indent=1)
         say(f"  blocked teeth, avoided by every later round: {', '.join(new)}")
+
+
+def ways_up(bench, board, logp, env, say):
+    """THE WAYS KEPT FOR A PLAN (loop's keep_ways: laid on its bench as copper, for the plan's lanes and the lay alone)
+    TAKEN UP AGAIN from `board`, a board laid on that bench: every one of them, or the run stops -- they are no copper
+    of the board's (kept_ways.py --take-up). Nothing where the bench has none"""
+    wf = (bench[:-len('.kicad_pcb')] if bench.endswith('.kicad_pcb') else bench) + '.ways.json'
+    if not os.path.isfile(wf) or not os.path.isfile(board):
+        return
+    if run(['kept_ways.py', '--take-up', board, wf], env, log_path=logp)[0] != 0:
+        raise RuntimeError(f"the ways kept for the plan not taken up from {board}: {' '.join(tail(logp, 2))}")
+    say('  ' + ' '.join(tail(logp, 1)))
 
 
 def plan_bench(loopd, plan, default):
@@ -2929,6 +3002,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         seq = os.path.join(d, f'seq{tag}.kicad_pcb')
         run(['route_lanes.py', 'all'] + rr + ['--mode', 'seq', '--write', seq], {**env, 'BRAID_PAIR_SLACKS': '0'},
             log_path=os.path.join(d, f'route_seq{tag}.log'))
+        ways_up(bench, seq, os.path.join(d, f'ways_up{tag}.log'), env, say)
         sm = '\n'.join(grep(os.path.join(d, f'route_seq{tag}.log'), r'^SUMMARY'))
         say(f"  all lanes laid: {sm}")
         if not os.path.isfile(seq):
@@ -2997,6 +3071,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         if not os.path.isfile(out_p):
             say("  the pack: no lane packed -- the round's lay stands")
             return None
+        ways_up(laid['bench'], out_p, os.path.join(dp, 'ways_up.log'), env, say)
         res_p = graded(r, dp, out_p, res['lanes'])
         if res_p['open'] > res['open'] or res_p['drc'] > res['drc']:
             say(f"  the pack: worse than the lay -- {res_p['open']} open, drc {res_p['drc']} against {res['open']} "
