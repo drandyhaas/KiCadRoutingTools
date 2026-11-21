@@ -838,8 +838,10 @@ def verify_runs(bm, pts, cliques, bicliques, n=200000, seed=1):
         seen += 1
         ma, mb = bm.menu[a[0]][a[1]], bm.menu[b[0]][b[1]]
         ra, rb = (getattr(mm, 'via_r', bm.sz['vr']) for mm in (ma, mb))
-        # (the test's one reach for both vias: the larger, where the two differ)
-        want = sm._conflict(ma, mb, strict=True, stack=True, xing=2, reach=max(ra, rb) + bm.sz['cl'] + bm.sz['tw'] / 2)
+        # (each via at its own reach, as the rules' groups price it: a via-in-pad's finer via at its own radius -- one
+        # reach for both, the larger, called 0.4 % of a memory array's whole-menu pairs held apart that are clear)
+        ext = bm.sz['cl'] + bm.sz['tw'] / 2
+        want = sm._conflict(ma, mb, strict=True, stack=True, xing=2, reach=(ra + ext, rb + ext))
         got = (min(a, b), max(a, b)) in hard or bool(at[a] & at[b])
         if want != got:
             bad[('the test alone' if want else 'the rules alone', ma.layer == je.RUN, mb.layer == je.RUN)] += 1

@@ -559,7 +559,7 @@ _TOUCH = 1e-6        # two spans that meet at a point DO conflict (see below)
 
 
 def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True, stack: bool = False,
-              xing: Optional[int] = None, reach: Optional[float] = None) -> bool:
+              xing: Optional[int] = None, reach=None) -> bool:
     """Two moves that cannot both be laid: a shared lane stretch or a
     shared site -- and, `strict`, a lane matched within `tol` (half a
     fine-pitch gap) or one's via site in the other's lane. The strict
@@ -580,7 +580,8 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True, stack: 
     SEL_XING when not given -- a caller meaning another rule passes it.
     `reach`: how far a via keeps the other move's run off it (_VIA_REACH,
     the router's grid ring, when not given -- rules.fan_via_clear for
-    moves laid exactly as they are)"""
+    moves laid exactly as they are); a pair (m's via's, om's via's) where
+    the two vias differ, each site against the other's run at its own"""
     xing = SEL_XING if xing is None else xing
     spans, ospans = _lane_spans(m), _lane_spans(om)
     for key, a, b in spans:
@@ -617,8 +618,9 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True, stack: 
     # cannot both be laid whatever their layers (K28: SODT0's site in
     # SCKE0's column gap, SDQ0's in SDQ14's row gap -- the fanout, which
     # now lays the plan's moves exactly, refused the second of each pair)
-    if any(_site_in_lane(om, key, a, b, reach) for key, a, b in spans) \
-            or any(_site_in_lane(m, ok, oa, ob, reach) for ok, oa, ob in ospans):
+    r_m, r_om = reach if isinstance(reach, tuple) else (reach, reach)
+    if any(_site_in_lane(om, key, a, b, r_om) for key, a, b in spans) \
+            or any(_site_in_lane(m, ok, oa, ob, r_m) for ok, oa, ob in ospans):
         return True
     # two teeth cannot share one exit point: the braid orders lanes by their
     # offset at the array, whatever their layers, and two lanes at one
