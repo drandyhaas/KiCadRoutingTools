@@ -2052,6 +2052,41 @@ python3 awx/whole_movie.py RUNDIR --check                        # the re-runs c
   of layers, while the film draws two.
 - Needs `ffmpeg` (libx264) for the mp4; `--stills` alone writes PNGs.
 
+**With sound** (`--sound`, made by `awx/whole_movie_sound.py`):
+
+```bash
+python3 awx/whole_movie.py RUNDIR OUT.mp4 --sound --workers 4                 # the default voice, kokoro:am_puck
+python3 awx/whole_movie.py RUNDIR OUT.mp4 --sound --voice Samantha            # a macOS `say` voice instead
+python3 awx/whole_movie.py RUNDIR --scenes --sound                            # every line's and effect's time
+python3 awx/whole_movie_sound.py --fetch [kokoro:NAME]                        # the neural voice, ahead of time
+```
+
+- The sound track is three stems: a **narration** of every scene (its own
+  lines, every number in them read from the run's files, as the captions'
+  are), **effects** on what the scenes draw (a plan found, a bound raised, a
+  search round, a lane laid ...), each at the moment it is drawn, and
+  **music**, a slow pad of chords. They are made with numpy and scipy and
+  mixed by `ffmpeg`, with the music ducked under the voice.
+- **The timeline is fitted to the narration.** A line starts at its moment of
+  its scene; where it needs more time than the scene gives it, the scene is
+  slowed up to its next line (or its last frame held), so no line runs into
+  the next line or scene. The film is longer with sound than without. The
+  run's `--scenes --sound` report lists every line and checks that.
+- **The voice.** By default it is the neural Kokoro-82M voice
+  `kokoro:am_puck`; `--voice kokoro:NAME` picks another of its voices. Its
+  first use installs Kokoro (with torch and spaCy, about 1 GB) into a venv of
+  its own under `$XDG_CACHE_HOME` (else `~/.cache`)`/krt_tts`, made by `uv`
+  where there is one (else by a Python 3.10 to 3.12 on the PATH), and fetches
+  the model's weights and the voice from huggingface.co there, once. After
+  that it speaks offline, and the words never leave the machine.
+  `whole_movie_sound.py --fetch` does the install and the fetch ahead of time,
+  for a machine that will film offline. Where the voice cannot be had, the film
+  stops and says how to fetch it. `--voice NAME` with a macOS `say` voice
+  (`say -v ?` lists them, e.g. `Samantha`) needs nothing installed, but only
+  runs on macOS.
+- Without `--sound` the film is unchanged, frame for frame, and none of this
+  is needed.
+
 ## Orphan Stub Checker (`check_orphan_stubs.py`)
 
 Detects trace endpoints that end without a proper connection point (via or pad).

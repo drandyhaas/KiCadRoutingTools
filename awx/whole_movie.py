@@ -72,8 +72,23 @@ before and after an event -- is a blend of the two, not a step of any stage. And
 their relaxation is not filmed at all: the move from each straight line to its string is a blend, and the scene says
 so.
 
+With --sound the film gets a sound track (whole_movie_sound.py): a NARRATION of every scene, from the scene's own lines
+(Scene.says, beside its captions, every number in them read from the run's files as the captions' are), EFFECTS on
+the things the scenes draw (Scene.cues: a plan found, a bound raised, a round of a search, a via changing cell, a lane
+laid ..), each at the moment its scene draws it, and MUSIC, all made here (numpy, scipy) and mixed by ffmpeg, the
+music ducked under the voice. The film's timeline is FITTED to the narration: a scene's line starts at its moment of
+the scene, and where a line is longer than the scene gives it the scene is slowed up to its next line (or to where
+what it speaks of leaves the screen), its last frame held after its last, so no line runs into the line or the scene
+after it. --scenes with --sound lists every line's and effect's time on the fitted timeline. The voice (--voice) is by
+default the neural Kokoro-82M's kokoro:am_puck (whole_movie_sound.DEFAULT_VOICE): its first use installs it into a
+venv of its own in the user's cache ($XDG_CACHE_HOME or ~/.cache, krt_tts) and fetches its weights there once, and it
+then speaks offline; `python3 whole_movie_sound.py --fetch [kokoro:NAME]` does that ahead of time, for a machine that
+will film offline. Where it cannot be had the film stops, saying how to fetch it -- or --voice NAME, a macOS `say`
+voice (`say -v ?` lists them), needs nothing installed. Without --sound the film is the same as ever, frame for frame,
+and nothing of the sound is needed.
+
 usage: whole_movie.py RUNDIR OUT.mp4 [--fps 30] [--workers 6] [--stills DIR [--at T1,T2,..]] [--human BOARD]
-                     [--speed X] [--force] [--scenes]
+                     [--speed X] [--force] [--scenes] [--sound [--voice kokoro:NAME | SAY_VOICE]]
        whole_movie.py RUNDIR --check
 The bench is the chain's: BASE (default fb_t2q_pairs.kicad_pcb) and DEST (default DU1) as whole_route.py reads them; a
 bus step's run gives its own, and BASE may then name the board from before the bus's ends were laid (the ends' scene
@@ -846,6 +861,9 @@ def load_group(rdir, step, rec):
         M_['uncounted'] = float(m.group(1)) if m else None
         m = re.search(r': ([\d.]+) \(\d+ s\)$', M_['search'] or '') if M_['label'] == 'the start' else None
         M_['start_value'] = float(m.group(1)) if m else None
+        # (the search's own value of the state its rounds ended on -- "A -> B" -- on the scale of its start's)
+        m = re.search(r': [\d.]+ -> ([\d.]+),', M_['search'] or '')
+        M_['end_value'] = float(m.group(1)) if m else None
     G.verdicts = [r_ for r_ in G.recs if r_['rec'] == 'verdict']
     G.fields = [r_ for r_ in G.recs if r_['rec'] == 'field']
     G.done = next((r_ for r_ in G.recs if r_['rec'] == 'done'), None)
@@ -1859,8 +1877,29 @@ def draw_braid(C, film, plan, alpha=1.0, cursor=None, cuts=None, labels=True, hl
 
 # =============================================================================== the scenes
 class Scene:
-    def __init__(self, key, stage, secs, fn, captions):
+    def __init__(self, key, stage, secs, fn, captions, says=(), cues=()):
         self.key, self.stage, self.secs, self.fn, self.captions = key, stage, secs, fn, captions
+        # (the sound, --sound: the scene's narration [(t, words[, t_end])], each line spoken from its moment t of the
+        # scene and done by its t_end where what it speaks of leaves the screen there, and its cues [(t, effect[, x[,
+        # t_end]])], each a thing the scene draws at t -- whole_movie_sound.py)
+        self.says, self.cues = list(says), list(cues)
+        self.knots = None           # (film seconds into the scene, t) where the narration's pace was fitted
+
+    @property
+    def span(self):
+        """the scene's length on film: its own, or with the narration fitted (whole_movie_sound.fit) the longer"""
+        return self.knots[-1][0] if self.knots else self.secs
+
+    def at(self, s):
+        """the scene's moment t (0 to 1) s seconds into it on film"""
+        if not self.knots:
+            return min(1.0, s / self.secs)
+        return float(np.interp(s, [k[0] for k in self.knots], [k[1] for k in self.knots]))
+
+
+def spoken(name):
+    """a part's or a net's name as the narration says it: letter by letter, its numbers whole (AB12: A B 12)"""
+    return ' '.join(re.findall(r'\d+|[A-Za-z]', name)) or name
 
 
 # ------------------------------------------------------------------------------- the 2-D geometry's scenes
@@ -2042,7 +2081,11 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
         (0.48, 'But there a lane can only shift sideways at its columns, and every via stays at the place along the '
                'route the solve gave it.' + (f' Where that does not fit the board, the program pays ({pl(npaid, "rule")}, '
                                              f'red).' if npaid else '')
-               + ' This layout is now only the START of the geometry.')]))
+               + ' This layout is now only the START of the geometry.')],
+        says=[(0, 'The geometry begins in the frame: one linear program turns the order into millimetres.'),
+              (0.48, ('But lanes can only shift sideways here, so some rules go unmet, in red.' if npaid else
+                      'But lanes can only shift sideways here, and every via stays put.') + ' It is only a start.')],
+        cues=[(0.04, 'glide', 0.4, 0.42)] + ([(0.52, 'alert', 0.4)] if npaid else [])))   # (the layout; its paid rules)
 
     # ------------------------------------------------------------------ the cells
     e0 = seq[0][3]
@@ -2087,7 +2130,10 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                             'CELLS (' + ', '.join(f'{bname(L)} {ncell[L]}' for L in range(nlay)) + '). The cells a lane '
                             'passes say which side of each piece of copper it goes -- and nothing more.'),
         (0.06 + VL * slot, f'A via needs its room on every layer at once, so the vias have a free space of their own, '
-                           f'cut the same way ({ncell[VL]} cells).')]))
+                           f'cut the same way ({ncell[VL]} cells).')],
+        says=[(0, 'Now the geometry works on the board itself. Each layer\'s free space is cut into triangles: cells.'),
+              (0.06 + VL * slot, 'Vias need room on every layer at once, so they get cells of their own.')],
+        cues=[(0.06 + L * slot, 'sweep', L / max(1, nmesh - 1), 0.06 + L * slot + 0.6 * slot) for L in range(nmesh)]))
 
     # ------------------------------------------------------------------ the lanes' own points
     kinds0 = ''.join(e0['kind'].values())
@@ -2128,7 +2174,11 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                f'via is a free point too, in a cell of the vias\' space.'),
         (0.7, 'Where the start stood inside the margin of some copper its line is read out to the free space, the '
               'runs kept in the order they had. And a lane leaves its tooth, and reaches its berth, straight along its '
-              'stub.')]))
+              'stub.')],
+        says=[(0, 'The starting layout is read onto the cells.'),
+              (0.28, 'White points slide along cell edges; yellow points move freely inside their cells.'),
+              (0.7, 'And each lane leaves and arrives straight along its stub.')],
+        cues=[(0.03, 'glide', 0.3, 0.22), (0.28, 'shimmer', 0.7)]))          # (the start read on; its points)
 
     # ------------------------------------------------------------------ the rounds
     # the film's time for each stand: the first rounds slow (they move the most), a slide a beat of its own
@@ -2257,12 +2307,37 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                     + (f', and {pl(len(E["slid"]), "via")} slid along its lane' if len(E['slid']) == 1 else
                        f', and {len(E["slid"])} vias were slid along their lanes' if E['slid'] else '')
                     + '. A closer look at one of each follows.')]
-    sc.append(Scene('rounds', 'geometry', 24, rounds, cap_r))
+    did = ([f'vias changed cell {tot["hops"]:,} times'] if tot['hops'] else []) \
+        + ([f'{pl(tot["npull"], "stretch", "stretches")} {"was" if tot["npull"] == 1 else "were"} pulled taut']
+           if tot['npull'] else []) \
+        + ([f'{pl(len(E["slid"]), "via")} slid along ' + ('its lane' if len(E['slid']) == 1 else 'their lanes')]
+           if E['slid'] else [])
+    say_r = [(0, 'Then, round after round, one linear program moves every via and every point together.'),
+             (0.2, 'Each round moves things only a little, and nothing passes through anything: lanes, vias and copper '
+                   'keep their sides.'),
+             (0.45, 'Each round holds only what is near the last round\'s moves, so the program shrinks as the layout '
+                    'settles.'),
+             (0.72, f'Over {NR:,} rounds, ' + (', '.join(did[:-1]) + ' and ' + did[-1] if len(did) > 1 else did[0])
+              + '.' if did else f'{pl(NR, "round")} in all.')]
+    # (each stand in turn, at its share of the scene: a round of the program -- the louder, the more points it holds
+    # -- and its via cell changes lit; or a via slid along its lane)
+    cue_r = []
+    for i, (_k, kind, rec_, _st) in enumerate(seq[1:]):
+        t_i = 0.04 + 0.88 * cumw[i] / cumw[-1]
+        if kind == 'round':
+            cue_r.append((t_i, 'round', rec_['nlive'] / top))
+            if rec_['hops']:
+                cue_r.append((0.04 + 0.88 * (cumw[i] + 0.25 * wts[i]) / cumw[-1], 'blip', min(1.0, rec_['hops'] / 12)))
+        else:
+            cue_r.append((t_i, 'slide', 0.5, 0.04 + 0.88 * cumw[i + 1] / cumw[-1]))
+    sc.append(Scene('rounds', 'geometry', 24, rounds, cap_r, says=say_r, cues=cue_r))
 
     # ------------------------------------------------------------------ one event of each kind, up close
-    def closeup(key, secs, board_key, view, sA, sB, ta, tb, kw_a, kw_b, title, lines, caps, sC=None, tc=None):
+    def closeup(key, secs, board_key, view, sA, sB, ta, tb, kw_a, kw_b, title, lines, caps, sC=None, tc=None, says=(),
+                cues=()):
         """a scene of one event: the board, and beneath it the stand before (left) and the move to the stand after
-        (right) -- then, with sC, on to a third (the layout the rounds that follow reach)"""
+        (right, from t 0.38 to 0.62) -- then, with sC, on to a third (the layout the rounds that follow reach, from
+        0.76 to 0.92)"""
         def fn(C, t, T_):
             draw_fanout(C, 0.5)
             for L in range(nlay):
@@ -2279,7 +2354,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                 close(C, boxB, view, sB if m >= 1 else blend(sA, sB, m, vb), tb if m >= 1 else 'the move',
                       **(kw_b if m >= 1 else dict(kw_b, pts=False)))
             facts(C, boxT, title, lines)
-        sc.append(Scene(key, 'geometry', secs, fn, caps))
+        sc.append(Scene(key, 'geometry', secs, fn, caps, says=says, cues=cues))
 
     def tri_marks(Lm, was, now):
         """a cell left (dim) and the cell gone into (bright), outlined"""
@@ -2336,7 +2411,10 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                      'the copper\'s margin with straight-line rules alone.'),
                  (0.38, 'When the program presses it on an edge of that cell, with free space beyond, it goes on into the '
                         'next cell. So a via is not tied to the cell it starts in: it moves on, cell by cell, wherever '
-                        'there is room for it.')])
+                        'there is room for it.')],
+                says=[(0, 'A via changes cell. It is held inside its cell.'),
+                      (0.38, 'Pressed against an edge, with free space beyond, it moves on into the next cell.')],
+                cues=[(0.38, 'blip', 0.6)])
 
     # ---- a lane's point goes on into the next cell
     bul = [(plain(b['L'], b['from'], b['to'], dist(b['was'], b['xy'])), j, b) for j, r in enumerate(ER) for b in r['bulge']]
@@ -2360,7 +2438,10 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                      'run in the free space. Pushed aside by a neighbour or a via, it comes to press on an edge of the '
                      'cell.'),
                  (0.38, 'With free space beyond that edge, the point goes on into the cell beyond, and the run with it. '
-                        'The chain of cells a run crosses is not fixed: only the copper is.')])
+                        'The chain of cells a run crosses is not fixed: only the copper is.')],
+                says=[(0, 'A lane bulges. Its free points are held inside their cells too.'),
+                      (0.38, 'Pushed to an edge, a point crosses into the next cell, and the lane goes with it.')],
+                cues=[(0.38, 'boing', 0.5)])
 
     # ---- a run pulled taut
     pulls = [(plen(p['before']) - plen(p['after']), j, p) for j, r in enumerate(ER) for p in r['pull']]
@@ -2387,7 +2468,10 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                      'never undo.'),
                  (0.38, 'After each round\'s program every run is looked at for such a stretch, and where nothing stands '
                         'inside the loop -- and the straight line comes no nearer anything than its rule -- it is pulled '
-                        'straight.')])
+                        'straight.')],
+                says=[(0, 'A run pulled taut. Moving vias and bulges leave empty loops behind.'),
+                      (0.38, 'After each round, a loop with nothing inside it is pulled straight.')],
+                cues=[(0.38, 'zip', 0.5)])
 
     # ---- a via slid along its lane
     if E['slides'] and E['slides'][0]['vias']:
@@ -2431,7 +2515,11 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                         'no lane there.'),
                  (0.74, 'Then the rounds again, from there: the lanes round the via move off it'
                         + ('.' if still_short else ', and it has its room.'))],
-                sC=seq[-1][3], tc=f'after round {NR}')
+                sC=seq[-1][3], tc=f'after round {NR}',
+                says=[(0, 'A via slides. In a corridor too narrow, small steps cannot give it its room.'),
+                      (0.38, 'So it slides along its own lane, to the most open place within reach.'),
+                      (0.74, 'Then the rounds run again, from there' + ('.' if still_short else ', and it has its room.'))],
+                cues=[(0.38, 'slide', 0.5, 0.62), (0.76, 'glide', 0.6, 0.92)])
 
     # ---- a breach
     if E['breach']:
@@ -2451,7 +2539,10 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                 [(0, 'A breach. Here the plan asks a lane to pass copper on a layer whose free space does not lead '
                      'round it -- the two sides are two separate pieces of that layer.'),
                  (0.38, 'No geometry can lay that lane on that layer there. The run is kept as it stands and the place '
-                        'goes back to the solve: that lane off that layer across that copper.')])
+                        'goes back to the solve: that lane off that layer across that copper.')],
+                says=[(0, 'A breach: no free space on this layer leads around the copper.'),
+                      (0.38, 'No geometry can lay that lane there, so the place goes back to the solve.')],
+                cues=[(0.05, 'alert', 0.6), (0.38, 'glide', 0.3, 0.62)])
 
     # ------------------------------------------------------------------ what stands at the end
     len0 = sum(plen(xy) for xy in e0['xy'].values())
@@ -2503,7 +2594,17 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
         (0.5, f'The lines are then written for the stages after, cleared of the folds and notches no router lays '
               f'({folds} found, {pl(shp.get("out", 0), "point")} left out where nothing stands in the way). '
               + (f'A via still short of its room, and each breach, go back to the solve as cuts: {cuts_txt}.'
-                 if vcuts or lcuts else 'Nothing goes back to the solve from here.'))]))
+                 if vcuts or lcuts else 'Nothing goes back to the solve from here.'))],
+        says=[(0, (f'After {NR:,} rounds, nothing moves.' if E['settled'] else
+                   f'The rounds stop after {NR:,}, the most they run; a few places still move.')
+               + (f' Short of a rule: {short_txt}, in red.' if E['short'] else
+                  ' Every lane has its pitch, and every via its room.')),
+              (0.5, 'The lines are cleaned of folds and notches' + (', and what is still short goes back to the solve.'
+                                                                    if vcuts or lcuts else
+                                                                    ', and nothing goes back to the solve.'))],
+        # (what stands short, and the margin given up; the written lines)
+        cues=([(0.08, 'alert' if E['short'] else 'shimmer', 0.4)] if E['short'] or E['tight'] else [])
+        + [(0.5, 'glide', 0.5, 0.68)]))
 
 
 # ------------------------------------------------------------------------------- the group's ends' scenes
@@ -2905,6 +3006,131 @@ def group_scenes(film, sc):
             (0.65, 'The field\'s ties: a pad on a poured net beneath the group\'s parts is tied before any lane is '
                    'planned' + (' (magenta).' if g.ties else '.') + ' The field\'s DRC is measured again; every bus is '
                    'routed on this board.')]))
+    group_sound(film, sc, locals())
+
+
+def group_sound(film, sc, v):
+    """the group's ends' scenes' narration and effects (--sound: whole_movie_sound.py), each line at the moment its
+    scene shows what it speaks of, every number read from the run's record as the captions read it. `v` is
+    group_scenes' own names (its counts, its states' times)"""
+    S, G, g = film.S, film.S.G, film.g
+    by = {s_.key: s_ for s_ in sc}
+    num = lambda n: f'{n:,}'
+    plw = lambda n, one, many=None: f'{num(n)} {one if n == 1 else (many or one + "s")}'
+    # ---- the buses, the group, the capture
+    if 'buses' in by:
+        nb, srcs = v['nb'], v['srcs']
+        bs = ', '.join(f'{spoken(b["src"])} to {spoken(b["dest"])}, {num(b["nets"])} nets' for b in G.plan)
+        secs_ = [e.get('secs') for e in G.cap_end if e.get('secs') is not None]
+        by['buses'].says = [
+            (0, f'The bus step finds its buses: {plw(len(G.plan), "bus", "buses")}, {bs}. The buses that leave one '
+                'source array are one group, and their ends are chosen together.', 0.3),
+            (0.3, 'First, each bus\'s ends model is captured by a short run of its own'
+                  + (f', here in {plw(max(secs_), "second")}.' if secs_ else '.'), 0.55),
+            (0.55, f'On the arrays: {num(nb["bus"])} bus balls in gold, {num(nb["other"])} other signals\' balls in grey, '
+                   f'and {num(nb["plane"])} plane balls in green. One model will serve every one of them.')]
+        by['buses'].cues = [(0.12, 'shimmer', 0.7), (0.3, 'swell', 0.3), (0.4, 'shimmer', 0.45), (0.55, 'shimmer', 0.9)]
+    # ---- the one model, a state at all, the start
+    if 'model' in by and G.models:
+        sq = G.state_q
+        k_ok = next((j for j, (_r, q) in enumerate(sq) if not q.startswith('no state')), None)
+        nno = len(sq) if k_ok is None else k_ok
+        ss = [(0, 'Then one CP-SAT model chooses the arrays\' whole fanout: every bus ball\'s tooth or berth, every other '
+                  'signal\'s escape, every plane ball\'s drop, together with every bus\'s ends.', 0.22),
+              (0.22, 'Each ball\'s moves come in tiers, the pattern a designer would lay coming first. Every rule is '
+                     'hard.', 0.3)]
+        if nno:
+            ss.append((0.3, ('In the first round, ' if nno == 1 else f'In the first {num(nno)} rounds, ')
+                       + 'no state holds every rule. The rules that cannot hold together are named, and the balls of '
+                         'their lanes are offered their whole menus.', 0.3 + 0.1 * nno if k_ok is not None else 0.6))
+        if k_ok is not None:
+            ss.append((0.3 + 0.1 * k_ok, f'In round {sq[k_ok][0]}, a state that holds every rule.', 0.6))
+        s0 = next(iter(G.models[0]['states'].values()), {})
+        ss.append((0.6, 'From it, the start: each bus\'s ends in turn, the costly ends first. Drawn, every lane\'s ends '
+                        f'as the model holds them: {plw(s0.get("crossings", 0), "crossing")}, and '
+                        f'{plw(s0.get("changes", 0), "lane")} changing layer.'))
+        by['model'].says = ss
+        by['model'].cues = [(0.05, 'swell', 0.3)] + [(0.3 + 0.1 * j, 'alert' if q.startswith('no state') else 'chord',
+                                                      0.5 if q.startswith('no state') else 1.0)
+                                                     for j, (_r, q) in enumerate(sq) if 0.3 + 0.1 * j < 0.6] \
+            + [(0.62, 'glide', 0.5, 0.8)]
+    # ---- the search
+    if 'search' in by:
+        t_chk, m_t, line_v, j_pre = v['t_chk'], v['m_t'], v['line_v'], v['j_pre']
+        n_rounds, taken = v['n_rounds'], v['taken']
+        # (the scene's moment of a time on the model's clock: the inverse of its cursor, ease(span(t, .04, .9)) t_chk)
+        grid_ = np.linspace(0, 1, 2001)
+        clock_ = np.array([ease(span(t_, 0.04, 0.9)) * t_chk for t_ in grid_])
+        at_ = lambda tm: float(grid_[min(len(grid_) - 1, int(np.searchsorted(clock_, tm)))])
+        nr_ = sum(int(a_) for a_, _b in n_rounds)
+        tk_ = (sum(int(a_) for a_, _b in taken), sum(int(b_) for _a, b_ in taken))
+        jl_ = max([j for j, tt in enumerate(m_t) if tt <= t_chk] or [0])
+        # (the two values spoken are the search's own, its start's and its last stretch's before the check: the
+        # chart's squares add what the model does not count, which the start's value has not)
+        v0 = G.models[0]['start_value'] if G.models else None
+        v1 = G.models[jl_]['end_value'] if G.models else None
+        by['search'].says = [
+            (0, 'The search. The lanes are cut into stretches, and each round frees a few lanes'
+                + (f', {n_rounds[0][1]} of them,' if n_rounds else '') + ' and the balls near them, holds the rest, and '
+                'solves again.', 0.35),
+            (0.35, f'Each dot is one round\'s best: {num(nr_)} rounds in all'
+                   + (f', and {num(tk_[0])} of the {num(tk_[1])} states they asked for were taken.' if taken else '.'), 0.7),
+            (0.7, ('The state the search holds comes down from ' + f'{v0:,.0f} to {v1:,.0f} vias\' worth. '
+                   if v0 and v1 else '') + 'On the board, the ends that moved since the state before are ringed.')]
+        by['search'].cues = [(0.02, 'swell', 0.3)] \
+            + [(at_(r_['t']), 'tick', 0.6) for r_ in G.rounds if r_['t'] <= t_chk] \
+            + [(at_(tt), 'bell', min(1.0, j / max(1, jl_))) for j, tt in enumerate(m_t) if tt <= t_chk]
+    # ---- the check, the field's lessons, the repair, the check again
+    if 'check' in by and G.verdicts:
+        v1_, f1 = G.verdicts[0], (G.fields[0] if G.fields else None)
+        vd = v1_.get('verdict') or {}
+        ss = [(0, f'Then the check: {spoken(v1_["bus"])}\'s own whole solve, under its strict rules, on the board as the '
+                  'model fanned it out. ' + (f'It finds a plan, in {plw(round(v1_["secs"]), "second")}.' if vd.get('plan')
+                                             else 'It finds none, and its refusal teaches the model.'), 0.25)]
+        items, stuck = v['items'], v['stuck_refs']
+        if f1 is not None:
+            ss.append((0.25, f'The field is laid and measured: {plw(f1.get("drc_field", 0), "design rule violation")}'
+                       + (f', but {plw(len(items), "finding")}: ' + ', '.join(spoken(r_) for r_ in stuck)
+                          + ' is left standing in lanes\' ways out, at the red marks. Each finding is a lesson for the '
+                            'model.' if items and stuck else
+                          f', and {plw(len(items), "finding")}, each a lesson for the model.' if items else
+                          ', and nothing for the model to answer.'), 0.5))
+        if v['j_rep'] is not None:
+            wn = v['why_n']
+            parts_ = [f'{num(wn[k_])} {w_}' for k_, w_ in (('named', 'named'), ('crossed one named', 'crossing one'),
+                                                          ('let go, could not stand with the rest', 'let go'))
+                      if wn.get(k_)]
+            ss.append((0.5, f'The repair holds every lane on the ends it had, but {num(len(v["freed"]))}: '
+                       + ', '.join(parts_) + '.' + (' Its state is dearer than the one before, so those lanes are '
+                                                    'searched again.' if G.dearer else ''), 0.75))
+        later = [('a plan' if (x_.get('verdict') or {}).get('plan') else 'no plan') for x_ in G.verdicts[1:]]
+        if later or G.fields[1:]:
+            ff_ = G.fields[-1] if len(G.fields) > 1 else None
+            ss.append((0.75, 'Checked again, the whole solve finds ' + (later[-1] if later else 'its answer')
+                       + ('; and the field, laid again, ' + ('has no finding and no violation.' if not ff_.get('lessons')
+                                                              and not ff_.get('drc_field') else 'is not clean.')
+                          if ff_ else '.')))
+        by['check'].says = ss
+        by['check'].cues = [(0.03, 'swell', 0.3), (0.06, 'chord' if vd.get('plan') else 'alert', 1.0)] \
+            + ([(0.28, 'alert', 0.5)] if items else []) + [(0.5, 'glide', 0.5, 0.72), (0.76, 'chord', 1.0)]
+    # ---- the field
+    if 'field' in by:
+        fan_ = v['fan_']
+        tie_ = re.findall(r'field ties: (\d+) of the (\d+) pad', G.log)
+        tie_drc = re.findall(r'field ties: .*DRC (\d+)', G.log)
+        by['field'].says = [
+            (0, 'The field: the arrays fanned out exactly as the model chose'
+                + (f', {plw(int(fan_[0]), "track")} and {plw(int(fan_[1]), "via")}' if fan_ else '')
+                + ': the bus lanes\' teeth and berths, the other signals\' escapes, and the plane balls\' drops.', 0.45),
+            (0.45, 'The cap nudge runs with every lane\'s way out held clear: '
+                   f'{plw(len(g.moved_parts), "part")} stand elsewhere than on the board the menus were measured on.',
+             0.65),
+            (0.65, ('Then the field\'s ties: ' + (f'{num(int(tie_[-1][0]))} of the {plw(int(tie_[-1][1]), "pad")} '
+                                                  'on a poured net beneath the parts tied before any lane is planned. '
+                                                  if tie_ else 'the pads on a poured net beneath the parts. '))
+             + (f'Measured again: {plw(int(tie_drc[-1]), "design rule violation")}. ' if tie_drc else '')
+             + 'Every bus is routed on this board.')]
+        by['field'].cues = [(0.05, 'glide', 0.4, 0.4), (0.45, 'slide', 0.5, 0.6), (0.66, 'mark', 0.5), (0.85, 'chord', 1.0)]
 
 
 def build_scenes(film, speed=1.0):
@@ -2936,7 +3162,9 @@ def build_scenes(film, speed=1.0):
         if not S.identical:
             C.text(W / 2, 660, 'NOTE: a re-run did not reproduce the chain\'s files (filmed with --force)', 20,
                    (255, 90, 90), anchor='mm')
-    sc.append(Scene('title', None, 5, title, []))
+    sc.append(Scene('title', None, 5, title, [],
+                    says=[(0, f'{film.title}. {nl:,} lanes, each one\'s whole path planned before anything is routed.')],
+                    cues=[(0, 'swell', 0.3)]))
 
     # ------------------------------------------------------------------ the bench
     def bench(C, t, T_):
@@ -2953,7 +3181,9 @@ def build_scenes(film, speed=1.0):
             C.wtext((min(xs) + max(xs)) / 2, min(ys) - 0.35, f'{ref} ({lab})', 18, mix(BODY, TEXT, a), anchor='mb', bold=True)
     sc.append(Scene('bench', None, 5, bench, [
         (0, f'The bench. {nl} lanes to route from {S.src} to {S.dst}: the lit balls ({nn} nets, {npairs} of the lanes are '
-            f'differential pairs). Every other net and part on the board is an obstacle.')]))
+            f'differential pairs). Every other net and part on the board is an obstacle.')],
+        says=[(0, f'{nl:,} lanes to route, from {spoken(S.src)} to {spoken(S.dst)}. Everything else is an obstacle.')],
+        cues=[(0.1, 'shimmer', 0.5)]))                    # (the balls lit)
 
     # ------------------------------------------------------------------ the group's ends (a bus step's run)
     if film.g:
@@ -2962,6 +3192,20 @@ def build_scenes(film, speed=1.0):
     # ------------------------------------------------------------------ the ends
     e0 = next((e for e in S.ends if e[0].startswith('on the teeth')), None)
     e1 = next((e for e in S.ends if e[0].startswith('teeth moved')), None)
+    # the wiring diagram's crossings: where each pair of lanes whose two orders disagree cross, straight from launch
+    # rank to final rank (the k-th drawn from t = 0.8 + 0.16 k / n_cross)
+    xa_, xb_ = film.bx(T['S_FACE']), film.bx(max(T['end'].values()))
+    rk = {n: ((xa_, film.rank_y(film.li[n])), (xb_, film.rank_y(film.fi[n]))) for n in film.M}
+    xdots = []
+    for key in T['windows']:
+        a_, b_ = key.split('|')
+        (p0, p1), (q0, q1) = rk[a_], rk[b_]
+        d1, d2 = (p1[0] - p0[0], p1[1] - p0[1]), (q1[0] - q0[0], q1[1] - q0[1])
+        den = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(den) < 1e-9:
+            continue
+        s_ = ((q0[0] - p0[0]) * d2[1] - (q0[1] - p0[1]) * d2[0]) / den
+        xdots.append((p0[0] + d1[0] * s_, p0[1] + d1[1] * s_))
 
     def ends(C, t, T_):
         a_old = 1.0 - ease(span(t, 0.28, 0.45))
@@ -2999,25 +3243,13 @@ def build_scenes(film, speed=1.0):
             C.text(xa - 6, BRAID[1] + 8, 'teeth (launch order)', 12, DIM, anchor='ra')
             C.text(min(xb + 6, BRAID[2] - 8 - C.tlen('berths (final order)', 12)), BRAID[1] + 8, 'berths (final order)',
                    12, DIM, anchor='la')
-            pts = {}
             for n in film.M:
-                ya, yb = film.rank_y(film.li[n]), film.rank_y(film.fi[n])
-                pts[n] = ((xa, ya), (xb, yb))
+                (_, ya), (_, yb) = rk[n]
                 C.line([(xa, ya), (xb, yb)], mix(PANEL, PAIR_COL if n in S.pairs else (170, 178, 190), a_w), 1.4)
                 C.text(xa - 6, ya, n, 10, mix(PANEL, DIM, a_w), anchor='rm')
                 C.text(xb + 6, yb, n, 10, mix(PANEL, DIM, a_w), anchor='lm')
-            k = 0
-            for key in T['windows']:
-                a_, b_ = key.split('|')
-                (p0, p1), (q0, q1) = pts[a_], pts[b_]
-                d1, d2 = (p1[0] - p0[0], p1[1] - p0[1]), (q1[0] - q0[0], q1[1] - q0[1])
-                den = d1[0] * d2[1] - d1[1] * d2[0]
-                if abs(den) < 1e-9:
-                    continue
-                s_ = ((q0[0] - p0[0]) * d2[1] - (q0[1] - p0[1]) * d2[0]) / den
-                k += 1
+            for k, (x, y) in enumerate(xdots, 1):
                 if k / n_cross <= span(t, 0.8, 0.96):
-                    x, y = p0[0] + d1[0] * s_, p0[1] + d1[1] * s_
                     C.d.ellipse([(x - 2.6) * SS, (y - 2.6) * SS, (x + 2.6) * SS, (y + 2.6) * SS], fill=ACCENT)
             C.text((xa + xb) / 2, BRAID[3] - 8, f'{n_cross} pairs of lanes disagree between the two orders: '
                    f'{n_cross} crossings the route must make', 14, mix(PANEL, ACCENT, ease(span(t, 0.9, 1.0))), anchor='mb')
@@ -3039,8 +3271,30 @@ def build_scenes(film, speed=1.0):
                            f'it is judged as laid.'))
     cap_e.append((0.72, 'The ends decide the braid: the teeth\'s order round the source and the berths\' order round '
                         'the destination fix every crossing -- two lanes whose orders disagree must cross once.'))
+    if film.g:
+        say_e = [(0, f'On the field, {spoken(S.dst)}\'s own whole route begins. Its teeth and berths are the group\'s, as the '
+                     'field laid them; this run chooses no end again.')]
+    else:
+        say_e = [(0, 'Each lane leaves by a short stub, its tooth, and arrives by another, its berth.')]
+        if e0 and e1:
+            say_e.append((0.26, 'The ends model searches the fanout\'s escapes, judged by the whole route\'s own '
+                                'estimate.'))
+        elif S.grouped:
+            say_e.append((0.26, 'These ends were chosen earlier, by one model for every bus on these arrays together. '
+                                'This step keeps them.'))
+        if not S.grouped:
+            say_e.append((0.5, 'The berths are chosen with them, and the fanout lays exactly what the model chose.'))
+    say_e.append((0.72, f'The two orders, round the source and round the destination, fix every crossing: {n_cross:,} '
+                        'pairs of lanes must cross.'))
+    # (the stubs moved away fade, the new teeth and berths come in, the orders are numbered, the wiring diagram, and
+    # its crossings one by one)
+    cue_e = ([(0.28, 'glide', 0.3)] if film.stub_gone or film.via_gone else []) \
+        + ([(0.30, 'shimmer', 0.6)] if film.teeth_new or film.tvia_new else []) \
+        + ([(0.52, 'shimmer', 0.75)] if film.berths_new or film.bvia_new else []) \
+        + [(0.7, 'shimmer', 0.4), (0.74, 'swell', 0.5)] \
+        + [(0.8 + 0.16 * k / n_cross, 'tick', k / len(xdots)) for k in range(1, len(xdots) + 1)]
     # (on the group's field nothing of the ends changes in this run: the scene is the orders and their crossings)
-    sc.append(Scene('ends', 'ends', 11 if film.g else 16, ends, cap_e))
+    sc.append(Scene('ends', 'ends', 11 if film.g else 16, ends, cap_e, says=say_e, cues=cue_e))
 
     def draw_fanout(C, alpha=0.9):
         C.segs(film.other_c[0], alpha=0.22)
@@ -3128,7 +3382,16 @@ def build_scenes(film, speed=1.0):
                 'its two ends held.')
                + ' What is left is the lane\'s way round the obstacles -- which side of each it passes.'),
         (0.66, f'{len(bent)} of the {len(film.strings)} strings bend round something. A string has no width and no '
-               f'layer yet: the frame, the solve and the geometry are all built on these.')]))
+               f'layer yet: the frame, the solve and the geometry are all built on these.')],
+        says=[(0, 'Each lane starts as a straight string.'),
+              (0.22, 'Pulled taut, round after round, it finds its way around the copper in its path.'),
+              (0.66, f'{len(bent):,} of them bend. A string has no width, and no layer, yet.')],
+        # (the strings drawn; each recorded round of their relaxation -- the higher, the fewer still moving -- or the
+        # blend where there is none; taut)
+        cues=[(0.03, 'shimmer', 0.3)]
+        + ([(0.24 + 0.42 * film.relax_t[j], 'tick', 1 - n_ / max(1, len(film.strings)))
+            for j, (_s, _k, n_) in enumerate(film.relax_at)] if film.relax else [(0.24, 'glide', 0.5, 0.62)])
+        + [(0.66, 'pluck', 0.2)]))
 
     # ------------------------------------------------------------------ the frame
 
@@ -3200,7 +3463,10 @@ def build_scenes(film, speed=1.0):
               'distance along the board -- so the plane below shares the board\'s x axis.'),
         (0.45, 'The frame reads each lane\'s taut string in these coordinates: its REFERENCE (yellow), an offset from '
                'the trunk or ring at every u. Inside an array\'s pad box, where a string threads between balls no track '
-               'fits, the reference takes the box\'s edge.')]))
+               'fits, the reference takes the box\'s edge.')],
+        says=[(0, 'The frame: a straight trunk from source to destination, and rings around the destination.'),
+              (0.45, 'Every route is now one coordinate along it, and each string becomes a reference, in yellow.')],
+        cues=[(0.2, 'swell', 0.4), (0.45, 'shimmer', 0.55)]))       # (the solve's plane; the references)
 
     # ------------------------------------------------------------------ the solve
     np_ = len(plans)
@@ -3234,12 +3500,21 @@ def build_scenes(film, speed=1.0):
     else:
         fl = lambda v: v / W_V
         ylab = f'the objective: layer changes, + {W_OVER / W_V:.0f} for each via past two on a net'
+    # the plans' slots: plan i holds from k_in + i seg_. Each event's moment in the film: a plan at its slot, a bound
+    # raised just before the next plan
+    k_in = 0.14
+    seg_ = (0.62 - k_in) / max(1, np_)
+    when, jp = [], 0
+    for e in events:
+        if e['plan']:
+            when.append(k_in + jp * seg_)
+            jp += 1
+        else:
+            when.append(k_in - 0.05 if jp == 0 else k_in + (jp - 1) * seg_ + 0.7 * seg_)
 
     def solve(C, t, T_):
         draw_fanout(C, 0.55)
         # which plan: plan i holds from its slot; the morphs between
-        k_in = 0.14
-        seg_ = (0.62 - k_in) / max(1, np_)
         pi = min(np_ - 1, max(0, int((t - k_in) / seg_))) if t >= k_in else 0
         # the plan drawn: the last of the ones drawn (film.pshow) found by now, moved to from the one drawn before it
         ps = film.pshow
@@ -3292,14 +3567,6 @@ def build_scenes(film, speed=1.0):
         C.line([(gx0, gy0), (gx0, gy1), (gx1, gy1)], mix(PANEL, DIM, a_g), 1)
         for v in range(int(math.ceil(vmin)), int(vmax) + 1, max(1, int((vmax - vmin) / 5))):
             C.text(gx0 - 6, gy(v), str(v), 11, mix(PANEL, DIM, a_g), anchor='rm')
-        # each event's moment in the film: a plan at its slot, a bound raised just before the next plan
-        when, jp = [], 0
-        for e in events:
-            if e['plan']:
-                when.append(k_in + jp * seg_)
-                jp += 1
-            else:
-                when.append(k_in - 0.05 if jp == 0 else k_in + (jp - 1) * seg_ + 0.7 * seg_)
         shown = [j for j, w in enumerate(when) if t >= w]
         pb, pl = [], []
         for j in shown:
@@ -3385,7 +3652,24 @@ def build_scenes(film, speed=1.0):
                     f'goes on to the geometry, and is laid.'),
              (0.72, 'The rules can be seen: two strands that cross are on different layers (a via lets a lane cross '
                     'lanes on its own layer), and each lane ends on its berth\'s layer.')]
-    sc.append(Scene('solve', 'solve', 26, solve, cap_s))
+    say_s = [(0, 'The solve places every crossing and every layer change, all lanes at once.'),
+             (0.14, 'Below, each plan as a braid: red front, blue back, white rings for vias.'),
+             (0.3, (f'It finds {np_:,} plans, from {plans[0]["vias"]:,} layer changes down to {last["vias"]:,}, while its '
+                    f'lower bound rises.' if np_ > 1 and plans[0]['vias'] != last['vias'] else
+                    f'It finds {pl(np_, "plan")}, with {last["vias"]:,} layer changes, while its lower bound rises.')),
+             (0.62, 'Best meets bound: proved the fewest.' if proved else
+                    'It stops after a fixed amount of work: its best is kept, though not proved the fewest.'),
+             (0.72, 'Where two strands cross, they are on different layers, and each lane ends on its berth\'s layer.')]
+    # (the plans' braid comes in; every plan found -- higher, the fewer its layer changes -- and every bound raised, at
+    # its moment in the chart; each plan the board and the braid move to; best meets bound, or a best kept unproved;
+    # the rules lit on one crossing and one change)
+    o0, o1 = fl(plans[0]['obj']), fl(last['obj'])
+    better = lambda v: min(1.0, max(0.0, (o0 - fl(v)) / (o0 - o1))) if o0 > o1 else 1.0
+    cue_s = [(0.08, 'swell', 0.3)] \
+        + [(w, 'ping', better(e['best'])) if e['plan'] else (w, 'thump', 0.5) for w, e in zip(when, events)] \
+        + [(k_in + q * seg_, 'bell', better(plans[q]['obj'])) for q in film.pshow[1:]] \
+        + [(0.62, 'chord', 1.0 if proved else 0.0), (0.7, 'mark', 0.5)]
+    sc.append(Scene('solve', 'solve', 26, solve, cap_s, says=say_s, cues=cue_s))
 
     # ------------------------------------------------------------------ the loop's failed rounds (when any)
     if S.failed:
@@ -3475,7 +3759,20 @@ def build_scenes(film, speed=1.0):
                                + (f': the same number of vias ({f0["vb"]})' if f0['va'] == f0['vb'] else
                                   f': {f0["vb"]} vias where it had {f0["va"]}')
                                + ', the crossings and changes moved out of the places that were short -- and the geometry '
-                                 'again, with the flips.')]))
+                                 'again, with the flips.')],
+            says=[(0, f'Loop round {f0["i"]} does not pass: its audit finds {pl(len(f0["finds"]), "place")} short.'),
+                  (0.35 / len(fails), 'What it found goes back: side flips to the geometry, and cuts and history to the '
+                                      'solve.'),
+                  (0.6 / len(fails), 'The solve runs again, warm, and moves its crossings out of the places that were '
+                                     'short.')],
+            # (each failed round in turn: its card, the places short, the side flips, the cuts and the history, the
+            # braid moving to the next round's solve)
+            cues=[c for j, F_ in enumerate(fails) for c in
+                  ([(j / len(fails), 'mark', 0.4)] if j else [])
+                  + ([((j + 0.08) / len(fails), 'alert', 0.5)] if F_['finds'] else [])
+                  + ([((j + 0.16) / len(fails), 'shimmer', 0.6)] if F_['flips'] else [])
+                  + ([((j + 0.35) / len(fails), 'mark', 0.6)] if F_['cuts'] or F_['hot'] else [])
+                  + [((j + 0.6) / len(fails), 'glide', 0.5, (j + 0.85) / len(fails))]]))
 
     # ------------------------------------------------------------------ the geometry
     def forces(C, marks, a, wmax=5.0):
@@ -3705,7 +4002,18 @@ def build_scenes(film, speed=1.0):
                      + (', none of them a cut.' if not (S.geo.get('cuts') or S.geo.get('vcuts')) else '.'))
               if npaid else 'Nothing paid: every hard rule met, no cut for the solve.')]
     if not S.Et:
-        sc.append(Scene('geometry', 'geometry', 30, geometry, cap_g))
+        sc.append(Scene('geometry', 'geometry', 30, geometry, cap_g, says=[
+            (0, 'The geometry: one linear program turns the order into millimetres, an offset for every lane at every '
+                'column.'),
+            (0.22, 'Each rule gets a shadow price: the lit rules are the ones holding a lane in place, and the thicker '
+                   'push harder.'),
+            (0.42, 'The cursor is one column of the program: the lanes there, in millimetres, in the braid\'s order.'),
+            (0.68, 'Pass two holds each lane to one side of every island of another part\'s pads.'),
+            (0.86, 'What the program had to pay, in red, would go back to the solve.' if npaid else
+                   'Nothing is paid: every hard rule is met.')],
+            # (pass 1's layout; its priced rules; the cursor along the trunk; the islands; pass 2; its rules again)
+            cues=[(0.02, 'glide', 0.4, 0.16), (0.2, 'shimmer', 0.5), (0.43, 'sweep', 0.5, 0.67), (0.68, 'mark', 0.5),
+                  (0.72, 'glide', 0.6, 0.84), (0.86, 'alert' if npaid else 'shimmer', 0.5)]))
     else:
         embed_scenes(film, sc, draw_fanout, forces, P2)
 
@@ -3737,7 +4045,10 @@ def build_scenes(film, speed=1.0):
         (0, f'The polish: the audit\'s own measures (pitch, via rooms, clearance to pads as KiCad draws them, turns) '
             f'met in board xy by small vertex moves, one LP per round -- here the largest move is {dmax:.3f} mm.'),
         (0.5, 'A lane with no room on its side of an island would be FLIPPED to the other and the geometry run '
-              'again. The smooth plan passes the audit.')]))
+              'again. The smooth plan passes the audit.')],
+        says=[(0, 'The polish meets the audit\'s own measures with small moves.'),
+              (0.5, 'The smooth plan passes the audit.')],
+        cues=[(0.1, 'glide', 0.5, 0.6)]))                  # (the polished lines)
 
     # ------------------------------------------------------------------ the snap
     pairs_ = set(S.pairs)
@@ -3864,7 +4175,14 @@ def build_scenes(film, speed=1.0):
             'straight run.' + xo_txt),
         (0.36, 'The pairs are then HELD while the polish fits the singles round them...'),
         (0.6, f'...and every single is laid on the router\'s {grid} mm grid: a grid search in a band round its smooth '
-              f'line, starting and ending where the router will.')]))
+              f'line, starting and ending where the router will.')],
+        says=([(0, 'The snap puts the plan on the router\'s grid. The differential pairs go first, with forty-five degree '
+                   'turns.' + (f' {" and ".join(spoken(n) for n in xo)} '
+                               f'{"swaps its legs" if len(xo) == 1 else "swap their legs"} at a crossover.' if xo else '')),
+               (0.36, 'Then the pairs are held, while the singles are fitted round them.')] if pairs_ else
+              [(0, 'The snap puts the plan on the router\'s grid, with forty-five degree turns.')])
+        + [(0.6, 'Finally, every single lane is snapped onto the grid.')],
+        cues=[(0.05, 'snap', 0.4), (0.4, 'snap', 0.6), (0.62, 'snap', 0.8)]))   # (the pairs; the singles held; snapped)
 
     # ------------------------------------------------------------------ the audit
     def audit(C, t, T_):
@@ -3892,7 +4210,16 @@ def build_scenes(film, speed=1.0):
                '-- and the loop runs again; ' + (
                    'findings that stand at the ENDS stop it, and go back to the group\'s model with the next round of '
                    'the group.' if film.g else 'trouble at the ends goes back to the fanout.')
-               + (f' Here the loop passed in round {S.lr}: nothing went back.' if not S.failed else ''))]))
+               + (f' Here the loop passed in round {S.lr}: nothing went back.' if not S.failed else ''))],
+        says=[(0, 'The audit checks the plan exactly as the router will get it, and the gate passes it only when it is '
+                  'complete and clean.'),
+              (0.55, 'A failing round sends its findings back: side flips to the geometry, cuts and history to the solve. '
+                     + ('Findings that stand at the ends would go back to the group\'s model. ' if film.g else '')
+                     + (f'Here the loop passed in round {S.lr}, with nothing waived.' if not S.failed else
+                        f'This loop passed in round {S.lr}.'))],
+        # (the card; its four rows in turn; the plan passes)
+        cues=[(0.05, 'swell', 0.4)] + [(0.15 + 0.12 * j, 'tick', 0.5 + 0.15 * j) for j in range(4)]
+        + [(0.7, 'chord', 1.0)]))
 
     # ------------------------------------------------------------------ the route
     order = [n for n in S.route_order if n in film.routed] + [n for n in film.M if n not in S.route_order]
@@ -3938,7 +4265,17 @@ def build_scenes(film, speed=1.0):
                + (f'here {pl(len(S.walled), "ball")} (the lay\'s log).' if S.walled else
                   'here the lay walled in none (its log names none).')),
         (0.85, 'A lane the router reports routed is not proof its net connects: the board is checked -- connectivity '
-               'and DRC, at the routed clearance.')]))
+               'and DRC, at the routed clearance.')],
+        says=[(0, 'The lay: the production router lays the copper, each lane held to its band. '
+                  + ('The pairs go first, then the singles.' if pairs_ else 'The lanes go in the berths\' order.')),
+              (0.45, 'Where the lay walls in another net\'s ball, the walling lanes are lifted and routed again round '
+                     'its way out. ' + (f'Here, {pl(len(S.walled), "ball")}.' if S.walled else 'Here the lay walled in '
+                                                                                                 'none.')),
+              (0.85, 'Then the board is checked, for connectivity and the design rules.')],
+        # (each lane's copper as it comes in, rising along the order they are laid; the checks)
+        cues=[(j * 0.8 / len(order), 'pluck', j / max(1, len(order) - 1)) for j, n in enumerate(order)
+              if film.routed[n][0] or film.routed[n][1]]
+        + [(0.85, 'chord' if S.connected and S.drc_clean else 'alert', 1.0)]))
 
     # ------------------------------------------------------------------ the result
     m_ = re.search(r'(\d+/\d+) in band', S.route_summary)
@@ -3967,13 +4304,22 @@ def build_scenes(film, speed=1.0):
             f'{"every net connected" if S.connected else "NETS OPEN"}; check_drc: {"clean" if S.drc_clean else "VIOLATIONS"}.' + (
             f' The whole route: {film.vias_ours} vias and {film.mm_ours:.0f} mm; the human\'s board on the same nets: '
             f'{film.vias_human} vias and {film.mm_human:.0f} mm (the human\'s copper includes its length-matching meanders).'
-            if film.human_c else ''))]))
+            if film.human_c else ''))],
+        says=[(0, ('The lanes are routed' if '/' not in band_ else f'All {band_.split("/")[1]} lanes routed'
+                   if band_.split('/')[0] == band_.split('/')[1] else f'{band_.replace("/", " of ")} lanes routed')
+               + (' and connected' if S.connected else ', some nets open')
+               + (', no design rule errors: ' if S.drc_clean else ', with design rule errors: ')
+               + f'{film.vias_ours:,} vias, {film.mm_ours:,.0f} millimetres.')]
+        + ([(0.35, f'The human\'s board: {film.vias_human:,} vias and {film.mm_human:,.0f} millimetres, meanders '
+                   f'included.', 0.75)] if film.human_c else []),      # (said while the human's board is shown)
+        cues=[(0.35, 'whoosh', 0.4), (0.75, 'whoosh', 0.6)] if film.human_c else []))   # (to the human's board, back)
 
     # ------------------------------------------------------------------ the escalation (a bus step's group): what ran
-    esc_txt, esc_clean = '', False
+    esc_txt, esc_clean, esc_ge, esc_count = '', False, {}, 0
     if film.g:
-        ge_ = S.G.group_end or {}
+        ge_ = esc_ge = S.G.group_end or {}
         dr_ = (S.G.summary.get('design_rules') or {})
+        esc_count = dr_.get('count') or 0
         esc_clean = ge_.get('open') == 0 and ge_.get('drc') == 0 and ge_.get('walled') == 0
         esc_txt = (f'this run: the group\'s grade {ge_.get("open", "?")} open, {ge_.get("drc", "?")} violations, '
                    f'{ge_.get("walled", "?")} walled'
@@ -4027,7 +4373,22 @@ def build_scenes(film, speed=1.0):
             C.text(W / 2, 800, 'a group left short of clean is routed again a rung down the fab ladder -- the lanes\' track, '
                    'the escapes\' track and the via together, the buses that failed alone', 20, mix(BG, DIM, a), anchor='mm')
             C.text(W / 2, 836, esc_txt, 20, mix(BG, (150, 245, 120) if esc_clean else (255, 170, 60), a), anchor='mm')
-    sc.append(Scene('coda', None, 6, coda, []))
+    sc.append(Scene('coda', None, 6, coda, [],
+                    says=[(0, 'Each stage measures the one before, and a plan is routed only when the router\'s own rules '
+                              'allow it.')] + ([
+                        (0.3, 'A refusal of the check, or a finding of the field, teaches the group\'s model; and a '
+                              'round of the group that leaves the board short of clean sends what its buses found at '
+                              'their ends back to it.'),
+                        (0.6, 'And a group left short of clean is routed again a rung down the fab ladder: the lanes\' '
+                              'track, the escapes\' track and the via together; and where only some of its buses failed, those '
+                              'buses alone are routed again. '
+                              + ('This group was clean at the sizes asked for, so no rung was needed.'
+                                 if esc_clean and not esc_count else
+                                 f'This group\'s grade: {esc_ge.get("open", "unknown")} open, '
+                                 f'{esc_ge.get("drc", "unknown")} violations, {esc_ge.get("walled", "unknown")} walled.'))]
+                        if film.g else []),
+                    cues=[(0, 'swell', 0.6)] + ([(0.3, 'shimmer', 0.5), (0.6, 'chord' if esc_clean else 'alert', 1.0)]
+                                                if film.g else [])))
     for s in sc:
         s.secs *= speed
     return sc
@@ -4097,10 +4458,10 @@ def render_frame(i):
     t_abs = i / fps
     acc = 0.0
     for sc in scenes:
-        if t_abs < acc + sc.secs or sc is scenes[-1]:
+        if t_abs < acc + sc.span or sc is scenes[-1]:
             break
-        acc += sc.secs
-    t = min(1.0, (t_abs - acc) / sc.secs)
+        acc += sc.span
+    t = sc.at(t_abs - acc)
     C = Canvas(film, base)
     sc.fn(C, t, t_abs)
     chrome(C, sc, t, T_total, t_abs, scenes)
@@ -4134,18 +4495,40 @@ def main():
     ap.add_argument('--check', action='store_true',
                     help='run the round\'s stages again, say whether each reproduces the chain\'s file, and stop (exit 1 '
                          'when one does not)')
-    ap.add_argument('--scenes', action='store_true', help='list the scenes and their start times, and stop')
+    ap.add_argument('--scenes', action='store_true', help='list the scenes and their start times, and stop (with '
+                                                           '--sound: and every line\'s and effect\'s time)')
+    from whole_movie_sound import DEFAULT_VOICE
+    ap.add_argument('--sound', action='store_true',
+                    help='a sound track: every scene narrated, effects on what the scenes draw, and music, mixed by '
+                         'ffmpeg (whole_movie_sound.py) -- the film\'s timeline fitted to the narration')
+    ap.add_argument('--voice', default=DEFAULT_VOICE,
+                    help=f'the narration\'s voice (default {DEFAULT_VOICE}): kokoro:NAME, a voice of the neural '
+                         'Kokoro-82M, installed on first use into its own venv in the user\'s cache ($XDG_CACHE_HOME or '
+                         '~/.cache, krt_tts) and its weights fetched there once; or a macOS `say` voice by name (one '
+                         '`say -v ?` lists, e.g. Samantha)')
     a = ap.parse_args()
     t0 = time.time()
     S = load_story(a)
     film = Film(S)
     film.title = a.title
     scenes = build_scenes(film, a.speed)
-    T_total = sum(s.secs for s in scenes)
+    if a.sound:
+        # (the narration spoken first, and the scenes fitted to it: the film's timeline is then the sound's)
+        import atexit
+        import shutil
+        import tempfile
+        import whole_movie_sound as wms
+        work = tempfile.mkdtemp(prefix='whole_movie_sound.')        # (the system's temporary directory, $TMPDIR)
+        atexit.register(shutil.rmtree, work, ignore_errors=True)
+        wms.narrate(scenes, work, voice=a.voice)
+        wms.fit(scenes)
+    T_total = sum(s.span for s in scenes)
     acc = 0.0
     for s in scenes:
-        print(f'  {acc:6.1f} s  {s.key:9s} {s.secs:5.1f} s')
-        acc += s.secs
+        print(f'  {acc:6.1f} s  {s.key:9s} {s.span:5.1f} s')
+        acc += s.span
+    if a.sound:
+        wms.report(scenes)
     if a.scenes:
         return
     global _FILM
@@ -4159,8 +4542,8 @@ def main():
         else:
             ts, acc = [], 0.0
             for s in scenes:
-                ts.append(acc + s.secs * 0.75)
-                acc += s.secs
+                ts.append(acc + s.span * 0.75)
+                acc += s.span
         for tt in ts:
             img = render_frame(int(round(tt * a.fps)))
             p = os.path.join(a.stills, f'still_{tt:06.1f}.png')
@@ -4177,8 +4560,14 @@ def main():
     if ffmpeg is None:
         raise SystemExit('whole_movie: no ffmpeg found (on the PATH, or under /opt/homebrew or /usr/local) -- the mp4 '
                          'needs it; --stills DIR writes PNGs without it')
+    vout = a.out
+    if a.sound:
+        # (the sound made before the frames, so a sound that cannot be made stops the film before they are drawn; the
+        # frames then go to a silent mp4 the sound is mixed onto)
+        stems = wms.score(scenes, work)
+        vout = os.path.join(work, 'video.mp4')
     cmd = [ffmpeg, '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{W}x{H}', '-r', str(a.fps),
-           '-i', '-', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', a.out]
+           '-i', '-', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', vout]
     ff = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     import multiprocessing as mpr
     t1 = time.time()
@@ -4190,7 +4579,9 @@ def main():
     ff.stdin.close()
     if ff.wait() != 0:
         raise SystemExit('whole_movie: ffmpeg failed')
-    print(f'wrote {a.out}: {nfr} frames, {T_total:.0f} s, in {time.time() - t0:.0f} s')
+    if a.sound:
+        wms.mux(ffmpeg, vout, stems, a.out)
+    print(f'wrote {a.out}: {nfr} frames, {T_total:.0f} s, in {time.time() - t0:.0f} s' + (', with sound' if a.sound else ''))
 
 
 if __name__ == '__main__':
