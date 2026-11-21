@@ -11,10 +11,11 @@ hole_clearance errors against the board's own rules. The layer-swap shrink
 loop did the same (its last resort keeps the nominal drill and shrinks the
 copper below the ring).
 
-A ring-short via is legal only where its raised twin is: other-net copper held
-at the clearance off the raised via's copper is exactly the hole clearance off
-the hole. So requiring the ring under ``board`` loses no site a DRC-clean via
-could take; ``fab`` keeps completion first (unchanged, test_1914).
+Against other-net copper a ring-short via is clean only where its raised twin
+is: copper held at the clearance off the raised via's copper is exactly the
+hole clearance off the hole. (The larger copper can still lose a site to the
+board edge or a bare NPTH hole.) ``fab`` keeps completion first (unchanged,
+test_1914).
 
 Unit checks, at clearance 0.1 / hole clearance 0.25 (ring 0.15):
   1. board, standard tier: the ladder is 0.5/0.2 only (fab: 0.5/0.2, 0.45/0.2);

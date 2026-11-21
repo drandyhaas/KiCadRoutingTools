@@ -202,14 +202,17 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
     drill_floor = min(f['via_drill'] for f in ladder)
     orig = [(v.size, v.drill) for v in new_vias]
     ANNULAR = 0.1  # keep body - drill >= this (2x ring) as we shrink
-    # #1914: the copper-to-hole ring is PREFERRED, size by size: at each
-    # size the drill capped to leave the ring round it -- (size - drill) / 2
-    # >= via_hole_ring() holds another net's copper, kept at the clearance off
-    # the via's copper, at the hole clearance off its hole -- is tried first,
-    # then the drill without the cap (the run's via census names what ships
-    # below the ring). The cap never takes a drill below the nominal rung's
-    # when the uncapped one is at or above it: the ring is not a reason to
-    # step to a smaller (costlier) tier.
+    # #1914: the copper-to-hole ring, size by size: at each size the drill
+    # capped to leave the ring round it -- (size - drill) / 2 >=
+    # via_hole_ring() holds another net's copper, kept at the clearance off
+    # the via's copper, at the hole clearance off its hole -- is tried first.
+    # Under ``fab`` the ring is PREFERRED: the drill without the cap is tried
+    # next (the run's via census names what ships below the ring), and the
+    # cap never takes a drill below the nominal rung's when the uncapped one
+    # is at or above it -- the ring is not a reason to step to a smaller
+    # (costlier) tier. Under ``board`` it is REQUIRED (#2018): the cap may
+    # take the drill down to the ladder's floor, and only ring-holding pairs
+    # are tried.
     ring = via_hole_ring()
     board_rules = bool(ring) and get_escalation_policy()[0] == 'board'
     nominal_drill = min(f['via_drill'] for i, f in enumerate(ladder)
@@ -228,7 +231,7 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
             if lo - 1e-9 <= held < drill - 1e-9:
                 pairs.insert(0, (size, held))
             if board_rules:
-                # own rules: the ring is required (fab_tiers._prefer_hole_ring)
+                # the ring is required (fab_tiers._prefer_hole_ring)
                 pairs = [(s_, d_) for s_, d_ in pairs
                          if (s_ - d_) / 2.0 >= ring - 1e-9]
         for size_, drill_ in pairs:
