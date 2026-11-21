@@ -41,6 +41,7 @@ import time
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import kicad_locate
+from kicad_quiet import QUIET_WX_SOURCE
 from swig_compat import patch_swig_iterators as _patch_swig_iterators
 
 # #795: repin_netcodes_from_file() walks board.GetTracks() in the pcbnew
@@ -50,8 +51,9 @@ _patch_swig_iterators()
 
 EXACT_FILL_TIMEOUT = 300
 
-_REFILL_SCRIPT = """\
-import sys
+# The wx log goes to stderr before LoadBoard: a load warning (a missing font)
+# otherwise opens a modal box nobody closes, and the refill hangs to its timeout.
+_REFILL_SCRIPT = "import sys\n" + QUIET_WX_SOURCE + """\
 import pcbnew
 src = sys.argv[1]
 dst = sys.argv[2]
