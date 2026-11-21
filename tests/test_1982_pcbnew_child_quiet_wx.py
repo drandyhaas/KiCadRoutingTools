@@ -4,16 +4,17 @@
 pcbnew reports a load warning through wx's log, whose default target is a
 modal message box. In the refill child nobody closes it, so LoadBoard never
 returns and the refill burns its whole timeout. A board naming a font the
-machine lacks is enough (rp2040-devboard: "Font 'FOT-Yuruka Std UB' not found;
-substituting 'Noto Sans Regular'", three 300 s refill timeouts, the plane-tap
-step killed at 1163 s; with the log on stderr the refill takes 0.8 s).
+machine lacks is enough ("Font 'X' not found; substituting 'Noto Sans
+Regular'": three 300 s refill timeouts, the plane-tap step killed at 1163 s;
+with the log on stderr the refill takes 0.8 s).
 
 Invariants:
 1. (any python) `kicad_exact_fill._REFILL_SCRIPT`, run against stand-in `wx`
    and `pcbnew` modules, has a wx.App and a wx.LogStderr target in place when
    it calls LoadBoard, and finishes REFILL_OK.
-2. `kicad_quiet.quiet_wx()` does the same in-process: it creates (or reuses)
-   the app and sets the stderr target, and is a no-op without wx.
+2. (any python) with no display, where wx.App raises SystemExit (headless
+   Linux), the same script still sets the stderr target and finishes
+   REFILL_OK instead of exiting before LoadBoard.
 3. (KiCad's python) the real refill of watchy with a text in a font that does
    not exist finishes REFILL_OK well inside its timeout, and the substitution
    warning arrives on stderr. Run only where KiCad's python is found; the
@@ -32,7 +33,6 @@ PY_ROUTER = os.path.join(REPO, 'py_router')
 sys.path.insert(0, PY_ROUTER)
 
 import kicad_exact_fill  # noqa: E402
-import kicad_quiet  # noqa: E402
 
 _fails = []
 
@@ -54,9 +54,13 @@ class Log:
     def SetActiveTarget(t):
         Log.active = t
 _app = None
+import os as _os
+NO_DISPLAY = bool(_os.environ.get('FAKE_WX_NO_DISPLAY'))
 class App:
     def __init__(self, redirect=True):
         global _app
+        if NO_DISPLAY:             # wx's own message and exception
+            raise SystemExit("Unable to access the X Display, is $DISPLAY set properly?")
         _app = self
         Log.active = None          # wx.App resets the target, as the real one does
 def GetApp():
@@ -67,7 +71,9 @@ FAKE_PCBNEW = '''\
 import sys
 import wx
 def LoadBoard(path):
-    if wx.GetApp() is None or not isinstance(wx.Log.active, wx.LogStderr):
+    # with no display no app can exist, so no modal can open
+    if ((wx.GetApp() is None and not wx.NO_DISPLAY)
+            or not isinstance(wx.Log.active, wx.LogStderr)):
         print("MODAL: LoadBoard with the default wx log target")
         sys.exit(5)
     return _Board()
@@ -91,46 +97,42 @@ def save_board(save, dst, board, **kw):
 '''
 
 
-def part1(td):
-    print('1. the refill script quiets wx before LoadBoard')
+def _fake_refill(td, no_display):
     fakes = os.path.join(td, 'fakes')
-    os.makedirs(fakes)
-    for name, src in (('wx', FAKE_WX), ('pcbnew', FAKE_PCBNEW), ('tool_records', FAKE_TOOL_RECORDS)):
-        with open(os.path.join(fakes, name + '.py'), 'w', encoding='utf-8') as f:
-            f.write(src)
+    if not os.path.isdir(fakes):
+        os.makedirs(fakes)
+        for name, src in (('wx', FAKE_WX), ('pcbnew', FAKE_PCBNEW),
+                          ('tool_records', FAKE_TOOL_RECORDS)):
+            with open(os.path.join(fakes, name + '.py'), 'w', encoding='utf-8') as f:
+                f.write(src)
     script = os.path.join(td, 'refill.py')
     with open(script, 'w', encoding='utf-8') as f:
         f.write(kicad_exact_fill._REFILL_SCRIPT)
     env = dict(os.environ, PYTHONPATH=fakes)
+    env.pop('FAKE_WX_NO_DISPLAY', None)
+    if no_display:
+        env['FAKE_WX_NO_DISPLAY'] = '1'
     # argv[3] is the fakes dir, so the script's kicad_exact_fill import fails
     # and the repin is skipped, as it degrades in the field.
-    r = subprocess.run([sys.executable, script, os.path.join(td, 'in.kicad_pcb'),
-                        os.path.join(td, 'out.kicad_pcb'), fakes],
-                       capture_output=True, text=True, timeout=60, env=env)
+    return subprocess.run([sys.executable, script, os.path.join(td, 'in.kicad_pcb'),
+                           os.path.join(td, 'out.kicad_pcb'), fakes],
+                          capture_output=True, text=True, timeout=60, env=env)
+
+
+def part1(td):
+    print('1. the refill script quiets wx before LoadBoard')
+    r = _fake_refill(td, no_display=False)
     check('REFILL_OK' in r.stdout and 'MODAL' not in r.stdout,
           'LoadBoard runs with a wx.App and the stderr log target',
           f'rc={r.returncode} {r.stdout[-300:]} {r.stderr[-300:]}')
 
 
 def part2(td):
-    print('2. quiet_wx() in-process')
-    fakes = os.path.join(td, 'fakes')
-    code = ('import sys; sys.path.insert(0, %r); sys.path.insert(0, %r)\n'
-            'import kicad_quiet, wx\n'
-            'app = kicad_quiet.quiet_wx()\n'
-            'assert app is wx.GetApp() and app is not None\n'
-            'assert isinstance(wx.Log.active, wx.LogStderr)\n'
-            'assert kicad_quiet.quiet_wx() is app\n'
-            'print("OK")\n') % (PY_ROUTER, fakes)
-    r = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=60)
-    check(r.stdout.strip() == 'OK', 'quiet_wx creates the app once and sets the stderr target',
-          f'{r.stdout[-300:]} {r.stderr[-300:]}')
-    code = ('import sys; sys.path.insert(0, %r)\n'
-            'sys.modules["wx"] = None\n'
-            'import kicad_quiet\n'
-            'print("NONE" if kicad_quiet.quiet_wx() is None else "APP")\n') % PY_ROUTER
-    r = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=60)
-    check(r.stdout.strip() == 'NONE', 'quiet_wx is a no-op without wx', f'{r.stdout} {r.stderr[-300:]}')
+    print('2. no display: wx.App raises SystemExit, the refill goes on')
+    r = _fake_refill(td, no_display=True)
+    check('REFILL_OK' in r.stdout and 'MODAL' not in r.stdout,
+          'with no display the refill still reaches LoadBoard and finishes',
+          f'rc={r.returncode} {r.stdout[-300:]} {r.stderr[-300:]}')
 
 
 MISSING_FONT_TEXT = ('\t(gr_text "missing font"\n\t\t(at 20 20 0)\n\t\t(layer "F.SilkS")\n'
