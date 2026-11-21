@@ -3055,9 +3055,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         _per_layer[nid] = by_layer
                     # An explicit --track-width is the PNS 'custom size': it
                     # wins where a layer's rule allows it and is clamped into
-                    # the window where the rule excludes it (stm32h7-hdmi-
-                    # sodimm's 55R classes, fixed 0.18 outer / 0.102 inner,
-                    # drew 0.18 on inner layers: 199 track_width errors).
+                    # the window where the rule excludes it (measured: a
+                    # 55-ohm class fixed at 0.18 outer / 0.102 inner drew
+                    # 0.18 on inner layers, 199 track_width errors).
                     if not track_width_from_class and impedance is None and _cu:
                         _xl = {}
                         for l in _cu:

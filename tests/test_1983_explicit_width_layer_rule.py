@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """An explicit --track-width still meets a layer-scoped .kicad_dru width rule.
 
-ulx3s (kicad_files/, four signal layers) with a rule file in the shape of
-stm32h7-hdmi-sodimm's 55-ohm classes: the SDRAM data nets fixed at 0.18 mm on
-outer layers and 0.102 mm on inner layers,
+An in-repo four-signal-layer board with a rule file in the shape of a
+55-ohm class: the SDRAM data nets fixed at 0.18 mm on outer layers and
+0.102 mm on inner layers,
 
     (rule "se_outer" (layer outer) (condition "A.NetName == 'SDRAM_D*'")
         (constraint track_width (min 0.18mm) (opt 0.18mm) (max 0.18mm)))
@@ -14,7 +14,7 @@ routed with --track-width 0.18 (the width a bench passes for the Default
 class) under --escalation board (descents stop at the rule minimums; the
 `fab` policy may go below them by design). Before the fix an explicit --track-width dropped the per-layer widths
 whole: every inner segment came out at 0.18, a track_width violation on each
-one (stm32h7: 199). The operator's width still wins where the rule allows it;
+one (199 where measured). The operator's width still wins where the rule allows it;
 where a layer's rule window excludes it, the net draws the width clamped into
 that window, as KiCad's router does for a custom size against a rule.
 """
