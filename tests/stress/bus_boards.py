@@ -127,8 +127,14 @@ def grade_board(out_, summaries, input_, work):
         return dict(buses=buses, nets=0, open=[], drc=None, walled=[], ok=False, why='no bus nets in the summaries')
     with contextlib.redirect_stdout(io.StringIO()):
         g = rb.board_grade(input_, out_, nets_, work, log=lambda *a_: None, tag='grade')
+    # (A BUS WITH NO SUMMARY has no net in that grade -- its step ended before it wrote one: the board is not clean
+    # for the buses that did write, and the verdict names it. Read without it, a board with one bus dead and the
+    # others clean was "every board clean")
+    dead = [b['bus'] for b in buses if b.get('why') == 'no summary']
+    why = 'the DRC gave nothing to read' if g['drc']['n'] is None else \
+        f'no summary of {", ".join(dead)}: its nets are in no grade' if dead else ''
     return dict(buses=buses, nets=g['nets'], open=g['open'], drc=g['drc']['n'], walled=g['walled']['walled'],
-                ok=g['ok'], why='' if g['drc']['n'] is not None else 'the DRC gave nothing to read')
+                ok=g['ok'] and not dead, why=why)
 
 
 def main():
