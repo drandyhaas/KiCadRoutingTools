@@ -25,7 +25,7 @@ Unit checks, at clearance 0.1 / hole clearance 0.25 (ring 0.15):
      unfitted (fab ships the ring-short (0.45, 0.3) last resort);
   6. board, swap loop: every pair it can ship holds the ring.
 
-    python3 tests/test_board_requires_hole_ring.py
+    python3 tests/test_2018_board_requires_hole_ring.py
 """
 import os
 import sys
