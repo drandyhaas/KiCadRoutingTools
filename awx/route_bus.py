@@ -1825,25 +1825,52 @@ def walls_made(before, after, refs, bus, moved, project=None, only=None):
     segs = [s for s in b_out.segments if s.net_id in mv]
     vias = [v for v in b_out.vias if v.net_id in mv]
 
-    def dist(p, s):
+    def dist(q, s):
         ax, ay, dx, dy = s.start_x, s.start_y, s.end_x - s.start_x, s.end_y - s.start_y
         L = dx * dx + dy * dy
-        t = 0.0 if L == 0 else max(0.0, min(1.0, ((p.global_x - ax) * dx + (p.global_y - ay) * dy) / L))
-        return math.hypot(p.global_x - ax - t * dx, p.global_y - ay - t * dy)
+        t = 0.0 if L == 0 else max(0.0, min(1.0, ((q[0] - ax) * dx + (q[1] - ay) * dy) / L))
+        return math.hypot(q[0] - ax - t * dx, q[1] - ay - t * dy)
+
+    own_net = collections.defaultdict(list)
+    for s in b_out.segments:
+        own_net[s.net_id].append(s)
+
+    def way_out(p):
+        """the places ball `p` leaves by: its pad, and the ends of the copper that runs on from it -- its escape's
+        stub, piece by piece (its via stands on one of them) -- within the cage's view of it. What walls a ball in
+        stands across the END of its way out: a ball in an array's second row leaves by a stub two pitches long,
+        lanes across that end were past WALL_NEAR of the pad, the ball was not asked about, and it shipped walled
+        in"""
+        pts, r0 = [(p.global_x, p.global_y)], max(p.size_x, p.size_y) / 2
+        left = [s for s in own_net.get(p.net_id, ()) if p.net_id
+                and max(abs(s.start_x - p.global_x), abs(s.start_y - p.global_y),
+                        abs(s.end_x - p.global_x), abs(s.end_y - p.global_y)) < CAGE_VIEW]
+        grew = True
+        while grew and left:
+            grew = False
+            for s in list(left):
+                ends = ((s.start_x, s.start_y), (s.end_x, s.end_y))
+                if any(math.hypot(q[0] - e[0], q[1] - e[1]) <= (r0 if i == 0 else 1e-3)
+                       for i, q in enumerate(pts) for e in ends):
+                    pts += ends
+                    left.remove(s)
+                    grew = True
+        return pts
 
     def near_nets(p):
-        """{net id: distance} of the moved nets' copper within WALL_NEAR of ball `p`"""
+        """{net id: distance} of the moved nets' copper within WALL_NEAR of ball `p`'s way out (way_out)"""
         d = {}
-        for s in segs:
-            if abs(s.start_x - p.global_x) < WALL_NEAR + abs(s.end_x - s.start_x) and \
-                    abs(s.start_y - p.global_y) < WALL_NEAR + abs(s.end_y - s.start_y):
-                x = dist(p, s)
-                if x < WALL_NEAR and x < d.get(s.net_id, 9e9):
-                    d[s.net_id] = x
-        for v in vias:
-            x = math.hypot(v.x - p.global_x, v.y - p.global_y)
-            if x < WALL_NEAR and x < d.get(v.net_id, 9e9):
-                d[v.net_id] = x
+        for q in way_out(p):
+            for s in segs:
+                if abs(s.start_x - q[0]) < WALL_NEAR + abs(s.end_x - s.start_x) and \
+                        abs(s.start_y - q[1]) < WALL_NEAR + abs(s.end_y - s.start_y):
+                    x = dist(q, s)
+                    if x < WALL_NEAR and x < d.get(s.net_id, 9e9):
+                        d[s.net_id] = x
+            for v in vias:
+                x = math.hypot(v.x - q[0], v.y - q[1])
+                if x < WALL_NEAR and x < d.get(v.net_id, 9e9):
+                    d[v.net_id] = x
         return {k: x for k, x in d.items() if k != p.net_id}
     fixed = _fixed_nets(b_out, after, bus)
     cand = {r: {p.pad_number: near_nets(p) for p in pads} for r, pads in _cage_balls(b_out, refs, bus).items()}
@@ -2082,6 +2109,173 @@ def ball_way(pcb, pad, fixed, rung, with_path=False, sites=1):
             taken.append((float(px[j]), float(py[j])))
             out.append(way_to(int(j)))
     return out
+
+
+CHANNEL_SHORT = 100.0   # (ball_channel) a cell of the way with no room for a track as laid, by what it is short
+CHANNEL_VIA = 1.0       # (ball_channel) a change of layer on the way, in mm of it
+
+
+def ball_channel(pcb, pad, fixed, rung, soft):
+    """THE WAY OUT OF ball `pad` BETWEEN THE LANES, on `pcb` with `fixed`'s copper the walls: from the ball's own copper
+    to what the cage test asks it to reach (_caged: the rest of its net in its view, else the view's edge), over the
+    cells a track of `rung` fits with the copper of `soft` gone ({id of a track or via of `pcb`: its lane} -- what a
+    remedy can lay again) and never across a piece of that copper: two lanes PART round a way between them and keep
+    their shape, a lane crossed has to go round the way's end. Of such ways the one through the least room that has to
+    be made -- a cell with no room for the track as laid is dearer by what it is short (CHANNEL_SHORT), the ball's own
+    copper next to free -- so it follows its stub to the end and goes on between the two lanes that close past it.
+    (Room as laid is a track's and a raster cell to spare: a lane is laid a hair over the clearance, and one that
+    stands the bare clearance off the way is routed again all the same.)
+    Layers change where a via of `rung` fits on every layer as laid (CHANNEL_VIA) or at a via of the net's own.
+    _caged's raster and its targets. A walled ball's via site alone, reserved, kept nothing open where the wall stood
+    past it: a ball of an array's second row, its stub out between two lanes that ran on side by side a track's width
+    short of a track's room.
+    {'lines': [(p, q, layer)] the way from the end of the ball's own copper on, 'vias': [(x, y)] its changes of layer,
+    'lanes': the lanes of `soft` a track along it is short of its clearance to, the nearest the ball first, 'short':
+    the mm of it with no room as laid, 'end': 'net' or 'edge'}; None where there is no such way"""
+    import heapq
+    import numpy as np
+    from kicad_parser import is_immutable_copper
+    if os.path.join(HERE, '..', 'py_placer') not in sys.path:
+        sys.path.insert(0, os.path.join(HERE, '..', 'py_placer'))
+    from placement.reachability import slack_field
+    track, via, clearance = rung
+    walls = _walls(_cropped(pcb, pcb.footprints[pad.component_ref]), fixed, pad.net_id, is_immutable_copper)
+    hard, lanes = copy.copy(walls), copy.copy(walls)
+    hard.segments = [s for s in walls.segments if id(s) not in soft]
+    hard.vias = [v for v in walls.vias if id(v) not in soft]
+    lanes.segments = [s for s in walls.segments if id(s) in soft]
+    lanes.vias = [v for v in walls.vias if id(v) in soft]
+    lanes.footprints = {}
+    if not lanes.segments and not lanes.vias:
+        return None
+    nid, step = pad.net_id, CAGE_STEP
+    view = (pad.global_x - CAGE_VIEW, pad.global_y - CAGE_VIEW, pad.global_x + CAGE_VIEW, pad.global_y + CAGE_VIEW)
+    layers = list(pcb.board_info.copper_layers)
+    home = next((L for L in layers if L in pad.layers), layers[0])
+    layers = [home] + [L for L in layers if L != home]
+    need = track / 2.0 + step
+    ok, price, own, room = [], [], [], []
+    for L in layers:
+        _s, o, D = slack_field(walls, nid, L, view, clearance, None, step)
+        Dh = slack_field(hard, nid, L, view, clearance, None, step)[2]
+        Dl = slack_field(lanes, nid, L, view, clearance, None, step)[2]
+        ok.append(((Dh >= track / 2.0) | o) & (Dl > -0.5))      # (slack_field's own mark of a cell on copper: -1)
+        price.append(np.where(o, 0.01, 1.0 + CHANNEL_SHORT * np.clip((need - D) / (need + clearance), 0.0, 1.0)))
+        own.append(o)
+        room.append(D)
+    h, w = ok[0].shape
+    via_ok = np.logical_and.reduce([D >= via / 2.0 for D in room])
+    own_via = set()
+    for v in walls.vias:
+        cx, cy = int((v.x - view[0]) / step), int((v.y - view[1]) / step)
+        if v.net_id == nid and 0 <= cx < w and 0 <= cy < h:
+            own_via.add((cy, cx))
+    sy, sx = int((pad.global_y - view[1]) / step), int((pad.global_x - view[0]) / step)
+    if not (0 <= sy < h and 0 <= sx < w) or not own[0][sy, sx]:
+        return None
+    # the ball's own island (its net's copper joined through its own vias), and the targets: the rest of its net, the
+    # view's edge
+    isl = [np.zeros((h, w), dtype=bool) for _L in layers]
+    todo = [(0, sy, sx)]
+    isl[0][sy, sx] = True
+    while todo:
+        li, y, x = todo.pop()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            y1, x1 = y + dy, x + dx
+            if 0 <= y1 < h and 0 <= x1 < w and own[li][y1, x1] and not isl[li][y1, x1]:
+                isl[li][y1, x1] = True
+                todo.append((li, y1, x1))
+        if (y, x) in own_via:
+            for lj in range(len(layers)):
+                if own[lj][y, x] and not isl[lj][y, x]:
+                    isl[lj][y, x] = True
+                    todo.append((lj, y, x))
+    edge = np.zeros((h, w), dtype=bool)
+    edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
+    tgt = [(o & ~i_) | (edge & k_) for o, i_, k_ in zip(own, isl, ok)]
+    dist, prev, heap, end = {(0, sy, sx): 0.0}, {(0, sy, sx): None}, [(0.0, 0, sy, sx)], None
+    while heap:
+        d, li, y, x = heapq.heappop(heap)
+        if d > dist.get((li, y, x), 9e18):
+            continue
+        if tgt[li][y, x]:
+            end = (li, y, x)
+            break
+        okL, prL = ok[li], price[li]
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            y1, x1 = y + dy, x + dx
+            # (no step across a corner two walls meet at: the cage test's regions are joined by their sides)
+            if not (0 <= y1 < h and 0 <= x1 < w) or not okL[y1, x1] or (dy and dx and not (okL[y, x1] and okL[y1, x])):
+                continue
+            d1 = d + step * (1.41421356 if dy and dx else 1.0) * prL[y1, x1]
+            if d1 < dist.get((li, y1, x1), 9e18):
+                dist[(li, y1, x1)], prev[(li, y1, x1)] = d1, (li, y, x)
+                heapq.heappush(heap, (d1, li, y1, x1))
+        hop = 0.0 if (y, x) in own_via else CHANNEL_VIA if via_ok[y, x] else None
+        if hop is not None:
+            for lj in range(len(layers)):
+                if lj != li and ok[lj][y, x] and d + hop < dist.get((lj, y, x), 9e18):
+                    dist[(lj, y, x)], prev[(lj, y, x)] = d + hop, (li, y, x)
+                    heapq.heappush(heap, (d + hop, lj, y, x))
+    if end is None:
+        return None
+    cells = []
+    while end is not None:
+        cells.append(end)
+        end = prev[end]
+    cells.reverse()
+    # (from the end of the ball's own copper on: what stands on its own stub reserves nothing)
+    k0 = max((i for i, (li, y, x) in enumerate(cells) if isl[li][y, x]), default=0)
+    way = cells[k0:]
+    at = lambda c: (float(view[0] + (c[2] + 0.5) * step), float(view[1] + (c[1] + 0.5) * step))   # noqa: E731
+
+    def turns(run):
+        """a run of cells on one layer as its points: the ends and each turn worth one -- a cell's step aside in a
+        straight stretch is the raster's, and reserved as drawn it took room from the lane beside it (Douglas-Peucker,
+        a cell and a half)"""
+        pts = [at(c) for c in run]
+
+        def keep(i, j):
+            if j - i < 2:
+                return []
+            (ax, ay), (bx, by) = pts[i], pts[j]
+            L = math.hypot(bx - ax, by - ay) or 1e-12
+            d = [abs((bx - ax) * (ay - y) - (ax - x) * (by - ay)) / L for x, y in pts[i + 1:j]]
+            k = max(range(len(d)), key=d.__getitem__)
+            return [] if d[k] <= 1.5 * step else keep(i, i + 1 + k) + [i + 1 + k] + keep(i + 1 + k, j)
+        return [pts[i] for i in [0] + keep(0, len(pts) - 1) + ([len(pts) - 1] if len(pts) > 1 else [])]
+    lines, vias_, run = [], [], [way[0]]
+    for c in way[1:] + [None]:
+        if c is not None and c[0] == run[-1][0]:
+            run.append(c)
+            continue
+        pts = turns(run)
+        lines += [(a, b, layers[run[0][0]]) for a, b in zip(pts, pts[1:])
+                  if math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-9]
+        if c is not None:
+            if (run[-1][1], run[-1][2]) not in own_via:
+                vias_.append(at(run[-1]))
+            run = [c]
+    # the lanes it is short of its clearance to: their copper within a track's room of a cell of it with none as laid
+    short = [c for c in way if not own[c[0]][c[1], c[2]] and room[c[0]][c[1], c[2]] < need]
+    first = {}
+    for i, c in enumerate(short):
+        px, py = at(c)
+        for s in lanes.segments:
+            if s.layer != layers[c[0]] or soft[id(s)] in first:
+                continue
+            ax, ay, dx, dy = s.start_x, s.start_y, s.end_x - s.start_x, s.end_y - s.start_y
+            L2 = dx * dx + dy * dy
+            t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+            if math.hypot(px - ax - t * dx, py - ay - t * dy) < need + clearance + s.width / 2.0:
+                first[soft[id(s)]] = i
+        for v in lanes.vias:
+            if soft[id(v)] not in first and \
+                    math.hypot(px - v.x, py - v.y) < need + clearance + v.size / 2.0:
+                first[soft[id(v)]] = i
+    last = cells[-1]
+    return dict(lines=lines, vias=vias_, lanes=sorted(first, key=lambda m: (first[m], str(m))),
+                short=round(len(short) * step, 3), end='net' if own[last[0]][last[1], last[2]] else 'edge')
 
 
 def changed_nets(board, routed, names):

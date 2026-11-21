@@ -544,6 +544,19 @@ reserved as a straight line from the ball, the way round the end of the
 walling lane's own fanout run was left open, and the lane routed again took
 that end and walled the ball once more.
 
+A ball that leaves walled in all the same has its WHOLE way out kept,
+BETWEEN the lanes (`route_bus.ball_channel`): the cage test's own way from
+the end of the ball's copper to the rest of its net or the edge of its view,
+never across a lane, through the least room that has to be made. The laid
+singles a track along it is short of its clearance to are lifted, the way
+reserved, and they are routed again round it -- each in its band, else in
+its band a lane's slice wider (`braid.route_lane`'s `slack`), so a lane
+parts from the way and keeps its place in the bundle; a lane with no room to
+part stands, and the way is asked for again clear of it. A ball of an
+array's second row, its stub out between two lanes that ran on side by side
+a track's width short of a track's room, had kept nothing by its via site:
+the wall stood past it (`tests/test_622_ball_channel.py`).
+
 It exits 0 whenever it writes OUT (#1738): the bus nets it hands on connected
 and clean (those it put back are in `refused`), or none handed on and OUT the
 board as it came. The summary's `exit` says which, and over several buses it
@@ -2702,7 +2715,9 @@ taken only with more routing layers than two. Every via is a through via.
   pad's layer alone is dropped (`relayer.py`). Where the runs moved wall in
   a ball of the arrays on no bus net (`route_bus.walls_made`, the step's
   cage test), every end whose run passes within `WALL_NEAR` (1.6 mm) of that
-  ball stays on the layer it was laid on, which walled nothing, and that
+  ball or of the copper that leaves it -- its escape's stub, its via: what
+  walls a ball stands across its way out, not its pad -- stays on the layer
+  it was laid on, which walled nothing, and that
   layer is banned for it in the round's re-solves (`VBAN_WALLS`); asked
   again up to `WALL_RETRIES` times (`whole_route.relay_ends`).
 - **The ends model** prices the same route: a surface escape's end fixed on

@@ -852,10 +852,12 @@ class Corridor:
     whole_ctx.PlanLanes borrows them as plain functions. Of `self` they read ctx, log, spine, teeth, stubs,
     lane_xy, band_of, sched_cur and, where a whole-route plan is installed, _geo."""
 
-    def route_lane(self, nm, virt, virt_vias=None, free=False):
+    def route_lane(self, nm, virt, virt_vias=None, free=False, slack=0.0):
         """Route one lane tooth -> stub: ONE connect() search inside its
         band by default (`free`: in no band, the free swimmers' window,
-        as route_lanes.lift_walls routes a lane again round a ball's way).
+        as route_lanes.lift_walls routes a lane again round a ball's way;
+        `slack`: its band that much wider a side, as it parts a lane from
+        a ball's way between two lanes).
         Returns (segments, vias) or None; partial copper is discarded."""
         ctx, sp = self.ctx, self.spine
         if nm in getattr(ctx, 'pairs', {}):
@@ -887,7 +889,7 @@ class Corridor:
                 margin = max(margin, 6.0)
         way = [(self.teeth[nm], ctx.tooth_layer[nm])]
         way.append((self.stubs[nm], ctx.dest_layer[nm]))
-        band = None if free_swim else self.band_of(nm)
+        band = None if free_swim else self.band_of(nm, slack=slack) if slack else self.band_of(nm)
         segs_all, vias_all = [], []
         added = 0
         # The lanes target the stub TIP. Finishing at any dest-stub
