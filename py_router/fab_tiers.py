@@ -891,14 +891,24 @@ TIER_RUNG_KEY = 'tier_rung'
 
 
 def _prefer_hole_ring(rungs, ring):
-    """#1914: the ladder ``rungs`` with the copper-to-hole ring PREFERRED, not
-    required: each tier rung raised to hold ``ring`` round its drill comes
-    immediately before the rung itself (duplicates dropped, so a rung that
-    already holds the ring appears once). The ring is preferred WITHIN a tier
-    rung and never causes a fab-tier escalation by itself: a smaller tier is
-    tried only after the rung above it, raised and as it is, did not fit.
-    Completion first: a via only an unraised rung fits still ships, and the
-    run's census of its shipped vias names it (:func:`replace_hole_ring_rows`).
+    """#1914: the ladder ``rungs`` with the copper-to-hole ring PREFERRED
+    under ``fab`` and REQUIRED under ``board`` (#2018).
+
+    Under ``fab`` each tier rung raised to hold ``ring`` round its drill
+    comes immediately before the rung itself (duplicates dropped, so a rung
+    that already holds the ring appears once). The ring is preferred WITHIN a
+    tier rung and never causes a fab-tier escalation by itself: a smaller
+    tier is tried only after the rung above it, raised and as it is, did not
+    fit. Completion first: a via only an unraised rung fits still ships, and
+    the run's census of its shipped vias names it
+    (:func:`replace_hole_ring_rows`).
+
+    Under ``board`` only the raised rung is offered: the board's hole
+    clearance is one of its own rules, like its via and drill minimums. It is
+    the clearance :func:`board_hole_clearance` resolves -- the author's
+    declaration, kept through a writeback that lowered the rule by the
+    chain's ``fab_floor_origin`` and :data:`HOLE_RING_RECORD_KEY`, as the
+    router's own hole walls keep it (``obstacle_map.resolve_hole_clearance``).
 
     Each rung carries :data:`TIER_RUNG_KEY`, its index in ``rungs``, so a
     site that tells a fab-tier escalation by the rung (:func:`rung_tier`,
@@ -909,7 +919,18 @@ def _prefer_hole_ring(rungs, ring):
     out, seen = [], []
     for i, r in enumerate(rungs):
         tagged = dict(r, **{TIER_RUNG_KEY: i})
-        for cand in (_apply_hole_ring([tagged], ring)[0], tagged):
+        # Under ``board`` the board's own hole clearance is a rule the run
+        # may not go below, like its via and drill minimums (#1676): the ring
+        # is REQUIRED, so only the raised rung is offered. Against OTHER-NET
+        # COPPER a ring-short via is clean only where its raised twin is
+        # (copper held at the clearance off the raised copper is exactly the
+        # hole clearance off the hole). The larger copper can still miss a
+        # site the short via took against the board edge or another net's
+        # bare (NPTH) hole, which only the copper is graded against.
+        cands = ((_apply_hole_ring([tagged], ring)[0],)
+                 if _ESCALATION == 'board' else
+                 (_apply_hole_ring([tagged], ring)[0], tagged))
+        for cand in cands:
             if _key(cand) not in seen:
                 seen.append(_key(cand))
                 out.append(cand)
@@ -1099,15 +1120,17 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     if want and rungs:
         rungs = (_apply_board_floors(rungs, want) if _ESCALATION == 'board'
                  else _first_choice_meets(rungs, want))
-    # #1914: a descended via PREFERS a ring that holds the copper-to-hole
-    # floor, so another net's copper, kept at the run's clearance off the
-    # via's copper, sits at the hole clearance off its hole. Each tier rung's
-    # ring-holding version comes just before the rung itself, so the ring
-    # never forces a fab-tier step (completion first; what ships below the
-    # ring is disclosed by the run's via census, replace_hole_ring_rows). Under every policy that descends
-    # at all (``off`` returned [] above). It is a KiCad DRC floor, not a
-    # board minimum the writeback lowers, so it is not a FLOOR_KEYS floor and
-    # not in _BOARD_FLOORS.
+    # #1914: a descended via holds a ring round its drill so another net's
+    # copper, kept at the run's clearance off the via's copper, sits at the
+    # hole clearance off its hole. Under ``fab`` the ring is PREFERRED: each
+    # tier rung's ring-holding version comes just before the rung itself, so
+    # the ring never forces a fab-tier step (completion first; what ships
+    # below the ring is disclosed by the run's via census,
+    # replace_hole_ring_rows). Under ``board`` it is REQUIRED (#2018): only
+    # the ring-holding version is offered (_prefer_hole_ring). ``off``
+    # returned [] above. It is a KiCad DRC floor, not a board minimum the
+    # writeback lowers, so it is not a FLOOR_KEYS floor and not in
+    # _BOARD_FLOORS.
     ring = via_hole_ring()
     if ring and rungs:
         rungs = _prefer_hole_ring(rungs, ring)
