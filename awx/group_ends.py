@@ -1086,6 +1086,27 @@ def held_hits(held, pc, net, tw, cl, run, way=None):
     return dead, on
 
 
+def standing(pads, laid, ways, name_of, buses, cl):
+    """THE LANES THAT STAND ON A PART HELD WHERE IT CAME: {a bus's name: its lanes} whose copper AS LAID (`laid`
+    [(a net's id, its copper, its run's layer, its track, its array)]: the field's pieces) or whose way out (`ways`
+    [(a net's id, an exit, its direction, its layer)]) the part's pads `pads` rule out (held_hits) -- the repair's
+    to free. `name_of`: a net's name by its id; a bus's lanes by its nets' names (its `leg_lane`). Read off what was
+    laid and not off the menus: a ball's menu is narrowed back to its first tiers once the search ends, and a
+    state's option was then no index of it"""
+    import joint_escape as je
+    on_it = set()
+    for nid, pc, L, tw, _ref in laid:
+        dead_, on_ = held_hits(pads, pc, name_of(nid), tw, cl, je.RUN)
+        if dead_ or any(pad_on(ly, L) for ly in on_):
+            on_it.add(name_of(nid))
+    for nid, ex, d, L in ways:
+        w = wayout_runs([(nid, tuple(ex), d, L)], [L])
+        if w and any(pad_on(ly, L) for ly in held_hits(pads, je.Piece(None, [], [], []), name_of(nid), 0.0, cl,
+                                                       je.RUN, ((w[0]['start'], w[0]['end']), w[0]['width']))[1]):
+            on_it.add(name_of(nid))
+    return {b.name: {b.leg_lane[n_] for n_ in on_it if n_ in b.leg_lane} for b in buses}
+
+
 def way_of(g0, L):
     """((its start, its end), its width) of the way out of the menu move `g0`'s exit on the layer L, as the nudge is
     given it (wayout_runs), or None where its exit has no direction"""
@@ -3522,32 +3543,11 @@ def main():
             moved = {r_ for r_, p_ in now_.items() if measured['poses'].get(r_, p_) != p_}
         return dict(nt=nt_, nv=nv_, caps=caps_, d_f=d_f, d_b=d_b, bad=bad_, items=items, moved=moved)
 
-    def standing(b, pads):
-        """the lanes of the bus `b` an end of which, as its state has it, a part of the pads `pads` held where it
-        came rules out (held_hits): a via, a leg or the way out within the clearance of a pad of another net"""
-        import joint_escape as je
-        import rules as _rules
-        out_ = set()
-        with awx_settings.given(genv):
-            cl_ = _rules.active().clearance
-            for k_ in (0, 1):
-                A = b.arr[k_]
-                if A is None:
-                    continue
-                for l_, _lg in b.E.lanes:
-                    L_ = b.E.RL[b.lay[l_][k_]]
-                    for mv in (b.E.T, b.E.B)[k_][l_][b.state[l_][k_]][0]:
-                        _r, k, i = mv.gid
-                        dead_, on_ = held_hits(pads, A.bm.opts[k][i][2], A.bm.items[k][1].net_name, A.bm.sz['tw'],
-                                               cl_, je.RUN, way_of(A.bm.menu[k][i], L_))
-                        if dead_ or any(pad_on(ly, L_) for ly in on_):
-                            out_.add(l_)
-        return out_
-
-    def teach_laid(items, buses, moved=()):
+    def teach_laid(items, buses, moved=(), laid_=(), ways_=()):
         """how many lessons the violations `items` (check_drc's) newly give: for each, the bus lanes of its nets --
         but a pad's own net, which stood there before the fanout -- each at its end nearer the violation; but a
-        violation at a pad of a part the nudge MOVED (`moved`) holds that part where it came instead"""
+        violation at a pad of a part the nudge MOVED (`moved`) holds that part where it came instead, the lanes
+        that stand on it there (`laid_`, `ways_`: the field's copper and the ways out, as laid) the repair's"""
         n, new_held = 0, set()
         for it in items:
             sl_ = it.get('seg_loc')
@@ -3574,8 +3574,12 @@ def main():
                                    tuple(p_.layers)) for p_ in f_.pads]
                     new_held.add(ref_)
                     n += 1
-                    for b in buses:
-                        fresh.setdefault(b.name, set()).update(standing(b, held[ref_]))
+                    import rules as _rules
+                    with awx_settings.given(genv):
+                        on_it = standing(held[ref_], laid_, ways_, lambda i_: bpcb.nets[i_].name if i_ in bpcb.nets
+                                         else None, buses, _rules.active().clearance)
+                    for bn_, ls_ in on_it.items():
+                        fresh.setdefault(bn_, set()).update(ls_)
                 if ref_ in new_held:
                     continue
             for b in buses:
@@ -5661,7 +5665,8 @@ def main():
         if not unplanned:
             M_ = lay_and_measure(laid, wayouts)
             n_held = len(held)
-            n_ban = teach_laid(M_['items'], buses, M_['moved']) if M_['items'] and laid_try < we.JOINT_TRIES else 0
+            n_ban = teach_laid(M_['items'], buses, M_['moved'], laid, wayouts) \
+                if M_['items'] and laid_try < we.JOINT_TRIES else 0
             TR.rec('field', check=chk_try + 1, drc_field=M_['d_f'], drc_bare=M_['d_b'], items=M_['items'][:60],
                    moved=M_['moved'], lessons=n_ban, held_parts=sorted(held))
             if not n_ban:

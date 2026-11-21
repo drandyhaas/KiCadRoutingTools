@@ -27,7 +27,11 @@ Synthetic geometry: a two-pad passive on the back layer 0.36 mm below a rim, thr
 6. the case: the option's own copper ends at the rim, clear of the part -- by the vias alone nothing is ruled out --
    and with its way out the exit is;
 7. a held part stays where it came in the nudge (write_field gives it the nudge's --lock), and its record carries
-   its pads' layers.
+   its pads' layers;
+8. standing: the lanes that stand on the part are read off the copper as laid and the ways out -- a lane whose way
+   out is over a pad, one whose laid run crosses a pad on the pad's layer -- and not a lane clear of it, one on the
+   other layer, or the pad's own net; no menu is read (a ball's menu is narrowed once the search ends, and a
+   state's option is then no index of it).
 """
 import inspect
 import math
@@ -149,6 +153,28 @@ check('7. write_field takes the held parts and gives them to the nudge as --lock
 main_src = inspect.getsource(ge.main)
 check('7. the field is laid with the held parts locked', 'locked=sorted(held)' in main_src)
 check('7. a held part\'s record carries its pads\' layers', 'tuple(p_.layers)' in main_src)
+
+# 8. the lanes that stand on the part
+DOWN = exit_at(0).direction
+NAMES = {1: 'S1', 2: 'S2', 3: 'S3', 4: 'S4', 5: 'G', 6: 'S6'}
+laid = [(1, piece([((-0.66, -1.2), (-0.66, 0.0), BACK)]), BACK, TW, 'A'),      # (its way out is over the pad of G)
+        (2, piece([((1.5, -1.2), (1.5, 0.0), BACK)]), BACK, TW, 'A'),          # (clear of the part)
+        (3, piece([((0.48, -0.2), (0.48, 0.5), je.RUN)]), BACK, TW, 'A'),      # (its run crosses the pad of P)
+        (4, piece([((0.48, -0.2), (0.48, 0.5), je.RUN)]), FRONT, TW, 'A'),     # (the same run on the other layer)
+        (5, piece([((-0.66, -1.2), (-0.66, 0.0), BACK)]), BACK, TW, 'A'),      # (the pad's own net)
+        (6, piece([((-0.66, -1.2), (-0.66, 0.0), FRONT)]), FRONT, TW, 'A')]    # (its way out on the other layer)
+ways = [(1, (-0.66, 0.0), DOWN, BACK), (2, (1.5, 0.0), DOWN, BACK), (5, (-0.66, 0.0), DOWN, BACK),
+        (6, (-0.66, 0.0), DOWN, FRONT)]
+buses = [types.SimpleNamespace(name='b1', leg_lane={'S1': 'l1', 'S2': 'l2', 'S6': 'l6'}),
+         types.SimpleNamespace(name='b2', leg_lane={'S3': 'l3', 'S4': 'l4', 'G': 'lg'})]
+got = ge.standing(PADS, laid, ways, NAMES.get, buses, CL)
+check('8. the lane whose way out is over a pad, and the one whose laid run crosses a pad on its layer',
+      got == {'b1': {'l1'}, 'b2': {'l3'}}, got)
+check('8. nothing laid on the part: no lane', ge.standing(PADS, laid[1:2], ways[1:2], NAMES.get, buses, CL)
+      == {'b1': set(), 'b2': set()})
+check('8. no menu is read: the lanes come from the copper as laid',
+      not any(w_ in inspect.getsource(ge.standing) for w_ in ('.menu', '.opts', '.state')))
+check('8. the lesson is given the field\'s copper and the ways out', 'M_[\'moved\'], laid, wayouts)' in main_src)
 
 print(f'{N[0] - len(BAD)}/{N[0]} checks passed')
 sys.exit(1 if BAD else 0)
