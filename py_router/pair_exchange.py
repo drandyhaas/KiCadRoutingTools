@@ -12,7 +12,9 @@ while both legs still stand.
 The lap here breaks the cycle as one unit: strip both legs and the crossers
 inside the row's box, route the two legs on the cleared row, then route the
 crossers around them. route.py keeps the result only when both sub-runs
-close every net they were given at the run's own rules.
+close every net they were given at the run's own rules. A leg that is
+protected, locked or otherwise not rippable, a pour net or a supply rail is
+never stripped: the pair is skipped.
 
 Pure functions only (names, boxes, copper lists); route.py does the I/O.
 """
@@ -72,20 +74,42 @@ def shared_pad_box(pads_x: Sequence[Tuple[str, float, float, float, float]],
                    pads_y: Sequence[Tuple[str, float, float, float, float]],
                    margin: float = BOX_MARGIN_MM
                    ) -> Optional[Tuple[float, float, float, float]]:
-    """The box around both legs' pads on the footprints they share.
+    """The box around both legs' pads on the ONE footprint where they meet
+    most: the shared footprint carrying the most pads of the two legs (the
+    interleaved row), the smallest box on a tie.
 
     Each pad is (footprint ref, x, y, half width, half height). Returns
     (x0, y0, x1, y1) grown by `margin`, or None when the legs share no
-    footprint (no interleaved row to clear)."""
+    footprint (no row to clear). One footprint only: a pair also shares its
+    far part (the IC), and a box over both parts would span the board
+    between them, so its "crossers" would be whatever has the most copper
+    there rather than the nets crossing the row."""
     refs = {p[0] for p in pads_x} & {p[0] for p in pads_y}
     if not refs:
         return None
-    sel = [p for p in list(pads_x) + list(pads_y) if p[0] in refs]
-    x0 = min(p[1] - p[3] for p in sel) - margin
-    y0 = min(p[2] - p[4] for p in sel) - margin
-    x1 = max(p[1] + p[3] for p in sel) + margin
-    y1 = max(p[2] + p[4] for p in sel) + margin
-    return (x0, y0, x1, y1)
+    every = list(pads_x) + list(pads_y)
+
+    def _box(ref):
+        sel = [p for p in every if p[0] == ref]
+        return (min(p[1] - p[3] for p in sel) - margin,
+                min(p[2] - p[4] for p in sel) - margin,
+                max(p[1] + p[3] for p in sel) + margin,
+                max(p[2] + p[4] for p in sel) + margin)
+
+    def _rank(ref):
+        b = _box(ref)
+        return (-sum(1 for p in every if p[0] == ref),
+                (b[2] - b[0]) * (b[3] - b[1]), ref)
+
+    return _box(min(refs, key=_rank))
+
+
+def is_power_leg(pintypes: Iterable[str]) -> bool:
+    """Whether a "leg" is a supply rail rather than a signal: every pad
+    names a power pin type. `V+`/`V-` and `VP`/`VN` rails match the suffix
+    pairs, but a rail is not a pair to re-route as a unit."""
+    kinds = [t for t in pintypes if t]
+    return bool(kinds) and all(t.startswith('power') for t in kinds)
 
 
 def _seg_hits_box(sx, sy, ex, ey, box) -> bool:

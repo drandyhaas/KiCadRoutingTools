@@ -3,10 +3,9 @@
 reconciliation laps is routed again together with its partner and the nets
 crossing their shared pad row (pair_exchange.py, route._pair_unit_lap).
 
-The field case: ftdi-jtag-programmer's USB-C row interleaves /USB_D+ and
-/USB_D- (D+ D- D+ D- at 0.5 mm pitch, off the 0.05 grid); VBUS crossed the
-row before the pair routed, and every lap swapped which leg shipped open
-(99.62% on fork 4c44f0ea). The lap strips both legs and the crossers, routes
+The field case: a USB-C row interleaves /USB_D+ and /USB_D- (D+ D- D+ D- at
+0.5 mm pitch, off the 0.05 grid); VBUS crossed the row before the pair
+routed, and every lap swapped which leg shipped open. The lap strips both legs and the crossers, routes
 the pair, then the crossers, at nominal rules, and keeps the copy only when
 every net closes.
 
@@ -14,14 +13,18 @@ Rows:
   1. unit: partner_name pairs _P/_N, DP/DM, +/-, P/N, and nothing else.
   2. unit: find_exchanges reports an open leg whose partner is open or a
      blocker, once per pair; an open leg blaming a stranger is not one.
-  3. unit: shared_pad_box covers only the footprints both legs share.
+  3. unit: shared_pad_box covers the ONE shared footprint carrying the most
+     of the legs' pads (the row, not the far IC); is_power_leg names a rail.
   4. unit: crossers_in_box counts segments clipped by the box and vias in it.
   5. the lap: on a synthetic interleaved row with D- routed, D+ open and a
      crosser over the row, the lap closes D+ and keeps the board; with D+'s
      far pad walled by locked copper it keeps nothing and the file is
      byte-identical.
+  6. the lap skips a pair whose partner the step may not rip (the rip
+     filter drops it: protected, locked, held): nothing stripped, the file
+     byte-identical.
 
-    python3 tests/test_pair_unit_lap.py
+    python3 tests/test_2016_pair_unit_lap.py
 """
 import contextlib
 import io
@@ -80,8 +83,14 @@ def row3_shared_box():
     box = px.shared_pad_box([p for p in dp if p[0] == 'J1'],
                             [p for p in dm if p[0] == 'J1'], margin=0.5)
     check(box == (9.35, 4.0, 12.15, 6.0), f'J1 row box {box}')
-    big = px.shared_pad_box(dp, dm, margin=0.0)
-    check(big[2] == 31.3 and big[3] == 20.3, 'shared U1 joins the box, R9 not')
+    whole = px.shared_pad_box(dp, dm, margin=0.5)
+    check(whole == box, f'the far IC U1 (shared too) stays out of the box {whole}')
+    tie = px.shared_pad_box([('U1', 0, 0, 1, 1), ('J2', 0, 0, 1, 1)],
+                            [('U1', 9, 0, 1, 1), ('J2', 2, 0, 1, 1)], margin=0)
+    check(tie == (-1, -1, 3, 1), f'a tie takes the smaller box {tie}')
+    check(px.is_power_leg(['power_in', 'power_out']), 'all power pins: a rail')
+    check(not px.is_power_leg(['bidirectional', 'power_in']), 'a signal pin: no rail')
+    check(not px.is_power_leg(['', '']), 'no pin types: no rail')
     check(px.shared_pad_box([('J1', 0, 0, 1, 1)], [('J2', 0, 0, 1, 1)]) is None,
           'no shared footprint: no box')
 
@@ -135,7 +144,7 @@ def _row_board(wall=False):
     return b.text()
 
 
-def _run_lap(text, tmp):
+def _run_lap(text, tmp, filter_names=lambda c: list(c)):
     import route
     path = os.path.join(tmp, 'row.kicad_pcb')
     with open(path, 'w', encoding='utf-8') as fh:
@@ -148,7 +157,7 @@ def _run_lap(text, tmp):
               layers=['F.Cu', 'B.Cu'], via_size=0.6, via_drill=0.3)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        n = route._pair_unit_lap(path, rk, lambda c: list(c))
+        n = route._pair_unit_lap(path, rk, filter_names)
     log = buf.getvalue()
     after = open(path, 'rb').read()
     left = [f for f in os.listdir(tmp) if 'pairlap' in f]
@@ -190,11 +199,27 @@ def row5_lap():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def row6_partner_not_rippable():
+    tmp = tempfile.mkdtemp(prefix='pairlap-')
+    try:
+        n, log, before, after, path, left = _run_lap(
+            _row_board(), tmp,
+            filter_names=lambda c: [x for x in c if x != '/USB_D-'])
+        check(n == 0, f'partner not rippable: lap closes nothing (returned {n})')
+        check('skipped' in log and '/USB_D-' in log and 'stripped' not in log,
+              'partner not rippable: skipped before stripping')
+        check(before == after, 'partner not rippable: file byte-identical')
+        check(not left, f'no .pairlap siblings left ({left})')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == '__main__':
     row1_partner_name()
     row2_find_exchanges()
     row3_shared_box()
     row4_crossers()
     row5_lap()
+    row6_partner_not_rippable()
     print('FAILED: %d' % len(FAILS) if FAILS else 'ALL PASS')
     sys.exit(1 if FAILS else 0)

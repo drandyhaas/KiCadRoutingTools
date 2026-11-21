@@ -1083,6 +1083,26 @@ def _pair_unit_lap(output_file, rk, filter_names):
     saved_tlo = getattr(batch_route, '_targets_left_open', None)
     saved_vic = getattr(batch_route, '_victims_left_open', None)
     for x, y in pairs:
+        # The legs are stripped whole, so they pass the same guard as the
+        # crossers: a protected, locked or held net (#521, #1279), a net the
+        # step's filter keeps hands off, a pour net or a supply rail is not
+        # this lap's to rip -- the pair is skipped.
+        skip = next((f"{n} is a pour net" for n in (x, y) if n in zone_names),
+                    None)
+        if skip is None:
+            skip = next((f"{n} is a supply rail" for n in (x, y)
+                         if _px.is_power_leg(
+                             p.pintype for p in
+                             (pcb.pads_by_net.get(id_of[n]) or []))), None)
+        if skip is None:
+            _kept = set(filter_names([x, y]))
+            _held = [n for n in (x, y) if n not in _kept]
+            if _held:
+                skip = (f"{', '.join(_held)} may not be ripped by this step "
+                        f"(protected, locked, held or outside its net filter)")
+        if skip is not None:
+            print(f"  Pair-unit lap: {x}/{y} skipped -- {skip}")
+            continue
         box = _px.shared_pad_box(_pads(x), _pads(y))
         if box is None:
             print(f"  Pair-unit lap: {x}/{y} share no footprint -- skipped")
