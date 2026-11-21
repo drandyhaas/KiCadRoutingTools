@@ -940,6 +940,17 @@ on its array is a group of one. The step:
    on these -- was left in three lanes' ways out; the lanes were planned
    through it, the loop stopped with its ends crowded, and one net shipped
    open (`tests/test_622_stuck_in_ways.py`).
+   A part the nudge moved and still could not clear is **held where it
+   came**, and from there on it is copper to the model: no via, no track on
+   its pads' layer and no bus lane's way out -- the run the nudge is given --
+   within the clearance of a pad of its of another net (`held_hits`), the
+   lanes that stand on it freed for the repair, and the nudge told to leave
+   it (`--lock`). Held against the vias alone, a decoupling capacitor just
+   past its array's rim, in two lanes' ways out, was moved off them at every
+   laying into the gap between a pair's tracks, where it grazed one: that
+   lane's end was ruled out, another with the same track took its place, and
+   after six laps the model ended on a field that broke the board's rules,
+   nothing routed (`tests/test_622_held_part.py`).
    Then **the field's ties** (`field_ties.py`): the pads on a poured net
    that stand beneath the group's parts -- a decap at an array's edge, a
    pull-up's supply pad under a destination part -- are tied before a lane

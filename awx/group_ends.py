@@ -1028,6 +1028,71 @@ def drop_hits(A, offered):
     return out
 
 
+def rect_seg_gap(px, py, hx, hy, a, b):
+    """the gap between a pad's rectangle (its centre, its half sizes) and the centre line of the run a-b: 0 where the
+    run crosses the rectangle"""
+    (ax, ay), (bx, by) = a, b
+    t0, t1 = 0.0, 1.0           # (the run clipped to the rectangle: any of it inside?)
+    for p_, q_ in ((ax - bx, ax - (px - hx)), (bx - ax, (px + hx) - ax), (ay - by, ay - (py - hy)),
+                   (by - ay, (py + hy) - ay)):
+        if abs(p_) < 1e-12:
+            if q_ < 0:
+                break
+        elif p_ < 0:
+            t0 = max(t0, q_ / p_)
+        else:
+            t1 = min(t1, q_ / p_)
+    else:
+        if t0 <= t1:
+            return 0.0
+    L2 = (bx - ax) ** 2 + (by - ay) ** 2
+
+    def to_run(x, y):
+        t = 0.0 if L2 < 1e-18 else max(0.0, min(1.0, ((x - ax) * (bx - ax) + (y - ay) * (by - ay)) / L2))
+        return math.hypot(ax + t * (bx - ax) - x, ay + t * (by - ay) - y)
+    # (apart, the nearest two points of a rectangle and a run have a corner of the one or an end of the other)
+    return min([math.hypot(max(abs(x - px) - hx, 0.0), max(abs(y - py) - hy, 0.0)) for x, y in (a, b)]
+               + [to_run(px + sx * hx, py + sy * hy) for sx in (-1, 1) for sy in (-1, 1)])
+
+
+def pad_on(ly, L):
+    """whether a held pad of layers `ly` (() where they are not known: every layer) has copper on the layer L"""
+    return not ly or L in ly or '*.Cu' in ly
+
+
+def held_hits(held, pc, net, tw, cl, run, way=None):
+    """WHAT A PART HELD WHERE IT CAME RULES OUT of one option's copper `pc` (joint_escape.Piece) of the net `net`:
+    (whether the option cannot stand whatever layer its run takes -- a via within the clearance `cl` of a pad of
+    another net, or a leg on a layer of its own, `tw` wide, that near a pad with copper there -- and the layers [a
+    tuple a pad, pad_on] of the pads a leg on its lane's own layer (`run`: joint_escape.RUN) comes that near, or its
+    lane's way out `way` ((its start, its end), its width: way_of)). `held` [(a pad's centre x, y, its half sizes,
+    its net, its layers)]"""
+    dead, on = False, []
+    for px, py, hx, hy, pn, *ly in held:
+        if pn == net:
+            continue
+        ly = tuple(ly[0]) if ly else ()
+        if any(math.hypot(max(abs(c[0] - px) - hx, 0.0), max(abs(c[1] - py) - hy, 0.0)) - r < cl - 1e-6
+               for c, r, _dr in pc.vias):
+            dead = True
+        for a, b, Lg in pc.legs:
+            if rect_seg_gap(px, py, hx, hy, a, b) - tw / 2 < cl - 1e-6:
+                if Lg == run:
+                    on.append(ly)
+                elif pad_on(ly, Lg):
+                    dead = True
+        if way is not None and rect_seg_gap(px, py, hx, hy, *way[0]) - way[1] / 2 < cl - 1e-6:
+            on.append(ly)
+    return dead, on
+
+
+def way_of(g0, L):
+    """((its start, its end), its width) of the way out of the menu move `g0`'s exit on the layer L, as the nudge is
+    given it (wayout_runs), or None where its exit has no direction"""
+    w = wayout_runs([(0, tuple(g0.exit_pt), g0.direction, L)], [L])
+    return ((w[0]['start'], w[0]['end']), w[0]['width']) if w else None
+
+
 def wayout_runs(wayouts, layers, reach=None):
     """THE LANES' WAYS OUT as copper: [{'start', 'end', 'width', 'layer', 'net_id'}], one for each of `wayouts`
     [(net id, an exit, its direction, its layer)] on one of the board's copper `layers` -- the exit's straight run out
@@ -1088,7 +1153,7 @@ def stuck_in_ways(field, caps, wayouts):
     return out
 
 
-def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()):
+def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=(), locked=()):
     """the arrays FANNED OUT as the model chose them, on a copy of the bare `board` (its project beside it): each
     piece of `laid` [(its net's id, its copper: joint_escape.Piece, the layer its run takes, the fan track)] as its own
     legs and its vias at the sizes the menu measured them at -- nothing planned again, nothing moved; two balls of one
@@ -1099,7 +1164,8 @@ def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()
     each bus's own step), and off THE LANES' WAYS OUT (`wayouts` [(net id, an exit, its direction, its layer)]: each
     exit's straight run out to where its lane can turn -- two lanes' bars on, its stub's mouth and a bar past it --
     laid for the nudge alone at the route's track and a grid step, a lane's bar off it at the clearance, and taken up
-    after). Returns (tracks written, vias written, the nudge's lines)"""
+    after); the parts `locked` (main's `held`: the model keeps every option off their pads where they came) are left
+    where they are. Returns (tracks written, vias written, the nudge's lines)"""
     import joint_escape as je
     import fanout_from_plan as fp
     import ship_vias
@@ -1182,7 +1248,10 @@ def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()
         with open(out, 'w', encoding='utf-8') as f:
             f.write(txt_)
     r = subprocess.run([sys.executable, os.path.join(HERE, '..', 'py_router', 'place_fanout_clearance.py'), out, out,
-                        '--clearance', str(_rules.active().clearance), '--beneath-only'],
+                        '--clearance', str(_rules.active().clearance), '--beneath-only']
+                       # (a part HELD where it came stays there: moved for a neighbour's sake, it left the pads the
+                       # model had kept clear and stood 1.4 mm off, on copper no rule had kept from it)
+                       + (['--lock'] + sorted(locked) if locked else []),
                        env=awx_settings.environ(), capture_output=True, text=True)
     with open(out[:-len('.kicad_pcb')] + '.caps.log', 'w', encoding='utf-8') as f:
         f.write(r.stdout + r.stderr)
@@ -1820,24 +1889,36 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
                           else dv[what_:what_ + 1]):
                     m.Add(v == 0).OnlyEnforceIf(gate('laid', A.ref, k, lanes={key}))
 
-    # ---- A PART HELD WHERE IT CAME (`held` [(a pad's centre x, y, its half sizes, its net)]: main's teach_laid -- a
-    # passive beneath the array the nudge could not clear of the fanout): no via within the clearance of a pad of its
-    # of another net -- a move's, every lane's alike, or a drop's. The menus measure their vias as if the movable
-    # passives were not there; one the nudge cannot move clear is copper, as any fixed pad is
+    # ---- A PART HELD WHERE IT CAME (`held` [(a pad's centre x, y, its half sizes, its net, its layers)]: main's
+    # teach_laid -- a passive beneath the array the nudge could not clear of the fanout): no copper within the
+    # clearance of a pad of its of another net -- a move's via, every lane's alike, or a drop's; a leg on the pad's
+    # layer; and a bus lane's WAY OUT of its exit there, which the nudge keeps the passives off as it does the copper
+    # (held_hits). The menus measure their copper as if the movable passives were not there; one the nudge cannot
+    # move clear is copper, as any fixed pad is. Held against the vias alone, a capacitor in two lanes' ways out was
+    # moved off them at every laying, into a nook where it grazed a third lane's run: that lane's end ruled out,
+    # another took its place, and the model stopped on a field that broke the board's rules
     if held:
         import rules as _rules
-        cl_ = _rules.active().clearance
-
-        def on_held(pc, net):
-            return any(pn != net and math.hypot(max(abs(c[0] - px) - hx, 0.0), max(abs(c[1] - py) - hy, 0.0)) - r
-                       < cl_ - 1e-6 for c, r, _dr in pc.vias for px, py, hx, hy, pn in held)
+        cl_, tw_ = _rules.active().clearance, bm.sz['tw']
         for (k, i), us in where.items():
-            if on_held(bm.opts[k][i][2], bm.items[k][1].net_name):
-                for key, i_ in us:
-                    m.Add(xs[key][i_] == 0).OnlyEnforceIf(gate('held', A.ref, k, lanes={key}))
+            hits = {}
+            for key, i_ in us:
+                bus_ = key[0] != oname          # (an other ball's escape ends at its exit: no way out is laid for it)
+                if bus_ not in hits:
+                    hits[bus_] = held_hits(held, bm.opts[k][i][2], bm.items[k][1].net_name, tw_, cl_, je.RUN,
+                                           way_of(bm.menu[k][i], RL[0]) if bus_ else None)
+                dead_, on_ = hits[bus_]
+                qs = [] if dead_ else [q for q in range(NL) if any(pad_on(ly, RL[q]) for ly in on_)]
+                if dead_ or qs:
+                    g_ = gate('held', A.ref, k, lanes={key})
+                    if dead_:
+                        m.Add(xs[key][i_] == 0).OnlyEnforceIf(g_)
+                    for q in qs:                # (the option, but not with its lane's end on the pad's layer)
+                        m.Add(xs[key][i_] + ys[key][q] <= 1).OnlyEnforceIf(g_)
         for k in A.okeys:
-            for j, (_s, pc_) in enumerate(A.drops.get(k, ())):
-                if on_held(pc_, bm.items[k][1].net_name):
+            for j, (_s, pc_) in enumerate(list(A.drops.get(k, ())) + list(A.straps.get(k, ()))):
+                dead_, on_ = held_hits(held, pc_, bm.items[k][1].net_name, tw_, cl_, je.RUN)
+                if dead_ or on_:
                     m.Add(others[k][2][j] == 0).OnlyEnforceIf(gate('held', A.ref, k, lanes={(oname, k, 0)}))
 
     # ---- a STRAP joins a ball that is itself joined to the plane -- dropped, or strapped on -- and a chain of straps
@@ -3228,7 +3309,7 @@ def main():
     learned = {}
     oth_ban = set()             # (array, ball, 'x' a fan-out / 'd' a drop, which): an other ball's choice ruled out
     from_first = False          # (--from) the first model built from the run before: its last state the ends wanted
-    held = {}                   # a part the nudge could not clear -> its pads where it came: no via on them (array_rows)
+    held = {}                   # a part the nudge could not clear -> its pads where it came: no copper on them (array_rows)
     # ---- FROM A RUN BEFORE (--from=ITS OUT) and WHAT ITS BUSES' STEPS FOUND (--feedback=THEIR OUT): the model as that
     # run left it -- the balls widened, the buses on the lines, what the checks taught, each bus's cut, the last state
     # -- solved again with the ends a step's audits found crowded RULED OUT: a lane's end at the very place (and, an
@@ -3419,7 +3500,7 @@ def main():
     def lay_and_measure(laid, wayouts=()):
         with awx_settings.given(genv):
             nt_, nv_, caps_ = write_field(board, os.path.join(out, 'shared_field.kicad_pcb'), laid, ties_of=ties_of,
-                                          tie_sites=tie_sites, pulls=pulls, wayouts=wayouts)
+                                          tie_sites=tie_sites, pulls=pulls, wayouts=wayouts, locked=sorted(held))
             d_f, jp_f = field_drc(os.path.join(out, 'shared_field.kicad_pcb'), 'field')
             if 'bare' not in measured:
                 measured['bare'] = field_drc(board, 'bare')[0]
@@ -3441,6 +3522,28 @@ def main():
             moved = {r_ for r_, p_ in now_.items() if measured['poses'].get(r_, p_) != p_}
         return dict(nt=nt_, nv=nv_, caps=caps_, d_f=d_f, d_b=d_b, bad=bad_, items=items, moved=moved)
 
+    def standing(b, pads):
+        """the lanes of the bus `b` an end of which, as its state has it, a part of the pads `pads` held where it
+        came rules out (held_hits): a via, a leg or the way out within the clearance of a pad of another net"""
+        import joint_escape as je
+        import rules as _rules
+        out_ = set()
+        with awx_settings.given(genv):
+            cl_ = _rules.active().clearance
+            for k_ in (0, 1):
+                A = b.arr[k_]
+                if A is None:
+                    continue
+                for l_, _lg in b.E.lanes:
+                    L_ = b.E.RL[b.lay[l_][k_]]
+                    for mv in (b.E.T, b.E.B)[k_][l_][b.state[l_][k_]][0]:
+                        _r, k, i = mv.gid
+                        dead_, on_ = held_hits(pads, A.bm.opts[k][i][2], A.bm.items[k][1].net_name, A.bm.sz['tw'],
+                                               cl_, je.RUN, way_of(A.bm.menu[k][i], L_))
+                        if dead_ or any(pad_on(ly, L_) for ly in on_):
+                            out_.add(l_)
+        return out_
+
     def teach_laid(items, buses, moved=()):
         """how many lessons the violations `items` (check_drc's) newly give: for each, the bus lanes of its nets --
         but a pad's own net, which stood there before the fanout -- each at its end nearer the violation; but a
@@ -3459,16 +3562,20 @@ def main():
                 ref_, num_ = it['pad_ref'].rsplit('.', 1)
                 f_ = bpcb.footprints.get(ref_)
                 static = next((p_.net_name for p_ in f_.pads if p_.pad_number == num_), None) if f_ else None
-                # (...a PART THE NUDGE MOVED and could not clear: what moved it is the fanout's vias on its pads where
-                # it came, not the copper it was moved against -- that lane ruled out, another's took its place and
-                # the part was moved onto it again, a lap of the model a net. The part is HELD where it came: no via
-                # within the clearance of its pads from here on, any lane's -- array_rows)
+                # (...a PART THE NUDGE MOVED and could not clear: what moved it is the fanout's copper on its pads
+                # where it came -- a via, a track, a lane's way out -- not the copper it was moved against: that
+                # lane ruled out, another's took its place and the part was moved onto it again, a lap of the model
+                # a net. The part is HELD where it came: no copper and no way out within the clearance of its pads
+                # from here on, any lane's -- array_rows -- and the lanes that stand on it now are the repair's to
+                # free, `standing`)
                 # (held already and moved again: its lanes' ends are what is left to answer, as before)
                 if f_ and ref_ in moved and ref_ not in held:
-                    held[ref_] = [(p_.global_x, p_.global_y, p_.size_x / 2, p_.size_y / 2, p_.net_name)
-                                  for p_ in f_.pads]
+                    held[ref_] = [(p_.global_x, p_.global_y, p_.size_x / 2, p_.size_y / 2, p_.net_name,
+                                   tuple(p_.layers)) for p_ in f_.pads]
                     new_held.add(ref_)
                     n += 1
+                    for b in buses:
+                        fresh.setdefault(b.name, set()).update(standing(b, held[ref_]))
                 if ref_ in new_held:
                     continue
             for b in buses:
@@ -5570,8 +5677,8 @@ def main():
                             lessons=n_ban)
             log(f'  the field as laid, measured: DRC {M_["d_f"]} (the bare board {M_["d_b"]}) -- {n_ban} lesson(s): '
                 f'{n_ban - (len(held) - n_held)} end(s) or other ball\'s choice(s) at fault ruled out'
-                + (f', {len(held) - n_held} part(s) the nudge could not clear held where they came, no via on their '
-                   f'pads again ({", ".join(sorted(held))} held in all)' if len(held) > n_held else '')
+                + (f', {len(held) - n_held} part(s) the nudge could not clear held where they came, no via, track or '
+                   f'way out on their pads again ({", ".join(sorted(held))} held in all)' if len(held) > n_held else '')
                 + '; the model solved again')
             for it in M_['items'][:12]:
                 log('    ' + ', '.join(f'{k_} {it[k_]}' for k_ in ('type', 'layer', 'net1', 'net2', 'pad_ref')
@@ -5660,7 +5767,8 @@ def main():
     if '--source-field' in flags:
         # (a bench's: the shared array alone fanned out, each bus's own step to fan out its destination from it)
         with awx_settings.given(genv):
-            write_field(board, os.path.join(out, 'source', 'shared_field.kicad_pcb'), [p_ for p_ in laid if p_[4] == sref])
+            write_field(board, os.path.join(out, 'source', 'shared_field.kicad_pcb'), [p_ for p_ in laid if p_[4] == sref],
+                        locked=sorted(held))
     # ---- CHECKED: each bus's ends read by the whole route's own frame, as its step's fanout audit will read its
     # board -- an end the route would refuse is the model's to answer, here, not a bus step's to find
     bad = []
