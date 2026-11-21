@@ -832,8 +832,14 @@ alone on its array a group of one:
    whole group again where nothing stands yet, where every bus failed, or
    where the result has a violation or a walled ball no one bus answers
    for. The fewest
-   nets open, then violations, then balls walled in, stands, the sizes
-   asked for on a tie; a rung that leaves the board clean ends the ladder,
+   nets open, then violations, then balls walled in, stands; of two results
+   alike, the one with fewer buses left to route again, then the earlier
+   (the sizes asked for before any rung). The earlier of two alike stood
+   whatever their buses: a three-bus group came in with a net open by each
+   of two buses, a rung left two nets open by one of them and the other
+   clean, and the next rung routed both again from the board the group came
+   in with -- the bus just made clean came back with a net open, and the
+   board shipped it. A rung that leaves the board clean ends the ladder,
    and a group with no result at all is not escalated -- that is the
    step's own result. The board handed on ships as route.py ships its own
    (`shipped_rules`), where a net was routed: its project's floor lowered

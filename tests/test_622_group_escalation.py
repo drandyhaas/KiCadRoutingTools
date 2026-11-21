@@ -37,8 +37,8 @@ not the search again.
     copper off, the board's own back, their nets no longer protected -- and every other bus's copper as it stands;
 16. the rungs by bus: a group with nets open by SOME of its buses routes those buses alone a rung down on that
     board, the others kept; the rung's summary is the whole group's, graded whole against the board the group came
-    in with; a rung that did worse does not stand, and the next starts from its end; every bus open, the whole
-    group again;
+    in with; a rung that did worse does not stand, and the next starts from its end; of two results with as many
+    nets open, the one with fewer buses left to route again stands; every bus open, the whole group again;
 17. the board a failed bus's ends model is captured on: the kept board without the copper inside its ball arrays
     that the group's input has not;
 18. ...and that copper is named for each bus's view of the board all the same (group_ends.kept_copper).
@@ -453,6 +453,18 @@ with tempfile.TemporaryDirectory() as td:
     check('16. a rung that did worse does not stand: the next routes the same bus on the same board, from that '
           'rung\'s end', nb.buses == [['B'], ['B']] and nb.boards[0][1] == nb.boards[1][1]
           and nb.starts[1] == (os.path.join(out[:-10] + '.rung1.bus', 'group'), out[:-10] + '.rung1.bus'), nb.starts)
+with tempfile.TemporaryDirectory() as td:
+    got, nb, out, graded = by_bus(td, {'DP2_N', 'INT1'}, [(('DP1_N', 'DP2_N'), True), ((), True)])
+    check('16. of two results with as many nets open, the one with fewer buses left stands: one net open by each of '
+          'two buses, then two by one of them -- that bus alone at the next rung, on the board the rung left',
+          nb.buses == [['B', 'C'], ['B']] and nb.boards[1][0].endswith(os.path.join('g.rung2.bus', 'kept.kicad_pcb'))
+          and 'INT1' in nb.boards[1][1] and 'DP1_N' not in nb.boards[1][1], (nb.buses, sorted(nb.boards[-1][1])))
+    check('16. ...and the clean board stands', got[0].endswith('.rung2.kicad_pcb')
+          and rb._group_key(got[3]) == (0, 0, 0))
+with tempfile.TemporaryDirectory() as td:
+    got, nb, out, graded = by_bus(td, {'DP2_N', 'INT1'}, [(('DP2_N', 'INT1'), True), ((), True)])
+    check('16. ...alike in their buses too, the earlier stands: both buses again, on the board the group came with',
+          nb.buses == [['B', 'C'], ['B', 'C']] and nb.boards[0][1] == nb.boards[1][1], nb.buses)
 with tempfile.TemporaryDirectory() as td:
     got, nb, out, graded = by_bus(td, {'DP1_P', 'DP2_N', 'INT1'}, [((), True)])
     check('16. every bus open: the whole group again, on the board it came in with',

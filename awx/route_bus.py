@@ -606,8 +606,8 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
             # buses left nets open (or broke the board's rules, or walled a ball in) routed again WHOLE -- its ends
             # model, the arrays' fanout and every bus's lanes -- a rung down the fab ladder, the lanes' track, the
             # escapes' and the vias together (escalation_ladder), rung after rung to the policy's floor until one
-            # leaves the board clean. The fewest open, then violations, then walled balls stands; the sizes asked for
-            # on a tie. The clearance is never reduced
+            # leaves the board clean. The fewest open, then violations, then walled balls stands; of two alike the
+            # one with fewer buses left to route again, then the earlier. The clearance is never reduced
             step_out, step_json, code, sj_ = _escalated(cur, step_out, step_json, code, sj_, grp, k, rounds, inproc,
                                                         log, feedback_rounds, negotiated_buses, sizes)
             got, neg_g = sj_.get('buses'), sj_.get('grade')
@@ -893,6 +893,12 @@ def _escalated(board, step_out, step_json, code, sj, grp, k, rounds, inproc, log
         return step_out, step_json, code, sj
     best = (key0, 0, step_out, step_json, code, sj)
     res = lambda key_: None if key_[0] == math.inf else list(key_)  # noqa: E731
+
+    def left(sj_):
+        """how many of the group's buses a result leaves to route again: those with a net open, or every one where
+        it is not open nets of its buses alone (_failed_buses)"""
+        f_ = _failed_buses(sj_, grp)
+        return len(f_) if f_ is not None else len(grp)
     tried = [dict(rung=0, **_rules_dict(run_rules), result=res(key0))]
     # (the last run that kept its group's end, BY THE BUSES IT ROUTED: a rung starts from the end of a run of the
     # same buses -- the whole group's, or the same failed buses' a rung up)
@@ -950,7 +956,12 @@ def _escalated(board, step_out, step_json, code, sj, grp, k, rounds, inproc, log
         # theirs: its group's directory is that run's own, whatever the whole group's summary says of rounds)
         if _group_state(out_i, sj_i):
             last[who] = ((out_i, sj_i), key_i)
-        if (key_i, i) < best[:2] and os.path.isfile(out_i):
+        # (THE BOARD THAT STANDS: the fewest nets open, then violations, then balls walled in -- and of two alike,
+        # the one with FEWER BUSES LEFT TO ROUTE AGAIN, then the earlier. The earlier of two alike stood whatever
+        # their buses: a group came in with a net open by each of two buses, a rung left two nets open by one of
+        # them and the other clean, and the rung after it routed both again from the board the group came in with
+        # -- the bus that rung had made clean came back with a net open, and the group shipped it)
+        if (key_i, left(sj_i), i) < (best[0], left(best[5]), best[1]) and os.path.isfile(out_i):
             best = (key_i, i, out_i, json_i, code_i, sj_i)
         if key_i == (0, 0, 0):
             break
