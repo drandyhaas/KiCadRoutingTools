@@ -1455,7 +1455,7 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), rerou
             ch.cur = start
         base = base_for(r)
         passes = tags[k]
-        first = spent = None
+        first = spent = rung_best = None
         for i in range(ROUTE_PASSES):
             if i:
                 if ch.last_iterations is None:
@@ -1497,23 +1497,35 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), rerou
                     ch.skip(tag, f'{passes[i]} could not be graded')
                 break
             print(f"  {os.path.basename(out)}: {g['open']} open, {g['drc']} DRC", flush=True)
-            if best is not None and best[0] is not None and not _improves(g, best[0]):
-                print(f"  not kept: no better than {os.path.basename(best[1])} "
-                      f"({best[0]['open']} open, {best[0]['drc']} DRC)", flush=True)
+            # A narrower rung is judged on its own passes: its first pass starts
+            # from the step's start again, so it is compared with the best of
+            # THESE sizes, and the board ships only if it ranks above the best
+            # of every rung.
+            ref = rung_best if k else best
+            if ref is not None and ref[0] is not None and not _improves(g, ref[0]):
+                print(f"  not kept: no better than {os.path.basename(ref[1])} "
+                      f"({ref[0]['open']} open, {ref[0]['drc']} DRC)", flush=True)
                 ch.end_step(result=f"{g['open']} open, {g['drc']} DRC: not kept",
                             grade=g, kept=False)
                 ch.decide(passes[i], False,
                           f"{g['open']} open, {g['drc']} DRC is no better than "
-                          f"{os.path.basename(best[1])} ({best[0]['open']} open, "
-                          f"{best[0]['drc']} DRC)")
+                          f"{os.path.basename(ref[1])} ({ref[0]['open']} open, "
+                          f"{ref[0]['drc']} DRC)")
                 for tag in passes[i + 1:]:
                     ch.skip(tag, f'{passes[i]} was not kept, which ends the passes '
                                  f'at these sizes')
                 break
-            best = (g, out)
-            ch.accept(out)
-            ch.end_step(result=f"{g['open']} open, {g['drc']} DRC: best so far",
-                        grade=g, kept=True)
+            rung_best = (g, out)
+            ch.cur = out                   # the rung's next pass starts here
+            if best is None or best[0] is None or _improves(g, best[0]):
+                best = (g, out)
+                ch.accept(out)
+                ch.end_step(result=f"{g['open']} open, {g['drc']} DRC: best so far",
+                            grade=g, kept=True)
+            else:
+                ch.end_step(result=f"{g['open']} open, {g['drc']} DRC: best at these "
+                                   f"sizes, not above {os.path.basename(best[1])}",
+                            grade=g, kept=False)
             if g['open'] == 0:
                 skip_from(k, i + 1, 'no open net left')
                 done = True

@@ -246,24 +246,29 @@ def test_default_ladder():
         cl = [_values(x, '--clearance-ceiling') for x in lad]
         expect(len(lad) == n and cl[0] == ['0.2'] and all(c == ['0.09'] for c in cl[1:]),
                f"{ref}: first escape at the class, then {n - 1} at the floor ({cl})")
-    # open after every rung's first pass, the floor's pass 1 finds 2 open
-    ch = OpenChain([5, 5, 4, 3, 2, 2])
+    # open after every rung's first pass. The floor's pass 1 (3 open) is worse
+    # than the best so far (2) but is the first at its sizes, so the floor
+    # still gets its later passes; none ranks above the standard's 2.
+    ch = OpenChain([5, 5, 4, 3, 2, 3, 2, 2])
     ch.cur = 'start'
     AP.route_passes(ch, a, a['layers'], ['1.0'] * 4, effort_factor=100.0)
     tags = [t for t, _ in ch.inputs]
     expect(tags == ['route', 'route_p2', 'route_standard', 'route_standard_p2',
-                    'route_standard_p3', 'route_floor'],
-           f"passes per rung, each rung after the last kept one ({tags})")
+                    'route_standard_p3', 'route_floor', 'route_floor_p2',
+                    'route_floor_p3'],
+           f"passes per rung, each rung judged on its own passes ({tags})")
     starts = dict(ch.inputs)
+    outs = dict(zip([t for t, _ in ch.inputs], [f'out{i + 1}' for i in range(len(ch.runs))]))
     expect(starts['route_standard'] == 'start' and starts['route_floor'] == 'start',
            f"each narrower rung starts on the route step's input ({starts})")
+    expect(starts['route_floor_p2'] == outs['route_floor'],
+           f"a rung's pass 2 starts on its own pass 1, not on the best of the "
+           f"wider rungs ({starts['route_floor_p2']})")
     for tag, c in (('route', '0.2'), ('route_standard', '0.1'), ('route_floor', '0.09')):
         args = next(x for k, t, x in ch.runs if t == tag)
         expect(_values(args, '--clearance-ceiling') == [c],
                f"{tag}: ceiling {_values(args, '--clearance-ceiling')} is {c}")
-    expect(ch.cur == next(o for o, (t, _) in zip(
-               [f'out{i + 1}' for i in range(len(ch.runs))], ch.inputs)
-               if t == 'route_standard_p3'),
+    expect(ch.cur == outs['route_standard_p3'],
            f"the best board, route_standard_p3's (2 open, the floor's 2 is no "
            f"better), is the chain's board ({ch.cur})")
     # nothing open after the class pass: no narrower rung runs
