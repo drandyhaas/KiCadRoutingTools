@@ -159,12 +159,18 @@ class AutorouteOptionsPanel(wx.Panel):
         grid.Add(self.plane_layer_cost, 0)
         self.board_rules = wx.CheckBox(self, label="Board's own rules (--board-rules)")
         self.board_rules.SetToolTip(
-            "Route to the board's declared rules instead of the fab floor: its Default "
-            "net class's clearance, track width, via and diff-pair gap/width, held at "
-            "its Board Setup minimums, every other class at its own, and no step "
-            "narrows below them. A net that cannot complete at them fails and is "
-            "reported.")
+            "Route to the board's declared rules: its Default net class's clearance, "
+            "track width, via and diff-pair gap/width, held at its Board Setup "
+            "minimums, every other class at its own, and a net that cannot complete "
+            "there narrowed only down to those minimums (--escalation board).")
         grid.Add(self.board_rules, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.AddSpacer(0)
+        self.floor_first = wx.CheckBox(self, label="Start at the fab floor (--floor-first)")
+        self.floor_first.SetToolTip(
+            "Start every step at the fab floor (the deepest tier) instead of the "
+            "board's Default net class with the standard tier and the floor below "
+            "it as the size rungs the chain steps down to.")
+        grid.Add(self.floor_first, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.AddSpacer(0)
         self.keep_placement = wx.CheckBox(self, label="Keep placement (--keep-placement)")
         self.keep_placement.SetToolTip(
@@ -185,6 +191,7 @@ class AutorouteOptionsPanel(wx.Panel):
                 'effort_factor': self.effort_factor.GetValue(),
                 'plane_layer_cost': self.plane_layer_cost.GetValue(),
                 'board_rules': self.board_rules.GetValue(),
+                'floor_first': self.floor_first.GetValue(),
                 'keep_placement': self.keep_placement.GetValue(),
                 'write_fill': self.write_fill.GetValue()}
 
@@ -196,7 +203,7 @@ class AutorouteOptionsPanel(wx.Panel):
                 self.effort_factor.SetValue(float(cfg['effort_factor']))
             if 'plane_layer_cost' in cfg:
                 self.plane_layer_cost.SetValue(float(cfg['plane_layer_cost']))
-            for key in ('board_rules', 'keep_placement', 'write_fill'):
+            for key in ('board_rules', 'floor_first', 'keep_placement', 'write_fill'):
                 if key in cfg:
                     getattr(self, key).SetValue(bool(cfg[key]))
         except (TypeError, ValueError):
@@ -205,7 +212,8 @@ class AutorouteOptionsPanel(wx.Panel):
     def reset_to_defaults(self):
         self.set_config({'finish': False, 'effort_factor': DEFAULT_EFFORT_FACTOR,
                          'plane_layer_cost': DEFAULT_PLANE_LAYER_COST,
-                         'board_rules': False, 'keep_placement': False,
+                         'board_rules': False, 'floor_first': False,
+                         'keep_placement': False,
                          'write_fill': False})
 
     def cli_args(self):
@@ -218,7 +226,10 @@ class AutorouteOptionsPanel(wx.Panel):
                 '--plane-layer-cost', f"{cfg['plane_layer_cost']:g}"]
         if cfg['finish']:
             args.append('--finish')
-        for key in ('board_rules', 'keep_placement', 'write_fill'):
+        if cfg.get('board_rules') and cfg.get('floor_first'):
+            raise ValueError("Board's own rules and Start at the fab floor pick "
+                             "different starting sizes (the CLI refuses both).")
+        for key in ('board_rules', 'floor_first', 'keep_placement', 'write_fill'):
             if cfg.get(key):
                 args.append('--' + key.replace('_', '-'))
         return args
