@@ -36,6 +36,10 @@ from typing import Callable, List, Optional, Sequence, Tuple
 
 Pt = Tuple[float, float]
 
+# a ball ON a line of its array -- its box's edge, a lattice line, its middle -- is so within this (mm): the relayer's
+# TOL, one point. Those lines are other balls' coordinates, and a ball stands a few nanometres off its grid
+ON_LINE = 1e-3
+
 
 @dataclass
 class Grid:
@@ -360,12 +364,12 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
             if dx:
                 gate = (px, py + sgn * hy)          # into the row gap
                 e = (edge(d)[0], gate[1])
-                if not (y0 < gate[1] < y1):
+                if not (y0 + ON_LINE < gate[1] < y1 - ON_LINE):
                     continue        # the gap outside the outer row is no gap
             else:
                 gate = (px + sgn * hx, py)          # into the column gap
                 e = (gate[0], edge(d)[1])
-                if not (x0 < gate[0] < x1):
+                if not (x0 + ON_LINE < gate[0] < x1 - ON_LINE):
                     continue        # the gap outside the outer column is no gap
             if clear((px, py), gate, home) and clear(gate, e, home):
                 out.append(Move(net, 'surface', d, home, e, 0,
@@ -407,7 +411,7 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
         # diagonal lies on the boundary line, where the run from the via
         # to the exit is a few microns long and the braid reads no tooth
         # (K28 SODT0: a corridor of one net, refused)
-        if not (x0 < site[0] < x1 and y0 < site[1] < y1):
+        if not (x0 + ON_LINE < site[0] < x1 - ON_LINE and y0 + ON_LINE < site[1] < y1 - ON_LINE):
             continue
         if via_clear and not all(via_clear(site, lay) for lay in layers):
             continue
@@ -443,7 +447,7 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
         starts = []      # (kind, site, first legs): where the run begins
         for (sx, sy) in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
             site = (px + sx * hx, py + sy * hy)
-            if not (x0 < site[0] < x1 and y0 < site[1] < y1):
+            if not (x0 + ON_LINE < site[0] < x1 - ON_LINE and y0 + ON_LINE < site[1] < y1 - ON_LINE):
                 continue
             if via_clear and not all(via_clear(site, lay) for lay in layers):
                 continue
@@ -478,11 +482,11 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                     elif dx:
                         gaps = [((px + g * hx, py),
                                  [] if not g else [((px, py), (px + g * hx, py), L)])
-                                for g in lanes if not g or x0 < px + g * hx < x1]
+                                for g in lanes if not g or x0 + ON_LINE < px + g * hx < x1 - ON_LINE]
                     else:
                         gaps = [((px, py + g * hy),
                                  [] if not g else [((px, py), (px, py + g * hy), L)])
-                                for g in lanes if not g or y0 < py + g * hy < y1]
+                                for g in lanes if not g or y0 + ON_LINE < py + g * hy < y1 - ON_LINE]
                     for (gx, gy), legs_in in gaps:
                         if any(not clear(a, b, l) for a, b, l in legs_in):
                             continue
@@ -498,12 +502,12 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                                 k = (h + 1) // 2
                                 if dx:
                                     ey = gy + s * h * hy
-                                    if not (y0 < ey < y1):
+                                    if not (y0 + ON_LINE < ey < y1 - ON_LINE):
                                         break       # beyond the outer row
                                     turn, e = (gx, ey), (e0[0], ey)
                                 else:
                                     ex = gx + s * h * hx
-                                    if not (x0 < ex < x1):
+                                    if not (x0 + ON_LINE < ex < x1 - ON_LINE):
                                         break
                                     turn, e = (ex, gy), (ex, e0[1])
                                 if not clear((gx, gy), turn, L):
@@ -562,9 +566,12 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
             lo_c, hi_c = (x0, x1) if axis == 1 else (y0, y1)
             pt = (lambda al, ac: (al, ac)) if axis == 1 else (lambda al, ac: (ac, al))
             for (a_, b_) in bl:
-                if pc <= a_ + 1e-6:
+                # (the band's two ball lines are the array's lattice, laid off its first ball: a ball ON one of
+                # them is so within a point's tolerance, ON_LINE -- 2 nm off its grid it stood inside the band, and
+                # was offered no side-step into it)
+                if pc <= a_ + ON_LINE:
                     sgn = 1
-                elif pc >= b_ - 1e-6:
+                elif pc >= b_ - ON_LINE:
                     sgn = -1
                 else:
                     continue
@@ -591,7 +598,7 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                             e0 = edge(d)
                             for t in range(street):
                                 s_ = c + dd * t * hc
-                                if not (lo_c < s_ < hi_c):
+                                if not (lo_c + ON_LINE < s_ < hi_c - ON_LINE):
                                     break
                                 site = pt(s_, v)
                                 legs = legs_f + ([(pt(c, v), site, home)] if t else [])

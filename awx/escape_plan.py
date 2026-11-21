@@ -244,7 +244,11 @@ def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE, own_line=Fals
                     ln = ln0 + sg * m * 2 * h
                     lines.append((ln, [site, P(ln0, site[k]), P(ln0, row), P(ln, row), P(ln, e)]))
         for ln, path in lines:
-            if not (lo - 1e-6 <= ln <= hi + 1e-6) or (own_line and abs(ln - ball[a_]) > 1e-6):
+            # (ON THE ARRAY'S BOX WITHIN A POINT'S TOLERANCE, the relayer's TOL: the box is the outer balls'
+            # coordinates and a line this ball's own -- and a line that near the ball's own line is that line. Asked
+            # to the nanometre, a ball 2 nm off its grid lost the line along the box's edge, one exit of its menu
+            # that its neighbours on the grid kept)
+            if not (lo - _END_TOL <= ln <= hi + _END_TOL) or (own_line and abs(ln - ball[a_]) > _END_TOL):
                 continue
             path = dedupe(path)
             for L in layers:
@@ -292,7 +296,7 @@ def escape_out(pad, grid, faces, copper):
                 g_ = ball[a_] + sg * o_
                 paths.append((g_, [ball, P(g_, ball[k] + s * hk), P(g_, e)]))
         for ln, path in paths:
-            if not (lo - h - 1e-6 <= ln <= hi + h + 1e-6):
+            if not (lo - h - _END_TOL <= ln <= hi + h + _END_TOL):       # (escape_menu's: within a point's tolerance)
                 continue
             path = dedupe(path)
             if not copper.path_clear(path, home, nid):

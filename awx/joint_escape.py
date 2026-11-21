@@ -417,8 +417,11 @@ def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_cl
         x0, y0, x1, y1 = grid.bbox
         # (toward the nearest corner -- but never outside the outer balls: an outer ball's the one beside it inward)
         dx, dy = (hx if c[0] >= (x0 + x1) / 2 else -hx), (hy if c[1] >= (y0 + y1) / 2 else -hy)
-        q = (c[0] + (dx if x0 - 1e-6 <= c[0] + dx <= x1 + 1e-6 else -dx),
-             c[1] + (dy if y0 - 1e-6 <= c[1] + dy <= y1 + 1e-6 else -dy))
+        # (...the box asked within a point's tolerance, ep._END_TOL, as escape_menu asks it: it is the outer balls'
+        # coordinates, and a ball a few nanometres off its grid has its gap point that far off the box's edge)
+        tol = ep._END_TOL
+        q = (c[0] + (dx if x0 - tol <= c[0] + dx <= x1 + tol else -dx),
+             c[1] + (dy if y0 - tol <= c[1] + dy <= y1 + tol else -dy))
         cands = [q]
         if PATTERN_NEXT_SITE:
             # (that point blocked -- a part's pad on the other side of the board under it -- the ball had NO dog-bone
@@ -426,8 +429,8 @@ def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_cl
             # its bus's other part: the next gap point that stands clear is taken, the two beside the first before the
             # one across the ball)
             oth = [(c[0] + sx * hx, c[1] + sy * hy) for sx in (-1, 1) for sy in (-1, 1)]
-            oth = [o for o in oth if x0 - 1e-6 <= o[0] <= x1 + 1e-6 and y0 - 1e-6 <= o[1] <= y1 + 1e-6
-                   and math.hypot(o[0] - q[0], o[1] - q[1]) > 1e-6]
+            oth = [o for o in oth if x0 - tol <= o[0] <= x1 + tol and y0 - tol <= o[1] <= y1 + tol
+                   and math.hypot(o[0] - q[0], o[1] - q[1]) > tol]
             cands += sorted(oth, key=lambda o: (round(math.hypot(o[0] - q[0], o[1] - q[1]), 6),
                                                  -round(math.hypot(o[0] - (x0 + x1) / 2, o[1] - (y0 + y1) / 2), 6), o))
         if PATTERN_ALL_SITES:
@@ -1047,7 +1050,9 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
 
             def half(d):
                 ax = 0 if ep.DIRS[d][0] else 1
-                return ((p.global_x, p.global_y)[ax] - mid_[ax]) * ep.DIRS[d][ax] >= -1e-6
+                # (a ball ON the array's middle line stands on both halves -- within a point's tolerance: the line
+                # is the mean of the outer balls' coordinates)
+                return ((p.global_x, p.global_y)[ax] - mid_[ax]) * ep.DIRS[d][ax] >= -ep._END_TOL
             return [d for d in ep.DIRS if d != far_ and (d == toward_ or half(d))]
     for p in foot.pads:
         nm = sn(p.net_name or '')
