@@ -791,19 +791,44 @@ alone on its array a group of one:
    findings that run's lay left at its ends are answered by the model's
    repair -- every lane held on its ends but those the findings name and
    those that cross one -- then the checks, the fanout and the lay at the
-   rung's sizes, its lanes' and exits' pitches scaled as the lane's own
-   slice (`rung_pitches`: the chain plans its rings, its handoffs and a
-   group's mouths a lane pitch apart, and that pitch was a constant, as
-   wide at the narrowest rung as at the sizes asked for). The fewest nets
-   open, then violations, then balls walled
-   in, stands, the sizes asked for on a tie; a rung that leaves the board
-   clean ends the ladder, and a group with no result at all is not
-   escalated -- that is the step's own result. The board handed on ships
-   as route.py ships its own (`shipped_rules`): its project's floor lowered
-   to the copper it carries, and every net delivered below the sizes asked
-   for in the summary's `design_rules` and the `Design rules [...]` line.
-   The Bus tab passes the shared Escalation choice
-   (`tests/test_622_group_escalation.py`).
+   rung's sizes. What a run learned of a lane's room for a change of layer
+   is its own sizes' (`resume.pkl` keeps them), and a rung starts without
+   it. EVERY RUN'S PITCHES ARE ITS OWN SIZES' (`rules.pitches`): the chain
+   plans its rings, its handoffs and a group's mouths a lane pitch apart
+   and its teeth an exit pitch apart, and the two, chosen for the chain's
+   own lane, are scaled as the run's lane's slice over that lane's, never
+   under one slice -- the sizes asked for and every rung alike. NO ROOM AT
+   THESE SIZES: the group's model reads, off each solve's own measure of a
+   lane, whether a lane a refusal names is too short between its two ends
+   for a change of layer at the run's via and has room at a rung's
+   (`group_ends.room_on_a_rung`); a lane named so twice, the model's answer
+   between, ends the model there -- nothing laid, its end kept -- and the
+   group is routed a rung down from that end (`--rungs-below`). THE BUSES
+   THAT FAILED ALONE (`_failed_buses`, `_bus_rung`): where the board that
+   stands has nets open by some of the group's buses and nothing else
+   amiss, a rung routes those buses alone -- their nets put back as the
+   board came with them, their ends model, their balls' fanout and their
+   lanes at the rung's sizes -- on the board the other buses' copper
+   stands on, kept as it is. Routed again whole, a rung laid every bus
+   anew, and a bus clean a rung up came back with a net open at the finer
+   sizes: each bus clean at some rung, never all at one. On that board a
+   ball that carries copper of its net already is served, no lane of the
+   model (`group_ends.served_balls`); the buses' ends models are captured
+   with their arrays bare (`_bare_arrays`), and what the board holds
+   there is put in each bus's view of it (`group_ends.kept_copper`). The
+   whole group again where nothing stands yet, where every bus failed, or
+   where the result has a violation or a walled ball no one bus answers
+   for. The fewest
+   nets open, then violations, then balls walled in, stands, the sizes
+   asked for on a tie; a rung that leaves the board clean ends the ladder,
+   and a group with no result at all is not escalated -- that is the
+   step's own result. The board handed on ships as route.py ships its own
+   (`shipped_rules`), where a net was routed: its project's floor lowered
+   to the copper it carries, and every bus net delivered below the sizes
+   asked for in the summary's `design_rules` and the `Design rules [...]`
+   line. The Bus tab passes the shared Escalation choice
+   (`tests/test_622_group_escalation.py`,
+   `tests/test_622_no_room_rung.py`).
 
 The groups go in turn, each on the board the one before handed on. Each bus
 is its own routing step, with its own process and its own pool of threads,
@@ -2922,7 +2947,7 @@ With nothing supplied, as on the benches:
 | braid hug clearance | `Rules.hug` -> `braid.CLEAR` | 0.105 = clearance + 5 um |
 | lane track / fanout track | `rules.TRACK` / `Rules.fan_track` | 0.127 / 0.1 -- two widths on purpose |
 | via size / drill | `rules.VIA_SIZE` / `VIA_DRILL` | 0.25 / 0.15 |
-| lane slice, lane pitch, exit pitch | `Rules.lane_slice` / `.lane_pitch` / `.exit_pitch` | 0.232, 0.35, 0.38 |
+| lane slice, lane pitch, exit pitch | `Rules.lane_slice` / `.lane_pitch` / `.exit_pitch` | 0.232, 0.35, 0.38 at the chain's own lane; the two pitches scaled as a run's slice (`rules.pitches`) |
 | hole-to-hole / edge | `Rules.hole_to_hole` / `.edge_clearance` | read off the board, tighten-only |
 
 ### Measuring honestly

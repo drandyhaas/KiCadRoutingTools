@@ -159,11 +159,14 @@ eq('wide.end_keep', wide.end_keep, 0.2 + 0.155 + 0.05)
 eq('wide.margin_out', wide.margin_out, 0.15 + 0.2 / 2)
 eq('wide.hole_to_hole', wide.hole_to_hole, 0.25)
 eq('wide.edge_clearance', wide.edge_clearance, 0.3)
-# the pitches keep their FLOOR semantics: the chain's own value, never
-# below one lane's slice at the supplied geometry (0.355 > 0.35 > 0.38? no:
-# 0.355 exceeds lane_pitch 0.35 and not exit_pitch 0.38)
-eq('wide.lane_pitch (floored at the slice)', wide.lane_pitch, 0.355)
-eq('wide.exit_pitch (chain value still larger)', wide.exit_pitch, 0.38)
+# the pitches follow the lane's slice (rules.pitches): the chain's own two scaled as the supplied lane's slice over
+# the slice they were chosen for (0.355 / 0.232) -- wider for a wider lane, finer for a narrower -- never under it
+eq('wide.lane_pitch (scaled as the slice)', wide.lane_pitch, round(0.35 * (0.355 / 0.232), 6))
+eq('wide.exit_pitch (scaled as the slice)', wide.exit_pitch, round(0.38 * (0.355 / 0.232), 6))
+fine = R.Rules.from_router_config(_Cfg(clearance=0.09, track_width=0.0762, via_size=0.25, via_drill=0.15))
+eq('fine.lane_slice', fine.lane_slice, 0.1712)
+eq('fine.lane_pitch (scaled as the slice)', fine.lane_pitch, round(0.35 * (0.1712 / 0.232), 6))
+eq('fine.exit_pitch (scaled as the slice)', fine.exit_pitch, round(0.38 * (0.1712 / 0.232), 6))
 
 # the two things it must NOT invent
 eq('fan_track defaults to the supplied width', wide.fan_track, 0.2)

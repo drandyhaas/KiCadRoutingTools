@@ -656,8 +656,8 @@ manifest routes.
   spec allows). The board's minimums ARE the floor, and nothing goes below
   them by default:
   - `--escalation board` on every step that takes it (`route.py`,
-    `route_diff.py`, `route_planes.py`, `bga_fanout.py`, `qfn_fanout.py`, and
-    `repair_planes.py` if it runs). A descent then stops at the board's own
+    `route_diff.py`, `route_planes.py`, `bga_fanout.py`, `qfn_fanout.py`,
+    `awx/route_bus.py`, and `repair_planes.py` if it runs). A descent then stops at the board's own
     `rules.min_*` (an unset key falls back to the fab tier floor, an unset
     `min_clearance` to the Default class), a descended via never rings below
     `min_via_annular_width` (#1579), a via the step sizes itself (no

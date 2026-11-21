@@ -687,6 +687,25 @@ def other_nets(pcb, ref, bus_nets):
     return sig, pl
 
 
+def served_balls(pcb, ref, bus_nets):
+    """the balls NET#PAD of array `ref` that are no bus's (`bus_nets`) and carry copper of their own net already --
+    a via that reaches the ball, a track that ends on it (bga_fanout.ball_has_copper): SERVED. A board an earlier
+    step fanned out or routed, or the board a group's escalation keeps while the buses that failed are routed again:
+    their copper stands as any other on the board, which every ball's menu is measured against. Offered a menu
+    again, each was a lane of the model and laid a second time beside its own copper"""
+    import joint_escape as je
+    from bga_fanout import ball_has_copper
+    from coherent_nets import namer
+    sn = namer(pcb)
+    foot = pcb.footprints[ref]
+    vias = [{'x': v.x, 'y': v.y, 'size': v.size, 'net_id': v.net_id} for v in pcb.vias]
+    tracks = [{'start': (s_.start_x, s_.start_y), 'end': (s_.end_x, s_.end_y), 'layer': s_.layer, 'net_id': s_.net_id}
+              for s_ in pcb.segments if not getattr(s_, 'graphic', False)]
+    tw = je._sizes(pcb, foot)['tw']
+    return {f'{sn(p.net_name)}#{p.pad_number}' for p in foot.pads
+            if p.net_id and p.net_name and sn(p.net_name) not in bus_nets and ball_has_copper(p, vias, tracks, tw)}
+
+
 def via_groups(bm):
     """(cliques, bicliques) of the menu's moves (ball, index) that can never both be laid whatever layers their runs
     take: one via site, or one's via within its reach of the other's run -- conflict_groups' site and reach parts,
@@ -867,9 +886,15 @@ def build_array(pcb, ref, bus_of):
     import joint_escape as je
     sig, pl = other_nets(pcb, ref, set(bus_of))
     nets = sorted(set(bus_of) | sig | pl)
-    bm = _menus(pcb, ref, nets)
+    # (the balls SERVED ALREADY are no lanes here -- served_balls; `only` the rest, None on a bare array)
+    from coherent_nets import namer
+    sn_ = namer(pcb)
+    gone = served_balls(pcb, ref, set(bus_of))
+    only = None if not gone else \
+        {f'{sn_(q.net_name)}#{q.pad_number}' for q in pcb.footprints[ref].pads if q.net_id and q.net_name} - gone
+    bm = _menus(pcb, ref, nets, only=only)
     with contextlib.redirect_stdout(io.StringIO()):
-        dm = je.build_menus(pcb, ref, [], [], [], drops=sorted(pl))
+        dm = je.build_menus(pcb, ref, [], [], [], drops=sorted(pl), only=only)
     track_banned, via_banned = keep_outs(pcb)
     hw = bm.sz['tw'] / 2
     pads = {p.pad_number: (p.global_x, p.global_y) for p in pcb.footprints[ref].pads}
@@ -883,7 +908,7 @@ def build_array(pcb, ref, bus_of):
                     for s_ in (bm.straps.get(k) or ()) if s_.to in dm.dmenu
                     and not track_banned(s_.a, s_.b, s_.layer, hw)] for k in dm.dmenu},
         ball_of={nm: k for k, (nm, _p) in bm.items.items() if nm in bus_of}, bus_of=dict(bus_of),
-        okeys=sorted(k for k, (nm, _p) in bm.items.items() if nm not in bus_of))
+        okeys=sorted(k for k, (nm, _p) in bm.items.items() if nm not in bus_of), served=sorted(gone))
     array_rules(pcb, A)
     return A
 
@@ -1418,7 +1443,30 @@ def qfn_berths(st, pcb):
     return out
 
 
-def load_bus(name, cap, arrays, log, cut=None, rank=False, feedback=None, bare_ids=None):
+def kept_copper(bpcb, cpcb, arrays):
+    """{array: ([segments], [vias])} of the board `bpcb` wholly inside each of the group's `arrays` (their pads' box
+    and BARE round it) that `cpcb`, the board the buses' ends models were captured on, has not: a group's escalation
+    captures the buses it routes again on the kept board with their arrays bare (route_bus._bare_arrays), and what
+    stands there -- the other buses' escapes, the field's stubs of the other balls -- is the board's all the same"""
+    r3 = lambda q: (round(q[0], 3), round(q[1], 3))        # noqa: E731
+    nm = lambda p_, i_: p_.nets[i_].name if i_ in p_.nets else None     # noqa: E731
+    had = {(frozenset((r3((s_.start_x, s_.start_y)), r3((s_.end_x, s_.end_y)))), s_.layer, nm(cpcb, s_.net_id))
+           for s_ in cpcb.segments}
+    hadv = {(r3((v_.x, v_.y)), nm(cpcb, v_.net_id)) for v_ in cpcb.vias}
+    out = {}
+    for ref, A in arrays.items():
+        x0, y0, x1, y1 = A.box[0] - BARE, A.box[1] - BARE, A.box[2] + BARE, A.box[3] + BARE
+        inb = lambda x, y, x0=x0, y0=y0, x1=x1, y1=y1: x0 <= x <= x1 and y0 <= y <= y1      # noqa: E731
+        out[ref] = (
+            [s_ for s_ in bpcb.segments if not getattr(s_, 'graphic', False)
+             and inb(s_.start_x, s_.start_y) and inb(s_.end_x, s_.end_y)
+             and (frozenset((r3((s_.start_x, s_.start_y)), r3((s_.end_x, s_.end_y)))), s_.layer,
+                  nm(bpcb, s_.net_id)) not in had],
+            [v_ for v_ in bpcb.vias if inb(v_.x, v_.y) and (r3((v_.x, v_.y)), nm(bpcb, v_.net_id)) not in hadv])
+    return out
+
+
+def load_bus(name, cap, arrays, log, cut=None, rank=False, feedback=None, bare_ids=None, board_cu=None):
     """a bus's ends model from its capture, under its own run's settings, its ends at the group's ARRAYS (`arrays`
     {ref: build_array's}: its source, and its destination where that is one) chosen from their menus: each such array
     bare in its board (its own fanout's copper there left out), the moves its balls are offered there (A.offer: the
@@ -1444,6 +1492,29 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, feedback=None, bare_i
             inb = lambda x, y, x0=x0, y0=y0, x1=x1, y1=y1: x0 <= x <= x1 and y0 <= y <= y1      # noqa: E731
             pcb.segments = [s for s in pcb.segments if not (inb(s.start_x, s.start_y) and inb(s.end_x, s.end_y))]
             pcb.vias = [v for v in pcb.vias if not inb(v.x, v.y)]
+        # (...and THE BOARD'S OWN COPPER THERE THE CAPTURE'S BOARD HAS NOT, in the bus's view (`board_cu`,
+        # kept_copper): turned into the bus's frame, each piece on its net there. Unknown to it, a berth's run was
+        # planned across the stub of a ball the board had fanned out already, at the array's rim -- the same finding
+        # at that end every round of the loop, and the ball walled in)
+        ids_ = {n_.name: i_ for i_, n_ in pcb.nets.items() if n_.name}
+        for A in arr.values():
+            if A is None or not (board_cu or {}).get(A.ref):
+                continue
+            more_s, more_v = [], []
+            for s_, n_ in board_cu[A.ref][0]:
+                if n_ in ids_:
+                    t_ = copy.copy(s_)
+                    (t_.start_x, t_.start_y), (t_.end_x, t_.end_y) = G.pt((s_.start_x, s_.start_y)), \
+                        G.pt((s_.end_x, s_.end_y))
+                    t_.net_id = ids_[n_]
+                    more_s.append(t_)
+            for v_, n_ in board_cu[A.ref][1]:
+                if n_ in ids_:
+                    t_ = copy.copy(v_)
+                    t_.x, t_.y = G.pt((v_.x, v_.y))
+                    t_.net_id = ids_[n_]
+                    more_v.append(t_)
+            pcb.segments, pcb.vias = list(pcb.segments) + more_s, list(pcb.vias) + more_v
         # (the FRONTS read on this board -- whole_ends._front's, kept per exit -- held from one building of the bus's
         # model to the next: the board is the capture's with the same copper left out each time, read again only if
         # it is not. Read afresh at every building, a 53-lane bus's fronts were a fifth of each)
@@ -2457,6 +2528,33 @@ def bus_bench(b, laid, RL):
     return ctx
 
 
+# the model's exit where a bus has NO ROOM AT THESE SIZES and a rung below has (main: --rungs-below)
+NO_ROOM = 7
+
+
+def room_on_a_rung(room, rungs):
+    """whether a lane with no room for a change of layer at these sizes has room for one ON A RUNG BELOW. `room` the
+    solve's own measure of the lane (whole_solve's `rooms`: its entry and its end along the frame, the room each of
+    its ends keeps, ..., the step its changes stand on); `rungs` [(the lanes' track, the via)] of the rungs below.
+    Each end's room is a via's need (rules.via_need: twice it a single's, a pair's dive room read as scaling the
+    same way), and a via's need is its sizes'"""
+    import dataclasses
+    import rules as _rules
+    r0 = _rules.active()
+    span, need = room[1] - room[0], room[2] + room[3]
+    return any(span - need * dataclasses.replace(r0, track=t_, via_size=v_).via_need / r0.via_need >= room[7]
+               for t_, v_ in rungs)
+
+
+def short_named(chk, state, rungs):
+    """the lanes a refusal `chk` (bus_check's verdict) NAMES that are too short between their two ends for a change of
+    layer at these sizes and have room for one on a rung below (`rungs`, room_on_a_rung) -- of the lanes in `state`.
+    A lane short and not named holds one layer, and nothing says the refusal is of that"""
+    rooms = chk.get('rooms') or {}
+    return {l_ for l_ in chk.get('short') or () if l_ in state and l_ in (chk.get('lanes') or ())
+            and rooms.get(l_) and room_on_a_rung(rooms[l_], rungs)}
+
+
 def bus_check(b, laid, RL, save=None, plans=None):
     """THE WHOLE SOLVE'S VERDICT on bus `b`'s ends as the model chose them (whole_ends.solve_check's, `exact`, on the
     group's own bench -- bus_bench): {'plan', 'status', 'core' (pairs of lanes whose crossing has no window), 'lanes'
@@ -2853,6 +2951,9 @@ def main():
     with awx_settings.given(genv):
         import rules as _rules
         _rules.install_defaults()
+        # (the run's sizes -- the lanes' track, the escapes', the via: kept with its end, resume.pkl)
+        sizes_now = tuple(round(float(v_), 6) for v_ in (_rules.active().track, _rules.active().fan_track,
+                                                         _rules.active().via_size, _rules.active().via_drill))
         import whole_ends as we
         import whole_solve
         import cp_seed
@@ -2938,7 +3039,8 @@ def main():
             A = arrays[ref] = build_array(bpcb, ref, bus_of)
             n0_ = sorted(len(A.offer[k]) for k in A.bm.items)
             log(f'  {ref}: {len(A.ball_of)} bus balls, {sum(1 for k in A.okeys if k not in A.drops)} other signal '
-                f'balls, {len(A.drops)} plane balls with {sum(len(v) for v in A.drops.values())} drops; the pattern '
+                f'balls' + (f' ({len(A.served)} more served already, their copper the board\'s)' if A.served else '')
+                + f', {len(A.drops)} plane balls with {sum(len(v) for v in A.drops.values())} drops; the pattern '
                 f'{sum(n0_)} moves (a ball {n0_[0]} to {n0_[-1]}, median {n0_[len(n0_) // 2]}); {len(A.cliques)} + '
                 f'{len(A.bicliques)} groups of vias ({A.bm.n_near} of them two vias too near), {len(A.pts)} points of '
                 f'its lines; {len(A.dead)} moves in a '
@@ -2947,6 +3049,18 @@ def main():
                 seen, bad = verify_runs(A.bm, A.pts, A.cliques, A.bicliques)
                 log(f'    verified against the whole route\'s conflict test on {seen} pairs of moves: '
                     + (f'{sum(bad.values())} DIFFER {bad}' if bad else 'the same on every one'))
+    # (THE CAPTURES' BOARD where it is not BOARD -- --captured-on: what BOARD holds inside the arrays that it has
+    # not is put in each bus's view of its board, load_bus)
+    board_cu = None
+    cap_on = next((a.split('=', 1)[1] for a in flags if a.startswith('--captured-on=')), None)
+    if cap_on:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cpcb_ = parse_kicad_pcb(cap_on)
+        nm_ = lambda i_: bpcb.nets[i_].name if i_ in bpcb.nets else None        # noqa: E731
+        board_cu = {ref_: ([(s_, nm_(s_.net_id)) for s_ in ss_], [(v_, nm_(v_.net_id)) for v_ in vs_])
+                    for ref_, (ss_, vs_) in kept_copper(bpcb, cpcb_, arrays).items()}
+        log('  the board\'s copper inside the arrays that the captures\' board has not, in each bus\'s view: '
+            + ', '.join(f'{ref_} {len(c_[0])} tracks and {len(c_[1])} vias' for ref_, c_ in sorted(board_cu.items())))
     # ---- THE PATTERN first: each ball its pattern's moves, its whole menu only where the pattern meets a problem
     every = {(A.ref, k) for A in arrays.values() for k in A.bm.items}
 
@@ -3130,6 +3244,10 @@ def main():
     # searched again from nothing, a rung cost what the first run had, 51 to 87 minutes of a group's model)
     at_point = next((f_ for f_ in ('--at-start', '--at-search', '--at-end') if f_ in flags), None) if frm else None
     fbd = next((a.split('=', 1)[1] for a in flags if a.startswith('--feedback=')), None)
+    # (the group's escalation's, --rungs-below=TRACK:VIA,...: the lanes' track and the via of each rung below these
+    # sizes -- NO ROOM AT THESE SIZES, at the checks)
+    rungs_below = [tuple(float(v_) for v_ in r_.split(':')) for r_ in
+                   next((a.split('=', 1)[1] for a in flags if a.startswith('--rungs-below=')), '').split(',') if r_]
     feedback, fed = {}, {}      # bus -> its step's findings (whole_feedback's file); bus -> its lanes they name
     found_at = {}               # bus -> the state its step was laid on, which its findings are of: the run before's
     check_plans = {}            # bus -> the plan its last check with one found: its next check asks it first
@@ -3215,6 +3333,17 @@ def main():
             whole(go_)
         narrow({key_ for key_ in nar_ if key_ in tier_sig}, keep_)
         prev_bus, prev_oth, learned = R_['prev_bus'], R_['prev_oth'], R_['learned']
+        # (WHAT A CHECK TAUGHT OF A LANE'S ROOM FOR A CHANGE OF LAYER IS ITS SIZES': from a run at other sizes -- a
+        # rung's start -- the lanes held to one layer and the lengths no change fits in are not kept. The rung is
+        # routed to give that room, and its own checks say what has none there)
+        if R_.get('sizes') is not None and tuple(R_['sizes']) != sizes_now:
+            n_l = sum(len(L_.get('nochg') or ()) for L_ in learned.values())
+            n_k = sum(len(L_.get('room') or ()) for L_ in learned.values())
+            for L_ in learned.values():
+                L_['nochg'], L_['room'] = set(), {}
+            if n_l or n_k:
+                log(f'  from {frm}: a run at other sizes -- the {n_l} lane(s) it held to one layer and the {n_k} '
+                    f'length(s) it found too short for a change of layer are not held here')
         found_at = dict(prev_bus)       # (each bus's state as the run before left it: `prev_bus` moves on with this run)
         layers_want = R_['layers_want']
         oth_ban |= set(R_.get('oth_ban') or ())
@@ -3399,6 +3528,8 @@ def main():
         # a rung's with no findings to answer, --at-end: its checks)
         fresh = {nm: set() for nm in caps}
     laid_try, M_ = 0, None      # the field's violations answered so far; the last laying's measure
+    no_room = {}                # bus -> its lanes with no room for a change here and room on a rung below
+    tight = {}                  # bus -> the lanes a refusal of this run named so: named again, the bus has no room
     # (THE EPOCHS of the search -- TIER_MENU: `stretches` the lanes in stretches round the source, `epoch` the one on
     # its whole menus now, `in_epoch` a model built for one)
     stretches, epoch, in_epoch, sweep, sweep_v0, epoch_balls = None, -1, False, 0, None, set()
@@ -3434,7 +3565,7 @@ def main():
                     built[(nm, mine, nm in lined)] = load_bus(
                         nm, cap, arrays, log, cut=cuts.get((nm, nm in lined)),
                         rank=nm in lined, feedback=feedback.get(nm),
-                        bare_ids={n_.name: i_ for i_, n_ in bpcb.nets.items() if n_.name})
+                        bare_ids={n_.name: i_ for i_, n_ in bpcb.nets.items() if n_.name}, board_cu=board_cu)
                 b = built[(nm, mine, nm in lined)]
                 teach(b)
                 buses.append(b)
@@ -5194,6 +5325,7 @@ def main():
                          'narrowed': set(narrowed), 'keep': kept_last},
                         open(os.path.join(out, 'search.pkl'), 'wb'))
         unplanned, taught, more, newly, n_taught, adopted = [], False, set(), False, 0, False
+        no_room = {}
         fresh, progressed = {}, False
         for b in buses:
             t0 = time.time()
@@ -5257,6 +5389,22 @@ def main():
                 f'{chk.get("lanes")}'
                 + (f' (the rules: {", ".join(f"{l_} {f_}" for l_, f_ in chk["rules"])})' if chk.get('rules') else '')
                 + f', no room for a change {chk.get("nochange")} ({time.time() - t0:.0f} s)')
+            # (NO ROOM AT THESE SIZES, and room on a rung below -- the group's escalation's, --rungs-below: a lane the
+            # refusal NAMES that is too short between its two ends for a change of layer here and has room for one at
+            # a rung's sizes (room_on_a_rung, on the solve's own measure of the lane), named so AGAIN: the model
+            # answered the first -- other ends, the lanes round it moved -- and the solve names the same lane for the
+            # same want. What stands in its way is the size of its vias, which a rung answers and the model's ends
+            # cannot. Answered here all the same -- another state, the solve asked again -- a 38-lane bus 3 mm from
+            # its array was refused at twelve checks running, a pair of it named so at seven of them, each repair four to
+            # five minutes of a model half on its whole menus: 65 minutes, and no plan. Not on a lane named ONCE: a
+            # bus whose second refusal named a lane so had its plan at the third check, at those sizes. Nor on a lane
+            # short and not named: it holds one layer, and nothing says that is what the refusal is of)
+            short_ = short_named(chk, s_, rungs_below)
+            again_ = sorted(short_ & tight.get(b.name, set()))
+            tight.setdefault(b.name, set()).update(short_)
+            if again_:
+                no_room[b.name] = again_
+                continue
             # (each lane it names, end by end: its layer the model's, whether the solve may move it, where it may not)
             ve_, vb_ = chk.get('vend') or set(), {(l_, k_): ls_ for l_, k_, ls_ in chk.get('vban') or ()}
             for l_ in chk.get('lanes') or ():
@@ -5394,6 +5542,15 @@ def main():
                         new_l_[k_] = d_
                 TR.rec('lessons', check=chk_try + 1, bus=b.name, new=new_l_, free_next=sorted(fresh.get(b.name, ())),
                        totals={k_: len(v_) if hasattr(v_, '__len__') else v_ for k_, v_ in L_.items()})
+        if no_room:
+            for nm_, ls_ in sorted(no_room.items()):
+                log(f'group ends: NO ROOM AT THESE SIZES for {nm_} after {chk_try + 1} check(s) -- {len(ls_)} lane(s) '
+                    f'named again, the model\'s answer between, as too short between their two ends for a change of '
+                    f'layer here, with room for one on a rung below: ' + ', '.join(ls_[:12])
+                    + (' ...' if len(ls_) > 12 else ''))
+            bus_events.emit('ends', 'no_room', group=sref, bus=None, check=chk_try + 1, buses=sorted(no_room))
+            no_plan = unplanned
+            break
         if not unplanned:
             M_ = lay_and_measure(laid, wayouts)
             n_held = len(held)
@@ -5448,8 +5605,15 @@ def main():
                  'cuts': dict(cuts), 'layers_want': layers_want, 'searched': set(searched),
                  'feedback': feedback, 'hard': hard, 'oth_ban': set(oth_ban),
                  'held': dict(held), 'prev_x': {nm: sorted(x_) for nm, x_ in prev_x.items()},
-                 'narrowed': set(narrowed), 'below': v_last},
+                 'narrowed': set(narrowed), 'below': v_last, 'sizes': list(sizes_now)},
                 open(os.path.join(out, 'resume.pkl'), 'wb'))
+    if no_room:
+        # (...the group's escalation's to answer, from this end -- the last state and what the checks before this one
+        # taught: no field is laid on ends the solve refused)
+        bus_events.emit('ends', 'done', group=sref, bus=None, secs=round(time.time() - t_all), refused=[],
+                        no_plan=list(no_plan or []), no_room=sorted(no_room))
+        log(f'group ends: {time.time() - t_all:.0f} s in all -- no answer at these sizes: a rung below')
+        raise SystemExit(NO_ROOM)
     if M_ is None or no_plan:
         M_ = lay_and_measure(laid, wayouts)
     log(f'  the arrays fanned out as chosen: {M_["nt"]} tracks and {M_["nv"]} vias -> '

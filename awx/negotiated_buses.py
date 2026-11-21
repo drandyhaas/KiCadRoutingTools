@@ -388,8 +388,12 @@ def _capture_all(jobs, files, log, src=None):
             f.close()
 
 
+# group_ends' exit where a bus has no room at these sizes and a rung below has (its NO_ROOM)
+ENDS_NO_ROOM = 7
+
+
 def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None, feedback_rounds=0,
-                  t0=None, start=None, **sizes):
+                  t0=None, start=None, rungs_below=None, capture_board=None, **sizes):
     """The buses off one array routed from THE GROUP'S ENDS (awx/group_ends.py): each bus's ends model
     captured by itself on `board` (work/caps, _capture_all), every bus's ends chosen in ONE model and the arrays
     fanned out once as chosen (work/group, its log work/group.log), then every bus routed negotiated on that field
@@ -401,7 +405,12 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
     fallback: a bus with no capture, or a first model that ends with no state or no plan, is the step's result,
     named. `start` (an earlier run's group directory, its lay's work directory): the first model FROM that run's end,
     its lay's findings answered and every other lane held (group_ends --at-end) -- a rung of the group's escalation,
-    the same buses at finer sizes. Returns (exit code, grade lines)"""
+    the same buses at finer sizes. `rungs_below` [(the lanes' track, the via)] of the escalation's rungs below
+    these sizes: a first model that finds a bus NO ROOM at these sizes, and room on one of them, ends there
+    (group_ends --rungs-below) -- nothing routed, the summary's `ends` {exit: ENDS_NO_ROOM} for the escalation to
+    answer from that end. `capture_board`: the board the buses' ends models are captured on, where it is not
+    `board` -- the group's escalation's, a kept board with these buses' arrays bare (route_bus._bare_arrays); the
+    model's menus, the field and the lay are on `board`. Returns (exit code, grade lines)"""
     from copy_board import copy_board
     work = out[:-len('.kicad_pcb')] + '.bus'
     caps = os.path.join(work, 'caps')
@@ -412,7 +421,8 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
     log(f'route_bus: {len(buses)} bus{"" if len(buses) == 1 else "es"} off {buses[0][0]} from the group\'s ends -- '
         + ', '.join(b[1] for b in buses))
     bus_events.emit('capture', 'start', group=buses[0][0], bus=None, buses=[f'{s}:{d}' for s, d in buses])
-    got = _capture_all([_bus_job(work, 'capture', b, board, {**_env0(), 'ENDS_ONLY': '1', 'ENDS_CAPTURE': caps},
+    got = _capture_all([_bus_job(work, 'capture', b, capture_board or board,
+                                 {**_env0(), 'ENDS_ONLY': '1', 'ENDS_CAPTURE': caps},
                                  k, 1, inproc, feedback_rounds, sizes) for b in buses],
                        {b[1]: os.path.join(caps, name_of(b[1]) + '.ends.pkl') for b in buses}, log, src=buses[0][0])
     if not all(got.values()):
@@ -431,13 +441,23 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
         bus_events.emit('ends', 'start', group=buses[0][0], bus=None, round=r, rounds=R, log=glog)
         with open(glog, 'w', encoding='utf-8') as f:
             rc = subprocess.run([sys.executable, '-u', '-X', 'utf8', os.path.join(HERE, 'group_ends.py'), caps, group,
-                                 '--board=' + board] + frm_,
+                                 '--board=' + board] + frm_
+                                + (['--captured-on=' + capture_board] if capture_board else [])
+                                + (['--rungs-below=' + ','.join(f'{t_:g}:{v_:g}' for t_, v_ in rungs_below)]
+                                   if rungs_below and r == 1 else []),
                                 cwd=HERE, env={**_env0(), **GROUP_SET}, stdout=f, stderr=subprocess.STDOUT).returncode
         for ln in open(glog, encoding='utf-8', errors='replace'):
             if re.match(r'group ends: |  check \d+: |  the field as laid|  \S+: its step\'s findings', ln):
                 log('  ' + ln.rstrip()[:300])
         bus_events.emit('ends', 'end', group=buses[0][0], bus=None, round=r, exit=rc, secs=int(time.time() - t_r),
                         log=glog)
+        if rc == ENDS_NO_ROOM and r == 1:
+            log(f'route_bus: the group\'s ends: no room at these sizes ({os.path.relpath(glog, work)}) -- nothing '
+                f'routed at them: a rung below')
+            if json_out:
+                with open(json_out, 'w', encoding='utf-8') as f:
+                    json.dump(dict(out=out, ends=dict(exit=rc), secs=int(time.time() - t0)), f, indent=1)
+            return 1, []
         if rc:
             log(f'route_bus: the group\'s ends: the model ended {rc} ({os.path.relpath(glog, work)})'
                 + (' -- nothing routed' if r == 1 else f' -- round {best[1]}\'s board stands'))
@@ -457,7 +477,7 @@ def route_grouped(board, out, buses, k=None, rounds=4, inproc=False, log=print, 
         except (OSError, ValueError):
             g_ = None
         key = (len(g_['open']), g_['drc']['n'] if g_['drc']['n'] is not None else 10 ** 9,
-               len(g_['walled']['walled'])) if g_ else (10 ** 9, 10 ** 9, 10 ** 9)
+               len(g_['walled']['walled'])) if g_ and not g_.get('dead') else (10 ** 9, 10 ** 9, 10 ** 9)
         done.append(dict(round=r, open=key[0], drc=key[1], walled=key[2], secs=int(time.time() - t_r)))
         bus_events.emit('group', 'round', group=buses[0][0], bus=None, **done[-1])
         log(f'  round {r}: ' + (f'{key[0]} open, drc {key[1]}, {key[2]} walled' if g_ else 'no grade')
@@ -580,6 +600,13 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
             j_ = json.load(open(x[1])) if x else {}
             nets_.append((b[0], b[1].split('+'), list(j_.get('routed') or []) + list(j_.get('refused') or {})))
         grade_ = rb.board_grade(board, out, nets_, work, log=log, tag='merged')
+        # (A BUS THAT WROTE NO BOARD has no net in that grade -- its process ended before its summary: the merged
+        # board is not clean for the buses that did write, and the grade says which did not. Read without it, two
+        # clean buses beside one that died were "0 open", the rounds stopped and no rung was tried)
+        dead_ = sorted(b[1] for b, x in zip(buses, boards) if not x)
+        if dead_:
+            grade_['dead'], grade_['ok'] = dead_, False
+            log(f'route_bus: {", ".join(dead_)} wrote no board -- its nets are in no grade: the group is not clean')
         bus_events.emit('grade', 'end', group=src, bus=None, open=len(grade_['open']), drc=grade_['drc']['n'],
                         walled=len(grade_['walled']['walled']))
     runs = []

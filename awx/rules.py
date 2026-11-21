@@ -52,12 +52,12 @@ THE QUANTITIES, and the formula that produced each literal
     lane_slice 0.232   = track + hug -- one
                        lane's centre-to-centre slice: two parallel tracks of
                        width w at clearance c sit at pitch w + c.
-    lane_pitch 0.35    = max(0.35, lane_slice)  (``braid.LPITCH``). 0.35 is the chain's
-                       pitch; the FLOOR is that a comb can never pack
-                       tighter than one lane's slice. It binds above
-                       clearance 0.218.
-    exit_pitch 0.38    = max(0.38, lane_slice)  (``braid.MINP``), same
-                       reading at the exits.
+    lane_pitch 0.35    (``braid.LPITCH``) the chain's pitch at its own lane,
+                       TRACK at SPEC_CLEARANCE; at other sizes scaled as
+                       the lane's slice over that lane's (``pitches``).
+                       The FLOOR is that a comb can never pack tighter
+                       than one lane's slice.
+    exit_pitch 0.38    (``braid.MINP``), the same reading at the exits.
     hole_to_hole / edge_clearance   None by default. The braid reads these
                        two off the board itself (``list_nets.board_constraint``)
                        and applies them tighten-only; that is left exactly
@@ -157,6 +157,19 @@ def _r(x):
     return round(float(x), _ROUND)
 
 
+def pitches(track, clearance):
+    """(the lanes' pitch, the exits' pitch) of lanes `track` wide at `clearance`. The chain plans its rings, its
+    handoffs and a group's mouths a LANE PITCH apart and its teeth an EXIT PITCH apart; the two (LANE_PITCH,
+    EXIT_PITCH) were chosen for the chain's own lane, TRACK at SPEC_CLEARANCE. A run at other sizes has them scaled
+    as its lane's slice (its track and its hug) over that lane's, never under its own slice: read as fixed
+    millimetres they left a narrower lane every ring and mouth as wide as before -- it held no lane more -- and a
+    wider lane less room, part for part, than the chain's own. The chain's own sizes give its own two pitches, to
+    the bit"""
+    sl = _r(_r(track) + _r(_r(clearance) + HUG_OVER))
+    k = sl / _r(TRACK + _r(SPEC_CLEARANCE + HUG_OVER))
+    return max(sl, _r(LANE_PITCH * k)), max(sl, _r(EXIT_PITCH * k))
+
+
 @dataclass(frozen=True)
 class Rules:
     """The topo chain's design constants. Millimetres.
@@ -249,8 +262,8 @@ class Rules:
           the caller passes ``fan_track`` -- the split is a chain decision
           and stays an explicit argument rather than a silent ratio.
 
-        The pitches keep their floor semantics: the chain's own 0.35 / 0.38,
-        never below one lane's slice at the supplied geometry.
+        The pitches are the supplied lane's (``pitches``): the chain's own
+        0.35 / 0.38 scaled as its slice, never below one lane's slice.
         """
         def get(*names):
             for n in names:
@@ -271,7 +284,7 @@ class Rules:
         clearance, track = _r(clearance), _r(track)
         via_size = get('via_size', 'via_diameter')
         via_drill = get('via_drill')
-        slice_ = _r(track + _r(clearance + HUG_OVER))
+        lane_p, exit_p = pitches(track, clearance)
         return cls(
             clearance=clearance,
             track=track,
@@ -281,8 +294,8 @@ class Rules:
             hole_to_hole=get('hole_to_hole_clearance'),
             edge_clearance=get('board_edge_clearance'),
             fan_track=_r(fan_track) if fan_track is not None else track,
-            lane_pitch=max(LANE_PITCH, slice_),
-            exit_pitch=max(EXIT_PITCH, slice_),
+            lane_pitch=lane_p,
+            exit_pitch=exit_p,
             source=f'router config ({type(cfg).__name__})',
             notes=(() if fan_track is not None else
                    ('fan_track = the supplied track_width (the caller did '

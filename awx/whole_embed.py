@@ -1021,6 +1021,21 @@ def same_layer_crossings(PL):
     return out
 
 
+def twisted_vias(crossings, PL, VIA, VIA_REF):
+    """[(lane, its change's index)]: the vias the embedding MOVED off their places in the plan (VIA against VIA_REF,
+    {(lane, change): point}) ACROSS another lane's run, of the runs that cross on one layer (`crossings`,
+    same_layer_crossings': [((lane, run), (lane, run), point)], run k of a lane between its changes k - 1 and k) -- a
+    crossing's two runs each asked for the via at either end of it, against the other's run in the layout PL"""
+    out = []
+    for ka_, kb_, _pt in crossings:
+        for (n_, k_), ko_ in ((ka_, kb_), (kb_, ka_)):
+            for vk in ((n_, k_ - 1), (n_, k_)):
+                if vk in VIA_REF and VIA[vk] != VIA_REF[vk] and vk not in out and len(PL[ko_]) > 1 \
+                        and LineString([VIA_REF[vk], VIA[vk]]).crosses(LineString(PL[ko_])):
+                    out.append(vk)
+    return out
+
+
 def edge_lists():
     """{(layer, a, b): [(run, its point, crossing from a to b?)]}: the runs of a layer on each cell edge (a < b)"""
     on = collections.defaultdict(list)
@@ -3317,6 +3332,20 @@ for (a_, kv_) in _vout:
     c_ = {'lane': a_, 'u': chg[a_][kv_], 'w': VS[a_]}
     if c_ not in res['vcuts']:
         res['vcuts'].append(c_)
+# ...and A VIA MOVED ACROSS ANOTHER LANE: one whose place in the plan had no room, set in the nearest free space --
+# the far side of a lane its own never crosses -- so that its run and that lane's then cross on one layer
+# (same_layer_crossings: the layout stands with it, no row un-crosses two runs). The same: the change is not to
+# stand there again. No solve made that crossing and none prices it -- left to the audit it was two lanes on top of
+# each other a few millimetres short of their berths, read as the ends' crowding, the same plan and the same twist
+# every round of every lay of one three-part bus, and one of the two lanes open in some
+_xv = twisted_vias(same_layer_crossings(PL), PL, VIA, VIA_REF)
+for (a_, kv_) in _xv:
+    res['vcuts'] = [c_ for c_ in res['vcuts'] if (c_['lane'], c_['u']) != (a_, chg[a_][kv_])] \
+        + [{'lane': a_, 'u': chg[a_][kv_], 'w': VS[a_], 'twist': True}]
+if _xv:
+    res['paid']['vtwist'] = len(_xv)
+    log(f'{len(_xv)} via(s) moved across another lane\'s run of their layer, the two crossing there: '
+        + ', '.join(f'{a_}.{kv_}' for a_, kv_ in _xv[:8]))
 if _vout:
     res['paid']['vcell'] = len(_vout)
     log(f'{len(_vout)} via(s) stand inside a bar of fixed copper: ' + ', '.join(f'{a_}.{kv_}' for a_, kv_ in _vout[:8]))

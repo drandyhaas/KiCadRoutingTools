@@ -1985,6 +1985,14 @@ def _last_ends():
         return None
 
 
+def cores_in_order(cores):
+    """the learned cores `cores` (E._nocross) as the model walks them: each one's crossings SORTED, and the cores
+    sorted by them -- as every set the model is built from. A set of frozensets comes out in its hash's order,
+    another one a process: the same lessons built another model each run"""
+    return [sorted(core_pairs(c_), key=sorted)
+            for c_ in sorted(cores, key=lambda c_: sorted(map(sorted, core_pairs(c_))))]
+
+
 def core_pairs(c):
     """the crossings (lane pairs, frozensets) of a learned CORE `c` (E._nocross: a frozenset of them) -- a lone pair as
     a core of its own, as a lesson read from a run that kept each crossing apart"""
@@ -2397,8 +2405,9 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
     # 196 crossings of a 38-lane bus -- were all held apart at once, and the group had no state. A crossing whatever the
     # ends, it stays in no clause; a pair that never crosses here meets its core already)
     Xf_ = {frozenset(k_): v_ for k_, v_ in X.items()}
-    for c_ in getattr(E, '_nocross', ()):
-        xs_ = [Xf_.get(pr_) for pr_ in core_pairs(c_)]
+    # (...walked SORTED, cores and each core's crossings: cores_in_order)
+    for prs_ in cores_in_order(getattr(E, '_nocross', ())):
+        xs_ = [Xf_.get(pr_) for pr_ in prs_]
         if any(v_ is None for v_ in xs_):
             continue
         lits_ = [v_.Not() for v_ in xs_ if not isinstance(v_, int)]

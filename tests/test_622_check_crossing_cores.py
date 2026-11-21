@@ -17,7 +17,9 @@ windows, and the model learns each core as a refused state of its own.
 4. ...reads each core's lanes as a group of its own;
 5. ...and teaches the model one refused state per group, each over that group's lanes alone;
 6. ...and each core as one lesson: not all of its crossings again (a clause) -- each of its crossings held apart, the
-   cores of one check held 90 to 196 crossings of one bus apart at once, and the group had no state.
+   cores of one check held 90 to 196 crossings of one bus apart at once, and the group had no state;
+7. the learned cores enter the model in ONE order -- sorted -- whatever the process's hash seed: walked as the set
+   they are kept in, the same lessons built another model each run.
 """
 import ast
 import os
@@ -67,11 +69,29 @@ ENDS = open(os.path.join(ROOT, 'awx', 'whole_ends.py')).read()
 check('6. each core taught as one lesson, its crossings together',
       "cores_ = {we.core_of(c_) for c_ in chk.get('cores') or [chk.get('core') or ()] if c_}" in GROUP
       and "L_['nocross'] |= cores_" in GROUP)
-i = ENDS.index("for c_ in getattr(E, '_nocross', ()):")
+i = ENDS.index("for prs_ in cores_in_order(getattr(E, '_nocross', ())):")
 check('6. ...the model holds NOT ALL of a core\'s crossings again -- one clause -- never each one apart',
       'm.AddBoolOr(lits_)' in ENDS[i:i + 400] and 'm.Add(xv == 0)' not in ENDS)
 sys.path[:0] = [os.path.join(ROOT, 'awx'), os.path.join(ROOT, 'py_router')]
 import whole_ends  # noqa: E402
+# 7. the cores enter the model in ONE order, whatever the process's hash seed
+import subprocess  # noqa: E402
+SNIP = ('import sys; sys.path[:0] = %r; import whole_ends as we; '
+        'cs = {we.core_of(c) for c in ([("N3", "N1"), ("N2", "N9")], [("N7", "N4")], [("N5", "N6"), ("N8", "N0"), '
+        '("N1", "N2")], [("N9", "N3"), ("N4", "N0")])}; '
+        'print([[sorted(p) for p in prs] for prs in we.cores_in_order(cs)])'
+        % [os.path.join(ROOT, 'awx'), os.path.join(ROOT, 'py_router')])
+orders = set()
+for seed in ('0', '1', '2', '3', '4'):
+    r = subprocess.run([sys.executable, '-c', SNIP], capture_output=True, text=True,
+                       env=dict(os.environ, PYTHONHASHSEED=seed))
+    if r.returncode:
+        raise SystemExit(f'BROKEN TEST: cores_in_order under PYTHONHASHSEED={seed}: {r.stderr[-300:]}')
+    orders.add(r.stdout.strip())
+check('7. the learned cores walked in one order under five hash seeds', len(orders), 1)
+got_ = eval(next(iter(orders)))     # noqa: S307  (the test's own output)
+check('7. ...sorted: each core\'s crossings, and the cores by them',
+      got_ == sorted(got_) and all(c_ == sorted(c_) for c_ in got_) and len(got_) == 4)
 c_ = whole_ends.core_of([('A', 'B'), ('C', 'A')])
 check('6. ...a core read back as its crossings',
       sorted(sorted(p_) for p_ in whole_ends.core_pairs(c_)), [['A', 'B'], ['A', 'C']])

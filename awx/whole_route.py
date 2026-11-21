@@ -1197,7 +1197,9 @@ def loop(solve, out, rounds, env, log, try_lay=None):
             newflips = after > before
             # (more routing layers than two: the round's LAYER cuts are its own answer, as a side flip is -- a round with
             # them is not one whose findings at the ends no solve moves)
-            answered = newflips or (nl_ > 2 and bool(lcuts))
+            # (...and a via the embedding moved across another lane: that twist is the solve's own to undo --
+            # whole_embed's cut, `twist` -- wherever the audit found the two lanes)
+            answered = newflips or (nl_ > 2 and (bool(lcuts) or any(c_.get('twist') for c_ in vcuts)))
             hp, hp0 = O(f'hp{i}.json'), O(f'hp{i - 1}.json')
             if (not passes and not answered and os.path.isfile(hp) and os.path.isfile(sidecar)
                     and run(['whole_feedback.py', '--now', sidecar, hp], env, to=unredirected)[0] == 0):

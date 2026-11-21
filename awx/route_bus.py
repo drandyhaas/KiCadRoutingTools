@@ -5,6 +5,7 @@
                          [--feedback-rounds F] [--round-edits EDITS.json] [--pack]
                          [--clearance C] [--clearance-ceiling C] [--track-width W] [--fanout-track-width W]
                          [--via-size D] [--via-drill D] [--hole-to-hole-clearance H] [--json-out FILE]
+                         [--escalation fab|board|off]
     python3 route_bus.py BOARD.kicad_pcb --find [--json-out FOUND.json] [sizes]
     python3 route_bus.py BOARD.kicad_pcb OUT.kicad_pcb --src SRC --dest DEST [...]     (one bus by itself)
 
@@ -16,7 +17,10 @@ first, and each other's lanes leave it on a branch, whole_frame). --find prints 
 to the router, each with why, then the --bus line that names them, and stops. EACH SOURCE'S BUSES ARE ONE GROUP
 (negotiated_buses.route_grouped): each bus's ends model captured by itself, every bus's ends chosen in one model with
 the arrays' fanout (group_ends.py), and every bus routed on that field at the same time, their solves coupled; the
-groups in turn, each on the board the one before handed on. The lanes run on every copper layer (all_layers).
+groups in turn, each on the board the one before handed on. The lanes run on every copper layer (all_layers). A group
+that leaves the board short of clean is routed again a rung down the fab ladder (--escalation, route.py's flag and
+default: _escalated, escalation_ladder) -- the buses that left nets open alone, where the others are clean, their
+copper kept -- and OUT's project floor is lowered to the copper it ships (shipped_rules).
 
 route_bus() takes a board as the chain hands it on and writes it back with the bus laid, in the board's own frame,
 at the chain's sizes (resolve_rules: the routing CLIs' flags, an omitted one resolved as route.py resolves it):
@@ -99,8 +103,6 @@ SIZE_ARGS = ('clearance', 'clearance_ceiling', 'track_width', 'fanout_track_widt
 
 # the step's --escalation, a setting every bus's process reads (route_buses runs a group's buses each in its own)
 ESCALATION_SETTING = 'BUS_ESCALATION'
-# a rung's pitches, as a part of the run's (rung_pitches): a setting the rung's every process reads, as its policy
-PITCH_SCALE_SETTING = 'BUS_PITCH_SCALE'
 
 
 def install_escalation(board, run_rules):
@@ -128,6 +130,7 @@ def escalation_ladder(run_rules, board):
     narrowest last"""
     import dataclasses
     import fab_tiers as ft
+    import rules as _rules
     ladder = ft.escalation_rungs(ft.count_copper_layers_in_file(board))
     if not ladder:
         return []
@@ -154,21 +157,11 @@ def escalation_ladder(run_rules, board):
                                                    if ft.escalation_target() == 'board_floors'
                                                    else 'the advanced tier\'s, more costly to fab'),) \
             if m and ft.ladder_escalates(ladder, v, dr) else ()
-        _k, lp, ep_ = rung_pitches(run_rules, w)
+        # (the rung's pitches its own sizes', as the run's are its own: rules.pitches)
+        lp, ep_ = _rules.pitches(w, run_rules.clearance)
         out.append(dataclasses.replace(run_rules, track=w, fan_track=fw, via_size=v, via_drill=dr, lane_pitch=lp,
                                        exit_pitch=ep_, source=f'the fab escalation, rung {len(out) + 1}', notes=past))
     return out
-
-
-def rung_pitches(run_rules, track):
-    """(the part of the run's, the lanes' pitch, the exits' pitch) of a rung whose lanes are `track` wide: the run's
-    two pitches scaled as the lane's own slice (its track and its hug), never under that slice. The chain plans its
-    rings, its handoffs and a group's mouths a LANE PITCH apart and its teeth an EXIT PITCH apart (rules' 0.35 and
-    0.38 mm, chosen for a 0.127 mm lane), floored at the lane's slice and no part of the lane's width otherwise: a
-    rung that halved the track left every ring and mouth as wide as before, and held no lane more"""
-    k = round((track + run_rules.hug) / run_rules.lane_slice, 6)
-    sl = round(track + run_rules.hug, 6)
-    return k, max(sl, round(run_rules.lane_pitch * k, 6)), max(sl, round(run_rules.exit_pitch * k, 6))
 
 
 def rung_line(r):
@@ -287,13 +280,6 @@ def resolve_rules(board, clearance=None, clearance_ceiling=None, track_width=Non
     fan = float(fanout_track_width) if fanout_track_width is not None else got['track_width']
     fan = enforce_fab_floors(n_cu, track_width=fan).get('track_width', fan)
     r = _rules.Rules.from_router_config(types.SimpleNamespace(**got), fan_track=fan)
-    # (a RUNG's pitches, a part of its run's -- rung_pitches, PITCH_SCALE_SETTING: every process of the rung resolves
-    # its sizes here)
-    import awx_settings
-    k = awx_settings.get(PITCH_SCALE_SETTING)
-    if k:
-        r = dataclasses.replace(r, lane_pitch=max(r.lane_slice, round(r.lane_pitch * float(k), 6)),
-                                exit_pitch=max(r.lane_slice, round(r.exit_pitch * float(k), 6)))
     return dataclasses.replace(r, source='the chain\'s sizes, resolved as route.py resolves its own')
 
 
@@ -333,9 +319,14 @@ def route_bus(board, out, src, dest, k=None, rounds=4, inproc=False, log=print, 
         s_ = json.load(open(sj_, encoding='utf-8'))
     except (OSError, ValueError):
         return got
-    if not s_.get('ends_only') and os.path.isfile(out):
-        s_['design_rules'] = shipped_rules(out, board, list(s_.get('routed') or []) + list(s_.get('refused') or {}),
-                                           run_rules, log)
+    if not s_.get('ends_only') and os.path.isfile(out) and s_.get('routed'):
+        # (...where a net was routed: a bus handed on as it came leaves its board's project as it came)
+        try:
+            s_['design_rules'] = shipped_rules(out, board, list(s_.get('routed') or [])
+                                               + list(s_.get('refused') or {}), run_rules, log)
+        except Exception as e:      # noqa: BLE001
+            log(f'route_bus: OUT\'s project floor NOT written ({type(e).__name__}: {e})')
+            return got
         with open(sj_, 'w', encoding='utf-8') as f:
             json.dump(s_, f, indent=1)
     return got
@@ -588,16 +579,6 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
         groups.setdefault(s, []).append((s, d))
     cur, runs, codes = board, [], []
 
-    def _fresh(*paths):
-        """an earlier run's outputs at these paths removed (a board with its siblings): a step that writes none must
-        not leave them to be read as its own -- the next step's board, its summary's nets"""
-        from copy_board import SIBLING_EXTS
-        for p_ in paths:
-            for q_ in [p_] + ([p_[:-len('.kicad_pcb')] + e_ for e_ in SIBLING_EXTS]
-                              if p_.endswith('.kicad_pcb') else []):
-                if os.path.isfile(q_):
-                    os.remove(q_)
-
     # (every bus's lanes on every copper layer: the setting each bus's process takes, unless the caller named them)
     env_ = awx_settings.environ()
     env_.setdefault('ROUTE_LAYERS', all_layers(pcb))
@@ -613,8 +594,10 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
             _fresh(step_out, step_json)
             bus_events.emit('group', 'start', group=s, buses=[f'{s}:{d_}' for _s, d_ in grp],
                             work=bus_events.work_dir(step_out))
-            code, _g = negotiated_buses.route_grouped(cur, step_out, grp, k, rounds, inproc, log, step_json,
-                                                      feedback_rounds, **sizes)
+            rules0_, _pol0, rungs0_ = _ladder(cur, sizes)
+            with _installed(rules0_):
+                code, _g = negotiated_buses.route_grouped(cur, step_out, grp, k, rounds, inproc, log, step_json,
+                                                          feedback_rounds, rungs_below=_below(rungs0_), **sizes)
             try:
                 sj_ = json.load(open(step_json))
             except (OSError, ValueError):
@@ -636,7 +619,9 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
                       else 'NO DRC VERDICT (check_drc gave none)')
                    + f', {len(neg_g["walled"]["walled"])} walled'
                    + (f', {len((neg_g.get("plane_balls") or {}).get("off") or [])} plane ball(s) on no pour'
-                      if (neg_g.get('plane_balls') or {}).get('off') else '')) + ' on the board')
+                      if (neg_g.get('plane_balls') or {}).get('off') else '')) + ' on the board'
+                + (f' -- NOT its whole result: {", ".join(neg_g["dead"])} wrote no board, and its nets are in no '
+                   f'grade' if neg_g and neg_g.get('dead') else ''))
             bus_events.emit('group', 'end', group=s, exit=code, open=len(neg_g['open']) if neg_g else None,
                             drc=neg_g['drc']['n'] if neg_g else None,
                             walled=len(neg_g['walled']['walled']) if neg_g else None, summary=step_json)
@@ -653,16 +638,25 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
     # (OUT as it ships, as route.py's main ships its own: its project's floor lowered to the copper it carries -- an
     # escalated group's narrower tracks and vias graded at their sizes -- and the design rules' ledger of what it
     # carries below the sizes asked for, every bus's nets, said in one line: shipped_rules)
-    nets_ = set()
+    nets_, routed_ = set(), False
     for r_ in runs:
         try:
             s_ = json.load(open(r_['summary'])) if r_.get('summary') else {}
         except (OSError, ValueError):
             s_ = {}
         nets_ |= set(s_.get('routed') or []) | set(s_.get('refused') or {})
+        routed_ = routed_ or bool(s_.get('routed'))
     rules_ = resolve_rules(board, log=lambda *a_, **k_: None, **sizes)
     install_escalation(board, rules_)
-    design = shipped_rules(out, board, sorted(nets_), rules_, log) if runs else None
+    # (...where a net was routed: a step that hands the board on as it came leaves its project as it came too --
+    # stamped all the same, a board no bus had touched shipped with its floors lowered to the sizes asked for. And a
+    # project that cannot be written is said, as route.py's main says it: OUT stands)
+    design = None
+    if routed_:
+        try:
+            design = shipped_rules(out, board, sorted(nets_), rules_, log)
+        except Exception as e:      # noqa: BLE001
+            log(f'route_bus: OUT\'s project floor NOT written ({type(e).__name__}: {e})')
     with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:
         json.dump(dict(board=board, out=out, buses=runs, plan=plan, exit=code, design_rules=design), f, indent=1)
     if not runs:
@@ -671,11 +665,58 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
     return code, [r['grade'] for r in runs]
 
 
+def _fresh(*paths):
+    """an earlier run's outputs at these paths removed (a board with its siblings): a step that writes none must not
+    leave them to be read as its own -- the next step's board, its summary's nets"""
+    from copy_board import SIBLING_EXTS
+    for p_ in paths:
+        for q_ in [p_] + ([p_[:-len('.kicad_pcb')] + e_ for e_ in SIBLING_EXTS] if p_.endswith('.kicad_pcb') else []):
+            if os.path.isfile(q_):
+                os.remove(q_)
+
+
+@contextlib.contextmanager
+def _installed(run_rules):
+    """THE RUN'S SIZES THIS PROCESS'S, while a group is routed from it -- as each bus's own process has them
+    (route_bus). The driver lays no lane, but it merges the buses' boards and stamps the merged project's floor at
+    the chain's sizes (negotiated_buses.merge, fanout_from_plan.copy_pro) and grades the merged board: under the
+    chain's own defaults that stamp was 0.1 clearance, a 0.1 track, a 0.25 / 0.15 via whatever the run's sizes --
+    lower-only, so a board routed at 0.2 handed on a project that said 0.1, graded there and read there by the
+    next step"""
+    import rules as _rules
+    prev = _rules.active()
+    _rules.install(run_rules)
+    try:
+        yield
+    finally:
+        _rules.install(prev)
+
+
+def _ladder(board, sizes):
+    """(the run's rules, its escalation policy's name, the rungs below the sizes asked for) of BOARD at `sizes`"""
+    run_rules = resolve_rules(board, log=lambda *a_, **k_: None, **sizes)
+    policy = install_escalation(board, run_rules)
+    return run_rules, policy, escalation_ladder(run_rules, board)
+
+
+def _below(rungs):
+    """`rungs` as a group's ends model takes the rungs below its own sizes: [(the lanes' track, the via)]"""
+    return [(r.track, r.via_size) for r in rungs]
+
+
+def _no_room(sj):
+    """whether a group's summary SJ is of a run whose ends model found a bus no room at its sizes, and room on a rung
+    below (negotiated_buses.ENDS_NO_ROOM): nothing routed, and the rungs' to answer"""
+    import negotiated_buses as nb_
+    return (sj.get('ends') or {}).get('exit') == nb_.ENDS_NO_ROOM
+
+
 def _group_key(sj):
     """a group's result as its escalation compares them: (nets open, violations, balls walled in), the fewest best --
-    a group with no grade, or whose check gave no verdict, the worst"""
+    a group with no grade, one whose check gave no verdict, or one a bus of which wrote no board (its nets are in no
+    grade: `dead`), the worst"""
     g = sj.get('grade')
-    if not g or g['drc']['n'] is None:
+    if not g or g.get('dead') or g['drc']['n'] is None:
         return (math.inf, math.inf, math.inf)
     return (len(g['open']), g['drc']['n'], len(g['walled']['walled']))
 
@@ -690,6 +731,146 @@ def _group_state(out, sj):
     return (group, lay) if os.path.isfile(os.path.join(group, 'resume.pkl')) else None
 
 
+def _bus_nets(r):
+    """the nets (the whole route's names) of a bus by its entry `r` in a group's summary -- those it routed and those
+    it put back as they came -- or None where its step wrote no summary"""
+    try:
+        s_ = json.load(open(r['summary']))
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return set(s_.get('routed') or []) | set(s_.get('refused') or {})
+
+
+def _failed_buses(sj, grp):
+    """the buses of group GRP [(src, dest)] whose nets the group's summary SJ has open -- or None where its result
+    is not open nets of its buses alone: no grade, a violation, a ball walled in, a bus that wrote no summary, an
+    open net no bus has. Those are the whole group's to answer"""
+    g = sj.get('grade')
+    if not g or g.get('dead') or g['drc']['n'] is None or g['drc']['n'] or g['walled']['walled'] or not g['open']:
+        return None
+    by_dest = {r_.get('dest'): r_ for r_ in sj.get('buses') or []}
+    left, failed = set(g['open']), []
+    for b in grp:
+        nets = _bus_nets(by_dest.get(b[1]))
+        if nets is None:
+            return None
+        if nets & left:
+            failed.append(b)
+        left -= nets
+    return failed if failed and not left else None
+
+
+def _kept(board, out, sj, failed, path):
+    """PATH: the group's board OUT (its summary SJ) with the buses FAILED's nets as BOARD, the board the group came in
+    with, has them -- their lanes and their escapes taken off, the copper they came with put back (put_back) -- and
+    no longer protected: the board those buses are routed on again, every other bus's copper as it stands. Returns
+    the nets put back (full names)"""
+    import negotiated_buses as nb_
+    from copy_board import copy_board
+    from protected_nets import pro_path_for_board, read_protected_nets
+    by_dest = {r_['dest']: r_ for r_ in sj['buses']}
+    short = set().union(*(_bus_nets(by_dest[d_]) for _s, d_ in failed))
+    with contextlib.redirect_stdout(sys.stderr):
+        copy_board(out, path)
+        pcb = parse_kicad_pcb_quiet(board)
+    back = others_full(pcb, short)
+    put_back(path, board, pcb, back)
+    pro = pro_path_for_board(path)
+    if os.path.isfile(pro):
+        nb_._set_protected(pro, {n_: v_ for n_, v_ in read_protected_nets(pro).items() if n_ not in back})
+    return back
+
+
+def _bare_arrays(board, kept, failed, path):
+    """PATH: the board KEPT without the copper it holds INSIDE the buses FAILED's ball arrays that BOARD, the board
+    the group came in with, has not -- the other buses' escapes there, the field's: the board those buses' ends
+    models are CAPTURED on. A bus's own run fans its array out for its capture among whatever copper stands there,
+    and a ball it finds no way out for is no lane of the bus: on the kept board seven of one bus's 54 nets were lost
+    so, before any model saw them. The group's model leaves that fanout out and measures every ball's menu on the
+    kept board itself (group_ends.load_bus, BARE; served_balls), so the capture is made as on the board the group
+    came in with, the kept buses' lanes beyond the arrays in its view. Returns the pieces taken off"""
+    import group_ends as ge
+    import make_bench as mb
+    from copy_board import copy_board
+    with contextlib.redirect_stdout(sys.stderr):
+        copy_board(kept, path)
+        pi = parse_kicad_pcb_quiet(board)
+    boxes = []
+    for r_ in sorted({s_ for s_, _d in failed} | {r_ for _s, d_ in failed for r_ in d_.split('+')}):
+        fp = pi.footprints.get(r_)
+        if fp is None or not is_array(fp):
+            continue
+        xs, ys = [p_.global_x for p_ in fp.pads], [p_.global_y for p_ in fp.pads]
+        boxes.append((min(xs) - ge.BARE, min(ys) - ge.BARE, max(xs) + ge.BARE, max(ys) + ge.BARE))
+    inb = lambda q: any(b_[0] <= q[0] <= b_[2] and b_[1] <= q[1] <= b_[3] for b_ in boxes)     # noqa: E731
+    r3 = lambda q: (round(q[0], 3), round(q[1], 3))        # noqa: E731
+    came = {frozenset((r3((s_.start_x, s_.start_y)), r3((s_.end_x, s_.end_y)))) | {s_.layer} for s_ in pi.segments}
+    came |= {frozenset({r3((v_.x, v_.y)), 'via'}) for v_ in pi.vias}
+    gone = [0]
+
+    def off(token):
+        def f(block):
+            a_, b_, L_ = mb.block_geom(block, token)
+            if not inb(a_) or (token == 'segment' and not inb(b_)):
+                return False
+            if (frozenset((r3(a_), r3(b_))) | {L_} if token == 'segment' else frozenset({r3(a_), 'via'})) in came:
+                return False
+            gone[0] += 1
+            return True
+        return f
+    txt = open(path, encoding='utf-8').read()
+    txt = mb.walk_blocks(txt, 'segment', off('segment'))
+    txt = mb.walk_blocks(txt, 'via', off('via'))
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(txt)
+    return gone[0]
+
+
+def _bus_rung(board, prev, failed, grp, out_i, json_i, k, rounds, inproc, log, feedback_rounds, nb, start, below,
+              sizes_i):
+    """ONE RUNG FOR THE BUSES THAT FAILED, the others kept: `prev` (the group's board that stands, its summary) with
+    the buses FAILED's nets as they came (_kept: <OUT_I stem>.bus/kept.kicad_pcb), and those buses routed on it as a
+    group of their own at `sizes_i` (negotiated_buses.route_grouped: their ends model, their balls fanned out, their
+    lanes -- every other bus's copper the board's, as any earlier step's; their captures on that board with their
+    arrays bare, _bare_arrays: kept.bare.kicad_pcb). OUT_I is the whole group's board again;
+    its summary JSON_I the whole group's: every bus of GRP, the kept ones as `prev` has them, and the grade of all of
+    them on OUT_I against BOARD (board_grade). Returns (status, summary) -- the failed buses' own where they routed
+    nothing (no room, no state: no board)"""
+    prev_out, prev_sj = prev
+    work_i = out_i[:-len('.kicad_pcb')] + '.bus'
+    os.makedirs(work_i, exist_ok=True)
+    kept = os.path.join(work_i, 'kept.kicad_pcb')
+    _kept(board, prev_out, prev_sj, failed, kept)
+    bare = os.path.join(work_i, 'kept.bare.kicad_pcb')
+    _bare_arrays(board, kept, failed, bare)
+    code_f, _g = nb.route_grouped(kept, out_i, failed, k, rounds, inproc, log, json_i, feedback_rounds, start=start,
+                                  rungs_below=below, capture_board=bare, **sizes_i)
+    try:
+        sj_f = json.load(open(json_i))
+    except (OSError, ValueError):
+        sj_f = {}
+    if not sj_f.get('grade') or not os.path.isfile(out_i):
+        return code_f, sj_f
+    new = {r_['dest']: r_ for r_ in sj_f.get('buses') or []}
+    old = {r_['dest']: r_ for r_ in prev_sj['buses']}
+    gone = {d_ for _s, d_ in failed}
+    buses = [new[d_] if d_ in gone and d_ in new else
+             dict(src=s_, dest=d_, exit=None, routed=0, grade=None, summary=None) if d_ in gone else old[d_]
+             for s_, d_ in grp]
+    dead = sorted(r_['dest'] for r_ in buses if not r_.get('summary'))
+    grade = board_grade(board, out_i, [(r_['src'], r_['dest'].split('+'), sorted(_bus_nets(r_) or ())) for r_ in buses],
+                        work_i, log=log, tag='group')
+    if dead:
+        grade['dead'], grade['ok'] = dead, False
+    code_i = max([code_f] + [1 if r_['exit'] is None else r_['exit'] for r_ in buses])
+    sj_i = dict(sj_f, board=board, buses=buses, grade=grade, exit=code_i,
+                held=dict(board=prev_out, buses=[d_ for _s, d_ in grp if d_ not in gone]), own=dict(
+                    board=kept, buses=sorted(gone), grade=sj_f.get('grade'), exit=code_f))
+    with open(json_i, 'w', encoding='utf-8') as f:
+        json.dump(sj_i, f, indent=1)
+    return code_i, sj_i
+
+
 def _escalated(board, step_out, step_json, code, sj, grp, k, rounds, inproc, log, feedback_rounds, nb, sizes):
     """(OUT, its summary's path, status, summary) of the group BOARD -> STEP_OUT as it stands, or escalated (route_buses:
     THE GROUP ESCALATED), each rung its own OUT and summary beside the group's, the escalation's record in the one
@@ -697,52 +878,78 @@ def _escalated(board, step_out, step_json, code, sj, grp, k, rounds, inproc, log
     key0 = _group_key(sj)
     if key0 == (0, 0, 0):
         return step_out, step_json, code, sj
-    if key0[0] == math.inf:
+    if key0[0] == math.inf and not _no_room(sj):
         # (NO GRADE -- nothing routed (no capture, a model that ended with no state), or a check with no verdict: the
         # step's own result, named where it happened. The rungs answer nets a routed group left open; a run with no
-        # result routed again at three more sizes was that run four times)
+        # result routed again at three more sizes was that run four times. BUT a group whose ends model found a bus
+        # NO ROOM at these sizes, and room on a rung below: that is the rungs' to answer, and it ended for them)
         return step_out, step_json, code, sj
-    run_rules = resolve_rules(board, log=lambda *a_, **k_: None, **sizes)
-    policy = install_escalation(board, run_rules)
-    rungs = escalation_ladder(run_rules, board)
-    say = lambda key_: f'{key_[0]} open, {key_[1]} violation(s), {key_[2]} walled'  # noqa: E731
+    run_rules, policy, rungs = _ladder(board, sizes)
+    say = lambda key_, sj_=None: ('no room at its sizes' if _no_room(sj_ or {}) else 'no result') \
+        if key_[0] == math.inf else f'{key_[0]} open, {key_[1]} violation(s), {key_[2]} walled'  # noqa: E731
     if not rungs:
         log(f'route_bus: the fab escalation ({policy}): no rung below the sizes asked for -- the group stands '
             f'({say(key0)})')
         return step_out, step_json, code, sj
     best = (key0, 0, step_out, step_json, code, sj)
-    tried = [dict(rung=0, **_rules_dict(run_rules), result=list(key0))]
-    last, key_l = (step_out, sj), key0
+    res = lambda key_: None if key_[0] == math.inf else list(key_)  # noqa: E731
+    tried = [dict(rung=0, **_rules_dict(run_rules), result=res(key0))]
+    # (the last run that kept its group's end, BY THE BUSES IT ROUTED: a rung starts from the end of a run of the
+    # same buses -- the whole group's, or the same failed buses' a rung up)
+    whole = frozenset(d_ for _s, d_ in grp)
+    last = {whole: ((step_out, sj), key0)}
     for i, rr in enumerate(rungs, 1):
+        # (THE BUSES THAT FAILED ALONE, where the board that stands has nets open by some of its buses and nothing
+        # else amiss: the other buses' copper kept as it stands -- _bus_rung. Routed again whole, a rung laid every
+        # bus anew at the finer sizes, and a bus that was clean a rung up came back with a net open: a three-bus
+        # group had each bus clean at some rung and never all three at one. Else THE WHOLE GROUP: nothing stands yet
+        # (no room at the sizes asked for), every bus failed, or a violation or a walled ball no one bus answers for)
+        failed = _failed_buses(best[5], grp) if os.path.isfile(best[2]) else None
+        if failed is not None and len(failed) == len(grp):
+            failed = None
+        who = frozenset(d_ for _s, d_ in failed) if failed else whole
         # (...each rung FROM THE RUN BEFORE IT: its group's model from that run's end, the findings its lay left
         # answered and every other lane held (group_ends --at-end), then the checks, the fanout and the lay at the
         # rung's sizes. Searched again from nothing, each rung cost what the first run had -- a three-bus group 51 minutes
         # at its first rung, the whole escalation past three hours)
-        start = _group_state(*last)
-        log(f'route_bus: === the fab escalation ({policy}), rung {i} of {len(rungs)}: {say(key_l)} left by the run '
-            f'it starts from -- routed again whole at {rung_line(rr)}'
+        (last_o, key_l) = last.get(who) or ((None, {}), best[0])
+        start = _group_state(*last_o) if last_o[0] else None
+        log(f'route_bus: === the fab escalation ({policy}), rung {i} of {len(rungs)}: '
+            + (f'{say(best[0])} on the board that stands -- {", ".join(d_ for _s, d_ in failed)} routed again alone, '
+               f'the other bus{"" if len(grp) - len(failed) == 1 else "es"} kept, at {rung_line(rr)}' if failed else
+               f'{say(key_l, last_o[1])} left by the run it starts from -- routed again whole at {rung_line(rr)}')
             + (f', from its group\'s end ({os.path.relpath(start[0], os.path.dirname(step_out))})' if start
-               else ' -- no group\'s end kept by a run before: searched from the start'))
+               else ' -- no group\'s end kept by a run of these buses before: searched from the start'))
         sizes_i = dict(sizes, track_width=rr.track, fanout_track_width=rr.fan_track, via_size=rr.via_size,
                        via_drill=rr.via_drill)
         out_i = step_out[:-len('.kicad_pcb')] + f'.rung{i}.kicad_pcb'
         json_i = step_json[:-len('.summary.json')] + f'.rung{i}.summary.json'
-        import awx_settings
-        with awx_settings.given({**awx_settings.environ(),
-                                 PITCH_SCALE_SETTING: repr(rung_pitches(run_rules, rr.track)[0])}):
-            code_i, _g = nb.route_grouped(board, out_i, grp, k, rounds, inproc, log, json_i, feedback_rounds,
-                                          start=start, **sizes_i)
-        try:
-            sj_i = json.load(open(json_i))
-        except (OSError, ValueError):
-            sj_i = {}
+        # (the rung's outputs its own: a rung that writes none -- no capture, a model that ended with no answer --
+        # left an earlier run's board and summary into the same OUT to be read as this rung's result, and that run's
+        # group directory to be the next rung's start)
+        import shutil
+        _fresh(out_i, json_i)
+        shutil.rmtree(out_i[:-len('.kicad_pcb')] + '.bus', ignore_errors=True)
+        with _installed(rr):
+            if failed:
+                code_i, sj_i = _bus_rung(board, (best[2], best[5]), failed, grp, out_i, json_i, k, rounds, inproc, log,
+                                         feedback_rounds, nb, start, _below(rungs[i:]), sizes_i)
+            else:
+                code_i, _g = nb.route_grouped(board, out_i, grp, k, rounds, inproc, log, json_i, feedback_rounds,
+                                              start=start, rungs_below=_below(rungs[i:]), **sizes_i)
+                try:
+                    sj_i = json.load(open(json_i))
+                except (OSError, ValueError):
+                    sj_i = {}
         key_i = _group_key(sj_i)
-        tried.append(dict(rung=i, **_rules_dict(rr), result=list(key_i)))
-        log(f'route_bus: rung {i}: {say(key_i)}')
+        tried.append(dict(rung=i, **_rules_dict(rr), result=res(key_i),
+                          **(dict(buses=sorted(who)) if failed else {})))
+        log(f'route_bus: rung {i}: {say(key_i, sj_i)}')
         # (...the last run that KEPT its group's end: a rung whose model ended with no state keeps none, and the rung
-        # after it starts from the run before that one -- not from nothing)
+        # after it starts from the run before that one -- not from nothing. A run of the failed buses alone keeps
+        # theirs: its group's directory is that run's own, whatever the whole group's summary says of rounds)
         if _group_state(out_i, sj_i):
-            last, key_l = (out_i, sj_i), key_i
+            last[who] = ((out_i, sj_i), key_i)
         if (key_i, i) < best[:2] and os.path.isfile(out_i):
             best = (key_i, i, out_i, json_i, code_i, sj_i)
         if key_i == (0, 0, 0):
@@ -1456,9 +1663,16 @@ def board_grade(board, routed, buses, work, log=print, tag='board'):
 
 
 def _cage_rung(pcb):
-    """(track, via, clearance) of the fab ladder's finest rung for `pcb`: the widths a cage is tested at"""
+    """(track, via, clearance) the widths a cage is tested at: the finest rung of the fab ladder for `pcb` under the
+    step's escalation policy -- the narrowest copper a later step may lay -- and, where the policy has no rung (off:
+    nothing is narrowed), the run's own sizes"""
     from list_nets import escalation_rungs
-    finest = escalation_rungs(len(pcb.board_info.copper_layers or ()) or 4)[-1]
+    rungs = escalation_rungs(len(pcb.board_info.copper_layers or ()) or 4)
+    if not rungs:
+        import rules as _rules
+        r = _rules.active()
+        return r.track, r.via_size, r.clearance
+    finest = rungs[-1]
     return finest['track_width'], finest['via_diameter'], finest['clearance']
 
 
