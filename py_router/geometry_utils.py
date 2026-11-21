@@ -149,8 +149,12 @@ def point_to_segment_distance(px: float, py: float,
         # Segment is effectively a point
         return math.sqrt((px - x1)**2 + (py - y1)**2)
 
-    # Project point onto line, clamped to segment [0, 1]
-    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+    # Project point onto line, clamped to segment [0, 1] (`max(0, min(1, t))`
+    # spelled as comparisons: the same values, NaN included, without two
+    # builtin calls on a function called millions of times per board).
+    t = ((px - x1) * dx + (py - y1) * dy) / length_sq
+    t = t if t < 1 else 1
+    t = t if t > 0 else 0
     proj_x = x1 + t * dx
     proj_y = y1 + t * dy
 
