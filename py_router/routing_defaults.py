@@ -71,6 +71,8 @@ NECKDOWN_TAPER_LENGTH = 0.5  # mm narrow->wide width taper (0 = abrupt)
 # the tap router (route_planes); not a CLI/GUI parameter. The fab / board
 # policies do not read it (their necks are shaped by NECKDOWN_LENGTH).
 PAD_ENTRY_NECK_MM = 2.0
+# #1872: the GUI control value for --power-neck-max-mm (0 = no bound).
+POWER_NECK_MAX_MM = 0.0
 TRACK_PROXIMITY_DISTANCE = 2.0  # mm
 # #1146 pairwise keep-away: band cost per cell (mm equivalent; 0 = measure
 # and report only) and the radius around the routed net's own pads where the
@@ -386,6 +388,8 @@ PARAM_RANGES = {
     'stub_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'neckdown_length': {'min': 0.0, 'max': 50.0, 'inc': 0.5, 'digits': 1},
     'neckdown_taper_length': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    # #1872: 0 = no bound (routing_config normalises it to None).
+    'power_neck_max_mm': {'min': 0.0, 'max': 50.0, 'inc': 0.5, 'digits': 1},
     'coplanar_gap': {'min': 0.0, 'max': 5.0, 'inc': 0.05, 'digits': 3},
     'via_proximity_cost': {'min': 0.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
     'track_proximity_distance': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},

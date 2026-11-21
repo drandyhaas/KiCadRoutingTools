@@ -88,6 +88,7 @@ so ``from list_nets import fab_floors`` keeps working.
 """
 
 import collections
+import math
 import os
 
 import routing_defaults as defaults
@@ -326,6 +327,36 @@ def project_writeback():
 def may_narrow():
     """False under ``--escalation off``: no descent site may shrink anything."""
     return _ESCALATION != 'off'
+
+
+def power_neck_allowance_mm(config):
+    """The pad-entry neck bound in mm that applies to this run, or None when
+    a neck is unbounded (#1872).
+
+    ``--power-neck-max-mm N`` (``config.power_neck_max_mm``) sets it under
+    every policy; otherwise it is the 2 mm ``PAD_ENTRY_NECK_MM`` under
+    ``--escalation off`` and unbounded elsewhere. A config value of None (or
+    <= 0, the GUI control's "no bound") means "no flag given"; a non-finite
+    value never reaches here (routing_config raises, the CLI refuses it).
+    """
+    v = getattr(config, 'power_neck_max_mm', None)
+    if v is not None and math.isfinite(float(v)) and float(v) > 0:
+        return float(v)
+    if may_narrow():
+        return None
+    return defaults.PAD_ENTRY_NECK_MM
+
+
+def power_neck_bound_label(config):
+    """What bounds the neck on this run, for refusal messages (#1872): the
+    flag that set it, else the policy that does; None when nothing bounds
+    it. Only meaningful when :func:`power_neck_allowance_mm` is not None."""
+    v = getattr(config, 'power_neck_max_mm', None)
+    if v is not None and math.isfinite(float(v)) and float(v) > 0:
+        return f"--power-neck-max-mm {float(v):g}"
+    if may_narrow():
+        return None
+    return "--escalation off"
 
 
 #: The ``kicad_routing_tools`` record that says ``rules.min_clearance`` holds a

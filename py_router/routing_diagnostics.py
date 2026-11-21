@@ -1098,6 +1098,17 @@ def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False,
         # #1452: a narrower track DID reach the pad; --escalation off refused
         # it because no route kept the net's width outside the pad entry.
         # Advising a smaller track would ask for exactly what was refused.
+        # #1872: when the FLAG bound the neck, the lever is raising the flag,
+        # not changing the policy -- name it, and say so.
+        if (refused.get('bound') or '').startswith('--power-neck-max-mm'):
+            return _ret(
+                f"Hint: under {refused['bound']} a wide net may narrow only within "
+                f"{refused['allowance_mm']:g} mm of a pad; this edge spans "
+                f"{refused['span_mm']:g} mm and a {refused['neck_width_mm']:g} mm "
+                f"track reaches it, but no route keeps "
+                f"{refused['net_width_mm']:g} mm outside that pad entry. Open a "
+                f"wider channel to the pad, or raise --power-neck-max-mm.",
+                dict(refused, verdict='pad_entry_allowance', iterations=iters))
         return _ret(
             f"Hint: under --escalation off a wide net may narrow only within "
             f"{refused['allowance_mm']:g} mm of a pad; this edge spans "

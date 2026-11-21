@@ -73,8 +73,25 @@ def test_fab_policy_keeps_long_tap():
     assert out is segs
 
 
+def test_flag_bounds_tap_under_fab():
+    # #1872: the flag binds the tap under every policy, not just off.
+    cfg = replace(_cfg({7: 2.0}), power_neck_max_mm=2.0)
+    segs = _tap(6.0)
+    out = _with_policy('fab', lambda: _bound_tap_neck(segs, 7, 'F.Cu', cfg))
+    assert out is None
+
+
+def test_flag_keeps_tap_within_bound():
+    # #1872: a tap inside the flag's bound is kept, under fab as under off.
+    cfg = replace(_cfg({7: 2.0}), power_neck_max_mm=5.0)
+    segs = _tap(3.0)
+    out = _with_policy('fab', lambda: _bound_tap_neck(segs, 7, 'F.Cu', cfg))
+    assert out is segs
+
+
 TESTS = [test_long_tap_for_wide_net_refused_under_off, test_short_tap_kept_and_recorded,
-         test_default_width_net_untouched, test_fab_policy_keeps_long_tap]
+         test_default_width_net_untouched, test_fab_policy_keeps_long_tap,
+         test_flag_bounds_tap_under_fab, test_flag_keeps_tap_within_bound]
 
 if __name__ == '__main__':
     for t in TESTS:

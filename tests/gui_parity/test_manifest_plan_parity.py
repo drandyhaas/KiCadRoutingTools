@@ -1967,6 +1967,12 @@ _POST_PARSE_WITNESSES = (
      'must have the same length'),
     ('_route_power_nets_count_mismatch', 'route.py a.kicad_pcb b.kicad_pcb '
      '--nets X --power-nets GND +3V3', None),
+    ('_route_power_neck_max_nonpositive', 'route.py a.kicad_pcb b.kicad_pcb '
+     '--nets X --power-neck-max-mm 0', 'must be > 0'),
+    ('_route_power_neck_max_nonpositive', 'route.py a.kicad_pcb b.kicad_pcb '
+     '--nets X --power-neck-max-mm nan', 'finite number'),
+    ('_route_power_neck_max_nonpositive', 'route.py a.kicad_pcb b.kicad_pcb '
+     '--nets X --power-neck-max-mm 2', None),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '
      '--clearance nan', 'finite number'),
     ('_cap_clearance_not_finite', 'place_fanout_clearance.py a.kicad_pcb '

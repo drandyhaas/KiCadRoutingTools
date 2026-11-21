@@ -323,6 +323,12 @@ class GridRouteConfig:
     via_span_type: Optional[str] = None
     neckdown_length: float = 2.5  # mm pad-entry zone (pad-capped width where it fits, #1318)
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
+    # #1872: the longest a power net may run below its requested width, in mm
+    # -- the pad-entry bound, under EVERY escalation policy. None = no flag
+    # given (the 2 mm PAD_ENTRY_NECK_MM allowance under --escalation off,
+    # unbounded otherwise); a non-positive value from the GUI control means
+    # the same (0 = no bound); a non-finite value is a caller error.
+    power_neck_max_mm: Optional[float] = None
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
     vertical_attraction_radius: float = 1.0  # mm - radius for attraction lookup (0 = disabled); matches routing_defaults.VERTICAL_ATTRACTION_RADIUS (N1)
@@ -551,6 +557,17 @@ class GridRouteConfig:
     # no GUI control -- the project and rules files are the source. Empty =
     # inert.
     coupled_pair_clearances: Dict[FrozenSet[int], dict] = field(default_factory=dict)
+
+    def __post_init__(self):
+        # #1872: single normalisation point for CLI/GUI/plan -- a non-finite
+        # bound is a caller error (it would silently mean "no bound"), a
+        # non-positive one (the GUI control's 0 = no bound) means no flag.
+        if self.power_neck_max_mm is not None:
+            if not math.isfinite(float(self.power_neck_max_mm)):
+                raise ValueError(
+                    "--power-neck-max-mm must be a finite number")
+            if float(self.power_neck_max_mm) <= 0:
+                self.power_neck_max_mm = None
 
     def net_via(self, net_id: int) -> Tuple[float, float]:
         """(diameter, drill) this net's vias are drawn at."""
