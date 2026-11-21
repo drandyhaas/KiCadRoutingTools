@@ -3031,8 +3031,17 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     from net_keepouts import stamp as _nk_stamp, config_for_nets
     with _nk_stamp(obstacles, pcb_data, (net_id,), config):
         cfg = config_for_nets(pcb_data, (net_id,), config)
-        # #2020: a pour of this net no copper touches gets one tap first
-        with _bare_pour_taps(pcb_data, net_id, cfg, obstacles) as taps:
+        # #2020: a pour of this net no copper touches gets one tap first --
+        # on a whole-board route only: a scoped one (a rescue's window or
+        # gap, `bounds` / the endpoint overrides) sees part of the copper,
+        # and would read a pour the rest of the board touches as untouched
+        _scope = dict(zip(('attraction_path', 'reverse_direction', 'bounds',
+                           'sources_override', 'targets_override'), args))
+        _scope.update(kwargs)
+        _whole = all(_scope.get(k) is None for k in
+                     ('bounds', 'sources_override', 'targets_override'))
+        with _bare_pour_taps(pcb_data, net_id, cfg, obstacles,
+                             enabled=_whole) as taps:
             if taps and _net_connected(pcb_data, net_id):
                 # the taps joined both sides through the pour: they are the
                 # route (the endpoint deriver groups by copper alone, and
@@ -5308,12 +5317,13 @@ def _remove_copper(pcb_data, segs, vias):
 
 
 @contextmanager
-def _bare_pour_taps(pcb_data, net_id, config, obstacles):
+def _bare_pour_taps(pcb_data, net_id, config, obstacles, enabled=True):
     """Hold `_tap_bare_pours`' copper in `pcb_data` for one route call
     (with each via's same-net ring in `obstacles`, as an unblock via's, so
     the route drops no via of its own hole-to-hole into it), then take it
     out again; the wrappers below hand it back in the route's result."""
-    segs, vias = _tap_bare_pours(pcb_data, net_id, config)
+    segs, vias = (_tap_bare_pours(pcb_data, net_id, config) if enabled
+                  else ([], []))
     if not (segs or vias):
         yield None
         return
