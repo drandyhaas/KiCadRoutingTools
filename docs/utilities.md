@@ -45,7 +45,8 @@ runnable tool in the clone with a one-line purpose.
   [nets side by side](#nets-side-by-side-render_netspy) ·
   [power view](#power-view-render_powerpy) ·
   [routing movie](#routing-movie-route_moviepy) ·
-  [placement movie](#placement-movie-place_moviepy)
+  [placement movie](#placement-movie-place_moviepy) ·
+  [whole-route film](#whole-route-film-awxwhole_moviepy)
 - Fanout: [BGA](#bga-fanout-generator-bga_fanoutpy) ·
   [QFN/QFP](#qfnqfp-fanout-generator-qfn_fanoutpy)
 - Boards and projects: [net analyzer](#net-analyzer-list_netspy) ·
@@ -2011,6 +2012,45 @@ fast routes one at a time, 7.5 min for the full route; ch32 (25 parts) took
 - `--size`, `--fps`, `--theme` — as the routing movie.
 - Exit codes are `place_simple.py`'s; with `--route`, 2 also when no seed
   placed legally or a route did not finish.
+
+## Whole-Route Film (`awx/whole_movie.py`)
+
+A film of one two-layer whole-route run (a research tool of the experimental
+bus step), each stage explained on the board as the run took it. RUNDIR is
+`whole_route.py`'s OUTDIR, or a bus step's own run (`route_bus.py`'s
+`BUS.bus/run`, under the group's directory `SRC-DEST.bus/solo/DEST/`).
+
+```bash
+python3 awx/whole_movie.py RUNDIR OUT.mp4 [--fps 30] [--workers 4]
+python3 awx/whole_movie.py RUNDIR --stills DIR [--at T1,T2,..]   # PNG stills
+python3 awx/whole_movie.py RUNDIR --scenes                       # the scenes and their times
+python3 awx/whole_movie.py RUNDIR --check                        # the re-runs compared, no film
+```
+
+- **The group's ends**, where the run's ends are its group's: the buses the
+  step found and each one's capture; the one model of the arrays' fanout and
+  every bus's ends (the balls by what serves them, the menus by tier, the
+  state looked for, the start); its search, every round's best on the
+  model's own clock beside the state each solve ended on, the ends that
+  moved ringed; each bus's check by its own whole solve, the field's
+  findings, the repair and the check again; and the shared field as laid,
+  with the parts the nudge moved and the field's ties. These scenes are
+  drawn from what the step recorded (its `events.jsonl`, the model's
+  `checks.jsonl`, `group.log`, `group.json` and the two boards), never
+  solved again.
+- **The bus's own run**: its ends and the crossings their orders fix, the
+  taut strings, the frame, the solve (CP-SAT's plans as it found them, drawn
+  as a braid), the geometry (and the 2-D geometry where the loop ran it),
+  the polish, the snap, the audit, and the lay with its wall guard, then the
+  result; the coda closes on the group's escalation -- a rung down the fab
+  ladder for a group left short of clean, or that none was needed.
+- The bus's own stages are OBSERVED: the round's solve, geometry and 2-D
+  geometry are run again in-process under the run's own settings, and the
+  film is refused unless each re-run writes the run's file byte for byte
+  (`--force` films it anyway and says so on screen). `--check` makes that
+  comparison alone and exits 1 when a re-run differs; it works on any number
+  of layers, while the film draws two.
+- Needs `ffmpeg` (libx264) for the mp4; `--stills` alone writes PNGs.
 
 ## Orphan Stub Checker (`check_orphan_stubs.py`)
 
