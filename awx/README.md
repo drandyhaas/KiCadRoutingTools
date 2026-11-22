@@ -1729,12 +1729,16 @@ once, proved optimal in its vias.
   end room waived down to that, and no stagger or pad cut there, the ends
   model having measured that via clear of every copper on every layer. Soft,
   priced as the geometry's cuts (`W_SOFT`).
-- A single the loop's layer cut holds on the other layer across an island
-  ([the loop](#the-loop-whole_routepy---loop), below): its changes a via's
-  clearance off the island's box on the trunk -- where its end room leaves
-  none before the island (or after it, at a trunk lane's berth), from its
-  stub's end, its end room, the face band and the stagger waived there as at
-  a planned end.
+- A lane the loop's layer cut holds on the other layer across an island
+  ([the loop](#the-loop-whole_routepy---loop), below) -- a single, or a pair:
+  its legs run on one layer, its P leg's, which each of its dives flips as a
+  single's changes flip a single's: its changes a via's clearance off the
+  island's box on the trunk -- where a single's end room leaves none before
+  the island (or after it, at a trunk lane's berth), from its stub's end, its
+  end room, the face band and the stagger waived there as at a planned end;
+  a pair keeps its dive room. A pair's cut read on more layers alone, a
+  strobe pair found against a passive's pad on two was given its cut every
+  round, planned the same, and the loop stopped not converging on it.
 - **Layer walls** (`whole_cells.py`): the same cuts, known before any plan.
   Each layer's free space -- a lane's
   bar off every pad and every other net's track and via -- falls into
@@ -2483,8 +2487,8 @@ only the fanout can move.
   gives) are kept as soft costs for that solve and the rounds after, with the
   history (`whole_solve SOFT_CUTS`), and that re-solve keeps a plan it cannot
   prove.
-- **Layer cuts:** a single lane the audit finds against an island on one
-  layer, or the snap cannot lay with its search stuck within
+- **Layer cuts:** a lane -- a single or a pair -- the audit finds against an
+  island on one layer, or the snap cannot lay with its search stuck within
   `SNAP_ISLAND_REACH` (2 mm) of one, is held on the other layer across that
   island from the next solve on (`lcuts` in the cut files: the island's box,
   whole_geo's `island_boxes`) -- a wall the lanes cannot go round. Not at an
@@ -3068,7 +3072,7 @@ With nothing supplied, as on the benches:
 | `cp_seed.py` | the bus step's seed: every CP-SAT solve of a round under one seed (`BUS_SEED`, else CP-SAT's default), the next draw under the next and a feedback round under its draw's -- the same board and seed the same plan |
 | `whole_ends.py`, `ends_kernel.py`, `whole_frame.py`, `whole_feedback.py` | the choice of ends (the fanout's ends model; every plane ball kept a way down: `tests/test_622_walled_balls.py`; its estimate scored in Rust); the frame of a bench (a part on a ring's stack: `tests/test_622_ring_room.py`); what goes back to the fanout (`tests/test_622_ends_fixes.py`, `test_622_exit_front.py`, `test_622_feedback_rounds.py`; an item for a lane the round's ends have no option for keys nothing: `fb_tables`) |
 | `ends_nudge.py`, `ends_reescape.py` | a crowded end repaired on the round's fanout bench (`whole_route.repair_ends`): a lane's via or tooth, or another net's via, nudged the smallest step clear of a finding; a ball escaped again from its menu, its first stretch clear of every other net's copper, laid alone by `source_realize.realize` |
-| `whole_solve.py`, `whole_geo.py`, `whole_polish.py`, `whole_snap.py` | the crossing and layer solve, the geometry LP (a part seen from several frames: `tests/test_622_part_frames.py`; islands made of pads: `tests/test_622_pad_islands.py`), the polish, the snap onto the router's grid |
+| `whole_solve.py`, `whole_geo.py`, `whole_polish.py`, `whole_snap.py` | the crossing and layer solve (a pair's layer cut on two layers, held as a single's: `tests/test_622_pair_layer_cut.py`), the geometry LP (a part seen from several frames: `tests/test_622_part_frames.py`; islands made of pads: `tests/test_622_pad_islands.py`), the polish, the snap onto the router's grid |
 | `whole_cells.py`, `whole_passages.py` | each layer's free space cut into its pieces, and the layer walls they give a bus's lanes before any plan; the passages the fixed copper leaves the lanes layer by layer, the census the solve, the walls and the geometry all read (a group's part standing only on its pads' layers, `Census`) |
 | `whole_embed.py` | the geometry in board xy, a stage of its own: a geometry of a solve fitted again in each layer's free space, the vias free; drawn with its cells and each lane's own points (`--draw`, `--draw-cells`, `--draw-points`); in every loop round |
 | `whole_audit.py`, `whole_gate.py`, `whole_lint.py`, `whole_render.py`, `whole_ctx.py` | a plan installed and audited, gated, linted, drawn; the bench they share, read as the ends model reads it (`tests/test_622_candidate_ctx.py`: an all-pair bus's plan sidecar read by the pairs' legs) |

@@ -595,9 +595,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 return s_
             s_ += G / 2
         return None
-    # ...and a single lane the loop found blocked by an island on one layer -- its audit against it, or its snap stuck
-    # beside it (whole_route's LAYER cuts, `lcuts` in the cut files: a wall the lanes cannot go round): on the other layer
-    # across the island's box on the trunk, a track's clearance either side, its changes a via's clearance off it
+    # ...and a lane (a single or a pair) the loop found blocked by an island on one layer -- its audit against it, or
+    # its snap stuck beside it (whole_route's LAYER cuts, `lcuts` in the cut files: a wall the lanes cannot go round):
+    # on the other layer across the island's box on the trunk, a track's clearance either side, its changes a via's
+    # clearance off it
     CHAN_CUTS, CHAN_T0 = set(), set()
     # (each by its whole cut: one island's name stands at several places -- a foreign net's tracks, an audit's cuts --
     # and keyed by the lane and the name, a later cut's layers overwrote an earlier one's)
@@ -682,8 +683,11 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
     for fn_ in [None] + list(cuts) + list(soft_cuts):
         for c_ in (_under if fn_ is None else json.load(open(fn_)).get('lcuts', [])):
             n_ = c_['lane']
-            # (a pair's lane too on more layers than two: its legs on one layer, held off the island's as a single's)
-            if n_ not in M or (n_ in prs and NL == 2):
+            # (a PAIR's lane too, on any number of layers: its legs run on one layer -- on two, its P leg's, the one bit
+            # each of its changes (a dive) flips, as a single's: the parity below holds it as it holds a single. Left
+            # out on two layers, a pair the audit found against a passive's pad there was given its layer cut every
+            # round, the solve read none, planned the same, and the loop stopped NOT CONVERGING on the same finding)
+            if n_ not in M:
                 continue
             L_ = int(c_['layer'])
             blk_ = sorted(int(b_) for b_ in c_.get('blocked', [1 - L_])) if NL > 2 else None
@@ -726,9 +730,12 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 # (an island so near the lane's tooth -- or a trunk lane's berth -- that its end room leaves no change
                 # before it -- after it: the change from the stub's end to the island, its end room and the face band
                 # waived and no stagger there, its neighbours still a ball pitch apart, as at a blocked front. On more
-                # layers than two: a single lane whose end there is fixed -- no via end -- on one of the island's layers)
+                # layers than two: a single lane whose end there is fixed -- no via end -- on one of the island's layers.
+                # A SINGLE's alone, on any number: the window is a via of its own at its stub's end (via_room), and a
+                # pair's change is a dive, which keeps its dive room from its end whatever stands past it)
                 if NL == 2:
-                    off0, off1 = tl[n_] != L_, dl[n_] != L_
+                    off0 = n_ not in prs and tl[n_] != L_
+                    off1 = n_ not in prs and dl[n_] != L_
                 else:
                     off0 = n_ not in prs and (n_, 0) not in VEND and tli[n_] in blk_
                     off1 = n_ not in prs and (n_, 1) not in VEND and dli[n_] in blk_
