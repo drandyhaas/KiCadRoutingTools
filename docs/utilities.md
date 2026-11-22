@@ -2858,8 +2858,9 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
 A step that fails is skipped and the chain continues from the last good board.
 
 Each route pass is graded: open nets are the nets `check_connected` reports
-unrouted or broken (its KiCad cross-check off, so the same board always grades
-the same), and DRC is `check_drc`'s real violations at the board's recorded
+unrouted or broken (with its KiCad refill cross-check, so a net KiCad will
+report unconnected -- a pad-less copper island, a net-tagged copper drawing a
+reroute left behind -- is open), and DRC is `check_drc`'s real violations at the board's recorded
 floors. A pass is kept when it ranks above the best board so far, completion
 first: fewer open nets, then fewer violations at the same open count, so a
 pass that closes nets at the cost of new violations is kept and its grade says

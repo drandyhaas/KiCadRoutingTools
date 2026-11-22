@@ -72,8 +72,8 @@ may rip and reroute existing copper and runs its plane finalize.
 
 Every step runs as its own process in <output>.autoroute/, so a step that
 fails is skipped and the chain continues from the last good board. Each route
-pass is graded: open nets as check_connected reports them (the KiCad
-cross-check off, so the grade is deterministic) and real violations as
+pass is graded: open nets as check_connected reports them (with its KiCad
+refill cross-check, so a net KiCad will report unconnected is open) and real violations as
 check_drc reports them. A pass is kept when it ranks above the best board so
 far, completion first: fewer open nets, then fewer violations at the same open
 count. The first pass that is not kept ends the passes. A further pass
@@ -871,12 +871,14 @@ class Chain(ChainEvents):
         checker could not grade it.
 
         open: the nets check_connected reports unrouted or broken, every one
-        (no capped name list, no pad counts), with its KiCad cross-check off
-        so the same board always grades the same. drc: check_drc's real
-        violations at the board's recorded floors (else the chain's
-        clearance), the chain's input as baseline."""
+        (no capped name list, no pad counts), with its KiCad refill
+        cross-check on where kicad-cli is to be had: a net whose copper
+        clusters KiCad still asks links between -- a pad-less island, a
+        net-tagged copper drawing a reroute left behind -- is open, as KiCad's
+        DRC will report it. drc: check_drc's real violations at the board's
+        recorded floors (else the chain's clearance), the chain's input as
+        baseline."""
         env = _child_env()
-        env['KICAD_NO_GRADE_RECONCILE'] = '1'
         r = subprocess.run([sys.executable, '-X', 'utf8', '-c', _CONN_PROBE, HERE, board],
                            capture_output=True, text=True, env=env)
         m = re.search(r'^AUTOROUTE_OPEN: (\[.*\])$', r.stdout, re.M)
