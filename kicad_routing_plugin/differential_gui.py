@@ -1399,7 +1399,6 @@ class DifferentialTab(wx.Panel):
     def _apply_results_to_board(self, results_data):
         """Apply routing results directly to the open pcbnew board."""
         import pcbnew
-        from kicad_parser import POSITION_DECIMALS
         from .swig_gui import _build_layer_mappings
         from .board_swaps import apply_swaps_to_board
 
@@ -1439,18 +1438,9 @@ class DifferentialTab(wx.Panel):
         # route_diff now returns vias_to_remove; swig_gui parity).
         vias_to_remove = results_data.get('vias_to_remove') or []
         if vias_to_remove:
-            via_keys = {(round(v.x, POSITION_DECIMALS),
-                         round(v.y, POSITION_DECIMALS), v.net_id)
-                        for v in vias_to_remove}
-            for track in list(board.GetTracks()):
-                if track.Type() != pcbnew.PCB_VIA_T:
-                    continue
-                vk = (round(pcbnew.ToMM(track.GetPosition().x), POSITION_DECIMALS),
-                      round(pcbnew.ToMM(track.GetPosition().y), POSITION_DECIMALS),
-                      track.GetNetCode())
-                if vk in via_keys:
-                    board.RemoveNative(track)
-                    tracks_removed += 1
+            # Counted and lock-keyed, as remove_vias_from_content.
+            from .gui_utils import remove_listed_vias
+            tracks_removed += remove_listed_vias(board, pcbnew, vias_to_remove)
 
         # Add segments from routing results
         for result in results_data.get('results', []):
