@@ -8244,8 +8244,7 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         _PARSE_MEMO = {'live': {}, 'masked_from': {}, 'ends': {}, 'shapes': {}}
     tee = _ParseOutputTee() if key is not None else None
     try:
-        pcb = _parse_kicad_pcb(filepath, guide_layer, keepout_layer,
-                               read_board_text(filepath))
+        pcb = _parse_kicad_pcb(filepath, guide_layer, keepout_layer)
     finally:
         if tee is not None:
             tee.close()
@@ -8266,7 +8265,9 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
 
 
 def _parse_kicad_pcb(filepath: str, guide_layer: str,
-                     keepout_layer: str, content: str) -> PCBData:
+                     keepout_layer: str, content: str = None) -> PCBData:
+    if content is None:
+        content = read_board_text(filepath)
     kicad_version = detect_kicad_version(content)
     if 0 < kicad_version < FIRST_SUPPORTED_BOARD_VERSION:
         raise UnsupportedBoardFormat(
