@@ -1115,7 +1115,7 @@ def _pair_unit_lap(output_file, rk, filter_names):
         crossers = [n for n in filter_names(cand)][:_px.CROSSER_CAP]
         tmp = output_file[:-len('.kicad_pcb')] + '.pairlap.kicad_pcb' \
             if output_file.endswith('.kicad_pcb') else output_file + '.pairlap'
-        shutil.copyfile(output_file, tmp)
+        _stage_lap_board(output_file, tmp)
         strip_ids = {id_of[n] for n in [x, y] + crossers}
         n_s, n_v = _strip_written_copper(
             tmp, [s for s in pcb.segments if s.net_id in strip_ids],
@@ -1170,6 +1170,24 @@ def _pair_unit_lap(output_file, rk, filter_names):
     batch_route._targets_left_open = saved_tlo
     batch_route._victims_left_open = saved_vic
     return closed
+
+
+def _stage_lap_board(src, dst):
+    """Copy the board ``src`` to ``dst`` with its sibling project files.
+
+    The lap routes ``dst`` in a fresh batch_route, which reads the board's
+    rules (the copper-to-hole floor of resolve_hole_clearance, custom DRC
+    rules) from the ``.kicad_pro``/``.kicad_dru`` next to it. A bare board
+    copy has none, so the lap's map dropped the #1038 via-copper keep-out
+    and placed a via 0.16 mm off an NPTH wall under a declared 0.25."""
+    import shutil
+    shutil.copyfile(src, dst)
+    if not (src.endswith('.kicad_pcb') and dst.endswith('.kicad_pcb')):
+        return
+    for ext in ('.kicad_pro', '.kicad_dru'):
+        side = src[:-len('.kicad_pcb')] + ext
+        if os.path.exists(side):
+            shutil.copyfile(side, dst[:-len('.kicad_pcb')] + ext)
 
 
 # The change-set lists the final reconciliation extends (results_data keys).
