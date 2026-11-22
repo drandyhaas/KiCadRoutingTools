@@ -67,7 +67,13 @@ benches.json: on more than two layers, the fanout's with its via ends moved onto
 (route_bus JOINT_DIR, its group's buses routed together) is re-run as its chain ran it: its first solve as the bus
 solved it alone, compared with solve.solo.json -- the coupled solve wrote its own plan for the bus over solve.json, and
 a scene of its own shows that plan, the one the loop laid out -- and its loop's stages with the other buses' published
-lanes on the board (joint_lanes.foreign), the first solve with those of the buses already ended. The traces are
+lanes on the board (joint_lanes.foreign), the first solve with those of the buses already ended. The film then shows
+the NEGOTIATION too, read from the step's records and never run again (load_negotiation): every bus of the group on one
+clock (each one's fanout, first solve, wait for the coupled solve, loop, lay and end, from the step's events), the
+coupled solve's couplings at their places (the ones the buses' own plans broke, the ones the coupled plan still breaks),
+the others laying their copper while the filmed bus's loop runs -- under its later scenes, faint, from then on -- and,
+before its result, every bus's copper on the merged board together, each in a tint of its own, with its numbers. The
+traces are
 kept in RUNDIR/rN/movie/, and a re-run writes nothing else: no event of its own is appended to the step's events
 file (BUS_EVENTS is not given it). --check stops there: it says whether each re-run reproduced the chain's file (exit 1 when
 one did not), for a run on any number of layers.
@@ -850,6 +856,7 @@ def load_story(a):
         if not same:
             print(f'whole_movie: {hp} does not place {S.src} and {S.dst} where the bench does -- no human comparison')
     S.G = load_group(rdir, step, rec)
+    S.N = load_negotiation(S, step)
     return S
 
 
@@ -891,6 +898,12 @@ def load_group(rdir, step, rec):
     G.ev = [e for e in G.ev if e.get('group') in (None, step.get('src'))]
     ev1 = lambda st_, kd_: next((e for e in G.ev if e['stage'] == st_ and e['kind'] == kd_), None)
     G.plan = (ev1('step', 'plan') or {}).get('buses') or []
+    # (the nets each bus routes, from its first start: the plan counts the nets between its two parts alone, the bus
+    # routes those with a pad on a third part too)
+    for b in G.plan:
+        e = next((e for e in G.ev if e['stage'] == 'bus' and e['kind'] == 'start'
+                  and e.get('bus') == f'{b["src"]}:{b["dest"]}' and e.get('bus_nets')), None)
+        b['routed'] = e['bus_nets'] if e else b['nets']
     G.step_start = ev1('step', 'start') or {}
     G.cap_end = [e for e in G.ev if e['stage'] == 'capture' and e['kind'] == 'end']
     G.group_end = ev1('group', 'end')
@@ -996,6 +1009,106 @@ def load_group(rdir, step, rec):
     sp_ = os.path.join(G.out, 'summary.json')
     G.summary = json.load(open(sp_)) if os.path.isfile(sp_) else {}
     return G
+
+
+def load_negotiation(S, step):
+    """THE NEGOTIATION of a bus step's negotiated group (route_bus JOINT_DIR: the buses off one shared array, each its
+    own whole route in a process of its own, their first plans one COUPLED solve), or None: as the step recorded it,
+    never run again -- its events (each bus's start, fanout, first solve, its wait for the coupled solve, its loop and the
+    loop's re-solves, its lay, its grade and its end, on one clock from the negotiated route's start), the coupled solve's
+    report (JOINT_DIR/r1/joint.json: every coupling of two buses' lanes, the ones their own plans broke side by side, the
+    ones the coupled plan still breaks), the couplings each bus held through its loop (BUS.cuts.json), the polish steps
+    the buses took in step (spolish.*/BUS.done), each bus's summary and its loop's rounds, and the merged board: each
+    bus's copper on it, in the bench's frame (the group's turn, G.tb)"""
+    import ast
+    G = S.G
+    st_ = (step or {}).get('settings') or {}
+    jd = st_.get('JOINT_DIR')
+    if G is None or not jd or not os.path.isdir(jd):
+        return None
+    r0 = next((e for e in G.ev if e['stage'] == 'route' and e['kind'] == 'start' and e.get('negotiated')), None)
+    if r0 is None:
+        return None
+    N = Story()
+    N.dir, N.t0, N.me, src = jd, r0['t'], S.dest, step.get('src')
+    N.order = [b for b in (st_.get('JOINT_ORDER') or '').split(',') if b]
+    peers = [b for b in (st_.get('JOINT_PEERS') or '').split(',') if b]
+    N.buses = [b for b in N.order if b in peers] + [b for b in peers if b not in N.order]
+    rel = lambda e: (e['t'] - N.t0) if e else None                         # noqa: E731
+    N.ph = {}
+    for b in N.buses:
+        mine = [e for e in G.ev if e.get('bus') == f'{src}:{b}' and e['t'] >= N.t0 - 1]
+        first = lambda st, kd: next((e for e in mine if e['stage'] == st and e['kind'] == kd), None)   # noqa: E731
+        solves = [e for e in mine if e['stage'] == 'solve' and e['kind'] == 'end']
+        lp0 = first('loop', 'start')
+        N.ph[b] = dict(start=first('bus', 'start'), fanout=(rel(first('fanout', 'start')), rel(first('fanout', 'end'))),
+                       solve=(rel(first('solve', 'start')), rel(solves[0]) if solves else None),
+                       solve_ev=solves[0] if solves else None,
+                       wait=(rel(first('coupled', 'start')), rel(first('coupled', 'end'))),
+                       coupled=first('coupled', 'end'), loop=(rel(lp0), rel(first('loop', 'end'))),
+                       resolves=[rel(e) for e in solves if lp0 and e['t'] > lp0['t']],
+                       lay=(rel(first('lay', 'start')), rel(first('lay', 'end'))), laid=first('lay', 'end'),
+                       graded=first('bus', 'graded'), end=rel(first('bus', 'end')), end_ev=first('bus', 'end'))
+    ev1 = lambda st, kd: next((e for e in G.ev if e['stage'] == st and e['kind'] == kd and e['t'] >= N.t0), None)  # noqa
+    N.search, N.merge, N.grade = ev1('coupled', 'search'), ev1('merge', 'end'), ev1('grade', 'end')
+    N.t_end = max([rel(e) for e in G.ev if e['t'] >= N.t0] + [1.0])
+    # the coupled solve's report, its couplings put in the bench's frame
+    try:
+        J = json.load(open(os.path.join(jd, 'r1', 'joint.json')))
+    except (OSError, ValueError):
+        J = {}
+    pt = lambda c: G.tb(c[6])                                               # noqa: E731
+    key = lambda c: tuple(c[:6])                                           # noqa: E731
+    N.couplings = [pt(c) for c in J.get('all') or []]
+    N.broken_alone = [pt(c) for c in J.get('broken_alone') or []]
+    N.broken = [pt(c) for c in J.get('broken') or []]
+    # (the couplings the buses' own plans broke and the coupled plan settled: broken alone, not broken coupled)
+    still = {key(c) for c in J.get('broken') or []}
+    N.settled = [pt(c) for c in J.get('broken_alone') or [] if key(c) not in still]
+    N.joint_secs = J.get('secs')
+    N.held, N.mine_broken = {}, {}
+    for b in N.buses:
+        try:
+            N.held[b] = len(json.load(open(os.path.join(jd, 'r1', f'{b}.cuts.json'))).get('lcuts') or [])
+        except (OSError, ValueError):
+            N.held[b] = 0
+        N.mine_broken[b] = sum(1 for c in J.get('broken') or [] if b in (c[0], c[3]))
+    # (the steps the buses' loops took in step: each bus's polished plan published, said in spolish.R.L.I/BUS.done)
+    N.syncs = {b: [] for b in N.buses}
+    for d in sorted(os.listdir(jd)):
+        if d.startswith('spolish.') and os.path.isdir(os.path.join(jd, d)):
+            for f in os.listdir(os.path.join(jd, d)):
+                if f.endswith('.done') and f[:-5] in N.syncs:
+                    N.syncs[f[:-5]].append(os.path.getmtime(os.path.join(jd, d, f)) - N.t0)
+    # each bus's summary, its loop's rounds, and its copper on the merged board
+    gname = os.path.basename(G.work)[:-len('.bus')] if G.work.endswith('.bus') else os.path.basename(G.work)
+    gs = {}
+    try:
+        gs = json.load(open(os.path.join(G.out, f'{gname}.summary.json')))
+    except (OSError, ValueError):
+        pass
+    lit = lambda v: ast.literal_eval(v) if isinstance(v, str) else v       # noqa: E731
+    N.group_grade, N.conflicts = lit(gs.get('grade') or {}) or {}, gs.get('conflicts')
+    N.sum, N.rounds, nets = {}, {}, {}
+    for b in N.buses:
+        sp = os.path.join(G.work, 'neg', b, 'bus.bus', f'{src}-{b}.summary.json')
+        try:
+            N.sum[b] = json.load(open(sp))
+        except (OSError, ValueError):
+            N.sum[b] = {}
+        nets[b] = set(N.sum[b].get('routed') or [])
+        lg = _read(os.path.join(G.work, 'neg', b, 'bus.bus', 'run', 'r1', 'loop.log'))
+        N.rounds[b] = max([int(m) for m in re.findall(r'^=== round (\d+): geometry', lg, re.M)] or [0])
+    N.copper = {}
+    mp_ = gs.get('out')
+    if mp_ and os.path.isfile(mp_):
+        M = _parse(mp_)
+        for b in N.buses:
+            segs, vias = copper(M, nets[b])
+            N.copper[b] = ([(*G.tb(q_[:2]), *G.tb(q_[2:4]), q_[4], q_[5], q_[6]) for q_ in segs],
+                           [(*G.tb(v_[:2]), v_[2], v_[3]) for v_ in vias])
+    N.nets = nets
+    return N
 
 
 def copper(pcb, names):
@@ -1337,6 +1450,9 @@ class Film:
         self._states()
         self._copper()
         self.g = self._group() if S.G else None
+        self.neg = getattr(S, 'N', None)
+        if self.neg:
+            neg_prepare(self)
         # the layers the run's lanes stand on (the legend's, on more than two): their plans' and their copper's
         used = {self.LN[b] for st in self.st.values() for _P, bits in st.values() for b in set(bits.tolist())}
         used |= {s[5] for s in self.seq_c[0]} & set(self.LN)
@@ -2929,7 +3045,9 @@ def group_scenes(film, sc):
         a1, a2, a3 = ease(span(t, 0.12, 0.3)), ease(span(t, 0.4, 0.55)), ease(span(t, 0.55, 0.7))
         arrays(C, lambda d, Z, s, ref: balls(d, Z, s, a1, a2, a3))
         rows = [(f'the bus step found {pl(len(G.plan), "bus", "buses")}:', TEXT)]
-        rows += [(f'   {b["src"]} -> {b["dest"]}, {b["nets"]} nets -- {b["why"]}', DIM) for b in G.plan]
+        rows += [(f'   {b["src"]} -> {b["dest"]}, {b["routed"]} nets'
+                  + (f' ({b["nets"]} between the two parts alone)' if b['routed'] != b['nets'] else '')
+                  + f' -- {b["why"]}', DIM) for b in G.plan]
         rows += [(f'one group for each source array: {", ".join(srcs)}', TEXT),
                  (f'the capture, each bus\'s ends model by a short run of its own: {caps_}', TEXT if t > 0.3 else DIM)]
         card_lines(C, (BRAID[0], BRAID[1], BRAID[0] + 930, BRAID[3]), rows, 16)
@@ -3236,7 +3354,7 @@ def group_sound(film, sc, v):
     # ---- the buses, the group, the capture
     if 'buses' in by:
         nb, srcs = v['nb'], v['srcs']
-        bs = ', '.join(f'{spoken(b["src"])} to {spoken(b["dest"])}, {num(b["nets"])} nets' for b in G.plan)
+        bs = ', '.join(f'{spoken(b["src"])} to {spoken(b["dest"])}, {num(b["routed"])} nets' for b in G.plan)
         secs_ = [e.get('secs') for e in G.cap_end if e.get('secs') is not None]
         by['buses'].says = [
             (0, f'The bus step finds its buses: {plw(len(G.plan), "bus", "buses")}, {bs}. The buses that leave one '
@@ -3349,6 +3467,323 @@ def group_sound(film, sc, v):
         by['field'].cues = [(0.05, 'glide', 0.4, 0.4), (0.45, 'slide', 0.5, 0.6), (0.66, 'mark', 0.5), (0.85, 'chord', 1.0)]
 
 
+# ------------------------------------------------------------------------------- the negotiation's scenes
+BUS_TINT = ((255, 210, 90), (110, 200, 200), (205, 130, 205), (160, 205, 110), (200, 170, 130), (150, 160, 230))
+PHASE_C = {'fanout': (140, 148, 160), 'solve': (90, 230, 255), 'wait': (64, 70, 82), 'loop': (150, 245, 120),
+           'lay': (255, 165, 70)}
+
+
+def neg_prepare(film):
+    """the negotiation made ready for drawing: each bus's tint (the filmed bus's the film's gold), the view that holds
+    every bus's copper and arrays, and the other buses' copper, drawn faint where the focus is the filmed bus"""
+    S, N = film.S, film.S.N
+    N.tint = {b: BUS_TINT[0] if b == N.me else BUS_TINT[1 + j % (len(BUS_TINT) - 1)]
+              for j, b in enumerate([b for b in N.buses if b != N.me])}
+    N.tint[N.me] = BUS_TINT[0]
+    pts = [(q[0], q[1]) for segs, _v in N.copper.values() for q in segs] + \
+          [(q[2], q[3]) for segs, _v in N.copper.values() for q in segs]
+    for ref in [S.src] + N.buses:
+        fp = S.fo.footprints.get(ref)
+        if fp is not None:
+            pts += [(p.global_x, p.global_y) for p in fp.pads]
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    N.view = fit_view(BOARD, (min(xs) - 1.5, min(ys) - 1.5, max(xs) + 1.5, max(ys) + 1.5))
+    N.peer_segs = [q for b in N.buses if b != N.me for q in N.copper.get(b, ([], []))[0]]
+    N.peer_vias = [q for b in N.buses if b != N.me for q in N.copper.get(b, ([], []))[1]]
+    N.field = {b: [q for q in (film.g.field_segs if film.g else []) if q[6] in N.nets.get(b, ())] for b in N.buses}
+
+
+def neg_view(C, film, draw, title, show=None, field=1.0):
+    """the whole group, every bus where it runs, in the board's panel: its pads, each bus's field ends (`field`), each
+    bus's copper as `show` {bus: alpha} has it -- its layers' colours over its tint -- then draw(d, Z, s); each bus named
+    by its destination"""
+    N = film.S.N
+
+    def fn(d, Z, s):
+        for b in N.buses:
+            if field > 0.02:
+                _mdraw(d, Z, s, N.field[b], (), field * (1.0 if b == N.me else 0.6))
+        for b, a in (show or {}).items():
+            segs, vias = N.copper.get(b, ([], []))
+            if a <= 0.02:
+                continue
+            tw = mix(BODY, N.tint[b], 0.38 * a)
+            for q in segs:
+                (x0, y0), (x1, y1) = Z(q[0], q[1]), Z(q[2], q[3])
+                d.line([(x0, y0), (x1, y1)], fill=tw, width=max(2, int((q[4] * s) + 5 * SS)))
+            _mdraw(d, Z, s, segs, [v_[:2] for v_ in vias], a, via_d=film.rules['via'])
+        for b in N.buses:
+            fp = film.S.fo.footprints.get(b)
+            if fp is not None:
+                xs = [p.global_x for p in fp.pads]
+                ys = [p.global_y for p in fp.pads]
+                x, y = Z((min(xs) + max(xs)) / 2, min(ys))
+                d.text((x, y - 6 * SS), b, font=font(15 * SS, True), fill=N.tint[b], anchor='mb')
+        draw(d, Z, s)
+    magnify(C, film, BOARD, N.view, fn, title, frame=False)
+
+
+def neg_timeline(C, film, box, now, a=1.0):
+    """the negotiation on its clock: a row for each bus in the standing order, its phases as the step's events have
+    them -- its fanout, its first solve, its wait for the coupled solve, its loop (each re-solve a tick, each polish
+    taken in step a dot), its lay, its end -- drawn up to `now` (seconds from the negotiated route's start)"""
+    N = film.S.N
+    C.card(box, alpha=0.95)
+    gx0, gx1 = box[0] + 170, box[2] - 30
+    top, bot = box[1] + 34, box[3] - 46
+    rh = (bot - top) / max(1, len(N.buses))
+    X = lambda ts: gx0 + min(ts, N.t_end) / N.t_end * (gx1 - gx0)          # noqa: E731
+    for m in range(0, int(N.t_end // 600) + 1):
+        x = X(m * 600)
+        C.line([(x, top - 6), (x, bot + 4)], mix(PANEL, (44, 48, 58), a), 1)
+        C.text(x, bot + 8, f'{m * 10} min', 11, mix(PANEL, DIM, a), anchor='ma')
+    cs = N.search
+    if cs:
+        t1 = cs['t'] - N.t0
+        x0, x1 = X(max(0.0, t1 - cs['secs'])), X(min(t1, now))
+        if x1 > x0:
+            C.rect((x0, top - 4, x1, bot), outline=mix(PANEL, (255, 90, 210), a), width=1.5)
+            C.text(x0 + 4, top - 18, 'the coupled solve', 11, mix(PANEL, (255, 90, 210), a))
+    for i, b in enumerate(N.buses):
+        P = N.ph[b]
+        y = top + (i + 0.5) * rh
+        C.text(box[0] + 14, y, f'{b}', 15, mix(PANEL, ACCENT if b == N.me else TEXT, a), bold=b == N.me, anchor='lm')
+        C.text(box[0] + 60, y, f'{(P["start"] or {}).get("nets", "?")} nets', 12, mix(PANEL, DIM, a), anchor='lm')
+        for k in ('fanout', 'solve', 'wait', 'loop', 'lay'):
+            t0_, t1_ = P[k]
+            if t0_ is None or t0_ > now:
+                continue
+            t1_ = min(t1_ if t1_ is not None else now, now)
+            C.rect((X(t0_), y - rh * 0.28, max(X(t0_) + 1, X(t1_)), y + rh * 0.28), fill=mix(PANEL, PHASE_C[k], a))
+        for tr in P['resolves']:
+            if tr is not None and tr <= now:
+                C.line([(X(tr), y - rh * 0.4), (X(tr), y + rh * 0.4)], mix(PANEL, TEXT, a), 1.5)
+        for ts in N.syncs.get(b, []):
+            if ts <= now:
+                C.d.ellipse([(X(ts) - 3) * SS, (y - rh * 0.4 - 3) * SS, (X(ts) + 3) * SS, (y - rh * 0.4 + 3) * SS],
+                            fill=mix(PANEL, TEXT, a))
+        if P['end'] is not None and P['end'] <= now:
+            x = X(P['end'])
+            C.d.ellipse([(x - 6) * SS, (y - 6) * SS, (x + 6) * SS, (y + 6) * SS], outline=mix(PANEL, (150, 245, 120), a),
+                        width=2 * SS)
+    x = X(min(now, N.t_end))
+    C.line([(x, top - 8), (x, bot + 4)], mix(PANEL, ACCENT, a), 1.2)
+    lx = box[0] + 14
+    for k, lab in (('fanout', 'fanout'), ('solve', 'first solve, alone'), ('wait', 'waiting for the coupled solve'),
+                   ('loop', 'loop (| a re-solve, · a polish taken in step)'), ('lay', 'lay')):
+        C.rect((lx, box[3] - 22, lx + 12, box[3] - 12), fill=mix(PANEL, PHASE_C[k], a))
+        C.text(lx + 18, box[3] - 24, lab, 11, mix(PANEL, DIM, a))
+        lx += 30 + C.tlen(lab, 11)
+    C.text(lx + 10, box[3] - 24, 'o its end', 11, mix(PANEL, (150, 245, 120), a))
+
+
+def neg_mins(ts):
+    return f'{ts / 60:.0f} min'
+
+
+def neg_scene_start(film, sc):
+    """THE NEGOTIATION, before the filmed bus's own run: every bus of the group routed by a whole route of its own, all
+    at once, in a standing order; each one's first solve alone, and the wait for the coupled solve"""
+    S, N = film.S, film.S.N
+    me = N.ph[N.me]
+    t_hi = me['wait'][0] or N.t_end * 0.3
+    solved = [(b, N.ph[b]['solve_ev']) for b in N.buses if N.ph[b]['solve_ev']]
+
+    def fn(C, t, T_):
+        now = ease(span(t, 0.08, 0.9)) * t_hi
+        neg_view(C, film, lambda d, Z, s: None, f'the group: {len(N.buses)} buses off {S.src}, each on its own ends of '
+                                                f'the shared field', field=1.0)
+        neg_timeline(C, film, BRAID, now)
+    order_ = ', '.join(N.order)
+    sv = '; '.join(f'{b} in {e["secs"]} s' + ('' if e.get('proved') else ', kept unproved') for b, e in solved)
+    at_ = lambda ts: 0.08 + 0.82 * min(1.0, ts / t_hi)                    # noqa: E731
+    sc.append(Scene('negotiate', 'negotiation', 18, fn, [
+        (0, f'THE NEGOTIATION. The {len(N.buses)} buses off {S.src} are routed together, each by a whole route of its '
+            f'own in a process of its own, all at once: ' + ', '.join(f'{b} ({(N.ph[b]["start"] or {}).get("nets", "?")} '
+                                                                     f'nets)' for b in N.buses) + '.'),
+        (0.3, f'They stand in an order, {order_}: a bus plans round the lanes the buses before it publish, and every bus '
+              f'round the copper any bus has laid. {N.order[-1] if N.order else N.me} plans last, round all of them.'),
+        (0.6, f'Each solves its first plan alone ({sv}), publishes it, and waits: the first plans are solved again '
+              f'together, in one coupled solve.')],
+        says=[(0, f'The {len(N.buses)} buses off this array are routed together, each by a whole route of its own, all '
+                  f'at once.'),
+              (0.3, f'They stand in an order: {", ".join(spoken(b) for b in N.order)}. A bus plans around the lanes '
+                    f'of the buses before it, and every bus around the copper any of them has laid.'),
+              (0.6, 'Each solves its first plan alone, publishes it, and waits for the others.')],
+        cues=[(0.02, 'swell', 0.4)] + [(at_(N.ph[b]['solve'][1]), 'ping', 0.3 + 0.7 * j / max(1, len(solved) - 1))
+                                       for j, (b, _e) in enumerate(solved) if N.ph[b]['solve'][1] is not None
+                                       and N.ph[b]['solve'][1] <= t_hi]
+        + [(at_(N.ph[b]['wait'][0]), 'mark', 0.4) for b in N.buses if N.ph[b]['wait'][0] is not None
+           and N.ph[b]['wait'][0] <= t_hi]))
+
+
+def neg_scene_couplings(film, sc):
+    """THE COUPLED SOLVE, for the whole group: where two buses' plans cross or pass near (its couplings, at their places),
+    the ones the buses' own plans broke side by side, and the ones the coupled plan still breaks"""
+    S, N = film.S, film.S.N
+    cs = N.search or {}
+    t_lo = min([N.ph[b]['wait'][0] for b in N.buses if N.ph[b]['wait'][0] is not None] or [0.0])
+    t_hi = max([N.ph[b]['wait'][1] for b in N.buses if N.ph[b]['wait'][1] is not None] or [N.t_end])
+    settled = len(N.settled)
+    waits = ', '.join(f'{b} {neg_mins(N.ph[b]["wait"][1] - N.ph[b]["wait"][0])}' for b in N.buses
+                      if N.ph[b]['wait'][0] is not None and N.ph[b]['wait'][1] is not None)
+
+    def fn(C, t, T_):
+        a_all = ease(span(t, 0.08, 0.25))
+        a_al = ease(span(t, 0.35, 0.45)) * (1 - ease(span(t, 0.62, 0.7)))
+        a_cp = ease(span(t, 0.62, 0.72))
+
+        def marks(d, Z, s):
+            r = max(1.5 * SS, 0.06 * s)
+            if a_all > 0.02:
+                for x, y in N.couplings:
+                    cx, cy = Z(x, y)
+                    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=mix(BODY, (200, 204, 214), 0.55 * a_all))
+            R = max(3 * SS, 0.16 * s)
+            for (x, y) in (N.broken_alone if a_al > 0.02 else []):
+                cx, cy = Z(x, y)
+                d.line([(cx - R, cy - R), (cx + R, cy + R)], fill=mix(BODY, LESSON_C, a_al), width=2 * SS)
+                d.line([(cx - R, cy + R), (cx + R, cy - R)], fill=mix(BODY, LESSON_C, a_al), width=2 * SS)
+            if a_cp > 0.02:
+                for (x, y) in N.settled:
+                    cx, cy = Z(x, y)
+                    d.ellipse([cx - R, cy - R, cx + R, cy + R], outline=mix(BODY, (150, 245, 120), a_cp), width=2 * SS)
+                for (x, y) in N.broken:
+                    cx, cy = Z(x, y)
+                    d.line([(cx - R, cy - R), (cx + R, cy + R)], fill=mix(BODY, LESSON_C, a_cp), width=3 * SS)
+                    d.line([(cx - R, cy + R), (cx + R, cy - R)], fill=mix(BODY, LESSON_C, a_cp), width=3 * SS)
+        neg_view(C, film, marks, 'the coupled solve: where two buses\' lanes cross or pass near', field=0.6)
+        neg_timeline(C, film, BRAID, t_lo + ease(span(t, 0.05, 0.9)) * (t_hi - t_lo))
+        box = (BOARD[0] + 10, BOARD[1] + 34, BOARD[0] + 560, BOARD[1] + 250)
+        C.card(box)
+        rows = [(f'{len(N.couplings):,} couplings: a lane of one bus crossing or passing near a lane of another', TEXT),
+                (f'the buses\' own plans side by side: {len(N.broken_alone):,} broken (red)', LESSON_C if t >= 0.35 else DIM),
+                (f'the coupled search: {cs.get("secs", "?")} s, {len(N.broken):,} still broken; {settled:,} settled '
+                 f'(green)', (150, 245, 120) if t >= 0.62 else DIM),
+                ('each bus\'s plan the coupled one, and the couplings it holds through its loop: '
+                 + ', '.join(f'{b} {N.held[b]}' for b in N.buses), DIM),
+                (f'the waits for it: {waits}', DIM)]
+        y = box[1] + 14
+        for ln, col in rows:
+            for w_ in C.wrap(ln, 14, box[2] - box[0] - 28):
+                if y < box[3] - 18:
+                    C.text(box[0] + 14, y, w_, 14, col)
+                y += 19
+            y += 5
+    sc.append(Scene('couplings', 'negotiation', 16, fn, [
+        (0, f'THE COUPLED SOLVE. Every bus\'s model is built again into one, and the buses are COUPLED where their lanes '
+            f'cross or pass near: {len(N.couplings):,} couplings, each settled by putting the two lanes on different '
+            f'layers there, or broken at a price.'),
+        (0.35, f'Side by side, the buses\' own plans break {len(N.broken_alone):,} of them (red).'),
+        (0.62, f'The coupled search ran {cs.get("secs", "?")} s: {len(N.broken):,} still broken, {settled:,} settled '
+               f'(green). Each bus takes the coupled plan, and holds its couplings through its loop. The buses that '
+               f'solved alone fastest waited the longest: {waits}.')],
+        says=[(0, f'Then the coupled solve: every bus\'s model built into one, coupled wherever two buses\' lanes cross '
+                  f'or pass near; {len(N.couplings):,} couplings.'),
+              (0.35, f'Side by side, the buses\' own plans break {len(N.broken_alone):,} of them, in red.'),
+              (0.62, f'After {cs.get("secs", "?")} seconds of coupled search, {len(N.broken):,} are still broken, and '
+                     f'{settled:,} are settled, in green.')],
+        cues=[(0.05, 'swell', 0.4), (0.1, 'shimmer', 0.6), (0.36, 'alert', 0.5), (0.63, 'chord', 1.0)]))
+
+
+def neg_scene_others(film, sc):
+    """THE OTHER BUSES FINISH, while the filmed bus's loop runs: each one's laid copper on the group's board as it ends,
+    its rounds and its time; from there on the filmed bus plans round it"""
+    S, N = film.S, film.S.N
+    me = N.ph[N.me]
+    t_lo = me['loop'][0] if me['loop'][0] is not None else 0.0
+    t_hi = me['loop'][1] if me['loop'][1] is not None else N.t_end
+    others = [b for b in N.buses if b != N.me]
+    fin = {b: N.ph[b]['laid']['t'] - N.t0 if N.ph[b]['laid'] else None for b in others}
+
+    def fn(C, t, T_):
+        now = t_lo + ease(span(t, 0.05, 0.9)) * (t_hi - t_lo)
+        show = {b: ease(min(1.0, max(0.0, (now - fin[b]) / max(1.0, 0.04 * (t_hi - t_lo))))) for b in others
+                if fin[b] is not None}
+        neg_view(C, film, lambda d, Z, s: None, 'the others lay their copper while this bus\'s loop runs', show=show,
+                 field=0.8)
+        neg_timeline(C, film, BRAID, now)
+
+    def done(b):
+        lv, P = N.ph[b]['laid'] or {}, N.ph[b]
+        return (f'{b} at {neg_mins(fin[b])}: {lv.get("lanes", "?")} lanes, {lv.get("vias", "?")} vias, '
+                f'{lv.get("copper_mm", "?")} mm, loop rounds {N.rounds.get(b, "?")}')
+    nres = len(me['resolves'])
+    at_ = lambda ts: 0.05 + 0.85 * min(1.0, max(0.0, (ts - t_lo) / max(1.0, t_hi - t_lo)))   # noqa: E731
+    sc.append(Scene('others', 'negotiation', 14, fn, [
+        (0, f'Meanwhile the others: each bus\'s loop runs on its own, the first polish of every loop taken in step (each '
+            f'bus\'s polished plan published before any audits it), then each at its own pace.'),
+        (0.3, 'They finish one after another, each publishing the copper it laid: ' + '; '.join(done(b) for b in others
+                                                                                                if fin[b] is not None)
+         + '.'),
+        (0.7, f'{N.me}, last in the order, plans round all of it: its loop solved again {pl(nres, "time")}, on a board '
+              f'with their copper on it -- faint from here on -- and ended at {neg_mins(t_hi)}.')],
+        says=[(0, 'Meanwhile, each of the other buses runs its own loop.'),
+              (0.3, 'They finish one after another: ' + ', '.join(f'{spoken(b)} at {fin[b] / 60:.0f} minutes'
+                                                                  for b in others if fin[b] is not None)
+               + '. Each publishes the copper it laid.'),
+              (0.7, f'This bus, last in the order, plans around all of it: its loop solves again {pl(nres, "time")}, '
+                    f'and ends at {t_hi / 60:.0f} minutes.')],
+        cues=[(at_(fin[b]), 'chord', 0.0) for b in others if fin[b] is not None]
+        + [(at_(tr), 'tick', 0.5) for tr in me['resolves'] if tr is not None]))
+
+
+def neg_scene_together(film, sc):
+    """ALL TOGETHER: every bus's copper on the merged board, each with its tint and its numbers"""
+    S, N = film.S, film.S.N
+    gg = N.group_grade or {}
+    g_open = len(gg.get('open') or []) if isinstance(gg.get('open'), list) else gg.get('open')
+    g_drc = (gg.get('drc') or {}).get('n') if isinstance(gg.get('drc'), dict) else gg.get('drc')
+
+    def row(b):
+        lv, gr, P = N.ph[b]['laid'] or {}, N.ph[b]['graded'] or {}, N.ph[b]
+        return (b, f'{(P["start"] or {}).get("nets", "?")} nets', f'{gr.get("vias", lv.get("vias", "?"))} vias',
+                f'{gr.get("copper_mm", lv.get("copper_mm", "?"))} mm', f'{lv.get("open", "?")} open',
+                f'{gr.get("drc", lv.get("drc", "?"))} DRC', f'loop rounds {N.rounds.get(b, "?")}',
+                neg_mins(P['end']) if P['end'] is not None else '?')
+
+    def fn(C, t, T_):
+        a = {b: ease(span(t, 0.05 + 0.08 * j, 0.2 + 0.08 * j)) for j, b in enumerate(N.buses)}
+        neg_view(C, film, lambda d, Z, s: None, 'all together: every bus\'s copper on the merged board', show=a,
+                 field=0.0)
+        C.card(BRAID, alpha=0.95)
+        x0, y0 = BRAID[0] + 20, BRAID[1] + 16
+        cols = [0, 110, 210, 320, 430, 530, 630, 790]
+        for j, b in enumerate(N.buses):
+            aj = a[b]
+            y = y0 + j * 30
+            C.rect((x0, y + 4, x0 + 26, y + 16), fill=mix(PANEL, N.tint[b], aj))
+            for k, cell in enumerate(row(b)):
+                C.text(x0 + 40 + cols[k], y, cell, 16, mix(PANEL, ACCENT if (k == 0 and b == N.me) else TEXT, aj),
+                       bold=k == 0)
+        C.text(x0, BRAID[3] - 36, f'merged: {N.conflicts if N.conflicts is not None else "?"} conflicts between the '
+               f'buses; the group\'s grade: {g_open} open, {g_drc} violations, '
+               f'{len((gg.get("walled") or {}).get("walled") or [])} walled', 16,
+               mix(PANEL, (150, 245, 120), ease(span(t, 0.5, 0.6))))
+    tot_v = sum((N.ph[b]['graded'] or {}).get('vias', 0) for b in N.buses)
+    sc.append(Scene('together', 'negotiation', 14, fn, [
+        (0, f'ALL TOGETHER: the {len(N.buses)} buses\' copper merged onto one board, each in its own tint, the layers in '
+            f'their colours. {N.me} is the one this film follows.'),
+        (0.5, f'The merge found {N.conflicts if N.conflicts is not None else "no record of"} conflicts between them, '
+              f'and the group\'s grade is {g_open} open, {g_drc} violations: {tot_v} vias over the {len(N.buses)} buses.')],
+        says=[(0, f'All together: the {len(N.buses)} buses\' copper, merged onto one board.'),
+              (0.5, f'{N.conflicts if N.conflicts is not None else "No"} conflicts between them; the group has '
+                    f'{g_open} open nets and {g_drc} design rule violations.')],
+        cues=[(0.05 + 0.08 * j, 'pluck', j / max(1, len(N.buses) - 1)) for j in range(len(N.buses))]
+        + [(0.5, 'chord', 1.0)]))
+
+
+def with_peers(film, fn):
+    """a scene of the filmed bus with the other buses' copper under it, faint: what its stages planned round"""
+    N = film.S.N
+
+    def fn2(C, t, T_):
+        C.segs(N.peer_segs, alpha=0.3)
+        C.cvias(N.peer_vias, 0.3)
+        fn(C, t, T_)
+    return fn2
+
+
 def build_scenes(film, speed=1.0):
     S, T, Gt = film.S, film.S.T, film.S.Gt
     nl, npairs = len(film.M), len(S.pairs)
@@ -3404,6 +3839,8 @@ def build_scenes(film, speed=1.0):
     # ------------------------------------------------------------------ the group's ends (a bus step's run)
     if film.g:
         group_scenes(film, sc)
+    if film.neg:
+        neg_scene_start(film, sc)
 
     # ------------------------------------------------------------------ the ends
     e0 = next((e for e in S.ends if e[0].startswith('on the teeth')), None)
@@ -3892,6 +4329,8 @@ def build_scenes(film, speed=1.0):
     sc.append(Scene('solve', 'solve', 26, solve, cap_s, says=say_s, cues=cue_s))
 
     # ------------------------------------------------------------------ the coupled solve (a negotiated bus's round)
+    if film.neg:
+        neg_scene_couplings(film, sc)
     if film.coupled:
         jn = S.coupled['joint']
         v_own, v_cp = (sum(len(v) for v in P_.changes.values()) for P_ in (film.root, film.coupled))
@@ -3923,13 +4362,18 @@ def build_scenes(film, speed=1.0):
                         C.text(box[0] + 16, y, w_, 14, mix(PANEL, col, a))
                     y += 19
                 y += 4
+        # (where the film has shown the group's coupled solve just before -- a negotiation -- this scene is its plan for
+        # this bus alone)
         sc.append(Scene('coupled', 'solve', 10, coupled, [
-            (0, f'THE COUPLED SOLVE. The buses off one array each solved their first plan alone; then every bus\'s model '
-                f'is built again into ONE, coupled wherever two buses\' lanes cross or pass near: on different layers '
-                f'there, or the coupling broken at a price.'),
+            (0, f'The coupled solve\'s plan for {S.dst}, on the board and in the braid, from the plan it solved alone.'
+             if film.neg else
+             f'THE COUPLED SOLVE. The buses off one array each solved their first plan alone; then every bus\'s model '
+             f'is built again into ONE, coupled wherever two buses\' lanes cross or pass near: on different layers '
+             f'there, or the coupling broken at a price.'),
             (0.3, f'Its plan for {S.dst}: {v_cp} layer changes, where alone it had {v_own}, {moved_} crossings moved. This '
                   f'plan, not its own, is the one its loop lays out.')],
-            says=[(0, 'Then the coupled solve: every bus off this array is solved again together, so that where their lanes '
+            says=[(0, 'Here is the coupled plan for this bus, moving from the plan it solved alone.' if film.neg else
+                      'Then the coupled solve: every bus off this array is solved again together, so that where their lanes '
                       'cross, they stand on different layers.'),
                   (0.3, f'For this bus, {v_cp:,} layer changes, where alone it had {v_own:,}. Its loop starts from this '
                         f'plan.')],
@@ -4037,6 +4481,12 @@ def build_scenes(film, speed=1.0):
                   + ([((j + 0.16) / len(fails), 'shimmer', 0.6)] if F_['flips'] else [])
                   + ([((j + 0.35) / len(fails), 'mark', 0.6)] if F_['cuts'] or F_['hot'] else [])
                   + [((j + 0.6) / len(fails), 'glide', 0.5, (j + 0.85) / len(fails))]]))
+
+    # ------------------------------------------------------------------ the other buses finish (a negotiated group)
+    n_peers = None
+    if film.neg:
+        neg_scene_others(film, sc)
+        n_peers = len(sc)
 
     # ------------------------------------------------------------------ the geometry
     def forces(C, marks, a, wmax=5.0):
@@ -4551,6 +5001,9 @@ def build_scenes(film, speed=1.0):
               if film.routed[n][0] or film.routed[n][1]]
         + [(0.85, 'chord' if S.connected and S.drc_clean else 'alert', 1.0)]))
 
+    if film.neg:
+        neg_scene_together(film, sc)
+
     # ------------------------------------------------------------------ the result
     m_ = re.search(r'(\d+/\d+) in band', S.route_summary)
     band_ = m_.group(1) if m_ else '?'
@@ -4663,6 +5116,11 @@ def build_scenes(film, speed=1.0):
                         if film.g else []),
                     cues=[(0, 'swell', 0.6)] + ([(0.3, 'shimmer', 0.5), (0.6, 'chord' if esc_clean else 'alert', 1.0)]
                                                 if film.g else [])))
+    if n_peers is not None:
+        # (the filmed bus's scenes after the others finished: their copper under it, faint)
+        for s_ in sc[n_peers:]:
+            if s_.key not in ('together', 'coda'):
+                s_.fn = with_peers(film, s_.fn)
     for s in sc:
         s.secs *= speed
     return sc
@@ -4695,17 +5153,21 @@ def short_clips(film, secs=15.0):
     board; a cut changes what is drawn, never where the camera is. The moments are the run's own and so is their choice
     (the same run gives the same short): each stage the run recorded is a candidate --
 
-      search   the group's ends model searching (a bus step's group): its states one after another, the ends each moved
-               ringed -- its worth the states the search held;
+      search   the group's ends model searching (a bus step's group), on the model's own clock: every state a solve
+               ended on, its ends at both arrays, the ones it moved ringed, and the rounds between them as the film's
+               chart of the search draws their bests -- its worth the states the search held, its share of the beats
+               its rounds besides;
       strings  each lane a straight string pulled taut round the copper -- the strings that bend;
       solve    CP-SAT's plans one after another, each lane in its references' slot (a negotiated bus's last, the coupled
                solve's) -- the plans;
       rounds   the 2-D geometry's rounds settling the lanes among the cells -- its rounds and their events;
       snap     the smooth lanes laid on the router's grid, the pairs first -- a constant;
-      lay      the router's copper coming in, lane after lane, in the order it was laid: always, last --
+      lay      the router's copper coming in, lane after lane, in the order it was laid, a single-ended lane twice as
+               fast as a pair's: always, last --
 
     and the candidates the beats allow, the most worth first, are played in the run's order, SHORT_MIN beats each and
-    the rest of the beats shared by worth; the lay has SHORT_LAY of them"""
+    the rest of the beats shared by worth. The lay is paced as SHORT_LAY of the beats would bring every lane in at a
+    pair's pace, and the beats its singles save go to the search first"""
     S, T = film.S, film.S.T
     beat = 60.0 / SHORT_BPM
     nb = max(SHORT_MIN + 5, int(round(secs / beat)))
@@ -4737,17 +5199,41 @@ def short_clips(film, secs=15.0):
     cands = []
     # ------------------------------------------------------------------ the group's search
     if film.g and len(film.g.states) > 1:
-        g = film.g
+        g, G = film.g, S.G
         st_ = lambda q: [(a, b, c, d_, TW, L, None) for a, b, c, d_, L in q]   # noqa: E731
-        live = [j for j, st in enumerate(g.states) if not j or j == len(g.states) - 1 or st['moved']]
+        # (the search on the model's own clock: every state a solve ended on -- its ends at both arrays, the ones it
+        # moved ringed -- and between them the rounds, each one's best as the search reported it, drawn as the film's
+        # chart draws them: no ends are recorded for a round, so a round moves no end on the board)
+        m_t = [M_['model']['t'] for M_ in G.models]
+        r_t = [r_['t'] for r_ in G.rounds if r_['best'] and r_['best'] > 0]
+        t_all = max(m_t + r_t + [1.0])
+        line_v = [M_['uncounted'] or M_['start_value'] for M_ in G.models]
+        lv_ = [v for v in line_v if v] or [1.0]
+        vals = [r_['best'] for r_ in G.rounds if r_['best'] and r_['best'] > 0] + lv_
+        vlo, vhi = max(1.0, min(vals) * 0.9), max(lv_) * 1.8
+        rcol = lambda lab: ((255, 170, 60) if 'costly' in lab else (90, 230, 255) if 'rest held' in lab else  # noqa: E731
+                            (255, 90, 210) if lab == 'the model' else (215, 220, 228))
+        # (the chart below the bus where the frame has room for it, else above it)
+        vy0, vy1 = film.X(0, film.view[1])[1] / SS, film.X(0, film.view[3])[1] / SS
+        cbox = (60, H - 150, W - 60, H - 24) if H - vy1 >= 140 or vy0 < 140 else (60, 24, W - 60, 150)
 
         def c_search(beats):
-            seq = thin(live, beats)
-            t0s = starts(beats, len(seq))
+            # (every state, and the rounds sampled evenly between them, a step each on the quarter beats)
+            steps = 4 * beats
+            ev_ = sorted((t_, 0, j_) for j_, t_ in enumerate(m_t))
+            if len(ev_) > steps:
+                ev_ = thin(ev_, steps)
+            else:
+                ev_ = sorted(ev_ + [(t_, 1, -1) for t_ in thin(sorted(r_t), steps - len(ev_))])
+            t0s = starts(beats, len(ev_), per=4)
+            jat = []
+            for _t, kind_, j_ in ev_:
+                jat.append(j_ if kind_ == 0 else (jat[-1] if jat else 0))
 
             def fn(C, t, T_):
                 C.segs(film.other_c[0], alpha=0.22)
-                j = seq[stepper(t, t0s)[0]]
+                k, f = stepper(t, t0s)
+                j = jat[k]
                 ends = g.states[j]['ends']
                 for segs, vias in ends.values():
                     C.segs(st_(segs))
@@ -4755,9 +5241,29 @@ def short_clips(film, secs=15.0):
                 for key in (g.states[j]['moved'] if j else ()):
                     if key in ends and ends[key][0]:
                         C.wring(*ends[key][0][-1][2:4], 0.3, MOVED_C, 2)
+                # the film's chart of the search, its clock run to this step's moment
+                now = ev_[k][0] + (ev_[k + 1][0] - ev_[k][0]) * f if k + 1 < len(ev_) else ev_[k][0]
+                C.card(cbox, alpha=0.92)
+                gx0, gy0, gx1, gy1 = cbox[0] + 20, cbox[1] + 14, cbox[2] - 20, cbox[3] - 14
+                Xc = lambda ts: gx0 + ts / t_all * (gx1 - gx0)                                        # noqa: E731
+                Yc = lambda v: gy1 - (math.log(max(v, vlo)) - math.log(vlo)) / (math.log(vhi) - math.log(vlo)) \
+                    * (gy1 - gy0)                                                                     # noqa: E731
+                C.line([(gx0, gy0), (gx0, gy1), (gx1, gy1)], DIM, 1)
+                for r_ in G.rounds:
+                    if r_['t'] <= now and r_['best'] and vlo <= r_['best'] <= vhi:
+                        x, y = Xc(r_['t']), Yc(r_['best'])
+                        C.d.ellipse([(x - 2.4) * SS, (y - 2.4) * SS, (x + 2.4) * SS, (y + 2.4) * SS],
+                                    fill=rcol(r_['label']))
+                for tt, v in zip(m_t, line_v):
+                    if v and tt <= now:
+                        x, y = Xc(tt), Yc(v)
+                        C.d.rectangle([(x - 4) * SS, (y - 4) * SS, (x + 4) * SS, (y + 4) * SS], fill=ACCENT)
+                C.line([(Xc(min(now, t_all)), gy0), (Xc(min(now, t_all)), gy1)], (120, 126, 140), 1)
+            # (a soft tick on each state the search ends a solve on)
             return Clip('search', 'search', beats, fn,
-                        cues=[(t0s[k], 'bell', k / max(1, len(seq) - 1)) for k in range(1, len(seq))])
-        cands.append((0, 'search', 1 + math.log2(len(g.states)), c_search))
+                        cues=[(t0s[k], 'tick', 0.4) for k in range(1, len(ev_)) if ev_[k][1] == 0])
+        # (its worth the states the search held; its share of the beats, its rounds besides)
+        cands.append((0, 'search', 1 + math.log2(len(g.states)), c_search, 1 + math.log2(len(g.states) + len(r_t))))
 
     # ------------------------------------------------------------------ the taut strings
     if film.strings:
@@ -4785,7 +5291,7 @@ def short_clips(film, secs=15.0):
                                               for j, (_s, _k, n_) in enumerate(film.relax_at)] if film.relax else
                                              [(0.0, 'glide', 0.5, 0.9)]) + [(0.9, 'pluck', 0.2)]
             return Clip('strings', 'strings', beats, fn, cues=cues)
-        cands.append((1, 'strings', 1 + math.log2(1 + len(bent)), c_strings))
+        cands.append((1, 'strings', 1 + math.log2(1 + len(bent)), c_strings, None))
 
     # ------------------------------------------------------------------ the solve's plans, in the references' slots
     if film.plans:
@@ -4809,7 +5315,7 @@ def short_clips(film, secs=15.0):
             cues = [(t0s[k], 'bell', better(o)) for k, o in enumerate(objs) if k] + \
                 [(t0s[len(keys) - 1], 'chord', 1.0 if proved and not film.coupled else 0.0)]
             return Clip('solve', 'solve', beats, fn, cues=cues)
-        cands.append((2, 'solve', 2 + math.log2(1 + len(film.plans)), c_solve))
+        cands.append((2, 'solve', 2 + math.log2(1 + len(film.plans)), c_solve, None))
 
     # ------------------------------------------------------------------ the 2-D geometry's rounds
     if S.Et and len(film.eseq) > 2:
@@ -4872,7 +5378,7 @@ def short_clips(film, secs=15.0):
                     cues.append((t0s[k], 'slide', 0.5, t0s[k + 1]))
             return Clip('rounds', 'geometry', beats, fn, cues=cues)
         tot_ = sum(r['hops'] + r['nexc'] + r['npull'] for r in E['rounds'])
-        cands.append((3, 'rounds', 1 + math.log2(1 + len(E['rounds'])) + 0.5 * math.log10(1 + tot_), c_rounds))
+        cands.append((3, 'rounds', 1 + math.log2(1 + len(E['rounds'])) + 0.5 * math.log10(1 + tot_), c_rounds, None))
 
     # ------------------------------------------------------------------ the snap
     if all(k in film.st for k in ('pol', 'pairs', 'held', 'snap')):
@@ -4891,16 +5397,23 @@ def short_clips(film, secs=15.0):
                 vs = film.vias['snap'] if t >= 0.62 else film.vias['pairs'] if t >= 0.2 else film.vias['pol']
                 C.vias(vs, only=prs if t < 0.36 else None, dim=dim)
             return Clip('snap', 'snap', beats, fn, cues=[(0.05, 'snap', 0.4), (0.4, 'snap', 0.6), (0.62, 'snap', 0.8)])
-        cands.append((4, 'snap', 1.0, c_snap))
+        cands.append((4, 'snap', 1.0, c_snap, None))
 
     # ------------------------------------------------------------------ the lay, last
     order = [n for n in S.route_order if n in film.routed] + [n for n in film.M if n not in S.route_order]
     order = [n for n in order if film.routed[n][0] or film.routed[n][1]]
     clean = S.connected and S.drc_clean
 
+    # (the lay's pace: a pair's lane at the pace of SHORT_LAY of the beats for every lane, a single's twice as fast)
+    wt = {n: (1.0 if n in prs else 0.5) for n in order}
+    b_lay0 = max(5, int(round(nb * SHORT_LAY)))
+    b_lay = max(3, int(round(b_lay0 * sum(wt.values()) / max(1, len(order)))))
+
     def c_lay(beats):
-        q = 1.0 / (2 * beats)                       # (lanes come in on the half beats, the last one's done at the end)
-        t_in = {n: _quant((1 - q) * j / max(1, len(order) - 1), q) for j, n in enumerate(order)}
+        q = 1.0 / (4 * beats)               # (lanes come in on the quarter beats, the last one's done at the end)
+        cum = np.concatenate([[0.0], np.cumsum([wt[n] for n in order])])
+        t_in = {n: _quant((1 - q) * cum[j] / max(1e-9, cum[-1] - wt[order[-1]]), q) if len(order) > 1 else 0.0
+                for j, n in enumerate(order)}
 
         def fn(C, t, T_):
             C.segs(film.other_c[0], alpha=0.22)
@@ -4919,23 +5432,38 @@ def short_clips(film, secs=15.0):
             [(_quant(0.75, q), 'chord' if clean else 'alert', 1.0)]
         return Clip('lay', 'lay', beats, fn, cues=cues)
 
-    # ---- the clips the beats allow, the most worth first, SHORT_MIN beats each and the rest shared by worth
-    b_lay = max(5, int(round(nb * SHORT_LAY)))
-    rest = nb - b_lay
+    # ---- the clips the beats allow, the most worth first, SHORT_MIN beats each, the rest shared by worth (the search's
+    # by its rounds too); and the beats the lay's singles save, to the search first, else shared the same way
+    rest = nb - b_lay0
     take = sorted(sorted(cands, key=lambda c: (-c[2], c[0]))[:max(0, rest // SHORT_MIN)], key=lambda c: c[0])
     give = {c[1]: SHORT_MIN for c in take}
-    extra = rest - SHORT_MIN * len(take)
-    if take and extra > 0:
-        w_ = sum(c[2] for c in take)
-        share = {c[1]: extra * c[2] / w_ for c in take}
-        for k in share:
-            give[k] += int(share[k])
-        left = extra - sum(int(v) for v in share.values())
-        for k in sorted(share, key=lambda k: (-(share[k] - int(share[k])), k))[:left]:
+    wgt = {c[1]: c[4] or c[2] for c in take}
+
+    def share(extra):
+        """`extra` beats shared among the clips taken by their weights; what none could take"""
+        if not take or extra <= 0:
+            return max(0, extra)
+        w_ = sum(wgt.values())
+        sh = {k: extra * wgt[k] / w_ for k in wgt}
+        for k in sh:
+            give[k] += int(sh[k])
+        for k in sorted(sh, key=lambda k: (-(sh[k] - int(sh[k])), k))[:extra - sum(int(v) for v in sh.values())]:
             give[k] += 1
+        return 0
+    left = share(rest - SHORT_MIN * len(take))
+    saved = b_lay0 - b_lay
+    if 'search' in give:
+        give['search'] += saved
     else:
-        b_lay += max(0, extra)
-    return [c[3](give[c[1]]) for c in take] + [c_lay(b_lay)]
+        left += share(saved)
+    clips = [c[3](give[c[1]]) for c in take] + [c_lay(b_lay + left)]
+    if getattr(film, 'neg', None):
+        # (a negotiated bus: its clips after the other buses finished drawn with their copper under them, faint -- as
+        # the film draws those stages)
+        for c_ in clips:
+            if c_.key in ('rounds', 'snap', 'lay'):
+                c_.fn = with_peers(film, c_.fn)
+    return clips
 
 
 # =============================================================================== the frames

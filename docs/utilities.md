@@ -2069,6 +2069,16 @@ python3 awx/whole_movie.py RUNDIR OUT.mp4 --short [SECS]         # a short of th
   with `solve.solo.json`; a scene of its own then shows the coupled solve's
   plan for it, the one its loop lays out. Its loop's stages are re-run with
   the other buses' published lanes on the board, as the chain ran them.
+  The film shows the negotiation as well, read from the step's records
+  (`events.jsonl`, the negotiation directory, the coupled solve's report, each
+  bus's summary and the merged board), never run again: every bus on one
+  clock (its fanout, its first solve, its wait for the coupled solve, its
+  loop, its lay and its end), the coupled solve's couplings at their places
+  (the ones the buses' own plans broke, the ones the coupled plan still
+  breaks), the other buses laying their copper while the filmed bus's loop
+  runs (faint under its later scenes from then on) and, before its result,
+  every bus's copper on the merged board together, each in a tint of its own
+  with its nets, vias, copper, open nets and violations.
 - Needs `ffmpeg` (libx264) for the mp4; `--stills` alone writes PNGs.
 
 **With sound** (`--sound`, made by `awx/whole_movie_sound.py`):
@@ -2111,11 +2121,14 @@ run's moments cut tighter -- no narration, no captions, no title or end card,
 something moving in every frame. Every clip is an excerpt of the film, drawn
 as the film draws that stage, and all of them at one framing: the film's own
 of the bus, from its source array to its destination. A cut changes what is
-drawn, never where the camera is. The candidates are the group's search, the
+drawn, never where the camera is. The candidates are the group's search
+(every state its solves ended on, the ends at both arrays with the moved ones
+ringed, and the rounds between them on the film's chart of the search), the
 taut strings, the solve's plans, the 2-D geometry's rounds, the snap and,
-always last, the lay. Which of them play, and for how long, is read from the
-run's own records (the states, strings, plans and rounds it kept), so a run
-gives the same short every time. Its sound is music and effects only
+always last, the lay (a single-ended lane coming in twice as fast as a
+pair's). Which of them play, and for how long, is read from the run's own
+records (the states, rounds, strings and plans it kept), so a run gives the
+same short every time. Its sound is music and effects only
 (`whole_movie_sound.short_score`): the film's own music voice, a chord to a
 clip over a slow pulse the cuts fall on, and the film's own effects (a plan
 found, a via moving, a lane laid, a stage's bell at a cut). `--scenes` and
