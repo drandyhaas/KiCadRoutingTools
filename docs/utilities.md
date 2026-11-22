@@ -2702,11 +2702,19 @@ net names, layer count and the board's own design rules -- without an agent.
 It makes the same kinds of choices the plan-pcb-routing skill asks an agent
 to make, and runs each step as its own process in `<output>.autoroute/`:
 
-1. **Design rules**: the fab clearance floor for every step, as the route
-   steps' `--clearance-ceiling` (a finished board meets the fab floor; a net
-   class declared above it is aspirational, as in the plan-pcb-routing
-   skill's chains), the fab track floor, the working via, and the fine via
-   for fine-pitch escapes (`list_nets.read_design_rules`).
+1. **Design rules**, as the plan-pcb-routing skill sizes a chain on
+   aspirational rules (#2021): a ladder of size rungs, each strictly narrower
+   than the one before -- the standard fab tier, then the fab floor (the
+   deepest tier: 0.09 mm clearance on 4+ layers, 0.10 on 2). A net class above
+   them is taken as aspirational, as the skill takes a stock class;
+   `--board-rules` routes at the board's own rules instead --
+   with the working via and the fine via for fine-pitch escapes
+   (`list_nets.read_design_rules`). Every step starts at the first rung, its
+   clearance passed as `--clearance-ceiling`, and each step's own escalation
+   (route.py's `--fab-tier auto --escalation fab`) narrows a net that cannot
+   complete there and reports it in `design_rules`. A fanout steps down to
+   the floor (3.) and the route step to each narrower rung (6.).
+   `--floor-first` starts every step at the fab floor instead (#1522).
 2. **Planes first**: on 4+ layer boards, the fewest inner layers that put a
    plane next to every signal layer, so each signal layer has a reference:
    In1+In2 on 4 layers, In1+In4 on 6, In1+In3+In6 on 8
@@ -2734,7 +2742,10 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
    form neither shape (a mezzanine aside), a through-hole part other than a PGA, and any
    connector, socket, header or magnetics by footprint name
    (`autoroute.NOT_FANOUT_NAMES`) is not fanned out. Plane nets are excluded.
-   A part that drops escapes or leaves grazes is retried with the fine via
+   A part that drops escapes or leaves grazes at the first size rung is
+   retried at the fab floor, as the skill retries a fanout at the
+   manufacturing floor (its writeback then puts the floor into the project
+   the later steps read), then with the fine via
    (BGA), then with the dogbone (BGA) or under-pad (QFN) method, keeping the
    attempt that escaped most, then grazed least (`drc_grazes`, less what the
    decap step clears, #1685).
@@ -2759,7 +2770,11 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
    are rippable, so the stubs it left do not block their partners. The first
    pass keeps signals off the planes; up to two further passes on the result
    may cross them at 3.0 (`autoroute.PLANE_FALLBACK_COST`), so a plane carries
-   only what could not route without it.
+   only what could not route without it. While nets stay open, the whole step
+   is routed again from the board it started on at each narrower size rung
+   (`route_floor`, with passes of its own), the skill's
+   congestion escalation; a narrower rung ships only when it ranks above the
+   best board so far.
 
 A step that fails is skipped and the chain continues from the last good board.
 
@@ -2800,15 +2815,16 @@ Options:
                      price lets every step cross them (the plan-pcb-routing
                      skill's route step uses 3.0), trading reference integrity
                      for routability.
-  --board-rules      Route to the board's own declared rules instead of the
-                     fab floor: its Default net class's clearance, track
-                     width, via and diff-pair gap/width, each held at its
-                     Board Setup minimums (the via grown to the minimum
-                     annular ring), every other class at its own clearance,
-                     and no step narrows below them (--escalation off). A net
-                     that cannot complete at the board's rules fails and is
-                     reported. By default autoroute routes every step at the
-                     fab floor, treating a net class above it as aspirational.
+  --board-rules      Route to the board's own declared rules: its Default
+                     net class's clearance, track width, via and diff-pair
+                     gap/width, each held at its Board Setup minimums (the via
+                     grown to the minimum annular ring), every other class at
+                     its own clearance, and a net that cannot complete there
+                     narrowed only down to those minimums (--escalation
+                     board), as the skill routes the user's own rules.
+  --floor-first      Start every step at the fab floor (the deepest tier)
+                     instead of the standard tier with the floor below it
+                     (#1522). Not with --board-rules.
   --keep-placement   No step moves a part: the decap step, which moves
                      decoupling caps off the fanout copper, is not run.
   --write-fill       Write the shipped board with its zones filled by KiCad's

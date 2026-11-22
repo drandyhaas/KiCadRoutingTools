@@ -10,11 +10,14 @@ footprints, net names, layer count and the board's own design rules -- and
 runs the chain, so routing without an agent gets the steps that remove most
 congestion before the router starts:
 
-  1. design rules  the fab clearance floor for every step (a net class above
-                   it is aspirational, so the route step caps every class
-                   at it), the fab track floor, the working via (fine via
-                   for fine-pitch escapes), all from
-                   list_nets.read_design_rules
+  1. design rules  the standard fab tier first, every net class capped at
+                   it, with each step's own escalation narrowing a net that
+                   cannot complete; the working via (fine via for fine-pitch
+                   escapes); then the fab floor below it, which the fanouts
+                   and the route step step down to as the plan skill does
+                   on aspirational rules (#2021); all from
+                   list_nets.read_design_rules. --floor-first starts every
+                   step at the fab floor (#1522)
   2. planes        on 4+ layer boards the fewest inner layers that put a
                    plane next to every signal layer (In1+In2 on 4 layers,
                    In1+In4 on 6, In1+In3+In6 on 8): GND, then the dominant
@@ -28,7 +31,8 @@ congestion before the router starts:
                    pads), read from the pads and their pitch
                    along a row -- never a connector, socket or magnetics --
                    plane nets excluded; a part that drops escapes or leaves
-                   grazes is retried with the fine via (BGA), then with the
+                   grazes at the first size rung is retried at the fab floor,
+                   then with the fine via (BGA), then with the
                    dogbone (BGA) or under-pad (QFN) method, keeping the attempt
                    that escaped most, then grazed least
   4. decaps        place_fanout_clearance once, after the fanouts; a part it
@@ -46,7 +50,9 @@ congestion before the router starts:
                    congested boards, and leave to rip the stubs of any pair
                    route_diff could not couple; up to two further passes on the result
                    while nets are left open, which may cross the planes at
-                   PLANE_FALLBACK_COST, shipping the best pass
+                   PLANE_FALLBACK_COST; then, while nets stay open, the same
+                   passes from the step's start at each narrower size rung,
+                   shipping the best pass
 
 --finish runs step 6 alone on a board another chain has already prepared and
 routed (an agent's chain, say): the poured planes are read from the board's
@@ -445,7 +451,8 @@ def _board_rule_sizes(rules, floor):
                 pair_width=_num(d.get('diff_pair_width') or floor['pair_width']))
 
 
-def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, board_rules=False):
+def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, board_rules=False,
+            floor_first=False):
     from kicad_parser import parse_kicad_pcb, pour_zones
     from list_nets import (read_design_rules, effective_floors,
                            find_power_nets, find_differential_pairs,
@@ -457,13 +464,29 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, board_rules=False)
     rules = read_design_rules(board)
     eff = rules.get('effective') or effective_floors(rules.get('constraints') or {}, n_layers)
 
-    # A finished board meets the fab floor everywhere; a declared net class
-    # above it is aspirational, so every step routes at the floor (#1522).
+    # The deepest floor the fab reaches (#1522): where --floor-first starts
+    # every step, and the last size rung of the default ladder.
     clearance = _num(eff['drc_clearance'])
     track = _num(max(eff['fab_track_width'], 0.1))
     via, drill = _num(eff['working_via_diameter']), _num(eff['working_via_drill'])
     fine_via, fine_drill = _num(eff['fine_via_diameter']), _num(eff['fine_via_drill'])
     pair_gap, pair_width = _num(max(0.1, clearance)), _num(max(0.1, track))
+    floor = dict(name='floor', clearance=clearance, track=track)
+    rungs = [floor]
+    if not (board_rules or floor_first):
+        # #2021: a board's net classes are aspirational unless --board-rules
+        # says they are the user's own, so the plan skill routes at the fab
+        # floor rather than at the class: start at the standard tier (what
+        # route.py's --fab-tier auto starts at), then the deepest floor, each
+        # rung strictly narrower than the one before.
+        std = eff.get('fab') or {}
+        std_r = dict(name='standard',
+                     clearance=_num(max(std.get('clearance') or clearance, clearance)),
+                     track=_num(max(std.get('track_width') or track, track)))
+        rungs = [std_r] if (std_r['clearance'], std_r['track']) != (
+            floor['clearance'], floor['track']) else []
+        rungs.append(floor)
+        clearance, track = rungs[0]['clearance'], rungs[0]['track']
     if board_rules:
         # --board-rules: the board's own declared rules instead of the fab
         # floor; no via smaller than the board allows, so the fine via is the
@@ -475,6 +498,7 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, board_rules=False)
         clearance, track, via, drill = br['clearance'], br['track'], br['via'], br['drill']
         fine_via, fine_drill = via, drill
         pair_gap, pair_width = br['pair_gap'], br['pair_width']
+        rungs = [dict(name='board', clearance=clearance, track=track)]
 
     pairs = []
     for pr in find_differential_pairs(pcb) or []:
@@ -562,6 +586,7 @@ def analyze(board, finish=False, plane_cost=PLANE_LAYER_COST, board_rules=False)
     return dict(layers=layers, clearance=clearance, track=track, via=via,
                 drill=drill, fine_via=fine_via, fine_drill=fine_drill,
                 pair_gap=pair_gap, pair_width=pair_width, board_rules=bool(board_rules),
+                floor_first=bool(floor_first), size_rungs=rungs,
                 planes=planes,
                 plane_nets=plane_nets, power_nets=power_nets,
                 layer_costs=layer_costs, parts=parts, grid=grid,
@@ -894,23 +919,27 @@ class Chain(ChainEvents):
             self.cur = out
 
 
-def _rules_args(a):
-    """How a routing step is told its clearance. By default the ceiling: every
-    net class capped at the fab floor (#1522). With --board-rules the board's
-    own Default class as --clearance, every other class at its own, and no
-    narrowing below any of it (--escalation off): a net that cannot complete
-    at the board's rules fails and is reported."""
+def _rules_args(a, clearance=None):
+    """How a routing step is told its clearance (CLEARANCE, else the chain's
+    first size rung's). By default the ceiling: every net class capped at it,
+    and the tool's own escalation (route.py's --fab-tier auto --escalation fab)
+    narrowing a net that cannot complete there (#2021); --floor-first starts
+    at the fab floor (#1522). With --board-rules the board's own Default class
+    as --clearance, every other class at its own, and a net narrowed only down
+    to the board's own Board Setup minimums (--escalation board)."""
+    c = a['clearance'] if clearance is None else clearance
     if a.get('board_rules'):
-        return ['--clearance', str(a['clearance']), '--escalation', 'off']
-    return ['--clearance-ceiling', str(a['clearance'])]
+        return ['--clearance', str(c), '--escalation', 'board']
+    return ['--clearance-ceiling', str(c)]
 
 
-def _fanout_rules_args(a):
+def _fanout_rules_args(a, clearance=None):
     """A fanout step's clearance: --clearance and, as on the route steps, the
     ceiling by default or the board's own rules with --board-rules."""
     if a.get('board_rules'):
-        return _rules_args(a)
-    return ['--clearance', str(a['clearance'])] + _rules_args(a)
+        return _rules_args(a, clearance)
+    c = a['clearance'] if clearance is None else clearance
+    return ['--clearance', str(c)] + _rules_args(a, clearance)
 
 
 def plan_steps(a, finish=False, effort_factor=2.0, keep_placement=False):
@@ -964,24 +993,48 @@ def plan_steps(a, finish=False, effort_factor=2.0, keep_placement=False):
         + (', deeper rip-up (congested)' if a['congested'] else '')
         + ('; signals kept off the inner planes' if any(
             float(c) < 0 for c in a['layer_costs']) else ''))
-    for i in range(2, ROUTE_PASSES + 1):
-        row(f'route_p{i}', 'route', f'route pass {i} on the best board so far',
-            f'only while nets stay open, the last pass was kept, and the router '
-            f'effort stays within --effort-factor {effort_factor:g} x the first '
-            f"pass's; may cross the planes at {PLANE_FALLBACK_COST:g}", optional=True)
+    rungs = a.get('size_rungs') or [{'name': 'floor', 'clearance': a['clearance'],
+                                     'track': a['track']}]
+    for k, (r, tags) in enumerate(zip(rungs, route_tags(a))):
+        if k:
+            row(tags[0], 'route',
+                f"route every net again at the {r['name']} sizes "
+                f"({r['clearance']:g} mm clearance, {r['track']:g} mm track)",
+                'only while nets stay open after the wider sizes; from the board '
+                'the route step started on, and kept only if it ranks above the '
+                'best board so far (#2021)', optional=True)
+        for i, tag in enumerate(tags[1:], start=2):
+            row(tag, 'route', f'route pass {i} on the best board so far',
+                f'only while nets stay open, the last pass was kept, and the router '
+                f'effort stays within --effort-factor {effort_factor:g} x the first '
+                f"pass's at these sizes; may cross the planes at "
+                f"{PLANE_FALLBACK_COST:g}", optional=True)
     rules = {k: a[k] for k in ('clearance', 'track', 'via', 'drill', 'fine_via',
                                'fine_drill', 'grid', 'pair_gap', 'pair_width')}
+    rules['size_rungs'] = rungs
     src = a.get('rules_source') or "the fab defaults (the board has no .kicad_pro)"
     return {'mode': 'finish' if finish else 'full', 'rules': rules,
             'rules_source': a.get('rules_source'),
             'board_rules': bool(a.get('board_rules')),
+            'floor_first': bool(a.get('floor_first')),
             'rules_why': (('the board\'s own rules (--board-rules): its Default net '
                            'class, held at its Board Setup minimums, every other class '
-                           'at its own, and no step narrows below them; read from ' + src)
+                           'at its own, and a net narrowed only down to those minimums '
+                           '(--escalation board); read from ' + src)
                           if a.get('board_rules') else
-                          ('the fab floor for every step: a net class above it is '
-                           'aspirational, so the route steps cap every class at it; '
-                           'read from ' + src)),
+                          ('the fab floor for every step (--floor-first): a net class '
+                           'above it is aspirational, so the route steps cap every '
+                           'class at it; read from ' + src)
+                          if a.get('floor_first') else
+                          ('the standard fab tier first, every net class capped at '
+                           'it (a class above it is aspirational); a net '
+                           'that cannot complete is narrowed by the step itself '
+                           '(--fab-tier auto --escalation fab), a fanout that drops '
+                           'balls retries at the fab floor, and while nets stay open '
+                           'the route step runs again at each narrower size rung '
+                           '(' + ' -> '.join(f"{r['name']} {r['clearance']:g}/"
+                                              f"{r['track']:g}" for r in rungs)
+                           + '); read from ' + src)),
             'layers': a['layers'],
             'layer_costs': a['layer_costs'], 'planes': a['planes'],
             'power_nets': a['power_nets'], 'pair_nets': a['pair_nets'],
@@ -1005,49 +1058,62 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0, keep_place
             '{IN}', '{OUT}', '--nets', *[n for n, _ in a['planes']],
             '--plane-layers', *[l for _, l in a['planes']],
             '--clearance', str(a['clearance']),
-            *(['--escalation', 'off'] if a.get('board_rules') else [])], 'planes')
+            *(['--escalation', 'board'] if a.get('board_rules') else [])], 'planes')
         ch.accept(out)
 
     # 3. fanout, each part, with a retry ladder keeping the best escape
     excl = [f"!{a['globs'][n]}" for n in a['plane_nets'] if n in a['globs']]
     fanned = False
     fans = []
+    rungs = a.get('size_rungs') or [dict(name='floor', clearance=a['clearance'],
+                                         track=a['track'])]
     for ref, tool, pitch in a['parts']:
         fine = pitch <= 0.65
         v, d = (a['fine_via'], a['fine_drill']) if fine else (a['via'], a['drill'])
-        tw = str(a['track'])
-        if tool == 'bga':
-            base = ['{IN}', '--output', '{OUT}', '--component', ref,
-                    '--nets', '*', *excl, '--layers', *L, '--layer-costs', *costs,
-                    '--track-width', tw, '--grid-step', str(a['grid']),
-                    # the ceiling too, as on the route steps: bga_fanout honours
-                    # and keeps the net classes without one (#1529)
-                    *_fanout_rules_args(a)]
-            # The working via, then the fine via (one rung when they are the
-            # same via), then the fine via with dogbone escapes.
-            vias = dict.fromkeys([(v, d), (a['fine_via'], a['fine_drill'])])
-            ladder = [base + ['--via-size', str(sv), '--via-drill', str(sd)]
-                      for sv, sd in vias]
-            ladder.append(ladder[-1] + ['--escape-method', 'dogbone'])
-            names = [f'{sv:g}/{sd:g} via' for sv, sd in vias]
-            names.append(names[-1] + ', dogbone')
-        else:
+
+        def variants(r):
+            """The part's escape attempts at size rung R, as (args, name)."""
+            tw = str(r['track'])
+            if tool == 'bga':
+                base = ['{IN}', '--output', '{OUT}', '--component', ref,
+                        '--nets', '*', *excl, '--layers', *L, '--layer-costs', *costs,
+                        '--track-width', tw, '--grid-step', str(a['grid']),
+                        # the ceiling too, as on the route steps: bga_fanout
+                        # honours and keeps the net classes without one (#1529)
+                        *_fanout_rules_args(a, r['clearance'])]
+                # The working via, then the fine via (one rung when they are
+                # the same via), then the fine via with dogbone escapes.
+                vias = dict.fromkeys([(v, d), (a['fine_via'], a['fine_drill'])])
+                out = [(base + ['--via-size', str(sv), '--via-drill', str(sd)],
+                        f'{sv:g}/{sd:g} via') for sv, sd in vias]
+                out.append((out[-1][0] + ['--escape-method', 'dogbone'],
+                            out[-1][1] + ', dogbone'))
+                return out
             base = ['{IN}', '--output', '{OUT}', '--component', ref,
                     '--nets', '*', *excl, '--width', tw,
                     '--grid-step', str(a['grid']),
-                    # the ceiling too, as on the route steps: qfn_fanout honours
-                    # and keeps the net classes without one (#1529)
-                    *_fanout_rules_args(a)]
-            ladder = [
-                base,
-                base + ['--escape-method', 'underpad',
-                        '--via-size', str(a['fine_via']), '--via-drill', str(a['fine_drill']),
-                        '--allow-via-in-pad'],
-            ]
-            names = ['stub escape', f"under-pad escape, {a['fine_via']:g}/"
-                                    f"{a['fine_drill']:g} via in pad"]
-            if tool == 'mezz':
-                ladder, names = ladder[1:], names[1:]
+                    # the ceiling too, as on the route steps: qfn_fanout
+                    # honours and keeps the net classes without one (#1529)
+                    *_fanout_rules_args(a, r['clearance'])]
+            out = [(base, 'stub escape'),
+                   (base + ['--escape-method', 'underpad',
+                            '--via-size', str(a['fine_via']), '--via-drill', str(a['fine_drill']),
+                            '--allow-via-in-pad'],
+                    f"under-pad escape, {a['fine_via']:g}/{a['fine_drill']:g} via in pad")]
+            return out[1:] if tool == 'mezz' else out
+        # #2021: the part's first escape at the chain's first size rung, then
+        # every escape at the fab floor -- the plan skill's fanout retry, which
+        # re-runs a part that drops balls or grazes at the manufacturing floor
+        if len(rungs) > 1:
+            first = variants(rungs[0])[:1]
+            tried = [(args, f"{name}, {rungs[0]['name']} {rungs[0]['clearance']:g} mm")
+                     for args, name in first]
+            tried += [(args, f"{name}, {rungs[-1]['name']} {rungs[-1]['clearance']:g} mm")
+                      for args, name in variants(rungs[-1])]
+        else:
+            tried = variants(rungs[0])
+        ladder = [t[0] for t in tried]
+        names = [t[1] for t in tried]
         fan = {'ref': ref, 'tool': tool, 'ladder': ladder, 'input': ch.cur,
                'rung_names': names}
         best = fan_ladder(ch, fan)
@@ -1283,35 +1349,58 @@ def _improves(g, best):
     return (g['open'], g['drc']) < (best['open'], best['drc'])
 
 
-def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), reroute=()):
-    """6. route every net; up to two more passes while nets are open, each
-    pass improves on the best board so far, and the effort stays within
-    budget. Only the first pass keeps signals off the solid planes; the later
-    ones may cross them at PLANE_FALLBACK_COST, so a plane carries only what
-    could not route without it. The REROUTE nets are first ripped and routed
-    again on their own. Returns (chain, best board or None,
-    its grade or None)."""
-    def route_args(costs):
-        return base + ['--layers', *L, '--layer-costs', *costs]
-    base = ['{IN}', '{OUT}', '--nets', '*', '--no-bga-zones',
-            *_rules_args(a),
-            '--track-width', str(a['track']),
-            '--via-size', str(a['via']), '--via-drill', str(a['drill']),
-            '--grid-step', str(a['grid'])]
-    if a['power_nets']:
-        base += ['--power-nets', *[a['globs'][n] for n in a['power_nets']],
-                 '--power-nets-widths',
-                 *[str(RAIL_WIDTH)] * len(a['power_nets'])]
-    if a['congested']:
-        base += ['--max-ripup', '5']
-    if rip:
-        base += ['--rip-existing-nets', *rip]
-    best = None                        # (grade, board)
-    passes = ['route' + (f'_p{i + 1}' if i else '') for i in range(ROUTE_PASSES)]
+def route_tags(a):
+    """The route passes' step tags, one list per size rung: 'route',
+    'route_p2', ... for the first rung, 'route_<rung>', 'route_<rung>_p2', ...
+    for each narrower one (#2021)."""
+    rungs = a.get('size_rungs') or [{'name': 'floor'}]
+    out = []
+    for k, r in enumerate(rungs):
+        head = 'route' if k == 0 else f"route_{r['name']}"
+        out.append([head + (f'_p{i + 1}' if i else '') for i in range(ROUTE_PASSES)])
+    return out
 
-    def skip_rest(i, why):
-        for tag in passes[i:]:
-            ch.skip(tag, why)
+
+def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), reroute=()):
+    """6. route every net at the chain's first size rung; up to two more
+    passes while nets are open, each pass improves on the best board so far,
+    and the effort stays within budget. Only the first pass keeps signals off
+    the solid planes; the later ones may cross them at PLANE_FALLBACK_COST, so
+    a plane carries only what could not route without it.
+
+    While nets stay open, the whole step is routed again from the board it
+    started on at each narrower size rung (#2021: the plan skill's congestion
+    escalation on aspirational rules, standard tier -> fab floor), with passes of its own,
+    and a board ships only when it ranks above the best so far: a narrower
+    rung that does not complete more ships nothing. The REROUTE nets are first
+    ripped and routed again on their own. Returns (chain, best board or None,
+    its grade or None)."""
+    rungs = a.get('size_rungs') or [dict(name='floor', clearance=a['clearance'],
+                                         track=a['track'])]
+    tags = route_tags(a)
+
+    def base_for(r):
+        b = ['{IN}', '{OUT}', '--nets', '*', '--no-bga-zones',
+             *_rules_args(a, r['clearance']),
+             '--track-width', str(r['track']),
+             '--via-size', str(a['via']), '--via-drill', str(a['drill']),
+             '--grid-step', str(a['grid'])]
+        if a['power_nets']:
+            b += ['--power-nets', *[a['globs'][n] for n in a['power_nets']],
+                  '--power-nets-widths',
+                  *[str(RAIL_WIDTH)] * len(a['power_nets'])]
+        if a['congested']:
+            b += ['--max-ripup', '5']
+        if rip:
+            b += ['--rip-existing-nets', *rip]
+        return b
+
+    def skip_from(k, i, why):
+        """Skip rung K's passes from I on, and every later rung's."""
+        for j in range(k, len(tags)):
+            for tag in tags[j][i if j == k else 0:]:
+                ch.skip(tag, why)
+    best = None                        # (grade, board)
     if finish:
         ev = {'n': 0, 'tag': 'input', 'tool': 'grade', 'parent': None,
               'board': ch.cur, 'input': ch.cur, 'cmd': [], 'log': None}
@@ -1326,7 +1415,7 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), rerou
                                         result='a checker could not grade the input',
                                         error_tail=[]))
             print("  the input could not be graded: no route pass runs", flush=True)
-            skip_rest(0, 'the input could not be graded')
+            skip_from(0, 0, 'the input could not be graded')
             return ch, None, None
         emit('AUTOROUTE_STEP', dict(end, state='done', grade=g,
                                     result=f"{g['open']} open, {g['drc']} DRC"))
@@ -1334,74 +1423,112 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), rerou
         best = (g, ch.cur)
         print(f"  input: {g['open']} open, {g['drc']} DRC", flush=True)
         if g['open'] == 0:
-            skip_rest(0, 'the input has no open net')
+            skip_from(0, 0, 'the input has no open net')
             return ch, ch.cur, g
     if reroute:
         # A net whose new route lays no copper gets its old copper back, and
         # the passes below route whatever is left open.
         out, _, _ = ch.run('route', ['{IN}', '{OUT}', '--nets', *[a['globs'][n] for n in reroute],
-                                     '--force-reroute', *base[4:], '--layers', *L,
+                                     '--force-reroute', *base_for(rungs[0])[4:], '--layers', *L,
                                      '--layer-costs', *costs], 'reroute_pairs',
                            parent='diffpairs')
         ch.accept(out)
+    start = ch.cur
     crossing = [str(PLANE_FALLBACK_COST) if float(c) < 0 else c for c in costs]
-    first = spent = None
-    for i in range(ROUTE_PASSES):
-        if i:
-            if ch.last_iterations is None:
-                print(f"  route pass {i + 1} not started: the last pass reported "
-                      f"no iterations to budget from", flush=True)
-                skip_rest(i, 'the last pass reported no router iterations to '
-                             'budget the next from')
+    done = False
+    for k, r in enumerate(rungs):
+        if k:
+            # the narrower rung routes the whole step again, from its start
+            print(f"  {len(best[0]['open_nets']) if best and best[0] else '?'} net(s) "
+                  f"open: routing every net again at the {r['name']} sizes "
+                  f"({r['clearance']:g} mm clearance, {r['track']:g} mm track)",
+                  flush=True)
+            ch.cur = start
+        base = base_for(r)
+        passes = tags[k]
+        first = spent = rung_best = None
+        for i in range(ROUTE_PASSES):
+            if i:
+                if ch.last_iterations is None:
+                    print(f"  route pass {passes[i]} not started: the last pass "
+                          f"reported no iterations to budget from", flush=True)
+                    skip_from(k, i, 'the last pass reported no router iterations '
+                                    'to budget the next from')
+                    break
+                if spent + ch.last_iterations > effort_factor * first:
+                    print(f"  route pass {passes[i]} not started: {spent} iterations "
+                          f"spent, the last pass took {ch.last_iterations}, budget "
+                          f"{effort_factor:g} x {first}", flush=True)
+                    for tag in passes[i:]:
+                        ch.skip(tag, f"effort budget: {spent} router iterations spent "
+                                     f"and the last pass took {ch.last_iterations}, over "
+                                     f"--effort-factor {effort_factor:g} x the rung's "
+                                     f"first pass's {first}")
+                    break
+            out, _, _ = ch.run('route', base + ['--layers', *L, '--layer-costs',
+                                                *(crossing if i else costs)],
+                               passes[i], hold=True)
+            if ch.last_iterations is not None:
+                spent = (spent or 0) + ch.last_iterations
+                if first is None:
+                    first = ch.last_iterations
+            if not out:
+                for tag in passes[i + 1:]:
+                    ch.skip(tag, f'{passes[i]} failed')
                 break
-            if spent + ch.last_iterations > effort_factor * first:
-                print(f"  route pass {i + 1} not started: {spent} iterations "
-                      f"spent, the last pass took {ch.last_iterations}, budget "
-                      f"{effort_factor:g} x {first}", flush=True)
-                skip_rest(i, f"effort budget: {spent} router iterations spent and "
-                             f"the last pass took {ch.last_iterations}, over "
-                             f"--effort-factor {effort_factor:g} x the first "
-                             f"pass's {first}")
+            g = ch.grade(out)
+            ch.steps[-1]['grade'] = g
+            if g is None:
+                if best is None:       # still the routed board, just ungraded
+                    best = (None, out)
+                    ch.accept(out)
+                ch.end_step(result='routed, but a checker could not grade it',
+                            grade=None, kept=best[1] == out)
+                for tag in passes[i + 1:]:
+                    ch.skip(tag, f'{passes[i]} could not be graded')
                 break
-        out, _, _ = ch.run('route', route_args(crossing if i else costs),
-                           passes[i], hold=True)
-        if ch.last_iterations is not None:
-            spent = (spent or 0) + ch.last_iterations
-            if first is None:
-                first = ch.last_iterations
-        if not out:
-            skip_rest(i + 1, f'{passes[i]} failed')
-            break
-        g = ch.grade(out)
-        ch.steps[-1]['grade'] = g
-        if g is None:
-            if best is None:           # still the routed board, just ungraded
-                best = (None, out)
+            print(f"  {os.path.basename(out)}: {g['open']} open, {g['drc']} DRC", flush=True)
+            # A narrower rung is judged on its own passes: its first pass starts
+            # from the step's start again, so it is compared with the best of
+            # THESE sizes, and the board ships only if it ranks above the best
+            # of every rung.
+            ref = rung_best if k else best
+            if ref is not None and ref[0] is not None and not _improves(g, ref[0]):
+                print(f"  not kept: no better than {os.path.basename(ref[1])} "
+                      f"({ref[0]['open']} open, {ref[0]['drc']} DRC)", flush=True)
+                ch.end_step(result=f"{g['open']} open, {g['drc']} DRC: not kept",
+                            grade=g, kept=False)
+                ch.decide(passes[i], False,
+                          f"{g['open']} open, {g['drc']} DRC is no better than "
+                          f"{os.path.basename(ref[1])} ({ref[0]['open']} open, "
+                          f"{ref[0]['drc']} DRC)")
+                for tag in passes[i + 1:]:
+                    ch.skip(tag, f'{passes[i]} was not kept, which ends the passes '
+                                 f'at these sizes')
+                break
+            rung_best = (g, out)
+            ch.cur = out                   # the rung's next pass starts here
+            if best is None or best[0] is None or _improves(g, best[0]):
+                best = (g, out)
                 ch.accept(out)
-            ch.end_step(result='routed, but a checker could not grade it',
-                        grade=None, kept=best[1] == out)
-            skip_rest(i + 1, f'{passes[i]} could not be graded')
+                ch.end_step(result=f"{g['open']} open, {g['drc']} DRC: best so far",
+                            grade=g, kept=True)
+            else:
+                ch.end_step(result=f"{g['open']} open, {g['drc']} DRC: best at these "
+                                   f"sizes, not above {os.path.basename(best[1])}",
+                            grade=g, kept=False)
+            if g['open'] == 0:
+                skip_from(k, i + 1, 'no open net left')
+                done = True
+                break
+        if done:
             break
-        print(f"  {os.path.basename(out)}: {g['open']} open, {g['drc']} DRC", flush=True)
-        if best is not None and not _improves(g, best[0]):
-            print(f"  not kept: no better than {os.path.basename(best[1])} "
-                  f"({best[0]['open']} open, {best[0]['drc']} DRC)", flush=True)
-            ch.end_step(result=f"{g['open']} open, {g['drc']} DRC: not kept",
-                        grade=g, kept=False)
-            ch.decide(passes[i], False,
-                      f"{g['open']} open, {g['drc']} DRC is no better than "
-                      f"{os.path.basename(best[1])} ({best[0]['open']} open, "
-                      f"{best[0]['drc']} DRC)")
-            skip_rest(i + 1, f'{passes[i]} was not kept, which ends the passes')
-            break
-        best = (g, out)
-        ch.accept(out)
-        ch.end_step(result=f"{g['open']} open, {g['drc']} DRC: best so far",
-                    grade=g, kept=True)
-        if g['open'] == 0:
-            skip_rest(i + 1, 'no open net left')
+        if best is None or best[0] is None:
+            skip_from(k + 1, 0, 'no route pass at these sizes produced a graded board')
             break
     ch.end_step()
+    if best:
+        ch.accept(best[1])
     return ch, (best[1] if best else None), (best[0] if best else None)
 
 
@@ -1479,12 +1606,15 @@ def main():
                          '(the skill\'s route step uses 3.0), trading reference '
                          'integrity for routability')
     ap.add_argument('--board-rules', action='store_true',
-                    help='route to the board\'s own declared rules instead of the fab '
-                         'floor: its Default net class\'s clearance, track width, via '
-                         'and diff-pair gap/width, held at its Board Setup minimums, '
-                         'every other class at its own, and no step narrows below '
-                         'them (--escalation off): a net that cannot complete at the '
-                         'board\'s rules fails and is reported')
+                    help='route to the board\'s own declared rules: its Default net '
+                         'class\'s clearance, track width, via and diff-pair gap/width, '
+                         'held at its Board Setup minimums, every other class at its '
+                         'own, and a net that cannot complete there narrowed only down '
+                         'to those minimums (--escalation board)')
+    ap.add_argument('--floor-first', action='store_true',
+                    help='start every step at the fab floor (the deepest tier: 0.09 mm '
+                         'clearance on 4+ layers, 0.10 on 2) instead of the standard '
+                         'tier with the floor below it as a size rung (#1522, #2021)')
     ap.add_argument('--keep-placement', action='store_true',
                     help='no step moves a part: the decap step, which moves '
                          'decoupling caps off the fanout copper, is not run')
@@ -1495,8 +1625,11 @@ def main():
     args = ap.parse_args()
 
     t_start = time.time()
+    if args.board_rules and args.floor_first:
+        ap.error('--board-rules and --floor-first pick different starting sizes; '
+                 'pass one')
     a = analyze(args.input_file, finish=args.finish, plane_cost=args.plane_layer_cost,
-                board_rules=args.board_rules)
+                board_rules=args.board_rules, floor_first=args.floor_first)
     print("AUTOROUTE_ANALYSIS: " + json.dumps(a, sort_keys=True), flush=True)
     plan = plan_steps(a, finish=args.finish, effort_factor=args.effort_factor,
                       keep_placement=args.keep_placement)

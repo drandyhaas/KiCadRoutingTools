@@ -595,14 +595,25 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     def _in_box(lo_x, hi_x, lo_y, hi_y):
         return not (hi_x < minx or lo_x > maxx or hi_y < miny or lo_y > maxy)
 
+    # `_in_box` inlined (this loop scans the whole board per call): an item
+    # is dropped when its grown box lies wholly outside the saved route's.
     o_segs = []
     for s in pcb_data.segments:
-        if s.net_id in own or s.net_id == 0:
+        n = s.net_id
+        if n == 0 or n in own:
             continue
         h = s.width / 2.0
-        if _in_box(min(s.start_x, s.end_x) - h, max(s.start_x, s.end_x) + h,
-                   min(s.start_y, s.end_y) - h, max(s.start_y, s.end_y) + h):
-            o_segs.append(s)
+        ax, bx = s.start_x, s.end_x
+        if ax > bx:
+            ax, bx = bx, ax
+        if bx + h < minx or ax - h > maxx:
+            continue
+        ay, by = s.start_y, s.end_y
+        if ay > by:
+            ay, by = by, ay
+        if by + h < miny or ay - h > maxy:
+            continue
+        o_segs.append(s)
     o_vias = []
     for v in pcb_data.vias:
         if v.net_id in own or v.net_id == 0:

@@ -1,3 +1,34 @@
+a4bd19216d0510d50a7048c3e1af452b38a27c82 2026-11-22 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 501ec2a5..a4bd19216: the work since v0.24.1, #2021's autoroute size
+ladder and #2031 (126 commits, merges included), macOS, KiCad 10.0.6.
+(A) Flags: no routing CLI flag added or removed, and no signature of
+  batch_route, batch_route_diff_pairs, create_plane, repair_planes or the
+  fanout entry points changed. autoroute.py adds --board-rules, --floor-first,
+  --keep-placement and --write-fill; the Autorouter tab has the four controls,
+  settings keys (autoroute_options) and the --board-rules/--floor-first
+  refusal, defaults False on both, and runs autoroute.py itself, so the ladder
+  reaches both. #1972's courtyard via rule has its live twin
+  (gui_utils.live_via_rule_test).
+(B) Post-passes and results data: everything else is inside the shared
+  engines or the graders, and the parse fixes are on both parse paths.
+  FIXED in a4bd19216: the GUI strips did not key on the lock as
+  kicad_writer's have since 65a2c2aa3 -- remove_listed_segments could take a
+  locked track for its unlocked twin, and the route and diff-pair tabs
+  removed every via at a position. Now lock-keyed and counted
+  (remove_listed_vias); the Planes and fanout via strips stay as their CLI
+  writers are, not lock-keyed.
+  KNOWN DIVERGENCE, recorded here: the pair-unit lap (route.py
+  _pair_unit_lap, KICAD_PAIR_UNIT_LAP, default on) runs in batch_route's
+  file-mode reconcile leg only; the GUI leg finds the exchange, prints
+  "skipped in the GUI leg (file-mode only)" and leaves it, so the CLI can
+  close a pair exchange the GUI leaves open.
+GATES: tests/gui_parity/run_gui_parity.py on a4bd19216, 93 passed, 0 failed, 0 declared SKIP;
+test_gui_engine_parity copper sets IDENTICAL (799 segments, 128 vias, 0 DRC
+both fronts).
+Obstacle ref-count gate on cd6e99e8c (CLI-only; a4bd19216 changes GUI code
+only): A, B, C, F hold, 13/13 BALANCED. Modal suite on cd6e99e8c 1424
+passed / 0 failed (+37 self-skipped).
+
 501ec2a53f2ed6fa383621dab2969fe396c9a34e 2026-11-16 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of e94a7677..501ec2a5: #1441, the #1873 fold, #1949's docs (9 commits,
 merges included), macOS, KiCad 10.0.6.

@@ -4552,6 +4552,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if relocatable_plane_ids:
             print(f"Tap relocation armed: {len(relocatable_plane_ids)} plane "
                   f"net(s) cached for single-tap surgery")
+    # Base-map-excluded, so the from-base obstacle builders must add these
+    # nets' copper back themselves (routing_context._relocation_plane_ids).
+    pcb_data._tap_relocation_plane_ids = tuple(relocatable_plane_ids)
     # Main-pass rip candidacy for PRE-EXISTING nets (0805, design intent):
     # a blocker routed by an EARLIER chain step used to be visible only as a
     # text hint ("the blocking copper belongs to N pre-existing net(s) ...")
