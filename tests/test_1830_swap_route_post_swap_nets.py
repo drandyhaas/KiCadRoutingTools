@@ -21,8 +21,11 @@ so the pair's two ends are genuinely opposite-handed.
     2. swaps allowed: the swap route wins -- the pair is polarity-swapped,
        coupled end to end (no hybrid escape), no terminal narrowed, DRC clean
        at the routed clearance, connected.
-    3. swaps denied: the probe routes, so the pair is listed
-       polarity-swap-denied (#1802's rule), and its copper is the hybrid's.
+    3. swaps denied: the legs cross at a layer change instead (#1055) -- the
+       crossover rung routes the pair coupled, nothing swapped and no swap
+       reported denied, DRC clean, connected, with skew far under the hybrid
+       escape's (4.46 mm on this pair). #1802's denied-swap report is pinned
+       by test_1802_polarity_denied_no_swap, whose pair no crossover can route.
 
     python3 -X utf8 tests/test_1830_swap_route_post_swap_nets.py
 """
@@ -196,22 +199,31 @@ def allowed(td, board):
 
 
 def denied(td, board):
-    print('3. swaps denied: the probe routes, so the pair is polarity-swap-denied')
-    r, _out, doc, rep = _route(td, board, 'deny', [])
-    row = next((ln.strip() for ln in r.stdout.splitlines()
-                if ln.strip().startswith('pad swap:')), '')
-    if not row:
-        raise AssertionError('BROKEN TEST: no ladder verdict, so this tests nothing\n'
-                             + r.stdout[-2000:])
-    check('the pad swap row: not allowed, and the probe would route',
-          row == 'pad swap: not allowed for this pair (--polarity-swap-nets); '
-                 'probed, the swap would route', row)
-    check('listed in polarity_swap_denied_pairs',
-          doc.get('polarity_swap_denied_pairs') == [PAIR],
-          f"{doc.get('polarity_swap_denied_pairs')}")
-    check('nothing swapped: it ships through the hybrid escape',
-          doc.get('polarity_swapped_pairs') == [] and rep.get('escape') == 'hybrid',
-          f"{doc.get('polarity_swapped_pairs')}/{rep.get('escape')}")
+    print('3. swaps denied: the legs cross at a layer change instead (#1055)')
+    r, out, doc, rep = _route(td, board, 'deny', [])
+    if 'Polarity mismatch' not in r.stdout:
+        raise AssertionError('BROKEN TEST: the fixture no longer has a polarity '
+                             'mismatch, so this tests nothing\n' + r.stdout[-2000:])
+    check('the crossover rung routed the pair', 'Crossover: routed' in r.stdout,
+          next((ln for ln in r.stdout.splitlines() if 'Crossover' in ln), 'no crossover line'))
+    check('coupled end to end, not the hybrid escape',
+          rep.get('outcome') == 'coupled' and 'escape' not in rep,
+          f"{rep.get('outcome')}/{rep.get('escape')}")
+    check('nothing swapped, and no swap reported denied (the crossover needed none)',
+          doc.get('polarity_swapped_pairs') == [] and doc.get('polarity_swap_denied_pairs') == [],
+          f"{doc.get('polarity_swapped_pairs')}/{doc.get('polarity_swap_denied_pairs')}")
+    # The hybrid this replaces shipped 4.46 mm of skew on this pair; the
+    # crossover's legs differ only by its jogs and their spans' ends.
+    skew = (rep.get('copper') or {}).get('skew_mm')
+    check('skew under 1.5 mm (the hybrid escape shipped 4.46 mm)', skew is not None and skew < 1.5,
+          f'{skew}')
+    d = run_utils.check(PY + [os.path.join(REPO, 'py_router', 'check_drc.py'), out,
+                              '--nets', '/IO_Banks/Z3_*'], accept=True)
+    check('DRC clean on the pair at the routed clearance',
+          'NO DRC VIOLATIONS FOUND' in d.stdout, d.stdout[-800:])
+    c = run_utils.check(PY + [os.path.join(REPO, 'py_router', 'check_connected.py'), out,
+                              '--nets', '/IO_Banks/Z3_*'], accept=True)
+    check('fully connected', 'ALL NETS FULLY CONNECTED' in c.stdout, c.stdout[-800:])
 
 
 def main():

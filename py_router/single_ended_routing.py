@@ -2554,6 +2554,13 @@ def _free_on_pad_cells(pad, layer_idx, config, obstacles, coord,
     # The landing rule is shared with placement's keep-out channel (#1031),
     # which must not accept a pose this function would find no cell on.
     from net_queries import pad_landing_extent
+    # The pad's copper on THIS layer (a per-layer padstack's smaller layer):
+    # a landing seeded from the max-over-layers model ends a track on copper
+    # only another layer has, which KiCad grades open.
+    from kicad_parser import pad_on_layer
+    _lname = (config.layers[layer_idx]
+              if 0 <= layer_idx < len(getattr(config, 'layers', ()) or ()) else None)
+    pad = pad_on_layer(pad, _lname, joins=True)
     # getattr: connectivity._EndpointStub (zero size, no `shape`) reaches
     # here from the end-of-run reconciliation; it must yield no cells, not
     # raise.
@@ -3023,9 +3030,28 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     (`net_keepouts.config_for_nets`, #1527)."""
     from net_keepouts import stamp as _nk_stamp, config_for_nets
     with _nk_stamp(obstacles, pcb_data, (net_id,), config):
-        return _route_net_with_obstacles_impl(
-            pcb_data, net_id, config_for_nets(pcb_data, (net_id,), config),
-            obstacles, *args, **kwargs)
+        cfg = config_for_nets(pcb_data, (net_id,), config)
+        # #2020: a pour of this net no copper touches gets one tap first --
+        # on a whole-board route only: a scoped one (a rescue's window or
+        # gap, `bounds` / the endpoint overrides) sees part of the copper,
+        # and would read a pour the rest of the board touches as untouched
+        _scope = dict(zip(('attraction_path', 'reverse_direction', 'bounds',
+                           'sources_override', 'targets_override'), args))
+        _scope.update(kwargs)
+        _whole = all(_scope.get(k) is None for k in
+                     ('bounds', 'sources_override', 'targets_override'))
+        with _bare_pour_taps(pcb_data, net_id, cfg, obstacles,
+                             enabled=_whole) as taps:
+            if taps and _net_connected(pcb_data, net_id):
+                # the taps joined both sides through the pour: they are the
+                # route (the endpoint deriver groups by copper alone, and
+                # would weld a sliver inside the fill)
+                res = {'new_segments': [], 'new_vias': [], 'iterations': 0,
+                       'path_length': 0, 'path': []}
+            else:
+                res = _route_net_with_obstacles_impl(
+                    pcb_data, net_id, cfg, obstacles, *args, **kwargs)
+        return _with_tap_copper(res, taps)
 
 
 def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
@@ -3940,11 +3966,13 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
     only ever ADDS Nones, so it cannot invalidate a cached failure.
     Successes are never cached (they carry mutable Via/Segment objects and
     the tap path's note_clearance_used side effect -- the exact two hazards
-    that sank the full-result memo, reverted same day). Bails to the impl
-    when phase-3 in-flight copper is pending: pending copper changes
-    placement legality WITHOUT an epoch bump, so a failure under inflight
-    state must not be trusted later. Likewise when the caller hands
-    ``pending_vias`` (this net's own uncommitted vias, see the impl)."""
+    that sank the full-result memo, reverted same day). Phase-3 in-flight
+    copper and the caller's ``pending_vias`` (this net's own uncommitted
+    vias, see the impl) change placement legality WITHOUT an epoch bump, so
+    a failure under them is keyed on their exact content as well: it answers
+    only the identical in-flight/pending state, never a later different one.
+    (They used to bypass the memo; the same boxed pad then re-failed with the
+    same pending via on every rescue rung, tigard 191 calls / 74 s.)"""
     # #1842: a via-span step lays copper on its span only. This via and its
     # stub start on the PAD's layer, so a pad with copper outside the span
     # (an F.Cu ball in an In1-In6 step) is not this step's to escape.
@@ -3957,23 +3985,29 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
 
     from plane_pad_tap import inflight_copper_dicts
     _iv, _isg = inflight_copper_dicts(pcb_data)
-    _inflight = bool(_iv) or bool(_isg) or bool(pending_vias)
-    _memo = None
-    if not _inflight:
-        _memo = getattr(pcb_data, '_via_place_fail_memo', None)
-        if _memo is None:
-            _memo = pcb_data._via_place_fail_memo = set()
-        _mkey = (net_id, pad_obj.component_ref, pad_obj.pad_number,
-                 pad_obj.global_x, pad_obj.global_y,
-                 getattr(pcb_data, '_copper_epoch', 0),
-                 config.via_size, config.via_drill, config.clearance,
-                 config.board_edge_clearance, config.same_net_pad_clearance,
-                 tuple(layer_names))
-        if _mkey in _memo:
-            return None
+    _memo = getattr(pcb_data, '_via_place_fail_memo', None)
+    if _memo is None:
+        _memo = pcb_data._via_place_fail_memo = set()
+    # Exact content of the copper the impl adds on top of pcb_data (empty
+    # tuples when none is in flight): the impl's extra_vias/extra_segments.
+    _transient = (
+        tuple((v['x'], v['y'], v['size'], v['drill'], tuple(v['layers']),
+               v['net_id'], v['via_type']) for v in (_iv or ())),
+        tuple((s['start'], s['end'], s['width'], s['layer'], s['net_id'])
+              for s in (_isg or ())),
+        tuple((v.x, v.y, v.size, v.drill, tuple(v.layers), v.net_id,
+               getattr(v, 'via_type', 'through')) for v in (pending_vias or ())))
+    _mkey = (net_id, pad_obj.component_ref, pad_obj.pad_number,
+             pad_obj.global_x, pad_obj.global_y,
+             getattr(pcb_data, '_copper_epoch', 0),
+             config.via_size, config.via_drill, config.clearance,
+             config.board_edge_clearance, config.same_net_pad_clearance,
+             tuple(layer_names), _transient)
+    if _mkey in _memo:
+        return None
     r = _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data,
                                       net_id, coord, layer_names, pending_vias)
-    if r is None and _memo is not None:
+    if r is None:
         _memo.add(_mkey)
     return r
 
@@ -5117,6 +5151,238 @@ def _terminal_layer_test(pcb_data, net_id, layer_names):
     return on
 
 
+def _bare_pour_regions(pcb_data, net_id, layer_names):
+    """#2020: the fill regions of this net's zones (on `layer_names`) that
+    no copper of the net touches on the zone's layer and that KiCad ships
+    anyway, each with the net's own SMD pads that stand over it on another
+    routing layer, as ``[(zone, model, label, [pad, ...]), ...]``.
+
+    A pour step leaves every pad not on its plane's layer to the route step
+    (route_planes, #562). KiCad keeps the fill of a zone nothing joins and
+    reports it as isolated copper (kicad-cli 10.0.6, the #2020 board): the
+    split under SMD parts. An untouched island of a zone something does
+    join is removed under island_removal_mode 0, KiCad's default, and is
+    left alone here; modes 1 and 2 keep it, so it counts."""
+    zones = [z for z in (pcb_data.zones or []) if z.net_id == net_id
+             and z.layer in layer_names]
+    if not zones:
+        return []
+    from plane_fill_model import get_zone_model
+    from net_queries import expand_pad_layers
+    from geometry_utils import via_on_layer
+    from connectivity import routable
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None)
+                  or layer_names)
+    pads = [p for p in routable(pcb_data.pads_by_net.get(net_id, []))
+            if getattr(p, 'pad_type', '') != 'np_thru_hole']
+    vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    out = []
+    for z in zones:
+        try:
+            m = get_zone_model(pcb_data, z)
+        except Exception:                                   # noqa: BLE001
+            m = None
+        if m is None or not getattr(m, 'ok', True):
+            continue
+        labels = set(int(x) for x in np.unique(m.labels) if x > 0)
+        if not labels:
+            continue
+        touched = set()
+
+        def _hit(x, y, size):
+            c = m.query_component(x, y, size=size)
+            if c and c > 0:
+                touched.add(c)
+        over = []
+        for p in pads:
+            if z.layer in expand_pad_layers(p.layers, copper):
+                _hit(p.global_x, p.global_y, max(p.size_x, p.size_y))
+            else:
+                over.append(p)
+        for v in vias:
+            if via_on_layer(v, z.layer):
+                _hit(v.x, v.y, v.size)
+        for s in segs:
+            if s.layer == z.layer:
+                for t in (0.0, 0.5, 1.0):
+                    _hit(s.start_x + t * (s.end_x - s.start_x),
+                         s.start_y + t * (s.end_y - s.start_y), s.width)
+        bare = labels - touched
+        if not bare or (touched and
+                        getattr(z, 'island_removal_mode', 0) not in (1, 2)):
+            continue
+        by_label = {}
+        for p in over:
+            pl = next((l for l in p.layers
+                       if l.endswith('.Cu') and not l.startswith('*')), None)
+            if pl is None or pl not in layer_names:
+                continue
+            c = m.query_component(p.global_x, p.global_y)
+            if c in bare:
+                by_label.setdefault(c, []).append(p)
+        for c in sorted(by_label):
+            out.append((z, m, c, sorted(
+                by_label[c], key=lambda p: (p.component_ref or '',
+                                            str(p.pad_number)))))
+    return out
+
+
+def _tap_bare_pours(pcb_data, net_id, config):
+    """#2020: tap each `_bare_pour_regions` region from ONE pad of every
+    group of the net's copper that has a pad over it (the first pad, in
+    order, that the plane tap -- plane_pad_tap, the machinery the plane
+    finalize taps with -- joins to the region), and return the tap copper
+    as ``(segments, vias)``.
+
+    The pour-launch ladders key a region to the component whose copper
+    covers it (#1777), and nothing covers a region no copper touches, so
+    the route joined such a split's pads on the surface and the zone
+    shipped isolated. The pour step defers each of those pads to the route
+    step to be welded into its plane (route_planes, #562); the taps weld
+    one per group, and the region then joins the groups over it as their
+    own copper would, and is fill the ladder offers every other terminal.
+    A probe route (``plan_probe``) and a via span narrower than the stack
+    (the tap drills a through via) tap nothing."""
+    if getattr(config, 'plan_probe', False) or getattr(config, 'via_span', None):
+        return [], []
+    regions = _bare_pour_regions(pcb_data, net_id, config.layers)
+    if not regions:
+        return [], []
+    from plane_pad_tap import (tap_pad_with_escalation, inflight_copper_dicts,
+                               _tap_copper)
+    from connectivity import get_terminal_component_info
+    import routing_defaults as _rd
+    cfg = _per_net_via_config(config, pcb_data, net_id)
+    segs_out, vias_out = [], []
+    try:
+        for z, m, label, pads in regions:
+            # the net's existing copper groups, as the router groups its
+            # terminals (rows: (gx, gy, layer_idx, x, y, pad))
+            comps = get_terminal_component_info(
+                pcb_data, net_id,
+                [(0, 0, 0, p.global_x, p.global_y, p) for p in pads])[0]
+            groups = {}
+            for i, p in enumerate(pads):
+                groups.setdefault(comps.get(i, i), []).append(p)
+            for group in groups.values():
+                _tap_one(pcb_data, net_id, cfg, z, m, label, group,
+                         segs_out, vias_out, tap_pad_with_escalation,
+                         inflight_copper_dicts, _tap_copper,
+                         _rd.PLANE_MAX_SEARCH_RADIUS)
+    finally:
+        _remove_copper(pcb_data, segs_out, vias_out)
+    return segs_out, vias_out
+
+
+def _tap_one(pcb_data, net_id, cfg, z, m, label, pads, segs_out, vias_out,
+             tap_pad_with_escalation, inflight_copper_dicts, _tap_copper,
+             radius):
+    """The first of `pads` the plane tap joins to fill region `label` of
+    `m`, its copper added to `pcb_data` (so the next tap sees it) and to
+    the out lists. False when none could be."""
+    for pad in pads:
+        pl = next(l for l in pad.layers
+                  if l.endswith('.Cu') and not l.startswith('*'))
+        iv, isg = inflight_copper_dicts(pcb_data)
+        res = tap_pad_with_escalation(
+            pad, pl, net_id, pcb_data, cfg, max_search_radius=radius,
+            via_size=cfg.via_size, via_drill=cfg.via_drill,
+            extra_vias=iv, extra_segments=isg, fine_for_all=True,
+            disable_reuse=True, plane_tap=True)
+        v = res.via if res.success else None
+        if v is None or m.query_component(
+                v['x'], v['y'], size=v['size']) != label:
+            continue
+        segs, vias = _tap_copper(net_id, res)
+        pcb_data.segments.extend(segs)
+        pcb_data.vias.extend(vias)
+        segs_out.extend(segs)
+        vias_out.extend(vias)
+        print(f"  POUR-TAP (#2020): {pad.component_ref}.{pad.pad_number} "
+              f"tapped into its {z.layer} pour, which no copper of the net "
+              f"touched (via at ({v['x']:.2f}, {v['y']:.2f}))")
+        return True
+    return False
+
+
+def _remove_copper(pcb_data, segs, vias):
+    if not (segs or vias):
+        return
+    _s, _v = set(map(id, segs)), set(map(id, vias))
+    pcb_data.segments = [s for s in pcb_data.segments if id(s) not in _s]
+    pcb_data.vias = [v for v in pcb_data.vias if id(v) not in _v]
+    from pcb_modification import bump_copper_epoch
+    bump_copper_epoch(pcb_data)
+
+
+@contextmanager
+def _bare_pour_taps(pcb_data, net_id, config, obstacles, enabled=True):
+    """Hold `_tap_bare_pours`' copper in `pcb_data` for one route call
+    (with each via's same-net ring in `obstacles`, as an unblock via's, so
+    the route drops no via of its own hole-to-hole into it), then take it
+    out again; the wrappers below hand it back in the route's result."""
+    segs, vias = (_tap_bare_pours(pcb_data, net_id, config) if enabled
+                  else ([], []))
+    if not (segs or vias):
+        yield None
+        return
+    pcb_data.segments.extend(segs)
+    pcb_data.vias.extend(vias)
+    from pcb_modification import bump_copper_epoch
+    bump_copper_epoch(pcb_data)
+    rings = []
+    coord = GridCoord(config.grid_step)
+    try:
+        for v in vias:
+            cells = inprogress_via_ring_cells(v, net_id, config, coord)
+            if not cells:
+                continue
+            arr = np.array(cells, dtype=np.int32)
+            try:
+                from obstacle_map import populated_via_rungs
+                rungs = tuple(populated_via_rungs(obstacles))
+            except ImportError:
+                rungs = ()
+            obstacles.add_blocked_vias_batch(arr)
+            for r in rungs:
+                obstacles.add_blocked_vias_rung_batch(r, arr)
+            rings.append((arr, rungs))
+        yield (segs, vias)
+    finally:
+        _release_unblock_via_rings(obstacles, rings)
+        _remove_copper(pcb_data, segs, vias)
+
+
+def _net_connected(pcb_data, net_id) -> bool:
+    """Whether the fill-aware checker grades the net's pads connected."""
+    from check_connected import check_net_connectivity
+    try:
+        return bool(check_net_connectivity(
+            net_id, [s for s in pcb_data.segments if s.net_id == net_id],
+            [v for v in pcb_data.vias if v.net_id == net_id],
+            pcb_data.pads_by_net.get(net_id, []),
+            [z for z in (pcb_data.zones or []) if z.net_id == net_id],
+            pcb_data=pcb_data).get('connected'))
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def _with_tap_copper(result, taps):
+    """A route result carrying `_bare_pour_taps`' copper, which it ships
+    with; a failed or empty result ships none of it."""
+    if not taps or not isinstance(result, dict) or result.get('failed'):
+        return result
+    segs, vias = taps
+    result['new_segments'] = list(segs) + list(result.get('new_segments') or [])
+    result['new_vias'] = list(vias) + list(result.get('new_vias') or [])
+    # Phase 3 launches every edge from the main route's copper; the tap is
+    # the tapped pad's own island (its component's, as a stub an earlier
+    # step laid would be), never the main route's
+    result['pour_tap_ids'] = frozenset(map(id, list(segs) + list(vias)))
+    return result
+
+
 def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
                               layer_names, coord, island_cells, config):
     """#544/#562 POUR-LAUNCH ladder v3: per-REGION fill launch cells.
@@ -5128,11 +5394,13 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     cross-region credit: attaching to a region unions you with THAT
     region's component only, and the MST plans the region's own join edge.
 
-    Regions covering NO terminal follow the zone's own island policy:
-    under island_removal_mode 0 (KiCad's default, remove isolated) they
-    are phantom copper -- never a node, never attach surface. Modes 1/2
-    keep them at fill time; their pseudo-terminal nodehood is deferred
-    (counted + noted, not offered).
+    A region no terminal covers is keyed to the component whose copper on
+    the zone's layer lies in it (#2020: the tap via `_tap_bare_pours`
+    drops beside a pad). A region nothing of the net touches follows the
+    zone's own island policy: under island_removal_mode 0 (KiCad's default,
+    remove isolated) it is phantom copper -- never a node, never attach
+    surface. Modes 1/2 keep them at fill time; their pseudo-terminal
+    nodehood is deferred (counted + noted, not offered).
 
     Per straggler, expanding rungs (1/2.5/6/15 mm); candidates = the
     region's fill cells scored dist + fragility (strait/boundary attach
@@ -5224,15 +5492,30 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
                 _c = _m.query_component(_info[3], _info[4])
                 if _c and _c > 0:
                     _cov.setdefault(_c, []).append(_idx)
-            # bare-region census (island policy; nodehood deferred)
+            from collections import Counter as _Ctr
+            _keyed = {_lb: _Ctr(pad_components.get(_i, _i)
+                                for _i in _idxs).most_common(1)[0][0]
+                      for _lb, _idxs in _cov.items()}
             _labels = set(int(x) for x in _np.unique(_m.labels) if x > 0)
-            for _lb in _labels - set(_cov):
+            # A region no terminal covers is still a component's where that
+            # component's copper on the zone's layer lies in it (#2020: the
+            # via _tap_bare_pours drops beside a pad, which is no terminal).
+            if _labels - set(_keyed):
+                _by_cu = {}
+                for _cid, _cmap in island_cells.items():
+                    for _k, (_fx, _fy) in _cmap.items():
+                        if _k[2] != _li:
+                            continue
+                        _c = _m.query_component(_fx, _fy)
+                        if _c and _c > 0 and _c not in _keyed:
+                            _by_cu.setdefault(_c, _Ctr())[_cid] += 1
+                for _lb, _cnt in _by_cu.items():
+                    _keyed[_lb] = _cnt.most_common(1)[0][0]
+            # bare-region census (island policy; nodehood deferred)
+            for _lb in _labels - set(_keyed):
                 if getattr(_z, 'island_removal_mode', 0) in (1, 2):
                     _bare_kept += 1
-            for _lb, _idxs in _cov.items():
-                from collections import Counter as _Ctr
-                _comp = _Ctr(pad_components.get(_i, _i)
-                             for _i in _idxs).most_common(1)[0][0]
+            for _lb, _comp in _keyed.items():
                 _cells_out = out.setdefault(_comp, {})
                 _copper = [(_fx, _fy, _k[2]) for _k, (_fx, _fy) in
                            (island_cells.get(_comp) or {}).items()]
@@ -5639,9 +5922,12 @@ def route_multipoint_main(pcb_data: PCBData, net_id: int, config: GridRouteConfi
     (`net_keepouts.config_for_nets`, #1527)."""
     from net_keepouts import stamp as _nk_stamp, config_for_nets
     with _nk_stamp(obstacles, pcb_data, (net_id,), config):
-        return _route_multipoint_main_impl(
-            pcb_data, net_id, config_for_nets(pcb_data, (net_id,), config),
-            obstacles, *args, **kwargs)
+        cfg = config_for_nets(pcb_data, (net_id,), config)
+        # #2020: a pour of this net no copper touches gets one tap first
+        with _bare_pour_taps(pcb_data, net_id, cfg, obstacles) as taps:
+            res = _route_multipoint_main_impl(
+                pcb_data, net_id, cfg, obstacles, *args, **kwargs)
+        return _with_tap_copper(res, taps)
 
 
 def _route_multipoint_main_impl(
@@ -6710,6 +6996,10 @@ def _route_multipoint_taps_impl(
     # Get the current segments (which may have meanders from length matching)
     all_segments = list(main_result['new_segments'])
     all_vias = list(main_result.get('new_vias', []))
+    # #2020: a pour tap is its pad's island, not the main route (see
+    # _with_tap_copper); a ROUTED component's island launches through
+    # _p3_island_cells below
+    _pour_taps = main_result.get('pour_tap_ids') or frozenset()
 
     coord = GridCoord(config.grid_step)
     layer_names = config.layers
@@ -6933,8 +7223,10 @@ def _route_multipoint_taps_impl(
         # Vias are included on ALL layers since they connect all copper layers
         obstacles.clear_source_target_cells()
         all_tap_points = _clear_launch_rows(
-            get_all_segment_tap_points(all_segments, coord, layer_names,
-                                       vias=all_vias),
+            get_all_segment_tap_points(
+                [_s for _s in all_segments if id(_s) not in _pour_taps],
+                coord, layer_names,
+                vias=[_v for _v in all_vias if id(_v) not in _pour_taps]),
             obstacles, coord, pcb_data, net_id)
 
         # Always include the designated source pad position as a potential source

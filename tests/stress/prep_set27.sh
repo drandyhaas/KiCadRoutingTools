@@ -16,7 +16,6 @@ mkdir -p "$STRESS/boards_unrouted_set27" "$STRESS/boards_set27"
 MAP=(
   "arty_mpw_tester|arty_mpw_tester"
   "audio_latency_tester|audio_latency_tester"
-  "dual_ipex_csi_interposer|dual_ipex_csi_interposer"
   "gmsl_deserializer|gmsl_deserializer"
   "jetson_agx_csi_adapter|jetson_agx_csi_adapter"
   "job_storage_exp|job_storage_exp"

@@ -399,13 +399,18 @@ def _live_step_board(pcb_data, results_data):
     vias.extend(results_data.get('all_swap_vias', []))
     from types import SimpleNamespace
 
+    # The lock is in the key, as in the adapter's strips (strip_listed_tracks
+    # and apply_routing_results' via strip): an unlocked strip target leaves
+    # its locked twin.
     def _sk(s):
         a = (round(s.start_x, 4), round(s.start_y, 4))
         b = (round(s.end_x, 4), round(s.end_y, 4))
-        return (min(a, b), max(a, b), s.layer, s.net_id)
+        return (min(a, b), max(a, b), s.layer, s.net_id,
+                bool(getattr(s, 'locked', False)))
 
     def _vk(v):
-        return (round(v.x, 4), round(v.y, 4), v.net_id)
+        return (round(v.x, 4), round(v.y, 4), v.net_id,
+                bool(getattr(v, 'locked', False)))
     _gone_s = {_sk(s) for s in results_data.get('segments_to_remove') or ()}
     _gone_v = {_vk(v) for v in results_data.get('vias_to_remove') or ()}
     pcb = SimpleNamespace(

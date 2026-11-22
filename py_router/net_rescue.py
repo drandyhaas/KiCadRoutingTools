@@ -326,6 +326,22 @@ def _withdraw_unused_escapes(pcb_data, net_id, tap_results, config,
     return kept
 
 
+def _on_board_pads(pcb_data, net_id):
+    """The net's pads less those `make_off_board_test` puts off the board
+    (#291: what `connectivity.drop_off_board_pads` drops from every routing
+    endpoint set). The off-board set is read once per board."""
+    off = getattr(pcb_data, '_off_board_pad_ids', None)
+    if off is None:
+        from check_drc import make_off_board_test
+        test = make_off_board_test(pcb_data.board_info)
+        off = frozenset() if test is None else frozenset(
+            id(p) for pads in pcb_data.pads_by_net.values() for p in pads
+            if test(p.global_x, p.global_y))
+        pcb_data._off_board_pad_ids = off
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    return [p for p in pads if id(p) not in off] if off else pads
+
+
 def _net_component_info(pcb_data, net_id):
     """Connected components of a net's pads+copper on the REAL board.
 
@@ -344,7 +360,9 @@ def _net_component_info(pcb_data, net_id):
     net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
     net_zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
                  if z.net_id == net_id]
-    net_pads = pcb_data.pads_by_net.get(net_id, [])
+    # #291: an off-board pad is no part to join. Counted, it kept the net
+    # open for the rescue, and a gap aimed at it ran its copper off the board.
+    net_pads = _on_board_pads(pcb_data, net_id)
 
     res = check_net_connectivity(net_id, net_segments, net_vias, net_pads,
                                  net_zones, return_graph=True,
@@ -2121,14 +2139,29 @@ def _size_escalation_ladder(config, pcb_data, net_id):
     if not may_narrow():
         return []  # --escalation off: nothing may march (#842)
     _fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
-    w0 = config.get_net_track_width(net_id, config.layers[0])
-    w_floor = min(w0, fab_track,
-                  (config.netclass_width_floors or {}).get(net_id, w0))
-    # #530: never below the net's own .kicad_dru / Board Setup minimum.
-    _rf = config.rule_floors(net_id, config.layers[0]).get('track_width')
-    if _rf:
-        w_floor = min(w0, max(w_floor, _rf))
-    width_travel = w0 - w_floor > 1e-9
+
+    def _layer_span(layer):
+        # (start, floor) of this net's width on `layer`: it starts at the
+        # width the net draws THERE -- a layer-scoped rule window (min..max,
+        # e.g. 0.18 outer / 0.102 inner) is already met by it -- and only
+        # ever marches DOWN, so no rung exceeds a layer's max.
+        w0 = config.get_net_track_width(net_id, layer)
+        w_floor = min(w0, fab_track,
+                      (config.netclass_width_floors or {}).get(net_id, w0))
+        # #530: never below the net's own .kicad_dru / Board Setup minimum.
+        _rf = config.rule_floors(net_id, layer).get('track_width')
+        if _rf:
+            w_floor = min(w0, max(w_floor, _rf))
+        return w0, w_floor
+
+    # Per-layer widths (net_layer_widths: an impedance declaration or a
+    # layer-scoped width rule, #1983) march layer by layer; a single width
+    # taken from layers[0] would draw the outer width on inner layers.
+    _own_layers = (config.net_layer_widths or {}).get(net_id) or {}
+    spans = {l: _layer_span(l) for l in config.layers} if _own_layers else {}
+    w0, w_floor = _layer_span(config.layers[0])
+    width_travel = (any(a - b > 1e-9 for a, b in spans.values()) if spans
+                    else w0 - w_floor > 1e-9)
 
     n_layers = len(pcb_data.board_info.copper_layers) or 2
     # escalation_rungs: raised to the board's own minimums under board (#857)
@@ -2160,11 +2193,21 @@ def _size_escalation_ladder(config, pcb_data, net_id):
     prev_key = None
     for k in range(1, n + 1):
         w = w0 + (w_floor - w0) * k / n if width_travel else w0
+        if spans:
+            _lw = {l: (a + (b - a) * k / n if width_travel else a)
+                   for l, (a, b) in spans.items()}
+            nlw = dict(net_layer_widths)
+            nlw[net_id] = _lw
+            w = _lw[config.layers[0]]
+            wkey = tuple(round(_lw[l], 6) for l in config.layers)
+        else:
+            nlw = net_layer_widths
+            wkey = (round(w, 6),)
         if m:
             v_dia, v_drill = via_rungs[min(m - 1, (k * m - 1) // n)]
         else:
             v_dia, v_drill = own_via
-        key = (round(w, 6), round(v_dia, 6), round(v_drill, 6))
+        key = wkey + (round(v_dia, 6), round(v_drill, 6))
         if key == prev_key:
             continue  # discrete via ladder can repeat a rung; dedupe
         prev_key = key
@@ -2172,7 +2215,7 @@ def _size_escalation_ladder(config, pcb_data, net_id):
             warn_fab_escalation(f"terminal escalation net_{net_id}")
         _rung = dict(track_width=w, layer_widths={},
                      power_net_widths=power_widths,
-                     net_layer_widths=net_layer_widths,
+                     net_layer_widths=nlw,
                      net_track_widths=net_track_widths,
                      coplanar_net_ids=coplanar_ids,
                      bga_exclusion_zones=[],
@@ -2185,6 +2228,16 @@ def _size_escalation_ladder(config, pcb_data, net_id):
             # is re-applied by route_net_with_obstacles; the run via here)
             rungs.append(replace(config, **_rung))
     return rungs
+
+
+def _rung_width_label(cfg, net_id) -> str:
+    """The track width(s) escalation rung `cfg` draws `net_id` at: one width,
+    or each distinct per-layer width ('0.102/0.18') when they differ."""
+    ws = sorted({round(cfg.get_net_track_width(net_id, l), 4)
+                 for l in (cfg.layers or [])})
+    if len(ws) > 1:
+        return '/'.join(f'{w:.4g}' for w in ws)
+    return f'{cfg.track_width:.4g}'
 
 
 def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
@@ -2522,7 +2575,7 @@ def terminal_geometry_escalation(state, single_ended_nets, net_clearances=None,
                 break
             _below = _below_hole_rules(config, cfg)
             print(f"  terminal escalation: {net_name} at track "
-                  f"{cfg.track_width:.4g} via {cfg.via_size:.4g}/"
+                  f"{_rung_width_label(cfg, net_id)} via {cfg.via_size:.4g}/"
                   f"{cfg.via_drill:.4g} (rung {k}/{n_rungs})"
                   + (", at the copper clearance alone: below the board's "
                      "hole_clearance rule(s)" if _below else ""))
@@ -2555,7 +2608,7 @@ def terminal_geometry_escalation(state, single_ended_nets, net_clearances=None,
             continue
 
         _acc_via = accepted_cfg.net_via(net_id)   # the via this net drew
-        geom = (f"{accepted_cfg.track_width:.4g}x"
+        geom = (f"{_rung_width_label(accepted_cfg, net_id)}x"
                 f"{_acc_via[0]:.4g}/{_acc_via[1]:.4g}")
         try:
             from fab_tiers import note_narrowing

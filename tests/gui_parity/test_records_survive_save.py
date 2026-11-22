@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What a GUI step records survives the user's KiCad save, and the CLI reads it.
+"""What a GUI step records survives a KiCad save, and the CLI reads it.
 
     python3 tests/gui_parity/test_records_survive_save.py
 
@@ -22,7 +22,7 @@ WHAT THIS DRIVES, on real boards through real pcbnew saves:
   1. flat_hierarchy (a project): a manual GUI step's writeback
      (apply_targets_to_board, then gui_utils.update_live_drc_floors, with the
      engine's protection / impedance / pour notes pending), then
-     ``pcbnew.SaveBoard`` with its project -- what KiCad's File > Save does.
+     a KiCad save of the board with its project (WHICH SAVE, below).
      Every record is read back by the CLI's own readers (declared_fab_floor,
      read_protected_nets, read_impedance_specs, read_pour_served_pads, the
      obstacle map's hole-floor origin), and a CLI step on the saved board
@@ -32,6 +32,16 @@ WHAT THIS DRIVES, on real boards through real pcbnew saves:
   3. the plan executor's REAL ``_write_drc_floors`` on flat_hierarchy, then a
      save: every rule its fix_project_for_output wrote is still in the saved
      project, and the class clearances too.
+
+WHICH SAVE. The gate first MEASURES this KiCad: a board property set on a
+loaded board, then a plain ``pcbnew.SaveBoard``. Where the saved file keeps
+the property (KiCad before 10.0.7), every save below is that plain save, which
+is also what the user's File > Save does. Where it does not (10.0.7 and later
+replace a board's properties with its project's text variables before saving,
+#1906), the user's own save is not covered by the tool, and every save below
+is the one the tool itself makes, ``tool_records.save_board``, over the real
+``pcbnew.SaveBoard``. The rows are the same either way: KiCad rewrites the
+project, and the board's copy is what the readers find.
 """
 
 # NOT RUNNABLE ON ipc-migration, and its claim does NOT hold here. It
@@ -165,6 +175,24 @@ def main():
             shutil.copyfile(src, dst)
         return dst
 
+    probe = stage(DECLARING, True)
+    probe_board = _pcbnew.LoadBoard(probe)
+    tool_records.set_live_board_namespace(probe_board, {'probe': 1})
+    _pcbnew.SaveBoard(probe, probe_board)
+    plain_save_keeps = tool_records.board_namespace(probe) == {'probe': 1}
+    print(f"--- 0. this KiCad ({_pcbnew.GetBuildVersion()}): a plain SaveBoard "
+          + ("KEEPS a board property, so every save below is that plain save "
+             "(the user's own File > Save)" if plain_save_keeps else
+             "DROPS a board property (#1906), so the user's own save is not "
+             "covered here and every save below is the tool's own, "
+             "tool_records.save_board"))
+
+    def kicad_save(path, board):
+        """The save this KiCad's records are promised to survive."""
+        if plain_save_keeps:
+            return _pcbnew.SaveBoard(path, board)
+        return tool_records.save_board(_pcbnew.SaveBoard, path, board)
+
     PROT = {'/RECORD_A': 'length-matched'}
     IMP = {'/RECORD_A': {'ohms': 50.0}}
     POUR = {'U1.1': {'net': 'GND', 'layer': 'F.Cu', 'how': 'pour'}}
@@ -209,7 +237,12 @@ def main():
     gui_step(board)
     check("before the save, the project on disk carries the records",
           P.read_protected_nets(os.path.splitext(path)[0] + '.kicad_pro') == PROT)
-    check("pcbnew saves the board and its project", bool(_pcbnew.SaveBoard(path, board)))
+    check("pcbnew saves the board and its project", bool(kicad_save(path, board)))
+    check("after the save, the live board still holds the records (its next "
+          "save writes them again)",
+          (tool_records.live_board_namespace(board) or {}).get(
+              'protected_nets') == PROT,
+          f"{tool_records.live_board_namespace(board)}")
     with open(os.path.splitext(path)[0] + '.kicad_pro', encoding='utf-8') as f:
         saved = json.load(f)
     check("(the save really rewrote the project from KiCad's copy: no "
@@ -260,7 +293,7 @@ def main():
         via_diameter=STEP_2['via_size'], via_drill=STEP_2['via_drill'],
         minima=board_minima_from_live(board2)), {})
     _quiet(update_live_drc_floors, board2, **STEP_2)
-    check("pcbnew saves it (creating its project)", bool(_pcbnew.SaveBoard(bare, board2)))
+    check("pcbnew saves it (creating its project)", bool(kicad_save(bare, board2)))
     read_back(bare, "after the save", 0.4)
 
     print("--- 3. the plan executor's end-of-plan writeback, then KiCad's save")
@@ -277,7 +310,7 @@ def main():
     _quiet(ex._write_drc_floors)
     with open(os.path.splitext(plan)[0] + '.kicad_pro', encoding='utf-8') as f:
         written = json.load(f)
-    check("pcbnew saves the board and its project", bool(_pcbnew.SaveBoard(plan, board3)))
+    check("pcbnew saves the board and its project", bool(kicad_save(plan, board3)))
     dlg.Destroy()
     with open(os.path.splitext(plan)[0] + '.kicad_pro', encoding='utf-8') as f:
         after = json.load(f)
@@ -317,7 +350,7 @@ def main():
                same_net_pad_clearance=0.15)
     except TypeError:            # code whose step boundary takes no #581 value
         _quiet(update_live_drc_floors, board4, clearance=STEP['clearance'])
-    _pcbnew.SaveBoard(snpc, board4)
+    kicad_save(snpc, board4)
     cli4 = stage(DECLARING, True)
     _quiet(P.persist_same_net_pad_clearance,
            os.path.splitext(cli4)[0] + '.kicad_pro', 0.15)   # route.py's call
@@ -353,7 +386,7 @@ def main():
                 clearance=STEP['clearance'],
                 minima=board_minima_from_live(board5)), severity_plan())
             update_live_drc_floors(board5, clearance=STEP['clearance'])
-        _pcbnew.SaveBoard(sev, board5)
+        kicad_save(sev, board5)
         cli5 = cli_twin(src, with_pro, clearance=STEP['clearance'],
                         relax_severities=True)
         g5 = tool_records.effective_namespace(sev).get('saved_severities')
@@ -396,7 +429,7 @@ def main():
         apply_targets_to_board(board6, compute_targets(
             clearance=0.15, minima=board_minima_from_live(board6)), {})
         update_live_drc_floors(board6, clearance=0.15)
-    _pcbnew.SaveBoard(cls6, board6)
+    kicad_save(cls6, board6)
     descent()
     cli6 = cli_twin(DECLARING, True, clearance=0.15)
     g6 = tool_records.effective_namespace(cls6).get(CLASS_CLEARANCE_RELAXED_KEY)
@@ -413,7 +446,7 @@ def main():
     board7 = _pcbnew.LoadBoard(vd)
     _pcbnew.GetBoard = lambda: board7
     _quiet(update_live_drc_floors, board7, **STEP)
-    _pcbnew.SaveBoard(vd, board7)
+    kicad_save(vd, board7)
     cli7 = cli_twin(DECLARING, True, **{'clearance': STEP['clearance'],
                                         'track_width': STEP['track_width'],
                                         'via_diameter': STEP['via_size'],
@@ -439,8 +472,10 @@ def main():
     if failures:
         print(f"FAILED ({len(failures)}): " + "; ".join(failures))
         return 1
-    print("PASS: a GUI step's records and rules survive the user's KiCad save, "
-          "and the CLI reads them")
+    print("PASS: a GUI step's records and rules survive "
+          + ("the user's KiCad save" if plain_save_keeps
+             else "the tool's own KiCad save (the user's is not covered on "
+                  "this KiCad, #1906)") + ", and the CLI reads them")
     return 0
 
 

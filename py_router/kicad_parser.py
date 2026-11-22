@@ -7,7 +7,11 @@ from __future__ import annotations
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': [], 'kind': 'instrument'}
 
+import collections
 import functools
+import hashlib
+import pickle
+import threading
 from array import array
 import os
 import re
@@ -485,6 +489,202 @@ class Pad:
     # BEFORE its partner pad's (check_drc.kicad_tests_tie_waiver). Set by
     # BOTH parse paths.
     uuid: str = ""
+    # A KiCad 9+ PADSTACK's per-layer copper: {layer: (size_x, size_y, shape,
+    # rect_rotation, roundrect_rratio)}, board frame, for each copper layer
+    # whose own copper is SMALLER than `size_x`/`size_y` -- those are the max
+    # over the pad's layers, which clearance keeps (DRC-safe). A track on such
+    # a layer meets only that layer's copper: a DIP pad that is a 2.54 x 1.27
+    # oval on F.Cu and a 2.6416 x 1.778 custom pad on B.Cu took F.Cu tracks
+    # landing on B.Cu-only copper as joined, and KiCad graded them open.
+    # Read through `pad_on_layer`. None when every layer is the same. Set by
+    # BOTH parse paths.
+    layer_copper: Optional[Dict[str, Tuple[float, float, str, float, float]]] = None
+    # The copper KiCad's CONNECTIVITY joins a custom pad through, when it is
+    # not `polygons` (board frame): KiCad joins an UNFILLED circle primitive
+    # only along its centreline, not across its stroke (measured, kicad 10.0.6:
+    # a 1.5 mm-stroke spacer ring joins a track end at the stroke's centre
+    # radius and at none of the radii 0.1 mm either side). So the anchor, the
+    # filled discs and a hairline ring per unfilled circle. None = `polygons`.
+    # Read through `pad_on_layer`. Set by BOTH parse paths.
+    join_polygons: Optional[List[List[Tuple[float, float]]]] = None
+
+
+def pad_on_layer(pad, layer=None, joins=False):
+    """`pad` as its copper stands on `layer` (KiCad 9+ padstacks): a copy
+    carrying that layer's size and shape when they differ from the pad's
+    max-over-layers model (`Pad.layer_copper`), else the pad itself.
+    `joins=True` also swaps in the copper KiCad's connectivity joins through
+    (`Pad.join_polygons`). For CONNECTIVITY and pad LANDING only: clearance
+    keeps the max model."""
+    lc = getattr(pad, 'layer_copper', None)
+    entry = lc.get(layer) if (lc and layer is not None) else None
+    jp = getattr(pad, 'join_polygons', None) if joins else None
+    if entry is None and jp is None:
+        return pad
+    import dataclasses
+    kw = {'layer_copper': None, 'join_polygons': None}
+    if entry is not None:
+        sx, sy, shape, rr, rratio = entry
+        kw.update(size_x=sx, size_y=sy, shape=shape, rect_rotation=rr,
+                  roundrect_rratio=rratio, polygons=None, copper_box=None)
+    if jp is not None and (entry is None or pad.shape == 'custom'):
+        kw['polygons'] = jp
+    return dataclasses.replace(pad, **kw)
+
+
+def padstack_layer_copper(base_size, base_shape, base_rratio, layer_geom,
+                          pad_rotation, max_size, max_shape):
+    """`Pad.layer_copper` from per-layer padstack geometry, shared by both
+    parse paths. `layer_geom` = {layer: (frame_w, frame_h, shape, rratio)} for
+    each copper layer the pad is on (pad frame, KiCad's own per-layer values);
+    an entry whose board-frame copper differs from the max model
+    (`max_size`, `max_shape`) and is not custom (a custom layer keeps the
+    max model) becomes one row."""
+    out = {}
+    for layer, (fw, fh, shape, rratio) in layer_geom.items():
+        if shape == 'custom' or fw <= 0 or fh <= 0:
+            continue
+        sx, sy, rr = _resolve_pad_rect(fw, fh, pad_rotation)
+        if (abs(sx - max_size[0]) < 1e-6 and abs(sy - max_size[1]) < 1e-6
+                and shape == max_shape):
+            continue
+        out[layer] = (sx, sy, shape, rr,
+                      rratio if shape == 'roundrect' else 0.0)
+    return out or None
+
+
+def _pad_circle_n(R):
+    """Vertices of a custom-pad circle primitive of radius R: the inscribed
+    32-gon, refined only past pcbnew's own 5 um max error (see the circle
+    primitive in `_custom_pad_global_polygons`). The one tessellation rule,
+    shared by a pad's copper outline and its join outline."""
+    return _adaptive_circle_n(R, eps=0.005, lo=32, hi=128)
+
+
+def custom_pad_join_polygons(prims, anchor_shape, anchor_size, global_x,
+                             global_y, pad_rotation):
+    """`Pad.join_polygons` for a custom pad whose primitives are all circles,
+    at least one of them UNFILLED: the anchor, each filled disc, and a
+    hairline ring on each unfilled circle's centreline. `prims` = [(cx, cy,
+    r, width, filled)] in the pad frame; the anchor is `anchor_shape`
+    ('circle'/'rect') of `anchor_size` about the pad. None when any primitive
+    is not a circle, or none is unfilled (then `polygons` already is it).
+    Shared by both parse paths."""
+    if not prims or not any(not f and w > 0 for (_x, _y, _r, w, f) in prims):
+        return None
+    rad = math.radians(-pad_rotation)
+    cos_r, sin_r = math.cos(rad), math.sin(rad)
+
+    def g(vx, vy):
+        return (global_x + vx * cos_r - vy * sin_r,
+                global_y + vx * sin_r + vy * cos_r)
+
+    def ring(cx, cy, r_out, r_in):
+        n = _pad_circle_n(max(r_out, 1e-6))
+        outer = [g(cx + r_out * math.cos(2 * math.pi * k / n),
+                   cy + r_out * math.sin(2 * math.pi * k / n)) for k in range(n)]
+        if r_in <= 0:
+            return outer
+        inner = [g(cx + r_in * math.cos(-2 * math.pi * k / n),
+                   cy + r_in * math.sin(-2 * math.pi * k / n)) for k in range(n)]
+        return outer + [outer[0], inner[0]] + inner[1:] + [inner[0]]
+
+    polys = []
+    aw, ah = anchor_size
+    if aw > 0 and ah > 0:
+        if anchor_shape == 'circle':
+            polys.append(ring(0.0, 0.0, min(aw, ah) / 2.0, 0.0))
+        else:
+            polys.append([g(-aw / 2, -ah / 2), g(aw / 2, -ah / 2),
+                          g(aw / 2, ah / 2), g(-aw / 2, ah / 2)])
+    for (cx, cy, r, w, filled) in prims:
+        if filled:
+            polys.append(ring(cx, cy, r + w / 2.0, 0.0))
+        else:
+            polys.append(ring(cx, cy, r + 1e-4, max(r - 1e-4, 0.0)))
+    return polys
+
+
+def _custom_pad_circle_prims(pad_text):
+    """The (cx, cy, r, width, filled) of a custom pad's primitives when every
+    one is a gr_circle (pad frame), else None."""
+    pm = re.search(r'\(primitives\b', pad_text)
+    if not pm:
+        return None
+    prim = pad_text[pm.start():find_matching_paren(pad_text, pm.start()) - 1]
+    kinds = re.findall(r'\(gr_(\w+)\b', prim)
+    if not kinds or any(k != 'circle' for k in kinds):
+        return None
+    out = []
+    for m in re.finditer(r'\(gr_circle\b', prim):
+        block = prim[m.start():find_matching_paren(prim, m.start()) - 1]
+        c = re.search(r'\(center\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
+        e = re.search(r'\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
+        wm = re.search(r'\(width\s+(-?[\d.]+)\)', block)
+        if not (c and e):
+            return None
+        cx, cy = float(c.group(1)), float(c.group(2))
+        r = math.hypot(float(e.group(1)) - cx, float(e.group(2)) - cy)
+        filled = not re.search(r'\(fill\s+(?:no|none)\b', block)
+        out.append((cx, cy, r, float(wm.group(1)) if wm else 0.0, filled))
+    return out
+
+
+_PCBNEW_PAD_TEXTS = {}
+
+
+def _pcbnew_pad_texts(fp):
+    """Each pad block of pcbnew footprint `fp` as KiCad formats it, in
+    `fp.Pads()` order (memoised per footprint object for the build)."""
+    key = id(fp)
+    got = _PCBNEW_PAD_TEXTS.get(key)
+    if got is not None and got[0] is fp:
+        return got[1]
+    import pcbnew
+    io = pcbnew.PCB_IO_KICAD_SEXPR()
+    io.Format(fp)
+    text = io.GetStringOutput(True)
+    blocks = []
+    for m in re.finditer(r'\(pad\s+"', text):
+        blocks.append(text[m.start():find_matching_paren(text, m.start())])
+    _PCBNEW_PAD_TEXTS[key] = (fp, blocks)
+    return blocks
+
+
+def _padstack_layer_geom(pad_text, base_size, base_shape, base_rratio,
+                         pad_layers, board_copper):
+    """{layer: (frame_w, frame_h, shape, rratio)} from a KiCad 9 `(padstack
+    ...)` for each copper layer the pad is on (the text path's half of
+    `padstack_layer_copper`), or None without a per-layer padstack."""
+    m = re.search(r'\(padstack\b', pad_text)
+    if not m:
+        return None
+    blk = pad_text[m.start():find_matching_paren(pad_text, m.start())]
+    mm = re.search(r'\(mode\s+(\w+)\)', blk)
+    mode = mm.group(1) if mm else 'normal'
+    if mode not in ('front_inner_back', 'custom'):
+        return None
+    per = {}
+    for lm in re.finditer(r'\(layer\s+"([^"]+)"', blk):
+        lb = blk[lm.start():find_matching_paren(blk, lm.start())]
+        sm = re.search(r'\(size\s+(%s)\s+(%s)\)' % (AT_NUM, AT_NUM), lb)
+        shm = re.search(r'\(shape\s+(\w+)\)', lb)
+        rm = re.search(r'\(roundrect_rratio\s+([\d.]+)\)', lb)
+        per[lm.group(1)] = (float(sm.group(1)) if sm else base_size[0],
+                            float(sm.group(2)) if sm else base_size[1],
+                            shm.group(1) if shm else base_shape,
+                            float(rm.group(1)) if rm else base_rratio)
+    on = [ln for ln in board_copper if '*.Cu' in pad_layers or ln in pad_layers]
+    base = (base_size[0], base_size[1], base_shape, base_rratio)
+    out = {}
+    for ln in on:
+        if ln == 'F.Cu':
+            out[ln] = base
+        elif mode == 'front_inner_back':
+            out[ln] = per.get('B.Cu' if ln == 'B.Cu' else 'Inner', base)
+        else:
+            out[ln] = per.get(ln, base)
+    return out
 
 
 _VIA_BIRTH_WATCH = None
@@ -1735,7 +1935,7 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                     # reterminal_em J6/J7). Every smaller circle keeps its
                     # 32-gon, so the geometry of most boards does not move
                     # (run-4 B6's 1 um adaptive version moved all of them).
-                    N = _adaptive_circle_n(R, eps=0.005, lo=32, hi=128)
+                    N = _pad_circle_n(R)
                     outer = [(c[0] + R * math.cos(2 * math.pi * k / N),
                               c[1] + R * math.sin(2 * math.pi * k / N))
                              for k in range(N)]
@@ -5285,6 +5485,24 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                                  or fp_zone_connection),
                 uuid=own_uuid_from_text(pad_text),
             )
+            # Per-layer padstack copper and the custom pad's join outline
+            # (Pad.layer_copper / join_polygons); the pcbnew path builds the
+            # same through the same two helpers.
+            if sizes:
+                _plg = _padstack_layer_geom(
+                    pad_text, (float(sizes[0][0]), float(sizes[0][1])),
+                    pad_shape, roundrect_rratio, pad_layers, board_copper)
+                if _plg:
+                    pad.layer_copper = padstack_layer_copper(
+                        None, pad_shape, roundrect_rratio, _plg, pad_rotation,
+                        (pad.size_x, pad.size_y), pad.shape)
+            if pad_shape == 'custom' and _anchor_size is not None:
+                _prims = _custom_pad_circle_prims(pad_text)
+                if _prims:
+                    _am = re.search(r'\(anchor\s+(\w+)\)', pad_text)
+                    pad.join_polygons = custom_pad_join_polygons(
+                        _prims, _am.group(1) if _am else 'rect', _anchor_size,
+                        global_x, global_y, pad_rotation)
 
             footprint.pads.append(pad)
 
@@ -6341,7 +6559,9 @@ def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
     inductor pad inside its net's own filled B.Cu gr_poly read
     open to the grader and to the route step while KiCad called it
     connected. They parse as ``Segment(graphic=True)``, immovable art (#337)
-    the router routes around and never targets. Returns the number of
+    the router routes around; an island of it that reaches none of its net's
+    pads is a routing terminal of the net (#659, art_terminals). Returns the
+    number of
     net-tagged graphic segments found. Called by BOTH parse paths (file text
     and pcbnew build)."""
     tagged = [s for s in segments
@@ -6354,18 +6574,18 @@ def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
     print(f"WARNING: {len(tagged)} NET-TAGGED copper graphic segment(s) on "
           f"{len(nets)} net(s) ({preview}). KiCad conducts through them (a "
           f"stroke joins the copper it touches, a filled shape its whole "
-          f"interior) and so does our connectivity grading, but they are "
-          f"immovable art the router routes around and never targets (#337).")
+          f"interior) and so does our connectivity grading. They are "
+          f"immovable art (#337); an island of them no pad reaches is a "
+          f"routing terminal of its net (#659, art_terminals).")
     # ...and say what it will look like AFTERWARDS, which is the part people
     # actually hit (#659): art that touches none of its net's other copper is
-    # an island KiCad's DRC demands a link to, and #337 makes it immutable, so
-    # no routing pass welds to it or deletes it. Measured over 31 recorded
-    # boards it was 36 of 51 KiCad-only open links on zone-less signal nets.
-    # Nobody should spend a retry on it.
-    print(f"         A net whose art touches none of its other copper stays "
-          f"UNCONNECTED in KiCad's DRC on every run: no routing pass welds "
-          f"to art, so joining it is a board-authoring fix, not a routing "
-          f"failure (#659).")
+    # an island KiCad's DRC demands a link to. #337 makes it immutable, so no
+    # pass deletes it; a route step gives the island a terminal and joins it
+    # (art_terminals). Measured over 31 recorded boards it was 36 of 51
+    # KiCad-only open links on zone-less signal nets.
+    print(f"         A net whose art touches none of its other copper is "
+          f"UNCONNECTED in KiCad's DRC until a route step joins it: route.py "
+          f"routes the net to the art island as to a pad (#659).")
     return len(tagged)
 
 
@@ -7839,6 +8059,74 @@ def release_text_caches() -> None:
     _footprint_edge_points_by_ref_cached.cache_clear()
 
 
+# Content-keyed cache of whole-board parses. One route.py run parses its
+# input and output files again and again (batch_route, file_only_copper, every
+# _late_* sweep, the final regrade), mostly with no byte changed in between:
+# esp_prog parses 19 times for 7 distinct texts, a 10.8 MB board 48 times at
+# 2.5 s each. A hit costs a sha1 of the bytes plus one pickle.loads (0.03 s on
+# that board), and returns a FRESH object, because callers mutate PCBData
+# (art terminals, renumbered nets). The key is the path (PCBData records
+# source_path), the bytes' sha1 and the two layer arguments; the parse reads
+# nothing else. What the parse printed is recorded and said again on a hit.
+# KRT_PARSE_CACHE=0 turns it off.
+_PARSE_CACHE = collections.OrderedDict()
+_PARSE_CACHE_SIZE = 4
+
+
+def _parse_cache_key(filepath, guide_layer, keepout_layer):
+    if os.environ.get('KRT_PARSE_CACHE', '1') == '0':
+        return None
+    try:
+        with open(filepath, 'rb') as f:
+            digest = hashlib.sha1(f.read()).hexdigest()
+    except (OSError, TypeError):
+        return None
+    return (os.path.abspath(filepath), digest, guide_layer, keepout_layer)
+
+
+def clear_parse_cache() -> None:
+    """Forget every cached parse (tests that patch the parser's internals)."""
+    _PARSE_CACHE.clear()
+
+
+class _ParseOutputTee:
+    """Pass sys.stdout/sys.stderr writes through and record them, so a cache
+    hit says what the parse said.
+
+    The streams are process-wide, so only the parsing thread's writes are
+    recorded (another thread printing meanwhile -- a GUI's UI thread -- is not
+    the parse's output, and would otherwise be said again on every hit), and
+    a stream is put back only if it is still this tee's (a thread that
+    swapped it meanwhile keeps its own)."""
+
+    class _Stream:
+        def __init__(self, inner, err, said, owner):
+            self._inner, self._err, self._said = inner, err, said
+            self._owner = owner
+
+        def write(self, text):
+            if threading.get_ident() == self._owner:
+                self._said.append((self._err, text))
+            return self._inner.write(text)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def __init__(self):
+        self.said = []
+        owner = threading.get_ident()
+        self._out, self._errs = sys.stdout, sys.stderr
+        self._tee_out = self._Stream(self._out, False, self.said, owner)
+        self._tee_err = self._Stream(self._errs, True, self.said, owner)
+        sys.stdout, sys.stderr = self._tee_out, self._tee_err
+
+    def close(self):
+        if sys.stdout is self._tee_out:
+            sys.stdout = self._out
+        if sys.stderr is self._tee_err:
+            sys.stderr = self._errs
+
+
 def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
                     keepout_layer: str = "User.2") -> PCBData:
     """
@@ -7853,15 +8141,37 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         PCBData object containing all parsed data
     """
     global _PARSE_MEMO
+    key = _parse_cache_key(filepath, guide_layer, keepout_layer)
+    if key is not None:
+        hit = _PARSE_CACHE.get(key)
+        if hit is not None:
+            _PARSE_CACHE.move_to_end(key)
+            blob, said = hit
+            for err, text in said:
+                (sys.stderr if err else sys.stdout).write(text)
+            return pickle.loads(blob)
     outer = _PARSE_MEMO is None
     if outer:
         _PARSE_MEMO = {'live': {}, 'masked_from': {}, 'ends': {}, 'shapes': {}}
+    tee = _ParseOutputTee() if key is not None else None
     try:
-        return _parse_kicad_pcb(filepath, guide_layer, keepout_layer)
+        pcb = _parse_kicad_pcb(filepath, guide_layer, keepout_layer)
     finally:
+        if tee is not None:
+            tee.close()
         if outer:
             _PARSE_MEMO = None
         release_text_caches()
+    if key is not None:
+        try:
+            blob = pickle.dumps(pcb, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            blob = None
+        if blob is not None:
+            _PARSE_CACHE[key] = (blob, tuple(tee.said))
+            while len(_PARSE_CACHE) > _PARSE_CACHE_SIZE:
+                _PARSE_CACHE.popitem(last=False)
+    return pcb
 
 
 def _parse_kicad_pcb(filepath: str, guide_layer: str,
@@ -8045,7 +8355,10 @@ def propagate_via_cluster_nets(content: str, vias, segments, footprints, zones,
         if getattr(v, 'free', False):
             continue        # `(free yes)`: KiCad never re-nets a free via
         layers = span(v)
-        r = v.size / 2.0
+        # A track end ON the rim joins the via: pcbnew compares integer nm
+        # (300000 <= 300000), where float puts (39.6 - 39.3)**2 a few ulps
+        # over 0.3**2. 1 nm of slack restores that, and no more.
+        r = v.size / 2.0 + 1e-6
         own = any(s.net_id == v.net_id and s.layer in layers
                   and (ex - v.x) ** 2 + (ey - v.y) ** 2 <= r * r
                   for ex, ey, s in near(ends, v.x, v.y, r)) if v.net_id else False
@@ -8094,7 +8407,7 @@ def propagate_via_cluster_nets(content: str, vias, segments, footprints, zones,
                          for ring in fills.get((z.uuid, z.layer), ()))}
         if not origin:
             continue
-        r = v.size / 2.0
+        r = v.size / 2.0 + 1e-6     # rim ends join, as above
         origin |= {s.net_id for ex, ey, s in near(ends, v.x, v.y, r)
                    if s.net_id and s.layer in layers
                    and (ex - v.x) ** 2 + (ey - v.y) ** 2 <= r * r}
@@ -10168,24 +10481,7 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
             shape_attr = getattr(padstack, "shape", None)
             roundrect_rratio = float(getattr(padstack, "corner_radius_ratio", 0.0) or 0.0)
 
-        if shape_attr is None:
-            shape = "rect"
-        else:
-            # kipy returns the PadStackShape enum as a bare int, which has no
-            # `.name`: read through `str(int)` it labelled EVERY pad 'rect' --
-            # circles, ovals and roundrects boxed, and no custom pad ever
-            # reached the #188 polygon read below. The enum's own name first.
-            name = getattr(shape_attr, "name", None)
-            if not name:
-                try:
-                    from kipy.proto.board.board_types_pb2 import PadStackShape
-                    name = _kipy_enum_name(PadStackShape, shape_attr)
-                except Exception:
-                    name = ""
-            if name:
-                shape = _pad_shape_label(str(name).lower())
-            else:
-                shape = _pad_shape_label(str(shape_attr).lower())
+        shape = _kipy_pad_shape_name(shape_attr)
 
         # The pad's kind and its true layer SET (`kipy_pad_layer_names`, the
         # spelling both of main's parse paths give, 4f3e4e6e); the old
@@ -10328,7 +10624,7 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
         # the way local_clearance is (parity with both other parse paths).
         _pad_zc = kipy_pad_zone_connection(padstack) or fp_zone_connection
 
-        return Pad(
+        pad_obj = Pad(
             component_ref=reference,
             pad_number=pad_num,
             global_x=global_x, global_y=global_y,
@@ -10362,9 +10658,127 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
             # #1737: check_drc's net-tie verdict follows the uuid order
             uuid=_kipy_uuid(pad),
         )
+        # Per-layer padstack copper and the custom pad's join outline
+        # (Pad.layer_copper / join_polygons), through the text path's two
+        # helpers, from kipy's own per-layer values.
+        try:
+            _plg = _kipy_padstack_layer_geom(
+                padstack, copper_layers, _base_size, shape, roundrect_rratio,
+                pad_layers, board_copper_layer_names)
+            if _plg:
+                pad_obj.layer_copper = padstack_layer_copper(
+                    None, shape, roundrect_rratio, _plg, pad_rotation,
+                    (pad_obj.size_x, pad_obj.size_y), pad_obj.shape)
+        except Exception:
+            pass  # no per-layer padstack read: one copper for every layer
+        if shape == "custom" and primary_layer is not None and anchor_size:
+            try:
+                _prims = _kipy_custom_pad_circle_prims(primary_layer)
+                if _prims:
+                    pad_obj.join_polygons = custom_pad_join_polygons(
+                        _prims, _kipy_custom_anchor_shape(primary_layer),
+                        anchor_size, global_x, global_y, pad_rotation)
+            except Exception:
+                pass  # keep the copper outline
+        return pad_obj
     except Exception as e:
         print(f"Warning: failed to read pad {getattr(pad, 'number', '?')}: {e}")
         return None
+
+
+def _kipy_pad_shape_name(shape_attr) -> str:
+    """The pad shape label ('rect', 'circle', 'oval', 'roundrect', ...) of a
+    kipy PadStackShape value, or 'rect' for None.
+
+    kipy returns the PadStackShape enum as a bare int, which has no `.name`:
+    read through `str(int)` it labelled EVERY pad 'rect' -- circles, ovals and
+    roundrects boxed, and no custom pad ever reached the #188 polygon read.
+    The enum's own name first."""
+    if shape_attr is None:
+        return "rect"
+    name = getattr(shape_attr, "name", None)
+    if not name:
+        try:
+            from kipy.proto.board.board_types_pb2 import PadStackShape
+            name = _kipy_enum_name(PadStackShape, shape_attr)
+        except Exception:
+            name = ""
+    return _pad_shape_label(str(name or shape_attr).lower())
+
+
+def _kipy_padstack_layer_geom(padstack, copper_layers, base_size, base_shape,
+                              base_rratio, pad_layers, board_copper):
+    """`_padstack_layer_geom` for a kipy padstack: {layer: (frame_w, frame_h,
+    shape, rratio)} for each copper layer the pad is on, or None without a
+    per-layer (front/inner/back or custom) padstack. The F.Cu entry is the
+    base, as the file's base `(size ...)` is; a front/inner/back stack reads
+    its inner and B.Cu entries, a custom one an entry per layer, and a layer
+    with no entry keeps the base -- `_kipy_padstack_on_size`'s mapping."""
+    from kipy.proto.board.board_types_pb2 import PadStackType
+    mode = int(getattr(padstack, "type", PadStackType.PST_NORMAL))
+    fib = int(PadStackType.PST_FRONT_INNER_BACK)
+    if mode not in (fib, int(PadStackType.PST_CUSTOM)):
+        return None
+    per = {}
+    for cl in (copper_layers or []):
+        n = _kipy_layer_token(getattr(cl, "layer", None))
+        size = getattr(cl, "size", None)
+        if not n or size is None or n in per:
+            continue
+        w, h = _vec_to_xy_mm(size)
+        per[n] = (w, h, _kipy_pad_shape_name(getattr(cl, "shape", None)),
+                  float(getattr(cl, "corner_rounding_ratio", 0.0) or 0.0))
+    base = per.get('F.Cu', (base_size[0], base_size[1], base_shape, base_rratio))
+    inner = next((g for n, g in per.items() if n.startswith('In')), base)
+    out = {}
+    for ln in board_copper:
+        if not ('*.Cu' in pad_layers or ln in pad_layers):
+            continue
+        if ln == 'F.Cu':
+            out[ln] = base
+        elif mode == fib:
+            out[ln] = per.get('B.Cu', base) if ln == 'B.Cu' else inner
+        else:
+            out[ln] = per.get(ln, base)
+    return out
+
+
+def _kipy_custom_anchor_shape(primary_layer) -> str:
+    """'circle' or 'rect': a kipy custom pad's anchor, as the text path reads
+    `(anchor ...)`."""
+    try:
+        from kipy.proto.board.board_types_pb2 import PadStackShape
+        if (int(getattr(primary_layer, "custom_anchor_shape", 0))
+                == int(PadStackShape.PSS_CIRCLE)):
+            return 'circle'
+    except Exception:
+        pass
+    return 'rect'
+
+
+def _kipy_custom_pad_circle_prims(primary_layer):
+    """`_custom_pad_circle_prims` for a kipy custom pad: the (cx, cy, r,
+    width, filled) of its primitives (the padstack layer's `custom_shapes`,
+    pad frame about the anchor) when every one is a circle, else None."""
+    shapes = list(getattr(primary_layer, "custom_shapes", None) or [])
+    if not shapes:
+        return None
+    out = []
+    for sh in shapes:
+        if _kipy_shape_kind(sh) != "circle":
+            return None
+        c, e = _vec_to_xy_mm(sh.center), _vec_to_xy_mm(sh.radius_point)
+        try:
+            w = _nm_to_mm(sh.attributes.stroke.width)
+        except Exception:
+            w = 0.0
+        try:
+            filled = bool(sh.attributes.fill.filled)
+        except Exception:
+            filled = True
+        out.append((c[0], c[1], math.hypot(e[0] - c[0], e[1] - c[1]),
+                    max(0.0, w), filled))
+    return out
 
 
 def _pad_shape_label(raw: str) -> str:
@@ -11956,6 +12370,29 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 bzc = getattr(bp, 'zone_connection', None); fzc = getattr(fp, 'zone_connection', None)
                 if bzc != fzc:
                     diffs.append(f"Pad {ref}:{bp.pad_number} zone_connection: board={bzc} file={fzc}")
+                # Per-layer padstack copper and the join outline: what
+                # connectivity and pad landing read (`pad_on_layer`).
+                blc = getattr(bp, 'layer_copper', None) or {}
+                flc = getattr(fp, 'layer_copper', None) or {}
+                if set(blc) != set(flc) or any(
+                        not (close(blc[k][0], flc[k][0]) and close(blc[k][1], flc[k][1])
+                             and blc[k][2] == flc[k][2]) for k in blc):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} layer_copper: "
+                                 f"board={blc} file={flc}")
+                bjp = getattr(bp, 'join_polygons', None)
+                fjp = getattr(fp, 'join_polygons', None)
+                if (bjp is None) != (fjp is None):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} join_polygons: "
+                                 f"board={'set' if bjp else None} "
+                                 f"file={'set' if fjp else None}")
+                elif bjp:
+                    _bv = [v for _r in bjp for v in _r]
+                    _fv = [v for _r in fjp for v in _r]
+                    if len(_bv) != len(_fv) or any(
+                            not (close(a[0], b[0]) and close(a[1], b[1]))
+                            for a, b in zip(_bv, _fv)):
+                        diffs.append(f"Pad {ref}:{bp.pad_number} join_polygons "
+                                     f"differ")
                 # #1737: check_drc's net-tie verdict follows the uuid order.
                 # A pad the file gives no uuid gets a fresh one from pcbnew.
                 bu, fu = getattr(bp, 'uuid', ''), getattr(fp, 'uuid', '')

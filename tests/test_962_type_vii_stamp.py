@@ -272,19 +272,26 @@ def main():
             print('  NOT RUN: 4. write_filled_board unavailable here (%s) -- this is '
                   'not a pass' % getattr(st, 'reason', st))
 
-        # 3c -- route_diff's CLI file stamp, end to end
+        # 3c -- route_diff's CLI file stamp, end to end. The witness is a
+        # board where route_diff itself lays a via under solder: orangecrab's
+        # five pairs leave /sheetIO/_USB_D's in a pad opening. (esp_prog's
+        # USB pair was the witness until the #1055 polarity crossover routed
+        # it with no via in a pad.) Only the vias THIS run added are graded:
+        # a via the input already had under solder is kept as it was.
+        src_d = os.path.join(work, 'oc_in.kicad_pcb')
+        copy_board(os.path.join(ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb'), src_d)
         out_d = os.path.join(work, 'diff.kicad_pcb')
         run_check([sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'route_diff.py'),
-                   src, out_d, '--nets', '/D_*'], accept=True, timeout=1200)
+                   src_d, out_d, '--nets', '*'], accept=True, timeout=1200)
         qd = parse_kicad_pcb(out_d)
-        dn = {n for n, v in qd.nets.items() if v.name.startswith('/D_')}
-        dv = [v for v in qd.vias if v.net_id in dn]
+        had = {(round(v.x, 4), round(v.y, 4)) for v in parse_kicad_pcb(src_d).vias}
+        dv = [v for v in qd.vias if (round(v.x, 4), round(v.y, 4)) not in had]
         dsites = {id(v): v for v, _pd in fab_notes.via_in_pad_sites(dv, qd.pads_by_net)}
         dsites.update({id(v): v for v, _a, _p in fab_notes.via_paste_sites(dv, qd)})
         check('3. route_diff: its via-in-pad/paste ships filled+capped (file stamp)',
               dsites and all(is_filled_and_capped(effective_via_protection(
                   v.tenting_attrs, qd.board_info.via_protection_setup))
-                  for v in dsites.values()), f'{len(dsites)} sites')
+                  for v in dsites.values()), f'{len(dsites)} sites of {len(dv)} new vias')
 
         # 3b -- repair_planes' post-pass stamps a written board end to end too
         rec = ship_via_protection_file(out_b, via_snapshot(parse_kicad_pcb(out_b).vias), quiet=True)

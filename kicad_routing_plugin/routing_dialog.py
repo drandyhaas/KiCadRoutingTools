@@ -32,7 +32,6 @@ for _sib in ('py_placer', 'py_tools'):
         sys.path.append(_d)
 
 import routing_defaults as defaults
-from kicad_parser import POSITION_DECIMALS
 from kicad_parser import mm_to_iu
 from keep_away import split_keep_away_specs
 

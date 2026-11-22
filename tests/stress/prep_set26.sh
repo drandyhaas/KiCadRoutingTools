@@ -14,7 +14,6 @@ mkdir -p "$STRESS/boards_unrouted_set26" "$STRESS/boards_set26"
 
 # short-name | source-filename-fragment (unique within github_set26/)
 MAP=(
-  "cvbs_mipi_bridge|cvbs_mipi_bridge"
   "d1600e_psu_breakout|d1600e_psu_breakout"
   "dcscm_breakout|dcscm_breakout"
   "environment_sensor|environment_sensor"
@@ -26,7 +25,6 @@ MAP=(
   "led_panel_prog|led_panel_prog"
   "lz1_led_driver|lz1_led_driver"
   "myra_sip_interposer|myra_sip_interposer"
-  "pmod_i3c_sensor|pmod_i3c_sensor"
   "sdi_fiber_adapter|sdi_fiber_adapter"
   "stm32h7_renode_ref|stm32h7_renode_ref"
 )

@@ -27,8 +27,9 @@ is what the adapter would hand KiCad over the socket:
      instead of recreating it, so a `sense:` group keeps its members (#1279)
   F. the dialog's re-sync patches footprint and pad poses IN PLACE (#362),
      keeping the Pad objects pads_by_net shares
-  G. #1556: every strip in the adapter is counted, layer-keyed and
-     width-preferring (`strip_listed_tracks`, kicad_writer.match_stack_members)
+  G. #1556: every strip in the adapter is counted, layer- and lock-keyed and
+     width-preferring (`strip_listed_tracks`, kicad_writer.match_stack_members),
+     and the routing apply's via strip is counted and lock-keyed
      -- the routing apply, and the Planes apply's finalize strips, which it
      used to drop on the floor; no endpoint-SET strip is left in the adapter
   H. the project writeback takes every keyword the shared writeback
@@ -540,7 +541,7 @@ def _track(board, x0, y0, x1, y1, w, layer, net):
 
 
 def test_live_strip_counted():
-    print("G. #1556: the adapter's strips are counted and width-preferring")
+    print("G. #1556: the adapter's strips are counted, lock-keyed and width-preferring")
     from kicad_parser import Segment, Via as PVia
     F, B = BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu
     pcb = SimpleNamespace(nets={1: SimpleNamespace(name='N')})
@@ -587,6 +588,51 @@ def test_live_strip_counted():
           and not is_in(keep, b.removed),
           "the Planes apply deletes the finalize's strips (segment by width, "
           "via by position), which it used to ignore", f"{c}")
+
+    # main's 5: the strip key carries the lock, as
+    # kicad_writer.remove_segments_from_content's does. Both board orders:
+    # without the lock in the key the first member in get_tracks() order goes,
+    # which is the locked one in one of the two.
+    for order in ((True, False), (False, True)):
+        b = Board(nets=('N',))
+        b.tracks = [_track(b, 10, 10, 12, 10, 0.1, F, 'N') for _ in order]
+        for t, lk in zip(b.tracks, order):
+            A.set_item_locked(t, lk)
+        c = A.apply_routing_results(b, {'segments_to_remove': [seg(0.1)]},
+                                    pcb_data=pcb)
+        left = [kipy_locked(t) for t in b.tracks if not is_in(t, b.removed)]
+        check(c['removed'] == 1 and left == [True],
+              f"added locked={order}: the unlocked twin goes, the locked "
+              f"original stays", f"{c} left locked={left}")
+
+    # main's 6: the routing apply's via strip is counted and lock-keyed, as
+    # remove_vias_from_content (main's gui_utils.remove_listed_vias).
+    def vias_at(locks):
+        b = Board(nets=('N',))
+        for lk in locks:
+            vv = Via()
+            vv.position = vec(20, 20)
+            vv.net = b.net('N')
+            A.set_item_locked(vv, lk)
+            b.vias.append(vv)
+        return b
+    pvia = PVia(x=20.0, y=20.0, size=0.6, drill=0.3, layers=['F.Cu', 'B.Cu'],
+                net_id=1)
+    b = vias_at([True, False])
+    c = A.apply_routing_results(b, {'vias_to_remove': [pvia]}, pcb_data=pcb)
+    left = [kipy_locked(vv) for vv in b.vias if not is_in(vv, b.removed)]
+    check(c['removed'] == 1 and left == [True],
+          "an unlocked via listing leaves the locked via at its position",
+          f"{c} left locked={left}")
+    b = vias_at([False, False])
+    c = A.apply_routing_results(b, {'vias_to_remove': [pvia]}, pcb_data=pcb)
+    check(c['removed'] == 1 and c['vias_unmatched'] == 0,
+          "one via listing removes one of two vias at the position", f"{c}")
+    b = vias_at([True])
+    c = A.apply_routing_results(b, {'vias_to_remove': [pvia]}, pcb_data=pcb)
+    check(c['removed'] == 0 and c['vias_unmatched'] == 1,
+          "an unlocked listing on a locked via alone removes nothing and is "
+          "reported", f"{c}")
 
     src = open(os.path.join(ROOT, 'kicad_ipc_adapter.py'), encoding='utf-8').read()
     body = src[src.index('def strip_listed_tracks'):]

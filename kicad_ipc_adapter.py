@@ -1064,9 +1064,11 @@ def _report_unmatched_strip(kind, leftovers, limit=6):
 def strip_listed_tracks(commit, board, segments, net_name_for):
     """Remove the live board's tracks a strip list names, as the CLI writer's
     strip does (kicad_writer.match_stack_members, #1556): matched by span,
-    layer and net, COUNTED, and the listed width first. A set of endpoint
-    keys removed EVERY member of a same-span stack, the keeper too, and some
-    sites matched across layers. The IPC twin of main's
+    layer, net and lock, COUNTED, and the listed width first. A set of
+    endpoint keys removed EVERY member of a same-span stack, the keeper too,
+    and some sites matched across layers. The lock is in the key as in
+    remove_segments_from_content: an unlocked target never takes the locked
+    original stacked under it. The IPC twin of main's
     gui_utils.remove_listed_segments, for every strip site in this adapter.
 
     Arc tracks are not candidates (a strip list names straight segments), as
@@ -1075,11 +1077,13 @@ def strip_listed_tracks(commit, board, segments, net_name_for):
         return 0, []
     from routing_utils import pos_key
     from kicad_writer import match_stack_members
+    from kicad_parser import kipy_locked
 
-    def _span(a, b, layer, net):
-        return (frozenset((a, b)), layer, net)
+    def _span(a, b, layer, net, locked):
+        return (frozenset((a, b)), layer, net, bool(locked))
     targets = [(_span(pos_key(s.start_x, s.start_y), pos_key(s.end_x, s.end_y),
-                      layer_id_for(s.layer), net_name_for(s.net_id)), s.width)
+                      layer_id_for(s.layer), net_name_for(s.net_id),
+                      getattr(s, 'locked', False)), s.width)
                for s in segments]
     tracks = [t for t in board.get_tracks() if type(t).__name__ != "ArcTrack"]
     items = []
@@ -1087,7 +1091,8 @@ def strip_listed_tracks(commit, board, segments, net_name_for):
         sx, sy = _vec_xy_mm(t.start)
         ex, ey = _vec_xy_mm(t.end)
         tname = (getattr(t.net, "name", "") or "") if t.net is not None else ""
-        items.append((_span(pos_key(sx, sy), pos_key(ex, ey), t.layer, tname),
+        items.append((_span(pos_key(sx, sy), pos_key(ex, ey), t.layer, tname,
+                            kipy_locked(t)),
                       _nm_to_mm(getattr(t, "width", 0))))
     gone, unmatched = match_stack_members(targets, items)
     for i in sorted(gone):
@@ -1145,21 +1150,27 @@ def apply_routing_results(board, results_data: dict, *,
         # vias behind, so a ripped-up route keeps stale barrels on the board.
         vias_to_remove = results_data.get("vias_to_remove") or []
         if vias_to_remove:
-            via_keys = {(pos_key(v.x, v.y), net_name_for(v.net_id)): v
-                        for v in vias_to_remove}
-            vhit = set()
+            # Counted and lock-keyed, as remove_vias_from_content: one live
+            # via per listing, and an unlocked listing never takes the locked
+            # original at its position (main's gui_utils.remove_listed_vias).
+            from kicad_parser import kipy_locked
+            want = {}
+            for v in vias_to_remove:
+                k = (pos_key(v.x, v.y), net_name_for(v.net_id),
+                     bool(getattr(v, "locked", False)))
+                want.setdefault(k, []).append(v)
             for vv in board.get_vias():
                 vx, vy = _vec_xy_mm(vv.position)
                 vname = ((getattr(vv.net, "name", "") or "")
                          if vv.net is not None else "")
-                k = (pos_key(vx, vy), vname)
-                if k in via_keys:
+                k = (pos_key(vx, vy), vname, kipy_locked(vv))
+                if want.get(k):
+                    want[k].pop()
                     commit.remove(vv)
-                    vhit.add(k)
                     counts["removed"] += 1
-            counts["vias_unmatched"] = len(via_keys) - len(vhit)
-            _report_unmatched_strip(
-                "via", [via_keys[k] for k in via_keys if k not in vhit])
+            _left = [v for vs in want.values() for v in vs]
+            counts["vias_unmatched"] = len(_left)
+            _report_unmatched_strip("via", _left)
 
         # Segments + vias from each net's result
         for result in results_data.get("results", []):

@@ -31,6 +31,14 @@ THE MODEL OVER-STATES CAPACITY, ON PURPOSE, so `deficit > 0` is a proof and
     copper off this part are no demand. A pad with no legal start at this
     track width is counted as escaping, and named.
 
+It grades the PLACEMENT: the board's routed copper (every track and via a
+router could rip, `reachability.without_routed_copper`) is set aside, as
+`check_reachability --pad` sets it aside for its verdict (#1347), and
+`routed_set_aside` counts what was (#1981). It asks whether each net can
+leave by a track, not whether each pin keeps a site for its own via: a
+fan-out that needs a via beside every pin can lose those sites to routed
+copper that this flow does not see.
+
 What it does not say: a flow of 0 deficit is not a route (the router still
 has to find it, and the window is a local question); the clearance is the
 single lane clearance the ledger prices at (`escape.lane_rules`), not
@@ -96,6 +104,9 @@ class PartFlow:
     #: #1837: where track_width / clearance / via_diameter came from
     #: (`escape.lane_rules`' sources).
     rule_sources: Dict[str, str] = field(default_factory=dict)
+    #: #1981: (track segments, vias) of the board's routing set aside before
+    #: measuring (`reachability.without_routed_copper`)
+    routed_set_aside: Tuple[int, int] = (0, 0)
 
     @property
     def deficit(self) -> int:
@@ -114,6 +125,9 @@ class PartFlow:
                 'local': list(self.local), 'ignored': list(self.ignored),
                 'stranded': list(self.stranded),
                 'seconds': round(self.seconds, 2),
+                'graded': 'placement',
+                'routed_set_aside': {'segments': self.routed_set_aside[0],
+                                     'vias': self.routed_set_aside[1]},
                 'basis': 'max flow on a half-lane lattice that over-states '
                          'capacity: deficit > 0 is a proof, 0 is not proven '
                          'short'}
@@ -281,7 +295,8 @@ def part_flow(pcb, ref, pcb_file=None, *, margin_mm: float = DEFAULT_MARGIN_MM,
                           'edge_clearance_mm': edge_c, 'lane_mm': lane,
                           'cell_mm': cell, 'step_mm': step,
                           'margin_mm': margin_mm},
-                   rule_sources=dict(rules.sources))
+                   rule_sources=dict(rules.sources),
+                   routed_set_aside=(_ns, _nv))
     if not demand:
         res.seconds = time.time() - t0
         return res

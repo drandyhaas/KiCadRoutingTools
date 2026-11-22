@@ -124,6 +124,7 @@ REGISTRY = {
     'routing_context.py:ensure_own_pad_lift': ('exempt', 'own-pad lift of composed rows'),
     'routing_context.py:release_own_pad_lift': ('exempt', 'own-pad lift of composed rows'),
     'single_ended_routing.py:_register_unblock_via': ('exempt', 'same-net hole-to-hole ring'),
+    'single_ended_routing.py:_bare_pour_taps': ('exempt', 'same-net hole-to-hole ring'),
     'single_ended_routing.py:_release_unblock_via_rings': ('exempt', 'same-net hole-to-hole ring'),
     'single_ended_routing.py:route_multipoint_taps': ('exempt', 'same-net hole-to-hole ring'),
     'single_ended_routing.py:_route_multipoint_taps_impl._register_inprogress_via': ('exempt', 'same-net ring'),

@@ -66,7 +66,7 @@ BOARDS = {
     'noahfc': ('noahfc', '10'),
     'fusb': ('fusb302_pd_dev', '9'),
     'tig': ('tigard', '3'),
-    'bitaxe': ('bitaxe_ultra', '1'),
+    'bitaxe': ('bitaxe_ultra', '32'),
     'z80': ('z80_devboard_rp2040', '12'),
 }
 

@@ -27,7 +27,6 @@ MAP=(
   "mdfpga_hub75|mdfpga"
   "ch32v203_ev|ch32v203_ev"
   "microzed_carrier|microzed_carrier"
-  "scalenode_cm4|scalenode_cm4"
   "zynq7020_som|zynq_som2"
   "hexberry_fpga|hexberry"
   "ulx5m_gatemate|ulx5m_gs"

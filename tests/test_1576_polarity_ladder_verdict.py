@@ -123,8 +123,9 @@ def ladder(td):
         check(f'{arm}: JSON polarity_swap_denied_pairs is []',
               doc.get('polarity_swap_denied_pairs') == [],
               f"{doc.get('polarity_swap_denied_pairs')}")
-        # #1802: the no-swap candidate runs whatever the policy
-        want = ['no swap', 'pad swap', 'flipped source', 'flipped target']
+        # #1802: the no-swap candidate runs whatever the policy; the
+        # crossover at a layer change (#1055) is the ladder's last rung
+        want = ['no swap', 'pad swap', 'flipped source', 'flipped target', 'crossover']
         check(f'{arm}: the verdict names every candidate: {want}', names == want,
               f'{verdict}')
         tried = [l for l in lines[:start] if 'trying' in l and 'opposite side' in l]

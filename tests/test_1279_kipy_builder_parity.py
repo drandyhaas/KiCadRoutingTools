@@ -38,6 +38,9 @@ board, so each is ported there and graded here:
             (here off the board, where containment alone calls it
             structural); #1404 an Edge.Cuts circle is linearised at
             EDGE_CHORD_EPS, the text parser's vertex for vertex
+  L.        Pad.layer_copper (a front/inner/back pad's per-layer copper) and
+            Pad.join_polygons (a custom pad's unfilled circle joins on its
+            centreline), through the text path's shared helpers
 
 WHY A HAND-BUILT kipy BOARD. The builder reaches a RUNNING KiCad over a
 socket, and `fake_ipc_board` serves reads by re-parsing the file, which would
@@ -792,6 +795,98 @@ def test_custom_pad_copper_box(tmp):
           "the fixture is the case: pad 1 offset, pad 2 drawn about its anchor")
 
 
+PADSTACK_BOARD = '''(kicad_pcb (version 20260206) (generator "pcbnew")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (2 "B.Cu" signal)
+    (1 "F.Mask" user) (3 "B.Mask" user) (25 "Edge.Cuts" user))
+  (net 0 "") (net 1 "D")
+  (footprint "lib:J" (layer "F.Cu") (at 10 10 90)
+    (property "Reference" "J1" (at 0 0 90) (layer "F.SilkS"))
+    (pad "1" thru_hole oval (at 0 0 90) (size 2.54 1.27) (drill 0.8)
+      (layers "*.Cu" "*.Mask")
+      (padstack (mode front_inner_back)
+        (layer "Inner" (shape oval) (size 2.54 1.27))
+        (layer "B.Cu" (shape rect) (size 2.6416 1.778)))
+      (net 1 "D"))
+    (pad "2" smd custom (at 4 0 90) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "D")
+      (options (clearance outline) (anchor circle))
+      (primitives
+        (gr_circle (center 0 0) (end 2 0) (width 1.5) (fill no))
+        (gr_circle (center 0 1) (end 0.3 1) (width 0) (fill yes)))))
+)
+'''
+
+
+def test_padstack_layer_copper_and_join(tmp):
+    """main's Pad.layer_copper / join_polygons, "set by BOTH parse paths":
+    a front/inner/back THT pad whose F.Cu oval is smaller than its B.Cu rect
+    (rotated 90, so the board-frame swap is exercised) carries per-layer rows,
+    and a custom pad of circle primitives, one UNFILLED, carries the join
+    outline (the anchor, the filled disc, a hairline ring on the unfilled
+    circle's centreline). The kipy pads go through the REAL
+    `_build_pad_from_kipy`; the oracle is the text parse."""
+    import copy
+    path = os.path.join(tmp, 'padstack.kicad_pcb')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(PADSTACK_BOARD)
+    txt = {p.pad_number: p for p in kp.parse_kicad_pcb(path).footprints['J1'].pads}
+    check(txt['1'].layer_copper is not None and txt['2'].join_polygons is not None,
+          "the fixture is the case: the text parse gives pad 1 per-layer copper "
+          "and pad 2 a join outline")
+    fx, fy, fr = 10, 10, 90
+    copper = ['F.Cu', 'In1.Cu', 'B.Cu']
+    p1 = make_pad('1', g(fx, fy, fr, 0, 0), bt.PT_PTH, 'GND',
+                  [bt.BL_F_Cu, bt.BL_In1_Cu, bt.BL_B_Cu, bt.BL_F_Mask, bt.BL_B_Mask],
+                  bt.PSS_OVAL, (2.54, 1.27), drill=0.8,
+                  extra_layers=[(bt.BL_In1_Cu, (2.54, 1.27)),
+                                (bt.BL_B_Cu, (2.6416, 1.778))])
+    p1.padstack.proto.copper_layers[1].shape = bt.PSS_OVAL
+    p1.padstack.type = bt.PST_FRONT_INNER_BACK
+    p2 = make_pad('2', g(fx, fy, fr, 4, 0), bt.PT_SMD, 'GND',
+                  [bt.BL_F_Cu, bt.BL_F_Mask], bt.PSS_CUSTOM, (1, 1))
+    cl = p2.padstack.proto.copper_layers[0]
+    cl.custom_anchor_shape = bt.PSS_CIRCLE
+    cl.custom_shapes.add().CopyFrom(
+        circle_shape((0, 0), (2, 0), bt.BL_F_Cu, 1.5, False).proto)
+    cl.custom_shapes.add().CopyFrom(
+        circle_shape((0, 1), (0.3, 1), bt.BL_F_Cu, 0, True).proto)
+    ipc = {}
+    for kpad in (p1, p2):
+        kpad.padstack.proto.angle.value_degrees = fr
+        ipc[kpad.number] = kp._build_pad_from_kipy(
+            kpad, 'J1', fx, fy, fr, kp._kipy_layer_token,
+            lambda n: (1, 'D'), copper)
+    check(all(ipc.values()), "both kipy pads build")
+    if not all(ipc.values()):
+        return
+
+    def lc_key(lc):
+        return None if lc is None else sorted(
+            (k, r6(v[0]), r6(v[1]), v[2], r6(v[3]), r6(v[4])) for k, v in lc.items())
+
+    def jp_key(jp):
+        return None if jp is None else [[(r6(x), r6(y)) for x, y in ring]
+                                        for ring in jp]
+
+    check(lc_key(ipc['1'].layer_copper) == lc_key(txt['1'].layer_copper),
+          f"pad 1 layer_copper {lc_key(ipc['1'].layer_copper)} == text "
+          f"{lc_key(txt['1'].layer_copper)}")
+    check(jp_key(ipc['2'].join_polygons) == jp_key(txt['2'].join_polygons),
+          f"pad 2 join_polygons agree ({len(ipc['2'].join_polygons or ())} kipy, "
+          f"{len(txt['2'].join_polygons or ())} text rings)")
+    check(ipc['2'].layer_copper is None and ipc['1'].join_polygons is None,
+          "no per-layer rows on the one-layer custom pad, no join outline on the oval")
+    # negative controls: each comparison sees a bent side
+    if ipc['1'].layer_copper and ipc['2'].join_polygons:
+        bent = copy.deepcopy(ipc['1'].layer_copper)
+        k0 = sorted(bent)[0]
+        bent[k0] = (bent[k0][0] + 0.1,) + tuple(bent[k0][1:])
+        check(lc_key(bent) != lc_key(txt['1'].layer_copper),
+              "a layer_copper size bent on one side is seen")
+        check(jp_key(ipc['2'].join_polygons[:-1]) != jp_key(txt['2'].join_polygons),
+              "a join ring dropped on one side is seen")
+
+
 ROUND_BOARD = '''(kicad_pcb (version 20260206) (generator "pcbnew")
   (general (thickness 1.6))
   (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
@@ -942,6 +1037,8 @@ def main():
         test_dialog_resync(b, ipc)
         print("J. a custom pad's copper box (Pad.copper_box)")
         test_custom_pad_copper_box(tmp)
+        print("L. per-layer padstack copper and a custom pad's join outline")
+        test_padstack_layer_copper_and_join(tmp)
         print("K. chamfered pads (#1450), carried windows (#1409), edge arcs (#1404)")
         test_main_round_ports(tmp)
     finally:

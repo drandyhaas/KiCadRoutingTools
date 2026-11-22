@@ -864,6 +864,108 @@ def _opposite_rows(geo, opp: Dict[int, float], kind: str, width: int) -> np.ndar
     return np.vstack(arrs) if arrs else np.empty((0, width + 2), dtype=np.float64)
 
 
+def _opposite_copper(geo, opp: Dict[int, float]):
+    """The other side's (segs, vias, pads), each row with its GAP and owning
+    net appended, and how far from an item's reference point its band can
+    reach: a track's bounding box grows by this before filtering items."""
+    o_segs, o_vias, o_pads = (_opposite_rows(geo, opp, kind, width)
+                              for kind, width in (('segs', 6), ('vias', 4),
+                                                  ('pads', 8)))
+    reach = max(float(o_segs[:, 5].max()) if len(o_segs) else 0.0,
+                float(o_vias[:, 3].max()) if len(o_vias) else 0.0,
+                float(np.hypot(o_pads[:, 3], o_pads[:, 4]).max())
+                if len(o_pads) else 0.0) + max(opp.values())
+    return (o_segs, o_vias, o_pads), reach
+
+
+def _track_samples(x1, y1, x2, y2, li, hw, own_pads, free, opposite, reach):
+    """Sample one track of a keep-away net against the other side's copper.
+
+    Returns (keep, hit, spacing, owners), or None when every sample lies within
+    `free` of the net's own pads: `keep` marks the samples the band prices,
+    `hit` those of them inside a band, and per (sample, item) the edge-to-edge
+    spacing and the item's owning net (-1 for none)."""
+    seg_len = math.hypot(x2 - x1, y2 - y1)
+    k = max(1, int(math.ceil(seg_len / _REPORT_STEP)))
+    t = (np.arange(k) + 0.5) / k
+    px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+    keep = np.ones(k, dtype=bool)
+    if free > 0 and len(own_pads):
+        keep &= ~(_pad_sdf(px, py, own_pads) <= free).any(axis=1)
+    if not keep.any():
+        return None
+    o_segs, o_vias, o_pads = opposite
+    lo_x, hi_x = min(x1, x2) - hw - reach, max(x1, x2) + hw + reach
+    lo_y, hi_y = min(y1, y2) - hw - reach, max(y1, y2) + hw + reach
+    # Edge-to-edge spacing per (sample, item), and each item's GAP.
+    spacing = [np.full((k, 1), math.inf)]
+    gaps = [np.zeros(1)]
+    owners = [np.full(1, -1.0)]
+    sel = o_segs[(o_segs[:, 0] == li)
+                 & (np.maximum(o_segs[:, 1], o_segs[:, 3]) >= lo_x)
+                 & (np.minimum(o_segs[:, 1], o_segs[:, 3]) <= hi_x)
+                 & (np.maximum(o_segs[:, 2], o_segs[:, 4]) >= lo_y)
+                 & (np.minimum(o_segs[:, 2], o_segs[:, 4]) <= hi_y)]
+    if len(sel):
+        spacing.append(_seg_dist(px, py, sel) - sel[None, :, 5] - hw)
+        gaps.append(sel[:, 6])
+        owners.append(sel[:, 7])
+    for arr, dist in ((o_vias, lambda a: np.hypot(
+                           px[:, None] - a[None, :, 1],
+                           py[:, None] - a[None, :, 2]) - a[None, :, 3]),
+                      (o_pads, lambda a: _pad_sdf(px, py, a))):
+        sel = arr[(arr[:, 0] == li)
+                  & (arr[:, 1] >= lo_x) & (arr[:, 1] <= hi_x)
+                  & (arr[:, 2] >= lo_y) & (arr[:, 2] <= hi_y)]
+        if len(sel):
+            spacing.append(dist(sel) - hw)
+            gaps.append(sel[:, -2])
+            owners.append(sel[:, -1])
+    sp = np.hstack(spacing)
+    gap_of = np.concatenate(gaps)
+    # In band where spacing < GAP for ANY item (each its own GAP).
+    dmin = (sp - gap_of[None, :]).min(axis=1)
+    hit = keep & (dmin < -REPORT_TOL)
+    return keep, hit, sp, np.concatenate(owners)
+
+
+def band_meter(pcb_data, config, net_id: int):
+    """In-band length of a candidate track of `net_id`, measured as
+    keep_away_report measures the routed copper (#2006): a function
+    (layer, x1, y1, x2, y2, width) -> mm. A post-route pass that moves copper
+    asks it so it does not hand back a band the router kept clear. None when
+    the band is not priced (no rule sets the net against another, or
+    keep_away_cost is 0). Reads the other side's copper as it is now; build a
+    new meter once that copper moves."""
+    if getattr(config, 'keep_away_cost', 0) <= 0:
+        return None
+    st = _state(config, pcb_data, announce=False)
+    if st is None or net_id not in st.members:
+        return None
+    opp = st.opposite((net_id,))
+    if not opp:
+        return None
+    st.refresh(pcb_data)
+    free = max(0.0, float(getattr(config, 'keep_away_free', 0.0) or 0.0))
+    geo = {n: _net_geometry(st, pcb_data, config, n) for n in (net_id, *opp)}
+    opposite, reach = _opposite_copper(geo, opp)
+    own_pads = geo[net_id]['pads']
+    lidx = {L: i for i, L in enumerate(config.layers)}
+
+    def in_band(layer, x1, y1, x2, y2, width) -> float:
+        li = lidx.get(layer)
+        if li is None:
+            return 0.0
+        samples = _track_samples(x1, y1, x2, y2, li, width / 2, own_pads, free,
+                                 opposite, reach)
+        if samples is None:
+            return 0.0
+        keep, hit, _sp, _owners = samples
+        return math.hypot(x2 - x1, y2 - y1) * float(hit.sum()) / len(keep)
+
+    return in_band
+
+
 def keep_away_report(pcb_data, config, announce: bool = True) -> Optional[dict]:
     """Measure every keep-away net's tracks against the other side's copper.
 
@@ -892,67 +994,23 @@ def keep_away_report(pcb_data, config, announce: bool = True) -> Optional[dict]:
         if not opp:
             continue
         checked += 1
-        # Opposite copper, each row with its GAP and owning net appended.
-        o_segs, o_vias, o_pads = (_opposite_rows(geo, opp, kind, width)
-                                  for kind, width in (('segs', 6), ('vias', 4),
-                                                      ('pads', 8)))
-        # How far from an item's reference point its band can reach: the
-        # bounding box of the samples grows by this before filtering items.
-        reach = max(float(o_segs[:, 5].max()) if len(o_segs) else 0.0,
-                    float(o_vias[:, 3].max()) if len(o_vias) else 0.0,
-                    float(np.hypot(o_pads[:, 3], o_pads[:, 4]).max())
-                    if len(o_pads) else 0.0) + max(opp.values())
+        opposite, reach = _opposite_copper(geo, opp)
         length = in_band = 0.0
         best = (math.inf, None, 0.0)      # (closest spacing, net, its GAP)
         for li, x1, y1, x2, y2, hw in own['segs']:
             seg_len = math.hypot(x2 - x1, y2 - y1)
             length += seg_len
-            k = max(1, int(math.ceil(seg_len / _REPORT_STEP)))
-            t = (np.arange(k) + 0.5) / k
-            px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
-            keep = np.ones(k, dtype=bool)
-            if free > 0 and len(own['pads']):
-                keep &= ~(_pad_sdf(px, py, own['pads']) <= free).any(axis=1)
-            if not keep.any():
+            samples = _track_samples(x1, y1, x2, y2, li, hw, own['pads'], free,
+                                     opposite, reach)
+            if samples is None:
                 continue
-            lo_x, hi_x = min(x1, x2) - hw - reach, max(x1, x2) + hw + reach
-            lo_y, hi_y = min(y1, y2) - hw - reach, max(y1, y2) + hw + reach
-            # Edge-to-edge spacing per (sample, item), and each item's GAP.
-            spacing = [np.full((k, 1), math.inf)]
-            gaps = [np.zeros(1)]
-            owners = [np.full(1, -1.0)]
-            sel = o_segs[(o_segs[:, 0] == li)
-                         & (np.maximum(o_segs[:, 1], o_segs[:, 3]) >= lo_x)
-                         & (np.minimum(o_segs[:, 1], o_segs[:, 3]) <= hi_x)
-                         & (np.maximum(o_segs[:, 2], o_segs[:, 4]) >= lo_y)
-                         & (np.minimum(o_segs[:, 2], o_segs[:, 4]) <= hi_y)]
-            if len(sel):
-                spacing.append(_seg_dist(px, py, sel) - sel[None, :, 5] - hw)
-                gaps.append(sel[:, 6])
-                owners.append(sel[:, 7])
-            for arr, dist in ((o_vias, lambda a: np.hypot(
-                                   px[:, None] - a[None, :, 1],
-                                   py[:, None] - a[None, :, 2]) - a[None, :, 3]),
-                              (o_pads, lambda a: _pad_sdf(px, py, a))):
-                sel = arr[(arr[:, 0] == li)
-                          & (arr[:, 1] >= lo_x) & (arr[:, 1] <= hi_x)
-                          & (arr[:, 2] >= lo_y) & (arr[:, 2] <= hi_y)]
-                if len(sel):
-                    spacing.append(dist(sel) - hw)
-                    gaps.append(sel[:, -2])
-                    owners.append(sel[:, -1])
-            sp = np.hstack(spacing)
-            gap_of = np.concatenate(gaps)
-            own_of = np.concatenate(owners)
-            # In band where spacing < GAP for ANY item (each its own GAP).
-            dmin = (sp - gap_of[None, :]).min(axis=1)
-            hit = keep & (dmin < -REPORT_TOL)
+            keep, hit, sp, own_of = samples
             if hit.any():
-                in_band += seg_len * float(hit.sum()) / k
+                in_band += seg_len * float(hit.sum()) / len(keep)
             # The closest copper of the other side, over the samples the band
             # prices -- the spacing a reader compares with the GAP.
             near = sp.argmin(axis=1)
-            spmin = sp[np.arange(k), near]
+            spmin = sp[np.arange(len(keep)), near]
             kept = np.flatnonzero(keep)
             j = int(kept[spmin[kept].argmin()])
             if spmin[j] < best[0]:
