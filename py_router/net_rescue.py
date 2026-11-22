@@ -2134,7 +2134,8 @@ def _size_escalation_ladder(config, pcb_data, net_id):
     march) -- callers skip such nets silently.
     """
     from plane_pad_tap import fab_floor_clearance_track
-    from fab_tiers import escalation_rungs, warn_fab_escalation, may_narrow, ladder_escalates
+    from fab_tiers import (escalation_rungs, warn_fab_escalation, may_narrow,
+                           ladder_escalates, power_neck_allowance_mm)
 
     if not may_narrow():
         return []  # --escalation off: nothing may march (#842)
@@ -2147,6 +2148,14 @@ def _size_escalation_ladder(config, pcb_data, net_id):
     if _rf:
         w_floor = min(w0, max(w_floor, _rf))
     width_travel = w0 - w_floor > 1e-9
+    # #1872: a wide net's terminal escalation would march it down to the
+    # fab floor -- a neck the allowance forbids. A net whose requested width
+    # is above the run's track width (power / impedance) gets no size rungs
+    # while a neck bound applies; a net already at track width (signal) is
+    # unaffected, so its terminal rescue still runs.
+    if (width_travel and w0 > config.track_width + 1e-9
+            and power_neck_allowance_mm(config) is not None):
+        return []
 
     n_layers = len(pcb_data.board_info.copper_layers) or 2
     # escalation_rungs: raised to the board's own minimums under board (#857)

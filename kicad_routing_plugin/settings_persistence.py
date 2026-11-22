@@ -104,6 +104,7 @@ def get_dialog_settings(dialog):
         'stub_proximity_cost': dialog.stub_proximity_cost.GetValue(),
         'neckdown_length': dialog.neckdown_length.GetValue(),
         'neckdown_taper_length': dialog.neckdown_taper_length.GetValue(),
+        'power_neck_max_mm': dialog.power_neck_max_mm.GetValue(),
         'power_tap_neckdown': dialog.power_tap_neckdown_check.GetValue(),
         'via_proximity_cost': dialog.via_proximity_cost.GetValue(),
         'track_proximity_distance': dialog.track_proximity_distance.GetValue(),
@@ -473,6 +474,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.neckdown_length.SetValue(settings['neckdown_length'])
     if 'neckdown_taper_length' in settings:
         dialog.neckdown_taper_length.SetValue(settings['neckdown_taper_length'])
+    if 'power_neck_max_mm' in settings:
+        dialog.power_neck_max_mm.SetValue(settings['power_neck_max_mm'])
     if 'power_tap_neckdown' in settings:
         dialog.power_tap_neckdown_check.SetValue(settings['power_tap_neckdown'])
     if 'via_proximity_cost' in settings:

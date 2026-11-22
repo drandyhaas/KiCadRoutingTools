@@ -1189,6 +1189,7 @@ class RoutingDialog(wx.Dialog):
             ('stub_proximity_cost', 'Stub Prox. Cost:', defaults.STUB_PROXIMITY_COST, "Cost for routing near stubs of other nets"),
             ('neckdown_length', 'Neck-down (mm):', defaults.NECKDOWN_LENGTH, "Length of the pad-entry zone when a wide power route is necked down (issue #72): there the track takes the power width capped at the pad's short side where it fits, the default width only where it does not (#1318)"),
             ('neckdown_taper_length', 'Neck Taper (mm):', defaults.NECKDOWN_TAPER_LENGTH, "Length of the stepped narrow-to-wide width taper on necked routes (0 = abrupt)"),
+            ('power_neck_max_mm', 'Power neck max (mm):', defaults.POWER_NECK_MAX_MM, "Bound a power net's neck to at most this many mm under every escalation policy (0 = no bound -- the 2 mm pad-entry allowance applies only under --escalation off). A bound at or below the neck-down taper length leaves no pad-entry zone -- the taper counts inside the bound; use --neckdown-taper-length 0 for very small bounds (#1872)"),
             ('coplanar_gap', 'Coplanar Gap (mm):', defaults.COPLANAR_GAP, "#486: declare that impedance-controlled traces run through a same-layer ground pour this far away (edge to edge). >0 uses the coplanar-waveguide-over-ground model instead of microstrip -- a NARROWER trace for the same ohms. Pour the plane layers with a MATCHING zone clearance, then verify with check_impedance.py. 0 = plain microstrip."),
             ('via_proximity_cost', 'Via Prox. Multiplier:', defaults.VIA_PROXIMITY_COST, "Via cost multiplier in stub/BGA proximity zones (0 = no extra cost)"),
             ('track_proximity_distance', 'Track Prox. (mm):', defaults.TRACK_PROXIMITY_DISTANCE, "Distance to detect parallel tracks for bunching avoidance"),
@@ -3078,6 +3079,7 @@ class RoutingDialog(wx.Dialog):
         self.stub_proximity_cost.SetValue(defaults.STUB_PROXIMITY_COST)
         self.neckdown_length.SetValue(defaults.NECKDOWN_LENGTH)
         self.neckdown_taper_length.SetValue(defaults.NECKDOWN_TAPER_LENGTH)
+        self.power_neck_max_mm.SetValue(defaults.POWER_NECK_MAX_MM)
         self.power_tap_neckdown_check.SetValue(True)
         self.via_proximity_cost.SetValue(defaults.VIA_PROXIMITY_COST)
         self.track_proximity_distance.SetValue(defaults.TRACK_PROXIMITY_DISTANCE)
@@ -3480,6 +3482,7 @@ class RoutingDialog(wx.Dialog):
             'power_tap_neckdown': self.power_tap_neckdown_check.GetValue(),
             'neckdown_length': self.neckdown_length.GetValue(),
             'neckdown_taper_length': self.neckdown_taper_length.GetValue(),
+            'power_neck_max_mm': self.power_neck_max_mm.GetValue(),
             'via_proximity_cost': self.via_proximity_cost.GetValue(),
             'track_proximity_distance': self.track_proximity_distance.GetValue(),
             'track_proximity_cost': self.track_proximity_cost.GetValue(),
@@ -4053,6 +4056,7 @@ class RoutingDialog(wx.Dialog):
                     power_tap_neckdown=config.get('power_tap_neckdown', True),
                     neckdown_length=config.get('neckdown_length', defaults.NECKDOWN_LENGTH),
                     neckdown_taper_length=config.get('neckdown_taper_length', defaults.NECKDOWN_TAPER_LENGTH),
+                    power_neck_max_mm=config.get('power_neck_max_mm'),
                     via_proximity_cost=config['via_proximity_cost'],
                     track_proximity_distance=config['track_proximity_distance'],
                     track_proximity_cost=config['track_proximity_cost'],

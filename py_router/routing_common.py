@@ -236,6 +236,77 @@ def power_width_report(segments, requested: Dict[int, float],
     return out
 
 
+def power_neck_report(segments, requested: Dict[int, float],
+                      name_of, pads_of) -> Dict[str, List[Dict]]:
+    """Per requested-width net, the narrow copper it SHIPPED, as runs (#1872).
+
+    The same measurement as the issue's necks.py, so a `--json-out` reader
+    and a board reader agree: narrow segments (below the requested width)
+    are grouped by shared endpoints per layer (union-find over rounded
+    endpoints), each run reported longest-first as {layer, width_mm (the
+    run's narrowest), length_mm, pad ('REF.NUM' of a pad of the net the run
+    touches, else None)}. Nets with no narrow copper list []. A run is a
+    pad entry only while it is short -- the flag bounds it; this list is
+    what a reader checks it against.
+    """
+    import math as _math
+    out: Dict[str, List[Dict]] = {}
+    for nid, req in sorted(requested.items()):
+        narrow = [s for s in segments
+                  if s.net_id == nid and s.width < req - 1e-6]
+        if not narrow:
+            out[name_of(nid)] = []
+            continue
+        par = list(range(len(narrow)))
+
+        def _find(i):
+            while par[i] != i:
+                par[i] = par[par[i]]
+                i = par[i]
+            return i
+
+        ends = {}
+        for i, s in enumerate(narrow):
+            for pt in ((round(s.start_x, 3), round(s.start_y, 3)),
+                       (round(s.end_x, 3), round(s.end_y, 3))):
+                k = (s.layer, pt)
+                if k in ends:
+                    par[_find(i)] = _find(ends[k])
+                else:
+                    ends[k] = i
+        groups: Dict[int, List] = {}
+        for i in range(len(narrow)):
+            groups.setdefault(_find(i), []).append(narrow[i])
+        pads = pads_of(nid) or []
+
+        def _pad_of(group):
+            for s in group:
+                for q in pads:
+                    if (s.layer not in q.layers
+                            and '*.Cu' not in q.layers):
+                        continue
+                    for x, y in ((s.start_x, s.start_y),
+                                 (s.end_x, s.end_y)):
+                        if (abs(x - q.global_x) <= q.size_x / 2 + 0.01
+                                and abs(y - q.global_y) <= q.size_y / 2 + 0.01):
+                            return f"{q.component_ref}.{q.pad_number}"
+            return None
+
+        rows = []
+        for g in groups.values():
+            length = sum(_math.hypot(s.end_x - s.start_x,
+                                     s.end_y - s.start_y) for s in g)
+            rows.append({
+                'layer': g[0].layer,
+                'width_mm': round(min(s.width for s in g), 4),
+                'length_mm': round(length, 2),
+                'pad': _pad_of(g),
+            })
+        rows.sort(key=lambda r: r['length_mm'], reverse=True)
+        out[name_of(nid)] = rows
+    return out
+
+
 def segment_identity(s, net_name):
     """A segment's geometry as a hashable key, orientation-free: net (by NAME,
     so a re-parsed board's renumbered nets still match), layer, width and the

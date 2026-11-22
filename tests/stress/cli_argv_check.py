@@ -285,6 +285,20 @@ def _route_power_nets_count_mismatch(ns, cwd):
                 f"must have the same length")
 
 
+def _route_power_neck_max_nonpositive(ns, cwd):
+    # route.py: --power-neck-max-mm bounds a power neck under every policy
+    # (#1872); a non-positive value cannot bound anything, and a non-finite
+    # one would silently mean "no flag" (NaN defeats every comparison).
+    import math
+    v = getattr(ns, 'power_neck_max_mm', None)
+    if v is None:
+        return None
+    if not math.isfinite(v):
+        return "--power-neck-max-mm must be a finite number"
+    if v <= 0:
+        return "--power-neck-max-mm must be > 0 when given"
+
+
 def _repair_count_mismatch(ns, cwd):
     if ns.nets and ns.plane_layers and len(ns.nets) != len(ns.plane_layers):
         return "when both --nets and --plane-layers are given, counts must match"
@@ -320,7 +334,9 @@ def _cap_intent_unreadable(ns, cwd):
 POST_PARSE = {
     'route.py': (_fab_overrides_missing, _output_twice, _route_group_empty,
                  _keep_away, _route_force_reroute_unscoped, _route_group_sources,
-                 _route_power_nets_count_mismatch, _net_clearances_unreadable),
+                 _route_power_nets_count_mismatch,
+                 _route_power_neck_max_nonpositive,
+                 _net_clearances_unreadable),
     'route_diff.py': (_keep_away, _fab_overrides_missing, _output_twice,
                       _diff_force_reroute_unscoped, _net_clearances_unreadable),
     'route_planes.py': (_fab_overrides_missing, _output_twice,
@@ -363,6 +379,10 @@ REFUSAL_SITES = {
         '--force-reroute requires an explicit net':
             ('argv', '_route_force_reroute_unscoped'),
         '--power-nets (': ('argv', '_route_power_nets_count_mismatch'),
+        '--power-neck-max-mm must be > 0 when giv':
+            ('argv', '_route_power_neck_max_nonpositive'),
+        '--power-neck-max-mm must be a finite num':
+            ('argv', '_route_power_neck_max_nonpositive'),
         '--component matched no footprint on this':
             ('board', "the board's footprint references"),
         # parse_sources is the argument half; block_refs, in the same try,

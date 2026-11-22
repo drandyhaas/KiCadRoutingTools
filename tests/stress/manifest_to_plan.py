@@ -288,6 +288,10 @@ FLAG_PARAMS = {
     '--diff-pair-gap': 'diff_pair_gap',
     '--impedance': 'impedance',
     '--coplanar-gap': 'coplanar_gap',
+    # #1872: the GUI control (and the plan executor's param name) is
+    # power_neck_max_mm; without this mapping the generic fallthrough would
+    # still spell it so, but the parity gate binds it only when registered.
+    '--power-neck-max-mm': 'power_neck_max_mm',
     '--gnd-via-distance': 'gnd_via_distance',
     # #485: route_planes area via stitching -- value flags.
     '--stitch-pitch': 'stitch_pitch',
