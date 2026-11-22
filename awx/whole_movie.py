@@ -92,11 +92,12 @@ will film offline. Where it cannot be had the film stops, saying how to fetch it
 voice (`say -v ?` lists them), needs nothing installed. Without --sound the film is the same as ever, frame for frame,
 and nothing of the sound is needed.
 
-With --short [SECS] the run is not filmed but cut into a SHORT of about SECS (15) seconds for the casual viewer: its
-most striking moments, each a clip of a few beats of its own music, cut on the beat, the camera pushing in -- no words,
-no captions, no title or end card, something moving in every frame. Which moments play, and for how long, is read
-from the run's own records (short_clips), so a run gives the same short every time; its sound is music and effects
-only (whole_movie_sound.short_score).
+With --short [SECS] the run is not filmed but cut into a SHORT of about SECS (15) seconds: a few of its moments,
+each an excerpt of the film cut tighter and drawn as the film draws that stage, all at ONE framing of the bus (the
+film's own, its source array to its destination) -- no words, no captions, no title or end card, something moving in
+every frame. Which moments play, and for how long, is read from the run's own records (short_clips), so a run gives
+the same short every time; its sound is the film's own music voice over a slow pulse the cuts fall on, and the film's
+own effects (whole_movie_sound.short_score).
 
 usage: whole_movie.py RUNDIR OUT.mp4 [--fps 30] [--workers 6] [--stills DIR [--at T1,T2,..]] [--human BOARD]
                      [--speed X] [--force] [--scenes] [--sound [--voice kokoro:NAME | SAY_VOICE] | --short [SECS]]
@@ -1755,7 +1756,6 @@ class Canvas:
         self.img = base.copy()
         self.d = ImageDraw.Draw(self.img)
         self.clipped = False
-        self.glow_base = None       # (the short: what of the frame does not glow -- the board's base, unless a clip says)
 
     def clip(self):
         """the board's overlays end at its panel: everything outside it painted over, once a frame, before the
@@ -4669,42 +4669,18 @@ def build_scenes(film, speed=1.0):
 
 
 # =============================================================================== the short (--short)
-SHORT_BPM = 128            # the short's tempo: every cut on a beat, a clip's steps on its half beats
-SHORT_LAY = 0.22           # the lay's share of the short's beats (6 at least): the finale
+SHORT_BPM = 80             # the short's pulse: every cut on a beat, a clip's steps on its beats or half beats
+SHORT_LAY = 0.3            # the lay's share of the short's beats (5 at least): the last clip
+SHORT_MIN = 4              # a clip's beats at the least
 
 
 class Clip(Scene):
-    """a clip of the short: a scene with no words and no stage -- `beats` of the music long, its camera cam(t) -> (x,
-    y, push): the frame's point (1x pixels) the camera is on and how far it is pushed in (1: the whole frame)"""
+    """a clip of the short: a scene with no words, `beats` of the music long, drawn at the film's one framing of the
+    bus; its stage the film's own (the stage's bell at its cut)"""
 
-    def __init__(self, key, beats, fn, cam=None, cues=()):
-        super().__init__(key, None, beats * 60.0 / SHORT_BPM, fn, [], cues=cues)
-        self.beats, self.cam = beats, cam
-
-
-def _full_view(C, film, view, draw_fn):
-    """a region of the board over the whole frame, drawn at its own scale (the magnifier's way: its pads, then
-    draw_fn(d, Z, s)); the pads alone kept as the frame's glow base (only what is drawn over them glows)"""
-    from PIL import Image, ImageDraw
-    wpx, hpx = W * SS, H * SS
-    cx, cy, hw = (view[0] + view[2]) / 2, (view[1] + view[3]) / 2, (view[2] - view[0]) / 2
-    v = (cx - hw, cy - hw * H / W, cx + hw, cy + hw * H / W)
-    s = wpx / (v[2] - v[0])
-    img = Image.new('RGB', (wpx, hpx), BODY)
-    d = ImageDraw.Draw(img)
-    Z = lambda x, y: ((x - v[0]) * s, (y - v[1]) * s)               # noqa: E731
-    for fp in film.S.fo.footprints.values():
-        for p in fp.pads:
-            if v[0] - 1 < p.global_x < v[2] + 1 and v[1] - 1 < p.global_y < v[3] + 1 and p.pad_type != 'np_thru_hole':
-                (x0, y0), (x1, y1) = Z(p.global_x - p.size_x / 2, p.global_y - p.size_y / 2), \
-                    Z(p.global_x + p.size_x / 2, p.global_y + p.size_y / 2)
-                if (p.shape or '').lower() == 'circle':
-                    d.ellipse([x0, y0, x1, y1], fill=(150, 131, 75))
-                else:
-                    d.rounded_rectangle([x0, y0, x1, y1], radius=min(x1 - x0, y1 - y0) * 0.25, fill=(150, 131, 75))
-    C.glow_base = img.copy()
-    draw_fn(d, Z, s)
-    C.img.paste(img, (0, 0))
+    def __init__(self, key, stage, beats, fn, cues=()):
+        super().__init__(key, stage, beats * 60.0 / SHORT_BPM, fn, [], cues=cues)
+        self.beats = beats
 
 
 def _quant(t, q):
@@ -4713,36 +4689,38 @@ def _quant(t, q):
 
 
 def short_clips(film, secs=15.0):
-    """THE SHORT: about `secs` of the run's most striking moments, each a clip of a few beats, cut on the beat -- no
-    words, no captions, no cards: from its first frame to its last, something moves. The moments are the run's own
-    and so is their choice (the same run gives the same short): each stage the run recorded is a candidate --
+    """THE SHORT: about `secs` of the run's moments, each an excerpt of the film cut tighter -- no words, no captions,
+    no cards, something moving from its first frame to its last. Every clip is drawn at ONE framing, the film's own of
+    the bus (its source array to its destination), and as the film draws its stage: its colours, its line weights, its
+    board; a cut changes what is drawn, never where the camera is. The moments are the run's own and so is their choice
+    (the same run gives the same short): each stage the run recorded is a candidate --
 
-      search   the group's ends model searching (a bus step's group): its states one after another, the ends that moved
+      search   the group's ends model searching (a bus step's group): its states one after another, the ends each moved
                ringed -- its worth the states the search held;
       strings  each lane a straight string pulled taut round the copper -- the strings that bend;
-      solve    the braid, CP-SAT's plans one after another (a negotiated bus's last, the coupled solve's) -- the plans;
+      solve    CP-SAT's plans one after another, each lane in its references' slot (a negotiated bus's last, the coupled
+               solve's) -- the plans;
       rounds   the 2-D geometry's rounds settling the lanes among the cells -- its rounds and their events;
-      snap     the smooth lanes snapped onto the router's grid, up close -- a constant;
-      lay      the router's copper sweeping in, lane after lane, from the source to the destination: always, last --
+      snap     the smooth lanes laid on the router's grid, the pairs first -- a constant;
+      lay      the router's copper coming in, lane after lane, in the order it was laid: always, last --
 
-    and the candidates the beats allow, the most worth first, are played in the run's order, each three beats and the
-    rest of the beats shared by worth. The camera pushes in on each clip's busiest place (its strings' most bent, the
-    rounds' moves, the lay pulled back from the source)"""
+    and the candidates the beats allow, the most worth first, are played in the run's order, SHORT_MIN beats each and
+    the rest of the beats shared by worth; the lay has SHORT_LAY of them"""
     S, T = film.S, film.S.T
     beat = 60.0 / SHORT_BPM
-    nb = max(9, int(round(secs / beat)))
-    X1 = lambda x, y: tuple(v / SS for v in film.X(x, y))           # noqa: E731  (a board point, 1x pixels)
-    vc = X1((film.view[0] + film.view[2]) / 2, (film.view[1] + film.view[3]) / 2)
-    TW, PP, VD = film.rules['TW'], film.rules['PP'], film.rules['via']
+    nb = max(SHORT_MIN + 5, int(round(secs / beat)))
+    TW, VD = film.rules['TW'], film.rules['via']
     prs = set(S.pairs)
+    STRC = (236, 222, 130)
 
-    def board(C, a_fo=0.7):
+    def fanout(C, a):
+        """the film's own ground of a stage: every other net's copper, faint, and the fanout's at `a`"""
         C.segs(film.other_c[0], alpha=0.22)
-        C.segs(film.fo_c[0], alpha=a_fo)
-        C.cvias(film.fo_c[1], a_fo)
+        C.segs(film.fo_c[0], alpha=a)
+        C.cvias(film.fo_c[1], a)
 
-    def starts(beats, n, per=2):
-        """the moments n steps of a clip of `beats` start at, each on the music's grid (`per` slots to a beat)"""
+    def starts(beats, n, per=1):
+        """the moments n steps of a clip of `beats` start at, each on the pulse (`per` steps to a beat at most)"""
         G = beats * per
         return [math.ceil(k * G / n - 1e-9) / G for k in range(n)] + [1.0]
 
@@ -4751,137 +4729,86 @@ def short_clips(film, secs=15.0):
         k = max(0, min(len(t0s) - 2, int(np.searchsorted(t0s, t, side='right')) - 1))
         return k, span(t, t0s[k], t0s[k + 1])
 
+    def thin(seq, n):
+        """seq cut to n at the most, evenly, its first and its last kept"""
+        return seq if len(seq) <= n else [seq[i] for i in sorted({int(round(j * (len(seq) - 1) / (n - 1)))
+                                                                   for j in range(n)})]
+
     cands = []
     # ------------------------------------------------------------------ the group's search
     if film.g and len(film.g.states) > 1:
         g = film.g
-        # (the array whose ends moved most -- on a group's shared source array, every bus's teeth -- framed on the ends
-        # the states laid about it)
-        moved = collections.Counter(k[2] for st in g.states for k in st['moved'])
-        vi = 1 if moved['berth'] > moved['tooth'] and len(g.views) > 1 else 0
-        _ref, bx = g.views[vi]
-        q_ = [(x, y) for st in g.states for segs, vias in st['ends'].values() for x0, y0, x1, y1, _L in segs
-              for x, y in ((x0, y0), (x1, y1)) if bx[0] - 3 < x < bx[2] + 3 and bx[1] - 3 < y < bx[3] + 3]
-        q_ += [(bx[0], bx[1]), (bx[2], bx[3])]
-        fx0, fy0 = min(p[0] for p in q_) - 1.2, min(p[1] for p in q_) - 1.2
-        fx1, fy1 = max(p[0] for p in q_) + 1.2, max(p[1] for p in q_) + 1.2
-        c0 = ((fx0 + fx1) / 2, (fy0 + fy1) / 2)
-        w0 = max(fx1 - fx0, (fy1 - fy0) * W / H)
         st_ = lambda q: [(a, b, c, d_, TW, L, None) for a, b, c, d_, L in q]   # noqa: E731
-        # (the states the search moved ends in, the first and the last with them)
         live = [j for j, st in enumerate(g.states) if not j or j == len(g.states) - 1 or st['moved']]
 
         def c_search(beats):
-            steps = 2 * beats
-            n = len(live)
-            seq = [live[i] for i in sorted({int(round(j * (n - 1) / (steps - 1))) for j in range(steps)})] \
-                if n > steps else live
+            seq = thin(live, beats)
             t0s = starts(beats, len(seq))
 
             def fn(C, t, T_):
-                k, f = stepper(t, t0s)
-                j = seq[k]
-                z = lerp(1.0, 0.92, ease(t))
-                view = (c0[0] - w0 * z / 2, c0[1] - w0 * z / 2, c0[0] + w0 * z / 2, c0[1] + w0 * z / 2)
-
-                def draw(d, Z, s):
-                    for key, (segs, vias) in g.states[j]['ends'].items():
-                        _mdraw(d, Z, s, st_(segs), vias, 1.0, via_d=VD)
-                    # (the ends this state moved, flashed white as it comes in)
-                    a = 1 - ease(f)
-                    if a > 0.02:
-                        for key in g.states[j]['moved']:
-                            segs, vias = g.states[j]['ends'].get(key) or ((), ())
-                            _mdraw(d, Z, s, st_(segs), vias, a, col=MOVED_C, w_px=5, via_d=VD, via_col=MOVED_C)
-                _full_view(C, film, view, draw)
-            cues = [(t0s[k], 'tick', 0.3 + 0.7 * k / len(seq)) for k in range(1, len(seq))]
-            return Clip('search', beats, fn, cues=cues + [(t0s[len(seq) - 1], 'bell', 1.0)])
+                C.segs(film.other_c[0], alpha=0.22)
+                j = seq[stepper(t, t0s)[0]]
+                ends = g.states[j]['ends']
+                for segs, vias in ends.values():
+                    C.segs(st_(segs))
+                    C.cvias([(x, y, VD, None) for x, y in vias])
+                for key in (g.states[j]['moved'] if j else ()):
+                    if key in ends and ends[key][0]:
+                        C.wring(*ends[key][0][-1][2:4], 0.3, MOVED_C, 2)
+            return Clip('search', 'search', beats, fn,
+                        cues=[(t0s[k], 'bell', k / max(1, len(seq) - 1)) for k in range(1, len(seq))])
         cands.append((0, 'search', 1 + math.log2(len(g.states)), c_search))
 
     # ------------------------------------------------------------------ the taut strings
     if film.strings:
         slen = {n: plen(P) for n, P in film.strings.items()}
         sch = {n: math.hypot(P[-1][0] - P[0][0], P[-1][1] - P[0][1]) for n, P in film.strings.items()}
-        bent = sorted((n for n in slen if slen[n] > sch[n] + 0.01), key=lambda n: sch[n] - slen[n])
-        foc = vc
-        if bent:
-            P = np.asarray(film.strings[bent[0]], float)
-            ab = P[-1] - P[0]
-            off = np.abs((P[:, 0] - P[0, 0]) * ab[1] - (P[:, 1] - P[0, 1]) * ab[0]) / max(1e-9, math.hypot(*ab))
-            foc = X1(*P[int(np.argmax(off))])
-        STRC = (236, 222, 130)
+        bent = [n for n in slen if slen[n] > sch[n] + 0.01]
 
         def c_strings(beats):
             def fn(C, t, T_):
-                board(C, 0.6)
-                u_ = ease(span(t, 0.0, 0.8))
+                fanout(C, 0.7)
+                u_ = span(t, 0.0, 0.9)
                 if film.relax:
                     j_ = int(min(len(film.relax) - 2, max(0, np.searchsorted(film.relax_t, u_, side='right') - 1)))
                     f_ = span(u_, film.relax_t[j_], film.relax_t[j_ + 1])
                     st = {n: A + (film.relax[j_ + 1][n] - A) * ease(f_) for n, A in film.relax[j_].items()}
                 else:
-                    st = {n: P for n, (P, _b) in morph(film.st['chord'], film.st['string'], u_).items()}
+                    st = {n: P for n, (P, _b) in morph(film.st['chord'], film.st['string'], ease(u_)).items()}
                 for n, P in st.items():
-                    C.wline([tuple(q) for q in P], PAIR_COL if n in prs else STRC, 2.0)
+                    C.wline([tuple(q) for q in P], PAIR_COL if n in prs else STRC, 1.3)
                 for n in film.strings:
                     tooth, _s, _l, berth = film.ends[n]
-                    C.wdot(*tooth, 3.0, TEXT)
-                    C.wdot(*berth, 3.0, TEXT)
-            cues = [(0.0, 'shimmer', 0.6)] + ([(0.8 * film.relax_t[j], 'tick', 1 - n_ / max(1, len(film.strings)))
+                    C.wdot(*tooth, 2.6, TEXT)
+                    C.wdot(*berth, 2.6, TEXT)
+            cues = [(0.0, 'shimmer', 0.3)] + ([(0.9 * film.relax_t[j], 'tick', 1 - n_ / max(1, len(film.strings)))
                                               for j, (_s, _k, n_) in enumerate(film.relax_at)] if film.relax else
-                                             [(0.0, 'glide', 0.5, 0.8)]) + [(0.8, 'pluck', 0.3)]
-            return Clip('strings', beats, fn, cam=lambda t: (foc[0], foc[1], lerp(1.0, 1.5, ease(t))), cues=cues)
+                                             [(0.0, 'glide', 0.5, 0.9)]) + [(0.9, 'pluck', 0.2)]
+            return Clip('strings', 'strings', beats, fn, cues=cues)
         cands.append((1, 'strings', 1 + math.log2(1 + len(bent)), c_strings))
 
-    # ------------------------------------------------------------------ the solve's plans, as the braid
+    # ------------------------------------------------------------------ the solve's plans, in the references' slots
     if film.plans:
         o0, o1 = film.plan_meta[0]['obj'], film.plan_meta[-1]['obj']
         better = lambda v: min(1.0, max(0.0, (o0 - v) / (o0 - o1))) if o0 > o1 else 1.0     # noqa: E731
+        proved = T['final'].get('proved', True)
 
         def c_solve(beats):
-            steps = 2 * beats - 1
-            ps = list(film.pshow)
-            if len(ps) > steps - (1 if film.coupled else 0):
-                n_ = steps - (1 if film.coupled else 0)
-                ps = sorted({ps[int(round(j * (len(ps) - 1) / max(1, n_ - 1)))] for j in range(n_)})
-            seq = [film.plans[i] for i in ps] + ([film.coupled] if film.coupled else [])
+            ps = thin(list(film.pshow), 2 * beats - (1 if film.coupled else 0))
+            keys = [f'plan{i}' for i in ps] + (['coupled'] if film.coupled else [])
             objs = [film.plan_meta[i]['obj'] for i in ps] + ([o1] if film.coupled else [])
-            from PIL import Image
-            flat = Image.new('RGB', (W * SS, H * SS), BG)
-
-            t0s = starts(beats, len(seq))
+            t0s = starts(beats, len(keys), per=2)
 
             def fn(C, t, T_):
-                C.img.paste(flat, (0, 0))
-                C.glow_base = flat
+                fanout(C, 0.55)
                 k, f = stepper(t, t0s)
-                plan = lerp_plan(seq[k - 1], seq[k], ease(min(1.0, f / 0.55))) if k and f < 0.55 else seq[k]
-                st = braid_strands(film, plan) if plan in seq else _braid_strands(film, plan)
-                Xb = film.bx
-                C.rect((Xb(T['S_FACE']), BRAID[1], Xb(T['BAND']), BRAID[3]), fill=(22, 25, 31))
-                for layer in film.order:
-                    for n in film.M:
-                        us, y, bits = st[n]
-                        pts = [(Xb(u), film.rank_y(r)) for u, r in zip(us, y)]
-                        j0 = None
-                        for j in range(len(bits) + 1):
-                            on = j < len(bits) and bits[j] == layer
-                            if on and j0 is None:
-                                j0 = j
-                            elif not on and j0 is not None:
-                                C.line(pts[max(0, j0 - 1):j + 1], film.col[layer], 4.2 if n in prs else 2.4)
-                                j0 = None
-                for n in film.M:
-                    us, y, _b = st[n]
-                    for c in plan.changes.get(n, []):
-                        x_, y_ = Xb(c), film.rank_y(float(np.interp(c, us, y)))
-                        R = 5.5
-                        C.d.ellipse([(x_ - R) * SS, (y_ - R) * SS, (x_ + R) * SS, (y_ + R) * SS], outline=VIA_COL,
-                                    width=int(2 * SS))
-                    for x_, y_ in ((Xb(us[0]), film.rank_y(y[0])), (Xb(us[-1]), film.rank_y(y[-1]))):
-                        C.d.ellipse([(x_ - 3) * SS, (y_ - 3) * SS, (x_ + 3) * SS, (y_ + 3) * SS], fill=TEXT)
-            cues = [(t0s[k], 'ping', better(o)) for k, o in enumerate(objs)] + [(t0s[len(seq) - 1], 'chord', 1.0)]
-            return Clip('solve', beats, fn, cam=lambda t: (W / 2, H / 2, lerp(1.0, 1.15, ease(t))), cues=cues)
+                ka, kb = keys[max(0, k - 1)], keys[k]
+                mt = ease(span(f, 0.0, 0.3)) if k else 1.0
+                C.lanes(morph(film.st[ka], film.st[kb], mt), w=2.2)
+                C.vias([(n, x, y) for n, x, y, al in morph_vias(film.vias[ka], film.vias[kb], mt) if al > 0.5])
+            cues = [(t0s[k], 'bell', better(o)) for k, o in enumerate(objs) if k] + \
+                [(t0s[len(keys) - 1], 'chord', 1.0 if proved and not film.coupled else 0.0)]
+            return Clip('solve', 'solve', beats, fn, cues=cues)
         cands.append((2, 'solve', 2 + math.log2(1 + len(film.plans)), c_solve))
 
     # ------------------------------------------------------------------ the 2-D geometry's rounds
@@ -4889,177 +4816,115 @@ def short_clips(film, secs=15.0):
         E = S.Et
         seq_e = film.eseq
         BP = lambda p: film.mp.pt(p[0], p[1])                       # noqa: E731
-        hots = [X1(*BP(q)) for r in E['rounds'][1:] for q in r['hot']] or [vc]
-        Hp = np.asarray(hots, float)
-        cnt = [int(((np.abs(Hp[:, 0] - h[0]) < 120) & (np.abs(Hp[:, 1] - h[1]) < 70)).sum()) for h in hots[::max(1, len(hots) // 400)]]
-        hf = hots[::max(1, len(hots) // 400)][int(np.argmax(cnt))]
-        near = Hp[(np.abs(Hp[:, 0] - hf[0]) < 120) & (np.abs(Hp[:, 1] - hf[1]) < 70)]
-        foc_e = (float(near[:, 0].mean()), float(near[:, 1].mean()))
-        # (the cells about the focus, each the brighter the nearer: a lens on the free space the lanes settle in)
-        lens = []
-        used_ = collections.Counter(film.erun[k][0] for k in seq_e[0][3]['xy'])
-        for L in [L for L, _c in used_.most_common(2)] + [len(film.emesh) - 1]:
-            V, T_ = film.emesh[L]
-            px = np.array([film.X(x, y) for x, y in V], float).reshape(-1, 2) / SS
-            cen = px[T_].mean(axis=1)
-            # (a cell's longest side: a sliver reaching far off the focus would streak across the frame)
-            far = np.max(np.hypot(*(px[T_] - np.roll(px[T_], 1, axis=1)).transpose(2, 0, 1)), axis=1)
-            dd = np.where(far < 140, np.hypot(cen[:, 0] - foc_e[0], (cen[:, 1] - foc_e[1]) * 1.6), 1e9)
-            col = (170, 170, 178) if L == len(film.emesh) - 1 else film.col[film.ebit[L]]
-            for i in np.nonzero(dd < 420)[0]:
-                lens.append((px[T_[i]] * SS, mix(BODY, col, 0.55 * (1 - dd[i] / 420))))
-        nlive = max([r['nlive'] for r in E['rounds']] + [1])
+        nlay = len(E['layers'])
+        CELLC = [mix(BODY, film.col[b], 0.6) for b in film.ebit]
+        mesh_px = [np.array([film.X(x, y) for x, y in V], float).reshape(-1, 2) for V, _T in film.emesh[:nlay]]
+        px_of = lambda pts: [film.X(*BP(q)) for q in pts]           # noqa: E731
+        lit_px = {r['it']: px_of(r['lit']) for r in E['rounds']}
+        hot_px = {r['it']: px_of(r['hot']) for r in E['rounds']}
+        top = max([r['nlive'] for r in E['rounds']] + [1])
 
         def c_rounds(beats):
-            steps = 2 * beats
             n = len(seq_e)
-            idx = sorted({int(round((j / (steps - 1)) ** 1.7 * (n - 1))) for j in range(steps)})
-
-            t0s = starts(beats, len(idx))
+            idx = sorted({int(round((j / (2 * beats - 1)) ** 1.7 * (n - 1))) for j in range(2 * beats)})
+            t0s = starts(beats, len(idx), per=2)
 
             def fn(C, t, T_):
-                board(C, 0.5)
-                for tri, col in lens:
-                    C.d.line([tuple(tri[0]), tuple(tri[1]), tuple(tri[2]), tuple(tri[0])], fill=col, width=SS)
+                fanout(C, 0.5)
+                for L in range(nlay):
+                    col = mix(BODY, CELLC[L], 0.26)
+                    px, T_c = mesh_px[L], film.emesh[L][1]
+                    for i_, j_, k_ in T_c:
+                        C.d.line([tuple(px[i_]), tuple(px[j_]), tuple(px[k_]), tuple(px[i_])], fill=col, width=SS)
                 k, f = stepper(t, t0s)
-                a_, b_ = seq_e[idx[max(0, k - 1)]], seq_e[idx[k]]
-                m = ease(min(1.0, f / 0.7)) if k else 1.0
-                C.lanes(morph(film.st[a_[0]], film.st[b_[0]], m), w=2.6)
-                C.vias([(n_, x, y) for n_, x, y, _al in morph_vias(film.vias[a_[0]], film.vias[b_[0]], m)])
-                rec_ = b_[2]
-                if b_[1] == 'round' and rec_ is not None:
-                    a = 1 - ease(f)
-                    for q in rec_['hot']:
-                        C.wdot(*BP(q), 2.2, mix(BODY, ACCENT, a))
-                    for h in rec_['vhop']:
-                        C.wring(*BP(h['to']), 0.25, mix(BODY, EVC['vhop'], a), 2.0)
+                (ka, _k, _r, sa), (kb, kind, rec_, sb) = seq_e[idx[max(0, k - 1)]], seq_e[idx[k]]
+                m = ease(span(f, 0.2, 0.8)) if k else 1.0
+                C.lanes(morph(film.st[ka], film.st[kb], m), w=2.0)
+                C.vias([(n_, x, y) for n_, x, y, _al in morph_vias(film.vias[ka], film.vias[kb], m)])
+                if kind == 'round':
+                    c1 = mix(BODY, (235, 238, 245), 1 - ease(span(f, 0.55, 1.0)))
+                    for (x_, y_) in lit_px[rec_['it']]:
+                        C.d.rectangle([x_ - SS / 2, y_ - SS / 2, x_ + SS / 2, y_ + SS / 2], fill=c1)
+                    a_h = ease(span(f, 0.25, 0.5)) * (1 - ease(span(f, 0.85, 1.0)))
+                    if a_h > 0.02:
+                        c2 = mix(BODY, ACCENT, a_h)
+                        for (x_, y_) in hot_px[rec_['it']]:
+                            C.d.ellipse([x_ - 1.6 * SS, y_ - 1.6 * SS, x_ + 1.6 * SS, y_ + 1.6 * SS], fill=c2)
+                        for h in rec_['vhop']:
+                            C.wring(*BP(h['to']), 0.22, mix(BODY, EVC['vhop'], a_h), 1.6)
+                        for b in rec_['bulge']:
+                            C.wring(*BP(b['xy']), 0.14, mix(BODY, EVC['bulge'], a_h), 1.4)
+                        for q in rec_['pulled']:
+                            C.wring(*BP(q), 0.14, mix(BODY, EVC['pull'], a_h), 1.4)
+                elif kind == 'slide':
+                    a_s = math.sin(math.pi * f)
+                    for vk in rec_['vias']:
+                        C.wline([sa['via'][vk], sb['via'][vk]], mix(BODY, ACCENT, a_s), 2.0)
+                        C.wring(*sb['via'][vk], 0.4, mix(BODY, ACCENT, a_s), 2.5)
             cues = []
             for k in range(1, len(idx)):
-                rec_ = seq_e[idx[k]][2]
-                cues.append((t0s[k], 'round', (rec_ or {}).get('nlive', 0) / nlive))
-                if rec_ and rec_.get('hops'):
-                    cues.append((t0s[k] + 0.25 * (t0s[k + 1] - t0s[k]), 'blip', min(1.0, rec_['hops'] / 12)))
-            return Clip('rounds', beats, fn, cam=lambda t: (foc_e[0], foc_e[1], lerp(1.0, 1.9, ease(t))), cues=cues)
+                kind, rec_ = seq_e[idx[k]][1], seq_e[idx[k]][2]
+                if kind == 'round':
+                    cues.append((t0s[k], 'round', rec_['nlive'] / top))
+                    if rec_['hops']:
+                        cues.append((t0s[k] + 0.25 * (t0s[k + 1] - t0s[k]), 'blip', min(1.0, rec_['hops'] / 12)))
+                elif kind == 'slide':
+                    cues.append((t0s[k], 'slide', 0.5, t0s[k + 1]))
+            return Clip('rounds', 'geometry', beats, fn, cues=cues)
         tot_ = sum(r['hops'] + r['nexc'] + r['npull'] for r in E['rounds'])
         cands.append((3, 'rounds', 1 + math.log2(1 + len(E['rounds'])) + 0.5 * math.log10(1 + tot_), c_rounds))
 
-    # ------------------------------------------------------------------ the snap, up close
-    if S.snapd and 'snap' in film.st and 'pol' in film.st:
-        focus = None
-        for n in S.pairs:
-            c = S.snapd['lanes'].get(n, {}).get('cross')
-            if c:
-                q = [pt for side in ('P', 'N') for pts_, _L in c['legs'][side] for pt in pts_] + [v[:2] for v in c['vias']]
-                focus = ((min(p[0] for p in q) + max(p[0] for p in q)) / 2, (min(p[1] for p in q) + max(p[1] for p in q)) / 2)
-                break
-        if focus is None and S.snapd.get('vias'):
-            focus = tuple(S.snapd['vias'][len(S.snapd['vias']) // 2][1:3])
-        if focus is not None:
-            focus = film.mp.pt(*focus)
-            grid = film.rules['grid']
-
-            def c_snap(beats):
-                def fn(C, t, T_):
-                    hw = lerp(4.0, 2.6, ease(t))
-                    view = (focus[0] - hw, focus[1] - hw, focus[0] + hw, focus[1] + hw)
-                    mp_ = ease(span(t, 0.12, 0.3))
-                    ms = ease(span(t, 0.45, 0.63))
-                    st = {n: (film.st['snap'][n] if (mp_ >= 1 if n in prs else ms >= 1) else
-                              morph({n: film.st['pol'][n]}, {n: film.st['snap'][n]}, mp_ if n in prs else ms)[n])
-                          for n in film.M if n in film.st['snap'] and n in film.st['pol']}
-                    vs = film.vias['snap'] if ms > 0.5 else film.vias['pol']
-
-                    def draw(d, Z, s):
-                        a_g = ease(span(t, 0.0, 0.12))
-                        gx = math.ceil((view[0] - 1) / grid) * grid
-                        while gx < view[2] + 1:
-                            gy = math.ceil((view[1] - 1) / grid) * grid
-                            while gy < view[3] + 1:
-                                x, y = Z(gx, gy)
-                                d.rectangle([x - SS, y - SS, x + SS, y + SS], fill=mix(BODY, (110, 120, 136), a_g))
-                                gy += grid
-                            gx += grid
-                        for layer in film.order:
-                            for n, (P, bits) in st.items():
-                                if not ((P[:, 0] > view[0] - 1) & (P[:, 0] < view[2] + 1) & (P[:, 1] > view[1] - 1)
-                                        & (P[:, 1] < view[3] + 1)).any():
-                                    continue
-                                wd = (PP + TW if n in prs else TW) * s
-                                col = mix(BODY, film.col[layer], 0.6 if n in prs else 1.0)
-                                j0 = None
-                                for j in range(len(bits) + 1):
-                                    on = j < len(bits) and bits[j] == layer
-                                    if on and j0 is None:
-                                        j0 = j
-                                    elif not on and j0 is not None:
-                                        d.line([Z(*q) for q in simplify(P[j0:j + 1], 0.2 / s * SS)], fill=col,
-                                               width=max(1, int(wd)), joint='curve')
-                                        j0 = None
-                        for n, x, y in vs:
-                            cx, cy = Z(x, y)
-                            r = VD / 2 * s
-                            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(185, 185, 185), outline=(245, 245, 245),
-                                      width=2 * SS)
-                    _full_view(C, film, view, draw)
-                return Clip('snap', beats, fn, cues=[(0.12, 'snap', 0.5), (0.45, 'snap', 0.8), (0.63, 'snap', 1.0)])
-            cands.append((4, 'snap', 1.5, c_snap))
+    # ------------------------------------------------------------------ the snap
+    if all(k in film.st for k in ('pol', 'pairs', 'held', 'snap')):
+        def c_snap(beats):
+            def fn(C, t, T_):
+                fanout(C, 0.5)
+                mp_, mq, ms = ease(span(t, 0.05, 0.28)), ease(span(t, 0.4, 0.55)), ease(span(t, 0.62, 0.85))
+                pr = morph(film.st['pol'], film.st['pairs'], mp_)
+                si = morph(film.st['pol'], film.st['held'], mq)
+                si = morph(si, film.st['snap'], ms) if ms > 0 else si
+                pr = morph(pr, film.st['snap'], ms) if ms > 0 else pr
+                st = {n: (pr[n] if n in prs else si[n]) for n in film.M if n in pr and n in si}
+                dim = 0.25 if t < 0.36 else 1.0
+                C.lanes(st, w=2.2, only=prs if t < 0.36 else None, dim=dim, hl=prs if t < 0.36 else None,
+                        ribbon=t >= 0.12)
+                vs = film.vias['snap'] if t >= 0.62 else film.vias['pairs'] if t >= 0.2 else film.vias['pol']
+                C.vias(vs, only=prs if t < 0.36 else None, dim=dim)
+            return Clip('snap', 'snap', beats, fn, cues=[(0.05, 'snap', 0.4), (0.4, 'snap', 0.6), (0.62, 'snap', 0.8)])
+        cands.append((4, 'snap', 1.0, c_snap))
 
     # ------------------------------------------------------------------ the lay, last
-    sp0, spd = film.sp0, film.spd
-    uof = lambda x, y: float((x - sp0[0]) * spd[0] + (y - sp0[1]) * spd[1])    # noqa: E731
     order = [n for n in S.route_order if n in film.routed] + [n for n in film.M if n not in S.route_order]
     order = [n for n in order if film.routed[n][0] or film.routed[n][1]]
-    laid = {n: (sorted(film.routed[n][0], key=lambda s_: uof((s_[0] + s_[2]) / 2, (s_[1] + s_[3]) / 2)),
-                film.routed[n][1]) for n in order}
-    urng = {n: (min([uof((s_[0] + s_[2]) / 2, (s_[1] + s_[3]) / 2) for s_ in v[0]] + [uof(q[0], q[1]) for q in v[1]]),
-                max([uof((s_[0] + s_[2]) / 2, (s_[1] + s_[3]) / 2) for s_ in v[0]] + [uof(q[0], q[1]) for q in v[1]]))
-            for n, v in laid.items()}
-    ulo, uhi = (min(v[0] for v in urng.values()), max(v[1] for v in urng.values())) if urng else (0.0, 1.0)
-    src_c = X1(*np.mean([(p.global_x, p.global_y) for p in S.fo.footprints[S.src].pads], axis=0))
+    clean = S.connected and S.drc_clean
 
     def c_lay(beats):
-        q16 = 1.0 / (beats * 4)
-        t_in = {n: _quant(0.02 + 0.5 * j / max(1, len(order) - 1), q16) for j, n in enumerate(order)}
-        DUR = 0.24
+        q = 1.0 / (2 * beats)                       # (lanes come in on the half beats, the last one's done at the end)
+        t_in = {n: _quant((1 - q) * j / max(1, len(order) - 1), q) for j, n in enumerate(order)}
 
         def fn(C, t, T_):
-            board(C, 0.9)
+            C.segs(film.other_c[0], alpha=0.22)
+            C.segs(film.fo_c[0], alpha=0.9)
+            C.cvias(film.fo_c[1])
             if 'snap' in film.st:
-                C.lanes(film.st['snap'], alpha=0.25, w=1.6)
-            segs, vias, hot = [], [], []
-            ub = lerp(ulo - 2, uhi + 0.5, span(t, 0.72, 1.0)) if t > 0.72 else None   # (a pulse along the copper)
+                C.lanes(film.st['snap'], alpha=0.28, w=1.6, ribbon=False)
             for n in order:
-                p = ease(span(t, t_in[n], t_in[n] + DUR))
-                if p <= 0:
+                a = span(t, t_in[n], t_in[n] + q)
+                if a <= 0:
                     continue
-                lo, hi = urng[n]
-                cut = lo + (hi - lo) * p + 1e-6
-                for s_ in laid[n][0]:
-                    u = uof((s_[0] + s_[2]) / 2, (s_[1] + s_[3]) / 2)
-                    if u <= cut:
-                        segs.append(s_)
-                        if ub is not None and abs(u - ub) < 1.6:
-                            hot.append(s_)
-                vias += [v for v in laid[n][1] if uof(v[0], v[1]) <= cut]
-            C.segs(segs)
-            C.cvias(vias)
-            if hot:
-                C.segs(hot, alpha=1.0, true_width=False, w_px=4.0, col=(255, 250, 225))
+                segs, vias = film.routed[n]
+                C.segs(segs, alpha=a)
+                C.cvias(vias, a)
         cues = [(t_in[n], 'pluck', j / max(1, len(order) - 1)) for j, n in enumerate(order)] + \
-            [(0.72, 'chord', 1.0), (0.74, 'shimmer', 0.9)]
+            [(_quant(0.75, q), 'chord' if clean else 'alert', 1.0)]
+        return Clip('lay', 'lay', beats, fn, cues=cues)
 
-        def cam(t):
-            # (pulled back from the source as the copper comes in, still moving on the last frame)
-            e = 0.85 * (1 - (1 - t) ** 3) + 0.15 * t
-            return (lerp(src_c[0], vc[0], e), lerp(src_c[1], vc[1], e), lerp(1.7, 1.02, e))
-        return Clip('lay', beats, fn, cam=cam, cues=cues)
-
-    # ---- the clips the beats allow, the most worth first, each three beats and the rest shared by worth
-    b_lay = max(6, int(round(nb * SHORT_LAY)))
+    # ---- the clips the beats allow, the most worth first, SHORT_MIN beats each and the rest shared by worth
+    b_lay = max(5, int(round(nb * SHORT_LAY)))
     rest = nb - b_lay
-    take = sorted(sorted(cands, key=lambda c: (-c[2], c[0]))[:max(0, rest // 3)], key=lambda c: c[0])
-    give = {c[1]: 3 for c in take}
-    extra = rest - 3 * len(take)
+    take = sorted(sorted(cands, key=lambda c: (-c[2], c[0]))[:max(0, rest // SHORT_MIN)], key=lambda c: c[0])
+    give = {c[1]: SHORT_MIN for c in take}
+    extra = rest - SHORT_MIN * len(take)
     if take and extra > 0:
         w_ = sum(c[2] for c in take)
         share = {c[1]: extra * c[2] / w_ for c in take}
@@ -5071,27 +4936,6 @@ def short_clips(film, secs=15.0):
     else:
         b_lay += max(0, extra)
     return [c[3](give[c[1]]) for c in take] + [c_lay(b_lay)]
-
-
-def short_post(img, sc, t, s_in, first, base):
-    """a frame of the short made from its canvas (supersampled): the camera's crop, pushed in and brought to the
-    frame's size; a glow on what the clip drew over its base; and a flash on the beat a clip is cut in on"""
-    from PIL import Image, ImageChops, ImageFilter
-    x, y, z = sc.cam(t) if sc.cam else (W / 2, H / 2, 1.0)
-    z = max(1.0, z)
-    hw, hh = W / (2 * z), H / (2 * z)
-    x, y = min(max(x, hw), W - hw), min(max(y, hh), H - hh)
-    box = tuple(v * SS for v in (x - hw, y - hh, x + hw, y + hh))
-    out = img.resize((W, H), Image.LANCZOS, box=box)
-    # (the glow a halo: what the clip drew over its base, blurred, where the blur reaches past it -- round a line, not
-    # over a wide piece of copper)
-    lit = ImageChops.subtract(out, base.resize((W, H), Image.BILINEAR, box=box))
-    halo = ImageChops.subtract(lit.filter(ImageFilter.GaussianBlur(7)), lit)
-    out = ImageChops.add(out, halo.point(lambda v: min(255, int(v * 2.2))))
-    fl = 0.0 if first else 0.5 * max(0.0, 1.0 - s_in / 0.12)
-    if fl > 0:
-        out = Image.blend(out, Image.new('RGB', (W, H), (255, 255, 255)), fl)
-    return out
 
 
 # =============================================================================== the frames
@@ -5173,10 +5017,8 @@ def render_frame(i):
     t = sc.at(t_abs - acc)
     C = Canvas(film, base)
     sc.fn(C, t, t_abs)
-    if short:
-        # (the short: no header, caption or timeline -- its camera, its glow, its cut)
-        return short_post(C.img, sc, t, t_abs - acc, sc is scenes[0], C.glow_base or base)
-    chrome(C, sc, t, T_total, t_abs, scenes)
+    if not short:
+        chrome(C, sc, t, T_total, t_abs, scenes)       # (the short: no header, caption or timeline)
     return C.img.reduce(SS)
 
 
@@ -5214,9 +5056,9 @@ def main():
                     help='a sound track: every scene narrated, effects on what the scenes draw, and music, mixed by '
                          'ffmpeg (whole_movie_sound.py) -- the film\'s timeline fitted to the narration')
     ap.add_argument('--short', nargs='?', type=float, const=15.0, default=None, metavar='SECS',
-                    help='a SHORT instead of the film: about SECS (default 15) of the run\'s most striking moments, each '
-                         'a clip of a few beats cut on the beat, with music and effects and no narration, no captions '
-                         'and no cards (short_clips); --stills and --scenes work on it as on the film')
+                    help='a SHORT instead of the film: about SECS (default 15) of the run\'s moments, each an excerpt '
+                         'of the film at one framing of the bus, cut on the music\'s pulse, with music and effects and no '
+                         'narration, captions or cards (short_clips); --stills and --scenes work on it as on the film')
     ap.add_argument('--voice', default=DEFAULT_VOICE,
                     help=f'the narration\'s voice (default {DEFAULT_VOICE}): kokoro:NAME, a voice of the neural '
                          'Kokoro-82M, installed on first use into its own venv in the user\'s cache ($XDG_CACHE_HOME or '

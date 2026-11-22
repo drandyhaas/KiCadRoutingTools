@@ -2106,19 +2106,20 @@ python3 awx/whole_movie_sound.py --fetch [kokoro:NAME]                        # 
 - Without `--sound` the film is unchanged, frame for frame, and none of this
   is needed.
 
-**The short** (`--short [SECS]`, default 15): not the film but a fast cut of
-the run's most striking moments for a casual viewer, each a clip of a few
-beats of its own music, cut on the beat -- no narration, no captions, no
-title or end card, something moving in every frame. The candidates are the
-group's search (its states one after another, the ends that moved flashed),
-the taut strings, the solve's plans as the braid, the 2-D geometry's rounds,
-the snap up close and, always last, the lay sweeping the copper in; which
-of them play, and for how long, is read from the run's own records (the
-states, strings, plans and rounds it kept), so a run gives the same short
-every time. The camera pushes in on each clip's busiest place. Its sound is
-music and effects only (`whole_movie_sound.short_score`): a four-to-the-floor
-track in D, and the clips' own effects (a plan found, a via moving, a lane
-laid) on the beat. `--scenes` and `--stills` work on it as on the film.
+**The short** (`--short [SECS]`, default 15): not the film but a few of the
+run's moments cut tighter -- no narration, no captions, no title or end card,
+something moving in every frame. Every clip is an excerpt of the film, drawn
+as the film draws that stage, and all of them at one framing: the film's own
+of the bus, from its source array to its destination. A cut changes what is
+drawn, never where the camera is. The candidates are the group's search, the
+taut strings, the solve's plans, the 2-D geometry's rounds, the snap and,
+always last, the lay. Which of them play, and for how long, is read from the
+run's own records (the states, strings, plans and rounds it kept), so a run
+gives the same short every time. Its sound is music and effects only
+(`whole_movie_sound.short_score`): the film's own music voice, a chord to a
+clip over a slow pulse the cuts fall on, and the film's own effects (a plan
+found, a via moving, a lane laid, a stage's bell at a cut). `--scenes` and
+`--stills` work on it as on the film.
 
 ## Orphan Stub Checker (`check_orphan_stubs.py`)
 
