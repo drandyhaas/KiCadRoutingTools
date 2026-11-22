@@ -57,6 +57,10 @@ def _s(name: str, dflt: str = '') -> str:
     return os.environ.get(name, dflt)
 
 
+#: KICAD_PROXIMITY_SUM values already warned about (refresh() re-reads).
+_WARNED_PROXIMITY_SUM: set = set()
+
+
 def refresh() -> None:
     """(Re)read every knob from os.environ (tests / in-process mutation)."""
     g = globals()
@@ -145,9 +149,21 @@ def refresh() -> None:
     # lean -45% vs old defaults) at +37% CPU. zoned/sum/softcap remain opt-in
     # (retry-tier on knob-sensitive boards).
     _ps = _s('KICAD_PROXIMITY_SUM', '').strip().lower()
-    g['PROXIMITY_SUM_MODE'] = ('zoned' if _ps == 'zoned'
-                               else 'softcap' if _ps == 'softcap'
-                               else 'sum' if _ps in _ON else '')
+    if _ps in ('sum', 'zoned', 'softcap'):
+        g['PROXIMITY_SUM_MODE'] = _ps
+    elif _ps in _ON:
+        g['PROXIMITY_SUM_MODE'] = 'sum'
+    else:
+        # A value no mode reads (a typo, an undocumented spelling) used to
+        # fall through to MAX in silence, so a run "with" a composition
+        # mode measured the default.
+        if _ps and _ps not in _OFF and _ps not in _WARNED_PROXIMITY_SUM:
+            _WARNED_PROXIMITY_SUM.add(_ps)
+            import sys
+            print(f"WARNING: KICAD_PROXIMITY_SUM={_ps!r} is not a composition "
+                  f"mode (1/true/on/sum, zoned, softcap; 0/off/false = max): "
+                  f"proximity costs compose by MAX", file=sys.stderr)
+        g['PROXIMITY_SUM_MODE'] = ''
     g['PROXIMITY_SUM'] = bool(g['PROXIMITY_SUM_MODE'])
     g['PROXIMITY_SOFTCAP_ALPHA'] = _f('KICAD_PROXIMITY_SOFTCAP_ALPHA', 0.3)
     # #585 item 1: layer-aware stub proximity. The stub's OWN layer keeps the
