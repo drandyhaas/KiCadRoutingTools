@@ -3,8 +3,9 @@
 
 RUNDIR is whole_route.py's OUTDIR, or a bus step's (route_bus.py's BUS.bus/run: the settings of its run are read from
 the step's run.json, and what the step gave its chain over them from the chain's own chain.json); the round that
-routed (rN/seq.kicad_pcb) is filmed. The film draws TWO layers, the front and the back: a run on more is not filmed
-(--check still runs its round's stages again and compares them).
+routed (rN/seq.kicad_pcb) is filmed. It draws a run on any number of layers, each copper layer a colour of its own on
+the board, in the braid and in the 2-D geometry (F.Cu red, B.Cu blue, an inner layer bright: layer_col); on more than
+two a legend in the header names the layers the lanes stand on.
 
 A bus step's run whose ends are its GROUP'S (route_bus under GROUP_ENDS: the group's directory, beside the bus's own
 run in SRC-DEST.bus/) opens with the group's ends, each array in a magnifier of its own: the BUSES the step found and
@@ -62,7 +63,11 @@ whole_embed under one that keeps its cells, the layout it starts from and, round
 round's LP held, what moved and every event (each count checked against the stage's own). Each re-run must write what
 the chain wrote, byte for byte, or the film is refused (--force films it anyway, and says so on screen). The round's
 first solve is run on the fanout's own board and its geometry on the board the loop's round stood on (the loop's
-benches.json: on more than two layers, the fanout's with its via ends moved onto the plan's layers). The traces are
+benches.json: on more than two layers, the fanout's with its via ends moved onto the plan's layers). A NEGOTIATED bus
+(route_bus JOINT_DIR, its group's buses routed together) is re-run as its chain ran it: its first solve as the bus
+solved it alone, compared with solve.solo.json -- the coupled solve wrote its own plan for the bus over solve.json, and
+a scene of its own shows that plan, the one the loop laid out -- and its loop's stages with the other buses' published
+lanes on the board (joint_lanes.foreign), the first solve with those of the buses already ended. The traces are
 kept in RUNDIR/rN/movie/, and a re-run writes nothing else: no event of its own is appended to the step's events
 file (BUS_EVENTS is not given it). --check stops there: it says whether each re-run reproduced the chain's file (exit 1 when
 one did not), for a run on any number of layers.
@@ -87,8 +92,14 @@ will film offline. Where it cannot be had the film stops, saying how to fetch it
 voice (`say -v ?` lists them), needs nothing installed. Without --sound the film is the same as ever, frame for frame,
 and nothing of the sound is needed.
 
+With --short [SECS] the run is not filmed but cut into a SHORT of about SECS (15) seconds for the casual viewer: its
+most striking moments, each a clip of a few beats of its own music, cut on the beat, the camera pushing in -- no words,
+no captions, no title or end card, something moving in every frame. Which moments play, and for how long, is read
+from the run's own records (short_clips), so a run gives the same short every time; its sound is music and effects
+only (whole_movie_sound.short_score).
+
 usage: whole_movie.py RUNDIR OUT.mp4 [--fps 30] [--workers 6] [--stills DIR [--at T1,T2,..]] [--human BOARD]
-                     [--speed X] [--force] [--scenes] [--sound [--voice kokoro:NAME | SAY_VOICE]]
+                     [--speed X] [--force] [--scenes] [--sound [--voice kokoro:NAME | SAY_VOICE] | --short [SECS]]
        whole_movie.py RUNDIR --check
 The bench is the chain's: BASE (default fb_t2q_pairs.kicad_pcb) and DEST (default DU1) as whole_route.py reads them; a
 bus step's run gives its own, and BASE may then name the board from before the bus's ends were laid (the ends' scene
@@ -150,10 +161,43 @@ def round_bench(round_dir, i):
     return b if os.path.isfile(b) else fo
 
 
+def solo_ref(round_dir):
+    """the file the round's first solve wrote: its solve.json -- or, a NEGOTIATED bus's round (route_bus JOINT_DIR),
+    solve.solo.json, where the coupled solve (whole_joint.py) kept it before writing its own plan for the bus over
+    solve.json"""
+    sj, solo = os.path.join(round_dir, 'solve.json'), os.path.join(round_dir, 'solve.solo.json')
+    try:
+        coupled = bool(json.load(open(sj)).get('joint'))
+    except (OSError, ValueError):
+        coupled = False
+    return solo if coupled and os.path.isfile(solo) else sj
+
+
+def joint_finished(round_dir, events, jd):
+    """(a negotiated bus) the other buses whose whole route had ended (JOINT_DIR/BUS.finished) when the round's first
+    solve started -- by the step's events (its solve's start), else by the round's fanout board"""
+    log = os.path.join(os.path.abspath(round_dir), 'solve.log')
+    t0 = None
+    if events and os.path.isfile(events):
+        for ln in open(events):
+            try:
+                e = json.loads(ln)
+            except ValueError:
+                continue
+            if e.get('stage') == 'solve' and e.get('kind') == 'start' and os.path.abspath(e.get('log') or '') == log:
+                t0 = e['t']
+    if t0 is None:
+        t0 = os.path.getmtime(os.path.join(round_dir, 'fo.kicad_pcb'))
+    return sorted(f[:-len('.finished')] for f in os.listdir(jd)
+                  if f.endswith('.finished') and os.path.getmtime(os.path.join(jd, f)) < t0)
+
+
 def _chain_env(round_dir, dest, bench=None):
     """the environment whole_route.py gives a stage of this round: a bus step's round under that step's settings, and
     under what the step gave its chain over them (the chain's own record). `bench`: the board the stage reads (a loop
-    round's: round_bench), the fanout's own when not given -- the round's first solve reads that one"""
+    round's: round_bench), the fanout's own when not given -- the round's first solve reads that one. A negotiated
+    bus's stages (JOINT_DIR) read the other buses' lanes as they published them (joint_lanes.foreign): the loop's
+    every one, the round's first solve only those of the buses ended when it started (whole_route.chain)"""
     nets = [ln.strip() for ln in open(os.path.join(round_dir, 'nets.lines')) if ln.strip()]
     env = dict(os.environ)
     rundir = os.path.dirname(os.path.abspath(round_dir))
@@ -168,6 +212,12 @@ def _chain_env(round_dir, dest, bench=None):
         env.update(rec.get('settings') or {})
         if rec.get('base'):
             env['BASE'] = rec['base']
+    if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
+        if bench is None:
+            env.update(JOINT_FOREIGN='finished',
+                       JOINT_FINISHED=','.join(joint_finished(round_dir, env.get('BUS_EVENTS'), env['JOINT_DIR'])))
+        else:
+            env['JOINT_FOREIGN'] = 'all'
     # (and nothing of a re-run's appended to the step's own record of its run, its events file: bus_events writes
     # nothing without BUS_EVENTS)
     for k in ('HINT', 'CUTS', 'HIST', 'GEO_FLIPS_FROM', 'SEED_FLIPS', 'SEED_CUTS', 'SEED_HIST', 'SNAP_KEEP',
@@ -201,11 +251,16 @@ def _trace_solve(round_dir, out):
             self.run = run
 
         def on_solution_callback(self):
+            # (every variable's value, kept compact: a search of an eight-layer bus finds its plans by the hundred, each
+            # of a model of many thousand variables)
             self.run['plans'].append({'t': self.WallTime(), 'obj': self.ObjectiveValue(),
-                                      'bound': self.BestObjectiveBound(), 'x': [self.Value(v) for v in self.vs]})
+                                      'bound': self.BestObjectiveBound(),
+                                      'x': np.fromiter((self.Value(v) for v in self.vs), np.int64, len(self.vs))})
 
     def observed(self, model, solution_callback=None):
-        run = {'plans': [], 'log': []}
+        # (who asks: the search's own runs, or -- on more layers than two -- the plane tie, which chooses a found
+        # plan's layers again by the planes they split, its crossings and changes held: no plan of the search)
+        run = {'plans': [], 'log': [], 'who': sys._getframe(1).f_code.co_name}
         runs.append(run)
         passed = self.log_callback
 
@@ -235,23 +290,30 @@ def _trace_solve(round_dir, out):
     if J is None:
         raise SystemExit('whole_movie: the root solve proved no plan')
     J = json.loads(json.dumps(J))
-    ref = json.load(open(os.path.join(round_dir, 'solve.json')))
+    ref = json.load(open(solo_ref(round_dir)))
     L = got
     Gs = whole_solve.G
+    LAYN = list(L.get('LAYN') or ('F.Cu', 'B.Cu'))
+    YL = L.get('YL') or {}
 
     def decode(x):
+        x = [int(v) for v in x]
         cross = {f'{a}|{b}': x[_ix(v)] * Gs for (a, b), v in L['t'].items()}
         changes = {n: [x[_ix(cv)] * Gs for cv, av in zip(*L['chg'][n]) if x[_ix(av)]] for n in L['M']}
-        return cross, changes, int(sum(x[_ix(L['over'][n])] for n in L['M']))
+        # (more layers than two: each run's layer between the changes -- whole_solve's YL, read as its plan writes
+        # 'layers'; on two a lane's layer is one bit, flipped by each change)
+        layers = {n: [LAYN[x[_ix(YL[n][k])]] for k in range(len(changes[n]) + 1)] for n in L['M'] if n in YL}
+        return cross, changes, int(sum(x[_ix(L['over'][n])] for n in L['M'])), layers
     out_runs = []
     for i, r in enumerate(runs):
         plans = []
         for p in r['plans']:
-            cross, changes, over = decode(p['x'])
-            plans.append({'t': p['t'], 'obj': p['obj'], 'bound': p['bound'], 'cross': cross, 'changes': changes,
-                          'over': over, 'vias': sum(len(v) for v in changes.values())})
-        out_runs.append({'workers': 'bound-raising' if i == 0 else 'fallback', 'plans': plans, 'secs': r.get('secs', 0.0),
-                         'log': [ln for ln in r['log'] if ln.startswith('#')]})
+            cross, changes, over, layers = decode(p['x'])
+            plans.append(dict({'t': p['t'], 'obj': p['obj'], 'bound': p['bound'], 'cross': cross, 'changes': changes,
+                               'over': over, 'vias': sum(len(v) for v in changes.values())},
+                              **({'layers': layers} if layers else {})))
+        out_runs.append({'workers': 'bound-raising' if i == 0 else 'fallback', 'who': r['who'], 'plans': plans,
+                         'secs': r.get('secs', 0.0), 'log': [ln for ln in r['log'] if ln.startswith('#')]})
     fl = lambda d: {k: float(v) for k, v in d.items()}
     res = {'identical': json.dumps(J, sort_keys=True) == json.dumps(ref, sort_keys=True),
            'final': J, 'runs': out_runs, 'G': Gs, 'W_V': whole_solve.W_V, 'W_OVER': L['W_OVER'],
@@ -262,6 +324,10 @@ def _trace_solve(round_dir, out):
            'vcuts': [{'lane': c['lane'], 'u': float(c['u']), 'w': float(c['w'])} for c in L['VCUTS']],
            'pairs': sorted(n for n in (L['prs'] or {}) if n in L['M']), 'xo': sorted(L['XO']), 'SV': L['SV'],
            'triples': int(L['nt'])}
+    if YL:
+        # (more layers than two: the routing layers, and each lane's first and last run's layer by name)
+        res.update(layn=LAYN, tooth_layer={n: LAYN[int(L['tli'][n])] for n in L['M']},
+                   dest_layer={n: LAYN[int(L['dli'][n])] for n in L['M']})
     json.dump(res, open(out, 'w'))
     print(f'whole_movie: root solve traced -- {sum(len(r["plans"]) for r in out_runs)} plan(s), identical to the '
           f'chain: {res["identical"]}')
@@ -653,18 +719,39 @@ def load_story(a):
         raise SystemExit(f'whole_movie: {rd}/loop.log names no round whose plan passed')
     S.rounds, S.lr = rounds, passed
     R = rounds[passed]
-    # (the film draws TWO layers, the front and the back: a run on more routing layers -- its solve then names each
-    # run's layer -- is not filmed; --check still runs its stages again and says whether they reproduce the chain)
-    lay = sorted({L for v in (json.load(open(R['solve'])).get('layers') or {}).values() for L in v})
-    if lay and not a.check:
-        raise SystemExit(f'whole_movie: the run routes on more than two layers (its plan on {", ".join(lay)}) -- the film '
-                         'draws a two-layer run, the front and the back (--check: its stages run again and compared, no '
-                         'film)')
+    # (the routing layers, F.Cu and B.Cu first: the step's ROUTE_LAYERS -- on more than two the solve names each run's
+    # layer -- else the two)
+    S.layers = [L_.strip() for L_ in (((step or {}).get('settings') or {}).get('ROUTE_LAYERS') or 'F.Cu,B.Cu').split(',')
+                if L_.strip()]
+    for L_ in sorted({L_ for v in (json.load(open(R['solve'])).get('layers') or {}).values() for L_ in v}):
+        if L_ not in S.layers:
+            S.layers.append(L_)
+    # (a NEGOTIATED bus's round, route_bus JOINT_DIR: its first plan is the coupled solve's, written over the one it
+    # solved alone -- the trace re-runs the bus's own solve, and the coupled plan is read from its file)
+    sj_ = json.load(open(os.path.join(rd, 'solve.json')))
+    S.coupled = sj_ if sj_.get('joint') and solo_ref(rd) != os.path.join(rd, 'solve.json') else None
+    S.joint_lines = []
+    if S.coupled:
+        # (...and what the coupled solve said of its round: its couplings, the buses' own plans side by side, its search)
+        jd_ = ((step or {}).get('settings') or {}).get('JOINT_DIR') or ''
+        S.joint_lines = [ln.strip() for ln in _read(os.path.join(jd_, f'r{S.coupled["joint"].get("round", 1)}',
+                                                                  'joint.log')).splitlines()
+                         if re.match(r'\s*(couplings|the buses\' own plans side by side|coupled search):', ln)]
     # ---- the traces (observed re-runs), cached beside the run
     mv = os.path.join(rd, 'movie')
     os.makedirs(mv, exist_ok=True)
     # (the round's first solve on the fanout's own bench; the passing round's geometry on the bench it stood on)
     env, genv = _chain_env(rd, S.dest), _chain_env(rd, S.dest, round_bench(rd, passed))
+    if genv.get('JOINT_FOREIGN'):
+        # (the other buses' lanes are read as they stand NOW: a bus that published after the passing round's geometry
+        # ran gives the re-run other copper than the chain's stage had, and it may not reproduce the chain's file)
+        ld_ = os.path.join(genv['JOINT_DIR'], 'lanes')
+        late = [f[:-len('.json')] for f in sorted(os.listdir(ld_)) if os.path.isdir(ld_) and f.endswith('.json')
+                and not f.startswith('.') and f != f'{genv["JOINT_BUS"]}.json'
+                and os.path.getmtime(os.path.join(ld_, f)) > os.path.getmtime(R['solve'])] if os.path.isdir(ld_) else []
+        if late:
+            print(f'whole_movie: NOTE -- {", ".join(late)} published lanes after round {passed}\'s solve was written: the '
+                  f're-run of its geometry reads them as they stand now')
     ts, tg = os.path.join(mv, 'trace_solve.json'), os.path.join(mv, f'trace_geo{passed}.json')
     te = os.path.join(mv, f'trace_embed{passed}.json')
     if not a.force:
@@ -771,7 +858,8 @@ def load_group(rdir, step, rec):
     the capture, every round of the model's search with the best it found), the model's every solve, state, check and
     field (group_ends' checks.jsonl), its log (group.log), its result (group.json: every array's exits, drops and
     straps) and the boards it measured and laid (prepared.kicad_pcb, shared_field.kicad_pcb). Every point is turned
-    into the bench's frame (ROUND_EDITS_TURN, as whole_route.edit_frame turns a board point) -- the film draws the bench"""
+    into the bench's frame (ROUND_EDITS_TURN, as whole_route.edit_frame turns a board point) -- the film draws the bench;
+    a state's ends, which the model holds in each bus's own frame, by that frame's two source pads (Film._group)"""
     gdir = ((step or {}).get('settings') or {}).get('GROUP_ENDS')
     if not gdir or not os.path.isfile(os.path.join(gdir, 'checks.jsonl')) or not os.path.isfile(os.path.join(gdir, 'group.json')):
         return None
@@ -946,10 +1034,16 @@ import numpy as np            # noqa: E402
 
 class Mapper:
     """the plan's frame to the board's: identity, or (a pair chirality of -1) braid.setup's turn back (ctx.M, the
-    layers swapped)"""
+    layers swapped: F.Cu and B.Cu, an inner layer its own)"""
 
     def __init__(self, Gt):
         self.aff = Gt.get('aff') if Gt.get('chi', 1) < 0 else None
+
+    def layer(self, name):
+        """a layer of the plan's frame by its board name"""
+        if not self.aff:
+            return name
+        return {'F.Cu': 'B.Cu', 'B.Cu': 'F.Cu'}.get(name, name)
 
     def pt(self, x, y):
         if not self.aff:
@@ -1077,12 +1171,14 @@ def mix(c1, c2, t):
 
 
 class Plan:
-    """one CP-SAT plan: crossings (frozenset -> u), changes (lane -> [u]), and its braid"""
+    """one CP-SAT plan: crossings (frozenset -> u), changes (lane -> [u]), and its braid -- on more layers than two each
+    lane's run layers between its changes (lane -> [layer name, in the plan's frame], as the solve writes 'layers')"""
 
-    def __init__(self, cross, changes, S):
+    def __init__(self, cross, changes, S, layers=None):
         # (a solve file's crossing is {'u', 'ring'}, a traced plan's its u alone)
         self.cross = {frozenset(k.split('|')): float(v['u'] if isinstance(v, dict) else v) for k, v in cross.items()}
         self.changes = {n: sorted(map(float, v)) for n, v in changes.items()}
+        self.layers = dict(layers or {})
         self.S = S
 
     def below(self, a, b, u):
@@ -1090,18 +1186,26 @@ class Plan:
         k = frozenset((a, b))
         return (li[a] < li[b]) ^ (k in self.cross and self.cross[k] <= u + 1e-9)
 
+    def run_layers(self, n):
+        """lane n's runs' layers, the film's layer indices in the board's frame (None: a two-layer plan's bit)"""
+        ls = self.layers.get(n)
+        return [self.S.lidx(self.S.mp.layer(L)) for L in ls] if ls else None
+
     def layer(self, n, u):
-        return self.S.tl[n] ^ (sum(1 for c in self.changes.get(n, ()) if c < u) & 1)
+        k = sum(1 for c in self.changes.get(n, ()) if c < u)
+        rl = self.run_layers(n)
+        return rl[min(k, len(rl) - 1)] if rl else self.S.tl[n] ^ (k & 1)
 
 
 def lerp_plan(A, B, t):
     """the braid between two plans: every crossing and change at its interpolated u (a change the other plan has not
-    kept is dropped at the half)"""
+    kept is dropped at the half; a lane's runs' layers are the nearer plan's)"""
     P = Plan({}, {}, A.S)
     P.cross = {k: lerp(A.cross[k], B.cross.get(k, A.cross[k]), t) for k in A.cross}
     for n in set(A.changes) | set(B.changes):
         ca, cb = A.changes.get(n, []), B.changes.get(n, [])
         P.changes[n] = [lerp(x, y, t) for x, y in zip(ca, cb)] if len(ca) == len(cb) else (ca if t < 0.5 else cb)
+    P.layers = dict(A.layers if t < 0.5 else B.layers)
     return P
 
 
@@ -1115,6 +1219,38 @@ ACCENT = (255, 210, 90)
 F_COL = (240, 84, 66)
 B_COL = (70, 156, 250)
 LAYC = (F_COL, B_COL)
+# an INNER layer's colour, In1.Cu on: bright, as the 3-D movie draws inner tracks -- yellow, sky, pink, then orange,
+# green and violet (its white is a via's ring here)
+INNER_COL = ((255, 226, 80), (110, 220, 255), (255, 140, 235), (255, 165, 70), (130, 235, 130), (185, 150, 255))
+
+
+def _inner_k(name):
+    m = re.match(r'In(\d+)\.Cu$', name or '')
+    return int(m.group(1)) if m else 0
+
+
+def layer_col(name):
+    """a copper layer's colour: F.Cu red, B.Cu blue, an inner layer its INNER_COL"""
+    if name == 'F.Cu':
+        return F_COL
+    if name == 'B.Cu':
+        return B_COL
+    k = _inner_k(name)
+    return INNER_COL[(k - 1) % len(INNER_COL)] if k else (170, 170, 178)
+
+
+def draw_order(names):
+    """layers bottom to top, as the film draws them one over another: B.Cu, the inner layers from the deepest up, F.Cu"""
+    inner = sorted((n for n in names if n not in ('F.Cu', 'B.Cu')), key=lambda n: (-_inner_k(n), n))
+    return (['B.Cu'] if 'B.Cu' in names else []) + inner + (['F.Cu'] if 'F.Cu' in names else [])
+
+
+def stack_order(names):
+    """layers top to bottom, as the board stacks them: F.Cu, the inner layers, B.Cu"""
+    return draw_order(names)[::-1]
+
+
+_LAYERS = ['B.Cu', 'F.Cu']      # (the run's layers in draw_order: Film sets it -- the copper of every scene drawn so)
 VIA_COL = (245, 245, 245)
 PAIR_COL = (250, 214, 64)
 FORCE = {'pitch': (255, 90, 210), 'via': (90, 230, 255), 'viavia': (90, 230, 255), 'bound': (255, 160, 40),
@@ -1157,22 +1293,37 @@ class Film:
         Gt, T = S.Gt, S.T
         self.mp = Mapper(Gt)
         mp = self.mp
+        # ---- the routing layers, each a colour: a lane's layer is its index here (on two, F.Cu 0 and B.Cu 1 -- the
+        # solve's own bit), drawn bottom to top in `order`
+        self.LN = list(getattr(S, 'layers', None) or ['F.Cu', 'B.Cu'])
+        self._layers_drawn()
         self.li = {n: i for i, n in enumerate(T['launch'])}
         self.fi = {n: i for i, n in enumerate(T['final_order'])}
-        self.tl = {n: mp.bit(int(v)) for n, v in T['tl'].items()}     # (the layer bits of the board's own frame)
-        self.dl = {n: mp.bit(int(v)) for n, v in T['dl'].items()}
+        if T.get('layn'):
+            # (more layers than two: each lane's tooth's and berth's layer by name)
+            self.tl = {n: self.lidx(mp.layer(L)) for n, L in T['tooth_layer'].items()}
+            self.dl = {n: self.lidx(mp.layer(L)) for n, L in T['dest_layer'].items()}
+        else:
+            self.tl = {n: mp.bit(int(v)) for n, v in T['tl'].items()}     # (the layer bits of the board's own frame)
+            self.dl = {n: mp.bit(int(v)) for n, v in T['dl'].items()}
         self.M = S.M
         self.N = len(self.M)
         self.rules = Gt['rules']
-        # ---- plans: CP-SAT's, in the order it found them; the one the passing round was laid on
-        self.plans = [Plan(p['cross'], p['changes'], self) for r in T['runs'] for p in r['plans']]
-        self.plan_meta = [dict(p, workers=r['workers']) for r in T['runs'] for p in r['plans']]
+        # ---- plans: CP-SAT's, in the order it found them; the one the passing round was laid on. (Not the plane
+        # tie's, on more layers than two: it chooses the found plan's layers again by the planes they split -- its
+        # crossings and changes held -- and its plan is the solve's, its final)
+        runs_ = [r for r in T['runs'] if r.get('who') != '_plane_tie']
+        self.plans = [Plan(p['cross'], p['changes'], self, p.get('layers')) for r in runs_ for p in r['plans']]
+        self.plan_meta = [dict(p, workers=r['workers']) for r in runs_ for p in r['plans']]
         # (a long search finds plans by the hundred: the braid and the board draw a dozen, the first and the last
         # among them; the search's chart has every one)
         n_ = len(self.plans)
         self.pshow = sorted({int(round(j * (n_ - 1) / 11)) for j in range(12)}) if n_ > 12 else list(range(n_))
-        self.root = Plan(T['final']['cross'], T['final']['changes'], self)
-        self.final = Plan(S.solve_round['cross'], S.solve_round['changes'], self)
+        self.root = Plan(T['final']['cross'], T['final']['changes'], self, T['final'].get('layers'))
+        self.final = Plan(S.solve_round['cross'], S.solve_round['changes'], self, S.solve_round.get('layers'))
+        # (a negotiated bus: the coupled solve's plan for it, the one its loop starts from)
+        cp_ = getattr(S, 'coupled', None)
+        self.coupled = Plan(cp_['cross'], cp_['changes'], self, cp_.get('layers')) if cp_ else None
         # ---- columns (the LP's own), their route coordinate and board point / normal
         self.cols = {}
         for c in Gt['cols']:
@@ -1185,6 +1336,23 @@ class Film:
         self._states()
         self._copper()
         self.g = self._group() if S.G else None
+        # the layers the run's lanes stand on (the legend's, on more than two): their plans' and their copper's
+        used = {self.LN[b] for st in self.st.values() for _P, bits in st.values() for b in set(bits.tolist())}
+        used |= {s[5] for s in self.seq_c[0]} & set(self.LN)
+        self.used = stack_order(used)
+
+    def _layers_drawn(self):
+        global _LAYERS
+        self.col = [layer_col(L) for L in self.LN]
+        self.order = [self.LN.index(L) for L in draw_order(self.LN)]
+        _LAYERS = draw_order(self.LN)
+
+    def lidx(self, name):
+        """a layer's index among the film's (one the run did not name is added, its colour its own)"""
+        if name not in self.LN:
+            self.LN.append(name)
+            self._layers_drawn()
+        return self.LN.index(name)
 
     # -------------------------------------------------------------- camera
     def _camera(self):
@@ -1303,9 +1471,9 @@ class Film:
             for x0, y0, x1, y1, L in v['pieces']:
                 if math.hypot(x0 - pts[-1][0], y0 - pts[-1][1]) > 1e-6:
                     pts.append(mp.pt(x0, y0))
-                    bits.append(mp.bit(0 if L == 'F.Cu' else 1))
+                    bits.append(self.lidx(mp.layer(L)))
                 pts.append(mp.pt(x1, y1))
-                bits.append(mp.bit(0 if L == 'F.Cu' else 1))
+                bits.append(self.lidx(mp.layer(L)))
             out[n] = (pts, bits, None)
         return out
 
@@ -1325,11 +1493,13 @@ class Film:
         for i in self.pshow:
             raw[f'plan{i}'] = self.slots(self.plans[i])
         raw['root'] = self.slots(self.root)
+        if self.coupled:
+            raw['coupled'] = self.slots(self.coupled)
         raw['slots'] = self.slots(self.final)
         raw['p1'] = self.pass_lanes(0, self.final)
         raw['p2'] = self.pass_lanes(len(S.Gt['passes']) - 1, self.final)
         vias = {k: self.col_vias(v, self.plans[int(k[4:])] if k.startswith('plan') else
-                                 (self.root if k == 'root' else self.final)) for k, v in raw.items()}
+                                 {'root': self.root, 'coupled': self.coupled}.get(k, self.final)) for k, v in raw.items()}
         for key, J in (('geo', S.geo), ('emb', S.emb), ('pol', S.pol), ('pairs', S.pairsd), ('held', S.held),
                        ('snap', S.snapd)):
             if J:
@@ -1378,7 +1548,7 @@ class Film:
         also as lanes (a lane's runs joined from tooth to berth) for the board's view"""
         E, mp = self.S.Et, self.mp
         P = lambda p: mp.pt(p[0], p[1])
-        self.ebit = [mp.bit(0 if name == 'F.Cu' else 1) for name in E['layers']]
+        self.ebit = [self.lidx(mp.layer(name)) for name in E['layers']]     # (each of its layers, the film's index)
         self.erun = {k: (v['L'], P(v['lead']) if v['lead'] else None, P(v['tail']) if v['tail'] else None)
                      for k, v in E['runs'].items()}
         self.emesh = [(np.array([P(p) for p in m['V']], float).reshape(-1, 2), np.array(m['T'], int).reshape(-1, 3))
@@ -1450,7 +1620,13 @@ class Film:
         self.routed = {n: ([s for s in rs if S.lane_of.get(s[6]) == n], [v for v in rv if S.lane_of.get(v[3]) == n])
                        for n in self.M}
         others = set(n.name.split('/')[-1] for n in S.fo.nets.values()) - run
-        self.other_c = copper(S.fo, others)
+        # (every other net's copper -- less what lies wholly off the canvas, which no frame draws)
+        x0_, y0_ = -self.ox / self.sc - 1, -self.oy / self.sc - 1
+        x1_, y1_ = (W - self.ox) / self.sc + 1, (H - self.oy) / self.sc + 1
+        os_, ov_ = copper(S.fo, others)
+        self.other_c = ([s for s in os_ if not (max(s[0], s[2]) < x0_ or min(s[0], s[2]) > x1_ or max(s[1], s[3]) < y0_
+                                                or min(s[1], s[3]) > y1_)],
+                        [v for v in ov_ if x0_ <= v[0] <= x1_ and y0_ <= v[1] <= y1_])
         # the source-side and destination-side halves of the new stubs
         DB = S.Gt['DB']
         near_dst = lambda x, y: DB[0] - 1.5 <= x <= DB[2] + 1.5 and DB[1] - 1.5 <= y <= DB[3] + 1.5
@@ -1494,8 +1670,30 @@ class Film:
             for d in (A.get('drops') or []) + (A.get('straps') or []):
                 g.balls['plane'].append(tb(d['at']))
 
-        def end_geo(e):
-            """an end as the state holds it (its signature: each leg's kind, its via's site, its pieces)"""
+        import flow_frame as ff
+
+        def bus_frame(bn):
+            """a bus's ends model's frame onto this bench's: its states hold each bus's ends in that bus's own frame
+            (its whole route's flow frame), which group.json gives by two of the source's pads placed in it -- the
+            quarter turn and the shift that put them where this bench has them; where they do not fit, the board's
+            point turned as the bench is (tb)"""
+            B_ = (G.json.get('buses') or {}).get(bn) or {}
+            fr, fp_ = B_.get('frame') or {}, S.fo.footprints.get(B_.get('src') or S.src)
+            here = {p.pad_number: (p.global_x, p.global_y) for p in fp_.pads} if fp_ is not None else {}
+            two = [n_ for n_ in sorted(fr) if n_ in here]
+            if len(two) == 2:
+                (a0, a1), (b0, b1) = fr[two[0]], fr[two[1]]
+                (A0, A1), (B0, B1) = here[two[0]], here[two[1]]
+                for q in range(4):
+                    d_ = ff._q(b0 - a0, b1 - a1, q)
+                    if abs(d_[0] - (B0 - A0)) < 1e-3 and abs(d_[1] - (B1 - A1)) < 1e-3:
+                        return lambda p, q=q, a=(a0, a1), A=(A0, A1): tuple(
+                            v_ + w_ for v_, w_ in zip(A, ff._q(float(p[0]) - a[0], float(p[1]) - a[1], q)))
+            return tb
+
+        def end_geo(e, to):
+            """an end as the state holds it (its signature: each leg's kind, its via's site, its pieces), its points
+            put in the bench's frame by `to`"""
             segs, vias = [], []
             try:
                 legs = ast.literal_eval(e.get('sig') or '()')
@@ -1504,19 +1702,21 @@ class Film:
             for leg in legs:
                 site, pieces = leg[5], leg[6]
                 for x0, y0, x1, y1, L in pieces:
-                    a, b = tb((x0, y0)), tb((x1, y1))
+                    a, b = to((x0, y0)), to((x1, y1))
                     segs.append((a[0], a[1], b[0], b[1], L))
                 if site is not None:
-                    vias.append(tb(site))
+                    vias.append(to(site))
             return segs, vias
         g.states = []
+        maps = {}
         for M_ in G.models:
             st, moved = {}, set()
             for bn, rec in M_['states'].items():
+                to = maps[bn] = maps.get(bn) or bus_frame(bn)
                 for ln, v in (rec.get('lanes') or {}).items():
                     for end in ('tooth', 'berth'):
                         if v.get(end):
-                            st[(bn, ln, end)] = end_geo(v[end])
+                            st[(bn, ln, end)] = end_geo(v[end], to)
                 for ln, ends_ in (rec.get('moved') or {}).items():
                     for end in ends_:
                         moved.add((bn, ln, end))
@@ -1555,6 +1755,7 @@ class Canvas:
         self.img = base.copy()
         self.d = ImageDraw.Draw(self.img)
         self.clipped = False
+        self.glow_base = None       # (the short: what of the frame does not glow -- the board's base, unless a clip says)
 
     def clip(self):
         """the board's overlays end at its panel: everything outside it painted over, once a frame, before the
@@ -1636,13 +1837,13 @@ class Canvas:
                     wr = (f.rules['PP'] + f.rules['TW']) * f.sc
                     self.d.line([f.X(x, y) for x, y in P], fill=mix(BODY, (110, 92, 26), a_of(n)),
                                 width=max(1, int(wr * SS)), joint='curve')
-        for layer in (1, 0):
+        for layer in f.order:
             for n in order:
                 a = a_of(n)
                 if a <= 0.02:
                     continue
                 P, bits = st[n]
-                col = mix(BODY, LAYC[layer], a)
+                col = mix(BODY, f.col[layer], a)
                 ww = w * (1.6 if hl and n in hl else 1.0)
                 j0 = None
                 for j in range(len(bits) + 1):
@@ -1663,8 +1864,8 @@ class Canvas:
 
     def segs(self, segs, alpha=1.0, true_width=True, w_px=2.0, col=None):
         f = self.f
-        for layer in ('B.Cu', 'F.Cu'):
-            c = col or LAYC[0 if layer == 'F.Cu' else 1]
+        for layer in _LAYERS:
+            c = col or layer_col(layer)
             c = mix(BODY, c, alpha)
             for s in segs:
                 if s[5] != layer:
@@ -1752,7 +1953,12 @@ def _braid_strands(film, plan, w=0.11):
         for (ux, sg) in per[n]:
             y += sg * np.clip((us - ux) / (2 * w) + 0.5, 0.0, 1.0)
         ch = np.array(plan.changes.get(n, []), float)
-        bits = film.tl[n] ^ (np.searchsorted(ch, us, side='left') & 1) if len(ch) else np.full(len(us), film.tl[n])
+        rl = plan.run_layers(n)
+        if rl:
+            # (more layers than two: the run's own layer, between the changes)
+            bits = np.asarray(rl, int)[np.minimum(np.searchsorted(ch, us, side='left'), len(rl) - 1)]
+        else:
+            bits = film.tl[n] ^ (np.searchsorted(ch, us, side='left') & 1) if len(ch) else np.full(len(us), film.tl[n])
         out[n] = (us, y, bits)
     return out
 
@@ -1837,11 +2043,11 @@ def draw_braid(C, film, plan, alpha=1.0, cursor=None, cuts=None, labels=True, hl
             y = f.rank_y(float(np.interp((ulo + uhi) / 2, st[n][0], st[n][1])))
             col = (255, 110, 60) if kind == 'island' else (255, 60, 200)
             C.rect((X(ulo), y - 4, X(uhi), y + 4), outline=col, width=1.5)
-    for layer in (1, 0):
+    for layer in f.order:
         for n in f.M:
             us, y, bits = st[n]
             a = alpha * (1.0 if not hl or n in hl else 0.25)
-            col = mix(PANEL, LAYC[layer], a)
+            col = mix(PANEL, f.col[layer], a)
             pts = [(X(u), f.rank_y(r)) for u, r in zip(us, y)]
             j0 = None
             for j in range(len(bits) + 1):
@@ -1918,9 +2124,9 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
     sidx = {s[0]: i for i, s in enumerate(seq)}
     nlay = len(E['layers'])
     BP = lambda p: film.mp.pt(p[0], p[1])                  # a recorded point in the board's frame
-    bname = lambda L: ('F.Cu', 'B.Cu')[film.ebit[L]]       # a layer of the record as the board names it
+    bname = lambda L: film.LN[film.ebit[L]]                # a layer of the record as the board names it
     lane_of = lambda key: key.split('|')[0]
-    CELLC = [mix(BODY, LAYC[b], 0.6) for b in film.ebit] + [(170, 170, 178)]
+    CELLC = [mix(BODY, film.col[b], 0.6) for b in film.ebit] + [(170, 170, 178)]
     VL = len(film.emesh) - 1                               # (the vias' own cells: the last mesh)
     prs = set(S.pairs)
     boxA = (BRAID[0], BRAID[1], BRAID[0] + 620, BRAID[3])
@@ -1947,6 +2153,8 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
         y = box[1] + 40
         for ln, col in lines:
             for w_ in C.wrap(ln, 14, box[2] - box[0] - 28):
+                if nlay > 2 and y > box[3] - 20:
+                    return                  # (more layers than two, more lines: the card holds what fits)
                 C.text(box[0] + 14, y, w_, 14, mix(PANEL, col, a))
                 y += 19
             y += 4
@@ -1980,7 +2188,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                 for t3 in tri[keep]:
                     q = [Z(*p) for p in t3]
                     d.line(q + [q[0]], fill=col, width=int(1.5 * SS))
-            for bit in (1, 0):
+            for bit in film.order:
                 for key, xy in st['xy'].items():
                     Lr, lead, tail = film.erun[key]
                     if film.ebit[Lr] != bit:
@@ -1993,7 +2201,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                     line = ([lead] if lead and key.endswith('|0') else []) + list(xy) \
                         + ([tail] if tail and f'{n}|{int(key.split("|")[1]) + 1}' not in st['xy'] else [])
                     a_ = (1.0 if (hl is None or key in hl) else dim) * (0.62 if n in prs else 1.0)
-                    d.line([Z(*p) for p in line], fill=mix(BODY, LAYC[bit], a_),
+                    d.line([Z(*p) for p in line], fill=mix(BODY, film.col[bit], a_),
                            width=max(1, int((PP_ + TW_ if n in prs else TW_) * s)), joint='curve')
             if pts:
                 r = max(3.0 * SS, 0.022 * s)
@@ -2109,7 +2317,9 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
             t0 = 0.06 + L * slot
             later = ease(span(t, t0 + slot, t0 + slot + 0.05)) if L < nmesh - 1 else 0.0
             draw_cells(C, L, 0.95 - 0.55 * later, upto=span(t, t0, t0 + 0.6 * slot))
-        for box, L in ((boxA, 0), (boxB, min(1, nlay - 1))):
+        # (the layers up close two at a time, as the sweep reaches them: the pair of the last layer it has begun)
+        p_ = max([L for L in range(nlay) if t >= 0.06 + L * slot] or [0]) // 2
+        for box, L in ((boxA, 2 * p_), (boxB, min(2 * p_ + 1, nlay - 1))):
             if t >= 0.06 + L * slot:
                 close(C, box, cwide, e0, f'{bname(L)} up close: its free space, cut into cells', L=L, dim=0.3, pts=False,
                       hl=set())
@@ -2119,10 +2329,12 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
             close(C, boxT, cwide, e0, 'the vias\' own free space, up close', vcells=True, dim=0.3, pts=False, hl=set())
         else:
             facts(C, boxT, 'cells', [(f'{nfix} pieces of fixed copper: pads, vias, tracks, the end of every stub', TEXT)]
-                  + [(f'{bname(L)}: {ncell[L]} cells', LAYC[film.ebit[L]]) for L in range(nlay)
+                  + [(f'{bname(L)}: {ncell[L]} cells', film.col[film.ebit[L]]) for L in range(nlay)
                      if t >= 0.06 + L * slot + 0.6 * slot]
-                  + [('every corner of a cell is a corner of the copper\'s margin: no point stands where nothing is', DIM)])
-    sc.append(Scene('cells', 'geometry', 12, cells, [
+                  + ([('every corner of a cell is a corner of the copper\'s margin: no point stands where nothing is',
+                       DIM)] if nlay <= 2 else []))
+    # (each layer its share of the sweep: on more layers than two the scene is longer)
+    sc.append(Scene('cells', 'geometry', 12 if nmesh <= 3 else 12 + 1.5 * (nmesh - 3), cells, [
         (0, 'The 2-D geometry works in board xy, not in the frame. A lane\'s centre keeps a margin off every piece '
             'of fixed copper: half a track, the clearance, half a grid step. What is left of a layer inside the board '
             'is its FREE SPACE.'),
@@ -2141,6 +2353,8 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
     KINDC = {'P': (250, 250, 250), 'F': (255, 226, 110), 'D': PAIR_COL}
     dots0 = [(k, x, y) for key, xy in e0['xy'].items() for (x, y), k in zip(xy[1:-1], e0['kind'][key])]
     on_layer = [{key for key in e0['xy'] if film.erun[key][0] == L} for L in range(nlay)]
+    # (up close, the two layers that carry the most runs -- on two layers, the two)
+    two_ = sorted(sorted(range(nlay), key=lambda L: (-len(on_layer[L]), L))[:2]) if nlay > 2 else [0, min(1, nlay - 1)]
 
     def points(C, t, T_):
         draw_fanout(C, 0.5)
@@ -2153,7 +2367,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
         if a_p > 0:
             for k, x, y in dots0:
                 C.wdot(x, y, 1.3, mix(BODY, KINDC.get(k, SHORT_C), a_p))
-        for box, L in ((boxA, 0), (boxB, min(1, nlay - 1))):
+        for box, L in ((boxA, two_[0]), (boxB, two_[-1])):
             close(C, box, cwin, e0, f'{bname(L)} up close: each run\'s own points', L=L, hl=on_layer[L], pts=a_p > 0.5)
         facts(C, boxT, 'the lanes\' own points', [
             (f'{len(e0["xy"])} runs of {len(film.M)} lanes, {len(e0["via"])} vias', TEXT),
@@ -2625,8 +2839,8 @@ def fit_view(box, view, title=True):
 
 def _mdraw(d, Z, s, segs=(), vias=(), alpha=1.0, col=None, w_px=None, via_d=0.25, via_col=None):
     """pieces of copper in a magnifier: segments (x0, y0, x1, y1, width, layer, ..) B under F, vias as rings"""
-    for layer in ('B.Cu', 'F.Cu'):
-        c = mix(BODY, col or LAYC[0 if layer == 'F.Cu' else 1], alpha)
+    for layer in _LAYERS:
+        c = mix(BODY, col or layer_col(layer), alpha)
         for q in segs:
             if q[5] != layer:
                 continue
@@ -2802,6 +3016,8 @@ def group_scenes(film, sc):
                 C.line([(gx0 - 4, Y(v)), (gx1, Y(v))], mix(PANEL, (44, 48, 58), a), 1)
                 C.text(gx0 - 8, Y(v), str(v), 11, mix(PANEL, DIM, a), anchor='rm')
         step_ = 60 if t_all > 300 else 30
+        # (a long search: a label every few minutes, not a crowd of them)
+        step_ = next((c_ for c_ in (30, 60, 120, 300, 600, 1200, 3000) if c_ >= step_ and t_all / c_ <= 16), 6000)
         for ts in range(0, int(t_all) + 1, step_):
             C.text(X(ts), gy1 + 6, f'{ts} s', 11, mix(PANEL, DIM, a), anchor='ma')
         if marks:
@@ -3618,7 +3834,7 @@ def build_scenes(film, speed=1.0):
                 x, y = film.bx(ux), film.rank_y(sum(ys) / 2)
                 R = 11
                 C.d.ellipse([(x - R) * SS, (y - R) * SS, (x + R) * SS, (y + R) * SS], outline=mix(PANEL, ACCENT, a_r), width=2 * SS)
-                la, lb = ('F' if fin.layer(a_, ux) == 0 else 'B'), ('F' if fin.layer(b_, ux) == 0 else 'B')
+                la, lb = (film.LN[fin.layer(n_, ux)].split('.')[0] for n_ in (a_, b_))
                 C.text(x + 14, y - 14, f'{a_} on {la} crosses {b_} on {lb}', 13, mix(PANEL, ACCENT, a_r), anchor='lb')
                 # ...and on the board: where the slots swap
                 Pa, _ba, Ua = film.raw[f'plan{np_ - 1}'][a_]
@@ -3639,9 +3855,11 @@ def build_scenes(film, speed=1.0):
     cap_s = [(0, f'The solve (CP-SAT) decides every crossing and every layer change, all lanes at once. Its variables '
                  f'are positions along u: where each of the {n_cross} crossings happens, and where each lane changes '
                  f'layer.'),
-             (0.14, 'Below, each plan it finds as a braid: red F, blue B, a white ring is a via. Above, the same plan '
-                    'on the board, each lane in its references\' slot in that order -- the solve knows ORDER and '
-                    'LAYERS, not millimetres.'),
+             (0.14, ('Below, each plan it finds as a braid: red F, blue B, a white ring is a via.' if len(film.LN) <= 2
+                     else f'Below, each plan it finds as a braid: its colour the layer ({len(film.used)} of the '
+                          f'{len(film.LN)} routing layers carry lanes), a white ring a via.')
+                    + ' Above, the same plan on the board, each lane in its references\' slot in that order -- the solve '
+                      'knows ORDER and LAYERS, not millimetres.'),
              (0.3, 'The search: ' + (' -> '.join(rdr(p) for p in plans) if np_ <= 4 else
                                       f'{np_} plans, from {rdr(plans[0])} to {rdr(last)}')
                    + '. The lower bound rises as it goes.'),
@@ -3653,7 +3871,9 @@ def build_scenes(film, speed=1.0):
              (0.72, 'The rules can be seen: two strands that cross are on different layers (a via lets a lane cross '
                     'lanes on its own layer), and each lane ends on its berth\'s layer.')]
     say_s = [(0, 'The solve places every crossing and every layer change, all lanes at once.'),
-             (0.14, 'Below, each plan as a braid: red front, blue back, white rings for vias.'),
+             (0.14, 'Below, each plan as a braid: red front, blue back, white rings for vias.' if len(film.LN) <= 2 else
+                    f'Below, each plan as a braid: each colour one of its {len(film.used):,} layers, white rings for '
+                    f'vias.'),
              (0.3, (f'It finds {np_:,} plans, from {plans[0]["vias"]:,} layer changes down to {last["vias"]:,}, while its '
                     f'lower bound rises.' if np_ > 1 and plans[0]['vias'] != last['vias'] else
                     f'It finds {pl(np_, "plan")}, with {last["vias"]:,} layer changes, while its lower bound rises.')),
@@ -3670,6 +3890,50 @@ def build_scenes(film, speed=1.0):
         + [(k_in + q * seg_, 'bell', better(plans[q]['obj'])) for q in film.pshow[1:]] \
         + [(0.62, 'chord', 1.0 if proved else 0.0), (0.7, 'mark', 0.5)]
     sc.append(Scene('solve', 'solve', 26, solve, cap_s, says=say_s, cues=cue_s))
+
+    # ------------------------------------------------------------------ the coupled solve (a negotiated bus's round)
+    if film.coupled:
+        jn = S.coupled['joint']
+        v_own, v_cp = (sum(len(v) for v in P_.changes.values()) for P_ in (film.root, film.coupled))
+        moved_ = sum(1 for k in film.root.cross if abs(film.root.cross[k] - film.coupled.cross.get(k, film.root.cross[k]))
+                     > 1e-6)
+        chm_ = sum(1 for n in film.M if film.root.changes.get(n, []) != film.coupled.changes.get(n, [])
+                   or film.root.layers.get(n) != film.coupled.layers.get(n))
+        nbr = len(jn.get('broken') or [])
+
+        def coupled(C, t, T_):
+            draw_fanout(C, 0.55)
+            m = ease(span(t, 0.3, 0.7))
+            C.lanes(morph(film.st['root'], film.st['coupled'], m), w=2.2)
+            C.vias([(n, x, y) for n, x, y, al in morph_vias(film.vias['root'], film.vias['coupled'], m) if al > 0.5])
+            draw_braid(C, film, lerp_plan(film.root, film.coupled, m))
+            box = (BOARD[0] + 6, BOARD[1] + 6, BOARD[0] + 600, BOARD[1] + 300)
+            a = ease(span(t, 0.0, 0.08))
+            C.card(box)
+            C.text(box[0] + 16, box[1] + 14, 'the coupled solve', 20, mix(PANEL, ACCENT, a), bold=True)
+            rows = [(f'every bus off this array, solved again in ONE model: {S.dst} with {", ".join(jn.get("with") or [])}',
+                     TEXT)] + [(ln, DIM) for ln in S.joint_lines] + [
+                (f'this bus: {v_own} layer changes alone, {v_cp} coupled; {moved_} crossings and {chm_} lanes\' changes '
+                 f'moved', ACCENT if t >= 0.3 else TEXT),
+                (f'{pl(nbr, "coupling")} of this bus\'s broken, each at its price', DIM)]
+            y = box[1] + 46
+            for ln, col in rows:
+                for w_ in C.wrap(ln, 14, box[2] - box[0] - 32):
+                    if y < box[3] - 18:
+                        C.text(box[0] + 16, y, w_, 14, mix(PANEL, col, a))
+                    y += 19
+                y += 4
+        sc.append(Scene('coupled', 'solve', 10, coupled, [
+            (0, f'THE COUPLED SOLVE. The buses off one array each solved their first plan alone; then every bus\'s model '
+                f'is built again into ONE, coupled wherever two buses\' lanes cross or pass near: on different layers '
+                f'there, or the coupling broken at a price.'),
+            (0.3, f'Its plan for {S.dst}: {v_cp} layer changes, where alone it had {v_own}, {moved_} crossings moved. This '
+                  f'plan, not its own, is the one its loop lays out.')],
+            says=[(0, 'Then the coupled solve: every bus off this array is solved again together, so that where their lanes '
+                      'cross, they stand on different layers.'),
+                  (0.3, f'For this bus, {v_cp:,} layer changes, where alone it had {v_own:,}. Its loop starts from this '
+                        f'plan.')],
+            cues=[(0.02, 'swell', 0.4), (0.3, 'glide', 0.5, 0.7), (0.72, 'chord', 1.0)]))
 
     # ------------------------------------------------------------------ the loop's failed rounds (when any)
     if S.failed:
@@ -3699,7 +3963,7 @@ def build_scenes(film, speed=1.0):
                     finds.append(film.mp.pt(float(m.group(1)), float(m.group(2))))
             A_ = json.load(open(r['solve']))
             B_ = json.load(open(nxt['solve'])) if nxt else A_
-            pa, pb = Plan(A_['cross'], A_['changes'], film), Plan(B_['cross'], B_['changes'], film)
+            pa, pb = (Plan(J_['cross'], J_['changes'], film, J_.get('layers')) for J_ in (A_, B_))
             moved = sum(1 for k in pa.cross if abs(pa.cross[k] - pb.cross.get(k, pa.cross[k])) > 1e-6)
             chm = sum(1 for n in film.M if pa.changes.get(n, []) != pb.changes.get(n, []))
             st_ = re.search(r'\[(OPTIMAL|FEASIBLE)\] (\d+)s(?: \([^)]*\))? vias (\d+)', slog)
@@ -3811,12 +4075,19 @@ def build_scenes(film, speed=1.0):
         oy = lambda v: y0 + (hi - v) / (hi - lo) * (y1 - y0) if sgn > 0 else y0 + (v - lo) / (hi - lo) * (y1 - y0)
         # the two layers side by side: the order binds a layer's OWN lanes only, so an F lane and a B lane may stand
         # at one offset (F over B, as a human stacks them); same-layer neighbours stand a bar apart
-        xL = {0: box[0] + 130, 1: box[0] + 196}
-        C.text(xL[0], box[1] + 58, 'F.Cu', 13, mix(PANEL, F_COL, a), bold=True, anchor='mm')
-        C.text(xL[1], box[1] + 58, 'B.Cu', 13, mix(PANEL, B_COL, a), bold=True, anchor='mm')
+        lay = {n: film.final.layer(n, u_) for n, _v in pres}
+        if len(film.LN) <= 2:
+            xL = {0: box[0] + 130, 1: box[0] + 196}
+        else:
+            # (more layers than two: a column for each layer a lane stands on here, in the board's stack order)
+            ks_ = [film.LN.index(L_) for L_ in stack_order([film.LN[v_] for v_ in set(lay.values())])]
+            xL = {L_: box[0] + (165 if len(ks_) == 1 else 110 + j_ * 110 / (len(ks_) - 1)) for j_, L_ in enumerate(ks_)}
+        first, last = min(xL, key=xL.get), max(xL, key=xL.get)
+        for L_, x_ in xL.items():
+            C.text(x_, box[1] + 58, film.LN[L_] if len(xL) <= 2 else film.LN[L_].split('.')[0], 13,
+                   mix(PANEL, film.col[L_], a), bold=True, anchor='mm')
         for x_ in xL.values():
             C.line([(x_, y0 - 6), (x_, y1 + 6)], mix(PANEL, (70, 76, 88), a), 1)
-        lay = {n: film.final.layer(n, u_) for n, _v in pres}
         at = {n: v for n, v in pres}
         rows = [r for r in Gt['passes'][pass_i]['rows'] if r['f'] == 'T' and r['k'] == k]
         for r in rows:
@@ -3825,12 +4096,12 @@ def build_scenes(film, speed=1.0):
                 na, nb = r['lanes']
                 w = min(5, 1.2 + 1.3 * math.log10(1 + r['price']))
                 if r['kind'] == 'pitch':
-                    xx = xL[lay[na]] + (8 if lay[na] == 0 else -8)
+                    xx = xL[lay[na]] + (8 if lay[na] == first else -8)
                     C.line([(xx, oy(at[na])), (xx, oy(at[nb]))], col, w)
                 else:
                     C.line([(xL[lay[na]], oy(at[na])), (xL[lay[nb]], oy(at[nb]))], col, w)
         prs_ = set(S.pairs)
-        for L_ in (0, 1):
+        for L_ in xL:
             ls = sorted([(oy(v), n) for n, v in pres if lay[n] == L_])
             # the labels a line apart at least, each led to its dot
             ys = [y for y, _n in ls]
@@ -3843,11 +4114,13 @@ def build_scenes(film, speed=1.0):
                     ys[j] = min(ys[j], ys[j + 1] - 13)
             for (y, n), yl in zip(ls, ys):
                 x_ = xL[L_]
-                C.d.ellipse([(x_ - 5) * SS, (y - 5) * SS, (x_ + 5) * SS, (y + 5) * SS], fill=mix(PANEL, LAYC[L_], a))
-                xt = x_ - 14 if L_ == 0 else x_ + 14
-                C.line([(x_ + (-6 if L_ == 0 else 6), y), (xt, yl)], mix(PANEL, (90, 96, 108), a), 1)
-                C.text(xt - (2 if L_ == 0 else -2), yl, n, 12, mix(PANEL, PAIR_COL if n in prs_ else TEXT, a),
-                       anchor='rm' if L_ == 0 else 'lm')
+                C.d.ellipse([(x_ - 5) * SS, (y - 5) * SS, (x_ + 5) * SS, (y + 5) * SS], fill=mix(PANEL, film.col[L_], a))
+                if L_ not in (first, last):
+                    continue                # (a middle column's lanes: their dots, the names beside the outer two)
+                xt = x_ - 14 if L_ == first else x_ + 14
+                C.line([(x_ + (-6 if L_ == first else 6), y), (xt, yl)], mix(PANEL, (90, 96, 108), a), 1)
+                C.text(xt - (2 if L_ == first else -2), yl, n, 12, mix(PANEL, PAIR_COL if n in prs_ else TEXT, a),
+                       anchor='rm' if L_ == first else 'lm')
         C.text(box[0] + 14, box[3] - 30, 'magenta: at the bar   cyan: a via\'s room', 11, mix(PANEL, DIM, a))
         # the column on the board
         ends_ = [(b[0] + (lo - 0.2) * nv[0], b[1] + (lo - 0.2) * nv[1]), (b[0] + (hi + 0.2) * nv[0], b[1] + (hi + 0.2) * nv[1])]
@@ -3874,12 +4147,12 @@ def build_scenes(film, speed=1.0):
 
         def draw(d, Z, s):
             v0, v1 = (fwin[0] - 1, fwin[1] - 1), (fwin[2] + 1, fwin[3] + 1)
-            for layer in (1, 0):
+            for layer in film.order:
                 for n, (P, bits) in st.items():
                     if not ((P[:, 0] > v0[0]) & (P[:, 0] < v1[0]) & (P[:, 1] > v0[1]) & (P[:, 1] < v1[1])).any():
                         continue
                     wd = (PP_ + TW_ if n in prs else TW_) * s
-                    col = mix(BODY, LAYC[layer], 0.55 if n in prs else 0.8)
+                    col = mix(BODY, film.col[layer], 0.55 if n in prs else 0.8)
                     j0 = None
                     for j in range(len(bits) + 1):
                         on = j < len(bits) and bits[j] == layer
@@ -4086,7 +4359,7 @@ def build_scenes(film, speed=1.0):
                             for side in ('P', 'N'):
                                 legs += [(pts_, L_) for pts_, L_ in c_['legs'][side]]
                         for pts_, L_ in legs:
-                            col = LAYC[film.mp.bit(0 if L_ == 'F.Cu' else 1)]
+                            col = film.col[film.lidx(film.mp.layer(L_))]
                             d.line([Z(*film.mp.pt(*q)) for q in pts_], fill=mix(PANEL, col, al), width=max(1, int(TW_ * s)),
                                    joint='curve')
                         if c_:
@@ -4094,13 +4367,14 @@ def build_scenes(film, speed=1.0):
                                 cx, cy = Z(*film.mp.pt(x_, y_))
                                 r = film.rules['via'] / 2 * s
                                 d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(185, 185, 185), outline=(240, 240, 240), width=SS)
-                for layer in (1, 0):
+                for layer in film.order:
                     for n, (P, bits, _U) in st.items():
                         if n not in t_state:
                             continue
                         for j, bt in enumerate(bits):
                             if bt == layer:
-                                d.line([Z(*P[j]), Z(*P[j + 1])], fill=mix(PANEL, LAYC[layer], al), width=max(1, int(wid * SS)))
+                                d.line([Z(*P[j]), Z(*P[j + 1])], fill=mix(PANEL, film.col[layer], al),
+                                       width=max(1, int(wid * SS)))
                 for n, x, y in film.vias[key]:
                     if n in t_state:
                         cx, cy = Z(x, y)
@@ -4394,6 +4668,432 @@ def build_scenes(film, speed=1.0):
     return sc
 
 
+# =============================================================================== the short (--short)
+SHORT_BPM = 128            # the short's tempo: every cut on a beat, a clip's steps on its half beats
+SHORT_LAY = 0.22           # the lay's share of the short's beats (6 at least): the finale
+
+
+class Clip(Scene):
+    """a clip of the short: a scene with no words and no stage -- `beats` of the music long, its camera cam(t) -> (x,
+    y, push): the frame's point (1x pixels) the camera is on and how far it is pushed in (1: the whole frame)"""
+
+    def __init__(self, key, beats, fn, cam=None, cues=()):
+        super().__init__(key, None, beats * 60.0 / SHORT_BPM, fn, [], cues=cues)
+        self.beats, self.cam = beats, cam
+
+
+def _full_view(C, film, view, draw_fn):
+    """a region of the board over the whole frame, drawn at its own scale (the magnifier's way: its pads, then
+    draw_fn(d, Z, s)); the pads alone kept as the frame's glow base (only what is drawn over them glows)"""
+    from PIL import Image, ImageDraw
+    wpx, hpx = W * SS, H * SS
+    cx, cy, hw = (view[0] + view[2]) / 2, (view[1] + view[3]) / 2, (view[2] - view[0]) / 2
+    v = (cx - hw, cy - hw * H / W, cx + hw, cy + hw * H / W)
+    s = wpx / (v[2] - v[0])
+    img = Image.new('RGB', (wpx, hpx), BODY)
+    d = ImageDraw.Draw(img)
+    Z = lambda x, y: ((x - v[0]) * s, (y - v[1]) * s)               # noqa: E731
+    for fp in film.S.fo.footprints.values():
+        for p in fp.pads:
+            if v[0] - 1 < p.global_x < v[2] + 1 and v[1] - 1 < p.global_y < v[3] + 1 and p.pad_type != 'np_thru_hole':
+                (x0, y0), (x1, y1) = Z(p.global_x - p.size_x / 2, p.global_y - p.size_y / 2), \
+                    Z(p.global_x + p.size_x / 2, p.global_y + p.size_y / 2)
+                if (p.shape or '').lower() == 'circle':
+                    d.ellipse([x0, y0, x1, y1], fill=(150, 131, 75))
+                else:
+                    d.rounded_rectangle([x0, y0, x1, y1], radius=min(x1 - x0, y1 - y0) * 0.25, fill=(150, 131, 75))
+    C.glow_base = img.copy()
+    draw_fn(d, Z, s)
+    C.img.paste(img, (0, 0))
+
+
+def _quant(t, q):
+    """t on the grid q (a step of the music, as a share of the clip)"""
+    return round(t / q) * q
+
+
+def short_clips(film, secs=15.0):
+    """THE SHORT: about `secs` of the run's most striking moments, each a clip of a few beats, cut on the beat -- no
+    words, no captions, no cards: from its first frame to its last, something moves. The moments are the run's own
+    and so is their choice (the same run gives the same short): each stage the run recorded is a candidate --
+
+      search   the group's ends model searching (a bus step's group): its states one after another, the ends that moved
+               ringed -- its worth the states the search held;
+      strings  each lane a straight string pulled taut round the copper -- the strings that bend;
+      solve    the braid, CP-SAT's plans one after another (a negotiated bus's last, the coupled solve's) -- the plans;
+      rounds   the 2-D geometry's rounds settling the lanes among the cells -- its rounds and their events;
+      snap     the smooth lanes snapped onto the router's grid, up close -- a constant;
+      lay      the router's copper sweeping in, lane after lane, from the source to the destination: always, last --
+
+    and the candidates the beats allow, the most worth first, are played in the run's order, each three beats and the
+    rest of the beats shared by worth. The camera pushes in on each clip's busiest place (its strings' most bent, the
+    rounds' moves, the lay pulled back from the source)"""
+    S, T = film.S, film.S.T
+    beat = 60.0 / SHORT_BPM
+    nb = max(9, int(round(secs / beat)))
+    X1 = lambda x, y: tuple(v / SS for v in film.X(x, y))           # noqa: E731  (a board point, 1x pixels)
+    vc = X1((film.view[0] + film.view[2]) / 2, (film.view[1] + film.view[3]) / 2)
+    TW, PP, VD = film.rules['TW'], film.rules['PP'], film.rules['via']
+    prs = set(S.pairs)
+
+    def board(C, a_fo=0.7):
+        C.segs(film.other_c[0], alpha=0.22)
+        C.segs(film.fo_c[0], alpha=a_fo)
+        C.cvias(film.fo_c[1], a_fo)
+
+    def starts(beats, n, per=2):
+        """the moments n steps of a clip of `beats` start at, each on the music's grid (`per` slots to a beat)"""
+        G = beats * per
+        return [math.ceil(k * G / n - 1e-9) / G for k in range(n)] + [1.0]
+
+    def stepper(t, t0s):
+        """(step, the share of it gone) at t, the steps starting at t0s"""
+        k = max(0, min(len(t0s) - 2, int(np.searchsorted(t0s, t, side='right')) - 1))
+        return k, span(t, t0s[k], t0s[k + 1])
+
+    cands = []
+    # ------------------------------------------------------------------ the group's search
+    if film.g and len(film.g.states) > 1:
+        g = film.g
+        # (the array whose ends moved most -- on a group's shared source array, every bus's teeth -- framed on the ends
+        # the states laid about it)
+        moved = collections.Counter(k[2] for st in g.states for k in st['moved'])
+        vi = 1 if moved['berth'] > moved['tooth'] and len(g.views) > 1 else 0
+        _ref, bx = g.views[vi]
+        q_ = [(x, y) for st in g.states for segs, vias in st['ends'].values() for x0, y0, x1, y1, _L in segs
+              for x, y in ((x0, y0), (x1, y1)) if bx[0] - 3 < x < bx[2] + 3 and bx[1] - 3 < y < bx[3] + 3]
+        q_ += [(bx[0], bx[1]), (bx[2], bx[3])]
+        fx0, fy0 = min(p[0] for p in q_) - 1.2, min(p[1] for p in q_) - 1.2
+        fx1, fy1 = max(p[0] for p in q_) + 1.2, max(p[1] for p in q_) + 1.2
+        c0 = ((fx0 + fx1) / 2, (fy0 + fy1) / 2)
+        w0 = max(fx1 - fx0, (fy1 - fy0) * W / H)
+        st_ = lambda q: [(a, b, c, d_, TW, L, None) for a, b, c, d_, L in q]   # noqa: E731
+        # (the states the search moved ends in, the first and the last with them)
+        live = [j for j, st in enumerate(g.states) if not j or j == len(g.states) - 1 or st['moved']]
+
+        def c_search(beats):
+            steps = 2 * beats
+            n = len(live)
+            seq = [live[i] for i in sorted({int(round(j * (n - 1) / (steps - 1))) for j in range(steps)})] \
+                if n > steps else live
+            t0s = starts(beats, len(seq))
+
+            def fn(C, t, T_):
+                k, f = stepper(t, t0s)
+                j = seq[k]
+                z = lerp(1.0, 0.92, ease(t))
+                view = (c0[0] - w0 * z / 2, c0[1] - w0 * z / 2, c0[0] + w0 * z / 2, c0[1] + w0 * z / 2)
+
+                def draw(d, Z, s):
+                    for key, (segs, vias) in g.states[j]['ends'].items():
+                        _mdraw(d, Z, s, st_(segs), vias, 1.0, via_d=VD)
+                    # (the ends this state moved, flashed white as it comes in)
+                    a = 1 - ease(f)
+                    if a > 0.02:
+                        for key in g.states[j]['moved']:
+                            segs, vias = g.states[j]['ends'].get(key) or ((), ())
+                            _mdraw(d, Z, s, st_(segs), vias, a, col=MOVED_C, w_px=5, via_d=VD, via_col=MOVED_C)
+                _full_view(C, film, view, draw)
+            cues = [(t0s[k], 'tick', 0.3 + 0.7 * k / len(seq)) for k in range(1, len(seq))]
+            return Clip('search', beats, fn, cues=cues + [(t0s[len(seq) - 1], 'bell', 1.0)])
+        cands.append((0, 'search', 1 + math.log2(len(g.states)), c_search))
+
+    # ------------------------------------------------------------------ the taut strings
+    if film.strings:
+        slen = {n: plen(P) for n, P in film.strings.items()}
+        sch = {n: math.hypot(P[-1][0] - P[0][0], P[-1][1] - P[0][1]) for n, P in film.strings.items()}
+        bent = sorted((n for n in slen if slen[n] > sch[n] + 0.01), key=lambda n: sch[n] - slen[n])
+        foc = vc
+        if bent:
+            P = np.asarray(film.strings[bent[0]], float)
+            ab = P[-1] - P[0]
+            off = np.abs((P[:, 0] - P[0, 0]) * ab[1] - (P[:, 1] - P[0, 1]) * ab[0]) / max(1e-9, math.hypot(*ab))
+            foc = X1(*P[int(np.argmax(off))])
+        STRC = (236, 222, 130)
+
+        def c_strings(beats):
+            def fn(C, t, T_):
+                board(C, 0.6)
+                u_ = ease(span(t, 0.0, 0.8))
+                if film.relax:
+                    j_ = int(min(len(film.relax) - 2, max(0, np.searchsorted(film.relax_t, u_, side='right') - 1)))
+                    f_ = span(u_, film.relax_t[j_], film.relax_t[j_ + 1])
+                    st = {n: A + (film.relax[j_ + 1][n] - A) * ease(f_) for n, A in film.relax[j_].items()}
+                else:
+                    st = {n: P for n, (P, _b) in morph(film.st['chord'], film.st['string'], u_).items()}
+                for n, P in st.items():
+                    C.wline([tuple(q) for q in P], PAIR_COL if n in prs else STRC, 2.0)
+                for n in film.strings:
+                    tooth, _s, _l, berth = film.ends[n]
+                    C.wdot(*tooth, 3.0, TEXT)
+                    C.wdot(*berth, 3.0, TEXT)
+            cues = [(0.0, 'shimmer', 0.6)] + ([(0.8 * film.relax_t[j], 'tick', 1 - n_ / max(1, len(film.strings)))
+                                              for j, (_s, _k, n_) in enumerate(film.relax_at)] if film.relax else
+                                             [(0.0, 'glide', 0.5, 0.8)]) + [(0.8, 'pluck', 0.3)]
+            return Clip('strings', beats, fn, cam=lambda t: (foc[0], foc[1], lerp(1.0, 1.5, ease(t))), cues=cues)
+        cands.append((1, 'strings', 1 + math.log2(1 + len(bent)), c_strings))
+
+    # ------------------------------------------------------------------ the solve's plans, as the braid
+    if film.plans:
+        o0, o1 = film.plan_meta[0]['obj'], film.plan_meta[-1]['obj']
+        better = lambda v: min(1.0, max(0.0, (o0 - v) / (o0 - o1))) if o0 > o1 else 1.0     # noqa: E731
+
+        def c_solve(beats):
+            steps = 2 * beats - 1
+            ps = list(film.pshow)
+            if len(ps) > steps - (1 if film.coupled else 0):
+                n_ = steps - (1 if film.coupled else 0)
+                ps = sorted({ps[int(round(j * (len(ps) - 1) / max(1, n_ - 1)))] for j in range(n_)})
+            seq = [film.plans[i] for i in ps] + ([film.coupled] if film.coupled else [])
+            objs = [film.plan_meta[i]['obj'] for i in ps] + ([o1] if film.coupled else [])
+            from PIL import Image
+            flat = Image.new('RGB', (W * SS, H * SS), BG)
+
+            t0s = starts(beats, len(seq))
+
+            def fn(C, t, T_):
+                C.img.paste(flat, (0, 0))
+                C.glow_base = flat
+                k, f = stepper(t, t0s)
+                plan = lerp_plan(seq[k - 1], seq[k], ease(min(1.0, f / 0.55))) if k and f < 0.55 else seq[k]
+                st = braid_strands(film, plan) if plan in seq else _braid_strands(film, plan)
+                Xb = film.bx
+                C.rect((Xb(T['S_FACE']), BRAID[1], Xb(T['BAND']), BRAID[3]), fill=(22, 25, 31))
+                for layer in film.order:
+                    for n in film.M:
+                        us, y, bits = st[n]
+                        pts = [(Xb(u), film.rank_y(r)) for u, r in zip(us, y)]
+                        j0 = None
+                        for j in range(len(bits) + 1):
+                            on = j < len(bits) and bits[j] == layer
+                            if on and j0 is None:
+                                j0 = j
+                            elif not on and j0 is not None:
+                                C.line(pts[max(0, j0 - 1):j + 1], film.col[layer], 4.2 if n in prs else 2.4)
+                                j0 = None
+                for n in film.M:
+                    us, y, _b = st[n]
+                    for c in plan.changes.get(n, []):
+                        x_, y_ = Xb(c), film.rank_y(float(np.interp(c, us, y)))
+                        R = 5.5
+                        C.d.ellipse([(x_ - R) * SS, (y_ - R) * SS, (x_ + R) * SS, (y_ + R) * SS], outline=VIA_COL,
+                                    width=int(2 * SS))
+                    for x_, y_ in ((Xb(us[0]), film.rank_y(y[0])), (Xb(us[-1]), film.rank_y(y[-1]))):
+                        C.d.ellipse([(x_ - 3) * SS, (y_ - 3) * SS, (x_ + 3) * SS, (y_ + 3) * SS], fill=TEXT)
+            cues = [(t0s[k], 'ping', better(o)) for k, o in enumerate(objs)] + [(t0s[len(seq) - 1], 'chord', 1.0)]
+            return Clip('solve', beats, fn, cam=lambda t: (W / 2, H / 2, lerp(1.0, 1.15, ease(t))), cues=cues)
+        cands.append((2, 'solve', 2 + math.log2(1 + len(film.plans)), c_solve))
+
+    # ------------------------------------------------------------------ the 2-D geometry's rounds
+    if S.Et and len(film.eseq) > 2:
+        E = S.Et
+        seq_e = film.eseq
+        BP = lambda p: film.mp.pt(p[0], p[1])                       # noqa: E731
+        hots = [X1(*BP(q)) for r in E['rounds'][1:] for q in r['hot']] or [vc]
+        Hp = np.asarray(hots, float)
+        cnt = [int(((np.abs(Hp[:, 0] - h[0]) < 120) & (np.abs(Hp[:, 1] - h[1]) < 70)).sum()) for h in hots[::max(1, len(hots) // 400)]]
+        hf = hots[::max(1, len(hots) // 400)][int(np.argmax(cnt))]
+        near = Hp[(np.abs(Hp[:, 0] - hf[0]) < 120) & (np.abs(Hp[:, 1] - hf[1]) < 70)]
+        foc_e = (float(near[:, 0].mean()), float(near[:, 1].mean()))
+        # (the cells about the focus, each the brighter the nearer: a lens on the free space the lanes settle in)
+        lens = []
+        used_ = collections.Counter(film.erun[k][0] for k in seq_e[0][3]['xy'])
+        for L in [L for L, _c in used_.most_common(2)] + [len(film.emesh) - 1]:
+            V, T_ = film.emesh[L]
+            px = np.array([film.X(x, y) for x, y in V], float).reshape(-1, 2) / SS
+            cen = px[T_].mean(axis=1)
+            # (a cell's longest side: a sliver reaching far off the focus would streak across the frame)
+            far = np.max(np.hypot(*(px[T_] - np.roll(px[T_], 1, axis=1)).transpose(2, 0, 1)), axis=1)
+            dd = np.where(far < 140, np.hypot(cen[:, 0] - foc_e[0], (cen[:, 1] - foc_e[1]) * 1.6), 1e9)
+            col = (170, 170, 178) if L == len(film.emesh) - 1 else film.col[film.ebit[L]]
+            for i in np.nonzero(dd < 420)[0]:
+                lens.append((px[T_[i]] * SS, mix(BODY, col, 0.55 * (1 - dd[i] / 420))))
+        nlive = max([r['nlive'] for r in E['rounds']] + [1])
+
+        def c_rounds(beats):
+            steps = 2 * beats
+            n = len(seq_e)
+            idx = sorted({int(round((j / (steps - 1)) ** 1.7 * (n - 1))) for j in range(steps)})
+
+            t0s = starts(beats, len(idx))
+
+            def fn(C, t, T_):
+                board(C, 0.5)
+                for tri, col in lens:
+                    C.d.line([tuple(tri[0]), tuple(tri[1]), tuple(tri[2]), tuple(tri[0])], fill=col, width=SS)
+                k, f = stepper(t, t0s)
+                a_, b_ = seq_e[idx[max(0, k - 1)]], seq_e[idx[k]]
+                m = ease(min(1.0, f / 0.7)) if k else 1.0
+                C.lanes(morph(film.st[a_[0]], film.st[b_[0]], m), w=2.6)
+                C.vias([(n_, x, y) for n_, x, y, _al in morph_vias(film.vias[a_[0]], film.vias[b_[0]], m)])
+                rec_ = b_[2]
+                if b_[1] == 'round' and rec_ is not None:
+                    a = 1 - ease(f)
+                    for q in rec_['hot']:
+                        C.wdot(*BP(q), 2.2, mix(BODY, ACCENT, a))
+                    for h in rec_['vhop']:
+                        C.wring(*BP(h['to']), 0.25, mix(BODY, EVC['vhop'], a), 2.0)
+            cues = []
+            for k in range(1, len(idx)):
+                rec_ = seq_e[idx[k]][2]
+                cues.append((t0s[k], 'round', (rec_ or {}).get('nlive', 0) / nlive))
+                if rec_ and rec_.get('hops'):
+                    cues.append((t0s[k] + 0.25 * (t0s[k + 1] - t0s[k]), 'blip', min(1.0, rec_['hops'] / 12)))
+            return Clip('rounds', beats, fn, cam=lambda t: (foc_e[0], foc_e[1], lerp(1.0, 1.9, ease(t))), cues=cues)
+        tot_ = sum(r['hops'] + r['nexc'] + r['npull'] for r in E['rounds'])
+        cands.append((3, 'rounds', 1 + math.log2(1 + len(E['rounds'])) + 0.5 * math.log10(1 + tot_), c_rounds))
+
+    # ------------------------------------------------------------------ the snap, up close
+    if S.snapd and 'snap' in film.st and 'pol' in film.st:
+        focus = None
+        for n in S.pairs:
+            c = S.snapd['lanes'].get(n, {}).get('cross')
+            if c:
+                q = [pt for side in ('P', 'N') for pts_, _L in c['legs'][side] for pt in pts_] + [v[:2] for v in c['vias']]
+                focus = ((min(p[0] for p in q) + max(p[0] for p in q)) / 2, (min(p[1] for p in q) + max(p[1] for p in q)) / 2)
+                break
+        if focus is None and S.snapd.get('vias'):
+            focus = tuple(S.snapd['vias'][len(S.snapd['vias']) // 2][1:3])
+        if focus is not None:
+            focus = film.mp.pt(*focus)
+            grid = film.rules['grid']
+
+            def c_snap(beats):
+                def fn(C, t, T_):
+                    hw = lerp(4.0, 2.6, ease(t))
+                    view = (focus[0] - hw, focus[1] - hw, focus[0] + hw, focus[1] + hw)
+                    mp_ = ease(span(t, 0.12, 0.3))
+                    ms = ease(span(t, 0.45, 0.63))
+                    st = {n: (film.st['snap'][n] if (mp_ >= 1 if n in prs else ms >= 1) else
+                              morph({n: film.st['pol'][n]}, {n: film.st['snap'][n]}, mp_ if n in prs else ms)[n])
+                          for n in film.M if n in film.st['snap'] and n in film.st['pol']}
+                    vs = film.vias['snap'] if ms > 0.5 else film.vias['pol']
+
+                    def draw(d, Z, s):
+                        a_g = ease(span(t, 0.0, 0.12))
+                        gx = math.ceil((view[0] - 1) / grid) * grid
+                        while gx < view[2] + 1:
+                            gy = math.ceil((view[1] - 1) / grid) * grid
+                            while gy < view[3] + 1:
+                                x, y = Z(gx, gy)
+                                d.rectangle([x - SS, y - SS, x + SS, y + SS], fill=mix(BODY, (110, 120, 136), a_g))
+                                gy += grid
+                            gx += grid
+                        for layer in film.order:
+                            for n, (P, bits) in st.items():
+                                if not ((P[:, 0] > view[0] - 1) & (P[:, 0] < view[2] + 1) & (P[:, 1] > view[1] - 1)
+                                        & (P[:, 1] < view[3] + 1)).any():
+                                    continue
+                                wd = (PP + TW if n in prs else TW) * s
+                                col = mix(BODY, film.col[layer], 0.6 if n in prs else 1.0)
+                                j0 = None
+                                for j in range(len(bits) + 1):
+                                    on = j < len(bits) and bits[j] == layer
+                                    if on and j0 is None:
+                                        j0 = j
+                                    elif not on and j0 is not None:
+                                        d.line([Z(*q) for q in simplify(P[j0:j + 1], 0.2 / s * SS)], fill=col,
+                                               width=max(1, int(wd)), joint='curve')
+                                        j0 = None
+                        for n, x, y in vs:
+                            cx, cy = Z(x, y)
+                            r = VD / 2 * s
+                            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(185, 185, 185), outline=(245, 245, 245),
+                                      width=2 * SS)
+                    _full_view(C, film, view, draw)
+                return Clip('snap', beats, fn, cues=[(0.12, 'snap', 0.5), (0.45, 'snap', 0.8), (0.63, 'snap', 1.0)])
+            cands.append((4, 'snap', 1.5, c_snap))
+
+    # ------------------------------------------------------------------ the lay, last
+    sp0, spd = film.sp0, film.spd
+    uof = lambda x, y: float((x - sp0[0]) * spd[0] + (y - sp0[1]) * spd[1])    # noqa: E731
+    order = [n for n in S.route_order if n in film.routed] + [n for n in film.M if n not in S.route_order]
+    order = [n for n in order if film.routed[n][0] or film.routed[n][1]]
+    laid = {n: (sorted(film.routed[n][0], key=lambda s_: uof((s_[0] + s_[2]) / 2, (s_[1] + s_[3]) / 2)),
+                film.routed[n][1]) for n in order}
+    urng = {n: (min([uof((s_[0] + s_[2]) / 2, (s_[1] + s_[3]) / 2) for s_ in v[0]] + [uof(q[0], q[1]) for q in v[1]]),
+                max([uof((s_[0] + s_[2]) / 2, (s_[1] + s_[3]) / 2) for s_ in v[0]] + [uof(q[0], q[1]) for q in v[1]]))
+            for n, v in laid.items()}
+    ulo, uhi = (min(v[0] for v in urng.values()), max(v[1] for v in urng.values())) if urng else (0.0, 1.0)
+    src_c = X1(*np.mean([(p.global_x, p.global_y) for p in S.fo.footprints[S.src].pads], axis=0))
+
+    def c_lay(beats):
+        q16 = 1.0 / (beats * 4)
+        t_in = {n: _quant(0.02 + 0.5 * j / max(1, len(order) - 1), q16) for j, n in enumerate(order)}
+        DUR = 0.24
+
+        def fn(C, t, T_):
+            board(C, 0.9)
+            if 'snap' in film.st:
+                C.lanes(film.st['snap'], alpha=0.25, w=1.6)
+            segs, vias, hot = [], [], []
+            ub = lerp(ulo - 2, uhi + 0.5, span(t, 0.72, 1.0)) if t > 0.72 else None   # (a pulse along the copper)
+            for n in order:
+                p = ease(span(t, t_in[n], t_in[n] + DUR))
+                if p <= 0:
+                    continue
+                lo, hi = urng[n]
+                cut = lo + (hi - lo) * p + 1e-6
+                for s_ in laid[n][0]:
+                    u = uof((s_[0] + s_[2]) / 2, (s_[1] + s_[3]) / 2)
+                    if u <= cut:
+                        segs.append(s_)
+                        if ub is not None and abs(u - ub) < 1.6:
+                            hot.append(s_)
+                vias += [v for v in laid[n][1] if uof(v[0], v[1]) <= cut]
+            C.segs(segs)
+            C.cvias(vias)
+            if hot:
+                C.segs(hot, alpha=1.0, true_width=False, w_px=4.0, col=(255, 250, 225))
+        cues = [(t_in[n], 'pluck', j / max(1, len(order) - 1)) for j, n in enumerate(order)] + \
+            [(0.72, 'chord', 1.0), (0.74, 'shimmer', 0.9)]
+
+        def cam(t):
+            # (pulled back from the source as the copper comes in, still moving on the last frame)
+            e = 0.85 * (1 - (1 - t) ** 3) + 0.15 * t
+            return (lerp(src_c[0], vc[0], e), lerp(src_c[1], vc[1], e), lerp(1.7, 1.02, e))
+        return Clip('lay', beats, fn, cam=cam, cues=cues)
+
+    # ---- the clips the beats allow, the most worth first, each three beats and the rest shared by worth
+    b_lay = max(6, int(round(nb * SHORT_LAY)))
+    rest = nb - b_lay
+    take = sorted(sorted(cands, key=lambda c: (-c[2], c[0]))[:max(0, rest // 3)], key=lambda c: c[0])
+    give = {c[1]: 3 for c in take}
+    extra = rest - 3 * len(take)
+    if take and extra > 0:
+        w_ = sum(c[2] for c in take)
+        share = {c[1]: extra * c[2] / w_ for c in take}
+        for k in share:
+            give[k] += int(share[k])
+        left = extra - sum(int(v) for v in share.values())
+        for k in sorted(share, key=lambda k: (-(share[k] - int(share[k])), k))[:left]:
+            give[k] += 1
+    else:
+        b_lay += max(0, extra)
+    return [c[3](give[c[1]]) for c in take] + [c_lay(b_lay)]
+
+
+def short_post(img, sc, t, s_in, first, base):
+    """a frame of the short made from its canvas (supersampled): the camera's crop, pushed in and brought to the
+    frame's size; a glow on what the clip drew over its base; and a flash on the beat a clip is cut in on"""
+    from PIL import Image, ImageChops, ImageFilter
+    x, y, z = sc.cam(t) if sc.cam else (W / 2, H / 2, 1.0)
+    z = max(1.0, z)
+    hw, hh = W / (2 * z), H / (2 * z)
+    x, y = min(max(x, hw), W - hw), min(max(y, hh), H - hh)
+    box = tuple(v * SS for v in (x - hw, y - hh, x + hw, y + hh))
+    out = img.resize((W, H), Image.LANCZOS, box=box)
+    # (the glow a halo: what the clip drew over its base, blurred, where the blur reaches past it -- round a line, not
+    # over a wide piece of copper)
+    lit = ImageChops.subtract(out, base.resize((W, H), Image.BILINEAR, box=box))
+    halo = ImageChops.subtract(lit.filter(ImageFilter.GaussianBlur(7)), lit)
+    out = ImageChops.add(out, halo.point(lambda v: min(255, int(v * 2.2))))
+    fl = 0.0 if first else 0.5 * max(0.0, 1.0 - s_in / 0.12)
+    if fl > 0:
+        out = Image.blend(out, Image.new('RGB', (W, H), (255, 255, 255)), fl)
+    return out
+
+
 # =============================================================================== the frames
 _FILM = None
 
@@ -4405,6 +5105,15 @@ def chrome(C, scene, t, T_total, t_abs, scenes):
     C.text(HEAD[0] + 230, HEAD[1] + 10, f'{os.path.basename(S.base_path)} → {S.src} to {S.dst}, {len(C.f.M)} lanes', 18, DIM)
     if scene.stage:
         C.text(HEAD[2], HEAD[1] + 4, scene.stage, 26, ACCENT, bold=True, anchor='ra')
+    if len(C.f.LN) > 2 and scene.stage:
+        # (more layers than two: the legend of the layers the lanes stand on, top to bottom of the board)
+        x = HEAD[2] - C.tlen(scene.stage, 26, bold=True) - 40
+        for L in reversed(C.f.used):
+            x -= C.tlen(L, 15)
+            C.text(x, HEAD[1] + 12, L, 15, DIM)
+            x -= 30
+            C.line([(x, HEAD[1] + 21), (x + 24, HEAD[1] + 21)], layer_col(L), 5)
+            x -= 16
     cap = None
     for (t0, s) in scene.captions:
         if t >= t0:
@@ -4454,7 +5163,7 @@ def base_image(film):
 
 
 def render_frame(i):
-    film, scenes, fps, T_total, base = _FILM
+    film, scenes, fps, T_total, base, short = _FILM
     t_abs = i / fps
     acc = 0.0
     for sc in scenes:
@@ -4464,6 +5173,9 @@ def render_frame(i):
     t = sc.at(t_abs - acc)
     C = Canvas(film, base)
     sc.fn(C, t, t_abs)
+    if short:
+        # (the short: no header, caption or timeline -- its camera, its glow, its cut)
+        return short_post(C.img, sc, t, t_abs - acc, sc is scenes[0], C.glow_base or base)
     chrome(C, sc, t, T_total, t_abs, scenes)
     return C.img.reduce(SS)
 
@@ -4501,17 +5213,28 @@ def main():
     ap.add_argument('--sound', action='store_true',
                     help='a sound track: every scene narrated, effects on what the scenes draw, and music, mixed by '
                          'ffmpeg (whole_movie_sound.py) -- the film\'s timeline fitted to the narration')
+    ap.add_argument('--short', nargs='?', type=float, const=15.0, default=None, metavar='SECS',
+                    help='a SHORT instead of the film: about SECS (default 15) of the run\'s most striking moments, each '
+                         'a clip of a few beats cut on the beat, with music and effects and no narration, no captions '
+                         'and no cards (short_clips); --stills and --scenes work on it as on the film')
     ap.add_argument('--voice', default=DEFAULT_VOICE,
                     help=f'the narration\'s voice (default {DEFAULT_VOICE}): kokoro:NAME, a voice of the neural '
                          'Kokoro-82M, installed on first use into its own venv in the user\'s cache ($XDG_CACHE_HOME or '
                          '~/.cache, krt_tts) and its weights fetched there once; or a macOS `say` voice by name (one '
                          '`say -v ?` lists, e.g. Samantha)')
     a = ap.parse_args()
+    if a.short is not None and a.sound:
+        raise SystemExit('whole_movie: --short has a sound track of its own (music and effects, no narration) -- '
+                         '--sound is the film\'s')
     t0 = time.time()
     S = load_story(a)
+    if a.short is not None:
+        # (the short's frame: the board over all of it, and the braid too -- no header, captions or timeline)
+        global BOARD, BRAID
+        BOARD, BRAID = (0, 0, W, H), (40, 80, W - 40, H - 80)
     film = Film(S)
     film.title = a.title
-    scenes = build_scenes(film, a.speed)
+    scenes = build_scenes(film, a.speed) if a.short is None else short_clips(film, a.short)
     if a.sound:
         # (the narration spoken first, and the scenes fitted to it: the film's timeline is then the sound's)
         import atexit
@@ -4525,7 +5248,7 @@ def main():
     T_total = sum(s.span for s in scenes)
     acc = 0.0
     for s in scenes:
-        print(f'  {acc:6.1f} s  {s.key:9s} {s.span:5.1f} s')
+        print(f'  {acc:6.1f} s  {s.key:9s} {s.span:5.1f} s' + (f'  ({s.beats} beats)' if a.short is not None else ''))
         acc += s.span
     if a.sound:
         wms.report(scenes)
@@ -4533,7 +5256,7 @@ def main():
         return
     global _FILM
     base = base_image(film)
-    _FILM = (film, scenes, a.fps, T_total, base)
+    _FILM = (film, scenes, a.fps, T_total, base, a.short is not None)
     print(f'whole_movie: {T_total:.0f} s at {a.fps} fps, prepared in {time.time() - t0:.0f} s')
     if a.stills:
         os.makedirs(a.stills, exist_ok=True)
@@ -4566,6 +5289,15 @@ def main():
         # frames then go to a silent mp4 the sound is mixed onto)
         stems = wms.score(scenes, work)
         vout = os.path.join(work, 'video.mp4')
+    elif a.short is not None:
+        # (the short's music and effects, on its beat)
+        import atexit
+        import tempfile
+        import whole_movie_sound as wms
+        work = tempfile.mkdtemp(prefix='whole_movie_short.')
+        atexit.register(shutil.rmtree, work, ignore_errors=True)
+        stems = wms.short_score(scenes, work, SHORT_BPM)
+        vout = os.path.join(work, 'video.mp4')
     cmd = [ffmpeg, '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{W}x{H}', '-r', str(a.fps),
            '-i', '-', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', vout]
     ff = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -4579,9 +5311,10 @@ def main():
     ff.stdin.close()
     if ff.wait() != 0:
         raise SystemExit('whole_movie: ffmpeg failed')
-    if a.sound:
+    if a.sound or a.short is not None:
         wms.mux(ffmpeg, vout, stems, a.out)
-    print(f'wrote {a.out}: {nfr} frames, {T_total:.0f} s, in {time.time() - t0:.0f} s' + (', with sound' if a.sound else ''))
+    print(f'wrote {a.out}: {nfr} frames, {T_total:.0f} s, in {time.time() - t0:.0f} s'
+          + (', with sound' if a.sound or a.short is not None else ''))
 
 
 if __name__ == '__main__':

@@ -2022,16 +2022,18 @@ fast routes one at a time, 7.5 min for the full route; ch32 (25 parts) took
 
 ## Whole-Route Film (`awx/whole_movie.py`)
 
-A film of one two-layer whole-route run (a research tool of the experimental
-bus step), each stage explained on the board as the run took it. RUNDIR is
+A film of one whole-route run (a research tool of the experimental bus
+step), each stage explained on the board as the run took it. RUNDIR is
 `whole_route.py`'s OUTDIR, or a bus step's own run (`route_bus.py`'s
-`BUS.bus/run`, under the group's directory `SRC-DEST.bus/solo/DEST/`).
+`BUS.bus/run`, under the group's directory: `SRC-DEST.bus/solo/DEST/`, or
+`SRC-DEST.bus/neg/DEST/` for a bus of a negotiated group).
 
 ```bash
 python3 awx/whole_movie.py RUNDIR OUT.mp4 [--fps 30] [--workers 4]
 python3 awx/whole_movie.py RUNDIR --stills DIR [--at T1,T2,..]   # PNG stills
 python3 awx/whole_movie.py RUNDIR --scenes                       # the scenes and their times
 python3 awx/whole_movie.py RUNDIR --check                        # the re-runs compared, no film
+python3 awx/whole_movie.py RUNDIR OUT.mp4 --short [SECS]         # a short of the run, ~15 s
 ```
 
 - **The group's ends**, where the run's ends are its group's: the buses the
@@ -2055,8 +2057,18 @@ python3 awx/whole_movie.py RUNDIR --check                        # the re-runs c
   geometry are run again in-process under the run's own settings, and the
   film is refused unless each re-run writes the run's file byte for byte
   (`--force` films it anyway and says so on screen). `--check` makes that
-  comparison alone and exits 1 when a re-run differs; it works on any number
-  of layers, while the film draws two.
+  comparison alone and exits 1 when a re-run differs.
+- **Any number of layers.** Each copper layer has its colour on the board,
+  in the braid and in the 2-D geometry: F.Cu red and B.Cu blue as ever, the
+  inner layers bright (In1 yellow, In2 sky, In3 pink, In4 orange, In5 green,
+  In6 violet); on more than two a legend in the header names the layers the
+  lanes stand on, and the scenes that show one layer at a time (the cells,
+  the lanes' own points) take them two at a time.
+- **A negotiated bus** (its group's buses routed together, `JOINT_DIR`):
+  its round's first solve is re-run as the bus solved it alone and compared
+  with `solve.solo.json`; a scene of its own then shows the coupled solve's
+  plan for it, the one its loop lays out. Its loop's stages are re-run with
+  the other buses' published lanes on the board, as the chain ran them.
 - Needs `ffmpeg` (libx264) for the mp4; `--stills` alone writes PNGs.
 
 **With sound** (`--sound`, made by `awx/whole_movie_sound.py`):
@@ -2093,6 +2105,20 @@ python3 awx/whole_movie_sound.py --fetch [kokoro:NAME]                        # 
   runs on macOS.
 - Without `--sound` the film is unchanged, frame for frame, and none of this
   is needed.
+
+**The short** (`--short [SECS]`, default 15): not the film but a fast cut of
+the run's most striking moments for a casual viewer, each a clip of a few
+beats of its own music, cut on the beat -- no narration, no captions, no
+title or end card, something moving in every frame. The candidates are the
+group's search (its states one after another, the ends that moved flashed),
+the taut strings, the solve's plans as the braid, the 2-D geometry's rounds,
+the snap up close and, always last, the lay sweeping the copper in; which
+of them play, and for how long, is read from the run's own records (the
+states, strings, plans and rounds it kept), so a run gives the same short
+every time. The camera pushes in on each clip's busiest place. Its sound is
+music and effects only (`whole_movie_sound.short_score`): a four-to-the-floor
+track in D, and the clips' own effects (a plan found, a via moving, a lane
+laid) on the beat. `--scenes` and `--stills` work on it as on the film.
 
 ## Orphan Stub Checker (`check_orphan_stubs.py`)
 

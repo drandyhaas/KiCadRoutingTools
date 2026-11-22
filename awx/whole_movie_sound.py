@@ -30,6 +30,10 @@ THE MUSIC is a slow pad of chords in D, a chord to each scene (a long scene's sp
 over a bass, with a few soft bell notes of the chord, in a made reverb; it rises under the title, resolves on the coda
 and dies away at the end.
 
+THE SHORT's sound (whole_movie --short: short_score) is music and effects alone: a four to the floor in D at the
+short's tempo (beat_music: kick, clap, hats, a bass in eighths, a plucked arpeggio in sixteenths, a pad, all pumped by
+the kick, a crash on the cut into the last clip), and its clips' own cues on the beat with a whoosh into every cut.
+
 Needs numpy and scipy, and ffmpeg for the mix. The three are written as WAVs (score) and mixed by ffmpeg (mux): the music ducked under the voice by a sidechain
 compressor, the three summed, a limiter on top, AAC beside the film's own video stream (copied, not encoded again).
 """
@@ -562,6 +566,138 @@ def music(scenes, T):
     tt = np.arange(N) / SR
     up *= (np.minimum(1, tt / 2.5) * np.clip((T - tt) / 3.5, 0, 1))[:, None]
     return up * (0.045 / max(1e-9, float(np.sqrt((up ** 2).mean()))))
+
+
+# ------------------------------------------------------------------------------- the short's music (whole_movie --short)
+BEAT_PROG = [(38, (62, 66, 69, 74)),    # D
+             (35, (59, 62, 66, 71)),    # B minor
+             (43, (62, 67, 71, 74)),    # G
+             (45, (61, 64, 69, 73))]    # A
+
+
+def _kick(rng):
+    t = _tt(0.32)
+    f = 48 + 120 * np.exp(-t / 0.04)
+    return np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t / 0.22) * np.minimum(1, t / 0.002)
+
+
+def _clap(rng):
+    t = _tt(0.25)
+    n = _band(rng.standard_normal(len(t)), 1800, 1100, q=0.9)
+    env = sum(np.exp(-np.maximum(0, t - o) / 0.012) * (t >= o) for o in (0.0, 0.011, 0.022)) * 0.4 + \
+        np.exp(-np.maximum(0, t - 0.03) / 0.09) * (t >= 0.03)
+    return _norm(n * env, 1.0)
+
+
+def _hat(rng, open_=False):
+    t = _tt(0.18 if open_ else 0.05)
+    n = rng.standard_normal(len(t))
+    n = n - np.convolve(n, np.ones(4) / 4, mode='same')            # (the highs only)
+    return _norm(n * np.exp(-t / (0.06 if open_ else 0.014)), 1.0)
+
+
+def _crash(rng):
+    t = _tt(1.6)
+    n = rng.standard_normal(len(t))
+    n = n - np.convolve(n, np.ones(3) / 3, mode='same')
+    return _norm(n * np.exp(-t / 0.45) * np.minimum(1, t / 0.003), 1.0)
+
+
+def beat_music(T, bpm, hits=()):
+    """the short's music, (n, 2) at SR: a driving four to the floor in D at `bpm` -- a kick on every beat, a clap on two
+    and four, hats on the eighths, a bass on the chord's root in eighths, a plucked arpeggio of the chord in
+    sixteenths, a soft pad -- a chord a bar (D, B minor, G, A), all but the kick pumped by it; a crash on each of
+    `hits` (seconds: the cuts the film makes the most of), a rise of noise into each, and on the last beat"""
+    rng = np.random.default_rng(23)
+    N = int(round(T * SR))
+    beat = 60.0 / bpm
+    nb = int(math.ceil(T / beat)) + 1
+    drums, tonal = np.zeros((N, 2)), np.zeros((N, 2))
+
+    def put(buf, y, t0, gain, pan=0.0):
+        a = int(round(t0 * SR))
+        if a >= N:
+            return
+        m = min(len(y), N - a)
+        buf[a:a + m, 0] += y[:m] * gain * (1 - pan)
+        buf[a:a + m, 1] += y[:m] * gain * (1 + pan)
+    kick, clap = _kick(rng), _clap(rng)
+    for b in range(nb):
+        t0 = b * beat
+        put(drums, kick, t0, 0.9)
+        if b % 2 == 1:
+            put(drums, clap, t0, 0.28)
+        for e in (0, 1):
+            put(drums, _hat(rng, open_=(e == 1 and b % 4 == 3)), t0 + e * beat / 2, 0.07 if e == 0 else 0.11,
+                pan=0.25)
+        bass, pad = BEAT_PROG[(b // 4) % len(BEAT_PROG)]
+        for e in (0, 1):                                            # the bass, its root in eighths, an octave on the off
+            t = _tt(beat / 2)
+            f = hz(bass + 12 * e)
+            y = sum(np.sin(2 * np.pi * h * f * t) / h for h in range(1, 7)) * np.exp(-t / 0.16) * np.minimum(1, t / 0.004)
+            put(tonal, y, t0 + e * beat / 2, 0.16)
+        for e in range(4):                                          # the arpeggio, in sixteenths
+            note = pad[(b * 4 + e) % len(pad)] + (12 if (b // 2) % 2 else 0)
+            put(tonal, _pluck(hz(note), 0.5, rng, rho=0.993), t0 + e * beat / 4, 0.05, pan=(-0.5 if e % 2 else 0.5))
+        if b % 4 == 0:                                              # the pad, a bar long
+            t = _tt(4 * beat + 0.3)
+            y = sum(np.sin(2 * np.pi * hz(m_) * t + v_) for v_, m_ in enumerate(pad))
+            put(tonal, y * np.minimum(1, t / 0.4) * np.clip((4 * beat + 0.3 - t) / 0.3, 0, 1), t0, 0.022)
+    # (every part but the kick pumped by it: down at each beat, back by its middle)
+    ph = (np.arange(N) / SR) % beat
+    tonal *= (1 - 0.55 * np.exp(-ph / 0.09))[:, None]
+    for h in sorted(set(round(x, 4) for x in hits) | {round((nb - 2) * beat, 4)}):
+        if 0 <= h < T:
+            put(drums, _crash(rng), h, 0.16)
+            t = _tt(min(2 * beat, h))
+            if len(t) > 10:                                         # (a rise into it)
+                y = _band(rng.standard_normal(len(t)), 600, 7000, q=1.5) * (t / t[-1]) ** 2
+                put(drums, _norm(y, 1.0), h - len(t) / SR, 0.05)
+    out = drums + tonal
+    tt = np.arange(N) / SR
+    out *= np.clip((T - tt) / 0.25, 0, 1)[:, None]                  # (out with the film's last frame)
+    return out * (0.12 / max(1e-9, float(np.sqrt((out ** 2).mean()))))
+
+
+def short_score(scenes, work, bpm):
+    """the short's two stems on its timeline (and a silent voice, for mux): the beat music, its crashes on the cut into
+    the last clip; the clips' own effects (their cues, thinned), and a whoosh into each cut"""
+    T = sum(sc.span for sc in scenes)
+    N = int(round(T * SR))
+    ev, acc, cuts = [], 0.0, []
+    for i, sc in enumerate(scenes):
+        if i:
+            cuts.append(acc)
+            ev.append((max(0.0, acc - 0.4), 'whoosh', 0.3, 0.0))
+        for c in sc.cues:
+            t0 = acc + c[0] * sc.span
+            ev.append((t0, c[1], c[2] if len(c) > 2 else 0.5, (c[3] - c[0]) * sc.span if len(c) > 3 else 0.0))
+        acc += sc.span
+    ev.sort(key=lambda e: e[0])
+    out, last = [], {}
+    for e in ev:
+        if e[0] - last.get(e[1], -1e9) >= THIN.get(e[1], 0.0):
+            out.append(e)
+            last[e[1]] = e[0]
+    fx = np.zeros((N, 2))
+    for j, (t0, kind, x, dur) in enumerate(out):
+        y, pan = effect(kind, x, dur, np.random.default_rng(2000 + j))
+        a = int(round(t0 * SR))
+        m = min(len(y), N - a)
+        if m > 0:
+            fx[a:a + m, 0] += y[:m] * (1 - pan)
+            fx[a:a + m, 1] += y[:m] * (1 + pan)
+    fx = _reverb(fx, 1.2, 0.2, seed=5) * FX_GAIN * 2.2
+    mus = beat_music(T, bpm, hits=cuts[-1:])
+    stems = {'music': os.path.join(work, 'music.wav'), 'effects': os.path.join(work, 'effects.wav'),
+             'voice': os.path.join(work, 'voice.wav')}
+    _write(stems['music'], mus)
+    _write(stems['effects'], fx)
+    _write(stems['voice'], np.zeros((N, 2)))
+    print(f'whole_movie: the short\'s sound -- {len(out)} effects ('
+          + ', '.join(f'{n} {k}' for k, n in collections.Counter(e[1] for e in out).most_common())
+          + f'), music at {bpm} beats a minute, {T:.1f} s')
+    return stems
 
 
 # =============================================================================== the mix
