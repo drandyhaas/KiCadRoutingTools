@@ -1060,6 +1060,8 @@ class BoardInfo:
     """Board-level information."""
     layers: Dict[int, str]  # layer_id -> layer_name
     copper_layers: List[str]
+    # copper layer -> its (layers ...) type: signal, power, mixed or jumper
+    copper_layer_types: Dict[str, str] = field(default_factory=dict)
     board_bounds: Optional[Tuple[float, float, float, float]] = None  # min_x, min_y, max_x, max_y
     stackup: List[StackupLayer] = field(default_factory=list)  # ordered top to bottom
     # #502: the drilled board thickness in mm (board_thickness_mm): the stackup
@@ -1112,6 +1114,12 @@ class BoardInfo:
     # A via with no spec of its own inherits this. check_drc's via-in-paste
     # grade reads it per token.
     via_protection_setup: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def plane_layers(self) -> List[str]:
+        """The copper layers typed ``power``: planes, which routing keeps
+        other nets' tracks off (#2024)."""
+        return [l for l in self.copper_layers if self.copper_layer_types.get(l) == 'power']
 
 
 @dataclass
@@ -2672,7 +2680,7 @@ def find_matching_paren(content: str, open_idx: int) -> int:
 
 def extract_layers(content: str) -> BoardInfo:
     """Extract layer information from PCB file."""
-    layers, copper_layers = _layer_table(content)
+    layers, copper_layers, copper_layer_types = _layer_table(content)
 
     # Extract board bounds from Edge.Cuts
     bounds = extract_board_bounds(content)
@@ -2683,17 +2691,19 @@ def extract_layers(content: str) -> BoardInfo:
     # Extract stackup information
     stackup = extract_stackup(content)
 
-    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds,
+    return BoardInfo(layers=layers, copper_layers=copper_layers,
+                     copper_layer_types=copper_layer_types, board_bounds=bounds,
                      stackup=stackup, board_outline=(outers[0] if outers else []),
                      board_outlines=outers, board_cutouts=cutouts,
                      board_thickness=board_thickness_mm(stackup, general_thickness(content)))
 
 
-def _layer_table(content: str) -> Tuple[Dict[int, str], List[str]]:
-    """The board's (layers ...) table: {id: name}, and its copper layer names
-    in table order."""
+def _layer_table(content: str) -> Tuple[Dict[int, str], List[str], Dict[str, str]]:
+    """The board's (layers ...) table: {id: name}, its copper layer names in
+    table order, and {copper name: type}."""
     layers = {}
     copper_layers = []
+    copper_layer_types = {}
 
     # Find the layers section. Capture lazily up to the block's closing paren on
     # its own line, rather than requiring a run of paren-free (...) entries: layer
@@ -2715,7 +2725,8 @@ def _layer_table(content: str) -> Tuple[Dict[int, str], List[str]]:
             # 2-layer (issue #76).
             if '.Cu' in layer_name and layer_type in ('signal', 'power', 'mixed', 'jumper'):
                 copper_layers.append(layer_name)
-    return layers, copper_layers
+                copper_layer_types[layer_name] = layer_type
+    return layers, copper_layers, copper_layer_types
 
 
 def _stackup_block_span(content: str) -> Optional[Tuple[int, int]]:
@@ -9409,6 +9420,13 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             if enabled.Contains(lid) and lid in copper_id_to_name:
                 copper_layers.append(lname)
     _board_cu_names = set(copper_layers)
+    copper_layer_types = {}
+    for lid, lname in copper_id_to_name.items():
+        if lname in _board_cu_names:
+            try:
+                copper_layer_types[lname] = pcbnew.LAYER.ShowType(board.GetLayerType(lid))
+            except Exception:
+                pass
 
     # Board bounds from Edge.Cuts drawings. We use each drawing's bounding
     # box rather than GetStart()/GetEnd() because the latter only describes
@@ -9513,6 +9531,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     board_info = BoardInfo(
         layers=layers_dict,
         copper_layers=copper_layers,
+        copper_layer_types=copper_layer_types,
         board_bounds=board_bounds,
         stackup=stackup,
         board_thickness=board_thickness_mm(stackup, _general_thickness_from_pcbnew(board)),
