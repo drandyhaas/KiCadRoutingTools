@@ -765,6 +765,35 @@ def _stamper(pcb_data, idx: Tuple[int, ...]):
     return stamp_into
 
 
+def _unique_rows(parts, width):
+    """np.unique(np.concatenate(parts), axis=0), the same rows in the same
+    (lexicographic) order, by one 1-D unique on the rows packed into int64
+    when their span fits (the axis=0 unique sorts structured rows, several
+    times slower on the hundred-thousand-cell sets a finger strip stamps)."""
+    if not parts:
+        return np.empty((0, width), dtype=np.int32)
+    arr = np.concatenate(parts)
+    if len(arr) == 0:
+        return np.empty((0, width), dtype=np.int32)
+    lo = arr.min(axis=0).astype(np.int64)
+    span = arr.max(axis=0).astype(np.int64) - lo + 1
+    total = 1
+    for v in span:
+        total *= int(v)
+    if total >= (1 << 62):
+        return np.unique(arr, axis=0)
+    rel = arr.astype(np.int64) - lo
+    packed = rel[:, 0]
+    for c in range(1, width):
+        packed = packed * int(span[c]) + rel[:, c]
+    packed = np.unique(packed)
+    out = np.empty((len(packed), width), dtype=np.int64)
+    for c in range(width - 1, 0, -1):
+        packed, out[:, c] = np.divmod(packed, int(span[c]))
+    out[:, 0] = packed
+    return (out + lo).astype(arr.dtype)
+
+
 def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.ndarray]:
     """(track cells (N, 3), via cells (M, 2)) keep-outs `idx` stamp at the
     run's geometry. Cached per (binding set, geometry, clip) on pcb_data.
@@ -773,20 +802,33 @@ def _cells_for(pcb_data, idx: Tuple[int, ...], config) -> Tuple[np.ndarray, np.n
     to it and a rescue window (plane_pad_tap.make_local_window) is a SHALLOW
     copy that shares this cache dict with the whole board: keyed on geometry
     alone, a window's clipped cells would be handed to a whole-board route
-    at the same geometry, which would then see only part of the region."""
-    key = (idx, config.grid_step, config.track_width, config.clearance,
+    at the same geometry, which would then see only part of the region.
+
+    Each REGION is rasterised once per geometry and a binding set is the
+    union of its regions' cells: the native pass stamps every keep-out on its
+    own, so the union is what the joint pass stamps. A finger strip gives
+    each finger net its own set (every column but its own), and rasterising
+    each set whole cost every such net the strip's full rasterisation."""
+    geo = (config.grid_step, config.track_width, config.clearance,
            getattr(config, 'edge_extra_clearance', 0.0),
            config.via_size, config.via_drill, tuple(config.layers),
            getattr(pcb_data.board_info, 'board_bounds', None))
+    key = (idx,) + geo
     cache: Dict = pcb_data.__dict__.setdefault('_net_keepout_cells', {})
     if key not in cache:
-        rec = _Recorder()
-        _stamper(pcb_data, idx)(rec, config)
-        cells = (np.unique(np.concatenate(rec.cells), axis=0) if rec.cells
-                 else np.empty((0, 3), dtype=np.int32))
-        vias = (np.unique(np.concatenate(rec.vias), axis=0) if rec.vias
-                else np.empty((0, 2), dtype=np.int32))
-        cache[key] = (cells, vias)
+        cells, vias = [], []
+        for i in idx:
+            one = ('region', i) + geo
+            if one not in cache:
+                rec = _Recorder()
+                _stamper(pcb_data, (i,))(rec, config)
+                cache[one] = (_unique_rows(rec.cells, 3), _unique_rows(rec.vias, 2))
+            c, v = cache[one]
+            if len(c):
+                cells.append(c)
+            if len(v):
+                vias.append(v)
+        cache[key] = (_unique_rows(cells, 3), _unique_rows(vias, 2))
     return cache[key]
 
 
