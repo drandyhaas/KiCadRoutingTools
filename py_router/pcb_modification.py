@@ -5264,6 +5264,9 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         grazing = [s for s in net_segs
                    if (not keep_input_copper or id(s) in routed_seg_ids)
                    and not _locked(s)   # #1261
+                   # #2031: art (#337) is immutable; one side of its ring
+                   # dropped here opened it for the dead-end sweep.
+                   and not getattr(s, 'graphic', False)
                    and grazes(s)]
         if not grazing:
             continue
