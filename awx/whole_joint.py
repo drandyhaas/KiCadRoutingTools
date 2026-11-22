@@ -394,19 +394,42 @@ def main():
         for bus in sorted(parts):
             put({'bus': bus, 'joint': True, 'own': True, 'cuts': None}, os.path.join(rd, f'{bus}.joint.json'))
         return
-    s_ = cp_seed.solver()
-    s_.parameters.num_workers = WORKERS
-    s_.parameters.subsolvers.extend(ws.FALLBACK)
-    s_.parameters.interleave_search = True
-    s_.parameters.max_num_deterministic_batches = BATCHES
-    s_.parameters.share_glue_clauses = False
-    s_.parameters.share_binary_clauses = False
-    bus_events.watch_solve(s_, 'coupled', 'the coupled search', W_V, bus=None)
-    st = s_.Solve(m)
+    def search(batches, keep=None):
+        """(solver, status) of one search of the coupled model, `batches` at most; `keep` the neighbourhood workers it
+        keeps alone beside the complete searches (None: every one)"""
+        s_ = cp_seed.solver()
+        s_.parameters.num_workers = WORKERS
+        s_.parameters.subsolvers.extend(ws.FALLBACK)
+        s_.parameters.interleave_search = True
+        s_.parameters.max_num_deterministic_batches = batches
+        s_.parameters.share_glue_clauses = False
+        s_.parameters.share_binary_clauses = False
+        if keep is not None:
+            s_.parameters.filter_subsolvers.extend(list(ws.FALLBACK) + list(keep))
+        bus_events.watch_solve(s_, 'coupled', 'the coupled search', W_V, bus=None)
+        return s_, s_.Solve(m)
+    # (TWO SEARCHES, as each bus's own plan-finders on more layers (whole_solve.finders_split): with every
+    # neighbourhood worker on, the complete searches -- the only ones that raise the bound -- had a quarter of the
+    # work, and the gap sat in the buses' own objectives. The second, from the first's plan and bound, keeps
+    # whole_solve.FIND_LNS_KEEP alone beside them)
+    s_, st = search(ws.FIND_LNS_BATCHES)
+    bound_ = s_.BestObjectiveBound() if st in ok else -math.inf
+    if st != cp_model.OPTIMAL:
+        if st in ok:
+            m.ClearHints()
+            for i_ in range(len(m.Proto().variables)):
+                m.AddHint(m.GetIntVarFromProtoIndex(i_), s_.Value(m.GetIntVarFromProtoIndex(i_)))
+        if bound_ > -math.inf:
+            m.Add(OBJ >= int(math.ceil(bound_ - 1e-6)))
+        s2_, st2 = search(BATCHES - ws.FIND_LNS_BATCHES, ws.FIND_LNS_KEEP)
+        if st2 in ok:
+            bound_ = max(bound_, s2_.BestObjectiveBound())
+            if st not in ok or s2_.ObjectiveValue() <= s_.ObjectiveValue():
+                s_, st = s2_, st2
     secs = time.time() - t0
     bus_events.emit('coupled', 'search', bus=None, round=key, status=s_.StatusName(st), secs=round(secs),
                     couplings=len(brk), buses=sorted(parts),
-                    **({'cost': round(s_.ObjectiveValue() / W_V, 1), 'bound': round(s_.BestObjectiveBound() / W_V, 1),
+                    **({'cost': round(s_.ObjectiveValue() / W_V, 1), 'bound': round(bound_ / W_V, 1),
                         'broken': sum(s_.Value(k_) for k_ in brk)} if st in ok else {}))
     if st not in ok:
         print(f'  coupled search: [{s_.StatusName(st)}] {secs:.0f}s -- no plan: every bus keeps its own')
@@ -414,7 +437,7 @@ def main():
     else:
         sv = s_
         print(f'  coupled search: [{s_.StatusName(st)}] {secs:.0f}s, {s_.ObjectiveValue() / W_V:.1f} vias-worth '
-              f'(bound {s_.BestObjectiveBound() / W_V:.1f}), {sum(s_.Value(k_) for k_ in brk)} of {len(brk)} '
+              f'(bound {bound_ / W_V:.1f}), {sum(s_.Value(k_) for k_ in brk)} of {len(brk)} '
               f'couplings broken')
     if cramped and sv is not None:
         print(f'  room: {sum(sv.Value(c_) for c_ in cramped)} cramped change(s) in the coupled plan')

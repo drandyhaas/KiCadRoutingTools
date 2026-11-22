@@ -79,7 +79,7 @@ check('3. run: the proof read off the plan and the bound it ended with', re.sear
     r'pr_ = st_ in OK_ and math\.floor\(s_\.ObjectiveValue\(\) / W_V\) <= math\.floor\(b_ / W_V\)', RUN) is not None)
 check('3. ...the gap met across a whole via: the bound\'s whole vias asked alone, in the same batches',
       'if st_ in OK_ and not pr_ and s_.ObjectiveValue() - b_ < W_V:' in RUN
-      and 'mq_.Add(OBJ <= W_V * (f_ + 1) - 1)' in RUN and 'once(subs, batches, b_, model=mq_)' in RUN)
+      and 'mq_.Add(OBJ <= W_V * (f_ + 1) - 1)' in RUN and re.search(r'once\(subs, batches, b_, model=mq_(?:, keep=keep)?\)', RUN) is not None)
 check('3. ...none there proves the plan\'s', 'elif stq_ == cp_model.INFEASIBLE:' in RUN
       and 'b_, pr_ = W_V * (f_ + 1), True' in RUN)
 check('3. ...a plan the gap test ended is FEASIBLE', re.search(

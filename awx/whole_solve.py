@@ -56,6 +56,9 @@ W_V = 10 ** 6                          # per via: vias first (an integer: the ob
 W_OVER_X = 5                           # each via a net carries past two costs this many vias MORE (whole_ends.W_OVER)
 SOLVE_BATCHES = 100                    # CP-SAT interleaved batches: the plan-finders' most
 PROBE_BATCHES = 10                     # the bound-raising workers' (run)
+FIND_LNS_BATCHES = 50                  # (more routing layers than two, finders_split) the plan-finders' first search,
+#                                        of their SOLVE_BATCHES, every neighbourhood worker on; the rest FIND_LNS_KEEP's
+FIND_LNS_KEEP = ['graph_arc_lns', 'graph_var_lns']  # ...the neighbourhood workers the second search keeps, alone
 FIRST_BATCHES = (100, 50, 100)          # a fresh solve's FIRST PLAN in two steps (below), its steps' batches: the layer
 #                                         rule off, the layer puzzle, the places
 PLANE_BATCHES = 20                     # the plane tie's search (_plane_tie), batches at most
@@ -84,6 +87,14 @@ def finders_alone(subs, layers):
     runs with CP-SAT's neighbourhood workers off (solve's `once`). The bound-raising probe and a window's search
     keep theirs, and so does every search on more layers -- there the neighbourhood searches find the plans"""
     return layers == 2 and list(subs) == FALLBACK
+
+
+def finders_split(layers):
+    """True where the plan-finders' SOLVE_BATCHES are two searches (solve): on more routing layers than two,
+    FIND_LNS_BATCHES with every neighbourhood worker, then the rest from the first's plan and bound with the
+    neighbourhood workers FIND_LNS_KEEP alone beside the complete searches. On two layers one search, the complete
+    searches alone (finders_alone)"""
+    return layers > 2
 
 
 FACE_ROOM = 2 * VNEED                 # the band along the source's near face: a change's room along its lane
@@ -2516,7 +2527,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
     # twenty of a search are never thinned by the log's rate limit; a probe has far fewer) and a new plan or a rise of
     # the bound sets it back (each said to the reader as it happens: the bound by its callback, as the '#Bound' lines
     # are thinned past twenty).
-    def once(subs, batches, known_, model=None):
+    def once(subs, batches, known_, model=None, keep=None):
         s_ = cp_seed.solver()
         s_.parameters.num_workers = SOLVE_WORKERS
         s_.parameters.subsolvers.extend(subs)
@@ -2535,6 +2546,11 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         # same batches, the same workers, the search as reproducible as before
         if finders_alone(subs, NL):
             s_.parameters.use_lns = False
+        # (the plan-finders' second search on more layers, finders_split: of the neighbourhood workers `keep` alone,
+        # beside the complete searches -- each of those runs a task at a time, and with two neighbourhood workers they
+        # have nearly one each in every batch, the two the rest of it)
+        if keep is not None:
+            s_.parameters.filter_subsolvers.extend(list(subs) + list(keep))
         # (the proof, in the batch it is met: the plan within a whole via of the bound -- run reads the whole vias)
         s_.parameters.absolute_gap_limit = W_V - 1
         stall = {'n': 0, 'plan': False}
@@ -2565,11 +2581,12 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
     # done; else the PLAN-FINDING workers run on from its plan and bound (SOLVE_BATCHES their most). On the two-end
     # USB and Ethernet bus the bound-raising workers' bound stood at 38 from 4 s on, and given 100 batches they ran
     # 159 s to it, their plans (from 35 s) the plan-finders' work, who found them from 22 s
-    def run(subs, batches, known=-math.inf):
-        """(solver, status, proved, its bound, seconds) of one search of `batches`; `known` a bound proved before it"""
+    def run(subs, batches, known=-math.inf, keep=None):
+        """(solver, status, proved, its bound, seconds) of one search of `batches`; `known` a bound proved before it;
+        `keep` the neighbourhood workers it keeps alone (None: every one)"""
         t0_ = time.time()
         OK_ = (cp_model.OPTIMAL, cp_model.FEASIBLE)
-        s_, st_ = once(subs, batches, known)
+        s_, st_ = once(subs, batches, known, keep=keep)
         b_ = max(s_.BestObjectiveBound(), known)
         pr_ = st_ in OK_ and math.floor(s_.ObjectiveValue() / W_V) <= math.floor(b_ / W_V)
         if st_ in OK_ and not pr_ and s_.ObjectiveValue() - b_ < W_V:
@@ -2586,7 +2603,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 v_ = m.GetIntVarFromProtoIndex(i_)
                 mq_.AddHint(v_, s_.Value(v_))
             t1_ = time.time()
-            sq_, stq_ = once(subs, batches, b_, model=mq_)
+            sq_, stq_ = once(subs, batches, b_, model=mq_, keep=keep)
             print(f'   the gap met across a whole via (best {s_.ObjectiveValue():.0f}, bound {b_:.0f}): a plan of '
                   f'{f_} whole vias\' worth? [{sq_.StatusName(stq_)}] {time.time() - t1_:.0f}s')
             if stq_ in OK_:
@@ -2894,7 +2911,33 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         if known > -math.inf:
             m.Add(OBJ >= int(math.ceil(known - 1e-6)))
         t_first = secs
-        sv, st, proved, known, secs = run(FALLBACK, SOLVE_BATCHES, known)
+        # (ON MORE ROUTING LAYERS THAN TWO the batches are TWO searches, finders_split: with every neighbourhood worker
+        # on the complete searches -- the only ones that raise the bound -- had a quarter of the work, and a 45-lane
+        # eight-layer bus kept 82 vias' worth unproved against 68; alone they left it at 92. The second search, from
+        # the first's plan and bound, keeps two neighbourhood workers beside them)
+        split_ = finders_split(NL)
+        sv, st, proved, known, secs = run(FALLBACK, FIND_LNS_BATCHES if split_ else SOLVE_BATCHES, known)
+        if split_ and not proved:
+            print(f'   plan-finding workers, {FIND_LNS_BATCHES} batches: [{sv.StatusName(st)}] {secs:.0f}s' +
+                  (f', best {sv.ObjectiveValue():.0f}' if st in (cp_model.OPTIMAL, cp_model.FEASIBLE) else ', no plan') +
+                  f', bound {known:.0f} -- on from there, {SOLVE_BATCHES - FIND_LNS_BATCHES} batches, the '
+                  f'neighbourhood workers {", ".join(FIND_LNS_KEEP)} alone')
+            if st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                m.ClearHints()
+                for i_ in range(len(m.Proto().variables)):
+                    v_ = m.GetIntVarFromProtoIndex(i_)
+                    m.AddHint(v_, sv.Value(v_))
+            if known > -math.inf:
+                m.Add(OBJ >= int(math.ceil(known - 1e-6)))
+            sv2_, st2_, _pr2, known, secs2_ = run(FALLBACK, SOLVE_BATCHES - FIND_LNS_BATCHES, known, FIND_LNS_KEEP)
+            secs += secs2_
+            # (the second search's plan where it has one no dearer -- it starts from the first's, hinted whole -- and
+            # the bound of both)
+            if st2_ in (cp_model.OPTIMAL, cp_model.FEASIBLE) and \
+                    (st not in (cp_model.OPTIMAL, cp_model.FEASIBLE) or sv2_.ObjectiveValue() <= sv.ObjectiveValue()):
+                sv, st = sv2_, st2_
+            proved = st in (cp_model.OPTIMAL, cp_model.FEASIBLE) and \
+                math.floor(sv.ObjectiveValue() / W_V) <= math.floor(known / W_V)
         print(f'   plan-finding workers: [{sv.StatusName(st)}] {secs:.0f}s (after {t_first:.0f}s)')
         solve_secs += secs
     # (the plane tie: the inner layers' MIRROR broken by the board. Every term prices two inner layers alike,

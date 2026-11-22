@@ -54,7 +54,7 @@ check('1. not a window\'s search (no list)', not ws.finders_alone([], 2))
 
 # 2. the search's parameters
 SRC = open(os.path.join(ROOT, 'awx', 'whole_solve.py')).read()
-m = re.search(r'    def once\(subs, batches, known_(?:, model=None)?\):\n(.*?)\n        stall = ', SRC, re.S)
+m = re.search(r'    def once\(subs, batches, known_(?:, model=None)?(?:, keep=None)?\):\n(.*?)\n        stall = ', SRC, re.S)
 body = m.group(1) if m else ''
 check('2. once: the neighbourhood workers off for the plan-finders alone',
       re.search(r'if finders_alone\(subs, NL\):\n\s+s_\.parameters\.use_lns = False', body) is not None

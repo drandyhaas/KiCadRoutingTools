@@ -743,7 +743,12 @@ alone on its array a group of one:
    starts. Where the buses' own plans side by side break no coupling there
    is nothing to settle, and no search runs: each bus's own plan is the
    coupled one (four such searches had taken 198 to 264 s each and ended
-   where they began, or 2 vias-worth lower).
+   where they began, or 2 vias-worth lower). Where there is something to
+   settle, the coupled search's batches are two searches, as a bus's own
+   plan-finders' are on more layers than two (`finders_split`, below):
+   `whole_solve.FIND_LNS_BATCHES` with every neighbourhood worker on, then
+   the rest from that plan and bound with `FIND_LNS_KEEP` alone beside the
+   complete searches (`tests/test_622_joint_split.py`).
    Every re-solve of the loops after is coupled in the same way, the buses
    in step (`joint_loop_sync`): a conflict two buses' audits find is the two
    buses' to settle, not only the one that found it. In those solves another
@@ -1860,9 +1865,16 @@ batch where only a complete search raises the bound. Four seeds of a 50-lane
 two-layer bus, each unproved with them (63, 226, 47 and 44 vias' worth
 against bounds of 25, 38, 21 and 28), are proved without, at 63, 78, 35 and
 44. With more layers the neighbourhood searches are the ones that find the
-plans -- an eight-layer bus kept 82 with them and 92 without -- so there the
-search is as it was (`tests/test_622_finders_alone.py`). Each stops sooner once
-the vias are proved, and the probe once it has a plan and three of its own
+plans -- an eight-layer bus kept 82 with them and 92 without, unproved both
+ways -- so there the 100 batches are two searches (`finders_split`): 50 as
+before, then 50 from their plan and bound with two neighbourhood searches
+alone beside the complete ones (`FIND_LNS_KEEP`), which then have a turn about
+every other batch where they had one in eight. Of 15 such buses' first
+solves the one search left unproved, 7 are proved and 7 keep a better plan
+(by 3 to 51 vias' worth); the last keeps its 82, its bound raised from 68 to
+80, and the 10 it proved are as they were (`tests/test_622_finders_alone.py`,
+`tests/test_622_finders_split.py`). Each stops sooner once the vias are
+proved, and the probe once it has a plan and three of its own
 model reductions in a row find no better plan or bound -- both at the end of a
 batch: the proof by CP-SAT's own gap test (`absolute_gap_limit`, a whole via
 less one), the stall between two batches, where the solver writes its `#Model`
