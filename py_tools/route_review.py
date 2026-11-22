@@ -52,7 +52,7 @@ import statistics
 import sys
 from collections import defaultdict
 
-from kicad_parser import parse_kicad_pcb  # noqa: E402
+from kicad_parser import parse_kicad_pcb, pour_zones  # noqa: E402
 from placement.grouping import BoardView  # noqa: E402
 
 
@@ -90,7 +90,7 @@ def review(pcb_file, cell=2.0, hot=0.5, top=8, pcb=None):
     pcb = pcb if pcb is not None else parse_kicad_pcb(pcb_file)
     view = BoardView(pcb)
     name = view.name_of
-    poured = {z.net_id for z in (pcb.zones or ()) if z.net_id}
+    poured = {z.net_id for z in pour_zones(pcb.zones) if z.net_id}
     tracks = [s for s in pcb.segments if not getattr(s, 'graphic', False) and s.net_id]
     clearance = board_default_netclass_clearance(pcb_file) or 0.2
     width = statistics.median([s.width for s in tracks]) if tracks else 0.2

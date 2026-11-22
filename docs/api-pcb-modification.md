@@ -34,8 +34,11 @@ re-commit of ripped copper, which must land exactly as it was.
 Cleanup (per net, on this result's new segments only):
 
 1. **Degenerate segment removal** — segments under 0.01 mm are dropped;
-   micro-bridges between two chains are welded shut (neighbors moved to the
-   midpoint) so no gap opens.
+   micro-bridges between two chains are welded shut so no gap opens. The
+   longer neighbour keeps its end and the shorter one's end moves onto it
+   (#1979), so a long leg keeps its bearing (a coupled pair member stays
+   parallel to its partner) and the shorter one takes the bridge, at most
+   0.01 mm. Two equally long neighbours meet at the bridge's midpoint.
 2. **Dead-end prune** (#84) — this route's own dead-end spurs are unwound, so
    dead copper does not block the routes that follow. The net's copper
    already on the board anchors junctions but is never removed here, and the
@@ -188,6 +191,25 @@ whose end an anchor's copper still touches, #1870, where it was 3 track
 widths); and
 > `snap_stub_gaps` skips a target trace the stub's own segment already crosses,
 > instead of laying a connector back over the tail.
+
+> **#1978 -- a loop whose two ends are one via is cut out.**
+> `excise_via_shorted_loops(results, pcb_data, scope_net_ids=None,
+> keep_input_copper=False) -> (loops, segments_removed)` finds a routed track
+> passing over a same-net via mid-span (its copper overlapping the via's, its
+> ends clear of it) where the copper on one side runs on as one unbranched
+> chain back into that via: a loop no signal travels that every all-copper
+> length counts. It removes the chain and shortens the track, in place, to the
+> foot of the via's centre. Only a pure loop of this run's unlocked copper on
+> one layer (no pad, other via, tee or crossing on it), never on a zoned net,
+> each excision gated on the physical and the width-clamped connectivity.
+> `run_post_route_cleanup` runs it right after `prune_redundant_cycles`, which
+> cannot see such a loop: it joins a via only to segment ends and removes only
+> whole segments, and the passing track is load-bearing on its other side.
+> The pipeline runs it only on the nets the step length-matches
+> (`length_graded_net_ids`: pairs matched P to N and length-match group
+> members, plus the AC-coupled chain members route_diff passes as
+> `extra_length_matched_net_ids`). Elsewhere the loop is dead copper no
+> measure reads, and cutting it only reshapes what later steps route round.
 
 > **The graze prune keeps a fill island's only link.** `prune_grazing_segments`
 > grades each removal on a zoned net twice: under the real-fill validator

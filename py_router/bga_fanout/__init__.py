@@ -3320,6 +3320,19 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # rotated run inherits the floored value (idempotent: re-floor is a no-op).
     from kicad_dru import board_layer_clearance_map
     _lcl_498 = board_layer_clearance_map(pcb_data)
+    # A rule area holding the whole ball field (bga_fanout.area_view): its
+    # rule replaces the net classes and every rule before it in the file, so
+    # only the layer rules after it floor the scalar, the classes go, and the
+    # run clearance rises to the room's value where the room tightens it. The
+    # room's rule binds every ball, so a fab-floor rescue stops at its value,
+    # as it stops at a scoped rule's (#1565).
+    from bga_fanout.area_view import part_view
+    _room = part_view(pcb_data, footprint)
+    if _room is not None:
+        _lcl_498 = _room.layer_map(_lcl_498)
+        clearance = _room.clearance(clearance)
+        net_clearances = {}
+        _clearance_floor = max(_clearance_floor, _room.value)
     _mx_498 = max((v for l, v in _lcl_498.items() if l in (layers or [])),
                   default=None)
     if _mx_498 is not None and _mx_498 > clearance:
@@ -4252,6 +4265,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # obstacle map's stamps here, the escaping ball's side in the class check
     from kicad_dru import install_pair_rule_channels
     _rules = install_pair_rule_channels(obstacle_cfg, pcb_data, fanned_net_ids)
+    if _room is not None:
+        # inside the room: its view of the classes and the rules (the class
+        # map is already empty, `net_clearances` was cleared above)
+        _room.apply(obstacle_cfg, clearance)
     _priced = bool(_nc) or _rules.live
 
     def _pair_cl(net_a, net_b, layer=None, types=None):

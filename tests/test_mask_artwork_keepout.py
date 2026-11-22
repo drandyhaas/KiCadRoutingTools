@@ -147,6 +147,9 @@ def _covered(entries, pt):
                for e in entries)
 
 
+# A second NET_A pad well away from every opening: makes NET_A a routed net.
+FAR_A = ('P2', 38.0, 2.0, 'NET_A', 0.8, 0.8)
+
 SMALL_RECT = ('  (gr_rect (start 0 3) (end 1 4) (stroke (width 0) (type solid)) '
               '(fill solid) (layer "F.Mask") (uuid "small"))')
 
@@ -163,7 +166,7 @@ def test_broad_opening_touching_a_pad_keeps_the_rest():
     # neighbourhood (OWN_MARGIN) is exempt
     rect = ('  (gr_rect (start 15 8) (end 25 16) (stroke (width 0) (type solid)) '
             '(fill solid) (layer "F.Mask") (uuid "broad"))')
-    got = _keepouts(rect, [('P1', 15.5, 12.0, 'NET_A', 0.8, 0.8)])
+    got = _keepouts(rect, [('P1', 15.5, 12.0, 'NET_A', 0.8, 0.8), FAR_A])
     assert _covered(got, (20.0, 12.0)) and _covered(got, (17.0, 12.0)), got
     assert not _covered(got, (15.5, 12.0)), 'pad centre still blocked'
 
@@ -171,8 +174,23 @@ def test_broad_opening_touching_a_pad_keeps_the_rest():
 def test_pad_own_opening_is_exempt():
     own = ('  (gr_rect (start 4.4 9.4) (end 5.6 10.6) (stroke (width 0) (type solid)) '
            '(fill solid) (layer "F.Mask") (uuid "own"))')
-    assert _keepouts(own, [('P1', 5.0, 10.0, 'NET_A', 0.8, 0.8)]) == []
+    assert _keepouts(own, [('P1', 5.0, 10.0, 'NET_A', 0.8, 0.8), FAR_A]) == []
     assert len(_keepouts(own)) == 1
+
+
+def test_single_pad_net_exempts_nothing():
+    # A net with one pad never routes: exempting its pad only opened the band
+    # around it (OWN_MARGIN) to every OTHER net, whose copper there ships bare
+    # in the opening (KiCad solder_mask_bridge; scalenode-cm4 SP6, a lone 4 mm
+    # pad under the N1 logo, got 3V3_SSD tracks through that band).
+    rect = ('  (gr_rect (start 15 8) (end 25 16) (stroke (width 0) (type solid)) '
+            '(fill solid) (layer "F.Mask") (uuid "broad"))')
+    lone = ('P1', 18.0, 12.0, 'unconnected-(P1-Pad1)', 2.0, 2.0)
+    got = _keepouts(rect, [lone])
+    assert _covered(got, (19.3, 12.0)) and _covered(got, (16.7, 12.0)),         'band around a single-pad net still open to other nets'
+    # the same pad on a routed net keeps its band, as before
+    got = _keepouts(rect, [('P1', 18.0, 12.0, 'NET_A', 2.0, 2.0), FAR_A])
+    assert not _covered(got, (19.3, 12.0)), 'routed pad lost its own opening'
 
 
 def test_circle_is_circumscribed_and_its_hole_inscribed():
@@ -253,6 +271,7 @@ if __name__ == '__main__':
     test_unrelated_long_pad_keeps_the_keepout()
     test_broad_opening_touching_a_pad_keeps_the_rest()
     test_pad_own_opening_is_exempt()
+    test_single_pad_net_exempts_nothing()
     test_circle_is_circumscribed_and_its_hole_inscribed()
     test_arc_stroke_covers_its_true_band()
     test_b_mask_keeps_b_cu_only()

@@ -606,12 +606,15 @@ minimum) every via there breaks a rule, and the clamp sizes it as before.
 via's drill at the board's hole clearance, so a via whose ring is narrower than
 `hole clearance - clearance` lets copper kept at the clearance off its copper
 sit too close to its hole (a 0.45/0.2 via rings 0.125; at 0.1 clearance that
-copper is 0.225 from the hole, under KiCad's 0.25). Every descent ladder
-therefore tries each tier rung raised to hold that ring just before the rung
-itself, so the ring is preferred within a tier and never forces a step to a
-smaller (costlier) tier: completion first, and each via that ships smaller
-than its net asked and below the ring is a `hole_clearance` row in
-`JSON_SUMMARY.design_rules` and the `Design rules` line. The hole clearance is
+copper is 0.225 from the hole, under KiCad's 0.25). Under `--escalation fab`
+every descent ladder therefore tries each tier rung raised to hold that ring
+just before the rung itself, so the ring is preferred within a tier and never
+forces a step to a smaller (costlier) tier: completion first, and each via
+that ships smaller than its net asked and below the ring is a `hole_clearance`
+row in `JSON_SUMMARY.design_rules` and the `Design rules` line. Under
+`--escalation board` the ring is one of the board's own rules, like its via
+and drill minimums (#2018): every ladder rung and every layer-swap shrink
+holds it, and a via no ring-holding size fits is not placed. The hole clearance is
 the board's declared `min_hole_clearance` (the live board's, on the GUI), raised
 to the chain's `fab_floor_origin`, else KiCad's factory 0.25; a declared 0 asks
 for no ring. A step's DRC writeback lowers `min_hole_clearance` to what it
@@ -656,7 +659,13 @@ the part (`!A.insideCourtyard('U1')` binds a via outside that part,
 `A.insideCourtyard('U1') || A.NetName == 'X'` X's via anywhere), is listed as one
 that MAY relax, with the nets its other terms do not rule out. No routing step
 applies a courtyard-scoped rule: the router routes that copper at the class
-value.
+value. The end-of-step via grades (the per-rule lines above and
+`board_setup_vias`) and the DRC writeback do read such a rule by position, as
+check_drc does (#1972). A via inside the courtyard is graded at the rule and is
+not named under the Board Setup minimum. The writeback lowers
+`min_via_annular_width`, `min_via_diameter` and `min_through_hole_diameter` only
+to vias that no `.kicad_dru` rule sizes, because KiCad grades a via that a rule
+sizes at the rule (kicad-cli 10.0.6). This holds on both fronts.
 
 **A via rule's `(layer ...)` clause (#1805).** Every reader of a via's size
 reads it as kicad-cli does for a via, of any type (through, blind, buried,
@@ -755,6 +764,24 @@ nets one by one costs build time: each named net is read on its own (a rule ORin
 200 net names added about half a minute to a 250-net board's map). The step
 prints `.kicad_dru rule 'x': hole_clearance min 0.254 mm: routed tracks and vias
 are kept that far from the holes of other nets' vias and pads`.
+
+A `hole_clearance` rule whose only unread terms are rule-area predicates
+(`A.insideArea('ROOM')`, `intersectsArea`, `enclosedByArea`, on either item,
+with any of the terms above) binds by where each item stands, as kicad-cli
+10.0.8 grades it: an item is in an area where its copper overlaps the area on
+the layer the pair is asked on (a through via pair is asked on every layer the
+two share), `enclosedByArea` wants the whole item inside, and the last matching
+rule still wins. `check_drc.py` grades it so (`Area-scoped hole-clearance
+rules`), and the generators' gate (`HoleRuleGate`: the fan-outs, GND vias, plane
+taps) and the route step read the same answer. The route step measures each
+hole of the board against the areas; the copper it lays has no position when
+the map is built, so where the condition turns on that copper being in an area
+-- one drawn on the layer, within the rule's reach of the hole -- the hole is
+held at the larger of the rule's value and what the earlier rules give
+(tighten-safe). A track that passes such a hole outside the area and enters it
+further along is not held by the map; the step's own grade names any such row.
+A rule naming an area the board does not draw stays `NOT GRADED` and `NOT
+honoured`.
 
 The generators that test a via site by their own means ask the same grader:
 `bga_fanout.py` (dogbone and under-pad), `qfn_fanout.py`, `route_planes.py
@@ -1206,7 +1233,7 @@ These options are only available in `route_diff.py`. All nets passed to route_di
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--diff-chamfer-extra` | 1.5 | Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings) |
 | `--diff-pair-intra-match` | false | Match P/N lengths within each diff pair |
-| `--diff-pair-intra-lane` | - | Measure each intra-matched pair between two pads (its lane) instead of in total copper: `auto` or `P_NET=REF.PAD:REF.PAD ...` (#1869) |
+| `--diff-pair-intra-lane` | - | Measure each intra-matched pair between two pads (its lane) instead of in total copper: `auto` or `P_NET=REF.PAD:REF.PAD ...` (#1869); the N member's pads are its pads on the same two parts, or named too (`N_NET=REF.PAD:REF.PAD`) when they are on other parts, as for a pair through a series part per member (#1970) |
 | `--ac-couple-match` | false | End-to-end length-match AC-coupled pairs split by series DC-blocking caps (#196): the cap chain is found, the concatenated P path is matched against the N path, and the meanders go on whichever segment has room |
 
 `--track-width` is the pair's leg width here (see [Geometry Options](#geometry-options)).

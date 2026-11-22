@@ -27,6 +27,7 @@ pathological slowness.
 ```bash
 git clone https://github.com/drandyhaas/KiCadRoutingTools.git
 cd KiCadRoutingTools
+python3 -m pip install -r requirements.txt
 python3 build_router.py        # fetches the prebuilt Rust router for your platform
 ```
 

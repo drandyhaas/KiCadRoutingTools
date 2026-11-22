@@ -333,6 +333,14 @@ def _part_main(args, pcb, tier=None, overrides=None):
               f"{', '.join(f.unstartable)}")
     if f.ignored:
         print(f"  plane nets, no demand: {', '.join(f.ignored)}")
+    # #1981: what the number graded, as --pad says it (#1347)
+    _ns, _nv = f.routed_set_aside
+    if _ns or _nv:
+        print(f"routed     {_ns} track segment(s) and {_nv} via(s) of routing set "
+              f"aside: the flow above grades the PLACEMENT (pads, parts, rule "
+              f"areas, locked copper)")
+    print("  it counts nets that can leave by a track, not a via site beside "
+          "each pin: a via-drop fan-out can still lose its sites to routing")
     return 1 if f.deficit else 0
 
 

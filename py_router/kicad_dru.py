@@ -413,8 +413,8 @@ def read_board_unmodelled_clearance_rules(board_path: str, copper_layers: List[s
 #: rule, check_drc silent). The kinds that change a fill and report nothing
 #: (`zone_connection`, `thermal_relief_gap`, `thermal_spoke_width`) are not
 #: among them. `hole_clearance` is not either: check_drc grades it
-#: (`check_drc.hole_rule_grade`) and names a rule whose condition it cannot
-#: read. `physical_clearance` and `physical_hole_clearance` bind silkscreen
+#: (`check_drc.hole_rule_grade`, a rule-area condition by where each item
+#: stands) and names a rule whose condition it cannot read. `physical_clearance` and `physical_hole_clearance` bind silkscreen
 #: and footprint graphics too (kicad-cli 10.0.6), which check_drc does not
 #: grade against copper or holes. A `courtyard_clearance` rule of min 0 or
 #: below is read as relaxing only (`_relaxes_only`) and left out.

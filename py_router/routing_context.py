@@ -209,6 +209,15 @@ def carry_run_state(src, dst):
     return dst
 
 
+def _relocation_plane_ids(pcb_data, skip):
+    """Plane nets armed for tap relocation (#424): left out of the base map and
+    of routed_net_ids, so a builder that starts from the base must stamp them
+    itself or a casualty re-route lays copper straight through their vias."""
+    skip = set(skip)
+    return [n for n in getattr(pcb_data, '_tap_relocation_plane_ids', ()) or ()
+            if n not in skip]
+
+
 def build_diff_pair_obstacles(
     diff_pair_base_obstacles,
     pcb_data,
@@ -267,6 +276,8 @@ def build_diff_pair_obstacles(
     # Add other unrouted nets as obstacles (can use cache since they haven't changed)
     other_unrouted = [nid for nid in remaining_net_ids
                      if nid != p_net_id and nid != n_net_id]
+    other_unrouted += _relocation_plane_ids(
+        pcb_data, set(other_unrouted) | set(routed_net_ids) | {p_net_id, n_net_id})
     for other_net_id in other_unrouted:
         if net_obstacles_cache and other_net_id in net_obstacles_cache:
             add_net_obstacles_from_cache(obstacles, net_obstacles_cache[other_net_id])
@@ -535,6 +546,8 @@ def build_single_ended_obstacles(
     # adds then reach exactly the rungs that hold copper (populated_via_rungs),
     # so they must see those rungs populated. Rung 0 is order-independent.
     other_unrouted = [nid for nid in remaining_net_ids if nid != net_id]
+    other_unrouted += _relocation_plane_ids(
+        pcb_data, set(other_unrouted) | set(routed_net_ids) | {net_id})
     _raw_unrouted = []
     for other_net_id in other_unrouted:
         if net_obstacles_cache and other_net_id in net_obstacles_cache:
@@ -1189,9 +1202,11 @@ def record_diff_pair_success(
             record_single_ended_success's callers keep. None = no map.
     """
     add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
-    from obstacle_cache import refresh_net_obstacles
+    # Every net the result put copper on: the pair's GND return vias ride
+    # it on the return net (#806, committed_net_ids).
+    from obstacle_cache import refresh_net_obstacles, committed_net_ids
     refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
-                          config, (pair.p_net_id, pair.n_net_id))
+                          config, committed_net_ids(result, (pair.p_net_id, pair.n_net_id)))
 
     if pair.p_net_id in remaining_net_ids:
         remaining_net_ids.remove(pair.p_net_id)

@@ -245,13 +245,21 @@ def main():
         opts.finish.SetValue(True)
         opts.effort_factor.SetValue(3.5)
         opts.plane_layer_cost.SetValue(2.5)
+        # the four opt-in checkboxes, each ticked so a restore that drops one
+        # shows (unticked is their default)
+        opts.board_rules.SetValue(True)
+        opts.floor_first.SetValue(True)
+        opts.keep_placement.SetValue(True)
+        opts.write_fill.SetValue(True)
         saved = get_dialog_settings(dlg)
         dlg2 = RoutingDialog(None, parse_kicad_pcb(board), board)
         try:
             if page_index(dlg2.notebook, 'Auto') != 0 or dlg2.notebook.GetSelection() != 0:
                 bad.append("a fresh dialog does not open on the Auto page")
             restore_dialog_settings(dlg2, saved)
-            want = {'finish': True, 'effort_factor': 3.5, 'plane_layer_cost': 2.5}
+            want = {'finish': True, 'effort_factor': 3.5, 'plane_layer_cost': 2.5,
+                    'board_rules': True, 'floor_first': True, 'keep_placement': True,
+                    'write_fill': True}
             got2 = dlg2.autoroute_tab.get_config()
             if got2 != want:
                 bad.append(f"autoroute options: restored {got2}, want {want}")

@@ -797,10 +797,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_intra_lane: #1869 -- match, record and grade each intra-matched
             pair on its LANE, the copper path between two pads, instead of
             total copper: 'auto' (the two terminals the pair step routes the
-            pair between) or a list of 'P_NET=REF.PAD:REF.PAD'. None: total
-            copper, KiCad's measure. Only a pair the step intra-matches and no
-            .kicad_dru skew rule binds takes a lane (the step says why
-            another does not). A lane naming pads its nets lack raises
+            pair between) or a list of 'P_NET=REF.PAD:REF.PAD', the N member's
+            pads being its pads on the same two parts unless it is named too
+            ('N_NET=REF.PAD:REF.PAD'; #1970, for a pair whose members end on
+            different parts). None: total copper, KiCad's measure. Only a
+            pair the step intra-matches and no .kicad_dru skew rule binds
+            takes a lane (the step says why another does not). A lane naming
+            pads its nets lack raises
             ValueError (the CLI prints it and exits 2).
         intra_pair_tolerance: the P/N skew every intra-matched pair is matched
             to, over a .kicad_dru rule's (#1503: the CLI's explicit
@@ -2615,7 +2618,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print("End-to-end AC-coupled diff-pair length matching (#196)")
         print("=" * 60)
         for _xn in ac_xnets:
-            _acr = apply_ac_coupled_length_matching(_xn, routed_results, config, pcb_data)
+            _acr = apply_ac_coupled_length_matching(
+                _xn, routed_results, config, pcb_data,
+                pair_diagnostics=state.pair_diagnostics)
             # #1799: the pass's own verdict; re-read off the shipped copper
             # below (regrade_ac_chains), as the per-pair records are.
             ac_coupled_summary.append({
@@ -2708,11 +2713,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     dp_scope = diff_cleanup_scope(
         diff_pair_ids_to_route, routed_results, state.diff_pair_single_ended_nets,
         lambda nid: _dpc_member_connected(pcb_data, nid))
+    # #1978: an AC-coupled chain this step matches end to end is length-matched
+    # too, though its pairs are not in config.skew_graded_net_ids
+    _ac_matched_ids = ({nid for _xn in ac_xnets
+                        for nid in (_xn.p_net_ids + _xn.n_net_ids)}
+                       if config.ac_couple_match else set())
     _dp_cleanup = run_post_route_cleanup(
         results, pcb_data, dp_scope, config,
         label='Diff-pair ', snap=False, phantom=False, neck=False,
         keep_input_copper=keep_input_copper,
-        progress_callback=progress_callback)
+        progress_callback=progress_callback,
+        extra_length_matched_net_ids=_ac_matched_ids)
     # #1843: a coupled pair is laid at one gap, so a tightened rule area it
     # passes through is not honoured between P and N: said so, per pair.
     from area_clearance import pair_gaps_below
@@ -3770,7 +3781,10 @@ Examples:
                              "total copper, so a branch to a third pad counts as a stub "
                              "(#1869): 'auto' (the two terminals the pair step routes "
                              "the pair between) or one or more P_NET=REF.PAD:REF.PAD (the "
-                             "N member's pads are its pads on the same two parts). Takes "
+                             "N member's pads are its pads on the same two parts, unless "
+                             "it is named too: name both members, P_NET=... N_NET=..., "
+                             "of a pair whose members end on different parts, such as a "
+                             "series resistor or capacitor per member). Takes "
                              "--diff-pair-intra-match; a pair a .kicad_dru skew rule binds "
                              "is matched on total copper, as KiCad grades the rule. "
                              "Default: total copper, as KiCad's skew DRC measures.")

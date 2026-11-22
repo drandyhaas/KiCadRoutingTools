@@ -2017,7 +2017,9 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
 
     Copper joins where it touches, as check_connected and KiCad have it
     (#1629): a track node joins a pad when its round cap reaches the pad's
-    exact outline, a via joins a pad its copper overlaps, two of `pads`
+    exact outline, and a via when its copper reaches the via's -- a track
+    passing the via mid-span is cut at the foot of the via's centre (#1969)
+    -- a via joins a pad its copper overlaps, two of `pads`
     whose copper touches on a shared layer join each other, and two tracks
     of a layer whose centrelines cross meet at the crossing (#1705).
 
@@ -2095,8 +2097,12 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
         spanned = (via_copper_layers(v, copper_layers) if copper_layers
                    else list(via_end_layers(v)))
         radius = max((getattr(v, 'size', 0) or 0) / 2, tolerance)
+        # #1969: a track point `hw` wide joins where its copper reaches the
+        # via's, the reach check_connected and a pad's join (above) use --
+        # not only where its centreline is inside the via's radius
         discs.append((v.x, v.y, radius, spanned,
-                      lambda x, y, _v=v, _r=radius: math.hypot(x - _v.x, y - _v.y) <= _r + tolerance,
+                      lambda x, y, hw=0.0, _v=v, _r=radius: math.hypot(
+                          x - _v.x, y - _v.y) <= _r + max(hw - 1e-6, tolerance),
                       'via', v))
     for pad in pads:
         pad_layers = [l for l in expand_pad_layers(pad.layers, copper_layers)]
@@ -2169,7 +2175,10 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
         for (cx, cy, radius, dlayers, _hit, kind, _obj) in discs:
             if s.layer not in dlayers:
                 continue
-            t = _project(cx, cy, radius + tolerance)
+            # #1969: a track whose copper overlaps a via's is cut at the foot
+            # of the via's centre, so the via joins it there
+            t = _project(cx, cy, radius + (max((s.width or 0.0) / 2 - 1e-6, tolerance)
+                                           if kind == 'via' else tolerance))
             if t is not None:
                 cuts.append(t)
             if kind == 'pad' and id(_obj) in through:
@@ -2255,7 +2264,7 @@ def _net_track_graph(pcb_data: PCBData, net_id: int, pads,
                 if nlayer != layer:
                     continue
                 if kind == 'via':
-                    if hit(nx, ny):
+                    if hit(nx, ny, half_w.get(node, 0.0)):
                         add_edge(hub, node, math.hypot(nx - cx, ny - cy),
                                  ('via_join', obj, node))
                         joined = True

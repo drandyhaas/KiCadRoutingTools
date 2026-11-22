@@ -1050,6 +1050,128 @@ def _strip_written_copper(output_file, segments, vias, name_of,
     return n_s, n_v
 
 
+def _pair_unit_lap(output_file, rk, filter_names):
+    """Pair-unit lap (pair_exchange.py): when the reconciliation laps end
+    with one leg of a pair open and blaming its partner, strip both legs and
+    the nets crossing their shared pad row, route the legs, then the
+    crossers. Works on a copy; the copy replaces `output_file` only when both
+    sub-runs close every net they were given at nominal rules (escalation
+    off: the rescue may only refine the grid). Returns the nets it closed that were open before (0 =
+    board untouched). KICAD_PAIR_UNIT_LAP=0 disables it."""
+    import shutil
+    import glob as _glob
+    import pair_exchange as _px
+    if os.environ.get('KICAD_PAIR_UNIT_LAP', '1') == '0':
+        return 0
+    tlo = dict(getattr(batch_route, '_targets_left_open', None) or {})
+    if not tlo:
+        return 0
+    pcb = parse_kicad_pcb(output_file)
+    name_of = {nid: n.name for nid, n in pcb.nets.items()}
+    id_of = {v: k for k, v in name_of.items()}
+    pairs = _px.find_exchanges(tlo, id_of)
+    if not pairs:
+        return 0
+    zone_names = {name_of.get(z.net_id) for z in pour_zones(pcb.zones)}
+
+    def _pads(nm):
+        return [(p.component_ref, p.global_x, p.global_y,
+                 max(p.size_x, p.size_y) / 2, max(p.size_x, p.size_y) / 2)
+                for p in (pcb.pads_by_net.get(id_of[nm]) or [])]
+
+    closed = 0
+    saved_tlo = getattr(batch_route, '_targets_left_open', None)
+    saved_vic = getattr(batch_route, '_victims_left_open', None)
+    for x, y in pairs:
+        # The legs are stripped whole, so they pass the same guard as the
+        # crossers: a protected, locked or held net (#521, #1279), a net the
+        # step's filter keeps hands off, a pour net or a supply rail is not
+        # this lap's to rip -- the pair is skipped.
+        skip = next((f"{n} is a pour net" for n in (x, y) if n in zone_names),
+                    None)
+        if skip is None:
+            skip = next((f"{n} is a supply rail" for n in (x, y)
+                         if _px.is_power_leg(
+                             p.pintype for p in
+                             (pcb.pads_by_net.get(id_of[n]) or []))), None)
+        if skip is None:
+            _kept = set(filter_names([x, y]))
+            _held = [n for n in (x, y) if n not in _kept]
+            if _held:
+                skip = (f"{', '.join(_held)} may not be ripped by this step "
+                        f"(protected, locked, held or outside its net filter)")
+        if skip is not None:
+            print(f"  Pair-unit lap: {x}/{y} skipped -- {skip}")
+            continue
+        box = _px.shared_pad_box(_pads(x), _pads(y))
+        if box is None:
+            print(f"  Pair-unit lap: {x}/{y} share no footprint -- skipped")
+            continue
+        segs = [(name_of.get(s.net_id), s.start_x, s.start_y, s.end_x,
+                 s.end_y) for s in pcb.segments]
+        vias = [(name_of.get(v.net_id), v.x, v.y) for v in pcb.vias]
+        cand = [n for n in _px.crossers_in_box(segs, vias, box, (x, y))
+                if n not in zone_names]
+        crossers = [n for n in filter_names(cand)][:_px.CROSSER_CAP]
+        tmp = output_file[:-len('.kicad_pcb')] + '.pairlap.kicad_pcb' \
+            if output_file.endswith('.kicad_pcb') else output_file + '.pairlap'
+        shutil.copyfile(output_file, tmp)
+        strip_ids = {id_of[n] for n in [x, y] + crossers}
+        n_s, n_v = _strip_written_copper(
+            tmp, [s for s in pcb.segments if s.net_id in strip_ids],
+            [v for v in pcb.vias if v.net_id in strip_ids], name_of)
+        print(f"  Pair-unit lap: {x} open against its partner {y} -- "
+              f"stripped {n_s} segment(s) / {n_v} via(s) of the pair"
+              + (f" and the row's crosser(s) {', '.join(crossers)}"
+                 if crossers else "")
+              + "; routing the pair first, then the crossers")
+        sub = dict(rk, force_reroute=False, return_results=False)
+        # Nominal rules only: the rescue keeps its finer-grid rung (an
+        # interleaved row's pads sit off the coarse grid -- USB-C 0.5 mm
+        # pitch at x.x5) but, under escalation 'off', may shrink no width,
+        # clearance or via; terminal escalation is off.
+        import fab_tiers as _ft
+        _knobs = (env_knobs.TERMINAL_ESCALATION, _ft._ESCALATION)
+        env_knobs.TERMINAL_ESCALATION = False
+        _ft._ESCALATION = 'off'
+        ok = False
+        try:
+            _ok1, f1, _t1 = batch_route(tmp, tmp, [x, y], **sub)
+            f2 = 0
+            if not f1 and crossers:
+                _ok2, f2, _t2 = batch_route(tmp, tmp, crossers, **sub)
+            ok = not f1 and not f2
+            why = (f"{f1} pair leg(s) failed" if f1 else
+                   f"{f2} crosser(s) failed" if f2 else "")
+        except Exception as e:  # the lap is optional; the board stays
+            why = f"{type(e).__name__}: {e}"
+        finally:
+            env_knobs.TERMINAL_ESCALATION, _ft._ESCALATION = _knobs
+        if ok:
+            shutil.copyfile(tmp, output_file)
+            was_open = [n for n in (x, y) if n in tlo]
+            closed += len(was_open)
+            for n in (x, y):
+                tlo.pop(n, None)
+            saved_tlo = dict(tlo)
+            print(f"  Pair-unit lap: {x}/{y} routed as a unit"
+                  + (f", {', '.join(crossers)} rerouted" if crossers else "")
+                  + " -- kept")
+            pcb = parse_kicad_pcb(output_file)
+        else:
+            print(f"  Pair-unit lap: {x}/{y} not kept ({why}); board "
+                  f"unchanged")
+        for f in _glob.glob(tmp[:-len('.kicad_pcb')] + '.*') \
+                if tmp.endswith('.kicad_pcb') else [tmp]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    batch_route._targets_left_open = saved_tlo
+    batch_route._victims_left_open = saved_vic
+    return closed
+
+
 # The change-set lists the final reconciliation extends (results_data keys).
 _VERIFIED_POUR_LISTS = ('segments_to_remove', 'vias_to_remove',
                         'all_swap_vias', 'all_swap_segments',
@@ -2995,6 +3117,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # exist yet, and the per-layer / per-net via readers further down then
     # met unbound names. No file -> no class widths or vias, as for tracks.
     _per_net, _per_layer, _per_net_via = {}, {}, {}
+    _per_layer_explicit = {}   # explicit --track-width clamped per layer
     if input_file and os.path.isfile(input_file):
         try:
             from list_nets import net_track_width_map_by_id, fab_floors
@@ -3052,6 +3175,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     by_layer = {l: w for l, w in by_layer.items() if w is not None}
                     if by_layer and len(set(by_layer.values())) > 1:
                         _per_layer[nid] = by_layer
+                    # An explicit --track-width is the PNS 'custom size': it
+                    # wins where a layer's rule allows it and is clamped into
+                    # the window where the rule excludes it (measured: a
+                    # 55-ohm class fixed at 0.18 outer / 0.102 inner drew
+                    # 0.18 on inner layers, 199 track_width errors).
+                    if not track_width_from_class and impedance is None and _cu:
+                        _xl = {}
+                        for l in _cu:
+                            _c = _dr.resolve_for_copper(
+                                'track_width', _dr.item_for_net(nid, 'track', l), None, l)
+                            _w = track_width
+                            if _c.min_rule is not None and _c.min is not None and _w < _c.min:
+                                _w = _c.min
+                            if _c.max is not None and _w > _c.max:
+                                _w = _c.max
+                            _xl[l] = float(_w)
+                        if any(abs(w - track_width) > 1e-9 for w in _xl.values()):
+                            _per_layer_explicit[nid] = _xl
                     if w_all is not None and (_dflt_w is None or abs(w_all - _dflt_w) > 1e-9
                                               or nid in _per_layer):
                         _per_net[nid] = w_all
@@ -3534,6 +3675,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         for _nid, _bl in (_per_layer or {}).items():
             if _nid not in net_layer_widths_map:
                 net_layer_widths_map[_nid] = dict(_bl)
+    # ...and an explicit --track-width a layer's rule window excludes is
+    # clamped into it on that layer (the rule outranks the operator's flag
+    # where they disagree, as KiCad's DRC grades it).
+    for _nid, _bl in _per_layer_explicit.items():
+        if _nid not in net_layer_widths_map:
+            net_layer_widths_map[_nid] = dict(_bl)
     if net_layer_widths_map:
         config_kwargs['net_layer_widths'] = net_layer_widths_map
     # #530 decision 4: per-net via geometry -> config.net_via_sizes (the
@@ -4409,6 +4556,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if relocatable_plane_ids:
             print(f"Tap relocation armed: {len(relocatable_plane_ids)} plane "
                   f"net(s) cached for single-tap surgery")
+    # Base-map-excluded, so the from-base obstacle builders must add these
+    # nets' copper back themselves (routing_context._relocation_plane_ids).
+    pcb_data._tap_relocation_plane_ids = tuple(relocatable_plane_ids)
     # Main-pass rip candidacy for PRE-EXISTING nets (0805, design intent):
     # a blocker routed by an EARLIER chain step used to be visible only as a
     # text hint ("the blocking copper belongs to N pre-existing net(s) ...")
@@ -6756,6 +6906,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # what `auto` left out and why -- the membership the meanders and the
     # #521 protected_nets record were built from.
     if 'groups' in _length_match_report:
+        # #1971: a group that matched a multipoint member on its main edge
+        # only is graded on each net's total copper, on the board as it now
+        # stands (Phase 3's taps laid, the post-route cleanup done).
+        from length_matching import grade_main_edge_groups
+        grade_main_edge_groups(_length_match_report['groups'], config, pcb_data)
         summary['length_match_groups'] = _length_match_report['groups']
     if 'auto' in _length_match_report:
         summary['length_match_auto'] = _length_match_report['auto']
@@ -9196,6 +9351,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _lap_names = _next_lap1763(_lrok, _lrfail, _lap10)
                     if not _lap_names:
                         break
+                # The pair-unit lap (CLI leg below) works on a board file; the
+                # GUI leg routes on the shared in-memory model and skips it.
+                if _rfail and os.environ.get('KICAD_PAIR_UNIT_LAP', '1') != '0':
+                    import pair_exchange as _px1
+                    _gx = _px1.find_exchanges(
+                        getattr(batch_route, '_targets_left_open', None) or {},
+                        [n.name for n in pcb_data.nets.values()])
+                    if _gx:
+                        print(f"  Pair-unit lap: {_gx[0][0]}/{_gx[0][1]} "
+                              f"exchange left open -- skipped in the GUI leg "
+                              f"(file-mode only)")
             else:
                 _rk.update(return_results=False)
                 # Bounded PROGRESS-LOOP (2026-08-06, Andy's step7-vs-step8
@@ -9224,6 +9390,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _lap_names = _next_lap1763(_lrok, _lrfail, _lap10)
                     if not _lap_names:
                         break
+                # Pair-unit lap (pair_exchange.py): the laps left one leg of
+                # a pair open against its partner -- route the pair as a
+                # unit on a cleared row, kept only when it closes cleanly.
+                if _rfail:
+                    _rk['grid_step'] = _rung1763['grid']
+                    _pok = _pair_unit_lap(output_file, _rk,
+                                          _filter_rip_hints103)
+                    if _pok:
+                        _rok += _pok
+                        _rfail = max(0, _rfail - _pok)
             _rk['grid_step'] = _rung1763['grid']
             # #1339: the forced links no lap landed (a lap that ended the
             # loop without failures was never harvested, so drop its landed

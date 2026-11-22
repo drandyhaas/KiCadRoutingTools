@@ -15,7 +15,6 @@ mkdir -p "$STRESS/boards_unrouted_set1" "$STRESS/boards_set1"
 
 # short-name (the staged source file is <short-name>.kicad_pcb)
 NAMES=(
-  "bitaxe_ultra"
   "castor_pollux"
   "glasgow_revC"
   "hackrf_one"

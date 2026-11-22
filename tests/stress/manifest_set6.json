@@ -188,23 +188,6 @@
   },
   {
     "set": "set6",
-    "repo": "antmicro/scalenode-cm4-baseboard",
-    "path": "scalenode-cm4-baseboard.kicad_pcb",
-    "file": "scalenode_cm4.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/antmicro/scalenode-cm4-baseboard/77f5bf281d13e43154cac9645f7cc22a82e56971/scalenode-cm4-baseboard.kicad_pcb",
-    "github_url": "https://github.com/antmicro/scalenode-cm4-baseboard/blob/main/scalenode-cm4-baseboard.kicad_pcb",
-    "size_kb": 9594,
-    "layers_est": 4,
-    "footprints": 146,
-    "routable_nets": 135,
-    "tier": "hard",
-    "packages": "4-layer,SBC carrier,Raspberry Pi CM4",
-    "license": "see repo",
-    "short_name": "scalenode_cm4",
-    "note": "Scalenode Raspberry Pi Compute Module 4 baseboard"
-  },
-  {
-    "set": "set6",
     "repo": "pinguz97/Zynq-SoM",
     "path": "Zynq_SoM.kicad_pcb",
     "file": "zynq_som2.kicad_pcb",

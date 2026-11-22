@@ -69,20 +69,22 @@ def save_board_via_ui_thread_ex(path, board, timeout_s=None):
 def remove_listed_segments(board, pcbnew, segments) -> int:
     """Remove the live board's tracks a strip list names, as the CLI writer's
     strip does (kicad_writer.match_stack_members, #1556): matched by span,
-    canonical layer and net, COUNTED, and the listed width first. A set of
-    endpoint keys removed EVERY member of a same-span stack, the keeper too,
-    and matched across layers. Returns the number removed."""
+    canonical layer, net and lock, COUNTED, and the listed width first. A set
+    of endpoint keys removed EVERY member of a same-span stack, the keeper
+    too, and matched across layers. The lock is in the key as in
+    remove_segments_from_content: an unlocked target never takes the locked
+    original stacked under it. Returns the number removed."""
     if not segments:
         return 0
     from kicad_parser import POSITION_DECIMALS as D, pcbnew_copper_layer_names
     from kicad_writer import match_stack_members
     id_to_name = pcbnew_copper_layer_names()
 
-    def _span(a, b, layer, net):
-        return (frozenset((a, b)), layer, net)
+    def _span(a, b, layer, net, locked):
+        return (frozenset((a, b)), layer, net, bool(locked))
     targets = [(_span((round(s.start_x, D), round(s.start_y, D)),
                       (round(s.end_x, D), round(s.end_y, D)),
-                      s.layer, s.net_id), s.width)
+                      s.layer, s.net_id, getattr(s, 'locked', False)), s.width)
                for s in segments]
     tracks = [t for t in board.GetTracks()
               if t.Type() == pcbnew.PCB_TRACE_T]  # not vias / arcs
@@ -95,12 +97,38 @@ def remove_listed_segments(board, pcbnew, segments) -> int:
         # Canonical layer name, as s.layer is: a renamed layer's display
         # name matched no key and left ripped copper (#1056).
         items.append((_span(a, b, id_to_name.get(track.GetLayer()),
-                            track.GetNetCode()),
+                            track.GetNetCode(), track.IsLocked()),
                       pcbnew.ToMM(track.GetWidth())))
     gone, _unmatched = match_stack_members(targets, items)
     for i in sorted(gone):
         board.RemoveNative(tracks[i])
     return len(gone)
+
+
+def remove_listed_vias(board, pcbnew, vias) -> int:
+    """Remove the live board's vias a strip list names, as the CLI writer's
+    remove_vias_from_content does: matched by position, net and lock, and
+    COUNTED, one board via per listing. A set of (x, y, net) keys removed
+    every via at the position, the locked original under an unlocked twin
+    too. Returns the number removed."""
+    if not vias:
+        return 0
+    from collections import Counter
+    from kicad_parser import POSITION_DECIMALS as D
+    want = Counter((round(v.x, D), round(v.y, D), v.net_id,
+                    bool(getattr(v, 'locked', False))) for v in vias)
+    removed = 0
+    for track in list(board.GetTracks()):
+        if track.Type() != pcbnew.PCB_VIA_T:
+            continue
+        k = (round(pcbnew.ToMM(track.GetPosition().x), D),
+             round(pcbnew.ToMM(track.GetPosition().y), D),
+             track.GetNetCode(), bool(track.IsLocked()))
+        if want.get(k, 0) > 0:
+            want[k] -= 1
+            board.RemoveNative(track)
+            removed += 1
+    return removed
 
 
 def ui_thread_status(status_text, progress_bar, message):
@@ -796,6 +824,72 @@ def live_track_held(board, track, held) -> bool:
                      pcbnew.ToMM(track.GetWidth())))
 
 
+def live_via_rule_test(board):
+    """#1972: the GUI twin of `fix_kicad_drc_settings.board_via_rule_test`:
+    `design_rules.via_rule_held_test` for the live board, read from the
+    rules file beside the board file and a namespace of the live board's
+    nets, footprints (their keys `live_footprints_by_key`'s, their courtyards
+    read from the board file as the engine's `CourtyardIndex` reads them) and
+    copper layers -- not a parse of the board, which the writeback must not
+    do (`board_minima_from_live`). None when the board has no rules file
+    sizing a via; a rules file that cannot be read is said on the console and
+    read as no rule, so every via counts against the Board Setup minimums."""
+    import os
+    try:
+        path = board.GetFileName() or ''
+    except Exception:                                          # noqa: BLE001
+        return None
+    if not path or not os.path.isfile(os.path.splitext(path)[0] + '.kicad_dru'):
+        return None
+    try:
+        import pcbnew
+        from collections import Counter
+        from types import SimpleNamespace
+        from design_rules import via_rule_held_test
+        nets = {}
+        for code, ni in board.GetNetsByNetcode().items():
+            if int(code):
+                nets[int(code)] = SimpleNamespace(name=ni.GetNetname())
+        fps, raw = {}, []
+        for key, fp in live_footprints_by_key(board).items():
+            pos = fp.GetPosition()
+            raw.append(fp.GetReference())
+            fps[key] = SimpleNamespace(
+                reference=fp.GetReference(), footprint_name=str(fp.GetFPIDAsString()),
+                x=pcbnew.ToMM(pos.x), y=pcbnew.ToMM(pos.y),
+                rotation=fp.GetOrientationDegrees(),
+                layer=board.GetLayerName(fp.GetLayer()), pads=[])
+        copper = [board.GetLayerName(l) for l in board.GetEnabledLayers().Seq()
+                  if pcbnew.IsCopperLayer(l)]
+        pcb = SimpleNamespace(
+            source_path=os.path.abspath(path), nets=nets, footprints=fps, groups={},
+            duplicate_references={r: n for r, n in Counter(raw).items() if r and n > 1},
+            board_info=SimpleNamespace(copper_layers=copper))
+        return via_rule_held_test(pcb, path)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"  WARNING: the board's .kicad_dru via rules could not be read "
+              f"({type(e).__name__}: {e}); every via is measured against the "
+              f"Board Setup via minimums")
+        return None
+
+
+def live_via_namespace(board, via):
+    """A live PCB_VIA as `design_rules.DesignRules.via_item` reads a via."""
+    import pcbnew
+    from kicad_parser import pcbnew_via_type
+    pos = via.GetPosition()
+    try:
+        w = pcbnew.ToMM(via.GetFrontWidth())
+    except Exception:                                          # noqa: BLE001
+        w = pcbnew.ToMM(via.GetWidth())
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        x=pcbnew.ToMM(pos.x), y=pcbnew.ToMM(pos.y), size=w,
+        drill=pcbnew.ToMM(via.GetDrillValue()), net_id=via.GetNetCode(),
+        via_type=pcbnew_via_type(via),
+        layers=[board.GetLayerName(via.TopLayer()), board.GetLayerName(via.BottomLayer())])
+
+
 def board_minima_from_live(board):
     """The GUI twin of fix_kicad_drc_settings.scan_board_minima(), read from the
     LIVE pcbnew board instead of re-parsing the board file.
@@ -821,6 +915,9 @@ def board_minima_from_live(board):
         import pcbnew
         widths, via_sizes, via_drills, annular, holes = [], [], [], [], []
         _held, _widths_unread = live_room_width_test(board)
+        # #1972: a via a .kicad_dru rule sizes is graded at the rule, not at
+        # the Board Setup minimum (fix_kicad_drc_settings.board_size_values)
+        _vheld = live_via_rule_test(board)
         for t in board.GetTracks():
             try:
                 if t.Type() == pcbnew.PCB_VIA_T:
@@ -836,12 +933,18 @@ def board_minima_from_live(board):
                     # and its ring at the micro via rule the step writes
                     # (fix_kicad_drc_settings.micro_via_floors)
                     _micro = live_via_is_micro(t)
-                    if w and not _micro:
+                    _ns = (live_via_namespace(board, t)
+                           if _vheld is not None and not _micro else None)
+
+                    def _free(kind):
+                        return _ns is None or not _vheld(_ns, kind)
+                    if w and not _micro and _free('via_diameter'):
                         via_sizes.append(w)
                     if d and not _micro:
                         via_drills.append(d)
-                        holes.append(d)
-                    if w and d and w > d and not _micro:
+                        if _free('hole_size'):
+                            holes.append(d)
+                    if w and d and w > d and not _micro and _free('annular_width'):
                         annular.append((w - d) / 2.0)
                 else:
                     w = pcbnew.ToMM(t.GetWidth())
@@ -1005,13 +1108,17 @@ def _live_step_board(pcb_data, results_data):
     vias.extend(results_data.get('all_swap_vias', []))
     from types import SimpleNamespace
 
+    # The lock is in the key, as in the strips (remove_listed_segments /
+    # remove_listed_vias): an unlocked strip target leaves its locked twin.
     def _sk(s):
         a = (round(s.start_x, 4), round(s.start_y, 4))
         b = (round(s.end_x, 4), round(s.end_y, 4))
-        return (min(a, b), max(a, b), s.layer, s.net_id)
+        return (min(a, b), max(a, b), s.layer, s.net_id,
+                bool(getattr(s, 'locked', False)))
 
     def _vk(v):
-        return (round(v.x, 4), round(v.y, 4), v.net_id)
+        return (round(v.x, 4), round(v.y, 4), v.net_id,
+                bool(getattr(v, 'locked', False)))
     _gone_s = {_sk(s) for s in results_data.get('segments_to_remove') or ()}
     _gone_v = {_vk(v) for v in results_data.get('vias_to_remove') or ()}
     pcb = SimpleNamespace(

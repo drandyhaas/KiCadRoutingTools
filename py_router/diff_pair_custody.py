@@ -1201,10 +1201,10 @@ def run_casualty_reconcile(state, progress_callback=None,
             pruned['casualty_restore'] = True
             add_route_to_pcb_data(pcb_data, pruned,
                                   debug_lines=config.debug_lines)
-            from obstacle_cache import refresh_net_obstacles  # #806
+            from obstacle_cache import refresh_net_obstacles, committed_net_ids  # #806
             refresh_net_obstacles(state.working_obstacles,
                                   state.net_obstacles_cache, pcb_data, config,
-                                  sorted(set(ripped_ids or []) | {net_id}))
+                                  committed_net_ids(pruned, sorted(set(ripped_ids or []) | {net_id})))
             # #1758: on route.py (register_partial) the restore is the net's
             # AUTHORITATIVE result, as the route.py #134 sibling's is (#508
             # finding 8 / #1427): route.py's

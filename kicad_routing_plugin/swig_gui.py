@@ -30,7 +30,6 @@ for _sib in ('py_placer', 'py_tools'):
         sys.path.append(_d)
 
 import routing_defaults as defaults
-from kicad_parser import POSITION_DECIMALS
 from kicad_parser import mm_to_iu
 from keep_away import split_keep_away_specs
 
@@ -4389,17 +4388,9 @@ class RoutingDialog(wx.Dialog):
         # stayed on the live board as a same-net drill pair.
         vias_to_remove = results_data.get('vias_to_remove') or []
         if vias_to_remove:
-            via_keys = {(round(v.x, POSITION_DECIMALS), round(v.y, POSITION_DECIMALS),
-                         v.net_id) for v in vias_to_remove}
-            for track in list(board.GetTracks()):
-                if track.Type() != pcbnew.PCB_VIA_T:
-                    continue
-                vk = (round(pcbnew.ToMM(track.GetPosition().x), POSITION_DECIMALS),
-                      round(pcbnew.ToMM(track.GetPosition().y), POSITION_DECIMALS),
-                      track.GetNetCode())
-                if vk in via_keys:
-                    board.RemoveNative(track)
-                    tracks_removed += 1
+            # Counted and lock-keyed, as remove_vias_from_content.
+            from .gui_utils import remove_listed_vias
+            tracks_removed += remove_listed_vias(board, pcbnew, vias_to_remove)
 
         # Add segments from routing results
         for result in results_data.get('results', []):

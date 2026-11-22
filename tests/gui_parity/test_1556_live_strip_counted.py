@@ -22,6 +22,12 @@ Checks, on a real pcbnew board:
      nothing goes.
   4. Every strip site calls the helper (AST over the plugin): no live strip
      matches tracks by a set of endpoint keys any more.
+  5. A locked track (#1261) with an unlocked same-width twin on its span, the
+     twin listed: only the twin goes (the strip key carries the lock, as
+     kicad_writer.remove_segments_from_content's does).
+  6. Vias go through gui_utils.remove_listed_vias, counted and
+     lock-keyed as remove_vias_from_content: a listed unlocked via leaves the
+     locked one at its position, and one listing removes one of two vias.
 """
 import ast
 import glob
@@ -66,8 +72,8 @@ def main():
     for sub in ('py_router', 'py_placer', 'py_tools'):
         sys.path.insert(0, os.path.join(REPO, sub))
     sys.path.insert(0, os.path.dirname(REPO))
-    from kicad_parser import Segment
-    from kicad_routing_plugin.gui_utils import remove_listed_segments
+    from kicad_parser import Segment, Via
+    from kicad_routing_plugin.gui_utils import remove_listed_segments, remove_listed_vias
 
     failures = []
 
@@ -81,15 +87,35 @@ def main():
         net = pcbnew.NETINFO_ITEM(b, "N")
         b.Add(net)
         code = net.GetNetCode()
-        for (x0, y0, x1, y1, w, layer) in tracks:
+        for (x0, y0, x1, y1, w, layer, *lk) in tracks:
             t = pcbnew.PCB_TRACK(b)
             t.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(x0), pcbnew.FromMM(y0)))
             t.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(x1), pcbnew.FromMM(y1)))
             t.SetWidth(pcbnew.FromMM(w))
             t.SetLayer(layer)
             t.SetNetCode(code)
+            t.SetLocked(bool(lk and lk[0]))
             b.Add(t)
         return b, code
+
+    def board_with_vias(locks):
+        b = pcbnew.BOARD()
+        net = pcbnew.NETINFO_ITEM(b, "N")
+        b.Add(net)
+        code = net.GetNetCode()
+        for lk in locks:
+            v = pcbnew.PCB_VIA(b)
+            v.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(10.0), pcbnew.FromMM(10.0)))
+            v.SetWidth(pcbnew.FromMM(0.6))
+            v.SetDrill(pcbnew.FromMM(0.3))
+            v.SetNetCode(code)
+            v.SetLocked(lk)
+            b.Add(v)
+        return b, code
+
+    def via_locks(b):
+        return sorted(bool(t.IsLocked()) for t in b.GetTracks()
+                      if t.Type() == pcbnew.PCB_VIA_T)
 
     def widths(b):
         return sorted((round(pcbnew.ToMM(t.GetWidth()), 4), t.GetLayer())
@@ -119,9 +145,33 @@ def main():
     gone = remove_listed_segments(b, pcbnew, [seg(n, 0.1, x1=13.0)])
     check("a listing with no member removes nothing", gone == 0 and len(widths(b)) == 1)
 
+    print("5. a locked track and its unlocked twin, the twin listed")
+    # Both board orders: without the lock in the key the first member in
+    # GetTracks() order goes, which is the locked one in one of the two.
+    for order in ((True, False), (False, True)):
+        b, n = board_with([(10, 10, 12, 10, 0.1, F, lk) for lk in order])
+        gone = remove_listed_segments(b, pcbnew, [seg(n, 0.1)])
+        left = [bool(t.IsLocked()) for t in b.GetTracks()]
+        check(f"added locked={order}: one removed, the locked original stays",
+              gone == 1 and left == [True], f"removed {gone}, left locked={left}")
+
+    print("6. vias: counted and lock-keyed")
+    def via(code, locked=False):
+        return Via(x=10.0, y=10.0, size=0.6, drill=0.3, layers=['F.Cu', 'B.Cu'],
+                   net_id=code, locked=locked)
+    b, n = board_with_vias([True, False])
+    gone = remove_listed_vias(b, pcbnew, [via(n)])
+    check("an unlocked listing leaves the locked via", gone == 1 and via_locks(b) == [True],
+          f"removed {gone}, left {via_locks(b)}")
+    b, n = board_with_vias([False, False])
+    gone = remove_listed_vias(b, pcbnew, [via(n)])
+    check("one listing removes one of two vias", gone == 1 and via_locks(b) == [False],
+          f"removed {gone}, left {via_locks(b)}")
+
     print("4. every live strip site calls the helper")
     plug = os.path.join(REPO, 'kicad_routing_plugin')
     calls = {}
+    via_calls = {}
     setkey = []
     for f in sorted(glob.glob(os.path.join(plug, '*.py'))):
         src = open(f, encoding='utf-8').read()
@@ -131,6 +181,9 @@ def main():
             if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == \
                     'remove_listed_segments':
                 calls[name] = calls.get(name, 0) + 1
+            if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == \
+                    'remove_listed_vias':
+                via_calls[name] = via_calls.get(name, 0) + 1
         # The old shape: a track's (start, end, net) key looked up in a set,
         # with the reversed-ends retry.
         if 'k[2], k[3], k[0], k[1], k[4]' in src or 'a[2], a[3], a[0], a[1], a[4]' in src:
@@ -141,12 +194,15 @@ def main():
           "strip call it", all(calls.get(k, 0) >= v for k, v in want.items()),
           f"{calls}")
     check("no endpoint-set strip is left", not setkey, f"{setkey}")
+    check("swig_gui and differential_gui strip vias through remove_listed_vias",
+          all(via_calls.get(k, 0) >= 1 for k in ('swig_gui.py', 'differential_gui.py')),
+          f"{via_calls}")
 
     print()
     if failures:
         print(f"FAILED ({len(failures)}): " + ", ".join(failures))
         return 1
-    print("PASS: every live strip is counted, layer-keyed and width-preferring")
+    print("PASS: every live strip is counted, layer- and lock-keyed and width-preferring")
     return 0
 
 

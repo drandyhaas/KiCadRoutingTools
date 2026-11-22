@@ -259,6 +259,77 @@ def test_stamp_result_copper(verbose):
           stamp_result_copper(GridObstacleMap(2), {}, config, 0.0) is None)
 
 
+# ---------------------------------------------------------------------------
+# 4. A commit refreshes every net it put copper on: the pair's GND return vias.
+# ---------------------------------------------------------------------------
+def test_commit_refreshes_return_net(verbose):
+    print("\n[4] a committed pair's GND return vias reach the working map")
+    from kicad_parser import Via, Segment
+    from routing_config import GridCoord
+    from obstacle_map import GridObstacleMap
+    from obstacle_cache import (precompute_net_obstacles, build_working_obstacle_map,
+                                remove_net_obstacles_from_cache, refresh_net_obstacles)
+    from pcb_modification import add_route_to_pcb_data
+    try:
+        from obstacle_cache import committed_net_ids
+    except ImportError as e:
+        check("obstacle_cache.committed_net_ids exists (a commit refreshes every "
+              "net it touched)", False, str(e))
+        return
+
+    def setup():
+        pcb, config, p_id, n_id, *_ = _fixture()
+        gnd_id = next(i for i, n in pcb.nets.items() if n.name == 'GND')
+        base = GridObstacleMap(len(config.layers))
+        cache = {nid: precompute_net_obstacles(pcb, nid, config) for nid in (p_id, n_id, gnd_id)}
+        return pcb, config, p_id, n_id, gnd_id, base, cache, build_working_obstacle_map(base, cache)
+
+    def result_for(pcb, p_id, gnd_id):
+        pu = next(p for p in pcb.nets[p_id].pads if p.component_ref == 'U1')
+        x, y = pu.global_x + 4.0, pu.global_y + 4.0
+        segm = Segment(start_x=x - 1.0, start_y=y, end_x=x - 0.6, end_y=y,
+                       width=0.2, layer='F.Cu', net_id=p_id)
+        gvia = Via(x=x, y=y, size=0.45, drill=0.3, layers=['F.Cu', 'B.Cu'], net_id=gnd_id)
+        return {'new_segments': [segm], 'new_vias': [gvia]}, gvia
+
+    # the defect, on its own map: the old P/N-only refresh never blocks the via
+    pcb, config, p_id, n_id, gnd_id, base, cache, working = setup()
+    coord = GridCoord(config.grid_step)
+    res, gvia = result_for(pcb, p_id, gnd_id)
+    gx, gy = coord.to_grid(gvia.x, gvia.y)
+    check("precondition: the return via's site is free before the commit",
+          not working.is_via_blocked(gx, gy))
+    add_route_to_pcb_data(pcb, res)
+    refresh_net_obstacles(working, cache, pcb, config, (p_id, n_id))
+    check("the P/N-only refresh leaves the GND via unblocked (the defect is visible here)",
+          not working.is_via_blocked(gx, gy))
+
+    # the fix: refresh every net the commit touched
+    pcb, config, p_id, n_id, gnd_id, base, cache, working = setup()
+    res, gvia = result_for(pcb, p_id, gnd_id)
+    ids = committed_net_ids(res, (p_id, n_id))
+    check("committed_net_ids: the pair first, then the return net",
+          ids == [p_id, n_id, gnd_id], f"{ids}")
+    add_route_to_pcb_data(pcb, res)
+    refresh_net_obstacles(working, cache, pcb, config, ids)
+    check("the GND return via is via-blocked in the working map", working.is_via_blocked(gx, gy))
+    fresh = precompute_net_obstacles(pcb, gnd_id, config)
+    check("GND's cache entry == a fresh recompute from the board",
+          np.array_equal(np.sort(cache[gnd_id].blocked_vias, axis=0),
+                         np.sort(fresh.blocked_vias, axis=0)))
+    probe = working.clone_fresh()
+    for cd in cache.values():
+        remove_net_obstacles_from_cache(probe, cd)
+    bs, ps = base.get_stats(), probe.get_stats()
+    check("ref-counts balanced (working - caches == base)",
+          bs[:2] == ps[:2] and bs[7] == ps[7], f"base {bs} probe {ps}")
+    check("net 0 and a result without copper add nothing",
+          committed_net_ids({'new_vias': [Via(x=0, y=0, size=0.45, drill=0.3,
+                                                layers=['F.Cu', 'B.Cu'], net_id=0)]},
+                            (p_id,)) == [p_id]
+          and committed_net_ids(None, (p_id, n_id)) == [p_id, n_id])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-v', '--verbose', action='store_true')
@@ -266,11 +337,12 @@ def main():
     test_end_to_end(args.verbose)
     test_terminal_restore_pair(args.verbose)
     test_stamp_result_copper(args.verbose)
+    test_commit_refreshes_return_net(args.verbose)
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s): " + "; ".join(FAILS))
         return 1
-    print("PASS: #806 working-map content, pair terminal restore, via stamp")
+    print("PASS: #806 working-map content, pair terminal restore, via stamp, return-net refresh")
     return 0
 
 
