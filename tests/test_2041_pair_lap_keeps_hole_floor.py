@@ -9,7 +9,7 @@ a board declaring min_hole_clearance 0.25.
 Checks:
 1. route._stage_lap_board exists (base: copies the board only, inline).
 2. The staged copy resolves the source's declared hole floor (0.25).
-3. A .kicad_dru next to the source is staged too.
+3. Every sibling (.kicad_dru, .design-brief.json, ...) is staged too.
 4. A source with no project stages the board alone (no error).
 """
 import json
@@ -55,6 +55,9 @@ def main():
             json.dump(pro, f, indent=2)
         with open(os.path.join(d, 'routed.kicad_dru'), 'w', encoding='utf-8') as f:
             f.write('(version 1)\n')
+        with open(os.path.join(d, 'routed.design-brief.json'), 'w',
+                  encoding='utf-8') as f:
+            json.dump({'keep_away': []}, f)
         src_floor = resolve_hole_clearance(parse_kicad_pcb(src), None)
 
         dst = os.path.join(d, 'routed.pairlap.kicad_pcb')
@@ -63,8 +66,12 @@ def main():
         check('2. staged copy keeps the declared hole floor',
               abs(got - 0.25) < 1e-9 and abs(src_floor - 0.25) < 1e-9,
               f'source {src_floor}, staged {got}')
-        check('3. .kicad_dru staged', os.path.exists(
-            os.path.join(d, 'routed.pairlap.kicad_dru')))
+        from copy_board import SIBLING_EXTS
+        missing = [e for e in ('.kicad_dru', '.design-brief.json')
+                   if not os.path.exists(os.path.join(d, 'routed.pairlap' + e))]
+        check('3. siblings staged (.kicad_dru, .design-brief.json)',
+              not missing and '.design-brief.json' in SIBLING_EXTS,
+              f'missing {missing}')
 
         bare = os.path.join(d, 'bare.kicad_pcb')
         shutil.copyfile(src, bare)

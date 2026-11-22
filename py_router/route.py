@@ -1177,17 +1177,15 @@ def _stage_lap_board(src, dst):
 
     The lap routes ``dst`` in a fresh batch_route, which reads the board's
     rules (the copper-to-hole floor of resolve_hole_clearance, custom DRC
-    rules) from the ``.kicad_pro``/``.kicad_dru`` next to it. A bare board
-    copy has none, so the lap's map dropped the #1038 via-copper keep-out
-    and placed a via 0.16 mm off an NPTH wall under a declared 0.25."""
+    rules, the design brief's keep-away rules) from the siblings next to it.
+    A bare board copy has none, so the lap's map dropped the #1038 via-copper
+    keep-out and placed a via 0.16 mm off an NPTH wall under a declared 0.25.
+    The siblings are copy_board's SIBLING_EXTS, the one list every sibling
+    copy carries."""
     import shutil
+    from copy_board import copy_siblings
     shutil.copyfile(src, dst)
-    if not (src.endswith('.kicad_pcb') and dst.endswith('.kicad_pcb')):
-        return
-    for ext in ('.kicad_pro', '.kicad_dru'):
-        side = src[:-len('.kicad_pcb')] + ext
-        if os.path.exists(side):
-            shutil.copyfile(side, dst[:-len('.kicad_pcb')] + ext)
+    copy_siblings(src, dst)
 
 
 # The change-set lists the final reconciliation extends (results_data keys).
