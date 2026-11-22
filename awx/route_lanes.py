@@ -55,7 +55,8 @@ import braid as bd  # noqa: E402
 import connect as cn  # noqa: E402
 from plan_audit import read_nets, dseg  # noqa: E402
 # after a plan's seq lay, a ball of the bus's parts on no bus net that the lay WALLED IN (the step's own cage test,
-# route_bus.walls_made) has the lanes walling it lifted and routed again round its way kept -- the via site it escapes
+# route_bus.walls_made) -- or another part's pad beside them that a later route must reach -- has the lanes walling
+# it lifted and routed again round its way kept -- the via site it escapes
 # by with them gone, reserved as a lane's line is (lift_walls); a ball that leaves walled in all the same has its
 # whole way out kept BETWEEN the lanes (route_bus.ball_channel), the lanes it is short of room to parted round it
 WALL_SITES = 6      # (lift_walls) the via sites a walled ball's lanes are routed again round, the nearest first
@@ -86,7 +87,7 @@ def lift_walls(ctx, laid, routed, board, names, dest, base_s, base_v):
     # (the walls by the copper a lift takes away -- each lane's own, its fanout standing)
     walls = rb.walls_made(before, ctx.pcb, refs, list(full.values()), [full[m] for m in laid if m in full],
                           project=board, only={full[m]: {id(o) for o in laid[m][1] + laid[m][2]}
-                                               for m in laid if m in full})
+                                               for m in laid if m in full}, pads=True)
     rung = rb._cage_rung(ctx.pcb)
 
     def again(lanes, vline, sites, tries=((False, 0.0), (True, 0.0))):

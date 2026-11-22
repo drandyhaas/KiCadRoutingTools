@@ -599,7 +599,7 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
         for b, x in zip(buses, boards):
             j_ = json.load(open(x[1])) if x else {}
             nets_.append((b[0], b[1].split('+'), list(j_.get('routed') or []) + list(j_.get('refused') or {})))
-        grade_ = rb.board_grade(board, out, nets_, work, log=log, tag='merged')
+        grade_ = rb.board_grade(board, out, nets_, work, log=log, tag='merged', field=field)
         # (A BUS THAT WROTE NO BOARD has no net in that grade -- its process ended before its summary: the merged
         # board is not clean for the buses that did write, and the grade says which did not. Read without it, two
         # clean buses beside one that died were "0 open", the rounds stopped and no rung was tried)

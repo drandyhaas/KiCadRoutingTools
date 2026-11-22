@@ -858,8 +858,10 @@ def _bus_rung(board, prev, failed, grp, out_i, json_i, k, rounds, inproc, log, f
              dict(src=s_, dest=d_, exit=None, routed=0, grade=None, summary=None) if d_ in gone else old[d_]
              for s_, d_ in grp]
     dead = sorted(r_['dest'] for r_ in buses if not r_.get('summary'))
+    # (the pads beside the arrays graded against the field the failed buses' lanes were laid on, as their own grade is)
+    field_i = sj_f.get('field') if sj_f.get('field') and os.path.isfile(sj_f['field']) else None
     grade = board_grade(board, out_i, [(r_['src'], r_['dest'].split('+'), sorted(_bus_nets(r_) or ())) for r_ in buses],
-                        work_i, log=log, tag='group')
+                        work_i, log=log, tag='group', **({'field': field_i} if field_i else {}))
     if dead:
         grade['dead'], grade['ok'] = dead, False
     code_i = max([code_f] + [1 if r_['exit'] is None else r_['exit'] for r_ in buses])
@@ -1506,7 +1508,7 @@ def plane_grade(pcb, board, routed, log=print):
     return out
 
 
-def walled_grade(board, routed, refs, names, log=print):
+def walled_grade(board, routed, refs, names, log=print, field=None, pads=True):
     """(#1348) the balls of the step's arrays `refs` on no bus net (`names`) that the step WALLED IN: from the ball, a
     track of the fab ladder's finest rung reaches the rest of its net on the board as it came and not as routed. The
     lanes are handed on locked, so no later step reaches such a ball, at any size, and its net ships open -- and no
@@ -1517,28 +1519,59 @@ def walled_grade(board, routed, refs, names, log=print):
     (#521), a pour's, KiCad-locked or held copper, and every pad. Another net's escape is none: the route step takes it
     up and lays it again elsewhere -- QSPI_SCK, U1.A5 of a DDR3 bus's source, read walled with USR_BTN's B.Cu stub under
     the ball; route.py ripped that stub, dropped a via beside the ball and laid USR_BTN again, both connected.
-    {balls, rung, walled: ['REF.PAD'], secs}"""
+    THE PADS LATER ROUTES MUST REACH beside the arrays are asked too (_cage_pads: another part's, by the bus's copper
+    or beneath an array) -- each against `field`, the board the lanes were laid on, where it is given (the group's
+    field: the arrays fanned out, its parts nudged, no lane), else against `board`: a pad the lanes wall in is walled
+    and counted. One the field walled in before any lane (`by_field`: walled on `field`, free on `board`) is named
+    apart and not counted -- the fanout walled it, and no lane, and no rung that lays the lanes again, answers it.
+    `pads` False: the arrays' balls alone. {balls, pads, rung, walled: ['REF.PAD'], by_field: ['REF.PAD'], secs}"""
     from kicad_parser import parse_kicad_pcb
     t0 = time.time()
     bus = set(names)
     with contextlib.redirect_stdout(io.StringIO()):
         b_out = parse_kicad_pcb(routed)
     rung = _cage_rung(b_out)
+    fixed_out = _fixed_nets(b_out, routed, bus)
     asked = {r: [p.pad_number for p in pads] for r, pads in _cage_balls(b_out, refs, bus).items()}
-    now = _caged_on(b_out, asked, _fixed_nets(b_out, routed, bus), rung)
-    walled = []
+    ids_ = {i for i, nn in b_out.nets.items() if nn.name in bus}
+    pads_ = {r: [p.pad_number for p in ps] for r, ps in _cage_pads(
+        b_out, refs, bus, [s for s in b_out.segments if s.net_id in ids_],
+        [v for v in b_out.vias if v.net_id in ids_]).items()} if pads else {}
+    now = _caged_on(b_out, asked, fixed_out, rung)
+    now_p = _caged_on(b_out, pads_, fixed_out, rung)
+    walled, by_field, parsed = [], [], {}
+
+    def on(path):
+        if path not in parsed:
+            with contextlib.redirect_stdout(io.StringIO()):
+                parsed[path] = parse_kicad_pcb(path)
+        return parsed[path]
+
+    def caged_of(path, keys):
+        """the `keys` ('REF.PAD') caged on the board at `path`"""
+        pcb_ = on(path)
+        by_ref = collections.defaultdict(list)
+        for k in keys:
+            by_ref[k.split('.', 1)[0]].append(k.split('.', 1)[1])
+        return set(_caged_on(pcb_, dict(by_ref), _fixed_nets(pcb_, path, bus), rung))
     if now:
-        with contextlib.redirect_stdout(io.StringIO()):
-            b_in = parse_kicad_pcb(board)
-        was = set(_caged_on(b_in, {r: [k.split('.', 1)[1] for k in now if k.split('.', 1)[0] == r] for r in asked},
-                            _fixed_nets(b_in, board, bus), rung))
+        was = caged_of(board, now)
         walled = [k for k in now if k not in was]
-    out = dict(balls=sum(len(v) for v in asked.values()), rung=list(rung), walled=walled,
-               secs=round(time.time() - t0, 1))
+    if now_p:
+        was_p = caged_of(field or board, now_p)
+        walled += [k for k in now_p if k not in was_p]
+        if field and was_p:
+            bare = caged_of(board, sorted(was_p))
+            by_field = sorted(k for k in was_p if k not in bare)
+    out = dict(balls=sum(len(v) for v in asked.values()), pads=sum(len(v) for v in pads_.values()), rung=list(rung),
+               walled=walled, by_field=by_field, secs=round(time.time() - t0, 1))
+    nets_ = {f'{r}.{p.pad_number}': p.net_name for r in list(asked) + list(pads_) for p in b_out.footprints[r].pads}
     if walled:
-        nets_ = {f'{r}.{p.pad_number}': p.net_name for r in asked for p in b_out.footprints[r].pads}
         log(f'  WALLED IN by the step, reached from nowhere at {rung[0]}/{rung[1]}/{rung[2]} (the fab ladder\'s finest): '
             + ', '.join(f'{k} ({nets_.get(k)})' for k in walled) + ' -- each net ships open past the locked lanes')
+    if by_field:
+        log(f'  walled in by the field before any lane (the fanout\'s copper, not counted): '
+            + ', '.join(f'{k} ({nets_.get(k)})' for k in by_field))
     return out
 
 
@@ -1582,7 +1615,7 @@ def plane_balls_grade(routed, refs, log=print):
     return out
 
 
-def board_grade(board, routed, buses, work, log=print, tag='board'):
+def board_grade(board, routed, buses, work, log=print, tag='board', field=None):
     """A bus step's output `routed` graded against the board it came in with, `board`, for the three things a step
     answers for on the BOARD -- `buses` [(source, [destination parts], [its nets, full names])]: every bus net's pads on
     its own bus's parts one piece of copper there (check_connected's test, zones credited; a net's pads elsewhere -- a
@@ -1591,7 +1624,9 @@ def board_grade(board, routed, buses, work, log=print, tag='board'):
     no ball of the buses' arrays walled in (walled_grade -- `walled`), and every plane ball of theirs joined to a pour
     of its net (plane_balls_grade -- `plane_balls`, where KiCad is there to pour). A step's own grade reads its own board
     alone; buses routed together (negotiated_buses' merge, the bus boards check) are graded here on the board they hand
-    on. {open, nets, drc: {bus, board, input, n}, walled, ok}; its files in `work`, prefixed `tag`"""
+    on. `field`: the board the buses' lanes were laid on (the group's field), the pads beside the arrays are graded
+    against (walled_grade). {open, nets, drc: {bus, board, input, n}, walled, ok}; its files in `work`, prefixed
+    `tag`"""
     import awx_settings
     import whole_route as wr
     import check_connected as _cc
@@ -1645,7 +1680,7 @@ def board_grade(board, routed, buses, work, log=print, tag='board'):
     # (the violations the step made: the board's past those it came with, of which the bus nets' own are a part -- the
     # larger of the two, never their sum, which counted a bus net's new violation twice)
     n_drc = None if None in (d_bus, d_out, d_in) else max(d_bus, d_out - d_in, 0)
-    walled = walled_grade(board, routed, refs, names, log)
+    walled = walled_grade(board, routed, refs, names, log, field=field)
     plane_balls = plane_balls_grade(routed, refs, log)
     # (a ball JOINED TO A POUR of its net is served: it needs no way out, and is not walled in -- the walls' grade
     # asks for a track from the ball out of its window, and named a plane ball whose drop stood among a bus's lanes,
@@ -1698,6 +1733,53 @@ def _cage_balls(pcb, refs, bus):
     return out
 
 
+def _cage_pads(pcb, refs, bus, segs, vias):
+    """{ref: [pad]} THE PADS LATER ROUTES MUST REACH that a cage test asks beside the balls of the arrays `refs`: a
+    pad of any other part on a net of none of `bus` (full names) with another pad -- a decoupling capacitor's, a
+    termination pack's supply pin, a test point -- whose copper stands within WALL_NEAR of the copper `segs` / `vias`
+    (the bus's, or the copper a remedy moved) or beneath an array of `refs`. A bus's lanes run past such parts as past
+    an array's balls, and a capacitor between two lanes on its face, the one beside its pad turned across the pad's
+    open end, was reached from nowhere: its net shipped open past copper no later step moves, and no check of the
+    step's asked it. Measured beside a memory bus: some 140 pads, 4 s of cage tests"""
+    boxes = []
+    for r in refs:
+        foot = pcb.footprints.get(r)
+        if foot is not None and foot.pads:
+            xs, ys = [p.global_x for p in foot.pads], [p.global_y for p in foot.pads]
+            boxes.append((min(xs), min(ys), max(xs), max(ys)))
+    items = [(min(s.start_x, s.end_x) - s.width / 2, min(s.start_y, s.end_y) - s.width / 2,
+              max(s.start_x, s.end_x) + s.width / 2, max(s.start_y, s.end_y) + s.width / 2, s) for s in segs] + \
+        [(v.x - v.size / 2, v.y - v.size / 2, v.x + v.size / 2, v.y + v.size / 2, v) for v in vias]
+
+    def near(p):
+        x, y, r0 = p.global_x, p.global_y, math.hypot(p.size_x, p.size_y) / 2
+        if any(b[0] <= x <= b[2] and b[1] <= y <= b[3] for b in boxes):
+            return True
+        g = WALL_NEAR + r0
+        for x0, y0, x1, y1, o in items:
+            if x < x0 - g or x > x1 + g or y < y0 - g or y > y1 + g:
+                continue
+            if hasattr(o, 'start_x'):
+                ax, ay, dx, dy = o.start_x, o.start_y, o.end_x - o.start_x, o.end_y - o.start_y
+                L = dx * dx + dy * dy
+                t = 0.0 if L == 0 else max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / L))
+                d = math.hypot(x - ax - t * dx, y - ay - t * dy) - o.width / 2
+            else:
+                d = math.hypot(x - o.x, y - o.y) - o.size / 2
+            if d <= g:
+                return True
+        return False
+    out = {}
+    for r, foot in pcb.footprints.items():
+        if r in refs:
+            continue
+        ps = [p for p in foot.pads if p.net_id and p.net_name and p.net_name not in bus
+              and p.pad_type != 'np_thru_hole' and len(pcb.nets[p.net_id].pads) > 1 and near(p)]
+        if ps:
+            out[r] = ps
+    return out
+
+
 def _fixed_nets(pcb, path, bus):
     """the nets of `pcb` (the board at `path`) whose copper no later step moves: the bus's, the protected, a pour's"""
     from protected_nets import read_protected_nets
@@ -1739,7 +1821,7 @@ def caps_walling(before, after, refs, bus, moved):
     move walled a ball of `refs` in -- walled_grade's test -- each such ball's nearest moved passive in its view whose
     pose put back frees it, else every moved one in its view; and the balls"""
     from kicad_parser import parse_kicad_pcb
-    g = walled_grade(before, after, refs, bus, log=lambda *a: None)
+    g = walled_grade(before, after, refs, bus, log=lambda *a: None, pads=False)
     if not g['walled']:
         return [], []
     with contextlib.redirect_stdout(io.StringIO()):
@@ -1818,7 +1900,7 @@ def plain_caps(board, refs, bus, lock, work, tag, log=print):
            awx_settings.environ(), log_path=logp, own_process=True)
 
 
-def walls_made(before, after, refs, bus, moved, project=None, only=None):
+def walls_made(before, after, refs, bus, moved, project=None, only=None, pads=False):
     """{'REF.PAD': [net]} the balls of `refs` on no bus net (`bus`, full names) that the board `after` walls in and
     `before` did not -- walled_grade's test at its finest rung -- each with the nets of `moved` (full names, whose
     copper is all that differs) that wall it: the nearest whose copper taken away alone frees the ball, else the fewest
@@ -1826,7 +1908,9 @@ def walls_made(before, after, refs, bus, moved, project=None, only=None):
     net's copper only. A board is a path, or a PCBData with `project` the board path its protected nets are read
     beside. `only` ({net full name: ids of `after`'s copper}): the copper a remedy can take away -- a lane's, its
     fanout standing (route_lanes.lift_walls) -- and only that taken away: by the whole net, a stub of a walling lane's
-    fanout under the ball named that lane, and lifting the lane freed nothing"""
+    fanout under the ball named that lane, and lifting the lane freed nothing. `pads`: THE PADS LATER ROUTES MUST REACH
+    beside the arrays asked too (_cage_pads: another part's, by the moved copper or beneath an array), as balls are --
+    the lanes' own remedies (route_lanes.lift_walls, kept_ways, the relayer) ask them; a fanout's do not"""
     from kicad_parser import parse_kicad_pcb, is_immutable_copper
     with contextlib.redirect_stdout(io.StringIO()):
         b_out, b_in = (parse_kicad_pcb(b) if isinstance(b, str) else b for b in (after, before))
@@ -1884,7 +1968,10 @@ def walls_made(before, after, refs, bus, moved, project=None, only=None):
                     d[v.net_id] = x
         return {k: x for k, x in d.items() if k != p.net_id}
     fixed = _fixed_nets(b_out, after, bus)
-    cand = {r: {p.pad_number: near_nets(p) for p in pads} for r, pads in _cage_balls(b_out, refs, bus).items()}
+    asked_ = dict(_cage_balls(b_out, refs, bus))
+    if pads:
+        asked_.update(_cage_pads(b_out, refs, bus, segs, vias))
+    cand = {r: {p.pad_number: near_nets(p) for p in ps} for r, ps in asked_.items()}
     cand = {r: {n: d for n, d in v.items() if d} for r, v in cand.items()}
     crops = {r: _cropped(b_out, b_out.footprints[r]) for r in cand if cand[r]}
     now = _caged_on(b_out, {r: list(v) for r, v in cand.items() if v}, fixed, rung, crops)

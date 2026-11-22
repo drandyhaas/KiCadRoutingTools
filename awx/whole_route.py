@@ -1698,13 +1698,15 @@ def relay_ends(d, bench, J, say, name='fo_layers', env=None):
         stand_ = {k_ for k_ in ((env or {}).get('WALLS_STAND') or '').split(',') if k_}
         for _w in range(_ffp.WALL_RETRIES):
             walls_ = {k_: v_ for k_, v_ in route_bus.walls_made(
-                bench, out, refs_, list(full_.values()), [full_[n_] for n_ in moved if n_ in full_]).items()
-                if k_ not in stand_}
+                bench, out, refs_, list(full_.values()), [full_[n_] for n_ in moved if n_ in full_],
+                pads=True).items() if k_ not in stand_}
             if not walls_:
                 break
             if env is not None:
                 env['WALLS_LAST'] = ','.join(sorted(walls_))
-            pads_ = {f'{r_}.{p_.pad_number}': p_ for r_ in refs_ for p_ in pcb_.footprints[r_].pads}
+            # (a ball's, or another part's pad beside the lanes: route_bus._cage_pads)
+            pads_ = {f'{r_}.{p_.pad_number}': p_ for r_ in {k_.split('.', 1)[0] for k_ in walls_}
+                     if r_ in pcb_.footprints for p_ in pcb_.footprints[r_].pads}
             grp_ = {m_[4] for k_ in walls_ if k_ in pads_ for m_ in keep_
                     if near_(m_, pads_[k_].global_x, pads_[k_].global_y)}
             if not grp_:

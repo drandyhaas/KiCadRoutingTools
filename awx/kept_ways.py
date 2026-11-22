@@ -111,7 +111,8 @@ def with_copper(pcb, segs, vias):
 
 def find(bench, plan, nets, dest):
     """THE WAYS: [{'ball', 'net', 'net_id', 'tracks', 'vias', 'lanes', 'short', 'length', 'end'}] one for each ball of
-    the bus's parts on no bus net that `plan`'s lanes wall in on the bench and that has a way out between them, and
+    the bus's parts on no bus net -- or another part's pad beside the lanes a later route must reach (route_bus.
+    _cage_pads) -- that `plan`'s lanes wall in on the bench and that has a way out between them, and
     the balls walled in with none [(ball, why)]. `tracks` [{'start', 'end', 'width', 'layer', 'net_id'}] and `vias`
     [{'x', 'y', 'size', 'drill', 'layers', 'net_id'}] as the board's writer takes them"""
     import route_bus as rb
@@ -130,7 +131,7 @@ def find(bench, plan, nets, dest):
         return [], []
     board = with_copper(pcb, segs, vias)
     with contextlib.redirect_stdout(io.StringIO()):
-        walled = rb.walls_made(pcb, board, refs, full, full, project=bench)
+        walled = rb.walls_made(pcb, board, refs, full, full, project=bench, pads=True)
     if not walled:
         return [], []
     fixed = rb._fixed_nets(board, bench, full)
