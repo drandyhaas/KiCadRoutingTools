@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Terminal escalation keeps a net's per-layer widths (#NNNN).
+"""Terminal escalation keeps a net's per-layer widths (#2036).
 
 _size_escalation_ladder dropped the net's net_layer_widths entry and marched
 ONE width taken from layers[0]. A net whose layer-scoped width rule fixes it
