@@ -456,7 +456,7 @@ def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_cl
                     break
         depth = {'left': (c[0] - x0) / (2 * hx), 'right': (x1 - c[0]) / (2 * hx),
                  'up': (c[1] - y0) / (2 * hy), 'down': (y1 - c[1]) / (2 * hy)}
-        surface = ep.escape_out(p, grid, [d for d in faces if depth[d] < pattern - 0.5], copper)
+        surface = ep.escape_out(p, grid, [d for d in faces if depth[d] < pattern - 0.5], copper, layers)
     else:
         for sx in (-1, 1):
             for sy in (-1, 1):
@@ -467,7 +467,7 @@ def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_cl
             out += ep.escape_menu(p, c, grid, faces, layers, copper)
         surface = None
     if not run:
-        return out + (surface if surface is not None else ep.escape_out(p, grid, faces, copper))
+        return out + (surface if surface is not None else ep.escape_out(p, grid, faces, copper, layers))
     seen, col = set(), []
     for m in out:
         geo = tuple((tuple(a), tuple(b), L == home) for a, b, L in m.legs)
@@ -479,7 +479,7 @@ def escape_field_moves(p, grid, home, layers, faces, copper, site_clear, stub_cl
         m2.layer = RUN
         m2.legs = [(a, b, home if L == home else RUN) for a, b, L in m.legs]
         col.append(m2)
-    return col + (surface if surface is not None else ep.escape_out(p, grid, faces, copper))
+    return col + (surface if surface is not None else ep.escape_out(p, grid, faces, copper, layers))
 
 
 def _via_clear(pcb, obs, nid, q, r, sz):

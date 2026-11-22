@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 import escape_moves as em  # noqa: E402
 from relayer import TOL as _END_TOL  # noqa: E402
+from kicad_parser import pad_is_plated_through  # noqa: E402
 
 SIDE = 2          # a sidestep: up to this many pitches past the lines beside the via
 PAST = 1.0        # the exit: this many pitches past the outer balls
@@ -188,7 +189,10 @@ def lattice(reach, step):
 
 def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE, own_line=False):
     """every escape the ball at `pad` has from its via at `site`, by each of `faces`, on each of `layers` (the module's
-    docstring): [Move]. `own_line`: only its runs straight out along the ball's own line"""
+    docstring): [Move]. `own_line`: only its runs straight out along the ball's own line. A plated through-hole pin
+    has none: its barrel is on every layer already, and it leaves on each of them by its surface escape (escape_out)"""
+    if pad_is_plated_through(pad):
+        return []
     net = copper.net_key(getattr(pad, 'net_name', '') or '')
     nid = pad.net_id
     home = next((L for L in pad.layers if L.endswith('.Cu')), 'F.Cu')
@@ -265,14 +269,22 @@ def escape_menu(pad, site, grid, faces, layers, copper, side=SIDE, own_line=Fals
     return out
 
 
-def escape_out(pad, grid, faces, copper):
+def escape_out(pad, grid, faces, copper, layers=None):
     """the escapes of a ball with NO via (an outer ball left to leave on its own layer): out on its own layer,
     straight along its own line or half a step onto a gap line beside it, to the exit (escape_menu's line, a pitch
     past the outer balls) -- a SURFACE escape, its run on that layer; where the lane leaves that layer is the
-    route's, as the human's surface escapes dive 0.8-2.9 mm off the balls in pairs (zynq U1)"""
+    route's, as the human's surface escapes dive 0.8-2.9 mm off the balls in pairs (zynq U1). A plated through-hole
+    pin (a pin header's) stands on every copper layer: its surface escapes leave on each of `layers`"""
+    if pad_is_plated_through(pad) and layers:
+        return [mv for L in layers for mv in _escape_out(pad, grid, faces, copper, L)]
+    return _escape_out(pad, grid, faces, copper,
+                       next((L for L in pad.layers if L.endswith('.Cu') and not L.startswith('*')), 'F.Cu'))
+
+
+def _escape_out(pad, grid, faces, copper, home):
+    """escape_out's surface escapes on the one layer `home`"""
     net = copper.net_key(getattr(pad, 'net_name', '') or '')
     nid = pad.net_id
-    home = next((L for L in pad.layers if L.endswith('.Cu')), 'F.Cu')
     x0, y0, x1, y1 = grid.bbox
     hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
     ball = (pad.global_x, pad.global_y)

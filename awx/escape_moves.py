@@ -195,6 +195,8 @@ def grid_of(footprint) -> Grid:
         return min(d) if d else 0.0
 
     px, py = _pitch(xs), _pitch(ys)
+    # (a single row or column -- a pin header -- has no pitch across it: its cells square, the pitch along it)
+    px, py = px or py, py or px
     allx = [p.global_x for p in footprint.pads]
     ally = [p.global_y for p in footprint.pads]
     return Grid(xs, ys, px, py,
