@@ -23,7 +23,7 @@ Checks (a synthetic strip of N nets off-origin, two geometries):
   4. the packed unique equals np.unique(axis=0) on rows with negative
      coordinates and on a span too wide to pack.
 
-    python3 tests/test_2022_keepout_region_cache.py
+    python3 tests/test_2039_keepout_region_cache.py
 """
 import os
 import sys
