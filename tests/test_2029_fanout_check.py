@@ -10,8 +10,8 @@ the pads. On the fourth (north) side the pocket is `depth` mm deep:
          caged), but two are CROWDED when all fan out at once.
     none the fence removed: every pin escapes, exit 0.
 
-A 4-layer board with a GND pour over In1.Cu leaves In1.Cu out of the default
-layers, as `--layer-costs` would ban it.
+A 4-layer board with In1.Cu typed `power` leaves In1.Cu out of the default
+layers, as `route.py` bans it.
 
     python3 tests/test_2029_fanout_check.py
 """
@@ -63,7 +63,7 @@ def board(path, depth=None, inner=False):
                  + ''.join(f'    (pad "W{i}" smd rect (at {x:g} {y:g}) (size {w:g} {h:g})'
                            f' (layers "F.Cu") (net 5 "FENCE"))\n'
                            for i, (x, y, w, h) in enumerate(walls)) + '  )\n')
-    layers = ('(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) '
+    layers = ('(0 "F.Cu" signal) (1 "In1.Cu" power) (2 "In2.Cu" signal) '
               '(31 "B.Cu" signal)' if inner else '(0 "F.Cu" signal) (31 "B.Cu" signal)')
     pour = ('  (zone (net 6) (net_name "GND") (layer "In1.Cu") (hatch edge 0.5)\n'
             '    (polygon (pts (xy 0 0) (xy 40 0) (xy 40 30) (xy 0 30))))\n'
@@ -119,7 +119,7 @@ def main(td):
 
     four = board(os.path.join(td, 'four.kicad_pcb'), inner=True)
     r = check_fanout(four, 'U1')
-    ok('a GND pour over In1.Cu leaves that layer out by default',
+    ok('In1.Cu typed power is left out by default',
        r['layers'] == ['F.Cu', 'In2.Cu', 'B.Cu'] and r['planes'] == {'In1.Cu': ['GND']},
        (r['layers'], r['planes']))
 

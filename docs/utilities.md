@@ -3580,9 +3580,8 @@ pins take no part in it. The window is `--margin` mm round the pad ring
 (default 3). A group whose region reaches the window edge says so, because a
 wider window may find more sites.
 
-By default the layers are the copper layers minus inner layers carrying a
-single-net plane (`escape.signal_layer_count`), as `route.py --layer-costs`
-would ban them; `--layers` overrides. The via still passes through every
+By default the layers are the copper layers minus those typed `power`, as
+`route.py` bans them; `--layers` overrides. The via still passes through every
 layer. Routed copper is set aside as in `check_reachability`, and locked
 copper stays, so a locked hand fan-out reads `local`.
 

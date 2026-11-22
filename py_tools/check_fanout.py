@@ -31,9 +31,8 @@ It is an estimate, and the report says so. `local` pins take no part in it.
 `check_reachability --part` asks the track-only cousin of this question (how
 many nets leave the window at once); it does not count a via site per pin.
 
-Layers carrying a single-net plane (`escape.signal_layer_count`, inner layers
-only) are left out by default, as `--layer-costs` would ban them; the via
-still passes through them. The board's routed copper is set aside
+Layers typed `power` (planes) are left out by default, as `route.py` bans
+them; the via still passes through them. The board's routed copper is set aside
 (`reachability.without_routed_copper`); locked copper stays.
 
 Parts with signal pads inside the pad ring, like BGAs, are refused: use
@@ -64,7 +63,6 @@ from placement.escape_flow import DEFAULT_MARGIN_MM, MAX_STEP_MM
 from placement.legality import PadClearanceModel
 
 WALLS_SHOWN = 8
-OUTER = ('F.Cu', 'B.Cu')
 ORDER = ('escapes', 'local', 'exposed pad', 'through-hole', 'unconnected',
          'caged', 'crowded')
 
@@ -116,12 +114,6 @@ class Grid:
         if c1 <= 0 or r1 <= 0 or c0 >= self.W or r0 >= self.H:
             return None
         return slice(max(0, r0), r1), slice(max(0, c0), c1)
-
-
-def plane_layers(pcb):
-    """Inner layers carrying a board-sized single-net pour. Outer pours are
-    floods a signal can still cross, so they are not planes here."""
-    return tuple(l for l in escape.signal_layer_count(pcb)[2] if l not in OUTER)
 
 
 def _via_ban(pcb, grid, cu):
@@ -253,7 +245,7 @@ def check_fanout(pcb_file, ref, layers=None, margin=DEFAULT_MARGIN_MM):
     if ref not in pcb.footprints:
         raise Unresolvable(f"no part '{ref}' on this board")
     cu = list(pcb.board_info.copper_layers)
-    planes = plane_layers(pcb)
+    planes = pcb.board_info.plane_layers
     if layers is None:
         layers = [l for l in cu if l not in planes]
     unknown = [l for l in layers if l not in cu]
