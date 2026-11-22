@@ -1859,7 +1859,15 @@ against bounds of 25, 38, 21 and 28), are proved without, at 63, 78, 35 and
 plans -- an eight-layer bus kept 82 with them and 92 without -- so there the
 search is as it was (`tests/test_622_finders_alone.py`). Each stops sooner once
 the vias are proved, and the probe once it has a plan and three of its own
-model reductions in a row find no better plan or bound. With more routing
+model reductions in a row find no better plan or bound -- both at the end of a
+batch: the proof by CP-SAT's own gap test (`absolute_gap_limit`, a whole via
+less one), the stall between two batches, where the solver writes its `#Model`
+lines. A search stopped from a new plan's line, in the middle of a batch, kept
+whichever of that batch's plans the other workers had handed in: one model's
+probe ended at three different plans in three runs side by side, and a lay
+from one recorded input left a net open in about half its runs. Stopped at a
+batch's end, one model stops at one plan on every run, alone or beside others
+(`tests/test_622_solve_stops_reproducible.py`). With more routing
 layers than two every solve of a round keeps a plan it cannot prove, and the
 probe is all the bound-raising workers spend there: on the two-end bus their
 bound stood at 38 from 4 s on, and given 100 batches they ran 160 s to it. A

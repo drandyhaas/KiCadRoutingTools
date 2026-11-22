@@ -63,6 +63,9 @@ REGION_W = 2                           # a lane priced on a passive region's lay
 REGION_REACH = 3.0                     # ...a lane within this many lane pitches of the region
 SOLVE_WORKERS = 4
 CHECK_WORK = 30.0                       # a check's deterministic work limit (solve(check=True)): past it, no verdict
+CHECK_WORK_BATCHES = 8                  # ...the same check on the solve's workers, its interleaved batches: CHECK_WORK's
+#                                         reach on a 9k-variable model (a first batch 0.5 of work, each after it 4); a
+#                                         large model's first is 11 and each after it 5 to 7, so 30 of work is 4 batches
 CHECK_BATCHES = 60                    # ...and, with no verdict from it, the batches of the same question on the solve's own workers
 CHECK_RULES_MAX = 80                    # (rules=True) the core's rules dropped in turn to minimize it, at most
 CHECK_RULES_CORES = 4                   # (rules=True) the small cores sought after the first, at most
@@ -2337,15 +2340,19 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         s_.parameters.num_workers = 1 if WLIT or RLIT else SOLVE_WORKERS        # (a core is one worker's)
         if WLIT or RLIT:
             m.AddAssumptions([m.GetBoolVarFromProtoIndex(i_) for i_ in sorted(WLIT)] + list(RLIT.values()))
+            s_.parameters.stop_after_first_solution = True
+            s_.parameters.max_deterministic_time = CHECK_WORK
         else:
             # (several workers REPRODUCIBLY, as the whole solve runs them: interleaved, sharing no clauses -- in parallel
             # under a deterministic-time cap, a model near it read a plan on one run and none on the next, and the ends
-            # chose on the verdict)
+            # chose on the verdict. Bounded by a count of batches, not by work: a work limit is dealt out to a batch's
+            # tasks as each starts, and which start first is the machine's. Nor stopped at the first plan a worker hands
+            # in: with the objective set aside the search ends with the batch it found its first plan in, the batch's
+            # plans all in -- the same plan every run, and the layers the check answers with)
             s_.parameters.interleave_search = True
             s_.parameters.share_glue_clauses = False
             s_.parameters.share_binary_clauses = False
-        s_.parameters.stop_after_first_solution = True
-        s_.parameters.max_deterministic_time = CHECK_WORK
+            s_.parameters.max_num_deterministic_batches = CHECK_WORK_BATCHES
         st_ = None
         if hint:
             # (THE PLAN A CHECK BEFORE FOUND, asked first, every value the hint has held: a plan there is this model's
@@ -2485,15 +2492,24 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 out_['rules'] = sorted([list(k_) for k_ in all_])
         return out_
     # ...and STOPPED when it STALLS: once it has a plan, SOLVE_STALL of the search's own model reductions in a row with
-    # no better plan and no better bound (its log's '#Model' against '#n' and '#Bound' lines, events of the
-    # deterministic search, never a clock). K35: its one plan at 46 s, then 145 s with neither -- the budget spent on
-    # nothing. Before its first plan the budget decides: K41's re-solve, stopped at 31 s with none, proved a plan of
-    # 33 vias by 255 s. And DONE once the vias
-    # are PROVED, read off the same lines (best, and the bound below it): the plan's vias no more than the bound's
-    # whole vias -- the nets over two and the vias settled, only the history's tie-break open (K35's re-solve: 167 s,
-    # most of it on the tie-break). (A gap limit of a via would stop short of that proof: a plan of 24 vias against a
-    # bound of 23 and half a via's history is within one via, and a 23-via plan may still exist.)
-    def once(subs, batches, known_):
+    # no better plan and no better bound (its log's '#Model' lines against its new plans and its bound's rises, events
+    # of the deterministic search, never a clock). K35: its one plan at 46 s, then 145 s with neither -- the budget spent
+    # on nothing. Before its first plan the budget decides: K41's re-solve, stopped at 31 s with none, proved a plan of
+    # 33 vias by 255 s. And DONE once the vias are PROVED: the plan's vias no more than the bound's whole vias -- the
+    # nets over two and the vias settled, only the history's tie-break open (K35's re-solve: 167 s, most of it on the
+    # tie-break).
+    # BOTH STOPS AT THE END OF A BATCH, so the same model stops at the same plan on every run, alone or beside others.
+    # A '#Model' line is written between two batches, by the thread that runs them, and a stop there ends the search
+    # where it stands. A new plan and a rise of the bound are each written by the worker that found it, in the middle
+    # of a batch: a search stopped there kept whichever of its batch's plans the other workers had handed in by then --
+    # one model's probe, stopped so, ended at three different plans in three runs beside each other (best 188.58,
+    # 188.20, 188.19 vias' worth against one bound). So the proof is CP-SAT's own gap test (absolute_gap_limit, a whole
+    # via less one): met in a batch, the search ends with that batch -- every worker's plan of it in, the best kept --
+    # and the proof is read off the plan and the bound it ends with (run). The stall counts '#Model' lines (the first
+    # twenty of a search are never thinned by the log's rate limit; a probe has far fewer) and a new plan or a rise of
+    # the bound sets it back (each said to the reader as it happens: the bound by its callback, as the '#Bound' lines
+    # are thinned past twenty).
+    def once(subs, batches, known_, model=None):
         s_ = cp_seed.solver()
         s_.parameters.num_workers = SOLVE_WORKERS
         s_.parameters.subsolvers.extend(subs)
@@ -2512,27 +2528,13 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         # same batches, the same workers, the search as reproducible as before
         if finders_alone(subs, NL):
             s_.parameters.use_lns = False
-        stall = {'n': 0, 'plan': False, 'search': False, 'due': False}
+        # (the proof, in the batch it is met: the plan within a whole via of the bound -- run reads the whole vias)
+        s_.parameters.absolute_gap_limit = W_V - 1
+        stall = {'n': 0, 'plan': False}
 
         def _progress(line):
-            # (a stop is held until the search's first '#Model' line, its presolved model out: a hint of EVERY variable
-            # -- the warm start laid out whole -- is reported as a plan BEFORE the presolve, and stopped there, OR-tools
-            # 9.15 postsolves an empty solution and aborts the process: "Check failed: solution->size() ==
-            # postsolve_mapping.size() (0 vs. 787)", a bus's re-solve whose warm start met its bound, every run)
-            if line.startswith('#Model'):
-                stall['search'] = True
-                if stall['due']:
-                    s_.StopSearch()
-            if line.startswith('#Bound') or re.match(r'#\d+\s', line):
-                stall['n'] = 0
-                stall['plan'] = stall['plan'] or not line.startswith('#Bound')
-                m_ = re.search(r'best:(\S+)\s+next:\[([^,\]]+)', line)
-                if m_ and float(m_.group(1)) < math.inf and \
-                        math.floor(float(m_.group(1)) / W_V) <= math.floor(max(float(m_.group(2)), known_) / W_V):
-                    if stall['search']:
-                        s_.StopSearch()
-                    else:
-                        stall['due'] = True
+            if re.match(r'#\d+\s', line):
+                stall['n'], stall['plan'] = 0, True
             # (not the FALLBACK's: started from the first run's plan, it has one from its first line, and a stall there is
             # the last chance lost -- K51 on the human's fanout on Linux stopped so, unproved, holding the plan it proves
             # optimal when it runs on, and the bench had no plan)
@@ -2540,12 +2542,16 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
                 stall['n'] += 1
                 if stall['n'] >= SOLVE_STALL:
                     s_.StopSearch()
+
+        def _risen(_bound):
+            stall['n'] = 0
         s_.parameters.log_search_progress = True
         s_.parameters.log_to_stdout = False
         s_.log_callback = bus_events.solver_progress(
             'solve', 'the plan-finding workers' if subs is FALLBACK else 'the bound-raising workers', W_V,
             then=_progress)
-        st_ = s_.Solve(m)
+        s_.best_bound_callback = _risen
+        st_ = s_.Solve(m if model is None else model)
         return s_, st_
 
     # ---- the BOUND-RAISING workers a PROBE (PROBE_BATCHES): their bound meeting a plan is the proof, and the solve
@@ -2555,10 +2561,35 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
     def run(subs, batches, known=-math.inf):
         """(solver, status, proved, its bound, seconds) of one search of `batches`; `known` a bound proved before it"""
         t0_ = time.time()
+        OK_ = (cp_model.OPTIMAL, cp_model.FEASIBLE)
         s_, st_ = once(subs, batches, known)
         b_ = max(s_.BestObjectiveBound(), known)
-        pr_ = st_ in (cp_model.OPTIMAL, cp_model.FEASIBLE) and \
-            math.floor(s_.ObjectiveValue() / W_V) <= math.floor(b_ / W_V)
+        pr_ = st_ in OK_ and math.floor(s_.ObjectiveValue() / W_V) <= math.floor(b_ / W_V)
+        if st_ in OK_ and not pr_ and s_.ObjectiveValue() - b_ < W_V:
+            # (THE GAP MET ACROSS A WHOLE VIA: the plan within a via of the bound, but the two on either side of a whole
+            # via -- the search ended there, where the vias are not yet proved and it searched on. The question it was
+            # left with asked alone, in a search of the same batches: a plan of the bound's whole vias? One found is
+            # proved; none there proves the plan's; with neither the plan stands unproved, as a search out of batches)
+            f_ = math.floor(b_ / W_V)
+            mq_ = m.clone()
+            mq_.Add(OBJ <= W_V * (f_ + 1) - 1)
+            mq_.Add(OBJ >= int(math.ceil(b_ - 1e-6)))
+            mq_.ClearHints()
+            for i_ in range(len(m.Proto().variables)):
+                v_ = m.GetIntVarFromProtoIndex(i_)
+                mq_.AddHint(v_, s_.Value(v_))
+            t1_ = time.time()
+            sq_, stq_ = once(subs, batches, b_, model=mq_)
+            print(f'   the gap met across a whole via (best {s_.ObjectiveValue():.0f}, bound {b_:.0f}): a plan of '
+                  f'{f_} whole vias\' worth? [{sq_.StatusName(stq_)}] {time.time() - t1_:.0f}s')
+            if stq_ in OK_:
+                s_, st_, pr_, b_ = sq_, stq_, True, max(b_, sq_.BestObjectiveBound())
+            elif stq_ == cp_model.INFEASIBLE:
+                b_, pr_ = W_V * (f_ + 1), True
+                s_ = _Windowed(s_, b_)
+        if st_ == cp_model.OPTIMAL and s_.ObjectiveValue() > s_.BestObjectiveBound():
+            # (ended by the gap test: a plan, not one proved optimal -- the status a stopped search has)
+            st_ = cp_model.FEASIBLE
         return s_, st_, pr_, b_, time.time() - t0_
     # ---- the WARM START, laid out whole: a re-solve starts from the round before's plan, and when that plan is one of
     # this model (no cut the round added excludes it) at the root's floor, it is PROVED -- the floor is the root's own
