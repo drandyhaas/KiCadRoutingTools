@@ -36,6 +36,9 @@ only) are left out by default, as `--layer-costs` would ban them; the via
 still passes through them. The board's routed copper is set aside
 (`reachability.without_routed_copper`); locked copper stays.
 
+Parts with signal pads inside the pad ring, like BGAs, are refused: use
+`bga_fanout.py` for them.
+
 Exit codes: 0 every pin fans out, 1 a pin is caged or crowded, 2 usage error.
 """
 
@@ -54,7 +57,7 @@ from collections import Counter
 import numpy as np
 
 import list_nets
-from kicad_parser import non_aperture_pads, parse_kicad_pcb
+from kicad_parser import non_aperture_pads, parse_kicad_pcb, pour_zones
 from net_queries import pad_on_layer
 from placement import escape, reachability as reach
 from placement.escape_flow import DEFAULT_MARGIN_MM, MAX_STEP_MM
@@ -283,6 +286,9 @@ def check_fanout(pcb_file, ref, layers=None, margin=DEFAULT_MARGIN_MM):
     pitch = escape.pad_pitch(fp)
     interior = [p for p in pads if escape.face_of(p, ring, pitch, boxes[id(p)]) is None]
     ep_nets = {p.net_id for p in interior if p.net_id}
+    if len(ep_nets) > 1:
+        raise Unresolvable(f"{ref} has signal pads inside its pad ring, like a BGA; "
+                           f"use bga_fanout.py")
     elsewhere = {p.net_id for r, f in pcb.footprints.items() if r != ref
                  for p in f.pads if p.net_id}
     elsewhere |= {z.net_id for z in pcb.zones if z.net_id}
@@ -397,7 +403,7 @@ def check_fanout(pcb_file, ref, layers=None, margin=DEFAULT_MARGIN_MM):
 
     return {
         'board': pcb_file, 'ref': ref, 'layers': list(layers),
-        'planes': {l: sorted({z.net_name for z in pcb.zones if z.layer == l})
+        'planes': {l: sorted({z.net_name for z in pour_zones(pcb.zones) if z.layer == l})
                    for l in planes},
         'rules': {'default': lane.to_dict(), 'edge_clearance': edge},
         'window': {'margin_mm': margin, 'ring': [round(v, 3) for v in ring],
