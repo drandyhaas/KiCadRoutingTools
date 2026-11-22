@@ -3,9 +3,18 @@
 
 RUNDIR is whole_route.py's OUTDIR, or a bus step's (route_bus.py's BUS.bus/run: the settings of its run are read from
 the step's run.json, and what the step gave its chain over them from the chain's own chain.json); the round that
-routed (rN/seq.kicad_pcb) is filmed. It draws a run on any number of layers, each copper layer a colour of its own on
-the board, in the braid and in the 2-D geometry (F.Cu red, B.Cu blue, an inner layer bright: layer_col); on more than
-two a legend in the header names the layers the lanes stand on.
+routed (rN/seq.kicad_pcb) is filmed. It draws a run on any number of layers, and COLOUR IS FOR LAYERS ONLY: each
+copper layer a colour of its own on the board, in the braid and in the 2-D geometry, the eight apart by lightness as
+well as hue and checked under colour-blind simulation (layer_col), a via a ring split in the two layers it joins; every
+other meaning in greys, outlines and shapes (another net's copper one faint grey, a ball's class by its mark). The
+header's legend lists the board's copper layers in their stack order beside a stack-up strip, the layers the frame
+draws in their colours and the rest grey.
+
+THE CUT (cut_film), five minutes at most: a cold open on the laid copper; the group's ends (below); then ONE bus end to
+end -- its ends, strings, frame, solve, geometry, snap, audit and lay; then its loop told plainly, the negotiation with
+the other buses, every bus together, and a closing. Each line of the narration is its scene's caption, every number
+read from the run's records; a panel that would list a log shows at most three large numbers. The scenes below that
+the cut leaves out (the check, the repair, the polish, the settled layout, the result, the coda) are built still.
 
 A bus step's run whose ends are its GROUP'S (route_bus under GROUP_ENDS: the group's directory, beside the bus's own
 run in SRC-DEST.bus/) opens with the group's ends, each array in a magnifier of its own: the BUSES the step found and
@@ -13,12 +22,21 @@ its group, and each bus's ends model CAPTURED (the step's events, OUT.bus/events
 fanout and every bus's ends -- the balls by what serves them (a bus's lane, another signal's escape, a plane's drop or
 strap: group.json), the menus by tier, the pattern first and widened where no state holds, and the START, its every
 lane end drawn as the model held it (group.log; checks.jsonl's states, each end's escape from its own signature); THE
-SEARCH, its every round's best on the model's own clock (the step's events) beside the state each solve ended on and
-the ends that moved since the one before (checks.jsonl); THE CHECK by each bus's own whole solve (its verdict and its
+SEARCH as it ran (below); THE CHECK by each bus's own whole solve (its verdict and its
 console), the field's findings at the points they were found, THE REPAIR -- the lanes it freed, and why -- and the
 check again; and THE FIELD as laid (shared_field.kicad_pcb over prepared.kicad_pcb: the fanout's copper, the parts
-the nudge moved, the field's ties). Those scenes run nothing again: the model's CP-SAT runs on many workers, which no
-re-run reproduces byte for byte, so every number and every end they draw is the run's own record. The coda closes on
+the nudge moved, the field's ties). Those scenes draw the run's own record -- but THE SEARCH, which the film runs
+again: the group's ends search (group_ends.py) from its recorded inputs -- its captures, its board and its flags
+(run.json), under the settings it ran under -- watched (_trace_group): every state it found, read as the step's
+own code reads a state (each lane's two ends and their layers, its change of layer, the model's crossings), and the
+objective split into its terms by the step's own objective_split. Its solves are bounded by deterministic batches, so
+the re-run is the run's search; --check compares its every model and state with the run's checks.jsonl. It costs a run
+of the search, once: kept in the bus's movie directory (trace_group.json). The film draws it at its own
+framing of the bus, as the short does: every bus's ends at both arrays, the ends each state moved ringed; each lane a
+straight line from its tooth to its berth, its two halves in its ends' layers' colours, a via's ring where the model
+counts a change of layer, a dot where the lines of two lanes the model counts crossing cross; and the terms of the
+objective counted down. Where the group's run.json is not kept, the search is drawn from the record: its every round's
+best on the model's own clock beside the state each solve ended on (checks.jsonl). The coda closes on
 the group's escalation as the step recorded it: a group left short of clean routed again a rung down the fab ladder,
 or, where its grade is clean and no net was delivered below the sizes asked for, that no rung was needed.
 
@@ -71,8 +89,9 @@ lanes on the board (joint_lanes.foreign), the first solve with those of the buse
 the NEGOTIATION too, read from the step's records and never run again (load_negotiation): every bus of the group on one
 clock (each one's fanout, first solve, wait for the coupled solve, loop, lay and end, from the step's events), the
 coupled solve's couplings at their places (the ones the buses' own plans broke, the ones the coupled plan still breaks),
-the others laying their copper while the filmed bus's loop runs -- under its later scenes, faint, from then on -- and,
-before its result, every bus's copper on the merged board together, each in a tint of its own, with its numbers. The
+the others laying their copper while the filmed bus's loop runs, and every bus's copper on the merged board together,
+the followed bus wider, with each one's numbers as laid -- the group's board in the left half, its table and clock on
+the right. Under the filmed bus's own scenes the other buses' copper is drawn as the obstacle it was. The
 traces are
 kept in RUNDIR/rN/movie/, and a re-run writes nothing else: no event of its own is appended to the step's events
 file (BUS_EVENTS is not given it). --check stops there: it says whether each re-run reproduced the chain's file (exit 1 when
@@ -98,15 +117,18 @@ will film offline. Where it cannot be had the film stops, saying how to fetch it
 voice (`say -v ?` lists them), needs nothing installed. Without --sound the film is the same as ever, frame for frame,
 and nothing of the sound is needed.
 
-With --short [SECS] the run is not filmed but cut into a SHORT of about SECS (15) seconds: a few of its moments,
+With --short the run is not filmed but cut into a SHORT of about 30 seconds: a few of its moments,
 each an excerpt of the film cut tighter and drawn as the film draws that stage, all at ONE framing of the bus (the
 film's own, its source array to its destination) -- no words, no captions, no title or end card, something moving in
-every frame. Which moments play, and for how long, is read from the run's own records (short_clips), so a run gives
-the same short every time; its sound is the film's own music voice over a slow pulse the cuts fall on, and the film's
-own effects (whole_movie_sound.short_score).
+every frame. It opens on a hook, the copper as laid sweeping in, and goes back to the start; the search's terms are
+counted by pictogram; the solve's plans are drawn on the lanes' own taut strings (the frame's slots and references,
+which the film draws over its braid, follow the frame's rings round the destination); a stack-up strip with no names
+shows the layers each frame draws. Which moments play, and for how long, is read from the run's own records
+(short_clips), so a run gives the same short every time; its sound is the film's own music voice over a slow pulse the
+cuts fall on, and the film's own effects (whole_movie_sound.short_score), brought to -14 LUFS, -1 dBTP.
 
 usage: whole_movie.py RUNDIR OUT.mp4 [--fps 30] [--workers 6] [--stills DIR [--at T1,T2,..]] [--human BOARD]
-                     [--speed X] [--force] [--scenes] [--sound [--voice kokoro:NAME | SAY_VOICE] | --short [SECS]]
+                     [--speed X] [--force] [--scenes] [--sound [--voice kokoro:NAME | SAY_VOICE] | --short]
        whole_movie.py RUNDIR --check
 The bench is the chain's: BASE (default fb_t2q_pairs.kicad_pcb) and DEST (default DU1) as whole_route.py reads them; a
 bus step's run gives its own, and BASE may then name the board from before the bus's ends were laid (the ends' scene
@@ -647,6 +669,153 @@ def _trace_embed(round_dir, solve_path, gref, eref, out):
           f'the stage counted seen: {seen}, identical to the chain: {identical}')
 
 
+def _trace_group(gdir, out):
+    """THE GROUP'S ENDS SEARCH (group_ends.py) run again from its recorded inputs -- the captures, the board and the flags
+    of its run.json, under the settings it ran under (no event of its own appended: BUS_EVENTS is not given it) -- into
+    a directory of its own, watched: at every search on the tiers (tier_search) the model and main's
+    reading of it (its buses, their ends' option and layer variables, its rows, its prices) -- and at the first, the
+    state it starts from (a later search's hint is the state before it, only partly set) -- then every round's state
+    the search found better than its best so far -- each lane's tooth and berth as the step's
+    own code reads a state (an option and a layer at each end), its change of layer, the model's crossings, and the
+    objective split into its terms by the step's own objective_split. Then the run's checks.jsonl compared with the
+    one this re-run wrote, model by model and state by state: `identical` when every one is"""
+    sys.path.insert(0, HERE)
+    import runpy
+    import shutil
+    import tempfile
+    run = json.load(open(os.path.join(gdir, 'run.json')))
+    GE = os.path.join(HERE, 'group_ends.py')
+    work = tempfile.mkdtemp(prefix='whole_movie_group.')
+    rout = os.path.join(work, 'out')
+    args = list(run['argv'][1:])
+    args[1] = rout                                            # (the captures and the flags as run; the output here)
+    sys.argv = [GE] + args
+    t_start = time.time()
+    rec = {'states': [], 'sigs': [], 'searches': 0}
+    sig_ix = {}
+    cur = {}
+    live = out + '.states.jsonl'                               # (each state as it is read, while the re-run goes on)
+    lf = open(live, 'w')
+
+    def sig_id(sg):
+        if sg not in sig_ix:
+            sig_ix[sg] = len(rec['sigs'])
+            rec['sigs'].append(sg)
+            lf.write(json.dumps({'sig': sig_ix[sg], 'text': sg}) + '\n')
+        return sig_ix[sg]
+
+    def read(vals, label, kind):
+        """the state `vals` of the search's model, as the step's own code reads one"""
+        we = sys.modules['whole_ends']
+        sv = G_['StateRead'](cur['m'], vals)
+        c = cur['ctx']
+        buses, RL, NL = c['buses'], c['RL'], c['NL']
+        st = {'t': round(time.time() - t_start, 2), 'label': label, 'kind': kind, 'search': rec['searches'],
+              'obj': float(sv.ObjectiveValue()), 'buses': {}}
+        try:
+            st['split'] = G_['objective_split'](sv, buses, c['rows'], c['between_cost'], c['ride'], c['walls'],
+                                                c['fans'], c['chg'], c['plane'], c['far'])
+            st['split'].pop('lanes', None)
+        except Exception as e_:                               # noqa: BLE001
+            st['split'] = {'error': repr(e_)[:200]}
+        for b in buses:
+            lanes = {}
+            for l_ in b.J.lanes:
+                try:
+                    s_ = [next(i for i, v in b.J.xs[k_][l_].items() if sv.Value(v)) for k_ in (0, 1)]
+                    y_ = [next(q for q in range(NL) if sv.Value(b.J.y[k_][l_][q])) for k_ in (0, 1)]
+                except StopIteration:
+                    continue
+                ends = []
+                for k_ in (0, 1):
+                    o_ = (b.E.T, b.E.B)[k_][l_][s_[k_]]
+                    xy = [list(map(float, m_.exit_pt)) for m_ in o_[0]]
+                    ends.append([sig_id(str(we._opt_sig(o_))), RL[y_[k_]],
+                                 [sum(p[0] for p in xy) / len(xy), sum(p[1] for p in xy) / len(xy)] if xy else None])
+                ch_ = b.J.chg.get(l_)
+                lanes[str(l_)] = {'ends': ends, 'change': None if ch_ is None else int(ch_ if isinstance(ch_, int)
+                                                                                         else sv.Value(ch_))}
+            X_ = [[str(a_), str(c_)] for (a_, c_), x_ in b.J.X.items() if (x_ if isinstance(x_, int) else sv.Value(x_))]
+            st['buses'][b.name] = {'lanes': lanes, 'crosses': X_}
+        lf.write(json.dumps(st) + '\n')
+        lf.flush()
+        return st
+
+    from ortools.sat.python import cp_model
+    # (its functions, main not run yet: run_path hands back a copy of the module's names, and its functions read the
+    # module's own -- the search is replaced there)
+    G_ = runpy.run_path(GE, run_name='group_ends_film')['main'].__globals__
+    tier_search = G_['tier_search']
+
+    def searched(m, meta, log, *a_, **k_):
+        # (a search on the tiers: the model and main's reading of it, the caller's; the state it starts from)
+        L = sys._getframe(1).f_locals
+        rec['searches'] += 1
+        cur.update(m=m, best=None, nv=len(m.Proto().variables),
+                   ctx={k: L.get(k) for k in ('buses', 'rows', 'between_cost', 'ride', 'walls', 'fans', 'chg', 'plane',
+                                              'far', 'RL', 'NL')})
+        h = k_.get('hint', a_[1] if len(a_) > 1 else None) if rec['searches'] == 1 else None
+        if h is not None:
+            st = read(list(h), 'the state it starts from', 'start')
+            cur['best'] = st['obj']
+            rec['states'].append(st)
+        return tier_search(m, meta, log, *a_, **k_)
+    G_['tier_search'] = searched
+    solve0 = cp_model.CpSolver.Solve
+
+    def observed(self, model, solution_callback=None):
+        r = solve0(self, model, solution_callback)
+        f = sys._getframe(1)
+        if f.f_code.co_name == 'run' and f.f_code.co_filename.endswith('group_ends.py') and cur.get('m') is not None \
+                and r in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            # (a round of the search: its answer, kept where better than the search's best -- as the search keeps it)
+            vals = list(self.ResponseProto().solution)[:cur['nv']]
+            v_ = G_['StateRead'](cur['m'], vals).ObjectiveValue()
+            if cur['best'] is None or v_ < cur['best'] - 1e-6:
+                st = read(vals, f.f_locals.get('label') or '', 'round')
+                cur['best'] = st['obj']
+                rec['states'].append(st)
+        return r
+    cp_model.CpSolver.Solve = observed
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            try:
+                G_['main']()
+            except SystemExit:
+                pass
+    finally:
+        cp_model.CpSolver.Solve = solve0
+        lf.close()
+    secs = time.time() - t_start
+
+    def recs(path):
+        """(the re-run's every model and state against the run's: the objective each model's state paid, and each
+        bus's ends -- each lane's two signatures and layers -- its crossings, its changes of layer)"""
+        out_ = []
+        for ln in open(path):
+            r_ = json.loads(ln)
+            if r_['rec'] == 'model':
+                out_.append(('model', json.dumps(r_.get('objective'), sort_keys=True)))
+            elif r_['rec'] == 'state':
+                out_.append(('state', r_['bus'], r_.get('crossings'), r_.get('changes'), r_.get('vias'),
+                             json.dumps({l_: [(v.get(e) or {}).get('sig') for e in ('tooth', 'berth')]
+                                         + [(v.get(e) or {}).get('layer') for e in ('tooth', 'berth')]
+                                         for l_, v in sorted((r_.get('lanes') or {}).items())}, sort_keys=True)))
+        return out_
+    a_ = recs(os.path.join(gdir, 'checks.jsonl'))
+    b_ = recs(os.path.join(rout, 'checks.jsonl')) if os.path.isfile(os.path.join(rout, 'checks.jsonl')) else []
+    first_diff = next((j for j, (x, y) in enumerate(zip(a_, b_)) if x != y), None)
+    rec.update(identical=bool(a_) and a_ == b_, records=[len(a_), len(b_)], first_diff=first_diff, secs=round(secs, 1),
+               log=[ln for ln in buf.getvalue().splitlines() if ln.startswith(('group ends:', '  the search'))][-40:])
+    json.dump(rec, open(out, 'w'))
+    shutil.rmtree(work, ignore_errors=True)
+    print(f'whole_movie: the group\'s ends search run again -- {len(rec["states"])} state(s) in {secs:.0f} s, its '
+          f'{len(a_)} recorded models and states ' + ('identical to the run' if rec['identical'] else
+                                                    f'NOT what the run recorded (first difference at record '
+                                                    f'{first_diff}; {len(b_)} records re-run)'))
+
+
 # =============================================================================== the run's files
 def _read(path):
     return open(path).read() if os.path.isfile(path) else ''
@@ -795,7 +964,16 @@ def load_story(a):
         print(f'whole_movie: round {passed} of {rd} run again -- ' + ', '.join(
             f'{k} {"identical to the chain" if v else "NOT what the chain wrote"}' for k, v in same.items())
             + ('' if not S.Et or S.Et['seen'] else '; a round of the 2-D geometry counted cell changes the hook did not all see'))
-        raise SystemExit(0 if S.identical else 1)
+        # (...and a bus step's group's ends search, run again from its recorded inputs: its every model and state)
+        G_ = load_group(rdir, step, rec)
+        gs_ = group_search(G_, mv) if G_ is not None else None
+        if gs_ is not None:
+            print(f'whole_movie: the group\'s ends search run again -- {len(gs_["states"])} states read, the '
+                  f'run\'s {gs_["records"][0]} models and states ' + (
+                      'identical to the run' if gs_['identical'] else
+                      f'NOT what the run recorded (the re-run wrote {gs_["records"][1]}; the first difference at '
+                      f'record {gs_["first_diff"]})'))
+        raise SystemExit(0 if S.identical and (gs_ is None or gs_['identical']) else 1)
     if not S.identical and not a.force:
         raise SystemExit('whole_movie: a re-run did not reproduce the chain ('
                          + ', '.join(f'{k} {v}' for k, v in same.items())
@@ -856,8 +1034,27 @@ def load_story(a):
         if not same:
             print(f'whole_movie: {hp} does not place {S.src} and {S.dst} where the bench does -- no human comparison')
     S.G = load_group(rdir, step, rec)
+    S.Gt_search = group_search(S.G, mv) if S.G is not None else None
     S.N = load_negotiation(S, step)
     return S
+
+
+def group_search(G, mv):
+    """the group's ends search run again from its recorded inputs, watched (_trace_group), under the settings it ran
+    under: every state it found, its ends at both arrays -- run once, kept in the bus's movie directory beside
+    its own traces (trace_group.json); None where the group's run.json is not kept"""
+    tgr = os.path.join(mv, 'trace_group.json')
+    rj = os.path.join(G.dir, 'run.json')
+    if not os.path.isfile(tgr):
+        if not os.path.isfile(rj):
+            return None
+        env = dict(os.environ, **{k: v for k, v in (json.load(open(rj)).get('settings') or {}).items()
+                                  if k not in ('BUS_EVENTS', 'BUS_EVENTS_BUS')})
+        env.update(OMP_NUM_THREADS='1', VECLIB_MAXIMUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
+        for k in ('BUS_EVENTS', 'BUS_EVENTS_BUS'):
+            env.pop(k, None)
+        subprocess.run([sys.executable, os.path.abspath(__file__), '--_trace', 'group', G.dir, tgr], env=env, check=True)
+    return json.load(open(tgr))
 
 
 def load_group(rdir, step, rec):
@@ -1065,6 +1262,9 @@ def load_negotiation(S, step):
     # (the couplings the buses' own plans broke and the coupled plan settled: broken alone, not broken coupled)
     still = {key(c) for c in J.get('broken') or []}
     N.settled = [pt(c) for c in J.get('broken_alone') or [] if key(c) not in still]
+    # (and the couplings the coupled plan breaks that the buses' own plans kept)
+    alone_ = {key(c) for c in J.get('broken_alone') or []}
+    N.new_broken = [pt(c) for c in J.get('broken') or [] if key(c) not in alone_]
     N.joint_secs = J.get('secs')
     N.held, N.mine_broken = {}, {}
     for b in N.buses:
@@ -1331,11 +1531,15 @@ TEXT = (228, 232, 238)
 DIM = (140, 148, 160)
 ACCENT = (255, 210, 90)
 F_COL = (240, 84, 66)
-B_COL = (70, 156, 250)
+B_COL = (60, 120, 235)
 LAYC = (F_COL, B_COL)
-# an INNER layer's colour, In1.Cu on: bright, as the 3-D movie draws inner tracks -- yellow, sky, pink, then orange,
-# green and violet (its white is a via's ring here)
-INNER_COL = ((255, 226, 80), (110, 220, 255), (255, 140, 235), (255, 165, 70), (130, 235, 130), (185, 150, 255))
+# an INNER layer's colour, In1.Cu on. COLOUR IS FOR LAYERS ONLY: the eight copper colours stand apart by LIGHTNESS as
+# well as hue -- F.Cu red (CIELAB L 57), B.Cu blue (52), In1 pale yellow (95), In2 teal (65), In3 mauve (59), In4
+# orange (75), In5 pale sky (87), In6 violet (37) -- every two of them at least dE 20 apart as seen and under a
+# deuteranopia and a protanopia simulation (Machado 2009, severity 1). Every other meaning a frame draws is in greys,
+# outlines and shapes (a via's white ring, a ball's class, a mark, a phase)
+INNER_COL = ((250, 245, 150), (0, 180, 135), (205, 110, 175), (255, 165, 70), (175, 225, 255), (110, 60, 170))
+OBST_C = (205, 209, 216)        # another net's copper, an obstacle whatever its layer: one grey, faint
 
 
 def _inner_k(name):
@@ -1343,8 +1547,12 @@ def _inner_k(name):
     return int(m.group(1)) if m else 0
 
 
+_DRAWN = set()      # (the copper layers the frame being made has drawn in their colours: the legend greys the rest)
+
+
 def layer_col(name):
-    """a copper layer's colour: F.Cu red, B.Cu blue, an inner layer its INNER_COL"""
+    """a copper layer's colour: F.Cu red, B.Cu blue, an inner layer its INNER_COL (and the layer marked drawn)"""
+    _DRAWN.add(name)
     if name == 'F.Cu':
         return F_COL
     if name == 'B.Cu':
@@ -1366,10 +1574,24 @@ def stack_order(names):
 
 _LAYERS = ['B.Cu', 'F.Cu']      # (the run's layers in draw_order: Film sets it -- the copper of every scene drawn so)
 VIA_COL = (245, 245, 245)
-PAIR_COL = (250, 214, 64)
-FORCE = {'pitch': (255, 90, 210), 'via': (90, 230, 255), 'viavia': (90, 230, 255), 'bound': (255, 160, 40),
-         'static': (255, 160, 40), 'turn': (150, 245, 120), 'pturn': (150, 245, 120), 'pdive': (150, 245, 120),
-         'slope': (150, 245, 120), 'approach': (150, 245, 120)}
+PAIR_COL = (168, 173, 183)      # (a differential pair's name, its strand, its string: a grey, not a layer's colour)
+PAIR_RIB = (66, 70, 80)         # (a pair's ribbon under its lane)
+FORCE = {'pitch': (245, 245, 245), 'via': (185, 189, 198), 'viavia': (185, 189, 198), 'bound': (135, 140, 150),
+         'static': (135, 140, 150), 'turn': (100, 105, 115), 'pturn': (100, 105, 115), 'pdive': (100, 105, 115),
+         'slope': (100, 105, 115), 'approach': (100, 105, 115)}
+PAID_C = (255, 255, 255)        # (a rule the program had to pay: white, drawn thicker)
+
+
+class _LayerCols(list):
+    """the film's layer colours by layer index; reading one marks its layer drawn in this frame (_DRAWN)"""
+
+    def __init__(self, names):
+        super().__init__(layer_col(L) for L in names)
+        self.names = list(names)
+
+    def __getitem__(self, i):
+        _DRAWN.add(self.names[i])
+        return list.__getitem__(self, i)
 _FONTS = {}
 
 
@@ -1450,17 +1672,85 @@ class Film:
         self._states()
         self._copper()
         self.g = self._group() if S.G else None
+        self.gsearch = group_search_prep(self) if self.g else None
         self.neg = getattr(S, 'N', None)
         if self.neg:
             neg_prepare(self)
+        self._via_layers()
         # the layers the run's lanes stand on (the legend's, on more than two): their plans' and their copper's
         used = {self.LN[b] for st in self.st.values() for _P, bits in st.values() for b in set(bits.tolist())}
         used |= {s[5] for s in self.seq_c[0]} & set(self.LN)
         self.used = stack_order(used)
 
+    def ref_state(self, plan):
+        """each lane's TAUT STRING from its tooth to its berth, on the layers `plan` gives it along u, and a via where
+        its layer changes: the solve's own choices (its layers and changes along u) on the lane's own way, the order of
+        its lanes aside. A string's u is read where its reference meets each of the frame's columns (the string's
+        point nearest the reference's), and between them along the string. ({n: resampled}, vias)"""
+        Gt = self.S.Gt
+        st, vs = {}, []
+        for n, Ps in self.strings.items():
+            P = np.asarray(Ps, float).reshape(-1, 2)
+            anc = []
+            for f_, k_, o_ in Gt['refs'].get(n) or []:
+                if (f_, k_) not in self.cols:
+                    continue
+                u_, b_, nv_ = self.cols[(f_, k_)]
+                q = (b_[0] + o_ * nv_[0], b_[1] + o_ * nv_[1])
+                anc.append((u_, int(np.argmin(((P - q) ** 2).sum(axis=1)))))
+            if len(P) < 2 or len(anc) < 2:
+                continue
+            anc.sort()
+            js = np.maximum.accumulate([a_[1] for a_ in anc])
+            keep = [0] + [m for m in range(1, len(js)) if js[m] > js[m - 1]]
+            ju, uu = np.asarray([js[m] for m in keep], float), np.asarray([anc[m][0] for m in keep], float)
+            U = np.interp(np.arange(len(P)), ju, uu) if len(ju) > 1 else np.full(len(P), uu[0])
+            bits = [plan.layer(n, (U[m] + U[m + 1]) / 2) for m in range(len(P) - 1)]
+            for m in range(1, len(bits)):
+                if bits[m] != bits[m - 1]:
+                    vs.append((n, float(P[m][0]), float(P[m][1])))
+            st[n] = resample([tuple(q) for q in P], bits, self.nres[n])
+        return st, vs
+
+    def _via_layers(self):
+        """each via's two layers, for its split ring: a plan's via (its lane's layer either side of it), keyed by its
+        lane and place; a via of copper (the top and the bottom of the layers its net's tracks end at it on), keyed by
+        its place"""
+        self.vpair = {}
+        for key, vs in self.vias.items():
+            st = self.raw.get(key) or {}
+            for n, x, y in vs:
+                if n not in st:
+                    continue
+                P, bits = np.asarray(st[n][0], float).reshape(-1, 2), list(st[n][1])
+                if len(P) < 2 or not len(bits):
+                    continue
+                j = int(np.argmin(((P - (x, y)) ** 2).sum(axis=1)))
+                la, lb = bits[max(0, min(len(bits) - 1, j - 1))], bits[min(len(bits) - 1, j)]
+                if la != lb:
+                    pr = [L for L in stack_order([self.LN[la], self.LN[lb]])]
+                    self.vpair[(n, round(float(x), 2), round(float(y), 2))] = (pr[0], pr[-1])
+        ends = collections.defaultdict(set)
+        pools = [self.base_c, self.fo_c, self.seq_c, self.other_c] + ([self.human_c] if self.human_c else []) \
+            + [v for v in self.routed.values()]
+        if self.g is not None:
+            pools.append((self.g.field_segs, []))
+        if getattr(self.S, 'N', None) is not None:
+            pools += list(self.S.N.copper.values())
+        for segs, _v in pools:
+            for q in segs:
+                ends[(round(q[0], 3), round(q[1], 3))].add(q[5])
+                ends[(round(q[2], 3), round(q[3], 3))].add(q[5])
+        self.cvpair = {}
+        for k, ls in ends.items():
+            ls = [L for L in ls if L in self.LN]
+            if len(ls) >= 2:
+                so = stack_order(ls)
+                self.cvpair[k] = (so[0], so[-1])
+
     def _layers_drawn(self):
         global _LAYERS
-        self.col = [layer_col(L) for L in self.LN]
+        self.col = _LayerCols(self.LN)
         self.order = [self.LN.index(L) for L in draw_order(self.LN)]
         _LAYERS = draw_order(self.LN)
 
@@ -1505,6 +1795,26 @@ class Film:
         self.sc = min((bw - 2 * mg) / wx, (bh - 2 * mg) / wy)   # px per mm (1x)
         self.ox = BOARD[0] + mg + (bw - 2 * mg - wx * self.sc) / 2 - self.view[0] * self.sc
         self.oy = BOARD[1] + mg + (bh - 2 * mg - wy * self.sc) / 2 - self.view[1] * self.sc
+        # (the view slid along the board where the panel would show past the board's edge: as little of the panel off
+        # the board as its size allows -- the bus's own region where it was, its scale the same)
+        bb = S.fo.board_info.board_bounds
+        if bb:
+            for ax in (0, 1):
+                lo_px, hi_px = (BOARD[0], BOARD[2]) if ax == 0 else (BOARD[1], BOARD[3])
+                o_ = self.ox if ax == 0 else self.oy
+                v0, v1 = (lo_px - o_) / self.sc, (hi_px - o_) / self.sc
+                off_lo, off_hi = (bb[ax] - 0.5) - v0, v1 - (bb[ax + 2] + 0.5)
+                d_ = -min(off_hi, (off_hi - off_lo) / 2) if off_hi > 0 and off_hi > off_lo else \
+                    min(off_lo, (off_lo - off_hi) / 2) if off_lo > 0 and off_lo > off_hi else 0.0
+                if d_:
+                    v_ = list(self.view)
+                    v_[ax] += d_
+                    v_[ax + 2] += d_
+                    self.view = tuple(v_)
+                    if ax == 0:
+                        self.ox -= d_ * self.sc
+                    else:
+                        self.oy -= d_ * self.sc
         # the braid: x of u where the trunk's point at u lands on the board; y of a rank
         # the board's x of u (the trunk's point at u)
         self.board_x = lambda u: self.X(*(self.sp0 + self.spd * u))[0] / SS
@@ -1838,6 +2148,9 @@ class Film:
                     for end in ends_:
                         moved.add((bn, ln, end))
             g.states.append({'ends': st, 'moved': moved})
+        for bn in (G.json.get('buses') or {}):
+            maps[bn] = maps.get(bn) or bus_frame(bn)
+        g.maps, g.end_geo = maps, end_geo
         # the field as laid: every net's copper on the field over the board its menus were measured on
         g.field_segs, g.field_vias, g.moved_parts = [], [], []
         if G.field is not None and G.prep is not None:
@@ -1951,7 +2264,7 @@ class Canvas:
                 if n in prs and a_of(n) > 0.02:
                     P = st[n][0]
                     wr = (f.rules['PP'] + f.rules['TW']) * f.sc
-                    self.d.line([f.X(x, y) for x, y in P], fill=mix(BODY, (110, 92, 26), a_of(n)),
+                    self.d.line([f.X(x, y) for x, y in P], fill=mix(BODY, PAIR_RIB, a_of(n)),
                                 width=max(1, int(wr * SS)), joint='curve')
         for layer in f.order:
             for n in order:
@@ -1959,6 +2272,8 @@ class Canvas:
                 if a <= 0.02:
                     continue
                 P, bits = st[n]
+                if layer not in bits:
+                    continue
                 col = mix(BODY, f.col[layer], a)
                 ww = w * (1.6 if hl and n in hl else 1.0)
                 j0 = None
@@ -1971,21 +2286,32 @@ class Canvas:
                         j0 = None
 
     def vias(self, vs, alpha=1.0, only=None, dim=0.0, r_mm=None):
+        """a plan's vias: each a ring split in the two layers it joins where the scale allows (at a plan's own
+        place), else white"""
         f = self.f
         r = (r_mm if r_mm is not None else f.rules['via'] / 2)
+        vp = getattr(f, 'vpair', {})
         for n, x, y in vs:
             a = alpha * (1.0 if only is None or n in only else dim)
             if a > 0.02:
-                self.wring(x, y, r, mix(BODY, VIA_COL, a), 1.6)
+                lp = vp.get((n, round(float(x), 2), round(float(y), 2)))
+                if lp and r * f.sc >= 3:
+                    cx, cy = f.X(x, y)
+                    R = r * f.sc * SS
+                    bb = [cx - R, cy - R, cx + R, cy + R]
+                    self.d.arc(bb, 90, 270, fill=mix(BODY, layer_col(lp[0]), a), width=int(2.2 * SS))
+                    self.d.arc(bb, 270, 450, fill=mix(BODY, layer_col(lp[1]), a), width=int(2.2 * SS))
+                else:
+                    self.wring(x, y, r, mix(BODY, VIA_COL, a), 1.6)
 
     def segs(self, segs, alpha=1.0, true_width=True, w_px=2.0, col=None):
         f = self.f
         for layer in _LAYERS:
-            c = col or layer_col(layer)
-            c = mix(BODY, c, alpha)
-            for s in segs:
-                if s[5] != layer:
-                    continue
+            mine = [s for s in segs if s[5] == layer]
+            if not mine:
+                continue
+            c = mix(BODY, col or layer_col(layer), alpha)
+            for s in mine:
                 w = s[4] * f.sc if true_width else w_px
                 self.d.line([f.X(s[0], s[1]), f.X(s[2], s[3])], fill=c, width=max(1, int(round(w * SS))))
                 if true_width:
@@ -1994,13 +2320,26 @@ class Canvas:
                         r = w * SS / 2
                         self.d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=c)
 
-    def cvias(self, vias, alpha=1.0):
+    def cvias(self, vias, alpha=1.0, plain=False):
+        """vias of copper: each a ring split in the two layers it joins (the top and the bottom of those its net's
+        copper meets it on) where the scale allows, else grey; `plain` grey always"""
+        f = self.f
         for x, y, size, _n in vias:
-            cx, cy = self.f.X(x, y)
-            r = size / 2 * self.f.sc * SS
-            self.d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=mix(BODY, (200, 200, 200), alpha))
+            cx, cy = f.X(x, y)
+            r = size / 2 * f.sc * SS
             r2 = r * 0.55
+            lp = None if plain else getattr(f, 'cvpair', {}).get((round(x, 3), round(y, 3)))
+            if lp and r >= 4 * SS:
+                bb = [cx - r, cy - r, cx + r, cy + r]
+                self.d.arc(bb, 90, 270, fill=mix(BODY, layer_col(lp[0]), alpha), width=max(1, int(r - r2)))
+                self.d.arc(bb, 270, 450, fill=mix(BODY, layer_col(lp[1]), alpha), width=max(1, int(r - r2)))
+            else:
+                self.d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=mix(BODY, (200, 200, 200), alpha))
             self.d.ellipse([cx - r2, cy - r2, cx + r2, cy + r2], fill=mix(BODY, (30, 30, 30), alpha))
+
+    def obst(self, segs, alpha=0.15):
+        """another net's copper: an obstacle, whatever its layer -- one grey, faint"""
+        self.segs(segs, alpha=alpha, col=OBST_C)
 
 
 def morph(A, B, t):
@@ -2114,7 +2453,7 @@ def magnify(C, film, box, view, draw_fn, title=None, frame=True):
     if frame:
         (a0, b0), (a1, b1) = film.X(view[0], view[1]), film.X(view[2], view[3])
         if BOARD[0] * SS <= a0 and a1 <= BOARD[2] * SS:
-            C.d.rectangle([a0, b0, a1, b1], outline=ACCENT, width=2 * SS)
+            C.d.rectangle([a0, b0, a1, b1], outline=(200, 204, 212), width=2 * SS)
     return view
 
 
@@ -2127,7 +2466,7 @@ def funnel(C, film, a=1.0):
                 fill=mix(BG, (40, 44, 34), a))
     for u, x in zip(f.ku, f.kx):
         C.line([(f.board_x(u), y0), (x, y1)], mix(BG, (110, 104, 70), a), 1)
-    C.line([(bx0, y0 - 3), (bx0, y0), (bx1, y0), (bx1, y0 - 3)], mix(BG, ACCENT, a), 1.5)
+    C.line([(bx0, y0 - 3), (bx0, y0), (bx1, y0), (bx1, y0 - 3)], mix(BG, (200, 204, 212), a), 1.5)
     C.text((f.kx[1] + f.kx[2]) / 2, (y0 + y1) / 2, f'the trunk between the arrays, magnified x{f.mag:.1f}', 12,
            mix(BG, (200, 190, 130), a), anchor='mm')
 
@@ -2157,11 +2496,13 @@ def draw_braid(C, film, plan, alpha=1.0, cursor=None, cuts=None, labels=True, hl
             if n not in st:
                 continue
             y = f.rank_y(float(np.interp((ulo + uhi) / 2, st[n][0], st[n][1])))
-            col = (255, 110, 60) if kind == 'island' else (255, 60, 200)
+            col = (200, 204, 212) if kind == 'island' else (140, 145, 155)
             C.rect((X(ulo), y - 4, X(uhi), y + 4), outline=col, width=1.5)
     for layer in f.order:
         for n in f.M:
             us, y, bits = st[n]
+            if layer not in list(bits):
+                continue
             a = alpha * (1.0 if not hl or n in hl else 0.25)
             col = mix(PANEL, f.col[layer], a)
             pts = [(X(u), f.rank_y(r)) for u, r in zip(us, y)]
@@ -2193,7 +2534,7 @@ def draw_braid(C, film, plan, alpha=1.0, cursor=None, cuts=None, labels=True, hl
                             outline=mix(PANEL, VIA_COL, alpha * vias_alpha), width=int(1.6 * SS))
     if cursor is not None:
         x = X(cursor)
-        C.line([(x, BRAID[1] + 14), (x, BRAID[3] - 8)], ACCENT, 1.2)
+        C.line([(x, BRAID[1] + 14), (x, BRAID[3] - 8)], MOVED_C, 1.2)
     return st
 
 
@@ -2225,8 +2566,8 @@ def spoken(name):
 
 
 # ------------------------------------------------------------------------------- the 2-D geometry's scenes
-EVC = {'vhop': (90, 230, 255), 'bulge': (255, 90, 210), 'pull': (150, 245, 120)}      # an event's colour, by its kind
-SHORT_C, TIGHT_C = (255, 40, 40), (255, 170, 60)
+EVC = {'vhop': (240, 240, 240), 'bulge': (175, 180, 190), 'pull': (125, 130, 140)}   # an event's grey, by its kind
+SHORT_C, TIGHT_C = (255, 255, 255), (175, 180, 190)
 
 
 def embed_scenes(film, sc, draw_fanout, forces, P2):
@@ -2329,7 +2670,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                         if k == 'P':
                             d.rectangle([cx - r, cy - r, cx + r, cy + r], fill=(250, 250, 250), outline=(20, 20, 20))
                         elif k == 'F':
-                            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 226, 110), outline=(20, 20, 20))
+                            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(150, 156, 166), outline=(20, 20, 20))
                         elif k == 'D':                      # (the end of a pair's dive: a diamond)
                             d.polygon([(cx, cy - 1.4 * r), (cx + 1.4 * r, cy), (cx, cy + 1.4 * r), (cx - 1.4 * r, cy)],
                                       fill=PAIR_COL, outline=(20, 20, 20))
@@ -2346,7 +2687,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                     for bx, by in bl:
                         cx, cy = Z(bx, by)
                         d.ellipse([cx - rv, cy - rv, cx + rv, cy + rv], fill=None if len(bl) > 2 else (58, 58, 62),
-                                  outline=ACCENT if on else (240, 240, 240), width=int((3 if on else 1.5) * SS))
+                                  outline=(255, 255, 255) if on else (200, 204, 212), width=int((3 if on else 1.5) * SS))
             if marks:
                 marks(d, Z, s, st)
         magnify(C, film, box, view, draw, title)
@@ -2397,7 +2738,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
                  'each via at the place along the route', '   the solve gave it', f'one linear program, {P2["nrow"]} rows',
                  f'{pl(npaid, "rule")} it could not meet (red)' if npaid else 'every rule of its own met']
         for j, ln in enumerate(lines):
-            C.text(box[0] + 16, box[1] + 44 + j * 21, ln, 14, (255, 110, 110) if (j == 5 and npaid) else TEXT)
+            C.text(box[0] + 16, box[1] + 44 + j * 21, ln, 14, TEXT)
     sc.append(Scene('start', 'geometry', 10, start, [
         (0, f'The geometry starts in the frame. ONE linear program gives every lane an offset at every column '
             f'({Gt["G"]:.2f} mm apart) along the trunk and its ring, in the solve\'s order, on its solved layers: the '
@@ -2413,6 +2754,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
 
     # ------------------------------------------------------------------ the cells
     e0 = seq[0][3]
+    L_main = max(range(nlay), key=lambda L: (sum(1 for k_ in e0['xy'] if film.erun[k_][0] == L), -L))
     hots = [BP(q) for r in ER[1:] for q in r['hot']] or [BP(q) for r in ER for q in r['hot']] or list(e0['via'].values())
     cwin = win(busiest(hots, 2.8, 2.8 * asp), 2.8)
     # (...and a wider one for the cells: about the pad of another part the most of the start's lanes pass by)
@@ -2432,7 +2774,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
         for L in range(nmesh):
             t0 = 0.06 + L * slot
             later = ease(span(t, t0 + slot, t0 + slot + 0.05)) if L < nmesh - 1 else 0.0
-            draw_cells(C, L, 0.95 - 0.55 * later, upto=span(t, t0, t0 + 0.6 * slot))
+            draw_cells(C, L, 0.95 * (1 - later), upto=span(t, t0, t0 + 0.6 * slot))      # (one layer's at a time)
         # (the layers up close two at a time, as the sweep reaches them: the pair of the last layer it has begun)
         p_ = max([L for L in range(nlay) if t >= 0.06 + L * slot] or [0]) // 2
         for box, L in ((boxA, 2 * p_), (boxB, min(2 * p_ + 1, nlay - 1))):
@@ -2466,7 +2808,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
     # ------------------------------------------------------------------ the lanes' own points
     kinds0 = ''.join(e0['kind'].values())
     nP, nF, nD = kinds0.count('P'), kinds0.count('F'), kinds0.count('D')
-    KINDC = {'P': (250, 250, 250), 'F': (255, 226, 110), 'D': PAIR_COL}
+    KINDC = {'P': (250, 250, 250), 'F': (150, 156, 166), 'D': PAIR_COL}
     dots0 = [(k, x, y) for key, xy in e0['xy'].items() for (x, y), k in zip(xy[1:-1], e0['kind'][key])]
     on_layer = [{key for key in e0['xy'] if film.erun[key][0] == L} for L in range(nlay)]
     # (up close, the two layers that carry the most runs -- on two layers, the two)
@@ -2475,8 +2817,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
     def points(C, t, T_):
         draw_fanout(C, 0.5)
         m = ease(span(t, 0.03, 0.22))
-        for L in range(nlay):
-            draw_cells(C, L, 0.3)
+        draw_cells(C, L_main, 0.3)
         C.lanes(morph(film.st['geo'], film.st['e0'], m), w=2.0)
         C.vias(film.vias['e0'] if m > 0.5 else film.vias['geo'])
         a_p = ease(span(t, 0.28, 0.4))
@@ -2487,9 +2828,10 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
             close(C, box, cwin, e0, f'{bname(L)} up close: each run\'s own points', L=L, hl=on_layer[L], pts=a_p > 0.5)
         facts(C, boxT, 'the lanes\' own points', [
             (f'{len(e0["xy"])} runs of {len(film.M)} lanes, {len(e0["via"])} vias', TEXT),
-            (f'{nP} points on cell edges (white): each slides along its edge', (250, 250, 250)),
-            (f'{nF} free points (yellow): each moves across its lane, inside its cell', (255, 226, 110))]
-            + ([(f'{nD} ends of a pair\'s dive (gold): each a fixed step from the pair\'s via, and moves with it', PAIR_COL)]
+            (f'{nP} points on cell edges (squares): each slides along its edge', TEXT),
+            (f'{nF} free points (round): each moves across its lane, inside its cell', TEXT)]
+            + ([(f'{nD} ends of a pair\'s dive (diamonds): each a fixed step from the pair\'s via, and moves with it',
+                 TEXT)]
                if nD else [])
             + ([('a pair\'s via is two barrels, one a leg; where the pair crosses over, room is kept for them on either '
                  'side of it (hollow)', DIM)] if any(len(v) > 2 for v in e0['barrel'].values()) else []) + [
@@ -2532,7 +2874,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
         bw_ = (x1 - x0) / max(1, NR)
         C.rect((x0, BRAID[1] + 12, x0 + 12, BRAID[1] + 24), fill=(96, 104, 118))
         C.text(x0 + 18, BRAID[1] + 10, 'the points a round\'s program holds', 12, DIM)
-        C.rect((x0 + 270, BRAID[1] + 12, x0 + 282, BRAID[1] + 24), fill=ACCENT)
+        C.rect((x0 + 270, BRAID[1] + 12, x0 + 282, BRAID[1] + 24), fill=(200, 204, 212))
         C.text(x0 + 288, BRAID[1] + 10, 'the places that moved in it', 12, DIM)
         C.text(x0 - 8, y0, str(top), 11, DIM, anchor='rm')
         C.text(x0 - 8, y1, '0', 11, DIM, anchor='rm')
@@ -2548,7 +2890,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
             C.rect((xa, y1 - (y1 - y0) * r['nlive'] / top * f, xb, y1), fill=(96, 104, 118))
             h2 = (y1 - y0) * min(top, len(r['hot'])) / top * f
             if h2 >= 0.5:
-                C.rect((xa + (xb - xa) * 0.25, y1 - h2, xb - (xb - xa) * 0.25, y1), fill=ACCENT)
+                C.rect((xa + (xb - xa) * 0.25, y1 - h2, xb - (xb - xa) * 0.25, y1), fill=(200, 204, 212))
             for row, (kind, cnt) in enumerate((('vhop', r['hops']), ('bulge', r['nexc']), ('pull', r['npull']))):
                 if cnt and f >= 1:
                     hh = min(12.0, 2.0 + 2.4 * math.log2(1 + cnt))
@@ -2559,9 +2901,9 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
         for after, s in slide_at.items():
             if done >= after:
                 x = x0 + after * bw_
-                C.line([(x, y0 - 6), (x, y1 + 46)], ACCENT, 1.5)
+                C.line([(x, y0 - 6), (x, y1 + 46)], MOVED_C, 1.5)
                 C.text(x + 5 if after < NR * 0.6 else x - 5, y0 - 2, slid_txt(len(s['vias'])), 12,
-                       ACCENT, anchor='lt' if after < NR * 0.6 else 'rt')
+                       TEXT, anchor='lt' if after < NR * 0.6 else 'rt')
 
     def rounds(C, t, T_):
         draw_fanout(C, 0.5)
@@ -2574,8 +2916,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
             i, f = len(wts) - 1, 1.0
         (ka, _ka, _ra, sa), (kb, kind, rec_, sb) = seq[i], seq[i + 1]
         m = ease(span(f, 0.2, 0.8))
-        for L in range(nlay):
-            draw_cells(C, L, 0.26)
+        draw_cells(C, L_main, 0.26)
         C.lanes(morph(film.st[ka], film.st[kb], m), w=2.0)
         C.vias([(n, x_, y_) for n, x_, y_, al in morph_vias(film.vias[ka], film.vias[kb], m)])
         done = sum(1 for s_ in seq[1:i + 1] if s_[1] == 'round')
@@ -2585,7 +2926,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
             for (x_, y_) in lit_px[rec_['it']]:
                 C.d.rectangle([x_ - SS / 2, y_ - SS / 2, x_ + SS / 2, y_ + SS / 2], fill=c1)
             a_h = ease(span(f, 0.25, 0.5)) * (1 - ease(span(f, 0.85, 1.0)))
-            c2 = mix(BODY, ACCENT, a_h)
+            c2 = mix(BODY, (175, 180, 190), a_h)
             if a_h > 0.02:
                 for (x_, y_) in hot_px[rec_['it']]:
                     C.d.ellipse([x_ - 1.6 * SS, y_ - 1.6 * SS, x_ + 1.6 * SS, y_ + 1.6 * SS], fill=c2)
@@ -2600,8 +2941,8 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
             a_s = math.sin(math.pi * span(f, 0.0, 1.0))
             for vk in rec_['vias']:
                 p0, p1 = sa['via'][vk], sb['via'][vk]
-                C.wline([p0, p1], mix(BODY, ACCENT, a_s), 2.0)
-                C.wring(*p1, 0.4, mix(BODY, ACCENT, a_s), 2.5)
+                C.wline([p0, p1], mix(BODY, MOVED_C, a_s), 2.0)
+                C.wring(*p1, 0.4, mix(BODY, MOVED_C, a_s), 2.5)
         C.card((BRAID[0], BRAID[1], boxR[0] - 10, BRAID[3]), alpha=0.95)
         chart(C, done if u < 1 else NR, BRAID[0] + 180, BRAID[0] + 960)
         x0 = BRAID[0] + 990
@@ -2670,8 +3011,7 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
         0.76 to 0.92)"""
         def fn(C, t, T_):
             draw_fanout(C, 0.5)
-            for L in range(nlay):
-                draw_cells(C, L, 0.2)
+            draw_cells(C, L_main, 0.2)
             C.lanes(film.st[board_key], w=2.0)
             C.vias(film.vias[board_key])
             vb = magnify_view(boxB, view, True)
@@ -2938,8 +3278,8 @@ def embed_scenes(film, sc, draw_fanout, forces, P2):
 
 
 # ------------------------------------------------------------------------------- the group's ends' scenes
-GBALL = {'bus': ACCENT, 'other': (170, 178, 190), 'plane': (120, 220, 120)}
-LESSON_C, FREED_C, MOVED_C = (255, 70, 70), (90, 230, 255), (255, 255, 255)
+GBALL = {'bus': (240, 242, 246), 'other': (120, 126, 136), 'plane': (150, 156, 166)}   # (by shape too: _ballmark)
+LESSON_C, FREED_C, MOVED_C = (250, 250, 250), (175, 180, 190), (255, 255, 255)
 
 
 def fit_view(box, view, title=True):
@@ -2956,10 +3296,11 @@ def fit_view(box, view, title=True):
 def _mdraw(d, Z, s, segs=(), vias=(), alpha=1.0, col=None, w_px=None, via_d=0.25, via_col=None):
     """pieces of copper in a magnifier: segments (x0, y0, x1, y1, width, layer, ..) B under F, vias as rings"""
     for layer in _LAYERS:
+        mine = [q for q in segs if q[5] == layer]
+        if not mine:
+            continue
         c = mix(BODY, col or layer_col(layer), alpha)
-        for q in segs:
-            if q[5] != layer:
-                continue
+        for q in mine:
             w = max(2, int(w_px * SS)) if w_px else max(2, int(q[4] * s))
             (a, b), (e, f_) = Z(q[0], q[1]), Z(q[2], q[3])
             d.line([(a, b), (e, f_)], fill=c, width=w)
@@ -2972,6 +3313,49 @@ def _mdraw(d, Z, s, segs=(), vias=(), alpha=1.0, col=None, w_px=None, via_d=0.25
         d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=mix(BODY, via_col or (220, 220, 220), alpha))
         r2 = r * 0.5
         d.ellipse([cx - r2, cy - r2, cx + r2, cy + r2], fill=mix(BODY, (30, 30, 30), alpha))
+
+
+def _ballmark(d, Z, s, x, y, kind, col, r_mm=0.36):
+    """a ball's class by its shape: a bus ball a ring, another signal's a thin ring, a plane ball a dot"""
+    cx, cy = Z(x, y)
+    if kind == 'plane':
+        r = r_mm * 0.45 * s
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=col)
+    else:
+        r = r_mm * s
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=col, width=int((2 if kind == 'bus' else 1) * SS))
+
+
+def big_numbers(C, box, items, a=1.0, px=54, card=True, bg=PANEL):
+    """at most three large numbers across `box`, each with its meaning beneath it -- what a panel says where a log
+    was listed"""
+    if card:
+        C.card(box, alpha=0.95)
+    n = len(items)
+    w = (box[2] - box[0]) / max(1, n)
+    yc = (box[1] + box[3]) / 2
+    for j, (val, lab) in enumerate(items):
+        x = box[0] + w * j + w / 2
+        if val:
+            C.text(x, yc - 4, val, px, mix(bg, TEXT, a), bold=True, anchor='mb')
+        for k, ln in enumerate(C.wrap(lab, 20, w - 40)[:2]):
+            C.text(x, yc + 8 + k * 26, ln, 20, mix(bg, DIM, a), anchor='ma')
+
+
+def side_table(C, box, title, rows, a=1.0, px=20, widths=None, bold_first=None):
+    """a table on the four-bus views' side: its title, then its rows of cells (each cell a string), the column widths
+    `widths` (a share of the box each), the row named `bold_first` bold"""
+    C.card(box, alpha=0.95)
+    C.text(box[0] + 20, box[1] + 16, title, 22, mix(PANEL, TEXT, a), bold=True)
+    wid = widths or [1.0 / max(1, max(len(r) for r in rows))] * max(len(r) for r in rows) if rows else []
+    y = box[1] + 60
+    for r in rows:
+        x = box[0] + 20
+        for k, cell in enumerate(r):
+            C.text(x, y, cell, px, mix(PANEL, TEXT if k == 0 or r[0] == bold_first else DIM, a),
+                   bold=(k == 0 and r[0] == bold_first))
+            x += (box[2] - box[0] - 40) * wid[k]
+        y += px + 14
 
 
 def _ring(d, Z, s, x, y, r_mm, col, w=2):
@@ -3005,7 +3389,7 @@ def group_scenes(film, sc):
         for k, a in (('bus', a_bus), ('other', a_other), ('plane', a_plane)):
             if a > 0.02:
                 for (x, y) in g.balls[k]:
-                    _ring(d, Z, s, x, y, r, mix(BODY, GBALL[k], a), 2)
+                    _ballmark(d, Z, s, x, y, k, mix(BODY, GBALL[k], a), r)
 
     def state_draw(d, Z, s, j, alpha=1.0, hl=None, hl_col=MOVED_C, dim=None):
         """state j's ends: each lane's escape as the model held it; `hl` ends ringed, `dim` the rest at that strength"""
@@ -3033,28 +3417,28 @@ def group_scenes(film, sc):
                 y += px + 5
             y += 3
 
-    trim = lambda ln, n=400: ln if len(ln) <= n else ln[:n - 3] + '...'
     clk = lambda t_s: f'{t_s:.0f} s'
 
     # ------------------------------------------------------------------ the buses, the group, the capture
-    caps_ = ', '.join(f'{e["bus"].split(":")[-1]} in {e.get("secs", "?")} s' for e in G.cap_end) or 'none recorded'
     srcs = sorted({b['src'] for b in G.plan})
     nb = {k: len(v) for k, v in g.balls.items()}
 
     def buses(C, t, T_):
         a1, a2, a3 = ease(span(t, 0.12, 0.3)), ease(span(t, 0.4, 0.55)), ease(span(t, 0.55, 0.7))
         arrays(C, lambda d, Z, s, ref: balls(d, Z, s, a1, a2, a3))
-        rows = [(f'the bus step found {pl(len(G.plan), "bus", "buses")}:', TEXT)]
-        rows += [(f'   {b["src"]} -> {b["dest"]}, {b["routed"]} nets'
-                  + (f' ({b["nets"]} between the two parts alone)' if b['routed'] != b['nets'] else '')
-                  + f' -- {b["why"]}', DIM) for b in G.plan]
-        rows += [(f'one group for each source array: {", ".join(srcs)}', TEXT),
-                 (f'the capture, each bus\'s ends model by a short run of its own: {caps_}', TEXT if t > 0.3 else DIM)]
-        card_lines(C, (BRAID[0], BRAID[1], BRAID[0] + 930, BRAID[3]), rows, 16)
-        rows2 = [(f'gold: {nb["bus"]} bus balls  ·  grey: {nb["other"]} other signals\' balls  ·  green: '
-                  f'{nb["plane"]} plane balls', TEXT)] + [(trim(ln.split('; the pattern')[0], 120), DIM) for ln in G.arrays]
-        card_lines(C, (BRAID[0] + 950, BRAID[1], BRAID[2], BRAID[3]), rows2, 16, a=ease(span(t, 0.35, 0.5)))
-    sc.append(Scene('buses', 'capture', 10, buses, [
+        rows = [(f'{pl(len(G.plan), "bus", "buses")} off {", ".join(srcs)}: one group', TEXT)]
+        rows += [(f'{b["src"]} to {b["dest"]}, {b["routed"]} nets', DIM) for b in G.plan]
+        card_lines(C, (BRAID[0], BRAID[1], BRAID[0] + 700, BRAID[3]), rows, 20)
+        a2 = ease(span(t, 0.35, 0.5))
+        bx = (BRAID[0] + 720, BRAID[1], BRAID[2], BRAID[3])
+        C.card(bx, alpha=0.95)
+        for j, (k, lab) in enumerate((('bus', 'bus balls'), ('other', 'other signals\' balls'), ('plane', 'plane balls'))):
+            x = bx[0] + 50 + j * (bx[2] - bx[0] - 80) / 3
+            cy = (bx[1] + bx[3]) / 2
+            _ballmark(C.d, lambda x_, y_: (x_ * SS, y_ * SS), 16 * SS / 0.36, x + 16, cy - 22, k, mix(PANEL, GBALL[k], a2))
+            C.text(x + 44, cy - 22, f'{nb[k]:,}', 40, mix(PANEL, TEXT, a2), bold=True, anchor='lm')
+            C.text(x, cy + 14, lab, 20, mix(PANEL, DIM, a2))
+    sc.append(Scene('buses', 'buses', 10, buses, [
         (0, f'The bus step finds its buses, and the buses that leave one source array are ONE GROUP: '
             f'{", ".join(b["src"] + " -> " + b["dest"] for b in G.plan)}. Their ends are chosen together.'),
         (0.3, 'CAPTURE: each bus\'s ends model is captured by a short run of its own -- its frame, its cut, each array '
@@ -3063,32 +3447,45 @@ def group_scenes(film, sc):
                'will serve every one of them.')]))
 
     # ------------------------------------------------------------------ the one model, and a state at all
-    m0 = G.models[0] if G.models else None
-    o0 = m0['model']['objective'] if m0 else {}
-    rest0 = sorted((o0.get('rest_vias') or {}).items(), key=lambda kv: -kv[1])
-    wl = (m0['model']['W_LEX'] / 1000) if m0 else 0
-    s0 = next(iter(m0['states'].values()), {}) if m0 else {}
+
+    # (one lane of the followed bus, its tooth and its berth named on the picture: the one in the middle of its teeth)
+    ex_ = None
+    if g.states:
+        e_ = g.states[0]['ends']
+        cand_ = [k for k in e_ if k[0] == S.dst and k[2] == 'tooth' and (k[0], k[1], 'berth') in e_ and e_[k][0]
+                 and e_[(k[0], k[1], 'berth')][0]]
+        if cand_:
+            k_ = sorted(cand_, key=lambda k: e_[k][0][-1][3])[len(cand_) // 2]
+            ex_ = (e_[k_], e_[(k_[0], k_[1], 'berth')])
+    n_lanes = len({(k[0], k[1]) for k in g.states[0]['ends']}) if g.states else 0
+    n_balls = sum(len(v) for v in g.balls.values())
 
     def model(C, t, T_):
         a_s = ease(span(t, 0.62, 0.8))
-        arrays(C, lambda d, Z, s, ref: (balls(d, Z, s, 0.55 * (1 - a_s) + 0.15, 0.55, 0.55),
-                                        state_draw(d, Z, s, 0, a_s) if a_s > 0.02 else None))
-        a_l = ease(span(t, 0.05, 0.2))
-        rows = [(trim(ln, 220), DIM) for ln in G.tiers]
-        rows += [(f'round {r}: {trim(q, 220)}', (255, 140, 120) if q.startswith('no state') else (150, 245, 120))
-                 for j, (r, q) in enumerate(G.state_q) if t > 0.3 + 0.1 * j]
-        card_lines(C, (BRAID[0], BRAID[1], BRAID[0] + 1000, BRAID[3]), rows, 14, a=a_l,
-                   title='the menus, the pattern first -- and a state at all?')
-        if t > 0.6 and m0:
-            a = ease(span(t, 0.6, 0.7))
-            rows = [(trim(ln, 200), DIM) for ln in G.start_lines]
-            rows += [(f'the start state: {s0.get("crossings", "?")} crossings, {s0.get("changes", "?")} lanes changing '
-                      f'layer, {s0.get("vias", "?")} fanout vias', TEXT),
-                     (f'its objective: {o0.get("walls", 0)} walled, {o0.get("fans", 0)} plane balls fanned out, '
-                      f'{o0.get("far_teeth", 0)} end(s) on a far face, {o0.get("changes", 0)} changes of layer at '
-                      f'{wl:g} vias each, and the rest in vias:', TEXT),
-                     ('   ' + ',  '.join(f'{k} {v:.0f}' for k, v in rest0 if v), DIM)]
-            card_lines(C, (BRAID[0] + 1020, BRAID[1], BRAID[2], BRAID[3]), rows, 14, a=a, title='the start')
+        a_x = ease(span(t, 0.7, 0.8))
+
+        def draw(d, Z, s, ref):
+            balls(d, Z, s, 0.55 * (1 - a_s) + 0.15, 0.55, 0.55)
+            if a_s > 0.02:
+                state_draw(d, Z, s, 0, a_s)
+            if ex_ and a_x > 0.02:
+                for (segs, _v), name, here in ((ex_[0], 'tooth', S.src), (ex_[1], 'berth', S.dst)):
+                    if ref != here or not segs:
+                        continue
+                    x, y = segs[-1][2:4]
+                    L_ = segs[-1][4]
+                    cx, cy = Z(x, y)
+                    r = 0.55 * s
+                    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=mix(BODY, MOVED_C, a_x), width=3 * SS)
+                    d.text((cx + r + 6 * SS, cy - 4 * SS), name, font=font(22 * SS, True), fill=mix(BODY, TEXT, a_x),
+                           anchor='lb')
+                    if L_ in film.LN:
+                        d.text((cx + r + 6 * SS, cy + 2 * SS), f'on {L_}', font=font(20 * SS, True),
+                               fill=mix(BODY, layer_col(L_), a_x), anchor='lt')
+        arrays(C, draw)
+        big_numbers(C, BRAID, [(f'{n_balls:,}', 'balls on the arrays, every one served'),
+                               (f'{2 * n_lanes:,}', f'ends to choose: a tooth and a berth for each of {n_lanes} lanes'),
+                               (f'{len(G.plan)}', 'buses, one model, every rule hard')], ease(span(t, 0.05, 0.2)))
     sc.append(Scene('model', 'ends model', 16, model, [
         (0, 'THE GROUP\'S ENDS: one CP-SAT model chooses the arrays\' whole fanout -- every bus ball\'s tooth or berth, '
             'every other signal\'s escape, every plane ball\'s drop -- together with every bus\'s ends.'),
@@ -3118,8 +3515,8 @@ def group_scenes(film, sc):
     n_top = sum(1 for r_ in G.rounds if r_['best'] and r_['best'] > vhi)
     taken = re.findall(r'(\d+) of (\d+) states asked taken', G.log)
     n_rounds = re.findall(r'the search: (\d+) rounds of (\d+) lanes', G.log)
-    rcol = lambda lab: ((255, 170, 60) if 'costly' in lab else (90, 230, 255) if 'rest held' in lab else
-                        (255, 90, 210) if lab == 'the model' else (215, 220, 228))
+    rcol = lambda lab: ((250, 250, 250) if 'costly' in lab else (170, 175, 185) if 'rest held' in lab else
+                        (120, 125, 135) if lab == 'the model' else (210, 214, 222))
 
     def chart(C, box, t_now, a=1.0, marks=True):
         C.card(box, alpha=0.95)
@@ -3164,8 +3561,8 @@ def group_scenes(film, sc):
             C.d.rectangle([(x - 4) * SS, (y - 4) * SS, (x + 4) * SS, (y + 4) * SS], fill=mix(PANEL, ACCENT, a))
         x_ = X(min(t_now, t_all))
         C.line([(x_, gy0), (x_, gy1)], mix(PANEL, (120, 126, 140), a), 1)
-        C.text(gx1, box[3] - 18, 'cyan: each bus\'s ends in turn   orange: a round about a costly ball   white: a round of '
-               'the search   magenta: a repair\'s solve   gold: a solve\'s state', 11, mix(PANEL, DIM, a), anchor='ra')
+        C.text(gx1, box[3] - 18, 'light grey: each bus\'s ends in turn   white: a round about a costly ball   grey: a round '
+               'of the search   dark grey: a repair\'s solve   square: a solve\'s state', 11, mix(PANEL, DIM, a), anchor='ra')
 
     def which(t_now):
         """the last of the model's states standing at t_now on its clock"""
@@ -3191,14 +3588,49 @@ def group_scenes(film, sc):
                    title=f'state {j + 1} of {len(G.models)}, at {clk(m_t[j])}')
     nr_ = sum(int(a_) for a_, _b in n_rounds)
     tk_ = (sum(int(a_) for a_, _b in taken), sum(int(b_) for _a, b_ in taken))
-    sc.append(Scene('search', 'search', 22, search, [
-        (0, 'THE SEARCH: the lanes are cut into stretches; each round frees a few lanes of a stretch, '
-            + (f'{n_rounds[0][1]}, ' if n_rounds else '') + 'and the balls near them, the rest held, and solves again. '
-            'Every solve is bounded by deterministic batches, never a clock.'),
-        (0.35, f'Each dot is one round\'s best ({nr_} rounds in all' + (f'; {tk_[0]} of the {tk_[1]} states asked were '
-               'taken' if taken else '') + '). The objective comes down from the start to the state the search ends on.'),
-        (0.7, 'On the board, the ends of the state the search holds; the ends that moved since the state before are '
-              'ringed.')]))
+    D = film.gsearch
+    if D is None:
+        sc.append(Scene('search', 'search', 22, search, [
+            (0, 'THE SEARCH: the lanes are cut into stretches; each round frees a few lanes of a stretch, '
+                + (f'{n_rounds[0][1]}, ' if n_rounds else '') + 'and the balls near them, the rest held, and solves again. '
+                'Every solve is bounded by deterministic batches, never a clock.'),
+            (0.35, f'Each dot is one round\'s best ({nr_} rounds in all' + (f'; {tk_[0]} of the {tk_[1]} states asked were '
+                   'taken' if taken else '') + '). The objective comes down from the start to the state the search ends on.'),
+            (0.7, 'On the board, the ends of the state the search holds; the ends that moved since the state before are '
+                  'ringed.')]))
+    else:
+        # THE SEARCH AS IT RAN: the group's ends search run again, watched -- every state it found, drawn as the
+        # short draws it (draw_group_search): the ends at both arrays moving, the lines of what it minimises, its terms
+        n_ = len(D.st)
+        s0_, s1_ = D.st[0].get('split') or {}, D.st[-1].get('split') or {}
+        moved_ = sum(1 for j_ in range(1, n_) for key, v in D.lanes[j_].items()
+                     if D.lanes[j_ - 1].get(key) is not None and (D.lanes[j_ - 1][key][0], D.lanes[j_ - 1][key][1],
+                                                                 D.lanes[j_ - 1][key][3], D.lanes[j_ - 1][key][4])
+                     != (v[0], v[1], v[3], v[4]))
+
+        def gsearch(C, t, T_):
+            j_ = int(round(ease(span(t, 0.04, 0.92)) * (n_ - 1)))
+            C.obst(film.other_c[0])
+            draw_group_search(C, film, D, j_, j_ - 1 if j_ else None, BRAID)
+        terms_ = lambda sp, j_: (sp.get('walls'), sp.get('fans'), sp.get('changes'), D.nx[j_],     # noqa: E731
+                                 sp.get('plane_runs_vias') or 0.0)
+        a0_, a1_ = terms_(s0_, 0), terms_(s1_, n_ - 1)
+        sc.append(Scene('search', 'search', 22, gsearch, [
+            (0, f'THE SEARCH, as it ran: the group\'s ends search run again from its recorded inputs, the {n_} states '
+                f'it found one after another -- every bus\'s ends at both arrays, those a state moved ringed '
+                f'({moved_} ends moved over the search).'),
+            (0.25, 'What it minimises, lane by lane: a straight line from each tooth to its berth, coloured by its ends\' '
+                   'layers, a via\'s ring where the model counts a change of layer, a dot where the lines of two lanes '
+                   'it counts crossing cross.'),
+            (0.55, f'Its terms, from the state it starts from to its last: walled balls {a0_[0]} to {a1_[0]}, plane balls '
+                   f'fanned out {a0_[1]} to {a1_[1]}, lanes changing layer {a0_[2]} to {a1_[2]}, crossings {a0_[3]} to '
+                   f'{a1_[3]}, runs on a plane\'s layer {a0_[4]:.0f} to {a1_[4]:.0f} vias\' worth.')],
+            says=[(0, f'The search, as it ran: {n_:,} states it found, the ends moving at both arrays.'),
+                  (0.25, 'Each line joins a lane\'s two ends, in its layers\' colours; a ring is a change of layer, a dot '
+                         'a crossing the model counts.'),
+                  (0.55, f'Walled balls come down from {a0_[0]} to {a1_[0]}, plane balls fanned out from {a0_[1]} to '
+                         f'{a1_[1]}, and lanes changing layer from {a0_[2]} to {a1_[2]}.')],
+            cues=[(0.04 + 0.88 * k_ / max(1, n_ - 1), 'tick', 0.4) for k_ in range(1, n_)]))
 
     # ------------------------------------------------------------------ the checks, the lessons, the repair
     v1 = G.verdicts[0] if G.verdicts else None
@@ -3297,38 +3729,23 @@ def group_scenes(film, sc):
                       else 'not clean.'))]))
 
     # ------------------------------------------------------------------ the field
-    tie_c = (255, 90, 210)
     fan_ = re.findall(r'the arrays fanned out as chosen: (\d+) tracks and (\d+) vias', G.log)
     fan_ = fan_[-1] if fan_ else None
 
     def field(C, t, T_):
         a = ease(span(t, 0.05, 0.4))
-        a_m = ease(span(t, 0.45, 0.6))
-        a_t = ease(span(t, 0.65, 0.75))
 
         def draw(d, Z, s, ref):
             _mdraw(d, Z, s, g.field_segs, [v[:2] for v in g.field_vias], a, via_d=VD)
             for (x, y) in g.balls['plane']:
-                _ring(d, Z, s, x, y, 0.36, mix(BODY, GBALL['plane'], a * 0.8), 2)
-            if a_m > 0.02:
-                for ref_, old, new in g.moved_parts:
-                    for ((x0, y0), sx, sy), ((x1, y1), _sx, _sy) in zip(old, new):
-                        (p0, q0), (p1, q1) = Z(x0 - sx / 2, y0 - sy / 2), Z(x0 + sx / 2, y0 + sy / 2)
-                        d.rectangle([p0, q0, p1, q1], outline=mix(BODY, (150, 150, 150), a_m), width=SS)
-                        d.line([Z(x0, y0), Z(x1, y1)], fill=mix(BODY, MOVED_C, a_m), width=2 * SS)
-                    (x, y), _sx, sy = new[0]
-                    cx, cy = Z(x, y)
-                    d.text((cx, cy - sy * s - 4 * SS), ref_, font=font(13 * SS, True), fill=mix(BODY, MOVED_C, a_m), anchor='mb')
-            if a_t > 0.02 and g.ties:
-                _mdraw(d, Z, s, g.ties, (), a_t, col=tie_c, w_px=4)
-                for q in g.ties:
-                    _ring(d, Z, s, q[0], q[1], 0.4, mix(BODY, tie_c, a_t), 2)
+                _ballmark(d, Z, s, x, y, 'plane', mix(BODY, GBALL['plane'], a * 0.8))
+            if g.ties:
+                _mdraw(d, Z, s, g.ties, (), a, via_d=VD)          # (the field's ties: copper of the field like the rest)
         arrays(C, draw)
-        rows = [(ln.split(' -> ')[0], TEXT if ln.startswith(('the arrays', 'the field as laid')) else DIM)
-                for ln in G.field_lines]
-        if G.secs_line:
-            rows.append((trim(G.secs_line.split(' -> ')[0], 120), DIM))
-        card_lines(C, (BRAID[0], BRAID[1], BRAID[2], BRAID[3]), rows, 16, title='the shared field')
+        fd_ = (G.fields[-1] if G.fields else {}) or {}
+        big_numbers(C, BRAID, ([(f'{int(fan_[0]):,}', 'tracks of the field'), (f'{int(fan_[1]):,}', 'vias of the field')]
+                               if fan_ else []) + [(f'{fd_.get("drc_field", "?")}',
+                                                    'design rule violations, the field as laid')], ease(span(t, 0.05, 0.3)))
     if g.field_segs:
         sc.append(Scene('field', 'field', 14, field, [
             (0, 'THE FIELD: the arrays are fanned out exactly as the model chose' + (
@@ -3389,7 +3806,7 @@ def group_sound(film, sc, v):
                                                      for j, (_r, q) in enumerate(sq) if 0.3 + 0.1 * j < 0.6] \
             + [(0.62, 'glide', 0.5, 0.8)]
     # ---- the search
-    if 'search' in by:
+    if 'search' in by and film.gsearch is None:
         t_chk, m_t, line_v, j_pre = v['t_chk'], v['m_t'], v['line_v'], v['j_pre']
         n_rounds, taken = v['n_rounds'], v['taken']
         # (the scene's moment of a time on the model's clock: the inverse of its cursor, ease(span(t, .04, .9)) t_chk)
@@ -3468,18 +3885,17 @@ def group_sound(film, sc, v):
 
 
 # ------------------------------------------------------------------------------- the negotiation's scenes
-BUS_TINT = ((255, 210, 90), (110, 200, 200), (205, 130, 205), (160, 205, 110), (200, 170, 130), (150, 160, 230))
-PHASE_C = {'fanout': (140, 148, 160), 'solve': (90, 230, 255), 'wait': (64, 70, 82), 'loop': (150, 245, 120),
-           'lay': (255, 165, 70)}
+PHASE_C = {'fanout': (96, 102, 114), 'solve': (205, 209, 216), 'wait': (46, 50, 60), 'loop': (150, 155, 165),
+           'lay': (245, 245, 245)}          # (a phase's grey on the negotiation's clock)
+NEG_BOARD = (20, 126, 950, 1006)            # (the group's board, portrait, in the left half at its full height)
+NEG_SIDE = (970, 126, 1900, 1006)           # (its table, cards and clock on the right)
+NEG_CLOCK = (970, 646, 1900, 1006)
 
 
 def neg_prepare(film):
     """the negotiation made ready for drawing: each bus's tint (the filmed bus's the film's gold), the view that holds
     every bus's copper and arrays, and the other buses' copper, drawn faint where the focus is the filmed bus"""
     S, N = film.S, film.S.N
-    N.tint = {b: BUS_TINT[0] if b == N.me else BUS_TINT[1 + j % (len(BUS_TINT) - 1)]
-              for j, b in enumerate([b for b in N.buses if b != N.me])}
-    N.tint[N.me] = BUS_TINT[0]
     pts = [(q[0], q[1]) for segs, _v in N.copper.values() for q in segs] + \
           [(q[2], q[3]) for segs, _v in N.copper.values() for q in segs]
     for ref in [S.src] + N.buses:
@@ -3487,40 +3903,39 @@ def neg_prepare(film):
         if fp is not None:
             pts += [(p.global_x, p.global_y) for p in fp.pads]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-    N.view = fit_view(BOARD, (min(xs) - 1.5, min(ys) - 1.5, max(xs) + 1.5, max(ys) + 1.5))
+    N.view = fit_view(NEG_BOARD, (min(xs) - 1.5, min(ys) - 1.5, max(xs) + 1.5, max(ys) + 1.5))
     N.peer_segs = [q for b in N.buses if b != N.me for q in N.copper.get(b, ([], []))[0]]
     N.peer_vias = [q for b in N.buses if b != N.me for q in N.copper.get(b, ([], []))[1]]
     N.field = {b: [q for q in (film.g.field_segs if film.g else []) if q[6] in N.nets.get(b, ())] for b in N.buses}
 
 
 def neg_view(C, film, draw, title, show=None, field=1.0):
-    """the whole group, every bus where it runs, in the board's panel: its pads, each bus's field ends (`field`), each
-    bus's copper as `show` {bus: alpha} has it -- its layers' colours over its tint -- then draw(d, Z, s); each bus named
-    by its destination"""
+    """the whole group, every bus where it runs, in the left half at its full height: its pads, each bus's field ends
+    (`field`), each bus's copper as `show` {bus: alpha} has it in its layers' colours -- the followed bus's 3.5 px
+    wide, the others' at their copper's width -- then draw(d, Z, s); each bus named by its destination"""
     N = film.S.N
+    C.rect((0, BOARD[1] - 2, W, BRAID[3] + 4), fill=BG)
 
     def fn(d, Z, s):
         for b in N.buses:
             if field > 0.02:
                 _mdraw(d, Z, s, N.field[b], (), field * (1.0 if b == N.me else 0.6))
-        for b, a in (show or {}).items():
+        for b, a in sorted((show or {}).items(), key=lambda kv: kv[0] == N.me):
             segs, vias = N.copper.get(b, ([], []))
             if a <= 0.02:
                 continue
-            tw = mix(BODY, N.tint[b], 0.38 * a)
-            for q in segs:
-                (x0, y0), (x1, y1) = Z(q[0], q[1]), Z(q[2], q[3])
-                d.line([(x0, y0), (x1, y1)], fill=tw, width=max(2, int((q[4] * s) + 5 * SS)))
-            _mdraw(d, Z, s, segs, [v_[:2] for v_ in vias], a, via_d=film.rules['via'])
+            _mdraw(d, Z, s, segs, [v_[:2] for v_ in vias], a, via_d=film.rules['via'],
+                   w_px=3.5 if b == N.me else None)
         for b in N.buses:
             fp = film.S.fo.footprints.get(b)
             if fp is not None:
                 xs = [p.global_x for p in fp.pads]
                 ys = [p.global_y for p in fp.pads]
                 x, y = Z((min(xs) + max(xs)) / 2, min(ys))
-                d.text((x, y - 6 * SS), b, font=font(15 * SS, True), fill=N.tint[b], anchor='mb')
+                d.text((x, y - 6 * SS), b, font=font((18 if b == N.me else 15) * SS, True),
+                       fill=TEXT if b == N.me else DIM, anchor='mb')
         draw(d, Z, s)
-    magnify(C, film, BOARD, N.view, fn, title, frame=False)
+    magnify(C, film, NEG_BOARD, N.view, fn, title, frame=False)
 
 
 def neg_timeline(C, film, box, now, a=1.0):
@@ -3542,19 +3957,20 @@ def neg_timeline(C, film, box, now, a=1.0):
         t1 = cs['t'] - N.t0
         x0, x1 = X(max(0.0, t1 - cs['secs'])), X(min(t1, now))
         if x1 > x0:
-            C.rect((x0, top - 4, x1, bot), outline=mix(PANEL, (255, 90, 210), a), width=1.5)
-            C.text(x0 + 4, top - 18, 'the coupled solve', 11, mix(PANEL, (255, 90, 210), a))
+            C.rect((x0, top - 4, x1, bot), outline=mix(PANEL, (200, 204, 212), a), width=1.5)
+            C.text(x0 + 4, top - 18, 'the coupled solve', 13, mix(PANEL, TEXT, a))
     for i, b in enumerate(N.buses):
         P = N.ph[b]
         y = top + (i + 0.5) * rh
-        C.text(box[0] + 14, y, f'{b}', 15, mix(PANEL, ACCENT if b == N.me else TEXT, a), bold=b == N.me, anchor='lm')
+        C.text(box[0] + 14, y, f'{b}', 15, mix(PANEL, TEXT if b == N.me else DIM, a), bold=b == N.me, anchor='lm')
         C.text(box[0] + 60, y, f'{(P["start"] or {}).get("nets", "?")} nets', 12, mix(PANEL, DIM, a), anchor='lm')
         for k in ('fanout', 'solve', 'wait', 'loop', 'lay'):
             t0_, t1_ = P[k]
             if t0_ is None or t0_ > now:
                 continue
             t1_ = min(t1_ if t1_ is not None else now, now)
-            C.rect((X(t0_), y - rh * 0.28, max(X(t0_) + 1, X(t1_)), y + rh * 0.28), fill=mix(PANEL, PHASE_C[k], a))
+            C.rect((X(t0_), y - rh * 0.28, max(X(t0_) + 1, X(t1_)), y + rh * 0.28), fill=mix(PANEL, PHASE_C[k], a),
+                   outline=mix(PANEL, (110, 116, 128), a) if k == 'wait' else None)
         for tr in P['resolves']:
             if tr is not None and tr <= now:
                 C.line([(X(tr), y - rh * 0.4), (X(tr), y + rh * 0.4)], mix(PANEL, TEXT, a), 1.5)
@@ -3564,17 +3980,18 @@ def neg_timeline(C, film, box, now, a=1.0):
                             fill=mix(PANEL, TEXT, a))
         if P['end'] is not None and P['end'] <= now:
             x = X(P['end'])
-            C.d.ellipse([(x - 6) * SS, (y - 6) * SS, (x + 6) * SS, (y + 6) * SS], outline=mix(PANEL, (150, 245, 120), a),
+            C.d.ellipse([(x - 6) * SS, (y - 6) * SS, (x + 6) * SS, (y + 6) * SS], outline=mix(PANEL, TEXT, a),
                         width=2 * SS)
     x = X(min(now, N.t_end))
     C.line([(x, top - 8), (x, bot + 4)], mix(PANEL, ACCENT, a), 1.2)
     lx = box[0] + 14
     for k, lab in (('fanout', 'fanout'), ('solve', 'first solve, alone'), ('wait', 'waiting for the coupled solve'),
                    ('loop', 'loop (| a re-solve, · a polish taken in step)'), ('lay', 'lay')):
-        C.rect((lx, box[3] - 22, lx + 12, box[3] - 12), fill=mix(PANEL, PHASE_C[k], a))
-        C.text(lx + 18, box[3] - 24, lab, 11, mix(PANEL, DIM, a))
-        lx += 30 + C.tlen(lab, 11)
-    C.text(lx + 10, box[3] - 24, 'o its end', 11, mix(PANEL, (150, 245, 120), a))
+        C.rect((lx, box[3] - 22, lx + 12, box[3] - 12), fill=mix(PANEL, PHASE_C[k], a),
+               outline=mix(PANEL, (110, 116, 128), a) if k == 'wait' else None)
+        C.text(lx + 18, box[3] - 24, lab, 12, mix(PANEL, DIM, a))
+        lx += 30 + C.tlen(lab, 12)
+    C.text(lx + 10, box[3] - 24, 'o its end', 12, mix(PANEL, TEXT, a))
 
 
 def neg_mins(ts):
@@ -3591,9 +4008,14 @@ def neg_scene_start(film, sc):
 
     def fn(C, t, T_):
         now = ease(span(t, 0.08, 0.9)) * t_hi
-        neg_view(C, film, lambda d, Z, s: None, f'the group: {len(N.buses)} buses off {S.src}, each on its own ends of '
-                                                f'the shared field', field=1.0)
-        neg_timeline(C, film, BRAID, now)
+        neg_view(C, film, lambda d, Z, s: None, f'the group: {len(N.buses)} buses off {S.src}', field=1.0)
+        side_table(C, (NEG_SIDE[0], NEG_SIDE[1], NEG_SIDE[2], NEG_CLOCK[1] - 16), 'in their standing order',
+                   [(b, f'{(N.ph[b]["start"] or {}).get("nets", "?")} nets',
+                     ('first plan alone in under a second' if (N.ph[b]['solve_ev'].get('secs') or 0) < 1 else
+                      f'first plan alone in {N.ph[b]["solve_ev"]["secs"]:,.0f} s') if N.ph[b]['solve_ev'] and
+                     N.ph[b]['solve'][1] is not None and N.ph[b]['solve'][1] <= now else '') for b in N.order],
+                   widths=[0.2, 0.25, 0.55], bold_first=N.me)
+        neg_timeline(C, film, NEG_CLOCK, now)
     order_ = ', '.join(N.order)
     sv = '; '.join(f'{b} in {e["secs"]} s' + ('' if e.get('proved') else ', kept unproved') for b, e in solved)
     at_ = lambda ts: 0.08 + 0.82 * min(1.0, ts / t_hi)                    # noqa: E731
@@ -3647,29 +4069,28 @@ def neg_scene_couplings(film, sc):
             if a_cp > 0.02:
                 for (x, y) in N.settled:
                     cx, cy = Z(x, y)
-                    d.ellipse([cx - R, cy - R, cx + R, cy + R], outline=mix(BODY, (150, 245, 120), a_cp), width=2 * SS)
+                    d.ellipse([cx - R, cy - R, cx + R, cy + R], outline=mix(BODY, (150, 155, 165), a_cp), width=2 * SS)
                 for (x, y) in N.broken:
                     cx, cy = Z(x, y)
                     d.line([(cx - R, cy - R), (cx + R, cy + R)], fill=mix(BODY, LESSON_C, a_cp), width=3 * SS)
                     d.line([(cx - R, cy + R), (cx + R, cy - R)], fill=mix(BODY, LESSON_C, a_cp), width=3 * SS)
+                for (x, y) in N.new_broken:
+                    cx, cy = Z(x, y)
+                    d.ellipse([cx - 1.6 * R, cy - 1.6 * R, cx + 1.6 * R, cy + 1.6 * R], outline=mix(BODY, LESSON_C, a_cp),
+                              width=2 * SS)
         neg_view(C, film, marks, 'the coupled solve: where two buses\' lanes cross or pass near', field=0.6)
-        neg_timeline(C, film, BRAID, t_lo + ease(span(t, 0.05, 0.9)) * (t_hi - t_lo))
-        box = (BOARD[0] + 10, BOARD[1] + 34, BOARD[0] + 560, BOARD[1] + 250)
-        C.card(box)
-        rows = [(f'{len(N.couplings):,} couplings: a lane of one bus crossing or passing near a lane of another', TEXT),
-                (f'the buses\' own plans side by side: {len(N.broken_alone):,} broken (red)', LESSON_C if t >= 0.35 else DIM),
-                (f'the coupled search: {cs.get("secs", "?")} s, {len(N.broken):,} still broken; {settled:,} settled '
-                 f'(green)', (150, 245, 120) if t >= 0.62 else DIM),
-                ('each bus\'s plan the coupled one, and the couplings it holds through its loop: '
-                 + ', '.join(f'{b} {N.held[b]}' for b in N.buses), DIM),
-                (f'the waits for it: {waits}', DIM)]
-        y = box[1] + 14
-        for ln, col in rows:
-            for w_ in C.wrap(ln, 14, box[2] - box[0] - 28):
-                if y < box[3] - 18:
-                    C.text(box[0] + 14, y, w_, 14, col)
-                y += 19
-            y += 5
+        neg_timeline(C, film, NEG_CLOCK, t_lo + ease(span(t, 0.05, 0.9)) * (t_hi - t_lo))
+        kept_ = len(N.broken) - len(N.new_broken)
+        rows = [(f'{len(N.couplings):,}', 'couplings: a lane of one bus crossing or passing near another\'s')]
+        if t >= 0.35:
+            rows.append((f'{len(N.broken_alone):,}', 'broken by the plans solved alone (X)'))
+        if t >= 0.62:
+            rows += [(f'{settled:,}', 'of those settled by the coupled plan (ring)'),
+                     (f'{kept_:,}', 'of those still broken'),
+                     (f'{len(N.new_broken):,}', 'broken anew, kept by the plans alone (X ringed)'),
+                     (f'{len(N.broken):,}', f'broken in all, after {cs.get("secs", "?")} s of coupled search')]
+        side_table(C, (NEG_SIDE[0], NEG_SIDE[1], NEG_SIDE[2], NEG_CLOCK[1] - 16), 'the coupled solve', rows,
+                   widths=[0.2, 0.8], px=20)
     sc.append(Scene('couplings', 'negotiation', 16, fn, [
         (0, f'THE COUPLED SOLVE. Every bus\'s model is built again into one, and the buses are COUPLED where their lanes '
             f'cross or pass near: {len(N.couplings):,} couplings, each settled by putting the two lanes on different '
@@ -3702,7 +4123,11 @@ def neg_scene_others(film, sc):
                 if fin[b] is not None}
         neg_view(C, film, lambda d, Z, s: None, 'the others lay their copper while this bus\'s loop runs', show=show,
                  field=0.8)
-        neg_timeline(C, film, BRAID, now)
+        side_table(C, (NEG_SIDE[0], NEG_SIDE[1], NEG_SIDE[2], NEG_CLOCK[1] - 16), 'each bus\'s loop, laid and done',
+                   [(b, f'{(N.ph[b]["laid"] or {}).get("lanes", "?")} lanes', f'done at {neg_mins(N.ph[b]["end"])}')
+                    for b in N.buses if N.ph[b]['end'] is not None and N.ph[b]['end'] <= now],
+                   widths=[0.2, 0.3, 0.5], bold_first=N.me)
+        neg_timeline(C, film, NEG_CLOCK, now)
 
     def done(b):
         lv, P = N.ph[b]['laid'] or {}, N.ph[b]
@@ -3736,30 +4161,22 @@ def neg_scene_together(film, sc):
     g_drc = (gg.get('drc') or {}).get('n') if isinstance(gg.get('drc'), dict) else gg.get('drc')
 
     def row(b):
-        lv, gr, P = N.ph[b]['laid'] or {}, N.ph[b]['graded'] or {}, N.ph[b]
-        return (b, f'{(P["start"] or {}).get("nets", "?")} nets', f'{gr.get("vias", lv.get("vias", "?"))} vias',
-                f'{gr.get("copper_mm", lv.get("copper_mm", "?"))} mm', f'{lv.get("open", "?")} open',
-                f'{gr.get("drc", lv.get("drc", "?"))} DRC', f'loop rounds {N.rounds.get(b, "?")}',
-                neg_mins(P['end']) if P['end'] is not None else '?')
+        # (each bus AS LAID: its lay's own record, the numbers the film's closing and its lay give)
+        lv, P = N.ph[b]['laid'] or {}, N.ph[b]
+        return (b, f'{(P["start"] or {}).get("nets", "?")}', f'{lv.get("vias", "?")}', f'{lv.get("copper_mm", "?")} mm',
+                f'{lv.get("open", "?")}', f'{lv.get("drc", "?")}', neg_mins(P['end']) if P['end'] is not None else '?')
 
     def fn(C, t, T_):
         a = {b: ease(span(t, 0.05 + 0.08 * j, 0.2 + 0.08 * j)) for j, b in enumerate(N.buses)}
         neg_view(C, film, lambda d, Z, s: None, 'all together: every bus\'s copper on the merged board', show=a,
                  field=0.0)
-        C.card(BRAID, alpha=0.95)
-        x0, y0 = BRAID[0] + 20, BRAID[1] + 16
-        cols = [0, 110, 210, 320, 430, 530, 630, 790]
-        for j, b in enumerate(N.buses):
-            aj = a[b]
-            y = y0 + j * 30
-            C.rect((x0, y + 4, x0 + 26, y + 16), fill=mix(PANEL, N.tint[b], aj))
-            for k, cell in enumerate(row(b)):
-                C.text(x0 + 40 + cols[k], y, cell, 16, mix(PANEL, ACCENT if (k == 0 and b == N.me) else TEXT, aj),
-                       bold=k == 0)
-        C.text(x0, BRAID[3] - 36, f'merged: {N.conflicts if N.conflicts is not None else "?"} conflicts between the '
-               f'buses; the group\'s grade: {g_open} open, {g_drc} violations, '
-               f'{len((gg.get("walled") or {}).get("walled") or [])} walled', 16,
-               mix(PANEL, (150, 245, 120), ease(span(t, 0.5, 0.6))))
+        rows = [('', 'nets', 'vias', 'copper', 'open', 'DRC', 'done')] + [row(b) for b in N.buses]
+        side_table(C, (NEG_SIDE[0], NEG_SIDE[1], NEG_SIDE[2], NEG_SIDE[1] + 330), 'each bus as laid', rows,
+                   widths=[0.13, 0.12, 0.12, 0.2, 0.13, 0.12, 0.18], bold_first=N.me)
+        a2 = ease(span(t, 0.5, 0.6))
+        big_numbers(C, (NEG_SIDE[0], NEG_SIDE[1] + 350, NEG_SIDE[2], NEG_SIDE[3]),
+                    [(f'{N.conflicts if N.conflicts is not None else "?"}', 'conflicts between the buses, merged'),
+                     (f'{g_open}', 'open nets in the group'), (f'{g_drc}', 'design rule violations')], a2)
     tot_v = sum((N.ph[b]['graded'] or {}).get('vias', 0) for b in N.buses)
     sc.append(Scene('together', 'negotiation', 14, fn, [
         (0, f'ALL TOGETHER: the {len(N.buses)} buses\' copper merged onto one board, each in its own tint, the layers in '
@@ -3778,10 +4195,234 @@ def with_peers(film, fn):
     N = film.S.N
 
     def fn2(C, t, T_):
-        C.segs(N.peer_segs, alpha=0.3)
-        C.cvias(N.peer_vias, 0.3)
+        C.obst(N.peer_segs)
+        C.cvias(N.peer_vias, 0.15, plain=True)
         fn(C, t, T_)
     return fn2
+
+
+def cut_film(film, sc):
+    """THE FILM'S CUT, five minutes at most: a cold open on the copper, the group's ends -- its buses, the model and the
+    END it chooses (a tooth, a berth), the search as it ran, the field -- then ONE bus end to end (its ends, strings,
+    frame, solve, geometry, snap, audit and lay), its loop told plainly, the negotiation with the other buses, every
+    bus together, and a closing. The scenes kept, in that order, with their lengths and their narration: every number
+    read from the run's record, each line its caption too"""
+    S, T = film.S, film.S.T
+    G, N, g, D = getattr(S, 'G', None), film.neg, film.g, film.gsearch
+    by = {s_.key: s_ for s_ in sc}
+    nl, nn = len(film.M), len(S.nets)
+    n_cross = len(T['windows'])
+    plans = film.plan_meta
+    plw = lambda n, one, many=None: f'{n:,} {one if n == 1 else (many or one + "s")}'      # noqa: E731
+
+    def say(key, lines, secs=None, stage=None):
+        s_ = by.get(key)
+        if s_ is None:
+            return
+        s_.says = [ln for ln in lines if ln and ln[1]]
+        s_.captions = [(ln[0], ln[1]) for ln in s_.says]
+        if secs is not None:
+            s_.secs = secs
+        if stage is not None:
+            s_.stage = stage
+
+    # ------------------------------------------------------------------ the cold open, on the copper
+    nets_all = sum(b['routed'] for b in G.plan) if G else nn
+    if N:
+        def opening(C, t, T_):
+            a = ease(span(t, 0.0, 0.25))
+            neg_view(C, film, lambda d, Z, s: None, None, show={b: a for b in N.buses}, field=0.0)
+            a2 = ease(span(t, 0.1, 0.35))
+            x = (NEG_SIDE[0] + NEG_SIDE[2]) / 2
+            C.text(x, 470, film.title, 64, mix(BG, TEXT, a2), bold=True, anchor='mm')
+            C.text(x, 545, f'{len(N.buses)} buses, {nets_all} nets, off one array', 28, mix(BG, DIM, a2), anchor='mm')
+            C.text(x, 590, f'one of them, {S.src} to {S.dst}, followed end to end', 24, mix(BG, DIM, a2), anchor='mm')
+        by['open'] = Scene('open', None, 7, opening, [], cues=[(0, 'swell', 0.6)])
+        say('open', [(0, f'{len(N.buses)} buses, {nets_all} nets, routed off one array, every lane planned whole '
+                         f'before any copper is laid.')])
+    # ------------------------------------------------------------------ the group's ends
+    if g and G:
+        say('buses', [(0, f'They all leave one array, {spoken(S.src)}, so they are one group, and their ends are '
+                          'chosen together.'),
+                      (0.45, 'White rings are bus balls; grey rings, other signals\'; grey dots, plane balls.')], secs=8)
+        say('model', [(0, 'One CP-SAT model chooses them all at once: a solver that searches for the cheapest choice '
+                          'that keeps every rule.'),
+                      (0.62, 'Its first answer: each lane\'s END, where it leaves its ball and on which layer -- its '
+                             'TOOTH at the source, its BERTH at the destination.')], secs=10)
+        if D is not None:
+            s0_, s1_ = D.st[0].get('split') or {}, D.st[-1].get('split') or {}
+            say('search', [(0, f'The search, as it ran: {plw(len(D.st), "answer")} it found, the ends moving at both '
+                               'arrays.'),
+                           (0.25, 'Each line joins a lane\'s tooth to its berth, in their layers\' colours; a ring is a '
+                                  'change of layer, a dot a crossing.'),
+                           (0.55, f'Balls walled in with no way out fall from {s0_.get("walls")} to {s1_.get("walls")}, '
+                                  f'plane balls fanned out instead of dropped from {s0_.get("fans")} to '
+                                  f'{s1_.get("fans")}, lanes changing layer from {s0_.get("changes")} to '
+                                  f'{s1_.get("changes")}.')], secs=20)
+        fan_ = re.findall(r'the arrays fanned out as chosen: (\d+) tracks and (\d+) vias', G.log)
+        fd_ = (G.fields[-1] if G.fields else {}) or {}
+        say('field', [(0, 'The FIELD: all that fanout copper, laid as the model chose'
+                          + (f' -- {int(fan_[-1][0]):,} tracks, {int(fan_[-1][1]):,} vias' if fan_ else '')
+                          + (f', {plw(fd_.get("drc_field"), "violation")}' if fd_.get('drc_field') is not None else '')
+                          + '. Every bus is routed on it.')], secs=9)
+    # ------------------------------------------------------------------ one bus, end to end
+    say('ends', [(0, f'Now one bus, {spoken(S.src)} to {spoken(S.dst)}, end to end: {nl} lanes, from their teeth to '
+                     'their berths.'),
+                 (0.72, f'Their two orders fix every crossing: {n_cross:,} pairs of lanes must cross.')], secs=9)
+    bent = sum(1 for n, P in film.strings.items() if plen(P) > math.hypot(P[-1][0] - P[0][0], P[-1][1] - P[0][1]) + 0.01)
+    say('strings', [(0, 'Each lane starts as a string from tooth to berth, pulled taut round the copper in its way.'),
+                    (0.66, f'{bent:,} bend. A string has no width and no layer yet.')], secs=7)
+    say('frame', [(0, 'The frame: a trunk from source to destination, and rings round the destination. Each string '
+                      'becomes a reference along it.')], secs=7)
+    last = plans[-1] if plans else {'vias': 0}
+    say('solve', [(0, 'The solve, CP-SAT again, places every crossing and change of layer, for all lanes at once.'),
+                  (0.14, f'Below, the plan as a braid: a strand a lane in its layer\'s colour, white rings for vias; '
+                         f'{len(film.used)} of the {len(film.LN)} layers carry lanes.'),
+                  (0.3, (f'It finds {len(plans):,} plans, from {plans[0]["vias"]:,} changes of layer down to '
+                         f'{last["vias"]:,}, and stops after a fixed amount of work.' if len(plans) > 1 else
+                         f'It finds its plan, with {last["vias"]:,} changes of layer.')),
+                  (0.72, 'What goes on is the plan that passed the loop, after the negotiation: both come later.'
+                   if N and S.failed else
+                         'The plan that goes on is the one that passed the loop, which comes later.' if S.failed else
+                         'Its plan goes on to the geometry.')], secs=18)
+    if 'geometry' in by:
+        say('geometry', [(0, 'The geometry: one linear program turns the order into millimetres, an offset for every '
+                             'lane at every column.'),
+                         (0.68, 'Its second pass holds each lane to one side of every island of another part\'s '
+                                'pads.')], secs=20)
+    say('start', [(0, 'The geometry turns the order into millimetres. A first linear program, in the frame, gives it a '
+                      'start.')], secs=6)
+    say('cells', [(0, 'Then it works on the board itself: each layer\'s free space is cut into triangles, called cells.'),
+                  (0.86, 'Vias get cells of their own.')], secs=8)
+    say('points', [(0, 'The start is read onto the cells.'),
+                   (0.28, 'Square points slide along the cell edges; round points move freely inside them.')], secs=6)
+    Et = S.Et or {}
+    hops = sum(r['hops'] for r in Et.get('rounds', []))
+    say('rounds', [(0, 'Round after round, one linear program moves every via and every point a little, and nothing '
+                       'passes through anything.'),
+                   (0.72, f'Over {len(Et.get("rounds", [])):,} rounds, vias changed cell {hops:,} times.' if hops else
+                          f'It runs {len(Et.get("rounds", [])):,} rounds.')], secs=12)
+    say('hop', [(0, 'A via pressed against its cell\'s edge moves on into the next.')], secs=4)
+    say('slide', [(0, 'A via with no room slides along its own lane, to the most open place within reach.')], secs=6)
+    say('snap', [(0, 'The snap puts the plan on the router\'s grid: the differential pairs first, with forty-five '
+                     'degree turns,' if S.pairs else 'The snap puts the plan on the router\'s grid,'),
+                 (0.6, 'then every single lane.')], secs=9)
+    say('audit', [(0, 'The audit checks the plan exactly as the router will get it. It passes only complete and clean.')],
+        secs=5)
+    say('route', [(0, 'The lay: the router lays the copper, each lane held to its band' + (', the pairs first.' if S.pairs
+                                                                                         else '.')),
+                  (0.85, ('All connected' if S.connected else 'Not all connected')
+                         + (', no design rule errors: ' if S.drc_clean else ', with design rule errors: ')
+                         + f'{film.vias_ours:,} vias and {film.mm_ours:,.0f} millimetres, as laid.')], secs=12,
+        stage='lay')
+    if S.failed:
+        nf = len(S.failed)
+        fd = []
+        for r in S.failed:
+            m_ = 0
+            for line in _read(os.path.join(S.loop, f'p{r["i"]}.audit')).splitlines():
+                if re.match(r'^(PITCH|STATIC|DIVE|SHAPE) [A-Z]', line) and (
+                        re.search(r'at \((-?\d+\.\d+),\s*(-?\d+\.\d+)\)', line)
+                        or re.search(r'^DIVE \S+\s+\(\s*(-?\d+\.\d+),\s*(-?\d+\.\d+)\)', line)):
+                    m_ += 1
+            fd.append((r['i'], m_))
+        if len(fd) > 2 and len({m_ for _i, m_ in fd[1:]}) == 1:
+            rest_ = (', '.join(f'{i}' for i, _m in fd[1:-1]) + f' and {fd[-1][0]}')
+            rest_ = f'Rounds {rest_} were {plw(fd[1][1], "place")} short each.'
+        else:
+            rest_ = ', '.join(f'round {i} {plw(m_, "place")} short' for i, m_ in fd[1:])
+            rest_ = (f'Then {rest_}.' if rest_ else '')
+        say('loop', [(0, f'That was loop round {S.lr}. Round {fd[0][0]}\'s audit had found {plw(fd[0][1], "place")} '
+                         'short; what it found went back to the solve and the geometry, and the round ran again.'),
+                     (1.0 / nf, (f'{rest_} ' if rest_ else '') + f'Round {S.lr} passed.')],
+            secs=max(9.0, 4.5 * nf))
+    # ------------------------------------------------------------------ the negotiation
+    if N:
+        fin_ = lambda b: N.ph[b]['end']                                                      # noqa: E731
+        say('negotiate', [(0, f'The {len(N.buses)} buses were routed at once, each by its own whole route, in a '
+                              f'standing order: {", ".join(spoken(b) for b in N.order)}.'),
+                          (0.6, 'Each solved a first plan alone, published it, and waited.')], secs=9)
+        kept_ = len(N.broken) - len(N.new_broken)
+        say('couplings', [(0, f'Then one coupled solve: all the buses\' models in one, coupled where their lanes cross '
+                              f'or pass near: {len(N.couplings):,} couplings.'),
+                          (0.35, f'The plans solved alone break {len(N.broken_alone):,} of them.'),
+                          (0.62, f'The coupled plan settles {len(N.settled):,}, leaves {kept_:,}, and breaks '
+                                 f'{len(N.new_broken):,} new ones: {len(N.broken):,} in all.')], secs=13)
+        if film.coupled:
+            v_own, v_cp = (sum(len(v) for v in P_.changes.values()) for P_ in (film.root, film.coupled))
+            say('coupled', [(0, f'For this bus, the coupled plan has {v_cp:,} changes of layer, where alone it had '
+                                f'{v_own:,}. Its loop started from it.')], secs=7, stage='negotiation')
+        others = [b for b in N.buses if b != N.me]
+        fo_ = [b for b in others if fin_(b) is not None]
+        done_ = ', '.join(f'{spoken(b)} finished at {fin_(b) / 60:.0f} minutes' if j == 0 else
+                          f'{spoken(b)} at {fin_(b) / 60:.0f}' for j, b in enumerate(fo_))
+        say('others', [(0, f'Each bus then ran its own loop: {done_}; and this bus, last in the order, at '
+                           f'{fin_(N.me) / 60:.0f}.' if fin_(N.me) is not None else
+                        f'Each bus then ran its own loop: {done_}.')], secs=10)
+        gg = N.group_grade or {}
+        g_open = len(gg.get('open') or []) if isinstance(gg.get('open'), list) else gg.get('open')
+        g_drc = (gg.get('drc') or {}).get('n') if isinstance(gg.get('drc'), dict) else gg.get('drc')
+        say('together', [(0, f'All together, the {len(N.buses)} buses merged onto one board: '
+                             f'{N.conflicts if N.conflicts is not None else "no record of"} conflicts, '
+                             f'{plw(g_open or 0, "open net")}, {plw(g_drc or 0, "design rule violation")}.')], secs=8)
+    # ------------------------------------------------------------------ the closing
+    dr_ = ((G.summary.get('design_rules') or {}) if G else {}) or {}
+    narrowed = dr_.get('narrowed') or []
+    nar_ = collections.defaultdict(set)
+    sz_ = {}
+    for x_ in narrowed:
+        nar_[x_['kind']].add(x_['net'])
+        sz_.setdefault(x_['kind'], (x_['requested'], x_['delivered']))
+    what_ = {'via_diameter': 'via', 'track_width': 'track', 'clearance': 'clearance', 'via_drill': 'drill'}
+    what2_ = {'via_diameter': 'smaller vias', 'track_width': 'narrower tracks', 'clearance': 'less clearance',
+              'via_drill': 'smaller drills'}
+    nar_txt = (f'{len({x_["net"] for x_ in narrowed}):,} of the group\'s nets were drawn below the sizes asked for: '
+               + ', and '.join(f'{len(v)} with a {sz_[k][1]:.2g} mm {what_.get(k, k)} instead of {sz_[k][0]:.2g}'
+                               for k, v in sorted(nar_.items(), key=lambda kv: -len(kv[1]))) + '.') if narrowed else ''
+    nar_say = (f'{len({x_["net"] for x_ in narrowed}):,} of the group\'s nets were drawn below the sizes asked for: '
+               + ', and '.join(f'{len(v)} with {what2_.get(k, k)}'
+                               for k, v in sorted(nar_.items(), key=lambda kv: -len(kv[1]))) + '.') if narrowed else ''
+    lanes_ok = nl if S.connected else None
+
+    def closing(C, t, T_):
+        C.d.rectangle([0, 0, W * SS, H * SS], fill=BG)
+        a = ease(span(t, 0, 0.15))
+        C.text(W / 2, 210, 'the whole route', 52, mix(BG, TEXT, a), bold=True, anchor='mm')
+        C.text(W / 2, 270, f'{S.src} to {S.dst}, as laid', 26, mix(BG, DIM, a), anchor='mm')
+        big_numbers(C, (160, 330, W - 160, 560),
+                    [(f'{lanes_ok}/{nl}' if lanes_ok is not None else f'?/{nl}',
+                      'lanes connected' + (', no design rule error' if S.drc_clean else '')),
+                     (f'{film.vias_ours:,}', f'vias, {film.vias_ours / nl:.1f} a lane'),
+                     (f'{film.mm_ours:,.0f} mm', f'of copper, {film.mm_ours / nl:.0f} mm a lane')], a, px=64, card=False,
+                    bg=BG)
+        if N:
+            gg_ = N.group_grade or {}
+            go_ = len(gg_.get('open') or []) if isinstance(gg_.get('open'), list) else gg_.get('open')
+            gd_ = (gg_.get('drc') or {}).get('n') if isinstance(gg_.get('drc'), dict) else gg_.get('drc')
+            C.text(W / 2, 660, f'the group: {len(N.buses)} buses, {plw(go_ or 0, "open net")}, '
+                   f'{plw(gd_ or 0, "design rule violation")}', 26, mix(BG, TEXT, ease(span(t, 0.15, 0.3))),
+                   anchor='mm')
+        if nar_txt:
+            a3 = ease(span(t, 0.45, 0.55))
+            for k, ln in enumerate(C.wrap(nar_txt, 22, W - 400)):
+                C.text(W / 2, 740 + k * 32, ln, 22, mix(BG, DIM, a3), anchor='mm')
+    by['closing'] = Scene('closing', None, 12, closing, [], cues=[(0, 'swell', 0.5), (0.45, 'chord', 1.0)])
+    say('closing', [(0, 'Each stage measured the one before; copper was laid only when the router\'s rules allowed it.'),
+                    (0.45, nar_say)])
+    by['closing'].captions = []                 # (its words are on its card)
+    # ------------------------------------------------------------------ the order
+    order = (['open'] if 'open' in by else ['title', 'bench']) \
+        + ['buses', 'model', 'search', 'field', 'ends', 'strings', 'frame', 'solve', 'geometry', 'start', 'cells', 'points',
+           'rounds', 'hop', 'slide', 'snap', 'audit', 'route', 'loop', 'negotiate', 'couplings', 'coupled', 'others',
+           'together', 'closing']
+    out = [by[k] for k in order if k in by]
+    if N:
+        # (the followed bus's scenes: the other buses' copper under them, an obstacle like any other net's)
+        for s_ in out:
+            if s_.key in ('ends', 'strings', 'frame', 'solve', 'geometry', 'start', 'cells', 'points', 'rounds', 'hop',
+                          'slide', 'snap', 'audit', 'route', 'loop', 'coupled'):
+                s_.fn = with_peers(film, s_.fn)
+    return out
 
 
 def build_scenes(film, speed=1.0):
@@ -3823,8 +4464,8 @@ def build_scenes(film, speed=1.0):
         for ref in (S.src, S.dst):
             for p in S.fo.footprints[ref].pads:
                 if (p.net_name or '').split('/')[-1] in S.nets:
-                    C.wring(p.global_x, p.global_y, 0.22, mix(BODY, ACCENT, a), 1.6)
-        C.segs(film.other_c[0], alpha=0.22)
+                    C.wring(p.global_x, p.global_y, 0.22, mix(BODY, MOVED_C, a), 1.6)
+        C.obst(film.other_c[0])
         for ref, lab in ((S.src, 'source'), (S.dst, 'destination')):
             fp = S.fo.footprints[ref]
             xs = [p.global_x for p in fp.pads]
@@ -3864,7 +4505,7 @@ def build_scenes(film, speed=1.0):
         a_old = 1.0 - ease(span(t, 0.28, 0.45))
         a_new = ease(span(t, 0.30, 0.48))
         a_b = ease(span(t, 0.52, 0.66))
-        C.segs(film.other_c[0], alpha=0.22)
+        C.obst(film.other_c[0])
         C.segs(film.stub_kept, alpha=0.95)
         C.cvias(film.via_kept)
         if a_old > 0:
@@ -3875,7 +4516,7 @@ def build_scenes(film, speed=1.0):
             C.cvias(film.tvia_new, a_new)
             hl = 1.0 - ease(span(t, 0.5, 0.7))
             for s in film.teeth_new:
-                C.wring(s[0], s[1], 0.18, mix(BODY, ACCENT, hl * a_new), 1.4)
+                C.wring(s[0], s[1], 0.18, mix(BODY, MOVED_C, hl * a_new), 1.4)
         if a_b > 0:
             C.segs(film.berths_new, alpha=a_b)
             C.cvias(film.bvia_new, a_b)
@@ -3950,7 +4591,7 @@ def build_scenes(film, speed=1.0):
     sc.append(Scene('ends', 'ends', 11 if film.g else 16, ends, cap_e, says=say_e, cues=cue_e))
 
     def draw_fanout(C, alpha=0.9):
-        C.segs(film.other_c[0], alpha=0.22)
+        C.obst(film.other_c[0])
         C.segs(film.fo_c[0], alpha=alpha)
         C.cvias(film.fo_c[1], alpha)
 
@@ -3958,7 +4599,7 @@ def build_scenes(film, speed=1.0):
     # each lane's string as every stage reads it, and its chord (the straight line its relaxation starts from).
     # Between the two: the relaxation's own rounds where the geometry's re-run ran it (film.relax: no memo of the
     # strings on disk), each string as it stood after them -- else a blend of the two, and the scene says so
-    STRC = (236, 222, 130)
+    STRC = (225, 228, 234)
     rsteps = collections.OrderedDict()                       # the relaxation's rounds at each spacing
     for step_, k_, _n in film.relax_at:
         rsteps[step_] = max(rsteps.get(step_, 0), k_)
@@ -4079,7 +4720,7 @@ def build_scenes(film, speed=1.0):
                 for f_, k_, o_ in Gt['refs'][n]:
                     u_, b_, nv_ = film.cols[(f_, k_)]
                     pts.append((b_[0] + o_ * nv_[0], b_[1] + o_ * nv_[1]))
-                C.wline(pts, mix(BODY, (200, 200, 120), refs * 0.6), 1.0)
+                C.wline(pts, mix(BODY, (190, 194, 202), refs * 0.6), 1.0)
 
     def frame(C, t, T_):
         draw_fanout(C)
@@ -4277,18 +4918,18 @@ def build_scenes(film, speed=1.0):
                 Pa, _ba, Ua = film.raw[f'plan{np_ - 1}'][a_]
                 Pb, _bb, Ub = film.raw[f'plan{np_ - 1}'][b_]
                 qa, qb = along(Pa, Ua, ux), along(Pb, Ub, ux)
-                C.wring((qa[0] + qb[0]) / 2, (qa[1] + qb[1]) / 2, 0.45, mix(BODY, ACCENT, a_r), 2)
+                C.wring((qa[0] + qb[0]) / 2, (qa[1] + qb[1]) / 2, 0.45, mix(BODY, MOVED_C, a_r), 2)
             chs = [(n, c) for n in film.M for c in fin.changes.get(n, [])]
             if chs:
                 n, c = min(chs, key=lambda e: abs(e[1] - mid_u - 0.8))
                 stb = braid_strands(film, fin)
                 x, y = film.bx(c), film.rank_y(float(np.interp(c, stb[n][0], stb[n][1])))
                 R = 11
-                C.d.ellipse([(x - R) * SS, (y - R) * SS, (x + R) * SS, (y + R) * SS], outline=mix(PANEL, (90, 230, 255), a_r), width=2 * SS)
-                C.text(x + 14, y + 14, f'{n} changes layer: a via', 13, mix(PANEL, (90, 230, 255), a_r), anchor='lt')
+                C.d.ellipse([(x - R) * SS, (y - R) * SS, (x + R) * SS, (y + R) * SS], outline=mix(PANEL, TEXT, a_r), width=2 * SS)
+                C.text(x + 14, y + 14, f'{n} changes layer: a via', 13, mix(PANEL, TEXT, a_r), anchor='lt')
                 P, _b, U = film.raw[f'plan{np_ - 1}'][n]
                 q = along(P, U, c)
-                C.wring(q[0], q[1], 0.45, mix(BODY, (90, 230, 255), a_r), 2)
+                C.wring(q[0], q[1], 0.45, mix(BODY, MOVED_C, a_r), 2)
     cap_s = [(0, f'The solve (CP-SAT) decides every crossing and every layer change, all lanes at once. Its variables '
                  f'are positions along u: where each of the {n_cross} crossings happens, and where each lane changes '
                  f'layer.'),
@@ -4346,22 +4987,10 @@ def build_scenes(film, speed=1.0):
             C.lanes(morph(film.st['root'], film.st['coupled'], m), w=2.2)
             C.vias([(n, x, y) for n, x, y, al in morph_vias(film.vias['root'], film.vias['coupled'], m) if al > 0.5])
             draw_braid(C, film, lerp_plan(film.root, film.coupled, m))
-            box = (BOARD[0] + 6, BOARD[1] + 6, BOARD[0] + 600, BOARD[1] + 300)
             a = ease(span(t, 0.0, 0.08))
-            C.card(box)
-            C.text(box[0] + 16, box[1] + 14, 'the coupled solve', 20, mix(PANEL, ACCENT, a), bold=True)
-            rows = [(f'every bus off this array, solved again in ONE model: {S.dst} with {", ".join(jn.get("with") or [])}',
-                     TEXT)] + [(ln, DIM) for ln in S.joint_lines] + [
-                (f'this bus: {v_own} layer changes alone, {v_cp} coupled; {moved_} crossings and {chm_} lanes\' changes '
-                 f'moved', ACCENT if t >= 0.3 else TEXT),
-                (f'{pl(nbr, "coupling")} of this bus\'s broken, each at its price', DIM)]
-            y = box[1] + 46
-            for ln, col in rows:
-                for w_ in C.wrap(ln, 14, box[2] - box[0] - 32):
-                    if y < box[3] - 18:
-                        C.text(box[0] + 16, y, w_, 14, mix(PANEL, col, a))
-                    y += 19
-                y += 4
+            big_numbers(C, (BOARD[0] + 6, BOARD[1] + 6, BOARD[0] + 760, BOARD[1] + 190),
+                        [(f'{v_own}', 'changes of layer, this bus alone'), (f'{v_cp}', 'with the coupled plan'),
+                         (f'{moved_}', 'crossings moved')], a, px=44)
         # (where the film has shown the group's coupled solve just before -- a negotiation -- this scene is its plan for
         # this bus alone)
         sc.append(Scene('coupled', 'solve', 10, coupled, [
@@ -4427,37 +5056,31 @@ def build_scenes(film, speed=1.0):
             C.vias(film.vias[key])
             a_f = ease(span(loc, 0.08, 0.16))
             for x, y in F_['finds']:
-                C.wring(x, y, 0.32, mix(BODY, (255, 0, 255), a_f), 2.5)
+                C.wring(x, y, 0.32, mix(BODY, MOVED_C, a_f), 2.5)
             for isl in Gt['islands']:
                 if any(isl['label'] == il for _n, il in F_['flips']):
                     x0, y0 = film.mp.pt(isl['box'][0], isl['box'][1])
                     x1, y1 = film.mp.pt(isl['box'][2], isl['box'][3])
                     C.d.rectangle([film.X(min(x0, x1) - 0.1, min(y0, y1) - 0.1), film.X(max(x0, x1) + 0.1, max(y0, y1) + 0.1)],
-                                  outline=mix(BODY, (150, 245, 120), a_f), width=2 * SS)
+                                  outline=mix(BODY, (175, 180, 190), a_f), width=2 * SS)
             a_h = ease(span(loc, 0.35, 0.45))
             for x, y in F_['hot']:
-                C.wring(x, y, 0.62, mix(BODY, (255, 150, 40), a_h), 2)
+                C.wring(x, y, 0.62, mix(BODY, (135, 140, 150), a_h), 2)
             m = ease(span(loc, 0.6, 0.85))
             cur = lerp_plan(F_['pa'], F_['pb'], m) if m > 0 else F_['pa']
             draw_braid(C, film, cur, alpha=1.0, cuts=F_['cuts'] if a_h > 0 else None, hl=flipped if loc < 0.35 else None)
-            box = (BOARD[0] + 6, BOARD[1] + 6, BOARD[0] + 470, BOARD[1] + 250)
+            box = (BOARD[0] + 6, BOARD[1] + 6, BOARD[0] + 430, BOARD[1] + 210)
             C.card(box)
-            x0, y0 = box[0] + 16, box[1] + 14
-            C.text(x0, y0, f'loop round {F_["i"]}: not yet', 20, ACCENT, bold=True)
-            lines = [('the smooth plan\'s audit found', TEXT, 0.08), (f'   {len(F_["finds"])} place(s) short (magenta)', (255, 120, 255), 0.08),
-                     ('the polish found no room on a side:', TEXT, 0.16),
-                     (f'   {len(F_["flips"])} side flip(s) -> the geometry', (150, 245, 120), 0.16),
-                     ('back to the solve:', TEXT, 0.35),
-                     (f'   {sum(1 for c in F_["cuts"] if c[3] == "island")} island cut(s), '
-                      f'{sum(1 for c in F_["cuts"] if c[3] == "via")} via cut(s) (boxes, below)', (255, 150, 60), 0.35),
-                     (f'   {F_["nhist"]} history place(s) priced (orange)', (255, 150, 40), 0.4)]
-            if F_['solved']:
-                lines += [(f'the solve again ({F_["solved"][1]} s): {F_["moved"]} crossings', ACCENT, 0.6),
-                          (f'   and {F_["chm"]} lanes\' changes moved, {F_["solved"][2]} vias', ACCENT, 0.6)]
-            for k_, (l_, col, a0) in enumerate(lines):
-                C.text(x0, y0 + 34 + k_ * 21, l_, 14, mix(PANEL, col, ease(span(loc, a0, a0 + 0.05))))
+            x0, y0 = box[0] + 18, box[1] + 14
+            C.text(x0, y0, f'loop round {F_["i"]}: not yet', 22, TEXT, bold=True)
+            C.text(x0, y0 + 98, f'{len(F_["finds"])}', 60, mix(PANEL, TEXT, a_f), bold=True, anchor='lb')
+            C.text(x0 + C.tlen(f'{len(F_["finds"])}', 60, bold=True) + 14, y0 + 92,
+                   ('place' if len(F_['finds']) == 1 else 'places') + ' short (ringed)', 20,
+                   mix(PANEL, DIM, a_f), anchor='lb')
+            C.text(x0, y0 + 122, 'sent back: side flips to the geometry,', 18, mix(PANEL, DIM, a_h))
+            C.text(x0, y0 + 148, 'cuts and history to the solve', 18, mix(PANEL, DIM, a_h))
         f0 = fails[0]
-        sc.append(Scene('loop', 'solve', 12 * len(fails), loop_back, [
+        sc.append(Scene('loop', 'loop', 12 * len(fails), loop_back, [
             (0, f'Loop round {f0["i"]} did not pass. Its smooth plan\'s audit found {len(f0["finds"])} place(s) short '
                 f'(magenta), and the polish found {len(f0["flips"])} lane(s) with no room on their side of an island (green).'),
             (0.35 / len(fails), 'What goes back: the side flips to the geometry; to the solve, the islands and vias the geometry '
@@ -4491,7 +5114,7 @@ def build_scenes(film, speed=1.0):
     # ------------------------------------------------------------------ the geometry
     def forces(C, marks, a, wmax=5.0):
         for r, how, pts in sorted(marks, key=lambda m: m[0]['price']):
-            col = mix(BODY, FORCE.get(r['kind'], (255, 255, 255)) if r['paid'] <= 1e-4 else (255, 40, 40), a)
+            col = mix(BODY, FORCE.get(r['kind'], (255, 255, 255)) if r['paid'] <= 1e-4 else PAID_C, a)
             w = min(wmax, 1.2 + 1.3 * math.log10(1.0 + r['price']))
             if how == 'strut':
                 C.wline(pts, col, w)
@@ -4574,7 +5197,7 @@ def build_scenes(film, speed=1.0):
         C.text(box[0] + 14, box[3] - 30, 'magenta: at the bar   cyan: a via\'s room', 11, mix(PANEL, DIM, a))
         # the column on the board
         ends_ = [(b[0] + (lo - 0.2) * nv[0], b[1] + (lo - 0.2) * nv[1]), (b[0] + (hi + 0.2) * nv[0], b[1] + (hi + 0.2) * nv[1])]
-        C.wline(ends_, mix(BODY, ACCENT, a), 1.2)
+        C.wline(ends_, mix(BODY, MOVED_C, a), 1.2)
 
     # up close: the window of the trunk where the most rules bind (both passes), in the force magnifier's aspect
     fbox = (BOARD[2] - 450, BOARD[1] + 6, BOARD[2] - 6, BOARD[3] - 6)
@@ -4599,7 +5222,8 @@ def build_scenes(film, speed=1.0):
             v0, v1 = (fwin[0] - 1, fwin[1] - 1), (fwin[2] + 1, fwin[3] + 1)
             for layer in film.order:
                 for n, (P, bits) in st.items():
-                    if not ((P[:, 0] > v0[0]) & (P[:, 0] < v1[0]) & (P[:, 1] > v0[1]) & (P[:, 1] < v1[1])).any():
+                    if not ((P[:, 0] > v0[0]) & (P[:, 0] < v1[0]) & (P[:, 1] > v0[1]) & (P[:, 1] < v1[1])).any() \
+                            or layer not in list(bits):
                         continue
                     wd = (PP_ + TW_ if n in prs else TW_) * s
                     col = mix(BODY, film.col[layer], 0.55 if n in prs else 0.8)
@@ -4618,7 +5242,7 @@ def build_scenes(film, speed=1.0):
                 d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(185, 185, 185), outline=(240, 240, 240), width=SS)
             lab = 0
             for r, how, pts in top:
-                col = FORCE.get(r['kind'], TEXT) if r['paid'] <= 1e-4 else (255, 40, 40)
+                col = FORCE.get(r['kind'], TEXT) if r['paid'] <= 1e-4 else PAID_C
                 w = SS * min(7.0, 1.5 + 1.8 * math.log10(1.0 + r['price']))
                 if not any(fwin[0] - 0.3 < p[0] < fwin[2] + 0.3 and fwin[1] - 0.3 < p[1] < fwin[3] + 0.3 for p in pts):
                     continue
@@ -4668,7 +5292,7 @@ def build_scenes(film, speed=1.0):
                 x0, y0 = film.mp.pt(isl['box'][0], isl['box'][1])
                 x1, y1 = film.mp.pt(isl['box'][2], isl['box'][3])
                 P = [film.X(min(x0, x1) - 0.08, min(y0, y1) - 0.08), film.X(max(x0, x1) + 0.08, max(y0, y1) + 0.08)]
-                C.d.rectangle([P[0], P[1]], outline=mix(BODY, (255, 160, 40), a_i), width=int(1.5 * SS))
+                C.d.rectangle([P[0], P[1]], outline=mix(BODY, (175, 180, 190), a_i), width=int(1.5 * SS))
         C.lanes(st, w=2.2)
         C.vias([(n, x, y) for n, x, y, al in vs])
         a_f = ease(span(t, 0.2, 0.26)) * (1 - ease(span(t, 0.68, 0.72))) + ease(span(t, 0.86, 0.92))
@@ -4798,7 +5422,7 @@ def build_scenes(film, speed=1.0):
                         if n not in t_state or n not in st:
                             continue
                         P, _bits, _U = st[n]
-                        d.line([Z(*q) for q in simplify(P, 0.3 / s * SS)], fill=mix(PANEL, (120, 100, 28), al),
+                        d.line([Z(*q) for q in simplify(P, 0.3 / s * SS)], fill=mix(PANEL, PAIR_RIB, al),
                                width=max(1, int((PP_ + TW_) * s)), joint='curve')
                         v = J['lanes'].get(n, {})
                         legs = []
@@ -4881,17 +5505,9 @@ def build_scenes(film, speed=1.0):
                 zoom(C, box2, v2, set(film.M), [('pol', 1.2, 0.35), ('snap' if t >= 0.62 else 'held', 2.4, 1.0)],
                      f'{n}: its via, and its neighbours')
             box3 = (BRAID[0] + 1280, BRAID[1], BRAID[2], BRAID[3])
-            C.card(box3, alpha=0.95)
-            lines = [('pairs laid first', S.gate.get('pairs held', '')), ('snapped', S.gate.get('snapped', ''))]
-            yy = box3[1] + 12
-            for lab, g in lines:
-                C.text(box3[0] + 12, yy, lab, 13, DIM)
-                for w_ in C.wrap(g, 12, box3[2] - box3[0] - 24)[:3]:
-                    yy += 18
-                    C.text(box3[0] + 12, yy, w_, 12, (150, 245, 120))
-                yy += 28
-            if S.lint:
-                C.text(box3[0] + 12, yy, S.lint[-1], 14, (150, 245, 120), bold=True)
+            nf_ = lambda g_: sum(int(x_) for x_ in re.findall(r'(?:dive|static|shape|swim|pitch) (\d+)', g_ or ''))  # noqa
+            big_numbers(C, box3, [(f'{nf_(S.gate.get("pairs held"))}', 'places short, the pairs laid'),
+                                  (f'{nf_(S.gate.get("snapped"))}', 'places short, every lane snapped')], px=44)
     xo_txt = f' {", ".join(xo)} swap{"s" if len(xo) == 1 else ""} its legs at its dive (a crossover), as a designer does.' if xo else ''
     sc.append(Scene('snap', 'snap', 20, snap, [
         (0, 'The snap makes the smooth plan octilinear on the router\'s grid. The PAIRS go first and alone, moving as '
@@ -4913,19 +5529,12 @@ def build_scenes(film, speed=1.0):
         draw_fanout(C, 0.5)
         C.lanes(film.st['snap'], w=2.2, ribbon=True)
         C.vias(film.vias['snap'])
-        box = (W / 2 - 520, BOARD[1] + 150, W / 2 + 520, BOARD[1] + 450)
         a = ease(span(t, 0.05, 0.2))
-        C.card(box, alpha=0.9 * a)
-        C.text(W / 2, box[1] + 26, 'the audit, the gate and the lint', 24, mix(PANEL, ACCENT, a), bold=True, anchor='ma')
-        rows = [('smooth plan', S.gate.get('smooth', '')), ('pairs held', S.gate.get('pairs held', '')),
-                ('snapped plan', S.gate.get('snapped', '')), ('lint', S.lint[-1] if S.lint else '')]
-        for j, (lab, g) in enumerate(rows):
-            aj = ease(span(t, 0.15 + 0.12 * j, 0.25 + 0.12 * j))
-            y = box[1] + 80 + j * 48
-            C.text(box[0] + 30, y, lab, 18, mix(PANEL, DIM, aj))
-            C.text(box[0] + 200, y, g[:84], 15, mix(PANEL, (150, 245, 120), aj), mono=True)
-        C.text(W / 2, box[3] - 40, f'loop round {S.lr}: the plan passes -- every check, nothing waived', 18,
-               mix(PANEL, TEXT, ease(span(t, 0.7, 0.8))), anchor='ma')
+        nf_ = sum(int(x_) for g_ in S.gate.values() for x_ in re.findall(r'(?:dive|static|shape|swim|pitch) (\d+)', g_))
+        lint_ = (S.lint[-1] if S.lint else '').replace('LINT ', '')
+        big_numbers(C, BRAID, [(f'{nf_}', 'places short, in every audit of this plan'),
+                               (lint_ or '?', 'the lint: what the snap promised'),
+                               (f'round {S.lr}', 'of the loop: the plan passes, nothing waived')], a)
     sc.append(Scene('audit', 'audit', 7, audit, [
         (0, 'The audit installs the plan exactly as the router will get it and runs every check; the gate passes it '
             'only when complete and clean with nothing waived; the lint checks what the snap promised.'),
@@ -4949,7 +5558,7 @@ def build_scenes(film, speed=1.0):
     order = [n for n in S.route_order if n in film.routed] + [n for n in film.M if n not in S.route_order]
 
     def route(C, t, T_):
-        C.segs(film.other_c[0], alpha=0.22)
+        C.obst(film.other_c[0])
         C.segs(film.fo_c[0], alpha=0.9)
         C.cvias(film.fo_c[1])
         C.lanes(film.st['snap'], alpha=0.28, w=1.6, ribbon=False)
@@ -4961,26 +5570,16 @@ def build_scenes(film, speed=1.0):
             segs, vias = film.routed[n]
             C.segs(segs, alpha=a)
             C.cvias(vias, a)
-        C.card(BRAID, alpha=0.95)
-        shown = [ln for j, ln in enumerate(S.route_lines) if j < k_]
-        C.text(BRAID[0] + 12, BRAID[1] + 8, 'route_lanes.py --plan  (the production router, each lane in its band, '
-               'all at once)', 13, DIM)
-        cols_ = 3 if len(S.route_lines) <= 30 else 4
-        per = int(math.ceil(len(S.route_lines) / cols_))
-        dy_ = min(22.0, (BRAID[3] - BRAID[1] - 40) / max(1, per))
-        for j, ln in enumerate(shown):
-            c_, r_ = divmod(j, per)
-            p = ln.split()
-            txt = f'{p[0]:<7} {"pair" if p[1] == "pair" else "single":<6} in band  vias {p[p.index("vias") + 1]}  len {p[p.index("len") + 1]} mm' if 'vias' in p and 'len' in p else ln[:60]
-            C.text(BRAID[0] + 12 + c_ * (1860 / cols_), BRAID[1] + 32 + r_ * dy_, txt, 13 if dy_ >= 18 else 11, (150, 245, 120),
-                   mono=True)
-        if t > 0.85:
-            a = ease(span(t, 0.85, 0.92))
-            box = (W / 2 - 430, BOARD[1] + 10, W / 2 + 430, BOARD[1] + 70)
-            C.card(box, alpha=0.9 * a)
-            C.text(W / 2, box[1] + 30, f'{S.route_summary.replace("SUMMARY seq: ", "")}   ·   check_connected: '
-                   f'{"all connected" if S.connected else "OPEN NETS"}   ·   check_drc: {"clean" if S.drc_clean else "VIOLATIONS"}',
-                   18, mix(PANEL, (150, 245, 120) if S.connected and S.drc_clean else (255, 90, 90), a), bold=True, anchor='mm')
+        nn_ = len(film.M)
+        a_e = ease(span(t, 0.85, 0.92))
+        big_numbers(C, BRAID, [(f'{min(nn_, int(k_)) if t < 0.85 else nn_}/{nn_}',
+                                'lanes laid, each in its band' if t < 0.85 else
+                                ('lanes connected, no design rule error' if S.connected and S.drc_clean else
+                                 'lanes laid -- the checks NOT clean')),
+                               (f'{film.vias_ours:,}' if a_e > 0 else '',
+                                f'vias on these nets as laid, {film.vias_ours / nn_:.1f} a lane' if a_e > 0 else ''),
+                               (f'{film.mm_ours:,.0f} mm' if a_e > 0 else '',
+                                f'of their copper as laid, {film.mm_ours / nn_:.0f} mm a lane' if a_e > 0 else '')])
     sc.append(Scene('route', 'lay', 16, route, [
         (0, 'The lay: the production router lays the plan\'s copper, each lane held to its band -- the pairs first (their '
             'end connectors and crossover laid as planned), then the singles in the berths\' order.'),
@@ -5009,7 +5608,7 @@ def build_scenes(film, speed=1.0):
     band_ = m_.group(1) if m_ else '?'
     def result(C, t, T_):
         a_h = ease(span(t, 0.35, 0.45)) * (1 - ease(span(t, 0.75, 0.85))) if film.human_c else 0.0
-        C.segs(film.other_c[0], alpha=0.22)
+        C.obst(film.other_c[0])
         if a_h < 1:
             C.segs(film.seq_c[0], alpha=1 - a_h)
             C.cvias(film.seq_c[1], 1 - a_h)
@@ -5116,11 +5715,7 @@ def build_scenes(film, speed=1.0):
                         if film.g else []),
                     cues=[(0, 'swell', 0.6)] + ([(0.3, 'shimmer', 0.5), (0.6, 'chord' if esc_clean else 'alert', 1.0)]
                                                 if film.g else [])))
-    if n_peers is not None:
-        # (the filmed bus's scenes after the others finished: their copper under it, faint)
-        for s_ in sc[n_peers:]:
-            if s_.key not in ('together', 'coda'):
-                s_.fn = with_peers(film, s_.fn)
+    sc[:] = cut_film(film, sc)
     for s in sc:
         s.secs *= speed
     return sc
@@ -5128,8 +5723,11 @@ def build_scenes(film, speed=1.0):
 
 # =============================================================================== the short (--short)
 SHORT_BPM = 80             # the short's pulse: every cut on a beat, a clip's steps on its beats or half beats
+SHORT_SECS = 30.0          # the short's length
 SHORT_LAY = 0.3            # the lay's share of the short's beats (5 at least): the last clip
 SHORT_MIN = 4              # a clip's beats at the least
+SHORT_HOOK = 2             # the hook's beats: the laid copper, first
+SHORT_LUFS = -14.0         # the short's loudness (integrated, EBU R128), its true peak held at -1 dBTP
 
 
 class Clip(Scene):
@@ -5146,7 +5744,171 @@ def _quant(t, q):
     return round(t / q) * q
 
 
-def short_clips(film, secs=15.0):
+def group_search_prep(film):
+    """the group's ends search as it ran (the re-run's trace, S.Gt_search: every state it found) made ready for
+    drawing, or None: each state's lanes -- each lane's two ends, the bus's frame turned onto the bench's, their
+    layers, its change of layer -- the model's crossings counted, the objective's top tier's price"""
+    S, g = film.S, film.g
+    GS = getattr(S, 'Gt_search', None)
+    if not (g and GS and len(GS.get('states') or []) > 1 and getattr(g, 'maps', None)):
+        return None
+    D = Story()
+    # (the states the search found: its first search's start, then every round's -- not a later search's start, the
+    # hint it is handed, only partly set (a trace kept before the tracer left those out has them); nor a round that
+    # only reports again the lanes of the state before it)
+    st_, sig_ = [], None
+    for j_, x_ in enumerate(GS['states']):
+        if x_['kind'] == 'start' and j_:
+            continue
+        k_ = json.dumps(x_['buses'], sort_keys=True)
+        if k_ != sig_:
+            st_.append(x_)
+            sig_ = k_
+    D.sigs, D.st, D.geo = GS['sigs'], st_, {}
+    D.W_TOP = next((M_['model'].get('W_TOP') for M_ in S.G.models if M_['model'].get('W_TOP')), None)
+    D.lanes = []
+    for st in D.st:
+        out = {}
+        for bn, B_ in st['buses'].items():
+            to = g.maps.get(bn) or S.G.tb
+            for ln, v in B_['lanes'].items():
+                e = v['ends']
+                out[(bn, ln)] = (e[0][0], e[0][1], to(e[0][2]) if e[0][2] else None,
+                                 e[1][0], e[1][1], to(e[1][2]) if e[1][2] else None, v.get('change'))
+        D.lanes.append(out)
+    D.nx = [sum(len(B_['crosses']) for B_ in st['buses'].values()) for st in D.st]
+    return D
+
+
+def _gs_end(film, D, bn, sid, layer):
+    """an end of a state, its pieces and its via in the bench's frame -- a via's run on the layer the state took
+    (joint_escape's RUN: the layer is the model's choice)"""
+    key = (bn, sid, layer)
+    if key not in D.geo:
+        segs, vias = film.g.end_geo({'sig': D.sigs[sid]}, film.g.maps.get(bn) or film.S.G.tb)
+        TW = film.rules.get('TW', 0.1)
+        D.geo[key] = ([(a, b, c, d_, TW, layer if L == '*run*' else L, None) for a, b, c, d_, L in segs],
+                      [(x, y, film.rules['via'], None) for x, y in vias])
+    return D.geo[key]
+
+
+def _seg_cross(p, q, r, t):
+    """where the segment p-q meets the segment r-t, or None"""
+    d = (q[0] - p[0]) * (t[1] - r[1]) - (q[1] - p[1]) * (t[0] - r[0])
+    if abs(d) < 1e-12:
+        return None
+    u = ((r[0] - p[0]) * (t[1] - r[1]) - (r[1] - p[1]) * (t[0] - r[0])) / d
+    v = ((r[0] - p[0]) * (q[1] - p[1]) - (r[1] - p[1]) * (q[0] - p[0])) / d
+    return (p[0] + u * (q[0] - p[0]), p[1] + u * (q[1] - p[1])) if 0 <= u <= 1 and 0 <= v <= 1 else None
+
+
+def _pict(C, kind, x, y, col=TEXT):
+    """a term of the group's objective as a pictogram, centred at (x, y), drawn from the marks the frame itself uses:
+    a walled ball (a ball's ring, crossed), a plane ball fanned out (a dot, its escape), a change of layer (a via's
+    ring on a lane), a crossing (two lanes, the dot), a run on a plane's layer (a lane over the plane), an end on a far
+    face (a lane to a wall), a way round the arrays (a lane round a ball)"""
+    d, Z = C.d, lambda a, b: ((x + a) * SS, (y + b) * SS)
+    w = int(2 * SS)
+    if kind == 'walls':
+        d.ellipse([*Z(-11, -11), *Z(11, 11)], outline=col, width=w)
+        d.line([Z(-8, -8), Z(8, 8)], fill=col, width=w)
+        d.line([Z(-8, 8), Z(8, -8)], fill=col, width=w)
+    elif kind == 'fans':
+        d.ellipse([*Z(-14, -5), *Z(-4, 5)], fill=(150, 156, 166))
+        d.line([Z(-4, 0), Z(14, -10)], fill=col, width=w)
+    elif kind == 'changes':
+        d.line([Z(-16, 0), Z(16, 0)], fill=(150, 156, 166), width=w)
+        d.ellipse([*Z(-6, -6), *Z(6, 6)], outline=col, width=w)
+    elif kind == 'crossings':
+        d.line([Z(-14, -10), Z(14, 10)], fill=(150, 156, 166), width=w)
+        d.line([Z(-14, 10), Z(14, -10)], fill=(150, 156, 166), width=w)
+        d.ellipse([*Z(-4, -4), *Z(4, 4)], fill=col)
+    elif kind == 'plane':
+        d.rectangle([*Z(-16, 3), *Z(16, 10)], fill=(90, 96, 108))
+        d.line([Z(-16, -4), Z(16, -4)], fill=col, width=w)
+    elif kind == 'far':
+        d.line([Z(10, -12), Z(10, 12)], fill=(150, 156, 166), width=int(3 * SS))
+        d.line([Z(-16, 0), Z(6, 0)], fill=col, width=w)
+    elif kind == 'ride':
+        d.ellipse([*Z(-5, 0), *Z(5, 10)], fill=(150, 156, 166))
+        d.arc([*Z(-14, -9), *Z(14, 19)], 180, 360, fill=col, width=w)
+
+
+def draw_group_search(C, film, D, j, jp, cbox, words=True):
+    """state j of the group's ends search on the board: each lane a straight line from its tooth to its berth, its two
+    halves in its ends' layers' colours, a via's ring at its middle where the model counts a change of layer, a dot
+    where the lines of two lanes the model counts crossing cross (a crossing the model counts and these lines do not
+    show is counted all the same); every bus's ends at both arrays as the state holds them, the ends moved since state
+    jp ringed; and in `cbox` the objective, term by term as the step's own objective_split reads it"""
+    st, L_ = D.st[j], D.lanes[j]
+    Lp = D.lanes[jp] if jp is not None else None
+    pts = {}
+    for key, (s0, l0, p0, s1, l1, p1, ch) in L_.items():
+        if p0 is None or p1 is None:
+            continue
+        pts[key] = (p0, p1)
+        mid = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
+        C.wline([p0, mid], mix(BODY, layer_col(l0), 0.55), 1.2)
+        C.wline([mid, p1], mix(BODY, layer_col(l1), 0.55), 1.2)
+        if ch:
+            C.wring(*mid, 0.12, mix(BODY, VIA_COL, 0.7), 1.2)
+    for bn, B_ in st['buses'].items():
+        for a_, c_ in B_['crosses']:
+            A_, Q_ = pts.get((bn, a_)), pts.get((bn, c_))
+            x_ = _seg_cross(A_[0], A_[1], Q_[0], Q_[1]) if A_ and Q_ else None
+            if x_ is not None:
+                C.wdot(*x_, 2.2, mix(BODY, TEXT, 0.85))
+    for key, (s0, l0, p0, s1, l1, p1, ch) in L_.items():
+        for sid, lay in ((s0, l0), (s1, l1)):
+            segs, vias = _gs_end(film, D, key[0], sid, lay)
+            C.segs(segs)
+            C.cvias(vias)
+    if Lp is not None:
+        for key, (s0, l0, p0, s1, l1, p1, ch) in L_.items():
+            q = Lp.get(key)
+            for e_, (sid, lay, pt) in enumerate(((s0, l0, p0), (s1, l1, p1))):
+                if q is not None and (q[3 * e_], q[3 * e_ + 1]) != (sid, lay) and pt is not None:
+                    C.wring(*pt, 0.3, MOVED_C, 2)
+    C.card(cbox, alpha=0.92)
+    sp = st.get('split') or {}
+    rv = sp.get('rest_vias') or {}
+    costly = (sp.get('walls') or 0) + (sp.get('fans') or 0)
+    rest = (st['obj'] - costly * D.W_TOP) / 1000 if D.W_TOP else None
+    if not words:
+        # (no words: each term its pictogram and its number, the value last)
+        terms = [('walls', f'{sp.get("walls", "?")}'), ('fans', f'{sp.get("fans", "?")}'),
+                 ('changes', f'{sp.get("changes", "?")}'), ('crossings', f'{D.nx[j]}'),
+                 ('plane', f'{sp.get("plane_runs_vias", 0):.0f}'), ('far', f'{sp.get("far_teeth", "?")}'),
+                 ('ride', f'{rv.get("ride", 0):.0f}')]
+        cw = (cbox[2] - cbox[0] - 300) / len(terms)
+        yc = (cbox[1] + cbox[3]) / 2
+        for n_, (kind, val) in enumerate(terms):
+            x = cbox[0] + 40 + n_ * cw
+            _pict(C, kind, x, yc)
+            C.text(x + 26, yc, val, 30, TEXT, bold=True, anchor='lm')
+        if rest is not None:
+            C.text(cbox[2] - 24, yc, (f'{costly} + ' if costly else '') + f'{rest:,.0f}', 30, ACCENT, bold=True,
+                   anchor='rm')
+        return
+    cells = [('walled balls', f'{sp.get("walls", "?")}'), ('plane balls fanned out', f'{sp.get("fans", "?")}'),
+             ('lanes changing layer', f'{sp.get("changes", "?")}'), ('crossings', f'{D.nx[j]}'),
+             ('runs on a plane\'s layer', f'{sp.get("plane_runs_vias", 0):.1f} vias'),
+             ('ends on a far face', f'{sp.get("far_teeth", "?")}'),
+             ('ways round the arrays', f'{rv.get("ride", 0):.1f} vias')]
+    x = cbox[0] + 18
+    C.text(x, cbox[1] + 12, 'the objective, as the model counts it', 15, DIM)
+    C.text(cbox[2] - 18, cbox[1] + 12, st.get('label') or '', 15, DIM, anchor='ra')
+    cw = (cbox[2] - cbox[0] - 300) / len(cells)
+    for n_, (lab, val) in enumerate(cells):
+        C.text(x + n_ * cw, cbox[1] + 42, val, 28, TEXT, bold=True)
+        C.text(x + n_ * cw, cbox[1] + 80, lab, 14, DIM)
+    if rest is not None:
+        C.text(cbox[2] - 18, cbox[1] + 42, (f'{costly} costly + ' if costly else '') + f'{rest:,.1f}', 28, ACCENT,
+               bold=True, anchor='ra')
+        C.text(cbox[2] - 18, cbox[1] + 80, 'its value, in vias', 14, DIM, anchor='ra')
+
+
+def short_clips(film, secs=SHORT_SECS):
     """THE SHORT: about `secs` of the run's moments, each an excerpt of the film cut tighter -- no words, no captions,
     no cards, something moving from its first frame to its last. Every clip is drawn at ONE framing, the film's own of
     the bus (its source array to its destination), and as the film draws its stage: its colours, its line weights, its
@@ -5173,11 +5935,11 @@ def short_clips(film, secs=15.0):
     nb = max(SHORT_MIN + 5, int(round(secs / beat)))
     TW, VD = film.rules['TW'], film.rules['via']
     prs = set(S.pairs)
-    STRC = (236, 222, 130)
+    STRC = (225, 228, 234)
 
     def fanout(C, a):
         """the film's own ground of a stage: every other net's copper, faint, and the fanout's at `a`"""
-        C.segs(film.other_c[0], alpha=0.22)
+        C.obst(film.other_c[0])
         C.segs(film.fo_c[0], alpha=a)
         C.cvias(film.fo_c[1], a)
 
@@ -5198,7 +5960,25 @@ def short_clips(film, secs=15.0):
 
     cands = []
     # ------------------------------------------------------------------ the group's search
-    if film.g and len(film.g.states) > 1:
+    D = getattr(film, 'gsearch', None)
+    if D is not None:
+        # THE SEARCH AS IT RAN (the group's ends search run again, watched): drawn as the film draws it
+        # (draw_group_search), its card along the frame's edge the bus leaves free
+        vy0, vy1 = film.X(0, film.view[1])[1] / SS, film.X(0, film.view[3])[1] / SS
+        cbox = (40, H - 132, W - 40, H - 16) if H - vy1 >= 110 or vy0 < 110 else (40, 16, W - 40, 132)
+
+        def c_search(beats):
+            # (the states sampled evenly over the search, the first and the last kept, a step each on the quarter beats)
+            idx = thin(list(range(len(D.st))), 4 * beats)
+            t0s = starts(beats, len(idx), per=4)
+
+            def fn(C, t, T_):
+                k, _f = stepper(t, t0s)
+                C.obst(film.other_c[0])
+                draw_group_search(C, film, D, idx[k], idx[max(0, k - 1)] if k else None, cbox, words=False)
+            return Clip('search', 'search', beats, fn, cues=[(t0s[k], 'tick', 0.4) for k in range(1, len(idx))])
+        cands.append((0, 'search', 1 + math.log2(len(D.st)), c_search, 1 + math.log2(len(D.st))))
+    elif film.g and len(film.g.states) > 1:
         g, G = film.g, S.G
         st_ = lambda q: [(a, b, c, d_, TW, L, None) for a, b, c, d_, L in q]   # noqa: E731
         # (the search on the model's own clock: every state a solve ended on -- its ends at both arrays, the ones it
@@ -5211,8 +5991,8 @@ def short_clips(film, secs=15.0):
         lv_ = [v for v in line_v if v] or [1.0]
         vals = [r_['best'] for r_ in G.rounds if r_['best'] and r_['best'] > 0] + lv_
         vlo, vhi = max(1.0, min(vals) * 0.9), max(lv_) * 1.8
-        rcol = lambda lab: ((255, 170, 60) if 'costly' in lab else (90, 230, 255) if 'rest held' in lab else  # noqa: E731
-                            (255, 90, 210) if lab == 'the model' else (215, 220, 228))
+        rcol = lambda lab: ((250, 250, 250) if 'costly' in lab else (170, 175, 185) if 'rest held' in lab else  # noqa: E731
+                            (120, 125, 135) if lab == 'the model' else (210, 214, 222))
         # (the chart below the bus where the frame has room for it, else above it)
         vy0, vy1 = film.X(0, film.view[1])[1] / SS, film.X(0, film.view[3])[1] / SS
         cbox = (60, H - 150, W - 60, H - 24) if H - vy1 >= 140 or vy0 < 140 else (60, 24, W - 60, 150)
@@ -5231,7 +6011,7 @@ def short_clips(film, secs=15.0):
                 jat.append(j_ if kind_ == 0 else (jat[-1] if jat else 0))
 
             def fn(C, t, T_):
-                C.segs(film.other_c[0], alpha=0.22)
+                C.obst(film.other_c[0])
                 k, f = stepper(t, t0s)
                 j = jat[k]
                 ends = g.states[j]['ends']
@@ -5300,20 +6080,24 @@ def short_clips(film, secs=15.0):
         proved = T['final'].get('proved', True)
 
         def c_solve(beats):
+            # (each plan on the lanes' own taut strings, as the solve chooses them: its layers and its changes along
+            # u -- the frame's slots and references, where the film draws its plans over the braid, follow the frame's
+            # rings round the destination, and without the braid read here as a shape of their own beyond it)
             ps = thin(list(film.pshow), 2 * beats - (1 if film.coupled else 0))
-            keys = [f'plan{i}' for i in ps] + (['coupled'] if film.coupled else [])
+            pls = [film.plans[i] for i in ps] + ([film.coupled] if film.coupled else [])
             objs = [film.plan_meta[i]['obj'] for i in ps] + ([o1] if film.coupled else [])
-            t0s = starts(beats, len(keys), per=2)
+            refs = [film.ref_state(P_) for P_ in pls]
+            t0s = starts(beats, len(pls), per=2)
 
             def fn(C, t, T_):
                 fanout(C, 0.55)
                 k, f = stepper(t, t0s)
-                ka, kb = keys[max(0, k - 1)], keys[k]
-                mt = ease(span(f, 0.0, 0.3)) if k else 1.0
-                C.lanes(morph(film.st[ka], film.st[kb], mt), w=2.2)
-                C.vias([(n, x, y) for n, x, y, al in morph_vias(film.vias[ka], film.vias[kb], mt) if al > 0.5])
+                (sa, va), (sb, vb) = refs[max(0, k - 1)], refs[k]
+                mt = ease(span(f, 0.0, 0.85)) if k else 1.0
+                C.lanes(morph(sa, sb, mt), w=2.2)
+                C.vias([(n, x, y) for n, x, y, al in morph_vias(va, vb, mt) if al > 0.5])
             cues = [(t0s[k], 'bell', better(o)) for k, o in enumerate(objs) if k] + \
-                [(t0s[len(keys) - 1], 'chord', 1.0 if proved and not film.coupled else 0.0)]
+                [(t0s[len(pls) - 1], 'chord', 1.0 if proved and not film.coupled else 0.0)]
             return Clip('solve', 'solve', beats, fn, cues=cues)
         cands.append((2, 'solve', 2 + math.log2(1 + len(film.plans)), c_solve, None))
 
@@ -5325,6 +6109,8 @@ def short_clips(film, secs=15.0):
         nlay = len(E['layers'])
         CELLC = [mix(BODY, film.col[b], 0.6) for b in film.ebit]
         mesh_px = [np.array([film.X(x, y) for x, y in V], float).reshape(-1, 2) for V, _T in film.emesh[:nlay]]
+        e0_ = seq_e[0][3]
+        L_main = max(range(nlay), key=lambda L: (sum(1 for k_ in e0_['xy'] if film.erun[k_][0] == L), -L))
         px_of = lambda pts: [film.X(*BP(q)) for q in pts]           # noqa: E731
         lit_px = {r['it']: px_of(r['lit']) for r in E['rounds']}
         hot_px = {r['it']: px_of(r['hot']) for r in E['rounds']}
@@ -5337,11 +6123,10 @@ def short_clips(film, secs=15.0):
 
             def fn(C, t, T_):
                 fanout(C, 0.5)
-                for L in range(nlay):
-                    col = mix(BODY, CELLC[L], 0.26)
-                    px, T_c = mesh_px[L], film.emesh[L][1]
-                    for i_, j_, k_ in T_c:
-                        C.d.line([tuple(px[i_]), tuple(px[j_]), tuple(px[k_]), tuple(px[i_])], fill=col, width=SS)
+                col = mix(BODY, CELLC[L_main], 0.26)            # (one layer's cells: the layer most lanes run on)
+                px, T_c = mesh_px[L_main], film.emesh[L_main][1]
+                for i_, j_, k_ in T_c:
+                    C.d.line([tuple(px[i_]), tuple(px[j_]), tuple(px[k_]), tuple(px[i_])], fill=col, width=SS)
                 k, f = stepper(t, t0s)
                 (ka, _k, _r, sa), (kb, kind, rec_, sb) = seq_e[idx[max(0, k - 1)]], seq_e[idx[k]]
                 m = ease(span(f, 0.2, 0.8)) if k else 1.0
@@ -5353,7 +6138,7 @@ def short_clips(film, secs=15.0):
                         C.d.rectangle([x_ - SS / 2, y_ - SS / 2, x_ + SS / 2, y_ + SS / 2], fill=c1)
                     a_h = ease(span(f, 0.25, 0.5)) * (1 - ease(span(f, 0.85, 1.0)))
                     if a_h > 0.02:
-                        c2 = mix(BODY, ACCENT, a_h)
+                        c2 = mix(BODY, (175, 180, 190), a_h)
                         for (x_, y_) in hot_px[rec_['it']]:
                             C.d.ellipse([x_ - 1.6 * SS, y_ - 1.6 * SS, x_ + 1.6 * SS, y_ + 1.6 * SS], fill=c2)
                         for h in rec_['vhop']:
@@ -5365,8 +6150,8 @@ def short_clips(film, secs=15.0):
                 elif kind == 'slide':
                     a_s = math.sin(math.pi * f)
                     for vk in rec_['vias']:
-                        C.wline([sa['via'][vk], sb['via'][vk]], mix(BODY, ACCENT, a_s), 2.0)
-                        C.wring(*sb['via'][vk], 0.4, mix(BODY, ACCENT, a_s), 2.5)
+                        C.wline([sa['via'][vk], sb['via'][vk]], mix(BODY, MOVED_C, a_s), 2.0)
+                        C.wring(*sb['via'][vk], 0.4, mix(BODY, MOVED_C, a_s), 2.5)
             cues = []
             for k in range(1, len(idx)):
                 kind, rec_ = seq_e[idx[k]][1], seq_e[idx[k]][2]
@@ -5385,18 +6170,18 @@ def short_clips(film, secs=15.0):
         def c_snap(beats):
             def fn(C, t, T_):
                 fanout(C, 0.5)
-                mp_, mq, ms = ease(span(t, 0.05, 0.28)), ease(span(t, 0.4, 0.55)), ease(span(t, 0.62, 0.85))
+                mp_, mq, ms = ease(span(t, 0.0, 0.4)), ease(span(t, 0.4, 0.55)), ease(span(t, 0.55, 1.0))
                 pr = morph(film.st['pol'], film.st['pairs'], mp_)
                 si = morph(film.st['pol'], film.st['held'], mq)
                 si = morph(si, film.st['snap'], ms) if ms > 0 else si
                 pr = morph(pr, film.st['snap'], ms) if ms > 0 else pr
                 st = {n: (pr[n] if n in prs else si[n]) for n in film.M if n in pr and n in si}
-                dim = 0.25 if t < 0.36 else 1.0
-                C.lanes(st, w=2.2, only=prs if t < 0.36 else None, dim=dim, hl=prs if t < 0.36 else None,
+                dim = 0.25 if t < 0.4 else 1.0
+                C.lanes(st, w=2.2, only=prs if t < 0.4 else None, dim=dim, hl=prs if t < 0.4 else None,
                         ribbon=t >= 0.12)
-                vs = film.vias['snap'] if t >= 0.62 else film.vias['pairs'] if t >= 0.2 else film.vias['pol']
-                C.vias(vs, only=prs if t < 0.36 else None, dim=dim)
-            return Clip('snap', 'snap', beats, fn, cues=[(0.05, 'snap', 0.4), (0.4, 'snap', 0.6), (0.62, 'snap', 0.8)])
+                vs = film.vias['snap'] if t >= 0.55 else film.vias['pairs'] if t >= 0.2 else film.vias['pol']
+                C.vias(vs, only=prs if t < 0.4 else None, dim=dim)
+            return Clip('snap', 'snap', beats, fn, cues=[(0.0, 'snap', 0.4), (0.4, 'snap', 0.6), (0.55, 'snap', 0.8)])
         cands.append((4, 'snap', 1.0, c_snap, None))
 
     # ------------------------------------------------------------------ the lay, last
@@ -5416,7 +6201,7 @@ def short_clips(film, secs=15.0):
                 for j, n in enumerate(order)}
 
         def fn(C, t, T_):
-            C.segs(film.other_c[0], alpha=0.22)
+            C.obst(film.other_c[0])
             C.segs(film.fo_c[0], alpha=0.9)
             C.cvias(film.fo_c[1])
             if 'snap' in film.st:
@@ -5432,9 +6217,26 @@ def short_clips(film, secs=15.0):
             [(_quant(0.75, q), 'chord' if clean else 'alert', 1.0)]
         return Clip('lay', 'lay', beats, fn, cues=cues)
 
+    def c_hook(beats):
+        # THE HOOK: where the short ends -- the bus's copper as it was laid, every lane sweeping in in its laying order
+        # -- for its first beats, then back to the start
+        def fn(C, t, T_):
+            C.obst(film.other_c[0])
+            C.segs(film.fo_c[0], alpha=0.9)
+            C.cvias(film.fo_c[1])
+            k_ = ease(span(t, 0.0, 0.75)) * len(order)
+            for j, n in enumerate(order):
+                a = min(1.0, max(0.0, k_ - j))
+                if a <= 0:
+                    break
+                segs, vias = film.routed[n]
+                C.segs(segs, alpha=a)
+                C.cvias(vias, a)
+        return Clip('hook', 'lay', beats, fn, cues=[(0.0, 'whoosh', 0.5)])
+
     # ---- the clips the beats allow, the most worth first, SHORT_MIN beats each, the rest shared by worth (the search's
     # by its rounds too); and the beats the lay's singles save, to the search first, else shared the same way
-    rest = nb - b_lay0
+    rest = nb - b_lay0 - SHORT_HOOK
     take = sorted(sorted(cands, key=lambda c: (-c[2], c[0]))[:max(0, rest // SHORT_MIN)], key=lambda c: c[0])
     give = {c[1]: SHORT_MIN for c in take}
     wgt = {c[1]: c[4] or c[2] for c in take}
@@ -5456,12 +6258,12 @@ def short_clips(film, secs=15.0):
         give['search'] += saved
     else:
         left += share(saved)
-    clips = [c[3](give[c[1]]) for c in take] + [c_lay(b_lay + left)]
+    clips = ([c_hook(SHORT_HOOK)] if order else []) + [c[3](give[c[1]]) for c in take] + [c_lay(b_lay + left)]
     if getattr(film, 'neg', None):
         # (a negotiated bus: its clips after the other buses finished drawn with their copper under them, faint -- as
         # the film draws those stages)
         for c_ in clips:
-            if c_.key in ('rounds', 'snap', 'lay'):
+            if c_.key in ('hook', 'rounds', 'snap', 'lay'):
                 c_.fn = with_peers(film, c_.fn)
     return clips
 
@@ -5470,22 +6272,51 @@ def short_clips(film, secs=15.0):
 _FILM = None
 
 
+def stack_strip(C, x1, y0, names, drawn, bar=(40, 8), gap=5):
+    """the stack-up, a bar a copper layer top to bottom, right-aligned at x1 from y0: a layer the frame draws in its
+    colour, the rest a dark grey; the strip's left edge"""
+    for j, L in enumerate(names):
+        y = y0 + j * (bar[1] + gap)
+        C.rect((x1 - bar[0], y, x1, y + bar[1]), fill=layer_col(L) if L in drawn else (52, 56, 64))
+    return x1 - bar[0]
+
+
+def legend(C, x1, y, names, drawn):
+    """the layers' legend, right-aligned at x1 on one line: the stack-up strip, small, then each layer's swatch (40 x 8)
+    and name (20 px) in stack order, the ones the frame draws in their colours, the rest grey; its left edge"""
+    xs = []
+    x = x1
+    for L in reversed(names):
+        on = L in drawn
+        x -= C.tlen(L, 20)
+        xs.append((x, L, on))
+        x -= 66
+    for x_, L, on in xs:
+        C.text(x_, y + 1, L, 20, TEXT if on else (78, 84, 94))
+        C.rect((x_ - 46, y + 10, x_ - 6, y + 18), fill=layer_col(L) if on else (52, 56, 64))
+    x -= 18
+    hb = max(2.0, min(5.0, 44 / max(1, len(names)) - 1.5))
+    for j, L in enumerate(names):
+        yy = y - 2 + j * (hb + 1.5)
+        C.rect((x - 30, yy, x, yy + hb), fill=layer_col(L) if L in drawn else (52, 56, 64))
+    return x - 40
+
+
 def chrome(C, scene, t, T_total, t_abs, scenes):
     """header, caption, the stage timeline"""
     C.text(HEAD[0], HEAD[1] + 4, 'the whole route', 26, TEXT, bold=True)
     S = C.f.S
-    C.text(HEAD[0] + 230, HEAD[1] + 10, f'{os.path.basename(S.base_path)} → {S.src} to {S.dst}, {len(C.f.M)} lanes', 18, DIM)
+    x_t = HEAD[0] + C.tlen('the whole route', 26, bold=True) + 24
+    x = HEAD[2]
     if scene.stage:
         C.text(HEAD[2], HEAD[1] + 4, scene.stage, 26, ACCENT, bold=True, anchor='ra')
-    if len(C.f.LN) > 2 and scene.stage:
-        # (more layers than two: the legend of the layers the lanes stand on, top to bottom of the board)
-        x = HEAD[2] - C.tlen(scene.stage, 26, bold=True) - 40
-        for L in reversed(C.f.used):
-            x -= C.tlen(L, 15)
-            C.text(x, HEAD[1] + 12, L, 15, DIM)
-            x -= 30
-            C.line([(x, HEAD[1] + 21), (x + 24, HEAD[1] + 21)], layer_col(L), 5)
-            x -= 16
+        x -= C.tlen(scene.stage, 26, bold=True) + 36
+    drawn = set(_DRAWN)
+    if drawn:
+        x = legend(C, x, HEAD[1] + 6, stack_order(list(C.f.LN)), drawn)
+    sub = f'{S.src} to {S.dst}, {len(C.f.M)} lanes'
+    if x - x_t > C.tlen(sub, 18) + 20:
+        C.text(x_t, HEAD[1] + 10, sub, 18, DIM)
     cap = None
     for (t0, s) in scene.captions:
         if t >= t0:
@@ -5544,9 +6375,16 @@ def render_frame(i):
         acc += sc.span
     t = sc.at(t_abs - acc)
     C = Canvas(film, base)
+    _DRAWN.clear()
     sc.fn(C, t, t_abs)
     if not short:
         chrome(C, sc, t, T_total, t_abs, scenes)       # (the short: no header, caption or timeline)
+    elif _DRAWN:
+        # (the short's stack-up: no words, a bar a copper layer top to bottom, the ones the frame draws in their colour)
+        names = stack_order(list(film.LN))
+        h_ = len(names) * 13 - 5
+        C.rect((W - 70, H / 2 - h_ / 2 - 12, W - 14, H / 2 + h_ / 2 + 12), fill=(14, 16, 20), r=6)
+        stack_strip(C, W - 22, H / 2 - h_ / 2, names, set(_DRAWN))
     return C.img.reduce(SS)
 
 
@@ -5558,6 +6396,8 @@ def main():
     if len(sys.argv) > 2 and sys.argv[1] == '--_trace':
         if sys.argv[2] == 'solve':
             _trace_solve(sys.argv[3], sys.argv[4])
+        elif sys.argv[2] == 'group':
+            _trace_group(sys.argv[3], sys.argv[4])
         elif sys.argv[2] == 'embed':
             _trace_embed(sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7])
         else:
@@ -5583,28 +6423,29 @@ def main():
     ap.add_argument('--sound', action='store_true',
                     help='a sound track: every scene narrated, effects on what the scenes draw, and music, mixed by '
                          'ffmpeg (whole_movie_sound.py) -- the film\'s timeline fitted to the narration')
-    ap.add_argument('--short', nargs='?', type=float, const=15.0, default=None, metavar='SECS',
-                    help='a SHORT instead of the film: about SECS (default 15) of the run\'s moments, each an excerpt '
-                         'of the film at one framing of the bus, cut on the music\'s pulse, with music and effects and no '
-                         'narration, captions or cards (short_clips); --stills and --scenes work on it as on the film')
+    ap.add_argument('--short', action='store_true',
+                    help='a SHORT instead of the film: about 30 s of the run\'s moments, each an excerpt of the film at '
+                         'one framing of the bus, cut on the music\'s pulse, with music and effects and no narration '
+                         '(short_clips); a bus step\'s group\'s ends search is run again for it, watched, once '
+                         '(trace_group.json); --stills and --scenes work on it as on the film')
     ap.add_argument('--voice', default=DEFAULT_VOICE,
                     help=f'the narration\'s voice (default {DEFAULT_VOICE}): kokoro:NAME, a voice of the neural '
                          'Kokoro-82M, installed on first use into its own venv in the user\'s cache ($XDG_CACHE_HOME or '
                          '~/.cache, krt_tts) and its weights fetched there once; or a macOS `say` voice by name (one '
                          '`say -v ?` lists, e.g. Samantha)')
     a = ap.parse_args()
-    if a.short is not None and a.sound:
+    if a.short and a.sound:
         raise SystemExit('whole_movie: --short has a sound track of its own (music and effects, no narration) -- '
                          '--sound is the film\'s')
     t0 = time.time()
     S = load_story(a)
-    if a.short is not None:
+    if a.short:
         # (the short's frame: the board over all of it, and the braid too -- no header, captions or timeline)
         global BOARD, BRAID
         BOARD, BRAID = (0, 0, W, H), (40, 80, W - 40, H - 80)
     film = Film(S)
     film.title = a.title
-    scenes = build_scenes(film, a.speed) if a.short is None else short_clips(film, a.short)
+    scenes = short_clips(film) if a.short else build_scenes(film, a.speed)
     if a.sound:
         # (the narration spoken first, and the scenes fitted to it: the film's timeline is then the sound's)
         import atexit
@@ -5618,7 +6459,7 @@ def main():
     T_total = sum(s.span for s in scenes)
     acc = 0.0
     for s in scenes:
-        print(f'  {acc:6.1f} s  {s.key:9s} {s.span:5.1f} s' + (f'  ({s.beats} beats)' if a.short is not None else ''))
+        print(f'  {acc:6.1f} s  {s.key:9s} {s.span:5.1f} s' + (f'  ({s.beats} beats)' if a.short else ''))
         acc += s.span
     if a.sound:
         wms.report(scenes)
@@ -5626,7 +6467,7 @@ def main():
         return
     global _FILM
     base = base_image(film)
-    _FILM = (film, scenes, a.fps, T_total, base, a.short is not None)
+    _FILM = (film, scenes, a.fps, T_total, base, bool(a.short))
     print(f'whole_movie: {T_total:.0f} s at {a.fps} fps, prepared in {time.time() - t0:.0f} s')
     if a.stills:
         os.makedirs(a.stills, exist_ok=True)
@@ -5659,7 +6500,7 @@ def main():
         # frames then go to a silent mp4 the sound is mixed onto)
         stems = wms.score(scenes, work)
         vout = os.path.join(work, 'video.mp4')
-    elif a.short is not None:
+    elif a.short:
         # (the short's music and effects, on its beat)
         import atexit
         import tempfile
@@ -5681,10 +6522,10 @@ def main():
     ff.stdin.close()
     if ff.wait() != 0:
         raise SystemExit('whole_movie: ffmpeg failed')
-    if a.sound or a.short is not None:
-        wms.mux(ffmpeg, vout, stems, a.out)
+    if a.sound or a.short:
+        wms.mux(ffmpeg, vout, stems, a.out, lufs=SHORT_LUFS if a.short else None)
     print(f'wrote {a.out}: {nfr} frames, {T_total:.0f} s, in {time.time() - t0:.0f} s'
-          + (', with sound' if a.sound or a.short is not None else ''))
+          + (', with sound' if a.sound or a.short else ''))
 
 
 if __name__ == '__main__':

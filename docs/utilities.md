@@ -2033,52 +2033,60 @@ python3 awx/whole_movie.py RUNDIR OUT.mp4 [--fps 30] [--workers 4]
 python3 awx/whole_movie.py RUNDIR --stills DIR [--at T1,T2,..]   # PNG stills
 python3 awx/whole_movie.py RUNDIR --scenes                       # the scenes and their times
 python3 awx/whole_movie.py RUNDIR --check                        # the re-runs compared, no film
-python3 awx/whole_movie.py RUNDIR OUT.mp4 --short [SECS]         # a short of the run, ~15 s
+python3 awx/whole_movie.py RUNDIR OUT.mp4 --short                # a short of the run, 30 s
 ```
 
-- **The group's ends**, where the run's ends are its group's: the buses the
-  step found and each one's capture; the one model of the arrays' fanout and
-  every bus's ends (the balls by what serves them, the menus by tier, the
-  state looked for, the start); its search, every round's best on the
-  model's own clock beside the state each solve ended on, the ends that
-  moved ringed; each bus's check by its own whole solve, the field's
-  findings, the repair and the check again; and the shared field as laid,
-  with the parts the nudge moved and the field's ties. These scenes are
-  drawn from what the step recorded (its `events.jsonl`, the model's
-  `checks.jsonl`, `group.log`, `group.json` and the two boards), never
-  solved again.
-- **The bus's own run**: its ends and the crossings their orders fix, the
-  taut strings, the frame, the solve (CP-SAT's plans as it found them, drawn
-  as a braid), the geometry (and the 2-D geometry where the loop ran it),
-  the polish, the snap, the audit, and the lay with its wall guard, then the
-  result; the coda closes on the group's escalation -- a rung down the fab
-  ladder for a group left short of clean, or that none was needed.
+- **The cut, five minutes at most** (`cut_film`): a cold open on the laid
+  copper; where the run's ends are its group's, the group's ends -- its
+  buses, the model and the END it chooses (where a lane leaves its ball and
+  on which layer: its TOOTH at the source, its BERTH at the destination,
+  named on the picture), the search as it ran (below), and the FIELD, every
+  fanout copper of the arrays as laid; then ONE bus end to end -- its ends
+  and the crossings their orders fix, the taut strings, the frame, the solve
+  (CP-SAT's plans, drawn as a braid), the geometry (and the 2-D geometry's
+  cells, points, rounds and a via hopping and sliding, where the loop ran
+  it), the snap, the audit and the lay; then its loop told plainly (each
+  failed round's places short, the round that passed), the negotiation with
+  the other buses, every bus together, and a closing. Every line of the
+  narration is also its scene's caption, every number read from the run's
+  records, and a panel that would list a log shows at most three large
+  numbers instead (a lane's share of the vias and copper among them). The
+  other scenes the stages have (the check, the settled layout, the polish,
+  the result and the coda) are built and left out of the cut.
 - The bus's own stages are OBSERVED: the round's solve, geometry and 2-D
   geometry are run again in-process under the run's own settings, and the
   film is refused unless each re-run writes the run's file byte for byte
   (`--force` films it anyway and says so on screen). `--check` makes that
   comparison alone and exits 1 when a re-run differs.
-- **Any number of layers.** Each copper layer has its colour on the board,
-  in the braid and in the 2-D geometry: F.Cu red and B.Cu blue as ever, the
-  inner layers bright (In1 yellow, In2 sky, In3 pink, In4 orange, In5 green,
-  In6 violet); on more than two a legend in the header names the layers the
-  lanes stand on, and the scenes that show one layer at a time (the cells,
-  the lanes' own points) take them two at a time.
+- **Colour is for layers only.** Each copper layer has its colour on the
+  board, in the braid and in the 2-D geometry, the eight apart by lightness
+  as well as hue (F.Cu red, B.Cu blue, In1 pale yellow, In2 teal, In3 mauve,
+  In4 orange, In5 pale sky, In6 violet: every two at least dE 20 apart as
+  seen and under deuteranopia and protanopia simulation). A via is a ring
+  split in the two layers it joins where the scale allows. Everything else is
+  drawn in greys, outlines and shapes: another net's copper one grey, faint;
+  a ball's class by its mark (a bus ball a white ring, another signal's a
+  grey ring, a plane ball a grey dot); couplings, marks of the loop, the
+  phases of the negotiation's clock. The header's legend lists every copper
+  layer of the board in its stack order beside a stack-up strip, the layers
+  the frame draws in their colours and the rest grey; the 2-D geometry draws
+  one layer's cells at a time.
 - **A negotiated bus** (its group's buses routed together, `JOINT_DIR`):
   its round's first solve is re-run as the bus solved it alone and compared
   with `solve.solo.json`; a scene of its own then shows the coupled solve's
   plan for it, the one its loop lays out. Its loop's stages are re-run with
-  the other buses' published lanes on the board, as the chain ran them.
+  the other buses' published lanes on the board, as the chain ran them, and
+  the other buses' copper is drawn under its scenes as the obstacle it was.
   The film shows the negotiation as well, read from the step's records
   (`events.jsonl`, the negotiation directory, the coupled solve's report, each
-  bus's summary and the merged board), never run again: every bus on one
-  clock (its fanout, its first solve, its wait for the coupled solve, its
+  bus's summary and the merged board), never run again, on the whole group's
+  board in the left half and its table and clock on the right: every bus on
+  one clock (its fanout, its first solve, its wait for the coupled solve, its
   loop, its lay and its end), the coupled solve's couplings at their places
-  (the ones the buses' own plans broke, the ones the coupled plan still
-  breaks), the other buses laying their copper while the filmed bus's loop
-  runs (faint under its later scenes from then on) and, before its result,
-  every bus's copper on the merged board together, each in a tint of its own
-  with its nets, vias, copper, open nets and violations.
+  (the ones the buses' own plans broke, the ones the coupled plan settles,
+  leaves and breaks anew), the other buses laying their copper while the
+  filmed bus's loop runs and, at the end, every bus's copper on the merged
+  board together (the followed bus wider) with each one's numbers as laid.
 - Needs `ffmpeg` (libx264) for the mp4; `--stills` alone writes PNGs.
 
 **With sound** (`--sound`, made by `awx/whole_movie_sound.py`):
@@ -2116,23 +2124,48 @@ python3 awx/whole_movie_sound.py --fetch [kokoro:NAME]                        # 
 - Without `--sound` the film is unchanged, frame for frame, and none of this
   is needed.
 
-**The short** (`--short [SECS]`, default 15): not the film but a few of the
+**The group's search, as it ran.** For a bus step's run on its group's
+field, the film runs the group's ends search again (`group_ends.py`) from its
+recorded inputs (its captures, board and flags in its `run.json`, under the
+settings it ran under, at most four solver workers) and watches it: every
+state it finds is read as the step's own code reads one (each lane's
+two ends and their layers, its change of layer, the model's crossings), with
+the objective split into its terms by the step's own `objective_split`. Its
+solves are bounded by deterministic batches, so the re-run is the run's
+search: `--check` compares its every model and state with the run's
+`checks.jsonl`. It costs a run of the search (28 min for a four-bus group
+on eight layers, whose step took 52), once: the trace is kept in the bus's movie
+directory (`trace_group.json`). The film's search scene and the short draw it
+alike, at the film's framing of the bus: every bus's ends at both arrays,
+the ends each state moved ringed; each lane a straight line from its tooth
+to its berth, its two halves in its ends' layers' colours, a via's ring
+where the model counts a change of layer, a dot where the lines of two
+lanes the model counts crossing cross; and the objective's terms (walled
+balls, plane balls fanned out, lanes changing layer, crossings, runs on a
+plane's layer, ends on a far face, ways round the arrays) counted down.
+
+**The short** (`--short`, 30 s): not the film but a few of the
 run's moments cut tighter -- no narration, no captions, no title or end card,
 something moving in every frame. Every clip is an excerpt of the film, drawn
 as the film draws that stage, and all of them at one framing: the film's own
 of the bus, from its source array to its destination. A cut changes what is
 drawn, never where the camera is. The candidates are the group's search
-(every state its solves ended on, the ends at both arrays with the moved ones
-ringed, and the rounds between them on the film's chart of the search), the
+(as it ran, drawn as the film draws it, its terms by pictogram: above), the
 taut strings, the solve's plans, the 2-D geometry's rounds, the snap and,
 always last, the lay (a single-ended lane coming in twice as fast as a
-pair's). Which of them play, and for how long, is read from the run's own
+pair's), after a hook of two beats on the copper as laid. The solve's plans
+are drawn on the lanes' own taut strings, each plan's layers and changes
+along them (the frame's slots and references, which the film draws over its
+braid, follow the frame's rings round the destination). A stack-up strip
+with no names shows the layers each frame draws. Which of them play, and for
+how long, is read from the run's own
 records (the states, rounds, strings and plans it kept), so a run gives the
 same short every time. Its sound is music and effects only
 (`whole_movie_sound.short_score`): the film's own music voice, a chord to a
 clip over a slow pulse the cuts fall on, and the film's own effects (a plan
-found, a via moving, a lane laid, a stage's bell at a cut). `--scenes` and
-`--stills` work on it as on the film.
+found, a via moving, a lane laid, a stage's bell at a cut), the mix brought
+to -14 LUFS with its true peak at -1 dBTP (`mux(lufs=...)`, ffmpeg's
+loudnorm). `--scenes` and `--stills` work on it as on the film.
 
 ## Orphan Stub Checker (`check_orphan_stubs.py`)
 

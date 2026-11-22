@@ -694,16 +694,33 @@ def score(scenes, work):
     return stems
 
 
-def mux(ffmpeg, video, stems, out):
+def mux(ffmpeg, video, stems, out, lufs=None, tp=-1.0):
     """the stems mixed by ffmpeg onto the silent `video`, into `out`: the music ducked under the voice (a sidechain
     compressor keyed by the voice), the three summed as they are, a limiter (its lookahead compensated: the sound keeps
-    the film's time to the sample); the video stream copied"""
+    the film's time to the sample); the video stream copied. With `lufs`, the mix brought to that integrated loudness
+    (EBU R128) with its true peak held at `tp` dBTP: ffmpeg's loudnorm, measured over the mix first and applied with
+    what it measured"""
     fc = ('[3:a]asplit=2[key][vo];'
           '[1:a][key]sidechaincompress=threshold=0.024:ratio=2.5:attack=60:release=900:knee=3[duck];'
           '[duck][2:a][vo]amix=inputs=3:normalize=0:duration=longest,alimiter=limit=0.9:level=disabled:latency=1[mix]')
-    cmd = [ffmpeg, '-y', '-loglevel', 'error', '-i', video, '-i', stems['music'], '-i', stems['effects'], '-i',
-           stems['voice'], '-filter_complex', fc, '-map', '0:v', '-map', '[mix]', '-c:v', 'copy', '-c:a', 'aac', '-b:a',
-           '192k', '-movflags', '+faststart', out]
+    ins = ['-i', video, '-i', stems['music'], '-i', stems['effects'], '-i', stems['voice']]
+    lab = '[mix]'
+    if lufs is not None:
+        ln_ = f'loudnorm=I={lufs}:TP={tp}:LRA=11'
+        r = subprocess.run([ffmpeg, '-hide_banner', '-nostats'] + ins + ['-filter_complex',
+                            fc + f';[mix]{ln_}:print_format=json[o]', '-map', '[o]', '-f', 'null', '-'],
+                           capture_output=True, text=True)
+        try:
+            J = json.loads(r.stderr[r.stderr.rindex('{'):r.stderr.rindex('}') + 1])
+        except ValueError:
+            raise SystemExit('whole_movie: ffmpeg could not measure the mix\'s loudness')
+        fc += (f';[mix]{ln_}:measured_I={J["input_i"]}:measured_TP={J["input_tp"]}:measured_LRA={J["input_lra"]}'
+               f':measured_thresh={J["input_thresh"]}:offset={J["target_offset"]}:linear=true,aresample={SR}[norm]')
+        lab = '[norm]'
+        print(f'whole_movie: the mix at {J["input_i"]} LUFS, {J["input_tp"]} dBTP, brought to {lufs:g} LUFS, '
+              f'{tp:g} dBTP')
+    cmd = [ffmpeg, '-y', '-loglevel', 'error'] + ins + ['-filter_complex', fc, '-map', '0:v', '-map', lab, '-c:v', 'copy',
+                                                        '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', out]
     if subprocess.run(cmd).returncode != 0:
         raise SystemExit('whole_movie: ffmpeg could not mix the sound onto the film')
 
