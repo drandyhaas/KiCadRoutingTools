@@ -49,19 +49,25 @@ def _anchor(segs):
 
 def art_islands(pcb_data, net_id):
     """[[segment, ...], ...]: the net's art clusters that reach none of its
-    pads and none of its pours (one per connected cluster, so one per layer
-    unless the art is joined across layers)."""
+    pads and none of its pours BY THEMSELVES (one per connected cluster, so one
+    per layer unless the art is joined across layers). Its tracks and vias are
+    left out of the question: a run may rip them, and its end-of-run cleanup
+    reads a track that ends on art and on no pad as a dead end -- art an
+    earlier step's track had joined got no terminal, so the step after swept
+    that track away and shipped the art open. With a terminal the joined art
+    keeps its track (the track ends on a pad), and a net ripped is routed to it
+    again; art a track already joins costs the run nothing (its terminal is
+    reached)."""
     from check_connected import check_net_connectivity
     from geometry_utils import UnionFind
-    segs = [s for s in pcb_data.segments if s.net_id == net_id]
-    if not any(getattr(s, 'graphic', False) for s in segs):
+    segs = [s for s in pcb_data.segments if s.net_id == net_id and getattr(s, 'graphic', False)]
+    if not segs:
         return []
     pads = pcb_data.pads_by_net.get(net_id, [])
     if not pads:
         return []
-    vias = [v for v in pcb_data.vias if v.net_id == net_id]
     zones = [z for z in (getattr(pcb_data, 'zones', None) or []) if z.net_id == net_id]
-    r = check_net_connectivity(net_id, segs, vias, pads, zones,
+    r = check_net_connectivity(net_id, segs, [], pads, zones,
                                return_graph=True, pcb_data=pcb_data)
     g = r.get('graph') or {}
     uf = UnionFind()
