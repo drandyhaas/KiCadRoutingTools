@@ -1011,6 +1011,16 @@ walked back along its own diagonal until they do. Two tips the fan had
 pointed at a passive and stopped at bare clearance left lanes a few
 hundredths of a millimetre short at their berths.
 
+A part of two rows of short pads -- a resistor network's two lines of four --
+is a row part of both its rows (`escape_moves._two_rows`: two lines a pad's
+length or more apart, as many pads on each at one pitch, each pad longer
+across its line than along it), every pad's way out straight out of its row.
+Read as a ball field, whose escapes run a pitch past its outer ring, a
+network a millimetre off its source had its berths planned at the source's
+own exit line, its lanes a tenth of a millimetre long; a hand lays a via
+straight out of each pad. A group of seven small buses with such a part
+routed three and two more of its forty nets on two seeds.
+
 **The menus, by need and by use.** Every bus ball's whole menu is built, each
 move tagged with the first tier that holds it: 0 the pattern a hand lays (a
 dog-bone toward the nearest corner, the run straight out along its own row

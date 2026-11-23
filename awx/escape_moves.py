@@ -106,9 +106,10 @@ def _row_pads(footprint):
         return min(p.global_x - x0, x1 - p.global_x, p.global_y - y0, y1 - p.global_y) - reach
     inner = [p for p in pads if depth(p) > 0]
     rows = [p for p in pads if depth(p) <= 0]
-    if len(inner) > 1 or len(rows) < 4 or \
-            any(max(p.size_x, p.size_y) < 1.5 * min(p.size_x, p.size_y) for p in rows):
+    if len(inner) > 1 or len(rows) < 4:
         return _one_row(pads)
+    if any(max(p.size_x, p.size_y) < 1.5 * min(p.size_x, p.size_y) for p in rows):
+        return _two_rows(pads) or _one_row(pads)
     # (the nearest pad on a copper layer of its own: a TWO-SIDED row -- an edge connector's fingers, one on each face
     # -- read its pitch as the step between its two faces' fingers, 0 where they stand on each other)
     def cu(p):
@@ -124,6 +125,37 @@ def _row_pads(footprint):
 
 
 TAB_AREA = 4.0
+
+
+def _two_rows(pads):
+    """(its pads, its pitch along a row) for a TWO-ROW part of SHORT pads -- a resistor network's two lines of four --
+    else None: every pad on one of two lines, as many on each (two or more), at one pitch along them, each pad longer
+    ACROSS its line than along it (so its way out is the row part's: straight out of its row, away from the other,
+    enumerate_moves) and the lines a pad's length or more apart. No pad stands inside such a part, as none stands
+    inside a QFN's rows -- its pads are no ball field's, whose escapes run a pitch past its outer ring (escape_plan):
+    planned so a millimetre off its source, a network's berths ran out at the source's own exit line, the lanes
+    between them a tenth of a millimetre long and up to two millimetres aside, one of four left open; a human's
+    are a via straight out of each pad"""
+    for ax in (0, 1):                                   # 0: two lines of one x each, 1: of one y each
+        lines = {}
+        for p in pads:
+            lines.setdefault(round((p.global_x, p.global_y)[ax], 3), []).append(p)
+        if len(lines) != 2:
+            continue
+        a, b = (sorted(v, key=lambda p: (p.global_y, p.global_x)[ax]) for v in lines.values())
+        if len(a) != len(b) or len(a) < 2:
+            continue
+        if any((p.size_x, p.size_y)[ax] <= (p.size_y, p.size_x)[ax] for p in pads):
+            continue
+        k0, k1 = sorted(lines)
+        if k1 - k0 < max((p.size_x, p.size_y)[ax] for p in pads):
+            continue
+        gaps = [(q.global_y, q.global_x)[ax] - (p.global_y, p.global_x)[ax] for row in (a, b)
+                for p, q in zip(row, row[1:])]
+        if min(gaps) <= 0 or max(gaps) - min(gaps) > max(0.01, 0.02 * min(gaps)):
+            continue
+        return list(pads), min(gaps)
+    return None
 
 
 def _one_row(pads):

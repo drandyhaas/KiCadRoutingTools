@@ -136,10 +136,25 @@ gs = em.grid_of(sk)
 check(em.row_part(sk) and gs.row and gs.out == 'left', f'5: a socket\'s pin column is its row, out away from its body: {gs}')
 check(abs(gs.pitch_x - 1.1) < 1e-9 and abs(gs.bbox[0] + 0.55) < 1e-9 and abs(gs.bbox[2] - 0.55) < 1e-9,
       f'5: its pitch the pins\', its box their copper: {gs}')
-# (a two-row pack, four pads a side: each row half its pads -- not read as one row and a body)
+# (a two-row pack of short pads, four a side: a row part of BOTH its rows -- every pad one of its row's, each its way
+# out straight out of its row, so the part has no one way out -- and never one row with a body behind it)
 pack = types.SimpleNamespace(pads=[pad(i + 1, 0.0, 0.5 * i, 0.5, 0.4) for i in range(4)]
                              + [pad(i + 5, 1.6, 0.5 * i, 0.5, 0.4) for i in range(4)])
-check(not em.row_part(pack), '5: a two-row pack is not read as one row and a body')
+gp = em.grid_of(pack)
+check(em.row_part(pack) and gp.row and gp.out is None and len(em._row_pads(pack)[0]) == 8
+      and abs(gp.pitch_y - 0.5) < 1e-9,
+      f'5: a two-row pack of short pads is a row part of both its rows, with no one way out: {gp}')
+# (...its pads square, none says which way its row runs: no row part)
+square = types.SimpleNamespace(pads=[pad(i + 1, 0.0, 0.5 * i, 0.4, 0.4) for i in range(4)]
+                               + [pad(i + 5, 1.6, 0.5 * i, 0.4, 0.4) for i in range(4)])
+check(not em.row_part(square), '5: a two-row pack of square pads is no row part')
+# (...its two rows nearer than a pad's length, or of unlike counts: not two rows)
+near = types.SimpleNamespace(pads=[pad(i + 1, 0.0, 0.5 * i, 0.5, 0.4) for i in range(4)]
+                             + [pad(i + 5, 0.45, 0.5 * i, 0.5, 0.4) for i in range(4)])
+odd = types.SimpleNamespace(pads=[pad(i + 1, 0.0, 0.5 * i, 0.5, 0.4) for i in range(4)]
+                            + [pad(i + 5, 1.6, 0.5 * i, 0.5, 0.4) for i in range(3)])
+check(em._two_rows(near.pads) is None and em._two_rows(odd.pads) is None and em._two_rows(pack.pads) is not None,
+      '5: two rows are two lines a pad\'s length apart with as many pads on each')
 check(em.turned_from(sk, (25.0, 3.0)) and not em.turned_from(sk, (-20.0, 3.0))
       and not em.turned_from(sk, (0.5, 30.0)) and not em.turned_from(qfn(), (25.0, 3.0)),
       '5: turned from a source behind its body; not one in front, not one beside its line, not a QFN')
