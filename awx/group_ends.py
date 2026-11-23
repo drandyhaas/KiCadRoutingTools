@@ -952,21 +952,60 @@ def expand(pcb, A, keys):
     array_rules(pcb, A)
 
 
+def loose_ends(pads, tracks, vias):
+    """the pads of one net (`pads`) that some track of `tracks` [(an end, the other, its layer)] ends ON with no copper
+    of their own on any layer the tracks ending there run on, and no via of `vias` [(its centre, its radius)] standing
+    there: [(a pad at the place, those layers)] -- a stub that joins its pad to nothing, which no clearance check
+    sees. By PLACE: a ball over a pad of its own net on the other side is one place, either's layer joins it; a run
+    on another layer that only turns under its own ball is none of it where the ball's own stub ends there too"""
+    place = {}
+    for a, b, L in tracks:
+        for e_ in (a, b):
+            for p_ in pads:
+                if math.hypot(e_[0] - p_.global_x, e_[1] - p_.global_y) < 1e-3:
+                    k_ = (round(p_.global_x, 3), round(p_.global_y, 3))
+                    if k_ not in place:
+                        place[k_] = ([q_ for q_ in pads
+                                      if math.hypot(q_.global_x - p_.global_x, q_.global_y - p_.global_y) < 1e-3], set())
+                    place[k_][1].add(L)
+    return [(ps_[0], sorted(ls_)) for (x_, y_), (ps_, ls_) in sorted(place.items())
+            if not any('*.Cu' in q_.layers or ls_ & set(q_.layers) for q_ in ps_)
+            and not any(math.hypot(c[0] - x_, c[1] - y_) < r for c, r in vias)]
+
+
 def array_rules(pcb, A):
     """array `A`'s rules' data over the moves its balls are offered now: each move's `gid` (the array, its ball, its
     index); the board's KEEP-OUT areas, which the menus' own copper models do not hold -- a run keeps the layers it
     stands clear of them on, and a move with a leg or a via in one, or a run with no layer left, is no option (`dead`);
+    a move whose track ENDS ON ANOTHER PART'S PAD OF ITS OWN NET that has no copper on the track's layer, no via of
+    the move's there (loose_ends: the field's own check before it is written) -- a run keeps the layers that pad has
+    copper on, and a move left with none is no option either: an escape whose run turned on an inner layer exactly
+    under a test point of its own net on the back was the state's, and the field was refused whole, no bus routed
+    (the array's own balls are not asked: each is a lane here, joined by its own copper, which the field's check
+    reads with the run's at that place);
     `offer` {ball: the indices offered}; the vias' groups (via_groups) and the points of its lines (run_points)"""
     import joint_escape as je
     bm = A.bm
     track_banned, via_banned = keep_outs(pcb)
     hw, dead = bm.sz['tw'] / 2, set()
+    own_ = collections.defaultdict(list)
+    for f_ in pcb.footprints.values():
+        for p_ in f_.pads:
+            if p_.net_id and p_.pad_type != 'np_thru_hole' and p_.component_ref != A.ref:
+                own_[p_.net_id].append(p_)
     for k, ms in bm.menu.items():
+        pads_ = own_.get(bm.items[k][1].net_id, ())
         for i, mv in enumerate(ms):
             mv.gid = (A.ref, k, i)
+            vias_ = [(c, r) for c, r, _dr in bm.opts[k][i][2].vias]
+            joined = lambda L: not loose_ends(pads_, [(a, b, L if Lg == je.RUN else Lg)              # noqa: E731
+                                                      for a, b, Lg in mv.legs], vias_)
             if mv.layer == je.RUN:
                 mv.runs_on = tuple(L for L in mv.runs_on
-                                   if not any(track_banned(a, b, L, hw) for a, b, Lg in mv.legs if Lg == je.RUN))
+                                   if not any(track_banned(a, b, L, hw) for a, b, Lg in mv.legs if Lg == je.RUN)
+                                   and joined(L))
+            elif not joined(None):
+                dead.add((k, i))
             if (mv.layer == je.RUN and not mv.runs_on) or \
                     any(track_banned(a, b, Lg, hw) for a, b, Lg in mv.legs if Lg != je.RUN) or \
                     any(via_banned(c, r) for c, r, _dr in bm.opts[k][i][2].vias):
@@ -1413,22 +1452,14 @@ def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()
         for p_ in f_.pads:
             if p_.net_id and p_.pad_type != 'np_thru_hole':
                 pads_[p_.net_id].append(p_)
-    place = {}                                     # (net, a pad's centre) -> [its pads there, the layers of the tracks ending there]
+    by_net = collections.defaultdict(list)
     for t_ in tracks:
-        for e_ in (t_['start'], t_['end']):
-            for p_ in pads_.get(t_['net_id'], ()):
-                if math.hypot(e_[0] - p_.global_x, e_[1] - p_.global_y) < 1e-3:
-                    k_ = (t_['net_id'], round(p_.global_x, 3), round(p_.global_y, 3))
-                    if k_ not in place:
-                        place[k_] = ([q_ for q_ in pads_[t_['net_id']]
-                                      if math.hypot(q_.global_x - p_.global_x, q_.global_y - p_.global_y) < 1e-3], set())
-                    place[k_][1].add(t_['layer'])
+        by_net[t_['net_id']].append((t_['start'], t_['end'], t_['layer']))
     loose = []
-    for (nid_, x_, y_), (ps_, ls_) in sorted(place.items(), key=lambda t: t[0]):
-        if not any('*.Cu' in q_.layers or ls_ & set(q_.layers) for q_ in ps_) \
-                and not any(v_['net_id'] == nid_ and math.hypot(v_['x'] - x_, v_['y'] - y_) < v_['size'] / 2
-                            for v_ in vias):
-            loose.append(f'{ps_[0].component_ref}.{ps_[0].pad_number} ({ps_[0].net_name}) on {"/".join(sorted(ls_))}')
+    for nid_ in sorted(by_net):
+        for p_, ls_ in loose_ends(pads_.get(nid_, ()), by_net[nid_],
+                                  [((v_['x'], v_['y']), v_['size'] / 2) for v_ in vias if v_['net_id'] == nid_]):
+            loose.append(f'{p_.component_ref}.{p_.pad_number} ({p_.net_name}) on {"/".join(ls_)}')
     if loose:
         raise SystemExit(f'group_ends: write_field: {len(loose)} pad(s) whose only stub runs on a layer the pad has no '
                          f'copper on, no via there: ' + ', '.join(sorted(loose)[:12]))

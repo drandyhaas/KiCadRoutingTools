@@ -468,6 +468,18 @@ unless a via of its net is laid in its ball (`group_ends.write_field`).
 Unseen, zynq7020_som's DDR_CK_P escaped along its ball row across DDR_CK_N's
 ball, the tie via was laid on that run, and the bus handed on a short.
 
+**No escape ends on a pad it cannot join.** The field is checked before it is
+written: a pad some track of its net ends on has one of them on a layer it has
+copper on, or a via of the net standing on it (`group_ends.loose_ends`) -- a
+stub on any other layer joins its pad to nothing, and no clearance check sees
+it. The array's rules ask the same question of every move before the model is
+built (`array_rules`), of the other parts' pads of the move's net: a run keeps
+only the layers such a pad has copper on where its track ends on one, and a
+move left with no layer is not offered. A test point on the back beneath the
+array, at the very place an escape's run turns on an inner layer, was
+otherwise the state's to choose, and the whole field was refused with no bus
+routed.
+
 The passives beneath the arrays are moved off the field once it is laid (the
 chain's cap nudge, `place_fanout_clearance.py --beneath-only`: a part beneath
 a BGA moves only where it stays beneath it, one beside the array stays where
