@@ -530,16 +530,46 @@ def _bus_out(work, phase, bus):
     return (b_, s_) if os.path.isfile(b_) and os.path.isfile(s_) else None
 
 
-def standing_order(field, dests):
+def close_in_front(pcb, src, dests):
+    """the buses of `dests` whose destination stands CLOSE IN FRONT of the source `src` on the board `pcb`: the two
+    exit lines of the bus give way to each other (escape_moves.reaches takes off one's whole reach) -- its lanes run
+    straight across a channel a millimetre wide, too short to change layer or to step aside"""
+    import escape_moves as em
+    sf = pcb.footprints.get(src)
+    out = set()
+    for d_ in dests if sf is not None else ():
+        fps = [pcb.footprints[r_] for r_ in d_.split('+') if r_ in pcb.footprints]
+        if fps:
+            o_s, o_d = em.reaches(sf, fps)
+            if o_s < em.EXIT_MARGIN or any(v_ < 0 for v_ in o_d.values()):
+                out.add(d_)
+    return out
+
+
+def ordered(dests, lanes, near=()):
+    """`dests` in STANDING ORDER: the buses `near` (close_in_front) first, then the bus of fewer `lanes` {dest: its
+    lanes}, a tie by name"""
+    return sorted(dests, key=lambda d_: (d_ not in near, lanes.get(d_, 0), d_))
+
+
+def standing_order(field, dests, src=None):
     """the buses `dests` in their STANDING ORDER, the first standing against every later one (joint_lanes.stands: of
-    two buses whose plans cross, the later plans round the earlier one's lanes): the bus of FEWER lanes first -- it
-    has the fewest ways to give, and the larger bus the most layers and room to go round it -- by the lanes the group's
-    model gave each (group.json beside the field), a tie by name"""
+    two buses whose plans cross, the later plans round the earlier one's lanes). First the buses whose destination
+    stands close in front of the source `src` (close_in_front): their lanes cannot give at all, and another bus's
+    lane laid along their channel first, on their layer, left them no plan -- a memory a millimetre off its array,
+    four of its six lanes open behind a five-lane bus's lane that had the whole board to go round by. Then the bus of
+    FEWER lanes first -- it has the fewest ways to give, and the larger bus the most layers and room to go round it --
+    by the lanes the group's model gave each (group.json beside the field), a tie by name"""
     import group_ends
     gj = os.path.join(os.path.dirname(field), 'group.json')
     gb = (json.load(open(gj)).get('buses') or {}) if os.path.isfile(gj) else {}
     n_ = {d_: len((gb.get(group_ends.bus_key(d_)) or {}).get('state') or ()) for d_ in dests}
-    return sorted(dests, key=lambda d_: (n_[d_], d_))
+    near = set()
+    if src and len(dests) > 1:
+        from kicad_parser import parse_kicad_pcb
+        with contextlib.redirect_stdout(io.StringIO()):
+            near = close_in_front(parse_kicad_pcb(field), src, dests)
+    return ordered(dests, n_, near)
 
 
 def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log=print, json_out=None,
@@ -559,7 +589,7 @@ def route_on_field(board, field, out, buses, k=None, rounds=4, inproc=False, log
     os.makedirs(jd)
     one = len(buses) == 1
     phase = 'solo' if one else 'neg'
-    ordr = standing_order(field, dests)
+    ordr = standing_order(field, dests, src)
     log(f'  {buses[0][1]} on the field, by itself' if one else
         f'  every bus on the shared field, negotiated (meeting in {os.path.relpath(jd, os.path.dirname(out))}); '
         f'where two buses\' plans cross, the later of {", ".join(ordr)} plans round the earlier')
