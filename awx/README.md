@@ -2227,6 +2227,21 @@ still lacks is in the
   spare is not taken: through a channel between two parts' pads that holds
   one lane to fifteen microns, a lane ended four hundredths short of both
   pads after the polish.
+- **The shorter side.** The same move is then asked wherever it shortens a
+  run (`shorten_edges`). Which side of a piece of fixed copper a run passes
+  is the reference's reading, taken where its line stood in the copper's
+  bar or beside it, and the rounds only move a run's points along the cells
+  it is in: a lane read round the far side of a capacitor's pad went 1.7 mm
+  round it where the near side was 0.2 mm away. Each end run of each passage
+  is tried the other side of the copper it stands next to there, and the way
+  is kept where it leaves the run shorter by a lane pitch at the least,
+  under the rules above, through passages that have room for it with the
+  runs they already hold. Only a run bent enough near the passage to gain
+  a pitch is asked (`passage_slack`: the stretch the move may leave, less
+  the straight line between its ends). On a seven-bus group it moved up to
+  eleven runs of a bus and laid the group 2.3% shorter on each of two
+  seeds, the same nets connected and no more time. `--no-shorter` leaves it
+  out.
 - **Written clean.** The written lines are cleared of folds and notches by
   the audit's own measures (a turn of more than 100 degrees; two opposite
   turns of 60 degrees or more nearer than a track and a grid step): a point

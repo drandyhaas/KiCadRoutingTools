@@ -67,6 +67,7 @@ from BENCH / NETS / DEST (whole_ctx).
                              trust), a point's or a via's cell change, a pull (the run, the stretch pulled); and each
                              passage short of room, with the run taken round or why none was
   --no-jump                  no run taken the other side of fixed copper where a passage has no room
+  --no-shorter               no run taken the other side of fixed copper where that is the shorter way
   --watch=LANE.k,LANE.k      two runs followed round by round: their points, how near they stand, the rows
                              between them and each pull of either; with --show-rows, the LP's rows that hold each of
                              their points, by kind, with the price each puts on the point's move
@@ -1335,6 +1336,7 @@ JUMP_BACK = 16 * P_MIN          # ...leaving its way this far before the passage
 JUMP_TRY = 12                   # ...the shortest of the ways found tried, this many at most
 JUMP_ROOM = GS                  # ...through passages each with this much room to spare, at the least
 JUMP_MAX = 12 * P_MIN           # ...by a way this much longer than the stretch it leaves, at most (twelve pitches)
+SHORTER = P_MIN                 # the other side of a piece of copper taken as the SHORTER way: by this much at the least
 _RINGS = {}
 
 
@@ -1388,13 +1390,16 @@ def passage_short(pk, lst):
     return need - (rings[pk[1]].distance(rings[pk[2]]) - hw[lst[0][0][0]] - hw[lst[-1][0][0]])
 
 
-def jump_run(pk, e_, ring, on):
+def jump_run(pk, e_, ring, on, gain=None, x0=None, now=None):
     """run e_ of the overfull passage `pk` taken ANOTHER WAY through the cells, round the far side of the copper
     `ring` it stands next to there: from a cell of its way before the passage to one after it (up to JUMP_BACK of
     its way either side), the shortest chain of cells through edges no other run of the layer stands on, or that
     touch that copper -- there it goes next the copper, as it stood in the passage. Of the ways found the one that
     leaves the run shortest is kept, where it crosses no run of its layer, passes no other lane's via on its other
-    side, goes through passages with JUMP_ROOM to spare, and is no more than JUMP_MAX longer
+    side, goes through passages with JUMP_ROOM to spare, and is no more than JUMP_MAX longer.
+    `gain`: the way is taken as the SHORTER one instead (shorten_edges) -- kept where it leaves the run that much
+    shorter at the least, and looked for through passages that have room for the run with the runs they hold
+    (`now`: passages() as it stands, `x0` the layout's same-layer crossings counted)
     -> (the copper it now passes the other side of, or None; why each way tried was not taken, counted)"""
     L_, r1, r2 = pk
     key = e_[0]
@@ -1403,7 +1408,17 @@ def jump_run(pk, e_, ring, on):
     pts = r['pts']
     Ps = [j for j, q in enumerate(pts) if q['k'] == 'P']
     inp = [c for c, j in enumerate(Ps) if {vr[pts[j]['a']], vr[pts[j]['b']]} == {r1, r2}]
-    x0 = len(same_layer_crossings(layout()))
+    if not inp:
+        return None, collections.Counter()
+    x0 = len(same_layer_crossings(layout())) if x0 is None else x0
+    roomy = {}
+
+    def has_room(ra, rb):
+        # (the passage between two pieces of copper, with this run added to the runs it holds)
+        k_ = (L_, min(ra, rb), max(ra, rb))
+        if k_ not in roomy:
+            roomy[k_] = passage_short(k_, [x_ for x_ in (now or {}).get(k_, ()) if x_[0] != key] + [e_]) <= -JUMP_ROOM
+        return roomy[k_]
     old_xy = run_xy(key)
     old = LineString(old_xy)
     cum = [0.0]
@@ -1414,6 +1429,8 @@ def jump_run(pk, e_, ring, on):
     def free_edge(t, k):
         a_, b_ = m.edge(t, k)
         if {vr[a_], vr[b_]} == {r1, r2}:
+            return False
+        if gain is not None and vr[a_] >= 0 and vr[b_] >= 0 and vr[a_] != vr[b_] and not has_room(vr[a_], vr[b_]):
             return False
         return ring in (vr[a_], vr[b_]) or all(q_[0] == key for q_ in on.get((L_, min(a_, b_), max(a_, b_)), ()))
 
@@ -1464,9 +1481,10 @@ def jump_run(pk, e_, ring, on):
         items = [by_ring(u0, u1) for u0, u1 in zip(chain, chain[1:])]
         r['pts'] = pts[:lo] + items + pts[hi + 1:]
         new = LineString(run_xy(key))
-        ok = new.length <= old.length + JUMP_MAX and len(same_layer_crossings(layout())) <= x0
+        most = old.length + JUMP_MAX if gain is None else old.length - gain
+        ok = new.length <= most and len(same_layer_crossings(layout())) <= x0
         if not ok:
-            why['too long' if new.length > old.length + JUMP_MAX else 'crosses a run'] += 1
+            why[('too long' if gain is None else 'no shorter') if new.length > most else 'crosses a run'] += 1
         if ok:
             # (...and by a way with ROOM: every passage it now goes through a grid step to spare at the least. Taken
             # through a channel between two parts' pads that holds one lane to fifteen microns, a lane was laid
@@ -1530,11 +1548,74 @@ def jump_edges():
     return out
 
 
+def passage_slack(key, pk):
+    """the most another way past the passage `pk` could shorten run `key`: its length from JUMP_BACK before the
+    passage to as far after it (the stretch jump_run may leave), less the straight line between those two points"""
+    vr, _rings = rings_of(pk[0])
+    pts, xy = RUN[key]['pts'], run_xy(key)
+    js = [j for j, q in enumerate(pts) if q['k'] == 'P' and {vr[q['a']], vr[q['b']]} == {pk[1], pk[2]}]
+    if not js:
+        return 0.0
+    cum = [0.0]
+    for a_, b_ in zip(xy, xy[1:]):
+        cum.append(cum[-1] + math.hypot(b_[0] - a_[0], b_[1] - a_[1]))
+    lo, hi = js[0] + 1, js[-1] + 1          # (a run's point j is its line's point j + 1: the line starts at its end)
+    while lo > 0 and cum[js[0] + 1] - cum[lo - 1] <= JUMP_BACK:
+        lo -= 1
+    while hi < len(xy) - 1 and cum[hi + 1] - cum[js[-1] + 1] <= JUMP_BACK:
+        hi += 1
+    return cum[hi] - cum[lo] - math.hypot(xy[hi][0] - xy[lo][0], xy[hi][1] - xy[lo][1])
+
+
+def shorten_edges():
+    """EVERY RUN THE SHORTER SIDE of each piece of fixed copper it passes: which side a run passes a piece on is the
+    reference's reading, taken where its line stood in the copper's bar or beside it, and nothing after it asks whether
+    the other side is the shorter -- the rounds move a run's points along the cells it is in. So each end run of each
+    passage is tried the other side of the copper it stands next to there (jump_run, as a run of a passage with no
+    room is), and taken where that leaves it SHORTER by a pitch at the least, crossing nothing, through passages
+    with room. Only a run bent enough near the passage to gain that much is asked (passage_slack).
+    -> [(run, layer, the copper, how much shorter)]"""
+    out, tried = [], set()
+    x0 = len(same_layer_crossings(layout()))
+    for _n in range(4 * len(KEYS)):
+        now, on, took = passages(), None, None
+        for pk, lst in sorted(now.items()):
+            for e_, rg_ in ((lst[0], pk[1]), (lst[-1], pk[2])):
+                if (pk, e_[0], rg_) in tried:
+                    continue
+                tried.add((pk, e_[0], rg_))
+                if passage_slack(e_[0], pk) < SHORTER:
+                    continue
+                on = edge_lists() if on is None else on
+                was = LineString(run_xy(e_[0])).length
+                over, why = jump_run(pk, e_, rg_, on, gain=SHORTER, x0=x0, now=now)
+                if '--show-why' in OPT:
+                    log(f'      a shorter way asked for {e_[0][0]}.{e_[0][1]} on {LNAME[pk[0]]}: '
+                        + (f'none {dict(why)}' if over is None else 'round ' + ', '.join(over)))
+                if over is not None:
+                    took = (e_[0], pk[0], over, was - LineString(run_xy(e_[0])).length)
+                    break
+            if took:
+                break
+        if took is None:
+            break
+        out.append(took)
+        spread_edges()
+        x0 = len(same_layer_crossings(layout()))
+    return out
+
+
 JUMPED = [] if '--no-jump' in OPT else jump_edges()
 if JUMPED:
     log(f'{len(JUMPED)} run(s) taken the other side of fixed copper, a passage short of the room its runs need: '
         + '; '.join(f'{k_[0]}.{k_[1]} on {LNAME[L_]} round {", ".join(o_[:3])} ({sh_:.3f} short)'
                     for k_, L_, o_, sh_ in JUMPED[:12]))
+SHORTENED = [] if '--no-shorter' in OPT else shorten_edges()
+if SHORTENED:
+    log(f'{len(SHORTENED)} run(s) taken the other side of fixed copper, the shorter way '
+        f'({sum(g_ for _k, _L, _o, g_ in SHORTENED):.2f} mm in all): '
+        + '; '.join(f'{k_[0]}.{k_[1]} on {LNAME[L_]} round {", ".join(o_[:3])} ({g_:.2f} mm)'
+                    for k_, L_, o_, g_ in SHORTENED[:12]))
 VIEW = tuple(float(v) for v in OPT['--view'].split(',')) if '--view' in OPT else None
 _x0 = same_layer_crossings(layout())
 log(f'the layout it starts from, read onto its points: {len(_x0)} same-layer crossing(s)')
