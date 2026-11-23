@@ -1877,7 +1877,7 @@ exactly what `--find` printed:
 
 ```bash
 python3 -X utf8 awx/route_bus.py board_step1.kicad_pcb board_step1a.kicad_pcb \
-    --rounds 2 --inproc \
+    --inproc \
     --clearance-ceiling 0.1 --track-width 0.1 --fanout-track-width 0.0975 \
     --via-size 0.35 --via-drill 0.15 --hole-to-hole-clearance 0.25 \
     2>&1 | tee /tmp/step1a_bus.txt
@@ -2019,8 +2019,9 @@ no one looking.
 
    `pin`, `cuts` and `areas` have not yet been measured closing a bus.
 
-3. **Rerun the step from the same input**, with the file and enough rounds to
-   reach it: `--rounds 2 --round-edits OUT_round_edits.json`. Round 1 runs as
+3. **Rerun the step from the same input**, with the file:
+   `--round-edits OUT_round_edits.json` (the step's default two rounds reach
+   round 2; leave `--rounds` unset). Round 1 runs as
    before; edits to its ends make round 2 a feedback round from round 1. An
    edit naming a lane round 1 did not lay is skipped, and the log says so
    (`whole_feedback: no lane NET on the sidecar -- ...`). Keep the file beside

@@ -2881,7 +2881,8 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
    to another ball array sharing 8 nets or more, or to a row part no track
    passes between the pads of) are routed whole by `awx/route_bus.py` in one
    call on the poured board, before any other fanout, as the
-   `/plan-pcb-routing` skill's bus step does: `--rounds 2 --inproc`, the
+   `/plan-pcb-routing` skill's bus step does: `--inproc` at the step's default
+   rounds (`routing_defaults.BUS_ROUNDS`, 2), the
    chain's clearance ceiling and track for the lanes and the escapes, and the
    fine via when one of the bus's arrays is at 0.65 mm or finer (the via the
    fanout's first rung would take), else the working via. The step plans each

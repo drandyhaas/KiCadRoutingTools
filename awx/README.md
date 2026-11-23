@@ -1165,7 +1165,7 @@ once: kintex, h616 and orangecrab with a fourth board; zynq7020 and h3 each
 alone; sdi beside one other.
 
 ```bash
-python3 tests/stress/bus_boards.py --cases kintex,h616,orangecrab,zynq7020,h3,sdi --rounds 1
+python3 tests/stress/bus_boards.py --cases kintex,h616,orangecrab,zynq7020,h3,sdi
 ```
 
 `group_ends.py CAPTURES OUT --board=BOARD` runs the model alone on a bus

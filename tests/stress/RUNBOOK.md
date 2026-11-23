@@ -717,7 +717,7 @@ python3 tests/stress/placement_survey.py report rows.jsonl
 ## The bus boards check (`bus_boards.py`, not run by default)
 
 `python3 tests/stress/bus_boards.py [--cases A,B] [--out DIR] [-j N] [--rounds R] [--set K=V]`
-runs the bus step (`awx/route_bus.py`, `--inproc`, `--rounds 1` by default) on each
+runs the bus step (`awx/route_bus.py`, `--inproc`, the step's default `--rounds`) on each
 board in `tests/fixtures/bus_boards` (pre-bus inputs, planes poured, gzipped with their
 `.kicad_pro`/`.kicad_dru`). `manifest.json` holds each board's SIZES alone -- the
 routing CLIs' flags of its chain (`--clearance-ceiling`, `--track-width`,

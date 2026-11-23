@@ -13,8 +13,8 @@
 3. `bus_step` with a scripted chain: not run without ortools; a failed step,
    a step that laid no copper on its arrays, and one whose board ranks below
    the board before it are not kept and the chain stays on that board; a step
-   that ranks no lower is kept. The command is the plan skill's: --rounds 2,
-   --inproc, the chain's clearance ceiling and track, the bus's via.
+   that ranks no lower is kept. The command is the plan skill's: the step's
+   default --rounds (routing_defaults.BUS_ROUNDS), --inproc, the chain's clearance ceiling and track, the bus's via.
 4. `run_plan` with a scripted chain: after a kept bus step no fanout runs on
    an array it served, every other fanout excludes the nets it handed on
    protected, and a pair it handed on is not given to route_diff; after a
@@ -179,7 +179,7 @@ def test_bus_step():
         expect(h is None and ch.cur == 'in' and ch.decisions[-1]['kept'] is False,
                "a failed step: not kept, the chain stays on the board before it")
         args = ch.calls[0][2]
-        want = ['--rounds', '2', '--inproc', '--clearance-ceiling', '0.09', '--track-width', '0.1',
+        want = ['--rounds', str(AP.routing_defaults.BUS_ROUNDS), '--inproc', '--clearance-ceiling', '0.09', '--track-width', '0.1',
                 '--fanout-track-width', '0.1', '--via-size', '0.25', '--via-drill', '0.15']
         expect(args[:2] == ['{IN}', '{OUT}'] and args[2:] == want,
                f"the command is the plan skill's bus step ({args})")

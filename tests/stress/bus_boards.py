@@ -13,7 +13,7 @@ run failed; the table names each board's open nets, DRC and walled balls, its bu
 and OUT/report.json holds it.
 
   --set K=V   a setting for every run: an A/B arm of a change behind a setting
-  --rounds R  route_bus --rounds (default 1: a bus closes in its first round)
+  --rounds R  route_bus --rounds (default: the step's own, routing_defaults.BUS_ROUNDS)
 """
 import argparse
 import concurrent.futures
@@ -142,7 +142,10 @@ def main():
     ap.add_argument('--cases', default=None, help='the cases to run, comma separated (default: all)')
     ap.add_argument('--out', default=None, help='the runs\' directory (default: a new temporary one, kept)')
     ap.add_argument('-j', type=int, default=3, help='boards routed at once (default 3)')
-    ap.add_argument('--rounds', type=int, default=1, help='route_bus --rounds (default 1)')
+    sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+    import routing_defaults
+    ap.add_argument('--rounds', type=int, default=routing_defaults.BUS_ROUNDS,
+                    help=f'route_bus --rounds (default {routing_defaults.BUS_ROUNDS}, the step\'s own)')
     ap.add_argument('--set', action='append', default=[], metavar='K=V', help='a setting for every run')
     ap.add_argument('--timeout', type=float, default=4 * 3600, help='seconds a board may take (default 4 h)')
     a = ap.parse_args()

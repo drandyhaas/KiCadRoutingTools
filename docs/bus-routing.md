@@ -119,7 +119,7 @@ python3 -X utf8 awx/route_bus.py board.kicad_pcb --find \
 
 # Route them, in one call
 python3 -X utf8 awx/route_bus.py board.kicad_pcb board_bus.kicad_pcb \
-    --rounds 2 --inproc \
+    --inproc \
     --clearance-ceiling 0.1 --track-width 0.1 --fanout-track-width 0.0975 \
     --via-size 0.35 --via-drill 0.15
 ```
@@ -161,7 +161,7 @@ The step writes what it is doing, as it does it, to `<OUT stem>.bus/events.jsonl
 
 A round is one whole attempt: choose every net's ends and fan out, solve every crossing and layer change (CP-SAT), then a **loop** that turns the plan into geometry, snaps it to the router's grid, audits it and solves again with what the audit found, and finally lays the copper.
 
-- **`--rounds R`** (default 4): rounds at most. In the bus step they are the group's: each bus runs one round on the shared field, and a round that leaves the board short of clean (a net open, a violation, a ball walled in) sends what its buses found at their ends back to the group's model, which chooses again from the state it had, and the buses are routed again on that field. The board with the fewest nets open, then the fewest violations, then the fewest balls walled in, is kept.
+- **`--rounds R`** (default 2): rounds at most. In the bus step they are the group's: each bus runs one round on the shared field, and a round that leaves the board short of clean (a net open, a violation, a ball walled in) sends what its buses found at their ends back to the group's model, which chooses again from the state it had, and the buses are routed again on that field. The board with the fewest nets open, then the fewest violations, then the fewest balls walled in, is kept.
 - Every solve of a round runs under one CP-SAT seed (`BUS_SEED`, else 1), so the same board and seed give the same plan.
 - A bus routed by itself (`--src`/`--dest`, a debugging aid) runs the whole route's own rounds: a round that leaves nets open is a **new draw** by default, round 1 again from the same board under the next seed, nothing carried from the round before; with **`--feedback-rounds F`** (default 0), up to F of the rounds after each draw keep that draw's seed and are fed what it found -- its crowded ends, its lanes over two vias, its open nets -- the fanout choosing again from that round's board. A round whose solve finds no plan at all is followed by a feedback round whatever F. When no round lays anything, a **last resort** lays a partial plan, leaving out the lanes the rounds named.
 - Every bus's ends are put to the solve before they are laid, each refusal teaching the next choice.

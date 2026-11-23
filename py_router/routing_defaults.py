@@ -24,9 +24,10 @@ FAB_TIER = 'auto'        # 'standard' | 'advanced' | 'auto'
 ESCALATION = 'fab'       # 'off' | 'board' | 'fab'
 
 # The bus step (awx/route_bus.py): its --rounds and --feedback-rounds, read by
-# its argparse and by the GUI's Bus tab, which runs the step as a child process
-# and passes a flag only where its control differs from these.
-BUS_ROUNDS = 4
+# its argparse, by autoroute's bus step (which passes them), and by the GUI's
+# Bus tab, which runs the step as a child process and passes a flag only where
+# its control differs from these. The plan skill's bus step leaves both unset.
+BUS_ROUNDS = 2
 BUS_FEEDBACK_ROUNDS = 0
 
 # Grid parameters

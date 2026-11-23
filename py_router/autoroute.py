@@ -135,6 +135,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import routing_defaults  # noqa: E402
 
 TOOLS = {
     'planes': os.path.join(HERE, 'route_planes.py'),
@@ -154,7 +155,6 @@ PLANE_FALLBACK_COST = 3.0    # a later pass's price on a solid plane, the route 
 ROUTE_PASSES = 3             # the first pass plus up to two on its result
 EFFORT_FACTOR = 2.0          # --effort-factor's default
 FINE_VIA_PITCH = 0.65        # an array at or under this pitch escapes on the fine via first
-BUS_ROUNDS = 2               # route_bus --rounds, as the plan skill's bus step
 
 
 def _num(x):
@@ -1276,7 +1276,8 @@ def bus_handoff(before, after, arrays):
 def bus_step(ch, a):
     """1a. The buses (analyze's `bus`), routed whole by route_bus on the poured
     board at the chain's sizes, as the plan skill's bus step: one call, every
-    bus it finds, --rounds BUS_ROUNDS. Kept when it laid copper on an array
+    bus it finds, at the step's default rounds (routing_defaults.BUS_ROUNDS,
+    passed so the recorded command carries it). Kept when it laid copper on an array
     it serves and its board ranks no lower than the board before it (fewer
     open nets, then fewer violations); else, like a failed step, the chain
     continues from the board before it and the arrays are fanned out as
@@ -1291,7 +1292,7 @@ def bus_step(ch, a):
         return None
     before = ch.cur
     out, _, _ = ch.run('bus', [
-        '{IN}', '{OUT}', '--rounds', str(BUS_ROUNDS), '--inproc',
+        '{IN}', '{OUT}', '--rounds', str(routing_defaults.BUS_ROUNDS), '--inproc',
         '--clearance-ceiling', str(a['clearance']),
         '--track-width', str(a['track']), '--fanout-track-width', str(a['track']),
         '--via-size', str(bus['via']), '--via-drill', str(bus['drill'])], 'bus', hold=True)
