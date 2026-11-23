@@ -107,7 +107,7 @@ def _row_pads(footprint):
     rows = [p for p in pads if depth(p) <= 0]
     if len(inner) > 1 or len(rows) < 4 or \
             any(max(p.size_x, p.size_y) < 1.5 * min(p.size_x, p.size_y) for p in rows):
-        return None
+        return _one_row(pads)
     # (the nearest pad on a copper layer of its own: a TWO-SIDED row -- an edge connector's fingers, one on each face
     # -- read its pitch as the step between its two faces' fingers, 0 where they stand on each other)
     def cu(p):
@@ -123,6 +123,38 @@ def _row_pads(footprint):
 
 
 TAB_AREA = 4.0
+
+
+def _one_row(pads):
+    """(the pads of its row, its pitch) for a ONE-ROW part whose other copper is not all mounting tabs (TAB_AREA) --
+    a card socket's pins in one line, its card-detect pin and small tabs about its body -- else None: the most pads
+    of the part on one line, four or more and more than half its pads (a two-row part's rows are half each), at one pitch, each longer across the line than
+    along it (1.25 times: a socket's 1.1 x 0.75 mm pins), every other pad's copper clear of the row's box. Those
+    others are the body's"""
+    best = None
+    for ax in (0, 1):                                   # 0: a line of one x (a column), 1: of one y
+        lines = {}
+        for p in pads:
+            lines.setdefault(round((p.global_x, p.global_y)[ax], 3), []).append(p)
+        for line in lines.values():
+            if len(line) < 4 or 2 * len(line) <= len(pads) or (best and len(line) <= len(best[0])):
+                continue
+            line.sort(key=lambda p: (p.global_y, p.global_x)[ax])
+            along = [(p.global_y, p.global_x)[ax] for p in line]
+            gaps = [b - a for a, b in zip(along, along[1:])]
+            if min(gaps) <= 0 or max(gaps) - min(gaps) > max(0.01, 0.02 * min(gaps)):
+                continue
+            if any((p.size_x, p.size_y)[ax] < 1.25 * (p.size_y, p.size_x)[ax] for p in line):
+                continue
+            box = (min(p.global_x - p.size_x / 2 for p in line), min(p.global_y - p.size_y / 2 for p in line),
+                   max(p.global_x + p.size_x / 2 for p in line), max(p.global_y + p.size_y / 2 for p in line))
+            ids = {id(p) for p in line}
+            if any(p.global_x - p.size_x / 2 < box[2] and p.global_x + p.size_x / 2 > box[0]
+                   and p.global_y - p.size_y / 2 < box[3] and p.global_y + p.size_y / 2 > box[1]
+                   for p in pads if id(p) not in ids):
+                continue
+            best = (line, min(gaps))
+    return best
 
 
 @dataclass
@@ -227,7 +259,11 @@ def _row_inward(pad, grid: Grid, d: str, home: str, others: Sequence[str], clear
     lat = (0, 1) if ax == 0 else (1, 0)                 # along the row
     half = max(pad.size_x, pad.size_y) / 2
     tin = (px + di[0] * half, py + di[1] * half)        # the pad's inner end
-    mid = ((x0 + x1) / 2, (y0 + y1) / 2)[ax]
+    # (a ONE-ROW part, grid.out, TURNED FROM the source -- the face its lanes leave by, iw.face, not the row's own: no
+    # other row across it, its box the row's copper, whose middle is the row itself -- so the strip behind the row runs
+    # into its body, `iw.columns` deep, the menu's clearance tests refusing what its other copper holds. A row facing
+    # the source keeps the strip to its middle: its lanes meet its pins' outer ends)
+    mid = None if grid.out and iw.face != d else ((x0 + x1) / 2, (y0 + y1) / 2)[ax]
     reach = iw.via_size / 2 + iw.clearance              # a via's centre off the row's inner ends
     lane = iw.track / 2 + iw.clearance + 0.01           # a lateral leg's off them
     step = iw.via_size + iw.clearance
@@ -240,7 +276,7 @@ def _row_inward(pad, grid: Grid, d: str, home: str, others: Sequence[str], clear
         for c in range(iw.columns):
             depth = reach + c * step
             site = (tin[0] + di[0] * depth + lat[0] * dl, tin[1] + di[1] * depth + lat[1] * dl)
-            if (site[ax] - mid) * di[ax] > 1e-9:
+            if mid is not None and (site[ax] - mid) * di[ax] > 1e-9:
                 break                                   # (past the middle: the other row's half)
             if k:
                 j = (tin[0] + di[0] * lane, tin[1] + di[1] * lane)
@@ -270,7 +306,7 @@ def _row_inward(pad, grid: Grid, d: str, home: str, others: Sequence[str], clear
         for k in range(iw.along):
             depth = lane + k * pitch_l
             j = (tin[0] + di[0] * depth, tin[1] + di[1] * depth)
-            if (j[ax] - mid) * di[ax] > 1e-9:
+            if mid is not None and (j[ax] - mid) * di[ax] > 1e-9:
                 break
             e = (j[0], fe[1]) if ax == 0 else (fe[0], j[1])
             if clear(tin, j, home) and clear(j, e, home):
@@ -354,6 +390,17 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                 out.append(Move(net, 'dogbone', d, home, e, 1, [((px, py), e, home)], site=e))
         if row_inward is not None and via_clear is not None:
             out += _row_inward(pad, grid, d, home, others, clear, via_clear, net, row_inward, edge)
+            # ...and the pad a via fits in of a ONE-ROW part turned from the source (a socket's pins at the far end of
+            # its body): the via IN it, the run on another layer along the pad's line out by the face toward the
+            # source -- under its own pad, which no other net's lane needs
+            if (grid.out and row_inward.face != d and row_inward.via_size <= min(pad.size_x, pad.size_y)
+                    and all(via_clear((px, py), lay) for lay in layers)):
+                ex = edge(row_inward.face)
+                e = (ex[0], py) if DIRS[row_inward.face][0] else (px, ex[1])
+                for L in list(others) + [L for L in row_inward.run_layers if L not in others and L != home]:
+                    if clear((px, py), e, L):
+                        out.append(Move(net, 'via_in_pad', row_inward.face, L, e, 1, [((px, py), e, L)],
+                                        site=(px, py), inner=1))
         return out
 
     # --- surface: leave on the pad's own layer along an ADJACENT GAP.

@@ -14,7 +14,13 @@ On parts stood in for (pads alone):
    the pad's centre to half a pitch past the pads' outer ends; its clearance asked from the pad's outer end on (a
    model's disc round the exposed pad that reaches a pad's inner end refuses nothing), and none where that is not clear;
 4. escape_blocks: the segments and vias of the named nets inside the array's box grown 1.5 mm, in either net dialect,
-   and nothing outside it or of another net.
+   and nothing outside it or of another net;
+5. a ONE-ROW part whose body's pads are under the mounting-tab size (a card socket): its pin line is its row, out away
+   from its body, a two-row pack not read so; with Inward, vias in the strip behind its pins, inside its body, and a
+   via IN a pin the via fits in, out on another layer toward the body's side -- never in a pin narrower than the via,
+   nor in a QFN's pad, and neither for a row facing its source;
+6. whole_frame.group_of_one: a single row turned from the source (its lanes under the body to their pins) is a group
+   of one, one facing the source is not, and a QFN is whatever the source.
 """
 import os
 import sys
@@ -112,6 +118,57 @@ got = rb.escape_blocks(TXT, pcb, 'U1', ['A', 'B'])
 uu = sorted(b.split('(uuid "')[1][:2] for b in got)
 check(uu == ['s1', 's3', 'v1'], f'4: the nets\' copper inside the box (+1.5 mm), either dialect: {uu}')
 
+# 5. a ONE-ROW part whose other copper is not all mounting tabs (a card socket: eight 1.1 x 0.75 mm pins at 1.1 mm in a
+# column, its card-detect pin and tabs about its body to the +x side, none four times a pin's area)
+def socket():
+    ps = [pad(i + 1, 0.0, 1.1 * i, 1.1, 0.75, f'S{i}') for i in range(8)]
+    ps += [pad(9, 6.2, -2.6, 1.0, 1.2, 'CD'), pad('MP', 0.35, 8.9, 1.8, 1.17), pad('MP', 10.9, 6.8, 1.35, 1.9),
+           pad('MP', 10.9, 0.9, 1.35, 1.9), pad('MP', 0.1, -2.4, 1.35, 1.55), pad('MP', 9.9, -2.6, 1.0, 1.2)]
+    return types.SimpleNamespace(pads=ps)
+
+
+sk = socket()
+gs = em.grid_of(sk)
+check(em.row_part(sk) and gs.row and gs.out == 'left', f'5: a socket\'s pin column is its row, out away from its body: {gs}')
+check(abs(gs.pitch_x - 1.1) < 1e-9 and abs(gs.bbox[0] + 0.55) < 1e-9 and abs(gs.bbox[2] - 0.55) < 1e-9,
+      f'5: its pitch the pins\', its box their copper: {gs}')
+# (a two-row pack, four pads a side: each row half its pads -- not read as one row and a body)
+pack = types.SimpleNamespace(pads=[pad(i + 1, 0.0, 0.5 * i, 0.5, 0.4) for i in range(4)]
+                             + [pad(i + 5, 1.6, 0.5 * i, 0.5, 0.4) for i in range(4)])
+check(not em.row_part(pack), '5: a two-row pack is not read as one row and a body')
+iw = em.Inward('right', 0.25, 0.09, 0.0762)
+pin = sk.pads[3]
+ms = em.enumerate_moves(pin, gs, ['F.Cu', 'In1.Cu', 'B.Cu'], lambda p, q, L: True, lambda s, L: True, row_inward=iw)
+inner = [m for m in ms if m.inner and m.kind == 'dogbone']
+check(inner and all(m.site[0] > 0.55 for m in inner), f'5: vias inside the body, behind the pins: {inner[:2]}')
+vip = [m for m in ms if m.kind == 'via_in_pad']
+check(vip and all(m.site == (pin.global_x, pin.global_y) and m.layer != 'F.Cu' and m.direction == 'right'
+                  for m in vip), f'5: the via in the pin, out on another layer toward the body\'s side: {vip}')
+big = em.enumerate_moves(pin, gs, ['F.Cu', 'In1.Cu', 'B.Cu'], lambda p, q, L: True, lambda s, L: True,
+                         row_inward=em.Inward('right', 0.8, 0.09, 0.0762))
+check(not [m for m in big if m.kind == 'via_in_pad'], '5: no via in a pin narrower than the via')
+qm = em.enumerate_moves(fp.pads[0], g, ['F.Cu', 'B.Cu'], clear, lambda s, L: True,
+                        row_inward=em.Inward('right', 0.25, 0.09, 0.0762))
+check(not [m for m in qm if m.kind == 'via_in_pad'], '5: a QFN (rows round its edge) takes no via in a pad')
+fac = em.enumerate_moves(pin, gs, ['F.Cu', 'In1.Cu', 'B.Cu'], lambda p, q, L: True, lambda s, L: True,
+                         row_inward=em.Inward('left', 0.25, 0.09, 0.0762))
+check(not [m for m in fac if m.inner or m.kind == 'via_in_pad'],
+      f'5: a row FACING its source (its lanes leave by its own face) takes neither: {fac}')
+
+# 6. the frame's group of one: a single row TURNED FROM the source (the source on its body's side) -- its lanes under
+# the body to their pins -- and not one facing it
+import whole_frame as wf  # noqa: E402
+src_east = types.SimpleNamespace(pads=[pad('A1', 25.0, 3.0, 0.3, 0.3)])
+src_west = types.SimpleNamespace(pads=[pad('A1', -20.0, 3.0, 0.3, 0.3)])
+check(wf.group_of_one(types.SimpleNamespace(footprints={'J': sk, 'U': src_east}), ['J'], 'U'),
+      '6: a row turned from its source is a group of one')
+check(not wf.group_of_one(types.SimpleNamespace(footprints={'J': sk, 'U': src_west}), ['J'], 'U'),
+      '6: a row facing its source is not')
+check(wf.group_of_one(types.SimpleNamespace(footprints={'Q': qfn(), 'U': src_west}), ['Q'], 'U'),
+      '6: a QFN (rows on more than one line) is, whatever the source')
+
 print('row part: ' + ('FAIL' if fails else 'PASS: a QFN found, its grid on its rows\' copper, one straight escape a pad '
-                                          'checked from its outer end; a shared source\'s escapes picked out'))
+                                          'checked from its outer end; a shared source\'s escapes picked out; a '
+                                          'socket\'s one row read past its body\'s pads, with vias behind and in its '
+                                          'pins, a group of one turned from its source'))
 sys.exit(1 if fails else 0)

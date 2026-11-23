@@ -618,22 +618,32 @@ def bridge_of(boxes, pitch):
     return far + pitch
 
 
-def group_of_one(pcb, dests):
+def group_of_one(pcb, dests, src=None):
     """a bus's ONE destination that is a row part with rows on more than one line (escape_moves._row_pads: a QFN, a
     two-row connector) -- the frame reads it as a group of one part, whose 'under' way takes a lane over its rows to a
     via at a berth on a row turned from the source. A single row of pins (an FFC) has every pin on its own face, no
     row beyond it, and stays a destination of its own: a group's lanes land on its front at one place, which a pair
-    on such a part cannot"""
+    on such a part cannot. ...unless that one row is TURNED FROM the source `src` (a card socket's pins along the far
+    end of its body): its face is the far one, and its lanes run under the body to vias at their pins, as a human's"""
     import escape_moves as em
     if len(dests) != 1 or dests[0] not in pcb.footprints:
         return False
-    rp = em._row_pads(pcb.footprints[dests[0]])
+    fp = pcb.footprints[dests[0]]
+    rp = em._row_pads(fp)
     if rp is None:
         return False
     pads = rp[0]
     reach = sorted(max(p.size_x, p.size_y) for p in pads)[len(pads) // 2]
-    return min(max(p.global_x for p in pads) - min(p.global_x for p in pads),
-               max(p.global_y for p in pads) - min(p.global_y for p in pads)) > reach
+    if min(max(p.global_x for p in pads) - min(p.global_x for p in pads),
+           max(p.global_y for p in pads) - min(p.global_y for p in pads)) > reach:
+        return True
+    out = em.grid_of(fp).out
+    if out is None or src not in pcb.footprints or not pcb.footprints[src].pads:
+        return False
+    sp = pcb.footprints[src].pads
+    sx, sy = sum(p.global_x for p in sp) / len(sp), sum(p.global_y for p in sp) / len(sp)
+    rx, ry = sum(p.global_x for p in pads) / len(pads), sum(p.global_y for p in pads) / len(pads)
+    return (sx - rx) * em.DIRS[out][0] + (sy - ry) * em.DIRS[out][1] < 0
 
 
 class Group:
@@ -1266,7 +1276,7 @@ def build(ctx, dest, _trunk=frozenset()):
     # (...and ONE ROW PART a group of one: a lane to its far row may run UNDER it, on a layer its pads leave open,
     # to a via at its berth -- Group's 'under' way -- where the part's box alone sends it round the part's end)
     F.group = Group(pcb, dests, ((_sraw[0] + _sraw[2]) / 2, (_sraw[1] + _sraw[3]) / 2)) \
-        if len(dests) > 1 or group_of_one(pcb, dests) else None
+        if len(dests) > 1 or group_of_one(pcb, dests, src) else None
     DB = F.group.bbox if F.group else F.DBs[dest]
     F.SB, F.DB = SB, DB                     # the arrays' pad boxes, grown to the line their stubs end on
     F.dpads = [(p.global_x, p.global_y) for r in dests for p in pcb.footprints[r].pads]   # the destination's pads

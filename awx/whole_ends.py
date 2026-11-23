@@ -343,7 +343,7 @@ class Ends:
         self.dest_of = {l_: (st['dst_pad'][lg[0]].component_ref if self.multi else st['dref']) for l_, lg in self.lanes}
         _sb = whole_frame.box_of(st['pcb'], st['sref'])
         self.group = whole_frame.Group(st['pcb'], dests_, ((_sb[0] + _sb[2]) / 2, (_sb[1] + _sb[3]) / 2)) \
-            if self.multi or whole_frame.group_of_one(st['pcb'], dests_) else None
+            if self.multi or whole_frame.group_of_one(st['pcb'], dests_, st['sref']) else None
         self.prim = [l_ for l_, _lg in self.lanes if self.dest_of[l_] == st['dref']]
         self.lbox = {l_: (st['dboxes'] if self.dest_of[l_] == st['dref'] else st['dbox_of'][self.dest_of[l_]])
                      for l_, _lg in self.lanes}
