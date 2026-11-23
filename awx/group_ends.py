@@ -1126,6 +1126,178 @@ def standing(pads, laid, ways, name_of, buses, cl):
     return {b.name: {b.leg_lane[n_] for n_ in on_it if n_ in b.leg_lane} for b in buses}
 
 
+WALL_VIAS = 2       # (field_walls) the most of the field's vias round a walled pad one lesson gives other sites
+WALL_CANDS = 10     # (field_walls) the field's vias nearest such a pad asked of, alone and two at a time
+
+
+def copper_pads(pcb, ref):
+    """the pads of part `ref` that are copper: a paste aperture drawn as a pad of its own (no copper layer) is none"""
+    cu = set(pcb.board_info.copper_layers or ())
+    return [p for p in pcb.footprints[ref].pads if '*.Cu' in p.layers or cu & set(p.layers)]
+
+
+def walled_on(before, after, refs, bus, prot):
+    """(the walls' nets of `after`, the rung, ['REF.PAD']): the pads later routes must reach beside the arrays `refs`
+    and beneath them (route_bus._cage_pads, `after`'s copper the copper near) that the step's own cage test
+    (route_bus._caged, at the fab ladder's finest rung) finds walled in on `after` and free on `before` (both parsed).
+    The walls are the bus's nets (`bus`, full names), the protected ones (`prot`) and the poured ones"""
+    import route_bus as rb
+    bus, prot = set(bus), set(prot)
+
+    def fixed_of(pcb):
+        return {i for i, nn in pcb.nets.items() if nn.name in bus | prot} | \
+            {z.net_id for z in (pcb.zones or []) if z.net_id}
+    ff, fb = fixed_of(after), fixed_of(before)
+    rung = rb._cage_rung(after)
+    asked = {r: [p.pad_number for p in ps] for r, ps in rb._cage_pads(after, refs, bus, after.segments,
+                                                                         after.vias).items()}
+    now = rb._caged_on(after, asked, ff, rung)
+    if not now:
+        return ff, rung, []
+    was_k = collections.defaultdict(list)
+    for k in now:
+        was_k[k.split('.', 1)[0]].append(k.split('.', 1)[1])
+    was = set(rb._caged_on(before, dict(was_k), fb, rung))
+    return ff, rung, [k for k in now if k not in was]
+
+
+def field_walls(bare, bare_path, field, refs, bus, held=()):
+    """THE PADS THE FIELD WALLS IN, and each one's lesson: the pads later routes must reach beside the arrays `refs`
+    and beneath them (route_bus._cage_pads -- a decoupling capacitor's, a test point's) that the step's own cage test
+    (route_bus._caged, at the fab ladder's finest rung) finds walled in on the laid `field` and free on the bare board
+    `bare` (parsed; its path `bare_path`, its project's protected nets walls as the bus step's grade reads them). The
+    walls are the bus's nets (`bus`, full names), the poured nets and the protected -- under an array, the lattice of
+    the plane balls' drops, each a via on a site between four balls: two vias a pitch apart leave less room than a
+    track and its clearances, and a capacitor's supply pad in a cell of them with no via of its own net beside it was
+    reached from nowhere, its net shipped open. The menus measure their vias as if the movable passives were not there.
+    The human board runs a short track from such a pad through sites its drops leave empty to a via of the pad's own
+    net half a millimetre to a millimetre off. Each such pad's lesson, the first that frees it:
+    'hold' -- its part MOVED by the nudge and free where it came, with no copper of another net on its pads there (as
+    a part held where it came has none, array_rows): the part is held there (`what`: its reference). Parts in `held`
+    are held already;
+    'sites' -- the fewest of the field's vias of other nets round it (WALL_CANDS nearest within WALL_NEAR, one, else
+    WALL_VIAS of them, the nearest first; no bus net's, no locked one) whose sites, left to no other net's drop, free it
+    (`what`: their centres) -- the balls dropped there take another site, share a via of their net or are strapped;
+    None -- neither frees it (`what`: why).
+    [(the pad 'REF.PAD', its net, kind, what)]"""
+    import copy
+    import itertools
+    import route_bus as rb
+    from kicad_parser import parse_kicad_pcb, is_immutable_copper
+    from protected_nets import read_protected_nets, pro_path_for_board
+    with contextlib.redirect_stdout(io.StringIO()):
+        f = parse_kicad_pcb(field)
+    bus = set(bus)
+    ff, rung, walled = walled_on(bare, f, refs, bus, read_protected_nets(pro_path_for_board(bare_path)))
+    cl = rung[2]
+
+    def gap(o, p):
+        """the copper of track or via `o` to pad `p`'s rectangle"""
+        hx, hy = p.size_x / 2, p.size_y / 2
+        if hasattr(o, 'start_x'):
+            return rect_seg_gap(p.global_x, p.global_y, hx, hy, (o.start_x, o.start_y),
+                                (o.end_x, o.end_y)) - o.width / 2
+        return math.hypot(max(abs(o.x - p.global_x) - hx, 0.0), max(abs(o.y - p.global_y) - hy, 0.0)) - o.size / 2
+
+    out = []
+    for k in walled:
+        r, n = k.split('.', 1)
+        pad = next(p for p in f.footprints[r].pads if p.pad_number == n)
+        ff_, fb_ = f.footprints[r], bare.footprints.get(r)
+        if fb_ is not None and r not in held and (abs(ff_.x - fb_.x) + abs(ff_.y - fb_.y) > 1e-3
+                                                  or abs((ff_.rotation - fb_.rotation) % 360) > 1e-3):
+            # (the part where it came, as a hold leaves it: no other net's via on its pads, nor track on their layer)
+            c = copy.copy(rb._cropped(f, fb_))
+            c.footprints = dict(c.footprints)
+            c.footprints[r] = fb_
+            cps = copper_pads(bare, r)
+            c.vias = [v for v in c.vias if not any(q.net_id != v.net_id and gap(v, q) < cl for q in cps)]
+            c.segments = [s for s in c.segments
+                          if not any(q.net_id != s.net_id and (s.layer in q.layers or '*.Cu' in q.layers)
+                                     and gap(s, q) < cl for q in cps)]
+            q0 = next((q for q in fb_.pads if q.pad_number == n), None)
+            if q0 is not None and not rb._caged(rb._walls(c, ff, q0.net_id, is_immutable_copper), q0, *rung):
+                out.append((k, pad.net_name, 'hold', r))
+                continue
+        crop = rb._cropped(f, ff_)
+        cands = sorted(((gap(v, pad), i) for i, v in enumerate(crop.vias)
+                        if v.net_id != pad.net_id and v.net_id in ff and f.nets[v.net_id].name not in bus
+                        and not is_immutable_copper(v)), key=lambda t: t[0])
+        cands = [crop.vias[i] for d_, i in cands if d_ <= rb.WALL_NEAR][:WALL_CANDS]
+        combos = sorted((c_ for size in range(1, WALL_VIAS + 1)
+                         for c_ in itertools.combinations(range(len(cands)), size)), key=lambda c_: (len(c_), sum(c_)))
+        hit = None
+        for c_ in combos:
+            gone = {id(cands[i]) for i in c_}
+            w = copy.copy(crop)
+            w.vias = [v for v in crop.vias if id(v) not in gone]
+            if not rb._caged(rb._walls(w, ff, pad.net_id, is_immutable_copper), pad, *rung):
+                hit = [(round(cands[i].x, 4), round(cands[i].y, 4)) for i in c_]
+                break
+        out.append((k, pad.net_name, 'sites', hit) if hit else
+                   (k, pad.net_name, None, f'no {WALL_VIAS} of the {len(cands)} vias of other nets round it free it'
+                    + (' (nor its part where it came)' if fb_ is not None and r not in held
+                       and abs(ff_.x - fb_.x) + abs(ff_.y - fb_.y) > 1e-3 else '')))
+    return out
+
+
+def tie_walls(untied, tied, ties, refs, bus, prot):
+    """THE FIELD'S TIES THAT WALL A PAD IN: (the indices of `ties`' tracks, of its vias, [(the pad 'REF.PAD', why)])
+    -- the pieces (field_ties.pieces) of the ties laid on the field at `tied` (`ties`: field_ties.lay's, its 'tracks'
+    and 'vs') to take out again, each one whose copper alone gone frees a pad later routes must reach that the
+    untied field (`untied`) leaves free (walled_on: the step's own cage test). A rail's tie run round another cap
+    under the array, from a via on one side of it back along the other, closed that cap's pad off from every way
+    out; its net shipped open past copper the bus step protects. The pad nothing frees is named"""
+    import copy
+    import types
+    import field_ties
+    import route_bus as rb
+    from kicad_parser import parse_kicad_pcb, is_immutable_copper
+    with contextlib.redirect_stdout(io.StringIO()):
+        a, b = parse_kicad_pcb(untied), parse_kicad_pcb(tied)
+    ff, rung, walled = walled_on(a, b, refs, bus, prot)
+    if not walled:
+        return set(), set(), []
+    ts = [types.SimpleNamespace(start_x=t['start'][0], start_y=t['start'][1], end_x=t['end'][0], end_y=t['end'][1],
+                                width=t['width'], layer=t['layer'], net_id=t['net_id'])
+          for t in ties.get('tracks') or ()]
+    vs = [types.SimpleNamespace(x=v['x'], y=v['y'], size=v['size'], net_id=v['net_id']) for v in ties.get('vs') or ()]
+    its = field_ties.pieces(ts, vs)
+    by_pc = collections.defaultdict(lambda: (set(), set()))
+    for i, (k_, o, pc) in enumerate(its):
+        by_pc[pc][0 if k_ == 's' else 1].add(i if k_ == 's' else i - len(ts))
+    sk = lambda o: (o.layer, round(o.start_x, 3), round(o.start_y, 3),         # noqa: E731
+                    round(o.end_x, 3), round(o.end_y, 3))
+    vk = lambda o: (round(o.x, 3), round(o.y, 3))       # noqa: E731
+    out_s, out_v, named = set(), set(), []
+    for key in walled:
+        r, n = key.split('.', 1)
+        pad = next(p for p in b.footprints[r].pads if p.pad_number == n)
+        crop = rb._cropped(b, b.footprints[r])
+        near = sorted(by_pc, key=lambda pc_: min(
+            [math.hypot((ts[i].start_x + ts[i].end_x) / 2 - pad.global_x,
+                        (ts[i].start_y + ts[i].end_y) / 2 - pad.global_y) for i in by_pc[pc_][0]]
+            + [math.hypot(vs[j].x - pad.global_x, vs[j].y - pad.global_y) for j in by_pc[pc_][1]] + [9e9]))
+        hit = None
+        for pc_ in near:
+            gone_s = {sk(ts[i]) for i in by_pc[pc_][0]}
+            gone_v = {vk(vs[j]) for j in by_pc[pc_][1]}
+            w = copy.copy(crop)
+            w.segments = [s_ for s_ in crop.segments if sk(s_) not in gone_s]
+            w.vias = [v_ for v_ in crop.vias if vk(v_) not in gone_v]
+            if not rb._caged(rb._walls(w, ff, pad.net_id, is_immutable_copper), pad, *rung):
+                hit = pc_
+                break
+        if hit is None:
+            named.append((key, 'no one tie alone gone frees it'))
+            continue
+        out_s |= by_pc[hit][0]
+        out_v |= by_pc[hit][1]
+        named.append((key, f'a tie of {b.nets[ts[next(iter(by_pc[hit][0]))].net_id].name if by_pc[hit][0] else "its net"} '
+                           'round it taken out'))
+    return out_s, out_v, named
+
+
 def way_of(g0, L):
     """((its start, its end), its width) of the way out of the menu move `g0`'s exit on the layer L, as the nudge is
     given it (wayout_runs), or None where its exit has no direction"""
@@ -3644,6 +3816,60 @@ def main():
                         oth_ban.add(e_)
                         n += 1
         return n
+    def teach_walled(buses, laid_=(), ways_=()):
+        """how many lessons THE PADS THE FIELD WALLS IN newly give (field_walls, on the field as laid): a part the nudge
+        moved into the cage is HELD where it came, as teach_laid holds one (its lanes standing on it the repair's to
+        free); else the sites of the field's vias round the pad that free it are left to no other net's drop -- every
+        drop of another net's ball there, and an escape whose via stands there, not again ('laid', as a choice whose
+        copper broke the board's rules) -- and those balls take another site, share a via of their net or are strapped.
+        A pad neither frees is named, and the field goes on as laid"""
+        import source_realize as sr_
+        bus_ = sorted({cap['st']['byname'][n_][1].name for cap in caps.values() for n_ in cap['st']['launch']
+                       if n_ in cap['st']['byname']})
+        with awx_settings.given(genv):
+            got = field_walls(bpcb, board, os.path.join(out, 'shared_field.kicad_pcb'), sorted(arrays), bus_,
+                              held=set(held))
+        n, said = 0, []
+        for key_, net_, kind_, what_ in got:
+            if kind_ == 'hold':
+                held[what_] = [(p_.global_x, p_.global_y, p_.size_x / 2, p_.size_y / 2, p_.net_name, tuple(p_.layers))
+                               for p_ in copper_pads(bpcb, what_)]
+                import rules as _rules
+                with awx_settings.given(genv):
+                    on_it = standing(held[what_], laid_, ways_, lambda i_: bpcb.nets[i_].name if i_ in bpcb.nets
+                                     else None, buses, _rules.active().clearance)
+                for bn_, ls_ in on_it.items():
+                    fresh.setdefault(bn_, set()).update(ls_)
+                n += 1
+                said.append(f'{key_} ({net_}): {what_} held where it came')
+                continue
+            if kind_ != 'sites':
+                said.append(f'{key_} ({net_}): NO WAY KEPT -- {what_}')
+                continue
+            at_ = lambda c_: any(math.hypot(c_[0] - x_, c_[1] - y_) < 0.01 for x_, y_ in what_)   # noqa: E731
+            new_ = set()
+            for ref, A in arrays.items():
+                for k, ds in A.drops.items():
+                    if A.bm.items[k][1].net_name != net_:
+                        new_ |= {(ref, k, 'd', j) for j, (d, _pc) in enumerate(ds) if at_(d.site)}
+                for k in A.okeys:
+                    ch_ = prev_oth.get((ref, k))
+                    if ch_ and ch_[0] == 'x' and A.bm.items[k][1].net_name != net_:
+                        i_ = next((i for i, mv in enumerate(A.bm.menu[k]) if sr_.move_sig(mv) == ch_[1]), None)
+                        if i_ is not None and any(at_(c_) for c_, _r, _dr in A.bm.opts[k][i_][2].vias):
+                            new_.add((ref, k, 'x', ch_[1]))
+            new_ -= oth_ban
+            if not new_:
+                said.append(f'{key_} ({net_}): its sites {what_} ruled out already, walled all the same')
+                continue
+            oth_ban.update(new_)
+            n += 1
+            said.append(f'{key_} ({net_}): the site(s) ' + ', '.join(f'({x_:.2f}, {y_:.2f})' for x_, y_ in what_)
+                        + f' left to no other net\'s drop ({len(new_)} choice(s) ruled out)')
+        if got:
+            log(f'  the field walls in {len(got)} pad(s) later routes must reach -- ' + '; '.join(said))
+        TR.rec('walled', check=chk_try + 1, pads=[list(g_[:3]) for g_ in got], lessons=n)
+        return n
     no_plan = []
     # (GROUP_LAYERS=free: a bus ALONE on its arrays -- no other bus of the group at either -- has its via ends' layers
     # chosen by its own solve, among the routing layers at their prices; the model's layers are where it starts)
@@ -5698,6 +5924,10 @@ def main():
             n_held = len(held)
             n_ban = teach_laid(M_['items'], buses, M_['moved'], laid, wayouts) \
                 if M_['items'] and laid_try < we.JOINT_TRIES else 0
+            # (...and on a field that breaks none of the board's rules, THE PADS IT WALLS IN: each one's way out kept
+            # -- teach_walled -- answered by the same repair)
+            if not M_['items'] and not M_['bad'] and laid_try < we.JOINT_TRIES:
+                n_ban += teach_walled(buses, laid, wayouts)
             TR.rec('field', check=chk_try + 1, drc_field=M_['d_f'], drc_bare=M_['d_b'], items=M_['items'][:60],
                    moved=M_['moved'], lessons=n_ban, held_parts=sorted(held))
             if not n_ban:
@@ -5793,6 +6023,36 @@ def main():
                 f'DRC {d_t} against the field\'s {M_["d_f"]} -- TAKEN OUT AGAIN, the field goes on untied '
                 f'(field_drc_tied.json)')
         else:
+            # (...and a tie that WALLS IN a pad later routes must reach, the untied field leaving it free, is no tie
+            # either: taken out again (tie_walls) -- the pad's way kept, and the tie the chain's to lay)
+            from protected_nets import read_protected_nets, pro_path_for_board
+            with awx_settings.given(genv):
+                out_s, out_v, named_ = tie_walls(fpath_ + '.untied', fpath_, T_, sorted(arrays), sorted(
+                    {cap['st']['byname'][n_][1].name for cap in caps.values() for n_ in cap['st']['launch']
+                     if n_ in cap['st']['byname']}), read_protected_nets(pro_path_for_board(board)))
+            if out_s or out_v:
+                import ship_vias
+                from kicad_writer import add_tracks_and_vias_to_pcb
+                T_ = dict(T_, tracks=[t_ for i_, t_ in enumerate(T_['tracks']) if i_ not in out_s],
+                          vs=[v_ for j_, v_ in enumerate(T_['vs']) if j_ not in out_v])
+                shutil.copy(fpath_ + '.untied', fpath_)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    add_tracks_and_vias_to_pcb(fpath_, fpath_, [dict(t_) for t_ in T_['tracks']],
+                                               [dict(v_) for v_ in T_['vs']], [],
+                                               net_id_to_name={i_: n_.name for i_, n_ in bpcb.nets.items()})
+                ship_vias.stamp(fpath_, 'group ends')
+                T_['segments'], T_['vias'] = len(T_['tracks']), len(T_['vs'])
+                # (the pads the copper kept still reaches: field_ties' own test of a piece on a pad)
+                import types
+                kept_ = [('s', types.SimpleNamespace(start_x=t_['start'][0], start_y=t_['start'][1], end_x=t_['end'][0],
+                                                     end_y=t_['end'][1], layer=t_['layer'], net_id=t_['net_id']))
+                         for t_ in T_['tracks']] + [('v', types.SimpleNamespace(x=v_['x'], y=v_['y'], net_id=v_['net_id']))
+                                                    for v_ in T_['vs']]
+                T_['tied'] = sorted({(p_.component_ref, p_.pad_number) for p_ in T_['pads'] for k_, o_ in kept_
+                                     if o_.net_id == p_.net_id and field_ties._at(k_, o_, p_)})
+            if named_:
+                log('  field ties: walling a pad in -- ' + '; '.join(f'{k_}: {w_}' for k_, w_ in named_)
+                    + (f' ({len(out_s)} track(s) and {len(out_v)} via(s) not kept)' if out_s or out_v else ''))
             json.dump({'tracks': T_['tracks'], 'vias': T_['vs']}, open(os.path.join(out, 'field_ties.json'), 'w'))
             log(f'  field ties: {len(T_["tied"])} of the {len(T_["pads"])} pad(s) on a poured net beneath '
                 f'{", ".join(sorted(parts_))} tied before the lanes -- {T_["segments"]} tracks, {T_["vias"]} vias, '
