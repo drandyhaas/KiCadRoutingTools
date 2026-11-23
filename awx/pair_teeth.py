@@ -191,7 +191,7 @@ def main(argv):
     split = 0
     for ref in refs:
         foot = pcb.footprints[ref]
-        grid = em.grid_of(foot)
+        grid = em.grid_of(foot, pcb)
         t = teeth(segs, name_of, legs, grid.bbox)
         for base, r in between(prs, t, segs, vias, name_of, max(grid.pitch_x, grid.pitch_y) / 2.0).items():
             if r == 'apart':

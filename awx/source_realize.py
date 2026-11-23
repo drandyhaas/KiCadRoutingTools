@@ -89,6 +89,25 @@ def move_class(m):
 # (see rules.py, "USING IT"); the engine call below reads them at call time.
 import rules as _rules            # noqa: E402  ONE source for every design rule
 FAN_TRACK = _rules.active().fan_track
+
+
+def exit_margin_of(pcb, sref, dests=None):
+    """the source array's exit margin for the engine: escape_moves.reaches' against the run's destinations (`dests`,
+    else the DEST setting's) -- shorter where one stands close in front of it"""
+    refs = dests if dests is not None else te.dest_refs(awx_settings.get('DEST') or '')
+    fps = [pcb.footprints[r] for r in refs if r in pcb.footprints and r != sref]
+    return em.reaches(pcb.footprints[sref], fps)[0] if fps else em.EXIT_MARGIN
+
+
+def at_fan_track(tracks):
+    """the array engine's `tracks` at the fanout's own track, FAN_TRACK, where the engine laid them wider: it pins an
+    escape up to its fab tier's NOMINAL floor, and the step's track is a rung of the fab ladder BELOW that one where the
+    chain came down to it (route_bus.resolve_rules pins it at the physical floor). Laid wider than the plan measured
+    its moves at, a run on a gap line of a fine-pitch array stood within the rule of the via in the ball beside it"""
+    for t in tracks:
+        if t.get('width', FAN_TRACK) > FAN_TRACK + 1e-9:
+            t['width'] = FAN_TRACK
+    return tracks
 FAN_CLEAR = _rules.active().fan_clear
 
 
@@ -512,8 +531,9 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
         layers=route_layers.stacked(pcb.board_info.copper_layers),
         track_width=FAN_TRACK, clearance=FAN_CLEAR, via_size=te.VIA_SIZE,
         via_drill=te.VIA_DRILL,
-        exit_margin=0.5, escape_method='underpad', plane_drop='off',
+        exit_margin=exit_margin_of(pcb, sref), escape_method='underpad', plane_drop='off',
         escape_dir_hints=hints, net_clearances={})   # class-blind, as the plan (#1529)
+    at_fan_track(tracks)
     got = {t['net_id'] for t in tracks}
     ok = [nm for nm in names if byname[nm][0] in got]
     # (a PAIR's legs laid together or neither, as a refused pair holds its escapes (route_bus.hold_board_escapes): a leg

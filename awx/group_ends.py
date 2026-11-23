@@ -3758,6 +3758,13 @@ def main():
             # shorted on one layer taught nothing, and the model stopped on a field it could have answered)
             P = it.get('via_loc') or ([(sl_[0] + sl_[2]) / 2, (sl_[1] + sl_[3]) / 2] if sl_ else None) \
                 or it.get('closest_pt') or it.get('pad_loc') or it.get('cross_point') or it.get('closest_pt1')
+            # (...two HOLES' own, a drill within the hole rule of another: between the two -- its item names its two
+            # places and no other, and read without them a tooth's via a quarter millimetre off its own lane's berth
+            # via, two parts a millimetre apart, taught nothing: the model stopped on a field one ban answers)
+            if P is None and it.get('loc1') and it.get('loc2'):
+                P = [(it['loc1'][0] + it['loc2'][0]) / 2, (it['loc1'][1] + it['loc2'][1]) / 2]
+            if P is None:
+                P = it.get('loc1') or it.get('loc2')
             if P is None:
                 continue
             static = None

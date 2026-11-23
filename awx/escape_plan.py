@@ -276,13 +276,15 @@ def escape_out(pad, grid, faces, copper, layers=None):
     route's, as the human's surface escapes dive 0.8-2.9 mm off the balls in pairs (zynq U1). A plated through-hole
     pin (a pin header's) stands on every copper layer: its surface escapes leave on each of `layers`"""
     if pad_is_plated_through(pad) and layers:
-        return [mv for L in layers for mv in _escape_out(pad, grid, faces, copper, L)]
+        # (its own line alone: a pin a track passes beside needs no lattice of side lines to leave by, and a header
+        # pin's were ~11 lines a face on every layer -- 145 to 210 moves a pin against a ball's handful)
+        return [mv for L in layers for mv in _escape_out(pad, grid, faces, copper, L, own_only=True)]
     return _escape_out(pad, grid, faces, copper,
                        next((L for L in pad.layers if L.endswith('.Cu') and not L.startswith('*')), 'F.Cu'))
 
 
-def _escape_out(pad, grid, faces, copper, home):
-    """escape_out's surface escapes on the one layer `home`"""
+def _escape_out(pad, grid, faces, copper, home, own_only=False):
+    """escape_out's surface escapes on the one layer `home` (`own_only`: along the ball's own line alone)"""
     net = copper.net_key(getattr(pad, 'net_name', '') or '')
     nid = pad.net_id
     x0, y0, x1, y1 = grid.bbox
@@ -303,7 +305,7 @@ def _escape_out(pad, grid, faces, copper, home):
             continue
         lo, hi = (y0, y1) if a_ == 1 else (x0, x1)
         paths = [(ball[a_], [ball, P(ball[a_], e)])]
-        for sg in (-1, 1):
+        for sg in (() if own_only else (-1, 1)):
             for o_ in lattice(h, line_step(2 * h, copper)):
                 g_ = ball[a_] + sg * o_
                 paths.append((g_, [ball, P(g_, ball[k] + s * hk), P(g_, e)]))

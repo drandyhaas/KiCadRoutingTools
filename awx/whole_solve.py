@@ -357,7 +357,13 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
             legs_ = ((n, ctx.ends[n][k_], (ctx.tooth_layer, ctx.dest_layer)[k_][n]),)
         for leg, pt_, L0_ in legs_:
             nid = ctx.byname[leg][0]
-            vs_ = [v for v in ctx.base_vias if v.net_id == nid and whole_frame.via_in_box(v, box)]
+            # (an end standing ON a via of its net is a via end wherever the via is: a surface tooth's stub run on
+            # past the exit line to a via -- ends_reescape's run-out -- ends beyond the box, grown to the stubs' median)
+            if any(v.net_id == nid and math.hypot(v.x - pt_[0], v.y - pt_[1]) < v.size / 2 for v in ctx.base_vias):
+                continue
+            # (...its vias, and its through-hole pins there: a pin header's pin is a barrel as a via is -- relayer.
+            # barrels -- and a lane held to the layer the fanout drew its stub on changed layer a via before each pin)
+            vs_ = [v for v in _relayer.barrels(ctx.pcb, nid, ctx.base_vias) if whole_frame.via_in_box(v, box)]
             if not vs_:
                 return False
             if not any(math.hypot(v.x - pt_[0], v.y - pt_[1]) < v.size / 2 for v in vs_) \
@@ -883,7 +889,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False, fro
         # (the check's CORE: each crossing's window held by two assumption literals, so a model with no plan names the
         # crossings whose windows it could not hold together -- the ends model prices those crossings and searches again,
         # whole_ends.checked. The model is the same: every assumption holds)
-        t = {k: m.NewIntVar(Q(U_LO), Q(U_HI + G), f't_{k[0]}_{k[1]}') for k in win}
+        # (...its domain never empty: a frame whose lanes end before they start -- a destination against its source's
+        # face -- has no place for a crossing, and its windows' assumptions say so: no plan, the crossings named)
+        t = {k: m.NewIntVar(Q(U_LO), max(Q(U_HI + G), Q(U_LO)), f't_{k[0]}_{k[1]}') for k in win}
         for k, (lo, hi) in win.items():
             a_l, a_h = m.NewBoolVar(''), m.NewBoolVar('')
             m.Add(t[k] >= Q(lo)).OnlyEnforceIf(a_l); m.Add(t[k] <= Q(hi)).OnlyEnforceIf(a_h)

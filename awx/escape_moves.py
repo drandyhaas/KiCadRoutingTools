@@ -31,6 +31,7 @@ passed in.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -178,6 +179,74 @@ class Inward:
                                     # (0: none): a human's lanes to a two-row connector also enter between its rows
                                     # from its end and meet the pads' inner ends
     along_pitch: float = 0.0        # ...their pitch: the exits' (the route plans lanes no closer at their ends)
+    turned: bool = False            # a ONE-ROW part turned from the source (turned_from): its strip runs into its body,
+                                    # and a pad a via fits in takes one
+
+
+TURNED_COS = -0.3              # a one-row part is TURNED FROM a point past this cosine (the point clearly behind it)
+
+
+def turned_from(footprint, pt, pcb=None) -> bool:
+    """a ONE-ROW part (grid_of's `out`, its pads' way away from its body) whose row faces AWAY from the point `pt` --
+    the source behind it, on its body's side, the row's face the far one from it: more than TURNED_COS off its way out,
+    so a source standing beside the row's line reads as no such part (as before). The one test the menu's ways inside
+    the part (Inward.turned) and the frame's group of one (whole_frame.group_of_one) both read. `pcb`: grid_of's"""
+    g = grid_of(footprint, pcb)
+    rp = _row_pads(footprint)
+    if not g.out or rp is None:
+        return False
+    rows = rp[0]
+    rx = sum(p.global_x for p in rows) / len(rows)
+    ry = sum(p.global_y for p in rows) / len(rows)
+    vx, vy = pt[0] - rx, pt[1] - ry
+    L = math.hypot(vx, vy)
+    return L > 1e-9 and (vx * DIRS[g.out][0] + vy * DIRS[g.out][1]) < TURNED_COS * L
+
+
+EXIT_MARGIN = 0.5              # a source array's escapes end this far past its boundary, half a pitch out of its pads (mm)
+CHANNEL = 0.3                  # between a bus's two exit lines, at least this much (mm): where its lanes run across
+MIN_OUT = 0.1                  # no exit nearer its part than this (mm)
+REACH_TOL = 0.05               # ...and a channel short of CHANNEL by less than this is left as it is (mm)
+
+
+def reaches(src_fp, dst_fps, src_margin: float = EXIT_MARGIN):
+    """THE EXITS OF A BUS WHOSE DESTINATION STANDS CLOSE IN FRONT OF ITS SOURCE: (the source's exit margin, {a
+    destination's reference: the margin its escapes take, enumerate_moves' `margin`, <= 0}). A source's escapes end
+    `src_margin` past its boundary and a destination's half a pitch out of its box, each whatever stands in front: two
+    parts nearer than those two reaches had their exit lines PAST each other -- a flash a millimetre under a ball
+    array's face: every lane's end before its start, no lane the route could plan -- and nearer than that and CHANNEL
+    their lanes had no room to run across the flow between the lines. There, each end gives up of its reach in
+    proportion to what it can give (a source down to MIN_OUT past its boundary; a ROW PART, whose box is its rows'
+    copper, down to MIN_OUT off it; an array or a pin header nothing -- its exit is half a pitch off its pads' centres,
+    beside their copper) until CHANNEL is left, or neither has more to give. Parts not across a face from each other
+    (one over the other) keep their reaches"""
+    sg = grid_of(src_fp)
+    hs = (sg.pitch_x / 2.0, sg.pitch_y / 2.0)
+    out_s, out_d = src_margin, {}
+    for fp in dst_fps:
+        dg = grid_of(fp)
+        out_d[fp.reference] = 0.0
+        gap = (max(dg.bbox[0] - sg.bbox[2], sg.bbox[0] - dg.bbox[2]),
+               max(dg.bbox[1] - sg.bbox[3], sg.bbox[1] - dg.bbox[3]))
+        ax = 0 if gap[0] >= gap[1] else 1
+        if gap[ax] <= 0:
+            continue
+        rs = hs[ax] + src_margin
+        rd = (dg.pitch_x, dg.pitch_y)[ax] / 2.0
+        short = rs + rd + CHANNEL - gap[ax]
+        cap_s, cap_d = max(0.0, src_margin - MIN_OUT), (max(0.0, rd - MIN_OUT) if dg.row else 0.0)
+        if short <= REACH_TOL or cap_s + cap_d <= 0:
+            continue
+        k = min(1.0, short / (cap_s + cap_d))
+        out_s = min(out_s, src_margin - k * cap_s)
+        out_d[fp.reference] = -k * cap_d
+    return out_s, out_d
+
+
+def through_pin(pad) -> bool:
+    """a plated through-hole pin: its barrel ties every copper layer (kicad_parser.pad_is_plated_through)"""
+    from kicad_parser import pad_is_plated_through
+    return pad_is_plated_through(pad)
 
 
 def row_part(footprint) -> bool:
@@ -185,7 +254,57 @@ def row_part(footprint) -> bool:
     return _row_pads(footprint) is not None
 
 
-def grid_of(footprint) -> Grid:
+def _one_line(rows):
+    """(the axis ACROSS a one-row part's row -- 0: its pads leave along x, 1: along y -- and the row's line on it), else
+    None: its pads' centres on one line, or every pad long the same way and their lengths SHARING a line -- the row of
+    a mating edge whose presence-detect finger is shorter, its centre off the others'"""
+    xs = {round(p.global_x, 3) for p in rows}
+    ys = {round(p.global_y, 3) for p in rows}
+    if len(ys) == 1:
+        return 1, next(iter(ys))
+    if len(xs) == 1:
+        return 0, next(iter(xs))
+    for ax in (0, 1):
+        if all((p.size_x, p.size_y)[ax] > (p.size_y, p.size_x)[ax] for p in rows):
+            ends = [((p.global_x, p.global_y)[ax] - (p.size_x, p.size_y)[ax] / 2,
+                     (p.global_x, p.global_y)[ax] + (p.size_x, p.size_y)[ax] / 2) for p in rows]
+            if max(a for a, _b in ends) < min(b for _a, b in ends):
+                return ax, sorted((p.global_x, p.global_y)[ax] for p in rows)[len(rows) // 2]
+    return None
+
+
+def _edge_out(footprint, pcb, ax):
+    """the way OUT of a one-row part with no body to tell it by, where it is a MATING EDGE's fingers: AWAY from the
+    board's edge they stand at, as the router reads it (net_keepouts.derive_finger_bands: each finger's column, from
+    its inner end to past the edge -- the strip its grade keeps other copper out of) -- else None. `ax`: _one_line's"""
+    if pcb is None:
+        return None
+    memo = getattr(pcb, '_finger_columns', None)
+    if memo is None:
+        memo = {}
+        try:
+            from net_keepouts import derive_finger_bands
+            for ko in derive_finger_bands(pcb):
+                if ko.get('finger_band') == 'column':
+                    memo.setdefault(ko['ref'], []).append((str(ko['pad']), ko['polygon']))
+        except Exception:            # noqa: BLE001 -- (a board the reader cannot take: no mating edge read, as before)
+            memo = {}
+        pcb._finger_columns = memo
+    by = {}
+    for p in footprint.pads:
+        by.setdefault(str(p.pad_number), p)
+    off = 0.0
+    for num, poly in memo.get(getattr(footprint, 'reference', None), ()):
+        p = by.get(num)
+        if p is not None:
+            v = [q[ax] for q in poly]
+            off += (min(v) + max(v)) / 2 - (p.global_x, p.global_y)[ax]
+    if abs(off) < 1e-6:
+        return None
+    return (('left', 'right'), ('up', 'down'))[ax][0 if off > 0 else 1]
+
+
+def grid_of(footprint, pcb=None) -> Grid:
     """Measure the array from its pads. A single row or column is fine;
     a non-grid part gives a degenerate Grid the caller can reject.
 
@@ -197,24 +316,29 @@ def grid_of(footprint) -> Grid:
     (0.9 mm pads at 0.5 mm) lay inside the pads, and its exposed pad's
     offset read as a 0.25 mm pitch.
 
-    A ONE-ROW part (an edge connector's single row) has two faces along its
-    pads, and its pads leave by the one away from its BODY: the side its
-    other copper (its mounting tabs) stands on, else its origin."""
+    A ONE-ROW part (an edge connector's single row, _one_line) has two faces
+    along its pads, and its pads leave by the one away from its BODY: the
+    side its other copper (its mounting tabs) stands on, else its origin --
+    and where neither tells (a card's own edge fingers: no other copper, the
+    origin on their line), with the board `pcb` given, away from the BOARD'S
+    EDGE they stand at (_edge_out)."""
     rp = _row_pads(footprint)
     if rp is not None:
         rows, pitch = rp
         xs = sorted({round(p.global_x, 3) for p in rows})
         ys = sorted({round(p.global_y, 3) for p in rows})
         out = None
-        if len(ys) == 1 or len(xs) == 1:
+        one = _one_line(rows)
+        if one is not None:
+            ax, line = one
             ids = {id(p) for p in rows}
             rest = [p for p in footprint.pads if id(p) not in ids]
-            bx, by = ((sum(p.global_x for p in rest) / len(rest), sum(p.global_y for p in rest) / len(rest)) if rest
-                      else (getattr(footprint, 'x', xs[0]), getattr(footprint, 'y', ys[0])))
-            if len(ys) == 1 and abs(by - ys[0]) > 1e-3:
-                out = 'up' if by > ys[0] else 'down'
-            elif len(xs) == 1 and abs(bx - xs[0]) > 1e-3:
-                out = 'left' if bx > xs[0] else 'right'
+            body = ((sum(p.global_x for p in rest) / len(rest), sum(p.global_y for p in rest) / len(rest)) if rest
+                    else (getattr(footprint, 'x', xs[0]), getattr(footprint, 'y', ys[0])))[ax]
+            if abs(body - line) > 1e-3:
+                out = (('left', 'right'), ('up', 'down'))[ax][0 if body > line else 1]
+            else:
+                out = _edge_out(footprint, pcb, ax)
         return Grid(xs, ys, pitch, pitch, (min(p.global_x - p.size_x / 2 for p in rows),
                                            min(p.global_y - p.size_y / 2 for p in rows),
                                            max(p.global_x + p.size_x / 2 for p in rows),
@@ -259,11 +383,12 @@ def _row_inward(pad, grid: Grid, d: str, home: str, others: Sequence[str], clear
     lat = (0, 1) if ax == 0 else (1, 0)                 # along the row
     half = max(pad.size_x, pad.size_y) / 2
     tin = (px + di[0] * half, py + di[1] * half)        # the pad's inner end
-    # (a ONE-ROW part, grid.out, TURNED FROM the source -- the face its lanes leave by, iw.face, not the row's own: no
+    # (a ONE-ROW part, grid.out, TURNED FROM the source -- iw.turned, turned_from: no
     # other row across it, its box the row's copper, whose middle is the row itself -- so the strip behind the row runs
     # into its body, `iw.columns` deep, the menu's clearance tests refusing what its other copper holds. A row facing
     # the source keeps the strip to its middle: its lanes meet its pins' outer ends)
-    mid = None if grid.out and iw.face != d else ((x0 + x1) / 2, (y0 + y1) / 2)[ax]
+    mid = None if grid.out and iw.turned else ((x0 + x1) / 2, (y0 + y1) / 2)[ax]
+    lo_l, hi_l = ((y0, y1) if ax == 0 else (x0, x1))    # the part's box along its rows
     reach = iw.via_size / 2 + iw.clearance              # a via's centre off the row's inner ends
     lane = iw.track / 2 + iw.clearance + 0.01           # a lateral leg's off them
     step = iw.via_size + iw.clearance
@@ -278,6 +403,11 @@ def _row_inward(pad, grid: Grid, d: str, home: str, others: Sequence[str], clear
             site = (tin[0] + di[0] * depth + lat[0] * dl, tin[1] + di[1] * depth + lat[1] * dl)
             if mid is not None and (site[ax] - mid) * di[ax] > 1e-9:
                 break                                   # (past the middle: the other row's half)
+            # (...and inside the part ALONG its rows too: a pad near a row's end had its site `spread` pitches along
+            # the row -- past the row's end, outside the part and past its own exit line, its run coming BACK to the
+            # exit: beside a ball array a millimetre off, a via among the array's stubs)
+            if not (lo_l - 1e-9 <= site[1 - ax] <= hi_l + 1e-9):
+                continue
             if k:
                 j = (tin[0] + di[0] * lane, tin[1] + di[1] * lane)
                 pts = [(px, py), j, (j[0] + lat[0] * dl, j[1] + lat[1] * dl), site]
@@ -360,6 +490,16 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
             return (x0 - hx - margin if dx < 0 else x1 + hx + margin, py)
         return (px, y0 - hy - margin if dy < 0 else y1 + hy + margin)
 
+    if through_pin(pad):
+        # a PLATED THROUGH-HOLE PIN (a pin header's): its barrel stands on every copper layer, so it takes no via --
+        # it leaves straight out along its own line, on each of the layers a run may take, by every face that is clear
+        for L in [home] + vlayers:
+            for d in DIRS:
+                e = edge(d)
+                if clear((px, py), e, L):
+                    out.append(Move(net, 'surface', d, L, e, 0, [((px, py), e, L)]))
+        return out
+
     if grid.row:
         # a ROW PART's pad has one way out: straight along its own length,
         # on its own layer, out of the face its row stands on -- between two
@@ -393,7 +533,7 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
             # ...and the pad a via fits in of a ONE-ROW part turned from the source (a socket's pins at the far end of
             # its body): the via IN it, the run on another layer along the pad's line out by the face toward the
             # source -- under its own pad, which no other net's lane needs
-            if (grid.out and row_inward.face != d and row_inward.via_size <= min(pad.size_x, pad.size_y)
+            if (grid.out and row_inward.turned and row_inward.via_size <= min(pad.size_x, pad.size_y)
                     and all(via_clear((px, py), lay) for lay in layers)):
                 ex = edge(row_inward.face)
                 e = (ex[0], py) if DIRS[row_inward.face][0] else (px, ex[1])

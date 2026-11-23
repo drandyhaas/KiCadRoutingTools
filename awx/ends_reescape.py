@@ -26,12 +26,19 @@ import source_realize as sr  # noqa: E402
 
 MARGIN = 0.05                # past the lane's clearance, as ends_nudge
 REACH = 0.6                  # the stretch past a tooth's exit that must stand clear (mm)
+RUN_OUT = 2.0                # the farthest a surface tooth's stub runs on past its exit to a via (mm)
+RUN_STEP = 0.05              # ...in steps of
 NEAR = 1.0                   # the farthest a tooth moves along its face (mm)
 TRIES = 4                    # the escapes realize is asked to lay, best first
 STRIP = 0.6                  # mm round the ball: the movable copper taken off for its menu where none clears
 
 args = [a for a in sys.argv[1:] if not a.startswith('--')]
 AVOID = next((a.split('=', 1)[1] for a in sys.argv[1:] if a.startswith('--avoid=')), None)
+# (--spare=LANE,..: the lanes repaired after this one, whose surface teeth's ways straight on a run-out keeps clear of
+# where it can -- the human's fan: the first stub's via laid beside the next one's way out shut it)
+SPARE = [n_ for a in sys.argv[1:] if a.startswith('--spare=') for n_ in a.split('=', 1)[1].split(',') if n_]
+# (--run-out-only: the run-out via alone, no other escape of the ball's menu -- whole_route's lead-in vias)
+RUN_OUT_ONLY = '--run-out-only' in sys.argv[1:]
 out, lane = args[0], args[1]
 bench = awx_settings.get('BENCH0') or awx_settings.req('BENCH')
 names = [n for n in awx_settings.req('NETS').split(',') if n]
@@ -108,9 +115,136 @@ for m in menu:
     if ok:
         cands.append(((m.layer != old['layer'], round(far, 2), m.vias, -d), m, d))
 cands.sort(key=lambda c: c[0])
+if RUN_OUT_ONLY:
+    cands = []
 for k, m, d in cands[:TRIES + 1]:
     print(f'  candidate {m!r} clear {d:.3f} key {k}')
+
+
+import copper_gates  # noqa: E402
+GATES = copper_gates.Gates(pcb)
+
+
+def gated(q, layer, via):
+    """True where the run's point q on `layer` (or, `via`, a via at q on every layer) stands clear of the outline,
+    every keep-out on its layer(s) and foreign filled copper (copper_gates)"""
+    if via:
+        return GATES.via_ok(q, te.VIA_SIZE, nid, te.CLEAR)
+    return GATES.track_ok(q, q, layer, te.TRACK, nid, te.CLEAR)
+
+
+def run_out():
+    """THE RUN-OUT VIA, where no escape of the ball's menu clears: the surface tooth's own stub run on past its exit to
+    a site a via stands clear at, within RUN_OUT -- straight on, or straight a while and then 45 degrees to either
+    side (a human's fan: the stubs of a face's edge balls a pitch apart, one's via standing beside the next one's way
+    straight on), the shortest that clears -- the run clear on its layer by the bar, the via on every copper layer by
+    a via's own, inside the board -- and the tooth that via, its lane's layer the plan's. A face's edge balls stub out
+    a pitch apart and leave a via no room on the exit line itself; a human's lanes off such a face leave their stubs
+    there and change layer a millimetre or two out, before the lane turns (a far face's lead-in round the source's
+    corner, whose run the solve cannot change on). ([the run's points, the tooth first and the site last], its
+    clearance) or None"""
+    if old['layer'] not in pcb.board_info.copper_layers:
+        return None
+    dx, dy = em.DIRS[old['direction']]
+    tx, ty = old['tooth']
+    need = te.VIA_SIZE / 2 + te.CLEAR + MARGIN
+    bb = pcb.board_info.board_bounds
+    edge = te.VIA_SIZE / 2 + 0.2
+    r2 = math.sqrt(0.5)
+    sides = [(0.0, 0.0), ((dx - dy) * r2, (dy + dx) * r2), ((dx + dy) * r2, (dy - dx) * r2)]
+    n_max = int(round(RUN_OUT / RUN_STEP))
+    for keep in (True, False):
+        got = _run_out(tx, ty, dx, dy, sides, n_max, need, bb, edge, rays if keep else ())
+        if got is not None:
+            return got
+    return None
+
+
+def _spare_rays():
+    """the ways straight on of the SPARE lanes' surface teeth (the sidecar's), RUN_OUT long: [(a, b)]"""
+    try:
+        side_ = json.load(open(os.path.splitext(bench)[0] + '.plan.json'))
+    except (OSError, ValueError):
+        return []
+    out_ = []
+    for n_ in SPARE:
+        if n_ == lane or n_ not in (side_.get('ends') or {}) or n_ not in (side_.get('tooth_dir') or {}):
+            continue
+        a_ = tuple(side_['ends'][n_][0])
+        d_ = side_['tooth_dir'][n_]
+        out_.append((a_, (a_[0] + d_[0] * RUN_OUT, a_[1] + d_[1] * RUN_OUT)))
+    return out_
+
+
+rays = _spare_rays()
+
+
+def _run_out(tx, ty, dx, dy, sides, n_max, need, bb, edge, keep):
+    """run_out's search, its run and via also kept clear of the ways `keep` ([(a, b)], a track's centreline each)"""
+    seen_ok = {}
+
+    def off_ways(q, room):
+        return all(seg_d(q, a_, b_) >= room + te.TRACK / 2 for a_, b_ in keep)
+
+    def ok_run(q):
+        k_ = (round(q[0], 4), round(q[1], 4))
+        if k_ not in seen_ok:
+            seen_ok[k_] = (foreign_d(q, old['layer'], nid) >= bar and off_ways(q, bar) and (not bb or (
+                bb[0] + edge <= q[0] <= bb[2] - edge and bb[1] + edge <= q[1] <= bb[3] - edge))
+                and gated(q, old['layer'], False))
+        return seen_ok[k_]
+    best = None
+    for a in range(0, n_max + 1):                        # the straight run's steps
+        knee = (tx + dx * a * RUN_STEP, ty + dy * a * RUN_STEP)
+        if a and not ok_run(knee):
+            break                                         # (straight on meets copper: no knee farther out)
+        for si, (ex, ey) in enumerate(sides):
+            if si == 0 and a == 0:
+                continue
+            for b in range(0 if si == 0 else 1, (1 if si == 0 else n_max - a + 1)):
+                q = (knee[0] + ex * b * RUN_STEP, knee[1] + ey * b * RUN_STEP)
+                if b and not ok_run(q):
+                    break
+                L = (a + b) * RUN_STEP
+                if best is not None and L >= best[0] - 1e-9:
+                    break
+                via_ = min(foreign_d(q, L_, nid) for L_ in pcb.board_info.copper_layers)
+                if via_ >= need and off_ways(q, need) and gated(q, None, True):
+                    pts = [(tx, ty)] + ([knee] if si and a else []) + [q]
+                    best = (L, pts, via_ - need + bar)
+                    break
+    return (best[1], best[2]) if best else None
+
+
 free = {}                             # (escape -> the nets outside the run whose escapes it frees, re-laid with it)
+if not cands:
+    ro_ = run_out()
+    if ro_ is not None:
+        pts_, d_ = ro_
+        site_ = pts_[-1]
+        from kicad_writer import add_tracks_and_vias_to_pcb
+        add_tracks_and_vias_to_pcb(
+            bench, out,
+            [{'start': tuple(p_), 'end': tuple(q_), 'width': te.TRACK, 'layer': old['layer'], 'net_id': nid}
+             for p_, q_ in zip(pts_, pts_[1:])],
+            [{'x': site_[0], 'y': site_[1], 'size': te.VIA_SIZE, 'drill': te.VIA_DRILL,
+              'layers': ['F.Cu', 'B.Cu'], 'net_id': nid}],
+            net_id_to_name={i: n.name for i, n in pcb.nets.items()})
+        side = json.load(open(os.path.splitext(bench)[0] + '.plan.json'))
+        side['ends'][lane][0] = [round(site_[0], 4), round(site_[1], 4)]
+        json.dump(side, open(os.path.splitext(out)[0] + '.plan.json', 'w'), indent=1)
+        for ext in ('.kicad_pro', '.kicad_dru'):
+            s_ = os.path.splitext(bench)[0] + ext
+            if os.path.isfile(s_) and not os.path.isfile(os.path.splitext(out)[0] + ext):
+                shutil.copy(s_, os.path.splitext(out)[0] + ext)
+        run_ = sum(math.hypot(q_[0] - p_[0], q_[1] - p_[1]) for p_, q_ in zip(pts_, pts_[1:]))
+        print(f'ends_reescape: {lane} re-escaped: tooth {old["tooth"]} {old["layer"]} {old["direction"]} -> its stub '
+              f'run on {run_:.2f} mm to a via at ({site_[0]:.3f}, {site_[1]:.3f}) (clear {d_:.3f})')
+        sys.exit(0)
+    print(f'  no run-out via within {RUN_OUT} mm of the tooth')
+    if RUN_OUT_ONLY:
+        print('ends_reescape: no run-out via laid')
+        sys.exit(2)
 if not cands:
     # NONE CLEARS: an escape whose way only another net's ESCAPE stands in -- a net outside the run, its track or via
     # unlocked, fanned and not yet routed -- is laid with that net's ball escaped again in the same call

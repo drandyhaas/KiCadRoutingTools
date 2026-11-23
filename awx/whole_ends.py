@@ -3761,7 +3761,7 @@ def _plane_ways(st, lanes, T, B, cur, ends, t0):
                  for p in foot.pads if p.net_id and p.net_name and sn(p.net_name) in drop_s}
         if not items:
             continue
-        grid = em.grid_of(foot)
+        grid = em.grid_of(foot, pcb0)
         sz = je._sizes(pcb0, foot)
         # (every pad as it stands: the bus's realize lays round them, source_realize, and its walls are graded so)
         cache = {}

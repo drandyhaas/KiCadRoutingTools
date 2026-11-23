@@ -121,7 +121,7 @@ def pair_nets(pcb, src, dst):
                        if pcb.footprints.get(p.component_ref)} <= {src, dst})
 
 
-def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_method='auto'):
+def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_method='auto', dests=None):
     """fanout_from_plan.fanout_once's engine call, on the SOURCE array.
 
     `diff_pairs` (2026-09-21): the pair BASE names among `names` (pairs.
@@ -151,8 +151,9 @@ def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_m
         pcb.footprints[src], pcb, net_filter=engine_filter(names, pcb),
         layers=list(layers) if layers else route_layers.stacked(pcb.board_info.copper_layers),
         track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE,
-        via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method=escape_method,
+        via_drill=te.VIA_DRILL, exit_margin=sr.exit_margin_of(pcb, src, dests), escape_method=escape_method,
         plane_drop='off', net_clearances={}, **extra)   # class-blind, as the plan (#1529)
+    sr.at_fan_track(tracks)
     if tracks:
         add_tracks_and_vias_to_pcb(
             board, out, tracks, vias_add, vias_rm,

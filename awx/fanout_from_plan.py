@@ -24,6 +24,7 @@ import io
 import json
 import os
 import awx_settings
+import collections
 import shutil
 import subprocess
 import sys
@@ -36,6 +37,7 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 from kicad_writer import add_tracks_and_vias_to_pcb  # noqa: E402
 import ship_vias  # noqa: E402  a via in a pad declares Type VII (#962)
 from bga_fanout import generate_bga_fanout  # noqa: E402
+import copper_gates  # noqa: E402
 import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 import detect_buses as db  # noqa: E402
@@ -141,6 +143,10 @@ def dedupe_climbs(moves):
     return [m for m in moves if not getattr(m, 'climb', 0) or id(m) in keep]
 
 
+# each destination's exit margin under the plan in hand (plan_state: escape_moves.reaches), read by the berths' engine
+REACH = {}
+
+
 def via_escapes(moves, end):
     """`moves` (at `end`, 'src' or 'dest') less the surface escapes under ESCAPE_VIAS (route_layers.escape_vias) -- all
     of them, where none is left"""
@@ -204,14 +210,14 @@ def plan_state(pcb, names, banned=frozenset()):
 
     key_of_id = {i: k for k, (i, _n) in byname.items()}
 
-    def menu(pad, grid, nid, climb=0, street=0, street_dirs=None, run_layers=(), row_inward=None):
+    def menu(pad, grid, nid, climb=0, street=0, street_dirs=None, run_layers=(), row_inward=None, margin=0.0):
         # the straight escape along the ball's own line too (escape_moves `straight`)
         return em.enumerate_moves(
             pad, grid, route_layers.escape_layers(pcb.board_info.copper_layers),
             lambda p, q, L, _n=nid: obs(_n, L).seg_clear(p, q),
             lambda p, L, _n=nid: not any((obs(_n, L_).point_violation(
                 p, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0] for L_ in (via_layers or (L,))),
-            climb=climb, straight=True,
+            margin=margin, climb=climb, straight=True,
             street=street, street_pitch=pe.sm._STACK_PITCH + 1e-4, street_dirs=street_dirs, net=key_of_id.get(nid),
             run_layers=run_layers, row_inward=row_inward)
     # the inner signal layers a via's run may take, the routing layers no plane fills: a source's (SRC_RUN_INNER), a
@@ -237,16 +243,26 @@ def plan_state(pcb, names, banned=frozenset()):
             print(f'  {nm}: no via {what} move on the outer layers -- {len(more)} with the run on an inner layer offered')
         return moves + more
     dmenu, launch, src_pad, dst_pad = {}, {}, {}, {}
+    _gates = copper_gates.Gates(pcb)
     dref = ends[names[0]][2]
+    # (each destination's exit margin: shorter where it stands close in front of the source -- escape_moves.reaches;
+    # the source the part off the destinations with the most of the run's pads)
+    _drefs = {ends[n][2] for n in names} | set(te.dest_refs(awx_settings.get('DEST') or ''))
+    _sc0 = collections.Counter(p_.component_ref for n in names for p_ in byname[n][1].pads
+                               if p_.component_ref not in _drefs)
+    REACH.clear()
+    if _sc0:
+        REACH.update(em.reaches(pcb.footprints[_sc0.most_common(1)[0][0]],
+                                [pcb.footprints[r_] for r_ in sorted(_drefs) if r_ in pcb.footprints])[1])
     # (DEST naming several parts, one source and several ends: ONE destination, the GROUP of them -- whole_frame.Group;
     # the first is the plan's destination array, each net's berth laid at its own part)
     _dl = te.dest_refs(awx_settings.get('DEST') or '')
     if len(_dl) > 1:
         dref = _dl[0]
-    dgrid = em.grid_of(pcb.footprints[dref])
+    dgrid = em.grid_of(pcb.footprints[dref], pcb)
     dboxes = dgrid.bbox
     _dests = [dref] + [r_ for r_ in _dl[1:] if r_ != dref] if len(_dl) > 1 else [dref]
-    _dgrid_of = {r_: (dgrid if r_ == dref else em.grid_of(pcb.footprints[r_])) for r_ in _dests}
+    _dgrid_of = {r_: (dgrid if r_ == dref else em.grid_of(pcb.footprints[r_], pcb)) for r_ in _dests}
     # the destination's FAR face, the one facing away from the source: under the whole route's ends a far-face move
     # is offered only to a ball in the array's half beside that face -- in ten fanouts over K15-K41 the ends model
     # chose 3 of 341 berths there, one net one column from the far face (K41 SA11), from 518 of 2269 menu moves
@@ -272,18 +288,36 @@ def plan_state(pcb, names, banned=frozenset()):
         nid, net = byname[nm]
         fp = pcb.footprints[ends[nm][2]]
         bx, by = ends[nm][1]
-        pad = min(fp.pads, key=lambda p: (p.global_x - bx) * (p.global_x - bx)
-                  + (p.global_y - by) * (p.global_y - by))
+        # (the net's OWN pad there, the nearest of them: a two-sided edge connector's fingers stand on each other, one
+        # on each face, and the nearest pad of any net was the other face's -- another net's, its menu empty)
+        pad = min([p for p in fp.pads if p.net_id == nid] or fp.pads,
+                  key=lambda p: (p.global_x - bx) * (p.global_x - bx) + (p.global_y - by) * (p.global_y - by))
         dst_pad[nm] = pad
         far, toward, _fax, _b, _c = faces_of(ends[nm][2])
         # (the ends: a row part's pad also berths on a via inside the part, its lane out by the face toward the
         # source)
         iw_ = em.Inward(toward, te.VIA_SIZE, sr.FAN_CLEAR, sr.FAN_TRACK, inner_runs, along=DST_ALONG,
-                        along_pitch=te.MINP) \
+                        along_pitch=te.MINP, turned=em.turned_from(fp, _sc, pcb)) \
             if em.row_part(fp) else None
-        def dst_moves(run_layers=()):
-            ms_ = dedupe_climbs(menu(pad, em.grid_of(fp), nid, climb=DST_CLIMB, street=DST_STREET,
-                                     street_dirs=(toward,), run_layers=run_layers, row_inward=iw_))
+        # (a plated through-hole pin stands on every layer: its escapes on the inner signal layers too)
+        def dst_moves(run_layers=inner_runs if em.through_pin(pad) else ()):
+            ms_ = dedupe_climbs(menu(pad, em.grid_of(fp, pcb), nid, climb=DST_CLIMB, street=DST_STREET,
+                                     street_dirs=(toward,), run_layers=run_layers, row_inward=iw_,
+                                     margin=REACH.get(fp.reference, 0.0)))
+            # (a berth the fanout lays itself -- a row part's, a pin header's: row_berths -- not offered off the
+            # board's edge clearance, in a keep-out or on foreign filled copper, where another is: copper_gates. A pin
+            # header along the board's edge had a stub out of its far side planned, laid past the outline)
+            if iw_ is not None or em.through_pin(pad):
+                ms_ = [m for m in ms_ if _gates.move_ok(m, nid, sr.FAN_TRACK, te.VIA_SIZE, sr.FAN_CLEAR)] or ms_
+            if em.through_pin(pad):
+                # (a plated through-hole pin leaves by any face on any layer: its stub out of a face TURNED FROM the
+                # source -- the source clearly behind it, escape_moves.TURNED_COS, the test a one-row part's row is
+                # read by; a header diagonal to its source has two -- only where it has no other. A one-row header's
+                # every pin stands on its part's middle line, each was offered its far face, and the lanes to those the
+                # ends chose there wrapped round the header's end)
+                vx_, vy_ = _sc[0] - pad.global_x, _sc[1] - pad.global_y
+                lim_ = em.TURNED_COS * math.hypot(vx_, vy_)
+                return [m for m in ms_ if em.DIRS[m.direction][0] * vx_ + em.DIRS[m.direction][1] * vy_ >= lim_] or ms_
             return ms_ if far_half(pad) else [m for m in ms_ if m.direction != far]
         moves = hemmed(nm, dst_moves(), dst_moves, 'berth')
         dmenu[nm] = unbanned_or_all(nm, moves, banned, 'berth')
@@ -363,7 +397,7 @@ def plan_state(pcb, names, banned=frozenset()):
             refs[src_pad[nm].component_ref] = refs.get(
                 src_pad[nm].component_ref, 0) + 1
     sref = max(refs, key=refs.get)
-    sgrid = em.grid_of(pcb.footprints[sref])
+    sgrid = em.grid_of(pcb.footprints[sref], pcb)
     smenu = {}
     # a tooth move to the source's FAR face (the one facing away from the destination) only from a ball in the array's
     # half beside it, as a side face's (side_half, below) -- the whole route takes such a lane round the source on a
@@ -1499,18 +1533,22 @@ def row_berths(pcb, dref, targets, choice, dst_pad, byname):
     """(tracks, vias, removed vias, failed nets) for the berths at a ROW PART (escape_moves.row_part): each target's
     planned move laid on its own legs at the fanout's track; a target the plan left unplaced takes its pad's one
     escape, straight out of its row (escape_moves), where its row's face is clear of everything but the run's nets"""
-    grid = em.grid_of(pcb.footprints[dref])
+    grid = em.grid_of(pcb.footprints[dref], pcb)
     kids = {byname[nm][0] for nm in targets}
     tracks, vias, failed = [], [], []
+    gates = copper_gates.Gates(pcb)
+    lay_ok = lambda m_, nid_: gates.move_ok(m_, nid_, sr.FAN_TRACK, te.VIA_SIZE, sr.FAN_CLEAR)  # noqa: E731
     for nm in targets:
         nid = byname[nm][0]
         m = choice.get(nm)
         if m is None and nm in dst_pad:
             own = em.enumerate_moves(dst_pad[nm], grid, route_layers.escape_layers(pcb.board_info.copper_layers),
                                      lambda p, q, L, _n=nid: te.build_obstacles(pcb, _n, kids, L).seg_clear(p, q),
-                                     net=nm)
-            m = own[0] if own else None
-        if m is None:
+                                     margin=REACH.get(dref, 0.0), net=nm)
+            m = next((o_ for o_ in own if lay_ok(o_, nid)), None)
+        # (...and a planned move off the board's edge clearance, in a keep-out or on foreign filled copper is not laid:
+        # refused, as the array engine refuses one, for the plan to ban and choose again -- copper_gates)
+        if m is None or not lay_ok(m, nid):
             failed.append(nm)
             continue
         tracks += [{'start': tuple(a), 'end': tuple(b), 'width': sr.FAN_TRACK, 'layer': L, 'net_id': nid}
@@ -1560,9 +1598,12 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board):
         tg_ = [nm for nm in targets if dof(nm) == r_]
         if not tg_ and r_ != dref:
             continue
-        if em.row_part(pcb.footprints[r_]):
+        if em.row_part(pcb.footprints[r_]) or (tg_ and all(nm in dst_pad and em.through_pin(dst_pad[nm])
+                                                           for nm in tg_)):
             # a ROW PART (a QFN): each berth laid as planned, on its own legs -- a pad's one escape, straight out of
-            # its row (escape_moves); the array engine follows a plan over a ball grid, and on zynq U4 laid 1 of 8
+            # its row (escape_moves); the array engine follows a plan over a ball grid, and on zynq U4 laid 1 of 8.
+            # A part of plated THROUGH-HOLE PINS (a pin header) the same: the array engine takes no such part, and
+            # its berths were left unlaid, every lane ending short of its pin
             got_ = row_berths(pcb, r_, tg_, choice, dst_pad, byname)
         else:
             got_ = generate_bga_fanout(
@@ -1571,6 +1612,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board):
                 track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
                 exit_margin=0.5, escape_method='underpad', plane_drop='off',
                 escape_dir_hints=hints, net_clearances={})   # class-blind, as the plan (#1529)
+            sr.at_fan_track(got_[0])
         for acc_, add_ in zip((tracks, vias_add, vias_rm, failed), got_):
             acc_ += list(add_)
     # a PAIR's berths laid together or not at all, as source_realize's teeth: a leg the engine could not lay leaves its

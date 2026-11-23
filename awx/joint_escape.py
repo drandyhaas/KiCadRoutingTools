@@ -954,7 +954,9 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
     import fanout_from_plan as fp
     t0 = time.time()
     foot = pcb.footprints[ref]
-    grid = em.grid_of(foot)
+    import copper_gates
+    _gates = copper_gates.Gates(pcb)
+    grid = em.grid_of(foot, pcb)
     if climb is None:
         climb = max(len(grid.xs), len(grid.ys))
     sn = namer(pcb)
@@ -1061,6 +1063,8 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
         key = f'{nm}#{p.pad_number}'
         if only is not None and key not in only:
             continue
+        if nm in drop_s and em.through_pin(p):
+            continue                # (a plated through-hole pin of a plane's net: its barrel meets the plane, no drop)
         items[key] = (nm, p)
         balls[key] = (p.global_x, p.global_y)
         if nm in drop_s:
@@ -1115,6 +1119,13 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
             moves = kept
         if snpc > 0:
             moves = [m for m in moves if m.site is None or off_pads(p, m.site, sz['vr'])]
+        if grid.row or em.through_pin(p):
+            # (a row part's or a pin header's escape, laid as the plan draws it: not offered off the board's edge
+            # clearance, in a keep-out or on foreign filled copper, where another is -- copper_gates, as the bus's own
+            # fanout. A header along the board's edge had each pin's stub out of its far side offered on every layer:
+            # laid past the outline, one layer's ruled out a lap, the model ended on the last)
+            ok_ = [m for m in moves if _gates.move_ok(m, p.net_id, sz['tw'], 2 * sz['vr'], sz['cl'])]
+            moves = ok_ or moves
         if not esc:
             # (one climb per exit row -- never across an escape field's SITES: which site is the plan's choice)
             moves = fp.dedupe_climbs(moves)

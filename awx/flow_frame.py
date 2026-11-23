@@ -240,6 +240,9 @@ from copy_board import SIBLING_EXTS as _SIBLING_EXTS  # noqa: E402
 SIBLINGS = tuple(_SIBLING_EXTS) + ('.ladder.txt',)
 
 
+ART_TOL = 0.05              # a drawn copper shape's box, turned, against its box on the turned board (mm)
+
+
 def turn_file(src, dst, k, cx, cy):
     """Write `src` turned by k quarter turns about (cx, cy) to `dst`,
     its siblings copied, and verify the pads, segments and vias against
@@ -289,11 +292,32 @@ def turn_file(src, dst, k, cx, cy):
                 not near(rot(*q0), q1) for q0, q1 in zip(z0.polygon, z1.polygon)):
             bad.append(f'zone {z0.net_name or z0.net_id} on {z0.layer}')
             break
-    for s0, s1 in zip(pcb0.segments, pcb1.segments):
+    # (the TRACKS one by one; a drawn copper shape's outline -- a net's art, a footprint's tab: the parser's chords of
+    # it, from wherever the shape starts -- by its box on each layer and net: the same shape turned is the same copper
+    # under other chords, and read chord by chord a board with a net's copper art failed every turn but none)
+    tr0 = [s_ for s_ in pcb0.segments if not getattr(s_, 'graphic', False)]
+    tr1 = [s_ for s_ in pcb1.segments if not getattr(s_, 'graphic', False)]
+    if len(tr0) != len(tr1):
+        bad.append('track counts differ')
+    for s0, s1 in zip(tr0, tr1):
         if not near(rot(s0.start_x, s0.start_y), (s1.start_x, s1.start_y)) \
                 or not near(rot(s0.end_x, s0.end_y), (s1.end_x, s1.end_y)):
             bad.append('segment')
             break
+
+    def art_boxes(pcb, turned):
+        out = {}
+        for s_ in pcb.segments:
+            if not getattr(s_, 'graphic', False):
+                continue
+            for x_, y_ in ((s_.start_x, s_.start_y), (s_.end_x, s_.end_y)):
+                x_, y_ = rot(x_, y_) if turned else (x_, y_)
+                b_ = out.setdefault((s_.layer, s_.net_id), [x_, y_, x_, y_])
+                b_[0], b_[1], b_[2], b_[3] = min(b_[0], x_), min(b_[1], y_), max(b_[2], x_), max(b_[3], y_)
+        return out
+    a0, a1 = art_boxes(pcb0, True), art_boxes(pcb1, False)
+    if set(a0) != set(a1) or any(max(abs(u_ - v_) for u_, v_ in zip(a0[k_], a1[k_])) > ART_TOL for k_ in a0):
+        bad.append('drawn copper')
     for v0, v1 in zip(pcb0.vias, pcb1.vias):
         if not near(rot(v0.x, v0.y), (v1.x, v1.y)):
             bad.append('via')

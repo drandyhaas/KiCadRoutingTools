@@ -637,13 +637,10 @@ def group_of_one(pcb, dests, src=None):
     if min(max(p.global_x for p in pads) - min(p.global_x for p in pads),
            max(p.global_y for p in pads) - min(p.global_y for p in pads)) > reach:
         return True
-    out = em.grid_of(fp).out
-    if out is None or src not in pcb.footprints or not pcb.footprints[src].pads:
+    if src not in pcb.footprints or not pcb.footprints[src].pads:
         return False
     sp = pcb.footprints[src].pads
-    sx, sy = sum(p.global_x for p in sp) / len(sp), sum(p.global_y for p in sp) / len(sp)
-    rx, ry = sum(p.global_x for p in pads) / len(pads), sum(p.global_y for p in pads) / len(pads)
-    return (sx - rx) * em.DIRS[out][0] + (sy - ry) * em.DIRS[out][1] < 0
+    return em.turned_from(fp, (sum(p.global_x for p in sp) / len(sp), sum(p.global_y for p in sp) / len(sp)), pcb)
 
 
 class Group:

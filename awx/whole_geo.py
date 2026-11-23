@@ -497,6 +497,11 @@ for n in M:
     s0, o0 = Fr.st[n]
     f0 = face_of(Fr.tooth[n], BOX[0])
     hold0 = (hold_pair(ctx.pair_ends[n][0]) if n in prs else HOLD) if f0 in ('E', 'W') else 0
+    # (a trunk lane's last column: its landing's -- never short of the column after its tooth's. A berth that stands
+    # BEHIND its tooth along the trunk -- a wide header's near pin, the trunk run aslant to the header's middle -- gave
+    # the lane no column at all and the geometry nothing to draw: it takes one step, from its tooth's offset to its
+    # berth's, the join its two ends are)
+    _k1 = lambda s0_, s1_: max(int(round(s1_ / G)), int(round(s0_ / G)) + 1)  # noqa: E731
     if Fr.start[n] != Fr.tooth[n]:
         # a pair STARTED at the end of its end run out of a side-face tooth (whole_frame) leaves it along the trunk,
         # held over its turn's run and the length the audit reads a turn on, as a ring pair arrives at its landing
@@ -511,9 +516,12 @@ for n in M:
         # source's balls (K28 SCKE0)
         hk_, oh_ = HK[cls[n]], Fr.o_h[n]
         dh_ = abs(oh_ - ref(hk_))
-        ref = (lambda s, r=ref, a=max(hk_ - dh_, s0), b=hk_, oh=oh_: r(s) if s <= a else float(np.interp(s, [a, b], [r(a), oh])))
-        PIECE[('T', n)] = dict(k0=int(round(s0 / G)), k1=int(round(HK[cls[n]] / G)), o0=o0, o1=None, hold0=hold0, hold1=0,
-                               ex0=max(hold0 + 1, EXC), ex1=0, ref=ref)
+        # (a tooth that ends AT or past its ring's handoff -- a destination against its source's exit line -- has its
+        # tooth's one column for its trunk: read to the handoff alone it had no column, and nothing to join its ring to)
+        ref = (lambda s, r=ref, a=max(hk_ - dh_, s0), b=max(hk_, s0 + 1e-9), oh=oh_:
+               r(s) if s <= a else float(np.interp(s, [a, max(b, a + 1e-9)], [r(a), oh])))
+        PIECE[('T', n)] = dict(k0=int(round(s0 / G)), k1=max(int(round(HK[cls[n]] / G)), int(round(s0 / G))),
+                               o0=o0, o1=None, hold0=hold0, hold1=0, ex0=max(hold0 + 1, EXC), ex1=0, ref=ref)
         sp = ring_sp[cls[n]]
         o_h = Fr.o_h[n]                                         # its offset on the arrival line (whole_frame: the order)
         sb0, ob0 = sp.project_pt(Fr.spine.xy(HK[cls[n]], o_h))
@@ -545,13 +553,13 @@ for n in M:
         # turned there
         s1, o1 = Fr.spine.project_pt(Fr.land[n])
         hold1 = max(HOLD, int(math.ceil((TURN_RUN + TW + CL) / G)) + 1)
-        PIECE[('T', n)] = dict(k0=int(round(s0 / G)), k1=int(round(s1 / G)), o0=o0, o1=o1, hold0=hold0, hold1=hold1,
+        PIECE[('T', n)] = dict(k0=int(round(s0 / G)), k1=_k1(s0, s1), o0=o0, o1=o1, hold0=hold0, hold1=hold1,
                                ex0=max(hold0 + 1, EXC), ex1=max(hold1 + 1, EXC), ref=ref)
     else:
         s1, o1 = Fr.se[n]
         f1 = face_of(bend_xy[n], Fr.DBs[Fr.dest_of[n]])
         hold1 = (hold_pair(ctx.pair_ends[n][1]) if n in prs else HOLD) if f1 in ('E', 'W') else 0
-        PIECE[('T', n)] = dict(k0=int(round(s0 / G)), k1=int(round(s1 / G)), o0=o0, o1=o1, hold0=hold0, hold1=hold1,
+        PIECE[('T', n)] = dict(k0=int(round(s0 / G)), k1=_k1(s0, s1), o0=o0, o1=o1, hold0=hold0, hold1=hold1,
                                ex0=max(hold0 + 1, EXC), ex1=max(hold1 + 1, EXC), ref=ref)
 
 
@@ -870,7 +878,9 @@ def build_and_solve(sides, prev=None):
     # terminals, holds, slope cap, travel, bends
     for (f, n), v in PIECE.items():
         for k, o_ in ((v['k0'], v['o0']), (v['k1'], v['o1'])):
-            if o_ is not None:
+            # (a piece with no column of its own -- a ring lane whose tooth ends at its ring's handoff, a destination
+            # against its source's exit line: nothing of it to hold on the trunk)
+            if o_ is not None and (f, n, k) in var:
                 bounds[var[(f, n, k)]] = (o_, o_)
         for i in range(1, v['hold0'] + 1):
             if v['o0'] is not None and (f, n, v['k0'] + i) in var:

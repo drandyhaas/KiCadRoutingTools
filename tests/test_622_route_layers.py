@@ -92,6 +92,16 @@ fork = NS(segments=run1 + [seg(1.5, 0.4, 1.5, 1.5, 'B.Cu', 1)], vias=[v1], footp
 check(relayer.run_to_via(fork, 1, (3.0, 0.4), 'B.Cu') is None, 'a fork: None')
 short = NS(segments=run1, vias=[], footprints={})
 check(relayer.run_to_via(short, 1, (3.0, 0.4), 'B.Cu') is None, 'no via at its end: None')
+# (a plated through-hole pin is a barrel as a via is: the run back to it found, the barrel the pin; not an SMD pad)
+pin = pad(0.4, 0.4, 1, layers=('*.Cu',), size=1.7, kind='thru_hole')
+pin.drill = 1.0
+pinned = NS(segments=run1, vias=[], footprints={'J1': NS(pads=[pin])}, nets={1: NS(pads=[pin])})
+gotp = relayer.run_to_via(pinned, 1, (3.0, 0.4), 'B.Cu', with_via=True)
+check(gotp is not None and gotp[0] == run1[::-1] and getattr(gotp[1], 'pin', None) is pin,
+      'the run back to a through-hole pin of its net, the pin its barrel')
+smd = pad(0.4, 0.4, 1, size=1.7)
+check(relayer.run_to_via(NS(segments=run1, vias=[], footprints={}, nets={1: NS(pads=[smd])}), 1, (3.0, 0.4), 'B.Cu')
+      is None, 'an SMD pad is no barrel')
 
 # 4. what a run may move beside (clearance 0.09: a run and a 0.1 track clash nearer than 0.19 between centrelines)
 CL = 0.09

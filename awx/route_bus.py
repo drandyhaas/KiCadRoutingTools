@@ -1116,7 +1116,8 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         held_e, base_c = [], base
         while True:
             with contextlib.redirect_stdout(sys.stderr):
-                n_t, n_v, failed = mb.fanout_source(base_c, fanned, src, [n for n in names if n not in held_e])
+                n_t, n_v, failed = mb.fanout_source(base_c, fanned, src, [n for n in names if n not in held_e],
+                                                    dests=dests)
             more = hold_board_escapes(board, base_c, os.path.join(work, 'base_held.kicad_pcb'), pcb, src, failed,
                                       names, short) if failed else []
             if not more:
@@ -2643,7 +2644,7 @@ def clear_row_escapes(board, ref, names, keep, work, log=print, zone=None):
     foot = pcb.footprints.get(ref)
     if foot is None or not em.row_part(foot):
         return []
-    grid = em.grid_of(foot)
+    grid = em.grid_of(foot, pcb)
     want = set(names)
     layers = route_layers.escape_layers(pcb.board_info.copper_layers)
     width = te.TRACK + 2 * max(0.0, te.CLEAR - te.SPEC_CLEARANCE)
@@ -2959,7 +2960,7 @@ def attach_pulls(path, held, refs, log=print):
     txt = open(path, encoding='utf-8').read()
     with contextlib.redirect_stdout(sys.stderr):
         pcb0 = parse_kicad_pcb(path)
-    grids = {r_: em.grid_of(pcb0.footprints[r_]) for r_ in refs if r_ in pcb0.footprints}
+    grids = {r_: em.grid_of(pcb0.footprints[r_], pcb0) for r_ in refs if r_ in pcb0.footprints}
     lims = {r_: ATTACH_PITCHES * max(g_.pitch_x, g_.pitch_y) for r_, g_ in grids.items()}
     near = []
     for h in held:

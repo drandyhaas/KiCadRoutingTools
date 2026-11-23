@@ -28,13 +28,28 @@ TOL = 1e-3                  # a stub's end, a segment's end and a via's centre: 
 SLACK = 0.01                # (clashes) under the rule by more than this: the fanout's own grid lays a hair under it
 
 
+def barrels(pcb, nid, vias=None):
+    """net `nid`'s BARRELS, what joins its copper on every layer where it stands: its vias (`vias`, else the board's)
+    and its plated through-hole PINS (a pin header's) -- each a thing with x, y and size, a pin's its pad's lesser
+    side. A lane leaves a pin on any layer as it leaves a via: a stub that runs back to one is a via end's run"""
+    import types
+    from kicad_parser import pad_is_plated_through
+    out = [v for v in (pcb.vias if vias is None else vias) if v.net_id == nid]
+    net = (getattr(pcb, 'nets', None) or {}).get(nid)        # (a board with no net table: its vias alone)
+    for p in (net.pads if net is not None else ()):
+        if pad_is_plated_through(p):
+            out.append(types.SimpleNamespace(x=p.global_x, y=p.global_y, size=min(p.size_x, p.size_y), net_id=nid,
+                                             pin=p))
+    return out
+
+
 def run_to_via(pcb, nid, end_pt, layer, with_via=False):
-    """the segments of net `nid` on `layer` from `end_pt` back along the stub to the first of its vias -- a chain
-    through their shared ends, each step one segment on -- or None where the chain forks or ends short of a via
-    (`with_via`: (the segments, the via), or None)"""
+    """the segments of net `nid` on `layer` from `end_pt` back along the stub to the first of its barrels (its vias,
+    its through-hole pins: barrels) -- a chain through their shared ends, each step one segment on -- or None where the
+    chain forks or ends short of one (`with_via`: (the segments, the barrel), or None)"""
     segs = [s for s in pcb.segments if s.net_id == nid and s.layer == layer]
     # (a via reached anywhere in its copper: a via in a pad is clamped off the stub's line -- the zynq's U5, 25 um)
-    vias = [v for v in pcb.vias if v.net_id == nid]
+    vias = barrels(pcb, nid)
     near = lambda a, b: math.hypot(a[0] - b[0], a[1] - b[1]) < TOL
     out, cur, used = [], (float(end_pt[0]), float(end_pt[1])), set()
     for _ in range(len(segs) + 1):

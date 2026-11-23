@@ -205,6 +205,8 @@ def walls(ctx, Fr, LNAME, refs, entry, end, ends, trk, clr, via, pitch, band, lo
             free[hw[n]] = Free(fixed, NL, win, bar + hw[n], trk / 2 + hw[n])
         F = free[hw[n]]
         R = np.asarray(refs[n], float)
+        if R.ndim != 2 or len(R) < 2:
+            continue                        # (a lane with no stretch of the frame of its own: no line to wall)
         us, xy = R[:, 0], R[:, 1:3]
         ins = bar + hw[n]                   # the lane's own bar: how far inside a free place copper may begin
         reach, step = 3 * ins, 0.4 * ctx.cfg.grid_step

@@ -2094,7 +2094,9 @@ def repair_layers(d, crowded_f, env, nets, say):
             say(f"  no plan: {lane}'s tooth layer cannot hold -- not a single lane's tooth here, left to the next round")
             continue
         out_ = os.path.join(d, f'fo_layer{k}.kicad_pcb')
-        rc_ = run(['ends_reescape.py', out_, lane, f'--avoid={tl[lane]}'], {**env, 'BENCH0': cur},
+        rest_ = [l_ for l_ in lanes[k + 1:] if l_ in tl and l_ in nets]
+        rc_ = run(['ends_reescape.py', out_, lane, f'--avoid={tl[lane]}']
+                  + ([f'--spare={",".join(rest_)}'] if rest_ else []), {**env, 'BENCH0': cur},
                   log_path=os.path.join(d, f'layer{k}.log'), own_process=True)[0]
         got = grep(os.path.join(d, f'layer{k}.log'), r'^ends_reescape: .*(re-escaped|no escape|NO |laid)')
         say(f"  no plan: {lane}'s tooth on {tl[lane]} cannot hold its layer -- "
@@ -2103,6 +2105,100 @@ def repair_layers(d, crowded_f, env, nets, say):
             cur = out_
             moved.append(lane)
     return cur if moved else None
+
+
+def repair_berths(d, crowded_f, env, nets, say):
+    """THE BACKUP for a solve with NO PLAN whose rules core names BERTHS that cannot hold their layer ('berthlay',
+    whole_solve's no-plan diagnosis): each such single lane's berth at a ROW PART given a via in its pad
+    (ends_padvia), at the first place along the pad a via clears -- the berth that via, its layer the plan's. A pin's
+    own way is its stub out of the row, and a via in a pad must be filled, so this is asked only after the solve found
+    no plan with the berths it had. The repaired bench, or None when none was laid"""
+    try:
+        rules = json.load(open(crowded_f)).get('rules') or []
+    except (OSError, ValueError):
+        return None
+    lanes = sorted({l_ for l_, f_ in rules if f_ == 'berthlay'})
+    cur = env.get('BENCH0') or env['BENCH']
+    moved = []
+    for k, lane in enumerate(lanes):
+        if lane not in nets:
+            say(f"  no plan: {lane}'s berth layer cannot hold -- not a single lane's berth here")
+            continue
+        out_ = os.path.join(d, f'fo_pad{k}.kicad_pcb')
+        rc_ = run(['ends_padvia.py', out_, lane], {**env, 'BENCH0': cur}, log_path=os.path.join(d, f'pad{k}.log'),
+                  own_process=True)[0]
+        got = grep(os.path.join(d, f'pad{k}.log'), r'^ends_padvia: ')
+        say(f"  no plan: {lane}'s berth cannot hold its layer -- " + (got[-1].split(': ', 1)[1][:170] if got
+                                                                       else f'exit {rc_}'))
+        if rc_ == 0 and os.path.isfile(out_):
+            cur = out_
+            moved.append(lane)
+    return cur if moved else None
+
+
+def leadin_vias(d, bench, env, singles, say, tag='lead', backup=False):
+    """THE LEAD-IN VIAS, before a solve: a single lane whose tooth is a SURFACE stub on the source's FAR face -- leaving
+    the array away from its destination, the lane run round the source's corner on a lead-in the solve has no change
+    on -- and whose berth is a surface escape on ANOTHER layer, so the lane changes layer somewhere whatever its plan:
+    that change on its lead-in, a via where its stub runs on clear of everything (ends_reescape --run-out-only, the
+    lanes still to come kept clear of where it can), the tooth that via and its layer the plan's. A human's lanes off a
+    far face change so, a millimetre or two out, before they turn. Laid before every solve that reads the bench -- a
+    round's, the last resort's -- so no plan is asked without it. The bench with them, or None.
+    `backup`: every lane of `singles` whose tooth is a surface stub, on any face and whatever its berth -- the lanes a
+    round's lay left OPEN, planned again by themselves (mini_reroute): held to the layer its stub was drawn on, each
+    was left open; its stub run on to a via, its layer is the plan's"""
+    try:
+        side = json.load(open(os.path.splitext(bench)[0] + '.plan.json'))
+    except (OSError, ValueError):
+        return None
+    ends, tl = side.get('ends') or {}, side.get('tooth_layer') or {}
+    td, dl, bs = side.get('tooth_dir') or {}, side.get('dest_layer') or {}, side.get('berth_sig') or {}
+    lanes = [n for n in singles if n in ends and n in tl and n in td]
+    if not lanes:
+        return None
+    sys.path.insert(0, PYR)
+    from kicad_parser import parse_kicad_pcb
+    import relayer as _relayer
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        pcb = parse_kicad_pcb(bench)
+    nid = {n_.name.split('/')[-1]: i_ for i_, n_ in pcb.nets.items()}
+    # (the FAR face as the frame itself reads it -- whole_frame.build's tooth_face against the source's pad box grown to
+    # its teeth: the bench is in the bus's flow frame, its destination east, and a tooth whose escape leaves the box
+    # westward is a far-face lane with a lead-in round the corner. An angle to where the berths stand read a side
+    # face's teeth as far ones)
+    import whole_frame as _wf
+    dests_ = set((env.get('DEST') or '').split('+'))
+    refs_ = collections.Counter(p_.component_ref for n in lanes if nid.get(n.split('/')[-1]) in pcb.nets
+                                for p_ in pcb.nets[nid[n.split('/')[-1]]].pads if p_.component_ref not in dests_)
+    if not refs_:
+        return None
+    SB_ = _wf.grown(_wf.box_of(pcb, refs_.most_common(1)[0][0]), [tuple(v_[0]) for v_ in ends.values()])
+    cand = []
+    for n in lanes:
+        t_, d_ = ends[n][0], td[n]
+        if not backup and _wf.tooth_face(tuple(t_), SB_, d_) != 'W':
+            continue                                     # (not the far face)
+        if not backup and ((bs.get(n) or [None])[0] != 'surface' or dl.get(n) in (None, tl[n])):
+            continue                                     # (its berth no surface escape on another layer)
+        i_ = nid.get(n.split('/')[-1])
+        if i_ is None or any(v_.net_id == i_ and math.hypot(v_.x - t_[0], v_.y - t_[1]) < v_.size / 2 + 1e-6
+                             for v_ in pcb.vias) or _relayer.run_to_via(pcb, i_, t_, tl[n]):
+            continue                                     # (its tooth a via end already: on a via, or run back to one)
+        cand.append(n)
+    cur, laid = bench, []
+    for k, lane in enumerate(cand):
+        out_ = os.path.join(d, f'fo_{tag}{k}.kicad_pcb')
+        rest_ = cand[k + 1:]
+        rc_ = run(['ends_reescape.py', out_, lane, '--run-out-only']
+                  + ([f'--spare={",".join(rest_)}'] if rest_ else []), {**env, 'BENCH0': cur, 'BENCH': cur},
+                  log_path=os.path.join(d, f'{tag}{k}.log'), own_process=True)[0]
+        got = grep(os.path.join(d, f'{tag}{k}.log'), r'^ends_reescape: .*(re-escaped|no run-out)')
+        if rc_ == 0 and os.path.isfile(out_):
+            cur = out_
+            laid.append(lane)
+        say(f"  {'the backup via of a lane left open' if backup else 'lead-in via'}: {lane} -- "
+            + (got[-1].split(': ', 1)[1][:170] if got else f'exit {rc_}'))
+    return cur if laid else None
 
 
 BLOCKED_ENDS = 'blocked_ends.json'      # (the run's directory: the teeth no escape cleared -- put_blocked)
@@ -3130,6 +3226,12 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         if not bench:
             return None
         legs = lane_legs()
+        # (the lead-in vias on its bench as on a round's: a feedback round that laid its round's ends again, the
+        # bench taken here is its fanout's own, without them)
+        lead_ = leadin_vias(d0, bench, {**env, 'NETS': ','.join(nets_all), 'DEST': dest},
+                            [ln for ln, lg in legs.items() if lg == (ln,)], say, tag='lead_lr')
+        if lead_:
+            bench = lead_
         xs = (json.load(open(os.path.join(d0, 'fo.plan.json'))).get('ends_model') or {}).get('x') or {}
         named = [ln for ln in ((json.load(open(FB)).get('named') if os.path.isfile(FB) else None) or []) if ln in legs]
         named = list(dict.fromkeys([ln for ln in refused_ if ln in legs] + named))
@@ -3205,6 +3307,13 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         say(f"=== the mini re-route: {len(lanes_)} of {len(legs)} lane(s) left open, planned again by themselves on "
             f"the laid board: {', '.join(lanes_)}"
             + (f' ({left} piece(s) of their ends not clear, left out)' if left else ''))
+        # (THE BACKUP of a lane left open with its tooth held to the layer its surface stub was drawn on: the stub run
+        # on to a via -- leadin_vias, backup -- and its layer the plan's. A via the lane's plan did not ask, laid only
+        # where the round's own choices left the lane open)
+        lead_m = leadin_vias(dj, bench_m, {**env, 'NETS': ','.join(sub_m), 'DEST': dest},
+                             [ln for ln in lanes_ if legs[ln] == (ln,)], say, tag='lead_m', backup=True)
+        if lead_m:
+            bench_m = lead_m
         # (JOINT_QUIET: its loop's plans are of these lanes alone -- published as the bus's, the buses after it would
         # read them in place of its laid copper)
         env_ = {**env, 'BENCH': bench_m, 'NETS': ','.join(sub_m), 'DEST': dest, 'JOINT_QUIET': '1'}
@@ -3349,6 +3458,11 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
                     f"round")
                 continue
         bench = os.path.join(d, 'fo.kicad_pcb')
+        # (the lead-in vias of the far face's surface teeth, before the round's first solve: leadin_vias)
+        lead_ = leadin_vias(d, bench, {**env, 'NETS': ','.join(nets_all), 'DEST': dest},
+                            [ln for ln, lg in lane_legs().items() if lg == (ln,)], say)
+        if lead_:
+            bench = lead_
         # (the round's own edits, written in the board's frame and read in the round's: raw cuts for its first solve
         # and its loop, flips for the loop's geometry, areas -- its cuts among them -- for the solve and every audit)
         ecuts, eflips, eareas = round_edit_files(ed_, d, env, bench)
@@ -3419,6 +3533,22 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
                 jcuts = joint_sync({**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin}, r, solve, say)
             # (a re-solve with no diagnosis of its own -- its setup refused the repaired bench -- keeps the first's)
+            crowded = (json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []) or crowded
+            no_plan = not os.path.isfile(solve)
+        # ...and still NO PLAN, the core naming berths whose fixed layer cannot hold: the BACKUP, a via in each such
+        # berth's pad at a row part (repair_berths), and the solve asked again on that bench
+        rpb_ = repair_berths(d, crowded_f, env, sub, say) if no_plan and os.path.isfile(crowded_f) else None
+        if rpb_ is not None:
+            bench = rpb_
+            env['BENCH'] = bench
+            env.pop('BENCH0', None)
+            os.replace(crowded_f, crowded_f[:-len('.json')] + '1.json')
+            run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin, **ecut_env},
+                log_path=os.path.join(d, 'solve_berths.log'))
+            for ln in grep(os.path.join(d, 'solve_berths.log'), r'whole_solve:|workers:|crowded:|rules core:'):
+                say(ln[:200])
+            if env.get('JOINT_DIR') and env.get('JOINT_BUS'):
+                jcuts = joint_sync({**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1', **jfin}, r, solve, say)
             crowded = (json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []) or crowded
             no_plan = not os.path.isfile(solve)
         if no_plan and env.get('ENDS_ONLY'):
