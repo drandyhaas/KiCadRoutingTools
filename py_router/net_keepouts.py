@@ -353,7 +353,16 @@ def config_for_nets(pcb_data, net_ids: Iterable[int], config):
     """`config` for routing `net_ids` under the board's track bans
     (`derive_layer_bans`): a shallow copy whose `layer_costs` FORBID every
     layer a ban binding any of the nets names, or `config` itself when none
-    binds them (every board without such a rule: one getattr)."""
+    binds them (every board without such a rule: one getattr). A net with its
+    own via cost (`config.net_via_costs`, --via-cost-nets) routes at it; a
+    pair takes the higher of its members'."""
+    net_ids = tuple(net_ids)
+    costs = getattr(config, 'net_via_costs', None)
+    own = [costs[n] for n in net_ids if costs and n in costs]
+    if own and int(max(own)) != config.via_cost:
+        import copy
+        config = copy.copy(config)
+        config.via_cost = int(max(own))
     banned = banned_layers(pcb_data, net_ids)
     if not banned:
         return config

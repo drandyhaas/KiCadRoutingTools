@@ -2622,6 +2622,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 coplanar_nets: Optional[List[str]] = None,
                 power_nets: Optional[List[str]] = None,
                 power_nets_widths: Optional[List[float]] = None,
+                via_cost_nets: Optional[List[str]] = None,
+                via_cost_nets_costs: Optional[List[int]] = None,
                 # Net-filtered keep-outs (net_keepouts.py) a PARENT run resolved
                 # from its board's .kicad_dru, handed to a nested sub-run like
                 # layer_clearances (#498). Internal: no CLI flag, no GUI
@@ -3720,6 +3722,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"loaded grid_router binary predates via rungs (needs 0.22.0+); "
                   f"routing every net at {via_size:g}/{via_drill:g}. Run "
                   f"build_router.py --from-source.")
+    if via_cost_nets or via_cost_nets_costs:
+        if len(via_cost_nets or []) != len(via_cost_nets_costs or []):
+            raise ValueError(f"--via-cost-nets ({len(via_cost_nets or [])}) and "
+                             f"--via-cost-nets-costs ({len(via_cost_nets_costs or [])}) "
+                             f"must have the same length")
+        _vcn = identify_power_nets(pcb_data, list(via_cost_nets or []),
+                                   [int(c) for c in (via_cost_nets_costs or [])])
+        if _vcn:
+            config_kwargs['net_via_costs'] = _vcn
+            print(f"Per-net via cost for {len(_vcn)} net(s): "
+                  + ", ".join(f"{pcb_data.nets[n].name}={c}" for n, c in sorted(_vcn.items()))
+                  + f" (run via cost {via_cost})")
+        else:
+            print(f"WARNING: --via-cost-nets {' '.join(via_cost_nets or [])} matches no net")
     if collect_stats:
         config_kwargs['collect_stats'] = collect_stats
     # #581: an active (> 0) same-net pad via clearance keeps EVERY via this
@@ -11035,6 +11051,11 @@ For differential pair routing, use route_diff.py:
                         help="Glob patterns for power nets (e.g., '*GND*' '*VCC*'). Must pair with --power-nets-widths.")
     parser.add_argument("--power-nets-widths", nargs="*", type=float, default=[],
                         help="Track widths in mm for each power-net pattern (must match --power-nets length)")
+    parser.add_argument("--via-cost-nets", nargs="*", default=[],
+                        help="Glob patterns for nets with their own via cost (e.g. a crystal's nets, to keep "
+                             "them on one layer where a longer path exists). Must pair with --via-cost-nets-costs.")
+    parser.add_argument("--via-cost-nets-costs", nargs="*", type=int, default=[],
+                        help="Via cost for each --via-cost-nets pattern, in --via-cost's units (first match wins)")
     parser.add_argument("--no-power-tap-neckdown", action="store_true",
                         help="Disable neck-down retry of failed power-net tap edges (issue #72): by default a "
                              "wide tap that cannot fit is re-routed at the layer's default width near the pad")
@@ -11851,6 +11872,8 @@ For differential pair routing, use route_diff.py:
                 coplanar_nets=args.coplanar_nets,
                 power_nets=args.power_nets,
                 power_nets_widths=args.power_nets_widths,
+                via_cost_nets=args.via_cost_nets,
+                via_cost_nets_costs=args.via_cost_nets_costs,
                 power_tap_neckdown=not args.no_power_tap_neckdown,
                 neckdown_length=args.neckdown_length,
                 neckdown_taper_length=args.neckdown_taper_length,
