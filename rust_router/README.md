@@ -39,7 +39,7 @@ the original pure-Python A* it replaced (measured then; there is no Python A* le
 - **Turn cost** proportional to the turn angle, for straighter paths with fewer wiggles
 - **Proximity costs**: stub proximity, per-layer track proximity, BGA exclusion zones and their proximity rings, and an optional proximity term in the heuristic for dense boards
 - **Cross-layer track attraction** ("vertical alignment"): routes stack over tracks on other layers, leaving room for vias
-- **Bus path attraction**: a member follows an earlier member's path, by a direction-aware step discount and an optional potential-shaped term (#656)
+- **A net's lane**: a way the net is to keep to -- a bus member's corridor, a plan's way for it -- at a price for each cell entered off it
 - **Wide tracks**: an exact swept-capsule clearance check with a fractional, per-layer margin (#156/#173)
 - **Via legality per via size** ("rungs", #568/#530), and **free vias**: an existing same-net hole is reused at no cost
 - **Pose-based routing with a Dubins heuristic** for differential-pair centerlines: headings at both ends, P/N via spacing, straight runs around vias, GND-via sites, a cumulative-turn limit
@@ -292,8 +292,7 @@ router = GridRouter(via_cost, h_weight, turn_cost=None, via_proximity_cost=1,
                     vertical_attraction_radius=0, vertical_attraction_bonus=0,
                     layer_costs=None, proximity_heuristic_cost=None,
                     layer_direction_preferences=None, direction_preference_cost=0,
-                    attraction_radius=0, attraction_bonus=0,
-                    attraction_cross_layer_pct=0, attraction_potential=0)
+                    lane_free=0, lane_ramp=0, lane_prices=None)
 ```
 
 Parameters:
@@ -305,9 +304,7 @@ Parameters:
 - `layer_costs`: per-layer multipliers (1000 = 1.0x, 3000 = 3.0x) on moves, on starting on a layer and on vias (a via onto a cheaper layer is discounted, down to free); a negative entry forbids the layer
 - `proximity_heuristic_cost`: expected proximity cost per grid step added to the heuristic (None = 0, off). Python sets it before each route with `set_proximity_heuristic_cost`, from the proximity zones the route's ends lie in (`GridRouteConfig.get_proximity_heuristic_for_zones`: each such zone's cost times its radius, summed, times `--proximity-heuristic-factor`); a route with both ends outside every zone gets 0
 - `layer_direction_preferences`: per layer 0 = horizontal, 1 = vertical, 255 = none; `direction_preference_cost`: charged per move that advances along the non-preferred axis, diagonals included (0 = off)
-- `attraction_radius`, `attraction_bonus`: bus path attraction to the path given by `set_attraction_path` -- a discount on moves in the same direction as the path near it, `attraction_bonus / 50` percent at full strength, capped at 90% (0 = off)
-- `attraction_cross_layer_pct`: percent of that attraction granted on layers other than the path's (0 = same layer only)
-- `attraction_potential`: strength of the potential-shaped attraction (#656): moves are charged the change in a potential that peaks on the path, so cycles never pay and a via onto the path's layer earns a one-time gain (0 = off)
+- `lane_free`, `lane_ramp`, `lane_prices`: the price of leaving the lane given by `set_lane_path` -- a cell within `lane_free` grid units of a lane point on its own layer is free, the price of entering a cell rises linearly over `lane_ramp` to `lane_prices[layer]` (cost units, one per layer; none = no lane priced), and every cell farther from the lane, or on a layer the lane is not on there, costs that. A price and not a discount: the search is weighted, and a discount along a lane never outweighs the heuristic's pull along the straight line
 
 Methods:
 - `route_multi(obstacles, sources, targets, max_iterations, collinear_vias=False, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0.0, max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0)` -- a path from any source to any target; sources and targets are lists of (gx, gy, layer)
@@ -320,7 +317,7 @@ Methods:
   - `via_rung`: which via size's legality to search with (0 = the configured via)
 - `route_with_frontier(...)`: the same arguments; returns `(path, iterations, blocked_cells)`, where `blocked_cells` (a list of (gx, gy, layer) that stopped the search) is empty on success
 - `set_proximity_heuristic_cost(cost)`: set before each route
-- `set_attraction_path([(gx, gy, layer), ...])`, `clear_attraction_path()`: the path bus members are attracted to (an empty list clears it)
+- `set_lane_path([(gx, gy, layer), ...])`, `clear_lane_path()`: the lane the net being routed keeps to, a point a cell (an empty list clears it)
 
 ### PoseRouter
 
@@ -453,6 +450,18 @@ src/
 - **Placement kernels**: the trees and gap trees keep the Python's float expressions in order; the crossing and pad-hit kernels skip pairs whose boxes cannot meet; the congestion kernels sum a move's change over the cells it reaches, so their totals can differ from a whole-window Python sum in the last bits
 
 ## Version History
+
+### 0.24.5 (2026-11-23)
+
+- **A net's lane is priced, not rewarded.** `GridRouter` took a path to attract a net to and gave a discount of up to
+  90% on steps along it, with an optional potential-shaped term (#656). Neither bent a route: the search is weighted
+  (`f = g + w h`, `h` at the full step price), so a discount lowers `g` along the lane and leaves `w h` as it was, and
+  the potential's change over a whole route between two fixed ends is the same whichever way it goes. The discount
+  also counted only steps in the direction the path was listed. `lane_free`, `lane_ramp` and `lane_prices` replace
+  `attraction_radius`, `attraction_bonus`, `attraction_cross_layer_pct` and `attraction_potential`, and
+  `set_lane_path` / `clear_lane_path` replace `set_attraction_path` / `clear_attraction_path`: entering a cell off the
+  lane costs up to `lane_prices[layer]`, on every layer and in either direction. The cross-layer ("vertical")
+  attraction is as it was.
 
 ### 0.24.4 (2026-11-16)
 

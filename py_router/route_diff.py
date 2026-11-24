@@ -671,8 +671,6 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 direction_preference_cost: int = defaults.DIRECTION_PREFERENCE_COST,
                 bus_enabled: bool = False,
                 bus_detection_radius: float = defaults.BUS_DETECTION_RADIUS,
-                bus_attraction_radius: float = defaults.BUS_ATTRACTION_RADIUS,
-                bus_attraction_bonus: int = defaults.BUS_ATTRACTION_BONUS,
                 bus_min_nets: int = defaults.BUS_MIN_NETS,
                 keepout_enabled: bool = False,
                 keepout_layer: str = defaults.KEEPOUT_LAYER,
@@ -1496,7 +1494,6 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         max_probe_iterations=max_probe_iterations, heuristic_weight=heuristic_weight,
         turn_cost=turn_cost, direction_preference_cost=direction_preference_cost,
         bus_enabled=bus_enabled, bus_detection_radius=bus_detection_radius,
-        bus_attraction_radius=bus_attraction_radius, bus_attraction_bonus=bus_attraction_bonus,
         bus_min_nets=bus_min_nets, proximity_heuristic_factor=proximity_heuristic_factor,
         keepout_enabled=keepout_enabled, keepout_layer=keepout_layer,
         bga_exclusion_zones=bga_exclusion_zones,
@@ -3652,14 +3649,6 @@ Examples:
                              "groups, so pairs are not bus-routed (nor do the --bus-* tuning flags below act)")
     parser.add_argument("--bus-detection-radius", type=float, default=defaults.BUS_DETECTION_RADIUS,
                         help=f"Max endpoint distance to form bus in mm (default: {defaults.BUS_DETECTION_RADIUS})")
-    parser.add_argument("--bus-attraction-radius", type=float, default=defaults.BUS_ATTRACTION_RADIUS,
-                        help=f"Reach of the bus attraction around the group's planned corridor (else an "
-                             f"already-routed neighbour's track) in mm; the pull falls off quadratically "
-                             f"to 0 here (default: {defaults.BUS_ATTRACTION_RADIUS})")
-    parser.add_argument("--bus-attraction-bonus", type=int, default=defaults.BUS_ATTRACTION_BONUS,
-                        help=f"Strength of the bus attraction: a step near the planned corridor (else the "
-                             f"routed neighbour) and moving along it costs up to bonus/50 percent less, capped "
-                             f"at 90%% -- 4500 and above is full strength (default: {defaults.BUS_ATTRACTION_BONUS})")
     parser.add_argument("--bus-min-nets", type=int, default=defaults.BUS_MIN_NETS,
                         help=f"Minimum nets to form a bus group (default: {defaults.BUS_MIN_NETS})")
     parser.add_argument("--keepout", action="store_true",
@@ -4170,8 +4159,6 @@ Examples:
                 direction_preference_cost=args.direction_preference_cost,
                 bus_enabled=args.bus,
                 bus_detection_radius=args.bus_detection_radius,
-                bus_attraction_radius=args.bus_attraction_radius,
-                bus_attraction_bonus=args.bus_attraction_bonus,
                 bus_min_nets=args.bus_min_nets,
                 keepout_enabled=args.keepout,
                 keepout_layer=args.keepout_layer,

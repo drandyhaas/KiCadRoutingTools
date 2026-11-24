@@ -309,8 +309,7 @@ _FINALIZE_ROUTE_KNOBS = (
     'mps_unroll', 'mps_reverse_rounds', 'mps_layer_swap',
     'mps_segment_intersection', 'keepout_enabled', 'keepout_layer',
     'guide_corridor_enabled', 'guide_corridor_layer', 'guide_corridor_spacing',
-    'bus_enabled', 'bus_detection_radius', 'bus_attraction_radius',
-    'bus_attraction_bonus', 'bus_min_nets',
+    'bus_enabled', 'bus_detection_radius', 'bus_min_nets',
     'keep_away', 'keep_away_free', 'keep_away_cost',
     # Net-filtered keep-outs (net_keepouts.py), resolved from the step's
     # .kicad_dru: a reconnect of a bound net must stay out of the regions the
@@ -2632,8 +2631,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 direction_preference_cost: int = defaults.DIRECTION_PREFERENCE_COST,
                 bus_enabled: bool = False,
                 bus_detection_radius: float = 5.0,
-                bus_attraction_radius: float = 5.0,
-                bus_attraction_bonus: int = 5000,
                 bus_min_nets: int = 2,
                 guide_corridor_enabled: bool = False,
                 guide_corridor_layer: str = "User.1",
@@ -3603,7 +3600,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         max_probe_iterations=max_probe_iterations, heuristic_weight=heuristic_weight,
         turn_cost=turn_cost, direction_preference_cost=direction_preference_cost,
         bus_enabled=bus_enabled, bus_detection_radius=bus_detection_radius,
-        bus_attraction_radius=bus_attraction_radius, bus_attraction_bonus=bus_attraction_bonus,
         bus_min_nets=bus_min_nets,
         guide_corridor_enabled=guide_corridor_enabled, guide_corridor_layer=guide_corridor_layer,
         guide_corridor_spacing=guide_corridor_spacing,
@@ -10917,7 +10913,7 @@ For differential pair routing, use route_diff.py:
                         help="Net ordering strategy: mps (default, crossing conflicts), "
                              "inside_out, original, or bus (detected bus groups first, "
                              "members middle-out, rest by mps; ordering only -- "
-                             "corridor attraction still needs --bus)")
+                             "keeping to a corridor still needs --bus)")
     parser.add_argument("--direction", "-d", choices=["forward", "backward"],
                         default=None,
                         help="Direction search order for each net route")
@@ -11079,14 +11075,6 @@ For differential pair routing, use route_diff.py:
                         help="Enable auto-detection and routing of bus groups (nets with clustered endpoints)")
     parser.add_argument("--bus-detection-radius", type=float, default=defaults.BUS_DETECTION_RADIUS,
                         help=f"Max endpoint distance to form bus in mm (default: {defaults.BUS_DETECTION_RADIUS})")
-    parser.add_argument("--bus-attraction-radius", type=float, default=defaults.BUS_ATTRACTION_RADIUS,
-                        help=f"Reach of the bus attraction around the group's planned corridor (else an "
-                             f"already-routed neighbour's track) in mm; the pull falls off quadratically "
-                             f"to 0 here (default: {defaults.BUS_ATTRACTION_RADIUS})")
-    parser.add_argument("--bus-attraction-bonus", type=int, default=defaults.BUS_ATTRACTION_BONUS,
-                        help=f"Strength of the bus attraction: a step near the planned corridor (else the "
-                             f"routed neighbour) and moving along it costs up to bonus/50 percent less, capped "
-                             f"at 90%% -- 4500 and above is full strength (default: {defaults.BUS_ATTRACTION_BONUS})")
     parser.add_argument("--bus-min-nets", type=int, default=defaults.BUS_MIN_NETS,
                         help=f"Minimum nets to form a bus group (default: {defaults.BUS_MIN_NETS})")
     parser.add_argument("--guide-corridor", action="store_true",
@@ -11867,8 +11855,6 @@ For differential pair routing, use route_diff.py:
                 direction_preference_cost=args.direction_preference_cost,
                 bus_enabled=args.bus,
                 bus_detection_radius=args.bus_detection_radius,
-                bus_attraction_radius=args.bus_attraction_radius,
-                bus_attraction_bonus=args.bus_attraction_bonus,
                 bus_min_nets=args.bus_min_nets,
                 guide_corridor_enabled=args.guide_corridor,
                 guide_corridor_layer=args.guide_corridor_layer,

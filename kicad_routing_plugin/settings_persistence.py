@@ -146,8 +146,6 @@ def get_dialog_settings(dialog):
         # Bus routing options
         'bus_enabled': dialog.bus_enabled.GetValue(),
         'bus_detection_radius': dialog.bus_detection_radius.GetValue(),
-        'bus_attraction_radius': dialog.bus_attraction_radius.GetValue(),
-        'bus_attraction_bonus': dialog.bus_attraction_bonus.GetValue(),
         'bus_min_nets': dialog.bus_min_nets.GetValue(),
 
         # Guide corridor (issue #7)
@@ -560,10 +558,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.bus_enabled.SetValue(settings['bus_enabled'])
     if 'bus_detection_radius' in settings:
         dialog.bus_detection_radius.SetValue(settings['bus_detection_radius'])
-    if 'bus_attraction_radius' in settings:
-        dialog.bus_attraction_radius.SetValue(settings['bus_attraction_radius'])
-    if 'bus_attraction_bonus' in settings:
-        dialog.bus_attraction_bonus.SetValue(settings['bus_attraction_bonus'])
     if 'bus_min_nets' in settings:
         dialog.bus_min_nets.SetValue(settings['bus_min_nets'])
 

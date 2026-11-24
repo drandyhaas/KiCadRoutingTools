@@ -758,29 +758,17 @@ impl GridSearch {
                         _ => 0, // No preference (255 or other)
                     }
                 } else { 0 };
-                // Path attraction for bus routing: a multiplicative DISCOUNT
-                // percent (0-90) on the whole step, direction-based, no
-                // spiraling. Multiplicative + capped means a step can never
-                // go free or negative (A* first-arrival stays valid) and the
-                // proximity/alignment/layer gradations survive any bonus
-                // setting instead of saturating a subtractive floor. The
-                // vertical (cross-layer copper) attraction stays subtractive
-                // but is capped so it too cannot zero the step.
-                let path_discount_pct =
-                    router.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
+                // THE NET'S LANE: a way it is to keep to, at a PRICE for leaving
+                // it (lane_price) -- added to the step that enters the cell. A
+                // price, not a discount: the search is weighted (f = g + w h, h
+                // at the full step price), so a discount along the lane lowers g
+                // there and leaves w h as it was, and a lane that bends from the
+                // straight line loses to the straight line at every step. The
+                // vertical (cross-layer copper) attraction stays subtractive,
+                // capped so it cannot zero the step.
                 let base_step = move_cost + turn_cost + proximity_cost + direction_penalty;
-                let after_vert = (base_step - attraction_bonus).max(move_cost / 10);
-                let step_cost = (after_vert * (100 - path_discount_pct) / 100)
-                    .max(move_cost / 10);
-                // #656 potential shaping: charge cost - (phi(next)-phi(cur)),
-                // floored positive. Approaching the lane earns once, leaving
-                // refunds, constant-phi travel pays full price -- cycles
-                // always cost > 0, so looping can never profit.
-                let step_cost = if router.attraction_potential > 0 {
-                    let d_phi = router.path_attraction_potential(ngx, ngy, current.layer)
-                        - router.path_attraction_potential(current.gx, current.gy, current.layer);
-                    (step_cost - d_phi).max(move_cost / 10)
-                } else { step_cost };
+                let step_cost = (base_step - attraction_bonus).max(move_cost / 10)
+                    + router.lane_price(ngx, ngy, current.layer);
                 let new_g = g + step_cost;
 
                 if new_g < existing_g {
@@ -900,17 +888,7 @@ impl GridSearch {
                 let layer_transition_cost = dest_layer_cost - current_layer_cost;
                 // Combined via cost can be as low as 0 when switching to a much cheaper layer
                 let combined_via_cost = (via_cost + layer_transition_cost).max(0);
-                // #656 potential shaping on the VIA edge: a via that lands
-                // on the lane's layer collects the same-layer/cross-layer
-                // potential difference once -- the edge attraction has
-                // always lacked (a planned dive can now outbid via_cost).
-                // Floored at 0 like the free-via case; the reverse via
-                // refunds the jump, so a down-up flip nets >= 2*via_cost.
-                let via_shaping = if router.attraction_potential > 0 {
-                    router.path_attraction_potential(current.gx, current.gy, layer)
-                        - router.path_attraction_potential(current.gx, current.gy, current.layer)
-                } else { 0 };
-                let new_g = g + (combined_via_cost + proximity_cost - via_shaping).max(0);
+                let new_g = g + (combined_via_cost + proximity_cost).max(0);
 
                 if new_g < existing_g {
                     if existing_g != i32::MAX {
@@ -957,46 +935,29 @@ pub struct GridRouter {
     proximity_heuristic_cost: i32,  // Expected proximity cost per grid step (added to heuristic)
     layer_direction_preferences: Vec<u8>,  // Per-layer direction preference (0=horizontal, 1=vertical, 255=none)
     direction_preference_cost: i32,  // Cost penalty for non-preferred direction moves
-    // Bus routing: attraction to a previously routed path (same layer only)
-    // Stores path with direction vectors: (gx, gy, layer, dx, dy) where dx,dy are normalized direction
-    attraction_path: Vec<(i32, i32, u8, i8, i8)>,  // Path to attract to with direction
-    attraction_radius: i32,  // Grid units for attraction (0 = disabled)
-    attraction_bonus: i32,   // Cost reduction when moving parallel to path (same layer)
-    // Fraction (percent) of the attraction bonus granted on layers OTHER
-    // than the path point's layer (issue #296 R9 phase B: a bus corridor
-    // must survive a via transition -- with 0 the river loses all guidance
-    // the moment a member changes layer). 0 = same-layer only (legacy).
-    attraction_cross_layer_pct: i32,
-    // Spatial POINT index for the attraction path (soft-knobs P2): bucket
-    // (bx, by, layer=254 wildcard) -> indices into attraction_path. The old
-    // membership-only hash still forced a linear scan of the WHOLE path per
-    // candidate move; the index bounds each lookup to the nearby points.
-    attraction_path_buckets: FxHashMap<u64, Vec<u32>>,
-    // #656 potential-based path attraction (0 = off / legacy discount
-    // only). Strength in cost units of the potential's PEAK: a state on
-    // the lane, on the lane's layer, holds potential `attraction_potential`;
-    // it falls off quadratically to 0 at attraction_radius, and off-layer
-    // states hold attraction_cross_layer_pct percent of the same-layer
-    // value. Search edges are charged (cost - (phi(next) - phi(prev))),
-    // floored positive -- so ANY cycle has strictly positive cost (loop
-    // farming is impossible by construction, not by tuning), staying at
-    // constant potential earns nothing per step (no meander reward), and
-    // a via ONTO the lane's layer collects a one-time potential jump that
-    // can genuinely compete with via_cost -- the capability no bounded
-    // per-step discount has.
-    attraction_potential: i32,
+    // THE NET'S LANE: the way the net being routed is to keep to -- a bus
+    // member's corridor, a plan's way for it -- (gx, gy, layer) point by point,
+    // a point a cell. A cell within lane_free of a point on ITS layer is free;
+    // the price of entering a cell rises over lane_ramp to lane_prices[layer],
+    // which every cell farther from the lane costs, on every layer (lane_price).
+    lane_path: Vec<(i32, i32, u8)>,
+    lane_free: i32,           // grid units
+    lane_ramp: i32,           // grid units
+    lane_prices: Vec<i32>,    // per layer, cost units a cell (empty = no lane priced)
+    // Spatial POINT index for the lane: bucket (bx, by, layer=254 wildcard) ->
+    // indices into lane_path; each lookup scans the buckets within reach.
+    lane_buckets: FxHashMap<u64, Vec<u32>>,
 }
 
 #[pymethods]
 impl GridRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0, attraction_radius=0, attraction_bonus=0, attraction_cross_layer_pct=0, attraction_potential=0))]
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0, lane_free=0, lane_ramp=0, lane_prices=None))]
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
                vertical_attraction_radius: i32, vertical_attraction_bonus: i32,
                layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: Option<i32>,
                layer_direction_preferences: Option<Vec<u8>>, direction_preference_cost: i32,
-               attraction_radius: i32, attraction_bonus: i32,
-               attraction_cross_layer_pct: i32, attraction_potential: i32) -> Self {
+               lane_free: i32, lane_ramp: i32, lane_prices: Option<Vec<i32>>) -> Self {
         Self {
             via_cost,
             h_weight,
@@ -1008,12 +969,11 @@ impl GridRouter {
             proximity_heuristic_cost: proximity_heuristic_cost.unwrap_or(0),  // Default: no proximity estimate
             layer_direction_preferences: layer_direction_preferences.unwrap_or_default(),
             direction_preference_cost,
-            attraction_path: Vec::new(),
-            attraction_radius,
-            attraction_bonus,
-            attraction_cross_layer_pct,
-            attraction_path_buckets: FxHashMap::default(),
-            attraction_potential,
+            lane_path: Vec::new(),
+            lane_free: lane_free.max(0),
+            lane_ramp: lane_ramp.max(1),
+            lane_prices: lane_prices.unwrap_or_default(),
+            lane_buckets: FxHashMap::default(),
         }
     }
 
@@ -1023,60 +983,26 @@ impl GridRouter {
         self.proximity_heuristic_cost = cost;
     }
 
-    /// Set the attraction path for bus routing.
-    /// The router will give a cost bonus for moving parallel to this path (same layer only).
-    /// Direction-based attraction prevents spiraling by only rewarding moves in the same
-    /// direction the neighbor was moving, not just proximity.
-    /// Call this before routing each subsequent bus member with the previously routed path.
-    /// Pass an empty Vec to clear the attraction.
-    pub fn set_attraction_path(&mut self, path: Vec<(i32, i32, u8)>) {
-        self.attraction_path_buckets.clear();
-        self.attraction_path.clear();
-
-        if path.is_empty() || self.attraction_radius <= 0 {
+    /// Set the net's lane: the way it is to keep to, a point a cell.
+    /// Leaving it is priced (lane_price); an empty Vec clears it.
+    pub fn set_lane_path(&mut self, path: Vec<(i32, i32, u8)>) {
+        self.lane_buckets.clear();
+        self.lane_path.clear();
+        if path.is_empty() || self.lane_prices.is_empty() {
             return;
         }
-
-        // Convert path to include direction vectors
-        // Direction at each point is computed from the move to the next point
-        // (or from previous point for the last point)
-        let path_with_directions: Vec<(i32, i32, u8, i8, i8)> = path.iter().enumerate().map(|(i, &(gx, gy, layer))| {
-            let (dx, dy) = if i < path.len() - 1 {
-                // Direction to next point
-                let (nx, ny, _) = path[i + 1];
-                let raw_dx = nx - gx;
-                let raw_dy = ny - gy;
-                (raw_dx.signum() as i8, raw_dy.signum() as i8)
-            } else if i > 0 {
-                // Last point: use direction from previous point
-                let (px, py, _) = path[i - 1];
-                let raw_dx = gx - px;
-                let raw_dy = gy - py;
-                (raw_dx.signum() as i8, raw_dy.signum() as i8)
-            } else {
-                // Single point path - no direction
-                (0, 0)
-            };
-            (gx, gy, layer, dx, dy)
-        }).collect();
-
-        // Build the spatial POINT index (soft-knobs P2): each point goes in
-        // its OWN bucket; lookups scan the neighborhood of buckets within the
-        // radius. Layer-blind (254 wildcard key) -- the lookup filters layers
-        // itself for the cross-layer fraction (#296 R9 phase B).
-        let bucket_size = (self.attraction_radius / 2).max(1);
-        for (i, &(px, py, _layer, _, _)) in path_with_directions.iter().enumerate() {
-            let key = Self::pack_bucket_key(px / bucket_size, py / bucket_size, 254);
-            self.attraction_path_buckets.entry(key).or_default().push(i as u32);
+        let bucket_size = ((self.lane_free + self.lane_ramp) / 2).max(1);
+        for (i, &(px, py, _layer)) in path.iter().enumerate() {
+            let key = Self::pack_bucket_key(px.div_euclid(bucket_size), py.div_euclid(bucket_size), 254);
+            self.lane_buckets.entry(key).or_default().push(i as u32);
         }
-
-        self.attraction_path = path_with_directions;
+        self.lane_path = path;
     }
 
-    /// Clear the attraction path
-    pub fn clear_attraction_path(&mut self) {
-        self.attraction_path.clear();
-        self.attraction_path_buckets.clear();
+    /// Clear the net's lane
+    pub fn clear_lane_path(&mut self) {
+        self.lane_path.clear();
+        self.lane_buckets.clear();
     }
 
     /// Route from multiple source points to multiple target points.
@@ -1458,163 +1384,56 @@ impl GridRouter {
         layer_bits | (by_bits << 8) | (bx_bits << 28)
     }
 
-    /// Calculate parallel-movement attraction bonus for bus routing.
-    ///
-    /// This rewards moving in the SAME DIRECTION as the neighbor path:
-    /// 1. Find nearby path points on the same layer
-    /// 2. Give bonus for moving in the same direction as the path at those points
-    /// 3. No bonus for perpendicular or opposite movement
-    ///
-    /// This creates parallel tracks because:
-    /// - Tracks are rewarded for moving the same direction as neighbor
-    /// - Natural clearances keep them at appropriate spacing
-    /// - No "pull toward" that would cause convergence
-    ///
-    /// Arguments:
-    /// - x, y: Current position
-    /// - layer: Current layer
-    /// - move_dx, move_dy: Direction of the current move (normalized to -1, 0, 1)
+    /// THE PRICE OF A CELL OFF THE NET'S LANE (cost units, 0 with no lane):
+    /// free within lane_free of a lane point on the cell's own layer, rising
+    /// linearly over lane_ramp to lane_prices[layer], which every cell
+    /// farther from the lane -- or on a layer the lane is not on there --
+    /// costs. A scalar field: the same whichever way the search runs and
+    /// whichever end the lane was given from.
     #[inline]
-    /// #656: potential-based attraction. phi(x, y, layer) in cost units:
-    /// peak `attraction_potential` on the lane on its layer, quadratic
-    /// falloff to 0 at attraction_radius, cross-layer states hold
-    /// attraction_cross_layer_pct percent. Directionless -- the shaping
-    /// (phi(next) - phi(prev)) pulls TOWARD the lane and refunds on
-    /// leaving; constant-potential travel earns nothing.
-    fn path_attraction_potential(&self, x: i32, y: i32, layer: u8) -> i32 {
-        if self.attraction_potential <= 0 || self.attraction_radius <= 0
-            || self.attraction_path.is_empty() {
+    fn lane_price(&self, x: i32, y: i32, layer: u8) -> i32 {
+        if self.lane_path.is_empty() {
             return 0;
         }
-        let bucket_size = (self.attraction_radius / 2).max(1);
-        let r2 = self.attraction_radius * self.attraction_radius;
-        let bx0 = (x - self.attraction_radius) / bucket_size - 1;
-        let bx1 = (x + self.attraction_radius) / bucket_size + 1;
-        let by0 = (y - self.attraction_radius) / bucket_size - 1;
-        let by1 = (y + self.attraction_radius) / bucket_size + 1;
-        let mut d2_same = i64::MAX;
-        let mut d2_cross = i64::MAX;
+        let full = match self.lane_prices.get(layer as usize) {
+            Some(&p) if p > 0 => p,
+            _ => return 0,
+        };
+        let reach = self.lane_free + self.lane_ramp;
+        let bucket_size = (reach / 2).max(1);
+        let r2 = reach as i64 * reach as i64;
+        let bx0 = (x - reach).div_euclid(bucket_size);
+        let bx1 = (x + reach).div_euclid(bucket_size);
+        let by0 = (y - reach).div_euclid(bucket_size);
+        let by1 = (y + reach).div_euclid(bucket_size);
+        let mut best = i64::MAX;
         for bx in bx0..=bx1 {
             for by in by0..=by1 {
-                let Some(idxs) = self.attraction_path_buckets
+                let Some(idxs) = self.lane_buckets
                     .get(&Self::pack_bucket_key(bx, by, 254)) else { continue };
                 for &i in idxs {
-                    let (px, py, pl, _dx, _dy) = self.attraction_path[i as usize];
+                    let (px, py, pl) = self.lane_path[i as usize];
+                    if pl != layer {
+                        continue;
+                    }
                     let ddx = (x - px) as i64;
                     let ddy = (y - py) as i64;
                     let d2 = ddx * ddx + ddy * ddy;
-                    if d2 > r2 as i64 {
-                        continue;
-                    }
-                    if pl == layer {
-                        if d2 < d2_same { d2_same = d2; }
-                    } else if d2 < d2_cross {
-                        d2_cross = d2;
+                    if d2 < best {
+                        best = d2;
                     }
                 }
             }
         }
-        let phi_of = |d2: i64, layer_pct: i64| -> i64 {
-            if d2 == i64::MAX { return 0; }
-            let dist = (d2 as f32).sqrt() as i64;
-            let ratio_num = (self.attraction_radius as i64 - dist).max(0);
-            // quadratic falloff: peak * ((R - d) / R)^2, then layer percent
-            self.attraction_potential as i64 * ratio_num * ratio_num
-                / (self.attraction_radius as i64 * self.attraction_radius as i64)
-                * layer_pct / 100
-        };
-        let same = phi_of(d2_same, 100);
-        let cross = phi_of(d2_cross, self.attraction_cross_layer_pct.max(0) as i64);
-        same.max(cross) as i32
-    }
-
-    fn get_path_attraction_bonus(&self, x: i32, y: i32, layer: u8, move_dx: i32, move_dy: i32) -> i32 {
-        if self.attraction_bonus <= 0 || self.attraction_radius <= 0 || self.attraction_path.is_empty() {
+        if best > r2 {
+            return full;
+        }
+        let d = (best as f64).sqrt();
+        let over = d - self.lane_free as f64;
+        if over <= 0.0 {
             return 0;
         }
-
-        // Scan only the point-index buckets within reach (soft-knobs P2: the
-        // old membership hash still linear-scanned the WHOLE path per move).
-        // Distance is EUCLIDEAN (soft-knobs N4: the old Manhattan test against
-        // a Euclidean-derived radius halved the diagonal reach). Same-layer
-        // points give the full bonus; when only OTHER-layer points are near,
-        // grant attraction_cross_layer_pct of it (the corridor survives via
-        // transitions instead of going silent, #296 R9 phase B).
-        let bucket_size = (self.attraction_radius / 2).max(1);
-        let r2 = self.attraction_radius * self.attraction_radius;
-        let bx0 = (x - self.attraction_radius) / bucket_size - 1;
-        let bx1 = (x + self.attraction_radius) / bucket_size + 1;
-        let by0 = (y - self.attraction_radius) / bucket_size - 1;
-        let by1 = (y + self.attraction_radius) / bucket_size + 1;
-
-        let mut d2_same = i64::MAX;
-        let mut dir_same: Option<(i8, i8)> = None;
-        let mut d2_cross = i64::MAX;
-        let mut dir_cross: Option<(i8, i8)> = None;
-
-        for bx in bx0..=bx1 {
-            for by in by0..=by1 {
-                let Some(idxs) = self.attraction_path_buckets
-                    .get(&Self::pack_bucket_key(bx, by, 254)) else { continue };
-                for &i in idxs {
-                    let (px, py, pl, path_dx, path_dy) = self.attraction_path[i as usize];
-                    let ddx = (x - px) as i64;
-                    let ddy = (y - py) as i64;
-                    let d2 = ddx * ddx + ddy * ddy;
-                    if d2 > r2 as i64 {
-                        continue;
-                    }
-                    if pl == layer {
-                        if d2 < d2_same {
-                            d2_same = d2;
-                            dir_same = Some((path_dx, path_dy));
-                        }
-                    } else if self.attraction_cross_layer_pct > 0 && d2 < d2_cross {
-                        d2_cross = d2;
-                        dir_cross = Some((path_dx, path_dy));
-                    }
-                }
-            }
-        }
-
-        let (nearest_d2, nearest_dir, layer_pct) = if dir_same.is_some() {
-            (d2_same, dir_same, 100)
-        } else {
-            (d2_cross, dir_cross, self.attraction_cross_layer_pct)
-        };
-        let (path_dx, path_dy) = match nearest_dir {
-            Some(d) => d,
-            None => return 0,
-        };
-        let nearest_dist = (nearest_d2 as f32).sqrt() as i32;
-
-        // Check direction alignment using dot product
-        let dot = move_dx * (path_dx as i32) + move_dy * (path_dy as i32);
-
-        // Only give bonus for moves in the same general direction
-        // dot >= 2: same diagonal (perfect)
-        // dot == 1: same orthogonal or 45° off (good)
-        // dot <= 0: perpendicular or opposite (no bonus)
-        if dot < 1 {
-            return 0;
-        }
-
-        // Alignment factor: 100% for perfect match, 70% for 45° off
-        let alignment = if dot >= 2 { 100 } else { 70 };
-
-        // Proximity factor with quadratic falloff (stronger near path)
-        let proximity_ratio = (self.attraction_radius - nearest_dist) as f32 / self.attraction_radius as f32;
-        let proximity_pct = (proximity_ratio * proximity_ratio * 100.0) as i32;
-
-        // Return a DISCOUNT PERCENT of the step cost (0-90), not cost units:
-        // a subtractive bonus larger than the move cost saturates into a
-        // negative/floored edge and every gradation (proximity, alignment,
-        // layer) collapses -- the soft-knobs review's finding #2. Strength
-        // mapping keeps legacy tuning meaningful: 50 bonus units = 1% max
-        // discount, so the default 5000 = full strength, capped at 90%.
-        let strength_pct = (self.attraction_bonus / 50).min(90);
-        (strength_pct as i64 * proximity_pct as i64 * alignment as i64
-            * layer_pct as i64 / 1_000_000) as i32
+        ((full as f64) * (over / self.lane_ramp as f64).min(1.0)).round() as i32
     }
 
     /// Convert RouteStats to a Python-friendly dictionary

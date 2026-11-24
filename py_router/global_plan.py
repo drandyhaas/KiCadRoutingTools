@@ -118,6 +118,56 @@ class GlobalPlan:
         return pts
 
 
+def _plan_from_file(path, pcb_data, config, net_ids, layer_map):
+    """A plan made OUTSIDE the router (KICAD_GLOBAL_PLAN_FILE): JSON
+    {net name: [[x mm, y mm, layer name], ...]}, each net's way point by
+    point, a change of layer two points at one place. The way stands where
+    a probe's rough path stands: the net's lane
+    (KICAD_GLOBAL_PLAN_LANE_COST), the source of its layer preference
+    (KICAD_GLOBAL_PLAN_LAYER with _LAYER_MODE=probe: the way's own majority
+    layer) and of the plan order. No probe is run and no reservation made;
+    a net the file does not name, or names with fewer than two points on
+    the run's layers, is routed unguided."""
+    import json
+    from routing_config import GridCoord
+    with open(path, encoding='utf-8') as f:
+        given = json.load(f)
+    coord = GridCoord(config.grid_step)
+    plan = GlobalPlan()
+    for name, nid in net_ids:
+        way = []
+        for x, y, layer in given.get(name) or ():
+            if layer not in layer_map:
+                continue
+            pt = (*coord.to_grid(x, y), layer_map[layer])
+            if not way or way[-1] != pt:
+                way.append(pt)
+        if len(way) >= 2:
+            plan.rough_paths[nid] = way
+    # each way's own layer, where the run may route there: the one most of
+    # its length is on (a given way starts on its layer already -- the
+    # probes' rule, no preference for a way that starts on its majority
+    # layer, would leave every such net unguided)
+    if global_plan_knobs()['layer'] or global_plan_knobs()['swaps']:
+        base_costs = list(config.layer_costs or []) or [1.0] * len(config.layers)
+        base_costs += [1.0] * (len(config.layers) - len(base_costs))
+        for nid, way in plan.rough_paths.items():
+            h: Dict[int, int] = {}
+            for (x1, y1, l1), (x2, y2, l2) in zip(way, way[1:]):
+                if l1 == l2:
+                    h[l1] = h.get(l1, 0) + max(abs(x2 - x1), abs(y2 - y1))
+            if h:
+                maj = max(sorted(h.items()), key=lambda t: t[1])[0]
+                if base_costs[maj] >= 0:
+                    plan.layer_pref[nid] = maj
+    _build_river_groups(plan, config, pcb_data)
+    global _ACTIVE_PLAN
+    _ACTIVE_PLAN = plan
+    print(f"Global plan: {len(plan.rough_paths)}/{len(net_ids)} way(s) read "
+          f"from {path}; {len(plan.layer_pref)} with a layer preference")
+    return plan
+
+
 def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
                        layer_map: Dict[str, int],
                        verbose: bool = False,
@@ -126,6 +176,8 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
     gate is off or there is nothing to probe; failed probes are counted and
     simply contribute no reservation and no ordering signal."""
     k = global_plan_knobs()
+    if k.get('file') and net_ids:
+        return _plan_from_file(k['file'], pcb_data, config, net_ids, layer_map)
     if not k['enable'] or not net_ids:
         return None
     # Deferred imports: single_ended_routing must not import this module
@@ -911,7 +963,7 @@ def _build_river_groups(plan: GlobalPlan, config, pcb_data) -> None:
     """#658 river mode (KICAD_GLOBAL_PLAN_RIVER=1): group 2-pad nets by
     endpoint footprint pair (>= 4 members = a bus) and rank members by
     their lateral position across the corridor. Consumers: apply_plan_order
-    pulls each group CONSECUTIVE in rank order, and plan_attraction_path
+    pulls each group CONSECUTIVE in rank order, and plan_lane_path
     hands each member the REALIZED copper of its predecessor as the
     attraction lane -- follow-the-leader. The leader routes free (the
     measured meta-verdict: constraints lose on frontier boards; structure
@@ -960,7 +1012,7 @@ def _build_river_groups(plan: GlobalPlan, config, pcb_data) -> None:
               f"follow-the-leader lanes, consecutive order")
 
 
-def river_attraction_path(config, net_id, pcb_data):
+def river_lane_path(config, net_id, pcb_data):
     """The realized copper of this river member's nearest ROUTED
     predecessor, densified as a (gx, gy, layer) lane -- or None (not a
     river member / leader / no predecessor copper yet). The potential
@@ -1113,47 +1165,31 @@ def apply_plan_order(net_ids: List[Tuple[str, int]], plan: GlobalPlan,
     return reordered
 
 
-def plan_attraction_path(config, net_id, pcb_data=None):
-    """#656/#589: the net's own plan corridor as a DENSIFIED attraction
-    path, or None (knob off / no plan / no path). Reroute/retry sites call
-    this when bus_attraction_context returned None -- a plan-attracted
-    victim must keep its lane THROUGH churn, or every rip cycle erodes
-    adherence exactly where guidance decides the outcome (the #655 churn
-    is concentrated on contested nets). Bus corridors keep precedence at
-    every call site."""
-    if not env_knobs.GLOBAL_PLAN.get('attract'):
+def plan_lane_path(config, net_id, pcb_data=None):
+    """The net's own way in the plan as its LANE, a point a cell, or None
+    (KICAD_GLOBAL_PLAN_LANE_COST 0 / no plan / no way). The first route, the
+    retries and the reroutes all take it -- a net ripped and routed again
+    keeps its lane -- where bus_lane_context gave none: a bus's corridor
+    comes first at every call site."""
+    if env_knobs.GLOBAL_PLAN.get('lane_cost', 0) <= 0:
         return None
     plan = getattr(config, '_global_plan', None)
     if plan is None:
         return None
     # #658 river: the predecessor's realized copper outranks the net's own
     # probe corridor (follow-the-leader; falls through when leader/no lane).
-    r = river_attraction_path(config, net_id, pcb_data)
+    r = river_lane_path(config, net_id, pcb_data)
     if r is not None:
         return r
     path = plan.rough_paths.get(net_id)
     if not path or len(path) < 2:
         return None
-    # #658 attract-home (KICAD_GLOBAL_PLAN_ATTRACT_HOME=1): when the net
-    # has a plan layer assignment (bus home-packing / clique), emit the
-    # attraction lane ON THE HOME LAYER regardless of the probe's layers --
-    # the #656 potential then peaks there and its via edges collect the
-    # dive bonus onto the home. This is the STRONG pull the soft step-cost
-    # discount is not: three independent measurements show the discount
-    # losing to congestion economics (members settle on non-home layers),
-    # while #656 shaping demonstrably wins contested tails.
-    home = None
-    if env_knobs.GLOBAL_PLAN.get('attract_home'):
-        home = plan.layer_pref.get(net_id)
     dense = []
     for (x1, y1, l1), (x2, y2, l2) in zip(path, path[1:]):
-        L1 = home if home is not None else l1
-        dense.append((x1, y1, L1))
+        dense.append((x1, y1, l1))
         if l1 == l2 and (x1, y1) != (x2, y2):
-            dense.extend((gx, gy, L1)
-                         for gx, gy in walk_line(x1, y1, x2, y2))
-    lx, ly, ll = path[-1]
-    dense.append((lx, ly, home if home is not None else ll))
+            dense.extend((gx, gy, l1) for gx, gy in walk_line(x1, y1, x2, y2))
+    dense.append(path[-1])
     return dense
 
 
@@ -1192,6 +1228,17 @@ def dump_plan(path: str, plan: GlobalPlan, nets_in, nets_ordered,
     with open(path, 'w') as f:
         json.dump(doc, f)
     print(f"Global plan dump: wrote {path}")
+
+
+def lane_net_ids(config):
+    """the nets routed along their own way in the plan at a price
+    (plan_lane_path): the nets the octolinear smoothing leaves as routed -- a
+    way kept at a price is the route's shape, and the shortcut the smoothing
+    takes is the way left"""
+    plan = getattr(config, '_global_plan', None)
+    if plan is None or env_knobs.GLOBAL_PLAN.get('lane_cost', 0) <= 0:
+        return set()
+    return set(plan.rough_paths)
 
 
 def add_plan_source(ghosts, config, net_id, routed_net_ids):

@@ -90,7 +90,7 @@ def main():
     options = base_options+'--proximity-heuristic-factor 0.02 --direction-preference-cost 50 --ripped-route-avoidance-radius 1.0 --ripped-route-avoidance-cost 10.0 \
     --via-proximity-cost 10 --via-cost 300 --track-proximity-distance 3.0 --track-proximity-cost 0.0 --vertical-attraction-cost 0.0 \
     --stub-proximity-cost 4.0 --stub-proximity-radius 5.0 --max-ripup 10 --max-iterations 10000000 \
-    --bus --bus-detection-radius 5 --bus-attraction-bonus 5000 --bus-attraction-radius 1 '+power_nets
+    --bus --bus-detection-radius 5 '+power_nets
 
     # Option groups are split here; PATHS are passed as whole argv items and
     # never go through shlex, whose POSIX rules eat a Windows backslash.

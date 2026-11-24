@@ -400,7 +400,6 @@ def refresh() -> None:
     # stress workers multiply per-process caches -- export a smaller value
     # there.
     g['RASTER_CACHE_MB'] = _f('KICAD_RASTER_CACHE_MB', 256.0)
-    g['BUS_XLAYER_PCT'] = _i('KICAD_BUS_XLAYER_PCT', 35)
     # #622 victim-priority restore (ported from bus622-take2 a693919b): a rip
     # victim whose terminal reroute failed AND whose full restore is
     # short-refused gets its channel back -- the squatting nets (routed since
@@ -486,6 +485,16 @@ def refresh() -> None:
     # are all expressible under the one master gate.
     g['GLOBAL_PLAN'] = {
         'enable': _opt_in('KICAD_GLOBAL_PLAN'),
+        # a plan made OUTSIDE the router: JSON {net name: [[x mm, y mm, layer name], ...]}, read in place of the
+        # probes (global_plan._plan_from_file); the plan's other knobs apply to it as to a probed one
+        'file': _s('KICAD_GLOBAL_PLAN_FILE', ''),
+        # THE NET'S OWN WAY IN THE PLAN AS ITS LANE (global_plan.plan_lane_path, lane_price): what a step off it costs
+        # the net, in steps on the lane (0 = the plan's ways are no lanes). Free within lane_free mm of the way on the
+        # way's layer there, the price rising over lane_ramp mm to the full one. A bus's corridor is priced the same
+        # way, at routing_defaults.LANE_COST where this is 0.
+        'lane_cost': _f('KICAD_GLOBAL_PLAN_LANE_COST', 0.0),
+        'lane_free': _f('KICAD_GLOBAL_PLAN_LANE_FREE', 0.2),
+        'lane_ramp': _f('KICAD_GLOBAL_PLAN_LANE_RAMP', 1.0),
         'cost': _f('KICAD_GLOBAL_PLAN_COST', 0.0),      # mm-equiv reservation cost; 0 = no reservations (glasgow: 0.15 HURT, 0.05 mildly helped)
         'radius': _f('KICAD_GLOBAL_PLAN_RADIUS', 1.0),  # falloff radius (mm) beyond half-width
         'hweight': _f('KICAD_GLOBAL_PLAN_HWEIGHT', 2.3),  # probe A* weight (glasgow: 2.3 == 4.0 verdict+cost; 1.0 worse AND 72x probes)
@@ -506,9 +515,6 @@ def refresh() -> None:
         # layers).
         'layer': _s('KICAD_GLOBAL_PLAN_LAYER', ''),     # '' off | 'pref'
         'layer_discount': _f('KICAD_GLOBAL_PLAN_LAYER_DISCOUNT', 0.7),
-        # #658: emit each assigned net's ATTRACTION lane on its home layer
-        # (the #656 potential does the pulling the soft discount cannot).
-        'attract_home': _opt_in('KICAD_GLOBAL_PLAN_ATTRACT_HOME'),
         # #658: multiply NON-home cheap layers' step costs for assigned
         # nets (defection tax; 1.0 = off). The discount alone is proven
         # too weak to pack buses.
@@ -548,20 +554,6 @@ def refresh() -> None:
         # probe will trade many mm of lateral squeeze before paying a via
         # pair -- the human solution pays ~1 via/net to spread layers.
         'probe_via_cost': _i('KICAD_GLOBAL_PLAN_VIA_COST', 0),
-        # Owner attraction (#589 v2 handoff): each net's detailed route is
-        # ATTRACTED to its own rough corridor via the bus attraction
-        # machinery (set_attraction_path; bonus/radius are the config's
-        # bus_attraction_* knobs, armed by default). v1 reservations are
-        # repulsion-only -- everyone is pushed off everyone's lane but
-        # nobody is guided INTO their own, so a near-disjoint negotiated
-        # plan had no consumer. Bus corridors take precedence for bus
-        # members.
-        'attract': _opt_in('KICAD_GLOBAL_PLAN_ATTRACT'),
-        # #656 potential-based attraction strength (cost units of the
-        # potential's PEAK; 0 = legacy discount-only). Loop-proof by
-        # construction (see rust GridRouter.attraction_potential). Sized
-        # against via_cost: ~60-70 lets a planned dive outbid a 75 via.
-        'attract_potential': _i('KICAD_ATTRACT_POTENTIAL', 0),
         # Front-load list (#589 escape-risk ordering experiment): a file of
         # net names (one per line); listed nets move to the FRONT of their
         # #472 partition block in file order, others keep relative order.

@@ -1035,8 +1035,6 @@ Detects groups of nets with clustered endpoints (buses), plans a corridor with r
 | `--bus` | off | Enable bus detection and routing |
 | `--bus-detection-radius` | 5.0 | Max endpoint distance for nets to form a bus (mm) |
 | `--bus-min-nets` | 2 | Minimum number of nets for a raw clique (the strict geometric filter then keeps a group only with 3 or more) |
-| `--bus-attraction-radius` | 5.0 | Reach of the attraction around the corridor or neighbor path (mm) |
-| `--bus-attraction-bonus` | 5000 | Attraction strength: `bonus/50` percent off a step's cost, capped at 90% (the default is at the cap) |
 
 ### Guide Corridor Options (preferred route)
 
@@ -1076,7 +1074,7 @@ Notes:
   lines) if you want several nets to follow it comfortably.
 - The guide applies to every net routed in the run, so select only the nets you want it to
   steer. Members of a detected bus (`--bus`) whose group clustered at its targets route in one
-  direction under the bus attraction and skip the guide.
+  direction along the bus's lane and skip the guide.
 - The route is built by routing A* legs between the waypoints and concatenating them. A
   multi-point tap or a detour can cross an earlier leg of the **same** net. KiCad allows
   same-net copper to overlap, so the net stays connected and DRC-clean against other nets,
@@ -1505,7 +1503,7 @@ disconnection verdict down 8 and DRC down 13, and it composes with heuristic
 weight 2.3). 25 and 100 both measured worse. Do not lower it for BGA escape
 routing: 25 lost on a corpus that includes BGA escape boards.
 
-All cost knobs (via cost, proximity costs, attraction bonuses) are calibrated at a 0.1mm
+All cost knobs (via cost, proximity costs, the cross-layer attraction bonus, the lane price) are calibrated at a 0.1mm
 reference grid and scale internally so the cost per mm of path is the same at any
 `--grid-step` - changing the grid resolution does not change what the router optimizes for.
 

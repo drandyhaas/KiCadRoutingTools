@@ -331,8 +331,8 @@ def run_reroute_loop(
             # neighbor); previously it rerouted blind, so every rip degraded
             # the river. Hoisted above the multipoint split so multipoint
             # members get corridor-spanning main-edge selection + attraction.
-            from bus_detection import bus_attraction_context
-            _attr, _rev = bus_attraction_context(
+            from bus_detection import bus_lane_context
+            _attr, _rev = bus_lane_context(
                 ripped_net_id, getattr(state, 'bus_net_to_group', None),
                 getattr(state, 'bus_corridors', None), routed_net_paths)
             # #572: a ripped forced-link net re-routes its EXACT oracle links
@@ -348,11 +348,11 @@ def run_reroute_loop(
                       f"link(s) (#572 forced edges)")
                 result = route_oracle_links(pcb_data, ripped_net_id, config,
                                             obstacles, _olinks_rr,
-                                            attraction_path=_attr)
+                                            lane_path=_attr)
             elif multipoint_pads:
                 print(f"  Multi-point net with {len(multipoint_pads)} pads - routing main + taps")
                 result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
-                                               attraction_path=_attr, state=state)
+                                               lane_path=_attr, state=state)
                 # If Phase 1 succeeded, immediately do Phase 3 (tap routing)
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     main_segments_count = len(result['new_segments'])
@@ -375,7 +375,7 @@ def run_reroute_loop(
                             del state.pending_multipoint_nets[ripped_net_id]
             else:
                 result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
-                                                  attraction_path=_attr,
+                                                  lane_path=_attr,
                                                   reverse_direction=_rev)
             elapsed = time.time() - start_time
             total_time += elapsed
@@ -617,8 +617,8 @@ def run_reroute_loop(
                                 )
 
                             # Bus attraction for the retry (multipoint too)
-                            from bus_detection import bus_attraction_context
-                            _attr, _rev = bus_attraction_context(
+                            from bus_detection import bus_lane_context
+                            _attr, _rev = bus_lane_context(
                                 ripped_net_id, getattr(state, 'bus_net_to_group', None),
                                 getattr(state, 'bus_corridors', None), routed_net_paths)
                             # #572: forced-link nets retry their EXACT links
@@ -631,10 +631,10 @@ def run_reroute_loop(
                                 retry_result = route_oracle_links(
                                     pcb_data, ripped_net_id, config,
                                     retry_obstacles, _olinks_rt,
-                                    attraction_path=_attr)
+                                    lane_path=_attr)
                             elif retry_multipoint_pads:
                                 retry_result = route_multipoint_main(pcb_data, ripped_net_id, config, retry_obstacles, retry_multipoint_pads,
-                                                                     attraction_path=_attr, state=state)
+                                                                     lane_path=_attr, state=state)
                                 if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                     tap_result = route_multipoint_taps(pcb_data, ripped_net_id, config, retry_obstacles, retry_result)
                                     if tap_result:
@@ -651,7 +651,7 @@ def run_reroute_loop(
                                             del state.pending_multipoint_nets[ripped_net_id]
                             else:
                                 retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles,
-                                                                        attraction_path=_attr,
+                                                                        lane_path=_attr,
                                                                         reverse_direction=_rev)
 
                             if retry_result and not retry_result.get('failed'):

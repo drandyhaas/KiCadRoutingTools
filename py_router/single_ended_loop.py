@@ -59,7 +59,7 @@ def _sample_path(path: List[Tuple[int, int, int]], step: int = 1) -> List[Tuple[
     return sampled
 
 from routing_state import RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set
-from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, bus_attraction_context, BusGroup
+from bus_detection import detect_bus_groups, get_bus_routing_order, get_lane_neighbor, bus_lane_context, BusGroup
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
@@ -632,8 +632,18 @@ def route_single_ended_nets(
                 # so it fills only under --bus; the 'bus' ORDERING strategy
                 # alone must not switch attraction on.
                 if config.bus_enabled:
+                    # (the members share one lane, the group's corridor: free about it half the bus's own width --
+                    # its tracks side by side, or its ends where they stand wider apart than that. A member is
+                    # priced for leaving the BUS, not for standing in it where its own pad is)
+                    if getattr(config, '_lane_free_mm', None) is None:
+                        config._lane_free_mm = {}
+                    _half = lambda pts: (max(max(p[0] for p in pts) - min(p[0] for p in pts),  # noqa: E731
+                                             max(p[1] for p in pts) - min(p[1] for p in pts)) / 2.0) if pts else 0.0
+                    _free = max(bus.count * (config.track_width + config.clearance) / 2.0,
+                                _half(bus.source_positions), _half(bus.target_positions))
                     for nid in bus.net_ids:
                         bus_net_to_group[nid] = bus
+                        config._lane_free_mm[nid] = _free
 
             # Corridor planning (#296 R9): probe-route each group's
             # representative at a ladder of inflated clearances and attract
@@ -801,24 +811,21 @@ def route_single_ended_nets(
         # planned corridor first (#296 R9), routed-neighbor fallback,
         # clustered-endpoint direction. Multipoint members use it for
         # main-edge selection + attraction too (they used to route blind).
-        attraction_path, reverse_direction = bus_attraction_context(
+        lane_path, reverse_direction = bus_lane_context(
             net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
-        # #589 v2 owner attraction (KICAD_GLOBAL_PLAN_ATTRACT=1): a net
-        # with a planned rough corridor and NO bus corridor is attracted
-        # to its own plan -- the global->detailed handoff the repulsion-
-        # only reservations lack. Densified like a bus corridor; the
-        # attraction bonus/radius knobs are shared with bus routing.
-        if attraction_path is None:
+        # A net with its own way in the plan and no bus corridor keeps to that way, at a price
+        # (KICAD_GLOBAL_PLAN_LANE_COST > 0: global_plan.plan_lane_path, lane_price).
+        if lane_path is None:
             _gp = getattr(config, '_global_plan', None)
             if (_gp is not None and net_id in _gp.rough_paths
-                    and env_knobs.GLOBAL_PLAN.get('attract')):
+                    and env_knobs.GLOBAL_PLAN.get('lane_cost', 0) > 0):
                 # #658 river: predecessor's realized copper outranks the
                 # net's own probe corridor (follow-the-leader packing).
                 _riv = None
                 if env_knobs.GLOBAL_PLAN.get('river'):
-                    from global_plan import river_attraction_path
-                    _riv = river_attraction_path(config, net_id, pcb_data)
-                attraction_path = (_sample_path(_riv) if _riv is not None
+                    from global_plan import river_lane_path
+                    _riv = river_lane_path(config, net_id, pcb_data)
+                lane_path = (_sample_path(_riv) if _riv is not None
                                    else _sample_path(_gp.rough_paths[net_id]))
                 reverse_direction = False
         # #589 option 2 (KICAD_GLOBAL_PLAN_LAYER=pref): soft discount on the
@@ -851,18 +858,18 @@ def route_single_ended_nets(
                       f"(#572 forced edges)")
                 result = route_oracle_links(pcb_data, net_id, cfg_route, obstacles,
                                             _olinks,
-                                            attraction_path=attraction_path)
+                                            lane_path=lane_path)
             elif multipoint_pads:
                 print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
                 result = route_multipoint_main(pcb_data, net_id, cfg_route, obstacles, multipoint_pads,
-                                               attraction_path=attraction_path, state=state)
+                                               lane_path=lane_path, state=state)
                 # Track for Phase 3 completion after length matching
                 if result and not result.get('failed') and result.get('is_multipoint'):
                     state.pending_multipoint_nets[net_id] = result
                     state.multipoint_taps_done.discard(net_id)
             else:
                 result = route_net_with_obstacles(pcb_data, net_id, cfg_route, obstacles,
-                                                  attraction_path=attraction_path,
+                                                  lane_path=lane_path,
                                                   reverse_direction=reverse_direction)
 
         elapsed = time.time() - start_time
@@ -1363,12 +1370,12 @@ def route_single_ended_nets(
                             )
 
                         # Bus attraction for the retry, multipoint included
-                        retry_attraction_path, retry_reverse_direction = bus_attraction_context(
+                        retry_lane_path, retry_reverse_direction = bus_lane_context(
                             net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
-                        if retry_attraction_path is None:
+                        if retry_lane_path is None:
                             # #656: keep the plan lane through rip retries
-                            from global_plan import plan_attraction_path
-                            retry_attraction_path = plan_attraction_path(
+                            from global_plan import plan_lane_path
+                            retry_lane_path = plan_lane_path(
                                 config, net_id, pcb_data)
                             retry_reverse_direction = False
                         # #572: a forced-link net retries its EXACT links
@@ -1384,16 +1391,16 @@ def route_single_ended_nets(
                             retry_result = route_oracle_links(
                                 pcb_data, net_id, config, retry_obstacles,
                                 _olinks_r,
-                                attraction_path=retry_attraction_path)
+                                lane_path=retry_lane_path)
                         elif retry_multipoint_pads:
                             retry_result = route_multipoint_main(pcb_data, net_id, config, retry_obstacles, retry_multipoint_pads,
-                                                                 attraction_path=retry_attraction_path, state=state)
+                                                                 lane_path=retry_lane_path, state=state)
                             # Track for Phase 3 completion after length matching
                             if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):
                                 state.pending_multipoint_nets[net_id] = retry_result
                         else:
                             retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles,
-                                                                     attraction_path=retry_attraction_path,
+                                                                     lane_path=retry_lane_path,
                                                                      reverse_direction=retry_reverse_direction)
 
                         if retry_result and not retry_result.get('failed'):

@@ -1817,25 +1817,6 @@ class RoutingDialog(wx.Dialog):
         bus_detect_sizer.Add(self.bus_detection_radius, 1, wx.EXPAND)
         options_inner.Add(bus_detect_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
-        bus_attract_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        bus_attract_sizer.Add(wx.StaticText(options_scroll, label="Attraction radius:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        r = defaults.PARAM_RANGES['bus_attraction_radius']
-        self.bus_attraction_radius = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
-                                                        initial=defaults.BUS_ATTRACTION_RADIUS, inc=r['inc'])
-        self.bus_attraction_radius.SetDigits(r['digits'])
-        self.bus_attraction_radius.SetToolTip("Reach of the bus attraction around the group's planned corridor (else an already-routed neighbour's track), mm; the pull falls off to 0 here")
-        bus_attract_sizer.Add(self.bus_attraction_radius, 1, wx.EXPAND)
-        options_inner.Add(bus_attract_sizer, 0, wx.EXPAND | wx.ALL, 3)
-
-        bus_bonus_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        bus_bonus_sizer.Add(wx.StaticText(options_scroll, label="Attraction bonus:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        r = defaults.PARAM_RANGES['bus_attraction_bonus']
-        self.bus_attraction_bonus = wx.SpinCtrl(options_scroll, min=r['min'], max=r['max'],
-                                                 initial=defaults.BUS_ATTRACTION_BONUS)
-        self.bus_attraction_bonus.SetToolTip("Strength of the bus attraction: a step near the planned corridor (else the routed neighbour) and moving along it costs up to bonus/50 percent less, capped at 90% (4500 and above is full strength)")
-        bus_bonus_sizer.Add(self.bus_attraction_bonus, 1, wx.EXPAND)
-        options_inner.Add(bus_bonus_sizer, 0, wx.EXPAND | wx.ALL, 3)
-
         bus_min_sizer = wx.BoxSizer(wx.HORIZONTAL)
         bus_min_sizer.Add(wx.StaticText(options_scroll, label="Min nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         r = defaults.PARAM_RANGES['bus_min_nets']
@@ -3175,8 +3156,6 @@ class RoutingDialog(wx.Dialog):
         self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
-        self.bus_attraction_radius.SetValue(defaults.BUS_ATTRACTION_RADIUS)
-        self.bus_attraction_bonus.SetValue(defaults.BUS_ATTRACTION_BONUS)
         self.bus_min_nets.SetValue(defaults.BUS_MIN_NETS)
         self.no_crossing_layer_check.SetValue(False)
         self.can_swap_to_top.SetValue(False)  # match creation default + CLI/engine (off)
@@ -3592,8 +3571,6 @@ class RoutingDialog(wx.Dialog):
             # Bus routing options
             'bus_enabled': self.bus_enabled.GetValue(),
             'bus_detection_radius': self.bus_detection_radius.GetValue(),
-            'bus_attraction_radius': self.bus_attraction_radius.GetValue(),
-            'bus_attraction_bonus': self.bus_attraction_bonus.GetValue(),
             'bus_min_nets': self.bus_min_nets.GetValue(),
             # Crossing/swap options
             'no_crossing_layer_check': self.no_crossing_layer_check.GetValue(),
@@ -4147,8 +4124,6 @@ class RoutingDialog(wx.Dialog):
                     mps_segment_intersection=config.get('mps_segment_intersection', False),
                     bus_enabled=config.get('bus_enabled', False),
                     bus_detection_radius=config.get('bus_detection_radius', 5.0),
-                    bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
-                    bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
                     bus_min_nets=config.get('bus_min_nets', 2),
                     guide_corridor_enabled=config.get('guide_corridor_enabled', False),
                     guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),

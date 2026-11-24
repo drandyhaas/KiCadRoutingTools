@@ -5,6 +5,7 @@ Routes individual nets using A* pathfinding on a grid obstacle map.
 """
 from __future__ import annotations
 
+from lane_price import lane_terms
 import env_knobs
 import itertools
 import math
@@ -2853,7 +2854,7 @@ def island_launch_rows(pcb_data: PCBData, net_id: int, end, other,
 
 def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                        obstacles: GridObstacleMap, links,
-                       attraction_path=None) -> Optional[dict]:
+                       lane_path=None) -> Optional[dict]:
     """Route the plane-finalize oracle's EXACT remaining links (#572, fix
     direction 2). `links` are remaining_links-shaped endpoint pairs
     ((ax, ay, layer, kind), (bx, by, layer, kind)) whose coordinates are
@@ -2913,7 +2914,7 @@ def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         rows_b = [(gbx, gby, layer_idx[l], bx, by) for l in lbs]
         result = route_net_with_obstacles(
             pcb_data, net_id, config, obstacles,
-            attraction_path=attraction_path,
+            lane_path=lane_path,
             sources_override=rows_a, targets_override=rows_b)
         # The anchors' cells are obstacle-exempt, so the copper between them
         # can land inside the clearance of foreign copper beside the gap --
@@ -2941,7 +2942,7 @@ def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
             if isl_a or isl_b:
                 result = route_net_with_obstacles(
                     pcb_data, net_id, config, obstacles,
-                    attraction_path=attraction_path,
+                    lane_path=lane_path,
                     sources_override=isl_a or rows_a,
                     targets_override=isl_b or rows_b)
                 graze = _forced_link_graze(result, (ax, ay), (bx, by),
@@ -3035,7 +3036,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         # on a whole-board route only: a scoped one (a rescue's window or
         # gap, `bounds` / the endpoint overrides) sees part of the copper,
         # and would read a pour the rest of the board touches as untouched
-        _scope = dict(zip(('attraction_path', 'reverse_direction', 'bounds',
+        _scope = dict(zip(('lane_path', 'reverse_direction', 'bounds',
                            'sources_override', 'targets_override'), args))
         _scope.update(kwargs)
         _whole = all(_scope.get(k) is None for k in
@@ -3056,7 +3057,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
 def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               obstacles: GridObstacleMap,
-                              attraction_path: Optional[List[Tuple[int, int, int]]] = None,
+                              lane_path: Optional[List[Tuple[int, int, int]]] = None,
                               reverse_direction: bool = False,
                               bounds: Optional[Tuple[int, int, int, int]] = None,
                               sources_override: Optional[List[Tuple]] = None,
@@ -3068,7 +3069,7 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
         net_id: Net ID to route
         config: Routing configuration
         obstacles: Pre-built obstacle map
-        attraction_path: Optional path to attract to (for bus routing).
+        lane_path: Optional path to attract to (for bus routing).
                         List of (gx, gy, layer) tuples from a previously routed neighbor.
         reverse_direction: If True, swap sources and targets (route from targets to sources).
                           Used for bus routing when the clique was formed by targets.
@@ -3241,24 +3242,8 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
         if tgt_in_bga: zones.append("tgt:bga")
         print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
-    # Calculate bus attraction parameters
-    bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
-    bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
-
-    # Cross-layer fraction of the bus attraction bonus (#296 R9 phase B):
-    # keeps a planned corridor guiding a member across via transitions.
-    # Experimental default 35% when bus routing is on; override with
-    # KICAD_BUS_XLAYER_PCT (0 = legacy same-layer-only attraction).
-    bus_xlayer_pct = 0
-    # #589 owner attraction: plan corridors change layers (~1 via/net in a
-    # negotiated plan), so cross-layer pull must arm for plan-attracted
-    # nets too, not only bus members.
-    if bus_attraction_bonus > 0 and (getattr(config, 'bus_enabled', False)
-                                     or env_knobs.GLOBAL_PLAN.get('attract')):
-        try:
-            bus_xlayer_pct = env_knobs.BUS_XLAYER_PCT
-        except ValueError:
-            bus_xlayer_pct = 35
+    # The net's lane (a bus member's corridor, a plan's way for it): what leaving it costs (lane_price)
+    lane_free_grid, lane_ramp_grid, lane_prices = lane_terms(config, net_id, lane_path)
 
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
                         turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
@@ -3268,17 +3253,14 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
                         proximity_heuristic_cost=prox_h_cost,
                         layer_direction_preferences=config.get_layer_direction_preferences(),
                         direction_preference_cost=config.direction_preference_cost,
-                        attraction_radius=bus_attraction_radius_grid,
-                        attraction_bonus=bus_attraction_bonus,
-                        attraction_cross_layer_pct=bus_xlayer_pct,
-                        attraction_potential=env_knobs.GLOBAL_PLAN.get('attract_potential', 0))
+                        lane_free=lane_free_grid, lane_ramp=lane_ramp_grid, lane_prices=lane_prices)
 
     # Set attraction path for bus routing (if provided)
-    if attraction_path:
-        router.set_attraction_path(attraction_path)
+    if lane_path:
+        router.set_lane_path(lane_path)
         if config.verbose:
-            layers_in_path = set(p[2] for p in attraction_path)
-            print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
+            layers_in_path = set(p[2] for p in lane_path)
+            print(f"    Lane: {len(lane_path)} points, layers={layers_in_path}, free {lane_free_grid} + ramp {lane_ramp_grid} grid, prices {lane_prices}")
 
     # Per-layer fractional track margins (#156): the net's extra half-width --
     # power override OR impedance layer width -- over what the obstacle stamps
@@ -5748,7 +5730,7 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
 
 
 def _select_multipoint_main_edge(pcb_data, pad_info, pad_components,
-                                 mst_edges, attraction_path):
+                                 mst_edges, lane_path):
     """Pick which MST edge Phase 1 routes NOW; the rest defer to Phase 3.
 
     Phase 3 runs after every other net's main route, so the deferred
@@ -5776,9 +5758,9 @@ def _select_multipoint_main_edge(pcb_data, pad_info, pad_components,
     def comp(i):
         return pad_components.get(i, i)
 
-    if attraction_path and env_knobs.BUS_MULTIPOINT_SPAN:
-        p0 = attraction_path[0]
-        p1 = attraction_path[-1]
+    if lane_path and env_knobs.BUS_MULTIPOINT_SPAN:
+        p0 = lane_path[0]
+        p1 = lane_path[-1]
         # Best cross-component terminal pair bridging the corridor's ends
         # (orientation-free score, grid Manhattan like the MST itself).
         best = None
@@ -5936,7 +5918,7 @@ def _route_multipoint_main_impl(
     config: GridRouteConfig,
     obstacles: 'GridObstacleMap',
     pad_info: List[Tuple],
-    attraction_path: Optional[List[Tuple[int, int, int]]] = None,
+    lane_path: Optional[List[Tuple[int, int, int]]] = None,
     state=None,
     _stub_switch_round: bool = False,
     _deferred_main_edges: frozenset = frozenset(),
@@ -5957,7 +5939,7 @@ def _route_multipoint_main_impl(
         config: Grid routing configuration
         obstacles: Pre-built obstacle map
         pad_info: List of (gx, gy, layer_idx, orig_x, orig_y, pad) from get_multipoint_net_pads()
-        attraction_path: Optional bus-corridor centerline (grid coords). The
+        lane_path: Optional bus-corridor centerline (grid coords). The
             main edge is chosen to SPAN it (see _select_multipoint_main_edge)
             and the router attracts toward it, exactly as in
             route_net_with_obstacles -- multipoint bus members used to route
@@ -6135,7 +6117,7 @@ def _route_multipoint_main_impl(
     _edges_before = list(mst_edges)
     mst_edges = _select_multipoint_main_edge(pcb_data, pad_info,
                                              pad_components, mst_edges,
-                                             attraction_path)
+                                             lane_path)
     # A main edge whose terminal copper overlapped foreign copper on an earlier
     # pass goes to the back, not away: Phase 1 tries the next edge first and
     # Phase 3 still routes this one as a tap.
@@ -6149,7 +6131,7 @@ def _route_multipoint_main_impl(
     if mst_edges and _edges_before and mst_edges[0] != _edges_before[0]:
         _sel_note = {'mode': ('terminal-gate-deferred'
                               if mst_edges[0] != _selected_front
-                              else 'corridor-span' if attraction_path
+                              else 'corridor-span' if lane_path
                               else 'dense-first'),
                      'main_edge': list(mst_edges[0][:2]),
                      'displaced_longest': list(_edges_before[0][:2])}
@@ -6204,21 +6186,8 @@ def _route_multipoint_main_impl(
         if tgt_in_bga: zones.append("tgt:bga")
         print(f"  proximity_heuristic_cost={prox_h_cost} zones=[{', '.join(zones) if zones else 'none'}]")
 
-    # Bus attraction parameters -- same math as route_net_with_obstacles
-    # (multipoint members' mains used to skip this entirely, so a bus net
-    # whose topology was multipoint routed its trunk OFF the corridor).
-    bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
-    bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
-    bus_xlayer_pct = 0
-    # #589 owner attraction: plan corridors change layers (~1 via/net in a
-    # negotiated plan), so cross-layer pull must arm for plan-attracted
-    # nets too, not only bus members.
-    if bus_attraction_bonus > 0 and (getattr(config, 'bus_enabled', False)
-                                     or env_knobs.GLOBAL_PLAN.get('attract')):
-        try:
-            bus_xlayer_pct = env_knobs.BUS_XLAYER_PCT
-        except ValueError:
-            bus_xlayer_pct = 35
+    # The net's lane, as route_net_with_obstacles prices it (a multipoint member's main keeps to the corridor too)
+    lane_free_grid, lane_ramp_grid, lane_prices = lane_terms(config, net_id, lane_path)
 
     # Route farthest pair with probe routing (same as single-ended)
     router = GridRouter(via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
@@ -6229,16 +6198,13 @@ def _route_multipoint_main_impl(
                         proximity_heuristic_cost=prox_h_cost,
                         layer_direction_preferences=config.get_layer_direction_preferences(),
                         direction_preference_cost=config.direction_preference_cost,
-                        attraction_radius=bus_attraction_radius_grid,
-                        attraction_bonus=bus_attraction_bonus,
-                        attraction_cross_layer_pct=bus_xlayer_pct,
-                        attraction_potential=env_knobs.GLOBAL_PLAN.get('attract_potential', 0))
+                        lane_free=lane_free_grid, lane_ramp=lane_ramp_grid, lane_prices=lane_prices)
 
-    if attraction_path:
-        router.set_attraction_path(attraction_path)
+    if lane_path:
+        router.set_lane_path(lane_path)
         if config.verbose:
-            layers_in_path = set(p[2] for p in attraction_path)
-            print(f"    Bus attraction: {len(attraction_path)} path points, layers={layers_in_path}, radius={bus_attraction_radius_grid} grid, bonus={bus_attraction_bonus}")
+            layers_in_path = set(p[2] for p in lane_path)
+            print(f"    Lane: {len(lane_path)} points, layers={layers_in_path}, free {lane_free_grid} + ramp {lane_ramp_grid} grid, prices {lane_prices}")
 
     # Per-layer fractional track margins (#156): exact extra half-width over
     # the stamps' reserve, no ceil, no +1 (see track_margins_for_net).
@@ -6373,7 +6339,7 @@ def _route_multipoint_main_impl(
             if new_pad_info:
                 retry = route_multipoint_main(
                     pcb_data, net_id, config, obstacles, new_pad_info,
-                    attraction_path=attraction_path, state=state,
+                    lane_path=lane_path, state=state,
                     _stub_switch_round=True)
             if retry and not retry.get('failed') and retry.get('path'):
                 print(f"  MULTIPOINT STUB SWITCH: main edge routed after "
@@ -6559,7 +6525,7 @@ def _route_multipoint_main_impl(
                   f"Phase 1 tries the next edge")
             retry = route_multipoint_main(
                 pcb_data, net_id, config, obstacles, pad_info,
-                attraction_path=attraction_path, state=state,
+                lane_path=lane_path, state=state,
                 _stub_switch_round=_stub_switch_round,
                 _deferred_main_edges=frozenset(_deferred))
             if retry is not None:

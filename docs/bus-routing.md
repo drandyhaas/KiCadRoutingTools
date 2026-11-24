@@ -21,12 +21,10 @@ The GUI's Advanced tab has the same switch ("Enable bus routing", with the four 
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--bus` | off | Enable bus detection, corridor planning and attraction |
+| `--bus` | off | Enable bus detection, corridor planning and each member's lane |
 | `--bus-detection-radius` | 5.0 | Max endpoint distance for nets to form a bus (mm) |
 | `--bus-min-nets` | 2 | Minimum number of nets for a raw clique (the strict filter below then needs 3) |
-| `--bus-attraction-radius` | 5.0 | Reach of the attraction around the corridor or neighbour path (mm) |
-| `--bus-attraction-bonus` | 5000 | Attraction strength: `bonus/50` percent off a step's cost, capped at 90% (the default is at the cap) |
-| `--ordering bus` | - | The bus-first ordering alone, with no corridor and no attraction (see [Net Ordering](net-ordering.md)) |
+| `--ordering bus` | - | The bus-first ordering alone, with no corridor and no lane (see [Net Ordering](net-ordering.md)) |
 
 ## Bus Detection
 
@@ -38,7 +36,7 @@ The clique search (`_find_largest_clique()`) is greedy: candidate pairs are sort
 
 **Strict geometric filter** (`filter_bus_groups_geometric()`, on by default): a group is kept as a bus only if its members genuinely travel together. Each member's run is the farthest-apart pair of its pads; the group keeps its largest subset whose runs are at least 5 mm long, parallel within a cos > 0.9 cone (either way round, a net has no direction) and within a 1.5× length ratio of each other, and drops power nets (`--power-nets`). A group left with fewer than 3 members is not a bus. This retires decoupling-cap clusters and power rails that raw cliques swept up. The run prints `Bus filter: N raw clique group(s) -> M geometric bus(es)`.
 
-When the clique formed at the targets, members route from that clustered end, in one direction only, where the attraction can guide them.
+When the clique formed at the targets, members route from that clustered end, in one direction only, where the lane can guide them.
 
 ## Routing Order: Bus Groups First, Middle-Out
 
@@ -59,11 +57,11 @@ Before any member routes, `plan_bus_corridors()` probe-routes each group's repre
 score = probe length + (k_max − k) × (track + clearance) × 40
 ```
 
-so a corridor with room for the whole group wins unless it costs much more length. The winning centreline becomes the attraction path for **every** member, the guide included. Probes commit nothing.
+so a corridor with room for the whole group wins unless it costs much more length. The winning centreline becomes the lane of **every** member, the guide included. Probes commit nothing.
 
 - **Laminar probe.** The probe pays `KICAD_BUS_CORRIDOR_PROBE_VIA_MULT` (default 20) times the via cost, so the corridor stays on one layer unless a change is unavoidable. Members route at the normal via cost.
 - **Demotion.** A centreline that still needs more than `KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES` (default 1) layer changes away from its ends (changes within 3 mm of either end are the river's on-ramps and do not count) has no lane to offer: the group is **demoted**, with no corridor, no attraction and no bus ordering, and its members route as plain nets.
-- **No corridor.** A group none of whose rungs route keeps its bus ordering and falls back to neighbour attraction.
+- **No corridor.** A group none of whose rungs route keeps its bus ordering and falls back to its routed neighbour's path as its lane.
 
 ## Multi-Point Bus Members
 
@@ -72,40 +70,35 @@ A bus member with 3+ terminals (e.g. a strobe line with pull-up resistors) route
 - **Corridor-spanning main edge.** The MST normally realizes each connection by the *closest* terminal pair, which for a BGA-to-chip bus net is typically resistor-to-trunk, leaving the dense ball tap deferred until the surrounding balls' own escapes seal it in. When the member has an attraction path, the main edge is instead re-realized as the terminal pair that spans the corridor's two endpoints (e.g. the BGA ball and the far chip pin), and only off-corridor taps (the pull-ups) defer to Phase 3. Disable with `KICAD_BUS_MULTIPOINT_SPAN=0`.
 - **Corridor attraction on the main edge.** The multipoint main routes with the same attraction path (and cross-layer share) as point-to-point members.
 
-## Attraction
+## A Member's Lane
 
-A member's attraction path is its group's planned corridor, else (no corridor) the path of an already-routed adjacent net in the bus's physical order, the left neighbour first (`get_attraction_neighbor()`). The path is sampled at every grid step and each point carries the direction to the next (`set_attraction_path()`).
+A member's lane is its group's planned corridor, else (no corridor) the path of an already-routed adjacent net in the bus's physical order, the left neighbour first (`get_lane_neighbor()`). The path is sampled at every grid step (`set_lane_path()`).
 
-During A*, `get_path_attraction_bonus()` takes a **percentage off the step's cost** for a move near the path:
+During A*, a step that enters a cell **off the lane pays a price** (`lane_price()` in the router, `lane_price.py` for its terms):
 
-```
-discount % = min(bonus / 50, 90) × proximity² × alignment × layer share
-```
+- **Free** within half the bus's width of the lane, on the lane's own layer there (never less than `LANE_FREE`, 0.2 mm): the members run side by side about the corridor.
+- **Rising** linearly over the next `LANE_RAMP` (1.0 mm) to the full price.
+- **The full price** everywhere farther off, and on a layer the lane is not on there: a step costs `1 + LANE_COST` (5) times a step on the lane's own layer.
 
-- **Proximity**: `1 − distance / --bus-attraction-radius` to the nearest path point (squared in the formula): full at the path, zero at the radius.
-- **Alignment** (the move against the path direction at that point): 100% for a diagonal move along a diagonal stretch, 70% for any other move with a forward component (straight along a straight stretch, or 45° off), **zero** for perpendicular or opposing moves. This rewards running alongside the path without rewarding circling it.
-- **Layer share**: 100% when a path point on the move's own layer is within reach; otherwise, measured to the nearest point on another layer, `KICAD_BUS_XLAYER_PCT` (default 35) percent, so the corridor still guides a member while it travels a different layer.
-
-A discount, unlike a subtracted bonus, can never make a step free, so the gradations survive. Clearances are enforced as normal: attraction only changes which legal path is cheapest.
+It is a price for leaving the lane and not a discount for keeping to it. The search is weighted (cost so far plus `--heuristic-weight` times the distance left, at the full step price): a discount lowers the cost along the lane and leaves the weighted distance as it was, so a lane that bends from the straight line loses to the straight line at every step. A price off the lane raises the cost of the straight line instead. It is a scalar field, the same whichever end the search starts from. A net routed along a lane is not straightened afterwards by the octolinear smoothing. Clearances are enforced as normal: the lane only changes which legal path is cheapest.
 
 ## Interaction with Other Features
 
-- **Net ordering**: `--bus` reorders whatever `--ordering` produced (bus groups first). `--ordering bus` gives the same reorder over an MPS base without corridors or attraction.
-- **Failures**: a failed member gets the normal rip-up and retry. Ripped members re-route *with* their corridor (or routed-neighbour) attraction. Other members continue; a failed neighbour simply provides no attraction (the next routed neighbour is used, if any).
+- **Net ordering**: `--bus` reorders whatever `--ordering` produced (bus groups first). `--ordering bus` gives the same reorder over an MPS base without corridors or lanes.
+- **Failures**: a failed member gets the normal rip-up and retry. Ripped members re-route *along* their corridor (or routed neighbour) again. Other members continue; a failed neighbour simply provides no lane (the next routed neighbour is used, if any).
 - **Differential pairs**: not bus-routed (see Overview).
 
 ## Tuning
 
 - Increase `--bus-detection-radius` if a connector's pins span more than 5 mm and aren't being grouped; decrease it if unrelated nets are being pulled into a bus.
-- `--bus-attraction-bonus` above 4500 changes nothing (the 90% cap); lower it if members hug the corridor at the cost of unnecessary detours. `--bus-attraction-radius` sets how far from the corridor the pull reaches.
 - The run prints the detected groups and their physical order; `--verbose` adds the routing order, the guide, which neighbour each member follows, and every corridor rung.
-- Env knobs on the default behaviour: `KICAD_BUS_STRICT=0` turns the strict filter off (raw cliques), `KICAD_BUS_XLAYER_PCT` sets the cross-layer share (0 = same layer only), `KICAD_BUS_CORRIDOR_PROBE_VIA_MULT` and `KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES` set the laminar probe and the demotion rule, `KICAD_BUS_MULTIPOINT_SPAN=0` turns the corridor-spanning main edge off.
+- Env knobs on the default behaviour: `KICAD_BUS_STRICT=0` turns the strict filter off (raw cliques), `KICAD_BUS_CORRIDOR_PROBE_VIA_MULT` and `KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES` set the laminar probe and the demotion rule, `KICAD_BUS_MULTIPOINT_SPAN=0` turns the corridor-spanning main edge off.
 
 ## Limitations
 
 - Grouping is geometric: two unrelated buses that leave a connector side by side and run parallel can be grouped together.
 - Attraction is strongest on the path's own layer; other layers get the 35% share.
-- A bus member with no corridor and no routed neighbour (e.g. all earlier members failed) routes without attraction.
+- A bus member with no corridor and no routed neighbour (e.g. all earlier members failed) routes with no lane.
 
 ## Buses between two arrays: the topo bus step (experimental)
 

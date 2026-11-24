@@ -277,7 +277,7 @@ def get_bus_routing_order(bus: BusGroup) -> List[int]:
     return order
 
 
-def get_attraction_neighbor(
+def get_lane_neighbor(
     bus: BusGroup,
     net_id: int,
     routed_paths: Dict[int, List[Tuple[int, int, int]]]
@@ -401,13 +401,13 @@ def filter_bus_groups_geometric(pcb_data, bus_groups, config,
     return out
 
 
-def bus_attraction_context(
+def bus_lane_context(
     net_id: int,
     bus_net_to_group: Optional[Dict[int, BusGroup]],
     bus_corridors: Optional[Dict[str, List[Tuple[int, int, int]]]],
     routed_paths: Optional[Dict[int, List[Tuple[int, int, int]]]] = None
 ) -> Tuple[Optional[List[Tuple[int, int, int]]], bool]:
-    """(attraction_path, reverse_direction) for a bus member.
+    """(lane_path, reverse_direction) for a bus member.
 
     The one place that encodes the priority every routing site must share:
     the group's PLANNED corridor first (one centerline for the whole group,
@@ -420,5 +420,5 @@ def bus_attraction_context(
     if bg is None:
         return None, False
     attr = ((bus_corridors or {}).get(bg.name)
-            or get_attraction_neighbor(bg, net_id, routed_paths or {}))
+            or get_lane_neighbor(bg, net_id, routed_paths or {}))
     return attr, (bg.clique_endpoint == "target")

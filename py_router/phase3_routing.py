@@ -1594,27 +1594,27 @@ def _retry_victim_main_with_ripup(
         # A bus-member victim re-routes with its corridor (no routed-paths
         # dict tracked at Phase-3 depth; the planned corridor is the stable
         # artifact and the usual hit).
-        from bus_detection import bus_attraction_context
-        _attr, _rev = bus_attraction_context(
+        from bus_detection import bus_lane_context
+        _attr, _rev = bus_lane_context(
             victim_id, getattr(state, 'bus_net_to_group', None),
             getattr(state, 'bus_corridors', None))
         if _attr is None:
             # #656: phase-3 victim reroutes keep their PLAN lane too --
             # churn on contested nets is where adherence erodes (#655).
-            from global_plan import plan_attraction_path
-            _attr = plan_attraction_path(config, victim_id, pcb_data)
+            from global_plan import plan_lane_path
+            _attr = plan_lane_path(config, victim_id, pcb_data)
             _rev = False
         if was_multipoint:
             multipoint_pads = get_multipoint_net_pads(pcb_data, victim_id, config)
             if multipoint_pads:
                 result = route_multipoint_main(pcb_data, victim_id, config, obstacles, multipoint_pads,
-                                               attraction_path=_attr, state=state)
+                                               lane_path=_attr, state=state)
             else:
                 result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles,
-                                                  attraction_path=_attr, reverse_direction=_rev)
+                                                  lane_path=_attr, reverse_direction=_rev)
         else:
             result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles,
-                                              attraction_path=_attr, reverse_direction=_rev)
+                                              lane_path=_attr, reverse_direction=_rev)
 
         if result and not result.get('failed') \
                 and (result.get('path') or result.get('phase1_exhausted')):
@@ -1707,18 +1707,18 @@ def _reroute_phase3_ripped_nets(
         was_multipoint = bool(multipoint_pads)
 
         # Ripped bus members reroute with their corridor here too
-        from bus_detection import bus_attraction_context
-        _attr, _rev = bus_attraction_context(
+        from bus_detection import bus_lane_context
+        _attr, _rev = bus_lane_context(
             ripped_net_id, getattr(state, 'bus_net_to_group', None),
             getattr(state, 'bus_corridors', None))
         if was_multipoint:
             # Use multipoint routing for multi-point nets
             result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
-                                           attraction_path=_attr, state=state)
+                                           lane_path=_attr, state=state)
         else:
             # Route the main path for simple nets
             result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
-                                              attraction_path=_attr, reverse_direction=_rev)
+                                              lane_path=_attr, reverse_direction=_rev)
 
         # A victim whose main re-route fails BARE strands, and the #85
         # arbitration then abandons the (successful) tap rip-up that ripped

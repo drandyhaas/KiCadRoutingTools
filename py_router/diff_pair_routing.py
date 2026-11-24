@@ -5060,34 +5060,31 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
                               add_pads_via_keepout, remove_pads_via_keepout,
                               get_same_net_through_hole_positions)
     partner_pads = partner_pads or []
-    _att_radius = 0
-    _att_bonus = 0
-    if attract_path:
-        # Tight radius (the pair's own lane width plus slack) and a bonus well
-        # above the bus default: the sibling lane must win against everything
-        # short of a hard obstacle -- "almost forced", same layer only
-        # (attraction_cross_layer_pct=0 never rewards a different layer).
+    _lane = (0, 0, None)
+    _pts = [(int(p[0]), int(p[1]), int(p[2])) for p in attract_path] if attract_path else []
+    if _pts:
+        # The partner leg as this leg's lane, tight and dear: free out to the
+        # leg's place beside it (half the reach), the price rising over the
+        # other half to three times a bus corridor's -- the sibling's side
+        # must win against everything short of a hard obstacle, on its layer.
         try:
             _att_mm = env_knobs.HYBRID_COUPLE_RADIUS
         except ValueError:
             _att_mm = 1.0
-        _att_radius = max(2, int(round(_att_mm / config.grid_step)))
-        import routing_defaults as _rd
-        _att_bonus = 3 * _rd.BUS_ATTRACTION_BONUS
+        from lane_price import lane_terms, lane_cost
+        _lane = lane_terms(config, net_id, _pts, cost=3 * lane_cost(config), free_mm=_att_mm / 2, ramp_mm=_att_mm / 2)
     router = GridRouter(
         via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost, via_proximity_cost=config.via_proximity_cost_int(),
         layer_costs=config.get_layer_costs(),
-        attraction_radius=_att_radius, attraction_bonus=_att_bonus,
-        attraction_cross_layer_pct=0)
+        lane_free=_lane[0], lane_ramp=_lane[1], lane_prices=_lane[2])
     if attract_path:
-        router.set_attraction_path([(int(p[0]), int(p[1]), int(p[2]))
-                                    for p in attract_path])
+        router.set_lane_path(_pts)
         if config.verbose:
             # Mechanism narration, not an outcome: the coupling heuristic
             # engaging is the normal case, once per leg.
-            print(f"      leg couple: net {net_id} attracted to partner leg "
-                  f"({len(attract_path)} pts, radius {_att_radius}, bonus {_att_bonus})")
+            print(f"      leg couple: net {net_id} kept beside its partner leg "
+                  f"({len(attract_path)} pts, free {_lane[0]} + ramp {_lane[1]} grid)")
     nlayers = len(config.layers)
     own_tol = _launch_assoc_tol(config)
     # An existing same-net through-hole (the net's THT pads + any pre-placed via,

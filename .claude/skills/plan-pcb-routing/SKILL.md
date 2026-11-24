@@ -2347,14 +2347,13 @@ spells it that way.
    carries pours** — the inner layer adjacent to the largest BGA that its
    widest bus needs (orangecrab: In2, the RAM highway; pricing it cost
    completions every time it was tried).
-4. **The plan/attraction environment** (route step only, as env-var
+4. **The plan environment** (route step only, as env-var
    prefixes on the command line so the manifest replays them):
    `KICAD_GLOBAL_PLAN=1 KICAD_GLOBAL_PLAN_SEQ=1
    KICAD_GLOBAL_PLAN_SEQ_COST=1.5 KICAD_GLOBAL_PLAN_VIA_COST=20
-   KICAD_GLOBAL_PLAN_ITERS=50000 KICAD_GLOBAL_PLAN_ATTRACT=1
-   KICAD_ATTRACT_POTENTIAL=65 KICAD_GLOBAL_PLAN_RIVER=1
+   KICAD_GLOBAL_PLAN_ITERS=50000 KICAD_GLOBAL_PLAN_RIVER=1
    KICAD_FINALIZE_REAUDIT=1 KICAD_PACK_INLINE=1`
-   (SEQ-negotiated global plan + potential attraction + river packing +
+   (SEQ-negotiated global plan + river packing +
    finalize re-audit. These are env knobs today, so they ride the
    redo-manifest form of the plan but NOT the GUI plan JSON — see the
    promotion note in Step 9. The recorder writes the knobs a step ran

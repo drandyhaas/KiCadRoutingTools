@@ -443,8 +443,6 @@ class GridRouteConfig:
     bus_enabled: bool = False  # Enable bus detection and routing
     bus_detection_radius: float = 5.0  # mm - max endpoint distance to form bus
     bus_min_nets: int = 2  # Minimum nets to form a bus
-    bus_attraction_radius: float = 5.0  # mm - attraction radius from neighbor track
-    bus_attraction_bonus: int = 5000  # Cost bonus for staying near neighbor
     # Guide corridor - route selected nets through a user-drawn polyline (issue #7)
     guide_corridor_enabled: bool = False  # Steer routed nets along a drawn guide path
     guide_corridor_layer: str = "User.1"  # User layer the guide polyline is drawn on
@@ -1276,7 +1274,7 @@ class GridRouteConfig:
 
     def scaled_cell_units(self, units: float) -> int:
         """Per-cell cost knobs in raw units calibrated at REFERENCE_GRID_STEP
-        (e.g. bus_attraction_bonus). soft-knobs B5: constant per cell -- the
+        (e.g. a proximity cost). soft-knobs B5: constant per cell -- the
         old (grid_step/REFERENCE) factor broke relative strength vs the move
         cost at non-reference grids. Identical at 0.1."""
         return int(units)

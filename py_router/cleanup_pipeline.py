@@ -96,6 +96,12 @@ def strict_collapse_deferred() -> bool:
     return _STRICT_COLLAPSE_DEFERRED[0] > 0
 
 
+def _lane_net_ids(config):
+    """the nets routed along a way of their own at a price (global_plan.lane_net_ids): not smoothed"""
+    from global_plan import lane_net_ids
+    return lane_net_ids(config)
+
+
 def _smooth_skip_net_ids(pcb_data):
     """Nets the #536 octolinear smoothing pass must never touch: protected
     nets (length/time-matched groups, coupled diff pairs, KiCad-locked
@@ -695,7 +701,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             keep_input_copper=keep_input_copper,
             net_clearances=_nc, board_edge_clearance=_bec,
             config=config,
-            skip_net_ids=_smooth_skip_net_ids(pcb_data))
+            skip_net_ids=_smooth_skip_net_ids(pcb_data) | _lane_net_ids(config))
         counts['smoothed_spans'] = _sm_stats.get('spans', 0)
         counts['smoothed_saved_mm'] = _sm_stats.get('saved_mm', 0.0)
         _trace('smooth')

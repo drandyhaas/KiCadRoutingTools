@@ -872,8 +872,6 @@ assert config.pair_clearance(1, 3, kind='stack') == 0.4        # via-via: max ov
 | `bus_enabled` | `False` | Detect and route bus groups together |
 | `bus_detection_radius` | `5.0` | Max endpoint spread to form a bus |
 | `bus_min_nets` | `2` | Minimum nets per bus |
-| `bus_attraction_radius` | `5.0` | Attraction radius from the neighbor's track |
-| `bus_attraction_bonus` | `5000` | Cost bonus for hugging the neighbor (cost units) |
 
 ### Guide corridor and keepouts
 

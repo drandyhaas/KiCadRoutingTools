@@ -211,8 +211,10 @@ DIRECTION_PREFERENCE_COST = 250  # Cost penalty per off-axis move (0 = disabled)
 # Bus routing - auto-detection and parallel routing of grouped nets
 BUS_DETECTION_RADIUS = 5.0  # mm - max endpoint distance to form bus
 BUS_MIN_NETS = 2  # Minimum nets to form a bus
-BUS_ATTRACTION_RADIUS = 5.0  # mm - attraction reach around the planned corridor (else the routed neighbour)
-BUS_ATTRACTION_BONUS = 5000  # up to bonus/50 percent off a step along the corridor, capped at 90% (4500+ = full)
+# A net's LANE -- a bus's corridor, a plan's way for the net -- and the price of leaving it (lane_price)
+LANE_COST = 5.0  # a step off the lane costs 1 + this many steps on it
+LANE_FREE = 0.2  # mm - within this of the lane, on its layer, a cell is free (a bus: half the bus's width, where wider)
+LANE_RAMP = 1.0  # mm - the price rises over this to the full one
 
 # Guide corridor - route selected nets through a user-drawn polyline (issue #7)
 GUIDE_CORRIDOR_ENABLED = False
@@ -452,7 +454,5 @@ PARAM_RANGES = {
     'repair_analysis_grid_step': {'min': 0.1, 'max': 2.0, 'inc': 0.1, 'digits': 1},
     # Bus routing parameters
     'bus_detection_radius': {'min': 0.5, 'max': 100.0, 'inc': 0.5, 'digits': 1},
-    'bus_attraction_radius': {'min': 0.5, 'max': 10.0, 'inc': 0.5, 'digits': 1},
-    'bus_attraction_bonus': {'min': 0, 'max': 10000},
     'bus_min_nets': {'min': 2, 'max': 20},
 }
