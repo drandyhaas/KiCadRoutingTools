@@ -66,7 +66,9 @@ congestion before the router starts:
                    congested boards, and leave to rip the stubs of any pair
                    route_diff could not couple; up to two further passes on the result
                    while nets are left open, which may cross the planes at
-                   PLANE_FALLBACK_COST; then, while nets stay open, the same
+                   PLANE_FALLBACK_COST (after a kept bus step every step
+                   prices them so, the first pass too: the bus step's lanes
+                   cross the planes); then, while nets stay open, the same
                    passes from the step's start at each narrower size rung,
                    shipping the best pass
 
@@ -1329,6 +1331,27 @@ def bus_step(ch, a):
     return h
 
 
+def costs_after_bus(ch, h, costs):
+    """The layer costs of the steps after the bus step (handoff H, None when
+    it was not kept): COSTS, with every forbidden plane priced at
+    PLANE_FALLBACK_COST once a bus step was kept.
+
+    The bus step prices a plane, it does not keep off it: its lanes run on
+    every layer, and its own check that it walled no ball in counts every
+    layer. So it hands on balls whose only way out crosses a plane. With the
+    planes forbidden, such a net has no way at all in the first route pass,
+    the pass routes everything else across its ground, and a later pass has to
+    rip that to reach it."""
+    if not h or not any(float(c) < 0 for c in costs):
+        return costs
+    priced = [str(PLANE_FALLBACK_COST) if float(c) < 0 else c for c in costs]
+    ch.decide('planes', True,
+              f"priced at {PLANE_FALLBACK_COST:g} from the first step after the buses, "
+              f"not forbidden: the bus step's lanes cross the planes, and it hands on "
+              f"balls whose only way out does", layer_costs=priced)
+    return priced
+
+
 def run_plan(board, output, a, work, finish=False, effort_factor=2.0, keep_placement=False):
     ch = Chain(board, work, clearance=a['clearance'], baseline=os.path.abspath(board))
     L = a['layers']
@@ -1348,6 +1371,7 @@ def run_plan(board, output, a, work, finish=False, effort_factor=2.0, keep_place
     # 2a. the buses, whole, before any other fanout
     h = bus_step(ch, a)
     served = h['served'] if h else []
+    costs = costs_after_bus(ch, h, costs)
 
     # 3. fanout, each part the bus step did not serve, with a retry ladder
     # keeping the best escape; the nets it handed on protected left out
@@ -1923,7 +1947,9 @@ def main():
                          'reference, and only the later route passes may cross them '
                          'at 3.0; a positive price lets every step cross them '
                          '(the skill\'s route step uses 3.0), trading reference '
-                         'integrity for routability')
+                         'integrity for routability. After a kept bus step, whose '
+                         'lanes cross the planes, a negative price is 3.0 in every '
+                         'step that follows')
     ap.add_argument('--board-rules', action='store_true',
                     help='route to the board\'s own declared rules: its Default net '
                          'class\'s clearance, track width, via and diff-pair gap/width, '

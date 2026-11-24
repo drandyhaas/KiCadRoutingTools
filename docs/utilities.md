@@ -2945,7 +2945,10 @@ to make, and runs each step as its own process in `<output>.autoroute/`:
    are rippable, so the stubs it left do not block their partners. The first
    pass keeps signals off the planes; up to two further passes on the result
    may cross them at 3.0 (`autoroute.PLANE_FALLBACK_COST`), so a plane carries
-   only what could not route without it. While nets stay open, the whole step
+   only what could not route without it. After a kept bus step every step
+   prices the planes at 3.0, the first pass too (`autoroute.costs_after_bus`):
+   the bus step's lanes cross the planes, and it hands on balls whose only way
+   out does. While nets stay open, the whole step
    is routed again from the board it started on at each narrower size rung
    (`route_floor`, with passes of its own), the skill's
    congestion escalation; a narrower rung ships only when it ranks above the
@@ -2990,7 +2993,9 @@ Options:
                      later route passes may cross them, at 3.0; a positive
                      price lets every step cross them (the plan-pcb-routing
                      skill's route step uses 3.0), trading reference integrity
-                     for routability.
+                     for routability. After a kept bus step, whose lanes cross
+                     the planes, a negative price is 3.0 in every step that
+                     follows.
   --board-rules      Route to the board's own declared rules: its Default
                      net class's clearance, track width, via and diff-pair
                      gap/width, each held at its Board Setup minimums (the via

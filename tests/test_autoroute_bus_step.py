@@ -17,8 +17,10 @@
    default --rounds (routing_defaults.BUS_ROUNDS), --inproc, the chain's clearance ceiling and track, the bus's via.
 4. `run_plan` with a scripted chain: after a kept bus step no fanout runs on
    an array it served, every other fanout excludes the nets it handed on
-   protected, and a pair it handed on is not given to route_diff; after a
-   failed bus step every array is fanned out as usual.
+   protected, a pair it handed on is not given to route_diff, and every step
+   after it prices the planes the plan forbids (the bus step's lanes cross
+   them); after a failed bus step every array is fanned out as usual and the
+   planes stay forbidden.
 5. `bus_handoff` on real board files: an array with a new track end on one of
    its pads is served, one without is not, and the nets protected after and
    not before are the ones handed on.
@@ -216,7 +218,8 @@ def test_run_plan():
         return made[-1]
     try:
         AP.Chain = chain
-        AP.route_passes = lambda ch, *a_, **k_: (ch, ch.cur, None)
+        handed = []
+        AP.route_passes = lambda ch, a__, L_, costs_, *a_, **k_: (handed.append(list(costs_)), (ch, ch.cur, None))[1]
         names = sorted(set(a['globs']) | {'RAM_D13'})
         AP.bus_handoff = lambda before, after, arrays: {
             'served': ['U3', 'U4'], 'nets': ['RAM_D13'] + pair, 'names': names}
@@ -235,11 +238,28 @@ def test_run_plan():
                and len(sel) == len(a['pair_nets']) - 2,
                f"route_diff is not given the pair the bus handed on ({len(sel)} nets)")
 
+        # the planes: forbidden in the plan, priced in every step after a kept bus step
+        def plane_costs(args):
+            i = args.index('--layer-costs') + 1
+            return args[i:i + len(a['layers'])]
+        plan = [str(c) for c in a['layer_costs']]
+        priced = [str(AP.PLANE_FALLBACK_COST) if float(c) < 0 else c for c in plan]
+        expect(any(float(c) < 0 for c in plan), f"the plan forbids a plane ({plan})")
+        expect(plane_costs(fan) == priced, f"a fanout after the buses prices the planes ({plane_costs(fan)})")
+        expect(not diff or plane_costs(diff) == priced, "...the pair step too")
+        expect(handed[-1] == priced, f"...and the route passes are handed the priced costs ({handed[-1]})")
+        expect([d for d in ch.decisions if d['tag'] == 'planes' and d['kept'] is True
+                and d.get('layer_costs') == priced], "...said as a decision of the chain's")
+
         made_fail = {'bus'}
         _quiet(AP.run_plan, 'in', 'out', a, '.', effort_factor=2.0)
         tags = [t for _, t, _ in made[-1].calls]
         expect('fanout_U3' in tags and 'fanout_U4' in tags,
                f"after a failed bus step every array is fanned out ({tags})")
+        fan = next(args for kind, t, args in made[-1].calls if t == 'fanout_U1')
+        expect(plane_costs(fan) == plan and handed[-1] == plan
+               and not [d for d in made[-1].decisions if d['tag'] == 'planes'],
+               f"...and the planes stay forbidden, as planned ({plane_costs(fan)})")
     finally:
         AP.Chain, AP.bus_handoff, AP.route_passes = saved
 

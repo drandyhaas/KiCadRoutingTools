@@ -158,7 +158,9 @@ class AutorouteOptionsPanel(wx.Panel):
             "--plane-layer-cost: the layer cost of every inner plane layer in the "
             "fanout, diff-pair and first route steps. Negative keeps signals off "
             "the planes (each stays a solid reference; later passes may cross at "
-            "3.0); positive lets every step cross them. Not 0.")
+            "3.0); positive lets every step cross them. After a kept bus step, "
+            "whose lanes cross the planes, a negative value is 3.0 in every step "
+            "that follows. Not 0.")
         grid.Add(self.plane_layer_cost, 0)
         self.board_rules = wx.CheckBox(self, label="Board's own rules (--board-rules)")
         self.board_rules.SetToolTip(
