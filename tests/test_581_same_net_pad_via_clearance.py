@@ -100,17 +100,23 @@ def main():
     from protected_nets import (persist_same_net_pad_clearance,
                                 read_same_net_pad_clearance)
     with tempfile.TemporaryDirectory() as td:
-        pro = os.path.join(td, 'b.kicad_pro')
-        with open(pro, 'w') as f:
-            json.dump({}, f)
-        check("0 not recorded",
-              not persist_same_net_pad_clearance(pro, 0.0, verbose=False))
-        check("-1 not recorded",
-              not persist_same_net_pad_clearance(pro, -1.0, verbose=False))
-        check("absent reads -1", read_same_net_pad_clearance(pro) == -1.0)
-        check("0.3 recorded",
-              persist_same_net_pad_clearance(pro, 0.3, verbose=False))
-        check("0.3 read back", read_same_net_pad_clearance(pro) == 0.3)
+        # One project per value: project_namespace caches by (mtime, size,
+        # inode), and two same-size writes within one timestamp tick would
+        # read back the first.
+        def fresh(name):
+            pro = os.path.join(td, name + '.kicad_pro')
+            with open(pro, 'w') as f:
+                json.dump({}, f)
+            return pro
+        import routing_defaults
+        check("absent reads the default (vias off same-net SMD pads)",
+              read_same_net_pad_clearance(fresh('absent'))
+              == routing_defaults.SAME_NET_PAD_CLEARANCE_DEFAULT > 0)
+        for name, value in (('allow', -1.0), ('legacy', 0.0), ('active', 0.3)):
+            pro = fresh(name)
+            check(f"{value:g} recorded",
+                  persist_same_net_pad_clearance(pro, value, verbose=False))
+            check(f"{value:g} read back", read_same_net_pad_clearance(pro) == value)
 
     # -- 3: #189 rescue gate --------------------------------------------------
     # With #581 active the IN-PAD arm is forbidden; the #535 off-pad escape

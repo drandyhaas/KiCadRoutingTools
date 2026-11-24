@@ -3598,8 +3598,11 @@ def create_plane(
         _snpc581 = _read_snpc581(pcb_data, input_file)
         same_net_pad_clearance = _snpc581 if _snpc581 > 0 else -1.0
         if _snpc581 > 0:
-            print(f"  Same-net pad via clearance {_snpc581:g}mm (from project "
-                  f"record, #581)")
+            from protected_nets import snpc_recorded as _snpc_rec581
+            _snpc_src = ("project record" if _snpc_rec581(pcb_data, input_file)
+                         else "default")
+            print(f"  Same-net pad via clearance {_snpc581:g}mm (from {_snpc_src}, "
+                  f"#581)")
     if same_net_pad_clearance > 0:
         config.same_net_pad_clearance = same_net_pad_clearance
     # #498: per-layer .kicad_dru clearance rules -- tap tracks/vias, region
@@ -4976,10 +4979,12 @@ Examples:
         try:
             from protected_nets import (persist_same_net_pad_clearance,
                                         pro_path_for_board)
-            persist_same_net_pad_clearance(
-                pro_path_for_board(args.output_file),
-                args.same_net_pad_clearance
-                if args.same_net_pad_clearance is not None else -1.0)
+            # Only an explicit flag is recorded: without one the step ran
+            # with the project's record or the default, which stays as it is.
+            if args.same_net_pad_clearance is not None:
+                persist_same_net_pad_clearance(
+                    pro_path_for_board(args.output_file),
+                    args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped same-net pad clearance record: {e})")
 

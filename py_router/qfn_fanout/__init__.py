@@ -3702,8 +3702,7 @@ def main():
         try:
             from protected_nets import (persist_same_net_pad_clearance,
                                         pro_path_for_board)
-            if args.same_net_pad_clearance is not None \
-                    and args.same_net_pad_clearance > 0:
+            if args.same_net_pad_clearance is not None:
                 persist_same_net_pad_clearance(
                     pro_path_for_board(out_path), args.same_net_pad_clearance)
         except Exception as _e:

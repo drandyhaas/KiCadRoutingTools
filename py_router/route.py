@@ -3731,7 +3731,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if same_net_pad_clearance is None:
         from protected_nets import read_snpc_for_pcb_data as _read_snpc581
         _snpc581 = _read_snpc581(pcb_data, input_file)
-        _snpc_src = "project record"
+        from protected_nets import snpc_recorded as _snpc_rec581
+        _snpc_src = ("project record" if _snpc_rec581(pcb_data, input_file)
+                     else "default")
     else:
         _snpc581 = same_net_pad_clearance
         _snpc_src = "flag"
@@ -11265,8 +11267,10 @@ For differential pair routing, use route_diff.py:
                              "AND off the net's solder-paste openings (#962) (escape vias, "
                              "via-in-pad rescue, tap vias) and is recorded "
                              "in the sibling .kicad_pro so later chain steps inherit it; "
-                             "-1 explicitly allows via-in-pad. Default: the project's "
-                             "recorded value, else via-in-pad allowed.")
+                             "-1 allows via-in-pad (boards built with filled vias). "
+                             "Default: the project's recorded value, else 0.1: an open "
+                             "via in an SMD pad wicks solder away from the joint. "
+                             "Exposed thermal pads keep their via arrays either way.")
     from fix_kicad_drc_settings import add_drc_fix_args
     add_drc_fix_args(parser)
 
@@ -12035,8 +12039,7 @@ For differential pair routing, use route_diff.py:
             persist_power_widths(_pro, consume_power_widths())
             # #581: an explicit active flag on this step is recorded so later
             # chain steps keep their vias off same-net pads too.
-            if getattr(args, 'same_net_pad_clearance', None) is not None \
-                    and args.same_net_pad_clearance > 0:
+            if getattr(args, 'same_net_pad_clearance', None) is not None:
                 from protected_nets import persist_same_net_pad_clearance
                 persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:

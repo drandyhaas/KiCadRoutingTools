@@ -193,7 +193,9 @@ def main():
         src = os.path.join(work, 'in.kicad_pcb')
         copy_board(FIX, src)
         hits = {}
-        for tag, extra in (('off', []), ('on', ['--same-net-pad-clearance', '0.4'])):
+        for tag, extra in (('off', ['--same-net-pad-clearance', '-1']),
+                           ('default', []),
+                           ('on', ['--same-net-pad-clearance', '0.4'])):
             out = os.path.join(work, tag + '.kicad_pcb')
             run_check([sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'route.py'),
                        src, '--output', out] + extra, accept=True, timeout=1200)
@@ -201,8 +203,10 @@ def main():
             hits[tag] = [(round(v.x, 3), round(v.y, 3), ap.label())
                          for v, ap, _pen in fab_notes.via_paste_sites(q.vias, q)
                          if ap.source != 'pad']
-        check('5. positive control: without the flag a via lands in a graphic/pane opening',
+        check('5. positive control: with -1 (via-in-pad allowed) a via lands in a graphic/pane opening',
               any('U2 F.Paste (graphic)' in h[2] for h in hits['off']), str(hits['off']))
+        check('5. no flag: the default keeps every via out of a graphic/pane opening',
+              not hits['default'], str(hits['default']))
         check('5. --same-net-pad-clearance 0.4: NO via in a graphic/pane opening',
               not hits['on'], str(hits['on']))
     finally:

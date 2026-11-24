@@ -600,6 +600,10 @@ def build_via_obstacle_map(
             continue
         pad_clearance = same_net_pad_clearance if is_target_net else None
         for pad in pads:
+            if is_target_net and same_net_pad_clearance > 0:
+                from obstacle_map import snpc_exempt_pad
+                if snpc_exempt_pad(pad, pcb_data):
+                    continue  # an exposed thermal pad keeps its via array (#487)
             _add_pad_via_obstacle(obstacles, pad, coord, config, clearance_override=pad_clearance)
             pad_count += 1
     # #962: the target net's solder-paste OPENINGS, at the same clearance its

@@ -331,17 +331,17 @@ def persist_power_widths(pro_path: str, mapping: Dict[str, float],
 
 def persist_same_net_pad_clearance(pro_path: str, value: float,
                                    verbose: bool = True, board=None) -> bool:
-    """Record an ACTIVE (> 0) same-net pad via clearance (#581) so every later
-    chain step keeps its vias off same-net pads too. Scalar, not a map: one
-    board-wide assembly constraint. No-op for <= 0 (-1 = via-in-pad allowed,
-    the default; 0 keeps its legacy stitching-only meaning and, per the
-    compat contract, must not change any other step's behavior) or when the
-    project file is absent.
+    """Record an explicit same-net pad via clearance (#581) so every later
+    chain step follows it too: > 0 keeps vias off same-net SMD pads, -1 allows
+    via-in-pad (a board built with filled vias), 0 keeps its legacy
+    stitching-only meaning. Scalar, not a map: one board-wide assembly
+    constraint. No-op when the project file is absent. Without a record a step
+    uses routing_defaults.SAME_NET_PAD_CLEARANCE_DEFAULT.
 
     ``board`` (the GUI): into the live board's records instead -- its project
     when it has one and the board itself always, the copy KiCad's own save
     keeps (tool_records), as _persist_map's live branch."""
-    if value is None or value <= 0:
+    if value is None:
         return False
     if board is not None:
         try:
@@ -382,13 +382,25 @@ def persist_same_net_pad_clearance(pro_path: str, value: float,
 
 
 def _snpc_from(ns: dict) -> float:
+    """The recorded #581 clearance; without a record, the default that keeps
+    vias off same-net SMD pads. A recorded value <= 0 is an explicit choice
+    (-1 allows via-in-pad, 0 keeps its legacy meaning) and is returned as is."""
     v = (ns or {}).get(SNPC_KEY)
-    return float(v) if isinstance(v, (int, float)) and float(v) > 0 else -1.0
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    import routing_defaults
+    return routing_defaults.SAME_NET_PAD_CLEARANCE_DEFAULT
 
 
 def read_same_net_pad_clearance(pro_path: str) -> float:
-    """The persisted #581 clearance, or -1.0 when absent/unreadable."""
+    """The persisted #581 clearance, or the default when absent/unreadable."""
     return _snpc_from(_namespace(pro_path))
+
+
+def snpc_recorded(pcb_data, input_file: Optional[str] = None) -> bool:
+    """True when the board's project records a #581 clearance (else the
+    default applies)."""
+    return SNPC_KEY in (_pcb_data_namespace(pcb_data, input_file) or {})
 
 
 def read_snpc_for_pcb_data(pcb_data, input_file: Optional[str] = None) -> float:

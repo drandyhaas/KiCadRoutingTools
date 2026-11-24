@@ -3973,6 +3973,51 @@ def _aperture_keepout_cells(ap, coord: "GridCoord", margin: float) -> "np.ndarra
     return np.concatenate(chunks).astype(np.int32)
 
 
+SNPC_EXPOSED_PAD_MIN_MM = 0.5
+
+
+def snpc_exempt_pad(pad, pcb_data) -> bool:
+    """True for a pad the #581 same-net pad clearance does not keep vias off:
+    a through-hole pad (its barrel is the layer transition) and an exposed
+    pad, whose vias are how the part sheds heat. Exposed pad = route_planes'
+    is_thermal_pad signature (active part, its largest pad, >= 3x the median
+    pad area or an EP footprint name) with SNPC_EXPOSED_PAD_MIN_MM instead of
+    the via-ARRAY floor: an HVSSOP's 1.8 mm pad carries thermal vias too."""
+    if getattr(pad, 'drill', 0):
+        return True
+    if pcb_data is None:
+        return False
+    # is_thermal_pad's footprint-NAME branch (SOIC-8-1EP, SOT-223, TO-252)
+    # passes every pad over the floor; at this floor that includes the leads.
+    # Only the footprint's largest pad can be its exposed pad.
+    fp = getattr(pcb_data, 'footprints', {}).get(getattr(pad, 'component_ref', None))
+    if fp is not None:
+        areas = [p.size_x * p.size_y for p in fp.pads
+                 if getattr(p, 'pad_type', '') != 'np_thru_hole']
+        if areas and pad.size_x * pad.size_y < max(areas) - 1e-9:
+            return False
+    from route_planes import is_thermal_pad
+    try:
+        return bool(is_thermal_pad(pad, pcb_data, min_mm=SNPC_EXPOSED_PAD_MIN_MM))
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def _on_exempt_pad(ap, exempt) -> bool:
+    """A paste opening lying on an exempt pad (an exposed pad's windowpanes)."""
+    b = getattr(ap, 'bounds', None)
+    if not b or not exempt:
+        return False
+    cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    for p in exempt:
+        if getattr(p, 'component_ref', None) != getattr(ap, 'owner_ref', None):
+            continue
+        if abs(cx - p.global_x) <= max(p.size_x, p.size_y) / 2.0 \
+                and abs(cy - p.global_y) <= max(p.size_x, p.size_y) / 2.0:
+            return True
+    return False
+
+
 def paste_keepout_apertures(pcb_data: PCBData, net_id: int):
     """The paste openings a net-`net_id` via must keep out of under
     `--same-net-pad-clearance` (#962).
@@ -3989,7 +4034,11 @@ def paste_keepout_apertures(pcb_data: PCBData, net_id: int):
     except ImportError:
         return []
     out = []
+    exempt = [p for p in pcb_data.pads_by_net.get(net_id, [])
+              if not getattr(p, 'drill', 0) and snpc_exempt_pad(p, pcb_data)]
     for ap in apertures_for_net(pcb_data, net_id):
+        if _on_exempt_pad(ap, exempt):
+            continue
         if ap.source == 'pad':
             sp = ap.shape_pad
             if getattr(sp, 'drill', 0):
@@ -4060,7 +4109,7 @@ def same_net_pad_via_keepout_cells(pcb_data: PCBData, net_id: int,
     if len(_ap_cells):
         chunks.append(_ap_cells)
     for pad in (pcb_data.pads_by_net.get(net_id, []) if pads is None else pads):
-        if getattr(pad, 'drill', 0):
+        if snpc_exempt_pad(pad, pcb_data):
             continue
         gx, gy = coord.to_grid(pad.global_x, pad.global_y)
         hw, hh = pad.size_x / 2, pad.size_y / 2

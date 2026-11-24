@@ -1564,7 +1564,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if same_net_pad_clearance is None:
         from protected_nets import read_snpc_for_pcb_data as _read_snpc581
         _snpc581 = _read_snpc581(pcb_data, input_file)
-        _snpc_src = "project record"
+        from protected_nets import snpc_recorded as _snpc_rec581
+        _snpc_src = ("project record" if _snpc_rec581(pcb_data, input_file)
+                     else "default")
     else:
         _snpc581 = same_net_pad_clearance
         _snpc_src = "flag"
@@ -4285,8 +4287,7 @@ Examples:
             persist_intra_pair_tolerances(_pro, consume_intra_pair_tolerances())
             # #581: an explicit active flag on this step is recorded so later
             # chain steps keep their vias off same-net pads too.
-            if getattr(args, 'same_net_pad_clearance', None) is not None \
-                    and args.same_net_pad_clearance > 0:
+            if getattr(args, 'same_net_pad_clearance', None) is not None:
                 from protected_nets import persist_same_net_pad_clearance
                 persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:

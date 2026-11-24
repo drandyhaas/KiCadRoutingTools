@@ -306,6 +306,11 @@ SAME_NET_PAD_CLEARANCE = -1.0  # mm - edge-to-edge clearance between via and sam
                                # when placing plane stitching vias. -1 disables (allow via-in-pad).
                                # Any value >= 0 forces vias to be placed outside same-net pads
                                # with that much edge-to-edge clearance.
+# The #581 clearance a board gets when neither a flag nor its project says otherwise: an open
+# via in an SMD pad wicks solder away from the joint during reflow, so vias stay off the pads
+# (exposed thermal pads excepted, obstacle_map.snpc_exempt_pad). A board built with filled
+# vias records -1 (--same-net-pad-clearance -1) to allow them.
+SAME_NET_PAD_CLEARANCE_DEFAULT = 0.1
 
 # Fine-pitch tap escalation (plane_pad_tap.py, issues #99/#104)
 # When a tap can't be placed at the nominal clearance/grid on dense fine-pitch
