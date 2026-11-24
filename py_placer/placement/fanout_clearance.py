@@ -853,6 +853,32 @@ def is_near_bga_cap(ref, fp, local_bounds, cap_prefixes, locked, bga_boxes,
     return beneath_boxes is None or pads_beneath(fp, beneath_boxes) is not None
 
 
+def routed_refs(pcb_data) -> Set[str]:
+    """The parts a TRACK ENDS ON: a pad of theirs with a track of its own net
+    ending on it, on a layer of the pad. Moved, such a part leaves its track
+    where it was -- the track's end on no pad, the pad on no track -- so it is
+    none of this step's movers: a static obstacle, as a locked part is. A via
+    on a pad is no such tie: the step itself pulls a cap's pad onto a via of
+    its net."""
+    ends: Dict[int, List[Tuple[float, float, str]]] = {}
+    for s in pcb_data.segments:
+        if s.net_id and not getattr(s, 'graphic', False):
+            ends.setdefault(s.net_id, []).append((s.start_x, s.start_y, s.layer))
+            ends.setdefault(s.net_id, []).append((s.end_x, s.end_y, s.layer))
+    out = set()
+    for ref, fp in pcb_data.footprints.items():
+        for p in fp.pads:
+            if not p.net_id or p.net_id not in ends:
+                continue
+            hx, hy = p.size_x / 2 + 1e-6, p.size_y / 2 + 1e-6
+            every = '*.Cu' in p.layers
+            if any(abs(x - p.global_x) <= hx and abs(y - p.global_y) <= hy and (every or L in p.layers)
+                   for x, y, L in ends[p.net_id]):
+                out.add(ref)
+                break
+    return out
+
+
 def movable_cap_refs(pcb_data, pcb_file, cap_prefix=DEFAULT_CAP_PREFIX,
                      near_margin=DEFAULT_NEAR_MARGIN, extra_locked=(), beneath_only=False,
                      near_refs=()) -> Set[str]:
@@ -868,6 +894,7 @@ def movable_cap_refs(pcb_data, pcb_file, cap_prefix=DEFAULT_CAP_PREFIX,
     locked = (set(extract_locked_refs(pcb_file)) if pcb_file else
               {r for r, f in pcb_data.footprints.items() if getattr(f, 'locked', False)})
     locked |= set(extra_locked)
+    locked |= routed_refs(pcb_data)          # (a part a track ends on does not move)
     bgas = find_components_by_type(pcb_data, 'BGA')
     boxes = [ball_field_box(fp) for fp in bgas]
     pkgs = [package_box(fp, courtyards) for fp in bgas]
@@ -1195,6 +1222,8 @@ class _Repair:
         # #1067: the decap tether gate, armed by the engine when an intent
         # declares a limit (`quench.TetherGateView`); None = no gate.
         self._tethers = None
+        # the poses the own-pad gate refused (_OwnPadGate): cost() is inf there
+        self.own_pad_refused: Set[Tuple] = set()
         self.tether_refused: Dict[str, int] = {}
         # ref -> the claims a cap broke because no clear pose kept them
         self.tether_broken: Dict[str, List] = {}
@@ -1424,6 +1453,10 @@ class _Repair:
         courtyards = extract_courtyard_bboxes(pcb_file)
         locked = set(extract_locked_refs(pcb_file)) | extra_locked
         self.locked_refs = locked
+        # (a part a track ends on -- a bus's end, a pull joined to its lane --
+        # is no mover either: routed_refs. Not a LOCKED part: it is not
+        # reported as one)
+        self.routed_refs = routed_refs(pcb_data) - locked
 
         # --- avoidance: the REAL fanout vias (after fanout) ---
         # Each (x, y, net, keepout) where keepout = via_radius + clearance; a
@@ -1604,7 +1637,7 @@ class _Repair:
             # place_fanout_clearance.py and the live board through
             # fanout_gui.py, so it has to be applied here or it does not apply
             # on this path at all)
-            if is_near_bga_cap(ref, fp, lb, self._cap_prefixes, locked,
+            if is_near_bga_cap(ref, fp, lb, self._cap_prefixes, locked | self.routed_refs,
                                bga_bboxes, near_margin, beneath_boxes=bga_pkgs if beneath_only else None):
                 self.caps[ref] = _Cap(fp, lb, self._floors, self._all_cu_ordered)
                 if beneath_only:
@@ -3582,6 +3615,8 @@ class _Repair:
             self._last_tether_fails = None
         if self._blocked_geom(ref, cap, x, y, rot):
             return float('inf')
+        if self.own_pad_refused and _pose_key(ref, x, y, rot) in self.own_pad_refused:
+            return float('inf')
         seg_by_net = self._seg_shortfalls(ref, cap, x, y, rot)
         pad_by_net = self._pad_shortfalls(ref, cap, x, y, rot)
         via_by_net = self._via_shortfalls(ref, cap, x, y, rot)
@@ -3670,6 +3705,146 @@ def _on_cap_lattice(cap, rot) -> bool:
     contract alone. (An undeclared cap is offered the absolute `ROTATIONS`
     as before #1122, on its lattice or not.)"""
     return abs((rot - cap.seed_rot + 45.0) % 90.0 - 45.0) <= 1e-6
+
+
+#: The own-pad gate's raster: this far round the pad, on cells of this size.
+OWN_PAD_VIEW, OWN_PAD_STEP = 4.0, 0.025
+
+
+class _OwnPadGate:
+    """A move may not wall in a pad of the part it moves.
+
+    A pad is WALLED at a pose when no track of the fab ladder's finest rung
+    gets from it to the rest of its net past the copper no later step moves
+    (`placement.reachability`: pads, parts, rule areas, locked or held tracks
+    and vias -- copper a router may rip is set aside). Its net then ships open
+    at any size. The pass prices clearance alone, so a pose between two locked
+    tracks is legal to it: a pull toward a same-net ball slid a decoupling
+    capacitor into the corridor of two locked lanes, the part's other pad the
+    corridor's end and no via site on the layers above -- reachable where it
+    stood, walled where it was put.
+
+    `refuses`: the pose walls a pad the part's SEED left reachable (a pad the
+    seed already walled is no worse for the move). A refused pose is priced
+    infinite from then on (`_Repair.own_pad_refused`, read by cost()), so the
+    descent and every fallback pass it over. No verdict -- no other copper of
+    the net in the view, a turn off the quarter-turn lattice -- refuses
+    nothing."""
+
+    def __init__(self, st, pcb_data):
+        from placement.reachability import without_routed_copper
+        from fab_tiers import fab_floor_ladder
+        self.st = st
+        self.fixed = without_routed_copper(pcb_data)[0]
+        self.layers = list(pcb_data.board_info.copper_layers
+                           or ('F.Cu', 'B.Cu'))
+        rung = fab_floor_ladder(len(self.layers))[-1]
+        self.track = rung['track_width']
+        self.via = rung['via_diameter']
+        self.clearance = rung['clearance']
+        self.multi = {i for i, n in pcb_data.nets.items() if len(n.pads) > 1}
+        self._seed: Dict[str, frozenset] = {}
+        self.refused: Dict[str, List] = {}
+
+    def _posed(self, ref, cap, x, y, rot):
+        """`ref`'s footprint with its pads at the pose, or None off the
+        lattice."""
+        import copy
+        delta = (rot - cap.seed_rot) % 360
+        if abs((delta + 45.0) % 90.0 - 45.0) > 1e-6:
+            return None
+        fp = self.fixed.footprints[ref]
+        rad = math.radians(-delta)
+        c, s = math.cos(rad), math.sin(rad)
+        swap = round(delta) % 180 == 90
+
+        def at(px, py):
+            dx, dy = px - cap.seed_x, py - cap.seed_y
+            return x + dx * c - dy * s, y + dx * s + dy * c
+
+        out = copy.copy(fp)
+        out.x, out.y, out.rotation = x, y, rot
+        out.pads = []
+        for p in fp.pads:
+            q = copy.copy(p)
+            q.global_x, q.global_y = at(p.global_x, p.global_y)
+            if swap:
+                q.size_x, q.size_y = p.size_y, p.size_x
+            if getattr(p, 'hole_x', None) is not None:
+                q.hole_x, q.hole_y = at(p.hole_x, p.hole_y)
+            out.pads.append(q)
+        return out
+
+    def _board(self, ref, x, y, rot):
+        """The fixed board with every mover where it now stands and `ref` at
+        the pose, or None where a mover's pads cannot be posed."""
+        import copy
+        fps = dict(self.fixed.footprints)
+        for r, cap in self.st.caps.items():
+            pose = (x, y, rot) if r == ref else (cap.x, cap.y, cap.rot)
+            if (abs(pose[0] - cap.seed_x) <= EPS
+                    and abs(pose[1] - cap.seed_y) <= EPS
+                    and abs(pose[2] - cap.seed_rot) <= EPS):
+                continue
+            moved = self._posed(r, cap, *pose)
+            if moved is None:
+                if r == ref:
+                    return None
+                continue
+            fps[r] = moved
+        board = copy.copy(self.fixed)
+        board.footprints = fps
+        return board
+
+    def walled(self, ref, x, y, rot) -> frozenset:
+        """The pad numbers of `ref` walled in at the pose."""
+        from placement.reachability import pad_reachability
+        board = self._board(ref, x, y, rot)
+        if board is None:
+            return frozenset()
+        out = []
+        for q in board.footprints[ref].pads:
+            if (q.net_id not in self.multi
+                    or getattr(q, 'pad_type', '') == 'np_thru_hole'):
+                continue
+            home = next((L for L in self.layers if pad_on_layer(q, L)), None)
+            if home is None:
+                continue
+            try:
+                r = pad_reachability(
+                    board, (q.global_x, q.global_y), net_id=q.net_id,
+                    layers=[home] + [L for L in self.layers if L != home],
+                    track_mm=self.track, via_mm=self.via,
+                    base_clearance=self.clearance, step=OWN_PAD_STEP,
+                    margin_mm=OWN_PAD_VIEW)
+            except ValueError:
+                continue
+            if r.measured and r.caged:
+                out.append(q.pad_number)
+        return frozenset(out)
+
+    def seed_walled(self, ref) -> frozenset:
+        if ref not in self._seed:
+            cap = self.st.caps[ref]
+            self._seed[ref] = self.walled(ref, cap.seed_x, cap.seed_y,
+                                          cap.seed_rot)
+        return self._seed[ref]
+
+    def newly_walled(self, ref, x, y, rot) -> frozenset:
+        now = self.walled(ref, x, y, rot)
+        return now - self.seed_walled(ref) if now else now
+
+    def refuses(self, ref, x, y, rot) -> bool:
+        new = self.newly_walled(ref, x, y, rot)
+        if not new:
+            return False
+        self.st.own_pad_refused.add(_pose_key(ref, x, y, rot))
+        self.refused.setdefault(ref, []).append((x, y, rot, sorted(new)))
+        return True
+
+
+def _pose_key(ref, x, y, rot):
+    return (ref, round(x, 4), round(y, 4), round(rot % 360, 3))
 
 
 def _soft_cost(st, cap, x, y, rot):
@@ -4257,6 +4432,7 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
     if on_move is not None:
         on_move(st)  # seed frame
 
+    own_pads = _OwnPadGate(st, pcb_data)
     budget = {r: max_displacement for r in st.caps}
     rotate = {r: False for r in st.caps}
     # #1563: caps in contact with foreign copper at the seed
@@ -4292,15 +4468,21 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                 current = st.cost(ref, cap, cap.x, cap.y, cap.rot)
                 _c1122 = claims1122.get(ref)
                 rots = _cap_rotations(cap, _c1122, allow_rotations, rotate[ref])
-                best = (current, cap.x, cap.y, cap.rot)
-                for cx, cy in _candidate_positions(cap, budget[ref], step,
-                                                   grid_step):
-                    for rot in rots:
-                        if (cx, cy, rot) == (cap.x, cap.y, cap.rot) or not cap.stays_beneath(cx, cy, rot):
-                            continue
-                        c = st.cost(ref, cap, cx, cy, rot)
-                        if c < best[0] - EPS:
-                            best = (c, cx, cy, rot)
+                while True:
+                    best = (current, cap.x, cap.y, cap.rot)
+                    for cx, cy in _candidate_positions(cap, budget[ref], step,
+                                                       grid_step):
+                        for rot in rots:
+                            if (cx, cy, rot) == (cap.x, cap.y, cap.rot) or not cap.stays_beneath(cx, cy, rot):
+                                continue
+                            c = st.cost(ref, cap, cx, cy, rot)
+                            if c < best[0] - EPS:
+                                best = (c, cx, cy, rot)
+                    # a pose that walls in a pad of the part is refused and
+                    # priced infinite: the scan again takes the next cheapest
+                    if not (best[0] < current - EPS
+                            and own_pads.refuses(ref, *best[1:])):
+                        break
                 if best[0] < current - EPS:
                     st.apply_pose(ref, best[1], best[2], best[3])
                     moves += 1
@@ -4481,12 +4663,23 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
             gc.enable()
 
     placements = []
+    walled_own = []
     for ref, cap in st.caps.items():
         moved = (abs(cap.x - cap.seed_x) > EPS or abs(cap.y - cap.seed_y) > EPS
                  or abs(cap.rot - cap.seed_rot) > EPS)
         if moved:
             placements.append({'reference': ref, 'new_x': cap.x,
                                'new_y': cap.y, 'new_rotation': cap.rot})
+            walled_own += [f'{ref}.{n}' for n in sorted(
+                own_pads.newly_walled(ref, cap.x, cap.y, cap.rot))]
+    if own_pads.refused:
+        print(f"Own-pad gate: {sum(len(v) for v in own_pads.refused.values())}"
+              f" pose(s) refused, each walling in a pad of the part moved: "
+              + ', '.join(f"{r} ({len(v)})"
+                          for r, v in sorted(own_pads.refused.items())))
+    if walled_own:
+        print(f"WARNING: {len(walled_own)} pad(s) walled in by their part's "
+              f"move: {', '.join(walled_own)}")
 
     # #746: ONE grader, so `resolved` and `unresolved` can never be read off
     # two different boards. They were: `resolved` was built here and never
@@ -4679,7 +4872,10 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
            'via_resolved': via_resolved, 'regrazed': regrazed,
            'parted': parted, 'shorted': shorted,
            'made_room': dict(made_room), 'below_hole_floor': below_hole_floor,
-           'required': required, 'clearance_notes': list(st.clearance_notes)}
+           'required': required, 'clearance_notes': list(st.clearance_notes),
+           'own_pad_refused': {r: [list(v) for v in vs]
+                               for r, vs in own_pads.refused.items()},
+           'walled_own': walled_own}
     if claims1122:
         out['declared_rotations'] = {
             r: c[0] if c[0] is not None else [float(a) for a in c[1]]

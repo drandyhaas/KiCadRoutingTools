@@ -271,6 +271,9 @@ class TestAnOrthogonalPartIsUnchanged(unittest.TestCase):
         self.assertTrue(all(abs(p.rect_rotation) < 1e-9 for p in _copper(fp)))
         vias = [make_via(fp.x + 0.3, fp.y + 0.25, net_id=FOREIGN, size=VIA, drill=DRILL)]
         pcb.vias[:] = vias
+        # (the board's own tracks set aside: a part a track ends on is no
+        # mover, and on the board as routed CAP is one)
+        pcb.segments[:] = []
         with contextlib.redirect_stdout(io.StringIO()):
             st = _Repair(pcb, BOARD, CLEAR, 0.1, 0.55, 1.0, 2.0, 0.3,
                          'C,R,FB', set())

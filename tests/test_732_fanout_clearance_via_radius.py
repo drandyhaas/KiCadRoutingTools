@@ -123,6 +123,10 @@ def _rig(dvs, gaps, sizes=None, stubs=()):
     line, outside its right edge, on a foreign net.
     """
     pcb = parse_kicad_pcb(BOARD)
+    # The board's own tracks are set aside before the probe: a part a track
+    # ends on is no mover (`routed_refs`), and on the board as routed CAP is
+    # one. The rig replaces every track below in any case.
+    pcb.segments[:] = []
     probe = _repair(pcb, dvs)
     rect = probe.caps[CAP].pad_rects()[1]        # the net-2 pad
     cy = (rect[1] + rect[3]) / 2.0
@@ -293,6 +297,7 @@ class TestNudgerSeesWhatTheGraderFlags(unittest.TestCase):
         reports it unresolved forever and prints nothing.
         """
         pcb = parse_kicad_pcb(BOARD)
+        pcb.segments[:] = []        # (as in `_rig`: on the board as routed CAP is no mover)
         probe = _repair(pcb, DVS_BIG)
         rect = probe.caps[CAP].pad_rects()[1]
         cy = (rect[1] + rect[3]) / 2.0

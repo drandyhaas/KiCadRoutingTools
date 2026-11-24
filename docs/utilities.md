@@ -2794,6 +2794,17 @@ still replay.
   the BGAs' (each part's own box the region a passive is near, nothing held
   beneath): the bus step's way of moving a QFN's decoupling cap off a pad's
   only escape.
+- **What a move may not do.** A part with a track of its own net ending on
+  one of its pads is not moved: the track would stay where it was, its end on
+  no pad (a via on a pad is no such tie). And no move walls in a pad of the
+  part it moves: a pose from which no track of the fab's finest rung reaches
+  the rest of the pad's net past the copper no later step moves (pads,
+  locked or held tracks and vias) is refused where the part's seed left that
+  pad reachable, and the next cheapest pose is taken -- a pose between two
+  locked tracks is clear of both and can still seal the part's own pad in.
+  The run prints `Own-pad gate: N pose(s) refused ...` (result key
+  `own_pad_refused`); a pad a move still walls in is named on a `WARNING`
+  line (result key `walled_own`).
 - **Holes.** A cap pad is held off a via's copper at the pair's clearance and
   off its DRILL at the copper-to-hole clearance KiCad grades: the project's
   `min_hole_clearance` (never the fab-floor origin), a `.kicad_dru`
