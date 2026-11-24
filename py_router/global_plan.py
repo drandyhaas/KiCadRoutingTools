@@ -89,6 +89,7 @@ class GlobalPlan:
     conflict_w: Dict[int, Dict[int, int]] = field(default_factory=dict)  # crossings
     share_w: Dict[int, Dict[int, int]] = field(default_factory=dict)     # corridor share
     layer_pref: Dict[int, int] = field(default_factory=dict)  # nid -> layer idx
+    lane_band: Dict[int, np.ndarray] = field(default_factory=dict)  # nid -> its lane's free cells (lane_exempt_fragility)
     # #658 river mode: nid -> (group_id, rank); rank = lateral order across
     # the bus corridor. river_order holds each group's rank-ordered nids.
     river: Dict[int, Tuple[int, int]] = field(default_factory=dict)
@@ -1228,6 +1229,53 @@ def dump_plan(path: str, plan: GlobalPlan, nets_in, nets_ordered,
     with open(path, 'w') as f:
         json.dump(doc, f)
     print(f"Global plan dump: wrote {path}")
+
+
+def _cell_keys(layer, gx, gy):
+    """one int64 per (layer, gx, gy) cell -- for membership tests between row arrays"""
+    return ((np.asarray(layer, dtype=np.int64) << 44)
+            | ((np.asarray(gx, dtype=np.int64) + (1 << 21)) << 22)
+            | (np.asarray(gy, dtype=np.int64) + (1 << 21)))
+
+
+def lane_exempt_fragility(cache, config, net_id):
+    """A net on its own way in the plan pays no POUR-EDGE price there: `cache`
+    (its cost sources, routing_context._per_net_cost_sources) without the
+    plane-fragility rows of the cells within the lane's free width of its
+    way, on the way's layer. The plan ran the net along that way with the
+    pours it crosses in view, and the price of a cell beside a pour's edge --
+    more than a step off the lane costs -- sent the net off every lane on a
+    poured layer. Everywhere else the net pays it as any net does. The same
+    dict where the net has no lane, or no fragility row lies on it."""
+    path = plan_lane_path(config, net_id)
+    if not path:
+        return cache
+    frag = [k for k, v in cache.items()
+            if isinstance(k, tuple) and k and k[0] == 'frag' and v is not None and len(v)]
+    if not frag:
+        return cache
+    plan = config._global_plan
+    band = plan.lane_band.get(net_id)
+    if band is None:
+        from lane_price import lane_terms
+        r = max(1, lane_terms(config, net_id, path)[0])
+        off = [(dx, dy) for dx in range(-r, r + 1) for dy in range(-r, r + 1) if dx * dx + dy * dy <= r * r]
+        pts = np.array(sorted(set(path)), dtype=np.int64)
+        ox = np.array([o[0] for o in off], dtype=np.int64)
+        oy = np.array([o[1] for o in off], dtype=np.int64)
+        band = np.unique(_cell_keys(np.repeat(pts[:, 2], len(off)),
+                                    (pts[:, 0][:, None] + ox[None, :]).ravel(),
+                                    (pts[:, 1][:, None] + oy[None, :]).ravel()))
+        plan.lane_band[net_id] = band
+    out = None
+    for k in frag:
+        rows = cache[k]
+        on = np.isin(_cell_keys(rows[:, 0], rows[:, 1], rows[:, 2]), band)
+        if on.any():
+            if out is None:
+                out = dict(cache)
+            out[k] = rows[~on]
+    return cache if out is None else out
 
 
 def lane_net_ids(config):

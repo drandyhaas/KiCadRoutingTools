@@ -125,6 +125,12 @@ _DERIVED_SOURCES: "OrderedDict[tuple, tuple]" = OrderedDict()
 _DERIVED_SOURCES_MAX = 64
 
 
+def _on_lane(cache, config, net_id):
+    """the net's cost sources with its own lane left out of the pour-edge price (global_plan.lane_exempt_fragility)"""
+    from global_plan import lane_exempt_fragility
+    return lane_exempt_fragility(cache, config, net_id)
+
+
 def _per_net_cost_sources(track_proximity_cache, net_ids, sibs=()):
     """The track_proximity_cache entries the net(s) being routed are priced
     with: all of them but their river siblings' corridors (#658), their own
@@ -600,7 +606,7 @@ def build_single_ended_obstacles(
     _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
         obstacles,
-        _per_net_cost_sources(track_proximity_cache, (net_id,), _sibs),
+        _on_lane(_per_net_cost_sources(track_proximity_cache, (net_id,), _sibs), config, net_id),
         ghost_costs=add_keepaway_source(add_plan_source(add_history_source(
             {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids, (net_id,)),
              **(_stub_surplus or {}),
@@ -713,7 +719,7 @@ def build_incremental_obstacles(
                            [r for r in routed_net_ids if r != net_id])
     merge_track_proximity_costs(
         obstacles,
-        _per_net_cost_sources(track_proximity_cache, (net_id,), _sibs),
+        _on_lane(_per_net_cost_sources(track_proximity_cache, (net_id,), _sibs), config, net_id),
         ghost_costs=add_keepaway_source(add_plan_source(add_history_source(
             {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids, (net_id,)),
              **(_stub_surplus or {}),
@@ -861,7 +867,7 @@ def prepare_obstacles_inplace(
     _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
         working_obstacles,
-        _per_net_cost_sources(track_proximity_cache, (net_id,), _sibs),
+        _on_lane(_per_net_cost_sources(track_proximity_cache, (net_id,), _sibs), config, net_id),
         ghost_costs=add_keepaway_source(add_plan_source(add_history_source(
             {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids, (net_id,)),
              **(_stub_surplus or {}),
