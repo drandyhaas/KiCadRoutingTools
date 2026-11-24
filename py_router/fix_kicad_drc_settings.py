@@ -566,8 +566,39 @@ def effective_board_edge_clearance(pcb_path: str, cli_value: float,
     way it is pinned UP to the fab floor (#441) unless ``fab_floor`` is False, so a
     board declaring a sub-fab (or 0) edge rule is never routed/graded with copper
     against the milled edge (80/184 corpus boards declare < 0.20 mm)."""
-    base = cli_value if (cli_value and cli_value > 0) else read_project_edge_clearance(pcb_path)
+    if cli_value and cli_value > 0:
+        base = cli_value
+    else:
+        base = read_project_edge_clearance(pcb_path)
+    # A run that writes no project ships the board graded at the rule it
+    # declares, else KiCad's factory value: its copper meets that rule.
+    base = max(base, _graded_edge_clearance(pcb_path))
     return max(base, fab_edge_floor(pcb_path)) if fab_floor else base
+
+
+def _graded_edge_clearance(pcb_path: str) -> float:
+    """What KiCad grades copper-to-edge at when this run writes no project
+    (fab_tiers.project_writeback False: --escalation off, --no-fix-drc-settings):
+    the project's declared rule, else (left out, or no project) KiCad's
+    factory value (fab_tiers.KICAD_FACTORY_RULES, #1287) -- the routed copper
+    must meet the rule the shipped board is graded at. 0.0 when the writeback
+    runs (it writes the routed floor) or the project declares the rule 0 (no
+    check)."""
+    try:
+        import fab_tiers
+        if fab_tiers.project_writeback():
+            return 0.0
+        pro = find_project(pcb_path)
+        if os.path.isfile(pro):
+            with open(pro) as f:
+                rules = ((json.load(f).get('board') or {}).get('design_settings')
+                         or {}).get('rules') or {}
+            if 'min_copper_edge_clearance' in rules:
+                v = rules.get('min_copper_edge_clearance')
+                return float(v) if isinstance(v, (int, float)) and v > 0 else 0.0
+        return float(fab_tiers.KICAD_FACTORY_RULES.get('min_copper_edge_clearance') or 0.0)
+    except Exception:                                          # noqa: BLE001
+        return 0.0
 
 
 # Rules that describe what the FAB can make, as opposed to how the board is
