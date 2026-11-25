@@ -380,6 +380,56 @@ def test_default_is_off():
           inspect.signature(run_post_route_cleanup).parameters['chamfer_corners'].default is False)
 
 
+def _many_ells(n):
+    """One net of n separate L-shaped tracks (3 mm legs at w 0.15) between
+    pads of the net, on a grid far enough apart that nothing is in the way."""
+    segs, pads = [], []
+    for k in range(n):
+        x0, y0 = 10.0 + 6.0 * (k % 20), 10.0 + 6.0 * (k // 20)
+        a, c, b = (x0, y0), (x0 + 3.0, y0), (x0 + 3.0, y0 + 3.0)
+        segs += [Segment(start_x=a[0], start_y=a[1], end_x=c[0], end_y=c[1], width=W,
+                         layer='F.Cu', net_id=1),
+                 Segment(start_x=c[0], start_y=c[1], end_x=b[0], end_y=b[1], width=W,
+                         layer='F.Cu', net_id=1)]
+        pads += [_pad(f'A{k}', *a, 1, '/SIG'), _pad(f'B{k}', *b, 1, '/SIG')]
+    return PCBData(footprints={}, nets={1: Net(1, '/SIG')}, segments=segs, vias=[],
+                   board_info=BoardInfo(layers={}, copper_layers=['F.Cu', 'B.Cu'],
+                                        board_bounds=(0.0, 0.0, 200.0, 200.0)),
+                   pads_by_net={1: pads})
+
+
+def test_many_corners_on_one_net_all_cut():
+    # more corners on one net than any fixed round count: every one is cut,
+    # none left uncounted
+    pcb = _many_ells(100)
+    st = smooth_octolinear_chains([], pcb, clearance=CLR, chamfer_corners=True)[4]
+    check("100 corners on one net: all chamfered, none left",
+          st.get('corners_chamfered') == 100 and not st.get('corners_left')
+          and not has_corner(pcb.segments), st)
+
+
+def test_width_change_without_narrowing():
+    # under --escalation off a neck may not grow (#1452): at a width change
+    # the new leg takes the WIDER width, so the narrow run only gets shorter
+    import fab_tiers
+    prev = fab_tiers.get_escalation_policy()[0]
+    fab_tiers.set_escalation_policy('off', writeback=False)
+    try:
+        pcb = board(ELBOW, extra_pads=[BLOCK])
+        pcb.segments[0].width = 0.6
+        st = _stats(pcb)
+    finally:
+        fab_tiers.set_escalation_policy(prev, writeback=False)
+    diag = [s for s in pcb.segments if abs(s.end_x - s.start_x) > 1e-6
+            and abs(s.end_y - s.start_y) > 1e-6]
+    check("--escalation off, neck-down elbow: the 45-degree leg at the wider width",
+          st.get('corners_chamfered') == 1 and len(diag) == 1
+          and abs(diag[0].width - 0.6) < 1e-9, (st, [s.width for s in diag]))
+    narrow = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                 for s in pcb.segments if abs(s.width - W) < 1e-9)
+    check("... the narrow run is shorter than before (4 mm)", narrow < 4.0 - 1e-6, narrow)
+
+
 TESTS = [test_elbow_chamfered, test_off_by_default_in_the_pass, test_foreign_copper_blocks,
          test_same_net_via_at_corner_pins_it, test_acute_corner_left_alone,
          test_corner_on_a_pad_left, test_stem_on_a_cut_piece_blocks,
@@ -389,7 +439,8 @@ TESTS = [test_elbow_chamfered, test_off_by_default_in_the_pass, test_foreign_cop
          test_corners_left_counted_by_reason, test_short_leg_taken_whole,
          test_short_leg_left_when_the_turn_at_its_end_would_not_stay,
          test_degenerate_short_leg_left, test_corners_on_a_net_over_the_size_cap_counted,
-         test_cli_plane_cleanup, test_default_is_off]
+         test_cli_plane_cleanup, test_default_is_off,
+         test_many_corners_on_one_net_all_cut, test_width_change_without_narrowing]
 
 if __name__ == '__main__':
     for t in TESTS:
