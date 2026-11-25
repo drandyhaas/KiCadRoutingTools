@@ -1407,7 +1407,8 @@ def _generate_multinet_layer_zones(
     verbose: bool,
     thermal_relief: bool = False,
     priority_offset: int = 0,
-    served_elsewhere: frozenset = frozenset()
+    served_elsewhere: frozenset = frozenset(),
+    background_from: frozenset = frozenset()
 ) -> Tuple[List[str], List[str], List[Dict]]:
     """
     Split a plane layer several nets share: the SPINE SPLIT. Every net's vias, virtual vias (the pads
@@ -1431,6 +1432,11 @@ def _generate_multinet_layer_zones(
         board_edge_clearance: Edge clearance for zones
         debug_lines: Whether to generate debug lines
         verbose: Verbose output
+        background_from: Net names the layer's background sheet is chosen
+            from when any of them has seeds here (#2065: the nets whose pour
+            is KEPT, so a newly poured net is a region above the kept pours,
+            never a whole-layer sheet that buries them). Empty: every net
+            with seeds is a candidate.
 
     Returns:
         Tuple of (zone_sexprs, debug_line_sexprs, zone_data_list)
@@ -1582,11 +1588,13 @@ def _generate_multinet_layer_zones(
                 kind, shp = _pad_copper_shape(pad)
                 _pad_box[(pad.global_x, pad.global_y)] = (
                     shp if kind == 'box' else (shp[0] - shp[2], shp[1] - shp[2], shp[0] + shp[2], shp[1] + shp[2]))
-    # the background, chosen once (on each net's pads) for the spines' order and the split
+    # the background, chosen once (on each net's pads) for the spines' order and the split -- among the kept nets
+    # when the caller names some (background_from)
+    _bg_pool = [n for n in nets_with_seeds if n in background_from] or nets_with_seeds
     _bg = _background_net(
-        {net_name_to_id[n]: list(pads_on_layer_by_net.get(net_name_to_id[n], ())) for n in nets_with_seeds},
+        {net_name_to_id[n]: list(pads_on_layer_by_net.get(net_name_to_id[n], ())) for n in _bg_pool},
         {net_name_to_id[n]: [(pd.global_x, pd.global_y) for pd in pcb_data.pads_by_net.get(net_name_to_id[n], [])]
-         for n in nets_with_seeds}, board_bounds)
+         for n in _bg_pool}, board_bounds)
     # virtual vias -- the pads whose drop the route step lays (create_plane) -- and pads with copper on this layer
     # join the spine
     _dv = getattr(pcb_data, '_deferred_pad_seeds', None) or {}
@@ -3273,8 +3281,10 @@ def create_plane(
         skip_existing_zones: When True, if a zone already exists on the target layer
             for the same net (in either the input file or the provided pcb_data), do
             not create another one - just place stitching vias to the existing zone.
-            When False (CLI default), an existing zone on the target layer for the
-            same net is replaced.
+            On a layer several nets share, a layer whose every net is kept is not
+            split again; where only some are kept, only the others get a pour
+            (#2065). When False (CLI default), an existing zone on the target layer
+            for the same net is replaced.
         progress_callback: Optional callable(current, total, label) invoked at
             phase milestones and per-pad during via placement, mirroring
             batch_route's callback (issue #364). (0, 0, label) marks an
@@ -4022,14 +4032,33 @@ def create_plane(
 
     # End of per-net loop
 
-    # Generate zones for multi-net layers using Voronoi boundaries
+    # Generate zones for multi-net layers using Voronoi boundaries.
+    # #2065: a net whose pour on the layer is KEPT (skip_existing_zones) gets
+    # no new pour here either, as on a single-net layer (Step 10). A layer
+    # whose every net is kept is not split again: its pours stay as they are,
+    # and the stitch pass below reads them. A layer where only some nets are
+    # kept is split with the kept nets as peers (their copper still seeds
+    # their share, so a new net's region sits round its own parts) and with a
+    # kept net as the background, and only the new nets' polygons are
+    # emitted: regions above the kept pours (priority_offset), never a second
+    # pour of a kept net and never a whole-layer sheet over a kept one.
+    _created_pairs = {(n, l) for n, l, c in zip(net_names, plane_layers, should_create_zones) if c}
     if layer_nets:
         for layer, nets_on_layer in layer_nets.items():
+            _kept_here = [n for n in nets_on_layer if (n, layer) not in _created_pairs]
+            if len(nets_on_layer) > 1 and len(_kept_here) == len(nets_on_layer):
+                print(f"\nMulti-net layer {layer}: every net's zone already exists and is kept "
+                      f"({', '.join(nets_on_layer)}; skip existing zones) -- the layer is not split again")
+                continue
             if len(nets_on_layer) > 1:
                 print(f"\n{'='*60}")
                 print(f"Computing zone boundaries for multi-net layer {layer}")
                 print(f"Nets: {', '.join(nets_on_layer)}")
                 print(f"{'='*60}")
+                if _kept_here:
+                    print(f"  Kept (skip existing zones): {', '.join(_kept_here)} -- split with them as peers "
+                          f"and as the background; only "
+                          f"{', '.join(n for n in nets_on_layer if n not in _kept_here)} get a new zone")
                 if progress_callback:
                     progress_callback(0, 0, f"Computing Voronoi zones for {layer}...")
 
@@ -4061,8 +4090,15 @@ def create_plane(
                     served_elsewhere=frozenset(
                         n for n in nets_on_layer
                         if any(n in ns for lyr, ns in layer_nets.items() if lyr != layer)
-                        or any(z.net_name == n and z.layer != layer for z in (pcb_data.zones or [])))
+                        or any(z.net_name == n and z.layer != layer for z in (pcb_data.zones or []))),
+                    background_from=frozenset(_kept_here)
                 )
+                if _kept_here:
+                    # zone_sexprs and zone_data are parallel, one entry per pour
+                    _new = [(zs, zd) for zs, zd in zip(zone_sexprs, zone_data)
+                            if zd.get('net_name') not in _kept_here]
+                    zone_sexprs = [zs for zs, _zd in _new]
+                    zone_data = [zd for _zs, zd in _new]
                 all_zone_sexprs.extend(zone_sexprs)
                 all_debug_lines.extend(debug_line_sexprs)
                 all_zone_data.extend(zone_data)
