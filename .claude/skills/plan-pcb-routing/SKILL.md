@@ -2324,7 +2324,9 @@ re-routes the nets the step before it left open, with the same flags, so:
    copper, which neither a lap nor `--rip-existing-nets` moves (a rip lifts
    tracks and vias; the pads stay). Take that net to **A boxed-in net**
    (after Diagnose and Retry) and to placement. When every failed pad is
-   CAGED, run no lap. Measured on a test board: a pad ringed by four signal
+   CAGED, run no lap. INCONCLUSIVE (exit 3) is not CAGED: the throat is
+   inside the raster's resolution even after the tool's own refinement, so
+   lap for it, or re-measure on a small `--view` at a finer `--step`. Measured on a test board: a pad ringed by four signal
    pins came out of two laps and the rip route.py's Hint named with the same
    failed set and the same copper, while a pad reachable only over the
    priced planes (PASSABLE) was routed by the first lap.

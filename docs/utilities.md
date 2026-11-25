@@ -3507,6 +3507,15 @@ python3 py_tools/check_reachability.py board.kicad_pcb --pad U3.23 --track 0.15 
   spec change. `--defect-json PATH` then writes the throat coordinates, the
   nearest foreign pads, the shortfall and the relief distance per direction,
   which `render_placement.py --defect-json` crops a panel to.
+- **INCONCLUSIVE** (exit 3) — neither (#2045). A raster bottleneck stands up
+  to 3.5 steps from the continuous one, so a margin inside that is no
+  finding: such a reading is re-measured at halved steps (down to 1 um,
+  within a cell budget) until its margin leaves its own step's resolution,
+  and the verdict is read there, with the coarser readings in `--json`'s
+  `refined_from` and the step's band as `resolution_mm`. Measured: a 46 um
+  step read +1 um PASSABLE for a pad a 5 um step put 89 um short; it now
+  refines to CAGED. Only a reading the budget cannot settle is INCONCLUSIVE;
+  re-measure it on a small `--view` round the throat at a finer `--step`.
 
 `--track` / `--via` / `--clearance` default to the board's Default net class,
 then its `min_track_width` / `min_via_diameter` constraint, then
@@ -3517,7 +3526,8 @@ board with no project), and `--json` carries them as `floors`;
 `--layers` (seed pad's layer first), `--step` (raster, 0.01 mm), `--margin`
 (4 mm view half-size) or `--view` set the measurement window. `--json` prints
 only the JSON; `--json-out PATH` also writes it. Exit 2 when an argument names
-nothing on the board (a ref, a pad number) or the board cannot be read.
+nothing on the board (a ref, a pad number), the board cannot be read, or
+nothing of the net is inside the view (NO-TARGET).
 
 `--part REF` (#1817) asks the question one pad at a time cannot: how many of
 the part's signal nets can leave a window round it (`--margin`, default 3 mm)
