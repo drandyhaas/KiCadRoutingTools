@@ -6200,6 +6200,12 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                     return False
         return True
 
+    # #1260: a pour barrier island the router detoured round is a track
+    # keep-out for a shortcut too.
+    from pour_guard import barrier_track_clear_fn
+    _barrier_clear = (barrier_track_clear_fn(config, pcb_data)
+                      if config is not None else None)
+
     import os as _665os
     _665trace = bool(_665os.environ.get('KICAD_665_TRACE'))
 
@@ -6224,7 +6230,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                               net_clearances=net_clearances, base_clearance=eff,
                                               track_clearances=_trk_clr, config=config, need=need) < need:  # dru track rules
             return False
-        ok = edge_clears(x1, y1, x2, y2, w) and keepout_clears(x1, y1, x2, y2, layer, w, net_id)
+        ok = (edge_clears(x1, y1, x2, y2, w) and keepout_clears(x1, y1, x2, y2, layer, w, net_id)
+              and (_barrier_clear is None or _barrier_clear(x1, y1, x2, y2, layer, w)))
         if _665trace and ok:
             # #665 forensics: re-check the pad distance with a FRESH pad
             # array (cache detached); a disagreement = a stale/poisoned

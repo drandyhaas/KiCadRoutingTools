@@ -14,7 +14,7 @@ console said nothing, and its JSON key appeared only under --impedance-nets. Now
     still says DONE. That is the decision the disclosure was made under (#1630).
 
 The fixture is test_1630's: one pair over an intact GND plane, its class at
-94 ohm differential, so a 75 ohm declaration is off target with no crossing.
+92 ohm differential, so a 75 ohm declaration is off target with no crossing.
 Control: a declaration the copper meets names nothing.
 
     python3 tests/test_1673_board_score_names_off_target.py
@@ -75,7 +75,7 @@ def main():
         check('no flag: the JSON carries both nets',
               imp.get('declared_ohms_off_target') == ['/X_N', '/X_P'], str(imp))
         check('no flag: and how far off they are',
-              all(abs((imp.get('ohms_off_pct') or {}).get(n, 0) - 25.7) < 2.5
+              all(abs((imp.get('ohms_off_pct') or {}).get(n, 0) - 22.4) < 2.5
                   for n in ('/X_N', '/X_P')), str(imp.get('ohms_off_pct')))
         check('no flag: the console line names them with the percentage',
               len(lines) == 1 and '/X_N +' in lines[0] and '/X_P +' in lines[0]
@@ -112,7 +112,7 @@ def main():
             verdict = json.load(f)['verdict']
         check('check_complete: the verdict does not read it', verdict == 'DONE', verdict)
 
-        met = declared(tmp, 'met', 94)
+        met = declared(tmp, 'met', 92)
         doc, lines = score(met)
         imp = doc['components']['impedance']
         check('control: a declaration the copper meets names nothing',

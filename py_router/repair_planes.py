@@ -863,6 +863,25 @@ def plane_chamfer_corners(route_knobs) -> bool:
     return bool(knobs.get('smoothing', True)) and bool(knobs.get('chamfer_corners', False))
 
 
+def apply_net_widths(config, net_track_widths=None, netclass_width_floors=None):
+    """Give the repair config the calling step's per-net netclass widths.
+
+    ``net_track_widths`` (net_id -> mm) is what the route step draws each net at
+    when ``--track-width`` was omitted; ``netclass_width_floors`` the class widths
+    it keeps for the escalation ladders either way. Entries the config already
+    holds (e.g. power_net_widths' own map) are not touched; an empty or None map
+    changes nothing, so a standalone run behaves as before."""
+    if net_track_widths:
+        merged = dict(net_track_widths)
+        merged.update(getattr(config, 'net_track_widths', None) or {})
+        config.net_track_widths = merged
+    if netclass_width_floors:
+        merged = dict(netclass_width_floors)
+        merged.update(getattr(config, 'netclass_width_floors', None) or {})
+        config.netclass_width_floors = merged
+    return config
+
+
 def repair_planes(*args, via_span: Optional[List[str]] = None,
                   via_span_type: Optional[str] = None, **kwargs):
     """`_repair_planes_all`, on a via span when one is given (#1842), or when
@@ -917,6 +936,8 @@ def _repair_planes_all(
     reroute_ripped_nets: bool = False,
     power_nets: Optional[List[str]] = None,
     power_nets_widths: Optional[List[float]] = None,
+    net_track_widths: Optional[Dict[int, float]] = None,
+    netclass_width_floors: Optional[Dict[int, float]] = None,
     layer_costs: Optional[List[float]] = None,
     no_bga_zone: bool = False,
     progress_callback=None,
@@ -1169,6 +1190,13 @@ def _repair_planes_all(
         config.power_net_widths = {
             _name2id[nm]: w for nm, w in zip(power_nets, power_nets_widths)
             if nm in _name2id}
+    # The calling route step's per-net NETCLASS widths (#435 / #530). Without
+    # them every repair leg here read a power-class net at the board default
+    # width: a plane tap or pad repair drawn at that width was then not seen as
+    # a neck, so --escalation off's pad-entry allowance (_bound_tap_neck,
+    # #1452) never applied -- a 0.8 mm class net shipped a 3.25 mm pad-repair
+    # trace at 0.2 mm, 2 mm from the nearest pad.
+    apply_net_widths(config, net_track_widths, netclass_width_floors)
     # #581: keep repair vias (pad taps, region joins, reconnects) off same-net
     # pads when the constraint is active. Explicit kwarg wins (route.py's #562
     # finalize forwards its resolved value -- the output's .kicad_pro sibling
@@ -3411,7 +3439,11 @@ def _repair_planes_all(
     try:
         from pcb_modification import close_soft_joints
         _bridge_results: List[Dict] = []
-        _nb = close_soft_joints(_bridge_results, pcb_data, None, config)
+        # this run's nets only: the plane nets it repaired and the nets it
+        # ripped or reconnected. None (the whole board) bridged every via
+        # that grazes a same-net pad on nets the run never touched.
+        _nb = close_soft_joints(_bridge_results, pcb_data,
+                                set(net_ids) | _recon_scope_ids, config)
         if _nb:
             for _br in _bridge_results:
                 for _bs in _br.get('new_segments', []):

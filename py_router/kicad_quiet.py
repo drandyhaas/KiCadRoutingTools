@@ -11,9 +11,17 @@ same refill with the log on stderr takes 0.8 s).
 ``QUIET_WX_SOURCE`` is that code as text, for the scripts this package
 writes out and runs under KiCad's python, which may not have py_router on
 sys.path. It must run BEFORE the first LoadBoard.
+
+It imports pcbnew before it creates a wx.App. The other order fails where a
+display exists: with KiCad 10.0.6 and wxPython 4.2.5 (GTK3) on Linux,
+``wx.App(False)`` followed by ``import pcbnew`` raises "SystemError:
+initialization of _pcbnew raised unreported exception", so every refill child
+died and the exact fill fell back to zone outlines. Headless runs never saw
+it, because wx.App raises SystemExit there and no app is made.
 """
 
 QUIET_WX_SOURCE = """\
+import pcbnew
 try:
     import wx
 except ImportError:

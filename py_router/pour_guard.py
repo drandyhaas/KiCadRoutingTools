@@ -427,6 +427,30 @@ def _barrier_keepouts(config, pcb_data):
     return rows
 
 
+def barrier_track_clear_fn(config, pcb_data):
+    """A (x1, y1, x2, y2, layer, w) -> bool predicate: does a track keep out
+    of every pour barrier island, at the clearance `add_pour_barrier_obstacles`
+    stamps? None when the run has no barrier. For the passes that move copper
+    after the router: a shortcut must not undo the detour it took round one."""
+    from check_drc import _segment_to_polys_distance
+    rows = _barrier_keepouts(config, pcb_data)
+    if not rows:
+        return None
+
+    def clear_of(x1, y1, x2, y2, layer, w):
+        for _net, blayer, polys, (bx0, by0, bx1, by1), clear in rows:
+            if blayer != layer:
+                continue
+            need = clear + w / 2.0
+            if (max(x1, x2) < bx0 - need or min(x1, x2) > bx1 + need
+                    or max(y1, y2) < by0 - need or min(y1, y2) > by1 + need):
+                continue
+            if _segment_to_polys_distance(x1, y1, x2, y2, polys)[0] < need - 1e-6:
+                return False
+        return True
+    return clear_of
+
+
 def _via_enters(row, x, y, size) -> bool:
     from check_drc import _point_to_polys_distance
     _net, _layer, polys, (x0, y0, x1, y1), clear = row
