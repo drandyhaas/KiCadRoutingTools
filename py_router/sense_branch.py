@@ -339,17 +339,6 @@ def _touches_join(item, join) -> bool:
     return False
 
 
-def _point_in_poly(x: float, y: float, poly) -> bool:
-    """Ray-casting point-in-polygon."""
-    inside, j = False, len(poly) - 1
-    for i in range(len(poly)):
-        (xi, yi), (xj, yj) = poly[i], poly[j]
-        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
-            inside = not inside
-        j = i
-    return inside
-
-
 def _pour_keepouts(pcb_data, layer: str) -> list:
     """The rule areas forbidding copper pour on `layer`, as rings (outline
     first, then its holes): KiCad's filler subtracts them from every zone
@@ -369,6 +358,37 @@ def _pour_keepouts(pcb_data, layer: str) -> list:
     return out
 
 
+def _pour_area(zone, kos):
+    """The area a pour of `zone` may fill on its layer, as one shapely
+    geometry: the outline minus its cut-outs (Zone.holes) minus every
+    copper-pour keep-out (`_pour_keepouts` rings: outline minus its holes).
+    The same region `in_fill` tests point by point, so a ring edge counts
+    only where it bounds that region: an outline edge inside a keep-out, a
+    keep-out edge outside the outline or a cut-out edge inside a keep-out
+    bounds no fill (#2068). Fill touches a keep-out edge lawfully and floods
+    over same-net copper, so no clearance is taken off; KiCad's own fill is
+    a subset of this area (it also clears foreign copper and the board edge
+    and drops slivers under min_thickness), so a tap found here may be one
+    KiCad would not pour, never the reverse."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from shapely.validation import make_valid
+
+    def ring(r):
+        return make_valid(Polygon(r))
+
+    area = ring(zone.polygon)
+    cuts = [ring(h) for h in (getattr(zone, 'holes', None) or ()) if len(h) >= 3]
+    bans = []
+    for rings in kos:
+        ko = ring(rings[0])
+        holes = [ring(h) for h in rings[1:]]
+        bans.append(ko.difference(unary_union(holes)) if holes else ko)
+    if cuts or bans:
+        area = area.difference(unary_union(cuts + bans))
+    return area
+
+
 def _zone_tap(pcb_data, items, join) -> Optional[str]:
     """Why a pour of the branch's own net already taps its sense copper, or
     None. A zone floods over same-net copper, so sense copper inside (or
@@ -376,10 +396,13 @@ def _zone_tap(pcb_data, items, join) -> Optional[str]:
     that pour -- and through it to every load the pour feeds -- in the board
     KiCad fills, whatever the router keeps off it. That area is the zone's
     outline minus its cut-outs (Zone.holes) and minus every rule area
-    forbidding pour on the layer: a pour cut around the sense trace does not
-    tap it. A sense pad is judged by its copper, not its centre: a pour
-    overlapping a strip of it is a tap. Contact on the join pad itself is
-    the join, not a tap."""
+    forbidding pour on the layer (`_pour_area`): a pour cut around the sense
+    trace does not tap it, including where the trace crosses the zone's
+    outline inside the cut (#2068). Copper taps when it comes within its
+    half width of that AREA, not of any ring edge. A sense pad is judged by
+    its copper, not its centre: a pour overlapping a strip of it is a tap.
+    Contact on the join pad itself is the join, not a tap."""
+    import shapely
     from kicad_parser import pour_zones
     from connectivity import via_copper_layers
     from check_drc import _pad_perimeter_points
@@ -390,20 +413,10 @@ def _zone_tap(pcb_data, items, join) -> Optional[str]:
         return None
     copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ())
     for z in zones:
-        cuts = [h for h in (getattr(z, 'holes', None) or ()) if len(h) >= 3]
-        kos = _pour_keepouts(pcb_data, z.layer)
-
-        def in_ko(x, y, rings):
-            return _point_in_poly(x, y, rings[0]) and not any(
-                _point_in_poly(x, y, h) for h in rings[1:])
-
-        def in_fill(x, y):
-            return (_point_in_poly(x, y, z.polygon)
-                    and not any(_point_in_poly(x, y, h) for h in cuts)
-                    and not any(in_ko(x, y, rings) for rings in kos))
-
-        rings = [z.polygon] + cuts + [r for k in kos for r in k]
-        edges = [(r[i], r[(i + 1) % len(r)]) for r in rings for i in range(len(r))]
+        area = _pour_area(z, _pour_keepouts(pcb_data, z.layer))
+        if area.is_empty:
+            continue
+        corners = None
         for kind, it in items:
             if kind == 'seg':
                 if it.layer != z.layer:
@@ -423,17 +436,19 @@ def _zone_tap(pcb_data, items, join) -> Optional[str]:
                 pts = [(it.global_x, it.global_y)] + list(_pad_perimeter_points(it))
                 r = 0.0
                 what = f"sense pad {it.component_ref}.{it.pad_number}"
+            pts = [(x, y) for x, y in pts if not _in_pad(join, x, y, r + _EPS)]
             hit = None
-            for x, y in pts:
-                if _in_pad(join, x, y, r + _EPS):
-                    continue
-                if in_fill(x, y) or any(
-                        _dist_seg(x, y, a[0], a[1], b[0], b[1]) <= r + _EPS for a, b in edges):
-                    hit = (x, y)
-                    break
+            if pts:
+                d = shapely.distance(area, shapely.points(np.asarray(pts, dtype=float)))
+                near = np.nonzero(d <= r + _EPS)[0]
+                if near.size:
+                    hit = pts[int(near[0])]
             if hit is None and kind == 'pad':
-                # A pour corner poking into the pad between perimeter samples.
-                hit = next(((x, y) for x, y in z.polygon
+                # A corner of the pour area poking into the pad between
+                # perimeter samples.
+                if corners is None:
+                    corners = shapely.get_coordinates(area.boundary).tolist()
+                hit = next(((x, y) for x, y in corners
                             if _in_pad(it, x, y, 0.0) and not _in_pad(join, x, y, _EPS)), None)
             if hit is not None:
                 return (f"a {z.net_name or net} zone on {z.layer} pours over {what} "
