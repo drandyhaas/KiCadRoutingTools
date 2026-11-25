@@ -727,6 +727,71 @@ embedding parted them round a berth's via the wrong way, across that berth's
 own lane, in the stretch past the route's end where no solve and no layer
 cut has a say, and that net was left open (`tests/test_622_two_end.py`).
 
+#### After a group's lanes: last hops, ties and packs
+
+Three things the lanes leave are finished by the step itself, on the board
+the group hands on, once its lanes stand and are locked -- each by the
+chain's own router run for that job alone (`route.py`, every other net with
+copper protected, so it rips nothing).
+
+**A pair that ends on two small parts.** A pair whose legs end on pads
+apart -- each on a series part of its own -- has no berth a pair can take.
+It is laid as a pair all the same, to a GATHER short of the pads
+(`group_ends.gather_berths`): two tips a pair pitch apart on one line across
+the face it arrives by, a grid step of track at each for its lane to end
+on, and no copper from there to the pads. A stub laid before the lanes
+stood where another lane had to come in; the last hop is laid after them,
+round the copper that is there. Two rules of the ends model are such a
+bus's alone. The lane's own part is no copper in front of its end
+(`whole_ends.own_parts`): a part a millimetre off its array has its other
+pad within the reach of the tooth's straight run, and the array's balls
+within the berth's, and read as blocked every front-layer end was held to a
+change of layer no lane that short has room for. And a gather that faces
+its teeth leaves the pair room to be laid between them (`_pair_room`). A
+bus to an array of pads has neither: its far array's pads stand in front of
+a lane as any copper does, and a pair berthing on an array turns onto a
+pose of another heading where it must
+(`tests/test_622_crowd_diagnosis.py`, `tests/test_622_pose_heads.py`).
+
+**The step's own leftovers** (`route_bus.bus_leftovers`, `_router_step`):
+the nets of its buses that end at a small part and that the lay left short
+of it -- a gathered pair's last hops, a lane the plan could not draw into
+the part's pads -- are routed on the group's board, each net it connects
+protected. A net left open is reserved first in a round after: routed alone
+before the others or, where the lanes took its way, found on the group's
+field and kept there while the group is laid again. The parts off an array
+that are no bus of the step's (`router_buses`: a header, a flash, a
+resistor array sharing a few nets with it) are routed the same way only
+with `BUS_ROUTER=1`. By default they are the chain's: its route step plans
+them with every other net of the board, and copper laid for them here, one
+net after another and then protected, left nets of that plan with no way.
+
+**The ties and the packs** (`route_bus._supply_ties`,
+`field_ties.lay_after`). Every pad of another part on a poured net beneath
+one of the group's parts that only a pour of its own layer joins gets a
+track and a via of its net: beneath an array that pour is cut by every via
+and lane, and by what the chain lays after. With them the step finishes its
+PACKS (`_packs`): the other parts a lane's net has a pad on -- a
+termination pack, a pull-up. A pack's rail pads are tied by copper whatever
+layer the rail is poured on (that pour is not read), and its own stubs --
+the pack's pads on the lanes' nets that no copper joins yet -- are laid in
+the same pass, the pass's nets planned together (`KICAD_PLAN_TOGETHER`):
+the stubs come in a third of a millimetre from the rail pads, and whichever
+was laid first stood across the other's way.
+
+The pass is kept when the board grades no worse for it (`board_grade`: nets
+open, violations, balls or pads walled in) and the route step's own plan
+still has a way for every net it had one for (`plan_boxed`: the first round
+of the plan the chain's route step makes of its nets together, on its grid
+and at its sizes, ended before it routes; a net with no way in it is walled
+in for that step, whatever a finer measure reads). Where a tie walls a pad
+in or leaves a net no way, the ties round it are taken out and the rest
+graded again (`field_ties.clear_of`: the pieces with copper within
+`TIE_REACH` of the walled pad or of the net's free ends, a rail run pad to
+pad a piece a span), `TIE_LAPS` times at most. The nets that plan has no
+way for on the group's board as its lanes left it are named in the log
+(`tests/test_622_supply_ties_packs.py`).
+
 #### Each source's buses, one group
 
 Buses that leave one array in different directions -- a star round it --
@@ -3121,7 +3186,7 @@ With nothing supplied, as on the benches:
 | `route_bus.py` | the bus step: a board as the chain hands it on, its buses routed in the board's own frame, graded on the board (`BUS ..`), handed on whenever their own nets come out clean, another net's copper it laid put back first (`tests/test_622_bus_handed_on.py`); the buses it routes and the parts it leaves, each with why (`bus_plan`, `find_buses`, `--find`: `tests/test_622_find_buses.py`), each source's buses one group (`route_buses`), the lanes on every copper layer (`all_layers`); the lanes handed on locked (`lock_lanes`: `tests/test_622_bus_lock.py`); a pull pad a short tie reaches joined to its lane on the routed board (`attach_pulls`: `tests/test_622_attach_pulls.py`); a net a pull or a termination alone keeps out laid as a lane (`pulled_nets`: `tests/test_622_route_bus_pulled.py`); one source and several ends as one whole route, `--bus SRC:U4+U3` (the parts one destination, `whole_frame.Group`: `tests/test_622_two_end.py`); `--src`/`--dest`, one bus by itself with its own ends, a group's per-bus process |
 | `negotiated_buses.py`, `whole_joint.py`, `joint_lanes.py` | each source's buses one group (`route_grouped`): every bus's ends model captured, the group's ends, every bus on the shared field in its own frame and a process of its own (`route_on_field`), merged (`merge`, `conflicts`, `give_back`, `protect_laid`), the group's rounds; a round's first plans and every loop's re-solves one coupled solve, one CP-SAT model, the buses in step, coupled where two buses' lanes cross or come within a lane's pitch (`whole_joint.py`, `JOINT_DIR`, `whole_route.joint_loop_sync`); each bus's lanes published in the board's frame and laid as copper of their own nets on every other bus's stages (`joint_lanes.publish`, `foreign`) |
 | `group_ends.py` | the group's ends (`negotiated_buses.route_grouped`): every bus off one array given its ends by one CP-SAT model over its captured ends model and the arrays' shared menus; the model offered each bus ball's first tiers, its whole menu by need (a refusal's rules) and by use (the search's epochs, a stretch of lanes at a time; `tier_search`, `lane_stretches`); each bus's ends checked by its whole solve; the arrays fanned out as chosen and measured, a violation the fanout made answered by the model (`write_field`, `teach_laid`); a bus step's fanout stage on the group's ends (`bus_stage`, `GROUP_ENDS`) |
-| `field_ties.py` | the field's ties: the pads on a poured net beneath a group's parts tied on the fanned-out field, before the lanes (`group_ends`, after the field is measured) |
+| `field_ties.py` | the field's ties: the pads on a poured net beneath a group's parts tied on the fanned-out field, before the lanes (`group_ends`, after the field is measured), and after them the pads a pour alone joins and the packs' rail pads and stubs (`lay_after`, `clear_of`, `relay`: `tests/test_622_supply_ties_packs.py`) |
 | `escape_plan.py` | a dog-boned ball's escapes, the menus' moves from its via (`escape_menu`: along a ball line beside it, a sidestep to a line further over, or a street; `escape_out`: a surface escape from a ball with none) (`tests/test_622_escape_menu.py`). The lines they leave along are one lattice a face (`line_step`): the ball pitch cut in the most even parts each at least a lane's pitch at the fanout's sizes -- half a pitch at ordinary sizes, a quarter at the fab ladder's narrowest, where two lanes fit between two balls. No sidestep runs along the exit line: an outer ring's dog-bone stands half a pitch out, and the "row" beside it is the exit line itself -- read as that line within the relayer's tolerance, since an array's balls may stand a few nanometres off their grid (`tests/test_622_escape_lattice.py`). Every test of a ball's own coordinate against a line of its array is asked within that tolerance (`escape_moves.ON_LINE`) -- the box's edge, its middle, the ball lines beside a band with no balls: those lines are other balls' coordinates, and asked to the nanometre a ball 2 nm off its grid lost the line along the box's edge, its own line from a via a board had laid, and its side-steps into a band, while 2 nm inward a point on the box's edge read as inside it (`escape_menu`, `escape_out`, `joint_escape.escape_field_moves`, `escape_moves.enumerate_moves`; `tests/test_622_grid_tolerance.py`) |
 | `joint_escape.py`, `conflict_groups.py` | an array's menus for the group's ends (`build_menus`: every ball's escapes, drops and straps; a drop at a finer rung's via: `tests/test_622_drop_fine_via.py`; nothing in a laid pair's pocket: `test_622_pair_teeth.py`; no escape between two laid lanes that close round it: `test_622_lane_walls.py`; a rule area that forbids pours read as a pour of no net, so no plane drop is planned where no plane will pour: `zone_regions`); an array's whole plan in one CP-SAT solve, laid by the under-pad engine's joint escape (`plan_array`, `fan_array`: a bus's own run escapes the balls its comb refused by it; `tests/test_622_plan_array.py`); the escapes' conflicts as cliques and bicliques (`tests/test_622_conflict_groups.py`) |
 | `whole_route.py`, `modal_whole.py` | one rung end to end -- fanout, solve, loop, route, checks, rounds under the next seed -- graded in one line (`WHOLE K=..`); the loop's layer cuts from the audit and the snap (`tests/test_622_layer_cuts.py`); a lane its fanout gave no end, or ran and did not lay, left out of the round, open (`with_ends`: `tests/test_622_whole_route_no_ends.py`); the ladder in the cloud, one container per rung |

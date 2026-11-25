@@ -3134,7 +3134,15 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         # their own: they are the harness's grade, not the route, and a checker run as a script installs its
         # command-line banner -- the CMD / EXIT echo -- for its whole process)
         checker = lambda name: os.path.join('..', 'py_router', name)
-        cc = run([checker('check_connected.py'), seq, '--nets'] + pats, env,
+        # (ENDS_SHORT, the bus step's: pads the plan's lanes END SHORT of -- a pair laid to a gather, its last hop
+        # the router's after the group's lay (route_bus.short_view): the lay's connectivity is read with those pads
+        # off their nets. Read with them on, every round found such a pair open, planned it again by itself and
+        # told the group's model its ends were to avoid)
+        seq_c = seq
+        if env.get('ENDS_SHORT'):
+            import route_bus as _rb
+            seq_c = _rb.short_view(seq, json.loads(env['ENDS_SHORT']), os.path.join(d, f'conn{tag}_short.kicad_pcb'))
+        cc = run([checker('check_connected.py'), seq_c, '--nets'] + pats, env,
                  log_path=os.path.join(d, f'conn{tag}.log'), own_process=True)[0]
         dj = os.path.join(d, f'drc{tag}.json')
         if os.path.exists(dj):

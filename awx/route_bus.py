@@ -440,7 +440,8 @@ def memory_bus(pcb, names):
 
 def bus_plan(pcb, rules):
     """THE BUSES THE STEP ROUTES on `pcb` at the chain's sizes `rules` (resolve_rules), and in what order:
-    {'buses': [{src, dest, nets, why}], 'left': [{src, dest, nets, why}]}.
+    {'buses': [{src, dest, nets, why}], 'router': [router_buses' entries, each with its why], 'left': [{src, dest,
+    nets, why}]} -- a part left that is a ROUTER BUS of a group (router_buses) is named there, not in `left`.
 
     A bus is the nets between a ball array (is_array) and another part that the whole route admits
     (make_bench.pair_nets, find_buses):
@@ -525,13 +526,28 @@ def bus_plan(pcb, rules):
         owner.setdefault(b['src'], b['src'])
         groups.setdefault(b['src'], []).append(b)
     order = sorted(groups, key=lambda s: (-max(b['nets'] for b in groups[s]), s))
-    return dict(buses=[b for s in order for b in groups[s]],
-                left=sorted(left, key=lambda b: (-b['nets'], b['src'], b['dest'])))
+    buses = [b for s in order for b in groups[s]]
+    # (THE ROUTER BUSES, where asked for -- _router_on: a part left that shares MIN_ROUTER_NETS admitted nets or more
+    # with an array of a group the step routes -- its nets route.py's, from their escapes, after the group's lay:
+    # router_buses, _router_step)
+    router = router_buses(pcb, [(b['src'], b['dest']) for b in buses]) if _router_on() else []
+    why_left = {(b['src'], b['dest']): b['why'] for b in left}
+    for r in router:
+        r['why'] = (f"no bus: {why_left[(r['src'], r['dest'])]}" if (r['src'], r['dest']) in why_left else
+                    f"no bus: fewer than {MIN_GROUP_NETS} nets") + \
+            f" -- a router bus: route.py routes its nets from their escapes after the group's lay" + \
+            (f"; the pair legs {', '.join(r['legs'])} left to the chain's pair step" if r['legs'] else '')
+    taken = {(r['src'], r['dest']) for r in router}
+    return dict(buses=buses, router=router,
+                left=sorted((b for b in left if (b['src'], b['dest']) not in taken),
+                            key=lambda b: (-b['nets'], b['src'], b['dest'])))
 
 
 def plan_lines(plan):
     """bus_plan's plan as the lines --find prints and route_buses logs"""
     return ([f"bus {b['src']} -> {b['dest']}, {b['nets']} nets -- {b['why']}" for b in plan['buses']]
+            + [f"router bus {b['src']} -> {b['dest']}, {b['nets']} nets ({', '.join(b['names'])}) -- {b['why']}"
+               for b in plan.get('router') or ()]
             + [f"not taken {b['src']} -> {b['dest']}, {b['nets']} nets -- {b['why']}" for b in plan['left']])
 
 
@@ -572,12 +588,18 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
         plan = bus_plan(pcb, resolve_rules(board, log=lambda *a_, **k_: None, **sizes))
         for ln in plan_lines(plan):
             log('route_bus: ' + ln)
-        bus_events.emit('step', 'plan', buses=plan['buses'], left=plan['left'])
+        bus_events.emit('step', 'plan', buses=plan['buses'], left=plan['left'], router=plan['router'])
         buses = [(b['src'], b['dest']) for b in plan['buses']]
+        router = plan['router']
+    else:
+        # (the buses named: their groups' router buses all the same, where asked for -- router_buses, _router_on)
+        router = router_buses(pcb, buses) if _router_on() else []
+        for r_ in router:
+            log(f"route_bus: router bus {r_['src']} -> {r_['dest']}, {r_['nets']} nets ({', '.join(r_['names'])})")
     groups = collections.OrderedDict()
     for s, d in buses:
         groups.setdefault(s, []).append((s, d))
-    cur, runs, codes = board, [], []
+    cur, runs, codes, routers = board, [], [], []
 
     # (every bus's lanes on every copper layer: the setting each bus's process takes, unless the caller named them)
     env_ = awx_settings.environ()
@@ -625,6 +647,30 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
             bus_events.emit('group', 'end', group=s, exit=code, open=len(neg_g['open']) if neg_g else None,
                             drc=neg_g['drc']['n'] if neg_g else None,
                             walled=len(neg_g['walled']['walled']) if neg_g else None, summary=step_json)
+            # THE GROUP'S ROUTER BUSES (router_buses; none unless asked for, _router_on): their nets routed by route.py
+            # on the board the group hands on, from the escapes its field gave them, a net left open reserved first
+            # in a round after (_router_step). On no graded board -- the group handed on nothing -- they are the
+            # chain's, as every left part's
+            rb_ = [r_ for r_ in router if r_['group'] == s]
+            # (...and THE GROUP'S OWN NETS ITS LAY LEFT OPEN AT A SMALL PART, bus_leftovers: routed with them)
+            if os.path.isfile(step_out) and neg_g and not neg_g.get('dead'):
+                rb_ = rb_ + bus_leftovers(parse_kicad_pcb_quiet(step_out), sj_, s)
+            if rb_ and os.path.isfile(step_out) and neg_g and not neg_g.get('dead'):
+                # (graded, and a way put on the field, at the sizes of the run that stands: _standing_sizes)
+                with _installed(_standing_sizes(cur, sj_, sizes)[0]):
+                    step_out, step_json, code, sj_, rec_ = _router_step(cur, step_out, step_json, code, sj_, grp, rb_,
+                                                                       k, inproc, log, feedback_rounds, sizes)
+                routers.append(rec_)
+                got = sj_.get('buses')
+            elif rb_:
+                log(f'route_bus: the router buses off {s} ({", ".join(r_["dest"] for r_ in rb_)}) not routed: the group '
+                    f'handed on no graded board -- their nets are the chain\'s')
+                routers.append(dict(group=s, buses=[dict(src=r_['src'], dest=r_['dest'], nets=r_['names'])
+                                                    for r_ in rb_], skipped='the group handed on no graded board'))
+            # THE SUPPLY PADS BENEATH THE GROUP'S PARTS, tied by copper now that its lanes stand (_supply_ties)
+            if os.path.isfile(step_out) and sj_.get('grade') and not sj_['grade'].get('dead'):
+                with _installed(_standing_sizes(cur, sj_, sizes)[0]):
+                    step_out, step_json, sj_ = _supply_ties(cur, step_out, step_json, sj_, grp, log)
             codes.append(code)
             for r_ in got or [dict(src=s, dest=g_[1], exit=None, grade=None, summary=None) for g_ in grp]:
                 runs.append(dict(src=r_['src'], dest=r_['dest'], exit=1 if r_['exit'] is None else r_['exit'],
@@ -646,6 +692,12 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
             s_ = {}
         nets_ |= set(s_.get('routed') or []) | set(s_.get('refused') or {})
         routed_ = routed_ or bool(s_.get('routed'))
+    # (...and the router buses' nets route.py connected: copper the step ships as well)
+    for rec_ in routers:
+        got_ = {n_ for b_ in rec_.get('buses') or () for n_ in b_['nets']} - set(rec_.get('open') or ())
+        if not rec_.get('skipped'):
+            nets_ |= got_
+            routed_ = routed_ or bool(got_)
     rules_ = resolve_rules(board, log=lambda *a_, **k_: None, **sizes)
     install_escalation(board, rules_)
     # (...where a net was routed: a step that hands the board on as it came leaves its project as it came too --
@@ -658,7 +710,8 @@ def _route_buses(board, out, work, buses, k, rounds, inproc, log, json_out, feed
         except Exception as e:      # noqa: BLE001
             log(f'route_bus: OUT\'s project floor NOT written ({type(e).__name__}: {e})')
     with open(json_out or os.path.join(work, 'summary.json'), 'w', encoding='utf-8') as f:
-        json.dump(dict(board=board, out=out, buses=runs, plan=plan, exit=code, design_rules=design), f, indent=1)
+        json.dump(dict(board=board, out=out, buses=runs, plan=plan, exit=code, design_rules=design, router=routers), f,
+                  indent=1)
     if not runs:
         log('route_bus: no bus found -- OUT is the board as it came')
     bus_events.emit('step', 'end', status=code, out=out, summary=json_out or os.path.join(work, 'summary.json'))
@@ -976,6 +1029,597 @@ def _escalated(board, step_out, step_json, code, sj, grp, k, rounds, inproc, log
     return out_b, json_b, code_b, sj_b
 
 
+# the protection a router bus's net carries once route.py has connected it (#521): no later step's rip takes it, and
+# the chain's fanouts leave its pads alone (autoroute.bus_handoff reads every net the step protected)
+ROUTER_PROTECT = 'router bus'
+# the step's sizes route.py is given for the router buses' nets: the ones the chain's route passes give it
+ROUTER_SIZES = ('clearance', 'clearance_ceiling', 'track_width', 'via_size', 'via_drill')
+# the hold a ball's kept way carries while route.py routes round it (_router_step): no rip takes it; lifted after
+WAY_HOLD = 'router way'
+
+
+def router_args(pcb, sizes):
+    """ROUTE.PY'S ARGUMENTS for the router buses' nets, as the chain's FIRST route pass gives them (autoroute.
+    route_passes; the bus step routes them before any pass of the chain): the step's sizes the chain gives route.py
+    (ROUTER_SIZES: the clearance, the track, the via -- the hole and edge floors route.py resolves from the board, as
+    in the chain: given its --hole-to-hole-clearance, route.py stamped that floor in the project, and two of the
+    field's plane drops, laid closer, read as a violation the board did not have), every copper layer -- an inner one
+    that carries a pour kept off (autoroute's PLANE_LAYER_COST: the planes stay solid. Crossed at a price, a header's
+    six nets cut a plane's pour, nothing in route.py's call repaired it -- the plane nets are no nets of it -- and its
+    improvement gate threw the whole run away), two layers at 1 and 1.5 --, autoroute's grid (0.05 mm where a part it
+    fans out has a pitch of GRID_FINE_PITCH or less, else 0.1), and no BGA exclusion zone: the nets leave from escapes
+    inside an array"""
+    import autoroute as ar
+    from kicad_parser import pour_zones
+    layers = list(pcb.board_info.copper_layers)
+    solid = {z.layer for z in pour_zones(pcb.zones or []) if not z.in_footprint and z.net_name} - {layers[0], layers[-1]}
+    costs = [1.0, 1.5] if len(layers) == 2 else [ar.PLANE_LAYER_COST if L in solid else 1.0 for L in layers]
+    fine = any(t and p is not None and p <= ar.GRID_FINE_PITCH for t, p, _w in ar.fanout_census(pcb).values())
+    out = ['--no-bga-zones', '--layers', *layers, '--layer-costs', *(f'{c:g}' for c in costs),
+           '--grid-step', '0.05' if fine else '0.1']
+    for n in ROUTER_SIZES:
+        if sizes.get(n) is not None:
+            out += ['--' + n.replace('_', '-'), f'{sizes[n]:g}']
+    return out
+
+
+def _standing_sizes(board, sj, sizes):
+    """(rules, sizes) of the run whose board stands for a group (its summary SJ, from BOARD): the rung its fab
+    escalation kept (_escalated), else the sizes asked for"""
+    run_rules, _pol, rungs = _ladder(board, sizes)
+    i = int((sj.get('escalation') or {}).get('kept') or 0)
+    if 0 < i <= len(rungs):
+        rr = rungs[i - 1]
+        return rr, dict(sizes, track_width=rr.track, fanout_track_width=rr.fan_track, via_size=rr.via_size,
+                        via_drill=rr.via_drill)
+    return run_rules, dict(sizes)
+
+
+def _transplant(path, src, pcb, names):
+    """`path` with the copper of the nets `names` (full names) exactly as the board `src` (parsed: `pcb`) has it --
+    theirs on `path` taken off, every track and via of theirs on `src` put on, as written. For copper a router laid on
+    that same board, legal there: put_back's own clearance test reads a round pad as its box, and dropped the last
+    piece of a route into a pin header beside the next pin, the net open"""
+    import braid as te
+    ids = {i for i, n in pcb.nets.items() if n.name in set(names)}
+    txt = open(path, encoding='utf-8').read()
+    for tok in ('segment', 'via'):
+        txt = te.strip_net_items(txt, tok, ids, names)
+    s_txt = open(src, encoding='utf-8').read()
+    blocks = [b for tok in ('segment', 'via') for b in net_blocks(s_txt, tok, ids, names)]
+    end = txt.rstrip().rfind(')')
+    txt = txt[:end].rstrip() + '\n' + ''.join(f'  {b}\n' for b in blocks) + txt[end:]
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(txt)
+    return len(blocks)
+
+
+#: a tie is taken out for a pad it walled in when its piece has copper this near the pad (mm): the cage of a pad is
+#: copper within a track or two of it
+TIE_REACH = 1.0
+#: ...and the ties are graded again this many times at most, the ones round what they still wall taken out each time
+TIE_LAPS = 3
+
+
+def _free_ends(pcb, nid):
+    """the FREE ENDS of the net `nid` on `pcb` [(x, y)]: its pads that no copper of it joins, and the ends of its
+    tracks that stand on no pad, via or other track of it -- where a net with no way is walled in"""
+    import field_ties
+    pads = [q for fp_ in pcb.footprints.values() for q in fp_.pads if q.net_id == nid]
+    out = [(q.global_x, q.global_y) for q in pads if q.pad_type != 'np_thru_hole' and not field_ties.joined(pcb, q)]
+    segs = [s_ for s_ in pcb.segments if s_.net_id == nid and not getattr(s_, 'graphic', False)]
+    K = lambda x, y: (round(x, 3), round(y, 3))     # noqa: E731
+    n = collections.Counter(k for s_ in segs for k in (K(s_.start_x, s_.start_y), K(s_.end_x, s_.end_y)))
+    vias = {K(v.x, v.y) for v in pcb.vias if v.net_id == nid}
+    for k, c in n.items():
+        if c == 1 and k not in vias and not any(abs(k[0] - q.global_x) <= q.size_x / 2 + 1e-6
+                                                and abs(k[1] - q.global_y) <= q.size_y / 2 + 1e-6 for q in pads):
+            out.append(k)
+    return out
+
+
+def plan_boxed(path):
+    """THE NETS THE ROUTE STEP'S PLAN FINDS NO WAY FOR on the board `path` {net name}: the chain's route step plans
+    its nets together before it routes any (plan_together), and a net with no way at all in that plan -- on its
+    grid, at its sizes, the planes priced as the chain prices them after a bus step -- is walled in for it, whatever
+    a finer measure says. route.py's own first round of that plan, ended before it routes (KICAD_PLAN_ONLY). None
+    where the check did not run"""
+    import subprocess
+    import autoroute as ar
+    import awx_settings
+    import field_ties
+    import rules as _rules
+    from kicad_parser import pour_zones
+    pcb = parse_kicad_pcb_quiet(path)
+    R = _rules.active()
+    layers = list(pcb.board_info.copper_layers)
+    solid = {z.layer for z in pour_zones(pcb.zones or []) if not z.in_footprint and z.net_name} - {layers[0], layers[-1]}
+    costs = [1.0, 1.5] if len(layers) == 2 else [ar.PLANE_FALLBACK_COST if L in solid else 1.0 for L in layers]
+    fine = any(t and p is not None and p <= ar.GRID_FINE_PITCH for t, p, _w in ar.fanout_census(pcb).values())
+    tmp = tempfile.mkdtemp(prefix='plan_boxed.', dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        rep = os.path.join(tmp, 'plan.json')
+        argv = [sys.executable, '-X', 'utf8', os.path.join(field_ties.PYR, 'route.py'), path, '--output',
+                os.path.join(tmp, 'out.kicad_pcb'), '--nets', '*', '--no-bga-zones', '--layers', *layers,
+                '--layer-costs', *(f'{c:g}' for c in costs), '--grid-step', '0.05' if fine else '0.1',
+                '--clearance-ceiling', f'{R.clearance:g}', '--track-width', f'{R.track:g}',
+                '--via-size', f'{R.via_size:g}', '--via-drill', f'{R.via_drill:g}']
+        subprocess.run(argv, env=dict(awx_settings.environ(), KICAD_PLAN_TOGETHER='1', KICAD_PLAN_ROUNDS='1',
+                                      KICAD_PLAN_ONLY=rep), capture_output=True, text=True)
+        try:
+            with open(rep, encoding='utf-8') as f:
+                return set(json.load(f).get('boxed') or ())
+        except (OSError, ValueError):
+            return None
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _packs(path, sj, parts):
+    """THE PACKS of a group (its summary SJ, its own parts `parts`) on the board `path`: the other parts a net of one
+    of its buses has a pad on -- a termination pack, a pull-up at a lane's end -- and those nets' names on the board.
+    Their rail pads and their own stubs are laid with the supply pads beneath the group's parts
+    (field_ties.lay_after)"""
+    from coherent_nets import net_keys
+    pcb = parse_kicad_pcb_quiet(path)
+    keys = net_keys(pcb)
+    mine = {n for r_ in sj.get('buses') or () for n in (_bus_nets(r_) or ())}
+    on = [p for fp in pcb.footprints.values() for p in fp.pads if p.net_name and keys.get(p.net_name, p.net_name) in mine]
+    return sorted({p.component_ref for p in on} - set(parts)), sorted({p.net_name for p in on})
+
+
+def _supply_ties(board, step_out, step_json, sj, grp, log):
+    """THE SUPPLY PADS BENEATH A GROUP'S PARTS TIED BY COPPER after its lay (route_buses): on a copy of the group's
+    board STEP_OUT (its summary SJ; BOARD the board the group came in with), every pad of another part on a poured
+    net beneath one of the group's parts that only a pour of its own layer joins is given a track and a via of its
+    net (field_ties.lay_after: route.py on those nets, the board read without its outer layers' pours, every other
+    net protected -- the lanes stand as laid). Such a pour is cut by every via and lane beneath an array and by what
+    the chain lays after: handed on so, one such pad shipped its net open.
+
+    KEPT when the board grades no worse for it (board_grade: no more nets open, no more violations, no more balls
+    or pads walled in); else the board stands as it was and the run says why. Returns (OUT, its summary's path, its
+    summary): the tied board's, its summary the group's with the new `grade` and `supply_ties` {pads, tied, left,
+    tracks, vias, secs}; STEP_OUT's own where nothing was tied or the ties were not kept"""
+    import field_ties
+    from copy_board import copy_board
+    t0 = time.time()
+    stem = step_out[:-len('.kicad_pcb')]
+    tied_b, js_new = stem + '.ties.kicad_pcb', stem + '.ties.summary.json'
+    with contextlib.redirect_stdout(io.StringIO()):
+        copy_board(step_out, tied_b)
+    parts = sorted({grp[0][0]} | {d_ for _s, dest_ in grp for d_ in str(dest_).split('+')})
+    packs_, lanes_ = _packs(tied_b, sj, parts)
+    got = field_ties.lay_after(tied_b, parts, log, packs=packs_, lanes=lanes_)
+    if got is None or not (got['segments'] or got['vias']):
+        log('route_bus: supply ties: ' + ('no pad beneath the group\'s parts that a pour alone joins' if got is None
+                                          else f'none of {len(got["pads"])} pad(s) tied'))
+        return step_out, step_json, sj
+    g0 = sj.get('grade')
+    bus = [(r_['src'], r_['dest'].split('+'), sorted(_bus_nets(r_) or ())) for r_ in sj.get('buses') or ()]
+    router = [(b_['src'], b_['dest'].split('+'), b_['nets']) for b_ in (sj.get('router') or {}).get('buses') or ()]
+    rank = lambda g_: (len(g_['open']) + len((g_.get('router') or {}).get('open') or ()),       # noqa: E731
+                       math.inf if g_['drc']['n'] is None else g_['drc']['n'], len(g_['walled']['walled']))
+    # THE ROUTE STEP'S OWN MEASURE beside the grade's (plan_boxed): the nets its plan finds no way for, on the board
+    # as it stood and with the ties. The grade's walled check passed a board on which that plan began with eight nets
+    # walled in, six of them by the ties.
+    boxed0 = plan_boxed(step_out)
+    if boxed0:
+        log(f"route_bus: the route step's plan finds no way for {len(boxed0)} net(s) on the group's board as it stands: "
+            f"{', '.join(sorted(n.split('/')[-1] for n in boxed0))}")
+    took, lap, new_w, new_b = [], 0, [], []
+    while True:
+        g = board_grade(board, tied_b, bus, os.path.join(os.path.dirname(step_out), 'ties'), log=lambda *a_: None,
+                        tag=f'ties{lap or ""}', field=sj.get('field'), router=router)
+        boxed = plan_boxed(tied_b) if boxed0 is not None else None
+        new_b = sorted((boxed or set()) - (boxed0 or set()))
+        new_w = sorted(set(g['walled']['walled']) - set(g0['walled']['walled'])) if g0 is not None else []
+        if g0 is None or not (new_w or new_b) or rank(g)[:2] > rank(g0)[:2] or lap >= TIE_LAPS:
+            break
+        # THE TIES ROUND A PAD THEY WALLED IN, OR ROUND THE FREE ENDS OF A NET THEY LEFT NO WAY, TAKEN OUT, the rest
+        # graded again: one tie of dozens closed the last way out of a pad beside it, and the whole pass was thrown
+        # away for it -- the rail pads of every pack with it. (TIE_REACH: the pieces with copper that near)
+        pcb_t = parse_kicad_pcb_quiet(tied_b)
+        at = [(q.global_x, q.global_y) for w_ in new_w for q in
+              (pcb_t.footprints[w_.rsplit('.', 1)[0]].pads if w_.rsplit('.', 1)[0] in pcb_t.footprints else ())
+              if q.pad_number == w_.rsplit('.', 1)[1]]
+        ids_b = {i_ for i_, n_ in pcb_t.nets.items() if n_.name in set(new_b)}
+        at += [pt for i_ in sorted(ids_b) for pt in _free_ends(pcb_t, i_)]
+        on_ = collections.defaultdict(list)
+        for fp_ in pcb_t.footprints.values():
+            for q in fp_.pads:
+                on_[q.net_id].append(q)
+        tr2, vs2 = field_ties.clear_of(
+            got['tracks'], got['vs'], at, TIE_REACH,
+            cut=lambda nid_, x_, y_: any(abs(x_ - q.global_x) <= q.size_x / 2 + 1e-6
+                                         and abs(y_ - q.global_y) <= q.size_y / 2 + 1e-6 for q in on_.get(nid_, ())))
+        if not at or (len(tr2), len(vs2)) == (len(got['tracks']), len(got['vs'])):
+            break
+        with contextlib.redirect_stdout(io.StringIO()):
+            copy_board(step_out, tied_b)
+        field_ties.relay(tied_b, tr2, vs2)
+        pcb_t = parse_kicad_pcb_quiet(tied_b)
+        now = {(q.component_ref, q.pad_number) for fp_ in pcb_t.footprints.values() for q in fp_.pads
+               if field_ties.joined(pcb_t, q)}
+        got = dict(got, tracks=tr2, vs=vs2, segments=len(tr2), vias=len(vs2),
+                   tied=[t_ for t_ in got['tied'] if tuple(t_) in now])
+        took += new_w + [n_.split('/')[-1] for n_ in new_b]
+        lap += 1
+    left = sorted({f'{p_.component_ref}.{p_.pad_number}' for p_ in got['pads']} - {f'{r_}.{n_}' for r_, n_ in got['tied']})
+    said = (f'{len(got["tied"])} of {len(got["pads"])} pad(s) beneath {", ".join(parts)} and at its packs that a pour '
+            f'alone joined, or no copper, tied by copper -- {got["segments"]} tracks, {got["vias"]} vias'
+            + (f'; the ties round {", ".join(took)} (walled in by them) taken out' if took else '')
+            + (f'; left: {", ".join(left)}' if left else ''))
+    if g0 is None or rank(g) > rank(g0) or new_b or not (got['segments'] or got['vias']):
+        log(f'route_bus: supply ties: {said} -- NOT KEPT: the board graded {rank(g)} with them (nets open, violations, '
+            f'walled) against {rank(g0) if g0 else "no grade"} without'
+            + (f"; the route step's plan with no way for {', '.join(n_.split('/')[-1] for n_ in new_b)}" if new_b else ''))
+        return step_out, step_json, sj
+    sj_new = dict(sj, grade=g, supply_ties=dict(pads=len(got['pads']), tied=[f'{r_}.{n_}' for r_, n_ in got['tied']],
+                                                left=left, tracks=got['segments'], vias=got['vias'],
+                                                secs=int(time.time() - t0)))
+    with open(js_new, 'w', encoding='utf-8') as f:
+        json.dump(sj_new, f, indent=1)
+    log(f'route_bus: supply ties: {said}; the board grades {rank(g)} (nets open, violations, walled), kept '
+        f'({int(time.time() - t0)} s)')
+    return tied_b, js_new, sj_new
+
+
+def _router_step(board, step_out, step_json, code, sj, grp, router, k, inproc, log, feedback_rounds, sizes):
+    """THE ROUTER BUSES OF A GROUP after its lay (route_buses): `router` (router_buses' entries of the group GRP)
+    routed by route.py on the group's board STEP_OUT (its summary SJ; BOARD the board the group came in with) from the
+    escapes the group's field gave their balls -- the lanes locked, so route.py routes round them -- with the chain's
+    own route arguments (router_args), every net it connects protected (ROUTER_PROTECT).
+
+    THE LESSON, where a net is left open -- its way out was not enough: the next round RESERVES ITS WAY FIRST. Either
+    its neighbours took it (route.py lays its nets in its own order: on one board two nets routed before another
+    stood their vias either side of its stub's end, a track's room short between them) or the lanes did. Routed ALONE
+    on the group's lay, before every other router net, it connects where the lanes left it a way: that route stands,
+    protected, and the other nets are routed round it. Where it does not connect even alone the lanes took its way:
+    its route is found on the group's FIELD -- the arrays fanned out as its model chose, no lane laid -- and KEPT
+    THERE, protected, and the group is laid again on that field (negotiated_buses.route_on_field: the same model's
+    ends, every bus routed round the kept route as round any copper), then the other nets routed on that lay. The nets
+    reserved ACCUMULATE: a net reserved first stays so, as a route kept on the field stays kept -- one reserved can
+    take the way of another, which the round after reserves too (on one board a net reserved first left two others
+    open, and walled three balls in) -- and the rounds go on while a round leaves open a net that no round before
+    reserved, so they end. The round that stands leaves the fewest nets open -- the buses' and the router buses'
+    together -- then the fewest violations, then the fewest balls walled in; of two alike the earlier.
+
+    Returns (OUT, its summary's path, status, summary, record): the round that stands, its summary the group's with
+    `grade` (board_grade, the router buses' nets with the buses') and `router`, the record -- the nets, each round's
+    nets reserved first and kept on the field, what it left open, its seconds"""
+    import shutil
+    import awx_settings
+    import negotiated_buses as nb
+    import whole_route as wr
+    from coherent_nets import net_keys, net_patterns
+    from copy_board import copy_board
+    from protected_nets import persist_protected_nets, pro_path_for_board, read_protected_nets
+    t0 = time.time()
+    board, step_out = os.path.abspath(board), os.path.abspath(step_out)
+    stem = step_out[:-len('.kicad_pcb')]
+    work = stem + '.router'
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    checker = lambda name: os.path.join(HERE, '..', 'py_router', name)  # noqa: E731
+    pcb = parse_kicad_pcb_quiet(step_out)
+    keys = net_keys(pcb)
+    full = {keys.get(n.name, n.name): n.name for n in pcb.nets.values() if n.name}
+    nets = sorted({n for r in router for n in r['names'] if n in full})
+    parts = [(r['src'], r['dest'].split('+'), [n for n in r['names'] if n in full]) for r in router]
+    args = router_args(pcb, sizes)
+    secs = collections.Counter()
+    mute = []                   # (route.py calls that wrote no board: no verdict, and no lesson to draw from one)
+    field = sj.get('field')
+    # (the group laid again on its field: a run of the whole group, whose field the summary names -- not a rung that
+    # routed some of its buses again on a board the others' copper kept, _bus_rung)
+    relay = bool(field and os.path.isfile(field) and not sj.get('held'))
+    src = grp[0][0]
+    log(f'route_bus: the router buses off {src}\'s group -- ' + ', '.join(f"{r['src']} -> {r['dest']} {r['nets']}"
+                                                                         for r in router)
+        + f': {len(nets)} net(s) routed by route.py on the group\'s board ({" ".join(args)})')
+    bus_events.emit('router', 'start', group=src, bus=None, parts=[r['dest'] for r in router], nets=len(nets))
+
+    def copy_(a, b):
+        with contextlib.redirect_stdout(io.StringIO()):
+            copy_board(a, b)
+
+    def route(inp, out, which, tag, env=None):
+        """route.py on the nets `which` from INP to OUT, its log and JSON summary in the router's work directory: OUT
+        the board as it came where route.py writes none"""
+        t = time.time()
+        rc = wr.run([checker('route.py'), inp, out, '--nets', *net_patterns(sorted(which), keys), *args,
+                     '--json-out', os.path.join(work, f'{tag}.json')], {**awx_settings.environ(), **(env or {})},
+                    log_path=os.path.join(work, f'{tag}.log'), own_process=True)[0]
+        secs['route'] += time.time() - t
+        if not os.path.isfile(out):
+            log(f'  route.py ended {rc} with no board ({os.path.join(work, tag + ".log")}): the board as it came on')
+            mute.append(tag)
+            copy_(inp, out)
+            return out
+        # (a run route.py's own improvement gate threw away -- its output the board as it came, whatever it routed:
+        # no net of it is open for want of a way, and no lesson is drawn from it)
+        try:
+            gate_ = (json.load(open(os.path.join(work, f'{tag}.json'))).get('improvement_gate') or {})
+        except (OSError, ValueError):
+            gate_ = {}
+        if isinstance(gate_, dict) and gate_.get('verdict') == 'reject':
+            log(f'  route.py\'s improvement gate threw its run away ({os.path.join(work, tag + ".log")}): '
+                + '; '.join(f'{k_} {gate_[k_]}' for k_ in ('lost', 'worsened', 'fragmented') if gate_.get(k_)))
+            mute.append(f'{tag} (its improvement gate)')
+        return out
+
+    def opens(path, which):
+        """the nets of `which` open on `path` between their router bus's two parts"""
+        return {keys.get(n, n) for n in open_on(parse_kicad_pcb_quiet(path), [
+            (s, ds, [full[n] for n in ns if n in which]) for s, ds, ns in parts])}
+
+    def protect(path, which):
+        """the nets of `which` that `path` has connected, protected in its project: no later route.py rips them"""
+        done = sorted(set(which) - opens(path, set(which)))
+        if done:
+            persist_protected_nets(pro_path_for_board(path), {full[n]: ROUTER_PROTECT for n in done}, verbose=False)
+        return done
+
+    def attempt(r, lay_board, first, alone=None, ways_json=None):
+        """round R on the group's board LAY_BOARD: the nets `first` routed alone first (ALONE: that board, already
+        routed) and protected, then every router net still open; the WAYS kept on LAY_BOARD (WAYS_JSON, kept_ways'
+        record) taken up from the board that leaves, and their nets' hold lifted"""
+        cur = lay_board
+        if first:
+            cur = alone or route(lay_board, os.path.join(work, f'r{r}_first.kicad_pcb'), first, f'r{r}_first')
+            protect(cur, first)
+        left = opens(cur, set(nets))
+        out = os.path.join(work, f'r{r}.kicad_pcb')
+        if left:
+            route(cur, out, left, f'r{r}')
+        else:
+            copy_(cur, out)
+        if ways_json:
+            import kept_ways
+            try:
+                kept_ways.take_up(out, ways_json)
+            except SystemExit as e:
+                log(f'  router round {r}: {e}')
+                mute.append(f'r{r} ways')
+            pro = pro_path_for_board(out)
+            nb._set_protected(pro, {n_: v_ for n_, v_ in read_protected_nets(pro).items() if v_ != WAY_HOLD})
+        protect(out, nets)
+        return out
+
+    def ways_for(out, lay_board, lay, balls):
+        """THE WAYS OUT of `balls` ('REF.PAD') that the router buses' routes wall in on OUT (routed from LAY_BOARD):
+        each found between those routes as kept_ways finds one between a plan's lanes (ball_channel: the copper
+        route.py laid the soft walls, every other wall hard -- the buses' lanes, the protected, the pours, the pads),
+        and recorded as kept_ways lays it: the fab ladder's finest track and a raster cell either side wide.
+        ([way], [ball with none])"""
+        po, pl = parse_kicad_pcb_quiet(out), parse_kicad_pcb_quiet(lay_board)
+        rid = {i for i, n in po.nets.items() if n.name and keys.get(n.name, n.name) in set(nets)}
+        r3 = lambda v: round(v, 3)  # noqa: E731
+        had = {(s.net_id, s.layer, r3(s.start_x), r3(s.start_y), r3(s.end_x), r3(s.end_y)) for s in pl.segments}
+        had_v = {(v.net_id, r3(v.x), r3(v.y)) for v in pl.vias}
+        soft = {id(s): keys.get(po.nets[s.net_id].name, po.nets[s.net_id].name) for s in po.segments
+                if s.net_id in rid and (s.net_id, s.layer, r3(s.start_x), r3(s.start_y), r3(s.end_x), r3(s.end_y))
+                not in had}
+        soft.update({id(v): keys.get(po.nets[v.net_id].name, po.nets[v.net_id].name) for v in po.vias
+                     if v.net_id in rid and (v.net_id, r3(v.x), r3(v.y)) not in had_v})
+        bus_full = [full.get(n, n) for r_ in lay['sj'].get('buses') or () for n in sorted(_bus_nets(r_) or ())]
+        fixed = _fixed_nets(po, out, bus_full)
+        rung = _cage_rung(po)
+        cu = list(po.board_info.copper_layers)
+        import rules as _rules
+        drill = min(_rules.active().via_drill, rung[1] / 2)
+        found, none = [], []
+        for k_ in balls:
+            ref, num = k_.split('.', 1)
+            pad = next((p for p in po.footprints[ref].pads if p.pad_number == num), None) if ref in po.footprints \
+                else None
+            ch = ball_channel(po, pad, fixed, rung, soft) if pad is not None else None
+            tr = [{'start': (round(a[0], 4), round(a[1], 4)), 'end': (round(b[0], 4), round(b[1], 4)),
+                   'width': round(rung[0] + 2 * CAGE_STEP, 4), 'layer': L, 'net_id': pad.net_id}
+                  for a, b, L in (ch or {}).get('lines') or ()
+                  if math.hypot(round(b[0], 4) - round(a[0], 4), round(b[1], 4) - round(a[1], 4)) > 1e-6]
+            if not tr:
+                none.append(k_)
+                continue
+            found.append({'ball': k_, 'net': pad.net_name, 'net_id': pad.net_id, 'tracks': tr,
+                          'vias': [{'x': round(x, 4), 'y': round(y, 4), 'size': rung[1], 'drill': drill,
+                                    'layers': [cu[0], cu[-1]], 'net_id': pad.net_id} for x, y in ch['vias']],
+                          'lanes': list(ch['lanes']), 'short': ch['short'], 'end': ch['end'],
+                          'length': round(sum(math.hypot(t['end'][0] - t['start'][0], t['end'][1] - t['start'][1])
+                                              for t in tr), 3)})
+        return found, none
+
+    def with_ways(r, lay_board, ways):
+        """LAY_BOARD with the `ways` laid on it as kept_ways lays them, their nets held (WAY_HOLD: route.py rips no
+        held copper), for route.py's round R: (the board, its ways' record)"""
+        import kept_ways
+        wb = os.path.join(work, f'r{r}_ways_kept.kicad_pcb')
+        with contextlib.redirect_stdout(io.StringIO()):
+            kept_ways.write(lay_board, wb, ways)
+        persist_protected_nets(pro_path_for_board(wb), {w_['net']: WAY_HOLD for w_ in ways}, verbose=False)
+        return wb, kept_ways.ways_file(wb)
+
+    def graded(r, out, lay):
+        t = time.time()
+        bus = [(r_['src'], r_['dest'].split('+'), sorted(_bus_nets(r_) or ())) for r_ in lay['sj'].get('buses') or ()]
+        g = board_grade(board, out, bus, work, log=log, tag=f'r{r}', router=parts)
+        secs['grade'] += time.time() - t
+        return g, (len(g['open']) + len(g['router']['open']), math.inf if g['drc']['n'] is None else g['drc']['n'],
+                   len(g['walled']['walled']))
+
+    def relay_group(r, fr):
+        """the group laid again on the field FR, at the sizes of the run that stands (_standing_sizes): {out, json,
+        code, sj}, or None where it handed on no graded board"""
+        out_, js_ = os.path.join(work, f'r{r}_lay.kicad_pcb'), os.path.join(work, f'r{r}_lay.summary.json')
+        rr, sizes_l = _standing_sizes(board, sj, sizes)
+        t = time.time()
+        with _installed(rr):
+            code_, _g = nb.route_on_field(board, fr, out_, grp, k, 1, inproc, log, js_, feedback_rounds,
+                                          settings={'GROUP_ENDS': os.path.dirname(field)}, **sizes_l)
+        secs['lay'] += time.time() - t
+        try:
+            sj_ = json.load(open(js_))
+        except (OSError, ValueError):
+            sj_ = {}
+        return dict(out=out_, json=js_, code=code_, sj=sj_) if os.path.isfile(out_) and sj_.get('grade') else None
+
+    lay0 = lay = dict(out=step_out, json=step_json, code=code, sj=sj)
+    rounds, first, on_field, field_r = [], [], [], field
+    ball_ways, tried = [], set()     # (the walled balls' ways kept for route.py's rounds; every ball one was sought for)
+
+    def made_walls(g, lay_):
+        """the balls a round's grade `g` has walled in that the group's lay `lay_` did not wall, on no router bus's
+        net (a router net left open is reserved first): the router buses' routes walled them"""
+        before = set(((lay_['sj'].get('grade') or {}).get('walled') or {}).get('walled') or ())
+        return sorted(k_ for k_ in g['walled']['walled'] if k_ not in before and k_ not in set(g['router']['walled']))
+
+    def said(r, g, out):
+        rec = dict(round=r, first=list(first) if r > 1 else [], on_field=list(on_field), relaid=lay is not lay0,
+                   ways=[w_['ball'] for w_ in ball_ways] if r > 1 else [],
+                   open=sorted(keys.get(n, n) for n in g['router']['open']), bus_open=len(g['open']),
+                   drc=g['drc']['n'], walled=len(g['walled']['walled']), router_walled=list(g['router']['walled']),
+                   made_walls=made_walls(g, lay), secs_route=round(secs['route']), secs_lay=round(secs['lay']),
+                   board=out)
+        rounds.append(rec)
+        log(f'route_bus: router round {r}: '
+            + ('; '.join(x_ for x_ in (
+                f'{", ".join(rec["first"])} reserved first' if rec['first'] else '',
+                f'{", ".join(on_field)} kept on the field and the group laid again round '
+                f'{"it" if len(on_field) == 1 else "them"}' if on_field else '',
+                f'the way out of {", ".join(rec["ways"])} kept' if rec['ways'] else '') if x_) + ' -- '
+               if r > 1 else '')
+            + f'{len(nets) - len(rec["open"])} of {len(nets)} router net(s) connected'
+            + (f', open {", ".join(rec["open"])}' if rec['open'] else '')
+            + f'; the board: {rec["bus_open"]} bus net(s) open, drc {rec["drc"]}, {rec["walled"]} walled'
+            + (f' ({", ".join(rec["made_walls"])} by the router buses\' routes)' if rec['made_walls'] else ''))
+        bus_events.emit('router', 'round', group=src, bus=None, round=r, open=len(rec['open']), bus_open=rec['bus_open'],
+                        drc=rec['drc'], walled=rec['walled'], relaid=rec['relaid'])
+
+    out1 = attempt(1, step_out, [])
+    g1, key1 = graded(1, out1, lay)
+    said(1, g1, out1)
+    best = dict(key=key1, round=1, out=out1, grade=g1, lay=lay)
+    r = 1
+    while not mute:
+        new = [n for n in rounds[-1]['open'] if n not in first and n not in on_field]
+        walls = [k_ for k_ in rounds[-1]['made_walls'] if k_ not in tried]
+        if not new and not walls:
+            break
+        r += 1
+        first += new
+        if walls:
+            # (A BALL THE ROUTES WALLED IN: its way out between them kept for the round, as kept_ways keeps one between
+            # a plan's lanes -- route.py routes round it, and it is taken up after. Its net ships open past the
+            # protected routes, and no later step reaches it)
+            tried.update(walls)
+            got_w, none_w = ways_for(rounds[-1]['board'], lay['out'], lay, walls)
+            ball_ways += got_w
+            log(f'  router round {r}: walled in by the router buses\' routes: {", ".join(walls)}'
+                + (f' -- the way out of {", ".join(w_["ball"] for w_ in got_w)} kept for the round' if got_w else '')
+                + (f'; no way between the routes out of {", ".join(none_w)}' if none_w else ''))
+        reserve = [n for n in first if n not in on_field]
+        base_r, wj = with_ways(r, lay['out'], ball_ways) if ball_ways else (lay['out'], None)
+        alone = route(base_r, os.path.join(work, f'r{r}_alone.kicad_pcb'), reserve, f'r{r}_alone') if reserve else None
+        if mute:
+            break
+        blocked = sorted(opens(alone, set(reserve))) if reserve else []
+        # (a net reserved first a round before and open AGAIN among the reserved: their order has had its turn, and the
+        # lanes leave the reserved too little room together -- each by itself got through, the bundle of them did not.
+        # Their ways are found together on the field, below)
+        again = [n for n in blocked if n not in new]
+        blocked = [n for n in blocked if n in new]
+        if len(reserve) > 1 and blocked:
+            # (...a net newly reserved that the reserved routed together leave open asked BY ITSELF on the lay: open
+            # there too, the lanes took its way; else the other reserved nets did, which the next round's order answers)
+            blocked = [n for i_, n in enumerate(blocked)
+                       if n in opens(route(base_r, os.path.join(work, f'r{r}_by_itself{i_}.kicad_pcb'), [n],
+                                           f'r{r}_by_itself{i_}'), {n})]
+            if mute:
+                break
+        kept = []
+        if again:
+            log(f'  router round {r}: {", ".join(again)} open again among the reserved, reserved first a round before '
+                f'-- the lanes leave the reserved too little room together: their ways found together on the field'
+                + ('' if relay else ', which this board has none of (the board that stands is a rung of some of its '
+                                    'buses alone)'))
+            blocked = list(reserve)
+        elif blocked:
+            log(f'  router round {r}: {", ".join(blocked)} not connected even by '
+                f'{"itself" if len(blocked) == 1 else "themselves"} on the group\'s lay -- the lanes took '
+                f'{"its" if len(blocked) == 1 else "their"} way'
+                + ('' if relay else ': no field to lay the group on again (the board that stands is a rung of some of '
+                                    'its buses alone)'))
+        if blocked and relay:
+            # (each one's way found on the field with no lane laid -- route.py taking up no other net's copper there:
+            # no rip of an earlier step's, nor its reconciliation's own grant of one, which moved a stub of another
+            # net and a lane's tooth on the field, the way laid round them and transplanted onto them -- and kept on a
+            # copy of it: its copper as route.py laid it on that board, nothing else of route.py's)
+            wf = route(field_r, os.path.join(work, f'r{r}_field_route.kicad_pcb'), blocked, f'r{r}_field_route',
+                       env={'KICAD_RIP_PREEXISTING': '0', 'KICAD_RECONCILE_RIP_ESCALATION': '0'})
+            got = sorted(set(blocked) - opens(wf, set(blocked)))
+            moved = changed_nets(field_r, wf, set(keys.values()) - set(blocked)) if got else set()
+            if moved:
+                log(f'  router round {r}: route.py moved other nets\' copper on the field ({", ".join(sorted(moved))})'
+                    f' -- no way of {", ".join(got)} kept: it was laid round copper the field does not have')
+                got = []
+            fr = os.path.join(work, f'r{r}_field.kicad_pcb')
+            if got:
+                copy_(field_r, fr)
+                _transplant(fr, wf, parse_kicad_pcb_quiet(wf), [full[n] for n in got])
+                kept = sorted(set(got) - opens(fr, set(got)))
+            log(f'  router round {r}: on the field ' + (f'{", ".join(kept)} kept, the group laid again round '
+                                                        f'{"it" if len(kept) == 1 else "them"}' if kept else
+                                                        f'no way of {", ".join(blocked)} stands either'))
+            if kept:
+                persist_protected_nets(pro_path_for_board(fr), {full[n]: ROUTER_PROTECT for n in kept}, verbose=False)
+                # (the buses' standing order read beside the field: negotiated_buses.standing_order)
+                if os.path.isfile(os.path.join(os.path.dirname(field), 'group.json')):
+                    shutil.copyfile(os.path.join(os.path.dirname(field), 'group.json'), os.path.join(work, 'group.json'))
+                lay_r = relay_group(r, fr)
+                if lay_r is None:
+                    log(f'  router round {r}: the group laid again handed on no graded board -- round '
+                        f'{best["round"]} stands')
+                    break
+                on_field += kept
+                field_r, lay = fr, lay_r
+                # (the balls' ways were found among the routes on the lay before: on this one the walls are asked anew)
+                ball_ways, base_r, wj = [], lay['out'], None
+                tried.clear()
+        out_r = attempt(r, base_r, [n for n in first if n not in on_field], alone=None if kept else alone,
+                        ways_json=wj)
+        g_r, key_r = graded(r, out_r, lay)
+        said(r, g_r, out_r)
+        if key_r < best['key']:
+            best = dict(key=key_r, round=r, out=out_r, grade=g_r, lay=lay)
+        else:
+            log(f'  router round {r}: no better than round {best["round"]}, which stands so far')
+    if mute:
+        log(f'  router: route.py gave no verdict ({", ".join(mute)}: no board, or its run thrown away) -- no lesson drawn, round '
+            f'{best["round"]} stands')
+    final, js_new = stem + '.router.kicad_pcb', stem + '.router.summary.json'
+    copy_(best['out'], final)
+    g_b, lay_b = best['grade'], best['lay']
+    rec = dict(group=src, buses=[dict(src=r_['src'], dest=r_['dest'], nets=r_['names']) for r_ in router],
+               nets=len(nets), args=args, rounds=rounds, kept=best['round'],
+               open=sorted(keys.get(n, n) for n in g_b['router']['open']), drc=g_b['router']['drc'],
+               walled=g_b['router']['walled'], relaid=lay_b is not lay0, out=final, mute=list(mute),
+               secs=int(time.time() - t0),
+               secs_route=int(secs['route']), secs_lay=int(secs['lay']), secs_grade=int(secs['grade']))
+    sj_new = dict(lay_b['sj'], grade=g_b, router=rec)
+    if lay_b is not lay0 and sj.get('escalation'):
+        sj_new['escalation'] = sj['escalation']
+    with open(js_new, 'w', encoding='utf-8') as f:
+        json.dump(sj_new, f, indent=1)
+    log(f'route_bus: the router buses: round {best["round"]} of {len(rounds)} stands -- {len(nets) - len(rec["open"])} '
+        f'of {len(nets)} net(s) connected' + (f', open {", ".join(rec["open"])}' if rec['open'] else '')
+        + f' ({rec["secs"]} s: route.py {rec["secs_route"]} s, the group laid again {rec["secs_lay"]} s, the grades '
+          f'{rec["secs_grade"]} s)')
+    bus_events.emit('router', 'end', group=src, bus=None, open=len(rec['open']), nets=len(nets), kept=best['round'],
+                    rounds=len(rounds), secs=rec['secs'])
+    return final, js_new, lay_b['code'], sj_new, rec
+
+
 def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=None, settings=None, feedback_rounds=0):
     import make_bench as mb
     import flow_frame as ff
@@ -1054,6 +1698,14 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     # round hands the round the model's own plan, group_ends.bus_stage)
     group = awx_settings.get('GROUP_ENDS')
     kept, n_cut = [], 0
+    # (the nets the group's model ends SHORT of their pads -- a pair laid to a gather: group_ends.short_pads)
+    short_ = {}
+    if group:
+        import group_ends as _ge
+        short_ = _ge.short_pads(group, dest)
+    if short_:
+        log(f'  {len(short_)} net(s) laid to a gather short of their pads, the last hop the router\'s after the '
+            f'group\'s lay: ' + ', '.join(f'{n_} ({r_}.{k_})' for n_, (r_, k_) in sorted(short_.items())))
     if group:
         log(f'  the group\'s ends ({group}): the bus\'s copper on the board is its teeth and berths, kept as laid')
     else:
@@ -1223,6 +1875,7 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                              settings={**(settings or {}), **STEP_SETTINGS, _rules.SETTING: _rules.as_setting(run_rules),
                                        'ROUND_EDITS_BUS': f'{src}:{dest}', 'ROUND_EDITS_TURN': f'{q},{cx},{cy}',
                                        **jsync,
+                                       **({'ENDS_SHORT': json.dumps(sorted(short_.values()))} if short_ else {}),
                                        # (PULLED: the pull pads read off their nets for the step, each with its net --
                                        # a lay's violations are counted less its nets' own copper on them)
                                        **({'PULLED': json.dumps({f'{p_.component_ref}.{p_.pad_number}': short(p_.net_name)
@@ -1258,7 +1911,9 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     summary = dict(board=board, out=out, src=src, dest=dest, k=K, rules=_rules_dict(run_rules),
                    routed=[], refused=dict(refused), grade=None, secs=None, exit=None,
                    pulled={short(n): sorted(f'{p.component_ref}.{p.pad_number}' for p in v)
-                           for n, v in pulled.items() if n in set(names)})
+                           for n, v in pulled.items() if n in set(names)},
+                   # (the nets laid to a gather short of their pads: the router's last hop, bus_leftovers)
+                   short={n_: f'{r_}.{k_}' for n_, (r_, k_) in sorted(short_.items())})
 
     def finish(code, why, g=None, routed=()):
         # a bus the step does not hand on clean is not handed on at all: OUT is the board as it came
@@ -1308,8 +1963,11 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     checker = lambda name: os.path.join(HERE, '..', 'py_router', name)
     # ...and so does one the whole route left OPEN (its best round short of every lane, exit 1): the step hands on what
     # it laid connected, never nothing for the sake of a few nets, and the rest of the chain routes those
+    # (a net laid to a gather is whole when its lane is: its pad's hop is the router's -- the checks below read the
+    # board without those pads, short_view)
+    conn_pcb = short_view(routed_pcb, sorted(short_.values()), os.path.join(work, 'routed_short.kicad_pcb'))
     if rc != 0:
-        wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + net_patterns(nets, keys), awx_settings.environ(),
+        wr.run([checker('check_connected.py'), conn_pcb, '--nets'] + net_patterns(nets, keys), awx_settings.environ(),
                log_path=os.path.join(work, 'conn_open.log'), own_process=True)
         opened = sorted(open_nets(os.path.join(work, 'conn_open.log'), keys) & set(nets))
         for n in opened:
@@ -1367,7 +2025,8 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
     put_others = set()
     for _ in range(6):
         pats = net_patterns(nets, keys)
-        cc = wr.run([checker('check_connected.py'), routed_pcb, '--nets'] + pats, awx_settings.environ(),
+        conn_pcb = short_view(routed_pcb, sorted(short_.values()), os.path.join(work, 'routed_short.kicad_pcb'))
+        cc = wr.run([checker('check_connected.py'), conn_pcb, '--nets'] + pats, awx_settings.environ(),
                     log_path=os.path.join(work, 'conn.log'), own_process=True)[0]
         d_bus, d_out = drc(routed_pcb, 'bus', '--nets', *pats), drc(routed_pcb, 'board')
         # (whole-array: the step laid the arrays' whole fanout and moved the passives off it each round -- the chain's
@@ -1624,35 +2283,13 @@ def plane_balls_grade(routed, refs, log=print):
     return out
 
 
-def board_grade(board, routed, buses, work, log=print, tag='board', field=None):
-    """A bus step's output `routed` graded against the board it came in with, `board`, for the three things a step
-    answers for on the BOARD -- `buses` [(source, [destination parts], [its nets, full names])]: every bus net's pads on
-    its own bus's parts one piece of copper there (check_connected's test, zones credited; a net's pads elsewhere -- a
-    termination's, a test point's -- are the chain's later steps': `open`, full names), no DRC violation the step made
-    (check_drc at the project's floor, margin 0.1: the bus nets' own and the board's past those it came with -- `drc`),
-    no ball of the buses' arrays walled in (walled_grade -- `walled`), and every plane ball of theirs joined to a pour
-    of its net (plane_balls_grade -- `plane_balls`, where KiCad is there to pour). A step's own grade reads its own board
-    alone; buses routed together (negotiated_buses' merge, the bus boards check) are graded here on the board they hand
-    on. `field`: the board the buses' lanes were laid on (the group's field), the pads beside the arrays are graded
-    against (walled_grade). {open, nets, drc: {bus, board, input, n}, walled, ok}; its files in `work`, prefixed
-    `tag`"""
-    import awx_settings
-    import whole_route as wr
+def open_on(pcb, buses):
+    """the nets of `buses` [(source, [destination parts], [its nets, full names])] whose pads on their own bus's parts
+    are not one piece of copper on `pcb` (check_connected's test, zones credited; a net's pads elsewhere -- a
+    termination's, a test point's -- are the chain's later steps'), and those the board has no net of: full names,
+    sorted"""
     import check_connected as _cc
-    from coherent_nets import net_keys, net_patterns
-    from kicad_parser import parse_kicad_pcb
-    os.makedirs(work, exist_ok=True)
-    checker = lambda name: os.path.join(HERE, '..', 'py_router', name)  # noqa: E731
-    with contextlib.redirect_stdout(io.StringIO()):
-        pcb = parse_kicad_pcb(routed)
-    keys = net_keys(pcb)
-    # (a net by its full name or the whole route's -- a step's summary names them so: by_key)
     by_name = {n.name: (i, n) for i, n in pcb.nets.items() if n.name}
-    by_name.update({keys.get(n.name, n.name): (i, n) for i, n in pcb.nets.items() if n.name})
-    full = lambda n: by_name[n][1].name if n in by_name else n  # noqa: E731
-    buses = [(s, list(ds), [full(n) for n in ns]) for s, ds, ns in buses]
-    names = sorted({n for _s, _d, ns in buses for n in ns})
-    refs = sorted({r for s, ds, _n in buses for r in [s] + list(ds)})
     segs, vias, zones = (collections.defaultdict(list) for _ in range(3))
     for s_ in pcb.segments:
         segs[s_.net_id].append(s_)
@@ -1675,8 +2312,44 @@ def board_grade(board, routed, buses, work, log=print, tag='board', field=None):
                 r_ = _cc.check_net_connectivity(nid, segs[nid], vias[nid], pads, zones[nid], pcb_data=pcb)
             if not r_.get('connected'):
                 open_.add(n)
-    open_ = sorted(open_)
-    pats = net_patterns(names, keys)
+    return sorted(open_)
+
+
+def board_grade(board, routed, buses, work, log=print, tag='board', field=None, router=()):
+    """A bus step's output `routed` graded against the board it came in with, `board`, for the three things a step
+    answers for on the BOARD -- `buses` [(source, [destination parts], [its nets, full names])]: every bus net's pads on
+    its own bus's parts one piece of copper there (open_on: `open`, full names), no DRC violation the step made
+    (check_drc at the project's floor, margin 0.1: the bus nets' own and the board's past those it came with -- `drc`),
+    no ball of the buses' arrays walled in (walled_grade -- `walled`), and every plane ball of theirs joined to a pour
+    of its net (plane_balls_grade -- `plane_balls`, where KiCad is there to pour). A step's own grade reads its own board
+    alone; buses routed together (negotiated_buses' merge, the bus boards check) are graded here on the board they hand
+    on. `field`: the board the buses' lanes were laid on (the group's field), the pads beside the arrays are graded
+    against (walled_grade). `router` [(an array, [the router bus's part], [its nets])] (router_buses, _router_step): the ROUTER BUSES' nets
+    graded with them -- each open on its two parts (`router.open`), its violations among the step's (`drc.n`, and
+    `router.drc` its own), and the balls of theirs walled in, which the walls' grade asks as it asks every ball on no
+    bus net (`router.walled`, of `walled`). {open, nets, drc: {bus, board, input, n}, walled, router: {open, nets, drc,
+    walled}, ok}; its files in `work`, prefixed `tag`"""
+    import awx_settings
+    import whole_route as wr
+    from coherent_nets import net_keys, net_patterns
+    from kicad_parser import parse_kicad_pcb
+    os.makedirs(work, exist_ok=True)
+    checker = lambda name: os.path.join(HERE, '..', 'py_router', name)  # noqa: E731
+    with contextlib.redirect_stdout(io.StringIO()):
+        pcb = parse_kicad_pcb(routed)
+    keys = net_keys(pcb)
+    # (a net by its full name or the whole route's -- a step's summary names them so: by_key)
+    by_name = {n.name: (i, n) for i, n in pcb.nets.items() if n.name}
+    by_name.update({keys.get(n.name, n.name): (i, n) for i, n in pcb.nets.items() if n.name})
+    full = lambda n: by_name[n][1].name if n in by_name else n  # noqa: E731
+    buses = [(s, list(ds), [full(n) for n in ns]) for s, ds, ns in buses]
+    router = [(s, list(ds), [full(n) for n in ns]) for s, ds, ns in router]
+    names = sorted({n for _s, _d, ns in buses for n in ns})
+    rnames = sorted({n for _s, _d, ns in router for n in ns} - set(names))
+    refs = sorted({r for s, ds, _n in buses for r in [s] + list(ds)})
+    open_ = open_on(pcb, buses)
+    r_open = open_on(pcb, router) if router else []
+    pats = net_patterns(names + rnames, keys)
 
     def drc(path, sub, *more):
         jp = os.path.join(work, f'{tag}_drc_{sub}.json')
@@ -1686,6 +2359,7 @@ def board_grade(board, routed, buses, work, log=print, tag='board', field=None):
                awx_settings.environ(), log_path=jp[:-len('.json')] + '.log', own_process=True)
         return wr.drc_count(jp)[0]
     d_bus, d_out, d_in = drc(routed, 'bus', '--nets', *pats), drc(routed, 'board'), drc(board, 'input')
+    d_router = drc(routed, 'router', '--nets', *net_patterns(rnames, keys)) if rnames else None
     # (the violations the step made: the board's past those it came with, of which the bus nets' own are a part -- the
     # larger of the two, never their sum, which counted a bus net's new violation twice)
     n_drc = None if None in (d_bus, d_out, d_in) else max(d_bus, d_out - d_in, 0)
@@ -1707,14 +2381,22 @@ def board_grade(board, routed, buses, work, log=print, tag='board', field=None):
     # step's to lay only where it cuts no ball off its pour -- measured where KiCad is there to pour, part of the
     # verdict there)
     off_ = plane_balls.get('off') or []
-    ok = not open_ and n_drc == 0 and not walled['walled'] and not off_
+    ok = not open_ and not r_open and n_drc == 0 and not walled['walled'] and not off_
+    # (a ball of a router bus's net walled in: of the walls' grade, named for the router buses as well)
+    net_at = {f'{r}.{p_.pad_number}': p_.net_name for r in refs if r in pcb.footprints for p_ in pcb.footprints[r].pads}
+    r_walled = [k_ for k_ in walled['walled'] if net_at.get(k_) in set(rnames)]
     log(f'  on the board: {len(open_)} bus net(s) open of {len(names)}'
         + (f' ({", ".join(keys.get(n, n) for n in open_[:8])})' if open_ else '')
-        + f', drc {n_drc} (bus {d_bus}, board {d_out} vs {d_in} in), walled {len(walled["walled"])}'
+        + (f', {len(r_open)} router bus net(s) open of {len(rnames)}'
+           + (f' ({", ".join(keys.get(n, n) for n in r_open[:8])})' if r_open else '') if router else '')
+        + f', drc {n_drc} (bus {d_bus}, board {d_out} vs {d_in} in'
+        + (f', router nets {d_router}' if router else '') + f'), walled {len(walled["walled"])}'
+        + (f' ({len(r_walled)} on a router net)' if r_walled else '')
         + (f', {len(off_)} plane ball(s) on no pour of their net' if off_ else '')
         + (' -- clean' if ok else ''))
     return dict(open=open_, nets=len(names), drc=dict(bus=d_bus, board=d_out, input=d_in, n=n_drc), walled=walled,
-                plane_balls=plane_balls, ok=ok)
+                plane_balls=plane_balls, ok=ok,
+                **(dict(router=dict(open=r_open, nets=len(rnames), drc=d_router, walled=r_walled)) if router else {}))
 
 
 def _cage_rung(pcb):
@@ -2649,6 +3331,99 @@ def find_buses(pcb, min_nets=MIN_BUS_NETS):
     return out
 
 
+#: a ROUTER BUS: a part no bus takes that shares this many nets or more the whole route admits with a ball array of a
+#: group the step routes (router_buses)
+MIN_ROUTER_NETS = 3
+
+
+def _router_on():
+    """BUS_ROUTER=1: the step routes the ROUTER BUSES it finds (router_buses) itself. Off by default: a small part's
+    nets off an array are the chain's, whose route step plans them together with every other net of the board. Routed
+    here, one net after another on the group's board and then protected, their copper stood in the way of that plan:
+    nets with no way left, more of the board open. The nets of the step's OWN buses that its lay leaves at a small
+    part -- a pair's last hops to its two parts, a lane the plan could not draw in -- are routed here either way
+    (bus_leftovers)"""
+    import awx_settings
+    return awx_settings.get('BUS_ROUTER', '0') == '1'
+
+
+def bus_leftovers(pcb, sj, group):
+    """THE NETS A GROUP'S LAY LEFT OPEN AT A SMALL PART: of each bus of the group's summary SJ whose destination is no
+    ball array (`pcb`: the board the group hands on), the nets of its own that the group's grade has open -- the
+    router's, as a router bus's are (_router_step). The plan draws a bus's lanes side by side in their order, each on
+    its layer, and where it cannot draw one into a small part's pads -- a via with no room in front of them, a run
+    that does not fit beside them -- what is left of that net is a short route round the lanes laid, which route.py
+    finds on the board as it is. A lane left open between two ball arrays stays the whole route's. Entries as
+    router_buses gives them: [{src, dest, group, nets, names (the whole route's), legs}]"""
+    from coherent_nets import net_keys
+    keys = net_keys(pcb)
+    open_ = {keys.get(n, n) for n in (sj.get('grade') or {}).get('open') or ()}
+    out = []
+    for r in sj.get('buses') or ():
+        if any(d in pcb.footprints and is_array(pcb.footprints[d]) for d in r['dest'].split('+')):
+            continue
+        # (...and the nets it laid to a GATHER short of their pads -- a pair whose legs end on parts apart,
+        # group_ends.gather_berths: their last hop is the router's by plan, open in no grade before it)
+        try:
+            short_ = set(json.load(open(r['summary'])).get('short') or {}) if r.get('summary') else set()
+        except (OSError, ValueError):
+            short_ = set()
+        names = sorted(((_bus_nets(r) or set()) & open_) | (short_ & set(_bus_nets(r) or set())))
+        if names:
+            out.append(dict(src=r['src'], dest=r['dest'], group=group, nets=len(names), names=names, legs=[]))
+    return out
+
+
+def router_buses(pcb, buses, min_nets=MIN_ROUTER_NETS):
+    """THE ROUTER BUSES of the step's buses `buses` [(src, dest)]: each part in none of them, and no ball array, that
+    shares `min_nets` nets or more the whole route admits (make_bench.pair_nets: on the two parts and on no other part
+    of more than two pads) with a ball array of a group the step routes -- a pin header, a flash, a resistor array, a
+    row part off a face no bus takes. The group's field fans out every ball of its arrays, theirs among them
+    (group_ends: EVERY BALL SERVED), and after the group's lay route.py routes their nets from those escapes, the
+    lanes locked (_router_step). Not a pair's leg (`legs`: the chain's pair step lays a pair whole), nor a part that
+    is a ball array (its own fanout, or a bus's, comes first: a route into an array nobody has fanned out walls its
+    balls). [{src, dest, group (the source of the group the array is in), nets, names (the whole route's), legs}],
+    the larger first"""
+    with step_policy():
+        import make_bench as mb
+    import pairs as _pairs
+    from coherent_nets import net_keys
+    keys = net_keys(pcb)
+    short = set(keys.values())
+    legs = {leg for b_, (pn, nn) in _pairs.pair_names(sorted(short), admit_all=True).items() if b_ not in short
+            for leg in (pn, nn)}
+    parts = {r for s, d in buses for r in [s] + d.split('+')}
+    group = {}
+    for s, d in buses:
+        for r in [s] + d.split('+'):
+            if r in pcb.footprints and is_array(pcb.footprints[r]):
+                group.setdefault(r, s)
+    many = {r for r, f in pcb.footprints.items() if len(f.pads) > 2}
+    count = collections.Counter()
+    for net in pcb.nets.values():
+        ends = {p.component_ref for p in net.pads if p.component_ref in many}
+        if len(ends) != 2:
+            continue
+        for a in ends:
+            for b in ends - {a}:
+                if a in group and b not in parts:
+                    count[(a, b)] += 1
+    out, arr = [], {}
+    for (a, b), n in sorted(count.items()):
+        if n < min_nets:
+            continue
+        if b not in arr:
+            arr[b] = is_array(pcb.footprints[b])
+        if arr[b]:
+            continue
+        names = sorted(keys.get(x, x) for x in mb.pair_nets(pcb, a, b))
+        lg = [x for x in names if x in legs]
+        names = [x for x in names if x not in legs]
+        if len(names) >= min_nets:
+            out.append(dict(src=a, dest=b, group=group[a], nets=len(names), names=names, legs=lg))
+    return sorted(out, key=lambda r: (-r['nets'], r['src'], r['dest']))
+
+
 def half_pairs(pcb, names):
     """{leg: why} for the pair legs among `names` whose partner is not among them (pairs.pair_names over the board's
     nets, by the whole route's names: coherent_nets.net_keys): a pair is laid whole or not at all, and a partner on a
@@ -3123,6 +3898,23 @@ def attach_pulls(path, held, refs, log=print):
         + (f' ({", ".join(lens)})' if attached else '')
         + (f'; left to the rest of the chain: {"; ".join(why)}' if why else ''))
     return [h for h in held if h not in attached], attached
+
+
+def short_view(path, pads, out):
+    """the board `path` with the pads `pads` [(part, pad number)] off their nets, written to `out` (its project
+    beside it): what a connectivity check reads of a bus whose lanes END SHORT of those pads (group_ends.
+    gather_berths) -- such a net is whole when its copper is one piece from its ball, the hop to the pad the
+    router's. `path` itself where it names no pad"""
+    import types
+    if not pads:
+        return path
+    txt, _held = unpull(open(path, encoding='utf-8').read(),
+                        [types.SimpleNamespace(component_ref=r_, pad_number=k_) for r_, k_ in pads])
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write(txt)
+    import fanout_from_plan as fp
+    fp.copy_pro(path, out)
+    return out
 
 
 def true_view(path, held, out):

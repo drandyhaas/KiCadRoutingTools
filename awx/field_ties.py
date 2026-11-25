@@ -128,7 +128,63 @@ def fans(pcb, parts, wayouts):
     return [(b[0] - deep[r], b[1] - deep[r], b[2] + deep[r], b[3] + deep[r]) for r, b in boxes.items()]
 
 
-def _pass(field, nets, pads, wayouts, within=None, outer=False):
+def _zone_blocks(text):
+    """[(start, end, its net's name, its layers)] of the board text's zones"""
+    import re
+    out, i = [], 0
+    while True:
+        j = text.find('\n\t(zone', i)
+        if j < 0:
+            return out
+        k, depth = j + 2, 0
+        while True:
+            c = text[k]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        blk = text[j + 1:k + 1]
+        net = re.search(r'\(net_name "([^"]*)"\)', blk) or re.search(r'\(net "([^"]*)"\)', blk)
+        lay = re.search(r'\(layers? ([^)]*)\)', blk)
+        out.append((j + 1, k + 1, net.group(1) if net else '',
+                    set(re.findall(r'"([^"]+)"', lay.group(1))) if lay else set()))
+        i = k
+
+
+def without_outer_pours(path, outer, also=()):
+    """the board file `path` rewritten without the zones that lie on the layers `outer` alone, of a net with a zone on
+    another layer too or named in `also`; how many were taken out"""
+    with open(path, encoding='utf-8') as f:
+        text = f.read()
+    blocks = _zone_blocks(text)
+    on = collections.defaultdict(set)
+    for _a, _b, n, ls in blocks:
+        on[n] |= ls
+    drop = [(a, b) for a, b, n, ls in blocks if n and ls and ls <= set(outer) and (on[n] - set(outer) or n in also)]
+    for a, b in sorted(drop, reverse=True):
+        text = text[:a] + text[b:].lstrip('\n')
+    if drop:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+    return len(drop)
+
+
+def joined(pcb, p):
+    """whether copper of its own net joins the pad `p`: a via standing in it, or a track ending on it on a layer of
+    its"""
+    hx, hy = p.size_x / 2 + 1e-6, p.size_y / 2 + 1e-6
+    if any(v.net_id == p.net_id and abs(v.x - p.global_x) <= hx and abs(v.y - p.global_y) <= hy for v in pcb.vias):
+        return True
+    return any(s.net_id == p.net_id and (s.layer in p.layers or '*.Cu' in p.layers)
+               and abs(x - p.global_x) <= hx and abs(y - p.global_y) <= hy
+               for s in pcb.segments if not getattr(s, 'graphic', False)
+               for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y)))
+
+
+def _pass(field, nets, pads, wayouts, within=None, outer=False, bare_outer=False, bare_nets=(), together=False):
     """the pass itself: route.py on the nets `nets` (names) of a copy of `field` -- the ways out laid on it, every
     other net with copper protected -- and of the copper it adds, the pieces
     that reach one of `pads` laid on `field` in place; with `within` [(x0, y0, x1, y1)] only those whose every end
@@ -154,6 +210,10 @@ def _pass(field, nets, pads, wayouts, within=None, outer=False):
         pro = field[:-len('.kicad_pcb')] + '.kicad_pro'
         if os.path.exists(pro):
             shutil.copy(pro, pro_path_for_board(src))
+        if bare_outer:
+            # (the pass reads the board WITHOUT its outer layers' pours, lay_after: a pad such a pour alone joins is
+            # then a pad to tie, by a track and a via to the net's plane)
+            without_outer_pours(src, [cu_l[0], cu_l[-1]], bare_nets)
         # (every other net with copper on the field protected for the pass: its rip ladder and its reconciliation lap
         # took a fanned ball's stub to make room for a tie, and the bus's own step then refused the field -- "no
         # copper of its net at the end the group's model laid")
@@ -167,7 +227,12 @@ def _pass(field, nets, pads, wayouts, within=None, outer=False):
                 '--grid-step', str(2 * R.grid), '--track-width', str(R.fan_track),
                 '--clearance-ceiling', str(R.clearance), '--via-size', str(R.via_size),
                 '--via-drill', str(R.via_drill), '--layers', *layers]
-        r = subprocess.run(argv, env=awx_settings.environ(), capture_output=True, text=True)
+        env_ = awx_settings.environ()
+        if together:
+            # (the pass's nets of few pads planned together before any is routed, and a rail of the packs with them --
+            # lay_after: a pack's stubs and its rail side share a third of a millimetre)
+            env_ = dict(env_, KICAD_PLAN_TOGETHER='1', KICAD_PLAN_MAX_PADS='64')
+        r = subprocess.run(argv, env=env_, capture_output=True, text=True)
         with open(field[:-len('.kicad_pcb')] + '.ties.log', 'w', encoding='utf-8') as f:
             f.write(' '.join(argv) + '\n' + r.stdout + r.stderr)
         if not os.path.exists(out):
@@ -224,6 +289,100 @@ def _pass(field, nets, pads, wayouts, within=None, outer=False):
                 'vs': vs, 'strayed': len(strayed)}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def clear_of(tracks, vs, pts, reach, cut=None):
+    """of the copper a pass kept (`tracks`, `vs` as _pass returns them), the pieces with no track or via within
+    `reach` of one of the points `pts` [(x, y)] -- (tracks, vias). A piece: tracks and vias of one net that share an
+    end -- but not an end `cut(net id, x, y)` names (one on a pad of the net: a rail run pad to pad is a piece a
+    span, and the span beside a walled pad goes, not the rail)"""
+    items = [('s', t) for t in tracks] + [('v', v) for v in vs]
+    par = list(range(len(items)))
+
+    def find(i):
+        while par[i] != i:
+            par[i] = par[par[i]]
+            i = par[i]
+        return i
+    node = {}
+    for i, (k, o) in enumerate(items):
+        ends = [o['start'], o['end']] if k == 's' else [(o['x'], o['y'])]
+        for x, y in ends:
+            key = (o['net_id'], round(x, 3), round(y, 3))
+            if cut is not None and cut(o['net_id'], x, y):
+                continue
+            if key in node:
+                par[find(i)] = find(node[key])
+            else:
+                node[key] = i
+
+    def dist(k, o, px, py):
+        if k == 'v':
+            return math.hypot(o['x'] - px, o['y'] - py)
+        (ax, ay), (bx, by) = o['start'], o['end']
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+        return math.hypot(ax + t * dx - px, ay + t * dy - py)
+    near = {find(i) for i, (k, o) in enumerate(items) if any(dist(k, o, px, py) <= reach for px, py in pts)}
+    return ([o for i, (k, o) in enumerate(items) if k == 's' and find(i) not in near],
+            [o for i, (k, o) in enumerate(items) if k == 'v' and find(i) not in near])
+
+
+def relay(board, tracks, vs):
+    """the copper `tracks`, `vs` (as _pass returns them) laid on `board` in place, as _pass lays what it keeps"""
+    import ship_vias
+    from kicad_writer import add_tracks_and_vias_to_pcb
+    a = _load(board)
+    names = {i: n.name for i, n in a.nets.items()}
+    if tracks or vs:
+        with contextlib.redirect_stdout(io.StringIO()):
+            add_tracks_and_vias_to_pcb(board, board, tracks, vs, [], net_id_to_name=names)
+        ship_vias.stamp(board, 'group ends')
+
+
+def lay_after(board, arrays, log=None, packs=(), lanes=()):
+    """THE SUPPLY PADS BENEATH THE ARRAYS TIED BY COPPER ONCE THE LANES ARE LAID, on `board` in place: every pad of
+    another part on a poured net inside the pad box of one of `arrays` that no copper of its net joins (joined) --
+    a pour of its own layer alone does. Beneath an array that pour is no tie: every via and lane cuts it, and what
+    the later steps lay cuts it again. A decoupling capacitor's ground pad stood in a cell of other nets' vias with
+    the back pour reaching it through a neck a fifth of a millimetre wide; the route step read it joined, laid
+    nothing for it, routed a supply's stub across the neck, and its net shipped open -- the one net of the board.
+
+    The pass is the chain's own (route.py on those pads' nets), on a copy of the board read WITHOUT the pours of its
+    outer layers (those of a net poured on an inner layer too), every other net with copper protected, so it rips
+    nothing and the lanes stand as laid; of what it lays, the pieces that reach one of those pads are kept. Returns
+    {'pads': those pads, 'tied': the ones the kept copper reaches, 'segments', 'vias', 'tracks', 'vs', 'secs'} --
+    None with no such pad"""
+    import time
+    t0 = time.time()
+    a = _load(board)
+    poured = {z.net_id for z in (a.zones or []) if z.net_id}
+    cu = list(a.board_info.copper_layers)
+    inner = {z.net_id for z in (a.zones or []) if z.net_id and z.layer not in (cu[0], cu[-1])}
+    pads = [p for p in beneath(a, set(arrays), poured & inner) if not joined(a, p)]
+    # ...AND THE RAIL PADS OF THE PACKS (`packs`: the parts a lane's net ends on beside its two arrays -- a termination
+    # pack, a pull-up): each pad of theirs on a poured net that no copper of its net joins, wherever the pack stands
+    # and on whatever layer its rail is poured. The lanes' own stubs come in at the pack's other pads, a third of a
+    # millimetre from these: laid first by a later step, they stood round the rail pads and cut the rail's pour from
+    # them, and the rail shipped open at the pack. Their rail's outer pour is not read either (bare_nets).
+    seen = {id(p) for p in pads}
+    rail = [p for r in sorted(set(packs)) if r in a.footprints for p in a.footprints[r].pads
+            if p.net_id in poured and not p.drill and p.pad_type != 'np_thru_hole' and id(p) not in seen
+            and not joined(a, p)]
+    # ...AND THE PACKS' OWN STUBS (`lanes`: the names of the nets the lanes carry): a pad of a pack on a lane's net
+    # that no copper of the net joins yet. Its last hop from the lane and the pack's rail side are laid in ONE pass,
+    # planned together: the rail tied first stood across the stubs' ways in, the stubs first across the rail's.
+    stub = [p for r in sorted(set(packs)) if r in a.footprints for p in a.footprints[r].pads
+            if p.net_name in set(lanes) and not p.drill and p.pad_type != 'np_thru_hole' and not joined(a, p)]
+    pads = pads + rail + stub
+    if not pads:
+        return None
+    got = _pass(board, {a.nets[p.net_id].name for p in pads}, pads, (), bare_outer=True,
+                bare_nets={a.nets[p.net_id].name for p in rail}, together=bool(stub))
+    if not got['tied'] and got['exit'] and log:
+        log(f'  supply ties: the pass ended with exit {got["exit"]} -- ({board[:-len(".kicad_pcb")]}.ties.log)')
+    return dict(got, pads=pads, secs=time.time() - t0)
 
 
 def lay(field, parts, wayouts=(), log=None):

@@ -298,6 +298,27 @@ def _move_key(m):
             getattr(m, 'inner', 0))
 
 
+def berth_reach(st, lg):
+    """How far apart a pair's two berths may stand: 1.3 pitches of the part its lane ends on -- the destination's, or,
+    of a GROUP of parts ('A+B'), its first leg's own"""
+    multi = len(st.get('dests') or [st['dref']]) > 1
+    part = st['dst_pad'][lg[0]].component_ref if multi else st['dref']
+    g_ = st['dgrid'] if part == st['dref'] else st['dgrid_of'][part]
+    return 1.3 * max(g_.pitch_x, g_.pitch_y)
+
+
+def coupled(a, b, reach):
+    """Two moves a pair's legs can take TOGETHER, by where they end alone: one face and one layer, their exits two
+    places and no further apart than `reach`. Two moves MADE FOR EACH OTHER (`mate`: a gather berth's two tips,
+    group_ends.gather_berths) are taken together and with no other move -- their tips stand a pair's pitch apart
+    wherever their pads do"""
+    ma, mb = getattr(a, 'mate', None), getattr(b, 'mate', None)
+    if ma is not None or mb is not None:
+        return ma == mb
+    d = math.hypot(a.exit_pt[0] - b.exit_pt[0], a.exit_pt[1] - b.exit_pt[1])
+    return (a.direction, a.layer) == (b.direction, b.layer) and DUP_TOL < d <= reach
+
+
 def _seg_d(a, b, p, q):
     """the least distance between segments ab and pq"""
     def pt(u, v, w):
@@ -360,10 +381,7 @@ class Ends:
         cur = {n: sr.current_tooth(st, n) for n in names}
         # ---- each lane's options at each end: (moves per leg, point, layer, vias)
         rt = 1.3 * max(st['sgrid'].pitch_x, st['sgrid'].pitch_y)
-        rb = 1.3 * max(st['dgrid'].pitch_x, st['dgrid'].pitch_y)
-        rb_of = {l_: (rb if self.dest_of[l_] == st['dref'] else
-                      1.3 * max(st['dgrid_of'][self.dest_of[l_]].pitch_x, st['dgrid_of'][self.dest_of[l_]].pitch_y))
-                 for l_, _lg in self.lanes}
+        rb_of = {l_: berth_reach(st, lg) for l_, lg in self.lanes}
 
         # (a pair's two legs are two nets' copper, held apart by the conflicts the lanes are -- below, where only other
         # lanes' options are excluded: both legs of a strobe pair once took one dog-bone site, the second's via moved
@@ -415,9 +433,7 @@ class Ends:
             out = []
             for a in menus[0]:
                 for b in menus[1]:
-                    d = math.hypot(a.exit_pt[0] - b.exit_pt[0], a.exit_pt[1] - b.exit_pt[1])
-                    ok = (a.direction, a.layer) == (b.direction, b.layer) and DUP_TOL < d <= reach \
-                        and not legs_clash(a, b, end)
+                    ok = coupled(a, b, reach) and not legs_clash(a, b, end)
                     if ok or forced:
                         out.append(((a, b), ((a.exit_pt[0] + b.exit_pt[0]) / 2, (a.exit_pt[1] + b.exit_pt[1]) / 2),
                                     a.layer, a.vias + b.vias, not ok))
@@ -606,7 +622,7 @@ class Ends:
                 continue
             for end, opts in ((0, self.T[lane]), (1, self.B[lane])):
                 c_ = {i: (0.0, FRONT_VIA, FRONT_BLOCKED)[exit_front(st['pcb'], st['byname'][lg[0]][0], o[0][0],
-                                                                    run_ids)]
+                                                                    run_ids, own_parts(st, end))]
                       for i, o in enumerate(opts)}
                 if any(c_.values()):
                     self.front[(lane, end)] = c_
@@ -1006,7 +1022,8 @@ class Ends:
             i_ = state[l_][k_]
             if c2_.get(i_) == FRONT_VIA:
                 o_ = (self.T if k_ == 0 else self.B)[l_][i_]
-                sp_ = front_span(self.st['pcb'], self.st['byname'][self.legs_of[l_][0]][0], o_[0][0], self.run_ids)
+                sp_ = front_span(self.st['pcb'], self.st['byname'][self.legs_of[l_][0]][0], o_[0][0], self.run_ids,
+                                 own_parts(self.st, k_))
                 if sp_ is not None:
                     lane_front[l_][k_] = sp_
         p['lane_front'] = dict(lane_front)
@@ -1897,7 +1914,8 @@ def joint_descent(E, s0, boxes, cut, learned=None, dear=None):
             if dear and dear.get((l_, k_)):
                 c_ += np.array([dear[(l_, k_)].get(i, 0.0) for i in range(len(O_))])
             lin[(l_, k_)] = c_
-    bad = {l_: np.array([[not _same_hands(E, l_, i, j) for j in range(len(E.B[l_]))] for i in range(len(E.T[l_]))])
+    bad = {l_: np.array([[not _same_hands(E, l_, i, j) or not _pair_room(E, l_, i, j)
+                          for j in range(len(E.B[l_]))] for i in range(len(E.T[l_]))])
            for l_, lg in E.lanes if len(lg) == 2}
     W = {l_: np.array([0.0 if o == l_ else JOINT_X + (learned or {}).get(frozenset((l_, o)), 0.0) for o in lanes])
          for l_ in lanes}
@@ -2182,6 +2200,13 @@ def _joint_model(E, hint, learned=None, log=print, boxes=None, soft=(), core=Fal
                         chg_cost.append(npair[l_] * ov_)
                     m.Add(xs[0][l_][i] + sum(xs[1][l_][j] for j in js) <= 1 + ov_)
                 elif js:
+                    m.Add(xs[0][l_][i] + sum(xs[1][l_][j] for j in js) <= 1)
+    # ...and a pair's two ends that face each other with no room for a pair between them (_pair_room): never both
+    for l_ in lanes:
+        if npair[l_] == 2:
+            for i in OT[l_]:
+                js = [j for j in OB[l_] if not _pair_room(E, l_, i, j)]
+                if js:
                     m.Add(xs[0][l_][i] + sum(xs[1][l_][j] for j in js) <= 1)
     # each end's layer, one-hot; the via dropped on its neck's layer
     dom = {(k_, l_, i): E.end_domain(opts(k_)[l_][i], k_, LG[l_]) for k_ in (0, 1) for l_ in lanes for i in xs[k_][l_]}
@@ -3245,6 +3270,36 @@ def _same_hands(E, lane, ti, bi):
     return not (a_ and b_ and a_ != b_)
 
 
+def _pair_room(E, lane, ti, bi):
+    """a pair's tooth option ti and berth option bi leave it ROOM TO BE LAID where they FACE each other across a
+    channel (the tooth's way out the very opposite of the berth's): past the stretch each end lays straight from its
+    tips (pairs.end_run: its connector onto the pose, the router's probe past it) the pair still runs forward, and
+    far enough to step across to the other end's line at 45 degrees. With less the pair step has no end connector
+    with a body between them: a pair whose berth is a gather a fifth of a millimetre off its teeth was planned so,
+    and laid open. Ends that do not face each other are none of this rule's: their lane goes round"""
+    tp, tn = E.T[lane][ti][0]
+    bp, bn = E.B[lane][bi][0]
+    # (a GATHER's rule alone -- a berth made for a pair short of its pads, group_ends.gather_berths: `mate`. A pair
+    # berthing on an array turns onto a pose of another heading where its dozen lack one, whole_snap's POSE_HEADS;
+    # held to this rule too, six such pairs were laid with sixteen vias where four do)
+    if getattr(bp, 'mate', None) is None:
+        return True
+    dt, db = FAR.get(tp.direction), FAR.get(bp.direction)
+    if dt is None or db is None or (dt[0] + db[0], dt[1] + db[1]) != (0, 0):
+        return True
+    cfg = E.__dict__.get('_run_cfg')
+    if cfg is None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cfg = E.__dict__['_run_cfg'] = _bd.run_config(E.st['pcb'], E.st.get('base'))
+    ra = _pairs.end_run(cfg, (tp.exit_pt, tn.exit_pt), dt)
+    rb = _pairs.end_run(cfg, (bp.exit_pt, bn.exit_pt), db)
+    ax, ay = (tp.exit_pt[0] + tn.exit_pt[0]) / 2 + dt[0] * ra, (tp.exit_pt[1] + tn.exit_pt[1]) / 2 + dt[1] * ra
+    bx, by = (bp.exit_pt[0] + bn.exit_pt[0]) / 2 + db[0] * rb, (bp.exit_pt[1] + bn.exit_pt[1]) / 2 + db[1] * rb
+    fwd = (bx - ax) * dt[0] + (by - ay) * dt[1]
+    side = abs((bx - ax) * dt[1] - (by - ay) * dt[0])
+    return fwd >= side - 1e-9
+
+
 def _sweep(E, state, lanes, log=print, hands=()):
     """a crowded lane's ends changed ALONE, every other lane held: its CHECK_SWEEP best (tooth, berth) options by the
     estimate, each asked of the whole solve -- the first it takes, else None. The fix is often the same place another
@@ -3570,16 +3625,19 @@ def _solve_check(E, st, plan, tracks, names, front, crowd, exact):
     return out
 
 
-def _corner_blocked(pcb, nid, layer, pts, bar):
+def _corner_blocked(pcb, nid, layer, pts, bar, skip=frozenset()):
     """[bool per point]: within `bar` of a foreign pad's copper on `layer` -- its copper as KiCad draws it, and in its
     corner's zone the router's corner buffer further (pairs.pad_corner_buffer), as the router keeps a single's track
-    or via off it and the audit measures it (plan_audit.check_static); an unplated hole by its drill"""
+    or via off it and the audit measures it (plan_audit.check_static); an unplated hole by its drill. The parts
+    `skip` have no pad here (_front)"""
     import numpy as _np
     P = _np.asarray(pts, float)
     out = _np.zeros(len(P), bool)
     x0, y0 = P.min(0) - bar - 3.0
     x1, y1 = P.max(0) + bar + 3.0
-    for fp in pcb.footprints.values():
+    for ref, fp in pcb.footprints.items():
+        if ref in skip:
+            continue
         for pd in fp.pads:
             if pd.net_id == nid and nid or not (x0 <= pd.global_x <= x1 and y0 <= pd.global_y <= y1):
                 continue
@@ -3602,7 +3660,30 @@ def _via_end(opt):
     return bool(opt[0]) and all(getattr(m, 'kind', 'surface') != 'surface' for m in opt[0])
 
 
-def _front(pcb, nid, m, kids):
+def own_parts(st, end):
+    """the parts a lane of the bus `st` runs TO from its end `end` (0 its tooth, 1 its berth): the destination's --
+    every part of a group's -- from a tooth, the source from a berth. Their pads are where the lane goes, not what
+    stands in front of it (_front's `skip`).
+
+    Of a bus to a SMALL PART alone -- a part of two pads, a row of pins: one to an ARRAY OF PADS (three rows and
+    three columns at least, bga_fanout's grid) has none. An array's pads stand in front of a lane as any copper does
+    -- the lane comes in by its berth, not through them -- and read as no copper, a bus of sixteen lanes across a
+    two-millimetre channel was given ends its solve had no plan for"""
+    got = st.get('_own_parts')
+    if got is None:
+        from bga_fanout.grid import analyze_bga_grid
+        dests = st.get('dests') or [st['dref']]
+        fps = st['pcb'].footprints
+
+        def grid(ref):
+            g = analyze_bga_grid(fps[ref]) if ref in fps else None
+            return g is not None and len(g.rows) >= 3 and len(g.cols) >= 3
+        small = not any(grid(d) for d in dests)
+        got = st['_own_parts'] = (frozenset(dests), frozenset([st['sref']])) if small else (frozenset(), frozenset())
+    return got[0 if end == 0 else 1]
+
+
+def _front(pcb, nid, m, kids, skip=frozenset()):
     """(level, span) of a single lane's exit `m`: what stands in the straight run out of it, FRONT_REACH along its
     escape direction on its layer, against copper outside the run (braid.build_obstacles: every foreign pad, segment
     and via, inflated by clearance and half a track; the segments of the run's nets `kids` left out, as they move with
@@ -3613,7 +3694,13 @@ def _front(pcb, nid, m, kids):
     layer clear from it across the block, and the span of the copper blocking the track beyond it (the first step that
     meets it, the first past the last within the reach that does); None where no via stands so, a block on every layer
     (a barrel, a hole) among them: the lane goes round that, priced as the via its bend is like. Kept on the board per
-    exit"""
+    exit.
+
+    `skip`: the parts the lane itself runs to (own_parts), their pads no copper here. A lane to a part a
+    millimetre off its array has that part's other pads within the reach of its tooth's straight run, and the
+    array's balls within its berth's: read as blocked, its every front-layer end across the channel was held to a
+    change of layer no lane that short has room for, and the lane left the array by another face -- 2.75 mm under
+    the edge row of balls to the next face, 6.2 mm laid where the straight way is 2.3"""
     from escape_moves import DIRS
     d = DIRS.get(getattr(m, 'direction', None))
     if d is None or getattr(m, 'exit_pt', None) is None:
@@ -3621,7 +3708,8 @@ def _front(pcb, nid, m, kids):
     # (a run on no one layer yet -- joint_escape.RUN: read on its own layers, `runs_on`, the first standing for it)
     own_ls = tuple(getattr(m, 'runs_on', None) or ())
     L0 = own_ls[0] if own_ls else m.layer
-    key = (nid, own_ls or m.layer, m.direction, round(m.exit_pt[0], 4), round(m.exit_pt[1], 4))
+    skip = frozenset(skip)
+    key = (nid, own_ls or m.layer, m.direction, round(m.exit_pt[0], 4), round(m.exit_pt[1], 4), skip)
     memo = pcb.__dict__.setdefault('_exit_front', {})
     if key in memo:
         return memo[key]
@@ -3637,9 +3725,9 @@ def _front(pcb, nid, m, kids):
     def cnr(L):
         # (each layer's corners as it is first asked: a clear front asks its own layer's alone)
         if L not in cnr_:
-            cnr_[L] = _corner_blocked(pcb, nid, L, pts, t_bar)
+            cnr_[L] = _corner_blocked(pcb, nid, L, pts, t_bar, skip)
         return cnr_[L]
-    track = _bd.build_obstacles(pcb, nid, kids, L0)
+    track = _bd.build_obstacles(pcb, nid, kids, L0, skip_refs=skip)
     blocked = lambda o, L, k: o.point_violation(at(k)) or cnr(L)[k]
     hits = [k for k in range(1, n + 1) if blocked(track, L0, k)]
     import route_layers
@@ -3648,19 +3736,21 @@ def _front(pcb, nid, m, kids):
         # (a VIA END on more routing layers than two: its run out, as the relayer lays it, on any of them -- clear where
         # any one is)
         for L_ in (own_ls or RL):
-            if L_ != L0 and not any(blocked(_bd.build_obstacles(pcb, nid, kids, L_), L_, k) for k in range(1, n + 1)):
+            if L_ != L0 and not any(blocked(_bd.build_obstacles(pcb, nid, kids, L_, skip_refs=skip), L_, k)
+                                    for k in range(1, n + 1)):
                 hits = []
                 break
     k0 = hits[0] if hits else None
     out = (0, None)
     if k0 is not None:
         k1 = min(hits[-1] + 1, n)          # (past the last step within the reach that meets copper)
-        vias = [_bd.build_obstacles(pcb, nid, kids, L, margin=v_bar) for L in layers]
-        vcn = [_corner_blocked(pcb, nid, L, pts[:k0], v_bar) for L in layers]
+        vias = [_bd.build_obstacles(pcb, nid, kids, L, margin=v_bar, skip_refs=skip) for L in layers]
+        vcn = [_corner_blocked(pcb, nid, L, pts[:k0], v_bar, skip) for L in layers]
         fit = [k for k in range(k0) if not any(v.point_violation(at(k)) or c[k] for v, c in zip(vias, vcn))]
         # (more routing layers than two: the layer past its via one of the ROUTING layers -- a copper layer the route
         # does not lay on is no way past)
-        others = [(_bd.build_obstacles(pcb, nid, kids, L), L) for L in (RL if len(RL) > 2 else layers) if L != L0]
+        others = [(_bd.build_obstacles(pcb, nid, kids, L, skip_refs=skip), L)
+                  for L in (RL if len(RL) > 2 else layers) if L != L0]
         # (the lane past its via on another layer, clear from the via across the block: a layer it can stand on)
         on = [k for k in fit if any(not any(blocked(o, L, j) for j in range(k, k1 + 1)) for o, L in others)]
         out = (1 if fit else 2, (round(min(on) * step, 3), round(max(on) * step, 3), round(k0 * step, 3),
@@ -3968,16 +4058,16 @@ def walled_balls(pw, lanes, state):
     return [b for b, dw, sw in pw.balls if not alive[b] and not any(w not in killed and alive.get(to) for w, to in sw)]
 
 
-def exit_front(pcb, nid, m, kids):
+def exit_front(pcb, nid, m, kids, skip=frozenset()):
     """the level of what stands in front of a single lane's exit `m` (_front): 0 clear, 1 blocked with room for a via
     before the block, 2 blocked with none"""
-    return _front(pcb, nid, m, kids)[0]
+    return _front(pcb, nid, m, kids, skip)[0]
 
 
-def front_span(pcb, nid, m, kids):
+def front_span(pcb, nid, m, kids, skip=frozenset()):
     """(via_near, via_far, near, far) of a single lane's exit `m` blocked where a layer change answers it (_front):
     where its via stands and where the copper blocking it does, in mm from the exit; None for any other exit"""
-    return _front(pcb, nid, m, kids)[1]
+    return _front(pcb, nid, m, kids, skip)[1]
 
 
 def _fb_nl():

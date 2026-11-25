@@ -928,6 +928,14 @@ def build_array(pcb, ref, bus_of):
                     and not track_banned(s_.a, s_.b, s_.layer, hw)] for k in dm.dmenu},
         ball_of={nm: k for k, (nm, _p) in bm.items.items() if nm in bus_of}, bus_of=dict(bus_of),
         okeys=sorted(k for k, (nm, _p) in bm.items.items() if nm not in bus_of), served=sorted(gone))
+    # (WHERE EACH OTHER SIGNAL'S NET GOES: the middle of its pads off this array -- way_out prices its escapes by it)
+    off_ = collections.defaultdict(list)
+    for n_ in pcb.nets.values():
+        if n_.name and sn_(n_.name) in sig:
+            off_[sn_(n_.name)] += [(q.global_x, q.global_y) for q in n_.pads
+                                   if q.component_ref != ref and q.pad_type != 'np_thru_hole']
+    A.far = {k: (sum(x for x, _y in off_[nm]) / len(off_[nm]), sum(y for _x, y in off_[nm]) / len(off_[nm]))
+             for k, (nm, _p) in bm.items.items() if off_.get(nm)}
     array_rules(pcb, A)
     return A
 
@@ -1548,6 +1556,39 @@ def write_field(board, out, laid, ties_of=(), tie_sites=(), pulls=(), wayouts=()
     return len(tracks), len(vias) + len(ties), caps + ([f'the nudge exited {r.returncode}'] if r.returncode else [])
 
 
+def way_out(box, ball, exit_pt, far):
+    """THE WAY AN ESCAPE ADDS to a net that goes on to `far` (mm): from its ball to its exit `exit_pt` on the array's
+    edge, then round the array's `box` to `far` by the shorter way that crosses no part of the box, less the straight
+    line from the ball to `far`. An escape out of the face toward `far` adds next to nothing; one out of a face turned
+    from it adds the way round the array -- which the net's route then travels along the array's edge, across the
+    exits of every ball of that face"""
+    x0, y0, x1, y1 = box
+    e = 0.05
+    inside = lambda p_: x0 + e < p_[0] < x1 - e and y0 + e < p_[1] < y1 - e  # noqa: E731
+
+    def clear(a, b):
+        """the segment a-b crosses no part of the box's inside (sampled each 0.1 mm)"""
+        n = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.1))
+        return not any(inside((a[0] + (b[0] - a[0]) * t / n, a[1] + (b[1] - a[1]) * t / n)) for t in range(1, n))
+    g = 0.3
+    nodes = [exit_pt, (x0 - g, y0 - g), (x1 + g, y0 - g), (x1 + g, y1 + g), (x0 - g, y1 + g), far]
+    dist = {0: 0.0}
+    todo = {0}
+    while todo:
+        i = min(todo, key=dist.get)
+        todo.discard(i)
+        for j in range(1, len(nodes)):
+            if j != i and clear(nodes[i], nodes[j]):
+                d_ = dist[i] + math.hypot(nodes[j][0] - nodes[i][0], nodes[j][1] - nodes[i][1])
+                if d_ < dist.get(j, 1e18) - 1e-9:
+                    dist[j] = d_
+                    todo.add(j)
+    if 5 not in dist:
+        return 0.0
+    straight = math.hypot(far[0] - ball[0], far[1] - ball[1])
+    return max(0.0, math.hypot(exit_pt[0] - ball[0], exit_pt[1] - ball[1]) + dist[5] - straight)
+
+
 def place_round(box, d, p):
     """where an exit `p` on face `d` lies round `box`, clockwise from its north-west corner (thousandths of a mm)"""
     x0, y0, x1, y1 = box
@@ -1755,6 +1796,124 @@ def qfn_berths(st, pcb):
     return out
 
 
+#: how far short of its pads a pair's gather may stand, in steps of the pair's own pitch (gather_berths)
+GATHER_STEPS = 4
+#: ...and how many gathers a pair is offered on each face, its legs each way round: those nearest its pads
+GATHER_KEEP = 3
+
+
+def gather_berths(st, pcb, menu, memo=None, log=None):
+    """A PAIR WHOSE LEGS END ON PADS APART -- each on a small part of its own: a series resistor's, a coupling
+    capacitor's, a test point's -- has no berth a pair can take: no two of its legs' moves stand within a pair's reach
+    of each other on one face and layer (whole_ends.coupled), so the ends model had every berth of the pair refused.
+    Such a pair is laid AS A PAIR all the same, to a GATHER short of its pads: its two tips a pair's pitch apart on
+    one line across the face the pair arrives by, and NO COPPER FROM THERE TO THE PADS -- a grid step of track at
+    each tip, for its lane to end on, and no more. The pair's lanes end at the
+    tips (bus_plan: `short`), and the last hop from each tip to its pad -- and to every other pad of its net, a
+    pull's or a termination's -- is the router's, once the group's lanes are laid (route_bus.bus_leftovers: on the
+    board as it then stands, the lanes locked): a stub laid here, before any lane, stood where another lane of the bus
+    had to come in, and no rule of the ends model reads a stub against another lane's berth. Returned: `menu` with
+    each such pair's legs offered its gathers in place of their own moves, each leg's move naming its partner's
+    (`mate`: taken together and with no other).
+
+    The gathers tried: on each of the four faces, the tips' line GATHER_STEPS pair pitches at most past the pads'
+    far edge that way, the pair's middle at the pads' own middle or with one tip in line with its own pad, the legs
+    either way round (a pair keeps its hands, so its teeth say which). One is kept where both tips stand on the board
+    and the pair has room to run straight from them (fanout_from_plan.pair_exit_clear, the stretch pairs.end_run lays
+    straight); of a face's, the legs each way round, the GATHER_KEEP nearest the pads. A pair none is found for
+    keeps its own moves, refused as they were, and is named (load_bus: `bare`)"""
+    import dataclasses
+    import braid as bd
+    import escape_moves as em
+    import fanout_from_plan as fp
+    import pairs as _pairs
+    import rules as _rules
+    import whole_ends as we
+    rl = _rules.active()
+    out = dict(menu)
+    memo = {} if memo is None else memo
+    prs = {b_: pr for b_, pr in _pairs.pair_names(list(st['launch'])).items() if menu.get(pr[0]) and menu.get(pr[1])}
+    kids = {st['byname'][n_][0] for n_ in st['launch']}
+    for base, lg in sorted(prs.items()):
+        if any(we.coupled(a, b, we.berth_reach(st, lg)) for a in menu[lg[0]] for b in menu[lg[1]]):
+            continue
+        if base not in memo:
+            memo[base] = _gathers(st, pcb, lg, menu, kids, rl, dataclasses, bd, em, fp, _pairs)
+            if log is not None:
+                pads = [st['dst_pad'][l_] for l_ in lg]
+                log(f'  {base}: its legs end on pads apart ('
+                    + ', '.join(f'{l_} {p_.component_ref}.{p_.pad_number}' for l_, p_ in zip(lg, pads))
+                    + f') -- {len(memo[base][lg[0]])} gather(s) short of them offered as its berths, the last hop '
+                    f'from each tip to its pad the router\'s'
+                    + ('' if memo[base][lg[0]] else ': none found, the pair has no berth'))
+        if memo[base][lg[0]]:
+            out[lg[0]], out[lg[1]] = list(memo[base][lg[0]]), list(memo[base][lg[1]])
+    return out
+
+
+def _gathers(st, pcb, lg, menu, kids, rl, dataclasses, bd, em, fp, _pairs):
+    """{leg: [its gather moves]} of the pair `lg` (gather_berths), the two legs' lists in step"""
+    pads = [st['dst_pad'][l_] for l_ in lg]
+    nids = [st['byname'][l_][0] for l_ in lg]
+    got = {lg[0]: [], lg[1]: []}
+    cu = list(pcb.board_info.copper_layers or ())
+    on = [L for L in cu if all(L in p_.layers or '*.Cu' in p_.layers for p_ in pads)]
+    if not on:
+        return got                              # (pads on no one layer: no one layer for the pair to end on)
+    homes = [pcb.footprints[p_.component_ref].layer for p_ in pads if p_.component_ref in pcb.footprints]
+    home = next((L for L in homes if L in on), on[0])
+    # (the board without the run's own copper beside the pads, as a row part's fan reads it: qfn_berths)
+    xs, ys = [p_.global_x for p_ in pads], [p_.global_y for p_ in pads]
+    box = (min(xs) - 3.0, min(ys) - 3.0, max(xs) + 3.0, max(ys) + 3.0)
+    inb = lambda x, y: box[0] <= x <= box[2] and box[1] <= y <= box[3]     # noqa: E731
+    bare = copy.copy(pcb)
+    bare.segments = [s_ for s_ in pcb.segments if not (s_.net_id in kids and inb(s_.start_x, s_.start_y))]
+    bare.vias = [v_ for v_ in pcb.vias if not (v_.net_id in kids and inb(v_.x, v_.y))]
+    cfg = bd.run_config(bare, st.get('base'))
+    edge_ = float(getattr(cfg, 'board_edge_clearance', 0.0) or 0.0) or cfg.clearance
+    pitch = _pairs.pitch(bd.TRACK)
+    free = kids - set(nids)
+    cs = [(p_.global_x, p_.global_y) for p_ in pads]
+    for dname, d in em.DIRS.items():
+        n = (-d[1], d[0])
+        U = lambda q: q[0] * d[0] + q[1] * d[1]                             # noqa: E731
+        W = lambda q: q[0] * n[0] + q[1] * n[1]                             # noqa: E731
+        XY = lambda u, w: (u * d[0] + w * n[0], u * d[1] + w * n[1])        # noqa: E731
+        u0 = max(U(c_) + (p_.size_x if d[0] else p_.size_y) / 2 for c_, p_ in zip(cs, pads))
+        ws = [W(c_) for c_ in cs]
+        # (the legs EITHER WAY ROUND on the tips' line: a pair keeps its hands from its teeth to its berth, so which
+        # leg stands on which side is its teeth's to say. Each leg on the side its pad is, alone, a pair that left its
+        # array with its legs the other way round had no gather on the face toward it, and came in by the side)
+        for sd in ((1, -1), (-1, 1)):
+            found = []
+            mids = sorted({round((ws[0] + ws[1]) / 2, 6), round(ws[0] - sd[0] * pitch / 2, 6),
+                           round(ws[1] - sd[1] * pitch / 2, 6)})
+            for k in range(1, GATHER_STEPS + 1):
+                for wm in mids:
+                    tips = [XY(u0 + k * pitch, wm + s_ * pitch / 2) for s_ in sd]
+                    if not all(bd._on_board(bare, t_[0], t_[1], edge_ + rl.fan_track / 2) for t_ in tips):
+                        continue
+                    mvs = [dataclasses.replace(menu[l_][0], kind='surface', direction=dname, layer=home, exit_pt=t_,
+                                               vias=0, legs=[], site=None, climb=0, street=0, inner=0)
+                           for l_, t_ in zip(lg, tips)]
+                    run = _pairs.end_run(cfg, tips, d)
+                    if not all(fp.pair_exit_clear(bare, nids[i], nids[1 - i], mvs[i], reach=run, free=free)
+                               for i in (0, 1)):
+                        continue
+                    for mv, t_ in zip(mvs, tips):
+                        mv.mate = (dname, sd, k, wm)
+                        # (a grid step of track at the tip, toward the pads, for the lane to end on: every end
+                        # the model lays has copper of its net at its exit -- bus_stage -- and a pair not laid
+                        # leaves it a piece of its own, which the step's connectivity checks read)
+                        mv.fan_legs = [((t_[0] - d[0] * rl.grid, t_[1] - d[1] * rl.grid), t_, home)]
+                    far = sum(math.hypot(c_[0] - t_[0], c_[1] - t_[1]) for c_, t_ in zip(cs, tips))
+                    found.append((far, k, wm, mvs))
+            for _far, _k, _wm, mvs in sorted(found, key=lambda f: f[:3])[:GATHER_KEEP]:
+                for l_, mv in zip(lg, mvs):
+                    got[l_].append(mv)
+    return got
+
+
 def kept_copper(bpcb, cpcb, arrays):
     """{array: ([segments], [vias])} of the board `bpcb` wholly inside each of the group's `arrays` (their pads' box
     and BARE round it) that `cpcb`, the board the buses' ends models were captured on, has not: a group's escalation
@@ -1835,7 +1994,7 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, feedback=None, bare_i
                hash(tuple((v.x, v.y, v.net_id) for v in pcb.vias)),
                hash(tuple((p.global_x, p.global_y, p.net_id) for f in pcb.footprints.values() for p in f.pads)))
         if cap.get('_fronts_of') != of_:
-            cap['_fronts_of'], cap['_fronts'], cap['_ends_memo'] = of_, {}, {}
+            cap['_fronts_of'], cap['_fronts'], cap['_ends_memo'], cap['_gathers'] = of_, {}, {}, {}
         pcb.__dict__['_exit_front'] = cap['_fronts']
         st['pcb'] = pcb
         # (...and, held the same way, what the ends model works out of an end's moves alone -- which of them cannot be
@@ -1867,12 +2026,16 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, feedback=None, bare_i
                     if mv.layer == je.RUN:
                         mv.runs_on = tuple(L for L in mv.runs_on if we._front(
                             pcb, st['byname'][n][0], types.SimpleNamespace(
-                                direction=mv.direction, exit_pt=mv.exit_pt, layer=L, kind='surface'), kids_)[0] == 0)
+                                direction=mv.direction, exit_pt=mv.exit_pt, layer=L, kind='surface'), kids_,
+                            we.own_parts(st, k_))[0] == 0)
                 menu[n] = [mv for mv in menu[n] if mv.layer != je.RUN or mv.runs_on]    # (no layer left: no option)
             st[('smenu', 'dmenu')[k_]] = menu
             st[('src_shared', 'dst_shared')[k_]] = True
         if arr[1] is None:
             st['dmenu'] = qfn_berths(st, pcb)
+            # (...and a pair whose legs end on pads apart, each on a part of its own: its gathers short of them --
+            # gather_berths, found once for the board as it stands)
+            st['dmenu'] = gather_berths(st, pcb, st['dmenu'], cap.setdefault('_gathers', {}), log)
         st['sblock'] = {}
         if feedback is not None:
             # (what the bus's own step found crowded at these ends, whole_feedback's file: the ends model's own
@@ -1898,7 +2061,9 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, feedback=None, bare_i
         B.leg_lane = {st['byname'][leg][1].name: lane for lane, lg in E.lanes for leg in lg if leg in st['byname']}
         laned = {l_ for _l, lg in E.lanes for l_ in lg}
         B.bare = [(lane, 0) for lane, _lg in E.lanes if all(o[4] for o in E.T[lane])]
-        B.bare += [(lane, 1) for lane, _lg in E.lanes if arr[1] is not None and all(o[4] for o in E.B[lane])]
+        # (...at a row part or a group of parts as at an array: a pair whose legs' berths cannot be taken together
+        # there, and none of its gathers found, has no berth -- named, where the start below had none to take)
+        B.bare += [(lane, 1) for lane, _lg in E.lanes if all(o[4] for o in E.B[lane])]
         # (a net of the bus the ends hold no lane for: no option at all at an end among the moves offered)
         B.bare += [(n, 1 if not st['dmenu'].get(n) else 0) for n in st['launch'] if n not in laned]
         if B.bare:
@@ -2107,6 +2272,16 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
                                     if (dom[(key, i)][0] == q if dom[(key, i)][0] is not None else q in dom[(key, i)][2])))
         # (a via each; a plane's ball fanned out still goes down to its plane somewhere: one more)
         cost += [1000 * (bm.menu[k][i].vias + (1 if k in A.drops else 0)) * v for i, v in xs[key].items()]
+        # ...and THE WAY ROUND, as a bus lane's is priced (the ride, at the one exchange rate): another signal's escape
+        # out of a face turned from where its net goes sends its route along the array's edge, across its neighbours'
+        # exits -- priced by the way it adds (way_out), so each leaves toward its own net's other pads where it can
+        if k not in A.drops and k in getattr(A, 'far', {}) and awx_settings.get('GROUP_OTHER_WAY', '1') != '0':
+            import select_moves as sm_
+            ball_ = (bm.items[k][1].global_x, bm.items[k][1].global_y)
+            for i, v in xs[key].items():
+                c_ = int(round(1000 * way_out(A.box, ball_, bm.menu[k][i].exit_pt, A.far[k]) / sm_.VIA_MM))
+                if c_:
+                    cost.append(c_ * v)
         nd_ = len(A.drops.get(k, ()))
         cost += [(1000 if j < nd_ else int(round(1000 * STRAP_VIAS))) * v for j, v in enumerate(dv)]
         plane += [(pk[q], ys[key][q]) for q in range(NL) if pk[q]]
@@ -2434,7 +2609,7 @@ def array_rows(m, A, users, gate, RL, pk, off, log, wide=(), dropped=False, oth_
                     if c_ != we.FRONT_VIA or i not in xs[key] or (key, i) in dead or len(exits[(key, i)]) != 1:
                         continue
                     if we.front_span(b.E.st['pcb'], b.E.st['byname'][lg[0]][0], opts[lane][i][0][0],
-                                     b.E.run_ids) is None:
+                                     b.E.run_ids, we.own_parts(b.E.st, k_)) is None:
                         continue            # (no via there: the lane goes round the block on its own layer)
                     p0, d0 = exits[(key, i)][0]
                     beside = collections.defaultdict(set)
@@ -2767,6 +2942,9 @@ def bus_plan(b, state, lay, RL):
                                        else None for m_ in (tm, bm_)]
             plan['tooth_layer'][leg], plan['dest_layer'][leg] = RL[lay[lane][0]], RL[lay[lane][1]]
             plan['tooth_dir'][leg], plan['stub_dir'][leg] = list(we.FAR[tm.direction]), list(we.FAR[bm_.direction])
+            if getattr(bm_, 'mate', None) is not None:
+                # (a gather's tip: the leg's lane ends SHORT of its pad, its last hop the router's -- short_pads)
+                plan.setdefault('short', {})[leg] = [st['dst_pad'][leg].component_ref, st['dst_pad'][leg].pad_number]
             if b.arr[1] is None:
                 # (a berth with a VIA at its stub's end: the stub stays on its pad's own layer and the lane's layer
                 # is the via's far side. Laid on the lane's layer, it left its pad joined to nothing: seven nets of
@@ -2818,7 +2996,8 @@ def bus_plan(b, state, lay, RL):
             continue
         for k_, opts in ((0, E.T[lane]), (1, E.B[lane])):
             if (E.front.get((lane, k_)) or {}).get(state[lane][k_]) == we.FRONT_VIA:
-                sp_ = we.front_span(st['pcb'], st['byname'][lg[0]][0], opts[state[lane][k_]][0][0], E.run_ids)
+                sp_ = we.front_span(st['pcb'], st['byname'][lg[0]][0], opts[state[lane][k_]][0][0], E.run_ids,
+                                    we.own_parts(st, k_))
                 if sp_ is not None:
                     plan['front'].setdefault(lane, {})[str(k_)] = [float(v) for v in sp_]
     return plan, copper
@@ -3153,6 +3332,14 @@ def bus_nets(group, dest):
     if dest not in g or not g[dest].get('plan'):
         raise SystemExit(f'group_ends: {os.path.join(group, "group.json")} holds no plan for the bus to {dest}')
     return list(g[dest]['plan']['nets'])
+
+
+def short_pads(group, dest):
+    """{net: (part, pad number)} of bus `dest`'s nets whose lanes END SHORT of their pads in the group's model (its
+    OUT directory `group`): a pair laid to a gather (gather_berths), the hop from each tip to that pad the
+    router's"""
+    g = json.load(open(os.path.join(group, 'group.json'))).get('buses') or {}
+    return {n_: tuple(v_) for n_, v_ in (((g.get(bus_key(dest)) or {}).get('plan') or {}).get('short') or {}).items()}
 
 
 def layers_free(group, dest):
@@ -3933,6 +4120,15 @@ def main():
         # (a bench's: every lane held on the state's ends -- then its checks, --at-search, or its sweeps, --at-start;
         # a rung's with no findings to answer, --at-end: its checks)
         fresh = {nm: set() for nm in caps}
+    # (A BUS ADDED to the group since the run before, --at-end: it has no state there. Its lanes are the repair's free
+    # ones -- every lane of it -- and each bus of the run before is held on the ends it had, as after a check's
+    # refusal: the state that run ended on, changed only where the added bus needs room. Searched whole again for
+    # one added lane, the ends took fifteen minutes of start and sweeps over lanes nothing was asked of)
+    added = {nm for nm in caps if not prev_bus.get(nm)} if frm and at_point == '--at-end' and any(prev_bus.values()) \
+        else set()
+    if added:
+        log(f'  added since the run before: {", ".join(sorted(added))} -- its lanes free, every other bus held on the '
+            f'ends it had (the repair)')
     laid_try, M_ = 0, None      # the field's violations answered so far; the last laying's measure
     no_room = {}                # bus -> its lanes with no room for a change here and room on a rung below
     tight = {}                  # bus -> the lanes a refusal of this run named so: named again, the bus has no room
@@ -4415,6 +4611,9 @@ def main():
                             ij_.append(i)
                         s_[l_] = tuple(b.own[l_][k_] if i is None else i for k_, i in enumerate(ij_))
                     held_idx[b.name] = dict(s_)        # (the last state's own ends on this menu: the repair's)
+                elif b.name in added:
+                    held_idx[b.name] = dict(s_)        # (no state before: none of its lanes is held)
+                    fresh[b.name] = set(b.J.lanes)
                     xl_ = (learned.get(b.name) or {}).get('xl')
                     # (...never for AN EPOCH's model: that one starts from the state before AS IT STOOD -- each end
                     # held where it was, below. Descended again there -- a bus a check's core had priced a crossing
