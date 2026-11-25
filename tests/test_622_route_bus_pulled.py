@@ -11,6 +11,13 @@
    termination) and two nets a part joins that are no pair are pulled, and still are once the Vtt is on few parts;
 2. unpull takes the pull pad off its net (its (net ...) token, and nothing else) and returns the token; repull puts it
    back after the pad's (layers ...), the text as it was; a pad not found is named.
+3. _came_with: copper put back as it came stands on a pull pad the step reads with no net -- a via of the net in its
+   own termination's pad. The pad is given the copper's net where the copper stood on it on the board it is taken
+   from, the pad where it was and of no other net there; not a pad that moved, one of another net there, one the
+   copper is clear of, or a track's on another layer.
+4. The step's two clearance grades read such a pad as the net's: true_view writes the board with the held pads back
+   on their nets (the text as it was), and whole_route.drc_count leaves out a row of a net's copper against its own
+   pull pad -- not one against another net's pull pad, an accepted row, or one of a pad that is no pull pad.
 """
 import os
 import sys
@@ -123,6 +130,68 @@ _t, missed = rb.repull(t2, [('RZ', '2', '(net "X")')])
 check(missed == ['RZ.2'], f'2: a pad not found is named: {missed}')
 t4, held4 = rb.unpull(TXT, [pad('RQ', '1', 1)])
 check(t4 == TXT and held4 == [], '2: a pad not on the board: nothing taken')
+
+# 3. _came_with: RA.2 (B.Cu, 0.4 x 0.5 at (5, 5)) off its net in the step's view; a via of PULLED at (4.9, 5)
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
+from synth import make_pad  # noqa: E402
+
+CLEAR = 0.09
+
+
+def board_(net_id, x=5.0, name='PULLED'):
+    """a board of one part RA whose pad 2 is at (x, 5) on B.Cu, on net `net_id` (0: off its net)"""
+    p = make_pad(net_id, x, 5.0, ref='RA', num='2', net_name=name if net_id else '', size_x=0.4, size_y=0.5,
+                 layers=['B.Cu', 'B.Mask', 'B.Paste'])
+    return types.SimpleNamespace(footprints={'RA': types.SimpleNamespace(pads=[p])},
+                                 nets={2: types.SimpleNamespace(name='PULLED'), 7: types.SimpleNamespace(name='OTHER')})
+
+
+def came_with(came, read, now=None):
+    now = now or board_(0)
+    rb._came_with(now, came, read, CLEAR)
+    return now.footprints['RA'].pads[0].net_id
+
+
+LAYERS = ['F.Cu', 'In1.Cu', 'B.Cu']
+VIA = [('via', 2, [(0.25, (4.9, 5.0), (4.9, 5.0), L) for L in LAYERS])]
+check(came_with(board_(2), VIA) == 2, '3: a via of the net in its own pad on the board it came from: the pad its net')
+check(came_with(board_(0), VIA) == 2, '3: the pad off its net on that board too (a step\'s own bench): its net')
+check(came_with(None, VIA) == 0, '3: no board it came from: nothing given')
+check(came_with(board_(7, name='OTHER'), VIA) == 0, '3: another net\'s pad on the board it came from: not given')
+check(came_with(board_(2, x=5.3), VIA) == 0, '3: a pad that moved since: not given')
+FAR = [('via', 2, [(0.25, (5.6, 5.0), (5.6, 5.0), L) for L in LAYERS])]
+check(came_with(board_(2), FAR) == 0, '3: a via clear of the pad: not given')
+NEAR = [('via', 2, [(0.25, (5.4, 5.0), (5.4, 5.0), L) for L in LAYERS])]
+check(came_with(board_(2), NEAR) == 2, '3: a via within the clearance of the pad, as it came: its net')
+check(came_with(board_(2), [('seg', 2, [(0.1, (4.0, 5.0), (5.0, 5.0), 'F.Cu')])]) == 0,
+      '3: a track over the pad on another layer: not given')
+check(came_with(board_(2), [('seg', 2, [(0.1, (4.0, 5.0), (5.0, 5.0), 'B.Cu')])]) == 2,
+      '3: a track ending on the pad on its layer: its net')
+check(came_with(board_(2), [('via', 0, VIA[0][2])]) == 0, '3: copper of no net: not given')
+
+# 4. the grades: the board as it is, and a lay's rows less the net's own pull pad's
+import json  # noqa: E402
+import tempfile  # noqa: E402
+import whole_route as wr  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    view, true_ = os.path.join(tmp, 'view.kicad_pcb'), os.path.join(tmp, 'true.kicad_pcb')
+    with open(view, 'w', encoding='utf-8') as f:
+        f.write(t2)
+    check(rb.true_view(view, [], true_) == view, '4: no pad held: the board itself')
+    got_ = rb.true_view(view, held, true_)
+    check(got_ == true_ and open(true_, encoding='utf-8').read() == TXT, '4: the held pad back on its net, the text as it was')
+    rows = [dict(type='pad-via', pad_ref='RA.2', net1='net_0', net2='/sheet/PULLED'),          # its own pull pad
+            dict(type='pad-hole', pad_ref='RA.2', net1='PULLED', net2='net_0'),                 # ...and its hole's row
+            dict(type='pad-via', pad_ref='RA.2', net1='net_0', net2='OTHER'),                   # another net on it
+            dict(type='pad-via', pad_ref='RB.1', net1='net_0', net2='PULLED'),                  # no pull pad
+            dict(type='via-in-paste', pad_ref='RA.2', net1='PULLED', accepted='protected')]     # accepted: not counted
+    jp = os.path.join(tmp, 'drc.json')
+    with open(jp, 'w', encoding='utf-8') as f:
+        json.dump(dict(violations=4, by_type={'pad-via': 3, 'pad-hole': 1}, items=rows), f)
+    check(wr.drc_count(jp)[0] == 4, f'4: no pull pads given: every row counted ({wr.drc_count(jp)[0]})')
+    check(wr.drc_count(jp, {'RA.2': 'PULLED'})[0] == 2,
+          f'4: the two rows of the net on its own pull pad left out ({wr.drc_count(jp, {"RA.2": "PULLED"})[0]})')
 
 print('route_bus pulled: ' + ('FAIL' if fails else 'PASS: the nets with other pads found; a stub pad off its net '
                                                   'and back, the text as it was'))

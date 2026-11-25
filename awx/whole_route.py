@@ -1538,16 +1538,26 @@ def standing_hots(d, loopd):
     return out
 
 
-def drc_count(json_path):
+def drc_count(json_path, pulled=None):
     """(violations, length rows) of check_drc's --json: the violations less the rows of the board's length rules
-    (LENGTH_ROWS), and those rows; (None, 0) when it wrote none"""
+    (LENGTH_ROWS), and those rows; (None, 0) when it wrote none.
+
+    `pulled` {REF.PAD: net}, the pads a bus step reads off their nets (route_bus.unpull): a row of a net's copper
+    against its OWN pull pad is no violation -- the pad is the net's on the board as it is -- and is not counted"""
     try:
         with open(json_path, encoding='utf-8') as f:
             J = json.load(f)
     except (OSError, ValueError):
         return None, 0
     n = sum(int((J.get('by_type') or {}).get(t, 0)) for t in LENGTH_ROWS)
-    return int(J.get('violations', 0)) - n, n
+    own = 0
+    if pulled:
+        last = lambda s_: str(s_ or '').rsplit('/', 1)[-1]                                      # noqa: E731
+        own = sum(1 for it in (J.get('items') or ())
+                  if not it.get('accepted') and it.get('type') not in LENGTH_ROWS
+                  and pulled.get(it.get('pad_ref')) is not None
+                  and last(pulled[it['pad_ref']]) in (last(it.get('net1')), last(it.get('net2'))))
+    return int(J.get('violations', 0)) - n - own, n
 
 
 def open_nets(conn_log, keys=None):
@@ -3131,7 +3141,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
             os.remove(dj)
         dc = run([checker('check_drc.py'), seq, '--nets'] + pats + ['--clearance-margin', '0.1', '--json', dj], env,
                  log_path=os.path.join(d, f'drc{tag}.log'), own_process=True)[0]
-        dv = drc_count(dj)[0]
+        dv = drc_count(dj, json.loads(env['PULLED']) if env.get('PULLED') else None)[0]
         # (the round's violations, 0 clean -- a round's lanes, laid untuned, are not judged by their lengths:
         # LENGTH_ROWS; a checker that counted none, its exit: one at least)
         ndrc = dv if dv is not None else int(dc != 0)
@@ -3270,7 +3280,7 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
     def mini_reroute(r, d, res):
         """THE MINI RE-ROUTE: the few lanes a round's lay left OPEN planned and laid again BY THEMSELVES on the board
         that lay made -- every other lane's copper there as copper, the open lanes' own ends put back as the round's
-        fanout bench has them -- the solve, one round of its loop and the route as a round's, on those lanes alone
+        fanout bench has them -- the solve, its loop and the route as a round's, on those lanes alone
         (the last resort's recipe, the other way round: there the named lanes are left out, here they are all there
         is). A whole re-solve moves every lane to answer two; this moves none of what is laid. The result when it
         leaves fewer open, else None"""
@@ -3329,10 +3339,12 @@ def chain(K, o, R=4, base=None, dest=None, settings=None, F=0):
         bench_l = relayed(dj, bench_m, json.load(open(solve)), env_, say)
         loopd = os.path.join(dj, 'loop')
         with open(os.path.join(dj, 'loop.log'), 'w') as lf:
-            # (ONE round of the loop: a few lanes among laid copper have a way or have none, and the buses after
-            # this one wait on its turn -- a quarter of a group bus's lanes with no way through the rest of it went
-            # four rounds on a plan that crossed the laid copper in forty places)
-            rc_ = loop(solve, loopd, 1, env_, Log(lf))
+            # (the loop's rounds, as a round's: the first plan of a few lanes among laid copper is made before that
+            # copper is met, and the round's findings -- this lane under that laid track -- are what move a lane's
+            # via ends to a layer that is clear: a lane between two via ends, another layer empty between them, was
+            # left open by one round and laid in the second. The loop's own stop -- two rounds with none better --
+            # ends the lanes that have no way, and MINI_SHARE keeps a bus's quarter out of here altogether)
+            rc_ = loop(solve, loopd, LOOP_ROUNDS, env_, Log(lf))
         for ln in grep(os.path.join(dj, 'loop.log'), r'^=== round|smooth:|NOT CONVERGING|passes'):
             say(ln[:170])
         say(f"  the mini re-route: loop exit {rc_} at {secs()} s")

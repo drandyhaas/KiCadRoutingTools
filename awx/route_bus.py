@@ -1223,6 +1223,10 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
                              settings={**(settings or {}), **STEP_SETTINGS, _rules.SETTING: _rules.as_setting(run_rules),
                                        'ROUND_EDITS_BUS': f'{src}:{dest}', 'ROUND_EDITS_TURN': f'{q},{cx},{cy}',
                                        **jsync,
+                                       # (PULLED: the pull pads read off their nets for the step, each with its net --
+                                       # a lay's violations are counted less its nets' own copper on them)
+                                       **({'PULLED': json.dumps({f'{p_.component_ref}.{p_.pad_number}': short(p_.net_name)
+                                                                 for p_ in pull_pads})} if pull_pads else {}),
                                        # (the group's ends: each end's layer the model's, held -- the model chose
                                        # them so that no two runs of any bus share a line on a layer under an array)
                                        # (GROUP_LAYERS=free, a bus alone on its arrays: its via ends' layers the
@@ -1339,6 +1343,10 @@ def _route(board, out, src, dest, k, rounds, inproc, log, run_rules, json_out=No
         lp, jp = os.path.join(work, f'drc_{tag}.log'), os.path.join(work, f'drc_{tag}.json')
         if os.path.exists(jp):
             os.remove(jp)
+        # (the routed board graded AS IT IS: the pull pads the step reads off their nets back on them -- a via of a
+        # net standing in its own pull pad is no violation, and read off its net was two on a net put back whole)
+        if path == routed_pcb:
+            path = true_view(path, held, os.path.join(work, f'routed_true_{tag}.kicad_pcb'))
         wr.run([checker('check_drc.py'), path, '--clearance-margin', '0.1', '--max-print', '0', '--json', jp, *more],
                awx_settings.environ(), log_path=lp, own_process=True)
         n, length_rows[tag] = wr.drc_count(jp)
@@ -2437,7 +2445,7 @@ def put_back(path, board, pcb, back):
     own = [(tok, b) for tok in ('segment', 'via') for b in net_blocks(src, tok, ids, back)]
     left = 0
     if own:
-        keep = _clear_blocks(path, txt, own)
+        keep = _clear_blocks(path, txt, own, came=pcb)
         left = len(own) - len(keep)
         if keep:
             end = txt.rstrip().rfind(')')
@@ -2447,10 +2455,14 @@ def put_back(path, board, pcb, back):
     return left
 
 
-def _clear_blocks(path, txt, blocks):
+def _clear_blocks(path, txt, blocks, came=None):
     """the `blocks` [(token, text)] -- a net's segments and vias -- that stand clear of every other net's copper on the
     board `txt` (written beside `path` to be read): a segment on its layer, a via on every copper layer, at the run's
-    clearance (escape_plan.Copper: pads, vias, segments)"""
+    clearance (escape_plan.Copper: pads, vias, segments).
+
+    `came`: the board the blocks are taken from, read. A pad a block stood on THERE is no copper met since -- the
+    block came with it (_came_with). A step reads a net's pull pads off their net, and a via the plan before stood in
+    one, of its own net on the board as it is, read as a short there: the via left out, its lane with no end"""
     import escape_plan as ep
     import rules as _rules
     tmp = path[:-len('.kicad_pcb')] + '.putback.kicad_pcb'
@@ -2462,7 +2474,7 @@ def _clear_blocks(path, txt, blocks):
     clear = _rules.active().clearance
     by_name = {n.name: i for i, n in now.nets.items() if n.name}
     num = lambda s, k: [float(x) for x in re.search(r'\(' + k + r' ([-\d.e]+) ([-\d.e]+)', s).groups()]   # noqa: E731
-    cu, keep = {}, []
+    cu, keep, read = {}, [], []
     for tok, b in blocks:
         m_id = re.search(r'\(net (\d+)\)', b)
         m_nm = block_net_name(b)
@@ -2476,6 +2488,9 @@ def _clear_blocks(path, txt, blocks):
             s = float(re.search(r'\(size ([\d.e-]+)\)', b).group(1))
             at = tuple(num(b, 'at'))
             checks = [(s, at, at, L) for L in now.board_info.copper_layers]
+        read.append((b, nid, checks))
+    _came_with(now, came, read, clear)
+    for b, nid, checks in read:
         ok = True
         for w, a, z, L in checks:
             if w not in cu:
@@ -2486,6 +2501,40 @@ def _clear_blocks(path, txt, blocks):
         if ok:
             keep.append(b)
     return keep
+
+
+def _came_with(now, came, read, clear):
+    """the pads of `now` with no net that a block of `read` [(text, net id, [(width, a, z, layer)])] stood on or
+    within `clear` of, on the board `came` it is taken from, given the block's net on `now` (in memory): a pad where
+    it was there, with no net or the block's own there, the block's copper on a layer of the pad"""
+    if came is None:
+        return
+    import escape_plan as ep
+    was = collections.defaultdict(list)
+    for fp in came.footprints.values():
+        for q in fp.pads:
+            was[(q.component_ref, q.pad_number)].append(q)
+    bare = [p for fp in now.footprints.values() for p in fp.pads
+            if not p.net_id and p.pad_type != 'np_thru_hole'
+            and any(abs(q.global_x - p.global_x) < 1e-3 and abs(q.global_y - p.global_y) < 1e-3
+                    for q in was.get((p.component_ref, p.pad_number), ()))]
+    for p in bare:
+        there = [q for q in was[(p.component_ref, p.pad_number)]
+                 if abs(q.global_x - p.global_x) < 1e-3 and abs(q.global_y - p.global_y) < 1e-3]
+        for _b, nid, checks in read:
+            name = now.nets[nid].name if nid in now.nets else None
+            if not nid or any(q.net_id and q.net_name != name for q in there):
+                continue
+            for w, a, z, L in checks:
+                if not (L in p.layers or '*.Cu' in p.layers or (p.drill or 0) > 0):
+                    continue
+                n = max(2, int(math.hypot(z[0] - a[0], z[1] - a[1]) / 0.05))
+                if any(ep.Copper._pad_dist(a[0] + (z[0] - a[0]) * k / n, a[1] + (z[1] - a[1]) * k / n, p)
+                       < w / 2 + clear for k in range(n + 1)):
+                    p.net_id = nid
+                    break
+            if p.net_id:
+                break
 
 
 def parse_kicad_pcb_quiet(path):
@@ -2867,7 +2916,7 @@ def hold_board_escapes(board, base, out, pcb, src, failed, names=(), short=lambd
     for b in blocks:
         by_net[net_of(b)].append(('via' if b.lstrip().startswith('(via') else 'segment', b))
     txt = open(base, encoding='utf-8').read()
-    ok = {n for n in want if by_net.get(n) and len(_clear_blocks(base, txt, by_net[n])) == len(by_net[n])}
+    ok = {n for n in want if by_net.get(n) and len(_clear_blocks(base, txt, by_net[n], came=pcb)) == len(by_net[n])}
     held = [n for n in want if n in ok and (n not in mate or mate[n] in ok)]
     if held:
         end = txt.rstrip().rfind(')')
@@ -3074,6 +3123,21 @@ def attach_pulls(path, held, refs, log=print):
         + (f' ({", ".join(lens)})' if attached else '')
         + (f'; left to the rest of the chain: {"; ".join(why)}' if why else ''))
     return [h for h in held if h not in attached], attached
+
+
+def true_view(path, held, out):
+    """the board `path` with the pads `held` (unpull's) back on their nets, written to `out` (its siblings beside
+    it): what a clearance check reads of a board a step holds with those pads off their nets. `path` itself where
+    none is held"""
+    if not held:
+        return path
+    with open(path, encoding='utf-8') as f:
+        txt, _missed = repull(f.read(), held)
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write(txt)
+    from copy_board import copy_siblings
+    copy_siblings(path, out)
+    return out
 
 
 def unpull(txt, pads):

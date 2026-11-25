@@ -2680,15 +2680,22 @@ for some of the lanes exists:
   most (`MINI_SHARE`) -- is followed by **the mini re-route**
   (`mini_reroute`): those lanes planned again BY THEMSELVES on the board that
   lay made, every other lane's copper there as copper and their own ends put
-  back as the fanout left them -- the solve, ONE round of the loop, the
-  route -- and kept where it leaves fewer open. A whole re-solve moves every
+  back as the fanout left them -- the solve, the loop, the route -- and kept
+  where it leaves fewer open. A whole re-solve moves every
   lane to answer two; this moves none of what is laid. A 53-lane bus whose
   loop stopped at crowded ends and whose held plan left one lane open had it
   closed in 23 s, the board's first lay with no net open on those ends; a
-  bus that left two had one closed in 30 s. It is one round because the buses
-  after this one wait on its turn, and a few lanes among laid copper have a
-  way or have none: a quarter of a group bus's lanes with no way through the
-  rest of it gained nothing from more;
+  bus that left two had one closed in 30 s. Its loop has a round's rounds:
+  the first plan of a lone lane is made before the laid copper is met, and
+  it is the round's findings -- this lane under that laid track -- that move
+  the lane's via ends to a layer that is clear. A lane between two via ends,
+  another layer empty between them, was left open by one round and laid by
+  the second with no via more. The loop's own stop, two rounds with none
+  better, ends the lanes that have no way. Its ends are put back with the
+  pads they came on: a via standing in a pull pad of its own net -- a
+  termination's, read off its net for the step -- is no copper met since
+  (`route_bus._came_with`), and the step's clearance grades read such a pad
+  as the net's (`route_bus.true_view`, `whole_route.drc_count`);
 - with `route_bus.py --pack` (the setting `BUS_PACK=1`; off by default), a
   round's lay -- and its mini re-route, where one ran -- is followed by
   **the pack** (`pack_lay`; the stage `pack_lanes.py`, on `pack.py`): each
