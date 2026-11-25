@@ -349,6 +349,17 @@ def planar_nets(pcb_data, board_path: Optional[str] = None) -> Dict[int, dict]:
     return out
 
 
+def via_cost_nets_error(nets, costs) -> Optional[str]:
+    """Why --via-cost-nets / --via-cost-nets-costs is refused, or None: each
+    pattern needs its own cost. route.py's argument check, batch_route and the
+    route tab's run check all ask here, so every front says the same thing."""
+    n, c = len(nets or []), len(costs or [])
+    if n != c:
+        return (f"--via-cost-nets ({n}) and --via-cost-nets-costs ({c}) "
+                f"must have the same length")
+    return None
+
+
 def config_for_nets(pcb_data, net_ids: Iterable[int], config):
     """`config` for routing `net_ids` under the board's track bans
     (`derive_layer_bans`): a shallow copy whose `layer_costs` FORBID every

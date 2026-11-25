@@ -1571,6 +1571,23 @@ class RoutingDialog(wx.Dialog):
         widths_sizer.Add(self.power_widths_ctrl, 1, wx.EXPAND)
         options_inner.Add(widths_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Per-net via cost (#2049): route.py --via-cost-nets / --via-cost-nets-costs
+        vcn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        vcn_sizer.Add(wx.StaticText(options_scroll, label="Via Cost Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.via_cost_nets_ctrl = wx.TextCtrl(options_scroll)
+        self.via_cost_nets_ctrl.SetToolTip(
+            "Glob patterns for nets with their own via cost (e.g., a crystal's nets, to keep them "
+            "on one layer where a longer path exists). First match wins. Empty = every net uses Via Cost.")
+        vcn_sizer.Add(self.via_cost_nets_ctrl, 1, wx.EXPAND)
+        options_inner.Add(vcn_sizer, 0, wx.EXPAND | wx.ALL, 3)
+        vcc_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        vcc_sizer.Add(wx.StaticText(options_scroll, label="Via Costs:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.via_cost_nets_costs_ctrl = wx.TextCtrl(options_scroll)
+        self.via_cost_nets_costs_ctrl.SetToolTip(
+            "Via cost for each Via Cost Nets pattern, in Via Cost's units (space-separated integers)")
+        vcc_sizer.Add(self.via_cost_nets_costs_ctrl, 1, wx.EXPAND)
+        options_inner.Add(vcc_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # Power route neck-down (issue #72)
         self.power_tap_neckdown_check = wx.CheckBox(options_scroll, label="Power route neck-down")
         self.power_tap_neckdown_check.SetValue(True)
@@ -3039,6 +3056,8 @@ class RoutingDialog(wx.Dialog):
         self.clearance_ceiling_check.SetValue(False)
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
+        self.via_cost_nets_ctrl.SetValue("")  # empty == CLI default (no per-net via cost)
+        self.via_cost_nets_costs_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
         self.via_span.SetValue("")  # empty == CLI default (None: through vias)
         self.via_span_type.SetSelection(0)
@@ -3396,6 +3415,15 @@ class RoutingDialog(wx.Dialog):
                           wx.OK | wx.ICON_WARNING)
             return None, None
 
+        # #2049: Via Cost Nets / Via Costs, refused like route.py refuses the
+        # flags (same message), not by the engine mid-run.
+        try:
+            self._via_cost_nets_fields()
+        except ValueError as e:
+            wx.MessageBox(str(e), "Invalid Via Cost Nets",
+                          wx.OK | wx.ICON_WARNING)
+            return None, None
+
         # A Net Clearances File route.py would fail to read is refused before
         # routing starts, not routed at the net classes instead.
         err = net_clearances_file_error(self.net_clearances_path.GetValue())
@@ -3405,6 +3433,24 @@ class RoutingDialog(wx.Dialog):
             return None, None
 
         return selected_nets, selected_layers
+
+    def _via_cost_nets_fields(self):
+        """(patterns, costs) from Via Cost Nets / Via Costs, as route.py's
+        --via-cost-nets / --via-cost-nets-costs; ([], []) when both are empty.
+        Raises ValueError with route.py's message for a cost that is not an
+        integer or a count that does not match."""
+        from net_keepouts import via_cost_nets_error
+        nets = _split_net_list(self.via_cost_nets_ctrl.GetValue())
+        costs = []
+        for tok in self.via_cost_nets_costs_ctrl.GetValue().split():
+            try:
+                costs.append(int(tok))
+            except ValueError:
+                raise ValueError(f"argument --via-cost-nets-costs: invalid int value: {tok!r}")
+        err = via_cost_nets_error(nets, costs)
+        if err:
+            raise ValueError(err)
+        return nets, costs
 
     @staticmethod
     def _safe_float(text, default):
@@ -3569,6 +3615,14 @@ class RoutingDialog(wx.Dialog):
         else:
             config['power_nets'] = []
             config['power_nets_widths'] = []
+
+        # #2049: per-net via cost (checked by _validate_routing_inputs; a plan
+        # step that skipped it still reaches the engine's own check)
+        try:
+            config['via_cost_nets'], config['via_cost_nets_costs'] = self._via_cost_nets_fields()
+        except ValueError:
+            config['via_cost_nets'] = _split_net_list(self.via_cost_nets_ctrl.GetValue())
+            config['via_cost_nets_costs'] = None
 
         # Parse no BGA zones
         no_bga_text = self.no_bga_zones_ctrl.GetValue().strip()
@@ -4091,6 +4145,8 @@ class RoutingDialog(wx.Dialog):
                     keepout_layer=config.get('keepout_layer', 'User.2'),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
+                    via_cost_nets=config.get('via_cost_nets') or None,
+                    via_cost_nets_costs=config.get('via_cost_nets_costs') or None,
                     disable_bga_zones=config.get('no_bga_zones'),
                     via_span=config.get('via_span'),
                     via_span_type=config.get('via_span_type'),

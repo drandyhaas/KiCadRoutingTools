@@ -36,6 +36,8 @@ PLAN_RESULT_SCHEMA = (
     '"params": {"track_width": <mm>, "clearance": <mm>, "via_size": <mm>, '
     '"via_drill": <mm>, "power_nets": ["<glob>", ...], '
     '"power_nets_widths": [<mm>, ...], '
+    '"via_cost_nets": ["<glob>", ...], '
+    '"via_cost_nets_costs": [<integer via cost per pattern, in via_cost units>, ...], '
     '"layer_costs": [<per-copper-layer cost multiplier, in board layer order>, ...]}} | '
     '{"action": "route_planes", "assignments": [{"nets": ["<exact net name>", ...], '
     '"layer": "<copper layer e.g. In1.Cu>"}], '
@@ -340,6 +342,8 @@ _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
                   # #530: --clearance-ceiling -> Min Clearance + the ceiling box
                   'clearance_ceiling',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
+                  # #2049: route.py's per-net via cost, two text fields
+                  'via_cost_nets', 'via_cost_nets_costs',
                   # #381 D5:
                   'impedance', 'length_match_groups', 'swappable_nets',
                   # #486:
@@ -623,6 +627,15 @@ def apply_step_params(step, dialog):
                 return False
             ctl.SetValue(_join_nets(value) if isinstance(value, (list, tuple))
                          else str(value or ''))
+            return True
+        if name in ('via_cost_nets', 'via_cost_nets_costs'):
+            # #2049: patterns (quoted like power_nets) / their integer costs
+            ctl = getattr(dialog, name + '_ctrl', None)
+            if ctl is None:
+                return False
+            vals = list(value) if isinstance(value, (list, tuple)) else [value]
+            ctl.SetValue(_join_nets([str(v) for v in vals]) if name == 'via_cost_nets'
+                         else ' '.join(str(v) for v in vals))
             return True
         if name == 'power_nets_widths' and isinstance(value, (list, tuple)):
             ctl = getattr(dialog, 'power_widths_ctrl', None)

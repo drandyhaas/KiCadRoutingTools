@@ -3723,10 +3723,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"routing every net at {via_size:g}/{via_drill:g}. Run "
                   f"build_router.py --from-source.")
     if via_cost_nets or via_cost_nets_costs:
-        if len(via_cost_nets or []) != len(via_cost_nets_costs or []):
-            raise ValueError(f"--via-cost-nets ({len(via_cost_nets or [])}) and "
-                             f"--via-cost-nets-costs ({len(via_cost_nets_costs or [])}) "
-                             f"must have the same length")
+        from net_keepouts import via_cost_nets_error
+        _vce = via_cost_nets_error(via_cost_nets, via_cost_nets_costs)
+        if _vce:
+            raise ValueError(_vce)
         _vcn = identify_power_nets(pcb_data, list(via_cost_nets or []),
                                    [int(c) for c in (via_cost_nets_costs or [])])
         if _vcn:
@@ -11367,6 +11367,10 @@ For differential pair routing, use route_diff.py:
         parser.error(f"--power-nets ({len(args.power_nets)}) and "
                      f"--power-nets-widths ({len(args.power_nets_widths)}) "
                      f"must have the same length")
+    from net_keepouts import via_cost_nets_error
+    _vce = via_cost_nets_error(args.via_cost_nets, args.via_cost_nets_costs)
+    if _vce:
+        parser.error(_vce)
     # #530: --clearance-ceiling is the clamp switch (#439 used the PRESENCE of
     # --clearance). Given -> non-Default classes are capped at min(class, ceiling)
     # and the output .kicad_pro clamps them to the routed floor. Omitted -> honor
