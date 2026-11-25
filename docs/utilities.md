@@ -3810,11 +3810,13 @@ a later step's ladder prefers the same ring while the rule still holds that
 value; KiCad and `check_drc` grade the rule (#1914).
 
 The `#530` cap lowers `rules.min_clearance` to the smallest pad clearance
-override the run honoured (KiCad floors an override there). That number
-belongs to one part, so the writeback records it
+override the run honoured (KiCad floors an override there), and the `#498`
+cap to the smallest `.kicad_dru` clearance rule. The first number belongs to
+one part and the second binds only the items its rule names, which route at
+the rule anyway, so the writeback records either
 (`kicad_routing_tools.pad_override_min_clearance`: `{rule, board}`), and
 `--escalation board` reads the board's own minimum (`board`) while the rule
-still holds the capped value (#1369).
+still holds the capped value (#1369, #2060).
 
 The `FAB FLOOR RELAXED` disclosure compares against the floors the board declared
 before the chain began (`kicad_routing_tools.fab_floor_origin`). A floor that

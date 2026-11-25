@@ -1382,6 +1382,11 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
         # floor outranks custom rules, so leaving it above a relaxing rule
         # re-manufactures phantom violations on that rule's layer.
         _clr_floor = clearance
+        # #1369: the floor WITHOUT the .kicad_dru cap here or the pad-override
+        # cap below -- the clearance the step routed at -- for the provenance
+        # record: a dru rule binds only its own items, so it is not the board's
+        # minimum for every other net (#2060).
+        _mc_uncapped = float(_clr_floor) if _clr_floor is not None else None
         try:
             from kicad_dru import min_rule_clearance
             _dru_min = min_rule_clearance(board.GetFileName() or "")
@@ -1390,9 +1395,8 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                 _clr_floor = _dru_min
         except Exception:
             pass
-        # #1369: the floor WITHOUT the pad-override cap below, and the rule
-        # the board declared before this writer, for the provenance record.
-        _mc_uncapped = float(_clr_floor) if _clr_floor is not None else None
+        # #1369: the rule the board declared before this writer, for the
+        # provenance record.
         _mc_before = (bds.m_MinClearance / 1e6
                       if 'min_clearance' in _declared else None)
         # #530: never above the smallest pad override the run honoured (KiCad
