@@ -1620,8 +1620,10 @@ class DifferentialTab(wx.Panel):
             set_via_layers(pcb_via, top_layer, bot_layer,
                            getattr(via, 'via_type', None))
         # Keep a re-placed via's own tenting/plugging/filling (#489 §8).
-        from .gui_utils import apply_via_protection
+        from .gui_utils import apply_via_protection, apply_via_free
         apply_via_protection(pcb_via, getattr(via, 'tenting_attrs', None))
+        # The pair's GND return vias are free, as the CLI writes them (#2067).
+        apply_via_free(pcb_via, getattr(via, 'free', False))
         board.Add(pcb_via)
 
     def get_polarity_swap_nets(self):

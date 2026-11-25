@@ -338,6 +338,23 @@ class StdoutRedirector:
             self.original.flush()
 
 
+def apply_via_free(pcb_via, free):
+    """Mark a pcbnew PCB_VIA free when the engine's via is (#2067): the GUI
+    twin of the writer's `(free yes)`, so both fronts write the same via.
+
+    A free via keeps its net: KiCad's connectivity pass never re-nets it from
+    the copper it touches. The engine sets it on a via whose only connection
+    is its pour (stitching and fence vias, the GND return vias). A via that is
+    not free is left as pcbnew built it. Returns True when it was set."""
+    if not free:
+        return False
+    try:
+        pcb_via.SetIsFree(True)
+        return True
+    except AttributeError:
+        return False
+
+
 def apply_via_protection(pcb_via, tenting_attrs):
     """Put a Via's parsed protection spec back onto a pcbnew PCB_VIA (#489 §8).
 

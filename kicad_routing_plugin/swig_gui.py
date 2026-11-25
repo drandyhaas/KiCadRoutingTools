@@ -4738,8 +4738,10 @@ class RoutingDialog(wx.Dialog):
                            getattr(via, 'via_type', None))
         # Keep a re-placed via's own tenting/plugging/filling (#489 §8). A via
         # with no spec is left to inherit the board setting, as before.
-        from .gui_utils import apply_via_protection
+        from .gui_utils import apply_via_protection, apply_via_free
         apply_via_protection(pcb_via, getattr(via, 'tenting_attrs', None))
+        # A free via stays free, as the CLI writes it (#2067).
+        apply_via_free(pcb_via, getattr(via, 'free', False))
         board.Add(pcb_via)
 
     def _move_copper_text_to_silkscreen(self, board):
