@@ -3403,7 +3403,11 @@ def _repair_planes_all(
     try:
         from pcb_modification import close_soft_joints
         _bridge_results: List[Dict] = []
-        _nb = close_soft_joints(_bridge_results, pcb_data, None, config)
+        # this run's nets only: the plane nets it repaired and the nets it
+        # ripped or reconnected. None (the whole board) bridged every via
+        # that grazes a same-net pad on nets the run never touched.
+        _nb = close_soft_joints(_bridge_results, pcb_data,
+                                set(net_ids) | _recon_scope_ids, config)
         if _nb:
             for _br in _bridge_results:
                 for _bs in _br.get('new_segments', []):
