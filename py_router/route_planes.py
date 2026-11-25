@@ -3002,14 +3002,19 @@ def _stitch_plane_area_vias(
                     continue
                 if _exact_layers_ok(x, y) < 2:
                     continue
+                # FREE (#2067): its only connection is the pour, so without
+                # the flag KiCad's load gives it the net of any stored fill
+                # of another net it sits in -- as KiCad's own via tool marks
+                # a via placed on a zone with no track or pad under it.
                 new_via_dicts.append({
                     'x': x, 'y': y, 'size': via_size, 'drill': via_drill,
                     'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id,
+                    'free': True,
                 })
                 pcb_data.vias.append(Via(x=x, y=y, size=via_size,
                                          drill=via_drill,
                                          layers=['F.Cu', 'B.Cu'],
-                                         net_id=net_id))
+                                         net_id=net_id, free=True))
                 block_via_position(obstacles, x, y, coord,
                                    hole_to_hole_clearance, via_drill,
                                    via_size, config.clearance)

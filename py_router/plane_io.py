@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, List, Dict, Tuple, Optional
 
 from kicad_parser import (PCBData, parse_kicad_pcb, _unescape_kicad_string,
-                          layer_list_tokens)
+                          layer_list_tokens, detect_kicad_version)
 from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, via_net_name,
                           move_copper_text_to_silkscreen,
                           move_copper_graphics_to_silkscreen, add_teardrops_to_pads,
@@ -758,16 +758,20 @@ def write_plane_output(
 
     # Add vias. A reused via carries its own protection spec; a NEW stitching
     # via emits no token and inherits the board's `(setup ...)` policy, exactly
-    # as a via placed in KiCad does (see add_tracks_and_vias_to_pcb).
+    # as a via placed in KiCad does (see add_tracks_and_vias_to_pcb). A via
+    # whose only connection is its pour comes FREE (#2067): without the flag
+    # KiCad gives it the net of any stored fill of another net it sits in.
+    _file_version = detect_kicad_version(content)
     for via in new_vias:
         elements.append(generate_via_sexpr(
             via['x'], via['y'], via['size'], via['drill'],
-            via['layers'], via['net_id'],
+            via['layers'], via['net_id'], via.get('free', False),
             # #749 D: the ONE resolver -- net 0 is absent from every map, and a
             # numeric ref emitted next to a spec used to be a via the parser
             # could not read back (#748).
             net_name=via_net_name(via['net_id'], net_id_to_name),
             tenting_attrs=via.get('tenting_attrs'),
+            file_version=_file_version,
             via_type=via.get('via_type')
         ))
 
@@ -990,7 +994,9 @@ def restore_failed_reroute_nets(
                                   # or the restore silently re-tents them (#489 §8).
                                   'tenting_attrs': dict(getattr(v, 'tenting_attrs', {}) or {}),
                                   # ...and its blind/micro type word.
-                                  'via_type': getattr(v, 'via_type', 'through')})
+                                  'via_type': getattr(v, 'via_type', 'through'),
+                                  # ...and its free flag (#2067).
+                                  'free': bool(getattr(v, 'free', False))})
 
     if not restored_net_ids:
         return [], 0, 0
@@ -1077,11 +1083,13 @@ def restore_failed_reroute_nets(
         # tenting it never had.
         elements.append(generate_via_sexpr(v['x'], v['y'], v['size'], v['drill'],
                                            v['layers'], v['net_id'],
+                                           v.get('free', False),
                                            net_name=via_net_name(v['net_id'],
                                                                  net_id_to_name),
                                            tenting_attrs=v.get('tenting_attrs'),
                                            inherit_when_unspecified=True,
-                                           via_type=v.get('via_type')))
+                                           via_type=v.get('via_type'),
+                                           file_version=detect_kicad_version(content)))
     for s in restored_segs:
         nm = net_id_to_name.get(s['net_id']) if net_id_to_name else None
         elements.append(generate_segment_sexpr(s['start'], s['end'], s['width'],

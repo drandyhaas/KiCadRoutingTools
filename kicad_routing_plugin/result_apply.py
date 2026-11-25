@@ -119,7 +119,7 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False, order_board=None):
     items go on in (its own); without it they keep the parse's order."""
     from kicad_parser import mm_to_iu, pcbnew_track_copper
     from .swig_gui import _build_layer_mappings
-    from .gui_utils import apply_via_protection, set_via_layers
+    from .gui_utils import apply_via_protection, apply_via_free, set_via_layers
     name_to_id, _ = _build_layer_mappings()
 
     # Result-board net ids can differ from live net codes; map by name.
@@ -195,6 +195,7 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False, order_board=None):
             # Keep the result's tenting/plugging spec (#489 §8); an empty spec
             # leaves the via inheriting the board's, as it was.
             apply_via_protection(it, getattr(taken[0], "tenting_attrs", None))
+            apply_via_free(it, getattr(taken[0], "free", False))   # #2067
     def make_track(seg):
         track = pcbnew.PCB_TRACK(board)
         # mm_to_iu, never FromMM(round(...)) (#493 item 5 / #362).
@@ -220,6 +221,7 @@ def apply_copper(board, result_pcb, pcbnew, dry_run=False, order_board=None):
         pcb_via.SetLocked(bool(getattr(via, "locked", False)))  # #521
         # Keep a via's own tenting/plugging spec (#489 §8).
         apply_via_protection(pcb_via, getattr(via, "tenting_attrs", None))
+        apply_via_free(pcb_via, getattr(via, "free", False))   # #2067
         return pcb_via
 
     # The live board ends up holding its tracks and vias in the RESULT's

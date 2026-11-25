@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import List, Dict, Optional
 from terminal_colors import RED, RESET
-from kicad_parser import is_kicad_10, board_uses_name_nets, KICAD_10_MIN_VERSION
+from kicad_parser import is_kicad_10, board_uses_name_nets, KICAD_10_MIN_VERSION, detect_kicad_version
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr, via_net_name,
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
@@ -195,7 +195,8 @@ def write_routed_output(
     # kicad_writer.via_protection_sexpr for why copying the board's prevailing
     # PER-VIA spec onto it was retired.
     routing_text = _generate_routing_text(results, all_swap_vias, net_id_to_name if kicad_v10 else None,
-                                          all_swap_segments=all_swap_segments)
+                                          all_swap_segments=all_swap_segments,
+                                          file_version=detect_kicad_version(content))
 
     # Add debug paths if enabled
     if debug_lines:
@@ -396,8 +397,12 @@ def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data,
 
 def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                            net_id_to_name: Dict = None,
-                           all_swap_segments: List = None) -> str:
+                           all_swap_segments: List = None,
+                           file_version: int = None) -> str:
     """Generate routing text for new segments and vias.
+
+    `file_version` is the board's `(version N)`, which spells a free via's
+    token (kicad_writer.via_free_sexpr).
 
     A via carries its OWN protection spec or none at all; there is no
     board-derived default any more (see kicad_writer.via_protection_sexpr).
@@ -434,7 +439,8 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                 # via has none, emits no token and inherits the board's setup.
                 tenting_attrs=_via_attrs(via),
                 # ...and its blind/micro type word (a new via is through).
-                via_type=getattr(via, 'via_type', None)
+                via_type=getattr(via, 'via_type', None),
+                file_version=file_version
             ) + "\n"
 
     # Add vias from stub layer swapping
@@ -449,7 +455,8 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                 # via has none, emits no token and inherits the board's setup.
                 tenting_attrs=_via_attrs(via),
                 # ...and its blind/micro type word (a new via is through).
-                via_type=getattr(via, 'via_type', None)
+                via_type=getattr(via, 'via_type', None),
+                file_version=file_version
             ) + "\n"
 
     # Add stub segments synthesized by bare-pad target swaps

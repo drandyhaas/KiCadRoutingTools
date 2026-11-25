@@ -5879,7 +5879,8 @@ _VIA_PREFIX_RE = re.compile(
 # -- the same disappearance #748 is about, by a different route.
 _VIA_NET_RE = re.compile(r'\(net\s+(?:"((?:[^"\\]|\\.)*)"|(\d+))\)')
 _VIA_UUID_RE = re.compile(r'\(uuid\s+"([^"]+)"\)')
-_VIA_FREE_RE = re.compile(r'\(free\s+yes\)')
+# KiCad 8+ writes `(free yes)`; KiCad 6/7 wrote a bare `(free)` (#2067).
+_VIA_FREE_RE = re.compile(r'\(free(?:\s+yes)?\s*\)')
 # KiCad's via type is a bare word of the via block (`(via micro (at ...`,
 # `(via buried ...`); a block with none is a THROUGH via. KiCad 9 writes
 # `blind` for its BLIND_BURIED type; KiCad 10 also writes `buried`.
@@ -9031,6 +9032,8 @@ def pcbnew_track_copper(board, to_mm=None, get_layer_name=None, owners=None):
                 uuid=_item_uuid(track),
                 locked=bool(track.IsLocked()),
                 via_type=pcbnew_via_type(track),
+                # Parity with the text parser's `(free yes)` (#2067).
+                free=bool(getattr(track, 'GetIsFree', lambda: False)()),
             )
             vias.append(v)
             if owners is not None:
