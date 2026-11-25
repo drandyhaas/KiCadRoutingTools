@@ -697,6 +697,25 @@ def rip_refusal(pcb_data, net_id: int, context: str = "in-run rip ladder",
     return None
 
 
+#: The reason of a net the run routed by a plan made of its nets together
+#: (plan_together): the plan is one consistent set, so no ladder of the run
+#: rips one net of it for another. It lives in the run's memo alone
+#: (protect_planned), never in the project, and naming the net in --nets --
+#: which is how the run came to route it -- does not lift it.
+PLANNED = 'planned'
+
+
+def protect_planned(pcb_data, name: str, on: bool = True) -> None:
+    """Mark (or unmark) a net as routed by the run's plan, for the run's own
+    rip ladders (rip_refusal). A net the board already protects keeps its
+    own reason."""
+    m = cached_protection_map(pcb_data)
+    if on:
+        m.setdefault(name, PLANNED)
+    elif m.get(name) == PLANNED:
+        del m[name]
+
+
 def in_run_rip_reason(pcb_data, name: Optional[str]) -> Optional[str]:
     """rip_refusal's rule for one net name, without recording it: the reason
     an in-run ladder must not rip the net's routed result, or None."""
@@ -707,7 +726,7 @@ def in_run_rip_reason(pcb_data, name: Optional[str]) -> Optional[str]:
         reason = _cached_project_reasons(pcb_data).get(name)
     if not reason:
         return None
-    if reason != 'locked' and name in rip_override_names(pcb_data):
+    if reason not in ('locked', PLANNED) and name in rip_override_names(pcb_data):
         return None
     return reason
 

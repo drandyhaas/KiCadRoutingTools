@@ -451,6 +451,16 @@ src/
 
 ## Version History
 
+### 0.24.6 (2026-11-24)
+
+- **`plan_search`: the search of a run's nets planned together** (`py_router/plan_together.py`,
+  `KICAD_PLAN_TOGETHER=1`). One net's way over the board's cells, layer by layer, from any cell of its own copper to
+  any cell of the pieces it has yet to reach: each move pays its length times its layer's cost, times one plus the
+  cell's history of having been shared, times one plus the present price of each other net's route standing on it; a
+  change of layer pays the via's cost the same way. It is the module's own search ported exactly -- the same doubles
+  formed in the same order, the heap ordered as Python's tuples order -- so a plan is the same routes with either; a
+  plan of 82 nets over a six-layer board at a 0.05 mm grid takes 47 s with it against 13 min.
+
 ### 0.24.5 (2026-11-23)
 
 - **A net's lane is priced, not rewarded.** `GridRouter` took a path to attract a net to and gave a discount of up to

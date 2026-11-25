@@ -720,6 +720,18 @@ def route_single_ended_nets(
         for _i, (_nm, _nid) in enumerate(single_ended_nets):
             if _nid in _members:
                 _stop_after_idx = _i
+    # The nets routed by a plan made of them together (plan_together, KICAD_PLAN_TOGETHER) go first, each by its plan
+    # and no search; the plan is one consistent set, so none of them is ripped for a net searched after.
+    _planned = getattr(config, '_planned_routes', None) or {}
+    if _planned:
+        single_ended_nets = sorted(single_ended_nets, key=lambda t: t[1] not in _planned)
+        state.restore_protected_net_ids |= set(_planned)
+        import plan_together as _pt
+        from protected_nets import protect_planned
+        for _n in _planned:
+            if _n in pcb_data.nets:
+                _pt.KEPT.add(pcb_data.nets[_n].name)
+                protect_planned(pcb_data, pcb_data.nets[_n].name)
     _pos = -1
     for net_name, net_id in single_ended_nets:
         _pos += 1
@@ -852,8 +864,36 @@ def route_single_ended_nets(
         # Hold the A* search diagnostics until we know whether this net failed;
         # a stall that the router recovers from needs no explanation (--verbose
         # streams them live).
+        _plan_res = _planned.pop(net_id, None)
+        if _plan_res is not None:
+            # (the plan was made before the run began: taken only while its copper still clears the board)
+            from rip_restore import _copper_conflicts
+            _why = None
+            if _copper_conflicts(pcb_data, config, {net_id}, _plan_res['new_segments'], _plan_res['new_vias'],
+                                 tol=1e-6):
+                _why = 'its copper no longer clears the board'
+            else:
+                from check_connected import check_net_connectivity as _cnc
+                _joined = _cnc(net_id,
+                               [s for s in pcb_data.segments if s.net_id == net_id] + _plan_res['new_segments'],
+                               [v for v in pcb_data.vias if v.net_id == net_id] + _plan_res['new_vias'],
+                               pcb_data.pads_by_net.get(net_id, []),
+                               [z for z in (getattr(pcb_data, 'zones', None) or []) if z.net_id == net_id],
+                               pcb_data=pcb_data)
+                if not _joined.get('connected'):
+                    _why = 'it no longer joins the net'
+            if _why:
+                print(f"  Plan not taken: {_why} -- searching")
+                state.restore_protected_net_ids.discard(net_id)
+                _pt.KEPT.discard(net_name)
+                protect_planned(pcb_data, net_name, on=False)
+                _plan_res = None
         with deferred_diagnostics(config) as diag_buf:
-            if _olinks:
+            if _plan_res is not None:
+                print(f"  Routed by the plan ({len(_plan_res['new_segments'])} segment(s), "
+                      f"{len(_plan_res['new_vias'])} via(s))")
+                result = _plan_res
+            elif _olinks:
                 print(f"  Routing {len(_olinks)} exact-fill oracle link(s) "
                       f"(#572 forced edges)")
                 result = route_oracle_links(pcb_data, net_id, cfg_route, obstacles,

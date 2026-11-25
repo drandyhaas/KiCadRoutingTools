@@ -483,6 +483,16 @@ def refresh() -> None:
     # net ordering. See global_plan.py. Opt-in experiment; 'cost' and 'order'
     # are independent so the A/B arms (reservations-only / order-only / both)
     # are all expressible under the one master gate.
+    # A RUN'S NETS PLANNED TOGETHER (plan_together): whole routes for the run's signal nets, found with one another
+    # in view before any is routed, each then routed by its plan in place of a search. Opt-in.
+    g['PLAN_TOGETHER'] = _opt_in('KICAD_PLAN_TOGETHER')
+    # ...and its hooks for a step that runs it for its own ends (the bus step: its pass for the parts its lanes' nets
+    # end on, and its check of the board it hands on): the most pads a planned net may have and the plan's rounds
+    # (0: the module's own), and a file for the plan's verdict alone -- its report written there as JSON, the run
+    # ended before it routes anything.
+    g['PLAN_MAX_PADS'] = _i('KICAD_PLAN_MAX_PADS', 0)
+    g['PLAN_ROUNDS'] = _i('KICAD_PLAN_ROUNDS', 0)
+    g['PLAN_ONLY'] = _s('KICAD_PLAN_ONLY')
     g['GLOBAL_PLAN'] = {
         'enable': _opt_in('KICAD_GLOBAL_PLAN'),
         # a plan made OUTSIDE the router: JSON {net name: [[x mm, y mm, layer name], ...]}, read in place of the

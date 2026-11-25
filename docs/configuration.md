@@ -1009,6 +1009,20 @@ See [Rip-Up and Reroute](rip-up-reroute.md) for how failed routes trigger rip-up
 
 The options above are on both `route.py` and `route_diff.py` unless marked.
 
+**Planning the nets together (opt-in, `KICAD_PLAN_TOGETHER=1`).** Routed one after another, each net takes the way
+that is best for it alone, and on a crowded board the ways close regions on one another: each net routes alone, and
+together some stay open whatever the order. With the variable set, `route.py` first finds whole routes for the run's
+signal nets with one another in view (`py_router/plan_together.py`): every net's route is priced for the ground it
+shares with the others' and found again while it shares any, the price of sharing rising round by round, until the
+routes stand clear of one another. Each net the plan routes is then laid by its plan in place of a search, ahead of the
+nets left to the search, and is not ripped for one of those. A net with a pour, a width or a clearance of its own, or
+with more than six pads, is not planned; nor is a net whose plan ends on ground another route keeps. The run prints
+`Plan: N of M net(s) routed by a plan made of them together`. Off by default. Three more variables serve a step
+that runs the plan for its own ends, as the bus step does: `KICAD_PLAN_MAX_PADS` (the most pads a planned net may
+have), `KICAD_PLAN_ROUNDS` (the plan's rounds), and `KICAD_PLAN_ONLY=<file>` (the plan's report -- the nets planned,
+those with no way, those left on another's ground -- written there as JSON, and the run ended before it routes
+anything).
+
 ### Proximity Penalty Options
 
 | Option | Default | Description |

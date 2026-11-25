@@ -4669,6 +4669,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         config.net_track_widths = {}
                     config.net_track_widths[_nid] = _w_in
             existing_rippable.extend(_pe_auto)
+    # A net this run's plan routed (plan_together.KEPT) is no rip candidate of a lap of the same run: the plan is one
+    # consistent set, and a lap that takes one net of it apart trades a joined net for another.
+    if existing_rippable and 'plan_together' in sys.modules:
+        _kept_pt = sys.modules['plan_together'].KEPT
+        if _kept_pt:
+            existing_rippable = [n for n in existing_rippable
+                                 if not (n in pcb_data.nets and pcb_data.nets[n].name in _kept_pt)]
     # #1156: this run's rip authority over pre-existing copper (--rip-existing-
     # nets matches plus the automatic candidacy above), for the blocker hint:
     # it used to tell the agent to grant --rip-existing-nets for nets this
@@ -4701,6 +4708,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         config, pcb_data, all_net_ids_to_route + existing_rippable, net_names,
         given=pour_barriers)
     _reconcile_kwargs['pour_barriers'] = list(config.pour_barriers)
+    # The run's nets planned together (plan_together, KICAD_PLAN_TOGETHER): here, once the run's rules stand -- its
+    # clearances above, its guarded pours just now -- since the plan is made on a base obstacle map built as the
+    # run's own. Top-level runs only: a lap routes what the run left, on the board the plan's routes already stand on.
+    if final_reconcile and env_knobs.PLAN_TOGETHER:
+        from plan_together import plan_run
+        plan_run(pcb_data, config, single_ended_nets, net_clearances=net_clearances)
     # ...and the out-of-scope zone nets it left crossable (a routed net has a
     # pad inside their pour), whose connectivity the end of the run grades
     # again on the shipped copper. Outermost run only.

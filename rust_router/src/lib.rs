@@ -19,6 +19,7 @@ mod pose_router;
 mod lane_search;
 mod placement_kernels;
 mod pair_search;
+mod plan_search;
 mod ends_kernel;
 
 pub use obstacle_map::GridObstacleMap;
@@ -167,5 +168,6 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(placement_kernels::cong_block_slack, m)?)?;
     m.add_function(wrap_pyfunction!(placement_kernels::overlap_sum, m)?)?;
     m.add_function(wrap_pyfunction!(pair_search::pair_search, m)?)?;
+    m.add_function(wrap_pyfunction!(plan_search::plan_search, m)?)?;
     Ok(())
 }
