@@ -1602,7 +1602,8 @@ Routing Completes): run them once, here, not again inside the routing.
      measurement.
    - **Hard cap:** 10 hours of wall clock, unless the user sets another.
 4. **An "impossible" claim needs its measurement.** Quote
-   `check_reachability` (PASSABLE is a router problem, CAGED is geometry) or
+   `check_reachability` (PASSABLE is a router problem, CAGED is geometry,
+   INCONCLUSIVE is neither and proves nothing) or
    the log block, not only its first refusal line.
 5. **One verifier, at most 3 calls.** When you believe you have your best
    board, spawn ONE fresh subagent (not a fork) with

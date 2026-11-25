@@ -36,6 +36,11 @@ This is that measurement. No physics, no heuristics, three classical steps:
 The distinction in that last block is the whole point. A router failing is
 evidence about the router. This is evidence about the board.
 
+It is exact for the RASTER, and the raster stands up to `RESOLUTION_STEPS`
+steps from the continuous answer (#2045). A margin inside that is no evidence
+either way, so `pad_reachability` re-measures such a reading at halved steps
+until it is decided, and reports INCONCLUSIVE when its budget runs out first.
+
 Validated on the two cases that motivated it: a pad the router failed on at
 every grid measured **PASSABLE by +5.5 um** against a hand-derived 6.4 um throat
 (the "impossible" claim was false, and the hand arithmetic agreed to within a
@@ -462,6 +467,130 @@ def widest_path(slacks, targets, via_ok, seed_xy, seed_layer, view, step,
     return (None, None) if return_throat else None
 
 
+def _components(slacks, via_ok, thr, ndimage):
+    """Global component roots of the cells with slack >= `thr`: 4-connected
+    in each layer (`ndimage.label`'s default structure, the same four
+    neighbours `widest_path` unions), joined across layers wherever a via is
+    legal and both layers are open -- `widest_path`'s two edge kinds.
+
+    Returns `(labs, root)`: per-layer label arrays in one id space (0 =
+    closed) and `root[id]`, the component every id belongs to."""
+    labs, off = [], 0
+    for s in slacks:
+        lab, k = ndimage.label(s >= thr)
+        labs.append(np.where(lab > 0, lab + off, 0))
+        off += k
+    parent = np.arange(off + 1, dtype=np.int64)
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for a in range(len(labs)):
+        for b in range(a + 1, len(labs)):
+            m = via_ok & (labs[a] > 0) & (labs[b] > 0)
+            if not m.any():
+                continue
+            for x, y in np.unique(np.stack([labs[a][m], labs[b][m]], 1),
+                                  axis=0):
+                rx, ry = find(int(x)), find(int(y))
+                if rx != ry:
+                    parent[rx] = ry
+    root = np.array([find(i) for i in range(off + 1)], dtype=np.int64)
+    return labs, root
+
+
+def widest_path_by_threshold(slacks, targets, via_ok, seed_xy, seed_layer,
+                             view, step):
+    """`widest_path(..., return_throat=True)`'s value, found by bisection.
+
+    The same answer by another route (#2045): the bottleneck is the largest
+    slack value at which the cells at or above it join the seed to a target,
+    so a bisection over the field's distinct non-negative values, each probe
+    one `ndimage.label` per layer, finds exactly the value Kruskal stops at.
+    Kruskal's union-find runs in Python once per cell, which is what bounds
+    how fine a raster `pad_reachability` can afford; this runs in C, so the
+    refinement of an uncertain reading can halve the step where the
+    Kruskal pass could not.
+
+    The throat is a cell AT the bottleneck value, in the joined component,
+    beside the seed's side of the cut (the component the seed has one value
+    higher) -- the cell Kruskal reports when only one cell holds that value,
+    and one of the tied cells when several do."""
+    ndimage = _require_scipy()
+    h, w = slacks[0].shape
+    sx = int((seed_xy[0] - view[0]) / step)
+    sy = int((seed_xy[1] - view[1]) / step)
+    if not (0 <= sx < w and 0 <= sy < h):
+        raise ValueError(f"seed {seed_xy} is outside the view {view}")
+
+    def joined(thr):
+        labs, root = _components(slacks, via_ok, thr, ndimage)
+        s = labs[seed_layer][sy, sx]
+        if not s:
+            return False, labs, root
+        rs = root[s]
+        for lab, t in zip(labs, targets):
+            ids = lab[t]
+            if ids.size and bool(np.any(root[ids[ids > 0]] == rs)):
+                return True, labs, root
+        return False, labs, root
+
+    vals = np.unique(np.concatenate([s[s >= 0.0] for s in slacks]))
+    if vals.size == 0 or not joined(float(vals[0]))[0]:
+        return None, None
+    lo, hi = 0, vals.size - 1                  # joined at vals[lo]
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if joined(float(vals[mid]))[0]:
+            lo = mid
+        else:
+            hi = mid - 1
+    b = float(vals[lo])
+    _ok, labs, root = joined(b)
+    rs = root[labs[seed_layer][sy, sx]]
+    side = None
+    if lo + 1 < vals.size:
+        _j, labs_hi, root_hi = joined(float(vals[lo + 1]))
+        s_hi = labs_hi[seed_layer][sy, sx]
+        if s_hi:
+            side = [(lab > 0) & (root_hi[lab] == root_hi[s_hi])
+                    for lab in labs_hi]
+    throat = None
+    for lay, (s, lab) in enumerate(zip(slacks, labs)):
+        at_b = (s == b) & (lab > 0) & (root[lab] == rs)
+        if side is not None:
+            near = ndimage.binary_dilation(side[lay])
+            if (at_b & near).any():
+                at_b = at_b & near
+        idx = np.flatnonzero(at_b)
+        if idx.size:
+            y, x = divmod(int(idx[0]), w)
+            throat = (lay, view[0] + (x + 0.5) * step,
+                      view[1] + (y + 0.5) * step)
+            break
+    return b, throat
+
+
+#: How far a raster bottleneck can stand from the continuous one, in raster
+#: STEPS (#2045). Slack is twice a distance, so it moves up to 2 mm per mm;
+#: a cell centre sits up to half a diagonal from the copper it samples
+#: (sqrt(2) steps of slack), and the path's first free cell beside its own pad
+#: up to a whole step past the pad's edge (2 steps): 2 + sqrt(2) = 3.41.
+#: Measured on a net-tie pad between two clearance classes, sweeping the step
+#: from 7.5 to 50 um: every reading stood optimistic by 0.6 to 2.7 steps, and
+#: at a 46 um step that was +1 um PASSABLE for a pad the 5 um raster put
+#: 89 um short.
+RESOLUTION_STEPS = 3.5
+#: The finest step an uncertain reading is refined to, mm.
+REFINE_MIN_STEP_MM = 0.001
+#: The most raster cells (every layer counted) a refinement may build. The
+#: fields are float64, a few arrays a layer, so this bounds the memory too.
+REFINE_CELL_BUDGET = 8_000_000
+
+
 @dataclass
 class Reachability:
     """What the field says about one pad reaching the rest of its net."""
@@ -498,6 +627,40 @@ class Reachability:
     #: override' -- when the field was built from a clearance model. Not in
     #: `to_dict` (its key set is pinned); the CLI publishes it.
     pricing_sources: Optional[dict] = None
+    #: #2045: the coarser readings this one replaced, coarsest first --
+    #: [{step_mm, bottleneck_mm, margin_um}]. Empty when the reading at the
+    #: step asked for was already outside its own resolution.
+    refined_from: Tuple[dict, ...] = ()
+
+    @property
+    def resolution_mm(self) -> float:
+        """How far this raster's bottleneck can stand from the continuous one
+        (`RESOLUTION_STEPS` steps, track space). A margin inside it is not a
+        measurement of which side of the track width the throat is on."""
+        return RESOLUTION_STEPS * self.step_mm
+
+    @property
+    def inconclusive(self) -> bool:
+        """Measured, but the margin is inside the raster's own resolution, so
+        neither PASSABLE nor CAGED is a finding (#2045). `pad_reachability`
+        refines such a reading at finer steps first; this is what is left
+        when the finest step its budget allows still cannot decide."""
+        return (self.measured and self.bottleneck_mm is not None
+                and not self.wide_open
+                and abs(self.bottleneck_mm - self.track_mm)
+                <= self.resolution_mm + 1e-12)
+
+    @property
+    def verdict(self) -> str:
+        """'NO-TARGET' | 'INCONCLUSIVE' | 'CAGED' | 'PASSABLE'. Read this, not
+        `caged`, for the finding: `caged` is the raw comparison of the raster
+        bottleneck with the track width, and is True or False for an
+        INCONCLUSIVE reading too."""
+        if not self.measured:
+            return 'NO-TARGET'
+        if self.inconclusive:
+            return 'INCONCLUSIVE'
+        return 'CAGED' if self.caged else 'PASSABLE'
 
     @property
     def wide_open(self) -> bool:
@@ -649,9 +812,9 @@ class Reachability:
                 # NO-TARGET is a third state, not a shade of CAGED -- see
                 # `measured`. It matches the CLI's long-standing exit 2, so the
                 # JSON and the exit code finally agree, and `verdict == 'CAGED'`
-                # becomes safe to test directly.
-                'verdict': ('CAGED' if self.caged else 'PASSABLE')
-                           if self.measured else 'NO-TARGET',
+                # becomes safe to test directly. INCONCLUSIVE (#2045) is a
+                # fourth: a margin inside the raster's own resolution.
+                'verdict': self.verdict,
                 'measured': self.measured,
                 'margin_um': (None if self.margin_um is None
                               else round(self.margin_um, 2)),
@@ -677,7 +840,11 @@ class Reachability:
                 # than 2 the far side is assumed, and `gap_mm` is NOT a
                 # distance between two named objects -- see `gap_blockers`.
                 'gap_blockers': self.gap_blockers,
-                'near': [dict(n) for n in self.near]}
+                'near': [dict(n) for n in self.near],
+                # #2045: how far this step's bottleneck can stand from the
+                # continuous one, and the coarser readings refined away.
+                'resolution_mm': round(self.resolution_mm, 6),
+                'refined_from': [dict(x) for x in self.refined_from]}
 
     def defect_record(self, board=None, board_sha=None, relief=(),
                       instrument='check_reachability', floors=None):
@@ -707,11 +874,12 @@ class Reachability:
         through (the check_reachability CLI fills them). Everything here was
         already computed by `pad_reachability`; this only arranges it.
 
-        Returns None when there is nothing to report: NO-TARGET (no verdict)
-        or PASSABLE. The only writer at present is `check_reachability
-        --defect-json`, which writes this dict to the path it is given.
+        Returns None when there is nothing to report: NO-TARGET (no verdict),
+        INCONCLUSIVE (no finding, #2045) or PASSABLE. The only writer at
+        present is `check_reachability --defect-json`, which writes this dict
+        to the path it is given.
         """
-        if not self.measured or not self.caged:
+        if self.verdict != 'CAGED':
             return None
         thr = self.throat
         # The two spaces, both stated, both labelled, with what converts them.
@@ -798,9 +966,23 @@ class Reachability:
         else:
             lines.append(f"BOTTLENECK {self.bottleneck_mm:.4f}mm (widest track "
                          f"that reaches the net)")
-            lines.append(
-                f"VERDICT    {'CAGED' if self.caged else 'PASSABLE'} at track "
-                f"{self.track_mm}mm  (margin {self.margin_um:+.1f} um)")
+            for x in self.refined_from:
+                lines.append(
+                    f"refined    from {x['margin_um']:+.1f} um at step "
+                    f"{x['step_mm']:g}mm, inside that raster's +/-"
+                    f"{1000.0 * RESOLUTION_STEPS * x['step_mm']:.1f} um")
+            if self.inconclusive:
+                lines.append(
+                    f"VERDICT    INCONCLUSIVE at track {self.track_mm}mm  "
+                    f"(margin {self.margin_um:+.1f} um, inside this "
+                    f"{self.step_mm:g}mm raster's +/-"
+                    f"{1000.0 * self.resolution_mm:.1f} um) -- neither "
+                    f"PASSABLE nor CAGED. Re-measure on a small --view round "
+                    f"the throat at a finer --step.")
+            else:
+                lines.append(
+                    f"VERDICT    {self.verdict} at track "
+                    f"{self.track_mm}mm  (margin {self.margin_um:+.1f} um)")
         return '\n'.join(lines)
 
 
@@ -999,6 +1181,14 @@ def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
     rasterising a whole board at 10um to answer it costs memory for nothing. A
     view that excludes the rest of the net is reported, not silently answered --
     see `note`.
+
+    A reading whose margin is inside its step's resolution (`inconclusive`,
+    #2045) is re-measured at half the step, and again, until it is decided or
+    the next step would pass `REFINE_MIN_STEP_MM` or `REFINE_CELL_BUDGET`; the
+    result is the finest reading, with the ones it replaced in
+    `refined_from`. Only that uncertain case pays for the refinement. Read
+    the finding from `verdict`, which is INCONCLUSIVE when the budget ran out
+    first.
     """
     ndimage = _require_scipy()
     if net_id is None:
@@ -1020,101 +1210,138 @@ def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
     if clearance_model is not None:
         pricing = PairPricing(clearance_model, net_id, clearance_floor,
                               pcb.board_info.copper_layers or layers)
-    slacks, owns, Ds = [], [], []
-    for layer in layers:
-        s, o, D = slack_field(pcb, net_id, layer, view, base_clearance,
-                              net_clearances, step,
-                              edge_clearance=edge_clearance, pricing=pricing)
-        slacks.append(s)
-        owns.append(o)
-        Ds.append(D)
-    via_ok = np.ones_like(Ds[0], dtype=bool)
-    for D in Ds:
-        via_ok &= (D >= via_mm / 2.0)
-    # #1031: a rule area forbidding VIAS on any layer the via spans refuses
-    # it, at the router's via reach (clearance + via/2 from the region).
-    _via_occ = np.zeros_like(via_ok)
-    for layer in layers:
-        for poly, holes, _t, vias_ok in rule_area_keepouts(pcb, layer):
-            if not vias_ok:
-                _region(_via_occ, poly, holes, view, step)
-    if _via_occ.any():
-        _dv = ndimage.distance_transform_edt(~_via_occ) * step - base_clearance
-        via_ok &= (_dv >= via_mm / 2.0)
+    def _at(step, kruskal=True):
+        """The reading at one raster step. `kruskal` False takes the
+        bottleneck by bisection (`widest_path_by_threshold`), which a
+        refinement can afford at steps the Python union-find cannot."""
+        slacks, owns, Ds = [], [], []
+        for layer in layers:
+            s, o, D = slack_field(pcb, net_id, layer, view, base_clearance,
+                                  net_clearances, step,
+                                  edge_clearance=edge_clearance,
+                                  pricing=pricing)
+            slacks.append(s)
+            owns.append(o)
+            Ds.append(D)
+        via_ok = np.ones_like(Ds[0], dtype=bool)
+        for D in Ds:
+            via_ok &= (D >= via_mm / 2.0)
+        # #1031: a rule area forbidding VIAS on any layer the via spans refuses
+        # it, at the router's via reach (clearance + via/2 from the region).
+        _via_occ = np.zeros_like(via_ok)
+        for layer in layers:
+            for poly, holes, _t, vias_ok in rule_area_keepouts(pcb, layer):
+                if not vias_ok:
+                    _region(_via_occ, poly, holes, view, step)
+        if _via_occ.any():
+            _dv = (ndimage.distance_transform_edt(~_via_occ) * step
+                   - base_clearance)
+            via_ok &= (_dv >= via_mm / 2.0)
 
-    # The seed pad IS own-net copper, so "reach the net" would be trivially
-    # true unless the pad's island is separated from the rest of the net.
-    # Label per layer, then stitch labels through the net's own vias.
-    labs, counts = [], []
-    for o in owns:
-        lab, k = ndimage.label(o)
-        labs.append(lab)
-        counts.append(k)
-    off, gid = [0], 0
-    for k in counts:
-        gid += k
-        off.append(gid)
-    par = list(range(gid + 1))
+        # The seed pad IS own-net copper, so "reach the net" would be trivially
+        # true unless the pad's island is separated from the rest of the net.
+        # Label per layer, then stitch labels through the net's own vias.
+        labs, counts = [], []
+        for o in owns:
+            lab, k = ndimage.label(o)
+            labs.append(lab)
+            counts.append(k)
+        off, gid = [0], 0
+        for k in counts:
+            gid += k
+            off.append(gid)
+        par = list(range(gid + 1))
 
-    def find(i):
-        while par[i] != i:
-            par[i] = par[par[i]]
-            i = par[i]
-        return i
+        def find(i):
+            while par[i] != i:
+                par[i] = par[par[i]]
+                i = par[i]
+            return i
 
-    def union(i, j):
-        ri, rj = find(i), find(j)
-        if ri != rj:
-            par[ri] = rj
+        def union(i, j):
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                par[ri] = rj
 
-    for v in pcb.vias:
-        if v.net_id != net_id:
-            continue
-        cx = int((v.x - view[0]) / step)
-        cy = int((v.y - view[1]) / step)
-        if not (0 <= cx < labs[0].shape[1] and 0 <= cy < labs[0].shape[0]):
-            continue
-        ids = [off[i] + int(labs[i][cy, cx]) for i in range(len(layers))
-               if labs[i][cy, cx]]
-        for k in range(1, len(ids)):
-            union(ids[0], ids[k])
+        for v in pcb.vias:
+            if v.net_id != net_id:
+                continue
+            cx = int((v.x - view[0]) / step)
+            cy = int((v.y - view[1]) / step)
+            if not (0 <= cx < labs[0].shape[1] and 0 <= cy < labs[0].shape[0]):
+                continue
+            ids = [off[i] + int(labs[i][cy, cx]) for i in range(len(layers))
+                   if labs[i][cy, cx]]
+            for k in range(1, len(ids)):
+                union(ids[0], ids[k])
 
-    sx = int((seed_xy[0] - view[0]) / step)
-    sy = int((seed_xy[1] - view[1]) / step)
-    if not (0 <= sx < labs[0].shape[1] and 0 <= sy < labs[0].shape[0]):
-        raise ValueError(f"seed {seed_xy} is outside the view {view}")
-    seed_lab = int(labs[0][sy, sx])
-    if seed_lab == 0:
-        raise ValueError(
-            f"({seed_xy[0]}, {seed_xy[1]}) is not on {name}'s copper on "
-            f"{layers[0]} -- pass the pad centre, and check the layer")
-    seed_root = find(off[0] + seed_lab)
+        sx = int((seed_xy[0] - view[0]) / step)
+        sy = int((seed_xy[1] - view[1]) / step)
+        if not (0 <= sx < labs[0].shape[1] and 0 <= sy < labs[0].shape[0]):
+            raise ValueError(f"seed {seed_xy} is outside the view {view}")
+        seed_lab = int(labs[0][sy, sx])
+        if seed_lab == 0:
+            raise ValueError(
+                f"({seed_xy[0]}, {seed_xy[1]}) is not on {name}'s copper on "
+                f"{layers[0]} -- pass the pad centre, and check the layer")
+        seed_root = find(off[0] + seed_lab)
 
-    targets = []
-    for i, o in enumerate(owns):
-        t = np.zeros_like(o)
-        for lab in range(1, counts[i] + 1):
-            if find(off[i] + lab) != seed_root:
-                t |= (labs[i] == lab)
-        targets.append(t)
-    n_t = sum(int(t.sum()) for t in targets)
+        targets = []
+        for i, o in enumerate(owns):
+            t = np.zeros_like(o)
+            for lab in range(1, counts[i] + 1):
+                if find(off[i] + lab) != seed_root:
+                    t |= (labs[i] == lab)
+            targets.append(t)
+        n_t = sum(int(t.sum()) for t in targets)
 
-    note = ''
-    if n_t == 0:
-        note = ("no other island of this net is inside the view -- the pad is "
-                "already joined to everything nearby. Widen --margin, or this "
-                "is not a reachability question")
-    b, throat = ((None, None) if n_t == 0
-                 else widest_path(slacks, targets, via_ok, seed_xy, 0, view,
-                                  step, return_throat=True))
-    r = Reachability(
-        net=name, net_id=net_id, seed=(seed_xy[0], seed_xy[1]), layers=layers,
-        step_mm=step, track_mm=track_mm, via_mm=via_mm, view=view,
-        bottleneck_mm=b, target_cells=n_t,
-        via_legal_fraction=float(via_ok.mean()),
-        grid=(slacks[0].shape[1], slacks[0].shape[0]), note=note,
-        open_room_mm=_open_room(view),
-        throat_cell=throat, clearance_mm=base_clearance)
+        note = ''
+        if n_t == 0:
+            note = ("no other island of this net is inside the view -- the "
+                    "pad is already joined to everything nearby. Widen "
+                    "--margin, or this is not a reachability question")
+        if n_t == 0:
+            b, throat = None, None
+        elif kruskal:
+            b, throat = widest_path(slacks, targets, via_ok, seed_xy, 0, view,
+                                    step, return_throat=True)
+        else:
+            b, throat = widest_path_by_threshold(slacks, targets, via_ok,
+                                                 seed_xy, 0, view, step)
+        r = Reachability(
+            net=name, net_id=net_id, seed=(seed_xy[0], seed_xy[1]),
+            layers=layers,
+            step_mm=step, track_mm=track_mm, via_mm=via_mm, view=view,
+            bottleneck_mm=b, target_cells=n_t,
+            via_legal_fraction=float(via_ok.mean()),
+            grid=(slacks[0].shape[1], slacks[0].shape[0]), note=note,
+            open_room_mm=_open_room(view),
+            throat_cell=throat, clearance_mm=base_clearance)
+        return r
+
+    r = _at(step)
+    # #2045: a margin inside the raster's own resolution is no finding.
+    # Measured: a 46 um step read +1 um PASSABLE where a 5 um one read
+    # -89 um CAGED. Halve the step until the reading leaves its own
+    # resolution, the floor or the cell budget, and say what was refined.
+    # Only that uncertain reading pays for it.
+    history = []
+    w_mm, h_mm = view[2] - view[0], view[3] - view[1]
+    while r.inconclusive:
+        s2 = r.step_mm / 2.0
+        cells = (math.ceil(w_mm / s2) * math.ceil(h_mm / s2)
+                 * len(layers))
+        if s2 < REFINE_MIN_STEP_MM - 1e-12 or cells > REFINE_CELL_BUDGET:
+            break
+        r2 = _at(s2, kruskal=False)
+        if not r2.measured:         # the finer raster lost the target
+            break
+        history.append({'step_mm': r.step_mm,
+                        'bottleneck_mm': round(r.bottleneck_mm, 5),
+                        'margin_um': round(r.margin_um, 2)})
+        r = r2
+    r.refined_from = tuple(history)
+    throat = r.throat_cell
     if r.wide_open:
         # The path never came near foreign copper, so the cell that closed it
         # is just the last free cell Kruskal happened to activate -- a point in
