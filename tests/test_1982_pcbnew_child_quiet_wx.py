@@ -15,6 +15,10 @@ Invariants:
 2. (any python) with no display, where wx.App raises SystemExit (headless
    Linux), the same script still sets the stderr target and finishes
    REFILL_OK instead of exiting before LoadBoard.
+   The stand-in pcbnew refuses to import once a wx.App exists, as the real
+   one does with a display (KiCad 10.0.6, wxPython 4.2.5 GTK3: "SystemError:
+   initialization of _pcbnew raised unreported exception"), so 1 also holds
+   the order: pcbnew is imported before the app is made.
 3. (KiCad's python) the real refill of watchy with a text in a font that does
    not exist finishes REFILL_OK well inside its timeout, and the substitution
    warning arrives on stderr. Run only where KiCad's python is found; the
@@ -70,6 +74,9 @@ def GetApp():
 FAKE_PCBNEW = '''\
 import sys
 import wx
+if wx.GetApp() is not None:
+    # the real _pcbnew fails to initialise once a wx.App exists (GTK3, display)
+    raise SystemError("initialization of _pcbnew raised unreported exception")
 def LoadBoard(path):
     # with no display no app can exist, so no modal can open
     if ((wx.GetApp() is None and not wx.NO_DISPLAY)
