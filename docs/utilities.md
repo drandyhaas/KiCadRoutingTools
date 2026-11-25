@@ -2787,6 +2787,19 @@ pass that closes nets at the cost of new violations is kept and its grade says
 so. The first pass that is not kept ends the passes, and a tie keeps the
 earlier board.
 
+The board's recorded floors are the ones its project ships with, so a DRC
+count is only as strict as those (#2060). A net a step narrowed below its
+class (route.py's escalation, down to the Board Setup minimums under
+`--board-rules`) lowers that class in the output project, and the count is
+then at the lowered class: the grade lists each such class in
+`relaxed_rules` (`{class, from, to, nets}`, with `below_board_min` when it
+sits below the input's own minimum clearance), and every line that prints the
+count says `N DRC at relaxed rules (Default 0.2 -> 0.15)`. A `.kicad_dru` rule
+`check_drc` names NOT GRADED is not in the count either, though KiCad grades
+it: the grade carries `ungraded_rules` (how many) and `ungraded_rule_names`,
+and the lines add `; 2 .kicad_dru rule(s) NOT GRADED (...)`. The run's last
+prose line, `AUTOROUTE: shipped <step>: N open, ...`, says both.
+
 ### Usage
 
 ```bash
@@ -2821,7 +2834,9 @@ Options:
                      grown to the minimum annular ring), every other class at
                      its own clearance, and a net that cannot complete there
                      narrowed only down to those minimums (--escalation
-                     board), as the skill routes the user's own rules.
+                     board), as the skill routes the user's own rules. Such
+                     a net lowers its class in the output project, and the
+                     grade says it is at relaxed rules.
   --floor-first      Start every step at the fab floor (the deepest tier)
                      instead of the standard tier with the floor below it
                      (#1522). Not with --board-rules.
@@ -2851,7 +2866,7 @@ follow it (the plugin's Autorouter sub-tab reads nothing else):
 | `AUTOROUTE_PLAN` | after the analysis | the design rules and `rules_why`, planes, parts, pairs, power nets, and `steps`: one `{tag, tool, what, why, optional}` row per step it means to run; an optional row runs only if what comes before calls for it |
 | `AUTOROUTE_STEP` | each step start and end | `state` `running`, then `done` or `failed` (one of each per step run), or `skipped` with its `reason` for a planned step that never ran. An ending carries `seconds`, `rc`, a one-line `result`, the step's own `summary` (escapes, caps moved, pairs routed, routed/failed/vias), the `cmd` and `log`, a route pass's `grade` (open nets, real DRC) and whether it was `kept`, and on failure `error_tail`, the last lines of its log. A step the plan did not list (a fanout's next rung, a re-fan, the pair re-route) names its planned row as `parent` |
 | `AUTOROUTE_DECISION` | when the chain chooses | `{tag, kept, why}`: the fanout rung kept, a re-fan or a route pass kept or not, the pair nets ripped or re-routed |
-| `AUTOROUTE_SUMMARY` | last | the shipped step (`final_step`, `final_tag`), `output`, `open`, `open_nets`, `drc`, `drc_items`, `seconds`; with `error` when nothing shipped |
+| `AUTOROUTE_SUMMARY` | last | the shipped step (`final_step`, `final_tag`), `output`, `open`, `open_nets`, `drc`, `drc_items`, what the `drc` count is not (`relaxed_rules`, `ungraded_rules`, `ungraded_rule_names`, #2060), `seconds`; with `error` when nothing shipped |
 
 `KRT_AUTOROUTE_FAIL_STEPS` (step tags, comma separated) makes those steps run
 a stand-in that exits 3, so a test can drive the failure path on a real board.

@@ -780,6 +780,9 @@ class Chain(ChainEvents):
         self.last_iterations = None
         self.clearance = clearance
         self.baseline = baseline
+        # the chain input's declared minimum clearance, which a relaxed
+        # class is measured against (#2060)
+        self.board_min = declared_min_clearance(baseline) if baseline else None
 
     def grade(self, board):
         """{'open': n, 'open_nets': [...], 'drc': n} for BOARD, or None when a
@@ -803,8 +806,13 @@ class Chain(ChainEvents):
         d = self.check_drc(board)
         if d is None:
             return None
+        ungraded = ungraded_rule_names(d)
         return {'open': len(open_nets), 'open_nets': open_nets, 'drc': int(d['violations']),
-                'drc_items': _named_items(d)}
+                'drc_items': _named_items(d),
+                # #2060: what the count is not -- the .kicad_dru rules it
+                # left ungraded, and the classes it graded relaxed
+                'ungraded_rules': len(ungraded), 'ungraded_rule_names': ungraded,
+                'relaxed_rules': relaxed_rules(board, self.board_min)}
 
     def check_drc(self, board):
         """check_drc's JSON report for BOARD at the board's recorded floors
@@ -1233,6 +1241,94 @@ def _named_items(d, cap=20):
     return names
 
 
+def ungraded_rule_names(d):
+    """The `.kicad_dru` rules check_drc report D names NOT GRADED (#2060),
+    from its --json `not_graded` rows (#1831), each name once. While any is
+    listed, `violations` is a partial grade: KiCad still grades those rules."""
+    return sorted({r['rule'] for r in d.get('not_graded') or () if r.get('rule')})
+
+
+def _project(board):
+    try:
+        with open(board[:-len('.kicad_pcb')] + '.kicad_pro', encoding='utf-8') as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def declared_min_clearance(board):
+    """BOARD's Board Setup minimum clearance as the board declares it (where
+    the writeback capped the rule at a pad override, the board's own value,
+    #1369), or None when the project leaves it unset."""
+    from fab_tiers import board_declared_min_clearance
+    import tool_records
+    mc = (((_project(board).get('board') or {}).get('design_settings') or {})
+          .get('rules') or {}).get('min_clearance')
+    try:
+        mc = board_declared_min_clearance(mc, tool_records.effective_namespace(board))
+    except Exception:                                        # noqa: BLE001
+        pass
+    return float(mc) if isinstance(mc, (int, float)) and mc > 0 else None
+
+
+def relaxed_rules(board, board_min=None):
+    """The net classes BOARD's project carries below the clearance a step
+    asked for, because an automatic descent lowered them (#1160's Default
+    record, #1492's per class): [{class, from, to, nets}], the Default class
+    first. check_drc grades the board at the classes it carries, so its count
+    is a count at these relaxed rules (#2060). A class raised back to its
+    `from` since is not listed. With BOARD_MIN (the chain input's declared
+    minimum clearance), a row below it carries `below_board_min`."""
+    from fix_kicad_drc_settings import (CLASS_CLEARANCE_RELAXED_KEY,
+                                        CLASS_CLEARANCE_RELAXED_CLASSES_KEY)
+    import tool_records
+    try:
+        ns = tool_records.effective_namespace(board)
+    except Exception:                                        # noqa: BLE001
+        return []
+    now = {c.get('name'): c.get('clearance')
+           for c in (_project(board).get('net_settings') or {}).get('classes') or ()}
+    recs = [('Default', ns.get(CLASS_CLEARANCE_RELAXED_KEY))]
+    recs += sorted((ns.get(CLASS_CLEARANCE_RELAXED_CLASSES_KEY) or {}).items())
+    out = []
+    for cls, rec in recs:
+        if not isinstance(rec, dict):
+            continue
+        try:
+            frm, to = float(rec['from']), float(rec['to'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        cur = now.get(cls)
+        if isinstance(cur, (int, float)) and cur >= frm - 1e-9:
+            continue                # raised back since: graded at `from` again
+        row = {'class': cls, 'from': frm, 'to': to, 'nets': list(rec.get('nets') or [])}
+        if board_min is not None and to < board_min - 1e-9:
+            row['below_board_min'] = board_min
+        out.append(row)
+    return out
+
+
+def drc_phrase(g):
+    """GRADE's DRC count as a reader must take it (#2060): `N DRC`, `at
+    relaxed rules (...)` when the board ships a class an automatic descent
+    lowered (the count is at the lowered class), and the `.kicad_dru` rules
+    check_drc did not grade. Shared by the run's console lines and the
+    plugin's Autorouter tab, which reads the same AUTOROUTE_SUMMARY keys."""
+    s = f"{g.get('drc')} DRC"
+    rel = g.get('relaxed_rules') or []
+    if rel:
+        s += ' at relaxed rules (' + ', '.join(
+            f"{r['class']} {r['from']:g} -> {r['to']:g}"
+            + (f", below the board's {r['below_board_min']:g} minimum"
+               if r.get('below_board_min') is not None else '')
+            for r in rel) + ')'
+    names = g.get('ungraded_rule_names') or []
+    if g.get('ungraded_rules'):
+        s += (f"; {g['ungraded_rules']} .kicad_dru rule(s) NOT GRADED"
+              + (f" ({', '.join(names)})" if names else ''))
+    return s
+
+
 def _shorts(d):
     """check_drc report D's shorts: the items it does not accept that put
     copper of two nets in contact (check_drc sets `short` on copper pairs
@@ -1421,7 +1517,7 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), rerou
                                     result=f"{g['open']} open, {g['drc']} DRC"))
         ch.steps.append({'tool': 'grade', 'tag': 'input', 'grade': g})
         best = (g, ch.cur)
-        print(f"  input: {g['open']} open, {g['drc']} DRC", flush=True)
+        print(f"  input: {g['open']} open, {drc_phrase(g)}", flush=True)
         if g['open'] == 0:
             skip_from(0, 0, 'the input has no open net')
             return ch, ch.cur, g
@@ -1487,7 +1583,8 @@ def route_passes(ch, a, L, costs, effort_factor=2.0, finish=False, rip=(), rerou
                 for tag in passes[i + 1:]:
                     ch.skip(tag, f'{passes[i]} could not be graded')
                 break
-            print(f"  {os.path.basename(out)}: {g['open']} open, {g['drc']} DRC", flush=True)
+            print(f"  {os.path.basename(out)}: {g['open']} open, {drc_phrase(g)}",
+                  flush=True)
             # A narrower rung is judged on its own passes: its first pass starts
             # from the step's start again, so it is compared with the best of
             # THESE sizes, and the board ships only if it ranks above the best
@@ -1610,7 +1707,9 @@ def main():
                          'class\'s clearance, track width, via and diff-pair gap/width, '
                          'held at its Board Setup minimums, every other class at its '
                          'own, and a net that cannot complete there narrowed only down '
-                         'to those minimums (--escalation board)')
+                         'to those minimums (--escalation board); such a net lowers '
+                         'its class in the output project, and the grade says it is '
+                         'at relaxed rules')
     ap.add_argument('--floor-first', action='store_true',
                     help='start every step at the fab floor (the deepest tier: 0.09 mm '
                          'clearance on 4+ layers, 0.10 on 2) instead of the standard '
@@ -1687,6 +1786,13 @@ def main():
                'open_nets': grade['open_nets'] if grade else None,
                'drc': grade['drc'] if grade else None,
                'drc_items': grade['drc_items'] if grade else None,
+               # #2060: `drc` is check_drc's count at the classes the board
+               # ships (relaxed_rules: those an automatic descent lowered),
+               # over the .kicad_dru rules it graded (ungraded_rules: the
+               # ones it named NOT GRADED, which KiCad still grades)
+               'relaxed_rules': grade.get('relaxed_rules', []) if grade else None,
+               'ungraded_rules': grade.get('ungraded_rules', 0) if grade else None,
+               'ungraded_rule_names': grade.get('ungraded_rule_names', []) if grade else None,
                'steps': len(ch.steps),
                'seconds': round(time.time() - t_start, 1),
                'skipped': [s['tag'] for s in ch.steps if not s.get('ok', True)]}
@@ -1698,6 +1804,9 @@ def main():
     _ship(final, out)
     if args.write_fill:
         summary['filled'] = _write_fill(out, os.path.abspath(args.input_file))
+    if grade:
+        print(f"AUTOROUTE: shipped {summary['final_step']}: {grade['open']} open, "
+              f"{drc_phrase(grade)}", flush=True)
     print("AUTOROUTE_SUMMARY: " + json.dumps(summary), flush=True)
     return 0
 

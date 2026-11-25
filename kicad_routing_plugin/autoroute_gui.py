@@ -56,6 +56,15 @@ try:
 except Exception:                                               # noqa: BLE001
     DEFAULT_EFFORT_FACTOR, DEFAULT_PLANE_LAYER_COST = 2.0, -1.0
 
+
+def _drc_text(g):
+    """A grade's DRC count as the CLI's own lines say it (#2060): at relaxed
+    rules when a class was lowered, and the .kicad_dru rules not graded."""
+    try:
+        return _AR.drc_phrase(g).replace(' DRC', ' real DRC', 1)
+    except Exception:                                           # noqa: BLE001
+        return f"{g.get('drc')} real DRC"
+
 EVENT_TOKENS = ('AUTOROUTE_PLAN', 'AUTOROUTE_STEP', 'AUTOROUTE_DECISION',
                 'AUTOROUTE_SUMMARY', 'AUTOROUTE_ANALYSIS')
 
@@ -791,7 +800,7 @@ class AutorouteTab(wx.Panel):
             out.append(f"Decision: {'kept' if d.get('kept') else 'not kept'} -- {d.get('why')}")
         g = row.get('grade')
         if g:
-            out.append(f"Grade: {g.get('open')} open net(s), {g.get('drc')} real DRC"
+            out.append(f"Grade: {g.get('open')} open net(s), {_drc_text(g)}"
                        + (f"; open: {', '.join(g.get('open_nets')[:12])}"
                           if g.get('open_nets') else ""))
             for item in (g.get('drc_items') or [])[:10]:
@@ -847,7 +856,7 @@ class AutorouteTab(wx.Panel):
         elif ok:
             self.set_status(
                 f"Finished in {el}: shipped {s.get('final_tag')} -- "
-                f"{s.get('open')} open net(s), {s.get('drc')} real DRC. "
+                f"{s.get('open')} open net(s), {_drc_text(s)}. "
                 f"Review, then Apply Result to Board.")
             self._summary_value = self._final_summary(s)
             self._render_info()
@@ -892,7 +901,7 @@ class AutorouteTab(wx.Panel):
                  f"{s.get('open')} open net(s)"
                  + (f" ({', '.join(open_nets[:8])}{' ...' if len(open_nets) > 8 else ''})"
                     if open_nets else "")
-                 + f", {s.get('drc')} real DRC" + (f"; {s['note']}" if s.get('note') else "")]
+                 + f", {_drc_text(s)}" + (f"; {s['note']}" if s.get('note') else "")]
         if counts:
             lines.append(
                 f"Apply makes the open board match it: {counts['tracks'] + counts['arcs']} "
