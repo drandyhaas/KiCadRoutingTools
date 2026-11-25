@@ -1011,7 +1011,11 @@ on its array is a group of one. The step:
    a change of layer two vias (`CHANGE_VIAS`), a crossing priced by the layers
    its two lanes share (`whole_ends.JOINT_X_LAYERS`), a run on a plane's layer
    at its price, the way round an array at the vias' exchange rate, and the
-   far face's last resort (`whole_ends.FAR_TOOTH`): a tooth on the source's far face,
+   far face's last resort (`whole_ends.FAR_TOOTH`): a tooth on the source's far face
+   -- or on a side face turned from every berth its lane has, each past
+   the array's other side face (`far_tooth`: a header's end pins lie past
+   its array's corner, and a lane out of the face turned from its pin
+   went round three faces of the array at a side face's price) --,
    and a pair's berth on its destination's far face, each leg's, since the
    geometry fails to lay a pair wound round its destination past a face of
    berths. The module docstring names each rule.
@@ -1072,7 +1076,12 @@ on its array is a group of one. The step:
    (`EXIT_REACH`), arrays' and row parts' alike -- and the way out of each
    of the arrays' other signals' escapes the same: a ground tie's via stood
    a third of a millimetre in front of a signal's edge stub, its neighbours'
-   stubs either side. A tie is a stub on an outer
+   stubs either side. A lane too short to change layer is its two ways
+   out and the run between them, so where a net's two exits stand within
+   twice that reach on one layer the straight run between them is kept
+   clear as well (`join_runs`): a tie laid clear of both ways out had run
+   between them, an arch from two decaps' pads with a two-millimetre
+   lane's tooth inside it and its pin outside. A tie is a stub on an outer
    layer and a via, inside its part's fan; of what the pass lays only such
    pieces that reach a pad beneath a part are kept, and the field's DRC is
    measured again -- ties that add a violation are taken out. So are the

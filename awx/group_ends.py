@@ -1396,6 +1396,48 @@ def way_of(g0, L):
     return ((w[0]['start'], w[0]['end']), w[0]['width']) if w else None
 
 
+def join_runs(wayouts, layers, reach):
+    """THE JOIN OF A SHORT LANE'S TWO WAYS OUT as copper, [{'start', 'end', 'width', 'layer', 'net_id'}]: for each net
+    with exactly two of `wayouts` [(net id, an exit, its direction, its layer)], both on one of the board's copper
+    `layers`, their exits within twice `reach` of each other -- a lane that is its two ways out and the run between
+    them, too short to change layer -- the straight run from one exit to the other, of the lane's own net and as wide
+    as a way out (wayout_runs). A supply tie laid clear of both ways out had run BETWEEN them: two decaps' pads joined
+    by an arch over a header lane two millimetres long, its tooth inside the arch and its pin outside, and the lane
+    was left open in every round"""
+    by = {}
+    for nid_, ex_, _d, L_ in sorted(set(wayouts)):
+        by.setdefault(nid_, []).append((tuple(ex_), L_))
+    w_ = next((r_['width'] for r_ in wayout_runs(wayouts, layers)), None)
+    out = []
+    for nid_, es_ in sorted(by.items()):
+        if w_ is None or len(es_) != 2 or es_[0][1] != es_[1][1] or es_[0][1] not in layers:
+            continue
+        (a_, L_), (b_, _l) = es_
+        if 1e-6 < math.hypot(a_[0] - b_[0], a_[1] - b_[1]) <= 2 * reach:
+            out.append({'start': (round(a_[0], 4), round(a_[1], 4)), 'end': (round(b_[0], 4), round(b_[1], 4)),
+                        'width': w_, 'layer': L_, 'net_id': nid_})
+    return out
+
+
+def far_tooth(E, lane, o):
+    """does the tooth option `o` take its lane ROUND the source: a tooth on the source's FAR face ('left' in the bus's
+    frame, the source to the destination along +x) -- or one on a SIDE face with every berth the lane has past the
+    array's OTHER side face. A header is a long row beside its array, its end pins past the array's corner: a lane out
+    of the side face turned from its pin went round three faces of the array, through the other buses' fan-out and
+    along the corridor every lane of the group crosses -- 39 mm for a 17 mm hop -- at a side face's price, and
+    whichever bus was laid after it had one lane with no way past it"""
+    if not o[0]:
+        return False
+    d_ = o[0][0].direction
+    if d_ == 'left':
+        return True
+    if d_ not in ('up', 'down'):
+        return False
+    sb = E.st['sgrid'].bbox
+    ys = [b_[1][1] for b_ in E.B.get(lane) or ()]
+    return bool(ys) and (all(y_ > sb[3] for y_ in ys) if d_ == 'up' else all(y_ < sb[1] for y_ in ys))
+
+
 def wayout_runs(wayouts, layers, reach=None):
     """THE LANES' WAYS OUT as copper: [{'start', 'end', 'width', 'layer', 'net_id'}], one for each of `wayouts`
     [(net id, an exit, its direction, its layer)] on one of the board's copper `layers` -- the exit's straight run out
@@ -2149,7 +2191,7 @@ def load_bus(name, cap, arrays, log, cut=None, rank=False, feedback=None, bare_i
         # the bus's own ends price it as a side face there, the group past any count of vias (main: `far`). Without
         # it the descents' ends put nine lanes of a four-bus group on far-face teeth, the start's with them)
         B.dear = {(lane, 0): {i: we.FAR_TOOTH * len(lg) for i, o in enumerate(E.T[lane])
-                              if o[0] and o[0][0].direction == 'left'} for lane, lg in E.lanes}
+                              if far_tooth(E, lane, o)} for lane, lg in E.lanes}
         if arr[1] is not None:
             # (THE START, as a bus's own ends chose theirs: its own run's ends DESCENDED at the cut
             # (whole_ends.joint_descent). THE CUT round a ball array destination: its far face's middle -- each lane
@@ -4484,7 +4526,7 @@ def main():
                     continue
                 for l_ in b.J.lanes:
                     far += [(int(round(1000 * far_w)) * b.J.npair[l_], x_) for i, x_ in b.J.xs[0][l_].items()
-                            if b.E.T[l_][i][0] and b.E.T[l_][i][0][0].direction == 'left']
+                            if far_tooth(b.E, l_, b.E.T[l_][i])]
             # ...and a PAIR's berth on a ball array destination's FAR FACE at the same price: a pair laid round its
             # destination to the face turned from its source passes the faces between on its layer, in front of their
             # berths, and turns two corners as a pair -- a memory bus's clock pair taken round to its DDR's far face
@@ -4540,7 +4582,7 @@ def main():
                     continue
                 for l_ in b.J.lanes:
                     fx = [x_ for i, x_ in b.J.xs[0][l_].items()
-                          if b.E.T[l_][i][0] and b.E.T[l_][i][0][0].direction == 'left']
+                          if far_tooth(b.E, l_, b.E.T[l_][i])]
                     if fx and not {(b.arr[0].ref, b.arr[0].ball_of[leg])
                                    for leg in (b.E.legs_of.get(l_) or (l_,))} <= wide:
                         m.Add(sum(fx) == 0).OnlyEnforceIf(gate('far', b.name, l_, lanes={(b.name, l_, 0)}))
@@ -5811,7 +5853,7 @@ def main():
             fan_ = [(ref, k) for ref, A in arrays.items() for k in rows[ref].others if k in A.drops
                     and (prev_oth.get((ref, k)) or ('d',))[0] == 'x']
             farl_ = [(b, l_) for b in buses if b.arr[0] is not None for l_ in b.J.lanes
-                     if b.E.T[l_][b.state[l_][0]][0] and b.E.T[l_][b.state[l_][0]][0][0].direction == 'left']
+                     if far_tooth(b.E, l_, b.E.T[l_][b.state[l_][0]])]
             return fan_ + [(b.arr[0].ref, b.arr[0].ball_of[leg]) for b, l_ in farl_
                            for leg in (b.E.legs_of.get(l_) or (l_,)) if leg in b.arr[0].ball_of]
 
@@ -6310,7 +6352,8 @@ def main():
             # an array round the end of a tooth's way out and back in, across the lane's own run on its layer)
             T_ = field_ties.lay(fpath_, parts_, wayout_runs(wayouts + row_ways, bpcb.board_info.copper_layers,
                                                             reach=EXIT_REACH), log=log,
-                                ways=wayout_runs(oth_ways, bpcb.board_info.copper_layers, reach=EXIT_REACH))
+                                ways=wayout_runs(oth_ways, bpcb.board_info.copper_layers, reach=EXIT_REACH)
+                                + join_runs(wayouts + row_ways, bpcb.board_info.copper_layers, EXIT_REACH))
             d_t = field_drc(fpath_, 'tied')[0] if T_ and (T_['segments'] or T_['vias']) else M_['d_f']
         if T_ is None:
             log('  field ties: no pad on a poured net beneath the group\'s parts')
