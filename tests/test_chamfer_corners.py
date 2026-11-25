@@ -29,6 +29,8 @@ def check(name, cond, detail=""):
     print(("  PASS " if cond else "  FAIL ") + name + (f"  {detail}" if detail else ""))
     if not cond:
         fails.append(name)
+        if 'pytest' in sys.modules:       # pytest: fail the test case here
+            raise AssertionError(f"{name}  {detail}")
 
 
 def _pad(ref, x, y, net_id, name, sx=0.5, sy=0.5):
