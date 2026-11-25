@@ -26,10 +26,10 @@ which let the outer member on a wider layer pass a neighbour inside
 clearance). Rows:
   - no per-layer widths, or no segment wider than the call's track width:
     that pass does not run (the terminal neck is the only one);
-  - routed: cap_chain with a 2-layer stackup, --impedance 80 (0.407 mm on both
+  - routed: cap_chain with a 2-layer stackup, --impedance 80 (0.417 mm on both
     layers over a 0.25 mm --track-width) and a foreign track ending just above
     the pair's path. With neither the neck nor the wider map the pair grazed
-    it (0.226 mm against 0.25); here it routes DRC-clean, at 0.407 away from
+    it (0.226 mm against 0.25); here it routes DRC-clean, clear of
     the neighbour, and the map reserves the layer's half-pitch.
 
     python3 tests/test_diff_layer_pitch.py
@@ -259,9 +259,9 @@ def test_wide_layer_run_keeps_clear_of_its_neighbour():
     names = {n.net_id: n.name for n in pcb.nets.values()}
     widths = sorted({round(s.width, 3) for s in pcb.segments
                      if names.get(s.net_id, '').startswith('DPA')})
-    check('routed: the pair runs at the 0.407 impedance width over a 0.25 call width, '
+    check('routed: the pair runs at the 0.417 impedance width over a 0.25 call width, '
           'and the map reserves the layer\'s half-pitch',
-          bool(widths) and max(widths) >= 0.4 and 'F.Cu 0.329, B.Cu 0.329' in log.getvalue(),
+          bool(widths) and max(widths) >= 0.4 and 'F.Cu 0.334, B.Cu 0.334' in log.getvalue(),
           str(widths))
     check('routed: DRC clean at the 0.25 clearance', list(drc) == [], str(drc)[:300])
     check('routed: the pair is connected', list(conn) == [], str(conn)[:200])

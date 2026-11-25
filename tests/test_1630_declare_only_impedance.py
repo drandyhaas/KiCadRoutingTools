@@ -4,14 +4,14 @@ changes no copper; check_impedance grades the copper against them; no later
 step recomputes widths from such a record.
 
 The fixture is test_1630_pair_class_one_gap's: one pair on F.Cu over a GND
-plane, its class PAIRS at width 0.15 / gap 0.12 (94.3 ohm differential on the
-tool's own model).
+plane, its class PAIRS at width 0.15 / gap 0.12 (91.8 ohm differential on the
+tool's own model; 89.5 ohm by a 2-D field solve).
 
   A. route_diff with `--impedance 75 --impedance-declare-only` ships the same
      copper as route_diff with no --impedance (every segment's net, layer,
      ends and width; check_drc and check_connected agree), and records
      {ohms 75, differential, pair_gap 0.12, applied false, declare_only true}.
-  B. check_impedance grades that record: both nets named off target (94 vs
+  B. check_impedance grades that record: both nets named off target (92 vs
      75 ohm), marked declare-only, exit code unchanged (disclosure).
   C. route.py the same way: `--impedance 50 --impedance-declare-only` on one
      net ships the plain copper and records a single-ended declare-only spec.
@@ -135,7 +135,7 @@ def main():
               d['totals']['nets_ohms_off_target'] == ['/X_N', '/X_P'],
               str(d['totals']['nets_ohms_off_target']))
         check('B: at the class geometry\'s ohms, marked declare-only',
-              abs((rows['/X_P'].get('shipped_ohms') or 0) - 94.3) < 1.5
+              abs((rows['/X_P'].get('shipped_ohms') or 0) - 91.8) < 1.5
               and rows['/X_P'].get('declare_only') is True,
               str({k: rows['/X_P'].get(k) for k in ('shipped_ohms', 'declare_only')}))
         check('B: and says so', 'declare-only' in r.stdout)
